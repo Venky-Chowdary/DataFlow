@@ -536,6 +536,40 @@ def test_g2_passes_unavailable_probe_when_table_exists():
     assert "unavailable" in g2.message.lower()
 
 
+def test_g2_blocks_redshift_staging_denied():
+    plan = _happy_plan()
+    plan.destination.db_type = "redshift"
+    plan.destination.table_exists = True
+    plan.destination.can_write = True
+    plan.destination.redshift_staging_probe = {
+        "status": "denied",
+        "method": "GetBucketAcl",
+        "detail": "Staging bucket `dw-stage` ACL does not grant write for COPY FROM S3",
+        "bucket": "dw-stage",
+    }
+    result = PreflightEngine().run(PreflightContext(plan=plan))
+    assert not result.passed
+    g2 = next(g for g in result.gates if g.gate_id.value == "g2_destination")
+    assert g2.status == GateStatus.BLOCK
+    assert "staging" in g2.message.lower()
+    assert g2.details["redshift_staging_probe"]["status"] == "denied"
+
+
+def test_g2_passes_redshift_staging_not_configured():
+    plan = _happy_plan()
+    plan.destination.db_type = "redshift"
+    plan.destination.table_exists = True
+    plan.destination.can_write = True
+    plan.destination.redshift_staging_probe = {
+        "status": "not_configured",
+        "detail": "PostgreSQL-wire insert remains valid.",
+    }
+    result = PreflightEngine().run(PreflightContext(plan=plan))
+    g2 = next(g for g in result.gates if g.gate_id.value == "g2_destination")
+    assert g2.status == GateStatus.PASS
+    assert "not configured" in g2.message.lower()
+
+
 def test_g3_schemaless_is_skip_not_pass():
     """No DDL type contract must not look like proven type safety."""
     from preflight.gates import gate_g3_schema_contract

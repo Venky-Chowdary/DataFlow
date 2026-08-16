@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
-from services.job_trust import attach_trust_to_updates, compute_job_trust, has_full_checksum_proof
+from services.job_trust import (
+    attach_trust_to_updates,
+    compute_job_trust,
+    has_full_checksum_proof,
+    is_append_delta_proof,
+)
 
 
 def test_clean_completed_job_high_trust() -> None:
@@ -113,6 +118,52 @@ def test_file_export_unproven_caps_trust() -> None:
     assert "unproven" in factor["note"].lower()
 
 
+def test_writer_ack_completeness_is_not_100() -> None:
+    trust = compute_job_trust({
+        "status": "completed",
+        "records_processed": 150_000,
+        "rejected_rows": 0,
+        "reconciliation": {
+            "passed": True,
+            "assurance_level": "writer_ack",
+            "phase": "post_write_writer_ack",
+            "source_checksum": "abc",
+        },
+    })
+    completeness = next(f for f in trust["factors"] if f["id"] == "completeness")
+    assert completeness["score"] <= 82
+    assert "writer" in completeness["note"].lower()
+
+
+def test_write_pass_dest_readback_is_not_full_checksum_grade_a() -> None:
+    trust = compute_job_trust({
+        "status": "completed",
+        "records_processed": 150_000,
+        "rejected_rows": 0,
+        "reconciliation": {
+            "passed": True,
+            "assurance_level": "write_pass_dest_readback",
+            "coverage": "write_pass_dest_readback",
+            "phase": "post_write_write_pass",
+            "source_checksum": "aaa",
+            "target_checksum": "aaa",
+            "source_checksum_provenance": "write_pass_fingerprints",
+            "migration_proven": False,
+        },
+    })
+    assert trust["grade"] != "A"
+    assert not has_full_checksum_proof({
+        "passed": True,
+        "assurance_level": "write_pass_dest_readback",
+        "source_checksum": "aaa",
+        "target_checksum": "aaa",
+        "source_checksum_provenance": "remapped_source_rows",
+    })
+    factor = next(f for f in trust["factors"] if f["id"] == "reconcile")
+    assert factor["score"] <= 82
+    assert "not independently" in factor["note"].lower() or "write-pass" in factor["note"].lower()
+
+
 def test_has_full_checksum_proof() -> None:
     assert has_full_checksum_proof({
         "passed": True,
@@ -125,7 +176,53 @@ def test_has_full_checksum_proof() -> None:
         "assurance_level": "writer_ack",
         "source_checksum": "x",
     })
+    assert not has_full_checksum_proof({
+        "passed": True,
+        "assurance_level": "write_pass_dest_readback",
+        "source_checksum": "x",
+        "target_checksum": "x",
+        "source_checksum_provenance": "write_pass_fingerprints",
+    })
     assert not has_full_checksum_proof({"passed": True})
+    append = {
+        "passed": True,
+        "assurance_level": "row_count",
+        "coverage": "row_count",
+        "phase": "post_write_row_count",
+        "checksum_scope": "whole_table_not_comparable",
+        "source_checksum": "aaa",
+        "target_checksum": "bbb",
+        "checksum_match": False,
+    }
+    assert is_append_delta_proof(append)
+    assert not has_full_checksum_proof(append)
+
+
+def test_append_delta_pass_does_not_say_investigate_gate8() -> None:
+    trust = compute_job_trust({
+        "status": "completed",
+        "records_processed": 200,
+        "rejected_rows": 0,
+        "coerced_null_rows": 0,
+        "reconciliation": {
+            "passed": True,
+            "phase": "post_write_row_count",
+            "assurance_level": "row_count",
+            "coverage": "row_count",
+            "checksum_scope": "whole_table_not_comparable",
+            "source_checksum": "aaa",
+            "target_checksum": "bbb",
+            "checksum_match": False,
+            "migration_proven": False,
+            "message": "Append delta verified (200 row(s) appended: 100 → 300).",
+        },
+    })
+    factor = next(f for f in trust["factors"] if f["id"] == "reconcile")
+    assert "append delta" in factor["note"].lower()
+    assert trust["grade"] != "A"
+    assert trust["score"] <= 89
+    assert trust["next_action"]["code"] == "append_delta"
+    assert "investigate" not in trust["next_action"]["label"].lower()
 
 
 def test_quarantine_lowers_score() -> None:
@@ -142,6 +239,32 @@ def test_quarantine_lowers_score() -> None:
     })
     assert trust["score"] < 85
     assert trust["next_action"]["code"] == "quarantine"
+
+
+def test_closed_quarantine_ledger_does_not_keep_review_cta() -> None:
+    trust = compute_job_trust({
+        "status": "completed_with_quarantine",
+        "records_processed": 100,
+        "rejected_rows": 40,
+        "quarantine_closure": {
+            "verdict": "closed",
+            "open_count": 0,
+            "promoted_count": 40,
+            "durable_count": 40,
+            "migration_proven": False,
+        },
+        "reconciliation": {
+            "passed": True,
+            "assurance_level": "full_checksum",
+            "source_checksum": "a",
+            "target_checksum": "a",
+        },
+    })
+    q = next(f for f in trust["factors"] if f["id"] == "quarantine")
+    assert q["score"] == 100
+    assert "remediation" in q["note"].lower() or "landed" in q["note"].lower()
+    assert trust["next_action"]["code"] == "quarantine_closed"
+    assert "migration_proven" not in trust["next_action"]["label"].lower()
 
 
 def test_reconcile_fail_next_action() -> None:

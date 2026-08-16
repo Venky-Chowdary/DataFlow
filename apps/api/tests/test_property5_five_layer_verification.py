@@ -11,7 +11,6 @@ Inject a single-cell drift and assert:
 from __future__ import annotations
 
 import os
-import socket
 import sqlite3
 import uuid
 from pathlib import Path
@@ -30,22 +29,34 @@ from src.transfer.engine import UniversalTransferEngine
 from src.transfer.models import EndpointConfig, TransferRequest
 
 
-def _pg_up() -> bool:
-    try:
-        with socket.create_connection(("127.0.0.1", 5432), timeout=0.4):
-            return True
-    except OSError:
-        return False
-
-
 def _pg_creds() -> dict:
     return {
         "host": os.environ.get("P5_PG_HOST", os.environ.get("P2_PG_HOST", "127.0.0.1")),
         "port": int(os.environ.get("P5_PG_PORT", os.environ.get("P2_PG_PORT", "5432"))),
-        "database": os.environ.get("P5_PG_DB", os.environ.get("P2_PG_DB", "postgres")),
-        "username": os.environ.get("P5_PG_USER", os.environ.get("P2_PG_USER", "postgres")),
-        "password": os.environ.get("P5_PG_PASSWORD", os.environ.get("P2_PG_PASSWORD", "admin")),
+        "database": os.environ.get("P5_PG_DB", os.environ.get("P2_PG_DB", "dataflow")),
+        "username": os.environ.get("P5_PG_USER", os.environ.get("P2_PG_USER", "dataflow")),
+        "password": os.environ.get("P5_PG_PASSWORD", os.environ.get("P2_PG_PASSWORD", "dataflow")),
     }
+
+
+def _pg_up() -> bool:
+    """True only when this host can authenticate — TCP-open is not enough."""
+    creds = _pg_creds()
+    try:
+        import psycopg2
+
+        conn = psycopg2.connect(
+            host=creds["host"],
+            port=creds["port"],
+            dbname=creds["database"],
+            user=creds["username"],
+            password=creds["password"],
+            connect_timeout=2,
+        )
+        conn.close()
+        return True
+    except Exception:
+        return False
 
 
 def _build_population(n: int = 500) -> list[dict]:
@@ -124,6 +135,35 @@ def test_attach_ladder_enriches_failed_message():
     out = attach_ladder_to_reconcile_report(report, ladder)
     assert "L4/L5 localized" in out["message"]
     assert out["verification_ladder"] is ladder
+
+
+def test_a_failed_column_profile_vetoes_a_green_checksum():
+    """Checksum match is not full fidelity when L2 names a silently-nulled column."""
+    from services.signed_proof_pack import classify_post_write_assurance
+
+    report = {
+        "passed": True,
+        "source_checksum": "aaa",
+        "target_checksum": "aaa",
+        "checksum_match": True,
+        "phase": "post_write_verified",
+        "coverage": "full_checksum",
+        "message": "Row fidelity verified",
+    }
+    ladder = {
+        "passed": False,
+        "skipped": False,
+        "localization_summary": "Engine column profile diverged on amount",
+        "assurance_level": "engine_column_profile",
+        "engine_profile": True,
+    }
+    out = attach_ladder_to_reconcile_report(report, ladder)
+    assert out["passed"] is False
+    assert out["phase"] == "post_write_failed"
+    assert out["migration_proven"] is False
+    claim = classify_post_write_assurance(out)
+    assert claim["migration_proven"] is False
+    assert claim["claim_level"] == "failed"
 
 
 def test_sqlite_transfer_ladder_localizes_post_write_drift(tmp_path: Path):
@@ -285,3 +325,179 @@ def test_pg_five_layer_localizes_injected_drift():
             cur.execute(f'DROP TABLE IF EXISTS public."{dst_table}"')
         conn.commit()
         conn.close()
+
+
+def test_l1_append_uses_dest_before_delta():
+    from services.verification_ladder import layer_l1_row_balance
+
+    # 200 written into a table that already held 100 → dest=300.
+    ok = layer_l1_row_balance(
+        source_rows=200,
+        target_rows=300,
+        allow_extra_rows=True,
+        target_rows_before=100,
+    )
+    assert ok.passed is True
+    assert ok.details["equation"] == "target - target_rows_before == expected"
+
+    short = layer_l1_row_balance(
+        source_rows=200,
+        target_rows=250,
+        allow_extra_rows=True,
+        target_rows_before=100,
+    )
+    assert short.passed is False
+
+
+def test_l1_keyed_uses_inserts_minus_deletes_not_reader_count():
+    """Upsert dest-Δ is inserts − deletes. Append dest-Δ is the reader batch.
+
+    3 updates + 1 insert into dest that already held 3 → COUNT(*) 4.
+    Append identity would demand dest_delta == 4 and fail a correct write.
+    """
+    from services.verification_ladder import layer_l1_row_balance
+
+    ok = layer_l1_row_balance(
+        source_rows=4,
+        target_rows=4,
+        allow_extra_rows=True,
+        target_rows_before=3,
+        keyed_cardinality=True,
+        keyed_expected_delta=1,
+    )
+    assert ok.passed is True
+    assert ok.details["equation"] == "target - target_rows_before == inserts - deletes"
+    assert ok.details["dest_delta"] == 1
+    assert ok.details["expected_rows"] == 1
+
+    tombstone = layer_l1_row_balance(
+        source_rows=4,
+        target_rows=3,
+        allow_extra_rows=True,
+        target_rows_before=3,
+        keyed_cardinality=True,
+        keyed_expected_delta=0,
+    )
+    assert tombstone.passed is True
+
+    short = layer_l1_row_balance(
+        source_rows=4,
+        target_rows=3,
+        allow_extra_rows=True,
+        target_rows_before=3,
+        keyed_cardinality=True,
+        keyed_expected_delta=1,
+    )
+    assert short.passed is False
+
+
+def test_l1_keyed_without_census_does_not_veto():
+    from services.verification_ladder import layer_l1_row_balance
+
+    skipped = layer_l1_row_balance(
+        source_rows=4,
+        target_rows=4,
+        allow_extra_rows=True,
+        target_rows_before=3,
+        keyed_cardinality=True,
+        keyed_expected_delta=None,
+    )
+    assert skipped.passed is True
+    assert skipped.details.get("skipped") is True
+    assert skipped.population_proof is False
+
+
+def test_attach_ladder_does_not_keep_verified_message_on_l1_fail():
+    from services.verification_ladder import attach_ladder_to_reconcile_report
+
+    report = {
+        "passed": True,
+        "message": "Row fidelity verified — source and target checksums match (4 rows)",
+        "phase": "post_write_verified",
+        "coverage": "full_checksum",
+        "assurance_level": "full_checksum",
+        "checksum_match": True,
+        "source_checksum": "aaa",
+        "target_checksum": "aaa",
+        "migration_proven": False,
+    }
+    ladder = {
+        "passed": False,
+        "skipped": False,
+        "assurance_level": "failed",
+        "population_checksum_proof": False,
+        "layers": {
+            "L1": {
+                "passed": False,
+                "details": {
+                    "equation": "target - target_rows_before == inserts - deletes"
+                },
+            },
+            "L3": {"passed": True},
+        },
+        "localization_summary": "",
+    }
+    out = attach_ladder_to_reconcile_report(report, ladder)
+    assert out["passed"] is False
+    assert "verified" not in str(out.get("message") or "").lower()
+    assert "L1 cardinality failed" in str(out.get("message") or "")
+
+
+def test_ladder_does_not_fail_incomparable_append_hashes():
+    """Whole-table hashes after Full Append are not L3 cell proof."""
+    from services.reconcile_coverage import WHOLE_TABLE_NOT_COMPARABLE
+    from services.verification_ladder import run_five_layer_verification
+
+    source = [{"id": 1, "nm": "a"}, {"id": 2, "nm": "b"}]
+    dest = source + [{"id": 9, "nm": "seed"}, {"id": 10, "nm": "seed"}]
+    ladder = run_five_layer_verification(
+        source_rows=source,
+        target_rows=dest,
+        columns=["id", "nm"],
+        pk_column="id",
+        source_row_count=2,
+        target_row_count=4,
+        source_checksum="aaa",
+        target_checksum="bbb",
+        allow_extra_rows=True,
+        checksum_scope=WHOLE_TABLE_NOT_COMPARABLE,
+        target_rows_before=2,
+    )
+    assert ladder["layers"]["L1"]["passed"] is True
+    assert ladder["layers"]["L3"]["details"]["skipped"] is True
+    assert ladder["passed"] is True
+    assert ladder["population_checksum_proof"] is False
+    assert ladder["assurance_level"] == "row_count"
+
+
+def test_attach_ladder_does_not_veto_dest_before_pass():
+    from services.reconcile_coverage import WHOLE_TABLE_NOT_COMPARABLE
+    from services.verification_ladder import attach_ladder_to_reconcile_report
+
+    report = {
+        "passed": True,
+        "message": "Append delta verified (2 row(s) appended: 2 → 4).",
+        "phase": "post_write_row_count",
+        "coverage": "row_count",
+        "assurance_level": "row_count",
+        "checksum_scope": WHOLE_TABLE_NOT_COMPARABLE,
+        "checksum_match": False,
+        "source_checksum": "aaa",
+        "target_checksum": "bbb",
+        "migration_proven": False,
+    }
+    ladder = {
+        "passed": False,
+        "skipped": False,
+        "assurance_level": "failed",
+        "population_checksum_proof": False,
+        "layers": {
+            "L1": {"passed": True},
+            "L3": {"passed": False},
+        },
+        "localization_summary": "",
+    }
+    out = attach_ladder_to_reconcile_report(report, ladder)
+    assert out["passed"] is True
+    assert out["phase"] == "post_write_row_count"
+    assert out["migration_proven"] is not True

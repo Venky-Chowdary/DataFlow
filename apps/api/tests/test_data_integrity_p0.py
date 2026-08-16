@@ -158,6 +158,14 @@ def test_reconcile_not_100_percent_when_coerced():
     assert report.coerced_null_rows == 1
     assert "100%" not in report.message
     assert "NOT full fidelity" in report.message
+    stamped = report.to_dict()
+    assert stamped["phase"] == "post_write_partial"
+    assert stamped["assurance_level"] == "coerced"
+    from services.signed_proof_pack import classify_post_write_assurance
+
+    claim = classify_post_write_assurance(stamped)
+    assert claim["migration_proven"] is False
+    assert claim["claim_level"] == "coerced"
 
 
 def test_reconcile_clean_still_reports_full_fidelity():

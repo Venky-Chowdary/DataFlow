@@ -253,9 +253,55 @@ class BatchDriftDetector:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+class _RecordAuditRow:
+    """One source record viewed as a matrix row — no retained list-of-lists."""
+
+    __slots__ = ("_record", "_headers")
+
+    def __init__(self, record: dict[str, Any], headers: list[str]) -> None:
+        self._record = record
+        self._headers = headers
+
+    def __len__(self) -> int:
+        return len(self._headers)
+
+    def __getitem__(self, idx: int) -> Any:
+        if idx >= len(self._headers):
+            return ""
+        from connectors.source_row_spool import matrix_cell_from_record
+
+        return matrix_cell_from_record(self._record, self._headers[idx])
+
+    def __iter__(self):
+        from connectors.source_row_spool import matrix_cell_from_record
+
+        for header in self._headers:
+            yield matrix_cell_from_record(self._record, header)
+
+
+class _RecordAuditRows:
+    """Sequence adapter so the audit algorithm stays one implementation."""
+
+    __slots__ = ("_records", "_headers")
+
+    def __init__(self, records: list[dict[str, Any]], headers: list[str]) -> None:
+        self._records = records
+        self._headers = headers
+
+    def __len__(self) -> int:
+        return len(self._records)
+
+    def __iter__(self):
+        for record in self._records:
+            yield _RecordAuditRow(record, self._headers)
+
+    def __getitem__(self, idx: int) -> _RecordAuditRow:
+        return _RecordAuditRow(self._records[idx], self._headers)
+
+
 def run_integrity_audit(
     headers: list[str],
-    rows: list[list[str]],
+    rows: list[list[str]] | None = None,
     column_types: dict[str, str] | None = None,
     mappings: list[dict[str, Any]] | None = None,
     required_targets: list[str] | None = None,
@@ -264,8 +310,13 @@ def run_integrity_audit(
     *,
     dest_kind: str = "",
     sync_mode: str | None = None,
+    records: list[dict[str, Any]] | None = None,
 ) -> DataQualityReport:
     """Run a sample-based integrity and anomaly audit over raw source rows.
+
+    ``records`` is the file-stream / engine dict form. Cells are read through
+    ``matrix_cell_from_record`` (same DF_MISSING / NULL / string rules as the
+    write spool) so the audit does not retain a full ``list[list]``.
 
     Hard checks always block: required-null values and financial precision loss.
     Duplicate identity keys hard-block only when the sync mode (or key-addressed
@@ -288,6 +339,8 @@ def run_integrity_audit(
     sync mode so Full append matches Validate.
     """
     report = DataQualityReport()
+    if records is not None:
+        rows = _RecordAuditRows(records, headers)
     if not rows or not headers:
         report.passed = False
         report.issues.append("No sample rows available for integrity audit")

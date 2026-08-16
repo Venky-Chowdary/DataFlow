@@ -26,18 +26,22 @@ __all__ = [
     "purge_object_store_parts",
     "read_object_from_store",
     "resolve_object_store_write_dest_types",
+    "ObjectStoreExport",
+    "serialize_object_store_body",
+    "serialize_object_store_export",
     "resolve_object_write_key",
     "resolve_object_write_layout",
     "_object_version_token",
 ]
 
-_PART_NAME_RE = re.compile(r"^part-\d{5}\.(json|jsonl|csv)$", re.IGNORECASE)
+OBJECT_STORE_EXPORT_EXTS = (".json", ".jsonl", ".csv", ".tsv", ".parquet")
+_PART_NAME_RE = re.compile(r"^part-\d{5}\.(json|jsonl|csv|tsv|parquet)$", re.IGNORECASE)
 
 
 def normalize_object_base_key(table_name: str, schema: str = "") -> str:
     """Canonical object key from table/schema (single-chunk layout)."""
     key = (table_name or schema or "exports/dataflow_export.json").strip()
-    if not key.endswith((".json", ".jsonl", ".csv")):
+    if not key.lower().endswith(OBJECT_STORE_EXPORT_EXTS):
         key = f"{key.rstrip('/')}/export.json"
     return key
 
@@ -384,3 +388,107 @@ def resolve_object_store_write_dest_types(
         studio_types=destination_column_types,
         product="Object-store",
     )
+
+
+@dataclass
+class ObjectStoreExport:
+    """Serialized export that may live in RAM or on a rolled spool file."""
+
+    content_type: str
+    size: int
+    spilled: bool
+    _spool: Any = None
+
+    def rewind(self) -> None:
+        if self._spool is not None:
+            self._spool.seek(0)
+
+    def read_all(self) -> bytes:
+        self.rewind()
+        data = self._spool.read() if self._spool is not None else b""
+        self.rewind()
+        return data
+
+    def iter_parts(self, part_size: int):
+        """Yield 1-indexed ``(part_number, chunk)`` from the spool."""
+        from connectors.object_store_multipart import iter_object_store_parts
+
+        self.rewind()
+        yield from iter_object_store_parts(
+            part_size=part_size, source=self._spool, size=self.size
+        )
+
+    def close(self) -> None:
+        spool = self._spool
+        self._spool = None
+        if spool is None:
+            return
+        try:
+            spool.close()
+        except Exception:
+            pass
+
+    def copy_to(self, dest: Any, *, chunk_size: int = 1024 * 1024) -> int:
+        """Write the spool to ``dest.write`` one chunk at a time. Returns bytes written."""
+        self.rewind()
+        written = 0
+        for _, chunk in self.iter_parts(max(1, int(chunk_size))):
+            dest.write(chunk)
+            written += len(chunk)
+        return written
+
+
+def serialize_object_store_export(
+    *,
+    key: str,
+    mapped_rows: list[tuple],
+    target_cols: list[str],
+    dest_types: dict[str, str] | None = None,
+    spill_max_size: int = 8 * 1024 * 1024,
+) -> ObjectStoreExport:
+    """Serialize JSON / JSONL / CSV / Parquet into a spool that rolls to disk.
+
+    Writers that still hold ``mapped_rows`` (tests, Iceberg helpers) go through
+    the same ``ObjectStoreEncoder`` as chunked materialize. Prefer
+    ``materialize_object_store_export`` on the S3/GCS/ADLS/SFTP/Email path so
+    the accepted-row list is never retained. ``data_rows`` stay in RAM.
+    """
+    from connectors.object_store_materialize import ObjectStoreEncoder
+
+    encoder = ObjectStoreEncoder(
+        key=key,
+        target_cols=target_cols,
+        dest_types=dest_types,
+        spill_max_size=spill_max_size,
+    )
+    try:
+        encoder.append_rows(mapped_rows)
+        return encoder.finish()
+    except Exception:
+        encoder.abort()
+        raise
+
+
+def serialize_object_store_body(
+    *,
+    key: str,
+    mapped_rows: list[tuple],
+    target_cols: list[str],
+    dest_types: dict[str, str] | None = None,
+) -> tuple[bytes, str]:
+    """Serialize one object-store chunk — JSON / JSONL / CSV / Parquet.
+
+    Parquet uses the shared Arrow coerce SSOT (same cells as Iceberg). JSON/CSV
+    still omit ``DF_MISSING`` keys. Default extension remains JSON.
+    """
+    export = serialize_object_store_export(
+        key=key,
+        mapped_rows=mapped_rows,
+        target_cols=target_cols,
+        dest_types=dest_types,
+        spill_max_size=64 * 1024 * 1024,
+    )
+    try:
+        return export.read_all(), export.content_type
+    finally:
+        export.close()

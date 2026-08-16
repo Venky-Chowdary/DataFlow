@@ -5,8 +5,11 @@ derived from evidence the engine already produced (Gate-8 reconciliation, the
 signed proof pack, the quarantine DLQ) — the certificate re-states that evidence
 honestly, it never re-derives correctness on its own.
 
-Module: `apps/api/services/migration_certificate.py`
-Tests: `apps/api/tests/test_migration_certificate.py`
+Module: `apps/api/services/row_conservation.py` (identity) +
+`apps/api/services/migration_certificate.py` (operator page)
+Tests: `apps/api/tests/test_row_conservation.py`,
+`apps/api/tests/test_property9_row_conservation.py`,
+`apps/api/tests/test_migration_certificate.py`
 
 ## Endpoints
 
@@ -24,19 +27,27 @@ subject-bound to the job id so a certificate cannot be replayed for another run.
 ## Row conservation ledger
 
 ```
-rows_read == rows_written + rows_quarantined + rows_skipped
+reader_count == dest_COUNT(*) + hold_outs + skipped
 ```
 
-`rows_read` comes **only** from Gate-8's measured `source_rows`. That is the
-single figure measured against the source rather than reported by the writer.
+`hold_outs = max(rejected − coerced_null, 0)` — coerced-null rows landed.
 
-- `unaccounted > 0` — rows were read and never explained. Reported as
-  **potential silent loss**; blocks the proven claim.
-- `unaccounted < 0` — more rows accounted for than read: duplicate writes or
-  double-counted rejects. Also blocks the claim.
-- `rows_read` absent — `rows_read_source: "unmeasured"`, `balanced: false`,
-  `unaccounted: null`. An unmeasured source count can never be rendered as a
-  clean ledger, and the Markdown prints `unmeasured`, never `0`.
+`rows_written` comes **only** from Gate-8's independent dest read-back
+(`target_rows` when that figure is dest COUNT(*), not writer ack). Writer
+`records_processed` is a diagnostic third number. Closing the ledger with it
+is how AWS DMS reports Full Load success and later `MISSING_TARGET`.
+
+- `unaccounted > 0` — dest COUNT(*) plus hold-outs plus skipped does not
+  explain the read. Reported as **potential silent loss**; blocks the proven
+  claim. Writer ack is not evidence those rows landed.
+- `unaccounted < 0` — dest holds more than the identity allows (duplicate
+  writes, leftover overwrite rows, or double-counted rejects).
+- `rows_read` absent — `rows_read_source: "unmeasured"`, `balanced: false`.
+- dest COUNT(*) absent or writer-ack-only — `rows_written_source: "unmeasured"`,
+  `balanced: false`. An unmeasured dest can never be rendered as a clean ledger.
+- append uses `COUNT(*)_after − COUNT(*)_before`, not the whole-table count.
+- upsert/CDC into a non-empty dest has no COUNT(*) identity (updates do not
+  change cardinality); the ledger stays unproven rather than inventing balance.
 
 ## Verdict
 

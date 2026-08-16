@@ -3,7 +3,7 @@ import { coerceLastTestOk, statusFromLastTest } from "./connectorHealth";
 import { clearSession, getAuthToken } from "./session";
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 15000;
-const LONG_REQUEST_TIMEOUT_MS = 120000;
+const LONG_REQUEST_TIMEOUT_MS = 180000;
 
 /** Unauthenticated liveness probe — used so a 401 on connectors is not "API offline". */
 let _healthFailStreak = 0;
@@ -276,6 +276,8 @@ export async function runPreflight(payload: {
     requires_review?: boolean;
     score_gap?: number;
     user_override?: boolean;
+    review_kind?: string;
+    false_friend_confirmed?: boolean;
     create_new?: boolean;
     assignment_strategy?: string;
     semantic_role?: string;
@@ -322,6 +324,8 @@ export async function runPreflight(payload: {
   sample_rows?: Record<string, unknown>[];
   estimated_bytes?: number;
   sync_mode?: string;
+  /** CDC delivery — default at_least_once; exactly_once is opt-in. */
+  delivery_guarantee?: "at_least_once" | "exactly_once";
   schema_policy?: string;
   validation_mode?: string;
   backfill_new_fields?: boolean;
@@ -341,6 +345,8 @@ export async function runPreflight(payload: {
   acknowledgment_reason?: string;
   /** Pre-ingestion staging (SQL destinations only). */
   write_via_staging?: boolean;
+  /** Connector-specific dest settings (Redshift staging_bucket / iam_role). */
+  dest_extra?: Record<string, unknown>;
   source_kind?: string;
   source_type?: string;
 }): Promise<import("./types").PreflightResult> {
@@ -591,6 +597,12 @@ export interface PilotTransferPreview {
   destination_table_exists?: boolean;
   preflight_run_id?: string;
   readiness_score?: number;
+  validation_mode?: string;
+  schema_policy?: string;
+  contract_id?: string;
+  require_signed_contract?: boolean;
+  enforce_contract?: boolean;
+  breaker_state?: string;
 }
 
 export interface CopilotChatResponse {
@@ -806,6 +818,8 @@ export interface CatalogConnector {
   capability_label?: string;
   /** Honest tier: certified | source_only | connect_only | planned */
   certification_tier?: string;
+  is_hosted_alias?: boolean;
+  alias_of?: string | null;
   capabilities?: {
     test?: boolean;
     read?: boolean;
@@ -880,6 +894,7 @@ export async function fetchConnectors(): Promise<Connector[]> {
       created_at: String(c.created_at ?? new Date().toISOString()),
       // Preserve tri-state: true / false / undefined (never tested).
       last_test_ok: lastTestOk,
+      last_used_at: c.last_used_at ? String(c.last_used_at) : null,
     };
   };
 
@@ -1292,6 +1307,10 @@ export function streamJobProgress(
       watermark: raw.watermark != null ? String(raw.watermark) : null,
       cdc_shared_reader: raw.cdc_shared_reader == null ? null : Boolean(raw.cdc_shared_reader),
       snapshot_mode: raw.snapshot_mode ? String(raw.snapshot_mode) : null,
+      snapshot_plan:
+        raw.snapshot_plan && typeof raw.snapshot_plan === "object"
+          ? (raw.snapshot_plan as import("./types").TransferJob["snapshot_plan"])
+          : null,
       cdc_lease_holder: raw.cdc_lease_holder ? String(raw.cdc_lease_holder) : null,
       cdc_lease_resource: raw.cdc_lease_resource ? String(raw.cdc_lease_resource) : null,
       cdc_lease_stale: raw.cdc_lease_stale == null ? null : Boolean(raw.cdc_lease_stale),
@@ -1321,6 +1340,9 @@ export function streamJobProgress(
       cdc_append_only_sink: raw.cdc_append_only_sink == null ? null : Boolean(raw.cdc_append_only_sink),
       trust_score: raw.trust_score != null ? Number(raw.trust_score) : null,
       trust: raw.trust && typeof raw.trust === "object" ? raw.trust as JobProgress["trust"] : null,
+      row_accounting: raw.row_accounting && typeof raw.row_accounting === "object"
+        ? raw.row_accounting as JobProgress["row_accounting"]
+        : undefined,
       streams: Array.isArray(raw.streams) ? raw.streams as JobProgress["streams"] : undefined,
       notifications: Array.isArray(raw.notifications)
         ? raw.notifications as JobProgress["notifications"]
@@ -1747,6 +1769,8 @@ export interface EndpointIntrospection {
   >;
   objects?: { name: string; type: string }[];
   row_estimate?: number;
+  row_estimate_uncertain?: boolean;
+  sample_row_count?: number;
   table_exists?: boolean;
   data?: Record<string, unknown>[];
   sample_data?: Record<string, unknown>[];
@@ -2176,6 +2200,8 @@ export async function runUniversalTransfer(options: {
   syncMode?: string;
   schemaPolicy?: string;
   validationMode?: string;
+  /** CDC dest-owned watermark EOS. Default at_least_once. */
+  deliveryGuarantee?: "at_least_once" | "exactly_once";
   backfillNewFields?: boolean;
   writeViaStaging?: boolean;
   /** Opt-in Tesseract OCR for scanned/image-only PDF sources. */
@@ -2204,6 +2230,9 @@ export async function runUniversalTransfer(options: {
   approvedDdlIdentityHash?: string;
   /** Optional full artifact payload (content_hash must match approved hash). */
   decisionArtifact?: Record<string, unknown>;
+  /** Bound data contract — same fail-closed SIGNED gate as scheduled runs. */
+  contractId?: string;
+  requireSignedContract?: boolean;
 }) {
   const formData = new FormData();
   if (options.file) formData.append("file", options.file);
@@ -2217,8 +2246,10 @@ export async function runUniversalTransfer(options: {
   formData.append("sync_mode", options.syncMode || "full_refresh_append");
   formData.append("schema_policy", options.schemaPolicy || "manual_review");
   formData.append("validation_mode", options.validationMode || "strict");
-  // Runtime SSOT: only at_least_once is selectable — never invent exactly-once.
-  formData.append("delivery_guarantee", "at_least_once");
+  formData.append(
+    "delivery_guarantee",
+    options.deliveryGuarantee === "exactly_once" ? "exactly_once" : "at_least_once",
+  );
   formData.append("backfill_new_fields", options.backfillNewFields === true ? "true" : "false");
   formData.append("write_via_staging", options.writeViaStaging === true ? "true" : "false");
   formData.append("enable_ocr", options.enableOcr === true ? "true" : "false");
@@ -2261,6 +2292,11 @@ export async function runUniversalTransfer(options: {
     formData.append("stream_contracts_json", JSON.stringify(options.streamContracts));
   }
   if (options.planId) formData.append("plan_id", options.planId);
+  if (options.contractId) formData.append("contract_id", options.contractId);
+  formData.append(
+    "require_signed_contract",
+    options.requireSignedContract === true ? "true" : "false",
+  );
   formData.append("date_locale", options.dateLocale || "");
   formData.append(
     "compliance_acknowledged",
@@ -2360,6 +2396,7 @@ export async function executeTransferJson(payload: {
   syncMode?: string;
   validationMode?: string;
   schemaPolicy?: string;
+  deliveryGuarantee?: "at_least_once" | "exactly_once";
   skipPreflight?: boolean;
   asyncMode?: boolean;
   planId?: string;
@@ -2391,7 +2428,8 @@ export async function executeTransferJson(payload: {
       sync_mode: payload.syncMode || "full_refresh_append",
       validation_mode: payload.validationMode || "strict",
       schema_policy: payload.schemaPolicy || "manual_review",
-      delivery_guarantee: "at_least_once",
+      delivery_guarantee:
+        payload.deliveryGuarantee === "exactly_once" ? "exactly_once" : "at_least_once",
       skip_preflight: payload.skipPreflight === true,
       async_mode: payload.asyncMode !== false,
       plan_id: payload.planId || undefined,
@@ -2861,6 +2899,7 @@ export interface QuarantineInfo {
   job_id: string;
   rejected_rows: number;
   issue_count?: number;
+  open_count?: number;
   /** write = load-time rejects; preflight = Validate/Run integrity findings */
   source?: "write" | "preflight" | "none" | string;
   quarantine: {
@@ -2874,6 +2913,7 @@ export interface QuarantineInfo {
     chars?: string[];
     suggested_transform?: string;
     _df_qid?: string;
+    retry_status?: string;
   }[];
   /** Destination-side DLQ table (`{table}_df_quarantine`) when written. */
   dest_dlq?: {
@@ -2893,6 +2933,17 @@ export interface QuarantineInfo {
    */
   quarantine_durable?: boolean | null;
   quarantine_dlq_error?: string | null;
+  /** Dual Run sibling: remediations until open_count hits zero. closed ≠ migration_proven. */
+  quarantine_closure?: {
+    verdict?: string;
+    open_count?: number;
+    promoted_count?: number;
+    failed_count?: number;
+    durable_count?: number;
+    next_action?: string;
+    note?: string;
+    migration_proven?: boolean;
+  };
 }
 
 export async function fetchJobQuarantine(jobId: string): Promise<QuarantineInfo> {
@@ -3015,6 +3066,7 @@ export interface QuarantineReplayResult {
     source_rows?: number;
     target_rows?: number;
   };
+  quarantine_closure?: QuarantineInfo["quarantine_closure"];
 }
 
 export async function replayJobQuarantine(
@@ -3273,6 +3325,19 @@ export async function runFidelityProof(): Promise<FidelityProofResult> {
   return res.json();
 }
 
+export async function runScheduleParallelCheck(
+  scheduleId: string,
+): Promise<{ passed?: boolean; message?: string; campaign?: PipelineSchedule["fidelity_campaign"] }> {
+  const res = await apiFetch(`${API_BASE}/fidelity/check`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ schedule_id: scheduleId }),
+    timeoutMs: 120_000,
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Parallel-run check failed"));
+  return res.json();
+}
+
 export async function runBenchmark(rows = 100_000): Promise<BenchmarkReport> {
   const res = await apiFetch(`${API_BASE}/workspace/benchmark`, {
     method: "POST",
@@ -3435,9 +3500,21 @@ export async function fetchUsageSummary(days = 30): Promise<{
 
 export interface SchemaDriftReport {
   severity: string;
-  additive: { kind: string; column?: string; to_type?: string }[];
-  breaking: { kind: string; column?: string; to?: string; to_type?: string }[];
+  additive: { kind: string; column?: string; to_type?: string; new_type?: string }[];
+  breaking: { kind: string; column?: string; to?: string; to_type?: string; new_type?: string }[];
   summary?: string;
+  compatibility?: string;
+  compatibility_note?: string;
+  hard_breaking?: { kind: string; column?: string; to?: string }[];
+  soft_net_additive?: { kind: string; column?: string; to?: string }[];
+  schema_evolution?: {
+    action?: string;
+    should_pause?: boolean;
+    compatibility?: string;
+    compatibility_note?: string;
+    hard_breaking?: { kind: string; column?: string }[];
+    soft_net_additive?: { kind: string; column?: string }[];
+  };
 }
 
 export async function classifySchemaDrift(

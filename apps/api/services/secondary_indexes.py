@@ -52,9 +52,17 @@ _MAX_INDEX_NAME = {
 class IndexColumn:
     name: str
     descending: bool = False
+    #: PostgreSQL operator class (``varchar_pattern_ops``, ``jsonb_path_ops``, …).
+    #: Empty means the type default. Recreating the index without it is a
+    #: different index, so this travels with the column rather than being
+    #: stripped at parse time.
+    opclass: str = ""
 
     def to_dict(self) -> dict[str, Any]:
-        return {"name": self.name, "descending": self.descending}
+        payload = {"name": self.name, "descending": self.descending}
+        if self.opclass:
+            payload["opclass"] = self.opclass
+        return payload
 
 
 @dataclass(frozen=True)
@@ -204,7 +212,14 @@ def _postgres_indexes(cursor: Any, schema: str, table: str) -> SourceIndexes:
                  SELECT pg_get_indexdef(ix.indexrelid, k + 1, true)
                  FROM generate_series(0, ix.indnatts - 1) k
                ) AS key_exprs,
-               ix.indoption
+               ix.indoption,
+               ARRAY(
+                 SELECT CASE WHEN opc.opcdefault THEN '' ELSE opc.opcname END
+                 FROM unnest(ix.indclass) WITH ORDINALITY AS k(oid, n)
+                 JOIN pg_opclass opc ON opc.oid = k.oid
+                 WHERE k.n <= GREATEST(ix.indnkeyatts, 1)
+                 ORDER BY k.n
+               ) AS opclasses
         FROM pg_index ix
         JOIN pg_class i ON i.oid = ix.indexrelid
         JOIN pg_class t ON t.oid = ix.indrelid
@@ -229,21 +244,27 @@ def _postgres_indexes(cursor: Any, schema: str, table: str) -> SourceIndexes:
         _n_atts,
         key_exprs,
         indoption,
+        opclasses,
     ) in rows:
         exprs = list(key_exprs or [])
         options = _int_vector(indoption)
+        opc_names = [str(x or "") for x in (opclasses or [])]
         keys = exprs[: int(n_key_atts or len(exprs))]
         include = tuple(_strip_quotes(e) for e in exprs[int(n_key_atts or len(exprs)) :])
         columns: list[IndexColumn] = []
         expression = ""
         for pos, raw in enumerate(keys):
-            ident = _plain_column(raw)
-            if ident is None:
+            parsed = _split_index_key(raw)
+            if parsed is None:
                 expression = expression or raw
                 continue
+            ident, parsed_op = parsed
+            # Catalog opclass is authoritative; pg_get_indexdef per attribute
+            # strips it. Only a non-default class is stored (empty = type default).
+            opclass = opc_names[pos] if pos < len(opc_names) and opc_names[pos] else parsed_op
             # indoption bit 0 is DESC.
             desc = bool(options[pos] & 1) if pos < len(options) else False
-            columns.append(IndexColumn(ident, descending=desc))
+            columns.append(IndexColumn(ident, descending=desc, opclass=opclass))
         items.append(
             SourceIndex(
                 name=str(name),
@@ -276,22 +297,48 @@ def _int_vector(value: Any) -> list[int]:
     return out
 
 
-def _plain_column(index_key_sql: str) -> str | None:
-    """Return the column name when a pg index key is a bare column, else None."""
+#: Tokens that may follow a bare column in ``pg_get_indexdef`` without changing
+#: the index into a different object (sort direction). An operator class is
+#: captured separately — it *does* change the index.
+_DIRECTION_TOKENS = frozenset({"desc", "asc", "nulls", "first", "last"})
+#: Access methods PostgreSQL can reproduce with ``USING``.
+_PG_ACCESS_METHODS = frozenset({"btree", "hash", "gist", "gin", "brin", "spgist"})
+
+
+def _split_index_key(index_key_sql: str) -> tuple[str, str] | None:
+    """``(column, opclass)`` when the key is a column, else ``None`` (expression).
+
+    ``pg_get_indexdef`` for one attribute yields ``col``, ``"Col"``, ``col DESC``,
+    ``col varchar_pattern_ops``, or an expression like ``lower(col)``. The
+    operator class is part of the index identity and must not be dropped.
+    """
     text = (index_key_sql or "").strip()
     if not text:
         return None
-    # pg_get_indexdef for one attribute yields `col`, `"Col"`, `col DESC`,
-    # `col text_pattern_ops`, or an expression like `lower(col)`.
-    head = text.split()[0]
-    if head.startswith('"'):
+    if text.startswith('"'):
         end = text.find('"', 1)
         if end == -1:
             return None
-        return text[1:end]
-    if "(" in head or ")" in head:
-        return None
-    return head
+        ident = text[1:end]
+        rest = text[end + 1 :].strip()
+    else:
+        parts = text.split()
+        head = parts[0]
+        if "(" in head or ")" in head:
+            return None
+        ident = head
+        rest = " ".join(parts[1:])
+    opclass = ""
+    leftovers: list[str] = []
+    for tok in rest.split():
+        if tok.lower() in _DIRECTION_TOKENS:
+            continue
+        leftovers.append(tok)
+    if leftovers:
+        if len(leftovers) != 1 or not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", leftovers[0]):
+            return None
+        opclass = leftovers[0]
+    return ident, opclass
 
 
 def _strip_quotes(ident: str) -> str:
@@ -304,17 +351,39 @@ def _strip_quotes(ident: str) -> str:
 
 
 def _mysql_indexes(cursor: Any, schema: str, table: str) -> SourceIndexes:
-    rows = _rows(
-        cursor,
-        """
-        SELECT INDEX_NAME, NON_UNIQUE, SEQ_IN_INDEX, COLUMN_NAME,
-               COLLATION, INDEX_TYPE, EXPRESSION
-        FROM information_schema.STATISTICS
-        WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s
-        ORDER BY INDEX_NAME, SEQ_IN_INDEX
-        """,
-        (schema, table),
-    )
+    # EXPRESSION exists on MySQL 8.0.13+ functional indexes. MariaDB 10.x and
+    # older MySQL raise 1054 Unknown column — that is not "no indexes".
+    try:
+        rows = _rows(
+            cursor,
+            """
+            SELECT INDEX_NAME, NON_UNIQUE, SEQ_IN_INDEX, COLUMN_NAME,
+                   COLLATION, INDEX_TYPE, EXPRESSION
+            FROM information_schema.STATISTICS
+            WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s
+            ORDER BY INDEX_NAME, SEQ_IN_INDEX
+            """,
+            (schema, table),
+        )
+    except Exception:  # noqa: BLE001 — MariaDB/old MySQL lack EXPRESSION
+        conn = getattr(cursor, "connection", None)
+        if conn is not None:
+            try:
+                conn.rollback()
+            except Exception:  # noqa: BLE001, S110 — clear the failed EXPRESSION probe
+                pass
+        raw = _rows(
+            cursor,
+            """
+            SELECT INDEX_NAME, NON_UNIQUE, SEQ_IN_INDEX, COLUMN_NAME,
+                   COLLATION, INDEX_TYPE
+            FROM information_schema.STATISTICS
+            WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s
+            ORDER BY INDEX_NAME, SEQ_IN_INDEX
+            """,
+            (schema, table),
+        )
+        rows = [(*r, None) for r in raw]
     grouped: dict[str, dict[str, Any]] = {}
     for name, non_unique, _seq, column, collation, index_type, expression in rows:
         entry = grouped.setdefault(
@@ -580,6 +649,66 @@ def plan_index_carry(
     return decisions
 
 
+def _using_clause(dest: str, method: str) -> tuple[str, str]:
+    """``(USING fragment, refuse_reason)``. Empty reason means the dest can hold it.
+
+    The identity of an index includes its access method. PostgreSQL's
+    ``CREATE INDEX`` without ``USING`` is btree; emitting that for a gin/gist
+    source would look carried and enforce a different rule. When the destination
+    can name the method, we do; when it cannot, we refuse rather than degrade.
+    """
+    am = (method or "btree").strip().lower()
+    if dest == "postgresql":
+        if am not in _PG_ACCESS_METHODS:
+            return "", (
+                f"access method {method!r} is not a PostgreSQL method this planner "
+                "can reproduce"
+            )
+        if am == "btree":
+            return "", ""
+        return f" USING {am}", ""
+    if dest in {"mysql", "mariadb"}:
+        if am in {"", "btree"}:
+            return "", ""
+        if am == "hash":
+            return " USING HASH", ""
+        return "", (
+            f"access method {method!r} has no equivalent CREATE INDEX on {dest}"
+        )
+    if dest == "sqlite":
+        if am in {"", "btree"}:
+            return "", ""
+        return "", f"SQLite cannot reproduce access method {method!r}"
+    # SQL Server / Oracle use a different CREATE shape; unknown methods stay
+    # as catalog type_desc and are not rewritten here.
+    return "", ""
+
+
+def _opclass_supported(dest: str, columns: list[IndexColumn]) -> str:
+    """Refuse reason when an operator class cannot be reproduced on ``dest``."""
+    ops = [c.opclass for c in columns if c.opclass]
+    if not ops:
+        return ""
+    if dest != "postgresql":
+        return (
+            f"operator class {ops[0]!r} is PostgreSQL-specific; {dest} has no "
+            "equivalent and recreating the index without it would be a different index"
+        )
+    return ""
+
+
+def _key_sql(col: IndexColumn, quote: Callable[[str], str]) -> str:
+    piece = quote(col.name)
+    if col.opclass:
+        # Operator classes are catalog identifiers, not string literals.
+        from connectors.sql_identifiers import require_safe_identifier
+
+        piece += " " + require_safe_identifier(col.opclass, preserve_case=True)
+    if col.descending:
+        piece += " DESC"
+    return piece
+
+
 def _plan_one(
     item: SourceIndex,
     *,
@@ -618,7 +747,16 @@ def _plan_one(
                 f"Index {item.name!r} covers source column {col.name!r}, which the "
                 "transfer does not carry to the destination."
             )
-        dest_cols.append(IndexColumn(mapped, descending=col.descending))
+        dest_cols.append(
+            IndexColumn(mapped, descending=col.descending, opclass=col.opclass)
+        )
+
+    using_sql, method_why = _using_clause(dest, item.method)
+    if method_why:
+        return refuse(method_why)
+    opclass_why = _opclass_supported(dest, dest_cols)
+    if opclass_why:
+        return refuse(opclass_why)
 
     key_names = [c.name for c in dest_cols]
     # ``constraint_backed`` alone is not a reason to skip: the source index may
@@ -672,13 +810,11 @@ def _plan_one(
     name = _dest_index_name(item.name, dest_table, dest, used_names)
     used_names.add(name)
 
-    key_sql = ", ".join(
-        quote(c.name) + (" DESC" if c.descending else "") for c in dest_cols
-    )
+    key_sql = ", ".join(_key_sql(c, quote) for c in dest_cols)
     target = f"{quote(dest_schema)}.{quote(dest_table)}" if dest_schema else quote(dest_table)
     sql = (
         f"CREATE {'UNIQUE ' if item.unique else ''}INDEX {quote(name)} "
-        f"ON {target} ({key_sql})"
+        f"ON {target}{using_sql} ({key_sql})"
     )
     if include_sql:
         sql += f" INCLUDE ({include_sql})"

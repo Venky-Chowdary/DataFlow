@@ -30,6 +30,7 @@ from services.decision_kernel.findings import (
 from services.readback_projection import project_readback
 from services.reconcile_sftp import verify_sftp_object
 from services.reconcile_coverage import (
+    SOURCE_DIGEST_WRITE_PASS,
     WRITTEN_BATCH_KEYS,
     append_row_count_report,
     extra_rows_note,
@@ -105,6 +106,8 @@ class ReconciliationReport:
     assurance_level: str = ""
     # Set when the digests cover different populations (see reconcile_coverage).
     checksum_scope: str = ""
+    # Pre-write dest COUNT(*) — append identity is dest_after − dest_before.
+    target_rows_before: int | None = None
 
     def to_dict(self) -> dict:
         return stamp_post_write_phase(asdict(self))
@@ -139,6 +142,19 @@ def stamp_post_write_phase(report: dict[str, Any]) -> dict[str, Any]:
     # Module 4: always stamp checksum honesty; never invent population RI proof.
     out["checksum_match"] = independent_match if (src and tgt) else False
     out["population_proof"] = False
+
+    if str(out.get("assurance_level") or "") == "no_op_destination_unchanged":
+        # Quiet incremental poll — dest-before equals dest-after. Digests from
+        # a prior write-pass must not upgrade this to full_checksum.
+        out["phase"] = "post_write_no_op"
+        out["post_write_pending"] = False
+        out["preview"] = False
+        out["coverage"] = "no_op_destination_unchanged"
+        out["assurance_level"] = "no_op_destination_unchanged"
+        out["migration_proven"] = False
+        out["population_proof"] = False
+        out["checksum_match"] = False
+        return out
 
     if is_unproven_export(out, msg):
         out["phase"] = "post_write_skipped"
@@ -189,6 +205,31 @@ def stamp_post_write_phase(report: dict[str, Any]) -> dict[str, Any]:
         return out
 
     if independent_match and not writer_only:
+        from services.signed_proof_pack import apply_fidelity_veto
+
+        vetoed = apply_fidelity_veto(out)
+        if vetoed.get("coverage") == "coerced" or vetoed.get("phase") == "post_write_failed":
+            return vetoed
+        provenance = str(out.get("source_checksum_provenance") or "")
+        # Write-pass fingerprints hash remapped cells in-process. Dest may be
+        # independently SELECT'd, but the source warehouse was not re-read —
+        # Fivetran/HVR Compare would not call that full_checksum / migration_proven.
+        if provenance == SOURCE_DIGEST_WRITE_PASS:
+            rows = out.get("target_rows") or out.get("source_rows") or 0
+            out["phase"] = "post_write_write_pass"
+            out["post_write_pending"] = False
+            out["preview"] = False
+            out["coverage"] = "write_pass_dest_readback"
+            out["assurance_level"] = "write_pass_dest_readback"
+            out["migration_proven"] = False
+            out["population_proof"] = False
+            if str(out.get("message") or "").lower().startswith("row fidelity verified"):
+                out["message"] = (
+                    f"Destination read-back matches the write-pass fingerprint "
+                    f"({rows} rows). Source warehouse was not independently "
+                    "re-read — not migration_proven."
+                )
+            return out
         out["phase"] = "post_write_verified"
         out["post_write_pending"] = False
         out["preview"] = False
@@ -524,6 +565,12 @@ def reconcile(
     which is the only comparable digest for an append into a table that already
     held rows — the whole-table count still goes in the report, but the digest
     must not be described as covering it.
+
+    Strict vs balanced does not make incomparable populations comparable.
+    Whole-table digest mismatch on append/upsert into a larger sink uses the
+    dest-before delta identity (``append_row_count_report``). A keyed-batch
+    digest that still disagrees is a real cell failure and still fails Gate-8.
+    Sample compare never upgrades that to ``full_checksum``.
     """
     coerced_null_rows = max(int(coerced_null_rows or 0), 0)
     rows_skipped = max(int(rows_skipped or 0), 0)
@@ -584,8 +631,10 @@ def reconcile(
         )
 
     if source_checksum != target_checksum:
-        # Enterprise GA: checksum mismatch always fails Gate-8.
-        # Sample compare may attach diagnostics only — never green-pass / override.
+        # Comparable checksum mismatch always fails Gate-8. Sample compare may
+        # attach diagnostics only — never green-pass / override. Incomparable
+        # append/upsert into a larger sink is not a checksum: dest-before delta
+        # is the identity. Strict does not invent comparability.
         compared = int((sample_compare or {}).get("compared") or 0)
         sample_ok = (
             bool(sample_compare)
@@ -606,7 +655,7 @@ def reconcile(
                 "soften checksum mismatch."
             )
         mode_label = "strict" if strict_checksum else "balanced"
-        if has_extra and not strict_checksum:
+        if has_extra and checksum_scope != WRITTEN_BATCH_KEYS:
             return append_row_count_report(
                 source_rows=source_rows,
                 target_rows=target_rows,
@@ -676,8 +725,9 @@ def reconcile(
         sample_compare=sample_compare,
         checksum_match=True,
         population_proof=False,
-        assurance_level="full_checksum",
+        assurance_level="coerced" if coerced_null_rows else "full_checksum",
         checksum_scope=checksum_scope,
+        target_rows_before=target_rows_before,
     )
 
 
@@ -772,6 +822,77 @@ def sa_streaming_result(
             yield from partition
 
     return names, _rows()
+
+
+def iter_select_row_dicts(
+    conn: Any,
+    statement: Any,
+    columns: list[str],
+    *,
+    itersize: int = READBACK_ITERSIZE,
+) -> Iterator[list[dict[str, Any]]]:
+    """Yield dict batches from one SELECT. Full-population drain — never OFFSET.
+
+    ``page_clause`` remains the owner for *windowed* preview reads that have a
+    stable ORDER BY. A complete scan (SCD2 staging, mirror key walk, active-row
+    digest) must be one cursor. Microsoft: OFFSET/FETCH is a new independent
+    query per page and requires a unique ORDER BY; without it SQL Server
+    errors and Oracle/DB2 reject LIMIT (ORA-03047). OFFSET is also O(n²).
+
+    Dest-engine ``HASH_AGG`` / ``CHECKSUM_AGG`` pushdown is a future
+    enhancement of this kernel, not a second path — those aggregates are not
+    type-portable (CHECKSUM_AGG ignores NULL; HASH_AGG is Snowflake-only).
+    """
+    _names, raw = sa_streaming_result(conn, statement, itersize=itersize)
+    batch: list[dict[str, Any]] = []
+    size = max(1, int(itersize))
+    for row in raw:
+        mapping = getattr(row, "_mapping", None)
+        if mapping is None:
+            mapping = dict(zip(columns, row))
+        batch.append({c: mapping.get(c) for c in columns})
+        if len(batch) >= size:
+            yield batch
+            batch = []
+    if batch:
+        yield batch
+
+
+def stream_select_checksum(
+    conn: Any,
+    statement: Any,
+    columns: list[str],
+    *,
+    itersize: int = READBACK_ITERSIZE,
+    dest_db_type: str = "",
+    dest_types: dict[str, str] | None = None,
+) -> tuple[int, str]:
+    """Order-independent checksum of a full SELECT, streamed.
+
+    Same Gate-8 fingerprint kernel as dest read-back
+    (``sa_streaming_result`` + ``canonical_checksum_from_iter``). Empty
+    population returns ``(0, "")`` — the SCD2/mirror writer contract (blank
+    digest, not sha256 of empty). This digest does not by itself close
+    Gate-8 or claim ``migration_proven``.
+    """
+    count = 0
+
+    def _rows() -> Iterator[Any]:
+        nonlocal count
+        for batch in iter_select_row_dicts(
+            conn, statement, columns, itersize=itersize
+        ):
+            for row in batch:
+                count += 1
+                yield row
+
+    digest = canonical_checksum_from_iter(
+        _rows(),
+        columns,
+        dest_db_type=dest_db_type,
+        dest_types=dest_types,
+    )
+    return count, (digest if count else "")
 
 
 # Cap on keys fetched back per batch proof: bounded so a 10M-row append does
@@ -1584,50 +1705,6 @@ def verify_bigquery_table(
         return -1, ""
 
 
-def _rows_from_object_bytes(
-    body: bytes, key: str, columns: list[str] | None = None
-) -> tuple[list[dict[str, Any]], list[str]]:
-    """Parse S3/GCS object payload (JSON, JSONL, CSV) into dict rows and headers."""
-    import csv
-    import io
-
-    text = body.decode("utf-8", errors="replace")
-    lower_key = (key or "").lower()
-
-    if lower_key.endswith(".csv"):
-        reader = csv.DictReader(io.StringIO(text))
-        rows = list(reader)
-        headers = reader.fieldnames or []
-        return rows, headers
-
-    if lower_key.endswith(".jsonl"):
-        rows: list[dict[str, Any]] = []
-        for line in text.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            parsed = json.loads(line)
-            if isinstance(parsed, dict):
-                rows.append(parsed)
-            else:
-                rows.append({"value": parsed})
-        headers = sorted(set(k for r in rows for k in r.keys())) if rows else []
-        return rows, headers or (columns or [])
-
-    # Default: JSON array or single JSON object.
-    try:
-        data = json.loads(text)
-    except json.JSONDecodeError:
-        data = []
-    if isinstance(data, list):
-        rows = [r for r in data if isinstance(r, dict)]
-        headers = sorted(set(k for r in rows for k in r.keys())) if rows else []
-        return rows, headers or (columns or [])
-    if isinstance(data, dict):
-        return [data], sorted(data.keys())
-    return [], columns or []
-
-
 def verify_s3_object(
     *,
     bucket: str,
@@ -1641,45 +1718,32 @@ def verify_s3_object(
     target_columns: list[str] | None = None,
     limit: int = 0,
 ) -> tuple[int, str]:
-    """Reconcile an S3 object by downloading and parsing its contents.
+    """Gate-8 cell checksum of S3 GET streams. Never JSON-fallback empty.
 
-    Multi-chunk writers emit ``part-*`` keys under a stem prefix; aggregate
-    those parts when present so Gate-8 does not fall through to writer-ack
-    while most rows live only in part objects.
+    Dest COUNT of the same keys is ``destination_row_count``. This digest
+    walks records (CSV RFC 4180, JSONL objects, JSON root array, Parquet/
+    Avro values) off the GET body. Gzip CSV as UTF-8 JSON garbage is not
+    dest=0. XML/Excel/ORC cell walk stays unmeasured. Missing object is
+    ``(0, "")``.
     """
     try:
-        from connectors.aws_common import boto3_client
-        from connectors.object_store_common import (
-            normalize_object_base_key,
-            object_parts_prefix,
-            object_store_read_keys,
-        )
-        from connectors.s3_reader import list_objects
+        from services.dest_precount import checksum_object_store
 
-        cfg = {
-            "host": host,
-            "port": port,
-            "username": username,
-            "password": password,
-            "connection_string": connection_string,
-            "ssl": ssl,
-            "database": bucket,
-        }
-        client = boto3_client("s3", cfg)
-        base = normalize_object_base_key(key)
-        parts_prefix = object_parts_prefix(base)
-        listed = list_objects(cfg, bucket, parts_prefix) if parts_prefix else []
-        read_keys = object_store_read_keys(base, listed)
-        all_rows: list[dict[str, Any]] = []
-        headers: list[str] = []
-        for obj_key in read_keys:
-            body = client.get_object(Bucket=bucket, Key=obj_key)["Body"].read()
-            rows, hdrs = _rows_from_object_bytes(body, obj_key, target_columns)
-            if not headers:
-                headers = list(hdrs or [])
-            all_rows.extend(rows)
-        columns = headers or target_columns or []
-        return len(all_rows), canonical_checksum_from_iter(all_rows, columns, limit=limit)
+        return checksum_object_store(
+            "s3",
+            {
+                "host": host,
+                "port": port,
+                "username": username,
+                "password": password,
+                "connection_string": connection_string,
+                "ssl": ssl,
+                "database": bucket,
+            },
+            table_name=key,
+            columns=target_columns,
+            limit=limit,
+        )
     except Exception as exc:
         logger.warning("Reconciliation read-back failed: %s", exc, exc_info=exc)
         return -1, ""
@@ -1695,37 +1759,22 @@ def verify_gcs_blob(
     target_columns: list[str] | None = None,
     limit: int = 0,
 ) -> tuple[int, str]:
-    """Reconcile a GCS blob by downloading and parsing its contents."""
+    """Gate-8 cell checksum of GCS GET streams. Never JSON-fallback empty."""
     try:
-        from connectors.gcs_common import gcs_client
-        from connectors.gcs_reader import list_objects
-        from connectors.object_store_common import (
-            normalize_object_base_key,
-            object_parts_prefix,
-            object_store_read_keys,
-        )
+        from services.dest_precount import checksum_object_store
 
-        cfg = {
-            "host": host,
-            "port": port,
-            "connection_string": connection_string,
-        }
-        client = gcs_client(cfg)
-        base = normalize_object_base_key(key)
-        parts_prefix = object_parts_prefix(base)
-        listed = list_objects(cfg, bucket, parts_prefix) if parts_prefix else []
-        read_keys = object_store_read_keys(base, listed)
-        bucket_obj = client.bucket(bucket)
-        all_rows: list[dict[str, Any]] = []
-        headers: list[str] = []
-        for obj_key in read_keys:
-            body = bucket_obj.blob(obj_key).download_as_bytes()
-            rows, hdrs = _rows_from_object_bytes(body, obj_key, target_columns)
-            if not headers:
-                headers = list(hdrs or [])
-            all_rows.extend(rows)
-        columns = headers or target_columns or []
-        return len(all_rows), canonical_checksum_from_iter(all_rows, columns, limit=limit)
+        return checksum_object_store(
+            "gcs",
+            {
+                "host": host,
+                "port": port,
+                "connection_string": connection_string,
+                "database": bucket,
+            },
+            table_name=key,
+            columns=target_columns,
+            limit=limit,
+        )
     except Exception as exc:
         logger.warning("Reconciliation read-back failed: %s", exc, exc_info=exc)
         return -1, ""
@@ -1745,42 +1794,23 @@ def verify_adls_blob(
     limit: int = 0,
     dest_types: dict[str, str] | None = None,
 ) -> tuple[int, str]:
-    """Independent Azure Blob / ADLS Gen2 read-back (parity with S3/GCS Gate-8)."""
+    """Gate-8 cell checksum of Azure Blob / ADLS GET streams. Never JSON ``[]``."""
     try:
-        from connectors.adls_common import blob_service_client
-        from connectors.adls_reader import list_objects
-        from connectors.object_store_common import (
-            normalize_object_base_key,
-            object_parts_prefix,
-            object_store_read_keys,
-        )
+        from services.dest_precount import checksum_object_store
 
-        cfg = {
-            "host": host,
-            "port": port,
-            "username": username,
-            "password": password,
-            "connection_string": connection_string,
-            "service_account": service_account,
-            "database": container,
-        }
-        client = blob_service_client(cfg)
-        base = normalize_object_base_key(key)
-        parts_prefix = object_parts_prefix(base)
-        listed = list_objects(cfg, container, parts_prefix) if parts_prefix else []
-        read_keys = object_store_read_keys(base, listed)
-        all_rows: list[dict[str, Any]] = []
-        headers: list[str] = []
-        for obj_key in read_keys:
-            body = client.get_blob_client(container, obj_key).download_blob().readall()
-            rows, hdrs = _rows_from_object_bytes(body, obj_key, target_columns)
-            if not headers:
-                headers = list(hdrs or [])
-            all_rows.extend(rows)
-        columns = headers or target_columns or []
-        return len(all_rows), canonical_checksum_from_iter(
-            all_rows,
-            columns,
+        return checksum_object_store(
+            "adls",
+            {
+                "host": host,
+                "port": port,
+                "username": username,
+                "password": password,
+                "connection_string": connection_string,
+                "service_account": service_account,
+                "database": container,
+            },
+            table_name=key,
+            columns=target_columns,
             limit=limit,
             dest_db_type="adls",
             dest_types=dest_types,
@@ -2533,27 +2563,40 @@ def verify_iceberg_table(
     target_columns: list[str] | None = None,
     limit: int = 0,
 ) -> tuple[int, str]:
-    """Reconcile an Iceberg table by scanning the catalog and fingerprinting rows."""
-    try:
-        from connectors.iceberg_catalog import load_catalog, parse_iceberg_catalog_config
+    """Reconcile Iceberg from current-snapshot data files, not ``scan().to_arrow()``.
 
-        endpoint = {
-            "connection_string": connection_string or "",
+    Dest COUNT is dest-engine file footers (same leftover MERGE listing).
+    Catalog ``SqlCatalog`` / ``scan().count()`` never close filesystem tables
+    and never close leftover identity. Unreadable snapshot is unmeasured.
+    """
+    try:
+        from services.dest_precount import destination_row_count, iceberg_target_sample
+
+        cfg = {
+            "connection_string": connection_string or warehouse or "",
+            "database": warehouse or connection_string or "",
             "warehouse": warehouse or "",
-            "table": table_name,
-            "table_name": table_name,
+            "host": "",
+            "schema": "",
         }
-        cfg = parse_iceberg_catalog_config(endpoint)
-        catalog = load_catalog(endpoint)
-        identifier = cfg["namespace"] + (cfg["table_name"],)
-        tbl = catalog.load_table(identifier)
-        count = tbl.scan().count()
-        arrow = tbl.scan().to_arrow()
-        if limit and len(arrow) > limit:
-            arrow = arrow.slice(0, limit)
-        rows = arrow.to_pylist()
-        columns = target_columns or list(arrow.column_names)
-        checksum = fingerprint_checksum(_iter_fingerprints(rows, columns))
+        count = destination_row_count(
+            "iceberg", cfg, schema="", table_name=table_name
+        )
+        if count is None:
+            return -1, ""
+        cols = [str(c) for c in (target_columns or []) if str(c).strip()]
+        if not cols:
+            return int(count), ""
+        rows = iceberg_target_sample(
+            cfg,
+            schema="",
+            table_name=table_name,
+            columns=cols,
+            limit=int(limit or 0) or None,
+        )
+        if rows is None:
+            return int(count), ""
+        checksum = fingerprint_checksum(_iter_fingerprints(rows, cols))
         return int(count), checksum
     except Exception as exc:
         logger.warning("Iceberg reconciliation read-back failed: %s", exc, exc_info=exc)
@@ -4469,53 +4512,6 @@ class TargetSampleUnavailable(RuntimeError):
     empty list is what made a missing SELECT grant report delete proof as
     passed while the rows were still live.
     """
-
-
-def _object_store_target_sample(
-    *,
-    table_name: str,
-    list_keys: Callable[[str], list[str]],
-    fetch_bytes: Callable[[str], bytes],
-    cols: list[str],
-    limit: int,
-    sort_key: str,
-    keys: Iterable[Any] | None,
-) -> list[dict[str, Any]]:
-    """Gate-8 sample read shared by S3, GCS and ADLS destinations.
-
-    Object stores have no WHERE clause, so the sample is assembled by reading
-    the part objects (or the single legacy object) and filtering in memory.
-    Reading every part matters: a multi-chunk write keeps most rows outside the
-    base key, and sampling only the base key would compare against a fraction
-    of the data while reporting a clean Gate-8.
-    """
-    from connectors.object_store_common import (
-        normalize_object_base_key,
-        object_parts_prefix,
-        object_store_read_keys,
-    )
-
-    base = normalize_object_base_key(table_name)
-    listed = list_keys(object_parts_prefix(base))
-    read_keys = object_store_read_keys(base, listed)
-    lim = max(1, int(limit or 50))
-    wanted = {str(k) for k in keys} if keys else set()
-    projection = None if cols == ["*"] else cols
-
-    rows: list[dict[str, Any]] = []
-    for obj_key in read_keys:
-        part_rows, _headers = _rows_from_object_bytes(
-            fetch_bytes(obj_key), obj_key, projection
-        )
-        if wanted and sort_key:
-            # Key-targeted sample: keep only the rows Gate-8 asked about, but
-            # keep scanning parts because a key can live in any part.
-            rows.extend(r for r in part_rows if str(r.get(sort_key)) in wanted)
-        else:
-            rows.extend(part_rows)
-        if len(rows) >= lim and not wanted:
-            break
-    return rows[:lim]
 
 
 def read_target_sample(

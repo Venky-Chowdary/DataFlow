@@ -140,6 +140,33 @@ def omit_missing_fields(
     return out
 
 
+def mapped_row_to_json_record(
+    row: tuple | list,
+    target_cols: list[str],
+    dest_types: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """One object-store JSON record — omit ``DF_MISSING`` keys (Kafka-class)."""
+    from services.value_serializer import is_missing_sentinel
+
+    dest_types = dest_types or {}
+    rec: dict[str, Any] = {}
+    for col, val in zip(target_cols, row):
+        if is_missing_sentinel(val):
+            continue
+        rec[col] = to_json_value(val, col, dest_types)
+    return rec
+
+
+def iter_mapped_json_records(
+    mapped_rows: list[tuple],
+    target_cols: list[str],
+    dest_types: dict[str, str] | None = None,
+):
+    """Yield JSON records without materializing the full list."""
+    for row in mapped_rows:
+        yield mapped_row_to_json_record(row, target_cols, dest_types)
+
+
 def mapped_rows_to_json_records(
     mapped_rows: list[tuple],
     target_cols: list[str],
@@ -150,18 +177,7 @@ def mapped_rows_to_json_records(
     Dense CSV still gets empty cells for omitted keys via DictWriter fieldnames;
     JSON/JSONL must never emit ``\"col\": null`` for STOP_COLUMN / sparse CDC.
     """
-    from services.value_serializer import is_missing_sentinel
-
-    dest_types = dest_types or {}
-    records: list[dict[str, Any]] = []
-    for row in mapped_rows:
-        rec: dict[str, Any] = {}
-        for col, val in zip(target_cols, row):
-            if is_missing_sentinel(val):
-                continue
-            rec[col] = to_json_value(val, col, dest_types)
-        records.append(rec)
-    return records
+    return list(iter_mapped_json_records(mapped_rows, target_cols, dest_types))
 
 
 def project_quarantine_source_values(
@@ -1111,20 +1127,25 @@ def _rejected_row_count(
     policy: str,
     *,
     sparse_rows: list[tuple] | None = None,
+    source_row_count: int | None = None,
 ) -> int:
     """Return the number of rows that were rejected or quarantined.
 
     For ``fail`` / ``quarantine`` the held-out rows are
-    ``len(data_rows) - len(mapped_rows) - len(sparse_rows)`` (quarantine never
+    ``source_count - len(mapped_rows) - len(sparse_rows)`` (quarantine never
     writes NULL into the primary table for a bad cell; sparse CDC rows are
     still written via omit-from-SET and must not inflate rejected counts).
+    ``source_row_count`` is the expanded STRUCT/explode count when the writer
+    ingested through ``SourceRowSpool`` — ``len(data_rows)`` is the unexpanded
+    engine chunk and must not be used after explode.
     For ``coerce_null`` the rows are preserved with a NULL bad cell, so the
     count is distinct source row numbers with at least one rejected cell.
     """
     if policy == "coerce_null":
         return len({d["row"] for d in rejected_details})
     kept = len(mapped_rows) + len(sparse_rows or [])
-    return max(0, len(data_rows) - kept)
+    n = int(source_row_count) if source_row_count is not None else len(data_rows)
+    return max(0, n - kept)
 
 
 def _coerced_null_row_count(rejected_details: list[dict[str, Any]], policy: str) -> int:
@@ -1185,6 +1206,8 @@ def map_rows_for_fingerprint(
     contract_primary_key: str | None = None,
     empty_cells_as_null: bool = False,
     destination_column_nullability: dict[str, bool] | None = None,
+    row_number_start: int = 1,
+    struct_already_materialized: bool = False,
 ) -> tuple[list[tuple], list[dict[str, Any]]]:
     """Map rows for Gate-8 fingerprints with write-path quarantine parity.
 
@@ -1211,6 +1234,8 @@ def map_rows_for_fingerprint(
         destination_column_nullability=destination_column_nullability,
         stream_contracts=stream_contracts,
         contract_primary_key=contract_primary_key,
+        row_number_start=row_number_start,
+        struct_already_materialized=struct_already_materialized,
     )
     rejected_details = list(rejected or [])
     type_map = dict(dest_types or {}) or dict(column_types or {})
@@ -1225,6 +1250,7 @@ def map_rows_for_fingerprint(
                 rejected_details,
                 policy,
                 dialect_label=(dest_kind or "destination").strip() or "destination",
+                dest_db=(dest_kind or "").strip(),
                 mappings=list(mappings or []) or None,
             )
     return mapped, rejected_details
@@ -1323,6 +1349,9 @@ def build_mapped_rows_with_details(
     stream_contracts: list[dict[str, Any]] | None = None,
     destination_column_nullability: dict[str, bool] | None = None,
     empty_cells_as_null: bool = False,
+    row_number_start: int = 1,
+    accepted_source_rows: list[int] | None = None,
+    struct_already_materialized: bool = False,
 ) -> tuple[list[tuple], list[str], list[dict[str, Any]]]:
     """Returns mapped rows, error messages, and structured rejected-row details.
 
@@ -1338,7 +1367,11 @@ def build_mapped_rows_with_details(
         error_policy, allow_coerce_null=allow_job_coerce_null
     )
     # Honor Map STRUCT policy (JSON blob vs flatten top-level keys) before bind.
-    headers, data_rows = materialize_struct_policies(headers, data_rows, mappings)
+    # Object-store chunked materialize expands once on the full engine batch,
+    # then maps slices — re-flattening each slice would miss keys that only
+    # appear after the first 50 rows of that slice.
+    if not struct_already_materialized:
+        headers, data_rows = materialize_struct_policies(headers, data_rows, mappings)
     source_indices = {h: i for i, h in enumerate(headers)}
     # Case-insensitive fallback — Map/header drift must not invent NULL wipes.
     source_indices_ci = {str(h).lower(): i for i, h in enumerate(headers)}
@@ -1363,6 +1396,8 @@ def build_mapped_rows_with_details(
             from services.mapping_constraints import is_intentional_omit
 
             if is_intentional_omit(m):
+                continue
+            if str(m.get("assignment_strategy") or "") == "pending_dest_schema":
                 continue
         except Exception:
             pass
@@ -1401,7 +1436,8 @@ def build_mapped_rows_with_details(
     )
 
     mapped: list[tuple] = []
-    for row_number, raw in enumerate(data_rows, start=1):
+    start_no = max(1, int(row_number_start or 1))
+    for row_number, raw in enumerate(data_rows, start=start_no):
         out = [None] * len(sanitized_target_cols)
         row_has_error = False
         # ok | fail | stop_table | abort_transaction | retry_then_fail |
@@ -1635,6 +1671,8 @@ def build_mapped_rows_with_details(
                 for c in out
             )
         )
+        if accepted_source_rows is not None:
+            accepted_source_rows.append(row_number)
 
     return mapped, errors, rejected_details
 
@@ -1730,6 +1768,9 @@ def flush_normalized_child_batches(
 
             ph = ", ".join([placeholder] * len(cols))
             insert_sql = f"INSERT INTO {table_q} ({col_q}) VALUES ({ph})"  # nosec B608
+            from services.shape_contract import require_name_addressed_insert
+
+            insert_sql = require_name_addressed_insert(insert_sql)
             if cursor is not None:
                 try:
                     cursor.executemany(insert_sql, rows)
@@ -1750,6 +1791,7 @@ def flush_normalized_child_batches(
                     params = {f"p{i}": v for i, v in enumerate(row)}
                     named_ph = ", ".join(f":p{i}" for i in range(len(cols)))
                     sql = f"INSERT INTO {table_q} ({col_q}) VALUES ({named_ph})"  # nosec B608
+                    sql = require_name_addressed_insert(sql)
                     try:
                         sa_conn.execute(sa.text(sql), params)
                     except Exception as row_exc:
@@ -1800,6 +1842,8 @@ def prepare_records_for_vector_write(
             from services.mapping_constraints import is_intentional_omit
 
             if is_intentional_omit(m):
+                continue
+            if str(m.get("assignment_strategy") or "") == "pending_dest_schema":
                 continue
         except Exception:
             pass
@@ -1955,6 +1999,7 @@ def resolve_studio_or_map_dest_types(
     logical_types: list[str] | None = None,
     studio_types: dict[str, Any] | None = None,
     product: str = "destination",
+    dest_db: str = "",
 ) -> tuple[dict[str, str], str | None]:
     """Studio present → fail-closed coverage; else Map stamps for create-new.
 
@@ -1995,6 +2040,7 @@ def resolve_studio_or_map_dest_types(
             logical_types=logical_types,
             live_types=None,
             default="VARCHAR",
+            dest_db=dest_db,
         ),
         None,
     )
@@ -2010,12 +2056,15 @@ def gate_additive_types_under_partial_studio(
     product: str,
     materialize_stamp: Any,
     col_in_existing: Any = None,
+    dest_db: str = "",
+    column_types: dict[str, str] | None = None,
 ) -> tuple[list[str], str | None]:
     """Under partial Studio, additive ADD must use explicit Map ``target_type``.
 
     Existing columns keep ``target_types`` (rematerialize/physical owns them).
     New columns without an operator Map stamp refuse — never invent from
-    source DDL / bare VARCHAR (BigQuery / generic_sql parity).
+    source DDL / bare VARCHAR (BigQuery / generic_sql parity). Widthless
+    VARCHAR family stamps inherit measured source ``(n)`` before ADD.
     """
     if not studio_err:
         return list(target_types), None
@@ -2036,6 +2085,10 @@ def gate_additive_types_under_partial_studio(
             by_tgt[tgt] = mapping
             by_tgt.setdefault(tgt.lower(), mapping)
     contains = col_in_existing or (lambda col, ex: col in ex)
+    ctypes = column_types or {}
+    inherit = None
+    if dest_db:
+        from services.decision_kernel import inherit_measured_string_width as inherit
     for i, col in enumerate(target_cols):
         if not col or contains(col, existing):
             continue
@@ -2049,6 +2102,13 @@ def gate_additive_types_under_partial_studio(
                 "Map target_type under partial Studio — refuse Map VARCHAR ADD "
                 "invent. Stamp the column on Map or disable backfill_new_fields."
             )
+        if inherit is not None:
+            src_type = str(
+                mapping.get("source_type")
+                or ctypes.get(str(mapping.get("source") or ""))
+                or ""
+            )
+            explicit = inherit(explicit, src_type, dest_db=dest_db) or explicit
         stamped = materialize_stamp(explicit)
         if not str(stamped or "").strip():
             return out, (
@@ -2101,6 +2161,7 @@ def resolve_mapping_dest_types(
     logical_types: list[str] | None = None,
     live_types: dict[str, str] | None = None,
     default: str = "VARCHAR",
+    dest_db: str = "",
 ) -> dict[str, str]:
     """Resolve per-column carriers for quarantine / coerce (SaaS + Kafka).
 
@@ -2110,6 +2171,9 @@ def resolve_mapping_dest_types(
     3. ``resolve_target_columns`` logical types
     4. source ``column_types``
     5. ``default`` (never invent unbounded ``string`` when typed Map exists)
+
+    Widthless Map VARCHAR-family stamps inherit measured source ``(n)`` so
+    create-new MySQL UNIQUE/PK stay indexable (Airbyte TEXT cliff).
 
     For rematerialize over live DDL/Registry/AttrDefs, prefer
     ``rematerialize_live_dest_types`` so gaps never soft-fill Map VARCHAR.
@@ -2129,6 +2193,8 @@ def resolve_mapping_dest_types(
         if tgt and tgt not in by_tgt:
             by_tgt[tgt] = mapping
             by_tgt.setdefault(tgt.lower(), mapping)
+    from services.decision_kernel import inherit_measured_string_width
+
     out: dict[str, str] = {}
     for i, col in enumerate(cols):
         live_hit = live.get(str(col).lower())
@@ -2138,13 +2204,19 @@ def resolve_mapping_dest_types(
         m = by_tgt.get(col) or by_tgt.get(str(col).lower()) or {}
         mapped = str(m.get("target_type") or m.get("dest_type") or "").strip()
         src = str(m.get("source") or "")
-        out[col] = (
+        src_type = str(ctypes.get(src) or m.get("source_type") or "")
+        chosen = (
             mapped
             or (logical[i] if i < len(logical) else "")
             or ctypes.get(src)
             or ctypes.get(col)
             or default
         )
+        if mapped:
+            chosen = inherit_measured_string_width(
+                mapped, src_type, dest_db=dest_db
+            ) or mapped
+        out[col] = chosen
     return out
 
 
@@ -2156,6 +2228,7 @@ def resolve_target_columns(
     *,
     sample_values_by_source: dict[str, list[str]] | None = None,
     table_exists: bool | None = None,
+    dest_db: str = "",
 ) -> tuple[list[str], list[str]]:
     """Return target column names and their intended logical target types.
 
@@ -2164,6 +2237,7 @@ def resolve_target_columns(
 
     Create-new (``table_exists is False``): Map ``target_type`` is preserved
     (Map≡CREATE) — unfit values quarantine on write instead of rewriting DDL.
+    Widthless VARCHAR-family stamps inherit measured source ``(n)``.
 
     Enterprise GA: create-new without an explicit Map ``target_type`` must **not**
     invent BOOLEAN/INTEGER/DECIMAL from head samples. Keep the source/carrier
@@ -2180,6 +2254,8 @@ def resolve_target_columns(
             from services.mapping_constraints import is_intentional_omit
 
             if is_intentional_omit(m) or not m.get("target"):
+                continue
+            if str(m.get("assignment_strategy") or "") == "pending_dest_schema":
                 continue
         except Exception:
             if not m.get("target"):
@@ -2207,6 +2283,14 @@ def resolve_target_columns(
             src = str(m.get("source") or "")
             src_type = column_types.get(src) or m.get("source_type")
             if table_exists is False:
+                if explicit_target:
+                    from services.decision_kernel import inherit_measured_string_width
+
+                    proposed = inherit_measured_string_width(
+                        str(proposed),
+                        str(src_type) if src_type else None,
+                        dest_db=dest_db,
+                    ) or proposed
                 # Explicit Map stamp OR non-explicit source/carrier proposal:
                 # honor_explicit=True prevents sample-driven invent of tighter types.
                 proposed = safe_ddl_logical_type(
@@ -2216,6 +2300,27 @@ def resolve_target_columns(
                     source_type=str(src_type) if src_type else None,
                     honor_explicit=True,
                 )
+                # Map≡CREATE must not honor a sample-invented stamp that collapses
+                # the declared source (DECIMAL(38,0)→BIGINT on the 150k TPC-H route).
+                if src_type and proposed and not (
+                    m.get("user_override") or m.get("userOverride")
+                ):
+                    try:
+                        from services.migration_risk_contract import (
+                            mapping_has_clearing_risk_contract,
+                        )
+
+                        risk_cleared = mapping_has_clearing_risk_contract(m)
+                    except Exception:
+                        risk_cleared = False
+                    if not risk_cleared:
+                        from services.decision_kernel import (
+                            refuse_create_new_numeric_collapse,
+                        )
+
+                        proposed = refuse_create_new_numeric_collapse(
+                            str(src_type), str(proposed), dest_db
+                        )
             target_types.append(str(proposed))
     return target_cols, target_types
 
@@ -3452,72 +3557,87 @@ def quarantine_unfit_strings(
     policy: str,
     *,
     dialect_label: str = "VARCHAR",
+    dest_db: str = "",
 ) -> list[tuple]:
     """Hold out / NULL cells that exceed bounded VARCHAR/NVARCHAR/CHAR width.
 
     Preflight only sees samples — production rows longer than samples used to
     reach SQL Server and silently truncate. Quarantine is fail-closed.
-    Unlimited carriers (TEXT, NVARCHAR(MAX), STRING) are skipped.
+    Unlimited carriers (TEXT, NVARCHAR(MAX), STRING) skip the width check
+    and still run encoding-capacity (utf8mb3 TEXT cannot store emoji).
     """
 
     from services.ddl_compatibility import parse_varchar_width
+    from services.encoding_capacity import quarantine_unfit_encoding
 
     width_cols: list[tuple[int, int, str]] = []
     for i, typ in enumerate(target_types):
         width = parse_varchar_width(typ)
         if width is not None:
             width_cols.append((i, width, typ))
-    if not width_cols:
-        return mapped_rows
 
-    from services.value_serializer import cell_to_string
+    kept = mapped_rows
+    if width_cols:
+        from services.value_serializer import cell_to_string
 
-    out: list[tuple] = []
-    for row_idx, row in enumerate(mapped_rows):
-        cells = list(row)
-        hold_out = False
-        for col_idx, width, typ in width_cols:
-            if col_idx >= len(cells) or cells[col_idx] is None:
-                continue
-            from services.value_serializer import is_missing_sentinel
+        out: list[tuple] = []
+        for row_idx, row in enumerate(mapped_rows):
+            cells = list(row)
+            hold_out = False
+            for col_idx, width, typ in width_cols:
+                if col_idx >= len(cells) or cells[col_idx] is None:
+                    continue
+                from services.value_serializer import is_missing_sentinel
 
-            if is_missing_sentinel(cells[col_idx]):
+                if is_missing_sentinel(cells[col_idx]):
+                    continue
+                if fits_varchar(
+                    cells[col_idx], width, typ, dialect_label=dialect_label
+                ):
+                    continue
+                sample = cell_to_string(cells[col_idx])[:120]
+                units = string_storage_units(
+                    cells[col_idx], typ, dialect_label=dialect_label
+                )
+                append_write_quarantine_detail(
+                    rejected_details,
+                    {
+                        "row": row_idx + 1,
+                        "column": target_cols[col_idx],
+                        "target": target_cols[col_idx],
+                        "value": sample,
+                        "reason": (
+                        f"value length {units} exceeds {dialect_label}({width}) "
+                        "— quarantined (would truncate on write)"
+                        ),
+                        "policy": "write_quarantine",
+                        "chars": [],
+                    },
+                    mapped_row=cells,
+                    target_cols=target_cols,
+                )
+                if policy == "coerce_null":
+                    from services.value_serializer import DF_MISSING_SENTINEL
+                    cells[col_idx] = DF_MISSING_SENTINEL
+                else:
+                    hold_out = True
+                    break
+            if hold_out:
                 continue
-            if fits_varchar(
-                cells[col_idx], width, typ, dialect_label=dialect_label
-            ):
-                continue
-            sample = cell_to_string(cells[col_idx])[:120]
-            units = string_storage_units(
-                cells[col_idx], typ, dialect_label=dialect_label
-            )
-            append_write_quarantine_detail(
-                rejected_details,
-                {
-                    "row": row_idx + 1,
-                    "column": target_cols[col_idx],
-                    "target": target_cols[col_idx],
-                    "value": sample,
-                    "reason": (
-                    f"value length {units} exceeds {dialect_label}({width}) "
-                    "— quarantined (would truncate on write)"
-                    ),
-                    "policy": "write_quarantine",
-                    "chars": [],
-                },
-                mapped_row=cells,
-                target_cols=target_cols,
-            )
-            if policy == "coerce_null":
-                from services.value_serializer import DF_MISSING_SENTINEL
-                cells[col_idx] = DF_MISSING_SENTINEL
-            else:
-                hold_out = True
-                break
-        if hold_out:
-            continue
-        out.append(tuple(cells))
-    return out
+            out.append(tuple(cells))
+        kept = out
+
+    engine = (dest_db or "").strip() or _infer_dest_db_from_dialect_label(
+        dialect_label
+    )
+    return quarantine_unfit_encoding(
+        kept,
+        target_cols,
+        target_types,
+        rejected_details,
+        policy,
+        dest_db=engine,
+    )
 
 
 # Engines whose ARRAY element slot is non-nullable by contract.
@@ -3973,6 +4093,7 @@ def apply_write_quarantine_matrix(
     dialect_label: str = "destination",
     mappings: list[dict[str, Any]] | None = None,
     dest_db: str = "",
+    source_row_numbers: list[int] | None = None,
 ) -> list[tuple]:
     """Shared fail-closed quarantine matrix for every typed write path.
 
@@ -3983,7 +4104,26 @@ def apply_write_quarantine_matrix(
 
     When ``mappings`` is provided, holdouts dual-stamp ``source_values`` for
     quarantine replay (Wave 34).
+
+    ``source_row_numbers`` aligns each mapped tuple with its 1-based source
+    row (object-store and SQL write-bundle materialize). The matrix still
+    runs the same 12-pass SSOT, one source row at a time, so holdout ``row``
+    stamps stay global across bundles.
     """
+    if source_row_numbers is not None:
+        kept, _nums = apply_write_quarantine_matrix_keeping_numbers(
+            mapped_rows,
+            target_cols,
+            target_types,
+            rejected_details,
+            policy,
+            dialect_label=dialect_label,
+            mappings=mappings,
+            dest_db=dest_db,
+            source_row_numbers=source_row_numbers,
+        )
+        return kept
+
     token = _active_quarantine_mappings.set(mappings)
     try:
         label = (dialect_label or "destination").strip() or "destination"
@@ -4007,7 +4147,12 @@ def apply_write_quarantine_matrix(
             mapped_rows, target_cols, target_types, rejected_details, policy
         )
         mapped_rows = quarantine_unfit_temporals(
-            mapped_rows, target_cols, target_types, rejected_details, policy
+            mapped_rows,
+            target_cols,
+            target_types,
+            rejected_details,
+            policy,
+            dest_db=decimal_dest,
         )
         mapped_rows = quarantine_unfit_specialty_types(
             mapped_rows, target_cols, target_types, rejected_details, policy
@@ -4060,6 +4205,7 @@ def apply_write_quarantine_matrix(
             rejected_details,
             policy,
             dialect_label=f"{label} VARCHAR",
+            dest_db=decimal_dest,
         )
         mapped_rows = quarantine_unfit_arrays(
             mapped_rows,
@@ -4081,6 +4227,67 @@ def apply_write_quarantine_matrix(
         return mapped_rows
     finally:
         _active_quarantine_mappings.reset(token)
+
+
+def apply_write_quarantine_matrix_keeping_numbers(
+    mapped_rows: list[tuple],
+    target_cols: list[str],
+    target_types: list[str],
+    rejected_details: list[dict[str, Any]],
+    policy: str,
+    *,
+    dialect_label: str = "destination",
+    mappings: list[dict[str, Any]] | None = None,
+    dest_db: str = "",
+    source_row_numbers: list[int] | None = None,
+) -> tuple[list[tuple], list[int]]:
+    """Same matrix as :func:`apply_write_quarantine_matrix`; also return survivors.
+
+    Binding / in-bundle dedupe / write-time SAVEPOINT quarantine must name the
+    source row that survived, not the index inside the leftover list. Callers
+    that already hold global 1-based numbers pass ``source_row_numbers``.
+    """
+    if source_row_numbers is None:
+        kept = apply_write_quarantine_matrix(
+            mapped_rows,
+            target_cols,
+            target_types,
+            rejected_details,
+            policy,
+            dialect_label=dialect_label,
+            mappings=mappings,
+            dest_db=dest_db,
+            source_row_numbers=None,
+        )
+        return kept, list(range(1, len(kept) + 1))
+    if len(source_row_numbers) != len(mapped_rows):
+        raise ValueError(
+            "source_row_numbers length must match mapped_rows "
+            "(SQL / object-store bundle materialize)"
+        )
+    kept: list[tuple] = []
+    nums: list[int] = []
+    for row, src_row in zip(mapped_rows, source_row_numbers):
+        n0 = len(rejected_details)
+        one = apply_write_quarantine_matrix(
+            [row],
+            target_cols,
+            target_types,
+            rejected_details,
+            policy,
+            dialect_label=dialect_label,
+            mappings=mappings,
+            dest_db=dest_db,
+            source_row_numbers=None,
+        )
+        src = int(src_row)
+        for detail in rejected_details[n0:]:
+            if detail.get("row") == 1:
+                detail["row"] = src
+        if one:
+            kept.extend(one)
+            nums.append(src)
+    return kept, nums
 
 
 def _specialty_column_kind(type_str: str) -> str | None:
@@ -4400,6 +4607,7 @@ def split_dense_sparse_rows_with_numbers(
     mapped_rows: list[tuple],
     *,
     row_offset: int = 0,
+    source_row_numbers: list[int] | None = None,
 ) -> tuple[list[tuple], list[tuple], list[int], list[int]]:
     """Partition rows *and* keep where each came from.
 
@@ -4407,17 +4615,29 @@ def split_dense_sparse_rows_with_numbers(
     numbers are 1-based positions in the source batch, matching every other
     quarantine record.
 
+    ``source_row_numbers`` wins when the caller already holds global numbers
+    (SQL write bundles). Otherwise ``row_offset + index + 1`` is the position
+    in the current list.
+
     Splitting without them meant a rejected sparse row was reported by its index
     inside the sparse list, so an operator replaying the dead-letter queue was
     pointed at a different row than the one that failed — the same misattribution
     that made Airtable name records which never left.
     """
+    if source_row_numbers is not None and len(source_row_numbers) != len(mapped_rows):
+        raise ValueError(
+            "source_row_numbers length must match mapped_rows (dense/sparse split)"
+        )
     dense: list[tuple] = []
     sparse: list[tuple] = []
     dense_rows: list[int] = []
     sparse_rows: list[int] = []
     for index, row in enumerate(mapped_rows):
-        number = row_offset + index + 1
+        number = (
+            int(source_row_numbers[index])
+            if source_row_numbers is not None
+            else row_offset + index + 1
+        )
         if row_has_missing_sentinel(row):
             sparse.append(row)
             sparse_rows.append(number)
@@ -4867,14 +5087,21 @@ def partition_dense_upsert_rows(
     rejected_details: list[dict[str, Any]] | None = None,
     policy: str = "quarantine",
     row_offset: int = 0,
+    source_row_numbers: list[int] | None = None,
 ) -> list[Any]:
     """Hold out null/empty conflict-key rows; return rows safe for MERGE.
 
     Preserves arrival order. When ``rejected_details`` is None, re-raises on the
     first bad row (fail-closed callers without a quarantine sink).
+    ``source_row_numbers`` keeps holdout ``row`` stamps global across write
+    bundles; otherwise ``row_offset + i + 1`` is the position in this list.
     """
     if not rows or not conflict_columns:
         return list(rows)
+    if source_row_numbers is not None and len(source_row_numbers) != len(rows):
+        raise ValueError(
+            "source_row_numbers length must match rows (dense upsert partition)"
+        )
     kept: list[Any] = []
     for i, row in enumerate(rows):
         try:
@@ -4887,7 +5114,11 @@ def partition_dense_upsert_rows(
                 raise
             rejected_details.append(
                 {
-                    "row": row_offset + i + 1,
+                    "row": (
+                        int(source_row_numbers[i])
+                        if source_row_numbers is not None
+                        else row_offset + i + 1
+                    ),
                     "column": "*",
                     "value": "",
                     "reason": str(exc)[:300],

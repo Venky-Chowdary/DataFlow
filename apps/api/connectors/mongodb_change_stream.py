@@ -9,6 +9,22 @@ A real MongoDB replica set is required for ``watch()`` to work. Single-node
 instances and the local ``dataflow-mongo`` test container usually do not
 support change streams, so the caller should fall back to query-based CDC when
 this module raises ``OperationFailure``.
+
+Retention
+---------
+Resume tokens are valid only while the oplog entry exists (Atlas window is
+hours). ``ChangeStreamHistoryLost`` (286) and collection ``invalidate`` are
+retention gaps. Poll must not open ``watch()`` without the expired token —
+that starts at current clusterTime and skips the lost window. ``when_needed``
+blocking-snapshots current documents, then captures a **new** resume token.
+Idle namespaces are the default Atlas failure: no events means the token
+never moves and the capped oplog wraps. PyMongo updates ``resume_token``
+after empty getMores (``postBatchResumeToken``). Poll persists that token
+as a position-only heartbeat — the same identity as a Postgres idle-slot
+advance and the Kafka connector heartbeat topic. Dummy writes to a
+heartbeat collection remain a future enhancement of this kernel when the
+server does not advance a collection-scoped token. Not lag proof. Not
+continuous CDC. Not ``migration_proven``.
 """
 
 from __future__ import annotations
@@ -20,6 +36,7 @@ from typing import Any
 
 from bson import json_util
 from services.brand_env import getenv_brand
+from services.cdc_cursor_gap import CdcCursorGapError, CdcOplogGapError
 from services.cdc_engine import ChangeBatch
 
 from connectors.mongodb_common import _mongo_client
@@ -30,6 +47,61 @@ from connectors.mongodb_reader import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def mongo_history_lost(exc: BaseException) -> bool:
+    """True for MongoDB error 286 / ChangeStreamHistoryLost (oplog wrap)."""
+    code = getattr(exc, "code", None)
+    name = str(getattr(exc, "codeName", None) or type(exc).__name__ or "")
+    text = str(exc).lower()
+    return (
+        code == 286
+        or name == "ChangeStreamHistoryLost"
+        or "resume point may no longer be in the oplog" in text
+        or "changestreamhistorylost" in text
+    )
+
+
+def usable_change_stream_resume(token: Any) -> Any | None:
+    """Return a watch()-ready resume token, or None if it is not a stream cursor.
+
+    Snapshot-phase wrappers and the synthetic ``phase=streaming`` handoff
+    without ``_data`` must not be passed to ``resumeAfter`` — that is not a
+    clusterTime. Nested ``token`` on a streaming wrapper is unwrapped.
+    """
+    if token is None:
+        return None
+    if isinstance(token, dict):
+        phase = str(token.get("phase") or "").strip().lower()
+        if phase == "snapshot":
+            return usable_change_stream_resume(token.get("token"))
+        if "token" in token and phase == "streaming":
+            nested = usable_change_stream_resume(token.get("token"))
+            if nested is not None:
+                return nested
+        if token.get("_data"):
+            return token
+        return None
+    text = str(token).strip()
+    if not text or text.lower() in {"none", "null", "~"}:
+        return None
+    if text.startswith("{"):
+        try:
+            return usable_change_stream_resume(json_util.loads(text))
+        except Exception:
+            return {"_data": text} if text else None
+    return {"_data": text}
+
+
+def _oplog_unix(ts: Any) -> int | None:
+    if ts is None:
+        return None
+    try:
+        if hasattr(ts, "time"):
+            return int(ts.time)
+        return int(ts)
+    except (TypeError, ValueError):
+        return None
 
 
 def _database_name(cfg: dict[str, Any]) -> str:
@@ -98,6 +170,7 @@ class MongodbChangeStreamCdc:
         from services.cdc_lease import CdcLeaseGuard
 
         cursor_key = str(cfg.get("cursor_key") or f"mongodb:{self.db_name}:{collection}")
+        self.cursor_key = cursor_key
         holder = str(
             cfg.get("lease_holder_id") or getenv_brand("CDC_LEASE_HOLDER") or ""
         )
@@ -112,6 +185,8 @@ class MongodbChangeStreamCdc:
                 "collection": collection,
             },
         )
+        self._oplog_catalog_cache: dict[str, Any] | None = None
+        self._oplog_catalog_cache_at: float = 0.0
 
     @property
     def lease_holder_id(self) -> str:
@@ -128,6 +203,110 @@ class MongodbChangeStreamCdc:
     def _acquire_cdc_lease(self) -> None:
         """Fail-fast if another worker already owns this change-stream cursor."""
         self._lease.ensure()
+
+    def _usable_resume(self) -> Any | None:
+        return usable_change_stream_resume(self.resume_token)
+
+    def _oplog_catalog_status(self, *, max_age_sec: float = 2.0) -> dict[str, Any]:
+        """Oldest/newest ``local.oplog.rs`` timestamps vs resume-token clusterTime."""
+        import time as _time
+
+        from services.cdc_retention_probe import resume_token_unix_seconds
+
+        now = _time.monotonic()
+        if (
+            self._oplog_catalog_cache is not None
+            and (now - float(self._oplog_catalog_cache_at or 0.0))
+            < max(0.25, float(max_age_sec))
+        ):
+            return dict(self._oplog_catalog_cache)
+
+        resume = self._usable_resume()
+        out: dict[str, Any] = {
+            "plugin": "mongodb_change_stream",
+            "resume_unix": resume_token_unix_seconds(resume),
+            "oldest_oplog_unix": None,
+            "newest_oplog_unix": None,
+            "collection": self.collection,
+        }
+        try:
+            oplog = self.client.local["oplog.rs"]
+            oldest_doc = oplog.find_one(sort=[("$natural", 1)]) or {}
+            newest_doc = oplog.find_one(sort=[("$natural", -1)]) or {}
+            out["oldest_oplog_unix"] = _oplog_unix(oldest_doc.get("ts"))
+            out["newest_oplog_unix"] = _oplog_unix(newest_doc.get("ts"))
+        except Exception as exc:
+            logger.debug("MongoDB oplog catalog probe failed: %s", exc)
+            out["error"] = str(exc)[:300]
+        self._oplog_catalog_cache = dict(out)
+        self._oplog_catalog_cache_at = now
+        return dict(out)
+
+    def _raise_oplog_gap(
+        self,
+        probe: Any,
+        *,
+        history_lost: bool = False,
+        invalidated: bool = False,
+    ) -> None:
+        raise CdcOplogGapError(
+            probe.message,
+            resume_unix=probe.resume,
+            oldest_oplog_unix=probe.retained,
+            cursor_key=self.cursor_key,
+        )
+
+    def _assert_resume_in_oplog(self, resume: Any = None) -> None:
+        """Raise :class:`CdcOplogGapError` when the token is before retained oplog.
+
+        Unknown catalog (no ``local`` privilege / mongos) does not invent a gap —
+        ``watch()`` still fail-closes on 286. Poll must never open ``watch()``
+        without the token in order to "skip" a lost window.
+        """
+        from services.cdc_retention_probe import (
+            classify_mongo_oplog_retention,
+            resume_token_unix_seconds,
+        )
+
+        token = resume if resume is not None else self._usable_resume()
+        if token is None:
+            return
+        catalog: dict[str, Any] = {}
+        try:
+            catalog = dict(self._oplog_catalog_status(max_age_sec=0) or {})
+        except Exception as exc:
+            logger.debug("oplog catalog during resume assert: %s", exc)
+        probe = classify_mongo_oplog_retention(
+            catalog.get("resume_unix")
+            if catalog.get("resume_unix") is not None
+            else resume_token_unix_seconds(token),
+            catalog.get("oldest_oplog_unix"),
+            newest_oplog_unix=catalog.get("newest_oplog_unix"),
+            cursor_key=self.cursor_key,
+        )
+        if probe.status == "gap":
+            self._raise_oplog_gap(probe)
+
+    def _token_is_oplog_gap(self, token: Any) -> bool:
+        from services.cdc_retention_probe import (
+            classify_mongo_oplog_retention,
+            resume_token_unix_seconds,
+        )
+
+        resume_unix = resume_token_unix_seconds(token)
+        if resume_unix is None:
+            return False
+        try:
+            catalog = dict(self._oplog_catalog_status(max_age_sec=0) or {})
+        except Exception:
+            return False
+        oldest = catalog.get("oldest_oplog_unix")
+        if oldest is None:
+            return False
+        probe = classify_mongo_oplog_retention(
+            resume_unix, oldest, cursor_key=self.cursor_key
+        )
+        return probe.status == "gap"
 
     def _fetch_incremental_chunk(self, sig: Any) -> tuple[list[dict[str, Any]], str | None, bool]:
         """PK-ordered chunk for signal-driven incremental snapshots (_id or configured PK)."""
@@ -183,6 +362,10 @@ class MongodbChangeStreamCdc:
                     # Pre-Wave Y offset tokens — honor once, then switch to _id keyset.
                     legacy_offset = int(self.resume_token.get("offset") or 0)
                 start_token = self.resume_token.get("token") or start_token
+                if start_token is not None and self._token_is_oplog_gap(start_token):
+                    # Snapshot recovery must not hand off an expired nested token
+                    # (same class as recreating a PG slot only during snapshot).
+                    start_token = None
             while True:
                 if legacy_offset is not None:
                     from connectors.mongodb_reader import read_collection_batch
@@ -291,12 +474,11 @@ class MongodbChangeStreamCdc:
             "full_document": self.full_document,
             "max_await_time_ms": 200,
         }
-        resume = self.resume_token
-        if isinstance(resume, dict) and "token" in resume and resume.get("phase") == "streaming":
-            resume = resume.get("token")
+        resume = self._usable_resume()
         if resume:
             watch_kwargs["resume_after"] = resume
         try:
+            self._assert_resume_in_oplog(resume)
             with self.coll.watch(None, **watch_kwargs) as stream:
                 deadline = time.monotonic() + 1.5
                 while time.monotonic() < deadline and len(events) < peek_limit:
@@ -315,7 +497,23 @@ class MongodbChangeStreamCdc:
                         pk = self._pk_value(change)
                         if is_present_cdc_row_key(pk):
                             events.append({"op": "d", "pk": pk, "row": {self.primary_key: pk}})
-        except Exception:
+                    elif op == "invalidate":
+                        from services.cdc_retention_probe import classify_mongo_oplog_retention
+
+                        probe = classify_mongo_oplog_retention(
+                            None, None, invalidated=True, cursor_key=self.cursor_key
+                        )
+                        self._raise_oplog_gap(probe, invalidated=True)
+        except CdcCursorGapError:
+            raise
+        except Exception as exc:
+            if mongo_history_lost(exc):
+                from services.cdc_retention_probe import classify_mongo_oplog_retention
+
+                probe = classify_mongo_oplog_retention(
+                    None, None, history_lost=True, cursor_key=self.cursor_key
+                )
+                self._raise_oplog_gap(probe, history_lost=True)
             return events
         return events
 
@@ -336,6 +534,7 @@ class MongodbChangeStreamCdc:
             fetch_chunk=self._fetch_incremental_chunk,
             stream_events_during_chunk=self._peek_stream_events_during_chunk,
             max_chunks_per_poll=1,
+            dest_resume=self.resume_token,
         )
 
         pipeline: list[dict[str, Any]] | None = None
@@ -343,52 +542,80 @@ class MongodbChangeStreamCdc:
             "full_document": self.full_document,
             "max_await_time_ms": 1000,
         }
-        resume = self.resume_token
-        if isinstance(resume, dict) and "token" in resume and resume.get("phase") == "streaming":
-            resume = resume.get("token")
+        resume = self._usable_resume()
+        self._assert_resume_in_oplog(resume)
         if resume:
             watch_kwargs["resume_after"] = resume
 
-        with self.coll.watch(pipeline, **watch_kwargs) as stream:
-            inserts: list[dict[str, Any]] = []
-            updates: list[dict[str, Any]] = []
-            deletes: list[str] = []
-            start = time.monotonic()
-            last_token: Any = None
-            while time.monotonic() - start < self.max_wait_seconds:
-                change = stream.try_next()
-                if change is None:
-                    continue
-                last_token = stream.resume_token
-                op = change.get("operationType")
-                doc = self._full_doc(change)
-                if op in ("insert", "replace", "update"):
-                    if not doc:
+        try:
+            with self.coll.watch(pipeline, **watch_kwargs) as stream:
+                inserts: list[dict[str, Any]] = []
+                updates: list[dict[str, Any]] = []
+                deletes: list[str] = []
+                start = time.monotonic()
+                last_token: Any = None
+                while time.monotonic() - start < self.max_wait_seconds:
+                    change = stream.try_next()
+                    # Empty getMore still publishes postBatchResumeToken.
+                    # Skipping it is the Atlas idle-namespace wrap.
+                    token = getattr(stream, "resume_token", None)
+                    if token is not None:
+                        last_token = token
+                    if change is None:
                         continue
-                    record = _doc_to_record(doc, self.columns)
-                    if op == "insert":
-                        inserts.append(record)
-                    else:
-                        updates.append(record)
-                elif op == "delete":
-                    from services.cdc_identity import is_present_cdc_row_key
+                    op = change.get("operationType")
+                    doc = self._full_doc(change)
+                    if op in ("insert", "replace", "update"):
+                        if not doc:
+                            continue
+                        record = _doc_to_record(doc, self.columns)
+                        if op == "insert":
+                            inserts.append(record)
+                        else:
+                            updates.append(record)
+                    elif op == "delete":
+                        from services.cdc_identity import is_present_cdc_row_key
 
-                    pk = self._pk_value(change)
-                    if is_present_cdc_row_key(pk):
-                        deletes.append(pk)
-                elif op == "invalidate":
-                    break
+                        pk = self._pk_value(change)
+                        if is_present_cdc_row_key(pk):
+                            deletes.append(pk)
+                    elif op == "invalidate":
+                        from services.cdc_retention_probe import classify_mongo_oplog_retention
 
-                if len(inserts) + len(updates) + len(deletes) >= self.batch_size:
-                    break
+                        probe = classify_mongo_oplog_retention(
+                            None, None, invalidated=True, cursor_key=self.cursor_key
+                        )
+                        self._raise_oplog_gap(probe, invalidated=True)
 
-            if inserts or updates or deletes or last_token is not None:
-                yield ChangeBatch(
-                    inserts=inserts,
-                    updates=updates,
-                    deletes=deletes,
-                    resume_token=last_token,
+                    if len(inserts) + len(updates) + len(deletes) >= self.batch_size:
+                        break
+
+                # Empty DML + token is a position-only heartbeat (PG idle-slot
+                # identity). Apply persists the watermark; lag is not 0.
+                if inserts or updates or deletes or last_token is not None:
+                    yield ChangeBatch(
+                        inserts=inserts,
+                        updates=updates,
+                        deletes=deletes,
+                        resume_token=last_token,
+                    )
+        except CdcCursorGapError:
+            raise
+        except Exception as exc:
+            if mongo_history_lost(exc):
+                from services.cdc_retention_probe import (
+                    classify_mongo_oplog_retention,
+                    resume_token_unix_seconds,
                 )
+
+                probe = classify_mongo_oplog_retention(
+                    resume_token_unix_seconds(resume) if resume is not None else None,
+                    None,
+                    history_lost=True,
+                    cursor_key=self.cursor_key,
+                )
+                self._raise_oplog_gap(probe, history_lost=True)
+            raise
 
     def is_available(self) -> bool:
         """Return True if the deployment supports change streams."""

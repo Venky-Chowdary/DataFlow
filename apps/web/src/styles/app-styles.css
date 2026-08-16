@@ -63,28 +63,60 @@
    No square card shadows. One equal white surface. No inner frame.
    ═══════════════════════════════════════════════════════════ */
 
+/* One continuous canvas — never a white inner sheet that reads as a cut.
+   Immersive Studio + Pilot stay a locked white viewport. */
+.df2-app .df2-main,
 .df2-app .df2-content,
 .df2-app .df2-content-inner,
-.df2-app .df2-content-inner > .df2-screen-panel {
-  background: #fff;
+.df2-app .df2-content-inner > .df2-screen-panel,
+.df2-app .df2-page:not(.df2-page-transfer-studio):not(.df2-page-pilot),
+.df2-app .df2-page-workspace:not(.df2-pilot-workspace):not(.df2-transfer-studio-shell) {
+  background: var(--df-bg-canvas, #f3f5f7) !important;
+}
+
+.df2-app .df2-screen-keep {
+  background: transparent !important;
+}
+
+.df2-app .df2-content-inner.df2-content-flush,
+.df2-app .df2-content-inner.df2-content-studio,
+.df2-app .df2-content-inner.df2-content-flush > .df2-screen-panel,
+.df2-app .df2-content-inner.df2-content-studio > .df2-screen-panel,
+.df2-app .df2-page-pilot,
+.df2-app .df2-page-transfer-studio,
+.df2-app .df2-pilot-workspace,
+.df2-app .df2-transfer-studio-shell {
+  background: var(--df-surface, #fff) !important;
+}
+
+.df2-app .df2-content-inner:not(.df2-content-flush):not(.df2-content-studio),
+.df2-app .df2-content-inner:not(.df2-content-flush):not(.df2-content-studio) > .df2-screen-panel,
+.df2-app .df2-page-untitled.df2-page-fluid {
+  min-height: min-content;
 }
 
 .df2-app .df2-content-inner:not(.df2-content-flush):not(.df2-content-studio) {
-  padding: 0 !important;
+  padding: 12px 16px 20px !important;
+  background: var(--df-bg-canvas, #f3f5f7) !important;
 }
 
 .df2-app .df2-content-inner > .df2-screen-panel {
   border: none !important;
-  border-radius: 0;
+  border-radius: 0 !important;
   padding: 0;
   margin: 0;
   box-shadow: none !important;
   filter: none !important;
+  overflow: visible;
 }
 
-/* Every authenticated page — same flat canvas (not only Overview) */
+/* Page chrome is the canvas — designed cards keep their own surface */
 .df2-app .df2-page,
-.df2-app [class*="df2-page-"] {
+.df2-app .df2-page-workspace,
+.df2-app .df2-page-untitled,
+.df2-app .df2-page-fluid,
+.df2-app .df2-page-compact,
+.df2-app .df2-page-fit {
   background: transparent;
 }
 
@@ -96,6 +128,30 @@
 
 .df2-app .df2-main .df2-screen-panel [class*="df2-"]:not(.df2-btn):not(.df2-input):not(.df2-select):not(.df2-dropdown):not(.df2-modal):not(.df2-toast):not(.df2-popover):not(.df2-command-palette):not(.df2-nav-item):not(.df2-alert):not(.df2-toolbar-search):not(.df2-query-editor-textarea):hover {
   box-shadow: none !important;
+}
+
+/* Designed surfaces keep a hairline elevation on the canvas — not random df2-* boxes */
+.df2-app .df2-main .df2-screen-panel .df2-card,
+.df2-app .df2-main .df2-screen-panel .df2-card-elevated,
+.df2-app .df2-main .df2-screen-panel .df2-overview-v3-card,
+.df2-app .df2-main .df2-screen-panel .df2-metric-glass,
+.df2-app .df2-main .df2-screen-panel .df2-toolbar,
+.df2-app .df2-main .df2-screen-panel .df2-context-bar,
+.df2-app .df2-main .df2-screen-panel .df2-connector-card,
+.df2-app .df2-main .df2-screen-panel .df2-pipeline-card,
+.df2-app .df2-main .df2-screen-panel .df2-settings-section,
+.df2-app .df2-main .df2-screen-panel .df2-mcp-endpoint-card,
+.df2-app .df2-main .df2-screen-panel .df2-empty-page,
+.df2-app .df2-main .df2-screen-panel .df2-docs-hero,
+.df2-app .df2-main .df2-screen-panel .df2-xform-card,
+.df2-app .df2-main .df2-screen-panel .df2-contract-row {
+  box-shadow: var(--df-shadow-xs) !important;
+}
+
+.df2-app .df2-main .df2-screen-panel .df2-job-row.is-active {
+  box-shadow: inset 3px 0 0 var(--df-brand, #0f766e) !important;
+  background: #ccfbf1 !important;
+  border-color: var(--df-brand, #0f766e) !important;
 }
 
 /* Floating UI keeps elevation */
@@ -267,7 +323,47 @@
   border-color: color-mix(in srgb, var(--df-brand, #0d9488) 30%, var(--df-border, #e2e8f0));
 }
 
-/* ── 3. Deterministic content scroll (no :has() / inline-style races) ─────── */
+/* ── 3. Workspace chrome lock — only the content pane scrolls ───────────────
+   Linear / Slack / Airbyte Cloud: sidebar + topbar (Workspace breadcrumb
+   + search) stay put. html/body never grow a second document scrollbar
+   while the app is mounted. Marketing (.lp) keeps document scroll.
+   .df2-main is a flex column, not a scrollport. */
+html:has(.df2-app),
+html:has(.df2-app) body,
+html:has(.df2-app) #root {
+  height: 100%;
+  max-height: 100%;
+  overflow: hidden;
+}
+
+.df2-app {
+  height: 100dvh !important;
+  max-height: 100dvh !important;
+  min-height: 100dvh !important;
+  overflow: hidden !important;
+}
+
+.df2-app .df2-main {
+  flex: 1 1 0 !important;
+  min-width: 0 !important;
+  min-height: 0 !important;
+  height: auto !important;
+  max-height: 100% !important;
+  overflow: hidden !important;
+  display: flex !important;
+  flex-direction: column !important;
+}
+
+.df2-app .df2-topbar,
+.df2-app .df2-api-offline-banner {
+  flex: 0 0 auto !important;
+}
+
+.df2-app .df2-content {
+  flex: 1 1 0 !important;
+  min-height: 0 !important;
+}
+
 .df2-app .df2-main .df2-content.df2-content-scroll {
   overflow-y: auto !important;
   overflow-x: clip;
@@ -278,6 +374,31 @@
 
 .df2-app .df2-main .df2-content.df2-content-fixed {
   overflow: hidden !important;
+}
+
+/* Page chrome stays at the top of the content scrollport — lists/cards move. */
+.df2-app .df2-content.df2-content-scroll .df2-toolbar,
+.df2-app .df2-content.df2-content-scroll .df2-page-actionbar {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  background: var(--df-surface, #fff);
+}
+
+.df2-app .df2-content.df2-content-scroll .df2-context-bar {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  background: var(--df-surface, #fff);
+}
+
+.df2-app .df2-content.df2-content-scroll .df2-settings-nav {
+  position: sticky;
+  top: 0;
+  align-self: start;
+  max-height: 100%;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 /* ── 4. Page identity lives in the topbar breadcrumb (Workspace > Page) ─────
@@ -295,9 +416,9 @@
   display: none !important;
 }
 
-/* Reclaim the vertical space the header used to occupy — content sits up top. */
-.df2-app .df2-page-untitled.df2-page-fluid:not(.df2-page-fit) {
-  padding-top: 14px;
+/* Content starts at the toolbar — no title and no KPI strip. */
+.df2-app .df2-page-untitled.df2-page-fluid {
+  padding: 0 !important;
 }
 
 /* Slim action bar (only when a page supplies actions — no title beside them) */
@@ -442,7 +563,7 @@
 
 /* ── 5. Overview dashboard — consistent card sizing + responsive grid ────── */
 .df2-app .df2-overview-v3 {
-  gap: 16px;
+  gap: 12px;
 }
 
 /* KPI strip — four equal panel tiles, one row */
@@ -604,9 +725,13 @@
   }
 
   .df2-app .df2-page-untitled.df2-page-fluid:not(.df2-page-fit) {
-    padding-left: 12px;
-    padding-right: 12px;
-    padding-top: 12px;
+    padding-left: 0;
+    padding-right: 0;
+    padding-top: 0;
+  }
+
+  .df2-app .df2-content-inner:not(.df2-content-flush):not(.df2-content-studio) {
+    padding: 12px 14px 18px !important;
   }
 
   .df2-app .df2-context-bar {
@@ -820,4 +945,166 @@
   .lp .lp-trust-grid {
     grid-template-columns: 1fr !important;
   }
+}
+
+/* ═══════════════════════════════════════════════════════════
+   Enterprise surface — one canvas, one card, one toolbar
+   (last word; tokens only — no page-specific vN siblings)
+   ═══════════════════════════════════════════════════════════ */
+
+.df2-app .df2-page-workspace {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  background: transparent;
+}
+
+/* Top status/KPI strips are gone — reclaim laptop height */
+.df2-app .df2-context-bar,
+.df2-app .df2-page-metrics-row,
+.df2-app .df2-overview-v3-kpis,
+.df2-app .df2-jobs-v3-summary-metrics,
+.df2-app .df2-docs-hero-stats,
+.df2-app .df2-freshness-slo.is-ok {
+  display: none !important;
+}
+
+.df2-app .df2-jobs-v3-summary-ids {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.df2-app .df2-jobs-v3-summary-dest {
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--df-text-secondary, #475569);
+  max-width: 16ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.df2-app .df2-toolbar {
+  background: var(--df-surface, #fff);
+  border-color: var(--df-border, #e4e8ee);
+  border-radius: var(--df-radius-panel, 12px);
+}
+
+.df2-app .df2-page-workspace > .df2-toolbar,
+.df2-app .df2-page-workspace > .df2-alert {
+  margin-bottom: 0;
+}
+
+.df2-app .df2-context-bar {
+  margin-bottom: 0;
+  background:
+    linear-gradient(180deg, color-mix(in srgb, var(--df-brand-muted, #f0fdfa) 55%, #fff) 0%, #fff 70%);
+  border-color: color-mix(in srgb, var(--df-brand, #0d9488) 14%, var(--df-border, #e4e8ee));
+}
+
+.df2-app .df2-overview-v3-card,
+.df2-app .df2-metric-glass,
+.df2-app .df2-card,
+.df2-app .df2-settings-section,
+.df2-app .df2-mcp-endpoint-card {
+  background: var(--df-surface, #fff);
+  border-color: var(--df-border, #e4e8ee);
+}
+
+/* Settings: nav + section cards on canvas — never one page-sized white sheet */
+.df2-app .df2-settings-panel,
+.df2-app .df2-settings-content {
+  background: transparent !important;
+  border: none !important;
+  box-shadow: none !important;
+  border-radius: 0 !important;
+}
+
+/* Studio + Pilot fill the host — no slate gutter around a white sheet */
+.df2-app .df2-content:has(.df2-content-studio),
+.df2-app .df2-content:has(.df2-content-flush) {
+  background: var(--df-surface, #fff) !important;
+}
+
+.df2-app .df2-content-inner.df2-content-studio,
+.df2-app .df2-content-inner.df2-content-flush {
+  padding: 0 !important;
+}
+
+.df2-app .df2-overview-v3 .df2-metric-glass-teal {
+  background: linear-gradient(180deg, color-mix(in srgb, var(--df-brand-muted, #f0fdfa) 92%, #fff) 0%, #fff 78%);
+}
+
+.df2-app .df2-overview-v3 .df2-metric-glass-value {
+  font-family: var(--df-font-display);
+  font-size: 1.55rem;
+  letter-spacing: -0.035em;
+}
+
+.df2-app .df2-overview-attention {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 12px 16px;
+  border-radius: var(--df-radius-panel, 12px);
+  border: 1px solid var(--df-warning-border);
+  background: var(--df-warning-bg);
+  color: var(--df-text-primary);
+}
+
+.df2-app .df2-overview-attention strong {
+  display: block;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.df2-app .df2-overview-attention p {
+  margin: 2px 0 0;
+  font-size: 13px;
+  color: var(--df-text-secondary);
+}
+
+.df2-app .df2-settings-section {
+  border: 1px solid var(--df-border, #e4e8ee);
+  border-radius: var(--df-radius-panel, 12px);
+  overflow: hidden;
+  background: var(--df-surface, #fff);
+}
+
+.df2-app .df2-settings-nav {
+  background: var(--df-surface, #fff);
+  border: 1px solid var(--df-border, #e4e8ee);
+  border-radius: var(--df-radius-panel, 12px);
+}
+
+.df2-app .df2-settings-nav-item.active {
+  background: var(--df-brand-muted, #f0fdfa);
+  color: var(--df-brand-strong, #115e59);
+}
+
+.df2-app .df2-table tbody tr:hover {
+  background: var(--df-table-row-hover);
+}
+
+.df2-app .df2-empty-page {
+  background: var(--df-surface, #fff);
+  border: 1px solid var(--df-border, #e4e8ee);
+  border-radius: var(--df-radius-panel, 12px);
+}
+
+.df2-app .df2-page-error {
+  border-color: var(--df-danger-border);
+  background: var(--df-danger-bg);
+  color: var(--df-text-primary);
+}
+
+.df2-app .df2-page-error strong {
+  color: var(--df-danger);
+}
+
+.df2-app .df2-page-error p {
+  font-family: var(--df-font-sans);
+  color: var(--df-text-secondary);
 }

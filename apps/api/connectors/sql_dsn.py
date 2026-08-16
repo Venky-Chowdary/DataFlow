@@ -2,18 +2,15 @@
 
 from __future__ import annotations
 
-import re
 from typing import Any
-from urllib.parse import quote, unquote, urlparse, urlunparse
-
-_MYSQL_SCHEMES = frozenset({"mysql", "mysql+pymysql", "mariadb"})
-_PG_SCHEMES = frozenset({"postgresql", "postgres", "postgresql+psycopg2", "pgsql"})
-
-# user:pass@host:port/db  (scheme omitted — common Railway paste mistake)
-_USERINFO_AT_HOST = re.compile(
-    r"^(?P<user>[^:/@\s]+):(?P<password>[^@\s]+)@(?P<host>[^:/?\s]+)(?::(?P<port>\d+))?(?:/(?P<db>[^?\s]*))?",
-    re.IGNORECASE,
+from connectors.url_authority import (
+    looks_like_userinfo_host,
+    parse_url_authority,
+    rebuild_url,
 )
+
+_MYSQL_SCHEMES = frozenset({"mysql", "mysql+pymysql", "mariadb", "mariadb+pymysql"})
+_PG_SCHEMES = frozenset({"postgresql", "postgres", "postgresql+psycopg2", "pgsql", "redshift"})
 
 
 def normalize_sql_dsn(url: str, *, family: str) -> str:
@@ -30,7 +27,7 @@ def normalize_sql_dsn(url: str, *, family: str) -> str:
     if "://" in raw:
         # postgres:// is fine for psycopg2; keep as-is
         return raw
-    if _USERINFO_AT_HOST.match(raw):
+    if looks_like_userinfo_host(raw):
         scheme = "mysql://" if family == "mysql" else "postgresql://"
         return scheme + raw
     return raw
@@ -43,17 +40,17 @@ def parse_sql_url(url: str, *, family: str) -> dict[str, Any]:
         return {}
     if "://" not in raw:
         return {}
-    parsed = urlparse(raw)
+    parsed = parse_url_authority(raw)
     scheme = (parsed.scheme or "").lower()
     allowed = _MYSQL_SCHEMES if family == "mysql" else _PG_SCHEMES
     if scheme not in allowed:
         return {}
-    database = unquote((parsed.path or "").lstrip("/").split("/")[0] or "")
+    database = (parsed.path or "").lstrip("/").split("/")[0] or ""
     return {
-        "host": parsed.hostname or "",
-        "port": int(parsed.port) if parsed.port else 0,
-        "username": unquote(parsed.username or ""),
-        "password": unquote(parsed.password or ""),
+        "host": parsed.host or "",
+        "port": int(parsed.port or 0),
+        "username": parsed.user or "",
+        "password": parsed.password or "",
         "database": database,
     }
 
@@ -68,8 +65,8 @@ def looks_like_sql_url(value: str, *, family: str) -> bool:
             return True
     elif lower.startswith(("postgresql://", "postgres://", "postgresql+psycopg2://", "pgsql://")):
         return True
-    # Scheme-less user:pass@host…
-    return bool(_USERINFO_AT_HOST.match(raw))
+    # Scheme-less user:pass@host… (password may contain @)
+    return looks_like_userinfo_host(raw)
 
 
 def resolve_sql_endpoint(
@@ -227,51 +224,33 @@ def sync_credentials_into_connection_string(cfg: dict[str, Any]) -> None:
     if not cstr or is_masked_secret(cstr) or is_masked_secret(password):
         return
 
-    family = (cfg.get("type") or cfg.get("format") or "").lower()
-    sql_families = {
-        "mysql",
-        "mariadb",
-        "postgresql",
-        "postgres",
-        "redshift",
-        "cockroachdb",
-        "timescaledb",
-        "aurora",
-        "amazon_aurora",
-        "azure_database_for_mysql",
-        "google_cloud_sql_mysql",
-        "amazon_rds_mysql",
-        "generic_sql",
-    }
-    if family not in sql_families:
+    lower = cstr.lower()
+    skip = (
+        "mongodb://",
+        "mongodb+srv://",
+        "redis://",
+        "rediss://",
+        "sftp://",
+        "smtp://",
+        "smtps://",
+        "snowflake://",
+        "s3://",
+        "gs://",
+        "http://",
+        "https://",
+    )
+    if lower.startswith(skip):
         return
 
-
-    normalized = normalize_sql_dsn(cstr, family=family)
-    if "://" not in normalized:
+    parsed = parse_url_authority(cstr)
+    if not parsed.host:
         return
-    parsed = urlparse(normalized)
-    if not parsed.hostname:
-        return
-    old_user = unquote(parsed.username or "")
-    old_pass = unquote(parsed.password or "")
-    # Only update if the explicit password is different or the explicit username
-    # differs and is non-empty. Keep the connection string's host/port/path/query.
+    old_user = parsed.user
+    old_pass = parsed.password
     new_user = username or old_user
     new_pass = password or old_pass
     if str(new_user) == old_user and str(new_pass) == old_pass:
         return
     if not new_pass:
         return
-
-    def _q(value: str) -> str:
-        return quote(value, safe="") if value else ""
-
-    host_part = parsed.hostname
-    if parsed.port:
-        host_part = f"{host_part}:{parsed.port}"
-    if new_user:
-        netloc = f"{_q(new_user)}:{_q(new_pass)}@{host_part}"
-    else:
-        netloc = f":{_q(new_pass)}@{host_part}"
-    cfg["connection_string"] = urlunparse(parsed._replace(netloc=netloc))
+    cfg["connection_string"] = rebuild_url(parsed, user=str(new_user), password=str(new_pass))

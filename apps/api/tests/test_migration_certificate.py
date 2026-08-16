@@ -54,25 +54,44 @@ def test_row_accounting_balances_when_every_row_is_explained() -> None:
     ledger = row_accounting(_job())
     assert ledger["rows_read"] == 10000
     assert ledger["rows_written"] == 9000
+    assert ledger["rows_written_source"] == "gate8_dest_readback"
     assert ledger["rows_quarantined"] == 1000
     assert ledger["unaccounted"] == 0
     assert ledger["balanced"] is True
+    assert ledger["writer_ack"] == 9000
 
 
 def test_unexplained_shortfall_is_reported_as_potential_silent_loss() -> None:
-    job = _job(records_processed=8500)
+    job = _job()
+    job["reconciliation"]["target_rows"] = 8500
     ledger = row_accounting(job)
+    assert ledger["rows_written"] == 8500
     assert ledger["unaccounted"] == 500
     assert ledger["balanced"] is False
     assert "silent loss" in ledger["note"]
 
 
+def test_writer_ack_cannot_hide_a_dest_count_shortfall() -> None:
+    """DMS Full Load success + MISSING_TARGET: writer claimed 10k, dest holds 9997."""
+    job = _job(records_processed=10000)
+    job["reconciliation"]["source_rows"] = 10000
+    job["reconciliation"]["target_rows"] = 9997
+    job["reconciliation"]["rejected_rows"] = 0
+    ledger = row_accounting(job)
+    assert ledger["rows_written"] == 9997
+    assert ledger["writer_ack"] == 10000
+    assert ledger["unaccounted"] == 3
+    assert ledger["balanced"] is False
+    assert ledger["writer_ack_delta"] == -3
+
+
 def test_more_rows_accounted_than_read_is_also_unbalanced() -> None:
-    job = _job(records_processed=9500)
+    job = _job()
+    job["reconciliation"]["target_rows"] = 9500
     ledger = row_accounting(job)
     assert ledger["unaccounted"] == -500
     assert ledger["balanced"] is False
-    assert "duplicate writes" in ledger["note"]
+    assert "more row" in ledger["note"]
 
 
 def test_unmeasured_source_count_never_claims_conservation() -> None:
@@ -86,7 +105,9 @@ def test_unmeasured_source_count_never_claims_conservation() -> None:
 
 
 def test_unbalanced_ledger_blocks_the_proven_claim() -> None:
-    cert = build_migration_certificate(_job(records_processed=8500))
+    job = _job()
+    job["reconciliation"]["target_rows"] = 8500
+    cert = build_migration_certificate(job)
     verdict = cert["verdict"]
     assert verdict["migration_proven"] is False
     assert verdict["headline"] == "NOT PROVEN"
@@ -142,7 +163,9 @@ def test_verify_rejects_a_forged_proven_claim() -> None:
     """Re-signing a forged verdict must still fail on the claim rules."""
     from services.signed_proof_pack import sign_body
 
-    cert = build_migration_certificate(_job(records_processed=8500))
+    job = _job()
+    job["reconciliation"]["target_rows"] = 8500
+    cert = build_migration_certificate(job)
     body = {k: v for k, v in cert.items() if k not in ("content_sha256", "signature")}
     body["verdict"] = {
         **body["verdict"],
@@ -167,8 +190,9 @@ def test_markdown_renders_the_numbers_an_operator_reads() -> None:
     text = render_certificate_markdown(build_migration_certificate(job))
     assert "# Migration Certificate" in text
     assert "| Read from source | 10,000 |" in text
-    assert "| Written to destination | 9,000 |" in text
-    assert "| Quarantined | 1,000 |" in text
+    assert "| On destination (COUNT(*)) | 9,000 |" in text
+    assert "| Quarantined (did not land) | 1,000 |" in text
+    assert "gate8_dest_readback" in text
     assert "Invalid integer" in text
     assert "Not proven by this certificate" in text
 

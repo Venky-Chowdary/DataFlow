@@ -32,6 +32,13 @@ import services as _canonical_services  # noqa: E402,F401
 os.environ.setdefault("DATAFLOW_JOB_STORE", "memory")
 os.environ.setdefault("DATAFLOW_DISABLE_OBJECT_STORE", "1")
 
+
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers",
+        "fake_mongo: leftover MERGE uses an in-memory collection (no live Mongo)",
+    )
+
 # fakesnow keeps the emulated warehouse in a DuckDB file, and DuckDB allows a
 # single writer per file. Under `pytest -n` every worker would open the same
 # default path and all but one would die on "Conflicting lock is held", so the
@@ -206,7 +213,7 @@ def pytest_collection_modifyitems(config, items):
     if not _is_mongo_reachable():
         skip_mongo = pytest.mark.skip(reason="MongoDB not reachable on this runner")
         for item in items:
-            if "mongodb" in item.nodeid.lower():
+            if "mongodb" in item.nodeid.lower() and "fake_mongo" not in item.keywords:
                 item.add_marker(skip_mongo)
 
     # Live execute_tracked / CDC PG paths hard-code dataflow/dataflow.
@@ -239,7 +246,6 @@ def pytest_collection_modifyitems(config, items):
                 token in nid
                 for token in (
                     "cdc_postgres",
-                    "postgresql_cdc",
                     "cross_schema_edge_types",
                     "csv_to_postgres_upsert",
                     "[pgvector]",

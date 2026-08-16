@@ -65,7 +65,21 @@ def is_unproven_export(out: dict[str, Any], msg: str) -> bool:
 #: case for exactly the large tables where the claim matters most.
 SOURCE_DIGEST_WRITER_ACK: Final[str] = "writer_ack"
 SOURCE_DIGEST_REMAPPED_ROWS: Final[str] = "remapped_source_rows"
+SOURCE_DIGEST_WRITE_PASS: Final[str] = "write_pass_fingerprints"
 SOURCE_DIGEST_ENGINE_POPULATION: Final[str] = "engine_population"
+#: Second warehouse scan after the write, paged like the extract (scan/keyset,
+#: never OFFSET on snapshot-scan sources). Dest is read back independently.
+#: This is the Fivetran/HVR Compare class of proof — it may earn full_checksum.
+SOURCE_DIGEST_SOURCE_REREAD: Final[str] = "independent_source_reread"
+
+#: Provenances that are independent of the writer's own account of the write.
+INDEPENDENT_SOURCE_DIGESTS: Final[frozenset[str]] = frozenset(
+    {
+        SOURCE_DIGEST_REMAPPED_ROWS,
+        SOURCE_DIGEST_ENGINE_POPULATION,
+        SOURCE_DIGEST_SOURCE_REREAD,
+    }
+)
 
 
 def is_writer_ack_only(
@@ -78,6 +92,8 @@ def is_writer_ack_only(
     """
     if source_provenance == SOURCE_DIGEST_WRITER_ACK:
         return True
+    if source_provenance in INDEPENDENT_SOURCE_DIGESTS:
+        return False
     return bool(
         not target_checksum
         or "verified by writer" in msg
@@ -153,6 +169,7 @@ def append_row_count_report(
         "checksum_match": False,
         "population_proof": False,
         "checksum_scope": WHOLE_TABLE_NOT_COMPARABLE,
+        "target_rows_before": target_rows_before,
     }
 
     if target_rows_before is None:

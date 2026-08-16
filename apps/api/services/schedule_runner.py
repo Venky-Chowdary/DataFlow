@@ -135,6 +135,62 @@ def _resolve_connector(connector_id: str) -> dict | None:
         return None
 
 
+def _apply_callable_schedule_source(source, sched) -> None:
+    """Stamp CALL/SELECT fields onto the endpoint so the reader is not a table scan."""
+    mode = str(getattr(sched, "source_read_mode", "") or "").strip().lower()
+    call = str(getattr(sched, "procedure_call", "") or "").strip()
+    query = str(getattr(sched, "source_query", "") or "").strip()
+    params = getattr(sched, "procedure_params", None) or {}
+    if mode not in {"procedure", "query"} and not call and not query:
+        return
+    if mode not in {"procedure", "query"}:
+        mode = "procedure" if call else "query"
+    extra = dict(getattr(source, "extra", None) or {})
+    extra["source_read_mode"] = mode
+    if call:
+        extra["procedure_call"] = call
+    if query:
+        extra["source_query"] = query
+    if isinstance(params, dict) and params:
+        extra["procedure_params"] = {str(k): v for k, v in params.items()}
+    source.extra = extra
+
+
+def probe_schedule_source_schema(source) -> dict[str, Any]:
+    """Read the extract shape. CALL/SELECT peeks — never a colliding table."""
+    from services.procedure_source import (
+        close_callable_spool,
+        is_callable_source,
+        read_callable_batch,
+    )
+
+    if is_callable_source(source):
+        from src.transfer.models import endpoint_to_dict
+
+        cfg = endpoint_to_dict(source)
+        try:
+            batch = read_callable_batch(cfg, offset=0, limit=1, peek=True)
+        finally:
+            close_callable_spool()
+        headers = [str(h) for h in (batch.headers or []) if str(h).strip()]
+        meta = getattr(batch, "meta", None) or {}
+        native = meta.get("native_types") if isinstance(meta, dict) else {}
+        schema: dict[str, str] = {}
+        if isinstance(native, dict):
+            schema = {str(k): str(v) for k, v in native.items() if str(k).strip()}
+        for name in headers:
+            schema.setdefault(name, "VARCHAR")
+        return {
+            "schema": schema,
+            "columns": headers or list(schema.keys()),
+            "primary_key_columns": [],
+        }
+
+    from src.transfer.endpoint_intelligence import introspect_endpoint
+
+    return introspect_endpoint(source) or {}
+
+
 def _endpoint_from_connector(conn: dict, table: str):
     from src.transfer.models import EndpointConfig
 
@@ -181,8 +237,12 @@ def build_schedule_request(sched, src: dict, dst: dict):
 
     source = _endpoint_from_connector(src, sched.source_table)
     destination = _endpoint_from_connector(dst, sched.dest_table)
+    _apply_callable_schedule_source(source, sched)
 
     effective_mode = _normalize_sync_mode(sched.sync_mode, sched.primary_key)
+    from services.procedure_source import assert_callable_sync_allowed
+
+    assert_callable_sync_allowed(effective_mode, source)
     stream_contracts = list(sched.stream_contracts or [])
     if not stream_contracts and effective_mode not in ("full_refresh_overwrite", "full_refresh_append"):
         stream_contracts = [{
@@ -196,12 +256,11 @@ def build_schedule_request(sched, src: dict, dst: dict):
             "validation_mode": sched.validation_mode,
         }]
 
-    contract_id = (getattr(sched, "contract_id", None) or "").strip()
-    require_signed = bool(getattr(sched, "require_signed_contract", False))
-    if contract_id or require_signed:
-        from services.schedule_store import assert_signed_contract
+    from services.schedule_store import assert_schedule_run_allowed
 
-        assert_signed_contract(contract_id, require_signed=require_signed)
+    bind = assert_schedule_run_allowed(sched)
+    contract_id = str(bind.get("contract_id") or "").strip()
+    require_signed = bool(bind.get("require_signed_contract", False))
 
     # Fail-closed: open CDC Map-review for this source pauses scheduled runs.
     sync_l = str(getattr(sched, "sync_mode", "") or "").strip().lower()
@@ -254,6 +313,8 @@ def build_schedule_request(sched, src: dict, dst: dict):
         sync_mode=effective_mode,
         schema_policy=schema_policy,
         validation_mode=sched.validation_mode or "strict",
+        delivery_guarantee=getattr(sched, "delivery_guarantee", None)
+        or "at_least_once",
         backfill_new_fields=effective_backfill_new_fields(
             backfill_new_fields=bool(sched.backfill_new_fields),
             schema_policy=schema_policy,
@@ -282,10 +343,13 @@ def _guard_source_schema_drift(sched: Any, request: Any) -> None:
     from services.source_schema_memory import evaluate_source_drift
 
     previous = dict(getattr(sched, "source_schema", None) or {})
+    previous_pk = [
+        str(p).strip()
+        for p in (getattr(sched, "source_primary_key", None) or [])
+        if str(p).strip()
+    ]
     try:
-        from src.transfer.endpoint_intelligence import introspect_endpoint
-
-        info = introspect_endpoint(request.source) or {}
+        info = probe_schedule_source_schema(request.source) or {}
     except Exception as exc:
         logger.info(
             "Schedule %s source schema probe unavailable: %s",
@@ -293,9 +357,19 @@ def _guard_source_schema_drift(sched: Any, request: Any) -> None:
             exc,
         )
         return
-    current = dict(info.get("schema") or {})
+    current = {
+        str(k): str(v)
+        for k, v in dict(info.get("schema") or {}).items()
+        if not isinstance(v, (dict, list))
+    }
     if not current:
         return
+    current_pk = [
+        str(p).strip()
+        for p in (info.get("primary_key_columns") or [])
+        if str(p).strip()
+    ]
+    cursor = str(getattr(sched, "cursor_column", "") or "").strip()
 
     verdict = evaluate_source_drift(
         previous_schema=previous,
@@ -304,18 +378,32 @@ def _guard_source_schema_drift(sched: Any, request: Any) -> None:
         mappings=list(getattr(request, "mappings", None) or []),
         schema_policy=str(getattr(sched, "schema_policy", "") or "manual_review"),
         dest_db=str(getattr(request.destination, "format", "") or ""),
+        previous_primary_key=previous_pk,
+        current_primary_key=current_pk,
+        cursor_fields=[cursor] if cursor else None,
     )
     if verdict.blocks:
         raise ValueError(
             f"{verdict.summary} Review the mapping and re-approve, or set "
             "schema_policy to propagate the change deliberately."
         )
-    _remember_source_schema(sched, current, verdict.fingerprint)
+    _remember_source_schema(
+        sched, current, verdict.fingerprint, primary_key=current_pk
+    )
 
 
-def _remember_source_schema(sched: Any, schema: dict[str, str], fingerprint: str) -> None:
+def _remember_source_schema(
+    sched: Any,
+    schema: dict[str, str],
+    fingerprint: str,
+    *,
+    primary_key: list[str] | None = None,
+) -> None:
     """Record the shape this run read, so the next one has something to compare."""
-    if not fingerprint or fingerprint == getattr(sched, "source_schema_fingerprint", ""):
+    pk = [str(p).strip() for p in (primary_key or []) if str(p).strip()]
+    same_fp = fingerprint == getattr(sched, "source_schema_fingerprint", "")
+    same_pk = pk == list(getattr(sched, "source_primary_key", None) or [])
+    if not fingerprint or (same_fp and same_pk):
         return
     try:
         from services.schedule_store import update_schedule
@@ -326,6 +414,7 @@ def _remember_source_schema(sched: Any, schema: dict[str, str], fingerprint: str
                 "source_schema": dict(schema),
                 "source_schema_fingerprint": fingerprint,
                 "source_schema_observed_at": datetime.now(timezone.utc).isoformat(),
+                "source_primary_key": pk,
             },
         )
     except Exception as exc:
@@ -336,6 +425,7 @@ def _remember_source_schema(sched: Any, schema: dict[str, str], fingerprint: str
 def _run_entry(job_id: str, status: str, attempt: int, started_at: datetime, job_doc: dict | None) -> dict:
     doc = job_doc or {}
     finished = datetime.now(timezone.utc)
+    ledger = doc.get("row_accounting") if isinstance(doc.get("row_accounting"), dict) else {}
     return {
         "job_id": job_id,
         "status": status,
@@ -347,6 +437,7 @@ def _run_entry(job_id: str, status: str, attempt: int, started_at: datetime, job
         "rejected_rows": int(doc.get("rejected_rows", 0) or 0),
         "coerced_null_rows": int(doc.get("coerced_null_rows", 0) or 0),
         "error": (doc.get("error") or "")[:500],
+        "row_accounting": dict(ledger),
     }
 
 
@@ -460,6 +551,69 @@ def _job_doc(job_id: str) -> dict | None:
         return None
 
 
+def _observe_parallel_run(sched: Any, job_doc: dict | None = None) -> None:
+    """Record one Dual Run cycle after a successful overwrite load.
+
+    Never fails the transfer. Append/incremental dests are not the same
+    population as the source — auto-running would false-diverge every night
+    (the Full Append dest-Δ lesson). On-demand checks still run via the API.
+
+    Column-profile screening runs first; Gate-8 from this job is recorded
+    last so the campaign tail is the snapshot compare (Google Dual Run
+    output identity), not the KPI screen.
+    """
+    from services.continuous_fidelity import (
+        population_comparable,
+        record_gate8_cycle,
+        run_and_record_campaign,
+    )
+
+    if not population_comparable(getattr(sched, "sync_mode", None)):
+        return
+    src = _resolve_connector(sched.source_connector_id)
+    dst = _resolve_connector(sched.dest_connector_id)
+    if not src or not dst:
+        return
+    campaign = dict(getattr(sched, "fidelity_campaign", None) or {})
+    try:
+        request = build_schedule_request(sched, src, dst)
+        _report, campaign = run_and_record_campaign(
+            campaign,
+            source=request.source,
+            destination=request.destination,
+            mappings=list(getattr(request, "mappings", None) or []),
+            workspace_id=str(getattr(sched, "workspace_id", "") or ""),
+        )
+    except Exception as exc:
+        logger.info(
+            "Schedule %s parallel-run profile skipped: %s",
+            getattr(sched, "id", ""),
+            exc,
+        )
+    try:
+        recon = (job_doc or {}).get("reconciliation")
+        campaign = record_gate8_cycle(campaign, recon if isinstance(recon, dict) else None)
+    except Exception as exc:
+        logger.info(
+            "Schedule %s Gate-8 Dual Run cycle skipped: %s",
+            getattr(sched, "id", ""),
+            exc,
+        )
+    try:
+        from services.schedule_store import update_schedule
+
+        update_schedule(
+            str(getattr(sched, "id", "")),
+            {"fidelity_campaign": campaign},
+        )
+    except Exception as exc:
+        logger.info(
+            "Schedule %s parallel-run observation skipped: %s",
+            getattr(sched, "id", ""),
+            exc,
+        )
+
+
 def _finalize_run(schedule_id: str, job_id: str, attempt: int, started_at: datetime) -> None:
     """Handle a finished scheduled run: retry on failure, else record + notify."""
     from services.schedule_store import (
@@ -512,6 +666,8 @@ def _finalize_run(schedule_id: str, job_id: str, attempt: int, started_at: datet
     mark_schedule_run(
         schedule_id, job_id, status=status, run_entry=entry, cursor_value=cursor_value
     )
+    if _is_success(status):
+        _observe_parallel_run(sched, job_doc)
     _notify_schedule(sched, job_id, status, job_doc)
 
 

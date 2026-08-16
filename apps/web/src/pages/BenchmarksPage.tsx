@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { DtIcon } from "../components/DtIcon";
+import { Button } from "../components/ui/Button";
 import { EmptyState } from "../components/ui/EmptyState";
 import { SectionLoader } from "../components/LoadingState";
 import { PageFrame } from "../components/ui/PageFrame";
@@ -372,13 +373,24 @@ export function BenchmarksPage() {
                   ))}
                 </div>
                 <div className="df2-page-benchmarks-actions">
-                  <button type="button" className="df2-btn df2-btn-secondary" onClick={handleDownload} disabled={!report || running}>
-                    <DtIcon name="download" size={14} /> Report
-                  </button>
-                  <button type="button" className="df2-btn df2-btn-primary" onClick={handleRun} disabled={running}>
-                    {running ? <span className="df2-spin"><DtIcon name="spinner" size={14} /></span> : <DtIcon name="play" size={14} />}
-                    {running ? "Running…" : "Run benchmark"}
-                  </button>
+                  <Button
+                    variant="secondary"
+                    onClick={handleDownload}
+                    disabled={!report || running}
+                    leadingIcon={<DtIcon name="download" size={14} />}
+                  >
+                    Report
+                  </Button>
+                  <Button
+                    variant="primary"
+                    onClick={handleRun}
+                    disabled={running}
+                    loading={running}
+                    loadingLabel="Running…"
+                    leadingIcon={<DtIcon name="play" size={14} />}
+                  >
+                    Run benchmark
+                  </Button>
                 </div>
               </div>
 

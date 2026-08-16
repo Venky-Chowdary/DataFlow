@@ -62,14 +62,53 @@ DIALECT_PROFILES: dict[str, DialectProfile] = {
     "presto": DialectProfile("presto", "public", True, "none", "double"),
     "trino": DialectProfile("trino", "default", True, "none", "double"),
     "generic_sql": DialectProfile("generic_sql", None, True, "none", "double"),
+    "iceberg": DialectProfile("iceberg", None, True, "none", "double", "namespace"),
+    "apache_iceberg": DialectProfile("apache_iceberg", None, True, "none", "double", "namespace"),
+    "s3": DialectProfile("s3", None, False, "none", "none", "bucket"),
+    "gcs": DialectProfile("gcs", None, False, "none", "none", "bucket"),
+    "adls": DialectProfile("adls", None, False, "none", "none", "container"),
 }
 
 _ALIASES: dict[str, str] = {
     "mssql+pyodbc": "sqlserver",
+    "mssql+pymssql": "sqlserver",
+    "sql_server": "sqlserver",
+    "microsoft_sql_server": "sqlserver",
+    "azure_sql": "sqlserver",
+    "azure_sql_database": "sqlserver",
+    "azure_sql_managed_instance": "sqlserver",
+    "google_cloud_sql_sql_server": "sqlserver",
+    "amazon_rds_sql_server": "sqlserver",
+    "synapse": "sqlserver",
+    "azure_synapse": "sqlserver",
+    "synapse_analytics": "sqlserver",
+    "azure_synapse_dedicated": "sqlserver",
+    "azure_synapse_serverless": "sqlserver",
     "postgresql+psycopg2": "postgresql",
     "mysql+pymysql": "mysql",
     "oracle+oracledb": "oracle",
+    "oracle+cx_oracle": "oracle",
+    "oracledb": "oracle",
+    "oracle_db": "oracle",
+    "oracle_autonomous": "oracle",
+    "oracle_adw": "oracle",
+    "oracle_atp": "oracle",
+    "oracle_autonomous_warehouse": "oracle",
+    "amazon_rds_oracle": "oracle",
+    "autonomous_database": "oracle",
     "bq": "bigquery",
+    "motherduck": "duckdb",
+    "databricks_sql": "databricks",
+    "amazon_redshift": "redshift",
+    "redshift_serverless": "redshift",
+    "amazon_s3": "s3",
+    "aws_s3": "s3",
+    "minio": "s3",
+    "s3_compatible": "s3",
+    "google_cloud_storage": "gcs",
+    "azure_blob_storage": "adls",
+    "azure_data_lake": "adls",
+    "azure_data_lake_storage": "adls",
 }
 
 
@@ -169,6 +208,41 @@ def schema_from_cfg(
     return normalize_schema(driver, raw, username=user) or ""
 
 
+def catalog_namespace(
+    driver: str | None,
+    cfg: dict | None = None,
+    *,
+    schema: str | None = None,
+) -> str:
+    """The name the engine catalog uses to find this object.
+
+    Distinct from :func:`schema_from_cfg`, which is the SQL qualifier in front
+    of a table. MySQL has no schema layer, so that helper correctly returns
+    empty — but ``information_schema.columns.table_schema`` is the *database
+    name*. Looking up ``public`` on MySQL matches nothing and silently falls
+    back to mapping hints, which is how ``timestamp`` (an instant on MySQL, a
+    wall clock on PostgreSQL) gets misclassified.
+
+    This is the single lookup rule every catalog reader should use. Extend the
+    per-dialect branch when a new engine's catalog is keyed differently; do
+    not copy a ``or "public"`` fallback into the caller.
+    """
+    cfg = cfg or {}
+    profile = dialect_profile(driver)
+    hinted = schema if schema is not None else cfg.get("schema")
+    if profile.uses_schema:
+        return schema_from_cfg(driver, cfg, schema=hinted if isinstance(hinted, str) or hinted is None else str(hinted))
+    key = normalize_driver(driver)
+    if key in {"mysql", "mariadb"}:
+        database = str(cfg.get("database") or "").strip()
+        leaked = str(hinted or "").strip()
+        # A leaked Postgres default is not a MySQL database.
+        if leaked.lower() in {"", "public"}:
+            return database
+        return leaked or database
+    return str(cfg.get("database") or hinted or "").strip()
+
+
 # Dialects that reject ``LIMIT``/``OFFSET`` and use the SQL:2008 form instead.
 # Oracle (12c+), SQL Server (2012+), DB2 and Derby all parse
 # ``OFFSET n ROWS FETCH NEXT m ROWS ONLY``; emitting ``LIMIT`` there raises
@@ -199,7 +273,19 @@ _FETCH_FIRST_DIALECTS: frozenset[str] = frozenset(
 )
 
 _ORACLE_LIKE: frozenset[str] = frozenset(
-    {"oracle", "oracle+oracledb", "oracle+cx_oracle", "autonomous_database", "amazon_rds_oracle"}
+    {
+        "oracle",
+        "oracle+oracledb",
+        "oracle+cx_oracle",
+        "oracledb",
+        "oracle_db",
+        "oracle_autonomous",
+        "oracle_adw",
+        "oracle_atp",
+        "oracle_autonomous_warehouse",
+        "autonomous_database",
+        "amazon_rds_oracle",
+    }
 )
 
 
@@ -208,7 +294,32 @@ def uses_fetch_first_pagination(driver: str | None) -> bool:
     return normalize_driver(driver) in _FETCH_FIRST_DIALECTS or (driver or "").strip().lower() in _FETCH_FIRST_DIALECTS
 
 
+def warehouse_sql_quote_dialect(driver: str | None) -> str | None:
+    """Exact dest-engine COUNT(*) family. Stats views never this path.
+
+    SQL Server / Oracle (catalog SKUs alias). Snowflake, BigQuery, DuckDB,
+    Databricks, and Redshift: ``SELECT COUNT(*)`` is exact;
+    ``INFORMATION_SCHEMA`` / ``__TABLES__.row_count`` / clustering stats /
+    ``SVV_TABLE_INFO.tbl_rows`` never close. Redshift is PG-wire, not
+    PG-catalog — ``to_regclass`` is not this family.
+    """
+    key = dialect_profile(driver).driver
+    if key in {"sqlserver", "mssql"}:
+        return "sqlserver"
+    if key == "oracle":
+        return "oracle"
+    if key in {"snowflake", "bigquery", "duckdb", "databricks", "redshift"}:
+        return key
+    return None
+
+
+def is_sqlserver_like(driver: str | None) -> bool:
+    return warehouse_sql_quote_dialect(driver) == "sqlserver"
+
+
 def is_oracle_like(driver: str | None) -> bool:
+    if dialect_profile(driver).driver == "oracle":
+        return True
     raw = (driver or "").strip().lower()
     return normalize_driver(driver) in _ORACLE_LIKE or raw in _ORACLE_LIKE
 
@@ -263,7 +374,19 @@ def denormalize_result_key(driver: str | None, name: str) -> str:
 
 
 def page_clause(driver: str | None, offset: int, limit: int) -> str:
-    """Dialect-correct row-window clause (caller supplies its own ORDER BY)."""
+    """Dialect-correct *window* clause. Caller supplies a unique ORDER BY.
+
+    Microsoft: each OFFSET/FETCH page is an independent query and is invalid
+    without ORDER BY. Oracle/DB2 reject ``LIMIT`` (ORA-03047). OFFSET is
+    O(n²) and can skip/duplicate rows when the order key is not unique.
+
+    Full-population reads (SCD2 current digest, mirror active digest, staging
+    drain) must not use this helper — stream one SELECT
+    (``iter_select_row_dicts`` / ``stream_select_checksum``). Dest-engine
+    ``HASH_AGG`` / ``CHECKSUM_AGG`` pushdown is a future enhancement of that
+    kernel, not a second path: CHECKSUM_AGG ignores NULL; HASH_AGG is not
+    portable.
+    """
     if uses_fetch_first_pagination(driver):
         return f"OFFSET {int(offset)} ROWS FETCH NEXT {int(limit)} ROWS ONLY"
     return f"LIMIT {int(limit)} OFFSET {int(offset)}"
@@ -272,18 +395,7 @@ def page_clause(driver: str | None, offset: int, limit: int) -> str:
 def zero_row_probe_sql(driver: str | None, qualified: str) -> str:
     """A ``SELECT`` that returns column metadata but no rows, on any dialect."""
     raw = (driver or "").strip().lower()
-    if normalize_driver(driver) in {"mssql", "sqlserver"} or raw in {
-        "mssql",
-        "sqlserver",
-        "microsoft_sql_server",
-        "azure_sql_database",
-        "azure_sql_managed_instance",
-        "synapse_analytics",
-        "azure_synapse_dedicated",
-        "azure_synapse_serverless",
-        "google_cloud_sql_sql_server",
-        "amazon_rds_sql_server",
-    }:
+    if is_sqlserver_like(driver) or raw in {"mssql", "sqlserver"}:
         return f"SELECT TOP 0 * FROM {qualified}"  # nosec B608
     if uses_fetch_first_pagination(driver):
         # ``LIMIT 0`` is a syntax error on Oracle/DB2; ``WHERE 1=0`` is universal.
@@ -300,3 +412,38 @@ def quote_char_for(driver: str | None) -> str:
     if style == "none":
         return ""
     return '"'
+
+
+def stores_boolean_as_numeric(driver: str | None) -> bool:
+    """True when BOOLEAN is INTEGER/BIT/NUMBER(1), not ANSI BOOLEAN.
+
+    SQLAlchemy dialect.name is ``mssql`` for SQL Server. Catalog SKUs alias
+    through ``warehouse_sql_quote_dialect``. T-SQL has no ``IS TRUE``;
+    Oracle 19c has no BOOLEAN (NUMBER(1) until 23c).
+    """
+    kind = (driver or "").strip().lower()
+    if kind in {"sqlite", "mssql"} or kind.startswith("mssql"):
+        return True
+    return warehouse_sql_quote_dialect(kind) in {"sqlserver", "oracle"}
+
+
+def sql_bool_is_true(driver: str | None, quoted_column: str) -> str:
+    """Predicate: column is the SQL TRUE / 1 value."""
+    if stores_boolean_as_numeric(driver):
+        return f"{quoted_column} = 1"
+    return f"{quoted_column} IS TRUE"
+
+
+def sql_bool_is_not_true(driver: str | None, quoted_column: str) -> str:
+    """Predicate: column is FALSE or NULL (SQL ``IS NOT TRUE``)."""
+    if stores_boolean_as_numeric(driver):
+        return f"({quoted_column} IS NULL OR {quoted_column} = 0)"
+    return f"{quoted_column} IS NOT TRUE"
+
+
+def sql_bool_true_literal(driver: str | None) -> str:
+    return "1" if stores_boolean_as_numeric(driver) else "TRUE"
+
+
+def sql_bool_false_literal(driver: str | None) -> str:
+    return "0" if stores_boolean_as_numeric(driver) else "FALSE"

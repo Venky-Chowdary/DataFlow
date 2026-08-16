@@ -14,11 +14,13 @@ if str(_API_ROOT) not in sys.path:
     sys.path.insert(0, str(_API_ROOT))
 
 from services.keyset_pagination import (  # noqa: E402
+    KEYSET_CAPABLE_SOURCES,
     KEYSET_SEP,
     decode_keyset_bookmark,
     encode_keyset_bookmark,
     keyset_successor_predicate,
     max_keyset_bookmark,
+    safe_keyset_unique_columns,
 )
 
 
@@ -194,3 +196,31 @@ def test_stream_sqlite_composite_pk_keyset_mode():
         out = sqlite3.connect(dst)
         assert out.execute("SELECT count(*) FROM lines_out").fetchone()[0] == 40
         out.close()
+
+
+def test_databricks_is_keyset_capable():
+    assert "databricks" in KEYSET_CAPABLE_SOURCES
+
+
+def test_nullable_or_advisory_unique_key_is_not_a_keyset_bookmark():
+    cols = ["email", "id"]
+    assert safe_keyset_unique_columns(
+        [{"columns": ["email"], "enforced": True}],
+        cols,
+        {"email": True},
+    ) == []
+    assert safe_keyset_unique_columns(
+        [{"columns": ["email"], "enforced": False}],
+        cols,
+        {"email": False},
+    ) == []
+    assert safe_keyset_unique_columns(
+        [{"columns": ["email"], "expression": "lower(email)"}],
+        cols,
+        {"email": False},
+    ) == []
+    assert safe_keyset_unique_columns(
+        [{"columns": ["email"], "enforced": True}],
+        cols,
+        {"email": False},
+    ) == ["email"]

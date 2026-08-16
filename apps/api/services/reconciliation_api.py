@@ -14,8 +14,10 @@ from services.reconciliation import (
     canonical_checksum_from_iter,
     checksum_rows,
     fingerprint_checksum,
+    iter_select_row_dicts,
     reconcile,
     stamp_post_write_phase,
+    stream_select_checksum,
 )
 from services.verification_ladder import (
     DEFAULT_SCREENING_LIMIT,
@@ -32,7 +34,9 @@ __all__ = [
     "canonical_checksum_from_iter",
     "checksum_rows",
     "fingerprint_checksum",
+    "iter_select_row_dicts",
     "reconcile",
     "run_five_layer_verification",
     "stamp_post_write_phase",
+    "stream_select_checksum",
 ]

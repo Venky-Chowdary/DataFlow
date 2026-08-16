@@ -35,13 +35,69 @@ type TrustJobInput = {
   cdc_lease_conflict?: boolean | null;
   cdc_cursor_gap?: boolean | null;
   error_code?: string | null;
+  snapshot_mode?: string | null;
+  snapshot_plan?: { snapshot_mode?: string | null } | null;
   source_ha_role?: string | null;
   trust?: JobTrustScore | null;
   trust_score?: number | null;
+  quarantine_closure?: {
+    verdict?: string | null;
+    open_count?: number | null;
+    promoted_count?: number | null;
+  } | null;
 };
 function num(value: unknown, fallback = 0): number {
   const n = Number(value);
   return Number.isFinite(n) ? n : fallback;
+}
+
+export const CDC_GAP_ERROR_CODES = [
+  "cdc_cursor_gap",
+  "cdc_lsn_gap",
+  "cdc_scn_gap",
+  "cdc_binlog_gap",
+  "cdc_slot_gap",
+  "cdc_ct_gap",
+  "cdc_oplog_gap",
+] as const;
+
+export function isCdcGapErrorCode(code?: string | null): boolean {
+  return Boolean(code && (CDC_GAP_ERROR_CODES as readonly string[]).includes(String(code)));
+}
+
+export function snapshotModeRecoversGap(mode?: string | null): boolean {
+  const m = String(mode || "").trim().toLowerCase().replace(/-/g, "_");
+  return m === "when_needed" || m === "always" || m === "initial_only";
+}
+
+export function cursorGapNextAction(snapshotMode?: string | null): {
+  code: string;
+  label: string;
+  detail: string;
+} {
+  const mode = String(snapshotMode || "").trim().toLowerCase().replace(/-/g, "_");
+  if (snapshotModeRecoversGap(mode)) {
+    return {
+      code: "cursor_gap",
+      label: "Resume — engine will snapshot",
+      detail:
+        "Purged-window events are gone. Resume re-upserts current source keys, then streams from the new tip. Not continuous CDC. Not migration_proven.",
+    };
+  }
+  if (mode === "never") {
+    return {
+      code: "cursor_gap",
+      label: "Set snapshot when_needed",
+      detail:
+        "snapshot_mode=never forbids a recovery snapshot. Change the mode, then Resume. Purged-window events are gone.",
+    };
+  }
+  return {
+    code: "cursor_gap",
+    label: "Reset CDC watermark",
+    detail:
+      "snapshot_mode=initial will not snapshot again. Reset the cursor or set when_needed, then re-run. Purged-window events are gone.",
+  };
 }
 
 function gradeOf(score: number): string {
@@ -52,6 +108,23 @@ function gradeOf(score: number): string {
   return "F";
 }
 
+/** Matches Gate-8 ``isGate8AppendDelta`` — dest-before delta, not whole-table hashes. */
+function isAppendDeltaProof(recon: Record<string, unknown> | null | undefined): boolean {
+  if (!recon) return false;
+  if (String(recon.checksum_scope || "").toLowerCase() === "whole_table_not_comparable") return true;
+  const coverage = String(recon.assurance_level || recon.coverage || "").toLowerCase();
+  const phase = String(recon.phase || "").toLowerCase();
+  const src = String(recon.source_checksum || "");
+  const tgt = String(recon.target_checksum || "");
+  return (
+    (coverage === "row_count" || phase.includes("post_write_row_count"))
+    && Boolean(src)
+    && Boolean(tgt)
+    && src !== tgt
+    && recon.checksum_match !== true
+  );
+}
+
 export function computeJobTrustScore(job: TrustJobInput | null | undefined): JobTrustScore {
   if (job?.trust && typeof job.trust.score === "number") {
     return job.trust;
@@ -59,8 +132,19 @@ export function computeJobTrustScore(job: TrustJobInput | null | undefined): Job
 
   const status = String(job?.status || "").toLowerCase();
   const processed = num(job?.records_processed);
-  let rejected = num(job?.rejected_rows);
-  if (rejected <= 0) rejected = num(job?.destination_summary?.rejected_rows);
+  const historicalRejected = (() => {
+    let r = num(job?.rejected_rows);
+    if (r <= 0) r = num(job?.destination_summary?.rejected_rows);
+    return r;
+  })();
+  const closure = (job?.quarantine_closure && typeof job.quarantine_closure === "object"
+    ? job.quarantine_closure
+    : (job?.destination_summary?.quarantine_closure as TrustJobInput["quarantine_closure"])) || null;
+  const closureVerdict = String(closure?.verdict || "");
+  let rejected = historicalRejected;
+  if (closure && closure.open_count != null && Number.isFinite(Number(closure.open_count))) {
+    rejected = num(closure.open_count);
+  }
   let coerced = num(job?.coerced_null_rows);
   if (coerced <= 0) coerced = num(job?.destination_summary?.coerced_null_rows);
   const recon = (job?.reconciliation || null) as Record<string, unknown> | null;
@@ -68,9 +152,9 @@ export function computeJobTrustScore(job: TrustJobInput | null | undefined): Job
   const leaseConflict = Boolean(job?.cdc_lease_conflict);
   const cursorGap =
     Boolean(job?.cdc_cursor_gap)
-    || ["cdc_cursor_gap", "cdc_lsn_gap", "cdc_scn_gap", "cdc_binlog_gap"].includes(
-      String(job?.error_code || ""),
-    );
+    || isCdcGapErrorCode(job?.error_code);
+  const snapshotMode =
+    String(job?.snapshot_mode || job?.snapshot_plan?.snapshot_mode || "").trim();
   const sourceHaRole = String(job?.source_ha_role || "").trim().toUpperCase() || null;
 
   const factors: JobTrustFactor[] = [];
@@ -95,15 +179,21 @@ export function computeJobTrustScore(job: TrustJobInput | null | undefined): Job
   }
   factors.push({ id: "completeness", label: "Completeness", score: outcome, weight: 0.25, note: outcomeNote });
 
-  const denom = Math.max(processed, rejected, 1);
+  const denom = Math.max(processed, rejected, historicalRejected, 1);
   const rejectRate = Math.min(1, rejected / denom);
   const quarantineScore = rejected <= 0 ? 100 : Math.max(0, 100 - rejectRate * 400);
+  const quarantineNote =
+    rejected <= 0 && closureVerdict === "closed"
+      ? `${historicalRejected.toLocaleString()} original hold-out(s) remediations landed (child Gate-8) — not a rewrite of the parent checksum.`
+      : rejected <= 0
+        ? "No quarantined rows."
+        : `${rejected.toLocaleString()} open quarantined (${(rejectRate * 100).toFixed(1)}% of processed).`;
   factors.push({
     id: "quarantine",
     label: "Quarantine",
     score: quarantineScore,
     weight: 0.25,
-    note: rejected <= 0 ? "No quarantined rows." : `${rejected.toLocaleString()} quarantined (${(rejectRate * 100).toFixed(1)}% of processed).`,
+    note: quarantineNote,
   });
 
   const coerceRate = Math.min(1, coerced / Math.max(processed, 1));
@@ -136,6 +226,10 @@ export function computeJobTrustScore(job: TrustJobInput | null | undefined): Job
       assurance === "sample"
       || phase.includes("sample_verified")
       || /sample-verified|sample verified/i.test(msg);
+    const writePass =
+      assurance === "write_pass_dest_readback"
+      || phase.includes("write_pass");
+    const appendDelta = isAppendDeltaProof(recon);
     const fullChecksum =
       assurance === "full_checksum"
       || (
@@ -145,7 +239,9 @@ export function computeJobTrustScore(job: TrustJobInput | null | undefined): Job
         && String(recon.source_checksum) === String(recon.target_checksum)
         && !writerAck
         && !sample
+        && !writePass
         && !unproven
+        && !appendDelta
       );
     const preWrite =
       preview
@@ -163,8 +259,12 @@ export function computeJobTrustScore(job: TrustJobInput | null | undefined): Job
       reconScore = 45;
     } else if (writerAck) {
       reconScore = 58;
+    } else if (writePass) {
+      reconScore = 82;
     } else if (sample) {
       reconScore = 68;
+    } else if (appendDelta) {
+      reconScore = 70;
     } else if (fullChecksum) {
       reconScore = 100;
     } else if (passed === true) {
@@ -183,8 +283,12 @@ export function computeJobTrustScore(job: TrustJobInput | null | undefined): Job
       rNote = "Pre-write / pending Gate-8 — not independent post-write proof.";
     } else if (writerAck) {
       rNote = "Writer acknowledgment only — independent read-back not captured.";
+    } else if (writePass) {
+      rNote = "Dest read-back matches the write-pass fingerprint — source warehouse was not independently re-read. Not migration_proven.";
     } else if (sample) {
       rNote = "Sample-verified Gate-8 — not full independent checksum.";
+    } else if (appendDelta) {
+      rNote = "Gate-8 append delta verified — whole-table checksums are not comparable; per-cell fidelity is not proven.";
     } else if (missing || extra) {
       rNote = `Keys missing=${missing} extra=${extra}.`;
     } else if (fullChecksum) {
@@ -263,6 +367,9 @@ export function computeJobTrustScore(job: TrustJobInput | null | undefined): Job
       && !phase.includes("skipped")
       && recon?.unproven !== true
       && recon?.skipped_readback !== true
+      && assurance !== "row_count"
+      && !phase.includes("row_count")
+      && String(recon?.checksum_scope || "") !== "whole_table_not_comparable"
     );
   if (!recon) {
     score = Math.min(score, 84);
@@ -283,21 +390,29 @@ export function computeJobTrustScore(job: TrustJobInput | null | undefined): Job
 
   let next_action = { code: "ok", label: "Trust posture healthy", detail: "No action required from composite factors." };
   if (cursorGap) {
-    next_action = {
-      code: "cursor_gap",
-      label: "Reset CDC watermark",
-      detail: "Clear the cursor, then re-run with snapshot when_needed or initial.",
-    };
+    next_action = cursorGapNextAction(snapshotMode);
   } else if (leaseConflict) {
     next_action = { code: "lease", label: "Resolve CDC lease", detail: "Force-release or stop the holder, then Resume." };
   } else if (status === "failed" || status === "error") {
     next_action = { code: "resume", label: "Fix failure then Resume", detail: "Use the failure hint and event log before retrying." };
   } else if (present.length) {
     const weakest = present.reduce((a, b) => ((a.score as number) <= (b.score as number) ? a : b));
-    if (weakest.id === "quarantine" || (rejected > 0 && (weakest.score as number) < 90)) {
-      next_action = { code: "quarantine", label: "Review quarantine", detail: "Replay or export rejected rows — nothing was silently dropped." };
+    if ((weakest.id === "quarantine" || weakest.id === "completeness") && closureVerdict === "closed" && rejected <= 0) {
+      next_action = {
+        code: "quarantine_closed",
+        label: "Quarantine ledger closed",
+        detail: "Remediations landed with child Gate-8. Parent checksum is historical — not migration_proven.",
+      };
+    } else if (weakest.id === "quarantine" || (rejected > 0 && (weakest.score as number) < 90)) {
+      next_action = { code: "quarantine", label: "Review quarantine", detail: "Replay or export remaining open rows — nothing was silently dropped." };
     } else if (weakest.id === "reconcile") {
-      next_action = { code: "reconcile", label: "Investigate Gate-8", detail: "Export proof JSON or re-run Validate after fixing drift." };
+      next_action = recon?.passed === true && isAppendDeltaProof(recon)
+        ? {
+            code: "append_delta",
+            label: "Append delta closed — not a dest replace",
+            detail: "Dest grew by this run. Overwrite to replace existing rows, or add a PK and upsert.",
+          }
+        : { code: "reconcile", label: "Investigate Gate-8", detail: "Export proof JSON or re-run Validate after fixing drift." };
     } else if (weakest.id === "freshness") {
       next_action = { code: "freshness", label: "Check CDC freshness", detail: "Open the pipeline — lag may need capacity or lease attention." };
     } else if (weakest.id === "coercion") {

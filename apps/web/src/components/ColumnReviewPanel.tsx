@@ -7,13 +7,19 @@ import {
   MAPPING_TRANSFORMS,
   STRUCT_POLICIES,
   applyDestTypeChange,
+  applyOperatorRemapDest,
   applyStructPolicyChange,
   acknowledgeMappingRisk,
   applyTransformChange,
   approveMappingHonestly,
   approveMappingsHonestly,
   canWidenMapping,
+  classifyMappingReview,
+  confirmFalseFriendMapping,
   countApproveEligible,
+  isFalseFriendReview,
+  mappingHealthSummary,
+  mappingReviewKindMeta,
   EXECUTION_POLICY_OPTIONS,
   flagExistingEnumBooleanConflict,
   isArrayLogicalType,
@@ -149,6 +155,7 @@ export function ColumnReviewPanel({
   const [safeBandExpanded, setSafeBandExpanded] = useState(false);
   const [readyBandExpanded, setReadyBandExpanded] = useState(false);
   const rowRefs = useRef<Map<string, HTMLTableRowElement>>(new Map());
+  const destInputRefs = useRef<Map<string, HTMLInputElement>>(new Map());
 
   const search = searchProp ?? internalSearch;
   const setSearch = onSearchChange ?? setInternalSearch;
@@ -274,6 +281,10 @@ export function ColumnReviewPanel({
   const approveOne = (index: number) => {
     const m = mappings[index];
     if (!m) return;
+    if (isFalseFriendReview(m) && !m.falseFriendConfirmed) {
+      updateMapping(index, confirmFalseFriendMapping(m));
+      return;
+    }
     // Fidelity / STRUCT / specialty need explicit risk ack — bare Approve must not clear G4.
     if (mappingRequiresRiskAck(m)) {
       const chosen = policyBySource[m.source];
@@ -305,6 +316,20 @@ export function ColumnReviewPanel({
   };
 
   const eligibleApproveCount = countApproveEligible(mappings);
+  const health = useMemo(
+    () => mappingHealthSummary(mappings, confidenceThreshold),
+    [mappings, confidenceThreshold],
+  );
+  const focusDestInput = (source: string) => {
+    const input = destInputRefs.current.get(source);
+    if (input) {
+      input.focus();
+      input.select();
+      return;
+    }
+    const row = rowRefs.current.get(source);
+    row?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  };
 
   const focusIssues = () => {
     setFilter("review");
@@ -415,7 +440,6 @@ export function ColumnReviewPanel({
       className={[
         "df2-column-review",
         compact ? "is-compact is-editor" : "",
-        compact && sampleRows && sampleRows.length > 0 ? "is-split" : "",
         isDialog ? "is-dialog" : "",
       ].filter(Boolean).join(" ")}
     >
@@ -565,7 +589,7 @@ export function ColumnReviewPanel({
           </div>
           <div className="df2-column-workbench-actions">
             {tableControls}
-            {filterCounts.review > 0 && (
+            {filterCounts.review > 0 && !compact && (
               <button type="button" className="df2-btn df2-btn-sm" onClick={focusIssues}>
                 <DtIcon name="alert" size={14} /> Issues ({filterCounts.review})
               </button>
@@ -583,7 +607,17 @@ export function ColumnReviewPanel({
           </div>
         </div>
 
-        {needsReview.length > 0 && filter === "review" && !compact && (
+        {health.falseFriendCount > 0 && (
+          <div className="df2-column-review-alert" role="status">
+            <DtIcon name="alert" size={16} />
+            <span>
+              <strong>{health.headline}</strong>
+              {" — "}
+              {health.detail}
+            </span>
+          </div>
+        )}
+        {needsReview.length > 0 && filter === "review" && !compact && health.falseFriendCount === 0 && (
           <div className="df2-column-review-alert" role="status">
             <DtIcon name="alert" size={16} />
             <span>
@@ -794,9 +828,20 @@ export function ColumnReviewPanel({
                           </span>
                         );
                       })()}
-                      {m.requiresReview && !m.approved && !omitted && !mappingRequiresRiskAck(m) && (
-                        <span className="df2-badge df2-badge-run df2-badge-xs">ambiguous</span>
-                      )}
+                      {(() => {
+                        if (omitted || m.approved || mappingRequiresRiskAck(m)) return null;
+                        const kind = classifyMappingReview(m);
+                        if (!kind) return null;
+                        const meta = mappingReviewKindMeta(kind);
+                        return (
+                          <span
+                            className="df2-badge df2-badge-run df2-badge-xs"
+                            title={meta.detail}
+                          >
+                            {meta.chip}
+                          </span>
+                        );
+                      })()}
                       {(m.semanticRole === "string_enum" || isEnumToBooleanConflict(m)) && !omitted && (
                         <span className="df2-badge df2-badge-warn df2-badge-xs" title="Status/lifecycle labels — not true/false">
                           string enum
@@ -838,7 +883,11 @@ export function ColumnReviewPanel({
                       <input
                         className="df2-input df2-column-target-input"
                         value={m.target}
-                        onChange={(e) => updateMapping(index, { target: e.target.value, approved: false })}
+                        ref={(el) => {
+                          if (el) destInputRefs.current.set(m.source, el);
+                          else destInputRefs.current.delete(m.source);
+                        }}
+                        onChange={(e) => updateMapping(index, applyOperatorRemapDest(m, e.target.value))}
                         aria-label={`Destination name for ${m.source}`}
                       />
                       <select
@@ -986,6 +1035,20 @@ export function ColumnReviewPanel({
                           </button>
                         </div>
                       )}
+                      {!omitted && isFalseFriendReview(m) && !m.approved && (
+                        <div className="df2-column-false-friend" role="note">
+                          <p className="df2-label-hint">
+                            {mappingReviewKindMeta(classifyMappingReview(m) || "generic").detail}
+                          </p>
+                          <button
+                            type="button"
+                            className="df2-btn df2-btn-primary df2-btn-sm"
+                            onClick={() => focusDestInput(m.source)}
+                          >
+                            {mappingReviewKindMeta(classifyMappingReview(m) || "generic").primaryLabel}
+                          </button>
+                        </div>
+                      )}
                       {!omitted && isExistingEnumBooleanConflict(m) && (
                         <button
                           type="button"
@@ -1102,7 +1165,9 @@ export function ColumnReviewPanel({
                             mappingRequiresRiskAck(m) && !policyBySource[m.source]
                           }
                           title={
-                            mappingRequiresRiskAck(m)
+                            isFalseFriendReview(m)
+                              ? mappingReviewKindMeta(classifyMappingReview(m) || "generic").detail
+                              : mappingRequiresRiskAck(m)
                               ? (!policyBySource[m.source]
                                 ? "Choose an execution policy first — no hidden defaults"
                                 : createNewRiskDetail(m)
@@ -1113,7 +1178,9 @@ export function ColumnReviewPanel({
                               : undefined
                           }
                         >
-                          {mappingAckLabel(m)}
+                          {isFalseFriendReview(m)
+                            ? mappingReviewKindMeta(classifyMappingReview(m) || "generic").confirmLabel
+                            : mappingAckLabel(m)}
                         </button>
                       </div>
                     )}
@@ -1134,7 +1201,7 @@ export function ColumnReviewPanel({
         </table>
       </div>
 
-      {(compact || displayItems.length > pageSize) && (
+      {(compact || pages > 1) && (
         <div className="df2-column-review-footer df2-column-workbench-pagination">
           {compact && (
             <span>
@@ -1149,8 +1216,8 @@ export function ColumnReviewPanel({
                 }`}
             </span>
           )}
-          {displayItems.length > pageSize && (
-            <div className="df2-column-workbench-pagination">
+          {pages > 1 && (
+            <div className="df2-column-workbench-pagination df2-column-review-pager" role="navigation" aria-label="Mapping column pages">
               <button
                 type="button"
                 className="df2-btn df2-btn-sm"

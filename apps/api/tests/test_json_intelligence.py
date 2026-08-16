@@ -9,6 +9,7 @@ from services.json_intelligence import (
     flatten_column_recommendations,
     flatten_document,
     flatten_struct_field,
+    iter_struct_materialized_rows,
     materialize_struct_policies,
     top_level_keys_from_samples,
 )
@@ -151,3 +152,19 @@ def test_explode_rows_duplicates_parent():
     assert elems == ["a", "b", "c"]
     # Parent array blob retained on every exploded row.
     assert all(r[new_headers.index("tags")] == '["a","b","c"]' for r in new_rows)
+
+
+def test_iter_struct_materialized_rows_matches_list_form():
+    from services.json_intelligence import ARRAY_POLICY_EXPLODE
+
+    headers = ["id", "tags"]
+    rows = [["1", '["a","b"]'], ["2", '["c"]']]
+    mappings = [
+        {"source": "id", "target": "id"},
+        {"source": "tags", "target": "tags", "struct_policy": ARRAY_POLICY_EXPLODE},
+    ]
+    listed_h, listed = materialize_struct_policies(headers, rows, mappings)
+    streamed_h, streamed_it = iter_struct_materialized_rows(headers, rows, mappings)
+    streamed = list(streamed_it)
+    assert streamed_h == listed_h
+    assert streamed == listed

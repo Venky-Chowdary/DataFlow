@@ -285,20 +285,10 @@ def _matrix_cell(value: Any) -> Any:
 def records_to_matrix(
     records: list[dict], columns: list[str]
 ) -> tuple[list[str], list[list[Any]]]:
-    from services.value_serializer import DF_MISSING_SENTINEL
+    from connectors.source_row_spool import iter_matrix_rows
 
     headers = columns or (list(records[0].keys()) if records else [])
-    rows: list[list[Any]] = []
-    for rec in records:
-        row: list[Any] = []
-        for h in headers:
-            # Absent key = omit-from-SET (same contract as cdc_transfer._records_to_matrix).
-            if h not in rec:
-                row.append(DF_MISSING_SENTINEL)
-            else:
-                row.append(_matrix_cell(rec.get(h)))
-        rows.append(row)
-    return headers, rows
+    return headers, list(iter_matrix_rows(records, headers))
 
 
 def mongodb_connection_string(cfg: dict[str, Any]) -> str:
@@ -489,8 +479,11 @@ def resolve_connector_config(
         "path_style": endpoint.path_style,
         "region": endpoint.region or "",
     }
-    # Keep "role" as the canonical key used by Snowflake connector functions.
-    cfg["role"] = endpoint.auth_role or ""
+    # Engine login role only — never topology source/destination/both.
+    from services.connector_auth import engine_login_role
+
+    cfg["role"] = engine_login_role(endpoint.auth_role)
+    cfg["auth_role"] = cfg["role"]
     cfg.update(endpoint.extra)
     connector_id = endpoint.connector_id or _find_implicit_connector_id(
         endpoint, cfg, fmt, workspace_id=workspace_id
@@ -592,6 +585,13 @@ def resolve_connector_config(
     # Ensure generic SQLAlchemy paths (introspection, schema drift, duplicate-key
     # probes) use the same credentials as the explicit user/pass fields.
     sync_credentials_into_connection_string(cfg)
+    # Merge can restore topology ``both`` from a saved connector. Strip it once
+    # here so every downstream Snowflake/Redshift path sees a login role or "".
+    from services.connector_auth import engine_login_role
+
+    cfg["role"] = engine_login_role(cfg.get("auth_role"), cfg.get("role"))
+    if cfg.get("auth_role"):
+        cfg["auth_role"] = engine_login_role(cfg.get("auth_role"))
     return cfg
 
 
@@ -728,6 +728,7 @@ def _introspect_table_schema_rich(
         "identity_columns": [],
         "generated_columns": [],
         "collations": {},
+        "charsets": {},
         "physical_storage": None,
         "check_constraints_meta": None,
         "indexes_meta": None,
@@ -752,6 +753,14 @@ def _introspect_table_schema_rich(
         ):
             if msg not in warnings:
                 warnings.append(msg)
+        charsets: dict[str, str] = {}
+        for col in payload.get("columns") or []:
+            if not isinstance(col, dict):
+                continue
+            name = str(col.get("name") or "").strip()
+            cs = str(col.get("charset") or "").strip()
+            if name and cs:
+                charsets[name] = cs
         return {
             "primary_key_columns": list(payload.get("primary_key_columns") or []),
             "unique_keys": list(payload.get("unique_keys") or []),
@@ -759,6 +768,7 @@ def _introspect_table_schema_rich(
             "identity_columns": list(identity_columns or []),
             "generated_columns": list(generated_columns or []),
             "collations": dict(collations or {}),
+            "charsets": charsets,
             "foreign_keys": list(payload.get("foreign_keys") or []),
             "check_constraints": list(payload.get("check_constraints") or []),
             # None when the dialect/probe never measured placement — the
@@ -827,6 +837,9 @@ def _introspect_table_schema_rich(
         catalog_type=cfg.get("type", ""),
         auth_source=cfg.get("auth_source", ""),
         api_key=cfg.get("api_key", ""),
+        role=str(cfg.get("role") or ""),
+        auth_role=str(cfg.get("auth_role") or ""),
+        private_key=str(cfg.get("private_key") or ""),
         strict_namespace=strict_namespace,
     )
     if info.get("ok") and info.get("columns"):
@@ -893,16 +906,23 @@ def _introspect_table_schema_rich(
     # Fallback: infer logical types from the sample records we already have in hand.
     # This is essential for schemaless sources (MongoDB, DynamoDB, Redis) whose
     # stored values may be strings but whose content is numeric, boolean, JSON, etc.
+    keys = dict(empty_keys)
+    if not info.get("ok"):
+        err = str(info.get("error") or "").strip()
+        if err:
+            keys["probe_error"] = err
     if records:
         try:
             from services.file_parser import FileParser
 
             inferred = FileParser.infer_schema(records)
             if inferred:
-                return {h: inferred.get(h, "TEXT") for h in headers}, {}, empty_keys
+                return {h: inferred.get(h, "TEXT") for h in headers}, {}, keys
         except Exception as exc:
             logger.debug("record schema inference failed: %s", exc, exc_info=exc)
-    return {h: "TEXT" for h in headers}, {}, empty_keys
+    if headers:
+        return {h: "TEXT" for h in headers}, {}, keys
+    return {}, {}, keys
 
 
 def _introspect_table_schema(
@@ -940,17 +960,54 @@ def _guard_truncated_read(batch, db_type: str, name: str) -> None:
         )
 
 
+def _pack_source_read(
+    records: list[dict],
+    headers: list[str],
+    schema: dict[str, str],
+    *,
+    batch: Any = None,
+    stamp_total: dict[str, Any] | None = None,
+) -> tuple[list[dict], list[str], dict[str, str]]:
+    """Return the read triple and optionally stamp the measured population.
+
+    Readers already run ``COUNT(*)`` (or equivalent) onto ``batch.total_rows``.
+    Introspect used to throw that away and treat ``len(records)`` (the 100-row
+    preview) as the transfer size.
+    """
+    if stamp_total is not None:
+        total = getattr(batch, "total_rows", None) if batch is not None else None
+        stamp_total["total_rows"] = int(total) if total is not None else None
+        stamp_total["sample_rows"] = len(records)
+    return records, headers, schema
+
+
 def read_source_database(
     endpoint: EndpointConfig,
     *,
     limit: int = _NON_STREAMING_ROW_LIMIT,
     raise_on_truncate: bool = True,
+    stamp_total: dict[str, Any] | None = None,
 ) -> tuple[list[dict], list[str], dict[str, str]]:
     from .connector_capabilities import resolve_driver_type
 
     cfg = resolve_connector_config(endpoint)
     # Prefer the saved connector's driver type over any inline format string.
     db_type = resolve_driver_type(cfg.get("type") or endpoint.format or "")
+
+    from services.procedure_source import is_callable_source, read_callable_batch
+
+    if is_callable_source(cfg) or is_callable_source(endpoint):
+        batch = read_callable_batch(cfg, offset=0, limit=limit, peek=True)
+        if raise_on_truncate:
+            _guard_truncated_read(batch, db_type or "procedure", endpoint.table or "procedure")
+        records = [dict(zip(batch.headers, row)) for row in batch.rows]
+        native = (batch.meta or {}).get("native_types") if isinstance(batch.meta, dict) else {}
+        schema = dict(native) if isinstance(native, dict) else {}
+        if not schema:
+            schema = {c: "string" for c in batch.headers}
+        return _pack_source_read(
+            records, batch.headers, schema, batch=batch, stamp_total=stamp_total
+        )
 
     if db_type == "postgresql" or db_type == "redshift":
         from connectors.postgresql_reader import read_table_batch
@@ -977,7 +1034,9 @@ def read_source_database(
         schema = _introspect_table_schema(
             "postgresql", cfg, table, batch.headers, records=records
         )
-        return records, batch.headers, schema
+        return _pack_source_read(
+            records, batch.headers, schema, batch=batch, stamp_total=stamp_total
+        )
 
     if db_type == "mongodb":
         from connectors.mongodb_reader import read_collection_batch
@@ -1005,7 +1064,9 @@ def read_source_database(
         schema = _introspect_table_schema(
             "mongodb", cfg, coll_name, batch.headers, records=records
         )
-        return records, batch.headers, schema
+        return _pack_source_read(
+            records, batch.headers, schema, batch=batch, stamp_total=stamp_total
+        )
 
     if db_type == "mysql":
         from connectors.mysql_reader import read_table_batch
@@ -1031,7 +1092,9 @@ def read_source_database(
         schema = _introspect_table_schema(
             db_type, cfg, table, batch.headers, records=records
         )
-        return records, batch.headers, schema
+        return _pack_source_read(
+            records, batch.headers, schema, batch=batch, stamp_total=stamp_total
+        )
 
     if db_type == "bigquery":
         from connectors.bigquery_reader import read_table_batch
@@ -1059,10 +1122,13 @@ def read_source_database(
         schema = _introspect_table_schema(
             db_type, cfg, table, batch.headers, records=records
         )
-        return records, batch.headers, schema
+        return _pack_source_read(
+            records, batch.headers, schema, batch=batch, stamp_total=stamp_total
+        )
 
     if db_type == "snowflake":
         from connectors.snowflake_reader import read_table_batch
+        from services.connector_auth import snowflake_session_kwargs
 
         table = endpoint.table
         if not table:
@@ -1078,7 +1144,15 @@ def read_source_database(
             warehouse=cfg.get("warehouse", ""),
             table=table,
             limit=limit,
-            role=cfg.get("role", ""),
+            cursor_primary_key=str(
+                (endpoint.extra or {}).get("primary_key")
+                or cfg.get("primary_key")
+                or ""
+            ),
+            skip_population_count=bool(
+                (endpoint.extra or {}).get("skip_population_count")
+            ),
+            **snowflake_session_kwargs(cfg),
         )
         if raise_on_truncate:
             _guard_truncated_read(batch, db_type, table)
@@ -1086,7 +1160,9 @@ def read_source_database(
         schema = _introspect_table_schema(
             db_type, cfg, table, batch.headers, records=records
         )
-        return records, batch.headers, schema
+        return _pack_source_read(
+            records, batch.headers, schema, batch=batch, stamp_total=stamp_total
+        )
 
     if db_type == "gcs":
         from connectors.gcs_reader import read_object
@@ -1106,7 +1182,9 @@ def read_source_database(
             if records
             else {c: "string" for c in batch.headers}
         )
-        return records, batch.headers, schema
+        return _pack_source_read(
+            records, batch.headers, schema, batch=batch, stamp_total=stamp_total
+        )
 
     if db_type == "adls":
         from connectors.adls_reader import read_object
@@ -1126,7 +1204,9 @@ def read_source_database(
             if records
             else {c: "string" for c in batch.headers}
         )
-        return records, batch.headers, schema
+        return _pack_source_read(
+            records, batch.headers, schema, batch=batch, stamp_total=stamp_total
+        )
 
     if db_type == "s3":
         from connectors.s3_reader import read_object
@@ -1146,7 +1226,9 @@ def read_source_database(
             if records
             else {c: "string" for c in batch.headers}
         )
-        return records, batch.headers, schema
+        return _pack_source_read(
+            records, batch.headers, schema, batch=batch, stamp_total=stamp_total
+        )
 
     if db_type == "dynamodb":
         from connectors.dynamodb_reader import read_all_paginated
@@ -1163,7 +1245,9 @@ def read_source_database(
             if records
             else {c: "string" for c in batch.headers}
         )
-        return records, batch.headers, schema
+        return _pack_source_read(
+            records, batch.headers, schema, batch=batch, stamp_total=stamp_total
+        )
 
     if db_type == "elasticsearch":
         from connectors.elasticsearch_reader import read_index_batch
@@ -1182,7 +1266,9 @@ def read_source_database(
             if records
             else {c: "string" for c in batch.headers}
         )
-        return records, batch.headers, schema
+        return _pack_source_read(
+            records, batch.headers, schema, batch=batch, stamp_total=stamp_total
+        )
 
     if db_type == "redis":
         from connectors.redis_reader import read_keys_batch, resolve_key_pattern
@@ -1199,7 +1285,9 @@ def read_source_database(
             if records
             else {c: "string" for c in batch.headers}
         )
-        return records, batch.headers, schema
+        return _pack_source_read(
+            records, batch.headers, schema, batch=batch, stamp_total=stamp_total
+        )
 
     if db_type == "sqlite":
         from connectors.sqlite_reader import read_table_batch
@@ -1225,7 +1313,9 @@ def read_source_database(
         schema = _introspect_table_schema(
             db_type, cfg, table, batch.headers, records=records
         )
-        return records, batch.headers, schema
+        return _pack_source_read(
+            records, batch.headers, schema, batch=batch, stamp_total=stamp_total
+        )
 
     if db_type == "generic_sql":
         from connectors.generic_sql import read_table_batch
@@ -1252,7 +1342,9 @@ def read_source_database(
         schema = _introspect_table_schema(
             db_type, cfg, table, batch.headers, records=records
         )
-        return records, batch.headers, schema
+        return _pack_source_read(
+            records, batch.headers, schema, batch=batch, stamp_total=stamp_total
+        )
 
     if db_type in ("sqlserver", "oracle"):
         from .connector_dispatch import read_via_registry
@@ -1267,7 +1359,9 @@ def read_source_database(
         schema = _introspect_table_schema(
             db_type, cfg, table, batch.headers, records=records
         )
-        return records, batch.headers, schema
+        return _pack_source_read(
+            records, batch.headers, schema, batch=batch, stamp_total=stamp_total
+        )
 
     if db_type == "iceberg":
         from .connector_dispatch import read_via_registry
@@ -1282,7 +1376,9 @@ def read_source_database(
         schema = _introspect_table_schema(
             db_type, cfg, table, batch.headers, records=records
         )
-        return records, batch.headers, schema
+        return _pack_source_read(
+            records, batch.headers, schema, batch=batch, stamp_total=stamp_total
+        )
 
     if db_type == "sftp":
         from connectors.sftp_reader import read_object
@@ -1314,7 +1410,9 @@ def read_source_database(
             if records
             else {c: "string" for c in batch.headers}
         )
-        return records, batch.headers, schema
+        return _pack_source_read(
+            records, batch.headers, schema, batch=batch, stamp_total=stamp_total
+        )
 
     if db_type in (
         "salesforce",
@@ -1343,7 +1441,9 @@ def read_source_database(
             if records
             else {c: "string" for c in batch.headers}
         )
-        return records, batch.headers, schema
+        return _pack_source_read(
+            records, batch.headers, schema, batch=batch, stamp_total=stamp_total
+        )
 
     if db_type == "singer_tap":
         from connectors.sdk import sdk_read_as_matrix
@@ -1384,14 +1484,146 @@ def write_destination_database(
     Keyword options are forwarded verbatim to ``_write_destination_database``.
     """
     from services.dest_precount import PRECOUNT_KEY, precount_destination
+    from services.dialect_profiles import schema_from_cfg
+    from services.row_conservation import CENSUS_KEY, prepare_keyed_upsert
+    from src.transfer.connector_capabilities import resolve_driver_type
 
-    rows_before = precount_destination(endpoint, resolve_connector_config(endpoint))
-    rows_written, ddl_log, summary = _write_destination_database(
-        endpoint, records, columns, schema, mappings, **options
+    from connectors.engine_record_spill import (
+        ENGINE_SPILL_SUMMARY_KEY,
+        mirror_pk_sources,
+        spill_engine_write_records,
+        spool_write_kinds,
     )
+
+    cfg = resolve_connector_config(endpoint)
+    from services.procedure_destination import (
+        DEST_ROW_MODES,
+        assert_dest_procedure_sync_allowed,
+        plan_dest_procedure,
+    )
+
+    dest_plan = plan_dest_procedure(endpoint)
+    if dest_plan is not None:
+        assert_dest_procedure_sync_allowed(str(options.get("sync_mode") or ""), endpoint)
+        if dest_plan.mode in DEST_ROW_MODES:
+            return _write_dest_procedure_rows(endpoint, records, dest_plan)
+        if dest_plan.before_spec is not None:
+            _run_dest_procedure_hook(endpoint, dest_plan.before_spec)
+
+    rows_before = precount_destination(endpoint, cfg)
+    write_mode = str(options.get("write_mode") or "")
+    conflict_columns = list(options.get("conflict_columns") or [])
+    collect_mirror_keys = bool(options.pop("collect_mirror_keys", False))
+    release_records = bool(options.pop("release_records", False))
+    retain_engine_spill = bool(options.pop("retain_engine_spill", False))
+    options.pop("source_spool", None)
+    db_type = resolve_driver_type(str(cfg.get("type") or endpoint.format or ""))
+    census_payload = None
+    if write_mode.lower() == "upsert" and conflict_columns:
+        records, census_payload = prepare_keyed_upsert(
+            records,
+            key_columns=conflict_columns,
+            mappings=mappings,
+            db_type=db_type,
+            cfg=cfg,
+            schema=schema_from_cfg(db_type, cfg),
+            table_name=resolve_dest_table(db_type, endpoint, "dt_import"),
+            dest_nonempty=bool(rows_before),
+        )
+    spill = None
+    if db_type in spool_write_kinds():
+        extra = cfg.get("extra") if isinstance(cfg.get("extra"), dict) else {}
+        pk_sources = (
+            mirror_pk_sources(conflict_columns, mappings)
+            if collect_mirror_keys and conflict_columns
+            else None
+        )
+        spill = spill_engine_write_records(
+            records,
+            columns,
+            mappings,
+            extra=extra,
+            collect_pk_sources=pk_sources,
+            clear_records=release_records,
+        )
+        options["source_spool"] = spill.spool
+    try:
+        rows_written, ddl_log, summary = _write_destination_database(
+            endpoint, records, columns, schema, mappings, **options
+        )
+        if dest_plan is not None and dest_plan.after_spec is not None:
+            _run_dest_procedure_hook(endpoint, dest_plan.after_spec)
+            ddl_log = list(ddl_log or [])
+            ddl_log.append(f"after_write {dest_plan.after_spec.identifier}")
+            if isinstance(summary, dict):
+                summary["dest_procedure_after"] = dest_plan.after_spec.identifier
+    except Exception:
+        if spill is not None:
+            spill.close()
+        raise
     if rows_before is not None and isinstance(summary, dict):
         summary.setdefault(PRECOUNT_KEY, int(rows_before))
+    if census_payload is not None and isinstance(summary, dict):
+        summary[CENSUS_KEY] = census_payload
+    if spill is not None and isinstance(summary, dict):
+        summary["engine_record_spill"] = {
+            "spilled": spill.spilled,
+            "source_row_count": spill.source_row_count,
+            "unexpanded_row_count": spill.unexpanded_row_count,
+        }
+        if retain_engine_spill:
+            summary[ENGINE_SPILL_SUMMARY_KEY] = spill
+        else:
+            spill.close()
+    elif spill is not None:
+        spill.close()
     return rows_written, ddl_log, summary
+
+
+def _dest_procedure_execute(endpoint: EndpointConfig):
+    """One dest engine session. Caller owns commit via ``engine.begin()``."""
+    from connectors.generic_sql import _engine
+    from services.engine_pool import release_engine
+    from sqlalchemy import text
+
+    cfg = resolve_connector_config(endpoint)
+    engine = _engine(cfg)
+
+    def _close() -> None:
+        release_engine(engine)
+
+    return engine, text, _close
+
+
+def _run_dest_procedure_hook(endpoint: EndpointConfig, spec) -> None:
+    from services.procedure_destination import run_dest_hook
+
+    engine, text, close = _dest_procedure_execute(endpoint)
+    try:
+        with engine.begin() as conn:
+            run_dest_hook(spec, lambda sql, binds: conn.execute(text(sql), binds or {}))
+    finally:
+        close()
+
+
+def _write_dest_procedure_rows(
+    endpoint: EndpointConfig,
+    records: list[dict],
+    plan,
+) -> tuple[int, list[str], dict]:
+    from services.procedure_destination import apply_rows_via_procedure
+
+    engine, text, close = _dest_procedure_execute(endpoint)
+    try:
+        with engine.begin() as conn:
+            return apply_rows_via_procedure(
+                endpoint,
+                list(records or []),
+                execute_call=lambda sql, binds: conn.execute(text(sql), binds or {}),
+                plan=plan,
+            )
+    finally:
+        close()
 
 
 def _write_destination_database(
@@ -1408,6 +1640,8 @@ def _write_destination_database(
     job_id: str | None = None,
     skip_preflight: bool = False,
     error_policy: str | None = None,
+    sync_mode: str = "",
+    source_spool: Any = None,
 ) -> tuple[int, list[str], dict]:
     """Write records to a SQL/NoSQL destination.
 
@@ -1436,7 +1670,22 @@ def _write_destination_database(
         else transform_error_policy_for_validation_mode(validation_mode)
     )
 
-    headers, data_rows = records_to_matrix(records, columns)
+    from connectors.source_row_spool import OBJECT_STORE_WRITE_KINDS
+    from connectors.sql_write_materialize import SQL_SPOOL_WRITE_KINDS
+
+    # Object-store and SQL/warehouse writers ingest records through
+    # SourceRowSpool — do not build a second full matrix here (STRUCT
+    # explode would copy again).
+    _spool_kinds = OBJECT_STORE_WRITE_KINDS | SQL_SPOOL_WRITE_KINDS
+    if source_spool is not None and hasattr(source_spool, "headers"):
+        headers = list(source_spool.headers or columns or [])
+        data_rows: list[list[Any]] = []
+        records = []
+    elif db_type in _spool_kinds:
+        headers = columns or (list(records[0].keys()) if records else [])
+        data_rows = []
+    else:
+        headers, data_rows = records_to_matrix(records, columns)
     column_types = {c: ddl_carrier_type(schema.get(c, "string")) for c in columns}
     if not mappings:
         mappings = [{"source": c, "target": c, "confidence": 0.95} for c in columns]
@@ -1490,6 +1739,8 @@ def _write_destination_database(
         "table_name": table_name,
         "headers": headers,
         "data_rows": data_rows,
+        "records": None if source_spool is not None else (records if db_type in _spool_kinds else None),
+        "source_spool": source_spool,
         "mappings": mappings,
         "column_types": column_types,
         "on_checkpoint": on_checkpoint,
@@ -1501,6 +1752,7 @@ def _write_destination_database(
         ),
         "file_batch_idx": 0,
         "skip_preflight": skip_preflight,
+        "sync_mode": sync_mode,
         # Live dest nullability for write-time NOT NULL escalate (G3 parity).
         "destination_column_nullability": dict(
             (cfg.get("extra") or {}).get("schema_nullability")
@@ -1516,7 +1768,24 @@ def _write_destination_database(
             or (getattr(endpoint, "extra", None) or {}).get("destination_column_types")
             or {}
         ),
+        "source_schema_catalog": (cfg.get("extra") or {}).get("source_schema_catalog"),
     }
+    from .connector_dispatch import writer_extra_kwargs
+
+    common.update(writer_extra_kwargs(db_type, cfg=cfg, dest=endpoint, common=common))
+    if db_type in {
+        "s3",
+        "minio",
+        "gcs",
+        "gcp_storage",
+        "adls",
+        "azure_blob",
+        "azure_data_lake",
+        "sftp",
+        "email",
+        "smtp",
+    }:
+        common["dest_extra"] = dict(cfg.get("extra") or {})
 
     if db_type == "snowflake":
         from connectors.snowflake_writer import write_mapped_rows
@@ -1552,8 +1821,9 @@ def _write_destination_database(
         from connectors.postgresql_writer import write_mapped_rows
 
         common["schema"] = schema_from_cfg(db_type, cfg)
-        if db_type == "redshift":
+        if db_type in {"redshift", "amazon_redshift", "redshift_serverless"}:
             common["port"] = cfg["port"] or 5439
+            common["dest_extra"] = dict(cfg.get("extra") or {})
         for col in columns:
             ddl_log.append(
                 f"{db_type.upper()} COLUMN {col} {ddl_type(db_type, schema.get(col, 'string'))}"

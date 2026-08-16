@@ -3,7 +3,12 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { availableSyncModes } from "./transferConstants.js";
+import {
+  availableSyncModes,
+  formatSchemaPolicyLabel,
+  formatSyncModeLabel,
+  formatValidationModeLabel,
+} from "./transferConstants.js";
 
 describe("availableSyncModes", () => {
   it("hides SCD2/mirror on Mongo destinations", () => {
@@ -31,6 +36,36 @@ describe("availableSyncModes", () => {
     assert.ok(modes.includes("cdc"));
   });
 
+  it("hides CDC for dest stored-procedure / dest query writes", () => {
+    const modes = availableSyncModes({
+      destDriver: "postgresql",
+      sourceDriver: "postgresql",
+      sourceKind: "database",
+      isMultiStream: false,
+      destWriteMode: "procedure",
+    }).map((m) => m.id);
+    assert.ok(!modes.includes("cdc"));
+    assert.ok(!modes.includes("scd2"));
+    assert.ok(!modes.includes("mirror"));
+    assert.ok(modes.includes("full_refresh_append"));
+  });
+
+  it("hides CDC for stored-procedure extracts", () => {
+    const modes = availableSyncModes({
+      destDriver: "postgresql",
+      sourceDriver: "postgresql",
+      sourceKind: "database",
+      isMultiStream: false,
+      sourceReadMode: "procedure",
+    }).map((m) => m.id);
+    assert.ok(!modes.includes("cdc"));
+    assert.ok(!modes.includes("scd2"));
+    assert.ok(!modes.includes("mirror"));
+    assert.ok(modes.includes("full_refresh_append"));
+    assert.ok(modes.includes("incremental_append"));
+    assert.ok(modes.includes("incremental_deduped"));
+  });
+
   it("hides CDC for file sources", () => {
     const modes = availableSyncModes({
       destDriver: "postgresql",
@@ -50,5 +85,19 @@ describe("availableSyncModes", () => {
     }).map((m) => m.id);
     assert.ok(modes.includes("scd2"));
     assert.ok(modes.includes("mirror"));
+  });
+});
+
+describe("formatSyncModeLabel", () => {
+  it("labels full_refresh_mirror as Mirror, not underscored engine id", () => {
+    assert.equal(formatSyncModeLabel("mirror"), "Mirror");
+    assert.equal(formatSyncModeLabel("full_refresh_mirror"), "Mirror");
+    assert.equal(formatSyncModeLabel("full_refresh_overwrite"), "Full overwrite");
+    assert.equal(formatSyncModeLabel(""), "—");
+  });
+
+  it("does not reuse sync-mode formatting for schema policy or validation", () => {
+    assert.equal(formatSchemaPolicyLabel("manual_review"), "Manual approval");
+    assert.equal(formatValidationModeLabel("strict"), "Strict");
   });
 });

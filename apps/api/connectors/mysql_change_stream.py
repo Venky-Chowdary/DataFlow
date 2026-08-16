@@ -27,7 +27,7 @@ from services.cdc_schema_history import (
 )
 
 from connectors.mysql_conn import get_connection
-from connectors.mysql_reader import read_table_batch
+from connectors.mysql_reader import read_table_batch, read_table_scan_batch
 from connectors.sql_identifiers import quote_table_ref
 from services.cdc_cursor_gap import CdcBinlogGapError
 
@@ -349,19 +349,39 @@ class MySqlChangeStreamCdc:
             locked = False
             lock_conn = None
 
-        if not start_pos.get("file"):
+        from services.cdc_snapshot_resume import streaming_handoff_fields
+
+        resume_handoff = {}
+        if (
+            isinstance(self.resume_token, dict)
+            and self.resume_token.get("phase") == "snapshot"
+        ):
+            resume_handoff = streaming_handoff_fields(self.resume_token)
+        if resume_handoff.get("file"):
+            # Mid-dump resume must keep the original binlog tip. Recapturing
+            # SHOW MASTER STATUS here would skip writes between the first lock
+            # and this restart (silent CDC loss).
+            start_pos = {
+                **start_pos,
+                **resume_handoff,
+                "table": self.table,
+                "tables": list(self.tables),
+            }
+        elif not start_pos.get("file"):
             # Fallback when binlog position cannot be captured while locked.
             start_pos = self._current_binlog_position() or start_pos
 
-        # Resume mid-snapshot from the recorded table/offset.
+        # Resume mid-snapshot from last_pk (Debezium-class) or legacy offset.
         offset = 0
         resume_table = self.table
+        resume_last_pk = ""
         if (
             isinstance(self.resume_token, dict)
             and self.resume_token.get("phase") == "snapshot"
         ):
             offset = int(self.resume_token.get("offset") or 0)
             resume_table = self.resume_token.get("table") or self.table
+            resume_last_pk = str(self.resume_token.get("last_pk") or "")
 
         if resume_table in self.tables:
             tables_to_snapshot = self.tables[self.tables.index(resume_table) :]
@@ -371,45 +391,26 @@ class MySqlChangeStreamCdc:
         try:
             for table in tables_to_snapshot:
                 table_offset = offset if table == resume_table else 0
-                while True:
-                    batch = read_table_batch(
-                        host=self.cfg.get("host") or "localhost",
-                        port=self.cfg.get("port") or 3306,
-                        database=self.database,
-                        username=self.cfg.get("username") or "",
-                        password=self.cfg.get("password") or "",
-                        schema="",
-                        connection_string=self.cfg.get("connection_string") or "",
-                        ssl=bool(self.cfg.get("ssl")),
-                        table=table,
-                        columns=self.columns,
-                        offset=table_offset,
-                        limit=self.batch_size,
-                        conn=lock_conn if locked else None,
-                    )
-                    if not batch.rows:
-                        break
-                    records = [dict(zip(batch.headers, row)) for row in batch.rows]
-                    table_offset += len(batch.rows)
-                    yield ChangeBatch(
-                        inserts=records,
-                        resume_token={
-                            **start_pos,
-                            "phase": "snapshot",
-                            "offset": table_offset,
-                            "table": table,
-                        },
-                    )
-                    if len(batch.rows) < self.batch_size:
-                        break
-            yield ChangeBatch(
-                resume_token={
-                    **start_pos,
-                    "phase": "streaming",
-                    "offset": 0,
-                    "table": self.table,
-                }
-            )
+                table_last_pk = resume_last_pk if table == resume_table else ""
+                yield from self._snapshot_table_pages(
+                    table,
+                    start_pos=start_pos,
+                    table_offset=table_offset,
+                    table_last_pk=table_last_pk,
+                    lock_conn=lock_conn if locked else None,
+                )
+            handoff = {
+                **start_pos,
+                "phase": "streaming",
+                "offset": 0,
+                "table": self.table,
+            }
+            handoff.pop("last_pk", None)
+            yield ChangeBatch(resume_token=handoff)
+            # Adopt the captured consistent point as the live resume. Poll after
+            # a when_needed gap recovery must stream from this tip, not the
+            # purged file:pos the adapter was constructed with.
+            self.resume_token = dict(handoff)
         finally:
             if lock_conn:
                 if locked:
@@ -422,6 +423,120 @@ class MySqlChangeStreamCdc:
                     lock_conn.close()
                 except Exception as exc:
                     _logger.debug("Error closing MySQL lock connection: %s", exc)
+
+    def _snapshot_table_pages(
+        self,
+        table: str,
+        *,
+        start_pos: dict[str, Any],
+        table_offset: int,
+        table_last_pk: str,
+        lock_conn: Any | None,
+    ) -> Iterator[ChangeBatch]:
+        """Page one table: held scan, PK-seek resume, or legacy OFFSET."""
+        from connectors.sql_snapshot_scan import close_table_scan
+        from services.cdc_snapshot_resume import (
+            classify_snapshot_resume,
+            last_pk_from_records,
+        )
+        from services.cdc_snapshot_window import _pk_columns
+
+        pk_cols = _pk_columns(self.primary_keys.get(table, self.primary_key))
+        mode = classify_snapshot_resume(last_pk=table_last_pk, offset=table_offset)
+        scan_state: dict = {}
+        try:
+            while True:
+                if mode == "keyset":
+                    records = self._mysql_keyset_page(
+                        table, pk_cols, table_last_pk, lock_conn
+                    )
+                    if not records:
+                        break
+                else:
+                    _read_kw = dict(
+                        host=self.cfg.get("host") or "localhost",
+                        port=self.cfg.get("port") or 3306,
+                        database=self.database,
+                        username=self.cfg.get("username") or "",
+                        password=self.cfg.get("password") or "",
+                        schema="",
+                        connection_string=self.cfg.get("connection_string") or "",
+                        ssl=bool(self.cfg.get("ssl")),
+                        table=table,
+                        columns=self.columns,
+                        offset=table_offset,
+                        limit=self.batch_size,
+                        conn=lock_conn,
+                    )
+                    if mode == "scan":
+                        batch = read_table_scan_batch(
+                            **_read_kw, scan_state=scan_state
+                        )
+                    else:
+                        batch = read_table_batch(**_read_kw)
+                    if not batch.rows:
+                        break
+                    records = [dict(zip(batch.headers, row)) for row in batch.rows]
+                table_offset += len(records)
+                table_last_pk = last_pk_from_records(records, pk_cols) or table_last_pk
+                token = {
+                    **start_pos,
+                    "phase": "snapshot",
+                    "offset": table_offset,
+                    "table": table,
+                }
+                if table_last_pk:
+                    token["last_pk"] = table_last_pk
+                yield ChangeBatch(inserts=records, resume_token=token)
+                if len(records) < self.batch_size:
+                    break
+        finally:
+            close_table_scan(scan_state)
+
+    def _mysql_keyset_page(
+        self,
+        table: str,
+        pk_cols: list[str],
+        last_pk: str,
+        conn: Any | None,
+    ) -> list[dict[str, Any]]:
+        """PK-seek one snapshot page on the locked session when we hold it."""
+        from connectors.sql_identifiers import quote_column_list, quote_table_ref
+        from services.cdc_snapshot_resume import quoted_pk_columns, snapshot_keyset_sql
+
+        table_ref = quote_table_ref(table, dialect="mysql")
+        quoted = quoted_pk_columns(pk_cols, "`")
+        sql, params = snapshot_keyset_sql(
+            table_ref=table_ref,
+            quoted_pk_columns=quoted,
+            last_pk=last_pk,
+            limit=self.batch_size,
+            dialect="mysql",
+            select_list=quote_column_list(self.columns, quote_char="`"),
+        )
+        close = conn is None
+        if conn is None:
+            conn = get_connection(
+                host=self.cfg.get("host") or "localhost",
+                port=self.cfg.get("port") or 3306,
+                database=self.database,
+                username=self.cfg.get("username") or "",
+                password=self.cfg.get("password") or "",
+                connection_string=self.cfg.get("connection_string") or "",
+                ssl=bool(self.cfg.get("ssl")),
+            )
+        try:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                rows = cur.fetchall() or []
+                headers = [d[0] for d in (cur.description or [])]
+            return [dict(zip(headers, row)) for row in rows]
+        finally:
+            if close:
+                try:
+                    conn.close()
+                except Exception as exc:
+                    _logger.debug("Error closing MySQL keyset connection: %s", exc)
 
     def _binlog_file_pos_on(self, cur) -> str | None:
         """Return ``file:pos`` from the open cursor for snapshot row stamps.
@@ -1234,6 +1349,7 @@ class MySqlChangeStreamCdc:
             fetch_chunk=self._fetch_incremental_chunk,
             stream_events_during_chunk=self._peek_stream_events_during_chunk,
             max_chunks_per_poll=1,
+            dest_resume=self.resume_token,
         )
 
         from pymysqlreplication import BinLogStreamReader

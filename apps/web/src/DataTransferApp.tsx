@@ -2,7 +2,7 @@
  * Datawrap — Universal Data Platform
  */
 
-import { lazy, Suspense, useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import { Suspense, useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { DtIcon } from "./components/DtIcon";
 import { BrandWordmark } from "./components/BrandWordmark";
 import { PageErrorBoundary } from "./components/PageErrorBoundary";
@@ -34,47 +34,23 @@ import { apiOfflineMessage } from "./lib/runtimeEnv";
 import { usePageMeta } from "./lib/usePageMeta";
 import { metaForLogin, metaForScreen } from "./lib/seo";
 import type { JobsStudioIntent } from "./pages/JobsPage";
+import { DashboardPage } from "./pages/DashboardPage";
+import { lazyNamed } from "./lib/lazyPage";
 
-/** Phase F9 — lazy route chunks (hashed assets; see docs/FRONTEND_CODE_SPLIT.md). */
-const DashboardPage = lazy(() =>
-  import("./pages/DashboardPage").then((m) => ({ default: m.DashboardPage })),
-);
-const PilotPage = lazy(() =>
-  import("./pages/PilotPage").then((m) => ({ default: m.PilotPage })),
-);
-const TransferPage = lazy(() =>
-  import("./pages/TransferPage").then((m) => ({ default: m.TransferPage })),
-);
-const ConnectorsPage = lazy(() =>
-  import("./pages/ConnectorsPage").then((m) => ({ default: m.ConnectorsPage })),
-);
-const SchedulesPage = lazy(() =>
-  import("./pages/SchedulesPage").then((m) => ({ default: m.SchedulesPage })),
-);
-const TransformsPage = lazy(() =>
-  import("./pages/TransformsPage").then((m) => ({ default: m.TransformsPage })),
-);
-const JobsPage = lazy(() =>
-  import("./pages/JobsPage").then((m) => ({ default: m.JobsPage })),
-);
-const ContractsPage = lazy(() =>
-  import("./pages/ContractsPage").then((m) => ({ default: m.ContractsPage })),
-);
-const McpPage = lazy(() =>
-  import("./pages/McpPage").then((m) => ({ default: m.McpPage })),
-);
-const QueryPage = lazy(() =>
-  import("./pages/QueryPage").then((m) => ({ default: m.QueryPage })),
-);
-const SettingsPage = lazy(() =>
-  import("./pages/SettingsPage").then((m) => ({ default: m.SettingsPage })),
-);
-const DocsPage = lazy(() =>
-  import("./pages/DocsPage").then((m) => ({ default: m.DocsPage })),
-);
-const BenchmarksPage = lazy(() =>
-  import("./pages/BenchmarksPage").then((m) => ({ default: m.BenchmarksPage })),
-);
+/** Overview is the signed-in home screen — never a separate hashed chunk.
+ * Other routes stay lazy; stale Vite hashes reload once (see lazyPage). */
+const PilotPage = lazyNamed(() => import("./pages/PilotPage"), "PilotPage");
+const TransferPage = lazyNamed(() => import("./pages/TransferPage"), "TransferPage");
+const ConnectorsPage = lazyNamed(() => import("./pages/ConnectorsPage"), "ConnectorsPage");
+const SchedulesPage = lazyNamed(() => import("./pages/SchedulesPage"), "SchedulesPage");
+const TransformsPage = lazyNamed(() => import("./pages/TransformsPage"), "TransformsPage");
+const JobsPage = lazyNamed(() => import("./pages/JobsPage"), "JobsPage");
+const ContractsPage = lazyNamed(() => import("./pages/ContractsPage"), "ContractsPage");
+const McpPage = lazyNamed(() => import("./pages/McpPage"), "McpPage");
+const QueryPage = lazyNamed(() => import("./pages/QueryPage"), "QueryPage");
+const SettingsPage = lazyNamed(() => import("./pages/SettingsPage"), "SettingsPage");
+const DocsPage = lazyNamed(() => import("./pages/DocsPage"), "DocsPage");
+const BenchmarksPage = lazyNamed(() => import("./pages/BenchmarksPage"), "BenchmarksPage");
 
 function LazyScreen({ label, children }: { label: string; children: ReactNode }) {
   return (
@@ -811,7 +787,7 @@ function AppShell({
               {mountedScreens.has("settings") && (
                 <div className={`df2-screen-keep ${showScreen("settings")}`} hidden={screen !== "settings"} aria-hidden={screen !== "settings"}>
                 <PageErrorBoundary label="Settings">
-                  <SettingsPage />
+                  <SettingsPage onOpenConnectors={() => setScreen("connectors")} />
                 </PageErrorBoundary>
                 </div>
               )}
@@ -1022,6 +998,11 @@ function DataTransferAppInner() {
           onBack={() => {
             setPublicRoute("home");
             writePublicHash("home", true);
+            setStage("landing");
+          }}
+          onLegal={(route) => {
+            setPublicRoute(route);
+            writePublicHash(route);
             setStage("landing");
           }}
         />

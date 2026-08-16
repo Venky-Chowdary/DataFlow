@@ -19,8 +19,6 @@ from typing import Any
 
 from services.reconciliation import (
     TargetSampleUnavailable,
-    _object_store_target_sample,
-    _rows_from_object_bytes,
 )
 
 logger = logging.getLogger(__name__)
@@ -809,103 +807,36 @@ def read_target_sample(
                     f"Could not read destination sample from {db_type!r}.{table_name!r}: {exc}"
                 ) from exc
 
-        if db_type in {
-            "adls",
-            "azure_blob_storage",
-            "azure_data_lake",
-            "azure_data_lake_storage",
-        }:
-            from connectors.adls_common import blob_service_client
-            from connectors.adls_reader import list_objects
+        from services.dest_precount import (
+            UnmeasuredArtifact,
+            _object_store_kind,
+            sample_artifact_records,
+            sample_object_store,
+        )
 
-            container = (dest.get("database") or schema or "").strip()
-            if not container or not table_name:
-                raise TargetSampleUnavailable(
-                    f"Could not read destination sample from {db_type!r}.{table_name!r}: "
-                    "ADLS container or blob path missing"
-                )
-            cfg_adls = {
-                "host": dest.get("host", ""),
-                "port": int(dest.get("port") or 0),
-                "username": dest.get("username", ""),
-                "password": dest.get("password", ""),
-                "connection_string": dest.get("connection_string", ""),
-                "service_account": dest.get("service_account", ""),
-                "database": container,
-            }
-            client = blob_service_client(cfg_adls)
-            return _object_store_target_sample(
-                table_name=table_name,
-                list_keys=lambda prefix: list_objects(cfg_adls, container, prefix),
-                fetch_bytes=lambda k: (
-                    client.get_blob_client(container, k).download_blob().readall()
-                ),
-                cols=cols,
-                limit=limit,
-                sort_key=sort_key,
-                keys=keys,
-            )
-
-        if db_type in {"s3", "minio", "s3_compatible", "aws_s3"}:
-            from connectors.aws_common import boto3_client
-            from connectors.s3_reader import list_objects
-
+        if _object_store_kind(db_type) in {"s3", "gcs", "adls"}:
             bucket = (dest.get("database") or schema or "").strip()
             if not bucket or not table_name:
                 raise TargetSampleUnavailable(
                     f"Could not read destination sample from {db_type!r}.{table_name!r}: "
-                    "S3 bucket or object key missing"
+                    "object-store bucket or key missing"
                 )
-            cfg_s3 = {
-                "host": dest.get("host", ""),
-                "port": int(dest.get("port") or 0),
-                "username": dest.get("username", ""),
-                "password": dest.get("password", ""),
-                "connection_string": dest.get("connection_string", ""),
-                "ssl": bool(dest.get("ssl", False)),
-                "database": bucket,
-                "endpoint_url": dest.get("endpoint_url", "") or "",
-                "path_style": bool(dest.get("path_style", False)),
-                "region": dest.get("region", "") or "",
-            }
-            client = boto3_client("s3", cfg_s3)
-            return _object_store_target_sample(
-                table_name=table_name,
-                list_keys=lambda prefix: list_objects(cfg_s3, bucket, prefix),
-                fetch_bytes=lambda k: client.get_object(Bucket=bucket, Key=k)["Body"].read(),
-                cols=cols,
-                limit=limit,
-                sort_key=sort_key,
-                keys=keys,
-            )
-
-        if db_type in {"gcs", "google_cloud_storage"}:
-            from connectors.gcs_common import gcs_client
-            from connectors.gcs_reader import list_objects
-
-            bucket = (dest.get("database") or schema or "").strip()
-            if not bucket or not table_name:
+            cfg = dict(dest)
+            cfg["database"] = bucket
+            try:
+                return sample_object_store(
+                    db_type,
+                    cfg,
+                    table_name=table_name,
+                    limit=limit,
+                    sort_key=sort_key or "",
+                    keys=keys,
+                    columns=None if cols == ["*"] else cols,
+                )
+            except UnmeasuredArtifact as exc:
                 raise TargetSampleUnavailable(
-                    f"Could not read destination sample from {db_type!r}.{table_name!r}: "
-                    "GCS bucket or object key missing"
-                )
-            cfg_gcs = {
-                "host": dest.get("host", ""),
-                "port": int(dest.get("port") or 0),
-                "connection_string": dest.get("connection_string", ""),
-                "service_account": dest.get("service_account", ""),
-                "password": dest.get("password", ""),
-            }
-            bucket_obj = gcs_client(cfg_gcs).bucket(bucket)
-            return _object_store_target_sample(
-                table_name=table_name,
-                list_keys=lambda prefix: list_objects(cfg_gcs, bucket, prefix),
-                fetch_bytes=lambda k: bucket_obj.blob(k).download_as_bytes(),
-                cols=cols,
-                limit=limit,
-                sort_key=sort_key,
-                keys=keys,
-            )
+                    f"Could not read destination sample from {db_type!r}.{table_name!r}: {exc}"
+                ) from exc
 
         if db_type in {
             "databricks",
@@ -1490,6 +1421,24 @@ def read_target_sample(
                 )
                 return [dict(zip(names, row)) for row in result.fetchall()]
 
+        if db_type in {"iceberg", "apache_iceberg"}:
+            from services.dest_precount import iceberg_target_sample
+
+            sampled = iceberg_target_sample(
+                dest,
+                schema=schema,
+                table_name=table_name,
+                columns=None if cols == ["*"] else list(cols),
+                limit=int(limit or 50),
+                sort_key=sort_key,
+                key_values=keys or None,
+            )
+            if sampled is None:
+                raise TargetSampleUnavailable(
+                    f"Could not read Iceberg snapshot sample from {table_name!r}"
+                )
+            return sampled
+
         if db_type == "pgvector":
             return read_pgvector_target_sample(
                 dest,
@@ -1502,55 +1451,41 @@ def read_target_sample(
             )
 
         if db_type == "sftp":
-            from connectors.sftp_common import (
-                connect_sftp,
-                host_key_settings,
-                parse_sftp_config,
-            )
+            from services.object_streaming import open_sftp_binary
 
-            cfg = parse_sftp_config(
-                connection_string=dest.get("connection_string", ""),
-                host=dest.get("host", ""),
-                port=int(dest.get("port") or 22),
-                username=dest.get("username", ""),
-                password=dest.get("password", ""),
-                database=dest.get("database", "") or schema or "",
-                table=table_name,
-                **host_key_settings(dest),
-            )
-            if not cfg.host or not cfg.path:
+            cfg = dict(dest)
+            if table_name:
+                cfg["table"] = table_name
+            if schema and not str(cfg.get("database") or "").strip():
+                cfg["database"] = schema
+            opened = open_sftp_binary(cfg)
+            if opened is False:
+                return []
+            if opened is None:
                 raise TargetSampleUnavailable(
                     f"Could not read destination sample from {db_type!r}.{table_name!r}: "
-                    "sftp host or path missing"
+                    "sftp host, path, or GET unavailable"
                 )
-            transport, sftp = connect_sftp(cfg)
+            stream, closer = opened
             try:
-                with sftp.file(cfg.path, "rb") as fh:
-                    body = fh.read()
+                return sample_artifact_records(
+                    stream,
+                    name=str(table_name or cfg.get("path") or ""),
+                    limit=limit,
+                    sort_key=sort_key or "",
+                    keys=keys,
+                    columns=None if cols == ["*"] else cols,
+                )
+            except UnmeasuredArtifact as exc:
+                raise TargetSampleUnavailable(
+                    f"Could not read destination sample from {db_type!r}.{table_name!r}: {exc}"
+                ) from exc
             finally:
-                sftp.close()
-                transport.close()
-            rows, headers = _rows_from_object_bytes(
-                body, cfg.path, None if cols == ["*"] else cols
-            )
-            out_rows: list[dict[str, Any]] = []
-            for row in rows:
-                if not isinstance(row, dict):
-                    if headers:
-                        row = {
-                            headers[i]: row[i] if i < len(row) else None
-                            for i in range(len(headers))
-                        }
-                    else:
-                        continue
-                if keys and sort_key and row.get(sort_key) not in set(keys):
-                    continue
-                if cols and cols != ["*"]:
-                    row = {k: row.get(k) for k in cols}
-                out_rows.append(row)
-                if len(out_rows) >= int(limit or 50):
-                    break
-            return out_rows
+                if closer is not None:
+                    try:
+                        closer()
+                    except Exception:
+                        pass
 
     except TargetSampleUnavailable:
         raise

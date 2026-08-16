@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import csv
-import io
-import json
 import smtplib
 import ssl
 from dataclasses import dataclass
@@ -15,17 +12,16 @@ from email.mime.text import MIMEText
 from typing import Any
 from urllib.parse import parse_qs, unquote, urlparse
 
-from services.value_serializer import cell_to_string, json_default
-
-from connectors.writer_common import reject_on_strict_policy, WriteResult as _WriteResult
+from connectors.object_store_common import resolve_object_store_write_dest_types
+from connectors.object_store_materialize import (
+    materialize_object_store_export,
+    resolve_materialize_batch,
+    source_from_writer,
+)
+from connectors.object_store_multipart import resolve_spill_max
+from connectors.writer_common import WriteResult as _WriteResult
 from connectors.writer_common import (
-    _rejected_row_count,
-    apply_write_quarantine_matrix,
-    build_mapped_rows_with_details,
-    gate8_writer_meta,
-    mapped_rows_to_json_records,
     resolve_target_columns,
-    row_checksum,
     transform_error_policy,
 )
 
@@ -33,6 +29,22 @@ from connectors.writer_common import (
 @dataclass
 class WriteResult(_WriteResult):
     driver: str = "smtplib"
+
+
+_EMAIL_FORMATS = frozenset({"csv", "json", "jsonl", "tsv", "parquet"})
+_EMAIL_FILENAMES = {
+    "csv": "export.csv",
+    "json": "export.json",
+    "jsonl": "export.jsonl",
+    "tsv": "export.tsv",
+    "parquet": "export.parquet",
+}
+
+
+def _mime_parts(content_type: str) -> tuple[str, str]:
+    main, _, rest = (content_type or "application/octet-stream").partition("/")
+    subtype = (rest.split(";", 1)[0] or "octet-stream").strip() or "octet-stream"
+    return (main.strip() or "application"), subtype
 
 
 class _EmailConfig:
@@ -203,7 +215,14 @@ def write_mapped_rows(
     error_policy: str | None = None,
     **_kwargs: Any,
 ) -> WriteResult:
-    """Send the mapped rows as an email with a CSV/JSON attachment."""
+    """Send mapped rows as an email attachment via the shared object-store spool.
+
+    JSON/CSV/TSV/JSONL/Parquet map+quarantine+serialize in bounded bundles
+    onto the same spool S3/GCS/ADLS/SFTP use. SMTP still materializes the
+    MIME payload (base64 + ``msg.as_string()``) — this is not SMTP streaming
+    and not exactly-once. Accepted mapped_rows are not retained; ``data_rows``
+    stay in RAM.
+    """
     cfg = _parse_email_config(
         connection_string=connection_string,
         host=host,
@@ -248,8 +267,6 @@ def write_mapped_rows(
     target_cols, logical_types = resolve_target_columns(mappings, column_types, preserve_case=True)
     # Parity with S3/SFTP/GCS/ADLS — Studio destination_column_types must cover
     # every mapped column; never soft-bind Map VARCHAR when Studio is partial.
-    from connectors.object_store_common import resolve_object_store_write_dest_types
-
     dest_types, cov_err = resolve_object_store_write_dest_types(
         target_cols,
         mappings,
@@ -268,33 +285,28 @@ def write_mapped_rows(
             error=cov_err,
         )
     policy = transform_error_policy(error_policy)
-    mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
-        headers=headers,
-        data_rows=data_rows,
-        mappings=mappings,
-        target_cols=target_cols,
-        column_types=column_types,
-        dest_types=dest_types,
-        error_policy=policy,
-        preserve_case=True,
-        dest_kind="email",
-        destination_pk_columns=None,
-    )
-    # Typed carriers still apply — refuse silent invent into the attachment
-    # (parity with S3/SFTP). SMTP has no independent Gate-8 read-back; stamp
-    # reconcile_sample so sample-verified honesty can still fire.
-    tgt_types = [str(dest_types.get(c, "") or "") for c in target_cols]
-    mapped_rows = apply_write_quarantine_matrix(
-        mapped_rows,
-        target_cols,
-        tgt_types,
-        rejected_details,
-        policy,
-        dialect_label="Email",
-        mappings=mappings,
-    )
-    _map_abort = reject_on_strict_policy(policy, rejected_details, "Email", transform_errors)
-    if _map_abort:
+    extra = _kwargs.get("dest_extra") if isinstance(_kwargs.get("dest_extra"), dict) else {}
+    fmt = (cfg.format or "csv").strip().lower()
+    if fmt not in _EMAIL_FORMATS:
+        fmt = "csv"
+    filename = _EMAIL_FILENAMES[fmt]
+    try:
+        mat = materialize_object_store_export(
+            key=filename,
+            headers=headers,
+            data_rows=data_rows,
+            mappings=mappings,
+            target_cols=target_cols,
+            column_types=column_types,
+            dest_types=dest_types,
+            error_policy=policy,
+            dest_kind="email",
+            dialect_label="Email",
+            spill_max_size=resolve_spill_max(extra),
+            batch_size=resolve_materialize_batch(extra),
+            **source_from_writer(_kwargs, extra),
+        )
+    except Exception as exc:
         return WriteResult(
             ok=False,
             rows_written=0,
@@ -302,39 +314,33 @@ def write_mapped_rows(
             target_schema=cfg.host,
             checksum="",
             chunks_completed=0,
-            error=_map_abort,
-            rejected_details=rejected_details,
-            rejected_rows=len(rejected_details),
+            error=f"Email serialize failed: {exc}",
         )
-
-    rejected_rows = max(
-        _rejected_row_count(data_rows, mapped_rows, rejected_details, policy),
-        len(data_rows) - len(mapped_rows),
-    )
-
-    records = mapped_rows_to_json_records(mapped_rows, target_cols, dest_types)
-    fmt = cfg.format.lower()
-    if fmt == "jsonl":
-        body = "\n".join(json.dumps(r, default=json_default, ensure_ascii=False, allow_nan=False) for r in records).encode("utf-8")
-        filename = "export.jsonl"
-        mime_subtype = "jsonl"
-        mime_main = "application"
-    elif fmt == "json":
-        body = json.dumps(records, indent=2, default=json_default, ensure_ascii=False, allow_nan=False).encode("utf-8")
-        filename = "export.json"
-        mime_subtype = "json"
-        mime_main = "application"
-    else:
-        buf = io.StringIO()
-        writer = csv.DictWriter(buf, fieldnames=target_cols, extrasaction="ignore")
-        writer.writeheader()
-        writer.writerows([{c: cell_to_string(v) for c, v in r.items()} for r in records])
-        body = buf.getvalue().encode("utf-8")
-        filename = "export.csv"
-        mime_main = "text"
-        mime_subtype = "csv"
+    transform_errors = mat.transform_errors
+    rejected_details = mat.rejected_details
+    if mat.abort_error:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=table_name,
+            target_schema=cfg.host,
+            checksum="",
+            chunks_completed=0,
+            error=mat.abort_error,
+            rejected_details=rejected_details,
+            rejected_rows=mat.rejected_rows,
+        )
+    export = mat.export
+    written = mat.rows_written
+    rejected_rows = mat.rejected_rows
 
     try:
+        # SMTP still materializes the MIME payload (base64 of the attachment
+        # plus msg.as_string()). Spill avoids a second records-list + dumps
+        # copy during serialize. This is not SMTP streaming and not exactly-once.
+        body = export.read_all()
+        mime_main, mime_subtype = _mime_parts(export.content_type)
+
         msg = MIMEMultipart()
         msg["From"] = cfg.from_addr
         msg["To"] = ", ".join(cfg.to_addrs)
@@ -366,27 +372,29 @@ def write_mapped_rows(
                 server.sendmail(cfg.from_addr, cfg.to_addrs, msg.as_string())
 
         if on_checkpoint:
-            on_checkpoint(1, 1, len(records))
+            on_checkpoint(1, 1, written)
 
         return WriteResult(
             ok=True,
-            rows_written=len(records),
+            rows_written=written,
             table_name=filename,
             target_schema=cfg.host,
-            checksum=row_checksum(mapped_rows, target_cols),
+            checksum=mat.checksum,
             chunks_completed=1,
             warnings=transform_errors[:10],
             rejected_rows=rejected_rows,
             rejected_details=rejected_details,
-            meta=gate8_writer_meta(records, target_cols),
+            meta=mat.meta,
         )
     except Exception as exc:
         return WriteResult(
             ok=False,
             rows_written=0,
-            table_name=filename if "filename" in locals() else table_name,
+            table_name=filename,
             target_schema=cfg.host,
             checksum="",
             chunks_completed=0,
             error=f"Email send failed: {exc}",
         )
+    finally:
+        export.close()

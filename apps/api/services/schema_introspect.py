@@ -19,6 +19,7 @@ from services.unique_key_introspect import (
 )
 from services.check_constraints import probe_check_constraints
 from services.foreign_key_metadata import probe_foreign_keys
+from services.identity_carry import apply_identity_probe
 from services.physical_storage_metadata import probe_physical_storage
 from services.secondary_indexes import probe_secondary_indexes
 from services.value_serializer import json_default
@@ -141,6 +142,9 @@ def introspect_schema(
     catalog_type: str = "",
     auth_source: str = "",
     api_key: str = "",
+    role: str = "",
+    auth_role: str = "",
+    private_key: str = "",
     strict_namespace: bool = False,
 ) -> dict[str, Any]:
     """Load tables/columns for ``table`` in the requested database/schema.
@@ -198,6 +202,9 @@ def introspect_schema(
             connection_string=connection_string,
             warehouse=warehouse,
             table=table,
+            role=role,
+            auth_role=auth_role,
+            private_key=private_key,
             strict_namespace=strict_namespace,
         )
     if db_type == "mysql":
@@ -636,9 +643,9 @@ def _snowflake_resolve_schema(cur: Any, requested: str) -> tuple[str, list[str],
         if folded and folded not in candidates:
             candidates.append(folded)
 
-    available = _snowflake_list_schemas(cur)
-    available_set = {a.upper() for a in available}
-
+    # Try the operator schema first. Listing every schema via
+    # information_schema.schemata is a cold-warehouse tax and is why
+    # "Analyzing destination schema" sat for minutes on Snowflake dest.
     for cand in candidates:
         try:
             cur.execute(f"USE SCHEMA {quote_sql_identifier(cand)}")
@@ -648,15 +655,16 @@ def _snowflake_resolve_schema(cur: Any, requested: str) -> tuple[str, list[str],
                 warning = (
                     f"Schema '{requested}' was not usable; using '{resolved}' instead."
                 )
-            elif available_set and resolved not in available_set:
-                warning = None
-            return resolved, available, warning
+            return resolved, [], warning
         except Exception as exc:
             msg = str(exc).lower()
             if "002043" in str(exc) or "002003" in str(exc) or "does not exist" in msg or "not exist" in msg:
                 continue
             # Unexpected errors (permissions, etc.) — re-raise for outer handler
             raise
+
+    available = _snowflake_list_schemas(cur)
+    available_set = {a.upper() for a in available}
 
     # Requested schema missing: fall back to first available, preferring PUBLIC.
     fallback = None
@@ -688,6 +696,8 @@ def _introspect_snowflake(**kwargs) -> dict[str, Any]:
         from connectors.snowflake_conn import get_connection, normalize_account
         from connectors.writer_common import quote_sql_identifier
 
+        from services.connector_auth import engine_login_role
+
         conn = get_connection(
             account=normalize_account(kwargs.get("host", "")),
             username=kwargs.get("username", ""),
@@ -696,10 +706,21 @@ def _introspect_snowflake(**kwargs) -> dict[str, Any]:
             schema=schema.upper(),
             warehouse=kwargs.get("warehouse", ""),
             connection_string=kwargs.get("connection_string", ""),
+            role=engine_login_role(kwargs.get("auth_role"), kwargs.get("role")),
+            private_key=str(kwargs.get("private_key") or ""),
+            private_key_passphrase=str(kwargs.get("password") or ""),
         )
 
         warnings: list[str] = []
         with conn.cursor() as cur:
+            # Dest Map only needs DESC TABLE. A suspended warehouse plus
+            # information_schema on SNOWFLAKE_SAMPLE_DATA is why the UI sat on
+            # "Checking destination…" for minutes. Fail closed with an honest
+            # timeout instead of an unbounded resume + catalog scan.
+            try:
+                cur.execute("ALTER SESSION SET STATEMENT_TIMEOUT_IN_SECONDS = 45")
+            except Exception as exc:
+                logger.debug("Snowflake statement timeout skipped: %s", exc)
             wh = (kwargs.get("warehouse") or "").strip()
             if wh:
                 try:
@@ -743,27 +764,39 @@ def _introspect_snowflake(**kwargs) -> dict[str, Any]:
             if schema_warning:
                 warnings.append(schema_warning)
 
-            cur.execute(
-                """
-                SELECT table_name FROM information_schema.tables
-                WHERE table_schema = %s AND table_type = 'BASE TABLE'
-                ORDER BY table_name LIMIT 100
-                """,
-                (schema,),
-            )
-            tables = [r[0] for r in cur.fetchall()]
+            tables: list[str] = []
+            if not table:
+                cur.execute(
+                    """
+                    SELECT table_name FROM information_schema.tables
+                    WHERE table_schema = %s AND table_type = 'BASE TABLE'
+                    ORDER BY table_name LIMIT 100
+                    """,
+                    (schema,),
+                )
+                tables = [r[0] for r in cur.fetchall()]
             columns: list[dict] = []
             target_table = table or (tables[0] if tables else None)
             if target_table:
-                from connectors.snowflake_conn import (
-                    resolve_or_fold_snowflake_table,
-                    snowflake_physical_column_rows,
-                )
+                from connectors.snowflake_conn import snowflake_physical_column_rows
+                from connectors.sql_identifiers import snowflake_fold_identifier
 
-                try:
-                    target_table = resolve_or_fold_snowflake_table(cur, schema, str(target_table))
-                except Exception as exc:
-                    logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+                named = bool(table) or bool(kwargs.get("strict_namespace"))
+                if named:
+                    # Dest/named table: DESC the folded name. Do not probe
+                    # information_schema.tables five times on SNOWFLAKE_SAMPLE_DATA.
+                    target_table = snowflake_fold_identifier(str(target_table))
+                else:
+                    from connectors.snowflake_conn import resolve_or_fold_snowflake_table
+
+                    try:
+                        target_table = resolve_or_fold_snowflake_table(
+                            cur, schema, str(target_table)
+                        )
+                    except Exception as exc:
+                        logging.getLogger(__name__).warning(
+                            "Exception suppressed: %s", exc, exc_info=exc
+                        )
                 col_rows = snowflake_physical_column_rows(
                     cur, schema, str(target_table)
                 )
@@ -819,11 +852,23 @@ def _introspect_snowflake(**kwargs) -> dict[str, Any]:
                             "nullable": nullable == "YES",
                         }
                     )
-            unique_meta = (
-                _snowflake_fetch_unique_keys(cur, schema, str(target_table))
-                if target_table and columns
-                else {"primary_key_columns": [], "unique_keys": []}
-            )
+            unique_meta: dict[str, Any]
+            if target_table and columns:
+                desc_pk = [str(c) for c in (getattr(cur, "_dataflow_desc_pk", None) or []) if c]
+                # Named dest/source table: DESC already answered columns + PK.
+                # The information_schema.table_constraints join on
+                # SNOWFLAKE_SAMPLE_DATA is the multi-minute Destination hang.
+                if desc_pk or table or bool(kwargs.get("strict_namespace")):
+                    unique_meta = {
+                        "primary_key_columns": desc_pk,
+                        "unique_keys": [],
+                    }
+                else:
+                    unique_meta = _snowflake_fetch_unique_keys(
+                        cur, schema, str(target_table)
+                    )
+            else:
+                unique_meta = {"primary_key_columns": [], "unique_keys": []}
         conn.close()
         out: dict[str, Any] = {
             "ok": True,
@@ -844,6 +889,14 @@ def _introspect_snowflake(**kwargs) -> dict[str, Any]:
                 "Snowflake UNIQUE/PRIMARY KEY declared but NOT ENFORCED "
                 f"({', '.join(str(n) for n in advisory[:5])}) — Validate will not "
                 "block duplicates; hybrid tables enforce constraints at write time."
+            )
+        db_name = str(kwargs.get("database") or "").strip().upper()
+        if db_name == "SNOWFLAKE_SAMPLE_DATA":
+            warnings.append(
+                "SNOWFLAKE_SAMPLE_DATA is a shared sample catalog (usually "
+                "read-only). Destination tables normally live in your own "
+                "database — looking up a write table here waits on warehouse "
+                "resume and a huge information_schema."
             )
         if warnings:
             out["warnings"] = warnings
@@ -1053,6 +1106,7 @@ def _introspect_mysql(**kwargs) -> dict[str, Any]:
                 indexes_meta = probe_secondary_indexes(
                     "mysql", cur, db_name, target
                 ).to_dict()
+                apply_identity_probe("mysql", cur, db_name, target, columns)
         conn.close()
         return {
             "ok": True,
@@ -1529,6 +1583,7 @@ def _pg_fetch_columns(cur: Any, schema: str, table: str) -> list[dict]:
         if default_expr and "nextval(" not in str(default_expr).lower():
             col_pg["default"] = str(default_expr)
         columns.append(col_pg)
+    apply_identity_probe("postgresql", cur, schema, table, columns)
     _measure_unconstrained_decimals(cur, schema, table, columns)
     return columns
 
@@ -2365,6 +2420,8 @@ def _introspect_oracle(**kwargs) -> dict[str, Any]:
                         "data_type": dtype,
                     }
                 )
+            if columns:
+                apply_identity_probe("oracle", conn, owner, resolved_table, columns)
             unique_meta = (
                 _oracle_fetch_unique_keys(conn, owner, resolved_table)
                 if columns
@@ -2587,44 +2644,10 @@ def _introspect_sqlserver(**kwargs) -> dict[str, Any]:
             # IDENTITY columns: INFORMATION_SCHEMA does not expose them, so a
             # SQL Server source looked like a plain BIGINT key and the
             # destination was created without a generator — the client's first
-            # insert after cutover then had no key to use.
+            # insert after cutover then had no key to use. Seed/increment are
+            # measured from sys.identity_columns (sql_variant decoded).
             if columns:
-                try:
-                    identity_rows = conn.execute(
-                        sa.text(
-                            """
-                            SELECT c.name,
-                                   CAST(c.seed_value AS BIGINT),
-                                   CAST(c.increment_value AS BIGINT)
-                            FROM sys.identity_columns c
-                            JOIN sys.tables t ON t.object_id = c.object_id
-                            JOIN sys.schemas s ON s.schema_id = t.schema_id
-                            WHERE s.name = :schema AND t.name = :table
-                            """
-                        ),
-                        {"schema": schema, "table": table},
-                    ).fetchall()
-                    identity_names = {
-                        str(r[0]): (r[1], r[2]) for r in (identity_rows or []) if r and r[0]
-                    }
-                    for col in columns:
-                        if col["name"] not in identity_names:
-                            continue
-                        seed, step = identity_names[col["name"]]
-                        typ = str(col.get("inferred_type") or "")
-                        col["is_identity"] = True
-                        # SQL Server IDENTITY always accepts client values under
-                        # SET IDENTITY_INSERT, so it is by-default polarity.
-                        col["generation"] = "by_default"
-                        if "IDENTITY" not in typ.upper():
-                            col["inferred_type"] = (
-                                f"{typ} IDENTITY({_as_int(seed, 1)},"
-                                f"{_as_int(step, 1)})"
-                            )
-                except Exception as exc:
-                    # Losing the sequence silently recreates IDENTITY(1,1) on a
-                    # table whose keys run on another progression.
-                    logger.warning("sqlserver identity probe failed: %s", exc)
+                apply_identity_probe("sqlserver", conn, schema, table, columns)
 
             # Computed columns are not insertable — annotate GENERATED ALWAYS
             # so writers omit them (same path as PG/MySQL identity).
@@ -3697,7 +3720,11 @@ def _introspect_sqlite(
                     col_out["semantic_role"] = semantic_role
                 columns.append(col_out)
 
+            apply_identity_probe("sqlite", cur, "", table, columns)
             unique_meta = _sqlite_fetch_unique_keys(cur, table_q, info_rows)
+            foreign_keys, foreign_keys_meta = _fetch_foreign_keys("sqlite", cur, "", table)
+            check_meta = probe_check_constraints("sqlite", cur, "", table).to_dict()
+            indexes_meta = probe_secondary_indexes("sqlite", cur, "", table).to_dict()
             return {
                 "ok": True,
                 "tables": [table],
@@ -3705,6 +3732,10 @@ def _introspect_sqlite(
                 "schema": "",
                 "primary_key_columns": unique_meta.get("primary_key_columns") or [],
                 "unique_keys": unique_meta.get("unique_keys") or [],
+                "foreign_keys": foreign_keys,
+                "foreign_keys_meta": foreign_keys_meta,
+                "check_constraints_meta": check_meta,
+                "indexes_meta": indexes_meta,
             }
         finally:
             conn.close()

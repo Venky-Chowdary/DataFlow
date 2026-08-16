@@ -76,7 +76,9 @@ def build_artifact_from_mappings(
             src_cols.append(ColumnSpec(name=src, canonical=_canonical_from_type_stamp(src_type)))
         wire = ""
         if tgt and tgt_type:
-            wire = str(materialize_dest_ddl(dest_db, tgt_type) or tgt_type)
+            wire = str(
+                materialize_dest_ddl(dest_db, tgt_type, source_type=src_type) or tgt_type
+            )
             column_ddl[tgt] = wire
             dst_cols.append(
                 ColumnSpec(name=tgt, canonical=_canonical_from_type_stamp(wire or tgt_type))

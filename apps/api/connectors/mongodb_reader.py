@@ -107,6 +107,33 @@ def _project_doc_row(doc: dict[str, Any], headers: list[str]) -> list[str]:
     return row
 
 
+def _page_docs_to_batch(
+    docs: list[dict[str, Any]],
+    *,
+    cfg: dict[str, Any],
+    columns: list[str] | None,
+    offset: int,
+    total: int | None,
+) -> ReadBatch:
+    """Shared projection for batch / cursor / held-scan pages."""
+    if not docs:
+        return ReadBatch(headers=columns or [], rows=[], offset=offset, total_rows=total)
+    for doc in docs:
+        if "_id" in doc:
+            doc["_id"] = str(doc["_id"])
+    docs = expand_mongo_documents(docs, cfg=cfg)
+    page_keys: list[str] = []
+    seen: set[str] = set()
+    for doc in docs:
+        for k in doc.keys():
+            if k not in seen:
+                seen.add(k)
+                page_keys.append(k)
+    headers = union_attribute_keys(columns, page_keys) if columns else page_keys
+    rows = [_project_doc_row(doc, headers) for doc in docs]
+    return ReadBatch(headers=headers, rows=rows, offset=offset, total_rows=total)
+
+
 def read_collection_batch(
     *,
     cfg: dict[str, Any],
@@ -123,33 +150,14 @@ def read_collection_batch(
         total = known_total_rows
     else:
         total = coll.count_documents({})
-    # Sort by _id so the first batch and any offset-based pagination share the
-    # same ordering as cursor/keyset pagination. Without this, the initial
-    # batch can come back in insertion order and the keyset cursor will skip
-    # every document whose _id is less than an arbitrary high watermark.
+    # Legacy OFFSET path — .skip(n) is O(n²) and drifts under concurrent
+    # inserts. Fresh dumps use read_collection_scan_batch; resume uses
+    # read_collection_cursor_batch on ``_id``.
     cursor = coll.find({}).sort("_id", 1).skip(offset).limit(limit)
     docs = list(cursor)
-    if not docs:
-        return ReadBatch(headers=columns or [], rows=[], offset=offset, total_rows=total)
-
-    for doc in docs:
-        if "_id" in doc:
-            doc["_id"] = str(doc["_id"])
-
-    docs = expand_mongo_documents(docs, cfg=cfg)
-
-    page_keys: list[str] = []
-    seen: set[str] = set()
-    for doc in docs:
-        for k in doc.keys():
-            if k not in seen:
-                seen.add(k)
-                page_keys.append(k)
-    # Always union — sparse fields mid-collection must not vanish when columns frozen.
-    headers = union_attribute_keys(columns, page_keys) if columns else page_keys
-
-    rows = [_project_doc_row(doc, headers) for doc in docs]
-    return ReadBatch(headers=headers, rows=rows, offset=offset, total_rows=total)
+    return _page_docs_to_batch(
+        docs, cfg=cfg, columns=columns, offset=offset, total=total
+    )
 
 
 def read_collection_cursor_batch(
@@ -226,23 +234,71 @@ def read_collection_cursor_batch(
         total = coll.count_documents(query)
     cursor = coll.find(query).sort(sort_spec).limit(limit)
     docs = list(cursor)
-    if not docs:
-        return ReadBatch(headers=columns or [], rows=[], offset=0, total_rows=total)
+    return _page_docs_to_batch(
+        docs, cfg=cfg, columns=columns, offset=0, total=total
+    )
 
-    for doc in docs:
-        if "_id" in doc:
-            doc["_id"] = str(doc["_id"])
 
-    docs = expand_mongo_documents(docs, cfg=cfg)
+def read_collection_scan_batch(
+    *,
+    cfg: dict[str, Any],
+    database: str,
+    collection: str,
+    columns: list[str] | None = None,
+    offset: int = 0,
+    limit: int = 500,
+    known_total_rows: int | None = None,
+    scan_state: dict[str, Any] | None = None,
+) -> ReadBatch:
+    """Page one ``find().sort(_id)`` cursor with getmore — no ``.skip()``.
 
-    page_keys: list[str] = []
-    seen: set[str] = set()
-    for doc in docs:
-        for k in doc.keys():
-            if k not in seen:
-                seen.add(k)
-                page_keys.append(k)
-    headers = union_attribute_keys(columns, page_keys) if columns else page_keys
+    Debezium/Fivetran snapshot the collection on a held ``_id``-ordered cursor.
+    ``skip(offset)`` walks the prefix on every page (O(n²)) and, under concurrent
+    inserts, can skip or duplicate documents. Mid-run resume must not call this
+    from a non-zero offset — stream.py keeps the held cursor or seeks ``_id``.
+    """
+    from connectors.sql_snapshot_scan import close_table_scan
 
-    rows = [_project_doc_row(doc, headers) for doc in docs]
-    return ReadBatch(headers=headers, rows=rows, offset=0, total_rows=total)
+    state = scan_state if scan_state is not None else {}
+    if not state.get("started"):
+        client = _mongo_client(_connection_string(cfg))
+        coll = client[database][collection]
+        if known_total_rows is not None:
+            total = known_total_rows
+        else:
+            total = coll.count_documents({})
+        cursor = coll.find({}).sort("_id", 1)
+        try:
+            cursor = cursor.batch_size(max(1, int(limit)))
+        except Exception:
+            pass
+        state.update(
+            started=True,
+            client=client,
+            cur=cursor,
+            total=total,
+            headers=list(columns or []),
+            cfg=cfg,
+        )
+    cursor = state["cur"]
+    page: list[dict[str, Any]] = []
+    n = max(1, int(limit))
+    try:
+        for _ in range(n):
+            page.append(dict(next(cursor)))
+    except StopIteration:
+        pass
+    if not page:
+        headers = list(state.get("headers") or columns or [])
+        total = state.get("total")
+        close_table_scan(state)
+        return ReadBatch(headers=headers, rows=[], offset=offset, total_rows=total)
+    batch = _page_docs_to_batch(
+        page,
+        cfg=state.get("cfg") or cfg,
+        columns=state.get("headers") or columns,
+        offset=offset,
+        total=state.get("total"),
+    )
+    state["headers"] = list(batch.headers)
+    return batch

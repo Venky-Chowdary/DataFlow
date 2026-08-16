@@ -469,6 +469,7 @@ class MongoDBService:
                     "cdc_lag_seconds": 1,
                     "cdc_lease_conflict": 1,
                     "destination_summary": 1,
+                    "quarantine_closure": 1,
                     "reconcile": 1,
                     "event_log": 1,
                     "message": 1,
@@ -504,6 +505,13 @@ class MongoDBService:
             from services.job_trust import attach_trust_to_updates
 
             attach_trust_to_updates(status, updates, previous=prev_doc)
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+
+        try:
+            from services.row_conservation import attach_conservation_to_updates
+
+            attach_conservation_to_updates(status, updates, previous=prev_doc)
         except Exception as exc:
             logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
@@ -1206,6 +1214,13 @@ class MemoryMongoDBService:
             from services.job_trust import attach_trust_to_updates
 
             attach_trust_to_updates(status, kwargs, previous=rec)
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+
+        try:
+            from services.row_conservation import attach_conservation_to_updates
+
+            attach_conservation_to_updates(status, kwargs, previous=rec)
         except Exception as exc:
             logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 

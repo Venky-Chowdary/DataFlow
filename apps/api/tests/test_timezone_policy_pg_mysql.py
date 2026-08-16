@@ -73,6 +73,16 @@ def test_offset_pinned_pair_preserves_the_label() -> None:
     assert policy.offset_label_preserved is True
 
 
+def test_datetimeoffset_onto_pg_with_time_zone_does_not_preserve_the_label() -> None:
+    """SQL-standard WITH TIME ZONE on PostgreSQL is TIMESTAMPTZ — UTC only."""
+    policy = resolve_timezone_policy(
+        "DATETIMEOFFSET", "TIMESTAMP WITH TIME ZONE", dest_db="postgresql"
+    )
+    assert policy is not None
+    assert policy.offset_label_preserved is False
+    assert policy.instant_preserved is True
+
+
 def test_non_temporal_pairs_raise_no_timezone_question() -> None:
     assert resolve_timezone_policy("VARCHAR(10)", "TEXT", dest_db="mysql") is None
 

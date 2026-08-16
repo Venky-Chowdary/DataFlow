@@ -245,7 +245,7 @@ export function ConnectorsPage({
       wide
       className="df2-page-connectors"
       title="Connectors"
-      description="Saved connections and the transfer-ready catalog."
+      description="Saved logins for Transfer Studio. Open a row for status and last test, or start a new connection."
     >
       <PageFrame className="df2-connectors-page">
         <PageToolbar
@@ -333,12 +333,16 @@ export function ConnectorsPage({
                   description="Browse the catalog, enter credentials once, and reuse connections across Transfer Studio, Pipelines, and Datawrap Pilot."
                   action={
                     <div className="df2-empty-actions-row">
-                      <button type="button" className="df2-btn df2-btn-primary" onClick={() => setTab("catalog")}>
-                        <DtIcon name="search" size={14} /> Browse catalog
-                      </button>
-                      <button type="button" className="df2-btn df2-btn-ghost" onClick={() => onAdd()}>
+                      <Button
+                        variant="primary"
+                        onClick={() => setTab("catalog")}
+                        leadingIcon={<DtIcon name="search" size={14} />}
+                      >
+                        Browse catalog
+                      </Button>
+                      <Button variant="ghost" onClick={() => onAdd()}>
                         Add connection
-                      </button>
+                      </Button>
                     </div>
                   }
                 />

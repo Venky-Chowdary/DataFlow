@@ -85,6 +85,7 @@ export interface Connector {
   path_style?: boolean;
   created_at: string;
   last_test_ok?: boolean;
+  last_used_at?: string | null;
 }
 
 export interface TransferCheckpoint {
@@ -133,6 +134,7 @@ export interface CdcStreamHealth {
   replication_lag_bytes?: number | null;
   watermark?: string | null;
   error?: string | null;
+  row_accounting?: import("./conservationLedger").ConservationLedger | null;
 }
 
 /**
@@ -164,6 +166,8 @@ export interface TransferJob {
   name?: string;
   source_type: string;
   source_name: string;
+  source_connector_id?: string;
+  dest_connector_id?: string;
   destination_type: string;
   destination_database: string;
   destination_collection: string;
@@ -207,6 +211,21 @@ export interface TransferJob {
   cdc_plugin?: string | null;
   cdc_slot_name?: string | null;
   cdc_delivery?: string | null;
+  /** Route-scoped dest-owned watermark EOS — never a platform-wide claim. */
+  exactly_once_active?: boolean | null;
+  exactly_once_claimed_platform?: boolean | null;
+  exactly_once_algorithm?: string | null;
+  exactly_once_protocol?: string | null;
+  delivery_semantics?: string | null;
+  eos_committed_lsn?: string | null;
+  eos_fence_epoch?: number | null;
+  eos_dest_authoritative?: boolean | null;
+  /** Dest-monotonic apply sequence after post-commit verify. */
+  eos_apply_seq?: number | null;
+  /** Dest-owned incremental-snapshot window id (Debezium DDD-3, dest-persisted). */
+  eos_window_id?: string | null;
+  eos_snapshot_signal_id?: string | null;
+  eos_window_hi_pk?: string | null;
   /** SQL Server CDC TVF row_filter_option actually used (all / all update old / net). */
   cdc_row_filter?: string | null;
   replication_lag_bytes?: number | null;
@@ -247,6 +266,21 @@ export interface TransferJob {
   cdc_shared_reader?: boolean | null;
   /** Debezium-compatible snapshot mode used for this run. */
   snapshot_mode?: string | null;
+  /**
+   * Named CDC snapshot plan. lost_window means purged WAL/binlog/redo events
+   * are gone — recovery is at-least-once upsert of current keys, not continuous CDC.
+   */
+  snapshot_plan?: {
+    kind?: string | null;
+    snapshot_mode?: string | null;
+    lost_window?: boolean | null;
+    resume_broken?: boolean | null;
+    run_snapshot?: boolean | null;
+    run_stream?: boolean | null;
+    next_action?: string | null;
+    reason?: string | null;
+    migration_proven?: boolean | null;
+  } | null;
   /** Active CDC lease holder (multi-worker fail-fast). */
   cdc_lease_holder?: string | null;
   cdc_lease_resource?: string | null;
@@ -281,6 +315,11 @@ export interface TransferJob {
   cdc_append_only_sink?: boolean | null;
   /** Composite trust score 0–100 (persisted on terminal). */
   trust_score?: number | null;
+  /**
+   * Independent dest COUNT(*) conservation stamped on terminal jobs.
+   * Display only — never close dest with records_processed / writer ack.
+   */
+  row_accounting?: import("./conservationLedger").ConservationLedger | null;
   trust?: {
     score: number;
     grade: string;
@@ -344,6 +383,13 @@ export interface Gate8ReconciliationPayload {
    * full_checksum | sample | writer_ack | none
    */
   coverage?: string;
+  /**
+   * Population the dest digest covers. ``whole_table_not_comparable`` means
+   * append/upsert into a larger sink — dest-before delta is the identity.
+   */
+  checksum_scope?: string;
+  assurance_level?: string;
+  checksum_match?: boolean | null;
   preview?: boolean;
   post_write_pending?: boolean;
   /** File/object export Gate-8: operational pass without read-back proof. */
@@ -360,11 +406,15 @@ export interface Gate8ReconciliationPayload {
   };
   source_rows?: number;
   target_rows?: number;
+  /** Pre-write dest COUNT(*) — append identity is dest_after − dest_before. */
+  target_rows_before?: number | null;
   rejected_rows?: number;
   coerced_null_rows?: number;
   /** Intentional LSN-guard / redelivery skips — not a shortfall. */
   rows_skipped?: number;
   source_checksum?: string;
+  /** writer_ack | write_pass_fingerprints | remapped_source_rows | engine_population | independent_source_reread */
+  source_checksum_provenance?: string;
   target_checksum?: string;
   missing_key_count?: number;
   extra_key_count?: number;
@@ -439,6 +489,7 @@ export interface JobProgress extends TransferJob {
   /** Durable operator event lines (phase / message / row milestones). */
   event_log?: string[];
   sync_mode?: string;
+  source_read_mode?: string;
   schema_policy?: string;
   validation_mode?: string;
   /** Operator who started the job. */
@@ -521,7 +572,7 @@ export interface EnhancedAnalysis {
 
 export interface PreflightGate {
   id: string;
-  status: "pass" | "block" | "skip" | "running";
+  status: "pass" | "block" | "skip" | "running" | "warn";
   message: string;
   duration_ms: number;
   details?: Record<string, unknown>;
@@ -867,6 +918,14 @@ export interface PreflightResult {
     can_write?: boolean | null;
     can_create_table?: boolean | null;
   };
+  /** Redshift COPY FROM S3 staging-bucket probe (also on g2_destination.details). */
+  redshift_staging_probe?: {
+    status?: string;
+    method?: string;
+    engine?: string;
+    detail?: string;
+    bucket?: string;
+  };
   proof_bundle?: PreflightProofBundle;
   coercion_report?: CoercionReport;
   load_history_report?: LoadHistoryReport;
@@ -940,6 +999,40 @@ export interface PreflightResult {
   }>;
   /** Canonical Kernel ValidationFinding dicts (coercion → findings SSOT). */
   validation_findings?: Array<Record<string, unknown>>;
+  /** G13/G14/G15 mapping contract — extras, dest-only, write_by=name. */
+  source_coverage?: {
+    unaccounted?: string[];
+    omitted?: string[];
+    written?: string[];
+    shape_contract?: {
+      shape?: string;
+      headline?: string;
+      detail?: string;
+      primary_action?: string;
+      unaccounted_sources?: string[];
+      extra_source_columns?: string[];
+      dest_only?: Array<{ target?: string; kind?: string }>;
+      counts?: Record<string, number>;
+      write_by?: string;
+    };
+  };
+  /** Callable extract: FK catalog was not probed against a fake relation. */
+  source_fk_catalog?: {
+    ran?: boolean;
+    skipped?: boolean;
+    reason?: string;
+    note?: string;
+  };
+  /** Procedure / SQL extract honesty — catalog probes skipped, CDC/SCD2/mirror refused. */
+  callable_extract?: {
+    mode?: string;
+    catalog_probes?: string;
+    note?: string;
+    cdc?: string;
+    history_sync?: string;
+    incremental?: string;
+    honesty?: string;
+  };
 }
 
 /** Machine-readable next step from POST /preflight/explain — mapped to Studio controls. */
@@ -953,7 +1046,13 @@ export type ValidationActionKind =
   | "normalize_control_chars"
   | "quarantine_and_rerun"
   | "open_bad_data_fix"
-  | "fix_source_keys";
+  | "fix_source_keys"
+  | "confirm_or_remap"
+  | "reload_dest_schema"
+  | "confirm_add"
+  | "continue_validate"
+  | "fix_orphans"
+  | "run_population_orphan_scan";
 
 export interface ValidationSuggestedAction {
   kind: ValidationActionKind | string;
@@ -1058,6 +1157,11 @@ export interface TransferResult {
   explanation?: string;
   mapping_proof?: Record<string, unknown>;
   job_id?: string;
+  /**
+   * Independent dest COUNT(*) conservation from execute_tracked.
+   * Display only — dest is never records_transferred.
+   */
+  row_accounting?: import("./conservationLedger").ConservationLedger | null;
   /** CDC operator signals copied from the completed job. */
   cdc_lag_seconds?: number | null;
   cdc_plugin?: string | null;
@@ -1065,6 +1169,7 @@ export interface TransferResult {
   cdc_row_filter?: string | null;
   cdc_shared_reader?: boolean | null;
   snapshot_mode?: string | null;
+  snapshot_plan?: TransferJob["snapshot_plan"];
   watermark?: string | null;
   cdc_lease_holder?: string | null;
   cdc_lease_backend?: string | null;
@@ -1124,8 +1229,13 @@ export interface ScheduleInput {
   validation_mode: string;
   schema_policy: string;
   backfill_new_fields: boolean;
+  delivery_guarantee?: string;
   cursor_column: string;
   primary_key: string;
+  source_read_mode?: string;
+  procedure_call?: string;
+  source_query?: string;
+  procedure_params?: Record<string, string>;
   mappings: Record<string, unknown>[];
   stream_contracts: Record<string, unknown>[];
   workspace_id: string;
@@ -1155,9 +1265,14 @@ export interface PipelineSchedule {
   validation_mode: string;
   schema_policy: string;
   backfill_new_fields: boolean;
+  delivery_guarantee?: string;
   cursor_column: string;
   primary_key: string;
   cursor_value: string;
+  source_read_mode?: string;
+  procedure_call?: string;
+  source_query?: string;
+  procedure_params?: Record<string, string>;
   workspace_id: string;
   max_retries: number;
   retry_backoff_seconds: number;
@@ -1177,6 +1292,20 @@ export interface PipelineSchedule {
   /** Present on GET /schedules/{id}; omitted from list summaries. */
   mappings?: { source: string; target: string; confidence?: number; transform?: string | null }[];
   mapping_count?: number;
+  /** Dual Run campaign (consecutive parallel-run cycles). Display-only. */
+  fidelity_campaign?: {
+    verdict?: string;
+    consecutive_passes?: number;
+    required_consecutive?: number;
+    next_action?: string;
+    note?: string;
+    last_check?: {
+      passed?: boolean;
+      message?: string;
+      divergent_columns?: string[];
+      assurance_level?: string;
+    } | null;
+  };
 }
 
 /** A single persisted run attempt from GET /schedules/{id}/history. */
@@ -1192,6 +1321,8 @@ export interface ScheduleRun {
   coerced_null_rows: number;
   error: string;
   retry_scheduled?: boolean;
+  /** Independent dest COUNT(*) ledger copied from the completed job. */
+  row_accounting?: import("./conservationLedger").ConservationLedger | null;
 }
 
 export interface ScheduleHistory {

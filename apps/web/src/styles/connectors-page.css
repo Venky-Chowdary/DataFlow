@@ -41,10 +41,10 @@
 }
 
 .df2-connector-rows-head {
-  padding: 8px 14px;
+  padding: 6px var(--df-list-row-pad-x, 12px);
   border-bottom: 1px solid var(--df-border, #e2e8f0);
   background: var(--df-surface-subtle, #f8fafc);
-  font-size: 11px;
+  font-size: 10.5px;
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.04em;
@@ -55,10 +55,13 @@
 
 /* Compact status-first row */
 .df2-connector-row {
-  grid-template-columns: auto auto minmax(0, 1fr) 120px 130px 120px 150px;
-  padding: 10px 14px;
+  grid-template-columns: auto auto minmax(0, 1fr) 140px 150px 130px 132px;
+  min-height: var(--df-list-row-min-h, 48px);
+  padding: var(--df-list-row-pad-y, 8px) var(--df-list-row-pad-x, 12px);
+  gap: var(--df-list-row-gap, 10px);
   border-bottom: 1px solid var(--df-border, #eef1f5);
   cursor: pointer;
+  box-sizing: border-box;
   transition: background var(--df-dur-fast, 140ms) ease;
 }
 
@@ -94,7 +97,10 @@
   justify-content: center;
 }
 
-.df2-connector-row-icon svg { width: 20px; height: 20px; }
+.df2-connector-row-icon svg {
+  width: var(--df-list-row-icon, 16px);
+  height: var(--df-list-row-icon, 16px);
+}
 
 .df2-connector-row-identity {
   display: flex;
@@ -103,8 +109,9 @@
 }
 
 .df2-connector-row-name {
-  font-size: 13.5px;
+  font-size: var(--df-list-row-title, 13px);
   font-weight: 600;
+  line-height: 1.25;
   color: var(--df-text-primary);
   white-space: nowrap;
   overflow: hidden;
@@ -112,7 +119,8 @@
 }
 
 .df2-connector-row-meta {
-  font-size: 11.5px;
+  font-size: var(--df-list-row-meta, 11.5px);
+  line-height: 1.25;
   color: var(--df-text-muted);
   white-space: nowrap;
   overflow: hidden;
@@ -150,7 +158,7 @@
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  font-size: 11.5px;
+  font-size: var(--df-list-row-meta, 11.5px);
   color: #64748b;
 }
 
@@ -158,7 +166,7 @@
 .df2-connector-row-signal.err { color: #dc2626; }
 
 .df2-connector-row-used {
-  font-size: 11.5px;
+  font-size: var(--df-list-row-meta, 11.5px);
   color: #64748b;
   white-space: nowrap;
 }
@@ -171,16 +179,18 @@
 }
 
 .df2-connector-row-quick .df2-btn {
-  padding: 4px 10px;
-  font-size: 11.5px;
+  min-height: var(--df-list-row-action, 26px);
+  height: var(--df-list-row-action, 26px);
+  padding: 0 8px;
+  font-size: 11px;
 }
 
 .df2-connector-row-open {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 28px;
-  height: 28px;
+  width: var(--df-list-row-action, 26px);
+  height: var(--df-list-row-action, 26px);
   border: none;
   border-radius: 8px;
   background: transparent;
@@ -193,6 +203,13 @@
 .df2-connector-row.selected .df2-connector-row-open {
   color: #0f766e;
   background: #fff;
+}
+
+/* Laptop: icon-only Test so the row stays as short as Contracts / Schedules */
+@media (max-width: 1366px) {
+  .df2-connector-row-quick .df2-btn-label {
+    display: none;
+  }
 }
 
 /* Tablet: drop the "last used" and role columns into the identity block */
@@ -223,7 +240,7 @@
   gap: 2px;
   padding: 10px 12px;
   border: 1px solid var(--df-border, #e6e9ee);
-  border-radius: 10px;
+  border-radius: var(--df-radius-card, 8px);
   background: var(--df-surface-subtle, #f8fafc);
   min-width: 0;
 }
@@ -236,11 +253,12 @@
 }
 
 .df2-drawer-fact strong {
-  font-size: 13px;
+  font-size: var(--df-fs-sm, 12.5px);
   color: #0f172a;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  white-space: normal;
+  line-height: 1.35;
   min-width: 0;
   max-width: 100%;
 }

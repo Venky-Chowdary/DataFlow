@@ -119,6 +119,11 @@ class DataTransferRAGPipeline:
                 "natural_language_query",
                 "self_learning",
             ],
+            "mapping_authority": "semantic_mapper.map_columns",
+            "honesty": (
+                "RAG retrieves evidence and explains. Assignment and confidence "
+                "come from map_columns — RAG must not auto-approve false-friends."
+            ),
         }
 
 

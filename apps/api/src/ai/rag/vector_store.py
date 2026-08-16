@@ -103,13 +103,16 @@ class DataTransferVectorStore:
             clean_metas.append(clean)
 
         embeddings = self._embedding_service.embed(texts)
+        embedding_rows = (
+            embeddings.tolist() if hasattr(embeddings, "tolist") else list(embeddings)
+        )
 
         if self._backend == "chromadb":
             self._collection.upsert(
                 ids=ids,
                 documents=texts,
                 metadatas=clean_metas,
-                embeddings=embeddings.tolist(),
+                embeddings=embedding_rows,
             )
         else:
             for i, text in enumerate(texts):
@@ -117,7 +120,7 @@ class DataTransferVectorStore:
                     "id": ids[i],
                     "text": text,
                     "metadata": clean_metas[i],
-                    "embedding": embeddings[i],
+                    "embedding": embedding_rows[i],
                 })
 
         return ids

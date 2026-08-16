@@ -62,9 +62,16 @@ def test_e2e_adapter_write_file_to_iceberg(tmp_path: Path) -> None:
     assert written == 2
     assert summary["type"] == "iceberg"
     assert summary["driver"] == "iceberg"
+    assert summary.get("target_rows_before") == 0
     assert any("iceberg" in x.lower() or "WRITE" in x for x in ddl)
     meta = list((warehouse / "mart" / "customers" / "metadata").glob("v*.metadata.json"))
     assert meta, "Iceberg metadata commit missing — not end-to-end"
+
+    written2, _ddl2, summary2 = write_destination_database(
+        dest, records, columns, schema, mappings
+    )
+    assert written2 == 2
+    assert summary2.get("target_rows_before") == 2
 
 
 def test_e2e_stream_write_batch_iceberg(tmp_path: Path) -> None:

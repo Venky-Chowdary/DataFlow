@@ -52,8 +52,14 @@ from connectors.writer_common import (
     row_fingerprints,
     transform_error_policy_for_validation_mode,
 )
-from services.dest_precount import PRECOUNT_KEY, precount_table
-from services.excel_parser import sheet_headers
+from services.dest_precount import (
+    PRECOUNT_KEY,
+    begin_overwrite_source_keys,
+    records_to_key_tuples,
+    precount_table,
+    stamp_overwrite_source_keys,
+)
+from services.excel_parser import cell_to_string, require_xlsx, sheet_headers
 from services.reconciliation import FingerprintAccumulator
 from services.tabular_rows import is_blank_row
 
@@ -189,6 +195,7 @@ def _text_reader(content: bytes | str | os.PathLike, encoding: str | None = None
 
 
 def _excel_preview(content: bytes | str | os.PathLike, preview_rows: int = 100) -> tuple[list[str], list[list[str]], int]:
+    require_xlsx(content if _is_path(content) else None)
     try:
         from openpyxl import load_workbook
     except ImportError as exc:
@@ -218,7 +225,7 @@ def _excel_preview(content: bytes | str | os.PathLike, preview_rows: int = 100) 
                 continue
             total += 1
             if len(preview) < preview_rows:
-                preview.append([str(c).strip() if c is not None else "" for c in row])
+                preview.append([cell_to_string(c) for c in row])
 
         return headers, preview, total
     finally:
@@ -226,6 +233,7 @@ def _excel_preview(content: bytes | str | os.PathLike, preview_rows: int = 100) 
 
 
 def _excel_batches(content: bytes | str | os.PathLike, chunk_size: int):
+    require_xlsx(content if _is_path(content) else None)
     try:
         from openpyxl import load_workbook
     except ImportError as exc:
@@ -262,7 +270,7 @@ def _excel_batches(content: bytes | str | os.PathLike, chunk_size: int):
                     "or fix the sheet"
                 )
             record = {
-                headers[i]: ("" if c is None else str(c).strip())
+                headers[i]: cell_to_string(c)
                 for i, c in enumerate(row[: len(headers)])
             }
             batch.append(record)
@@ -276,6 +284,7 @@ def _excel_batches(content: bytes | str | os.PathLike, chunk_size: int):
 
 
 def _excel_count(content: bytes | str | os.PathLike) -> int:
+    require_xlsx(content if _is_path(content) else None)
     try:
         from openpyxl import load_workbook
     except ImportError as exc:
@@ -875,6 +884,9 @@ def stream_file_to_database(
     chunk_idx = checkpoint.chunk_index or 0
     resumed = chunk_idx > 0 or written > 0
     dest_summary: dict[str, Any] = {}
+    overwrite_keys_acc = begin_overwrite_source_keys(
+        effective_sync, pk_target_cols, resumed=resumed
+    )
     # Gate-8 append proof needs the cardinality from before the first batch. On a
     # resume the destination already holds rows this job wrote, so the count is
     # no longer a "before" and the delta stays unproven rather than wrong.
@@ -977,56 +989,70 @@ def stream_file_to_database(
         pg_conn_state["conn"] = conn
         return conn
 
-    def _process_file_chunk(idx: int, batch: list[dict]) -> dict[str, Any]:
-        # Worker threads do not inherit the caller's contextvars, so each chunk
-        # must re-apply the resolved date locale before any date coercion runs.
-        if date_locale:
-            set_active_date_locale(date_locale)
-        if not batch:
-            return {
-                "batch_written": 0,
-                "last_checksum": "",
-                "dest_summary": {},
-                "fingerprints": [],
-                "rejected": 0,
-                "coerced_null": 0,
-                "warnings": [],
-                "rejected_details": [],
-                "batch_rows": 0,
-            }
-        headers, data_rows = records_to_matrix(batch, columns)
+    from connectors.engine_record_spill import (
+        fingerprints_from_spool,
+        spill_engine_write_records,
+        spool_write_kinds,
+    )
+
+    dest_extra = dest_cfg.get("extra") if isinstance(dest_cfg.get("extra"), dict) else {}
+    use_source_spool = dest_type in spool_write_kinds()
+
+    def _apply_batch_audit(
+        idx: int,
+        headers: list[str],
+        *,
+        rows=None,
+        records=None,
+    ) -> list[str]:
         local_warnings: list[str] = []
-
-        # Per-batch data-quality / anomaly gate.
-        if batch_quality_enabled:
-            audit_sync = (
-                "upsert" if write_mode == "upsert" else effective_sync
+        if not batch_quality_enabled:
+            return local_warnings
+        audit_sync = "upsert" if write_mode == "upsert" else effective_sync
+        audit = run_integrity_audit(
+            headers=headers,
+            rows=rows,
+            records=records,
+            column_types=column_types,
+            mappings=mappings,
+            validation_mode=validation_mode,
+            dest_kind=dest_type,
+            sync_mode=audit_sync,
+        )
+        if audit.issues:
+            local_warnings.extend(audit.issues[:10])
+        if audit.warnings:
+            local_warnings.extend(audit.warnings[:10])
+        if not audit.passed:
+            raise ValueError(
+                f"Batch {idx} failed data-quality audit: {'; '.join(audit.issues[:5])}"
             )
-            audit = run_integrity_audit(
-                headers=headers,
-                rows=data_rows,
-                column_types=column_types,
-                mappings=mappings,
-                validation_mode=validation_mode,
-                dest_kind=dest_type,
-                sync_mode=audit_sync,
-            )
-            if audit.issues:
-                local_warnings.extend(audit.issues[:10])
-            if audit.warnings:
-                local_warnings.extend(audit.warnings[:10])
-            if not audit.passed:
-                raise ValueError(f"Batch {idx} failed data-quality audit: {'; '.join(audit.issues[:5])}")
+        drift_warnings = drift_detector.check(audit.stats or {})
+        if drift_warnings:
+            if validation_mode == "maximum":
+                raise ValueError(
+                    f"Batch {idx} drift detected: {'; '.join(drift_warnings[:3])}"
+                )
+            local_warnings.extend(drift_warnings[:3])
+        return local_warnings
 
-            # Cross-batch drift detection against the first batch's statistics.
-            drift_warnings = drift_detector.check(audit.stats or {})
-            if drift_warnings:
-                if validation_mode == "maximum":
-                    raise ValueError(f"Batch {idx} drift detected: {'; '.join(drift_warnings[:3])}")
-                local_warnings.extend(drift_warnings[:3])
+    def _spool_fingerprints(spool: Any) -> list[tuple[str, str]]:
+        return fingerprints_from_spool(
+            spool,
+            mappings,
+            target_cols,
+            headers=list(getattr(spool, "headers", None) or columns or []),
+            column_types=column_types,
+            dest_db_type=dest_type,
+            dest_types=fingerprint_dest_types,
+            error_policy=stream_error_policy,
+            destination_pk_columns=list(pk_target_cols or []) or None,
+            empty_cells_as_null=True,
+        )
 
-        # Compute source fingerprints from the mapped batch without materializing
-        # the whole file.  This replaces the final FileParser.parse() pass.
+    def _matrix_fingerprints(
+        headers: list[str], data_rows: list[list[Any]]
+    ) -> list[tuple[str, str]]:
         mapped_rows, _ = map_rows_for_fingerprint(
             headers=headers,
             data_rows=data_rows,
@@ -1040,7 +1066,7 @@ def stream_file_to_database(
             destination_pk_columns=list(pk_target_cols or []) or None,
             empty_cells_as_null=True,
         )
-        fingerprints = (
+        return (
             row_fingerprints(
                 mapped_rows,
                 target_cols,
@@ -1051,6 +1077,13 @@ def stream_file_to_database(
             else []
         )
 
+    def _run_file_write(
+        idx: int,
+        headers: list[str],
+        data_rows: list[list[Any]],
+        *,
+        source_spool: Any = None,
+    ) -> tuple[int, str, dict]:
         write_op = partial(
             _write_batch,
             dest_type,
@@ -1079,6 +1112,7 @@ def stream_file_to_database(
             # it left overwrite jobs on the append path so stale part-* objects
             # survived and Gate-8 aggregated mixed generations.
             sync_mode=effective_sync,
+            source_spool=source_spool,
             **(
                 {
                     "connection": _ensure_pg_conn(),
@@ -1090,7 +1124,7 @@ def stream_file_to_database(
             ),
         )
         try:
-            batch_written, last_checksum, dest_summary = with_retry(
+            return with_retry(
                 write_op,
                 budget=RetryBudget(
                     max_attempts=retry.max_attempts,
@@ -1117,6 +1151,58 @@ def stream_file_to_database(
                     ),
                 )
             raise
+
+    def _process_file_chunk(idx: int, batch: list[dict]) -> dict[str, Any]:
+        # Worker threads do not inherit the caller's contextvars, so each chunk
+        # must re-apply the resolved date locale before any date coercion runs.
+        if date_locale:
+            set_active_date_locale(date_locale)
+        empty = {
+            "batch_written": 0,
+            "last_checksum": "",
+            "dest_summary": {},
+            "fingerprints": [],
+            "rejected": 0,
+            "coerced_null": 0,
+            "warnings": [],
+            "rejected_details": [],
+            "batch_rows": 0,
+            "overwrite_keys": [],
+        }
+        if not batch:
+            return empty
+        headers = columns or (list(batch[0].keys()) if batch else [])
+        # Overwrite keys need the dict rows — collect before spill clears them.
+        overwrite_keys = (
+            records_to_key_tuples(batch, pk_target_cols, mappings)
+            if overwrite_keys_acc is not None
+            else None
+        )
+        if use_source_spool:
+            local_warnings = _apply_batch_audit(idx, headers, records=batch)
+            spill = spill_engine_write_records(
+                batch,
+                headers,
+                mappings,
+                extra=dest_extra,
+                clear_records=True,
+            )
+            try:
+                fingerprints = _spool_fingerprints(spill.spool)
+                batch_written, last_checksum, dest_summary = _run_file_write(
+                    idx, headers, [], source_spool=spill.spool
+                )
+                batch_rows = spill.unexpanded_row_count
+            finally:
+                spill.close()
+        else:
+            headers, data_rows = records_to_matrix(batch, columns)
+            local_warnings = _apply_batch_audit(idx, headers, rows=data_rows)
+            fingerprints = _matrix_fingerprints(headers, data_rows)
+            batch_written, last_checksum, dest_summary = _run_file_write(
+                idx, headers, data_rows
+            )
+            batch_rows = len(data_rows)
         return {
             "batch_written": batch_written,
             "last_checksum": last_checksum,
@@ -1127,7 +1213,8 @@ def stream_file_to_database(
             "warnings": (dest_summary.get("warnings") or [])[:10] + local_warnings,
             # Full rejected_details for DLQ — never truncate before persist.
             "rejected_details": list(dest_summary.get("rejected_details") or []),
-            "batch_rows": len(data_rows),
+            "batch_rows": batch_rows,
+            "overwrite_keys": overwrite_keys,
         }
 
     first_index = chunk_idx + 1
@@ -1135,6 +1222,11 @@ def stream_file_to_database(
 
     def _apply_file_result(idx: int, result: dict[str, Any]) -> None:
         nonlocal written, rejected_total, coerced_null_total, last_checksum, dest_summary, source_rows_seen
+        if overwrite_keys_acc is not None:
+            if "overwrite_keys" in result:
+                overwrite_keys_acc.observe_tuples(result.get("overwrite_keys"))
+            elif result.get("batch_rows"):
+                overwrite_keys_acc.observe_tuples(None)
         if result["fingerprints"]:
             fp_accumulator.add_many(result["fingerprints"])
         source_rows_seen += int(result.get("batch_rows") or 0)
@@ -1251,29 +1343,28 @@ def stream_file_to_database(
         for batch in full_iter:
             if not batch:
                 continue
-            headers, data_rows = records_to_matrix(batch, columns)
-            full_source_rows += len(data_rows)
-            mapped_rows, _ = map_rows_for_fingerprint(
-                headers=headers,
-                data_rows=data_rows,
-                mappings=mappings,
-                target_cols=target_cols,
-                column_types=column_types,
-                error_policy=stream_error_policy,
-                dest_types=fingerprint_dest_types,
-                preserve_case=True,
-                dest_kind=dest_type,
-                destination_pk_columns=list(pk_target_cols or []) or None,
-            )
-            if mapped_rows:
-                full_accumulator.add_many(
-                    row_fingerprints(
-                        mapped_rows,
-                        target_cols,
-                        dest_db_type=dest_type,
-                        dest_types=fingerprint_dest_types,
-                    )
+            if use_source_spool:
+                headers = columns or (list(batch[0].keys()) if batch else [])
+                spill = spill_engine_write_records(
+                    batch,
+                    headers,
+                    mappings,
+                    extra=dest_extra,
+                    clear_records=True,
                 )
+                try:
+                    full_source_rows += spill.unexpanded_row_count
+                    fps = _spool_fingerprints(spill.spool)
+                    if fps:
+                        full_accumulator.add_many(fps)
+                finally:
+                    spill.close()
+            else:
+                headers, data_rows = records_to_matrix(batch, columns)
+                full_source_rows += len(data_rows)
+                fps = _matrix_fingerprints(headers, data_rows)
+                if fps:
+                    full_accumulator.add_many(fps)
         final_checksum = full_accumulator.digest() if full_accumulator.total else last_checksum
     else:
         full_source_rows = 0
@@ -1287,6 +1378,7 @@ def stream_file_to_database(
     dest_summary["warnings"] = warning_samples[:10]
     dest_summary["error_policy"] = "quarantine" if (rejected_total or coerced_null_total) else "none"
     dest_summary["sync_mode"] = effective_sync
+    stamp_overwrite_source_keys(dest_summary, overwrite_keys_acc)
     if pk_target_cols:
         dest_summary["conflict_columns"] = list(pk_target_cols)
         dest_summary["primary_key_columns"] = list(pk_target_cols)

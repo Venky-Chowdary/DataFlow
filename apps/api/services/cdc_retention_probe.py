@@ -3,9 +3,13 @@
 Honesty
 -------
 ``ok`` / ``at_risk`` / ``gap`` classify resume against live retention. A ``gap``
-means continuous CDC across the window is impossible — clear watermark and
-re-snapshot (``when_needed`` / ``initial``). This does not invent dual-node AG
-failover; single-node cleanup produces the same gap class.
+means continuous CDC across the window is impossible. PostgreSQL
+``wal_status=lost``, a dropped slot, a purged binlog, SQL Server Change Tracking
+``last_sync_version < CHANGE_TRACKING_MIN_VALID_VERSION``, or MongoDB
+``ChangeStreamHistoryLost`` (oplog wrap / ``invalidate``) are the same class.
+Opening a Mongo change stream at current clusterTime skips the lost window.
+``when_needed`` recovers by blocking-snapshot of current source keys (see
+``cdc_snapshot_mode``); ``initial`` / ``never`` stay fail-closed.
 """
 
 from __future__ import annotations
@@ -106,6 +110,350 @@ def classify_lsn_retention(
         retained=retained,
         cursor_key=cursor_key,
         message=f"Resume LSN is within retention (resume={resume}, min_lsn={retained}).",
+    )
+
+
+def _ct_version_int(value: int | str | None) -> int | None:
+    """Parse a Change Tracking version. ``None`` means not supplied / unknown."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    text = str(value).strip()
+    if not text or text.lower() in {"none", "null", "~"}:
+        return None
+    try:
+        return int(text)
+    except (TypeError, ValueError):
+        return None
+
+
+def classify_ct_version_retention(
+    resume_version: int | str | None,
+    min_valid_version: int | str | None,
+    *,
+    current_version: int | str | None = None,
+    ct_enabled: bool | None = None,
+    cursor_key: str = "",
+    dialect: str = "sqlserver",
+) -> RetentionProbeResult:
+    """Compare last_sync_version to ``CHANGE_TRACKING_MIN_VALID_VERSION``.
+
+    Microsoft (Work with Change Tracking / CHANGETABLE):
+
+    - If ``last_sync_version < min_valid_version``, do **not** call
+      ``CHANGETABLE`` — cleaned-up rows make the result set invalid.
+      The client must reinitialize. That is a retention ``gap``.
+    - Equal versions are still enumerable (changes *after* last_sync). Next
+      cleanup may bump min_valid past resume → ``at_risk``.
+    - ``CHANGE_RETENTION`` (default 2 days) and ``TRUNCATE`` both raise min_valid.
+    - ``CHANGETABLE`` with a stale version may return a **partial** change set
+      instead of erroring — skipping this check is silent CDC data loss.
+
+    Honesty: recovery is at-least-once upsert of the **live** population
+    (``when_needed`` blocking snapshot). Purged CT rows are gone. Not
+    continuous CDC. Not ``migration_proven``.
+    """
+    resume = _ct_version_int(resume_version)
+    retained = _ct_version_int(min_valid_version)
+    current = _ct_version_int(current_version)
+    lost_note = (
+        "CHANGE_RETENTION cleanup or TRUNCATE removed change rows. "
+        "when_needed snapshots current source keys then streams from the new "
+        "CHANGE_TRACKING_CURRENT_VERSION. Not continuous CDC, not migration_proven."
+    )
+    details: dict[str, Any] = {
+        "plugin": "sqlserver_change_tracking",
+        "ct_enabled": ct_enabled,
+        "current_version": current,
+    }
+    if resume is None:
+        return RetentionProbeResult(
+            status="no_watermark",
+            dialect=dialect,
+            retained=str(retained) if retained is not None else "",
+            cursor_key=cursor_key,
+            message="No Change Tracking last_sync_version — next run will snapshot.",
+            details=details,
+        )
+    if ct_enabled is False:
+        return RetentionProbeResult(
+            status="gap",
+            dialect=dialect,
+            resume=str(resume),
+            retained="ct_disabled",
+            cursor_key=cursor_key,
+            message=(
+                "SQL Server Change Tracking is not enabled while a CDC watermark "
+                f"is present (last_sync_version={resume}). {lost_note}"
+            ),
+            details=details,
+        )
+    if retained is None:
+        return RetentionProbeResult(
+            status="unknown",
+            dialect=dialect,
+            resume=str(resume),
+            cursor_key=cursor_key,
+            message="Could not read CHANGE_TRACKING_MIN_VALID_VERSION.",
+            details=details,
+        )
+    if resume < retained:
+        return RetentionProbeResult(
+            status="gap",
+            dialect=dialect,
+            resume=str(resume),
+            retained=str(retained),
+            cursor_key=cursor_key,
+            message=(
+                f"Change Tracking last_sync_version {resume} is before "
+                f"CHANGE_TRACKING_MIN_VALID_VERSION {retained}. "
+                "Do not call CHANGETABLE — Microsoft requires reinitialize. "
+                f"{lost_note}"
+            ),
+            details=details,
+        )
+    if resume == retained:
+        return RetentionProbeResult(
+            status="at_risk",
+            dialect=dialect,
+            resume=str(resume),
+            retained=str(retained),
+            cursor_key=cursor_key,
+            message=(
+                f"Change Tracking resume sits on min_valid_version={retained}. "
+                "Next CHANGE_RETENTION cleanup may force a gap — "
+                "when_needed snapshot readiness is the recovery path."
+            ),
+            details=details,
+        )
+    return RetentionProbeResult(
+        status="ok",
+        dialect=dialect,
+        resume=str(resume),
+        retained=str(retained),
+        cursor_key=cursor_key,
+        message=(
+            f"Change Tracking last_sync_version {resume} is within retention "
+            f"(min_valid={retained}"
+            f"{f', current={current}' if current is not None else ''})."
+        ),
+        details=details,
+    )
+
+
+# Resume-token v1 wraps a BSON Timestamp as hex ``82`` + 8-char seconds + increment.
+# Unix-second sanity: 2010-01-01 .. 2100-01-01 — refuse invented timestamps.
+_MONGO_TOKEN_TS_MIN = 1_262_304_000
+_MONGO_TOKEN_TS_MAX = 4_102_444_800
+
+
+def resume_token_unix_seconds(token: Any) -> int | None:
+    """Extract clusterTime seconds from a MongoDB change-stream resume token.
+
+    Tokens are opaque for LSN-guard compares (``mongo_resume`` family). The
+    leading ``0x82`` Timestamp wrapper is the *retention* compare key against
+    ``local.oplog.rs`` — same role as SCN / min_lsn / min_valid_version.
+    Unknown encodings return ``None`` (probe ``unknown``), never a fake gap.
+    Snapshot-phase wrappers are not stream cursors.
+    """
+    if token is None:
+        return None
+    if isinstance(token, dict):
+        phase = str(token.get("phase") or "").strip().lower()
+        if phase == "snapshot":
+            nested = token.get("token")
+            return resume_token_unix_seconds(nested) if nested else None
+        if "token" in token and phase == "streaming":
+            nested = token.get("token")
+            if nested:
+                inner = resume_token_unix_seconds(nested)
+                if inner is not None:
+                    return inner
+        data = str(token.get("_data") or "").strip()
+        if not data:
+            return None
+    else:
+        text = str(token).strip()
+        if not text or text.lower() in {"none", "null", "~"}:
+            return None
+        if text.lower().startswith("mongo:"):
+            text = text[6:]
+        if text.startswith("{"):
+            try:
+                import json
+
+                return resume_token_unix_seconds(json.loads(text))
+            except Exception:
+                return None
+        data = text
+    hex_body = data.lower().replace("mongo:", "").strip()
+    if len(hex_body) < 10 or not all(c in "0123456789abcdef" for c in hex_body[:10]):
+        return None
+    if not hex_body.startswith("82"):
+        return None
+    try:
+        seconds = int(hex_body[2:10], 16)
+    except ValueError:
+        return None
+    if seconds < _MONGO_TOKEN_TS_MIN or seconds > _MONGO_TOKEN_TS_MAX:
+        return None
+    return seconds
+
+
+def classify_mongo_oplog_retention(
+    resume_unix: int | str | None,
+    oldest_oplog_unix: int | str | None,
+    *,
+    newest_oplog_unix: int | str | None = None,
+    history_lost: bool = False,
+    invalidated: bool = False,
+    cursor_key: str = "",
+    at_risk_headroom: int = 3_600,
+    dialect: str = "mongodb",
+) -> RetentionProbeResult:
+    """Compare resume-token clusterTime to the oldest retained oplog event.
+
+    MongoDB / Atlas (Kafka connector error 286, ``ChangeStreamHistoryLost``):
+
+    - Resume token is valid only while the oplog entry still exists.
+    - Capped oplog + idle namespace is the default Atlas failure (window is
+      hours, not days). Poll persists PyMongo ``postBatchResumeToken`` after
+      empty getMores (Kafka heartbeat identity). Dummy heartbeat-collection
+      writes remain a future enhancement of this kernel when a
+      collection-scoped watch does not advance the token.
+    - Opening ``watch()`` without the expired token starts at current
+      clusterTime and **skips** the lost window. Forbidden on poll.
+    - Collection ``invalidate`` (drop/rename): ``resumeAfter`` cannot continue.
+
+    Honesty: recovery is at-least-once upsert of the **live** collection
+    (``when_needed`` blocking snapshot). Purged oplog events are gone. Not
+    continuous CDC. Not ``migration_proven``.
+    """
+    def _unix(value: int | str | None) -> int | None:
+        if value is None or value is False:
+            return None
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, int):
+            return value if value > 0 else None
+        text = str(value).strip()
+        if not text or text.lower() in {"none", "null", "~", "invalidate", "oplog_purged"}:
+            try:
+                return int(text) if text.isdigit() else None
+            except ValueError:
+                return None
+        try:
+            n = int(text)
+        except (TypeError, ValueError):
+            return None
+        return n if n > 0 else None
+
+    resume = _unix(resume_unix)
+    oldest = _unix(oldest_oplog_unix)
+    newest = _unix(newest_oplog_unix)
+    lost_note = (
+        "Opening a change stream at current clusterTime would skip the lost "
+        "window. when_needed snapshots current source keys then streams from "
+        "a new resume token. Not continuous CDC, not migration_proven."
+    )
+    details: dict[str, Any] = {
+        "plugin": "mongodb_change_stream",
+        "history_lost": bool(history_lost),
+        "invalidated": bool(invalidated),
+        "newest_oplog_unix": newest,
+        "at_risk_headroom": int(at_risk_headroom),
+    }
+    if invalidated:
+        return RetentionProbeResult(
+            status="gap",
+            dialect=dialect,
+            resume=str(resume) if resume is not None else "",
+            retained="invalidate",
+            cursor_key=cursor_key,
+            message=(
+                "MongoDB change stream received invalidate (collection drop or "
+                f"rename). resumeAfter cannot continue. {lost_note}"
+            ),
+            details=details,
+        )
+    if history_lost:
+        return RetentionProbeResult(
+            status="gap",
+            dialect=dialect,
+            resume=str(resume) if resume is not None else "",
+            retained=str(oldest) if oldest is not None else "oplog_purged",
+            cursor_key=cursor_key,
+            message=(
+                "MongoDB ChangeStreamHistoryLost (286): resume token is no "
+                f"longer in the oplog. {lost_note}"
+            ),
+            details=details,
+        )
+    if resume is None:
+        return RetentionProbeResult(
+            status="no_watermark",
+            dialect=dialect,
+            retained=str(oldest) if oldest is not None else "",
+            cursor_key=cursor_key,
+            message="No MongoDB change-stream resume token — next run will snapshot.",
+            details=details,
+        )
+    if oldest is None:
+        return RetentionProbeResult(
+            status="unknown",
+            dialect=dialect,
+            resume=str(resume),
+            cursor_key=cursor_key,
+            message=(
+                "Could not read local.oplog.rs (privilege, mongos, or standalone). "
+                "Poll will fail-closed on ChangeStreamHistoryLost rather than "
+                "opening watch() from now."
+            ),
+            details=details,
+        )
+    if resume < oldest:
+        return RetentionProbeResult(
+            status="gap",
+            dialect=dialect,
+            resume=str(resume),
+            retained=str(oldest),
+            cursor_key=cursor_key,
+            message=(
+                f"MongoDB resume token clusterTime {resume} is before oldest "
+                f"oplog event {oldest}. {lost_note}"
+            ),
+            details=details,
+        )
+    headroom = resume - oldest
+    if headroom <= max(0, int(at_risk_headroom)):
+        return RetentionProbeResult(
+            status="at_risk",
+            dialect=dialect,
+            resume=str(resume),
+            retained=str(oldest),
+            cursor_key=cursor_key,
+            message=(
+                f"MongoDB resume token is within {headroom}s of the oldest oplog "
+                "event. Atlas oplog wrap or an idle namespace may force a gap — "
+                "when_needed snapshot readiness is the recovery path."
+            ),
+            details={**details, "headroom": headroom},
+        )
+    return RetentionProbeResult(
+        status="ok",
+        dialect=dialect,
+        resume=str(resume),
+        retained=str(oldest),
+        cursor_key=cursor_key,
+        message=(
+            f"MongoDB resume token clusterTime {resume} is within the oplog "
+            f"(oldest={oldest}, headroom={headroom}s"
+            f"{f', newest={newest}' if newest is not None else ''})."
+        ),
+        details={**details, "headroom": headroom},
     )
 
 
@@ -295,6 +643,135 @@ def classify_binlog_retention(
     )
 
 
+def classify_pg_slot_retention(
+    *,
+    slot_exists: bool | None = None,
+    wal_status: str = "",
+    restart_lsn: str = "",
+    confirmed_flush_lsn: str = "",
+    watermark: Any = None,
+    resume_expected: bool | None = None,
+    cursor_key: str = "",
+    slot_name: str = "",
+) -> RetentionProbeResult:
+    """Classify a PostgreSQL logical slot against ``wal_status`` / existence.
+
+    PG13+ ``pg_replication_slots.wal_status``:
+
+    - ``lost`` — required WAL was recycled (``max_slot_wal_keep_size``). Gap.
+    - ``unreserved`` / ``extended`` — next checkpoint may invalidate. At-risk.
+    - ``reserved`` — restart_lsn is retained. Ok.
+    - empty (PG12) — slot existence retains WAL; treat existing slot as ok.
+
+    A **dropped** slot while a watermark/resume is present is the same gap
+    class: ``pg_create_logical_replication_slot`` would start at *current* WAL
+    and skip the lost window. That is silent CDC data loss. Snapshot recovery
+    (``when_needed``) may recreate the slot; poll/resume must not.
+    """
+    from services.cdc_snapshot_mode import watermark_present
+
+    wal = str(wal_status or "").strip().lower()
+    exists = bool(slot_exists)
+    expected = (
+        bool(resume_expected)
+        if resume_expected is not None
+        else watermark_present(watermark)
+    )
+    resume = str(confirmed_flush_lsn or watermark or slot_name or "").strip()
+    retained = wal or restart_lsn or ("slot_missing" if not exists else "")
+    lost_note = (
+        "Recreating the slot at current WAL would skip the lost window. "
+        "when_needed snapshots current source keys then streams from the new tip. "
+        "Not continuous CDC, not migration_proven."
+    )
+
+    if not exists:
+        if expected:
+            return RetentionProbeResult(
+                status="gap",
+                dialect="postgresql",
+                resume=resume,
+                retained="slot_missing",
+                cursor_key=cursor_key,
+                capture_instance=slot_name,
+                message=(
+                    f"PostgreSQL replication slot {slot_name or '(unnamed)'} is missing "
+                    f"while a CDC watermark is present. {lost_note}"
+                ),
+                details={"slot_exists": False, "wal_status": wal, "slot_name": slot_name},
+            )
+        return RetentionProbeResult(
+            status="no_watermark",
+            dialect="postgresql",
+            retained=retained,
+            cursor_key=cursor_key,
+            capture_instance=slot_name,
+            message="No PostgreSQL slot or watermark — next run will snapshot and create the slot.",
+            details={"slot_exists": False, "slot_name": slot_name},
+        )
+
+    if wal == "lost":
+        return RetentionProbeResult(
+            status="gap",
+            dialect="postgresql",
+            resume=resume,
+            retained="lost",
+            cursor_key=cursor_key,
+            capture_instance=slot_name,
+            message=(
+                f"PostgreSQL slot {slot_name or '(unnamed)'} wal_status=lost "
+                f"(restart_lsn={restart_lsn or '?'}, confirmed_flush={confirmed_flush_lsn or '?'}). "
+                f"{lost_note}"
+            ),
+            details={
+                "slot_exists": True,
+                "wal_status": "lost",
+                "restart_lsn": restart_lsn,
+                "confirmed_flush_lsn": confirmed_flush_lsn,
+                "slot_name": slot_name,
+            },
+        )
+    if wal in {"unreserved", "extended"}:
+        return RetentionProbeResult(
+            status="at_risk",
+            dialect="postgresql",
+            resume=resume,
+            retained=wal,
+            cursor_key=cursor_key,
+            capture_instance=slot_name,
+            message=(
+                f"PostgreSQL slot {slot_name or '(unnamed)'} wal_status={wal}. "
+                "max_slot_wal_keep_size may invalidate the slot at the next checkpoint. "
+                "when_needed snapshot readiness is the recovery path — not continuous CDC."
+            ),
+            details={
+                "slot_exists": True,
+                "wal_status": wal,
+                "restart_lsn": restart_lsn,
+                "slot_name": slot_name,
+            },
+        )
+    return RetentionProbeResult(
+        status="ok",
+        dialect="postgresql",
+        resume=resume,
+        retained=wal or restart_lsn,
+        cursor_key=cursor_key,
+        capture_instance=slot_name,
+        message=(
+            f"PostgreSQL slot {slot_name or '(unnamed)'} retains WAL "
+            f"(wal_status={wal or 'n/a-pg12'}, restart_lsn={restart_lsn or '?'})."
+        ),
+        details={
+            "slot_exists": True,
+            "wal_status": wal,
+            "restart_lsn": restart_lsn,
+            "confirmed_flush_lsn": confirmed_flush_lsn,
+            "slot_name": slot_name,
+        },
+    )
+
+
 def _resume_binlog_from_watermark(watermark: str | None) -> dict[str, Any]:
     """Extract file/pos/gtid from a MySQL CDC watermark JSON or bare file:pos."""
     out: dict[str, Any] = {"file": "", "pos": None, "gtid": ""}
@@ -342,6 +819,28 @@ def _resume_lsn_from_watermark(watermark: str | None) -> str:
     if text.startswith("{"):
         return ""
     return text
+
+
+def _resume_ct_version_from_watermark(watermark: str | None) -> int | None:
+    """Extract Change Tracking last_sync_version. ``None`` = no streaming cursor."""
+    if not watermark:
+        return None
+    try:
+        from connectors.sqlserver_change_stream import decode_sqlserver_resume_token
+
+        token = decode_sqlserver_resume_token(watermark)
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+        return None
+    phase = str(token.get("phase") or "").strip().lower()
+    version = _ct_version_int(token.get("version"))
+    if phase in {"initial", ""} and (version is None or version <= 0):
+        return None
+    if phase == "snapshot":
+        return None
+    if version is None:
+        return None
+    return version
 
 
 def _resume_scn_from_watermark(watermark: str | None) -> int:
@@ -398,12 +897,24 @@ def probe_sqlserver_retention(
             cursor_key=ck or None,
         )
         if not cdc.is_available():
+            ct = probe_sqlserver_ct_retention(
+                cfg,
+                table=table,
+                schema=schema,
+                cursor_key=ck,
+                watermark=wm,
+            )
+            if ct.status != "n_a":
+                return ct
             return RetentionProbeResult(
                 status="unknown",
                 dialect="sqlserver",
                 resume=resume,
                 cursor_key=ck,
-                message="SQL Server native CDC capture not available for this table.",
+                message=(
+                    "SQL Server native CDC capture is not available and Change "
+                    "Tracking is not enabled for this table."
+                ),
             )
         with cdc._conn() as conn:
             with conn.cursor() as cur:
@@ -414,6 +925,15 @@ def probe_sqlserver_retention(
         result.details["schema"] = schema
         return result
     except Exception as exc:
+        ct = probe_sqlserver_ct_retention(
+            cfg,
+            table=table,
+            schema=schema,
+            cursor_key=ck,
+            watermark=wm,
+        )
+        if ct.status not in {"unknown", "n_a"}:
+            return ct
         return RetentionProbeResult(
             status="unknown",
             dialect="sqlserver",
@@ -421,6 +941,84 @@ def probe_sqlserver_retention(
             cursor_key=ck,
             message=f"Retention probe failed: {exc}",
             details={"error": str(exc)[:300]},
+        )
+
+
+def probe_sqlserver_ct_retention(
+    cfg: dict[str, Any],
+    *,
+    table: str,
+    schema: str = "dbo",
+    cursor_key: str = "",
+    watermark: str | None = None,
+) -> RetentionProbeResult:
+    """Live probe: last_sync_version vs ``CHANGE_TRACKING_MIN_VALID_VERSION``."""
+    from connectors.sqlserver_change_stream import SqlServerChangeTrackingCdc
+
+    from services.sync_cursor import get_watermark
+
+    ck = (cursor_key or "").strip()
+    wm = watermark if watermark is not None else (get_watermark(ck) if ck else None)
+    resume = _resume_ct_version_from_watermark(wm)
+    if not table:
+        return RetentionProbeResult(
+            status="n_a",
+            dialect="sqlserver",
+            cursor_key=ck,
+            message="table is required for SQL Server Change Tracking retention probe.",
+        )
+    try:
+        from services.cdc_identity import require_cdc_primary_key
+
+        cdc = SqlServerChangeTrackingCdc(
+            {**cfg, "type": cfg.get("type") or "sqlserver"},
+            table=table,
+            primary_key=require_cdc_primary_key(cfg.get("primary_key"), table=table),
+            schema=schema or "dbo",
+            cursor_key=ck,
+        )
+        catalog = cdc._ct_catalog_status(max_age_sec=0)
+        if catalog.get("error") and catalog.get("ct_enabled") is not True:
+            return RetentionProbeResult(
+                status="unknown",
+                dialect="sqlserver",
+                resume=str(resume) if resume is not None else "",
+                cursor_key=ck,
+                message=f"Change Tracking catalog could not be read: {catalog.get('error')}",
+                details={"plugin": "sqlserver_change_tracking", "error": catalog.get("error")},
+            )
+        if catalog.get("ct_enabled") is False:
+            return classify_ct_version_retention(
+                resume,
+                None,
+                ct_enabled=False,
+                cursor_key=ck,
+            ) if resume is not None else RetentionProbeResult(
+                status="n_a",
+                dialect="sqlserver",
+                cursor_key=ck,
+                message="SQL Server Change Tracking is not enabled for this table.",
+                details={"plugin": "sqlserver_change_tracking", "ct_enabled": False},
+            )
+        result = classify_ct_version_retention(
+            catalog.get("resume_version") if catalog.get("resume_version") is not None else resume,
+            catalog.get("min_valid_version"),
+            current_version=catalog.get("current_version"),
+            ct_enabled=catalog.get("ct_enabled"),
+            cursor_key=ck,
+        )
+        result.details["table"] = table
+        result.details["schema"] = schema
+        result.capture_instance = f"{schema}.{table}"
+        return result
+    except Exception as exc:
+        return RetentionProbeResult(
+            status="unknown",
+            dialect="sqlserver",
+            resume=str(resume) if resume is not None else "",
+            cursor_key=ck,
+            message=f"Change Tracking retention probe failed: {exc}",
+            details={"error": str(exc)[:300], "plugin": "sqlserver_change_tracking"},
         )
 
 
@@ -557,6 +1155,196 @@ def probe_mysql_retention(
         )
 
 
+_PG_RETENTION_DIALECTS = frozenset(
+    {
+        "postgresql",
+        "postgres",
+        "pg",
+        "amazon_rds_postgresql",
+        "aurora_postgres",
+        "alloydb",
+        "supabase",
+        "timescaledb",
+        "cloudsql_postgres",
+    }
+)
+
+_MONGO_RETENTION_DIALECTS = frozenset(
+    {
+        "mongodb",
+        "mongo",
+        "documentdb",
+        "amazon_documentdb",
+        "atlas",
+    }
+)
+
+
+def probe_postgres_retention(
+    cfg: dict[str, Any],
+    *,
+    table: str = "",
+    cursor_key: str = "",
+    watermark: str | None = None,
+    slot_name: str = "",
+) -> RetentionProbeResult:
+    """Live probe: ``pg_replication_slots`` existence + ``wal_status`` (PG13+)."""
+    from connectors.postgresql_change_stream import _slot_name
+    from connectors.postgresql_conn import get_connection
+
+    from services.sync_cursor import get_watermark
+
+    ck = (cursor_key or "").strip()
+    wm = watermark if watermark is not None else (get_watermark(ck) if ck else None)
+    database = str(cfg.get("database") or "postgres")
+    slot = (slot_name or "").strip() or (
+        _slot_name(database, table, ck) if (table or ck) else ""
+    )
+    if not slot:
+        return RetentionProbeResult(
+            status="n_a",
+            dialect="postgresql",
+            cursor_key=ck,
+            message="slot_name or table+cursor_key required for PostgreSQL retention probe.",
+        )
+    try:
+        conn = get_connection(
+            host=cfg.get("host") or "localhost",
+            port=cfg.get("port") or 5432,
+            database=database,
+            username=cfg.get("username") or "",
+            password=cfg.get("password") or "",
+            connection_string=cfg.get("connection_string") or "",
+            ssl=bool(cfg.get("ssl")),
+        )
+        try:
+            exists = False
+            wal = ""
+            restart = ""
+            confirmed = ""
+            with conn.cursor() as cur:
+                try:
+                    cur.execute(
+                        """
+                        SELECT restart_lsn::text,
+                               confirmed_flush_lsn::text,
+                               wal_status
+                        FROM pg_replication_slots
+                        WHERE slot_name = %s
+                        """,
+                        (slot,),
+                    )
+                    row = cur.fetchone()
+                    if row:
+                        exists = True
+                        restart = str(row[0] or "")
+                        confirmed = str(row[1] or "")
+                        wal = str(row[2] or "")
+                except Exception as col_exc:
+                    msg = str(col_exc).lower()
+                    if "wal_status" not in msg and "undefined" not in msg:
+                        raise
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
+                    cur.execute(
+                        """
+                        SELECT restart_lsn::text, confirmed_flush_lsn::text
+                        FROM pg_replication_slots
+                        WHERE slot_name = %s
+                        """,
+                        (slot,),
+                    )
+                    row = cur.fetchone()
+                    if row:
+                        exists = True
+                        restart = str(row[0] or "")
+                        confirmed = str(row[1] or "")
+            return classify_pg_slot_retention(
+                slot_exists=exists,
+                wal_status=wal,
+                restart_lsn=restart,
+                confirmed_flush_lsn=confirmed,
+                watermark=wm,
+                cursor_key=ck,
+                slot_name=slot,
+            )
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    except Exception as exc:
+        return RetentionProbeResult(
+            status="unknown",
+            dialect="postgresql",
+            resume=str(wm or ""),
+            cursor_key=ck,
+            capture_instance=slot,
+            message=f"PostgreSQL slot retention probe failed: {exc}",
+            details={"error": str(exc)[:300], "slot_name": slot},
+        )
+
+
+def probe_mongo_retention(
+    cfg: dict[str, Any],
+    *,
+    table: str = "",
+    cursor_key: str = "",
+    watermark: str | None = None,
+) -> RetentionProbeResult:
+    """Live probe: resume-token clusterTime vs ``local.oplog.rs`` oldest event."""
+    from connectors.mongodb_change_stream import MongodbChangeStreamCdc
+
+    from services.sync_cursor import get_watermark
+
+    ck = (cursor_key or "").strip()
+    wm = watermark if watermark is not None else (get_watermark(ck) if ck else None)
+    collection = table or str(cfg.get("collection") or cfg.get("table") or "")
+    try:
+        cdc = MongodbChangeStreamCdc(
+            {**cfg, "type": cfg.get("type") or "mongodb", "cursor_key": ck},
+            collection=collection or "probe",
+            primary_key=str(cfg.get("primary_key") or "_id"),
+            resume_token=wm,
+        )
+        try:
+            catalog = cdc._oplog_catalog_status(max_age_sec=0)
+        finally:
+            try:
+                cdc.close()
+            except Exception:
+                pass
+        if catalog.get("error") and catalog.get("oldest_oplog_unix") is None:
+            return RetentionProbeResult(
+                status="unknown",
+                dialect="mongodb",
+                resume=str(catalog.get("resume_unix") or resume_token_unix_seconds(wm) or ""),
+                cursor_key=ck,
+                message=f"MongoDB oplog catalog could not be read: {catalog.get('error')}",
+                details={"plugin": "mongodb_change_stream", "error": catalog.get("error")},
+            )
+        result = classify_mongo_oplog_retention(
+            catalog.get("resume_unix") if catalog.get("resume_unix") is not None else resume_token_unix_seconds(wm),
+            catalog.get("oldest_oplog_unix"),
+            newest_oplog_unix=catalog.get("newest_oplog_unix"),
+            cursor_key=ck,
+        )
+        result.capture_instance = collection
+        result.details["collection"] = collection
+        return result
+    except Exception as exc:
+        return RetentionProbeResult(
+            status="unknown",
+            dialect="mongodb",
+            resume=str(resume_token_unix_seconds(wm) or ""),
+            cursor_key=ck,
+            message=f"MongoDB oplog retention probe failed: {exc}",
+            details={"error": str(exc)[:300], "plugin": "mongodb_change_stream"},
+        )
+
+
 def probe_cdc_retention(
     cfg: dict[str, Any],
     *,
@@ -585,6 +1373,20 @@ def probe_cdc_retention(
         return probe_mysql_retention(
             cfg, cursor_key=cursor_key, watermark=watermark
         )
+    if dialect in _PG_RETENTION_DIALECTS:
+        return probe_postgres_retention(
+            cfg,
+            table=table,
+            cursor_key=cursor_key,
+            watermark=watermark,
+        )
+    if dialect in _MONGO_RETENTION_DIALECTS:
+        return probe_mongo_retention(
+            cfg,
+            table=table,
+            cursor_key=cursor_key,
+            watermark=watermark,
+        )
     return RetentionProbeResult(
         status="n_a",
         dialect=dialect or "unknown",
@@ -611,13 +1413,99 @@ def attach_cdc_retention(cdc: Any, src_cfg: dict[str, Any] | None, *, table: str
         "microsoft_sql_server",
         "azure_sql_database",
         "amazon_rds_sql_server",
-    }:
+    } | _PG_RETENTION_DIALECTS | _MONGO_RETENTION_DIALECTS:
         return None
     table_name = table or str(getattr(cdc, "table", "") or src_cfg.get("table") or "")
     if isinstance(table_name, (list, tuple)):
         table_name = str(table_name[0]) if table_name else ""
     cursor_key = str(getattr(cdc, "cursor_key", "") or src_cfg.get("cursor_key") or "")
     schema = str(src_cfg.get("schema") or getattr(cdc, "schema", "") or "")
+    if dialect in _PG_RETENTION_DIALECTS and cdc is not None and hasattr(
+        cdc, "_slot_catalog_status"
+    ):
+        catalog: dict[str, Any] = {}
+        try:
+            catalog = dict(cdc._slot_catalog_status(max_age_sec=0) or {})
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+        from services.sync_cursor import get_watermark
+
+        wm = getattr(cdc, "consistent_point_lsn", None) or (
+            get_watermark(cursor_key) if cursor_key else None
+        )
+        resume_expected = (
+            bool(cdc._resume_expected) if hasattr(cdc, "_resume_expected") else None
+        )
+        probe = classify_pg_slot_retention(
+            slot_exists=catalog.get("slot_exists"),
+            wal_status=str(catalog.get("wal_status") or ""),
+            restart_lsn=str(catalog.get("restart_lsn") or ""),
+            confirmed_flush_lsn=str(catalog.get("confirmed_flush_lsn") or ""),
+            watermark=wm,
+            resume_expected=resume_expected,
+            cursor_key=cursor_key,
+            slot_name=str(getattr(cdc, "slot_name", "") or ""),
+        )
+        try:
+            setattr(cdc, "_cdc_retention", probe)
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+        return probe
+    if cdc is not None and hasattr(cdc, "_ct_catalog_status"):
+        catalog: dict[str, Any] = {}
+        try:
+            catalog = dict(cdc._ct_catalog_status(max_age_sec=0) or {})
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+        if not catalog:
+            probe = RetentionProbeResult(
+                status="unknown",
+                dialect="sqlserver",
+                cursor_key=cursor_key,
+                message="Change Tracking catalog could not be read.",
+                details={"plugin": "sqlserver_change_tracking"},
+            )
+        else:
+            probe = classify_ct_version_retention(
+                catalog.get("resume_version"),
+                catalog.get("min_valid_version"),
+                current_version=catalog.get("current_version"),
+                ct_enabled=catalog.get("ct_enabled"),
+                cursor_key=cursor_key,
+            )
+        try:
+            setattr(cdc, "_cdc_retention", probe)
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+        return probe
+    if cdc is not None and hasattr(cdc, "_oplog_catalog_status"):
+        catalog = {}
+        try:
+            catalog = dict(cdc._oplog_catalog_status(max_age_sec=0) or {})
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+        if not catalog:
+            probe = RetentionProbeResult(
+                status="unknown",
+                dialect="mongodb",
+                cursor_key=cursor_key,
+                message="MongoDB oplog catalog could not be read.",
+                details={"plugin": "mongodb_change_stream"},
+            )
+        else:
+            probe = classify_mongo_oplog_retention(
+                catalog.get("resume_unix"),
+                catalog.get("oldest_oplog_unix"),
+                newest_oplog_unix=catalog.get("newest_oplog_unix"),
+                history_lost=bool(catalog.get("history_lost")),
+                invalidated=bool(catalog.get("invalidated")),
+                cursor_key=cursor_key,
+            )
+        try:
+            setattr(cdc, "_cdc_retention", probe)
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+        return probe
     probe = probe_cdc_retention(
         src_cfg,
         table=table_name,

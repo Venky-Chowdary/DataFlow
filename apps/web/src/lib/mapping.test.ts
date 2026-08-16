@@ -653,6 +653,36 @@ describe("destination schema honesty", () => {
     assert.ok(editable[0].confidence <= 0.93);
   });
 
+  it("does not flatten create-new confidence to a 95% wall", () => {
+    const rows = editableFromPipelineMappings([
+      {
+        source: "c_custkey",
+        target: "c_custkey",
+        confidence: 0.88,
+        transform: "none",
+        create_new: true,
+        assignment_strategy: "identity_passthrough",
+        source_type: "BIGINT",
+        target_type: "NUMBER(38,0)",
+        fidelity: "preserve",
+      },
+      {
+        source: "c_acctbal",
+        target: "c_acctbal",
+        confidence: 0.91,
+        transform: "none",
+        create_new: true,
+        assignment_strategy: "identity_passthrough",
+        source_type: "DECIMAL(11,6)",
+        target_type: "NUMBER(11,6)",
+        fidelity: "preserve",
+      },
+    ]);
+    assert.equal(rows[0].confidence, 0.88);
+    assert.equal(rows[1].confidence, 0.91);
+    assert.notEqual(rows[0].confidence, rows[1].confidence);
+  });
+
   it("caps create-new confidence in buildPreflightMappings before preflight", () => {
     const fromEditable = buildPreflightMappings([], [
       {
@@ -730,6 +760,20 @@ describe("destination schema honesty", () => {
     assert.ok(existing[0].confidence >= 0.95);
     // Bootstrap must not invent Approve — fidelity pipeline stamps first.
     assert.equal(existing[0].approved, false);
+  });
+
+  it("create-new destType uses catalog inferred_type, not sample semantic_type", () => {
+    const cols = [{
+      column_name: "C_CUSTKEY",
+      confidence: 0.99,
+      inferred_type: "DECIMAL(38,0)",
+      semantic_type: "BIGINT",
+      is_pii: false,
+      compliance: [],
+    }];
+    const create = mappingsFromAnalysis(cols, undefined, ["other_col"]);
+    assert.equal(create[0].createNew, true);
+    assert.equal(create[0].destType, "DECIMAL(38,0)");
   });
 
   it("intentional omit is first-class Map policy", () => {

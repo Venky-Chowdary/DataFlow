@@ -4,11 +4,19 @@ from __future__ import annotations
 
 import logging
 import os
-from services.brand_env import getenv_brand
+import re
 import sys
 import threading
 import unittest.mock
 from typing import Any
+from urllib.parse import parse_qs, unquote
+
+from services.brand_env import getenv_brand
+
+_SF_HOST_SUFFIXES = (
+    ".privatelink.snowflakecomputing.com",
+    ".snowflakecomputing.com",
+)
 
 # fakesnow patches snowflake.connector.connect globally; keep a process-wide
 # refcount so multiple nested get_connection() calls (e.g. count + read) can
@@ -38,12 +46,351 @@ def _fakesnow_exit_patch() -> None:
 
 
 def normalize_account(host: str) -> str:
-    host = host.strip()
-    if not host:
+    """Account locator / org-account for snowflake.connector — not a URL.
+
+    Accepts pasted browser hosts:
+    ``https://xy12345.us-east-1.snowflakecomputing.com``,
+    ``org-account.privatelink.snowflakecomputing.com:443/console``.
+    """
+    raw = (host or "").strip()
+    if not raw:
         return ""
-    if ".snowflakecomputing.com" in host:
-        return host.split(".snowflakecomputing.com")[0]
-    return host
+    raw = re.sub(r"^https?://", "", raw, flags=re.I)
+    raw = raw.split("/")[0].split("?")[0]
+    if "@" in raw:
+        raw = raw.rsplit("@", 1)[-1]
+    if raw.count(":") == 1 and not raw.startswith("["):
+        host_part, port = raw.rsplit(":", 1)
+        if port.isdigit():
+            raw = host_part
+    raw = raw.strip().rstrip(".")
+    lower = raw.lower()
+    for suffix in _SF_HOST_SUFFIXES:
+        if lower.endswith(suffix):
+            return raw[: -len(suffix)]
+    return raw
+
+
+def is_placeholder_snowflake_account(host: str) -> bool:
+    """True for the form default ``account.snowflakecomputing.com`` and docs examples."""
+    acct = normalize_account(host).lower()
+    if not acct:
+        return False
+    return acct in SNOWFLAKE_PLACEHOLDER_ACCOUNTS
+
+
+# Operator-facing copy when they paste a browser host instead of a login URL.
+SNOWFLAKE_HOST_ONLY_URL_MSG = (
+    "That is a Snowflake account host, not a login. "
+    "Use snowflake://user:password@account/DATABASE/SCHEMA?warehouse=COMPUTE_WH "
+    "or switch to Username & password and enter the account host, user, and password. "
+    "If the password contains @, encode it as %40."
+)
+
+SNOWFLAKE_MISSING_ACCOUNT_MSG = (
+    "Snowflake account is required. Paste snowflake://user:password@account/... "
+    "or the account host (org-account or locator.region)."
+)
+
+SNOWFLAKE_MISSING_USER_MSG = (
+    "Snowflake username is required. A browser URL "
+    "(https://….snowflakecomputing.com) is the account host, not a login."
+)
+
+SNOWFLAKE_MISSING_SECRET_MSG = (
+    "Provide a password or a PKCS#8 private key. Browser account URLs do not "
+    "include credentials."
+)
+
+# Official driver: 290404 (08001) when POST /session/v1/login-request is 404.
+# That is an account-identifier miss — Snowflake never checked the password.
+# Preferred identifier is org-account (docs: admin-account-identifier).
+SNOWFLAKE_ACCOUNT_NOT_FOUND_MSG = (
+    "Snowflake account host was not found (HTTP 404 / 290404). "
+    "Username and password were not checked — that host is not a login endpoint. "
+    "In Snowsight, open the account menu and copy the account identifier "
+    "(preferred: org-account such as myorg-acctname). "
+    "Locator-only hosts like xy12345.snowflakecomputing.com return 404 when the "
+    "account is not in the default region or the locator is wrong. "
+    "You can also use locator.region or locator.region.cloud."
+)
+
+# Form default / docs examples — not a real account. Live probe of
+# account.snowflakecomputing.com returns the same 290404 as a bad locator.
+SNOWFLAKE_PLACEHOLDER_ACCOUNTS = frozenset({
+    "account",
+    "xy12345",
+    "xy12345.us-east-1",
+    "myorg-acctname",
+    "myorg-acct",
+    "org-account",
+    "org-acctname",
+})
+
+SNOWFLAKE_PLACEHOLDER_HOST_MSG = (
+    "That Account host is a form placeholder, not your Snowflake account. "
+    "Paste the Snowsight org-account (myorg-acctname), not "
+    "account.snowflakecomputing.com."
+)
+
+SNOWFLAKE_BAD_PASSWORD_MSG = (
+    "Snowflake rejected the username or password (250001). "
+    "The account host was reached — this is not a 404. "
+    "Check the username and password for this account. "
+    "A 250001 is not an MFA challenge. If the password works in Snowsight "
+    "but Test still returns 250001, switch to Programmatic access token or Key-pair."
+)
+
+
+def parse_snowflake_url(raw: str) -> dict[str, str]:
+    """Parse operator-pasted Snowflake URLs into connector kwargs.
+
+    ``snowflake.connector.connect`` is keyword-only. Passing a SQLAlchemy or
+    browser URL as a positional argument raises
+    ``SnowflakeConnection.__init__() takes 0 positional arguments but 1 was given``.
+
+    Accepted:
+    - ``snowflake://user:pass@account/db/schema?warehouse=&role=``
+    - ``snowflake://user:pass@account.snowflakecomputing.com/db/schema?...``
+    - ``jdbc:snowflake://account.snowflakecomputing.com/?user=&password=&db=``
+    - ``https://account.snowflakecomputing.com`` (account only — caller must supply user/secret)
+    - host-only ``account.snowflakecomputing.com``
+
+    The last ``@`` separates account from userinfo so a password may contain ``@``.
+    """
+    text = (raw or "").strip()
+    if not text:
+        return {}
+    if text.lower().startswith("jdbc:"):
+        text = text[5:].lstrip()
+
+    query = ""
+    if "?" in text:
+        text, query = text.split("?", 1)
+
+    if "://" in text:
+        _scheme, rest = text.split("://", 1)
+    else:
+        rest = text
+
+    userinfo = ""
+    if "@" in rest:
+        userinfo, rest = rest.rsplit("@", 1)
+
+    path_parts = [part for part in rest.split("/") if part]
+    account_raw = unquote(path_parts[0]) if path_parts else ""
+    database = unquote(path_parts[1]) if len(path_parts) > 1 else ""
+    schema = unquote(path_parts[2]) if len(path_parts) > 2 else ""
+
+    user = ""
+    password = ""
+    if userinfo:
+        if ":" in userinfo:
+            user, password = userinfo.split(":", 1)
+            user = unquote(user)
+            password = unquote(password)
+        else:
+            user = unquote(userinfo)
+
+    qs = parse_qs(query, keep_blank_values=True)
+
+    def q(*names: str) -> str:
+        for name in names:
+            for key in (name, name.lower(), name.upper()):
+                vals = qs.get(key)
+                if vals and str(vals[0]).strip():
+                    return unquote(str(vals[0]))
+        return ""
+
+    out: dict[str, str] = {}
+    account = normalize_account(account_raw or q("account"))
+    if account:
+        out["account"] = account
+    user = user or q("user", "username")
+    password = password or q("password", "passwd", "pwd")
+    database = database or q("db", "database")
+    schema = schema or q("schema")
+    warehouse = q("warehouse", "wh")
+    role = q("role")
+    if user:
+        out["user"] = user
+    if password:
+        out["password"] = password
+    if database:
+        out["database"] = database
+    if schema:
+        out["schema"] = schema
+    if warehouse:
+        out["warehouse"] = warehouse
+    if role:
+        out["role"] = role
+    return out
+
+
+def snowflake_connect_kwargs(
+    *,
+    account: str = "",
+    username: str = "",
+    password: str = "",
+    database: str = "",
+    schema: str = "",
+    warehouse: str = "",
+    connection_string: str = "",
+    role: str = "",
+    private_key: str = "",
+    private_key_passphrase: str = "",
+) -> dict[str, Any]:
+    """Keyword args for ``snowflake.connector.connect`` — never a positional URL.
+
+    URL fields win when present; discrete form fields fill gaps. Topology tokens
+    such as ``both`` are dropped from ``role``.
+    """
+    from services.connector_auth import engine_login_role
+
+    parsed = parse_snowflake_url(connection_string) if (connection_string or "").strip() else {}
+    merged_account = parsed.get("account") or account
+    merged_user = parsed.get("user") or username
+    merged_password = parsed.get("password") or password
+    merged_database = parsed.get("database") or database
+    merged_schema = parsed.get("schema") or schema
+    merged_warehouse = parsed.get("warehouse") or warehouse
+    login_role = engine_login_role(parsed.get("role"), role)
+    pem = (private_key or "").strip()
+
+    if not normalize_account(merged_account):
+        raise ValueError(SNOWFLAKE_MISSING_ACCOUNT_MSG)
+    if is_placeholder_snowflake_account(merged_account):
+        raise ValueError(SNOWFLAKE_PLACEHOLDER_HOST_MSG)
+    if not (merged_user or "").strip():
+        if parsed.get("account") and not parsed.get("user"):
+            raise ValueError(SNOWFLAKE_HOST_ONLY_URL_MSG)
+        raise ValueError(SNOWFLAKE_MISSING_USER_MSG)
+    if not pem and not (merged_password or "").strip():
+        if parsed.get("account") and not parsed.get("password"):
+            raise ValueError(SNOWFLAKE_HOST_ONLY_URL_MSG)
+        raise ValueError(SNOWFLAKE_MISSING_SECRET_MSG)
+
+    kwargs: dict[str, Any] = {
+        "account": normalize_account(merged_account),
+        "user": merged_user,
+        "login_timeout": 10,
+    }
+    if pem:
+        kwargs["private_key"] = load_snowflake_private_key(pem, private_key_passphrase)
+    elif merged_password:
+        kwargs["password"] = merged_password
+    if merged_database:
+        kwargs["database"] = merged_database
+    if merged_schema:
+        kwargs["schema"] = merged_schema
+    if merged_warehouse:
+        kwargs["warehouse"] = merged_warehouse
+    if login_role:
+        kwargs["role"] = login_role
+    return kwargs
+
+
+def load_snowflake_private_key(pem: str, passphrase: str = "") -> bytes:
+    """PKCS#8 DER bytes for snowflake.connector ``private_key=``."""
+    blob = (pem or "").strip().encode("utf-8")
+    if not blob:
+        raise ValueError("Snowflake private key is empty")
+    try:
+        from cryptography.hazmat.primitives import serialization
+    except ImportError as exc:
+        raise RuntimeError(
+            "cryptography is required for Snowflake key-pair authentication"
+        ) from exc
+    password = passphrase.encode("utf-8") if passphrase.strip() else None
+    key = serialization.load_pem_private_key(blob, password=password)
+    return key.private_bytes(
+        encoding=serialization.Encoding.DER,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    )
+
+
+def classify_snowflake_connect_error(raw: str) -> str | None:
+    """Honest operator copy — do not call an invalid role a bad password."""
+    stripped = (raw or "").strip()
+    text = stripped.lower()
+    if not text:
+        return None
+    if stripped in {
+        SNOWFLAKE_ACCOUNT_NOT_FOUND_MSG,
+        SNOWFLAKE_HOST_ONLY_URL_MSG,
+        SNOWFLAKE_PLACEHOLDER_HOST_MSG,
+        SNOWFLAKE_BAD_PASSWORD_MSG,
+    }:
+        return stripped
+    if "form placeholder" in text or is_placeholder_snowflake_account(stripped):
+        return SNOWFLAKE_PLACEHOLDER_HOST_MSG
+    # 404 / 290404 / 513 on login-request is a missing account host, not auth.
+    # The path contains "login" and used to be humanized as a bad password.
+    if re.search(r"290404|\b513\b", text) or (
+        "login-request" in text and re.search(r"\b404\b|not found", text)
+    ) or re.search(r"verify the account name|account name is correct", text):
+        return SNOWFLAKE_ACCOUNT_NOT_FOUND_MSG
+    if re.search(r"network policy|not allowed to access|390403|390422", text):
+        return (
+            "Snowflake blocked this IP (network policy). Allow the DataFlow egress "
+            "address or ask your Snowflake admin to update the policy."
+        )
+    if re.search(
+        r"password.{0,40}(not allowed|disabled|not enabled|deprecated)|"
+        r"single-factor password|authentication policy|394400|394504|"
+        r"authentication_method",
+        text,
+    ):
+        return (
+            "Snowflake refused password-only login (authentication policy / MFA "
+            "rollout). Use Programmatic access token or Key-pair (JWT). "
+            "Password-only Test cannot complete MFA."
+        )
+    if re.search(r"mfa|duo|ext_auth|390195|394508|multi-factor", text):
+        return (
+            "Snowflake requires MFA or key-pair for this user. Password-only login "
+            "is refused. Use Programmatic access token or Key-pair on Connectors."
+        )
+    if re.search(r"jwt|private.?key|390144|invalid token", text):
+        return (
+            "Snowflake key-pair authentication failed. Check the username, account "
+            "host, and that the public key is assigned (ALTER USER … SET RSA_PUBLIC_KEY)."
+        )
+    if re.search(
+        r"role .+ (does not exist|not granted|not authorized)|unknown role|"
+        r"invalid role|251006|390201|specified in the connect string",
+        text,
+    ):
+        return (
+            "Snowflake role is invalid or not granted to this user. Leave Role blank "
+            "to use the user's default role, or enter a role the user can assume."
+        )
+    if re.search(r"warehouse .+ (does not exist|not authorized)|invalid warehouse|000606", text):
+        return (
+            "Snowflake warehouse is invalid or not granted. Check the warehouse name "
+            "and USAGE privilege."
+        )
+    if re.search(
+        r"database .+ (does not exist|not authorized)|schema .+ (does not exist|not authorized)",
+        text,
+    ):
+        return (
+            "Snowflake database or schema was not found or is not granted. Check names "
+            "and privileges."
+        )
+    if re.search(
+        r"250001|incorrect username|incorrect password|invalid username or password|"
+        r"rejected the username or password",
+        text,
+    ):
+        return SNOWFLAKE_BAD_PASSWORD_MSG
+    if re.search(
+        r"takes 0 positional arguments|snowflakeconnection\.__init__",
+        text,
+    ):
+        return SNOWFLAKE_HOST_ONLY_URL_MSG
+    return None
 
 
 def _is_local_account(account: str) -> bool:
@@ -135,24 +482,37 @@ _SF_COLUMN_PROJECTIONS: tuple[str, ...] = (
 )
 
 
+def _snowflake_object_missing(exc: BaseException) -> bool:
+    """True when Snowflake said the *table* is absent (002003 / 002043)."""
+    msg = str(exc)
+    low = msg.lower()
+    return (
+        "002003" in msg
+        or "002043" in msg
+        or "does not exist" in low
+        or "object does not exist" in low
+    )
+
+
 def snowflake_physical_column_rows(
     cur: Any, schema: str, table: str
 ) -> list[tuple[Any, ...]]:
     """Physical column metadata as ``(name, type, nullable, len, p, s, dt_p)``.
 
-    Single introspection SSOT for the Snowflake reader, the writer bind overlay
-    and destination schema discovery, because they must never disagree about
-    what the destination physically holds.
+    ``DESC TABLE`` first. ``information_schema.columns`` on shared catalogs
+    (``SNOWFLAKE_SAMPLE_DATA``) federates every TPCH schema and is why
+    Destination "Checking destination…" sat for minutes after a warehouse
+    resume. DESC is one object lookup and returns ``NUMBER(38,10)`` text.
 
-    Catalogs differ in which optional INFORMATION_SCHEMA columns they expose
-    (a role without full projection rights, a Snowflake-compatible engine
-    without ``DATETIME_PRECISION``). One missing optional column used to fail
-    the whole SELECT, so a table whose DDL was perfectly readable reported *no
-    physical metadata* and the writer fail-closed on every row. Degrade the
-    projection instead, then fall back to ``DESC TABLE`` — which returns the
-    fully qualified type text (``NUMBER(38,10)``, ``TIMESTAMP_NTZ(9)``). Every
-    rung reads the catalog; nothing here infers a type from data.
+    A missing table (002003) must not fall through to information_schema —
+    that is the SAMPLE_DATA hang. IS is only a fallback when DESC is empty
+    without a missing-object error (compatible engines without DESC).
     """
+    desc, desc_missing = _snowflake_desc_column_rows(cur, schema, table)
+    if desc:
+        return desc
+    if desc_missing:
+        return []
     for projection in _SF_COLUMN_PROJECTIONS:
         try:
             cur.execute(
@@ -172,20 +532,26 @@ def snowflake_physical_column_rows(
             continue
         if rows:
             return [r + (None,) * (7 - len(r)) for r in rows]
-    return _snowflake_desc_column_rows(cur, schema, table)
+    return []
 
 
 def _snowflake_desc_column_rows(
     cur: Any, schema: str, table: str
-) -> list[tuple[Any, ...]]:
-    """``DESC TABLE`` rows shaped like the INFORMATION_SCHEMA projection."""
+) -> tuple[list[tuple[Any, ...]], bool]:
+    """``DESC TABLE`` rows shaped like the INFORMATION_SCHEMA projection.
+
+    Second value is True when Snowflake said the table is absent — callers
+    must not scan ``information_schema`` on ``SNOWFLAKE_SAMPLE_DATA``.
+    """
     try:
         cur.execute(f"DESC TABLE {snowflake_qualified_table(schema, table)}")
         rows = list(cur.fetchall() or [])
     except Exception as exc:
         logger.debug("snowflake DESC TABLE failed: %s", exc, exc_info=exc)
-        return []
+        return [], _snowflake_object_missing(exc)
     out: list[tuple[Any, ...]] = []
+    pk_cols: list[str] = []
+    unique_cols: list[str] = []
     for row in rows:
         if len(row) < 2:
             continue
@@ -202,7 +568,18 @@ def _snowflake_desc_column_rows(
         # DESC carries the width inside the type text, so the typmod columns
         # stay None rather than being invented as zero.
         out.append((name, ddl, nullable, None, None, None, None))
-    return out
+        if len(row) > 5 and str(row[5] or "").upper().startswith("Y"):
+            pk_cols.append(name)
+        if len(row) > 6 and str(row[6] or "").upper().startswith("Y"):
+            unique_cols.append(name)
+    # Stash keys on the cursor so dest introspect can skip the
+    # information_schema.table_constraints join (SAMPLE_DATA hang).
+    try:
+        cur._dataflow_desc_pk = pk_cols
+        cur._dataflow_desc_unique = unique_cols
+    except Exception:
+        pass
+    return out, False
 
 
 def snowflake_qualified_table(schema: str, table: str) -> str:
@@ -278,6 +655,15 @@ def _fakesnow_rollback_product_patch() -> None:
             _fakesnow_refcount = 0
 
 
+def _snowflake_connector_module() -> Any:
+    try:
+        import snowflake.connector
+    except ImportError as exc:
+        from connectors.driver_guard import require_driver
+        raise RuntimeError(require_driver("snowflake.connector", "snowflake-connector-python")) from exc
+    return snowflake.connector
+
+
 def get_connection(
     *,
     account: str,
@@ -288,30 +674,23 @@ def get_connection(
     warehouse: str,
     connection_string: str,
     role: str = "",
+    private_key: str = "",
+    private_key_passphrase: str = "",
 ) -> Any:
-    try:
-        import snowflake.connector
-    except ImportError as exc:
-        from connectors.driver_guard import require_driver
-        raise RuntimeError(require_driver("snowflake.connector", "snowflake-connector-python")) from exc
+    kwargs = snowflake_connect_kwargs(
+        account=account,
+        username=username,
+        password=password,
+        database=database,
+        schema=schema,
+        warehouse=warehouse,
+        connection_string=connection_string,
+        role=role,
+        private_key=private_key,
+        private_key_passphrase=private_key_passphrase,
+    )
 
-    if connection_string.strip():
-        return snowflake.connector.connect(connection_string, login_timeout=10)
-
-    kwargs: dict[str, Any] = {
-        "account": normalize_account(account),
-        "user": username,
-        "password": password,
-        "login_timeout": 10,
-    }
-    if database:
-        kwargs["database"] = database
-    if schema:
-        kwargs["schema"] = schema
-    if warehouse:
-        kwargs["warehouse"] = warehouse
-    if role:
-        kwargs["role"] = role
+    snowflake_connector = _snowflake_connector_module()
 
     # Use fakesnow for local/emulator testing; it patches snowflake.connector.connect
     # and persists databases to disk so read-after-write works across connections.
@@ -326,8 +705,8 @@ def get_connection(
         while True:
             product_managed = False
             with _fakesnow_lock:
-                already_patched = isinstance(snowflake.connector.connect, unittest.mock.MagicMock)
-                connect_mod = getattr(snowflake.connector.connect, "__module__", "") or ""
+                already_patched = isinstance(snowflake_connector.connect, unittest.mock.MagicMock)
+                connect_mod = getattr(snowflake_connector.connect, "__module__", "") or ""
                 if not already_patched and connect_mod.startswith("fakesnow"):
                     already_patched = True
                 if _fakesnow_refcount > 0:
@@ -355,7 +734,7 @@ def get_connection(
                     product_managed = False
 
             try:
-                conn = snowflake.connector.connect(**kwargs)
+                conn = snowflake_connector.connect(**kwargs)
             except Exception as exc:
                 # If we installed a patch for this connect attempt, roll it back so a
                 # failed local connection cannot leak the patch into later tests.
@@ -383,4 +762,4 @@ def get_connection(
             conn.close = _close  # type: ignore[assignment]
             return conn
 
-    return snowflake.connector.connect(**kwargs)
+    return snowflake_connector.connect(**kwargs)

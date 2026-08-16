@@ -87,7 +87,7 @@ export function ConnectorCard({
           title={healthy ? "Healthy" : "Connection error"}
         />
         <span className="df2-connector-row-icon" aria-hidden>
-          <ConnectorIcon id={c.type} size={20} />
+          <ConnectorIcon id={c.type} size={16} />
         </span>
         <div className="df2-connector-row-identity">
           <span className="df2-connector-row-name" title={c.name}>{c.name}</span>
@@ -95,7 +95,9 @@ export function ConnectorCard({
             className="df2-connector-row-meta"
             title={[c.type.replace(/_/g, " "), c.database, endpoint, usage.hint].filter(Boolean).join(" · ")}
           >
-            {c.type.replace(/_/g, " ")}{c.database ? ` · ${c.database}` : ""}
+            {c.type.replace(/_/g, " ")}
+            {endpoint ? ` · ${endpoint}` : ""}
+            {c.database ? ` · ${c.database}` : ""}
             {usage.hint ? ` · ${usage.hint}` : ""}
           </span>
         </div>
@@ -127,7 +129,7 @@ export function ConnectorCard({
             onClick={onTest}
             leadingIcon={<DtIcon name="activity" size={14} />}
           >
-            Test
+            <span className="df2-btn-label">Test</span>
           </Button>
           <button type="button" className="df2-connector-row-open" onClick={onSelect} aria-label={`Open ${c.name} details`}>
             <DtIcon name="chevron-right" size={16} />

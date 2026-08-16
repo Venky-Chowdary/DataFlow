@@ -195,6 +195,115 @@ def struct_policies_from_mappings(mappings: list[dict[str, Any]] | None) -> dict
     return out
 
 
+def iter_struct_materialized_rows(
+    headers: list[str],
+    data_rows,
+    mappings: list[dict[str, Any]] | None,
+):
+    """Yield flatten / explode rows without building the expanded matrix.
+
+    Header discovery still samples the first 50 rows (same as the list form).
+    Explode yields one child row at a time — a 20k × 256 array cannot become
+    a 5.1M-row Python list. Warehouse and object-store writers stream this
+    iterator through ``SourceRowSpool``. Callers that still need a list use
+    :func:`materialize_struct_policies`.
+    """
+    from collections.abc import Iterator
+
+    policies = struct_policies_from_mappings(mappings)
+    if not policies or not headers:
+        return list(headers), iter(data_rows)
+
+    flatten_policies = {
+        k: v for k, v in policies.items()
+        if v in {STRUCT_POLICY_FLATTEN_TOP_LEVEL, STRUCT_POLICY_FLATTEN_DEEP}
+    }
+    explode_cols = [k for k, v in policies.items() if v == ARRAY_POLICY_EXPLODE]
+    header_list = list(headers)
+    header_set = set(header_list)
+    orig_headers = list(headers)
+    source = iter(data_rows)
+    sample: list[list[Any]] = []
+    if flatten_policies:
+        for _ in range(50):
+            try:
+                sample.append(next(source))
+            except StopIteration:
+                break
+        for row in sample:
+            as_dict = {
+                h: (row[i] if i < len(row) else None) for i, h in enumerate(orig_headers)
+            }
+            flat = apply_struct_policies_to_row(as_dict, flatten_policies)
+            for key in flat:
+                if key not in header_set:
+                    header_set.add(key)
+                    header_list.append(key)
+
+    flatten_headers = list(header_list)
+
+    def _flatten_row(row: list[Any]) -> list[Any]:
+        if not flatten_policies:
+            return list(row)
+        as_dict = {
+            h: (row[i] if i < len(row) else None) for i, h in enumerate(orig_headers)
+        }
+        flat = apply_struct_policies_to_row(as_dict, flatten_policies)
+        return [flat.get(h) for h in flatten_headers]
+
+    def _explode_row(row: list[Any]) -> Iterator[list[Any]]:
+        as_dict = {
+            h: (row[i] if i < len(row) else None) for i, h in enumerate(flatten_headers)
+        }
+        col = explode_cols[0]
+        arr = _parse_array_sample(as_dict.get(col))
+        if not arr:
+            base = [as_dict.get(h) for h in header_list]
+            if elem_col in header_list:
+                base[header_list.index(elem_col)] = None
+            yield base
+            return
+        for idx, elem in enumerate(arr[:ARRAY_EXPLODE_MAX]):
+            clone = dict(as_dict)
+            if isinstance(elem, (dict, list)):
+                from services.value_serializer import json_default
+
+                clone[elem_col] = json.dumps(
+                    elem, ensure_ascii=False, separators=(",", ":"), default=json_default
+                )
+            else:
+                clone[elem_col] = elem
+            clone[f"{col}_idx"] = idx
+            if f"{col}_idx" not in header_set:
+                header_list.append(f"{col}_idx")
+                header_set.add(f"{col}_idx")
+            yield [clone.get(h) for h in header_list]
+
+    elem_col = ""
+    if explode_cols:
+        elem_col = (
+            f"{explode_cols[0]}_elem" if len(explode_cols) == 1 else "_df_array_elem"
+        )
+        if elem_col not in header_set:
+            header_list.append(elem_col)
+            header_set.add(elem_col)
+
+    def _generate():
+        def _flat_source():
+            for row in sample:
+                yield _flatten_row(row)
+            for row in source:
+                yield _flatten_row(row)
+
+        if explode_cols:
+            for row in _flat_source():
+                yield from _explode_row(row)
+        else:
+            yield from _flat_source()
+
+    return header_list, _generate()
+
+
 def materialize_struct_policies(
     headers: list[str],
     data_rows: list[list[Any]],
@@ -205,79 +314,17 @@ def materialize_struct_policies(
     - ``flatten_top_level_keys`` / ``flatten_deep``: promote nested keys.
     - ``explode_rows``: duplicate parent row per array element (capped).
     Parent JSON blob is always kept on flatten so nothing is silently dropped.
+
+    Object-store and SQL/warehouse materialize use
+    :func:`iter_struct_materialized_rows` via ``SourceRowSpool`` so the
+    expanded matrix is never retained. This list form stays for callers
+    that still need a materialized matrix (tests, non-writer paths).
     """
     policies = struct_policies_from_mappings(mappings)
     if not policies or not headers:
         return headers, data_rows
-
-    flatten_policies = {
-        k: v for k, v in policies.items()
-        if v in {STRUCT_POLICY_FLATTEN_TOP_LEVEL, STRUCT_POLICY_FLATTEN_DEEP}
-    }
-    explode_cols = [k for k, v in policies.items() if v == ARRAY_POLICY_EXPLODE]
-
-    header_list = list(headers)
-    header_set = set(header_list)
-    working_rows = list(data_rows)
-
-    if flatten_policies:
-        sample_cap = min(len(working_rows), 50)
-        for row in working_rows[:sample_cap]:
-            as_dict = {h: (row[i] if i < len(row) else None) for i, h in enumerate(headers)}
-            flat = apply_struct_policies_to_row(as_dict, flatten_policies)
-            for key in flat:
-                if key not in header_set:
-                    header_set.add(key)
-                    header_list.append(key)
-        new_rows: list[list[Any]] = []
-        for row in working_rows:
-            as_dict = {h: (row[i] if i < len(row) else None) for i, h in enumerate(headers)}
-            flat = apply_struct_policies_to_row(as_dict, flatten_policies)
-            new_rows.append([flat.get(h) for h in header_list])
-        working_rows = new_rows
-        headers = header_list
-
-    if explode_cols:
-        exploded: list[list[Any]] = []
-        elem_col = f"{explode_cols[0]}_elem" if len(explode_cols) == 1 else "_df_array_elem"
-        if elem_col not in header_set:
-            header_list.append(elem_col)
-            header_set.add(elem_col)
-        for row in working_rows:
-            as_dict = {h: (row[i] if i < len(row) else None) for i, h in enumerate(headers)}
-            # Explode the first configured array column (multi-array explode is out of scope).
-            col = explode_cols[0]
-            arr = _parse_array_sample(as_dict.get(col))
-            if not arr:
-                # Keep the row — never drop because array empty/unparseable.
-                base = [as_dict.get(h) for h in header_list]
-                if elem_col in header_list:
-                    base[header_list.index(elem_col)] = None
-                exploded.append(base)
-                continue
-            for idx, elem in enumerate(arr[:ARRAY_EXPLODE_MAX]):
-                clone = dict(as_dict)
-                if isinstance(elem, (dict, list)):
-                    from services.value_serializer import json_default
-
-                    clone[elem_col] = json.dumps(
-                        elem, ensure_ascii=False, separators=(",", ":"), default=json_default
-                    )
-                else:
-                    clone[elem_col] = elem
-                # Preserve original array blob on parent; index for reconcile honesty.
-                clone[f"{col}_idx"] = idx
-                if f"{col}_idx" not in header_set:
-                    header_list.append(f"{col}_idx")
-                    header_set.add(f"{col}_idx")
-                exploded.append([clone.get(h) for h in header_list])
-            if len(arr) > ARRAY_EXPLODE_MAX:
-                # Remainder stays as a quarantine-friendly note on a synthetic row? Prefer
-                # keep overflow elements serialized on parent — already retained in col.
-                pass
-        working_rows = exploded
-
-    return header_list, working_rows
+    header_list, row_iter = iter_struct_materialized_rows(headers, data_rows, mappings)
+    return header_list, list(row_iter)
 
 
 def expand_dynamo_documents(

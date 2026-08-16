@@ -4,6 +4,12 @@ A DataContract is a versioned, enforceable snapshot of the agreement between a
 source schema, a semantic mapping, a destination schema, and the preflight gates
 that approved it. The CircuitBreaker tracks the runtime health of a contract and
 can halt transfers when a violation is detected.
+
+Contracted column types are enforced through
+``services.schema_drift.classify_schema_change`` — the same lattice Validate,
+Execute, and schedules use. String equality on type names is not a contract:
+INTEGER vs INT is identical; a narrow or drop of a signed column is a break
+until re-sign.
 """
 
 from __future__ import annotations
@@ -278,9 +284,19 @@ class ContractEnforcer:
             })
 
         schema = sample_schema or {}
+        schema_ci = {
+            str(k).lower(): (str(k), str(v))
+            for k, v in schema.items()
+            if not isinstance(v, (dict, list))
+        }
+
+        def _live_type(name: str) -> str | None:
+            hit = schema_ci.get(str(name).lower())
+            return hit[1] if hit else None
+
         missing_required = [
             c for c in self.contract.columns
-            if not c.nullable and c.source_name not in schema
+            if not c.nullable and c.source_name and _live_type(c.source_name) is None
         ]
         if missing_required:
             for c in missing_required:
@@ -290,20 +306,7 @@ class ContractEnforcer:
                     "message": f"Required source column '{c.source_name}' is missing",
                 })
 
-        if self.contract.strict:
-            for c in self.contract.columns:
-                if c.source_name not in schema:
-                    continue
-                actual_type = schema.get(c.source_name, "").lower()
-                expected_type = c.source_type.lower()
-                if expected_type and actual_type and expected_type != actual_type:
-                    violations.append({
-                        "rule": "source_type_change",
-                        "column": c.source_name,
-                        "expected": expected_type,
-                        "actual": actual_type,
-                        "message": f"Source column '{c.source_name}' type changed from {expected_type} to {actual_type}",
-                    })
+        self._enforce_contracted_schema(request, schema_ci, violations)
 
         if self.contract.status == ContractStatus.BROKEN:
             violations.append({
@@ -316,6 +319,94 @@ class ContractEnforcer:
                 f"Data contract {self.contract.id} violated: {violations[0]['message']}",
                 violations=violations,
             )
+
+    def _enforce_contracted_schema(
+        self,
+        request: Any,
+        schema_ci: dict[str, tuple[str, str]],
+        violations: list[dict[str, Any]],
+    ) -> None:
+        """Enforce contracted columns via the shared evolution kernel.
+
+        String equality on type names false-positives INTEGER vs INT and
+        VARCHAR vs varchar(n) aliases — the same class of incident Confluent
+        compatibility exists to prevent. Extra live columns are not a break
+        (superset is allowed). A drop or hard type change of a contracted
+        column is a break until the contract is re-signed. Strict contracts
+        also refuse source widens: dest types in the contract may overflow.
+        """
+        from services.schema_drift import classify_schema_change
+
+        old_cols: dict[str, str] = {}
+        new_cols: dict[str, str] = {}
+        old_null: dict[str, bool] = {}
+        new_null: dict[str, bool] = {}
+        for column in self.contract.columns:
+            name = str(column.source_name or "").strip()
+            if not name:
+                continue
+            old_cols[name] = column.source_type or "VARCHAR"
+            old_null[name] = bool(column.nullable)
+            live = schema_ci.get(name.lower())
+            if live is None:
+                continue
+            new_cols[name] = live[1]
+            new_null[name] = bool(column.nullable)
+        if not old_cols:
+            return
+        dest_db = str(getattr(getattr(request, "destination", None), "format", "") or "")
+        classification = classify_schema_change(
+            {"columns": old_cols, "nullable": old_null, "primary_key": []},
+            {"columns": new_cols, "nullable": new_null, "primary_key": []},
+            dest_db=dest_db,
+        )
+        for item in classification.get("breaking") or []:
+            kind = str(item.get("kind") or "")
+            column = str(item.get("column") or item.get("to") or "")
+            expected = str(item.get("old_type") or "")
+            actual = str(item.get("new_type") or "")
+            if kind in {"drop", "rename"}:
+                violations.append({
+                    "rule": "contracted_column_dropped",
+                    "column": column,
+                    "kind": kind,
+                    "message": (
+                        f"Contracted source column '{column}' is missing or renamed"
+                        + (f" to {item.get('to')}" if item.get("to") else "")
+                    ),
+                })
+                continue
+            violations.append({
+                "rule": "source_type_change",
+                "column": column,
+                "kind": kind,
+                "expected": expected,
+                "actual": actual,
+                "message": (
+                    f"Source column '{column}' type changed from {expected} to {actual}"
+                    if expected and actual
+                    else f"Source column '{column}' broke the signed contract ({kind})"
+                ),
+            })
+        if not self.contract.strict:
+            return
+        for item in classification.get("additive") or []:
+            if str(item.get("kind") or "") != "widen_type":
+                continue
+            column = str(item.get("column") or "")
+            expected = str(item.get("old_type") or "")
+            actual = str(item.get("new_type") or "")
+            violations.append({
+                "rule": "source_type_change",
+                "column": column,
+                "kind": "widen_type",
+                "expected": expected,
+                "actual": actual,
+                "message": (
+                    f"Source column '{column}' widened from {expected} to {actual}; "
+                    "strict contracts refuse dest overflow until re-signed"
+                ),
+            })
 
 
 def build_contract_from_preflight(

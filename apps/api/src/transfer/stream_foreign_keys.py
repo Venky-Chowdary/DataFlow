@@ -78,7 +78,9 @@ def carry_foreign_keys_after_load(
 
         dest_type = resolve_driver_type(destination.format)
         dest_cfg = resolve_connector_config(destination)
-        dest_schema = str(dest_cfg.get("schema") or "")
+        from services.dialect_profiles import catalog_namespace
+
+        dest_schema = catalog_namespace(dest_type, dest_cfg)
         # Multi-stream lands each source table under its own name; a rename
         # would arrive through the contract and change only this map.
         table_map = dict(table_map or {}) or {t: t for t in context.source_keys}
@@ -97,6 +99,8 @@ def carry_foreign_keys_after_load(
         )
         if context.cycle:
             summary["cycle"] = list(context.cycle)
+        if context.order:
+            summary["dependency_order"] = list(context.order)
         return summary
     except Exception as exc:
         logger.warning("foreign key carry failed: %s", exc, exc_info=exc)

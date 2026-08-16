@@ -69,6 +69,16 @@ def load_source_foreign_keys(
         return []
     if not source_connector_id and not source_config:
         return []
+    try:
+        from services.procedure_source import is_callable_source
+
+        if is_callable_source(source_config):
+            logger.info(
+                "source FK catalog skipped: callable extract has no catalog relation"
+            )
+            return []
+    except Exception:
+        pass
     cfg, db_type = _resolve_source(
         source_connector_id=source_connector_id,
         source_config=source_config,

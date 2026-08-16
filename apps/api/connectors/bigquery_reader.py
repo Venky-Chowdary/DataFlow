@@ -243,3 +243,157 @@ def read_table_cursor_batch(
         return ReadBatch(headers=headers, rows=rows, offset=0, total_rows=None)
     except Exception as exc:
         raise RuntimeError(f"BigQuery cursor read failed for {table_ref}: {exc}") from exc
+
+
+def read_table_scan_batch(
+    *,
+    host: str,
+    port: int,
+    database: str,
+    username: str,
+    password: str,
+    schema: str,
+    connection_string: str,
+    ssl: bool,
+    table: str,
+    warehouse: str = "",
+    columns: list[str] | None = None,
+    offset: int = 0,
+    limit: int = 500,
+    known_total_rows: int | None = None,
+    service_account: str = "",
+    scan_state: dict[str, Any],
+) -> ReadBatch:
+    """One ``SELECT … ORDER BY`` job + iterator pages — no LIMIT/OFFSET."""
+    from connectors.sql_snapshot_scan import close_table_scan
+
+    del username, password, ssl, warehouse
+    if scan_state.get("started"):
+        return _bigquery_scan_page(scan_state, offset=offset, limit=limit)
+
+    project_id = database or host
+    dataset_id = schema or "dataflow"
+    table_ref = quote_table_ref(
+        table,
+        dialect="bigquery",
+        project=project_id,
+        dataset=dataset_id,
+    )
+    from google.cloud import bigquery
+    from connectors.bigquery_conn import _is_local_endpoint, get_client
+
+    try:
+        client = get_client(
+            project_id=project_id,
+            credentials_path=connection_string,
+            service_account=service_account,
+            host=host,
+            port=port,
+            connection_string=connection_string,
+        )
+        is_local = _is_local_endpoint(host, connection_string or "")[0]
+        api_ref = bigquery.TableReference(
+            bigquery.DatasetReference(project_id, dataset_id), table
+        )
+        if known_total_rows is not None:
+            total = known_total_rows
+        elif is_local:
+            bq_table = client.get_table(api_ref)
+            total = bq_table.num_rows or 0
+        else:
+            count_q = f"SELECT COUNT(*) AS cnt FROM {table_ref}"  # nosec B608
+            total = int(list(client.query(count_q).result(timeout=60))[0]["cnt"])
+        if columns:
+            order_cols = list(columns)
+        else:
+            bq_table = client.get_table(api_ref)
+            order_cols = [field.name for field in (bq_table.schema or [])]
+        if not order_cols:
+            raise RuntimeError("BigQuery table has no columns for stable pagination")
+        if is_local:
+            rows_list = list(client.list_rows(api_ref))
+
+            def _row_key(row):
+                values = row if isinstance(row, dict) else dict(row.items())
+                return tuple(values.get(c) for c in order_cols)
+
+            rows_list = sorted(rows_list, key=_row_key)
+            headers = columns or order_cols
+            scan_state.update(
+                started=True,
+                local_rows=rows_list,
+                idx=0,
+                headers=headers,
+                total=total,
+            )
+        else:
+            col_sql = (
+                quote_column_list(
+                    [require_safe_identifier(c, preserve_case=True) for c in columns],
+                    quote_char="`",
+                )
+                if columns
+                else "*"
+            )
+            order_sql = quote_column_list(
+                [require_safe_identifier(order_cols[0], preserve_case=True)],
+                quote_char="`",
+            )
+            query = f"SELECT {col_sql} FROM {table_ref} ORDER BY {order_sql}"  # nosec B608
+            job = client.query(query)
+            rows_iter = job.result(timeout=300)
+            if job.schema:
+                headers = [field.name for field in job.schema]
+            else:
+                headers = list(order_cols)
+            scan_state.update(
+                started=True,
+                iter=iter(rows_iter),
+                headers=headers,
+                total=total,
+            )
+        return _bigquery_scan_page(scan_state, offset=offset, limit=limit)
+    except Exception as exc:
+        close_table_scan(scan_state)
+        raise RuntimeError(f"BigQuery scan failed for {table_ref}: {exc}") from exc
+
+
+def _bigquery_scan_page(
+    scan_state: dict[str, Any], *, offset: int, limit: int
+) -> ReadBatch:
+    from connectors.sql_snapshot_scan import close_table_scan
+
+    headers = list(scan_state.get("headers") or [])
+    total = scan_state.get("total")
+    local_rows = scan_state.get("local_rows")
+    if local_rows is not None:
+        idx = int(scan_state.get("idx") or 0)
+        page = local_rows[idx : idx + max(1, int(limit))]
+        scan_state["idx"] = idx + len(page)
+        if not page:
+            close_table_scan(scan_state)
+            return ReadBatch(headers=headers, rows=[], offset=offset, total_rows=total)
+        rows = [
+            [
+                cell_to_string(
+                    row.get(c) if isinstance(row, dict) else row[c],
+                    preserve_sql_null=True,
+                )
+                for c in headers
+            ]
+            for row in page
+        ]
+        return ReadBatch(headers=headers, rows=rows, offset=offset, total_rows=total)
+    it = scan_state.get("iter")
+    page_rows: list[list[str]] = []
+    if it is not None:
+        for row in it:
+            page_rows.append(
+                [cell_to_string(v, preserve_sql_null=True) for v in row.values()]
+            )
+            if len(page_rows) >= max(1, int(limit)):
+                break
+    if not page_rows:
+        close_table_scan(scan_state)
+        return ReadBatch(headers=headers, rows=[], offset=offset, total_rows=total)
+    return ReadBatch(headers=headers, rows=page_rows, offset=offset, total_rows=total)

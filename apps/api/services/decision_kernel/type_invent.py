@@ -74,11 +74,13 @@ def _bind_from_type_system() -> None:
         'float_mantissa_bits',
         'integer_bit_width',
         'is_bitstring_carrier',
+        'is_fixed_width_char_carrier',
         'is_national_string_carrier',
         'is_unlimited_string_carrier',
         'observe_numeric_samples',
         'parse_array_element',
         'parse_numeric_precision_scale',
+        'parse_string_carrier_width',
         'parse_temporal_fractional_precision',
         'specialty_carrier_base',
         'specialty_wire_preserves_value',
@@ -944,9 +946,52 @@ def create_new_mapping_target_type(
     stamp = _create_new_mapping_target_type(
         src_type, dest_db_type, samples=samples, source_db=source_db
     )
-    return unicode_safe_target_carrier(
+    stamp = unicode_safe_target_carrier(
         stamp, dest_db=dest_db_type, source_db=source_db
     )
+    stamp = refuse_create_new_numeric_collapse(src_type, stamp, dest_db_type)
+    inherited = inherit_measured_string_width(
+        stamp, src_type, dest_db=dest_db_type
+    )
+    return inherited or stamp
+
+
+def refuse_create_new_numeric_collapse(
+    src_type: str, stamp: str, dest_db_type: str
+) -> str:
+    """Create-new must not invent a narrower dest than the declared source.
+
+    Sample-sized BIGINT / NUMERIC(9,4) from NUMBER(38,0) / DECIMAL(12,2) is the
+    Airbyte-class cliff: Validate looks green on 25 rows, Execute can overflow
+    or round the rest of the population.
+    """
+    from services.type_system import is_precision_collapse_coercion
+
+    src = (src_type or "").strip()
+    dest = (stamp or "").strip()
+    db = (dest_db_type or "").strip()
+    if not src or not dest:
+        return stamp
+    # Only rewrite numeric/integer/float invent. DECIMAL→TEXT is an explicit
+    # Map stamp (quarantine unfit cells), not the BIGINT / NUMERIC(9,4) cliff.
+    dest_logical = normalize_logical_type(dest)
+    if dest_logical not in {LOGICAL_DECIMAL, LOGICAL_INTEGER, LOGICAL_FLOAT}:
+        return stamp
+    # Bare DECIMAL/NUMBER may still be sample-sized. Only rewrite when the
+    # source declared a precision the stamp collapses (NUMBER(38,0)→BIGINT).
+    src_p, _src_s = parse_numeric_precision_scale(src)
+    if src_p is None and dest_logical != LOGICAL_INTEGER:
+        return stamp
+    if not is_precision_collapse_coercion(
+        src, dest, dest_db=db, dest_table_exists=False
+    ):
+        return stamp
+    recovered = ddl_type(db, src) if db else src
+    if recovered and not is_precision_collapse_coercion(
+        src, recovered, dest_db=db, dest_table_exists=False
+    ):
+        return recovered
+    return src
 
 
 def _create_new_mapping_target_type(
@@ -1557,7 +1602,163 @@ def _is_explicit_physical_stamp(carrier: str, dest_db: str = "") -> bool:
 
 
 
-def materialize_dest_ddl(db_type: str, carrier: str | None) -> str:
+# Bare Map stamps that name a string family but declare no width. These are
+# Studio/Map defaults, not an operator request for a LOB. TEXT/CLOB/MAX stay
+# unbounded (Map≡CREATE). Widthless CHAR is CHAR(1) on MySQL — treat it as a
+# string-family alias unless the source itself is pad-fixed CHAR(n).
+_WIDTHLESS_VARCHAR_STAMPS = frozenset({
+    "VARCHAR",
+    "NVARCHAR",
+    "VARCHAR2",
+    "NVARCHAR2",
+    "CHAR",
+    "NCHAR",
+    "CHARACTER",
+    "CHARACTER VARYING",
+    "NATIONAL CHAR",
+    "NATIONAL CHARACTER",
+    "NATIONAL CHARACTER VARYING",
+    "STRING",
+})
+_NATIONAL_STRING_FAMILIES = frozenset({
+    "NVARCHAR",
+    "NVARCHAR2",
+    "NCHAR",
+    "NATIONAL CHAR",
+    "NATIONAL CHARACTER",
+    "NATIONAL CHARACTER VARYING",
+})
+_FIXED_STRING_FAMILIES = frozenset({
+    "CHAR",
+    "NCHAR",
+    "CHARACTER",
+    "NATIONAL CHAR",
+    "NATIONAL CHARACTER",
+})
+_ORACLE_LENGTH_FAMILIES = frozenset({
+    "VARCHAR",
+    "NVARCHAR",
+    "VARCHAR2",
+    "NVARCHAR2",
+    "CHAR",
+    "NCHAR",
+})
+_MYSQL_CHARSET_DESTS = frozenset({"mysql", "mariadb", "tidb"})
+_STRING_QUALIFIER_RE = re.compile(
+    r"(?i)^(.+?)((?:\s+(?:CHARACTER\s+SET|CHARSET|COLLATE)\s+\S+)+)$"
+)
+_LENGTH_SEMANTICS_RE = re.compile(r"\(\s*\d+\s*(CHAR|BYTE)\s*\)", re.I)
+
+
+def _split_string_qualifiers(stamp: str) -> tuple[str, str]:
+    """Split ``VARCHAR COLLATE utf8mb4_bin`` into (base, trailing charset/collate)."""
+    text = (stamp or "").strip()
+    matched = _STRING_QUALIFIER_RE.match(text)
+    if not matched:
+        return text, ""
+    return matched.group(1).strip(), matched.group(2)
+
+
+def _fold_widthless_string_stamp(stamp: str) -> str:
+    folded = re.sub(r"\s+COLLATE\s+\S+", "", stamp, flags=re.I)
+    folded = re.sub(r"\s+CHARACTER\s+SET\s+\S+", "", folded, flags=re.I)
+    folded = re.sub(r"\s+CHARSET\s+\S+", "", folded, flags=re.I)
+    return re.sub(r"\s+", " ", folded).strip().upper()
+
+
+def _length_semantics_unit(inferred: str) -> str:
+    """Oracle ``(n CHAR)`` / ``(n BYTE)`` unit, else empty."""
+    matched = _LENGTH_SEMANTICS_RE.search(strip_identity_qualifier(inferred))
+    return matched.group(1).upper() if matched else ""
+
+
+def _family_for_inherited_width(folded: str, source_type: str) -> str:
+    """Map-stamp family + source pad polarity → the token that receives ``(n)``.
+
+    Map owns national/varying polarity (``NVARCHAR`` vs ``VARCHAR``). Source
+    owns whether a widthless ``CHAR`` was a pad-fixed request (source is
+    CHAR(n)) or a Studio string alias (source is VARCHAR(n) → VARCHAR(n)).
+    """
+    national = folded in _NATIONAL_STRING_FAMILIES or is_national_string_carrier(folded)
+    if folded in _FIXED_STRING_FAMILIES:
+        if is_fixed_width_char_carrier(source_type):
+            return "NCHAR" if national else "CHAR"
+        return "NVARCHAR" if national else "VARCHAR"
+    if folded in {"CHARACTER VARYING", "NATIONAL CHARACTER VARYING"}:
+        return "NVARCHAR" if national else "VARCHAR"
+    if folded == "STRING":
+        return "STRING"
+    if folded == "VARCHAR2":
+        return "NVARCHAR2" if national else "VARCHAR2"
+    if folded == "NVARCHAR2":
+        return "NVARCHAR2"
+    if folded == "NVARCHAR":
+        return "NVARCHAR"
+    return "NVARCHAR" if national else "VARCHAR"
+
+
+def inherit_measured_string_width(
+    map_stamp: str | None,
+    source_type: str | None,
+    *,
+    dest_db: str = "",
+) -> str:
+    """CREATE-new dest DDL: a widthless VARCHAR stamp inherits source ``(n)``.
+
+    Competitor pain: Fivetran auto-promotes types; Airbyte lands TEXT and the
+    unique key disappears. A measured ``VARCHAR(255)`` source must not become
+    MySQL ``TEXT`` (unindexable without an invented prefix) just because Map
+    stamped bare ``VARCHAR``.
+
+    Rules (Map≡CREATE, never silent LOB invent):
+    - Bounded Map stamps (``VARCHAR(10)``) stay as stamped.
+    - Explicit LOB stamps (``TEXT``, ``CLOB``, ``LONGTEXT``, ``VARCHAR(MAX)``)
+      stay unbounded.
+    - Widthless family stamps inherit source width onto the **Map family**
+      (national / STRING / VARCHAR2 polarity is the operator's), then project
+      through ``_string_ddl_for_dest`` when ``dest_db`` is known so over-cap
+      widths become LONGTEXT/CLOB/MAX instead of illegal ``VARCHAR(n)``.
+    """
+    raw_stamp = (map_stamp or "").strip()
+    if not raw_stamp:
+        return ""
+    # Split charset/collate before strip_identity_qualifier — that helper
+    # drops COLLATE, which would silently un-pin a case-sensitive unique key.
+    base_raw, qualifiers = _split_string_qualifiers(raw_stamp)
+    stamp = strip_identity_qualifier(base_raw).strip()
+    src = strip_identity_qualifier(source_type).strip() if source_type else ""
+    if not stamp:
+        return stamp
+    if parse_string_carrier_width(stamp) is not None:
+        return raw_stamp
+    folded = _fold_widthless_string_stamp(stamp)
+    if folded not in _WIDTHLESS_VARCHAR_STAMPS:
+        return stamp
+    width = parse_string_carrier_width(src)
+    if width is None:
+        return stamp
+    family = _family_for_inherited_width(folded, src)
+    unit = _length_semantics_unit(src)
+    if unit and family in _ORACLE_LENGTH_FAMILIES:
+        synthetic = f"{family}({width} {unit})"
+    else:
+        synthetic = f"{family}({width})"
+    db = _normalize_dest_db(dest_db) if dest_db else ""
+    inherited = synthetic
+    if db:
+        projected = _string_ddl_for_dest(db, synthetic)
+        if projected:
+            inherited = projected
+    if qualifiers and (not db or db in _MYSQL_CHARSET_DESTS):
+        return f"{inherited}{qualifiers}"
+    return inherited
+
+
+def materialize_dest_ddl(
+    db_type: str,
+    carrier: str | None,
+    source_type: str | None = None,
+) -> str:
     """Writer CREATE DDL: honor Map physical stamps; map logicals via ddl_type.
 
     SSOT so Execute CREATE cannot invent REAL→DOUBLE, TIMESTAMP→DATETIME (BQ),
@@ -1579,11 +1780,18 @@ def materialize_dest_ddl(db_type: str, carrier: str | None) -> str:
     Validate's job, not silent CREATE rewrite. Exception: tokens listed in
     ``_PASS_THROUGH_REJECT_ON_DEST`` (e.g. ``DECIMAL(p,s)`` on SQLite) always
     rematerialize via ``ddl_type`` so CREATE cannot invent NUMERIC affinity.
+
+    ``source_type``: when Map stamped a widthless VARCHAR family token, inherit
+    the source's measured ``(n)`` so MySQL UNIQUE/PK stay indexable.
     """
     raw = strip_identity_qualifier(carrier).strip()
+    db = _normalize_dest_db(db_type)
+    if raw and source_type:
+        inherited = inherit_measured_string_width(raw, source_type, dest_db=db)
+        if inherited:
+            raw = inherited
     if not raw:
         return ddl_type(db_type, "VARCHAR")
-    db = _normalize_dest_db(db_type)
     upper = raw.upper()
     if db == "iceberg":
         # Rematerialize SQL/Spark ARRAY / VECTOR spellings to list<…>.
@@ -1770,7 +1978,9 @@ __all__ = [
     'normalize_logical_type',
     'ddl_type',
     'create_new_mapping_target_type',
+    'refuse_create_new_numeric_collapse',
     'materialize_dest_ddl',
+    'inherit_measured_string_width',
     'integer_width_carrier',
     'float_width_carrier',
     'ddl_invent_never_narrower_than_table',

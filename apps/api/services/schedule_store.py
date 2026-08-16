@@ -12,7 +12,7 @@ import logging
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Mapping
 
 from services.cron_schedule import CronError, validate_cron
 from services.cron_schedule import next_run as _cron_next_run
@@ -32,6 +32,8 @@ SYNC_MODES = {
     "full_refresh_overwrite",
     "full_refresh_append",
     "incremental",
+    "incremental_append",
+    "incremental_deduped",
     "cdc",
     "scd2",
     "mirror",
@@ -121,10 +123,17 @@ class PipelineSchedule:
     validation_mode: str = "strict"
     schema_policy: str = "manual_review"
     backfill_new_fields: bool = False
+    # CDC dest-owned watermark EOS is opt-in; default stays at_least_once.
+    delivery_guarantee: str = "at_least_once"
     mappings: list[dict] = field(default_factory=list)
     stream_contracts: list[dict] = field(default_factory=list)
     cursor_column: str = ""  # watermark column for incremental syncs
     primary_key: str = ""  # key for idempotent incremental/cdc upserts
+    #: Callable extract — persist the CALL/SELECT, not just the stream label.
+    source_read_mode: str = ""
+    procedure_call: str = ""
+    source_query: str = ""
+    procedure_params: dict[str, Any] = field(default_factory=dict)
     cursor_value: str = ""  # last observed watermark (advances each run)
     workspace_id: str = ""
     # Data contract — when set, scheduled runs enforce the signed contract.
@@ -138,6 +147,13 @@ class PipelineSchedule:
     source_schema: dict[str, str] = field(default_factory=dict)
     source_schema_fingerprint: str = ""
     source_schema_observed_at: str = ""
+    #: Live source primary-key columns observed with the type map. PK-only
+    #: identity changes keep the same col→type map, so a type-only baseline
+    #: cannot see them — Confluent NONE / Airbyte hard-break.
+    source_primary_key: list[str] = field(default_factory=list)
+    #: Dual Run campaign: consecutive parallel-run cycles on this route.
+    #: ``evaluate_campaign`` is the kernel; this is durable memory for it.
+    fidelity_campaign: dict[str, Any] = field(default_factory=dict)
     # Retry policy applied on run failure.
     max_retries: int = 0
     retry_backoff_seconds: int = 60
@@ -187,10 +203,23 @@ class PipelineSchedule:
             validation_mode=data.get("validation_mode") or "strict",
             schema_policy=data.get("schema_policy") or "manual_review",
             backfill_new_fields=bool(data.get("backfill_new_fields", False)),
+            delivery_guarantee=(
+                str(data.get("delivery_guarantee") or "at_least_once")
+                .strip()
+                .lower()
+                .replace("-", "_")
+                or "at_least_once"
+            ),
             mappings=list(data.get("mappings") or []),
             stream_contracts=list(data.get("stream_contracts") or []),
             cursor_column=(data.get("cursor_column") or "").strip(),
             primary_key=(data.get("primary_key") or "").strip(),
+            source_read_mode=str(data.get("source_read_mode") or "").strip().lower(),
+            procedure_call=str(data.get("procedure_call") or "").strip(),
+            source_query=str(data.get("source_query") or "").strip(),
+            procedure_params=dict(data.get("procedure_params") or {})
+            if isinstance(data.get("procedure_params"), dict)
+            else {},
             cursor_value=str(data.get("cursor_value") or ""),
             workspace_id=(data.get("workspace_id") or "").strip(),
             contract_id=(data.get("contract_id") or "").strip(),
@@ -200,6 +229,21 @@ class PipelineSchedule:
                     bool((data.get("contract_id") or "").strip()),
                 )
             ),
+            source_schema={
+                str(k): str(v)
+                for k, v in (data.get("source_schema") or {}).items()
+                if not isinstance(v, (dict, list))
+            },
+            source_schema_fingerprint=str(data.get("source_schema_fingerprint") or ""),
+            source_schema_observed_at=str(data.get("source_schema_observed_at") or ""),
+            source_primary_key=[
+                str(p).strip()
+                for p in (data.get("source_primary_key") or [])
+                if str(p).strip()
+            ],
+            fidelity_campaign=dict(data.get("fidelity_campaign") or {})
+            if isinstance(data.get("fidelity_campaign"), dict)
+            else {},
             max_retries=max(0, int(data.get("max_retries", 0) or 0)),
             retry_backoff_seconds=max(0, int(data.get("retry_backoff_seconds", 60) or 0)),
             notify_on_failure=bool(data.get("notify_on_failure", True)),
@@ -427,9 +471,55 @@ def assert_signed_contract(contract_id: str, *, require_signed: bool) -> None:
         raise ValueError(f"Contract {contract_id} not found")
     if require_signed and contract.status != ContractStatus.SIGNED:
         raise ValueError(
-            f"Contract {contract_id} must be SIGNED before scheduling "
+            f"Contract {contract_id} must be SIGNED before this run "
             f"(current status: {contract.status.value})"
         )
+
+
+def schedule_bind_summary(sched: Any) -> dict[str, Any]:
+    """Read-only bind preview for Pilot list/get. Never invents. Never raises.
+
+    OPEN / unsigned binds still appear so the operator can see why Run is
+    refused. Cron and Confirm use ``assert_schedule_run_allowed`` instead.
+    """
+    try:
+        from services.contract_store import bound_contract_preview
+    except ImportError:  # pragma: no cover
+        from src.services.contract_store import bound_contract_preview
+
+    return bound_contract_preview(
+        getattr(sched, "contract_id", None) or "",
+        require_signed=bool(getattr(sched, "require_signed_contract", False)),
+    )
+
+
+def assert_schedule_run_allowed(sched: Any) -> dict[str, Any]:
+    """Fail-closed SIGNED + breaker for a scheduled run. Returns bind preview.
+
+    Cron, Pilot staging, and Pilot Confirm share this check. An unbound
+    schedule returns ``{}`` so enforce stays unset (same as Studio).
+    """
+    cid = (getattr(sched, "contract_id", None) or "").strip()
+    require = bool(getattr(sched, "require_signed_contract", False))
+    if cid or require:
+        assert_signed_contract(cid, require_signed=require)
+    if cid:
+        try:
+            from services.contract_store import assert_contract_breaker_allows
+        except ImportError:  # pragma: no cover
+            from src.services.contract_store import assert_contract_breaker_allows
+
+        assert_contract_breaker_allows(cid)
+    return schedule_bind_summary(sched)
+
+
+def _assert_callable_schedule_sync(data: Mapping[str, Any] | None, sync_mode: str) -> None:
+    """Refuse CDC/SCD2/mirror on a persisted CALL/SELECT extract."""
+    from services.procedure_source import callable_sync_refusal, source_read_mode_of
+
+    reason = callable_sync_refusal(sync_mode, source_read_mode=source_read_mode_of(data or {}))
+    if reason:
+        raise ValueError(reason)
 
 
 def create_schedule(data: dict[str, Any]) -> PipelineSchedule:
@@ -443,6 +533,7 @@ def create_schedule(data: dict[str, Any]) -> PipelineSchedule:
     require_signed = bool(data.get("require_signed_contract", bool(contract_id)))
     if contract_id or require_signed:
         assert_signed_contract(contract_id, require_signed=require_signed)
+    _assert_callable_schedule_sync(data, sync_mode)
     sched = PipelineSchedule.from_dict({
         **data,
         "id": str(uuid.uuid4()),
@@ -482,6 +573,7 @@ def update_schedule(schedule_id: str, data: dict[str, Any]) -> PipelineSchedule 
         )
         if (enabling or contract_changed) and (contract_id or require_signed):
             assert_signed_contract(contract_id, require_signed=require_signed)
+        _assert_callable_schedule_sync(merged, sync_mode)
         merged["contract_id"] = contract_id
         merged["require_signed_contract"] = require_signed
         updated = PipelineSchedule.from_dict(merged)

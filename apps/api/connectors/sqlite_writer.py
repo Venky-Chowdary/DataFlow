@@ -25,17 +25,12 @@ from connectors.writer_common import (
     CHUNK_SIZE,
     _coerced_null_row_count,
     _rejected_row_count,
-    apply_write_quarantine_matrix,
     bind_sql_mapped_rows_with_quarantine,
-    build_mapped_rows_with_details,
     filter_stale_lsn_rows,
-    gate8_writer_meta,
     quote_sql_identifier,
     resolve_conflict_targets,
     resolve_target_columns,
-    row_checksum,
     sanitize_identifier,
-    split_dense_sparse_rows,
     transform_error_policy,
 )
 from connectors.writer_common import (
@@ -48,6 +43,20 @@ logger = logging.getLogger(__name__)
 @dataclass
 class WriteResult(_WriteResult):
     driver: str = "sqlite3"
+
+
+@dataclass
+class _SqliteMaterializedBatch:
+    """Retain-contract concat of finished bundles. Write loop must not use this."""
+
+    mapped_rows: list[tuple]
+    sparse_rows: list[tuple]
+    transform_errors: list[str]
+    rejected_details: list
+    target_types: list[str]
+    dest_types: dict[str, str]
+    rows_for_checksum: list[tuple]
+    source_row_count: int = 0
 
 
 def sqlite_type(inferred: str) -> str:
@@ -195,6 +204,266 @@ def _to_sqlite_value(value: Any, source_type: str) -> Any:
             )
         return coerced
     return value
+
+
+def _sqlite_polish_bound_rows(
+    rows: list[tuple],
+    tgt_types: list[str],
+) -> list[tuple]:
+    """Typed wire polish after shared bind. Peak RAM is this bundle."""
+    if not rows:
+        return rows
+    return [
+        tuple(
+            _to_sqlite_value(v, tgt_types[i] if i < len(tgt_types) else "")
+            for i, v in enumerate(row)
+        )
+        for row in rows
+    ]
+
+
+def _sqlite_map_kwargs(
+    *,
+    headers: list[str],
+    data_rows: list,
+    mappings: list,
+    target_cols: list[str],
+    column_types: dict[str, str] | None,
+    dest_types: dict[str, str],
+    policy: Any,
+    destination_pk_columns: list[str] | None,
+    destination_column_nullability: Any,
+    empty_cells_as_null: bool,
+    records: list[dict[str, Any]] | None,
+    source_spool: Any,
+    extra: dict[str, Any] | None,
+    materialize_batch: int | None,
+) -> dict[str, Any]:
+    return {
+        "headers": headers,
+        "data_rows": data_rows,
+        "mappings": mappings,
+        "target_cols": target_cols,
+        "column_types": column_types,
+        "dest_types": dest_types,
+        "error_policy": policy,
+        "preserve_case": True,
+        "dest_kind": "sqlite",
+        "destination_pk_columns": list(destination_pk_columns or []) or None,
+        "destination_column_nullability": destination_column_nullability,
+        "empty_cells_as_null": bool(empty_cells_as_null),
+        "records": records,
+        "source_spool": source_spool,
+        "extra": extra,
+        "batch_size": materialize_batch,
+    }
+
+
+def _sqlite_finish_mapped_bundle(
+    bundle: Any,
+    *,
+    target_cols: list[str],
+    dest_types: dict[str, str],
+    tgt_types: list[str],
+    policy: Any,
+    conflict_columns: list[str] | None,
+    write_mode: str,
+    mappings: list,
+) -> Any:
+    """Quarantine + in-bundle dedupe + bind + SQLite wire polish. One bundle."""
+    from connectors.sql_write_materialize import finish_sql_mapped_bundle
+    from connectors.writer_common import (
+        combined_mapped_rows_for_checksum,
+        materialize_missing_as_null_for_dense_write,
+    )
+
+    finished = finish_sql_mapped_bundle(
+        bundle,
+        target_cols=target_cols,
+        target_types=tgt_types,
+        policy=policy,
+        dialect_label="SQLite",
+        dest_db="sqlite",
+        mappings=list(mappings or []) or None,
+        write_mode=write_mode,
+        conflict_columns=conflict_columns,
+    )
+    finished.dense_rows = bind_sql_mapped_rows_with_quarantine(
+        finished.dense_rows,
+        target_cols,
+        tgt_types,
+        finished.rejected_details,
+        policy,
+        engine="sqlite",
+        dialect_label="SQLite",
+        mappings=list(mappings or []) or None,
+        row_numbers=finished.dense_row_numbers or None,
+    )
+    finished.sparse_rows = bind_sql_mapped_rows_with_quarantine(
+        finished.sparse_rows,
+        target_cols,
+        tgt_types,
+        finished.rejected_details,
+        policy,
+        engine="sqlite",
+        dialect_label="SQLite",
+        mappings=list(mappings or []) or None,
+        row_numbers=finished.sparse_row_numbers or None,
+    )
+    finished.dense_rows = _sqlite_polish_bound_rows(finished.dense_rows, tgt_types)
+    finished.sparse_rows = _sqlite_polish_bound_rows(finished.sparse_rows, tgt_types)
+    if not (write_mode == "upsert" and conflict_columns):
+        finished.dense_rows = materialize_missing_as_null_for_dense_write(
+            finished.dense_rows
+        )
+    finished.checksum_rows = combined_mapped_rows_for_checksum(
+        finished.dense_rows, finished.sparse_rows
+    )
+    finished.target_types = list(tgt_types)
+    finished.bind_types = list(tgt_types)
+    return finished
+
+
+def iter_sqlite_finished_bundles(
+    *,
+    headers: list[str],
+    data_rows: list,
+    mappings: list,
+    target_cols: list[str],
+    column_types: dict[str, str] | None,
+    dest_types: dict[str, str],
+    tgt_types: list[str],
+    policy: Any,
+    conflict_columns: list[str] | None,
+    write_mode: str,
+    destination_pk_columns: list[str] | None = None,
+    destination_column_nullability: Any = None,
+    empty_cells_as_null: bool = False,
+    records: list[dict[str, Any]] | None = None,
+    source_spool: Any = None,
+    extra: dict[str, Any] | None = None,
+    materialize_batch: int | None = None,
+) -> Any:
+    """Yield finished SQLite bundles. Caller writes and drops each one."""
+    from connectors.sql_write_materialize import iter_finished_sql_bundles
+
+    def _finish(bundle):
+        return _sqlite_finish_mapped_bundle(
+            bundle,
+            target_cols=target_cols,
+            dest_types=dest_types,
+            tgt_types=tgt_types,
+            policy=policy,
+            conflict_columns=conflict_columns,
+            write_mode=write_mode,
+            mappings=mappings,
+        )
+
+    yield from iter_finished_sql_bundles(
+        finish=_finish,
+        **_sqlite_map_kwargs(
+            headers=headers,
+            data_rows=data_rows,
+            mappings=mappings,
+            target_cols=target_cols,
+            column_types=column_types,
+            dest_types=dest_types,
+            policy=policy,
+            destination_pk_columns=destination_pk_columns,
+            destination_column_nullability=destination_column_nullability,
+            empty_cells_as_null=empty_cells_as_null,
+            records=records,
+            source_spool=source_spool,
+            extra=extra,
+            materialize_batch=materialize_batch,
+        ),
+    )
+
+
+def _sqlite_scan_finished_bundles(**kwargs: Any) -> Any:
+    """Map + finish every bundle, keep rejects, discard accepted tuples."""
+    from connectors.sql_write_materialize import SqlWriteAccumulator
+
+    acc = SqlWriteAccumulator(
+        target_cols=kwargs["target_cols"],
+        dest_db_type="sqlite",
+        dest_types=kwargs.get("dest_types") if isinstance(kwargs.get("dest_types"), dict) else {},
+        dialect_label="SQLite",
+    )
+    source_row_count = 0
+    tgt_types: list[str] = list(kwargs.get("tgt_types") or [])
+    for finished in iter_sqlite_finished_bundles(**kwargs):
+        acc.note_rejects(finished.rejected_details, finished.transform_errors)
+        source_row_count = finished.source_row_count
+        tgt_types = finished.target_types or tgt_types
+        del finished
+    acc.stop_writing()
+    return acc, source_row_count, tgt_types
+
+
+def _sqlite_materialize_mapped_batch(
+    *,
+    headers: list[str],
+    data_rows: list,
+    mappings: list,
+    target_cols: list[str],
+    column_types: dict[str, str] | None,
+    dest_types: dict[str, str],
+    tgt_types: list[str],
+    policy: Any,
+    conflict_columns: list[str] | None,
+    write_mode: str,
+    destination_pk_columns: list[str] | None = None,
+    destination_column_nullability: Any = None,
+    empty_cells_as_null: bool = False,
+    records: list[dict[str, Any]] | None = None,
+    source_spool: Any = None,
+    extra: dict[str, Any] | None = None,
+    materialize_batch: int | None = None,
+) -> _SqliteMaterializedBatch:
+    """Concat finished bundles for the retain contract. Write loop must not call this."""
+    mapped_rows: list[tuple] = []
+    sparse_rows: list[tuple] = []
+    transform_errors: list[str] = []
+    rejected_details: list = []
+    rows_for_checksum: list[tuple] = []
+    source_row_count = 0
+    for finished in iter_sqlite_finished_bundles(
+        headers=headers,
+        data_rows=data_rows,
+        mappings=mappings,
+        target_cols=target_cols,
+        column_types=column_types,
+        dest_types=dest_types,
+        tgt_types=tgt_types,
+        policy=policy,
+        conflict_columns=conflict_columns,
+        write_mode=write_mode,
+        destination_pk_columns=destination_pk_columns,
+        destination_column_nullability=destination_column_nullability,
+        empty_cells_as_null=empty_cells_as_null,
+        records=records,
+        source_spool=source_spool,
+        extra=extra,
+        materialize_batch=materialize_batch,
+    ):
+        mapped_rows.extend(finished.dense_rows)
+        sparse_rows.extend(finished.sparse_rows)
+        rows_for_checksum.extend(finished.checksum_rows)
+        transform_errors.extend(finished.transform_errors)
+        rejected_details.extend(finished.rejected_details)
+        source_row_count = finished.source_row_count
+        del finished
+    return _SqliteMaterializedBatch(
+        mapped_rows=mapped_rows,
+        sparse_rows=sparse_rows,
+        transform_errors=transform_errors,
+        rejected_details=rejected_details,
+        target_types=list(tgt_types),
+        dest_types=dict(dest_types or {}),
+        rows_for_checksum=rows_for_checksum,
+        source_row_count=source_row_count,
+    )
 
 
 def _sqlite_apply_sparse_upsert(
@@ -360,10 +629,14 @@ def _sqlite_upsert_batch(
         return 0, empty_pk_skipped + skipped
 
     table_quoted = quote_sql_identifier(table_name)
-    cols_sql = ", ".join(quote_sql_identifier(c) for c in target_cols)
-    placeholders = ", ".join("?" for _ in target_cols)
+    lattice = _sqlite_physical_lattice(cur, table_name)
+    from services.mirror_engine import upsert_insert_columns, upsert_set_columns
+
+    update_cols = upsert_set_columns(target_cols, conflict_cols, lattice)
+    insert_cols = upsert_insert_columns(target_cols, lattice)
+    cols_sql = ", ".join(quote_sql_identifier(c) for c in insert_cols)
+    placeholders = ", ".join("?" for _ in insert_cols)
     conflict_sql = ", ".join(quote_sql_identifier(c) for c in conflict_cols)
-    update_cols = [c for c in target_cols if c not in conflict_cols]
 
     if lsn_guarded and update_cols:
         where_sql = sqlite_lsn_update_guard_sql(table_name)
@@ -376,13 +649,26 @@ def _sqlite_upsert_batch(
             f"ON CONFLICT ({conflict_sql}) DO UPDATE SET {set_sql} WHERE {where_sql}"
         )
         try:
-            cur.executemany(insert_sql, rows)
+            cur.executemany(
+                insert_sql, [_project_row(r, target_cols, insert_cols) for r in rows]
+            )
             return len(rows), empty_pk_skipped + skipped
         except Exception as exc:
-            # Missing UNIQUE on conflict cols — fall through to delete+insert.
-            logger.warning("Exception suppressed: %s", exc, exc_info=exc)
+            logger.debug("sqlite ON CONFLICT unavailable: %s", exc)
 
-    # delete+insert fallback (already deduped + LSN filtered).
+    if lattice:
+        written = _sqlite_update_insert_upsert(
+            cur,
+            table_quoted,
+            target_cols,
+            conflict_cols,
+            update_cols,
+            insert_cols,
+            rows,
+        )
+        return written, empty_pk_skipped + skipped
+
+    # delete+insert fallback when the dest has no dest-owned lattice columns.
     indices = [target_cols.index(c) for c in conflict_cols]
     deduped = {tuple(row[i] for i in indices): row for row in rows}
     rows = list(deduped.values())
@@ -394,11 +680,71 @@ def _sqlite_upsert_batch(
     delete_params = [v for key in deduped.keys() for v in key]
     cur.execute(delete_sql, delete_params)
 
-    insert_sql = f"INSERT INTO {table_quoted} ({cols_sql}) VALUES ({placeholders})"  # nosec B608
-    cur.executemany(insert_sql, rows)
-    # Dedup may drop duplicates within the batch — count those as skipped too.
+    insert_sql = (
+        f"INSERT INTO {table_quoted} ({cols_sql}) VALUES ({placeholders})"  # nosec B608
+    )
+    cur.executemany(insert_sql, [_project_row(r, target_cols, insert_cols) for r in rows])
     dedup_skipped = original_count - len(rows) - skipped
     return len(rows), empty_pk_skipped + skipped + max(0, dedup_skipped)
+
+
+def _sqlite_physical_lattice(cur: Any, table_name: str) -> tuple[str, ...]:
+    from services.mirror_engine import lattice_column_names
+
+    cur.execute(f"PRAGMA table_info({quote_sql_identifier(table_name)})")  # nosec B608
+    return lattice_column_names([row[1] for row in cur.fetchall()])
+
+
+def _project_row(row: Any, target_cols: list[str], cols: list[str]) -> tuple[Any, ...]:
+    if isinstance(row, dict):
+        return tuple(row.get(c) for c in cols)
+    return tuple(row[target_cols.index(c)] for c in cols)
+
+
+def _sqlite_update_insert_upsert(
+    cur: Any,
+    table_quoted: str,
+    target_cols: list[str],
+    conflict_cols: list[str],
+    update_cols: list[str],
+    insert_cols: list[str],
+    rows: list[Any],
+) -> int:
+    """sqlite3 spelling of ``merge_dialects.update_insert_upsert``. Never DELETE."""
+    keys = [_project_row(row, target_cols, conflict_cols) for row in rows]
+    existing: set[tuple[Any, ...]] = set()
+    pk_sql = ", ".join(quote_sql_identifier(c) for c in conflict_cols)
+    for i in range(0, len(keys), 400):
+        part = keys[i : i + 400]
+        ph = ", ".join("(" + ", ".join("?" for _ in conflict_cols) + ")" for _ in part)
+        cur.execute(
+            f"SELECT {pk_sql} FROM {table_quoted} WHERE ({pk_sql}) IN ({ph})",  # nosec B608
+            [v for key in part for v in key],
+        )
+        existing.update(tuple(found) for found in cur.fetchall())
+    to_update: list[tuple[Any, ...]] = []
+    to_insert: list[tuple[Any, ...]] = []
+    for row, key in zip(rows, keys):
+        if key in existing:
+            if update_cols:
+                to_update.append(_project_row(row, target_cols, update_cols) + key)
+        else:
+            to_insert.append(_project_row(row, target_cols, insert_cols))
+    if to_update and update_cols:
+        set_sql = ", ".join(f"{quote_sql_identifier(c)}=?" for c in update_cols)
+        where_sql = " AND ".join(f"{quote_sql_identifier(c)}=?" for c in conflict_cols)
+        cur.executemany(
+            f"UPDATE {table_quoted} SET {set_sql} WHERE {where_sql}",  # nosec B608
+            to_update,
+        )
+    if to_insert:
+        cols_sql = ", ".join(quote_sql_identifier(c) for c in insert_cols)
+        ph = ", ".join("?" for _ in insert_cols)
+        cur.executemany(
+            f"INSERT INTO {table_quoted} ({cols_sql}) VALUES ({ph})",  # nosec B608
+            to_insert,
+        )
+    return len(rows)
 
 
 def write_mapped_rows(
@@ -445,15 +791,18 @@ def write_mapped_rows(
             error="SQLite path is required (database or connection_string).",
         )
 
-    from connectors.writer_common import sample_values_by_source_from_batch
+    from connectors.sql_write_materialize import sample_sql_source_values
 
-    batch_samples = sample_values_by_source_from_batch(headers, data_rows, mappings)
+    batch_samples = sample_sql_source_values(
+        headers, data_rows, mappings, records=_kwargs.get("records") if isinstance(_kwargs.get("records"), list) else None
+    )
     target_cols, logical_types = resolve_target_columns(
         mappings,
         column_types,
         preserve_case=True,
         sample_values_by_source=batch_samples,
         table_exists=False if create_table else None,
+        dest_db="sqlite",
     )
     if not target_cols:
         return WriteResult(
@@ -495,6 +844,7 @@ def write_mapped_rows(
         logical_types=logical_types,
         studio_types=live_dest if isinstance(live_dest, dict) else None,
         product="SQLite",
+        dest_db="sqlite",
     )
     # ddl_types → CREATE/ALTER affinity; tgt_types → Map carriers for quarantine/bind
     # (DATETIME must not collapse to TEXT before TZ→NTZ refuse — audit §2.7).
@@ -509,16 +859,16 @@ def write_mapped_rows(
         target_types.append(sqlite_type(bind_c) if bind_c else "")
     policy = transform_error_policy(error_policy)
 
-    mapped_rows: list[tuple] = []
-    converted_rows: list[tuple] = []
     chunks = 0
     written = 0
     rows_skipped = 0
     transform_errors: list[str] = []
     rejected_details: list[dict] = []
-    rows_for_checksum: list[tuple] = []
-    sparse_rows: list[tuple] = []
     conflict_cols = [c for c in (conflict_columns or []) if c in target_cols]
+    rejected_rows = 0
+    coerced_null_rows = 0
+    source_row_count = 0
+    scanned_dest_sig: tuple[str, ...] | None = None
 
     try:
         # Probe before Map so create-new refuse / rematerialize win over
@@ -565,46 +915,6 @@ def write_mapped_rows(
                 rejected_details=rejected_details,
                 warnings=transform_errors,
             )
-
-        if not studio_err:
-            mapped_rows, transform_errors, rejected_details = (
-                build_mapped_rows_with_details(
-                    headers=headers,
-                    data_rows=data_rows,
-                    mappings=mappings,
-                    target_cols=target_cols,
-                    column_types=column_types,
-                    dest_types=dest_types,
-                    error_policy=policy,
-                    preserve_case=True,
-                    dest_kind="sqlite",
-                    destination_pk_columns=list(conflict_columns or []) or None,
-                    destination_column_nullability=_kwargs.get(
-                        "destination_column_nullability"
-                    ),
-                    empty_cells_as_null=bool(_kwargs.get("empty_cells_as_null")),
-                )
-            )
-            # Shared quarantine matrix — SQLite is PRODUCTION_SKU; never skip fit
-            # checks that generic_sql / Postgres / BQ run (silent truncate / invent).
-            mapped_rows = apply_write_quarantine_matrix(
-                mapped_rows,
-                target_cols,
-                tgt_types,
-                rejected_details,
-                policy,
-                dialect_label="SQLite",
-                mappings=list(mappings or []) or None,
-                dest_db="sqlite",
-            )
-            if write_mode == "upsert" and conflict_cols:
-                mapped_rows, sparse_rows = split_dense_sparse_rows(mapped_rows)
-            else:
-                from connectors.writer_common import (
-                    materialize_missing_as_null_for_dense_write,
-                )
-
-                mapped_rows = materialize_missing_as_null_for_dense_write(mapped_rows)
 
         overlay_err = require_physical_types_for_existing_table(
             table_existed=table_existed,
@@ -659,6 +969,8 @@ def write_mapped_rows(
                     col in ex
                     or str(col).lower() in {str(k).lower() for k in ex}
                 ),
+                dest_db="sqlite",
+                column_types=column_types,
             )
             if add_err:
                 return WriteResult(
@@ -726,11 +1038,11 @@ def write_mapped_rows(
                 != str(live_dest_types.get(c) or "").strip().upper()
                 for c in covered_cols
             )
-            need_remap = carriers_differ or (bool(studio_err) and not mapped_rows)
+            # Settle carriers now; the write loop maps once against this image.
+            # Keep Map temporal stamps over TEXT/NUMERIC affinity for bind
+            # fidelity (PRAGMA cannot express DATETIME vs TIMESTAMPTZ).
+            need_remap = carriers_differ or bool(studio_err)
             if need_remap:
-                # Rematerialize from source against live DDL (no Map VARCHAR invent).
-                # Keep Map temporal stamps over TEXT/NUMERIC affinity for bind
-                # fidelity (PRAGMA cannot express DATETIME vs TIMESTAMPTZ).
                 map_dest_before = dict(dest_types or {})
                 dest_types = live_dest_types
                 target_types = []
@@ -762,103 +1074,110 @@ def write_mapped_rows(
                         dest_types[c] = carrier
                     tgt_types.append(carrier)
                     target_types.append(sqlite_type(carrier) if carrier else "")
-                mapped_rows, transform_errors, rejected_details = (
-                    build_mapped_rows_with_details(
-                        headers=headers,
-                        data_rows=data_rows,
-                        mappings=mappings,
-                        target_cols=target_cols,
-                        column_types=column_types,
-                        dest_types=dest_types,
-                        error_policy=policy,
-                        preserve_case=True,
-                        dest_kind="sqlite",
-                        destination_pk_columns=list(conflict_columns or []) or None,
-                        destination_column_nullability=_kwargs.get(
-                            "destination_column_nullability"
-                        ),
-                        empty_cells_as_null=bool(_kwargs.get("empty_cells_as_null")),
-                    )
-                )
-                mapped_rows = apply_write_quarantine_matrix(
-                    mapped_rows,
-                    target_cols,
-                    tgt_types,
-                    rejected_details,
-                    policy,
-                    dialect_label="SQLite",
-                    mappings=list(mappings or []) or None,
-                    dest_db="sqlite",
-                )
-                sparse_rows = []
-                if write_mode == "upsert" and conflict_cols:
-                    mapped_rows, sparse_rows = split_dense_sparse_rows(mapped_rows)
-                else:
-                    from connectors.writer_common import (
-                        materialize_missing_as_null_for_dense_write,
-                    )
-
-                    mapped_rows = materialize_missing_as_null_for_dense_write(
-                        mapped_rows
-                    )
             else:
                 tgt_types = overlay_physical_bind_types(
                     target_cols, tgt_types, physical
                 )
 
-        converted_rows = bind_sql_mapped_rows_with_quarantine(
-            mapped_rows,
-            target_cols,
-            tgt_types,
-            rejected_details,
-            policy,
-            engine="sqlite",
-            dialect_label="SQLite",
-            mappings=list(mappings or []) or None,
+        from connectors.sql_write_materialize import (
+            SqlWriteAccumulator,
+            dest_types_signature,
+            ensure_sql_source_spool,
+            sql_source_from_writer,
         )
-        # Dense ISO-Z / typed polish after shared bind refuse path.
-        converted_rows = [
-            tuple(_to_sqlite_value(v, tgt_types[i] if i < len(tgt_types) else "") for i, v in enumerate(row))
-            for row in converted_rows
-        ]
-        sparse_converted = bind_sql_mapped_rows_with_quarantine(
-            sparse_rows,
-            target_cols,
-            tgt_types,
-            rejected_details,
-            policy,
-            engine="sqlite",
-            dialect_label="SQLite",
-            mappings=list(mappings or []) or None,
-        )
-        sparse_converted = [
-            tuple(_to_sqlite_value(v, tgt_types[i] if i < len(tgt_types) else "") for i, v in enumerate(row))
-            for row in sparse_converted
-        ]
-        # Dense rows are fully written — include them in writer-ack checksum.
-        rows_for_checksum = list(converted_rows)
 
-        rejected_rows = _rejected_row_count(
-            data_rows, mapped_rows, rejected_details, policy, sparse_rows=sparse_rows
+        extra = (
+            _kwargs.get("dest_extra")
+            if isinstance(_kwargs.get("dest_extra"), dict)
+            else {}
         )
-        coerced_null_rows = _coerced_null_row_count(rejected_details, policy)
-        _map_abort = reject_on_strict_policy(policy, rejected_details, 'SQLite', transform_errors)
-        if _map_abort:
-            return WriteResult(
-                ok=False,
-                rows_written=0,
-                table_name=table_name,
-                target_schema=schema or "main",
-                checksum="",
-                chunks_completed=0,
-                error=_map_abort or f"Transform errors: {'; '.join(transform_errors[:3])}",
-                rejected_rows=rejected_rows,
-                rejected_details=rejected_details,
-                warnings=transform_errors,
+        _sql_src = sql_source_from_writer(_kwargs, extra)
+        spool, close_spool = ensure_sql_source_spool(
+            headers=headers,
+            data_rows=data_rows,
+            records=_sql_src["records"],
+            mappings=mappings,
+            extra=extra,
+            source_spool=_sql_src.get("source_spool"),
+            spill_max=_sql_src.get("source_spill_max"),
+        )
+        source_row_count = int(getattr(spool, "row_count", 0) or 0)
+
+        def _cleanup_spool() -> None:
+            nonlocal close_spool
+            if not close_spool:
+                return
+            close_spool = False
+            try:
+                spool.close()
+            except Exception:
+                logger.debug("sqlite source spool close skipped", exc_info=True)
+
+        write_acc = SqlWriteAccumulator(
+            target_cols=target_cols,
+            dest_db_type="sqlite",
+            dest_types=dest_types if isinstance(dest_types, dict) else {},
+            dialect_label="SQLite",
+        )
+        _sqlite_finish_kwargs = dict(
+            headers=headers,
+            data_rows=data_rows,
+            mappings=mappings,
+            target_cols=target_cols,
+            column_types=column_types,
+            dest_types=dest_types,
+            tgt_types=tgt_types,
+            policy=policy,
+            conflict_columns=conflict_cols or None,
+            write_mode=write_mode,
+            destination_pk_columns=list(conflict_columns or []) or None,
+            destination_column_nullability=_kwargs.get(
+                "destination_column_nullability"
+            ),
+            empty_cells_as_null=bool(_kwargs.get("empty_cells_as_null")),
+            records=None,
+            source_spool=spool,
+            extra=extra,
+            materialize_batch=_sql_src["materialize_batch"],
+        )
+        if policy == "fail":
+            scan_acc, source_row_count, scanned_tgt = _sqlite_scan_finished_bundles(
+                **_sqlite_finish_kwargs
             )
+            if scanned_tgt:
+                tgt_types = scanned_tgt
+            rejected_details = list(scan_acc.rejected_details)
+            transform_errors = list(scan_acc.transform_errors)
+            scanned_dest_sig = dest_types_signature(
+                dest_types if isinstance(dest_types, dict) else {}, target_cols
+            )
+            rejected_rows = _rejected_row_count(
+                data_rows,
+                [],
+                rejected_details,
+                policy,
+                source_row_count=source_row_count or None,
+            )
+            coerced_null_rows = _coerced_null_row_count(rejected_details, policy)
+            _map_abort = scan_acc.abort_error(policy)
+            if _map_abort:
+                _cleanup_spool()
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=table_name,
+                    target_schema=schema or "main",
+                    checksum="",
+                    chunks_completed=0,
+                    error=_map_abort
+                    or f"Transform errors: {'; '.join(transform_errors[:3])}",
+                    rejected_rows=rejected_rows,
+                    rejected_details=rejected_details,
+                    warnings=transform_errors,
+                )
+        del scanned_dest_sig
 
-        total = len(converted_rows)
-        chunks = max(1, (total + CHUNK_SIZE - 1) // CHUNK_SIZE) if total else 0
+        chunks = max(1, (source_row_count + CHUNK_SIZE - 1) // CHUNK_SIZE) if source_row_count else 0
         placeholders = ", ".join("?" for _ in target_cols)
         insert = f"INSERT INTO {table_quoted} ({', '.join(quote_sql_identifier(c) for c in target_cols)}) VALUES ({placeholders})"  # nosec B608
 
@@ -1000,8 +1319,11 @@ def write_mapped_rows(
                         studio_err=studio_err,
                         product="SQLite",
                         materialize_stamp=sqlite_type,
+                        dest_db="sqlite",
+                        column_types=column_types,
                     )
                     if add_err:
+                        _cleanup_spool()
                         return WriteResult(
                             ok=False,
                             rows_written=0,
@@ -1021,6 +1343,7 @@ def write_mapped_rows(
                                 )
                             except sqlite3.OperationalError as exc:
                                 # Fail closed — silent skip invents schema drift.
+                                _cleanup_spool()
                                 return WriteResult(
                                     ok=False,
                                     rows_written=0,
@@ -1036,99 +1359,119 @@ def write_mapped_rows(
                                     warnings=transform_errors,
                                 )
 
-            if sparse_converted and write_mode == "upsert" and conflict_cols:
-                with conn:
-                    cur = conn.cursor()
-                    sparse_written, sparse_skipped, sparse_checksum = (
-                        _sqlite_apply_sparse_upsert(
-                            cur,
-                            table_name,
-                            target_cols,
-                            conflict_cols,
-                            sparse_converted,
-                        )
-                    )
-                    written += sparse_written
-                    rows_skipped += sparse_skipped
-                    rows_for_checksum.extend(sparse_checksum)
-
-            # Each chunk is a separate transaction so checkpoints are durable
-            # and a failed chunk can be retried without writing partial data.
-            for chunk_idx in range(chunks):
-                start = chunk_idx * CHUNK_SIZE
-                batch = converted_rows[start : start + CHUNK_SIZE]
-                if not batch:
-                    break
-
-                with conn:
-                    cur = conn.cursor()
-                    already = (
-                        raw_chunk_rows_written(
-                            cur,
-                            dialect="sqlite",
-                            job_id=ledger_job_id,
-                            batch_key=ledger_batch_key,
-                            chunk_idx=chunk_idx,
-                        )
-                        if use_ledger
-                        else None
-                    )
-                    if already is not None:
-                        # A previous attempt already committed this chunk.
-                        # Credit the recorded count, not len(batch), so a chunk
-                        # that quarantined rows is not over-reported on replay.
-                        written += already
-                        ledger_chunks_skipped += 1
-                    elif write_mode == "upsert" and conflict_cols:
-                        chunk_written, chunk_skipped = _sqlite_upsert_batch(
-                            cur,
-                            table_name,
-                            target_cols,
-                            batch,
-                            conflict_cols,
-                            schema=schema or None,
-                            rejected_details=rejected_details,
-                            policy=policy,
-                            row_offset=start,
-                        )
-                        written += chunk_written
-                        rows_skipped += chunk_skipped
-                    else:
-                        cur.executemany(insert, batch)
-                        written += len(batch)
-                        if use_ledger:
-                            # Same transaction as the rows it vouches for, so
-                            # the ledger entry cannot outlive a rolled-back write.
-                            mark_raw_chunk_committed(
-                                cur,
-                                dialect="sqlite",
-                                job_id=ledger_job_id,
-                                batch_key=ledger_batch_key,
-                                chunk_idx=chunk_idx,
-                                rows_written=len(batch),
-                                row_start=start,
-                                row_end=start + len(batch) - 1,
-                                attempt=1,
+            # Fail already scanned this dest_types image — do not duplicate
+            # map/quarantine details. Quarantine collects them on this pass.
+            collect_map_details = policy != "fail"
+            writing = True
+            chunk_idx = 0
+            wrote_sparse = False
+            row_offset = 0
+            for finished in iter_sqlite_finished_bundles(**_sqlite_finish_kwargs):
+                if collect_map_details:
+                    rejected_details.extend(finished.rejected_details)
+                    transform_errors.extend(finished.transform_errors)
+                if writing and reject_on_strict_policy(
+                    policy, rejected_details, "SQLite", transform_errors
+                ):
+                    writing = False
+                    write_acc.stop_writing()
+                if writing:
+                    if finished.sparse_rows and write_mode == "upsert" and conflict_cols:
+                        with conn:
+                            cur = conn.cursor()
+                            sparse_written, sparse_skipped, sparse_checksum = (
+                                _sqlite_apply_sparse_upsert(
+                                    cur,
+                                    table_name,
+                                    target_cols,
+                                    conflict_cols,
+                                    finished.sparse_rows,
+                                )
                             )
-
-                if on_checkpoint:
-                    on_checkpoint(chunk_idx + 1, max(chunks, 1), written)
-
+                        written += sparse_written
+                        rows_skipped += sparse_skipped
+                        write_acc.add_accepted(list(sparse_checksum))
+                        wrote_sparse = True
+                    dense = list(finished.dense_rows)
+                    for offset in range(0, len(dense), CHUNK_SIZE) if dense else []:
+                        batch = dense[offset : offset + CHUNK_SIZE]
+                        start = row_offset + offset
+                        with conn:
+                            cur = conn.cursor()
+                            already = (
+                                raw_chunk_rows_written(
+                                    cur,
+                                    dialect="sqlite",
+                                    job_id=ledger_job_id,
+                                    batch_key=ledger_batch_key,
+                                    chunk_idx=chunk_idx,
+                                )
+                                if use_ledger
+                                else None
+                            )
+                            if already is not None:
+                                written += already
+                                ledger_chunks_skipped += 1
+                            elif write_mode == "upsert" and conflict_cols:
+                                chunk_written, chunk_skipped = _sqlite_upsert_batch(
+                                    cur,
+                                    table_name,
+                                    target_cols,
+                                    batch,
+                                    conflict_cols,
+                                    schema=schema or None,
+                                    rejected_details=rejected_details,
+                                    policy=policy,
+                                    row_offset=start,
+                                )
+                                written += chunk_written
+                                rows_skipped += chunk_skipped
+                            else:
+                                cur.executemany(insert, batch)
+                                written += len(batch)
+                                if use_ledger:
+                                    mark_raw_chunk_committed(
+                                        cur,
+                                        dialect="sqlite",
+                                        job_id=ledger_job_id,
+                                        batch_key=ledger_batch_key,
+                                        chunk_idx=chunk_idx,
+                                        rows_written=len(batch),
+                                        row_start=start,
+                                        row_end=start + len(batch) - 1,
+                                        attempt=1,
+                                    )
+                        if on_checkpoint:
+                            on_checkpoint(chunk_idx + 1, max(chunks, chunk_idx + 1), written)
+                        chunk_idx += 1
+                    write_acc.add_accepted(dense)
+                    row_offset += len(dense)
+                del finished
+            chunks = chunk_idx
             if ledger_chunks_skipped:
                 transform_errors.append(
                     f"Skipped {ledger_chunks_skipped} chunk(s) already committed by a "
                     "previous attempt (write ledger prevented duplicate rows)"
                 )
 
+            rejected_rows = _rejected_row_count(
+                data_rows,
+                [()] * write_acc.accepted_row_count,
+                rejected_details,
+                policy,
+                source_row_count=source_row_count or None,
+            )
+            coerced_null_rows = _coerced_null_row_count(rejected_details, policy)
             _final_abort = reject_on_strict_policy(policy, rejected_details, "SQLite")
             if _final_abort:
+                _cleanup_spool()
                 return WriteResult(
                     ok=False,
                     rows_written=written,
                     table_name=table_name,
                     target_schema=schema or "main",
                     checksum="",
-                    chunks_completed=chunks or (1 if sparse_converted else 0),
+                    chunks_completed=chunks or (1 if wrote_sparse else 0),
                     error=_final_abort,
                     rejected_rows=max(
                         rejected_rows, len(data_rows) - written - rows_skipped
@@ -1139,28 +1482,19 @@ def write_mapped_rows(
                     warnings=transform_errors,
                 )
 
-            meta_out = gate8_writer_meta(
-                rows_for_checksum,
-                target_cols,
-                conflict_columns=conflict_cols or None,
-            )
+            meta_out = write_acc.gate8_meta(conflict_columns=conflict_cols or None)
             fid_report = _kwargs.get("_schema_fidelity_report")
             if isinstance(fid_report, dict):
                 meta_out = dict(meta_out or {})
                 meta_out["schema_fidelity"] = fid_report
+            _cleanup_spool()
             return WriteResult(
                 ok=True,
                 rows_written=written,
                 table_name=table_name,
                 target_schema=schema or "main",
-                # Checksum must reflect values as stored (sparse preserves dest cells).
-                checksum=row_checksum(
-                    rows_for_checksum,
-                    target_cols,
-                    dest_db_type="sqlite",
-                    dest_types=dest_types,
-                ),
-                chunks_completed=chunks or (1 if sparse_converted else 0),
+                checksum=write_acc.digest(),
+                chunks_completed=chunks or (1 if wrote_sparse else 0),
                 rejected_rows=max(
                     rejected_rows, len(data_rows) - written - rows_skipped
                 ),
@@ -1172,7 +1506,11 @@ def write_mapped_rows(
             )
         finally:
             conn.close()
+            _cleanup_spool()
     except Exception as exc:
+        cleanup = locals().get("_cleanup_spool")
+        if callable(cleanup):
+            cleanup()
         return WriteResult(
             ok=False,
             rows_written=written,

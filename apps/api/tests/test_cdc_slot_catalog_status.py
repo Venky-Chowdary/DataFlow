@@ -183,3 +183,91 @@ def test_inactive_slot_warns_without_inventing_seconds():
     assert fields["cdc_slot_active"] is False
     assert fields["cdc_lag_seconds"] == 0.0  # catch-up bytes
     assert fields.get("cdc_freshness_severity") == "warn"
+
+
+def test_ensure_slot_refuses_to_recreate_lost_slot_on_resume():
+    """Poll must not create a slot at current WAL — that skips the lost window."""
+    import pytest
+
+    from connectors.postgresql_change_stream import PostgreSqlChangeStreamCdc
+    from services.cdc_cursor_gap import CdcSlotGapError
+
+    cdc = object.__new__(PostgreSqlChangeStreamCdc)
+    cdc.slot_name = "df_lost"
+    cdc.output_plugin = "pgoutput"
+    cdc.cursor_key = "pg:test:orders"
+    cdc.consistent_point_lsn = "0/200"
+    cdc._resume_expected = True
+    cdc._slot_catalog_cache = {
+        "slot_exists": True,
+        "wal_status": "lost",
+        "restart_lsn": "0/100",
+        "confirmed_flush_lsn": "0/200",
+    }
+    cdc._slot_catalog_cache_at = 10**9
+    cdc._acquire_cdc_lease = lambda: None
+
+    with pytest.raises(CdcSlotGapError) as exc:
+        cdc._ensure_slot(allow_create=False, recreate_if_lost=False)
+    assert exc.value.code == "cdc_slot_gap"
+    assert "lost" in str(exc.value).lower()
+
+
+def test_ensure_slot_recreates_lost_slot_only_during_snapshot(monkeypatch):
+    from connectors.postgresql_change_stream import PostgreSqlChangeStreamCdc
+
+    cdc = object.__new__(PostgreSqlChangeStreamCdc)
+    cdc.slot_name = "df_lost"
+    cdc.output_plugin = "pgoutput"
+    cdc.cursor_key = "pg:test:orders"
+    cdc.consistent_point_lsn = "0/200"
+    cdc._resume_expected = True
+    cdc._slot_catalog_cache = {
+        "slot_exists": True,
+        "wal_status": "lost",
+        "restart_lsn": "0/100",
+        "confirmed_flush_lsn": "0/200",
+    }
+    cdc._slot_catalog_cache_at = 10**9
+    cdc._acquire_cdc_lease = lambda: None
+    calls = {"dropped": 0, "created": 0}
+
+    def _drop():
+        calls["dropped"] += 1
+        cdc._slot_catalog_cache = None
+
+    class _Cur:
+        def execute(self, sql, params=None):
+            if "pg_create_logical_replication_slot" in str(sql):
+                calls["created"] += 1
+
+        def fetchone(self):
+            if calls["created"]:
+                return ("0/999",)
+            return None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    class _Conn:
+        def cursor(self):
+            return _Cur()
+
+        def commit(self):
+            return None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    cdc._drop_replication_slot = _drop
+    monkeypatch.setattr(cdc, "_conn", lambda: _Conn())
+    lsn = cdc._ensure_slot(allow_create=True, recreate_if_lost=True)
+    assert calls["dropped"] == 1
+    assert calls["created"] == 1
+    assert cdc.consistent_point_lsn == "0/999"

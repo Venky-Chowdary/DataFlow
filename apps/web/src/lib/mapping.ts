@@ -61,6 +61,17 @@ export interface CreateNewTypeRisk {
   message: string;
 }
 
+/** Engine-stamped Map review kinds — keep aligned with ``semantic_mapper``. */
+export type MappingReviewKind =
+  | "measure_kind"
+  | "entity_identity"
+  | "dest_collision"
+  | "identity_leaf"
+  | "temporal_polarity"
+  | "lossy"
+  | "create_new"
+  | "generic";
+
 export interface EditableMapping {
   source: string;
   target: string;
@@ -135,6 +146,13 @@ export interface EditableMapping {
    * Engine-stamped — never invent client-side invent from sample string alone.
    */
   columnProfile?: ColumnProfile;
+  /**
+   * Engine Map review kind from ``semantic_mapper.classify_review_kind``.
+   * False-friends stay off Approve eligible until Confirm this pair / Remap.
+   */
+  reviewKind?: MappingReviewKind;
+  /** Operator explicitly confirmed a false-friend pair (not Approve eligible). */
+  falseFriendConfirmed?: boolean;
 }
 
 /** Compact profiler strip from ``mapping_quality.column_profile_for_map``. */
@@ -655,7 +673,216 @@ export function mappingRequiresManualApproval(m: EditableMapping): boolean {
   if (isIntentionalOmit(m)) return false;
   if (isExistingEnumBooleanConflict(m) || isExistingDestTypeOverride(m)) return true;
   if (mappingRequiresRiskAck(m) && !m.riskAcknowledged) return true;
+  // Airbyte hole: Approve-all must not clear qty≠amt / user≠customer / dest fold.
+  if (isFalseFriendReview(m) && !m.falseFriendConfirmed) return true;
   return false;
+}
+
+export const FALSE_FRIEND_REVIEW_KINDS: ReadonlySet<MappingReviewKind> = new Set([
+  "measure_kind",
+  "entity_identity",
+  "dest_collision",
+  "identity_leaf",
+  "temporal_polarity",
+]);
+
+const REVIEW_KIND_SET: ReadonlySet<string> = new Set([
+  "measure_kind",
+  "entity_identity",
+  "dest_collision",
+  "identity_leaf",
+  "temporal_polarity",
+  "lossy",
+  "create_new",
+  "generic",
+]);
+
+const FALSE_FRIEND_KIND_ORDER: MappingReviewKind[] = [
+  "dest_collision",
+  "measure_kind",
+  "identity_leaf",
+  "temporal_polarity",
+  "entity_identity",
+];
+
+export interface MappingReviewKindMeta {
+  kind: MappingReviewKind;
+  chip: string;
+  noun: string;
+  detail: string;
+  primaryLabel: string;
+  confirmLabel: string;
+}
+
+const REVIEW_KIND_META: Record<MappingReviewKind, Omit<MappingReviewKindMeta, "kind">> = {
+  measure_kind: {
+    chip: "qty≠amt",
+    noun: "quantity≠amount pair(s)",
+    detail: "Count is not money. Remap the destination column — do not write quantity into amount.",
+    primaryLabel: "Remap dest",
+    confirmLabel: "Confirm this pair",
+  },
+  entity_identity: {
+    chip: "user≠customer",
+    noun: "user≠customer pair(s)",
+    detail: "Different entities share an id leaf. Remap to the intended destination — user is not customer.",
+    primaryLabel: "Remap dest",
+    confirmLabel: "Confirm this pair",
+  },
+  dest_collision: {
+    chip: "dest collision",
+    noun: "destination identifier collision(s)",
+    detail: "Two destination names fold to the same identifier (UserID vs userid). Remap to the intended column.",
+    primaryLabel: "Remap dest",
+    confirmLabel: "Confirm this pair",
+  },
+  identity_leaf: {
+    chip: "sku≠id",
+    noun: "sku≠product_id pair(s)",
+    detail: "Identity kinds differ (sku vs id/key). Remap to the matching destination column.",
+    primaryLabel: "Remap dest",
+    confirmLabel: "Confirm this pair",
+  },
+  temporal_polarity: {
+    chip: "created≠updated",
+    noun: "created≠updated pair(s)",
+    detail: "Created and updated are opposite time polarity. Remap — do not write one into the other.",
+    primaryLabel: "Remap dest",
+    confirmLabel: "Confirm this pair",
+  },
+  lossy: {
+    chip: "lossy",
+    noun: "lossy type pair(s)",
+    detail: "Type path narrows or mutates. Sign a Risk Contract — Approve eligible will not clear this.",
+    primaryLabel: "Sign Risk Contract",
+    confirmLabel: "Approve",
+  },
+  create_new: {
+    chip: "create-new",
+    noun: "create-new column(s)",
+    detail: "This source will ADD a destination column. Confirm the name and type before Validate.",
+    primaryLabel: "Review dest name",
+    confirmLabel: "Approve",
+  },
+  generic: {
+    chip: "review",
+    noun: "mapping(s)",
+    detail: "Engine held this pair below the auto-approve floor. Remap or confirm the pair.",
+    primaryLabel: "Remap dest",
+    confirmLabel: "Approve",
+  },
+};
+
+export function mappingReviewKindMeta(kind: MappingReviewKind): MappingReviewKindMeta {
+  return { kind, ...(REVIEW_KIND_META[kind] || REVIEW_KIND_META.generic) };
+}
+
+function parseReviewKindFromReason(reason?: string): MappingReviewKind | null {
+  const text = (reason || "").toLowerCase();
+  if (!text) return null;
+  if (text.includes("destination identifier collision")) return "dest_collision";
+  if (text.includes("measure-kind mismatch")) return "measure_kind";
+  if (text.includes("identity leaf mismatch")) return "identity_leaf";
+  if (text.includes("temporal polarity")) return "temporal_polarity";
+  if (text.includes("entity qualifier conflict") || text.includes("conflicting entity qualifiers")) {
+    return "entity_identity";
+  }
+  return null;
+}
+
+export function classifyMappingReview(m: EditableMapping): MappingReviewKind | null {
+  if (isIntentionalOmit(m) || m.approved || m.falseFriendConfirmed) return null;
+  if (m.reviewKind && REVIEW_KIND_SET.has(m.reviewKind)) return m.reviewKind;
+  const fromReason = parseReviewKindFromReason(m.reason);
+  if (fromReason) return fromReason;
+  if (!m.requiresReview) return null;
+  if (mappingRequiresRiskAck(m)) return "lossy";
+  if (m.createNew) return "create_new";
+  return "generic";
+}
+
+export function isFalseFriendReview(m: EditableMapping): boolean {
+  const kind = classifyMappingReview(m);
+  return kind != null && FALSE_FRIEND_REVIEW_KINDS.has(kind);
+}
+
+/** Per-row confirm of a false-friend. Approve eligible must not call this. */
+export function confirmFalseFriendMapping(m: EditableMapping): EditableMapping {
+  if (mappingRequiresRiskAck(m) && !m.riskAcknowledged) {
+    return { ...m, approved: false, requiresReview: true };
+  }
+  if (isExistingEnumBooleanConflict(m) || isExistingDestTypeOverride(m)) {
+    return { ...m, approved: false, requiresReview: true };
+  }
+  return {
+    ...m,
+    approved: true,
+    requiresReview: false,
+    falseFriendConfirmed: true,
+    reason: [m.reason, "Operator confirmed proposed pair"].filter(Boolean).join(" · "),
+  };
+}
+
+/**
+ * Validate-step confirm for G15. Named sources win; empty list confirms every
+ * unconfirmed false-friend. Approve-all must not call this.
+ */
+export function confirmFalseFriendsBySource(
+  mappings: EditableMapping[],
+  sources?: string[] | null,
+): {
+  mappings: EditableMapping[];
+  confirmed: string[];
+  blocked: string[];
+  unmatched: string[];
+} {
+  const named = (sources || []).map((s) => String(s || "").trim()).filter(Boolean);
+  const want = new Set(named.map((s) => s.toLowerCase()));
+  const confirmed: string[] = [];
+  const blocked: string[] = [];
+  const seen = new Set<string>();
+
+  const next = mappings.map((m) => {
+    const src = String(m.source || "").trim();
+    if (!src) return m;
+    const key = src.toLowerCase();
+    const targeted = want.size === 0
+      ? isFalseFriendReview(m) && !m.falseFriendConfirmed
+      : want.has(key);
+    if (!targeted) return m;
+    if (!isFalseFriendReview(m) || m.falseFriendConfirmed) return m;
+    seen.add(key);
+    const stamped = confirmFalseFriendMapping(m);
+    if (stamped.falseFriendConfirmed) {
+      confirmed.push(src);
+      return stamped;
+    }
+    blocked.push(src);
+    return stamped;
+  });
+
+  const unmatched = named.filter((s) => !seen.has(s.toLowerCase()));
+  return { mappings: next, confirmed, blocked, unmatched };
+}
+
+/** Operator changed the dest name — drop stale false-friend kind until rematch. */
+export function applyOperatorRemapDest(m: EditableMapping, target: string): EditableMapping {
+  const next = String(target || "").trim();
+  const baseReason = (m.reason || "")
+    .replace(/(?: · )?Operator remapped dest to .+$/u, "")
+    .replace(/(?: · )?Operator cleared dest$/u, "")
+    .trim();
+  return {
+    ...m,
+    target: next,
+    approved: false,
+    requiresReview: true,
+    reviewKind: "generic",
+    falseFriendConfirmed: false,
+    reason: [baseReason, next ? `Operator remapped dest to ${next}` : "Operator cleared dest"]
+      .filter(Boolean)
+      .join(" · "),
+  };
 }
 
 /**
@@ -885,6 +1112,9 @@ export function approveMappingHonestly(m: EditableMapping): EditableMapping {
     return flagExistingEnumBooleanConflict(m);
   }
   if (isExistingDestTypeOverride(m)) {
+    return { ...m, approved: false, requiresReview: true };
+  }
+  if (isFalseFriendReview(m) && !m.falseFriendConfirmed) {
     return { ...m, approved: false, requiresReview: true };
   }
   if (isEnumToBooleanConflict(m) && canWidenMapping(m)) {
@@ -1367,19 +1597,9 @@ function boostIdentityConfidence(
   let next = confidence;
   if (exact) {
     if (createNew) {
-      // Vary create-new identity by fidelity — avoid a flat 93% wall.
-      if (fid === "lossy_cast") next = Math.min(Math.max(confidence, 0.62), 0.74);
-      else if (fid === "mutate" && !SAFE_NORMALIZE_TRANSFORMS.has(tf)) {
-        next = Math.min(Math.max(confidence, 0.78), 0.88);
-      } else if (fid === "mutate") {
-        next = Math.min(Math.max(confidence, 0.88), 0.94);
-      } else if (fid === "cast") {
-        next = Math.min(Math.max(confidence, 0.8), 0.9);
-      } else if (fid === "preserve" || !fid) {
-        next = Math.min(Math.max(confidence, 0.9), 0.96);
-      } else {
-        next = Math.min(Math.max(confidence, 0.86), 0.93);
-      }
+      // Trust the API evidence band — do not flatten every create-new row to 95%.
+      if (fid === "lossy_cast") next = Math.min(confidence, 0.74);
+      else next = Math.min(confidence, 0.93);
     } else {
       next = Math.max(confidence, fid === "lossy_cast" ? 0.7 : 0.95);
     }
@@ -1454,7 +1674,8 @@ export function mappingsFromAnalysis(
       createNew: createNew || undefined,
       // Create-new / ADD must carry a destType stamp — Execute refuse Map VARCHAR
       // invent under partial Studio when target_type is blank (Excel→PG cliff).
-      destType: createNew && !pendingDest ? inferred : undefined,
+      // Catalog DDL wins over sample semantic_type (BIGINT invented from 1,2,150000).
+      destType: createNew && !pendingDest ? (col.inferred_type || inferred) : undefined,
       assignmentStrategy: pendingDest
         ? "pending_dest_schema"
         : createNew
@@ -1546,6 +1767,9 @@ export function buildPreflightMappings(
         type_narrowing: omitted ? undefined : Boolean(safe.typeNarrowing) || undefined,
         risk_acknowledged: omitted ? undefined : Boolean(safe.riskAcknowledged) || undefined,
         risk_contract: omitted ? undefined : (safe.riskContract || undefined),
+        review_kind: omitted ? undefined : (safe.reviewKind || classifyMappingReview(safe) || undefined),
+        // Engine G15 only clears false-friend on this flag — not Approve / user_override.
+        false_friend_confirmed: omitted ? undefined : Boolean(safe.falseFriendConfirmed) || undefined,
       };
     });
   }
@@ -1600,6 +1824,8 @@ export function editableFromPipelineMappings(
     type_narrowing?: boolean;
     create_new_risks?: Array<{ kind?: string; severity?: string; message?: string }>;
     column_profile?: ColumnProfile | Record<string, unknown> | null;
+    review_kind?: string;
+    false_friend_confirmed?: boolean;
   }>,
   sampleRows?: Record<string, unknown>[],
   destColumns?: string[],
@@ -1720,6 +1946,7 @@ export function editableFromPipelineMappings(
     // Fail-closed: never invent Approve from confidence. Operator must Approve
     // (or Approve-all for eligible rows). Ready ≡ approved only.
     const autoApproved = false;
+    const friendConfirmed = Boolean(m.false_friend_confirmed);
     const base: EditableMapping = {
       source: m.source,
       target: m.target,
@@ -1727,7 +1954,8 @@ export function editableFromPipelineMappings(
       inferredType: sourceType,
       destType,
       sample: sampleVal != null ? String(sampleVal) : undefined,
-      approved: autoApproved,
+      approved: friendConfirmed || autoApproved,
+      falseFriendConfirmed: friendConfirmed || undefined,
       isPii: m.is_pii,
       reason: specialty && !(m.reasoning || "").toLowerCase().includes("identity")
         ? [m.reasoning, `${sourceType || destType} — identity payload (dim/SRID not rewritten)`].filter(Boolean).join(" · ")
@@ -1737,7 +1965,9 @@ export function editableFromPipelineMappings(
             ? "ARRAY — JSON default; optional normalize/hybrid/explode (Map policy)"
             : m.reasoning,
       existsInDestination: existsInDest,
-      requiresReview: requiresReview || specialty || structish || arrayish || lossyFidelity || conf < threshold,
+      requiresReview: friendConfirmed
+        ? false
+        : requiresReview || specialty || structish || arrayish || lossyFidelity || conf < threshold,
       scoreGap: m.score_gap,
       transform: uiTf === "none" && (structish || arrayish) ? "parse_json" : uiTf,
       engineTransform: engineTf || (structish || arrayish ? "json" : undefined),
@@ -1756,6 +1986,9 @@ export function editableFromPipelineMappings(
       structDerived: Boolean(m.struct_derived),
       structParent: m.struct_parent,
       columnProfile,
+      reviewKind: m.review_kind && REVIEW_KIND_SET.has(m.review_kind)
+        ? (m.review_kind as MappingReviewKind)
+        : parseReviewKindFromReason(m.reasoning) || undefined,
     };
     if (isEnumToBooleanConflict(base)) {
       if (base.existsInDestination) {
@@ -1788,6 +2021,8 @@ export interface MappingHealthSummary {
   intentionalOmit: number;
   specialtyIdentity: number;
   existingTypeConflict: number;
+  falseFriendCount: number;
+  falseFriendKinds: Partial<Record<MappingReviewKind, number>>;
   weak: boolean;
   headline: string;
   detail: string;
@@ -1815,6 +2050,14 @@ export function mappingHealthSummary(
   const existingTypeConflict = active.filter(
     (m) => isExistingEnumBooleanConflict(m) || isExistingDestTypeOverride(m),
   ).length;
+  const falseFriendKinds: Partial<Record<MappingReviewKind, number>> = {};
+  for (const m of active) {
+    const kind = classifyMappingReview(m);
+    if (kind && FALSE_FRIEND_REVIEW_KINDS.has(kind)) {
+      falseFriendKinds[kind] = (falseFriendKinds[kind] || 0) + 1;
+    }
+  }
+  const falseFriendCount = Object.values(falseFriendKinds).reduce((s, n) => s + (n || 0), 0);
   // Ready ≡ operator-approved (and Accept risk when required) — never confidence alone.
   const ready = mappings.filter((m) => {
     if (mappingRequiresRiskAck(m) && !m.riskAcknowledged) return false;
@@ -1827,7 +2070,8 @@ export function mappingHealthSummary(
     || needsReview > 0
     || lowConfidence > 0
     || existingTypeConflict > 0
-    || specialtyIdentity > 0;
+    || specialtyIdentity > 0
+    || falseFriendCount > 0;
 
   let headline = "Map looks ready";
   let detail = `${ready}/${total} mappings approved for Validate.`;
@@ -1843,6 +2087,12 @@ export function mappingHealthSummary(
   } else if (existingTypeConflict > 0) {
     headline = `${existingTypeConflict} existing-column type conflict(s)`;
     detail = "Remap to a compatible column or ALTER the destination — Map Widen cannot change DDL.";
+  } else if (falseFriendCount > 0) {
+    const parts = FALSE_FRIEND_KIND_ORDER
+      .filter((k) => (falseFriendKinds[k] || 0) > 0)
+      .map((k) => `${falseFriendKinds[k]} ${mappingReviewKindMeta(k).noun}`);
+    headline = `${parts.join(" · ")} need confirm`;
+    detail = "Approve eligible will not clear these. Remap the destination column, or Confirm this pair on the row.";
   } else if (needsReview > 0 || lowConfidence > 0) {
     // One row can be both requiresReview and low-confidence — count unique mappings.
     const reviewCount = active.filter(
@@ -1867,6 +2117,8 @@ export function mappingHealthSummary(
     intentionalOmit,
     specialtyIdentity,
     existingTypeConflict,
+    falseFriendCount,
+    falseFriendKinds,
     weak,
     headline,
     detail,

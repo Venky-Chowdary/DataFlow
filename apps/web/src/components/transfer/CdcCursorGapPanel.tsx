@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { DtIcon } from "../DtIcon";
 import { Button } from "../ui/Button";
 import { clearCdcCursor, fetchCdcCursor } from "../../lib/api";
+import { snapshotModeRecoversGap, isCdcGapErrorCode } from "../../lib/jobTrustScore";
 import { JobProgress } from "../../lib/types";
 import { useToast } from "../Toast";
 import { useConfirm } from "../ui/ConfirmDialog";
@@ -15,6 +16,11 @@ interface CdcCursorGapPanelProps {
 /**
  * Closed-loop Next step when CDC failed because resume LSN/SCN is before
  * retained redo (AG failover, archive purge, CDC cleanup).
+ *
+ * when_needed / always / initial_only: Resume is primary — the engine blocking-
+ * snapshots current source keys, then streams from the new tip.
+ * initial: Reset watermark (or set when_needed).
+ * never: change mode; Reset would leave never without a cursor.
  */
 export function CdcCursorGapPanel({ job, onResume, resuming }: CdcCursorGapPanelProps) {
   const { toast } = useToast();
@@ -24,12 +30,17 @@ export function CdcCursorGapPanel({ job, onResume, resuming }: CdcCursorGapPanel
   const [cleared, setCleared] = useState(false);
   const [liveWatermark, setLiveWatermark] = useState<string | null>(job.watermark ?? null);
 
+  const snapshotMode = String(job.snapshot_mode || job.snapshot_plan?.snapshot_mode || "")
+    .trim()
+    .toLowerCase()
+    .replace(/-/g, "_");
+  const engineSnapshots = snapshotModeRecoversGap(snapshotMode);
+  const neverMode = snapshotMode === "never";
+
   const isGap =
     Boolean(job.cdc_cursor_gap)
-    || job.error_code === "cdc_cursor_gap"
-    || job.error_code === "cdc_lsn_gap"
-    || job.error_code === "cdc_scn_gap"
-    || /before capture retention|before available redo|min_lsn|oldest_available|ora-01291/i.test(
+    || isCdcGapErrorCode(job.error_code)
+    || /before capture retention|before available redo|min_lsn|min_valid_version|last_sync_version|change tracking|oldest_available|ora-01291|wal_status=lost|replication slot|changestreamhistorylost|resume point may no longer be in the oplog/i.test(
       String(job.error || ""),
     );
 
@@ -68,7 +79,7 @@ export function CdcCursorGapPanel({ job, onResume, resuming }: CdcCursorGapPanel
     const ok = await confirm({
       title: "Reset CDC watermark?",
       message:
-        "Clears the resume cursor so the next run re-snapshots (when_needed / initial). Destination rows are not rolled back — at-least-once upsert may re-apply. Continuous CDC across the gap is not claimed.",
+        "Clears the resume cursor so the next run re-snapshots under initial. Destination rows are not rolled back — at-least-once upsert may re-apply. Purged-window events are gone. Not continuous CDC.",
       confirmLabel: "Reset watermark",
       cancelLabel: "Keep cursor",
       tone: "danger",
@@ -84,7 +95,7 @@ export function CdcCursorGapPanel({ job, onResume, resuming }: CdcCursorGapPanel
       setLiveWatermark(null);
       toast({
         title: result.reason === "not_found" ? "Watermark already clear" : "Watermark reset",
-        message: "Re-run with snapshot mode when_needed or initial. Delivery remains at-least-once.",
+        message: "Re-run with snapshot mode initial or when_needed. Delivery remains at-least-once.",
         tone: "success",
       });
     } catch (e) {
@@ -98,32 +109,29 @@ export function CdcCursorGapPanel({ job, onResume, resuming }: CdcCursorGapPanel
     }
   };
 
+  const copy = cleared
+    ? "Watermark cleared. Re-run with snapshot when_needed or initial — do not claim continuous CDC across the gap."
+    : engineSnapshots
+      ? `${dialect} resume ${resume} is before retained ${retained}${
+          liveWatermark ? ` · live cursor ${liveWatermark}` : ""
+        }. Resume re-upserts current source keys, then streams from the new tip. Purged-window events are gone — not continuous CDC, not migration_proven.`
+      : neverMode
+        ? `${dialect} resume ${resume} is before retained ${retained}. snapshot_mode=never forbids a recovery snapshot. Set when_needed, then Resume. Purged-window events are gone.`
+        : `${dialect} resume ${resume} is before retained ${retained}${
+            liveWatermark ? ` · live cursor ${liveWatermark}` : ""
+          }. snapshot_mode=initial will not snapshot again. Reset the watermark or set when_needed.`;
+
+  const showResume = Boolean(onResume) && (cleared || engineSnapshots) && !neverMode;
+  const showReset = !cleared && !neverMode;
+
   return (
     <div className="df2-theater-v3-next df2-theater-cursor-gap-next" role="region" aria-label="CDC cursor gap next steps">
       <div className="df2-theater-v3-next-copy">
         <strong>Next step · CDC cursor gap</strong>
-        <span>
-          {cleared
-            ? "Watermark cleared. Re-run with snapshot when_needed or initial — do not claim continuous CDC across the gap."
-            : `${dialect} resume ${resume} is before retained ${retained}${
-                liveWatermark ? ` · live cursor ${liveWatermark}` : ""
-              }. Reset the watermark, then re-snapshot.`}
-        </span>
+        <span>{copy}</span>
       </div>
       <div className="df2-theater-v3-next-actions">
-        {!cleared && (
-          <Button
-            size="sm"
-            variant="danger"
-            loading={busy}
-            loadingLabel="Resetting…"
-            onClick={() => void handleClear()}
-            leadingIcon={<DtIcon name="alert" size={14} />}
-          >
-            Reset watermark
-          </Button>
-        )}
-        {cleared && onResume && (
+        {showResume && (
           <Button
             size="sm"
             variant="primary"
@@ -133,6 +141,18 @@ export function CdcCursorGapPanel({ job, onResume, resuming }: CdcCursorGapPanel
             leadingIcon={<DtIcon name="play" size={14} />}
           >
             Resume / re-run
+          </Button>
+        )}
+        {showReset && (
+          <Button
+            size="sm"
+            variant={engineSnapshots ? "secondary" : "danger"}
+            loading={busy}
+            loadingLabel="Resetting…"
+            onClick={() => void handleClear()}
+            leadingIcon={<DtIcon name="alert" size={14} />}
+          >
+            Reset watermark
           </Button>
         )}
       </div>

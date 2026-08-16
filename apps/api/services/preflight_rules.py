@@ -35,6 +35,7 @@ HARD_GATE_IDS = {
     "proof_bundle",
     "g13_source_coverage",
     "g14_destination_requirements",
+    "g15_dest_exists_shape",
 }
 
 SOFT_GATE_IDS = {
@@ -148,6 +149,27 @@ PREFLIGHT_GATE_RULES: dict[str, dict[str, Any]] = {
         ],
         "suggested_actions": [
             {"kind": "review_mappings", "label": "Open Map to fill required columns"},
+        ],
+    },
+    "g15_dest_exists_shape": {
+        "title": "Dest-exists shape",
+        "category": "hard",
+        "why": (
+            "When the destination table already exists, source extras, dest-only "
+            "NOT NULL columns, and false-friend binds must be classified once. "
+            "A positional INSERT would shift values if a new column is not last."
+        ),
+        "fix": (
+            "Open Map. Remap extra source columns or mark them omitted. Fill "
+            "required dest-only columns. Writes stay name-addressed — dest-only "
+            "columns stay off SET."
+        ),
+        "examples": [
+            "Stored-procedure result grew loyalty_tier — remap or omit, never silent drop.",
+            "Dest UserID vs userid fold is dest-superset, not a false bind.",
+        ],
+        "suggested_actions": [
+            {"kind": "review_mappings", "label": "Open Map to remap extra columns"},
         ],
     },
     "g4_mapping_confidence": {
@@ -794,6 +816,34 @@ def explain_issue(
     }
 
 
+def _g15_suggested_actions(action: str, details: dict[str, Any] | None = None) -> list[dict[str, str]]:
+    """One primary Validate button from dest-exists ``primary_action``."""
+    details = details or {}
+    extras = [
+        str(c)
+        for c in (details.get("extra_source_columns") or details.get("unaccounted_sources") or [])
+        if str(c).strip()
+    ]
+    friends = [
+        str(c)
+        for c in (details.get("false_friend_sources") or [])
+        if str(c).strip()
+    ]
+    kind_map = {
+        "review_map": ("review_mappings", "Open Map to remap extra columns"),
+        "confirm_or_remap": ("confirm_or_remap", "Confirm this pair"),
+        "reload_dest_schema": ("reload_dest_schema", "Reload destination schema"),
+        "confirm_add": ("confirm_add", "Review ADD COLUMN proposals"),
+        "continue_validate": ("continue_validate", "Continue — dest-only columns stay off SET"),
+    }
+    kind, label = kind_map.get(action, ("review_mappings", "Open Map to remap extra columns"))
+    focus = friends[0] if kind == "confirm_or_remap" and friends else (extras[0] if extras else "")
+    row: dict[str, str] = {"kind": kind, "label": label}
+    if focus and kind in {"review_mappings", "confirm_or_remap", "confirm_add"}:
+        row["column"] = focus
+    return [row]
+
+
 def explain_gate(gate_id: str, message: str, details: dict[str, Any] | None = None) -> dict[str, Any]:
     """Return the rule for a gate failure."""
     details = details or {}
@@ -825,6 +875,19 @@ def explain_gate(gate_id: str, message: str, details: dict[str, Any] | None = No
                 {"kind": "fix_orphans", "label": "Fix parent rows / load order"},
                 {"kind": "run_population_orphan_scan", "label": "Run population orphan scan"},
             ],
+        }
+    if gate_id == "g15_dest_exists_shape":
+        rule = PREFLIGHT_GATE_RULES.get(gate_id) or {}
+        action = str(details.get("primary_action") or details.get("remediation_kind") or "review_map")
+        actions = _g15_suggested_actions(action, details)
+        return {
+            "gate": gate_id,
+            "title": rule.get("title") or "Dest-exists shape",
+            "category": rule.get("category", "hard"),
+            "why": rule.get("why", ""),
+            "fix": str(details.get("detail") or rule.get("fix", "")),
+            "examples": rule.get("examples", []),
+            "suggested_actions": actions,
         }
     # Prefer issue-catalog match so encoding/nulls beat generic gate CTAs.
     issue_match = explain_issue(message, dest_kind="", validation_mode="balanced")

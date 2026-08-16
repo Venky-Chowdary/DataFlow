@@ -14,6 +14,7 @@ import logging
 import uuid
 from typing import Any, Callable, Iterator, Optional
 
+from services.cdc_cursor_gap import CdcCursorGapError
 from services.cdc_engine import ChangeBatch
 from services.cdc_incremental_snapshot import (
     SnapshotSignal,
@@ -67,18 +68,29 @@ def interleave_incremental_snapshot(
     fetch_chunk: RowFetcher,
     max_chunks_per_poll: int = 1,
     stream_events_during_chunk: StreamDuringChunk | None = None,
+    dest_resume: Any = None,
 ) -> Iterator[ChangeBatch]:
     """Yield snapshot chunks for at most ``max_chunks_per_poll`` claimed signals.
 
     ``fetch_chunk(signal)`` must return ``(rows, last_pk_or_none, done)``.
     Optional ``stream_events_during_chunk`` returns live events seen while the
     chunk SELECT ran (op + row / pk) for DDD-3 stream-wins collision resolution.
+    Optional ``dest_resume`` is dest Open's stored keyset — the signal
+    ``last_pk`` is fast-forwarded so the chunk SELECT seeks past dest hi
+    (Debezium last_pk lives only in connector offsets).
     """
     chunks = 0
     while chunks < max(1, int(max_chunks_per_poll)):
         sig = claim_next_signal(source_key, table=table)
         if sig is None:
             return
+        if dest_resume is not None:
+            from services.cdc_exactly_once import apply_dest_keyset_to_signal
+
+            advanced = apply_dest_keyset_to_signal(sig, dest_resume)
+            if (advanced.last_pk or "") != (sig.last_pk or ""):
+                update_signal(sig.id, last_pk=advanced.last_pk)
+                sig = advanced
         window_id = f"{sig.id}:{uuid.uuid4().hex[:8]}"
         from services.cdc_identity import require_cdc_primary_key
 
@@ -94,6 +106,8 @@ def interleave_incremental_snapshot(
             if stream_events_during_chunk is not None:
                 try:
                     stream_events = list(stream_events_during_chunk(sig) or [])
+                except CdcCursorGapError:
+                    raise
                 except Exception as exc:
                     logger.warning(
                         "Stream peek during snapshot window failed for %s.%s: %s",

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import sys
 from pathlib import Path
 from typing import Any
@@ -18,12 +19,28 @@ from connectors.sql_identifiers import (
     quote_sql_identifier,
     require_safe_identifier,
 )
+from connectors.sql_snapshot_scan import close_table_scan
 
 _api_root = Path(__file__).resolve().parents[1]
 if str(_api_root) not in sys.path:
     sys.path.insert(0, str(_api_root))
 
 from services.value_serializer import cell_to_string
+
+
+def snapshot_order_sql(columns: list[str], primary_key: str | None = "") -> str:
+    """ORDER BY first column plus PK so OFFSET pages cannot skip/duplicate rows."""
+    order_cols: list[str] = []
+    if columns:
+        order_cols.append(str(columns[0]))
+    pk = (primary_key or "").strip()
+    if pk and pk.lower() not in {c.lower() for c in order_cols}:
+        order_cols.append(pk)
+    if not order_cols:
+        raise RuntimeError("Snowflake table has no columns for stable pagination")
+    return quote_column_list(
+        [require_safe_identifier(str(c), preserve_case=True) for c in order_cols]
+    )
 
 
 def _use_warehouse(cur, warehouse: str) -> None:
@@ -61,6 +78,7 @@ def count_table_rows(
     warehouse: str,
     table: str,
     role: str = "",
+    private_key: str = "",
 ) -> int:
     del port
     account = normalize_account(host)
@@ -74,6 +92,8 @@ def count_table_rows(
         warehouse=warehouse,
         connection_string=connection_string,
         role=role,
+        private_key=private_key,
+        private_key_passphrase=password if private_key else "",
     )
     try:
         with conn.cursor() as cur:
@@ -101,6 +121,9 @@ def read_table_batch(
     limit: int = 100_000,
     known_total_rows: int | None = None,
     role: str = "",
+    private_key: str = "",
+    cursor_primary_key: str | None = None,
+    skip_population_count: bool = False,
 ) -> ReadBatch:
     account = normalize_account(host)
     schema = _snowflake_schema(schema)
@@ -113,6 +136,8 @@ def read_table_batch(
         warehouse=warehouse,
         connection_string=connection_string,
         role=role,
+        private_key=private_key,
+        private_key_passphrase=password if private_key else "",
     )
     try:
         with conn.cursor() as cur:
@@ -120,27 +145,24 @@ def read_table_batch(
             table_ref = _table_ref(cur, schema, table)
             if known_total_rows is not None:
                 total = known_total_rows
+            elif skip_population_count:
+                total = None
             else:
-                total = count_table_rows(
-                    host=host, port=port, database=database, username=username, password=password,
-                    schema=schema, connection_string=connection_string, warehouse=warehouse, table=table,
-                    role=role,
-                )
+                # Same session — a nested count_table_rows() used to open a
+                # second login just to COUNT(*), doubling warehouse cold-start.
+                cur.execute(f"SELECT COUNT(*) FROM {table_ref}")  # nosec B608
+                total = int(cur.fetchone()[0])
             col_sql = (
                 quote_column_list([require_safe_identifier(c, preserve_case=True) for c in columns])
                 if columns
                 else "*"
             )
-            # Stable LIMIT/OFFSET requires ORDER BY (PK-or-first-column pattern).
+            # Stable LIMIT/OFFSET requires ORDER BY (first column + PK tiebreak).
             order_cols = list(columns or [])
             if not order_cols:
                 cur.execute(f"SELECT * FROM {table_ref} LIMIT 0")  # nosec B608
                 order_cols = [desc[0] for desc in (cur.description or [])]
-            if not order_cols:
-                raise RuntimeError("Snowflake table has no columns for stable pagination")
-            order_sql = quote_column_list(
-                [require_safe_identifier(str(order_cols[0]), preserve_case=True)]
-            )
+            order_sql = snapshot_order_sql(order_cols, primary_key=cursor_primary_key)
             cur.execute(
                 f"SELECT {col_sql} FROM {table_ref} "  # nosec B608
                 f"ORDER BY {order_sql} LIMIT {int(limit)} OFFSET {int(offset)}"
@@ -150,6 +172,164 @@ def read_table_batch(
         return ReadBatch(headers=headers, rows=rows, offset=offset, total_rows=total)
     finally:
         conn.close()
+
+
+# One snapshot scan + fetchmany. OFFSET pages are O(n²) on Snowflake and each
+# read_table_batch() used to open a new login — 150k/5k looked like a 3-minute read.
+_SF_SCAN_ARRAYSIZE = 10_000
+
+
+def _snowflake_time_travel_clause() -> tuple[str, tuple]:
+    """``AT (TIMESTAMP => %s)`` when Property 3 bound a Time Travel instant."""
+    try:
+        from services.source_snapshot import get_source_snapshot_meta
+
+        meta = get_source_snapshot_meta() or {}
+    except Exception:
+        return "", ()
+    ts = str(meta.get("time_travel_ts") or "").strip()
+    if not ts:
+        return "", ()
+    return " AT (TIMESTAMP => %s)", (ts,)
+
+
+def _execute_snowflake_snapshot(
+    cur: Any,
+    sql_before_at: str,
+    sql_after_at: str,
+    at_sql: str,
+    at_params: tuple,
+) -> None:
+    """Run a snapshot SQL, falling back to live when Time Travel is refused."""
+    if at_sql:
+        try:
+            cur.execute(f"{sql_before_at}{at_sql}{sql_after_at}", at_params)
+            return
+        except Exception as exc:
+            logger = logging.getLogger(__name__)
+            logger.warning(
+                "Snowflake Time Travel unavailable (%s) — live scan, not a frozen snapshot",
+                exc,
+            )
+            try:
+                from services.source_snapshot import patch_source_snapshot_meta
+
+                patch_source_snapshot_meta(
+                    {
+                        "guarantee": "live_scan_not_time_travel",
+                        "time_travel_fallback": str(exc)[:300],
+                    }
+                )
+            except Exception:
+                pass
+    cur.execute(f"{sql_before_at}{sql_after_at}")
+
+
+def read_table_scan_batch(
+    *,
+    host: str,
+    port: int,
+    database: str,
+    username: str,
+    password: str,
+    schema: str,
+    connection_string: str,
+    warehouse: str,
+    table: str,
+    columns: list[str] | None = None,
+    offset: int = 0,
+    limit: int = 100_000,
+    known_total_rows: int | None = None,
+    role: str = "",
+    private_key: str = "",
+    cursor_primary_key: str | None = None,
+    skip_population_count: bool = False,
+    scan_state: dict[str, Any],
+) -> ReadBatch:
+    """Page a single ``SELECT … ORDER BY`` with ``fetchmany`` — no OFFSET, one login."""
+    del port
+    if not scan_state.get("started"):
+        account = normalize_account(host)
+        schema = _snowflake_schema(schema)
+        conn = get_connection(
+            account=account,
+            username=username,
+            password=password,
+            database=database,
+            schema=schema,
+            warehouse=warehouse,
+            connection_string=connection_string,
+            role=role,
+            private_key=private_key,
+            private_key_passphrase=password if private_key else "",
+        )
+        cur = conn.cursor()
+        try:
+            _use_warehouse(cur, warehouse)
+            table_ref = _table_ref(cur, schema, table)
+            at_sql, at_params = _snowflake_time_travel_clause()
+            if known_total_rows is not None:
+                total = known_total_rows
+            elif skip_population_count:
+                total = None
+            else:
+                _execute_snowflake_snapshot(
+                    cur,
+                    f"SELECT COUNT(*) FROM {table_ref}",  # nosec B608
+                    "",
+                    at_sql,
+                    at_params,
+                )
+                total = int(cur.fetchone()[0])
+            col_sql = (
+                quote_column_list([require_safe_identifier(c, preserve_case=True) for c in columns])
+                if columns
+                else "*"
+            )
+            order_cols = list(columns or [])
+            if not order_cols:
+                cur.execute(f"SELECT * FROM {table_ref} LIMIT 0")  # nosec B608
+                order_cols = [desc[0] for desc in (cur.description or [])]
+            order_sql = snapshot_order_sql(order_cols, primary_key=cursor_primary_key)
+            arraysize = max(1, min(int(limit or _SF_SCAN_ARRAYSIZE), _SF_SCAN_ARRAYSIZE))
+            try:
+                cur.arraysize = arraysize
+            except Exception:
+                pass
+            _execute_snowflake_snapshot(
+                cur,
+                f"SELECT {col_sql} FROM {table_ref}",  # nosec B608
+                f" ORDER BY {order_sql}",
+                at_sql,
+                at_params,
+            )
+            headers = [desc[0] for desc in cur.description]
+        except Exception:
+            try:
+                cur.close()
+            except Exception:
+                pass
+            try:
+                conn.close()
+            except Exception:
+                pass
+            raise
+        scan_state.update(
+            started=True,
+            conn=conn,
+            cur=cur,
+            headers=headers,
+            total=total,
+        )
+    cur = scan_state["cur"]
+    raw = cur.fetchmany(max(1, int(limit)))
+    headers = list(scan_state.get("headers") or [])
+    total = scan_state.get("total")
+    if not raw:
+        close_table_scan(scan_state)
+        return ReadBatch(headers=headers, rows=[], offset=offset, total_rows=total)
+    rows = [[cell_to_string(v, preserve_sql_null=True) for v in row] for row in raw]
+    return ReadBatch(headers=headers, rows=rows, offset=offset, total_rows=total)
 
 
 def read_table_cursor_batch(
@@ -168,6 +348,7 @@ def read_table_cursor_batch(
     columns: list[str] | None = None,
     limit: int = 500,
     role: str = "",
+    private_key: str = "",
     cursor_primary_key: str | None = None,
 ) -> ReadBatch:
     """Read rows where cursor_column > watermark — incremental sync.
@@ -189,6 +370,8 @@ def read_table_cursor_batch(
         warehouse=warehouse,
         connection_string=connection_string,
         role=role,
+        private_key=private_key,
+        private_key_passphrase=password if private_key else "",
     )
     try:
         with conn.cursor() as cur:

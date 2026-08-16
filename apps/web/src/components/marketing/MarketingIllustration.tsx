@@ -42,7 +42,7 @@ export function MarketingIllustration({ kind, className = "" }: { kind: Illustra
         <text x="240" y="142" textAnchor="middle" fontSize="12" fill="#0f172a" fontWeight="650">Governed transfer engine</text>
         <text x="240" y="162" textAnchor="middle" fontSize="10" fill="#64748b">Preflight · Quarantine · Reconcile</text>
         <rect x="48" y="208" width="384" height="44" rx="10" fill="#0f766e" opacity="0.08" />
-        <text x="240" y="235" textAnchor="middle" fontSize="11" fill="#0f766e" fontWeight="600">SOC 2 · GDPR · HIPAA controls mapped — no audit certificate yet</text>
+        <text x="240" y="235" textAnchor="middle" fontSize="11" fill="#0f766e" fontWeight="600">Encryption · SSO · BYOK · GDPR — security pack on request</text>
       </svg>
     );
   }
@@ -66,7 +66,7 @@ export function MarketingIllustration({ kind, className = "" }: { kind: Illustra
         <text x="48" y="172" fontSize="11" fill="#94a3b8">RBAC · Pipelines · Quarantine</text>
         <rect x="48" y="196" width="160" height="10" rx="5" fill="#1e293b" />
         <rect x="48" y="196" width="118" height="10" rx="5" fill="#0d9488" />
-        <text x="48" y="232" fontSize="11" fill="#99f6e4">Preflight 8/8 · checksum match</text>
+        <text x="48" y="232" fontSize="11" fill="#99f6e4">Preflight 9/9 · checksum match</text>
         <rect x="252" y="92" width="200" height="168" rx="14" fill="#111827" stroke="#334155" />
         <text x="272" y="122" fontSize="11" fill="#94a3b8" fontWeight="700">WORKSPACE B</text>
         <text x="272" y="148" fontSize="13" fill="#f8fafc" fontWeight="650">Regulated loads</text>
@@ -151,7 +151,7 @@ export function MarketingIllustration({ kind, className = "" }: { kind: Illustra
         <g className="lp-cust-tile" style={{ "--i": 1 } as CSSProperties}>
           <rect x="240" y="24" width="216" height="120" rx="14" fill="#0f766e" />
           <text x="256" y="54" fontSize="11" fill="#99f6e4" fontWeight="700">PREFLIGHT</text>
-          <text x="256" y="88" fontSize="22" fill="#fff" fontWeight="700">G1–G8</text>
+          <text x="256" y="88" fontSize="22" fill="#fff" fontWeight="700">G1–G9</text>
           <text x="256" y="112" fontSize="12" fill="#ccfbf1">gates before every write</text>
         </g>
         <g className="lp-cust-tile" style={{ "--i": 2 } as CSSProperties}>
@@ -217,8 +217,9 @@ export function MarketingIllustration({ kind, className = "" }: { kind: Illustra
   }
 
   if (kind === "mapping") {
-    const src = ["order_amt", "cust_email", "order_id", "ts"];
-    const dst = ["payment_amount", "email", "order_key", "created_at"];
+    const src = ["order_amt", "pay_amt", "tax_amt", "cust_id"];
+    const dst = ["total_amount", "payment_amount", "tax_amount", "customer_key"];
+    const scores = ["0.92", "0.99", "0.99", "rev"];
     return (
       <svg className={cls} viewBox="0 0 480 280" role="img" aria-label="Semantic column mapping">
         <rect width="480" height="280" rx="16" fill="#f8fafc" stroke="#e2e8f0" />
@@ -234,7 +235,7 @@ export function MarketingIllustration({ kind, className = "" }: { kind: Illustra
               <text x="384" y={y + 23} textAnchor="middle" fontSize="12" fill="#0f766e" fontFamily="ui-monospace, monospace">{dst[i]}</text>
               <path d={`M168 ${y + 18}C220 ${y + 18} 260 ${y + 18} 312 ${y + 18}`} stroke="#0d9488" strokeWidth="2" fill="none" strokeDasharray="5 4" />
               <circle cx="240" cy={y + 18} r="11" fill="#ecfdf5" stroke="#0d9488" />
-              <text x="240" y={y + 22} textAnchor="middle" fontSize="9" fill="#0f766e" fontWeight="700">{96 - i * 3}</text>
+              <text x="240" y={y + 22} textAnchor="middle" fontSize="9" fill="#0f766e" fontWeight="700">{scores[i]}</text>
             </g>
           );
         })}

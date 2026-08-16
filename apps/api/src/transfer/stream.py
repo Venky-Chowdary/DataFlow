@@ -31,8 +31,16 @@ from connectors.writer_common import (  # noqa: E402
 
 # Keep resilient batch/quarantine path importable for streaming callers.
 from services.bounded_collections import BoundedStrings
-from services.dest_precount import PRECOUNT_KEY, precount_table
+from services.dest_precount import (
+    PRECOUNT_KEY,
+    begin_overwrite_source_keys,
+    matrix_to_key_tuples,
+    precount_table,
+    stamp_overwrite_source_keys,
+)
+from services.dialect_profiles import schema_from_cfg
 from services.engine_pool import release_engine
+from services.row_conservation import CENSUS_KEY, KeyCensusAccumulator, observe_keyed_batch, record_stream_health
 from services.resilience import (  # noqa: E402, F401
     ResilientBatcher,
     adaptive_chunk_size,
@@ -46,7 +54,11 @@ from .adapters import (
     resolve_dest_table,
 )
 from .connector_capabilities import resolve_driver_type
-from .stream_row_accounting import stamp_incremental_no_op, stamp_source_row_count
+from .stream_row_accounting import (
+    begin_table_population,
+    stamp_incremental_no_op,
+    stamp_source_row_count,
+)
 from .stream_foreign_keys import (
     ForeignKeyContext as _ForeignKeyContext,
     carry_foreign_keys_after_load as _carry_foreign_keys_after_load,
@@ -237,6 +249,8 @@ def _write_batch(
     skip_preflight: bool = False,
     source_schema_catalog: dict[str, Any] | None = None,
     empty_cells_as_null: bool = False,
+    records: list[dict[str, Any]] | None = None,
+    source_spool: Any = None,
 ) -> tuple[int, str, dict]:
     # Live dest nullability for write-time NOT NULL escalate (G3 / adapters parity).
     dest_nullability = dict(
@@ -253,6 +267,11 @@ def _write_batch(
         or (cfg.get("extra") or {}).get("destination_column_types")
         or {}
     )
+    source_handoff: dict[str, Any] = {}
+    if source_spool is not None:
+        source_handoff["source_spool"] = source_spool
+    if records is not None:
+        source_handoff["records"] = records
     if dest_type == "postgresql" or dest_type == "redshift":
         from connectors.postgresql_writer import write_mapped_rows
         from connectors.write_resilience import build_write_batch_key
@@ -292,6 +311,7 @@ def _write_batch(
             destination_column_types=dest_column_types,
             source_schema_catalog=source_schema_catalog,
             empty_cells_as_null=empty_cells_as_null,
+            **source_handoff,
         )
         if not result.ok:
             _raise_write_failure(result, f"{dest_type} batch write failed")
@@ -338,6 +358,8 @@ def _write_batch(
             destination_column_nullability=dest_nullability,
             destination_column_types=dest_column_types,
             empty_cells_as_null=empty_cells_as_null,
+            source_schema_catalog=source_schema_catalog,
+            **source_handoff,
         )
         if not result.ok:
             _raise_write_failure(result, "MySQL batch write failed")
@@ -425,6 +447,7 @@ def _write_batch(
             destination_column_types=dest_column_types,
             source_schema_catalog=source_schema_catalog,
             empty_cells_as_null=empty_cells_as_null,
+            **source_handoff,
         )
         if not result.ok:
             _raise_write_failure(result, "SQLite batch write failed")
@@ -469,6 +492,7 @@ def _write_batch(
             skip_session_setup=skip_session_setup,
             destination_column_nullability=dest_nullability,
             destination_column_types=dest_column_types,
+            **source_handoff,
         )
         if not result.ok:
             _raise_write_failure(result, "Snowflake batch write failed")
@@ -504,6 +528,7 @@ def _write_batch(
             on_checkpoint=lambda c, t, r: on_checkpoint(chunk_idx, total_chunks, rows_so_far + r) if on_checkpoint else None,
             destination_column_nullability=dest_nullability,
             destination_column_types=dest_column_types,
+            **source_handoff,
         )
         if not result.ok:
             _raise_write_failure(result, "BigQuery batch write failed")
@@ -578,6 +603,7 @@ def _write_batch(
             kwargs["file_batch_idx"] = chunk_idx
             kwargs["total_chunks"] = total_chunks
             kwargs["job_id"] = job_id or ""
+            kwargs.update(source_handoff)
         if dest_type in ("pgvector", "qdrant", "weaviate", "pinecone", "milvus"):
             extra = getattr(dest, "extra", {}) or {}
             kwargs["content_column"] = extra.get("content_column")
@@ -632,6 +658,7 @@ def _write_batch(
             file_batch_idx=chunk_idx,
             destination_column_nullability=dest_nullability,
             destination_column_types=dest_column_types,
+            **source_handoff,
         )
         if not result.ok:
             _raise_write_failure(result, f"{dest_type} batch write failed")
@@ -674,6 +701,10 @@ def _write_batch(
                 else None
             ),
         }
+        from connectors.engine_record_spill import spool_write_kinds
+
+        if dest_type in spool_write_kinds():
+            common.update(source_handoff)
         extra = writer_extra_kwargs(dest_type, cfg=cfg, dest=dest, common=common)
         if dest_type == "iceberg":
             # Iceberg full-refresh overwrite must truncate once per job, not per chunk.
@@ -797,6 +828,13 @@ def stream_database_transfer(
             release_active_snapshot(commit=ok)
         except Exception as exc:
             logger.warning("source snapshot release failed: %s", exc, exc_info=exc)
+        try:
+            from services.procedure_source import close_callable_spool
+
+            if job_id:
+                close_callable_spool(job_id=job_id)
+        except Exception as exc:
+            logger.warning("callable spool release failed: %s", exc, exc_info=exc)
 
 
 from .copy_route import _try_copy_fast_path  # noqa: E402 — see module docstring
@@ -830,6 +868,9 @@ def _stream_database_transfer_impl(
     dest_type = resolve_driver_type(destination.format)
     src_cfg = resolve_connector_config(source)
     dest_cfg = resolve_connector_config(destination)
+    from services.procedure_source import is_callable_source, stamp_callable_job_id
+
+    src_cfg = stamp_callable_job_id(src_cfg, job_id)
 
     from services.sync_cursor import (
         compare_cursor_values,
@@ -923,33 +964,62 @@ def _stream_database_transfer_impl(
         job_id=job_id,
         has_primary_key=bool(pk_target_cols),
     )
-    watermark = None
-    cursor_key = ""
-    if incremental and cursor_source_col:
-        # One resolver for the whole product: Validate's gates read this route's
-        # watermark through the same call, so what they judge is what this run
-        # will read.
-        scope = resolve_incremental_read_scope(
-            sync_mode=effective_sync,
-            stream_contracts=stream_contracts,
-            source_type=src_type,
-            source_database=source.database or src_cfg.get("database", ""),
-            source_object=_source_name(source),
-            dest_type=dest_type,
-            dest_database=destination.database or dest_cfg.get("database", ""),
-            dest_object=resolve_dest_table(dest_type, destination, _source_name(source)),
-        )
-        cursor_key = scope.cursor_key
-        watermark = scope.watermark
-
     if src_type not in _STREAMING_TYPES:
         raise ValueError(f"Streaming source '{src_type}' not supported")
     if dest_type not in _STREAMING_TYPES:
         raise ValueError(f"Streaming destination '{dest_type}' not supported")
 
     table = _source_name(source)
+    if is_callable_source(source) or is_callable_source(src_cfg):
+        from services.procedure_source import (
+            parse_callable_source,
+            procedure_params_of,
+            procedure_text_of,
+            source_object_for_cursor,
+            source_read_mode_of,
+            stream_name_for_callable,
+        )
+
+        if not table:
+            try:
+                spec = parse_callable_source(
+                    procedure_text_of(source) or procedure_text_of(src_cfg),
+                    dialect=src_type,
+                    mode=source_read_mode_of(source) or source_read_mode_of(src_cfg),
+                    params=procedure_params_of(source) or procedure_params_of(src_cfg),
+                )
+                table = stream_name_for_callable(spec)
+            except Exception:
+                table = "procedure_result"
+        cursor_source_object = (
+            source_object_for_cursor(source)
+            or source_object_for_cursor(src_cfg)
+            or table
+        )
+    else:
+        cursor_source_object = table
     if not table:
         raise ValueError("Source table/collection name required for streaming transfer")
+
+    watermark = None
+    cursor_key = ""
+    if incremental and cursor_source_col:
+        # One resolver for the whole product: Validate's gates read this route's
+        # watermark through the same call, so what they judge is what this run
+        # will read. Callable identity includes SQL+binds, not just the stream label.
+        scope = resolve_incremental_read_scope(
+            sync_mode=effective_sync,
+            stream_contracts=stream_contracts,
+            source_type=src_type,
+            source_database=source.database or src_cfg.get("database", ""),
+            source_object=cursor_source_object,
+            dest_type=dest_type,
+            dest_database=destination.database or dest_cfg.get("database", ""),
+            dest_object=resolve_dest_table(dest_type, destination, table),
+            source=source if is_callable_source(source) or is_callable_source(src_cfg) else src_cfg,
+        )
+        cursor_key = scope.cursor_key
+        watermark = scope.watermark
 
     src_db = source.database or src_cfg.get("database") or ("test" if src_type == "mongodb" else "")
 
@@ -1052,6 +1122,40 @@ def _stream_database_transfer_impl(
                 exc,
                 exc_info=exc,
             )
+    elif not incremental and src_type == "snowflake":
+        try:
+            from services.connector_auth import snowflake_session_kwargs
+            from services.source_snapshot import (
+                activate_snapshot,
+                begin_snowflake_time_travel,
+                end_snowflake_time_travel,
+            )
+
+            session = snowflake_session_kwargs(src_cfg)
+            _snap_conn, _snap_meta = begin_snowflake_time_travel(
+                host=str(src_cfg.get("host") or ""),
+                database=str(src_cfg.get("database") or ""),
+                username=str(src_cfg.get("username") or ""),
+                password=str(src_cfg.get("password") or ""),
+                schema=str(src_cfg.get("schema") or "PUBLIC"),
+                warehouse=str(src_cfg.get("warehouse") or ""),
+                connection_string=str(src_cfg.get("connection_string") or ""),
+                role=str(session.get("role") or src_cfg.get("role") or ""),
+                private_key=str(session.get("private_key") or src_cfg.get("private_key") or ""),
+            )
+            activate_snapshot(_snap_conn, _snap_meta, end_snowflake_time_travel)
+            logger.info(
+                "Property 3 source snapshot bound — engine=snowflake "
+                "isolation=time_travel ts=%s",
+                _snap_meta.get("time_travel_ts"),
+            )
+        except Exception as exc:
+            logger.warning(
+                "Property 3 Snowflake Time Travel snapshot unavailable (%s) — "
+                "falling back to live scans (re-read may see concurrent writes)",
+                exc,
+                exc_info=exc,
+            )
 
     # Memory-safe chunk sizing: sample a few rows, then size batches to keep
     # per-batch memory within a destination-safe limit while respecting CHUNK_SIZE.
@@ -1094,19 +1198,29 @@ def _stream_database_transfer_impl(
         }
 
     _sample_started = time.perf_counter()
-    sample_probe, _ = _unwrap_read(
-        _read_batch(
-            src_type, src_cfg, table, None, 0, sample_limit, database=src_db,
-            **_cursor_read_args(watermark),
+    # Snowflake snapshot scan opens one warehouse session on the first write
+    # page. A separate OFFSET sizing login resumes the warehouse twice — that
+    # is how a 150k TPC-H extract spent minutes before the first real page.
+    skip_sf_sizing_probe = src_type == "snowflake" and not incremental
+    if skip_sf_sizing_probe:
+        sample_probe = type("SizingSkip", (), {"rows": [], "headers": [], "total_rows": None})()
+        sample_rows = []
+        avg_row_size = 256
+        phase_profile.add(PHASE_READ, time.perf_counter() - _sample_started, rows=0)
+    else:
+        sample_probe, _ = _unwrap_read(
+            _read_batch(
+                src_type, src_cfg, table, None, 0, sample_limit, database=src_db,
+                **_cursor_read_args(watermark),
+            )
         )
-    )
-    phase_profile.add(
-        PHASE_READ,
-        time.perf_counter() - _sample_started,
-        rows=len(sample_probe.rows or []),
-    )
-    sample_rows = sample_probe.rows or []
-    avg_row_size = 100
+        phase_profile.add(
+            PHASE_READ,
+            time.perf_counter() - _sample_started,
+            rows=len(sample_probe.rows or []),
+        )
+        sample_rows = sample_probe.rows or []
+        avg_row_size = 100
     if sample_rows:
         # Prefer mapped cell byte lengths — len(str(row)) under-counts nested/wide payloads.
         sizes: list[int] = []
@@ -1181,10 +1295,31 @@ def _stream_database_transfer_impl(
         return default
 
     _probe_started = time.perf_counter()
+    # Warehouse/SQL snapshot without a keyset must not OFFSET-page (O(n²) +
+    # new login per chunk). One SELECT + fetchmany, started on this first page.
+    from connectors.sql_snapshot_scan import SNAPSHOT_SCAN_SOURCES as _SNAPSHOT_SCAN_SOURCES
+
+    src_scan: dict[str, Any] = {}
+    # A held scan always starts at row 0. Resume must not rewrite the prefix
+    # the first probe would otherwise become. Keyset seek (after introspect)
+    # or OFFSET (legacy checkpoint) owns mid-run continuation.
+    _is_resume = bool(
+        checkpoint
+        and (
+            int(getattr(checkpoint, "offset", 0) or 0) > 0
+            or int(getattr(checkpoint, "chunk_index", 0) or 0) > 0
+        )
+    )
+    _scan_kw: dict[str, Any] = (
+        {"scan_state": src_scan}
+        if src_type in _SNAPSHOT_SCAN_SOURCES and not incremental and not _is_resume
+        else {}
+    )
     probe, ddb_cursor = _unwrap_read(
         _read_batch(
             src_type, src_cfg, table, None, 0, _batch_limit(0), database=src_db,
             **_cursor_read_args(watermark),
+            **_scan_kw,
         )
     )
     # This page is not thrown away — it becomes the first written batch.
@@ -1299,6 +1434,10 @@ def _stream_database_transfer_impl(
     column_types = {c: ddl_carrier_type(schema.get(c, "string")) for c in columns}
     if not mappings:
         mappings = [{"source": c, "target": c, "confidence": 0.95} for c in columns]
+    from services.shape_contract import write_ready_mappings
+
+    # Pending extras and intentional omits stay off INSERT/MERGE (name-addressed).
+    mappings = write_ready_mappings(mappings)
     # Schemaless sources: always allow ADD COLUMN when attrs appear mid-transfer.
     if src_type in ("dynamodb", "mongodb", "elasticsearch", "redis", "kafka"):
         backfill_new_fields = True
@@ -1373,6 +1512,17 @@ def _stream_database_transfer_impl(
         rows_before = precount_table(dest_type, dest_cfg, dest_table)
         if rows_before is not None:
             dest_summary[PRECOUNT_KEY] = int(rows_before)
+            checkpoint.target_rows_before = int(rows_before)
+    elif checkpoint.target_rows_before is not None:
+        # Resume: restore the first-pass dest-before. A live COUNT now includes
+        # rows this job already wrote and is not a pre-write cardinality.
+        dest_summary[PRECOUNT_KEY] = int(checkpoint.target_rows_before)
+    keyed_census_acc = (
+        KeyCensusAccumulator() if write_mode == "upsert" and pk_target_cols else None
+    )
+    overwrite_keys_acc = begin_overwrite_source_keys(
+        effective_sync, pk_target_cols, resumed=resumed_pass
+    )
     last_checksum = ""
     # Phase F1 — accumulate fingerprints during the write pass (avoids double source I/O).
     write_pass_fp = FingerprintAccumulator()
@@ -1401,9 +1551,14 @@ def _stream_database_transfer_impl(
     # Bookmark the full primary key (including composite) so page boundaries
     # cannot skip tied leading-key values. Without a PK, fall back to OFFSET —
     # quadratic and slow, but it cannot skip rows.
-    from services.keyset_pagination import KEYSET_CAPABLE_SOURCES, max_keyset_bookmark
+    from services.keyset_pagination import (
+        KEYSET_CAPABLE_SOURCES,
+        max_keyset_bookmark,
+        safe_keyset_unique_columns,
+    )
 
     keyset_pk_cols = [c for c in pk_source_cols if c and c in columns]
+    pagination_warning = ""
     _pk_introspect_types = (
         "postgresql",
         "redshift",
@@ -1413,38 +1568,45 @@ def _stream_database_transfer_impl(
         "oracle",
         "sqlite",
         "generic_sql",
+        "bigquery",
+        "databricks",
     )
-    # Property 6 — source catalog for create-new fidelity certificate (PG/SQLite sinks).
+    # Property 6 — source catalog for create-new fidelity (any SQL sink that
+    # consumes it). Always introspect SQL sources: a contract PK is not a
+    # substitute for nullability / defaults / unique keys.
     source_schema_catalog: dict[str, Any] | None = None
     _src_schema_types: dict[str, str] = {}
     _src_schema_nulls: dict[str, bool] = {}
     _src_keys: dict[str, Any] = {}
-    if not keyset_pk_cols and src_type in _pk_introspect_types:
-        # Most transfers never declare a stream contract, so requiring a
-        # contract PK would drop every one of them onto OFFSET. The source
-        # catalog already knows the real key — ask it, so the common case keeps
-        # seek reads and gets uniqueness from the database rather than a guess.
+    if src_type in _pk_introspect_types:
         try:
             _src_schema_types, _src_schema_nulls, _src_keys = _introspect_table_schema_rich(
                 src_type, src_cfg, table, columns
             )
-            keyset_pk_cols = [
-                c for c in (_src_keys.get("primary_key_columns") or []) if c in columns
-            ]
+            if not keyset_pk_cols:
+                keyset_pk_cols = [
+                    c for c in (_src_keys.get("primary_key_columns") or []) if c in columns
+                ]
+            if not keyset_pk_cols:
+                keyset_pk_cols = safe_keyset_unique_columns(
+                    _src_keys.get("unique_keys") or [],
+                    columns,
+                    _src_schema_nulls,
+                )
+                if not keyset_pk_cols and (_src_keys.get("unique_keys") or []):
+                    pagination_warning = (
+                        "Unique key is nullable, advisory, or expression-based — "
+                        "snapshot scan (one SELECT + fetchmany), not keyset. "
+                        "Nullable UK seek skips NULL rows."
+                    )
         except Exception as exc:
-            logger.debug("source primary-key introspection failed: %s", exc, exc_info=exc)
-    elif src_type in _pk_introspect_types and dest_type in (
-        "sqlite",
-        "postgresql",
-        "redshift",
-    ):
-        # Contract already supplied a PK — still need nullability/defaults for fidelity.
-        try:
-            _src_schema_types, _src_schema_nulls, _src_keys = _introspect_table_schema_rich(
-                src_type, src_cfg, table, columns
-            )
-        except Exception as exc:
-            logger.debug("source schema fidelity introspection failed: %s", exc, exc_info=exc)
+            logger.debug("source schema introspection failed: %s", exc, exc_info=exc)
+    # MongoDB ``_id`` is the collection primary key. Without this, a full
+    # snapshot fell through to ``.skip(offset)`` (O(n²) + concurrent-insert
+    # drift). Debezium/Fivetran seek ``_id``; we do the same.
+    if src_type == "mongodb" and columns and "_id" in columns:
+        if "_id" not in keyset_pk_cols:
+            keyset_pk_cols = ["_id"] + [c for c in keyset_pk_cols if c != "_id"]
     if _src_keys or _src_schema_nulls or _src_schema_types:
         try:
             from services.schema_fidelity import (
@@ -1496,7 +1658,12 @@ def _stream_database_transfer_impl(
             chunk_idx,
         )
         use_keyset = False
-    pagination_mode = "keyset" if use_keyset else "offset"
+    pagination_mode = "keyset" if use_keyset else ("scan" if src_scan else "offset")
+    if use_keyset and src_scan.get("started"):
+        # First page already landed from the snapshot scan; later pages seek.
+        from connectors.sql_snapshot_scan import close_table_scan
+
+        close_table_scan(src_scan)
     # Phase F3 — PostgreSQL COPY TO STDOUT bulk export (full refresh, no filter).
     bulk_export_iter = None
     try:
@@ -1513,6 +1680,8 @@ def _stream_database_transfer_impl(
             and not incremental
             and not source_filter
             and not limit
+            and not is_callable_source(source)
+            and not is_callable_source(src_cfg)
         ):
             try:
                 bulk_export_iter = iter_postgresql_copy_batches(
@@ -1562,14 +1731,16 @@ def _stream_database_transfer_impl(
         logger.info(
             "Keyset pagination disabled for %s.%s — no unique bookmark (declare a "
             "primary_key on the stream contract to re-enable seek reads). Falling "
-            "back to OFFSET pagination.",
+            "back to %s.",
             src_type,
             table,
+            "snapshot scan" if src_scan else "OFFSET pagination",
         )
     elif not use_keyset:
         logger.info(
-            "OFFSET pagination for %s.%s — no keyset-capable unique bookmark "
-            "(quadratic cost on large tables).",
+            "%s pagination for %s.%s — no keyset-capable unique bookmark "
+            "(quadratic cost on large tables when OFFSET).",
+            "Snapshot-scan" if src_scan else "OFFSET",
             src_type,
             table,
         )
@@ -1672,6 +1843,25 @@ def _stream_database_transfer_impl(
                     database=src_db,
                     kafka_cursor=kafka_cursor,
                     known_total_rows=total_rows,
+                )
+            )
+            return batch
+        elif incremental and cursor_source_col and (
+            is_callable_source(src_cfg)
+        ):
+            # Spool is not cursor-sorted. Filter against the *run* watermark
+            # then OFFSET — never the advancing page max (that drops rows).
+            batch, _ = _unwrap_read(
+                _read_batch(
+                    src_type,
+                    src_cfg,
+                    table,
+                    columns,
+                    fetch_offset,
+                    batch_limit,
+                    database=src_db,
+                    known_total_rows=total_rows,
+                    **_cursor_read_args(watermark),
                 )
             )
             return batch
@@ -1783,6 +1973,11 @@ def _stream_database_transfer_impl(
                     batch_limit,
                     database=src_db,
                     known_total_rows=total_rows,
+                    **(
+                        {"scan_state": src_scan}
+                        if src_type in _SNAPSHOT_SCAN_SOURCES and src_scan
+                        else {}
+                    ),
                 )
             )
             if src_type == "elasticsearch":
@@ -1871,6 +2066,9 @@ def _stream_database_transfer_impl(
             return sf_conn_state["conn"]
         from connectors.snowflake_conn import get_connection, normalize_account
 
+        from services.connector_auth import engine_login_role
+
+        pem = str(dest_cfg.get("private_key") or "")
         sf_conn_state["conn"] = get_connection(
             account=normalize_account(dest_cfg.get("host", "")),
             username=dest_cfg.get("username", ""),
@@ -1879,7 +2077,9 @@ def _stream_database_transfer_impl(
             schema=dest_cfg.get("schema", "PUBLIC"),
             warehouse=dest_cfg.get("warehouse", ""),
             connection_string=dest_cfg.get("connection_string", ""),
-            role=dest_cfg.get("role", ""),
+            role=engine_login_role(dest_cfg.get("auth_role"), dest_cfg.get("role")),
+            private_key=pem,
+            private_key_passphrase=str(dest_cfg.get("password") or "") if pem else "",
         )
         return sf_conn_state["conn"]
 
@@ -2028,8 +2228,22 @@ def _stream_database_transfer_impl(
             source_schema_catalog=source_schema_catalog,
             **write_kwargs,
         )
+        if keyed_census_acc is not None:
+            observe_keyed_batch(
+                keyed_census_acc,
+                headers=batch.headers,
+                rows=batch.rows,
+                mappings=mappings,
+                key_columns=pk_target_cols,
+                db_type=dest_type,
+                cfg=dest_cfg,
+                schema=schema_from_cfg(dest_type, dest_cfg),
+                table_name=dest_table,
+            )
         # Phase F1 — fingerprint the mapped rows from this chunk (same policy as
         # post-write re-read) so the write pass can own the source checksum.
+        # Tombstones are already stripped: hashing deleted keys as writes would
+        # fail Gate-8 after a correct hard DELETE.
         inline_fps: list[Any] = []
         try:
             mapped_fp, _ = map_rows_for_fingerprint(
@@ -2098,10 +2312,22 @@ def _stream_database_transfer_impl(
             "batch_rows": len(batch.rows),
             "reconcile_sample_rows": sample_rows,
             "fingerprints": inline_fps,
+            "overwrite_keys": (
+                matrix_to_key_tuples(
+                    batch.headers, batch.rows, mappings, pk_target_cols
+                )
+                if overwrite_keys_acc is not None
+                else None
+            ),
         }
 
     def _apply_result(idx: int, result: dict[str, Any]) -> None:
         nonlocal written, rejected_total, coerced_null_total, last_checksum, running_cursor, committed_offset, committed_keyset, dest_summary, batches_completed, kafka_cursor, reconcile_sample
+        if overwrite_keys_acc is not None:
+            if "overwrite_keys" in result:
+                overwrite_keys_acc.observe_tuples(result.get("overwrite_keys"))
+            elif result.get("batch_rows"):
+                overwrite_keys_acc.observe_tuples(None)
         written += result["batch_written"]
         rejected_total += result["rejected"]
         coerced_null_total += result.get("coerced_null", 0)
@@ -2211,6 +2437,8 @@ def _stream_database_transfer_impl(
         checkpoint.kafka_cursor = kafka_cursor
         checkpoint.checksum = last_checksum
         checkpoint.phase = "writing"
+        if dest_summary.get(PRECOUNT_KEY) is not None:
+            checkpoint.target_rows_before = int(dest_summary[PRECOUNT_KEY])
         checkpoint.chunk_total = chunks
         checkpoint.status = "running"
         # Fail-closed: no durable resume point ⇒ abort (do not keep writing).
@@ -2299,6 +2527,15 @@ def _stream_database_transfer_impl(
                 dispatcher.abort()
                 raise
     finally:
+        if src_scan:
+            try:
+                from connectors.sql_snapshot_scan import close_table_scan
+
+                close_table_scan(src_scan)
+            except Exception as exc:
+                logging.getLogger(__name__).debug(
+                    "Source snapshot scan close skipped: %s", exc, exc_info=exc
+                )
         for state in (sf_conn_state, pg_conn_state):
             conn = state.get("conn")
             if conn is not None:
@@ -2359,14 +2596,13 @@ def _stream_database_transfer_impl(
     if incremental and running_cursor and cursor_key and running_cursor != watermark:
         set_watermark(cursor_key, running_cursor, metadata={"job_id": job_id, "sync_mode": effective_sync})
 
-    # Phase F1 — prefer write-pass fingerprints (same mapped rows as transferred).
-    # Opt into source re-read with DATAFLOW_RECONCILE_SOURCE_REREAD=1 when operators
-    # need an independent second scan (costs double I/O / warehouse bill).
-    _reread = getenv_brand("RECONCILE_SOURCE_REREAD", "0").strip().lower() in (
-        "1",
-        "true",
-        "yes",
-    )
+    # Phase F1 — write-pass fingerprints hash the same remapped rows just written.
+    # Heterogeneous warehouse routes auto-re-read (DATAFLOW_RECONCILE_SOURCE_REREAD=auto)
+    # so Snowflake→Postgres can earn independent_source_reread / full_checksum.
+    # Force off with =0; force on with =1. Partial write-pass (resume tail) always
+    # re-reads — a session digest vs a full destination is a false mismatch.
+    from services.source_reread import reread_pagination_plan, should_reread_source
+
     # Resume: the write pass only fingerprints this session's rows while Gate-8
     # compares the full destination — force a source re-read. This holds for
     # every sync mode, not just overwrite: a resumed keyed load lands the whole
@@ -2379,100 +2615,128 @@ def _stream_database_transfer_impl(
         and write_pass_fp.total < _expected_population
         and (is_overwrite_sync(effective_sync) or resumed_pass)
     )
-    if write_pass_fp.total > 0 and not _reread and not _partial_write_pass:
+    _reread = should_reread_source(
+        src_type=src_type,
+        dest_type=dest_type,
+        incremental=incremental,
+        partial_write_pass=_partial_write_pass,
+    )
+    if write_pass_fp.total > 0 and not _reread:
         checksum_started = time.perf_counter()
         final_checksum = write_pass_fp.digest()
         phase_profile.add(
             PHASE_CHECKSUM, time.perf_counter() - checksum_started, rows=write_pass_fp.total
         )
         dest_summary["checksum_mode"] = "inline_write_pass"
+        dest_summary["source_independently_reread"] = False
         dest_summary["checksum_note"] = (
             "Source fingerprints accumulated during the write pass (Phase F1) — "
-            "no second source scan. Set DATAFLOW_RECONCILE_SOURCE_REREAD=1 for "
-            "independent re-read proof (double I/O)."
+            "no second source scan. Heterogeneous warehouse routes re-read by "
+            "default; set DATAFLOW_RECONCILE_SOURCE_REREAD=1 to force a second "
+            "scan on same-engine routes (double I/O)."
         )
     elif src_type in {"postgresql", "redshift", "mysql", "snowflake", "bigquery", "sqlite", "generic_sql", "mongodb", "s3", "gcs", "adls"}:
-        # Legacy / optional re-read — memory-bounded chunked FingerprintAccumulator.
+        # Independent re-read — snapshot scan (no OFFSET) on warehouse sources.
+        from connectors.sql_snapshot_scan import close_table_scan
+
         checksum_started = time.perf_counter()
         fp_accumulator = FingerprintAccumulator()
+        reread_plan = reread_pagination_plan(src_type=src_type, incremental=incremental)
+        reread_scan = reread_plan.get("scan_state")
+        use_reread_offset = bool(reread_plan.get("use_offset"))
         cursor_type_for_read: str | None = None
         if incremental and cursor_source_col:
             cursor_type_for_read = normalize_inferred(schema.get(cursor_source_col, "string")).upper()
         checksum_cursor_col = cursor_source_col if incremental else ""
         checksum_cursor_after = watermark if incremental else None
         use_checksum_keyset = False
-        if not incremental and keyset_col and keyset_col in (columns or []):
-            if src_type in {"mongodb"}:
-                checksum_cursor_col = keyset_col
-                checksum_cursor_after = None
-                use_checksum_keyset = True
-                cursor_type_for_read = normalize_inferred(column_types.get(keyset_col, "string")).upper()
+        if incremental and checksum_cursor_col:
+            use_checksum_keyset = True
         read_offset = 0
         checksum_rows_read = 0
-        while True:
-            read_limit = _batch_limit(read_offset, default=chunk_size)
-            if read_limit <= 0:
-                break
-            batch, _ = _unwrap_read(
-                _read_batch(
-                    src_type,
-                    src_cfg,
-                    table,
-                    columns,
-                    read_offset,
-                    read_limit,
-                    database=src_db,
-                    cursor_column=checksum_cursor_col,
-                    cursor_after=checksum_cursor_after,
-                    cursor_type=cursor_type_for_read,
-                    known_total_rows=total_rows,
+        try:
+            while True:
+                read_limit = _batch_limit(
+                    read_offset if use_reread_offset else checksum_rows_read,
+                    default=chunk_size,
                 )
-            )
-            if not batch or not batch.rows:
-                break
-            mapped, _ = map_rows_for_fingerprint(
-                headers=batch.headers,
-                data_rows=batch.rows,
-                mappings=mappings,
-                target_cols=target_cols,
-                column_types=column_types,
-                error_policy=stream_error_policy,
-                dest_types=fingerprint_dest_types,
-                preserve_case=True,
-                dest_kind=dest_type,
-                destination_pk_columns=list(pk_target_cols or []) or None,
-            )
-            if mapped:
-                fp_accumulator.add_many(
-                    row_fingerprints(
-                        mapped,
-                        target_cols,
-                        dest_db_type=dest_type,
-                        dest_types=fingerprint_dest_types,
+                if read_limit <= 0:
+                    break
+                _scan_kw = {"scan_state": reread_scan} if reread_scan is not None else {}
+                batch, _ = _unwrap_read(
+                    _read_batch(
+                        src_type,
+                        src_cfg,
+                        table,
+                        columns,
+                        read_offset if use_reread_offset else 0,
+                        read_limit,
+                        database=src_db,
+                        cursor_column=checksum_cursor_col,
+                        cursor_after=checksum_cursor_after,
+                        cursor_type=cursor_type_for_read,
+                        known_total_rows=total_rows,
+                        **_scan_kw,
                     )
                 )
-            checksum_rows_read += len(batch.rows)
-            if limit > 0 and checksum_rows_read >= limit:
-                break
-            if len(batch.rows) < read_limit:
-                break
-            if use_checksum_keyset:
-                checksum_cursor_after = batch.rows[-1][batch.headers.index(checksum_cursor_col)]
-            else:
-                read_offset += len(batch.rows)
+                if not batch or not batch.rows:
+                    break
+                mapped, _ = map_rows_for_fingerprint(
+                    headers=batch.headers,
+                    data_rows=batch.rows,
+                    mappings=mappings,
+                    target_cols=target_cols,
+                    column_types=column_types,
+                    error_policy=stream_error_policy,
+                    dest_types=fingerprint_dest_types,
+                    preserve_case=True,
+                    dest_kind=dest_type,
+                    destination_pk_columns=list(pk_target_cols or []) or None,
+                )
+                if mapped:
+                    fp_accumulator.add_many(
+                        row_fingerprints(
+                            mapped,
+                            target_cols,
+                            dest_db_type=dest_type,
+                            dest_types=fingerprint_dest_types,
+                        )
+                    )
+                checksum_rows_read += len(batch.rows)
+                if limit > 0 and checksum_rows_read >= limit:
+                    break
+                if len(batch.rows) < read_limit:
+                    break
+                if use_checksum_keyset and checksum_cursor_col in (batch.headers or []):
+                    checksum_cursor_after = batch.rows[-1][batch.headers.index(checksum_cursor_col)]
+                elif use_reread_offset:
+                    read_offset += len(batch.rows)
+        finally:
+            if reread_scan is not None:
+                close_table_scan(reread_scan)
         final_checksum = fp_accumulator.digest() if fp_accumulator.total else last_checksum
         phase_profile.add(
             PHASE_CHECKSUM, time.perf_counter() - checksum_started, rows=fp_accumulator.total
         )
         dest_summary["checksum_mode"] = "source_reread"
+        dest_summary["source_independently_reread"] = True
+        dest_summary["reread_pagination"] = reread_plan.get("mode")
+        dest_summary["checksum_note"] = (
+            "Independent source re-read after the write pass "
+            f"({reread_plan.get('mode')} pagination) — dest read-back can earn "
+            "full_checksum / migration_proven."
+        )
     else:
         final_checksum = write_pass_fp.digest() if write_pass_fp.total else last_checksum
         dest_summary["checksum_mode"] = "inline_write_pass" if write_pass_fp.total else "writer_last_batch"
+        dest_summary["source_independently_reread"] = False
 
     dest_summary["checksum"] = final_checksum or last_checksum
     # Phase F2 — operator-visible pagination honesty (OFFSET cliff vs keyset).
     dest_summary["pagination_mode"] = pagination_mode
-    if pagination_mode == "offset":
+    if pagination_warning:
+        dest_summary["pagination_warning"] = pagination_warning
+    elif pagination_mode == "offset":
         dest_summary["pagination_warning"] = (
             "OFFSET pagination — quadratic cost and full scans on some warehouses; "
             "declare a primary key to enable keyset seek reads."
@@ -2565,6 +2829,11 @@ def _stream_database_transfer_impl(
         dest_summary["warnings_suppressed"] = suppressed_warnings
     dest_summary["error_policy"] = "quarantine" if (rejected_total or coerced_null_total) else "none"
     dest_summary["sync_mode"] = effective_sync
+    stamp_overwrite_source_keys(dest_summary, overwrite_keys_acc)
+    if keyed_census_acc is not None:
+        census = keyed_census_acc.to_census()
+        if census is not None:
+            dest_summary[CENSUS_KEY] = census.to_dict()
     if pk_target_cols:
         dest_summary.setdefault("conflict_columns", list(pk_target_cols))
         dest_summary.setdefault("primary_key_columns", list(pk_target_cols))
@@ -2769,6 +3038,7 @@ def run_non_cdc_multi_stream_sequential(
             if remaining_limit == 0 and limit > 0:
                 break
             stream_name = (contract.name or "").strip() or "stream"
+            begin_table_population(checkpoint)
             if getattr(source, "format", "") == "mongodb" or original_collection:
                 source.collection = stream_name
             else:
@@ -2849,27 +3119,35 @@ def run_non_cdc_multi_stream_sequential(
             except Exception as exc:
                 status = "failed"
                 error = str(exc)
-                stream_health.append(
-                    {
-                        "name": stream_name,
-                        "status": status,
-                        "records_processed": rows,
-                        "error": error,
-                    }
+                record_stream_health(
+                    stream_health,
+                    name=stream_name,
+                    status=status,
+                    records_processed=rows,
+                    summary=summary,
+                    extra={"error": error},
+                    sync_mode=sync_mode,
+                    source=source,
+                    destination=destination,
                 )
                 raise
-            stream_health.append(
-                {
-                    "name": stream_name,
-                    "status": status,
-                    "records_processed": rows,
+            record_stream_health(
+                stream_health,
+                name=stream_name,
+                status=status,
+                records_processed=rows,
+                summary=summary,
+                extra={
                     "watermark": summary.get("watermark"),
                     "sync_mode": summary.get("sync_mode")
                     or resolve_effective_sync_mode(
                         sync_mode, single_contracts[0].get("sync_mode")
                     ),
                     "error": error,
-                }
+                },
+                sync_mode=sync_mode,
+                source=source,
+                destination=destination,
             )
     finally:
         if original_table is not None:
@@ -2976,9 +3254,7 @@ def stream_scd2_mirror_transfer(
     """
     import math
 
-    import sqlalchemy as sa
     from connectors.generic_sql import drop_table, get_sql_schema, get_sqlalchemy_engine
-    from connectors.writer_common import quote_sql_identifier
     from services.sync_cursor import (
         map_source_to_target,
         resolve_effective_sync_mode,
@@ -3175,9 +3451,9 @@ def stream_scd2_mirror_transfer(
                     rows_written = written_total
 
         elif effective_sync in ("full_refresh_mirror", "mirror"):
-            from src.services.mirror_engine import (
+            from services.mirror_engine import (
                 _compute_active_checksum,
-                _ensure_soft_delete_column,
+                apply_inferred_deletes_via_staging,
             )
 
             # Stream upsert staging → target.
@@ -3213,7 +3489,6 @@ def stream_scd2_mirror_transfer(
 
             # Single SQL pass to reactivate present keys and soft-delete missing keys.
             engine = get_sqlalchemy_engine(dest_cfg)
-            soft_delete_col = quote_sql_identifier("_deleted")
             if contract and contract.primary_key:
                 pk_cols = [
                     map_source_to_target(col, mappings) for col in contract.primary_key_columns()
@@ -3223,34 +3498,17 @@ def stream_scd2_mirror_transfer(
                     "Mirror requires an explicit primary_key on the stream contract; "
                     "refuse inventing a conflict key from the first mapped column"
                 )
-            # Correlate target↔staging without UPDATE aliases (SQLite-compatible).
-            join_pred = " AND ".join(
-                f"{staging_qualified}.{quote_sql_identifier(c)} = "
-                f"{target_qualified}.{quote_sql_identifier(c)}"
-                for c in pk_cols
-            )
             with engine.connect() as conn:
-                _ensure_soft_delete_column(conn, target_qualified, "_deleted")
-                # Reactivate rows that are back in the source.
-                conn.execute(
-                    sa.text(
-                        f"UPDATE {target_qualified} "  # nosec B608
-                        f"SET {soft_delete_col} = FALSE "
-                        f"WHERE EXISTS (SELECT 1 FROM {staging_qualified} WHERE {join_pred})"
-                    )
-                )
-                # Soft-delete rows that are no longer in the source.
-                conn.execute(
-                    sa.text(
-                        f"UPDATE {target_qualified} "  # nosec B608
-                        f"SET {soft_delete_col} = TRUE "
-                        f"WHERE NOT EXISTS (SELECT 1 FROM {staging_qualified} WHERE {join_pred}) "
-                        f"AND ({soft_delete_col} IS NULL OR {soft_delete_col} = FALSE)"
+                dest_summary.update(
+                    apply_inferred_deletes_via_staging(
+                        conn,
+                        target_qualified,
+                        staging_qualified,
+                        pk_cols,
+                        dialect=dest_type,
                     )
                 )
                 conn.commit()
-
-                # Read active rows and compute checksum.
                 active_count, active_checksum = _compute_active_checksum(
                     conn, target_qualified, target_cols, "_deleted", batch_size=1_000
                 )
@@ -3283,27 +3541,21 @@ def _read_staging_batches(
     columns: list[str],
     batch_size: int,
 ):
-    """Yield batches of dicts from the staging table using LIMIT/OFFSET."""
+    """Yield batches from staging via one streamed SELECT. Never OFFSET."""
     import sqlalchemy as sa
     from connectors.generic_sql import get_sqlalchemy_engine
     from connectors.writer_common import quote_sql_identifier
+    from services.reconciliation_api import iter_select_row_dicts
 
     engine = get_sqlalchemy_engine(cfg)
     qualified = _qualified(endpoint.table, schema_name)
     try:
         with engine.connect() as conn:
-            offset = 0
-            while True:
-                cols = ",".join(quote_sql_identifier(c) for c in columns)
-                sql = f"SELECT {cols} FROM {qualified} LIMIT {batch_size} OFFSET {offset}"  # nosec B608
-                result = conn.execute(sa.text(sql))
-                rows = result.mappings().all()
-                if not rows:
-                    break
-                yield [{c: row[c] for c in columns} for row in rows]
-                if len(rows) < batch_size:
-                    break
-                offset += batch_size
+            cols = ",".join(quote_sql_identifier(c) for c in columns)
+            sql = f"SELECT {cols} FROM {qualified}"  # nosec B608
+            yield from iter_select_row_dicts(
+                conn, sa.text(sql), columns, itersize=batch_size
+            )
     finally:
         release_engine(engine)
 

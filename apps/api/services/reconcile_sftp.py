@@ -30,49 +30,49 @@ def verify_sftp_object(
     known_hosts: str = "",
     host_key_policy: str = "",
 ) -> tuple[int, str]:
-    """Independent SFTP download + parse for Gate-8 (parity with S3/GCS/ADLS).
+    """Gate-8 cell checksum of an SFTP GET stream. Never JSON-fallback empty.
 
-    The read-back must run under the same host-key trust as the write;
-    reconnecting without the pin would verify the destination over a transport
-    the operator never trusted.
+    Same artifact walk as S3/GCS/ADLS (``checksum_artifact_stream``). Gzip CSV
+    as UTF-8 JSON garbage is not dest=0. Missing file is ``(0, "")``.
+    Unparseable is ``(-1, "")``. Host-key trust must match the write.
     """
     try:
-        from connectors.sftp_common import connect_sftp, parse_sftp_config
-        from services.reconciliation import (
-            _rows_from_object_bytes,
-            canonical_checksum_from_iter,
-        )
+        from services.dest_precount import checksum_artifact_stream
+        from services.object_streaming import open_sftp_binary
 
-        cfg = parse_sftp_config(
-            connection_string=connection_string,
-            host=host,
-            port=port,
-            username=username,
-            password=password,
-            database=database,
-            table=table_name,
-            host_key=host_key,
-            known_hosts=known_hosts,
-            host_key_policy=host_key_policy,
-        )
-        if not cfg.host or not cfg.path:
+        cfg = {
+            "host": host,
+            "port": port,
+            "username": username,
+            "password": password,
+            "connection_string": connection_string,
+            "database": database,
+            "table": table_name,
+            "host_key": host_key,
+            "known_hosts": known_hosts,
+            "host_key_policy": host_key_policy,
+        }
+        opened = open_sftp_binary(cfg)
+        if opened is False:
+            return 0, ""
+        if opened is None:
             return -1, ""
-        transport, sftp = connect_sftp(cfg)
+        stream, closer = opened
         try:
-            with sftp.file(cfg.path, "rb") as fh:
-                body = fh.read()
+            return checksum_artifact_stream(
+                stream,
+                name=str(table_name or ""),
+                columns=target_columns,
+                limit=limit,
+                dest_db_type="sftp",
+                dest_types=dest_types,
+            )
         finally:
-            sftp.close()
-            transport.close()
-        rows, headers = _rows_from_object_bytes(body, cfg.path, target_columns)
-        columns = headers or target_columns or []
-        return len(rows), canonical_checksum_from_iter(
-            rows,
-            columns,
-            limit=limit,
-            dest_db_type="sftp",
-            dest_types=dest_types,
-        )
+            if closer is not None:
+                try:
+                    closer()
+                except Exception:
+                    pass
     except Exception as exc:
         logger.warning("SFTP reconciliation read-back failed: %s", exc, exc_info=exc)
         return -1, ""

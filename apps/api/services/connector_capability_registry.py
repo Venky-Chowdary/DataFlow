@@ -236,6 +236,10 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
             "JSON/ARRAY land as SUPER; binary as VARBYTE.",
             "Upsert prefers native MERGE with NULL-safe PK match; falls back to delete+insert. Still at-least-once (not exactly-once).",
             "DISTKEY/SORTKEY are operator-owned — Datawrap does not invent them.",
+            "Bulk loads use COPY FROM S3 when staging_bucket and iam_role are set "
+            "(TSV, gzip when the stage file is large; Parquet when "
+            "redshift_stage_format=parquet). Inserts below REDSHIFT_COPY_THRESHOLD "
+            "keep the PostgreSQL-wire path. Still at-least-once.",
         ],
         "recommended_batch_size": 5000,
     },
@@ -364,8 +368,17 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "supports_unstructured": True,
         "common_issues": [
             "Use the region-specific endpoint and verify bucket permissions.",
-            "Large objects should be split into parts. S3 has no native UPDATE — "
-            "upsert sync modes are not supported (overwrite object key only).",
+            "Bodies at or above DATAFLOW_OBJECT_STORE_MULTIPART_THRESHOLD use "
+            "S3 multipart (abort on failure). Map+quarantine+serialize runs in "
+            "bounded bundles (DATAFLOW_OBJECT_STORE_MATERIALIZE_BATCH, default "
+            "1024); accepted mapped_rows are not retained. Source matrix / "
+            "STRUCT explode spills to disk above DATAFLOW_SOURCE_ROW_SPILL_MAX. "
+            "Engine records stay in RAM until the write returns. The export "
+            "spool rolls to disk above DATAFLOW_OBJECT_STORE_SPILL_MAX. "
+            "Parquet writes one RecordBatch per bundle. S3 has no native UPDATE "
+            "— upsert sync modes are not supported (overwrite object key only). "
+            "Still at-least-once.",
+            "Export JSON, JSONL, CSV, or Parquet by object key extension.",
         ],
         "recommended_batch_size": 1000,
     },
@@ -385,7 +398,13 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "common_issues": [
             "Use HMAC keys or service-account JSON for authentication.",
             "Bucket names are global and unique.",
-            "Object overwrite only — no row-level upsert/MERGE.",
+            "Large objects compose from component uploads; small objects stay "
+            "on upload_from_string. Map+quarantine+serialize uses the same "
+            "bounded-bundle + source-row spool algorithm as S3 (accepted "
+            "mapped_rows not retained; STRUCT explode does not build a list). "
+            "Object overwrite only — no row-level "
+            "upsert/MERGE. Still at-least-once.",
+            "Export JSON, JSONL, CSV, or Parquet by object key extension.",
         ],
         "recommended_batch_size": 1000,
     },
@@ -403,8 +422,14 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "supports_binary": True,
         "supports_unstructured": True,
         "common_issues": [
-            "Object overwrite only — no row-level upsert/MERGE.",
+            "Large objects use stage_block + commit_block_list; small objects "
+            "stay on upload_blob. Map+quarantine+serialize uses the same "
+            "bounded-bundle + source-row spool algorithm as S3 (accepted "
+            "mapped_rows not retained; STRUCT explode does not build a list). "
+            "Object overwrite only — no row-level "
+            "upsert/MERGE. Still at-least-once.",
             "Use Azure Storage Account key or service principal.",
+            "Export JSON, JSONL, CSV, or Parquet by object key extension.",
         ],
         "recommended_batch_size": 1000,
     },
@@ -424,7 +449,8 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "common_issues": [
             "MinIO is S3-compatible; use the MinIO endpoint and region.",
             "Bucket policies may differ from AWS S3.",
-            "Object overwrite only — no row-level upsert/MERGE.",
+            "Large objects use the same S3 multipart path as AWS. "
+            "Object overwrite only — no row-level upsert/MERGE. Still at-least-once.",
         ],
         "recommended_batch_size": 1000,
     },
@@ -717,7 +743,16 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "requires_schema": False,
         "supports_binary": True,
         "supports_unstructured": True,
-        "common_issues": ["Files are immutable; use a unique filename or append-only mode."],
+        "common_issues": [
+            "Files are immutable; use a unique filename or append-only mode.",
+            "JSON/CSV/TSV/JSONL/Parquet map+quarantine+serialize in bounded "
+            "bundles onto the same object-store spool (rolls to disk above "
+            "DATAFLOW_OBJECT_STORE_SPILL_MAX) and PUT in chunks. Accepted "
+            "mapped_rows are not retained; source rows spill above "
+            "DATAFLOW_SOURCE_ROW_SPILL_MAX. Temp file + "
+            "posix_rename when the server supports it — still at-least-once, "
+            "not exactly-once.",
+        ],
         "recommended_batch_size": 1000,
     },
     # ERP / strategic
@@ -803,21 +838,22 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "supports_append": True,
         "supports_overwrite": True,
         "supports_merge": True,
-        # Filesystem + catalog path today is Copy-on-Write rewrite (not MoR /
-        # deletion-vector). MoR is Planned — do not claim Iceberg V3 DV yet.
-        "write_strategy": "copy-on-write",
-        "supports_merge_on_read": False,
+        # Overwrite/replace stay Copy-on-Write. Upserts and CDC/leftover
+        # deletes write v2 equality-delete files. Dest COUNT applies v2
+        # position/equality and v3 deletion-vector-v1.
+        "write_strategy": "merge-on-read-upserts-deletes, copy-on-write-overwrite",
+        "supports_merge_on_read": True,
         "supports_lsn_guard": True,
         "requires_schema": True,
         "supports_binary": True,
         "common_issues": [
             "Schema evolution is supported but should be declared explicitly.",
-            "Upserts/deletes rewrite data files (copy-on-write); merge-on-read / deletion vectors are Planned.",
+            "Upserts write Iceberg v2 equality-delete files plus a new data file at the same snapshot sequence. CDC/leftover deletes write equality deletes. Overwrite/replace stay copy-on-write.",
         ],
         "recommended_batch_size": 10000,
     },
     "delta": {
-        "transfer_ready": True,
+        "transfer_ready": False,
         "tier": TIER_STRATEGIC,
         "pattern": "batch",
         "supports_cdc": False,
@@ -828,11 +864,14 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "supports_merge": True,
         "requires_schema": True,
         "supports_binary": True,
-        "common_issues": ["Delta schema enforcement can reject type changes; enable schema evolution if needed."],
+        "common_issues": [
+            "Delta Lake writer is Planned — no transfer driver in this build.",
+            "Delta schema enforcement can reject type changes; enable schema evolution if needed.",
+        ],
         "recommended_batch_size": 10000,
     },
     "hudi": {
-        "transfer_ready": True,
+        "transfer_ready": False,
         "tier": TIER_STRATEGIC,
         "pattern": "batch",
         "supports_cdc": False,
@@ -843,7 +882,10 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         "supports_merge": True,
         "requires_schema": True,
         "supports_binary": True,
-        "common_issues": ["Hudi requires a record key and pre-combine field for upserts."],
+        "common_issues": [
+            "Apache Hudi writer is Planned — no transfer driver in this build.",
+            "Hudi requires a record key and pre-combine field for upserts.",
+        ],
         "recommended_batch_size": 10000,
     },
     "generic_sql": {
@@ -1008,7 +1050,11 @@ CONNECTOR_ALIASES: dict[str, str] = {
     "mssql": "sqlserver",
     "sql_server": "sqlserver",
     "ms_sql": "sqlserver",
+    "azure_sql": "sqlserver",
+    "azure_sql_database": "sqlserver",
+    "amazon_rds_sql_server": "sqlserver",
     "oracle_db": "oracle",
+    "oracle_autonomous_warehouse": "oracle",
     "mongo": "mongodb",
     "documentdb": "mongodb",
     "document_db": "mongodb",

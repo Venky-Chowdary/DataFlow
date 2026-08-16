@@ -377,10 +377,15 @@ def honesty_dict() -> dict[str, Any]:
         "delivery_classes": {
             DELIVERY_CLASS_EXACTLY_ONCE: {
                 "claimed": False,
-                "available": False,
+                "available": True,
+                "opt_in": True,
+                "algorithm": "dest_owned_watermark_txn",
                 "note": (
-                    "Platform never claims exactly-once end-to-end CDC. "
-                    "PK+_df_lsn upsert is LSN-guarded row-state idempotency under at-least-once capture."
+                    "Platform never claims all CDC is exactly-once. "
+                    "Opt-in delivery_guarantee=exactly_once uses a dest-owned "
+                    "watermark in the same dest transaction as apply (Flink / "
+                    "Estuary sink pattern). Ineligible routes fail closed. "
+                    "Default remains at-least-once upsert."
                 ),
             },
             DELIVERY_CLASS_AT_LEAST_ONCE: {
@@ -410,7 +415,10 @@ def honesty_dict() -> dict[str, Any]:
             "Log capture remains at-least-once (peek→apply→ack).",
             "PK sinks with _df_lsn reject older tokens so row state does not regress.",
             "Append-only sinks are gated unless allow_append_only is set.",
-            "Do not claim exactly-once pipeline delivery.",
+            "Do not claim platform-wide exactly-once pipeline delivery.",
+            "Route-scoped dest-owned watermark EOS is opt-in and fail-closed.",
             "Do not claim at-most-once (would allow silent loss).",
         ],
+        "exactly_once_route_opt_in": True,
+        "exactly_once_algorithm": "dest_owned_watermark_txn",
     }

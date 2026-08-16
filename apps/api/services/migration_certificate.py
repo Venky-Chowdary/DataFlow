@@ -7,10 +7,12 @@ from evidence that already exists (Gate-8 reconciliation, the quarantine DLQ,
 risk contracts, Map→DDL hashes) — it derives no new correctness facts.
 
 The one judgement it *does* add is **row conservation**: every source row must
-be accounted for as written, quarantined, or intentionally skipped. An
-unexplained shortfall is the definition of silent data loss, so the certificate
-refuses to claim proof when the arithmetic does not close, even if Gate-8 was
-otherwise happy.
+be accounted for as on the destination (independent COUNT(*)), quarantined, or
+intentionally skipped. Writer ``records_processed`` is diagnostic only — using
+it to close the ledger is how DMS reports Full Load success and later
+``MISSING_TARGET``. An unexplained shortfall is silent data loss, so the
+certificate refuses to claim proof when the identity does not close, even if
+Gate-8 checksums of *accepted* rows were green.
 """
 
 from __future__ import annotations
@@ -20,6 +22,7 @@ from collections import Counter
 from datetime import datetime, timezone
 from typing import Any
 
+from services.row_conservation import account_job
 from services.signed_proof_pack import export_proof_pack_for_job, sign_body, verify_body
 
 logger = logging.getLogger(__name__)
@@ -114,64 +117,12 @@ def quarantine_burndown(job_id: str, *, limit: int = 500) -> dict[str, Any]:
 
 
 def row_accounting(job: dict[str, Any]) -> dict[str, Any]:
-    """Conservation ledger: read = written + quarantined + skipped.
+    """Conservation ledger: read = dest COUNT(*) + hold-outs + skipped.
 
-    ``rows_read`` comes from Gate-8's source count, which is the only figure
-    measured against the source rather than reported by the writer. When it is
-    absent the ledger is marked unbalanced-unknown: an unmeasured source count
-    cannot be used to prove nothing was lost.
+    ``rows_written`` is the independent destination population, never the
+    writer's ``records_processed``. See ``services.row_conservation``.
     """
-    recon = _dict(job.get("reconciliation"))
-    dest = _dict(job.get("destination_summary"))
-
-    rows_written = _as_int(job.get("records_processed") or dest.get("rows"))
-    rows_quarantined = _as_int(
-        recon.get("rejected_rows") or job.get("rejected_rows") or dest.get("rejected")
-    )
-    rows_skipped = _as_int(recon.get("rows_skipped") or dest.get("rows_skipped"))
-    coerced_null_rows = _as_int(
-        recon.get("coerced_null_rows") or job.get("coerced_null_rows")
-    )
-
-    raw_read = recon.get("source_rows")
-    rows_read = _as_int(raw_read) if raw_read is not None else None
-
-    ledger: dict[str, Any] = {
-        "rows_read": rows_read,
-        "rows_written": rows_written,
-        "rows_quarantined": rows_quarantined,
-        "rows_skipped": rows_skipped,
-        "rows_coerced_null": coerced_null_rows,
-        "rows_read_source": "gate8_source_count" if rows_read is not None else "unmeasured",
-    }
-
-    if rows_read is None:
-        ledger["balanced"] = False
-        ledger["unaccounted"] = None
-        ledger["note"] = (
-            "Source row count was not measured for this run, so no conservation "
-            "check is possible. Rows written cannot be compared against rows read."
-        )
-        return ledger
-
-    unaccounted = rows_read - (rows_written + rows_quarantined + rows_skipped)
-    ledger["unaccounted"] = unaccounted
-    ledger["balanced"] = unaccounted == 0
-    if unaccounted > 0:
-        ledger["note"] = (
-            f"{unaccounted} source row(s) are neither written, quarantined, nor "
-            "skipped. Treat as potential silent loss and investigate before "
-            "accepting this run."
-        )
-    elif unaccounted < 0:
-        ledger["note"] = (
-            f"{abs(unaccounted)} more row(s) are accounted for than were read — "
-            "duplicate writes or double-counted rejects. Investigate before "
-            "accepting this run."
-        )
-    else:
-        ledger["note"] = "Every source row is written, quarantined, or skipped."
-    return ledger
+    return account_job(job).to_dict()
 
 
 def _rejected_details(
@@ -555,10 +506,18 @@ def render_certificate_markdown(cert: dict[str, Any]) -> str:
         "| | Rows |",
         "|---|---:|",
         f"| Read from source | {_n(ledger.get('rows_read'))} |",
-        f"| Written to destination | {_n(ledger.get('rows_written'))} |",
-        f"| Quarantined | {_n(ledger.get('rows_quarantined'))} |",
+        f"| On destination (COUNT(*)) | {_n(ledger.get('rows_written'))} |",
+        f"| Quarantined (did not land) | {_n(ledger.get('rows_quarantined'))} |",
         f"| Skipped (stale / duplicate) | {_n(ledger.get('rows_skipped'))} |",
         f"| Unaccounted | {_n(ledger.get('unaccounted'))} |",
+        "",
+        f"Written figure is `{ledger.get('rows_written_source') or 'unmeasured'}`"
+        f" ({ledger.get('conservation_kind') or 'n/a'})."
+        + (
+            f" Writer acknowledged {_n(ledger.get('writer_ack'))}."
+            if ledger.get("writer_ack") is not None
+            else ""
+        ),
         "",
         f"{ledger.get('note', '')}",
         "",

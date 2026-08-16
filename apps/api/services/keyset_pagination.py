@@ -134,6 +134,30 @@ def _column_order_keys(values: list[str]) -> list[Any]:
         return list(values)
 
 
+def compare_keyset_bookmark(left: str, right: str) -> int | None:
+    """Compare two keyset bookmarks in column order.
+
+    Numeric parts use Decimal (so ``99`` < ``200``). Mixed/non-numeric parts
+    use text. Returns ``None`` when arity differs or either side is empty —
+    callers must not invent ``<=`` / skip from incomparable bookmarks.
+    """
+    a = "" if left is None else str(left)
+    b = "" if right is None else str(right)
+    if not a or not b:
+        return None
+    left_parts = a.split(KEYSET_SEP) if KEYSET_SEP in a else [a]
+    right_parts = b.split(KEYSET_SEP) if KEYSET_SEP in b else [b]
+    if len(left_parts) != len(right_parts):
+        return None
+    for lp, rp in zip(left_parts, right_parts):
+        keys = _column_order_keys([lp, rp])
+        if keys[0] < keys[1]:
+            return -1
+        if keys[0] > keys[1]:
+            return 1
+    return 0
+
+
 def max_keyset_bookmark(
     rows: list[list[Any]],
     headers: list[str],
@@ -209,5 +233,41 @@ KEYSET_CAPABLE_SOURCES = frozenset(
         # Salesforce SOQL caps OFFSET at 2000 rows — Id seek is the only way to
         # page a large SObject, so keyset is mandatory rather than an optimization.
         "salesforce",
+        # Databricks reads go through generic_sql; a declared PK must seek.
+        "databricks",
     }
 )
+
+
+def safe_keyset_unique_columns(
+    unique_keys: list[Any] | None,
+    columns: list[str],
+    nullable: dict[str, bool] | None = None,
+) -> list[str]:
+    """Unique-key columns that are safe to seek — never a nullable/advisory UK.
+
+    Keyset on a nullable unique index skips NULL/tied rows (silent loss).
+    Advisory / NOT ENFORCED keys and expression indexes cannot bookmark.
+    Unknown nullability defaults to nullable (fail closed).
+    """
+    colset = {c for c in (columns or []) if c}
+    nulls = nullable or {}
+    for uk in unique_keys or []:
+        if isinstance(uk, dict):
+            if uk.get("enforced") is False:
+                continue
+            if uk.get("primary"):
+                continue
+            if uk.get("expression") or uk.get("expression_columns"):
+                continue
+            uk_cols = [c for c in (uk.get("columns") or []) if c in colset]
+        elif isinstance(uk, (list, tuple)):
+            uk_cols = [c for c in uk if c in colset]
+        else:
+            continue
+        if not uk_cols:
+            continue
+        if any(bool(nulls.get(c, True)) for c in uk_cols):
+            continue
+        return uk_cols
+    return []

@@ -93,6 +93,32 @@ def test_append_into_non_empty_table_passes_on_proven_delta() -> None:
     assert stamped["migration_proven"] is False
 
 
+def test_strict_full_append_passes_on_dest_before_delta() -> None:
+    """CSV Full Append into 100 existing rows: 200 landed, dest=300.
+
+    Whole-table digests are incomparable. Strict does not invent comparability.
+    Dest-before delta is the identity — the same proof balanced already used.
+    """
+    report = reconcile(
+        source_rows=200,
+        target_rows=300,
+        source_checksum="aaa",
+        target_checksum="bbb",
+        allow_extra_rows=True,
+        strict_checksum=True,
+        target_rows_before=100,
+    )
+    assert report.passed is True
+    assert report.assurance_level == "row_count"
+    stamped = report.to_dict()
+    assert stamped["passed"] is True
+    assert stamped["phase"] == "post_write_row_count"
+    assert stamped["migration_proven"] is False
+    assert "checksum mismatch" not in stamped["message"].lower()
+    assert "200" in stamped["message"]
+    assert stamped.get("target_rows_before") == 100
+
+
 def test_append_without_pre_write_count_is_not_verified() -> None:
     # 30 >= 15 is satisfied by the rows that were already there; nothing proves
     # this job appended anything, so Gate-8 must not report a verified count.
@@ -127,6 +153,7 @@ def test_append_delta_short_of_expected_fails() -> None:
 
 
 def test_strict_mode_still_fails_incomparable_append() -> None:
+    """Strict without dest-before cannot prove the batch landed — unverified, not a checksum."""
     report = reconcile(
         source_rows=15,
         target_rows=30,
@@ -136,6 +163,26 @@ def test_strict_mode_still_fails_incomparable_append() -> None:
         strict_checksum=True,
     )
     assert report.passed is False
+    assert "unverified" in report.message.lower()
+    assert "checksum mismatch" not in report.message.lower()
+
+
+def test_strict_keyed_batch_checksum_mismatch_still_fails() -> None:
+    """When dest was re-read by written key, hashes are comparable — strict fails cells."""
+    from services.reconcile_coverage import WRITTEN_BATCH_KEYS
+
+    report = reconcile(
+        source_rows=15,
+        target_rows=30,
+        source_checksum="aaa",
+        target_checksum="bbb",
+        allow_extra_rows=True,
+        strict_checksum=True,
+        target_rows_before=15,
+        checksum_scope=WRITTEN_BATCH_KEYS,
+    )
+    assert report.passed is False
+    assert "checksum mismatch" in report.message.lower()
 
 
 def test_overwrite_checksum_mismatch_still_fails() -> None:

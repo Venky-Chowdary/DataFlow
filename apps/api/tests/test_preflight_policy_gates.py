@@ -9,6 +9,51 @@ from src.services.preflight_service import (
 )
 
 
+def test_readiness_caps_when_g9_uniqueness_is_sample_only():
+    from services.preflight_service import apply_readiness_honesty_caps
+
+    capped = apply_readiness_honesty_caps({
+        "passed": True,
+        "passed_count": 14,
+        "total_gates": 14,
+        "readiness_score": 100.0,
+        "gates": [
+            {"id": "g1_source", "status": "pass", "message": "ok", "details": {}},
+            {
+                "id": "g9_data_integrity",
+                "status": "pass",
+                "message": "Integrity checks passed (Validate sample only — population uniqueness not proven)",
+                "details": {"coverage": "sample"},
+            },
+        ],
+    })
+    assert capped["readiness_score"] == 92.0
+    assert capped["population_uniqueness_proven"] is False
+    assert capped["readiness_cap_reason"] == "g9_sample_uniqueness"
+
+
+def test_readiness_caps_when_g5_dry_run_is_sample_only():
+    from services.preflight_service import apply_readiness_honesty_caps
+
+    capped = apply_readiness_honesty_caps({
+        "passed": True,
+        "passed_count": 14,
+        "total_gates": 14,
+        "readiness_score": 100.0,
+        "gates": [
+            {
+                "id": "g5_dry_run",
+                "status": "pass",
+                "message": "Dry-run passed on 1000 sample rows",
+                "details": {"sample_cap": 1000, "coverage": "sample"},
+            },
+            {"id": "g9_data_integrity", "status": "pass", "message": "ok", "details": {}},
+        ],
+    })
+    assert capped["readiness_score"] == 92.0
+    assert "g5_sample_dry_run" in capped["readiness_cap_reason"]
+
+
 def test_cdc_policy_blocks_without_cursor_and_primary_key():
     gates = run_transfer_policy_gates(
         sync_mode="cdc",
@@ -201,6 +246,86 @@ def test_cdc_cursor_and_pk_pass_when_present_in_source_columns():
     )
     g9 = next(g for g in gates if g["id"] == "g9_sync_contract")
     assert g9["status"] == "pass"
+
+
+def test_cdc_exactly_once_blocks_on_file_dest():
+    gates = run_transfer_policy_gates(
+        sync_mode="cdc",
+        schema_policy="manual_review",
+        validation_mode="strict",
+        stream_contracts=[{
+            "name": "orders",
+            "selected": True,
+            "cursor_field": "updated_at",
+            "primary_key": "order_id",
+            "cursor_semantics": "cdc_position",
+        }],
+        source_columns=["order_id", "updated_at"],
+        source_kind="database",
+        source_type="mysql",
+        dest_type="csv",
+        delivery_guarantee="exactly_once",
+    )
+    g16 = next(g for g in gates if g["id"] == "g16_cdc_delivery")
+    assert g16["status"] == "block"
+    assert g16["details"]["reason"] == "exactly_once_dest_not_transactional"
+
+
+def test_cdc_exactly_once_passes_on_wired_sql_dest():
+    gates = run_transfer_policy_gates(
+        sync_mode="cdc",
+        schema_policy="manual_review",
+        validation_mode="strict",
+        stream_contracts=[{
+            "name": "orders",
+            "selected": True,
+            "cursor_field": "updated_at",
+            "primary_key": "order_id",
+            "cursor_semantics": "cdc_position",
+        }],
+        source_columns=["order_id", "updated_at"],
+        source_kind="database",
+        source_type="mysql",
+        dest_type="postgresql",
+        delivery_guarantee="exactly_once",
+    )
+    g16 = next(g for g in gates if g["id"] == "g16_cdc_delivery")
+    assert g16["status"] == "pass"
+    assert g16["details"]["wired"] is True
+    assert g16["details"]["platform_claimed"] is False
+
+
+def test_cdc_default_delivery_gate_is_at_least_once():
+    gates = run_transfer_policy_gates(
+        sync_mode="cdc",
+        schema_policy="manual_review",
+        validation_mode="strict",
+        stream_contracts=[{
+            "name": "orders",
+            "selected": True,
+            "cursor_field": "updated_at",
+            "primary_key": "order_id",
+            "cursor_semantics": "cdc_position",
+        }],
+        source_columns=["order_id", "updated_at"],
+        source_kind="database",
+        source_type="mysql",
+        dest_type="postgresql",
+    )
+    g16 = next(g for g in gates if g["id"] == "g16_cdc_delivery")
+    assert g16["status"] == "pass"
+    assert g16["details"]["delivery_guarantee"] == "at_least_once"
+
+
+def test_full_refresh_omits_cdc_delivery_gate():
+    gates = run_transfer_policy_gates(
+        sync_mode="full_refresh_overwrite",
+        schema_policy="manual_review",
+        validation_mode="strict",
+        stream_contracts=[],
+        dest_type="postgresql",
+    )
+    assert all(g["id"] != "g16_cdc_delivery" for g in gates)
 
 
 def test_incremental_deduped_blocks_an_undeclared_cursor():

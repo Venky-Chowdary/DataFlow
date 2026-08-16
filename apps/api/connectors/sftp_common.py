@@ -10,7 +10,6 @@ import os
 import re
 from collections.abc import Mapping
 from typing import Any
-from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
@@ -100,12 +99,14 @@ def parse_sftp_config(
     raw = (connection_string or "").strip()
 
     if raw:
-        parsed = urlparse(raw)
-        if parsed.scheme in ("sftp", "ssh"):
-            cfg.host = (parsed.hostname or "").strip()
+        from connectors.url_authority import parse_url_authority
+
+        parsed = parse_url_authority(raw)
+        if parsed.scheme in ("sftp", "ssh") and parsed.host:
+            cfg.host = parsed.host.strip()
             cfg.port = parsed.port or _default_port(parsed.scheme)
-            cfg.username = (parsed.username or "").strip()
-            cfg.password = (parsed.password or "").strip()
+            cfg.username = parsed.user.strip()
+            cfg.password = parsed.password
             cfg.path = parsed.path or ""
         else:
             # Treat a bare connection string as a remote path.
@@ -123,9 +124,15 @@ def parse_sftp_config(
     # private key can be explicit, ride service_account (file path/key text) or api_key
     cfg.private_key = (private_key or service_account or api_key or "").strip()
 
-    # If table/filename is provided separately, append it to the directory path.
+    # Compose database+table only when the URI has no file path, or the
+    # operator set a real directory (not form-default "/"). Otherwise
+    # database="/" + table="data.csv" used to clobber /incoming/nested/data.csv.
     if table and database:
-        cfg.path = (database.rstrip("/") + "/" + table.lstrip("/")).replace("//", "/")
+        composed = (database.rstrip("/") + "/" + table.lstrip("/")).replace("//", "/")
+        uri_has_file = bool(cfg.path and cfg.path not in ("/", ""))
+        database_is_root = database.strip() in ("", "/", ".")
+        if not uri_has_file or not database_is_root:
+            cfg.path = composed
     elif table and not cfg.path:
         cfg.path = table
     elif database and not cfg.path:
@@ -356,9 +363,30 @@ def test_sftp(
         transport, sftp = connect_sftp(cfg)
         try:
             if cfg.path:
-                directory, _ = split_remote_path(cfg.path)
-                if directory:
-                    sftp.stat(directory)
+                import stat as statmod
+
+                try:
+                    st = sftp.stat(cfg.path)
+                except OSError as exc:
+                    directory, filename = split_remote_path(cfg.path)
+                    if filename and directory:
+                        try:
+                            sftp.stat(directory)
+                        except OSError:
+                            return False, f"SFTP authenticated but path not found: {cfg.path}"
+                        return False, f"SFTP authenticated but file not found: {cfg.path}"
+                    return False, f"SFTP authenticated but path not found: {cfg.path} ({exc})"
+                if statmod.S_ISDIR(st.st_mode):
+                    sftp.listdir(cfg.path)
+                    return True, (
+                        f"SFTP directory {cfg.path} reachable on {cfg.host}:{cfg.port}."
+                    )
+                with sftp.open(cfg.path, "rb") as handle:
+                    handle.read(1)
+                return True, (
+                    f"SFTP file {cfg.path} reachable on {cfg.host}:{cfg.port}."
+                )
+            sftp.listdir(".")
             return True, f"SFTP server {cfg.host}:{cfg.port} reachable and authenticated."
         finally:
             sftp.close()

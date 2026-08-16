@@ -68,6 +68,46 @@ describe("computeJobTrustScore", () => {
     assert.ok(t.score <= 28);
     assert.equal(t.cursor_gap, true);
     assert.equal(t.next_action.code, "cursor_gap");
+    assert.match(t.next_action.label, /Reset/);
+  });
+
+  it("when_needed cursor gap tells the operator Resume will snapshot", () => {
+    const t = computeJobTrustScore({
+      status: "failed",
+      records_processed: 10,
+      cdc_cursor_gap: true,
+      snapshot_mode: "when_needed",
+      reconciliation: { passed: false },
+    });
+    assert.equal(t.next_action.code, "cursor_gap");
+    assert.match(t.next_action.label, /Resume/);
+    assert.match(t.next_action.detail, /migration_proven/);
+  });
+
+  it("treats cdc_ct_gap error_code as a cursor gap", () => {
+    const t = computeJobTrustScore({
+      status: "failed",
+      records_processed: 10,
+      error_code: "cdc_ct_gap",
+      snapshot_mode: "when_needed",
+      reconciliation: { passed: false },
+    });
+    assert.equal(t.cursor_gap, true);
+    assert.equal(t.next_action.code, "cursor_gap");
+    assert.match(t.next_action.label, /Resume/);
+  });
+
+  it("treats cdc_oplog_gap error_code as a cursor gap", () => {
+    const t = computeJobTrustScore({
+      status: "failed",
+      records_processed: 10,
+      error_code: "cdc_oplog_gap",
+      snapshot_mode: "when_needed",
+      reconciliation: { passed: false },
+    });
+    assert.equal(t.cursor_gap, true);
+    assert.equal(t.next_action.code, "cursor_gap");
+    assert.match(t.next_action.label, /Resume/);
   });
 
   it("caps completeness when Gate-8 reconcile is missing", () => {
@@ -154,5 +194,49 @@ describe("computeJobTrustScore", () => {
     const factor = exportJob.factors.find((f) => f.id === "reconcile");
     assert.ok((factor?.score as number) <= 45);
     assert.ok(factor?.note.toLowerCase().includes("unproven"));
+  });
+
+  it("does not treat append dest-before delta as full checksum Verified", () => {
+    const append = computeJobTrustScore({
+      status: "completed",
+      records_processed: 200,
+      rejected_rows: 0,
+      reconciliation: {
+        passed: true,
+        phase: "post_write_row_count",
+        assurance_level: "row_count",
+        coverage: "row_count",
+        checksum_scope: "whole_table_not_comparable",
+        source_checksum: "aaa",
+        target_checksum: "bbb",
+        checksum_match: false,
+        migration_proven: false,
+        message: "Append delta verified (200 row(s) appended: 100 → 300).",
+      },
+    });
+    const factor = append.factors.find((f) => f.id === "reconcile");
+    assert.ok(factor?.note.toLowerCase().includes("append delta"));
+    assert.notEqual(append.grade, "A");
+    assert.ok(append.score <= 89);
+    assert.equal(append.next_action.code, "append_delta");
+    assert.doesNotMatch(append.next_action.label, /investigate/i);
+  });
+
+  it("closed quarantine ledger does not keep Review quarantine as next action", () => {
+    const t = computeJobTrustScore({
+      status: "completed_with_quarantine",
+      records_processed: 100,
+      rejected_rows: 40,
+      quarantine_closure: { verdict: "closed", open_count: 0, promoted_count: 40 },
+      reconciliation: {
+        passed: true,
+        assurance_level: "full_checksum",
+        source_checksum: "a",
+        target_checksum: "a",
+      },
+    });
+    const q = t.factors.find((f) => f.id === "quarantine");
+    assert.equal(q?.score, 100);
+    assert.equal(t.next_action.code, "quarantine_closed");
   });
 });

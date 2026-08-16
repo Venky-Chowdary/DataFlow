@@ -4,6 +4,7 @@ import { DtIcon } from "../components/DtIcon";
 import { EmptyState } from "../components/ui/EmptyState";
 import { ConnectorIcon } from "../app/brand-icons";
 import { ConnectorSelect } from "../components/ui/ConnectorSelect";
+import { FilterTabs } from "../components/ui/FilterTabs";
 import { SourceKindTiles, type SourceKind } from "../components/ui/SourceKindTiles";
 import { StructurePreview } from "../components/ui/StructurePreview";
 import { PageFrame } from "../components/ui/PageFrame";
@@ -13,11 +14,17 @@ import { ButtonLoader, LoadingBlock, Spinner } from "../components/LoadingState"
 import { useToast } from "../components/Toast";
 import { TransferMapStep } from "./transfer/TransferMapStep";
 import { DestinationPicker } from "../components/transfer/DestinationPicker";
+import { DestProcedurePanel, type DestWriteMode } from "../components/transfer/DestProcedurePanel";
+import { SqlEditor } from "../components/ui/SqlEditor";
 import { DestinationAdvancedDrawer } from "../components/transfer/DestinationAdvancedDrawer";
 import { ObjectNameCombobox } from "../components/transfer/ObjectNameCombobox";
 import { Button } from "../components/ui/Button";
 import { SourceStepAside } from "../components/transfer/SourceStepAside";
 import { ValidateActionsRail } from "../components/transfer/ValidateActionsRail";
+import { ContractBindField } from "../components/contracts/ContractBindField";
+import { contractBindFromPolicies } from "../lib/contractBind";
+import { destExistsPrimaryCta, shapeContractFromPreflight } from "../lib/destExistsShape";
+import { launchStageState, stagePercent } from "../lib/progressRing";
 import { ValidateDashboard, type RemediationOpResult } from "../components/transfer/ValidateDashboard";
 import { TransferResultDashboard } from "../components/transfer/TransferResultDashboard";
 import { TransferRouteBar } from "../components/transfer/TransferRouteBar";
@@ -66,6 +73,22 @@ import {
 } from "../lib/dialectDefaults";
 import { defaultPortForType, getConnectorDefaults, getGenericSqlGroup, getGenericSqlPlaceholder, isGenericSql, isTransferLiveType, resolveDriverType, setTransferLiveDrivers } from "../lib/connectorTypes";
 import {
+  bindNamesFromSql,
+  callableSourceExtra,
+  dialectOffersProcedures,
+  dialectOffersQuery,
+  dialectOffersSqlExtract,
+  destWriteReady,
+  isCallableDestMode,
+  isCallableSourceMode,
+  procedureHint,
+  procedureStreamName,
+  queryHint,
+  sourceExtractReady,
+  type SourceReadMode,
+} from "../lib/sourceReadMode";
+import { diagnoseSql } from "../lib/sqlEditorModel";
+import {
   availableSyncModes,
   DATE_LOCALES,
   PREFLIGHT_SAMPLE_LIMIT,
@@ -79,6 +102,21 @@ import {
   multiStreamScd2MirrorBlockCopy,
   MULTI_STREAM_SCD2_MIRROR_BLOCK,
 } from "../lib/transferConstants";
+import {
+  jobStudioDataRules,
+  namedStudioSchemaPolicy,
+  namedStudioValidationMode,
+  schemaPolicyBackfills,
+  studioSchedulePolicies,
+} from "../lib/studioDataRules";
+import {
+  CDC_DELIVERY_AT_LEAST_ONCE,
+  exactlyOnceWiredDest,
+  jobStudioDeliveryGuarantee,
+  namedCdcDeliveryGuarantee,
+  studioDeliveryGuarantee,
+  type CdcDeliveryGuarantee,
+} from "../lib/cdcExactlyOnce";
 import { isJobSuccess } from "../lib/uiUtils";
 import {
   parseStreamNames,
@@ -87,6 +125,7 @@ import {
 } from "../lib/sourceStreams";
 import {
   approveMappingsHonestly,
+  confirmFalseFriendsBySource,
   buildPreflightMappings,
   confidenceThresholdForMode,
   editableFromPipelineMappings,
@@ -120,12 +159,15 @@ import { parseCsvTextForPreview } from "../lib/csvPreview";
 import { runLocalFileExport } from "../lib/localFileExport";
 import { runLocalPreflight } from "../lib/localPreflight";
 import { readJobEventLog } from "../lib/jobEventLog";
+import { destHeadline } from "../lib/conservationLedger";
 import { schemaIntrospectionFailureMessage } from "../lib/preflightMessages";
 import {
   buildDisplayBlockers,
   findDuplicateKeyRoot,
   isEncodingIntegritySignal,
+  rankAndDedupeSuggestedActions,
 } from "../lib/validateIssueGrouping";
+import { planFkOrphanSuggestedAction, resolvePopulationOrphanScanFlag } from "../lib/fkOrphanCta";
 import { suggestUniqueKeyCandidates, suggestCompositeUniqueKeyCandidates } from "../lib/uniqueKeySuggestions";
 import { needsMappingReview } from "../lib/columnWorkbench";
 import {
@@ -188,6 +230,23 @@ export function TransferPage({
   const [sourceConnectorId, setSourceConnectorId] = useState("");
   const [sourceTable, setSourceTable] = useState("");
   const [sourceCollection, setSourceCollection] = useState("");
+  const [sourceReadMode, setSourceReadMode] = useState<SourceReadMode>("table");
+  const [procedureCall, setProcedureCall] = useState("");
+  const [procedureParams, setProcedureParams] = useState<Record<string, string>>({});
+  const [destWriteMode, setDestWriteMode] = useState<DestWriteMode>("table");
+  const [destProcedureCall, setDestProcedureCall] = useState("");
+  const [destQuerySql, setDestQuerySql] = useState("");
+  const [destProcedureParams, setDestProcedureParams] = useState<Record<string, string>>({});
+  const [destProcedureBefore, setDestProcedureBefore] = useState("");
+  const [destProcedureAfter, setDestProcedureAfter] = useState("");
+  const [destProcedureParamMap, setDestProcedureParamMap] = useState<Record<string, string>>({});
+  const [shapeContract, setShapeContract] = useState<{
+    shape?: string;
+    extra_source_columns?: string[];
+    headline?: string;
+    primary_action?: string;
+    unaccounted_sources?: string[];
+  } | null>(null);
   const [cloudPath, setCloudPath] = useState("");
   const [advancedOpen, setAdvancedOpen] = useState(false);
   /** Shared Fix-bad-data drawer open state (Validate dashboard + rail Fix CTA). */
@@ -223,6 +282,9 @@ export function TransferPage({
   const lastNewTableToastRef = useRef("");
   const [preflighting, setPreflighting] = useState(false);
   const [savingContract, setSavingContract] = useState(false);
+  const [boundContractId, setBoundContractId] = useState("");
+  const [requireSignedContract, setRequireSignedContract] = useState(false);
+  const [contractBlockReason, setContractBlockReason] = useState("");
   const [dragOver, setDragOver] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
@@ -282,6 +344,9 @@ export function TransferPage({
   const [priorityDirection, setPriorityDirection] = useState<"asc" | "desc">("desc");
   const [rowLimit, setRowLimit] = useState(0);
   const [snapshotMode, setSnapshotMode] = useState("initial");
+  const [deliveryGuarantee, setDeliveryGuarantee] = useState<CdcDeliveryGuarantee>(
+    CDC_DELIVERY_AT_LEAST_ONCE,
+  );
   const [allowAppendOnly, setAllowAppendOnly] = useState(false);
   const [multiSubnetFailover, setMultiSubnetFailover] = useState(false);
   /** SQL Server CDC TVF row filter: all | all update old | net. */
@@ -450,6 +515,35 @@ export function TransferPage({
               chunk_overlap: vectorChunkOverlap,
               durable_embedding_cache: vectorDurableCache,
             }
+          : {}),
+        ...(destWriteMode === "procedure"
+          ? {
+              dest_write_mode: "procedure",
+              dest_procedure_call: destProcedureCall.trim(),
+              ...(Object.keys(destProcedureParamMap).length
+                ? { dest_procedure_param_map: destProcedureParamMap }
+                : {}),
+              ...(Object.keys(destProcedureParams).length
+                ? { dest_procedure_params: destProcedureParams }
+                : {}),
+            }
+          : destWriteMode === "query"
+            ? {
+                dest_write_mode: "query",
+                dest_query_sql: destQuerySql.trim(),
+                ...(Object.keys(destProcedureParamMap).length
+                  ? { dest_procedure_param_map: destProcedureParamMap }
+                  : {}),
+                ...(Object.keys(destProcedureParams).length
+                  ? { dest_procedure_params: destProcedureParams }
+                  : {}),
+              }
+            : {}),
+        ...(destProcedureBefore.trim()
+          ? { dest_procedure_before: destProcedureBefore.trim() }
+          : {}),
+        ...(destProcedureAfter.trim()
+          ? { dest_procedure_after: destProcedureAfter.trim() }
           : {}),
       },
     };
@@ -771,7 +865,11 @@ export function TransferPage({
       : sourceCollection || sourceTable || "source_stream";
   // Comma-separated tables → multi-stream contracts (each gets its own watermark).
   const sourceStreamInputRaw = sourceKind === "database"
-    ? (sourceConnector?.type === "mongodb" ? sourceCollection : sourceTable)
+    ? (sourceConnector?.type === "mongodb"
+      ? sourceCollection
+      : isCallableSourceMode(sourceReadMode)
+        ? procedureStreamName(procedureCall)
+        : sourceTable)
     : "";
   const multiStreamNames = parseStreamNames(sourceStreamInputRaw);
   /** First named stream — API table/collection field (never the raw CSV string). */
@@ -788,8 +886,10 @@ export function TransferPage({
         sourceDriver: resolveDriverType(sourceConnector?.type || "") || "",
         sourceKind,
         isMultiStream: isMultiStreamSource,
+        sourceReadMode,
+        destWriteMode,
       }),
-    [destDriverType, destType, sourceConnector?.type, sourceKind, isMultiStreamSource],
+    [destDriverType, destType, sourceConnector?.type, sourceKind, isMultiStreamSource, sourceReadMode, destWriteMode],
   );
   // Client deploy: never leave an engine-unsupported mode selected after route change.
   useEffect(() => {
@@ -944,12 +1044,14 @@ export function TransferPage({
       : (isDynamo
         ? (primarySourceStream || sourceConnector.database || "")
         : primarySourceStream);
+    const callable = isCallableSourceMode(sourceReadMode) && !isMongo && !isDynamo;
+    const procName = callable ? procedureStreamName(procedureCall) : "";
     return {
       kind: "database",
       format: sourceConnector.type,
       connector_id: sourceConnectorId,
       database: isDynamo ? tableOrPath : sourceConnector.database,
-      table: isMongo ? undefined : tableOrPath || undefined,
+      table: isMongo ? undefined : (callable ? procName : tableOrPath) || undefined,
       collection: isMongo ? tableOrPath : undefined,
       auth_source: sourceConnector.auth_source || undefined,
       auth_mode: sourceConnector.auth_mode || undefined,
@@ -958,6 +1060,20 @@ export function TransferPage({
       service_account: sourceConnector.service_account || undefined,
       ...(syncMode === "cdc" && multiSubnetFailover
         ? { multi_subnet_failover: true }
+        : {}),
+      ...(callable
+        ? {
+            source_read_mode: sourceReadMode,
+            procedure_call: sourceReadMode === "procedure" ? procedureCall.trim() : undefined,
+            source_query: sourceReadMode === "query" ? procedureCall.trim() : undefined,
+            procedure_params: Object.keys(procedureParams).length ? procedureParams : undefined,
+            extra: {
+              source_read_mode: sourceReadMode,
+              procedure_call: sourceReadMode === "procedure" ? procedureCall.trim() : "",
+              source_query: sourceReadMode === "query" ? procedureCall.trim() : "",
+              procedure_params: procedureParams,
+            },
+          }
         : {}),
     };
   };
@@ -983,6 +1099,16 @@ export function TransferPage({
       backfill_new_fields: backfillNewFields,
       write_via_staging: writeViaStaging,
       stream_contracts: streamContracts,
+      ...(() => {
+        const bind = contractBindFromPolicies({
+          contract_id: boundContractId,
+          require_signed_contract: requireSignedContract,
+        });
+        return {
+          contract_id: bind.contractId,
+          require_signed_contract: bind.requireSigned,
+        };
+      })(),
     },
   }), [
     file,
@@ -994,6 +1120,8 @@ export function TransferPage({
     sourceConnectorId,
     sourceCollection,
     sourceTable,
+    sourceReadMode,
+    procedureCall,
     primarySourceStream,
     cloudPath,
     destKindMode,
@@ -1022,6 +1150,15 @@ export function TransferPage({
     destWarehouse,
     targetCollection,
     destTableExists,
+    destWriteMode,
+    destProcedureCall,
+    destQuerySql,
+    destProcedureParams,
+    destProcedureBefore,
+    destProcedureAfter,
+    destProcedureParamMap,
+    boundContractId,
+    requireSignedContract,
   ]);
 
   const ensurePersistedPlan = useCallback(async (
@@ -1219,6 +1356,22 @@ export function TransferPage({
           threshold,
           targetSchema,
         );
+        const shape = (result as { shape_contract?: typeof shapeContract }).shape_contract;
+        if (shape && typeof shape === "object") {
+          const extras = [
+            ...((shape as { unaccounted_sources?: string[] }).unaccounted_sources || []),
+            ...(((shape as { columns?: Array<{ source?: string; kind?: string }> }).columns || [])
+              .filter((c) => c.kind === "add_proposed" || c.kind === "pending" || c.kind === "unaccounted")
+              .map((c) => c.source || "")
+              .filter(Boolean)),
+          ];
+          setShapeContract({
+            ...shape,
+            extra_source_columns: [...new Set(extras)],
+          });
+        } else {
+          setShapeContract(null);
+        }
         return commitMappings(
           mapped,
           Boolean(result.llm?.llm_used),
@@ -1283,6 +1436,8 @@ export function TransferPage({
           source_samples: buildColumnSamples(sourceCols, rows ?? []),
           destination_db_type: destKindMode === "file_export" ? exportFormat : destType,
           sync_mode: syncMode,
+          destination_table_exists:
+            destKindMode === "database" ? destTableExists : false,
         });
         return editableFromPipelineMappings(
           result.mappings,
@@ -1316,6 +1471,7 @@ export function TransferPage({
       exportFormat,
       destType,
       syncMode,
+      destTableExists,
     ],
   );
 
@@ -1607,6 +1763,15 @@ export function TransferPage({
     autoSelectedSourceConnector.current = false;
   }, [sourceKind]);
 
+  useEffect(() => {
+    if (sourceReadMode === "procedure" && !dialectOffersProcedures(sourceConnector?.type)) {
+      setSourceReadMode(dialectOffersQuery(sourceConnector?.type) ? "query" : "table");
+    }
+    if (sourceReadMode === "query" && !dialectOffersQuery(sourceConnector?.type)) {
+      setSourceReadMode("table");
+    }
+  }, [sourceConnector?.type, sourceReadMode]);
+
   // Carry selected connection from Connectors drawer into Transfer Studio source step.
   // Apply once per seed token — do not re-run on connectors list refresh (that would
   // yank the operator back to Source mid-wizard).
@@ -1655,11 +1820,21 @@ export function TransferPage({
       void fetchJob(seedStudioIntent.jobId)
         .then((job) => {
           if (job?.preflight) setPreflight(job.preflight as typeof preflight);
-          const mode = (job as { transfer_request?: { validation_mode?: string } })
-            ?.transfer_request?.validation_mode;
-          if (mode === "balanced" || mode === "strict" || mode === "maximum") {
-            setValidationMode(mode);
+          const rules = jobStudioDataRules(job as {
+            validation_mode?: string;
+            schema_policy?: string;
+            transfer_request?: { validation_mode?: string; schema_policy?: string };
+          });
+          if (rules.validationMode) setValidationMode(rules.validationMode);
+          if (rules.schemaPolicy) {
+            setSchemaPolicy(rules.schemaPolicy);
+            setBackfillNewFields(schemaPolicyBackfills(rules.schemaPolicy));
           }
+          const delivery = jobStudioDeliveryGuarantee(job as {
+            delivery_guarantee?: string;
+            transfer_request?: { delivery_guarantee?: string };
+          });
+          setDeliveryGuarantee(delivery);
         })
         .catch(() => {
           /* keep null — operator can Re-run */
@@ -1668,12 +1843,15 @@ export function TransferPage({
       setPreflight(null);
     }
 
-    if (
-      seedStudioIntent.validationMode === "balanced"
-      || seedStudioIntent.validationMode === "strict"
-      || seedStudioIntent.validationMode === "maximum"
-    ) {
-      setValidationMode(seedStudioIntent.validationMode);
+    const seededMode = namedStudioValidationMode(seedStudioIntent.validationMode);
+    if (seededMode) setValidationMode(seededMode);
+    const seededPolicy = namedStudioSchemaPolicy(seedStudioIntent.schemaPolicy);
+    if (seededPolicy) {
+      setSchemaPolicy(seededPolicy);
+      setBackfillNewFields(schemaPolicyBackfills(seededPolicy));
+    }
+    if (seedStudioIntent.deliveryGuarantee) {
+      setDeliveryGuarantee(namedCdcDeliveryGuarantee(seedStudioIntent.deliveryGuarantee));
     }
 
     const maps = seedStudioIntent.mappings;
@@ -2055,7 +2233,18 @@ export function TransferPage({
       setStep(STEP_SOURCE);
       return true;
     }
-    if (sourceKind === "database" && !(sourceTable || sourceCollection)) {
+    if (sourceKind === "database" && isCallableSourceMode(sourceReadMode) && !procedureCall.trim()) {
+      toast({
+        title: sourceReadMode === "query" ? "SQL query required" : "Stored procedure required",
+        message: sourceReadMode === "query"
+          ? "Paste one read-only SELECT/WITH to inspect the result set."
+          : "Paste a single CALL / EXEC (or a PostgreSQL SELECT * FROM func()) to inspect the result set.",
+        tone: "warning",
+      });
+      setStep(STEP_SOURCE);
+      return true;
+    }
+    if (sourceKind === "database" && !isCallableSourceMode(sourceReadMode) && !(sourceTable || sourceCollection)) {
       toast({ title: "Source stream required", message: "Enter the table or collection name to inspect.", tone: "warning" });
       setStep(STEP_SOURCE);
       return true;
@@ -2070,12 +2259,51 @@ export function TransferPage({
 
   const explainDestinationGap = () => {
     if (explainSourceGap()) return true;
-    if (destKindMode === "database" && !targetDb.trim()) {
+    if (destKindMode === "database" && isCallableDestMode(destWriteMode)) {
+      const sql = destWriteMode === "query" ? destQuerySql : destProcedureCall;
+      if (!sql.trim()) {
+        toast({
+          title: destWriteMode === "query" ? "Destination query required" : "Destination procedure required",
+          message: destWriteMode === "query"
+            ? "Paste one INSERT / MERGE / UPDATE with :binds."
+            : "Paste one CALL / EXEC. Each row is one statement; failed rows quarantine.",
+          tone: "warning",
+        });
+        setStep(STEP_DESTINATION);
+        return true;
+      }
+      const boundForDiag = {
+        ...destProcedureParams,
+        ...Object.fromEntries(
+          Object.entries(destProcedureParamMap)
+            .filter(([, col]) => Boolean(col))
+            .map(([name]) => [name, "mapped"]),
+        ),
+      };
+      const diagnosis = diagnoseSql(sql, {
+        mode: destWriteMode === "query" ? "dest_dml" : "procedure",
+        dialect: destDriverType || destType,
+        bound: boundForDiag,
+      });
+      if (!diagnosis.ok) {
+        toast({
+          title: "Destination SQL needs a fix",
+          message: diagnosis.error,
+          tone: "warning",
+        });
+        setStep(STEP_DESTINATION);
+        return true;
+      }
+      if (!targetCollection.trim()) {
+        setTargetCollection(procedureStreamName(sql));
+      }
+    }
+    if (destKindMode === "database" && !isCallableDestMode(destWriteMode) && !targetDb.trim()) {
       toast({ title: "Destination database required", message: "Enter the target database or project.", tone: "warning" });
       setStep(STEP_DESTINATION);
       return true;
     }
-    if (destKindMode === "database" && !targetCollection.trim()) {
+    if (destKindMode === "database" && !isCallableDestMode(destWriteMode) && !targetCollection.trim()) {
       toast({ title: "Destination table required", message: "Enter the target table or collection.", tone: "warning" });
       setStep(STEP_DESTINATION);
       return true;
@@ -2101,13 +2329,19 @@ export function TransferPage({
       schema?: Record<string, string>;
       schema_intelligence?: Record<string, { semantic_role?: string; logical_type?: string; notes?: string[] }>;
       row_estimate?: number;
+      row_estimate_uncertain?: boolean;
       data?: Record<string, unknown>[];
       sample_data?: Record<string, unknown>[];
       message?: string;
     },
   ) => {
     if (!sourceConnector) return;
-    if (intro.row_estimate != null && intro.row_estimate > 0) {
+    // Never stamp a 100-row preview as the transfer volume.
+    if (
+      !intro.row_estimate_uncertain
+      && intro.row_estimate != null
+      && intro.row_estimate > 0
+    ) {
       setSourceRowEstimate(intro.row_estimate);
     }
     const sampleRows = intro.data ?? intro.sample_data ?? [];
@@ -2126,17 +2360,22 @@ export function TransferPage({
       source_columns: intro.columns,
       source_schema: intro.schema ?? {},
     }));
+    const population = (
+      intro.row_estimate_uncertain
+      || intro.row_estimate == null
+      || intro.row_estimate <= 0
+    ) ? 0 : intro.row_estimate;
     setActiveData({
       name: streamName || sourceConnector.name,
       columns: intro.columns,
-      row_count: intro.row_estimate ?? 0,
+      row_count: population,
       samples: columnSamples,
       schema: intro.schema ?? {},
     });
     setParsed({
       columns: intro.columns,
       schema: intro.schema ?? {},
-      row_count: intro.row_estimate ?? 0,
+      row_count: population,
       data: intro.data ?? intro.sample_data ?? [],
       file_type: sourceConnector.type,
     });
@@ -2192,6 +2431,18 @@ export function TransferPage({
     };
     if (isMongo) sourceEndpoint.collection = streamName;
     else sourceEndpoint.table = streamName;
+    if (isCallableSourceMode(sourceReadMode) && !isMongo) {
+      sourceEndpoint.source_read_mode = sourceReadMode;
+      if (sourceReadMode === "procedure") sourceEndpoint.procedure_call = procedureCall.trim();
+      if (sourceReadMode === "query") sourceEndpoint.source_query = procedureCall.trim();
+      if (Object.keys(procedureParams).length) sourceEndpoint.procedure_params = procedureParams;
+      sourceEndpoint.extra = {
+        source_read_mode: sourceReadMode,
+        procedure_call: sourceReadMode === "procedure" ? procedureCall.trim() : "",
+        source_query: sourceReadMode === "query" ? procedureCall.trim() : "",
+        procedure_params: procedureParams,
+      };
+    }
 
     const { source: intro } = await introspectTransferEndpoints({
       source: sourceEndpoint,
@@ -2216,7 +2467,7 @@ export function TransferPage({
       });
     }
     return { ok: true as const, intro };
-  }, [sourceConnector, sourceConnectorId, toast]);
+  }, [sourceConnector, sourceConnectorId, toast, sourceReadMode, procedureCall]);
 
   const introspectConnectorSource = useCallback(async () => {
     if (!sourceConnector) return null;
@@ -2233,6 +2484,30 @@ export function TransferPage({
         return null;
       }
       applyPrimaryStreamSchema(tableOrPath, result.intro);
+      setSourceIntrospectError(null);
+      return result.intro;
+    }
+
+    if (isCallableSourceMode(sourceReadMode) && !isMongo) {
+      const call = procedureCall.trim();
+      if (!call) return null;
+      const streamName = procedureStreamName(call);
+      setStreamPreviews([{
+        name: streamName,
+        status: "loading",
+        columns: [],
+        schema: {},
+        rows: [],
+      }]);
+      setActiveStreamTab(streamName);
+      setSourceIntrospectError(null);
+      const result = await introspectOneStream(streamName);
+      if (!result.ok) {
+        setSourceIntrospectError(result.error);
+        toast({ title: "Could not execute stored procedure", message: result.error, tone: "error" });
+        return null;
+      }
+      applyPrimaryStreamSchema(streamName, result.intro);
       setSourceIntrospectError(null);
       return result.intro;
     }
@@ -2337,6 +2612,8 @@ export function TransferPage({
     sourceCollection,
     sourceTable,
     cloudPath,
+    sourceReadMode,
+    procedureCall,
     introspectOneStream,
     applyPrimaryStreamSchema,
     toast,
@@ -2350,17 +2627,26 @@ export function TransferPage({
   useEffect(() => {
     if (sourceKind !== "database" && sourceKind !== "cloud") return;
     if (!sourceConnectorId || !sourceConnector) return;
+    const callable = sourceKind === "database"
+      && isCallableSourceMode(sourceReadMode)
+      && sourceConnector.type !== "mongodb";
     const rawPath = sourceKind === "cloud"
       ? cloudPath.trim()
-      : (sourceConnector.type === "mongodb" ? (sourceCollection || sourceTable) : sourceTable);
-    const names = sourceKind === "cloud" ? (rawPath ? [rawPath] : []) : parseStreamNames(rawPath);
+      : callable
+        ? procedureCall.trim()
+        : (sourceConnector.type === "mongodb" ? (sourceCollection || sourceTable) : sourceTable);
+    const names = sourceKind === "cloud"
+      ? (rawPath ? [rawPath] : [])
+      : callable
+        ? (rawPath ? [procedureStreamName(rawPath)] : [])
+        : parseStreamNames(rawPath);
     if (!names.length) {
       setStreamPreviews([]);
       return;
     }
 
     // Gate on the full stream list so adding/removing a name re-reads schemas.
-    const key = `${sourceKind}|${sourceConnectorId}|${names.join("|")}`;
+    const key = `${sourceKind}|${sourceConnectorId}|${sourceReadMode}|${callable ? procedureCall.trim() : names.join("|")}`;
     const gate = sourceIntrospectGateRef.current;
     if (gate.key === key && (gate.status === "ok" || gate.status === "error" || gate.status === "running")) {
       return;
@@ -2414,6 +2700,8 @@ export function TransferPage({
     sourceCollection,
     sourceTable,
     cloudPath,
+    sourceReadMode,
+    procedureCall,
   ]);
 
   const retrySourceIntrospect = useCallback(() => {
@@ -2422,14 +2710,21 @@ export function TransferPage({
     setSourceIntrospectError(null);
     setSourceIntrospecting(false);
     setAnalyzing(false);
-    // Nudge effect by clearing then relying on current collection key — force via
-    // a microtask re-entry of the same inputs.
+    const callable = sourceKind === "database"
+      && isCallableSourceMode(sourceReadMode)
+      && sourceConnector?.type !== "mongodb";
     const rawPath = sourceKind === "cloud"
       ? cloudPath.trim()
-      : (sourceConnector?.type === "mongodb" ? (sourceCollection || sourceTable) : sourceTable);
-    const names = sourceKind === "cloud" ? (rawPath ? [rawPath] : []) : parseStreamNames(rawPath);
+      : callable
+        ? procedureCall.trim()
+        : (sourceConnector?.type === "mongodb" ? (sourceCollection || sourceTable) : sourceTable);
+    const names = sourceKind === "cloud"
+      ? (rawPath ? [rawPath] : [])
+      : callable
+        ? (rawPath ? [procedureStreamName(rawPath)] : [])
+        : parseStreamNames(rawPath);
     if (!sourceConnectorId || !names.length) return;
-    const key = `${sourceKind}|${sourceConnectorId}|${names.join("|")}`;
+    const key = `${sourceKind}|${sourceConnectorId}|${sourceReadMode}|${callable ? procedureCall.trim() : names.join("|")}`;
     const gen = ++sourceIntrospectGenRef.current;
     sourceIntrospectGateRef.current = { key, status: "running" };
     setSourceIntrospecting(true);
@@ -2464,6 +2759,8 @@ export function TransferPage({
     sourceCollection,
     sourceTable,
     cloudPath,
+    sourceReadMode,
+    procedureCall,
     introspectConnectorSource,
   ]);
 
@@ -2496,13 +2793,23 @@ export function TransferPage({
       setMappingPhase(phase);
     };
     try {
-      bump(8, "Preparing schema context…");
+      let mappingUnitsDone = 0;
+      const mappingUnits =
+        (destKindMode === "database" ? 1 : 0)
+        + 1
+        + 1
+        + (isMultiStreamSource && multiStreamNames.length > 1 ? 1 : 0);
+      const mark = (phase: string) => {
+        mappingUnitsDone += 1;
+        bump(stagePercent(mappingUnitsDone, mappingUnits + 1), phase);
+      };
+      mark("Preparing schema context…");
       let freshDestCols = destColumns;
       let freshDestSchema = destSchemaMap;
       let loadedTableExists: boolean | null = destTableExists;
       let loadedConnected: boolean | null = null;
       if (destKindMode === "database") {
-        bump(22, "Loading destination schema…");
+        mark("Loading destination schema…");
         let loaded = await loadDestinationSchema();
         // One retry — SSL / metadata races often succeed on the second probe.
         if (
@@ -2511,7 +2818,7 @@ export function TransferPage({
           && targetCollection.trim()
           && loaded.connected !== false
         ) {
-          bump(28, "Retrying destination schema…");
+          bump(stagePercent(mappingUnitsDone, mappingUnits + 1), "Retrying destination schema…");
           await new Promise((r) => window.setTimeout(r, 400));
           loaded = await loadDestinationSchema();
         }
@@ -2520,7 +2827,7 @@ export function TransferPage({
         loadedTableExists = loaded.tableExists;
         loadedConnected = loaded.connected;
       }
-      bump(42, "Building transfer plan…");
+      mark("Building transfer plan…");
       await loadTransferPlan();
       let mapped: EditableMapping[] = [];
       // Create-new only when the destination object is confirmed missing (or file export).
@@ -2576,13 +2883,13 @@ export function TransferPage({
               : loadedTableExists;
         if (sourceKind === "file" && parsed) {
           if (!analysis?.columns.length || !columnMappings.length) {
-            bump(58, "Profiling source columns…");
+            bump(stagePercent(mappingUnitsDone, mappingUnits + 1), "Profiling source columns…");
             await runSourceColumnAnalysis(parsed, { manageAnalyzing: false });
           }
-          bump(72, schemaPending ? "Holding map until destination schema confirms…" : "Matching source to create-new fields…");
+          mark(schemaPending ? "Holding map until destination schema confirms…" : "Matching source to create-new fields…");
           mapped = await applyPipelineMappings(undefined, {}, undefined, existsForEmpty) ?? [];
         } else if (analysis?.columns.length || currentSourceColumns.length) {
-          bump(65, schemaPending ? "Holding map until destination schema confirms…" : "Matching source to create-new fields…");
+          mark(schemaPending ? "Holding map until destination schema confirms…" : "Matching source to create-new fields…");
           mapped = await applyPipelineMappings(undefined, {}, undefined, existsForEmpty) ?? [];
         } else {
           toast({
@@ -2595,13 +2902,13 @@ export function TransferPage({
         }
       } else if (sourceKind === "file" && parsed) {
         if (!analysis?.columns.length || !columnMappings.length) {
-          bump(58, "Profiling source columns…");
-          await runSourceColumnAnalysis(parsed, { manageAnalyzing: false });
-        }
-        bump(72, "Matching source to destination fields…");
+            bump(stagePercent(mappingUnitsDone, mappingUnits + 1), "Profiling source columns…");
+            await runSourceColumnAnalysis(parsed, { manageAnalyzing: false });
+          }
+          mark("Matching source to destination fields…");
         mapped = await applyPipelineMappings(mapTargets, freshDestSchema, undefined, loadedTableExists) ?? [];
       } else if (analysis?.columns.length || currentSourceColumns.length) {
-        bump(65, "Matching source to destination fields…");
+          mark("Matching source to destination fields…");
         mapped = await applyPipelineMappings(mapTargets, freshDestSchema, undefined, loadedTableExists) ?? [];
       } else {
         toast({
@@ -2615,7 +2922,7 @@ export function TransferPage({
 
       // Multi-stream: seed per-stream mappings (copy when schemas match; rematch when they diverge).
       if (isMultiStreamSource && multiStreamNames.length > 1) {
-        bump(85, "Mapping each source stream…");
+        mark("Mapping each source stream…");
         const primary = primarySourceStream;
         setMapActiveStream(primary);
         // Read latest primary mappings from a dedicated rematch of primary stream columns.
@@ -2648,6 +2955,7 @@ export function TransferPage({
       }
 
       bump(100, "Mapping ready");
+      await new Promise((r) => window.setTimeout(r, 220));
       if (!mapped.length) {
         toast({
           title: "Mappings did not load",
@@ -2744,6 +3052,46 @@ export function TransferPage({
       message: `Signed a quarantine Risk Contract for ${signed.length} column(s): ${signed
         .slice(0, 3)
         .join(", ")}${signed.length > 3 ? "…" : ""}. Failing rows go to quarantine for replay — re-validating…`,
+      tone: "success",
+    });
+    await executePreflight(next);
+  };
+
+  /**
+   * G15 Validate door — stamp false_friend_confirmed in place and re-run.
+   * Approve eligible must not call this. Remap still lives on Map.
+   */
+  const confirmFalseFriendsAndRevalidate = async (sources?: string[]) => {
+    const { mappings: next, confirmed, blocked, unmatched } = confirmFalseFriendsBySource(
+      columnMappings,
+      sources,
+    );
+    if (blocked.length && !confirmed.length) {
+      toast({
+        title: "Cannot confirm this pair yet",
+        message: `${blocked.slice(0, 3).join(", ")} still needs Accept risk or a type remap on Map.`,
+        tone: "warning",
+      });
+      if (blocked[0]) setMapFocusSource(blocked[0]);
+      setStep(STEP_MAP);
+      return;
+    }
+    if (!confirmed.length) {
+      toast({
+        title: unmatched.length ? "Column is not a false-friend" : "No false-friend pair to confirm",
+        message: unmatched.length
+          ? `${unmatched.slice(0, 3).join(", ")} is not waiting on Confirm this pair. Open Map to remap.`
+          : "Open Map to remap, or re-run Validate if the pair was already confirmed.",
+        tone: "warning",
+      });
+      if (unmatched[0] || sources?.[0]) setMapFocusSource(unmatched[0] || sources?.[0] || "");
+      setStep(STEP_MAP);
+      return;
+    }
+    setColumnMappings(next);
+    toast({
+      title: "Pair confirmed — re-validating",
+      message: `Confirmed ${confirmed.slice(0, 3).join(", ")}${confirmed.length > 3 ? "…" : ""}. Re-running Validate.`,
       tone: "success",
     });
     await executePreflight(next);
@@ -3138,6 +3486,53 @@ export function TransferPage({
           tone: "info",
         });
         break;
+      case "confirm_or_remap":
+        void confirmFalseFriendsAndRevalidate(action.column ? [action.column] : undefined);
+        break;
+      case "confirm_add":
+        if (action.column) setMapFocusSource(action.column);
+        setStep(STEP_MAP);
+        toast({
+          title: "Opened Map step",
+          message: "Review ADD COLUMN proposals, then re-run Validate.",
+          tone: "info",
+        });
+        break;
+      case "reload_dest_schema":
+        void loadDestinationSchema();
+        toast({
+          title: "Reloading destination schema",
+          message: "Re-introspecting dest columns, then return to Validate.",
+          tone: "info",
+        });
+        break;
+      case "continue_validate":
+        void executePreflight();
+        break;
+      case "run_population_orphan_scan": {
+        const plan = planFkOrphanSuggestedAction({ kind: action.kind, column: action.column });
+        if (!plan) break;
+        setRunPopulationOrphanScan(true);
+        toast({
+          title: plan.toastTitle,
+          message: plan.toastMessage,
+          tone: plan.toastTone,
+        });
+        void executePreflight(undefined, undefined, { runPopulationOrphanScan: true });
+        break;
+      }
+      case "fix_orphans": {
+        const plan = planFkOrphanSuggestedAction({ kind: action.kind, column: action.column });
+        if (!plan) break;
+        if (plan.focusSource) setMapFocusSource(plan.focusSource);
+        if (plan.goToMap) setStep(STEP_MAP);
+        toast({
+          title: plan.toastTitle,
+          message: plan.toastMessage,
+          tone: plan.toastTone,
+        });
+        break;
+      }
       case "check_connection":
         window.location.hash = "#/connectors";
         toast({
@@ -3159,6 +3554,7 @@ export function TransferPage({
       schemaDriftAcknowledged?: boolean;
       fkRiskAcknowledged?: boolean;
       acknowledgmentReason?: string;
+      runPopulationOrphanScan?: boolean;
     },
   ) => {
     const activeMappings = overrideMappings ?? columnMappings;
@@ -3410,7 +3806,24 @@ export function TransferPage({
           connector_id: destKindMode === "database" && connectorId ? connectorId : undefined,
           source_connector_id: isConnectorSource ? sourceConnectorId || undefined : undefined,
           source_table: isConnectorSource && sourceKind === "database" && sourceConnector?.type !== "mongodb"
+            && sourceReadMode === "table"
             ? (sourceTable || undefined)
+            : undefined,
+          source_config: isConnectorSource && sourceKind === "database"
+            ? {
+                type: sourceConnector?.type,
+                db_type: sourceConnector?.type,
+                source_read_mode: sourceReadMode,
+                procedure_call: sourceReadMode === "procedure" ? procedureCall.trim() : undefined,
+                source_query: sourceReadMode === "query" ? procedureCall.trim() : undefined,
+                procedure_params: Object.keys(procedureParams).length ? procedureParams : undefined,
+                extra: {
+                  source_read_mode: sourceReadMode,
+                  procedure_call: sourceReadMode === "procedure" ? procedureCall.trim() : "",
+                  source_query: sourceReadMode === "query" ? procedureCall.trim() : "",
+                  procedure_params: procedureParams,
+                },
+              }
             : undefined,
           source_collection: isConnectorSource && sourceKind === "database" && sourceConnector?.type === "mongodb"
             ? (sourceCollection || undefined)
@@ -3458,6 +3871,13 @@ export function TransferPage({
           sample_rows: sampleRows,
           estimated_bytes: estimatedBytes,
           sync_mode: syncMode,
+          delivery_guarantee: studioDeliveryGuarantee({
+            syncMode,
+            deliveryGuarantee,
+            allowAppendOnly,
+            callableSource: sourceReadMode === "procedure" || sourceReadMode === "query",
+          }),
+          dest_extra: { allow_append_only: allowAppendOnly },
           schema_policy: schemaPolicy,
           validation_mode: validationOverride ?? validationMode,
           date_locale: dateLocale,
@@ -3466,7 +3886,10 @@ export function TransferPage({
           compliance_acknowledged: ackCompliance,
           schema_drift_acknowledged: ackSchemaDrift,
           fk_risk_acknowledged: ackFkRisk,
-          run_population_orphan_scan: runPopulationOrphanScan,
+          run_population_orphan_scan: resolvePopulationOrphanScanFlag(
+            opts?.runPopulationOrphanScan,
+            runPopulationOrphanScan,
+          ),
           acknowledgment_actor: ackActor || undefined,
           acknowledgment_reason: ackReason || undefined,
           write_via_staging: writeViaStaging,
@@ -3482,6 +3905,9 @@ export function TransferPage({
             sampleRows,
             confidenceThreshold: threshold,
             destKind: destKindMode,
+            sourceReadMode,
+            destWriteMode,
+            syncMode,
           });
           toast({
             title: "Validated locally",
@@ -3543,6 +3969,9 @@ export function TransferPage({
           sampleRows: (parsed.data ?? parsed.sample_data)?.slice(0, PREFLIGHT_SAMPLE_LIMIT),
           confidenceThreshold: threshold,
           destKind: destKindMode,
+          sourceReadMode,
+          destWriteMode,
+          syncMode,
         });
         setPreflight(pf);
         setValidatedContractKey(buildValidateContractKey(activeMappings));
@@ -3589,7 +4018,11 @@ export function TransferPage({
         primaryFixLabel: "Fix bad data…",
       };
     }
-    const action = firstBlocker?.suggested_actions?.[0];
+    const g15Cta = destExistsPrimaryCta(shapeContractFromPreflight(preflight));
+    const action = rankAndDedupeSuggestedActions(firstBlocker?.suggested_actions)[0]
+      || (g15Cta
+        ? { kind: g15Cta.kind, label: g15Cta.label, column: g15Cta.column }
+        : undefined);
     if (!action) return { onPrimaryFix: undefined, primaryFixLabel: undefined };
 
     switch (action.kind) {
@@ -3598,6 +4031,31 @@ export function TransferPage({
       case "add_transform":
       case "map_column":
         return { onPrimaryFix: () => setStep(STEP_MAP), primaryFixLabel: action.label };
+      case "confirm_or_remap":
+        return {
+          onPrimaryFix: () => {
+            void confirmFalseFriendsAndRevalidate(action.column ? [action.column] : undefined);
+          },
+          primaryFixLabel: action.label || "Confirm this pair",
+        };
+      case "confirm_add":
+        return {
+          onPrimaryFix: () => {
+            if (action.column) setMapFocusSource(action.column);
+            setStep(STEP_MAP);
+          },
+          primaryFixLabel: action.label,
+        };
+      case "reload_dest_schema":
+        return {
+          onPrimaryFix: () => { void loadDestinationSchema(); },
+          primaryFixLabel: action.label,
+        };
+      case "continue_validate":
+        return {
+          onPrimaryFix: () => { void executePreflight(); },
+          primaryFixLabel: action.label,
+        };
       case "normalize_control_chars":
       case "open_bad_data_fix":
         return {
@@ -3640,6 +4098,38 @@ export function TransferPage({
         };
       case "fix_source_keys":
         return { onPrimaryFix: openIdentitySettings, primaryFixLabel: action.label };
+      case "run_population_orphan_scan": {
+        const plan = planFkOrphanSuggestedAction({ kind: action.kind, column: action.column });
+        return {
+          onPrimaryFix: () => {
+            if (!plan) return;
+            setRunPopulationOrphanScan(true);
+            toast({
+              title: plan.toastTitle,
+              message: plan.toastMessage,
+              tone: plan.toastTone,
+            });
+            void executePreflight(undefined, undefined, { runPopulationOrphanScan: true });
+          },
+          primaryFixLabel: action.label,
+        };
+      }
+      case "fix_orphans": {
+        const plan = planFkOrphanSuggestedAction({ kind: action.kind, column: action.column });
+        return {
+          onPrimaryFix: () => {
+            if (!plan) return;
+            if (plan.focusSource) setMapFocusSource(plan.focusSource);
+            if (plan.goToMap) setStep(STEP_MAP);
+            toast({
+              title: plan.toastTitle,
+              message: plan.toastMessage,
+              tone: plan.toastTone,
+            });
+          },
+          primaryFixLabel: action.label,
+        };
+      }
       default:
         return { onPrimaryFix: undefined, primaryFixLabel: undefined };
     }
@@ -3710,6 +4200,14 @@ export function TransferPage({
     const approvedDdlIdentityHash = String(
       preflight?.proof_bundle?.ddl_identity?.ddl_identity_hash || "",
     ).trim();
+    if (contractBlockReason) {
+      toast({
+        title: "Signed contract required",
+        message: contractBlockReason,
+        tone: "warning",
+      });
+      return;
+    }
     if (
       enforcePreflight
       && (!approvedDecisionArtifactHash || approvedDecisionArtifactHash.length !== 64)
@@ -3729,7 +4227,7 @@ export function TransferPage({
     setActiveJobId(null);
     setResult(null);
     setTransferLaunch(null);
-    setRunStartupProgress(12);
+    setRunStartupProgress(stagePercent(1, RUN_LAUNCH_STAGES.length));
     setRunStartupPhase(RUN_LAUNCH_STAGES[0]);
     // Prefer Validate-echoed Kernel stamps + signed contracts over Map drafts.
     const mappingsForExecute = mergeSignedRiskContracts(
@@ -3762,7 +4260,7 @@ export function TransferPage({
           }
         }
       }
-      setRunStartupProgress(24);
+      setRunStartupProgress(stagePercent(2, RUN_LAUNCH_STAGES.length));
       setRunStartupPhase(RUN_LAUNCH_STAGES[1]);
       const data = await runUniversalTransfer({
         file: sourceKind === "file" ? file ?? undefined : undefined,
@@ -3797,23 +4295,34 @@ export function TransferPage({
         syncMode,
         schemaPolicy,
         validationMode,
+        deliveryGuarantee: studioDeliveryGuarantee({
+          syncMode,
+          deliveryGuarantee,
+          allowAppendOnly,
+          callableSource: sourceReadMode === "procedure" || sourceReadMode === "query",
+        }),
         dateLocale,
         backfillNewFields,
         writeViaStaging,
         enableOcr,
         sourceExtra: (() => {
-          if (syncMode !== "cdc") return undefined;
-          const extra: Record<string, unknown> = {};
-          if (multiSubnetFailover) extra.multi_subnet_failover = true;
-          const sqlServerCdc = [
-            "sqlserver",
-            "mssql",
-            "azure_sql_database",
-            "microsoft_sql_server",
-            "amazon_rds_sql_server",
-          ].includes(resolveDriverType(sourceConnector?.type || ""));
-          if (sqlServerCdc && cdcRowFilter && cdcRowFilter !== "all") {
-            extra.cdc_row_filter = cdcRowFilter;
+          const extra: Record<string, unknown> = {
+            ...(sourceKind === "database"
+              ? callableSourceExtra(sourceReadMode, procedureCall, procedureParams) || {}
+              : {}),
+          };
+          if (syncMode === "cdc") {
+            if (multiSubnetFailover) extra.multi_subnet_failover = true;
+            const sqlServerCdc = [
+              "sqlserver",
+              "mssql",
+              "azure_sql_database",
+              "microsoft_sql_server",
+              "amazon_rds_sql_server",
+            ].includes(resolveDriverType(sourceConnector?.type || ""));
+            if (sqlServerCdc && cdcRowFilter && cdcRowFilter !== "all") {
+              extra.cdc_row_filter = cdcRowFilter;
+            }
           }
           return Object.keys(extra).length ? extra : undefined;
         })(),
@@ -3829,6 +4338,28 @@ export function TransferPage({
           if (syncMode === "cdc" && allowAppendOnly) {
             extra.allow_append_only = true;
           }
+          if (destWriteMode === "procedure") {
+            extra.dest_write_mode = "procedure";
+            extra.dest_procedure_call = destProcedureCall.trim();
+            if (Object.keys(destProcedureParamMap).length) {
+              extra.dest_procedure_param_map = { ...destProcedureParamMap };
+            }
+            if (Object.keys(destProcedureParams).length) {
+              extra.dest_procedure_params = { ...destProcedureParams };
+            }
+          }
+          if (destWriteMode === "query") {
+            extra.dest_write_mode = "query";
+            extra.dest_query_sql = destQuerySql.trim();
+            if (Object.keys(destProcedureParamMap).length) {
+              extra.dest_procedure_param_map = { ...destProcedureParamMap };
+            }
+            if (Object.keys(destProcedureParams).length) {
+              extra.dest_procedure_params = { ...destProcedureParams };
+            }
+          }
+          if (destProcedureBefore.trim()) extra.dest_procedure_before = destProcedureBefore.trim();
+          if (destProcedureAfter.trim()) extra.dest_procedure_after = destProcedureAfter.trim();
           const isVectorDestRun =
             destDriverType === "pgvector" ||
             destDriverType === "qdrant" ||
@@ -3871,13 +4402,15 @@ export function TransferPage({
         ].filter(Boolean).join("; ") || undefined,
         approvedDecisionArtifactHash: approvedDecisionArtifactHash || undefined,
         approvedDdlIdentityHash: approvedDdlIdentityHash || undefined,
+        contractId: boundContractId.trim() || undefined,
+        requireSignedContract: Boolean(boundContractId.trim() && requireSignedContract),
         decisionArtifact:
           preflight?.proof_bundle?.decision_artifact
           && typeof preflight.proof_bundle.decision_artifact === "object"
             ? (preflight.proof_bundle.decision_artifact as Record<string, unknown>)
             : undefined,
       });
-      setRunStartupProgress(36);
+      setRunStartupProgress(stagePercent(3, RUN_LAUNCH_STAGES.length));
       setRunStartupPhase(RUN_LAUNCH_STAGES[3]);
       // A double-click / retry that hit an already-running equivalent transfer.
       // Open the live job instead of starting a second writer against the same table.
@@ -3889,7 +4422,7 @@ export function TransferPage({
         const existingStatus = String(
           (data as { existing_status?: string }).existing_status || "in progress",
         );
-        setRunStartupProgress(40);
+        setRunStartupProgress(100);
         setActiveJobId(existingId);
         setTransferring(false);
         toast({
@@ -3900,7 +4433,7 @@ export function TransferPage({
         return;
       }
       if (data.job_id && (data as { async?: boolean }).async) {
-        setRunStartupProgress(40);
+        setRunStartupProgress(100);
         setActiveJobId(data.job_id);
         setTransferLaunch({
           jobId: data.job_id,
@@ -3984,6 +4517,7 @@ export function TransferPage({
           ?? job.load_history_report,
       },
       reconciliation: job.reconciliation,
+      row_accounting: job.row_accounting,
       explanation: job.explanation,
       mapping_proof: job.mapping_proof,
       ddl_executed: job.ddl_executed ?? job.ddl_log,
@@ -3994,6 +4528,7 @@ export function TransferPage({
       cdc_row_filter: job.cdc_row_filter,
       cdc_shared_reader: job.cdc_shared_reader,
       snapshot_mode: job.snapshot_mode,
+      snapshot_plan: job.snapshot_plan,
       watermark: job.watermark,
       cdc_lease_holder: job.cdc_lease_holder,
       cdc_lease_backend: job.cdc_lease_backend,
@@ -4075,6 +4610,32 @@ export function TransferPage({
         dest_table: targetCollection,
         interval: "daily",
         enabled: true,
+        sync_mode: syncMode,
+        cursor_column: cursorField,
+        primary_key: primaryKeyField,
+        source_read_mode: sourceReadMode,
+        procedure_call: sourceReadMode === "procedure" ? procedureCall.trim() : "",
+        source_query: sourceReadMode === "query" ? procedureCall.trim() : "",
+        procedure_params: Object.keys(procedureParams).length ? procedureParams : {},
+        mappings: columnMappings.map((m) => ({
+          source: m.source,
+          target: m.target,
+          confidence: m.confidence,
+          transform: m.transform,
+        })),
+        ...studioSchedulePolicies({
+          validationMode,
+          schemaPolicy,
+          backfillNewFields,
+        }),
+        delivery_guarantee: studioDeliveryGuarantee({
+          syncMode,
+          deliveryGuarantee,
+          allowAppendOnly,
+          callableSource: sourceReadMode === "procedure" || sourceReadMode === "query",
+        }),
+        contract_id: boundContractId.trim(),
+        require_signed_contract: Boolean(boundContractId.trim() && requireSignedContract),
       });
       toast({
         title: "Pipeline created",
@@ -4091,13 +4652,16 @@ export function TransferPage({
     }
   };
 
-  const sourceInputsReady =
-    sourceKind === "file"
-      ? Boolean(parsed)
-      : Boolean(
-          sourceConnectorId
-          && (sourceKind === "cloud" ? cloudPath.trim() : (sourceTable || sourceCollection)),
-        );
+  const sourceInputsReady = sourceExtractReady({
+    sourceKind,
+    parsed: Boolean(parsed),
+    sourceConnectorId,
+    cloudPath,
+    sourceTable,
+    sourceCollection,
+    sourceReadMode,
+    procedureCall,
+  });
 
   const canConfigureDest =
     sourceKind === "file"
@@ -4107,10 +4671,22 @@ export function TransferPage({
           && (analysis?.columns.length || currentSourceColumns.length),
         );
 
+  const destSqlReady = destWriteReady({
+    destWriteMode,
+    destProcedureCall,
+    destQuerySql,
+  });
   const canRunPreflight =
     canConfigureDest &&
     (destKindMode === "file_export" ||
-      (Boolean(destType && targetDb && targetCollection) && !destSchemaLoading));
+      (isCallableDestMode(destWriteMode)
+        ? Boolean(
+            destType
+            && destSqlReady
+            && (connectorId || targetDb.trim() || destDriverType === "iceberg")
+            && !destSchemaLoading,
+          )
+        : Boolean(destType && targetDb && targetCollection) && !destSchemaLoading));
 
   const needsDbPreflight = destKindMode === "database";
   /** Map/sync/PK/dest edits must invalidate a prior green Validate before Execute. */
@@ -4554,6 +5130,8 @@ export function TransferPage({
           destColumns={destColumns}
           destSchemaLoading={destSchemaLoading}
           destTableExists={destTableExists}
+          extraSourceColumns={shapeContract?.extra_source_columns ?? []}
+          destShapeHeadline={shapeContract?.headline ?? ""}
           destConnected={destConnected}
           destConnectionError={destConnectionError}
           targetCollection={targetCollection}
@@ -4915,7 +5493,77 @@ export function TransferPage({
                   placeholder="Select connector…"
                   hint="Saved connection (host, database, credentials)."
                 />
-                <div className="df2-field">
+                {dialectOffersSqlExtract(sourceConnector?.type) && (
+                  <div className="df2-field df2-source-read-mode">
+                    <label className="df2-label" htmlFor="source-read-mode">
+                      Source extract
+                    </label>
+                    <FilterTabs<SourceReadMode>
+                      ariaLabel="Source extract"
+                      value={sourceReadMode}
+                      onChange={setSourceReadMode}
+                      items={[
+                        { id: "table", label: "Table" },
+                        ...(dialectOffersQuery(sourceConnector?.type)
+                          ? [{ id: "query" as const, label: "SQL query" }]
+                          : []),
+                        ...(dialectOffersProcedures(sourceConnector?.type)
+                          ? [{ id: "procedure" as const, label: "Stored procedure" }]
+                          : []),
+                      ]}
+                    />
+                    <span className="df2-label-hint">
+                      {sourceReadMode === "procedure"
+                        ? "Execute one CALL/EXEC, map the result set, remap extra columns on Map."
+                        : sourceReadMode === "query"
+                          ? "One read-only SELECT/WITH. Result columns map on the next step. Not CDC."
+                          : "Read a table or view. Query and stored procedure are result-set snapshots, not CDC."}
+                    </span>
+                  </div>
+                )}
+                {isCallableSourceMode(sourceReadMode) && dialectOffersSqlExtract(sourceConnector?.type) ? (
+                <div className="df2-field df2-source-procedure">
+                  <SqlEditor
+                    id="source-procedure-input"
+                    label={sourceReadMode === "query" ? "SQL query" : "Stored procedure"}
+                    value={procedureCall}
+                    onChange={setProcedureCall}
+                    mode={sourceReadMode === "query" ? "query" : "procedure"}
+                    dialect={sourceConnector?.type}
+                    bound={procedureParams}
+                    placeholder={
+                      sourceReadMode === "query"
+                        ? queryHint(sourceConnector?.type)
+                        : procedureHint(sourceConnector?.type)
+                    }
+                    hint="One statement. :name binds below, or quoted/numeric literals. Extra result columns stay on Map — never silent drop."
+                    rows={6}
+                  />
+                  {bindNamesFromSql(procedureCall).length > 0 && (
+                    <div className="df2-source-bind-params">
+                      {bindNamesFromSql(procedureCall).map((name) => (
+                        <div className="df2-field" key={name}>
+                          <label className="df2-label" htmlFor={`bind-${name}`}>
+                            :{name}
+                          </label>
+                          <input
+                            id={`bind-${name}`}
+                            className="df2-input"
+                            value={procedureParams[name] ?? ""}
+                            onChange={(e) =>
+                              setProcedureParams((prev) => ({ ...prev, [name]: e.target.value }))
+                            }
+                            placeholder="Bound value"
+                            autoComplete="off"
+                            spellCheck={false}
+                          />
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+                ) : (
+                <div className="df2-field df2-source-stream-field">
                   <label className="df2-label" htmlFor="source-stream-input">
                     {sourceConnector?.type === "mongodb" ? "Collection(s)" : "Table(s)"}
                   </label>
@@ -4943,8 +5591,10 @@ export function TransferPage({
                       : "One table, or several separated by commas."}
                   </span>
                 </div>
+                )}
               </div>
 
+              {!isCallableSourceMode(sourceReadMode) && (
               <div className="df2-source-multistream" role="note">
                 <div className="df2-source-multistream-head">
                   <DtIcon name="activity" size={15} />
@@ -4982,6 +5632,7 @@ export function TransferPage({
                   </ul>
                 )}
               </div>
+              )}
             </div>
           )}
 
@@ -5031,9 +5682,15 @@ export function TransferPage({
             ? "Source profiled — choose where data should land next."
             : sourceKind === "cloud"
               ? "Select connector and path to continue"
-              : isMultiStreamSource
-                ? `${multiStreamNames.length} streams selected — continue to pick a destination`
-                : "Select connector and table/collection to continue";
+              : isCallableSourceMode(sourceReadMode)
+                ? (currentSourceColumns.length || analysis?.columns.length
+                    ? "Result set profiled — choose where data should land next."
+                    : sourceReadMode === "query"
+                      ? "Enter a read-only SELECT. Preview the result set, then continue."
+                      : "Enter a CALL/EXEC. Preview the result set, then continue.")
+                : isMultiStreamSource
+                  ? `${multiStreamNames.length} streams selected — continue to pick a destination`
+                  : "Select connector and table/collection to continue";
           const disabled = fileReady ? uploading : !canConfigureDest || sourceIntrospecting;
           return (
             <div className="df2-card-footer df2-wizard-footer">
@@ -5404,6 +6061,24 @@ export function TransferPage({
                 </div>
               )}
             </div>
+            <DestProcedurePanel
+              destType={destDriverType || destType}
+              destWriteMode={destWriteMode}
+              onDestWriteMode={setDestWriteMode}
+              destProcedureCall={destProcedureCall}
+              onDestProcedureCall={setDestProcedureCall}
+              destQuerySql={destQuerySql}
+              onDestQuerySql={setDestQuerySql}
+              destProcedureParams={destProcedureParams}
+              onDestProcedureParams={setDestProcedureParams}
+              destProcedureBefore={destProcedureBefore}
+              onDestProcedureBefore={setDestProcedureBefore}
+              destProcedureAfter={destProcedureAfter}
+              onDestProcedureAfter={setDestProcedureAfter}
+              sourceColumns={currentSourceColumns}
+              paramMap={destProcedureParamMap}
+              onParamMap={setDestProcedureParamMap}
+            />
             {/* Status when probing / resolved — including pending unknown existence */}
             {destDriverType !== "dynamodb"
               && (destSchemaLoading
@@ -5428,8 +6103,21 @@ export function TransferPage({
                     <Spinner size="sm" label="Analyzing destination schema" />
                     <p>
                       <strong>Checking destination…</strong> Looking up{" "}
-                      <code>{targetDb ? `${targetDb}.` : ""}{targetCollection.trim() || "table"}</code>{" "}
-                      and loading column types for mapping.
+                      <code>{targetDb ? `${targetDb}.` : ""}{targetCollection.trim() || "table"}</code>
+                      {" "}(column types only — no row scan).
+                      {destDriverType === "snowflake" ? (
+                        <>
+                          {" "}If the warehouse is suspended, Snowflake is waking it
+                          (often 20–60s), then one <code>DESC TABLE</code>.
+                          {String(targetDb || "").toUpperCase() === "SNOWFLAKE_SAMPLE_DATA" ? (
+                            <>
+                              {" "}<code>SNOWFLAKE_SAMPLE_DATA</code> is a shared
+                              sample catalog (usually read-only) — destination
+                              tables normally live in your own database.
+                            </>
+                          ) : null}
+                        </>
+                      ) : null}
                     </p>
                   </>
                 ) : destTableExists === true ? (
@@ -5504,7 +6192,7 @@ export function TransferPage({
             </>
           ) : (
             <p className="df2-label-hint df2-dest-right-empty">
-              Select a saved connector or engine on the left to configure the destination.
+              Select a saved connection, or open New connection to pick an engine.
             </p>
           )}
             </>
@@ -5645,6 +6333,7 @@ export function TransferPage({
               }
               setStep(STEP_MAP);
             }}
+            onReloadDestSchema={() => { void loadDestinationSchema(); }}
             onOpenIdentitySettings={openIdentitySettings}
             uniqueKeySuggestions={uniqueKeySuggestions}
             compositeKeySuggestions={compositeKeySuggestions}
@@ -5767,12 +6456,23 @@ export function TransferPage({
             rowCount={parsed?.row_count ?? sourceRowEstimate ?? undefined}
             transferLaunch={transferLaunch}
             savingContract={savingContract}
-            executeBlocked={multiStreamUnsupportedMode}
+            executeBlocked={multiStreamUnsupportedMode || Boolean(contractBlockReason)}
             executeBlockedReason={
               multiStreamUnsupportedMode
                 ? MULTI_STREAM_SCD2_MIRROR_BLOCK
-                : undefined
+                : contractBlockReason || undefined
             }
+            contractSlot={(
+              <ContractBindField
+                idPrefix="studio"
+                contractId={boundContractId}
+                requireSigned={requireSignedContract}
+                onContractIdChange={setBoundContractId}
+                onRequireSignedChange={setRequireSignedContract}
+                onBlockReasonChange={setContractBlockReason}
+                compact
+              />
+            )}
             cdcRetentionSlot={
               syncMode === "cdc"
               && sourceConnector
@@ -5946,14 +6646,14 @@ export function TransferPage({
                 <span>Initializing transfer job</span>
                 <strong>Starting…</strong>
               </div>
-              <div className="df2-run-launch-progress-track df2-run-launch-progress-track-indeterminate">
-                <span className="df2-run-launch-progress-fill" style={{ width: `${Math.min(runStartupProgress, 40)}%` }} />
+              <div className="df2-run-launch-progress-track">
+                <span className="df2-run-launch-progress-fill" style={{ width: `${runStartupProgress}%` }} />
               </div>
             </div>
 
             <div className="df2-run-launch-stages" aria-label="Launch stages">
               {RUN_LAUNCH_STAGES.map((stage, idx) => {
-                const state = runStartupProgress >= (idx + 1) * 25 ? "done" : runStartupProgress >= idx * 25 ? "active" : "pending";
+                const state = launchStageState(runStartupProgress, idx, RUN_LAUNCH_STAGES.length);
                 return (
                   <span key={stage} className={`df2-run-launch-stage ${state}`}>
                     {stage}
@@ -6104,9 +6804,14 @@ export function TransferPage({
               <span>
                 <strong>Result</strong> {result.success ? "Completed" : "Needs attention"}
               </span>
-              <span>
-                <strong>Rows</strong> {(result.records_transferred ?? 0).toLocaleString()}
-              </span>
+              {(() => {
+                const dest = destHeadline(result);
+                return (
+                  <span title={dest.title}>
+                    <strong>{dest.label}</strong> {dest.value}
+                  </span>
+                );
+              })()}
             </div>
             <div className="df2-run-footer-actions">
               {(!result.success || Boolean(result.destination_summary?.rejected_rows)) && (
@@ -6189,6 +6894,9 @@ export function TransferPage({
         compositeKeySuggestions={compositeKeySuggestions}
         snapshotMode={snapshotMode}
         onSnapshotModeChange={setSnapshotMode}
+        deliveryGuarantee={deliveryGuarantee}
+        onDeliveryGuaranteeChange={setDeliveryGuarantee}
+        exactlyOnceWired={exactlyOnceWiredDest(destDriverType || destType)}
         allowAppendOnly={allowAppendOnly}
         onAllowAppendOnlyChange={setAllowAppendOnly}
         multiSubnetFailover={multiSubnetFailover}

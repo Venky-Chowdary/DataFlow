@@ -983,6 +983,7 @@ def _execute_preflight_parity_kwargs(
         "contract_primary_key": contract_pk,
         "stream_contracts": stream_contracts,
         "privilege_probe": privilege_probe or None,
+        "redshift_staging_probe": dest_meta.get("redshift_staging_probe") or None,
         "destination_can_create": bool(can_create),
         "destination_can_write": bool(can_write),
         # Always owned here — never also pass at the call site with **parity.
@@ -1033,6 +1034,7 @@ def _execute_policy_gates_for_request(
         source_type=str(getattr(src, "format", None) or getattr(src, "kind", None) or ""),
         source_kind=str(getattr(src, "kind", None) or "file"),
         write_via_staging=bool(getattr(request, "write_via_staging", False)),
+        source_read_mode=str((getattr(src, "extra", None) or {}).get("source_read_mode") or ""),
     )
 
 
@@ -1230,6 +1232,14 @@ _CDC_JOB_FIELDS = (
     "cdc_plugin",
     "cdc_slot_name",
     "cdc_delivery",
+    "exactly_once_active",
+    "exactly_once_claimed_platform",
+    "exactly_once_algorithm",
+    "exactly_once_protocol",
+    "delivery_semantics",
+    "eos_committed_lsn",
+    "eos_fence_epoch",
+    "eos_dest_authoritative",
     "cdc_lease_holder",
     "cdc_lease_resource",
     "cdc_lease_stale",
@@ -1260,6 +1270,7 @@ _CDC_JOB_FIELDS = (
     "watermark",
     "cdc_shared_reader",
     "snapshot_mode",
+    "snapshot_plan",
 )
 
 
@@ -1370,6 +1381,11 @@ def _job_failure_fields(exc: Exception) -> tuple[dict[str, Any], dict[str, Any]]
                     or extras.get("cdc_lease_cursor_key"),
                 }
             )
+            if exc.snapshot_plan:
+                extras["snapshot_plan"] = dict(exc.snapshot_plan)
+                mode = exc.snapshot_plan.get("snapshot_mode")
+                if mode:
+                    extras["snapshot_mode"] = mode
     except Exception as exc:
         logger.debug("cdc cursor gap classification skipped: %s", exc, exc_info=exc)
     try:
@@ -2016,19 +2032,38 @@ class UniversalTransferEngine:
             logger.debug("job shell bootstrap skipped for %s", job_id, exc_info=True)
         # Hard-block Execute when Map still has unresolved requires_review rows —
         # skip_preflight must never green-path ambiguous remaps into a write.
-        # Also refuse impossible CDC delivery guarantees (exactly_once / at_most_once).
-        from services.execution_engine_contract import (
-            DeliveryGuaranteeError,
-            assert_delivery_guarantee_allowed,
+        # Delivery: at_least_once default; exactly_once opt-in and fail-closed
+        # on ineligible routes. at_most_once is never offered.
+        from services.cdc_exactly_once import (
+            ExactlyOnceRouteError,
+            assert_requested_cdc_delivery,
+            dest_allow_append_only,
+            route_has_cdc_pk,
         )
+        from services.execution_engine_contract import DeliveryGuaranteeError
         from services.mapping_pipeline import assert_mappings_executable
+        from services.procedure_source import is_callable_source
 
         try:
-            assert_delivery_guarantee_allowed(
-                getattr(request, "delivery_guarantee", None) or "at_least_once"
+            assert_requested_cdc_delivery(
+                getattr(request, "delivery_guarantee", None) or "at_least_once",
+                sync_mode=getattr(request, "sync_mode", "") or "",
+                dest_type=str(getattr(request.destination, "format", "") or ""),
+                source_type=str(getattr(request.source, "format", "") or ""),
+                has_primary_key=route_has_cdc_pk(
+                    getattr(request, "stream_contracts", None),
+                ),
+                allow_append_only=dest_allow_append_only(request.destination),
+                callable_source=is_callable_source(request.source),
+            )
+            from services.procedure_source import assert_callable_sync_allowed
+
+            assert_callable_sync_allowed(
+                getattr(request, "sync_mode", "") or "",
+                getattr(request, "source", None),
             )
             assert_mappings_executable(request.mappings)
-        except (ValueError, DeliveryGuaranteeError) as mapping_exc:
+        except (ValueError, DeliveryGuaranteeError, ExactlyOnceRouteError) as mapping_exc:
             mongo = get_mongodb_service()
             mongo.update_job_status(
                 job_id,
@@ -2156,6 +2191,20 @@ class UniversalTransferEngine:
                 result.destination_summary["elapsed_seconds"] = result.elapsed_seconds
                 result.destination_summary["records_per_second"] = result.records_per_second
                 result.destination_summary["peak_memory_bytes"] = result.peak_memory_bytes
+                try:
+                    from services.row_conservation import ledger_from_transfer_result
+
+                    result.row_accounting = ledger_from_transfer_result(
+                        result,
+                        sync_mode=str(getattr(request, "sync_mode", "") or ""),
+                    )
+                except Exception:
+                    logger.warning(
+                        "Conservation ledger stamp failed for job %s",
+                        job_id,
+                        exc_info=True,
+                    )
+                    result.row_accounting = {}
                 if start_span is not None:
                     set_span_attribute(span, "dataflow.records_transferred", result.records_transferred)
                     set_span_attribute(span, "dataflow.elapsed_seconds", result.elapsed_seconds)
@@ -2872,7 +2921,9 @@ class UniversalTransferEngine:
                         if conflict_columns:
                             write_mode = "upsert"
                         # Keep full population — no positional slice.
-                        resume_full_records = list(records)
+                        # Engine record spill owns the population; do not
+                        # duplicate the dict list for resume.
+                        resume_full_records = []
                         resume_skipped_rows = 0
                         dest_summary_resume_note = (
                             f"Idempotent resume after {skip_n:,} prior row(s) — "
@@ -2944,25 +2995,48 @@ class UniversalTransferEngine:
                         conflict_columns=conflict_columns,
                         job_id=job_id,
                         skip_preflight=request.skip_preflight,
+                        sync_mode=request.sync_mode,
+                        release_records=True,
+                        retain_engine_spill=True,
+                        collect_mirror_keys=effective_sync_lower
+                        in ("full_refresh_mirror", "mirror"),
                     )
 
                 if effective_sync_lower == "scd2" and conflict_columns:
-                    scd2_summary = with_retry(
-                        lambda: apply_scd2(
-                            request.destination,
-                            records,
-                            columns,
-                            schema,
-                            mappings,
-                            conflict_columns,
-                            validation_mode=request.validation_mode,
-                        ),
-                        budget=RetryBudget(
-                            max_attempts=3,
-                            base_delay_seconds=0.5,
-                            max_delay_seconds=5.0,
-                        ),
+                    from connectors.engine_record_spill import (
+                        ENGINE_SPILL_SUMMARY_KEY,
+                        spill_engine_write_records,
                     )
+
+                    dest_extra = getattr(request.destination, "extra", None)
+                    scd2_spill = spill_engine_write_records(
+                        records,
+                        columns,
+                        mappings,
+                        extra=dest_extra if isinstance(dest_extra, dict) else {},
+                        clear_records=True,
+                    )
+                    try:
+                        scd2_summary = with_retry(
+                            lambda: apply_scd2(
+                                request.destination,
+                                records,
+                                columns,
+                                schema,
+                                mappings,
+                                conflict_columns,
+                                validation_mode=request.validation_mode,
+                                source_spool=scd2_spill.spool,
+                            ),
+                            budget=RetryBudget(
+                                max_attempts=3,
+                                base_delay_seconds=0.5,
+                                max_delay_seconds=5.0,
+                            ),
+                        )
+                    except Exception:
+                        scd2_spill.close()
+                        raise
                     dest_summary = {
                         "table": request.destination.table
                         or request.destination.collection,
@@ -2973,8 +3047,19 @@ class UniversalTransferEngine:
                             scd2_summary.get("rejected_details") or []
                         ),
                         "rejected_rows": int(scd2_summary.get("rejected_rows") or 0),
+                        "source_row_count": int(scd2_spill.unexpanded_row_count),
+                        "source_row_count_source": "engine_record_spill",
+                        "engine_record_spill": {
+                            "spilled": scd2_spill.spilled,
+                            "source_row_count": scd2_spill.source_row_count,
+                            "unexpanded_row_count": scd2_spill.unexpanded_row_count,
+                        },
+                        ENGINE_SPILL_SUMMARY_KEY: scd2_spill,
                     }
                     if scd2_summary.get("ok") is False:
+                        _fail_spill = dest_summary.pop(ENGINE_SPILL_SUMMARY_KEY, None)
+                        if _fail_spill is not None:
+                            _fail_spill.close()
                         block_msg = str(
                             scd2_summary.get("error")
                             or "SCD2 map/Risk Contract blocked history merge"
@@ -3027,6 +3112,11 @@ class UniversalTransferEngine:
                         ),
                     )
                     if dest_summary.get("promote_blocked"):
+                        from connectors.engine_record_spill import ENGINE_SPILL_SUMMARY_KEY
+
+                        _blocked_spill = dest_summary.pop(ENGINE_SPILL_SUMMARY_KEY, None)
+                        if _blocked_spill is not None:
+                            _blocked_spill.close()
                         # Strict/maximum + staging: primary untouched; persist DLQ then fail.
                         _persist_job_quarantine(
                             job_id,
@@ -3072,6 +3162,21 @@ class UniversalTransferEngine:
                         effective_sync_lower in ("full_refresh_mirror", "mirror")
                         and conflict_columns
                     ):
+                        from connectors.engine_record_spill import (
+                            ENGINE_SPILL_SUMMARY_KEY,
+                            MIRROR_PK_SUMMARY_KEY,
+                        )
+
+                        spill_holder = (
+                            dest_summary.get(ENGINE_SPILL_SUMMARY_KEY)
+                            if isinstance(dest_summary, dict)
+                            else None
+                        )
+                        legacy_keys = (
+                            dest_summary.pop(MIRROR_PK_SUMMARY_KEY, None)
+                            if isinstance(dest_summary, dict)
+                            else None
+                        )
                         mirror_summary = apply_inferred_soft_deletes(
                             request.destination,
                             records,
@@ -3079,6 +3184,13 @@ class UniversalTransferEngine:
                             schema,
                             mappings,
                             conflict_columns,
+                            source_spool=getattr(spill_holder, "spool", None),
+                            source_key_spool=getattr(spill_holder, "key_spool", None),
+                            pk_sources=getattr(spill_holder, "pk_sources", None),
+                            source_pk_tuples=legacy_keys
+                            if getattr(spill_holder, "key_spool", None) is None
+                            and getattr(spill_holder, "spool", None) is None
+                            else None,
                         )
                         dest_summary["mirror"] = mirror_summary
                         rows_written = mirror_summary.get("active_rows", rows_written)
@@ -3235,24 +3347,42 @@ class UniversalTransferEngine:
                         dest_summary.setdefault(
                             "primary_key_columns", list(conflict_columns)
                         )
+                from connectors.engine_record_spill import ENGINE_SPILL_SUMMARY_KEY
+
+                spill_holder = (
+                    dest_summary.pop(ENGINE_SPILL_SUMMARY_KEY, None)
+                    if isinstance(dest_summary, dict)
+                    else None
+                )
                 if resume_skipped_rows and isinstance(dest_summary, dict):
                     dest_summary["resumed_from"] = resume_skipped_rows
-                    dest_summary["resume_full_source_rows"] = len(resume_full_records)
-                recon = run_reconciliation(
-                    endpoint=request.destination,
-                    # Full population, so the source digest and row ledger cover
-                    # what the destination actually holds after the resume.
-                    records=resume_full_records or records,
-                    columns=columns,
-                    rows_written=rows_written,
-                    writer_checksum=dest_summary.get("checksum")
-                    or dest_summary.get("active_checksum", ""),
-                    dest_summary=dest_summary,
-                    mappings=mappings,
-                    source_schema=schema,
-                    validation_mode=request.validation_mode,
-                    source_endpoint=request.source,
-                )
+                    dest_summary["resume_full_source_rows"] = int(
+                        (dest_summary.get("engine_record_spill") or {}).get(
+                            "unexpanded_row_count"
+                        )
+                        or len(resume_full_records)
+                        or len(records)
+                    )
+                try:
+                    recon = run_reconciliation(
+                        endpoint=request.destination,
+                        # Full population via spool when the engine released
+                        # the dict list; otherwise the in-memory records.
+                        records=resume_full_records or records,
+                        columns=columns,
+                        rows_written=rows_written,
+                        writer_checksum=dest_summary.get("checksum")
+                        or dest_summary.get("active_checksum", ""),
+                        dest_summary=dest_summary,
+                        mappings=mappings,
+                        source_schema=schema,
+                        validation_mode=request.validation_mode,
+                        source_endpoint=request.source,
+                        source_spool=getattr(spill_holder, "spool", None),
+                    )
+                finally:
+                    if spill_holder is not None:
+                        spill_holder.close()
             dest_summary = pii_guard.redact_destination_summary(dest_summary, mappings)
             recon = pii_guard.redact_reconciliation(recon, mappings)
             if not recon.get("passed"):
@@ -3986,6 +4116,8 @@ class UniversalTransferEngine:
                     backfill_new_fields=backfill_fields,
                     validation_mode=request.validation_mode,
                     limit=request.limit,
+                    delivery_guarantee=getattr(request, "delivery_guarantee", None)
+                    or "at_least_once",
                 )
             elif multi_non_cdc:
                 rows_written, ddl_log, dest_summary, _ = (
@@ -4927,6 +5059,8 @@ class UniversalTransferEngine:
 
             persist_file_source(request)
         mongo = get_mongodb_service()
+        from services.procedure_source import source_read_mode_of
+
         source_name = (
             request.source_filename
             or request.source.table
@@ -4946,6 +5080,8 @@ class UniversalTransferEngine:
             "name": f"{source_name} → {dest_label}",
             "name_key": f"{source_name} → {dest_label}".strip().casefold(),
             "source_format": request.source.format,
+            "source_connector_id": str(getattr(request.source, "connector_id", None) or "").strip() or None,
+            "dest_connector_id": str(getattr(request.destination, "connector_id", None) or "").strip() or None,
             "destination_type": request.destination.format,
             "destination_kind": request.destination.kind,
             "destination_database": request.destination.database or "",
@@ -4964,6 +5100,7 @@ class UniversalTransferEngine:
             "sync_mode": request.sync_mode,
             "schema_policy": request.schema_policy,
             "validation_mode": request.validation_mode,
+            "source_read_mode": source_read_mode_of(request.source),
             "triggered_by": (request.triggered_by or "").strip(),
             "retry_of": None,
         }
@@ -5000,6 +5137,12 @@ class UniversalTransferEngine:
             # job now so a later release, or a duplicate check, names the right
             # run rather than the placeholder.
             self._bind_idempotency_claim(claim.key, job_id)
+        try:
+            from services.connector_store import mark_used
+
+            mark_used(job_doc.get("source_connector_id"), job_doc.get("dest_connector_id"))
+        except Exception as used_exc:
+            logger.debug("mark_used after job create skipped: %s", used_exc)
         return job_id
 
     def _idempotency_key(self, request: TransferRequest) -> str:

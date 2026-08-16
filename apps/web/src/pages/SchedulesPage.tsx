@@ -416,7 +416,7 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
           searchPlaceholder="Search schedules by name, table, cadence, or sync mode…"
           filters={
             schedules.length > 0 ? (
-              <FilterBar ariaLabel="Filter schedules">
+              <FilterBar variant="inline" ariaLabel="Filter schedules">
                 {showForm ? (
                   <span className="df2-toolbar-status" role="status">
                     {editing ? "Editing schedule" : "Creating schedule"}

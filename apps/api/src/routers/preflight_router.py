@@ -105,6 +105,10 @@ class PreflightRequest(BaseModel):
     acknowledgment_reason: str = ""
     # Pre-ingestion staging (SQL destinations only) — Validate must fail closed.
     write_via_staging: bool = False
+    # Connector-specific dest settings (Redshift staging_bucket / iam_role, etc.).
+    dest_extra: dict[str, Any] | None = None
+    # CDC delivery — default at_least_once; exactly_once is opt-in and fail-closed.
+    delivery_guarantee: str = "at_least_once"
 
 
 def _schema_default(db_type: str) -> str:
@@ -184,6 +188,7 @@ async def run_preflight(body: PreflightRequest):
         dest_api_key=body.dest_api_key,
         dest_service_account=body.dest_service_account,
         dest_kind=body.dest_kind,
+        dest_extra=dict(body.dest_extra or {}),
     )
 
     if body.dest_kind == "file_export" or dest_meta.get("connected"):
@@ -296,6 +301,7 @@ async def run_preflight(body: PreflightRequest):
             destination_can_create=dest_meta.get("can_create_table"),
             destination_can_write=dest_meta.get("can_write"),
             privilege_probe=dest_meta.get("privilege_probe"),
+            redshift_staging_probe=dest_meta.get("redshift_staging_probe"),
             destination_db_type=(dest_meta.get("db_type") or body.dest_type or "postgresql").lower(),
             source_connector_id=body.source_connector_id or "",
             source_config=body.source_config,
@@ -428,6 +434,13 @@ async def run_preflight(body: PreflightRequest):
             source_type=body.source_type,
             source_kind=body.source_kind or ("database" if body.source_connector_id else "file"),
             write_via_staging=bool(body.write_via_staging),
+            source_read_mode=str(
+                ((body.source_config or {}).get("source_read_mode")
+                 or ((body.source_config or {}).get("extra") or {}).get("source_read_mode")
+                 or "")
+            ),
+            delivery_guarantee=body.delivery_guarantee or "at_least_once",
+            allow_append_only=bool((body.dest_extra or {}).get("allow_append_only")),
         ),
         validation_mode=body.validation_mode,
     )
@@ -513,15 +526,22 @@ async def explain_preflight(body: ExplainRequest):
 class SchemaDriftRequest(BaseModel):
     old_schema: dict[str, Any] = Field(default_factory=dict)
     new_schema: dict[str, Any] = Field(default_factory=dict)
+    dest_db: str = ""
+    schema_policy: str = "manual_review"
 
 
 @router.post("/schema-drift")
 async def classify_schema_drift(body: SchemaDriftRequest):
-    """Classify schema evolution as additive vs breaking (approve/reject UX)."""
-    from services.schema_drift import classify_schema_change
+    """Classify schema evolution and stamp compatibility + pause/propagate/review."""
+    from services.schema_drift import classify_schema_evolution_report
 
     try:
-        return classify_schema_change(body.old_schema, body.new_schema)
+        return classify_schema_evolution_report(
+            body.old_schema,
+            body.new_schema,
+            dest_db=body.dest_db or "",
+            schema_policy=body.schema_policy or "manual_review",
+        )
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=str(e))
 

@@ -71,6 +71,11 @@ _FILE_CAPS: dict[str, dict[str, bool]] = {
     "html": {"test": True, "read": True, "write": False, "file_source": True, "file_export": False},
 }
 
+
+def file_source_types() -> FrozenSet[str]:
+    """Catalog ids that are file sources — Test must not claim Connected without a path."""
+    return frozenset(_FILE_CAPS)
+
 # Catalog marketplace id → driver / format type
 CATALOG_ID_ALIASES: dict[str, str] = {
     "csv___tsv": "csv",
@@ -131,6 +136,12 @@ CATALOG_ID_ALIASES: dict[str, str] = {
     "ssh": "sftp",
     "email": "email",
     "smtp": "email",
+    "excel_workbook": "excel",
+    "csv_upload": "csv",
+    "tsv_upload": "tsv",
+    "json_documents": "json",
+    "parquet_lake": "parquet",
+    "jsonl_stream": "jsonl",
 }
 
 # Suggested lists — only connectors users can configure today
@@ -173,6 +184,7 @@ _TRANSFER_READY_HOSTED_TWINS = frozenset({
     "amazon_rds_oracle", "oracle_autonomous_warehouse",
     "google_bigquery", "bigquery_us", "bigquery_eu",
     "snowflake_aws", "snowflake_azure", "snowflake_gcp",
+    "snowflake_standard", "snowflake_enterprise",
     "amazon_dynamodb",
     "mongodb_atlas",
     # Search / cache

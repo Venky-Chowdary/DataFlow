@@ -32,7 +32,16 @@ import {
   remapToTypeForMismatch,
 } from "../../lib/validateIssueGrouping";
 import { buildValidateDecisionPath } from "../../lib/validateDecisionPath";
-import { buildValidateHonestyControls } from "../../lib/validateHonestyControls";
+import { buildValidateHonestyControls, schemaDriftAllowsAcknowledge, schemaDriftCompatibilityHeadline, schemaDriftRequiresRemap } from "../../lib/validateHonestyControls";
+import { isFkOrphanBlockerText, isFkOrphanCtaKind } from "../../lib/fkOrphanCta";
+import {
+  callableExtractNote,
+  destExistsPrimaryCta,
+  destOnlyPreserveColumns,
+  extraSourceColumnsFromContract,
+  shapeContractFromPreflight,
+} from "../../lib/destExistsShape";
+import { ringDasharray, validateRingPercent } from "../../lib/progressRing";
 import { BadDataFixDrawer, type BadDataIssue } from "./BadDataFixDrawer";
 import { Gate8ProofCard, type Gate8Reconciliation } from "./Gate8ProofCard";
 import { LoadHistoryPanel } from "./LoadHistoryPanel";
@@ -96,17 +105,23 @@ function issueTextsFromDetails(details?: Record<string, unknown> | null): string
   if (Array.isArray(issues)) {
     return issues.map((e) => (typeof e === "string" ? e : String((e as { message?: string })?.message ?? e))).filter(Boolean).slice(0, 12);
   }
-  // Privilege probe honesty on G2
+  // Privilege / Redshift staging probe honesty on G2
   const probe = details.privilege_probe;
+  const staging = details.redshift_staging_probe;
+  const lines: string[] = [];
   if (probe && typeof probe === "object") {
     const p = probe as Record<string, unknown>;
-    const lines: string[] = [];
     if (p.method) lines.push(`Probe: ${String(p.method)}`);
     if (p.status) lines.push(`Privilege status: ${String(p.status)}`);
     if (p.engine) lines.push(`Engine: ${String(p.engine)}`);
     if (p.detail && String(p.status) !== "ok") lines.push(String(p.detail));
-    if (lines.length) return lines.slice(0, 8);
   }
+  if (staging && typeof staging === "object") {
+    const s = staging as Record<string, unknown>;
+    if (s.status) lines.push(`COPY staging: ${String(s.status)}`);
+    if (s.detail && String(s.status) !== "ok") lines.push(String(s.detail));
+  }
+  if (lines.length) return lines.slice(0, 8);
   // G4 / G6 structured detail keys that are not named "issues"
   const extras: string[] = [];
   for (const key of ["low_confidence", "ambiguous_mappings", "unmapped", "sample_duplicates", "encoding_issues"] as const) {
@@ -153,10 +168,23 @@ function privilegeProbeFromDetails(details?: Record<string, unknown> | null): Pr
   };
 }
 
+function stagingProbeFromDetails(details?: Record<string, unknown> | null): PrivilegeProbeMeta | null {
+  const raw = details?.redshift_staging_probe;
+  if (!raw || typeof raw !== "object") return null;
+  const p = raw as Record<string, unknown>;
+  return {
+    status: p.status != null ? String(p.status) : undefined,
+    method: p.method != null ? String(p.method) : undefined,
+    engine: p.engine != null ? String(p.engine) : undefined,
+    detail: p.detail != null ? String(p.detail) : undefined,
+  };
+}
+
 const STATUS_LABEL: Record<string, string> = {
   pass: "Passed",
   block: "Blocked",
   skip: "Skipped",
+  warn: "Review",
   running: "Running",
   pending: "Pending",
 };
@@ -182,6 +210,8 @@ interface ValidateDashboardProps {
   cellPreview?: CellPreviewResult | null;
   /** Jump back to Map so the operator can fix coerced / identity column mappings. */
   onReviewMappings?: (opts?: { focusSource?: string }) => void;
+  /** Reload live destination types — G15 pending / dest_unknown. */
+  onReloadDestSchema?: () => void;
   /**
    * Open Destination → Advanced settings where primary key and sync mode live.
    * Used for duplicate-identity blockers (Map alone cannot change the sync contract).
@@ -345,6 +375,12 @@ const ACTION_ICON: Record<string, string> = {
   quarantine_and_rerun: "shield",
   open_bad_data_fix: "shield",
   fix_source_keys: "settings",
+  confirm_or_remap: "layers",
+  reload_dest_schema: "scan",
+  confirm_add: "layers",
+  continue_validate: "check",
+  fix_orphans: "alert",
+  run_population_orphan_scan: "scan",
 };
 
 /** Encoding remediations collapse to one Fix-bad-data CTA (drawer owns Strip/Quarantine). */
@@ -683,6 +719,7 @@ export function ValidateDashboard({
   onQuarantineAndRerun,
   cellPreview = null,
   onReviewMappings,
+  onReloadDestSchema,
   onOpenIdentitySettings,
   uniqueKeySuggestions = [],
   onApplyPrimaryKey,
@@ -778,17 +815,21 @@ export function ValidateDashboard({
   const isPrivilegeBlock = Boolean(
     preflight?.blockers.some((b) => {
       const probe = privilegeProbeFromDetails(b.details);
+      const staging = stagingProbeFromDetails(b.details);
       return (
         (b.id === "g2_destination" || /g2_destination/i.test(b.id || ""))
         && (probe?.status === "denied"
-          || /privilege|INSERT|CREATE|ACL|IAM|PutObject|has_privileges|GRANT/i.test(b.message || ""))
+          || staging?.status === "denied"
+          || /privilege|INSERT|CREATE|ACL|IAM|PutObject|has_privileges|GRANT|staging bucket/i.test(b.message || ""))
       );
     })
     || preflight?.gates.some((g) => {
       if (g.id !== "g2_destination" || g.status !== "block") return false;
       const probe = privilegeProbeFromDetails(g.details);
+      const staging = stagingProbeFromDetails(g.details);
       return probe?.status === "denied"
-        || /privilege|INSERT|CREATE|ACL|IAM|PutObject|has_privileges|GRANT/i.test(g.message || "");
+        || staging?.status === "denied"
+        || /privilege|INSERT|CREATE|ACL|IAM|PutObject|has_privileges|GRANT|staging bucket/i.test(g.message || "");
     }),
   );
   const isConnectionBlock = Boolean(
@@ -826,6 +867,17 @@ export function ValidateDashboard({
     || preflight?.gates.some((g) => g.status === "block" && isEncodingIntegritySignal(g.message)),
   );
   const showEncodingRemediation = !isTypeMismatchBlock && !isConnectionBlock && !isPrivilegeBlock && (hasEncodingIssue || encodingBlocks);
+  const isFkOrphanBlock = Boolean(
+    preflight?.blockers.some((b) =>
+      (b.id === "constraint_fk" || /constraint_fk/i.test(b.id || ""))
+      && isFkOrphanBlockerText(`${b.message || ""} ${JSON.stringify(b.details || {})}`),
+    )
+    || preflight?.gates.some((g) =>
+      g.status === "block"
+      && (g.id === "constraint_fk" || /constraint_fk/i.test(g.id || ""))
+      && isFkOrphanBlockerText(`${g.message || ""} ${JSON.stringify(g.details || {})}`),
+    ),
+  );
   // Auto-open the Fix bad data drawer when dry-run is blocked by encoding/control chars.
   useEffect(() => {
     if (!running && encodingBlocks && hasEncodingIssue) {
@@ -881,6 +933,21 @@ export function ValidateDashboard({
     setExplainError(null);
     setAssistExpanded(true);
   }, [preflight?.run_id]);
+
+  const destShape = useMemo(() => shapeContractFromPreflight(preflight), [preflight]);
+  const destShapeExtras = useMemo(() => extraSourceColumnsFromContract(destShape), [destShape]);
+  const destShapePreserve = useMemo(() => destOnlyPreserveColumns(destShape), [destShape]);
+  const destShapeCta = useMemo(() => destExistsPrimaryCta(destShape), [destShape]);
+  const callableNote = useMemo(() => callableExtractNote(preflight), [preflight]);
+  const showDestShape = Boolean(
+    destShape
+    && (
+      destShapeExtras.length
+      || destShapePreserve.length
+      || destShapeCta
+      || (destShape.shape && destShape.shape !== "create_new_table")
+    ),
+  );
 
   // After a remediation re-run, close out "waiting for re-validation" entries.
   useEffect(() => {
@@ -1060,8 +1127,6 @@ export function ValidateDashboard({
     || String(proof?.quality_grade || "").toLowerCase() === "not_profiled";
   const quality = qualityNotProfiled ? null : Number(qualityRaw);
   const complianceRisk = proof?.compliance?.risk_score ?? 0;
-  const qualityGrade = (proof?.quality_grade ?? "").toLowerCase();
-  const confidenceBand = (proof?.confidence_band ?? "").toLowerCase();
   const localPreflight = isLocalPreflight(preflight);
   const proofWarnings = proof?.transfer_decision?.warnings ?? [];
   const reconciliation = proof?.reconciliation;
@@ -1092,6 +1157,14 @@ export function ValidateDashboard({
         : decision === "review"
           ? "review"
           : "pending";
+  const heroRing = validateRingPercent({
+    running,
+    passed: preflight?.passed,
+    decision,
+    passedCount,
+    blockedCount,
+    readinessScore: readiness,
+  });
   const complianceAck = proof?.compliance?.acknowledgment as
     | { actor?: string; at?: string; reason?: string }
     | undefined;
@@ -1118,6 +1191,13 @@ export function ValidateDashboard({
     () => (preflight ? buildDisplayBlockers(preflight, syncMode) : []),
     [preflight, syncMode],
   );
+  const orphanBarActions = useMemo(() => {
+    const fromBlockers = displayBlockers.flatMap((b) => b.suggested_actions || []);
+    const fromEngine = (preflight?.blockers ?? []).flatMap((b) => b.guidance?.suggested_actions || []);
+    return rankAndDedupeSuggestedActions(
+      [...fromBlockers, ...fromEngine].filter((a) => isFkOrphanCtaKind(String(a.kind))),
+    );
+  }, [displayBlockers, preflight]);
   const fidelityRoot = useMemo(
     () => displayBlockers.find((d) => d.kind === "fidelity_root") ?? null,
     [displayBlockers],
@@ -1176,16 +1256,22 @@ export function ValidateDashboard({
         };
       }
       const privilegeProbe = privilegeProbeFromDetails(gate.details);
+      const stagingProbe = stagingProbeFromDetails(gate.details);
       const issues = gate.status === "block" ? issueTextsFromDetails(gate.details) : [];
       const evidenceScope = (gate.details?.evidence_scope
         && typeof gate.details.evidence_scope === "object")
         ? (gate.details.evidence_scope as Record<string, unknown>)
         : null;
       // On pass, still surface probe method/status as non-blocking issues for G2 honesty.
-      if (gate.status === "pass" && privilegeProbe?.method && meta.key === "g2_destination") {
-        const soft: string[] = [`Probe: ${privilegeProbe.method}`];
-        if (privilegeProbe.status === "unavailable" && privilegeProbe.detail) {
+      if (gate.status === "pass" && (privilegeProbe?.method || stagingProbe?.status) && meta.key === "g2_destination") {
+        const soft: string[] = [];
+        if (privilegeProbe?.method) soft.push(`Probe: ${privilegeProbe.method}`);
+        if (privilegeProbe?.status === "unavailable" && privilegeProbe.detail) {
           soft.push(privilegeProbe.detail);
+        }
+        if (stagingProbe?.status) soft.push(`COPY staging: ${stagingProbe.status}`);
+        if (stagingProbe?.status && stagingProbe.status !== "ok" && stagingProbe.detail) {
+          soft.push(stagingProbe.detail);
         }
         return {
           status: gate.status,
@@ -1348,10 +1434,60 @@ export function ValidateDashboard({
       );
       return;
     }
-    if (action.kind === "review_mappings" || action.kind === "rerun_mapping") {
+    if (action.kind === "review_mappings" || action.kind === "rerun_mapping"
+      || action.kind === "confirm_add") {
       onReviewMappings?.(
         action.column ? { focusSource: action.column } : undefined,
       );
+      return;
+    }
+    if (action.kind === "confirm_or_remap") {
+      pendingVerifyRef.current = true;
+      pushRemediation(
+        action.label || "Confirm this pair",
+        action.column
+          ? `Confirm false-friend pair on ${action.column} — re-running Validate.`
+          : "Confirm false-friend pair(s) — re-running Validate.",
+        "Applied — re-running validation",
+        [
+          "Confirm this pair stamps false_friend_confirmed.",
+          "Approve eligible does not clear qty≠amt / user≠customer.",
+          "Re-validate after confirm — Execute unlocks only when gates pass.",
+        ],
+      );
+      onApplyAction?.(action);
+      return;
+    }
+    if (action.kind === "reload_dest_schema") {
+      if (onReloadDestSchema) {
+        onReloadDestSchema();
+        return;
+      }
+      onRunPreflight?.();
+      return;
+    }
+    if (action.kind === "continue_validate") {
+      onRunPreflight?.();
+      return;
+    }
+    if (action.kind === "run_population_orphan_scan") {
+      pendingVerifyRef.current = true;
+      pushRemediation(
+        action.label || "Run population orphan scan",
+        "Opt-in full-table anti-join — only path to RI proven. Sample Validate never claims referential integrity.",
+        "Running population orphan scan",
+        [
+          "Enables the same honesty checkbox as Run population orphan scan on next Validate.",
+          "Sample orphan probe is not population RI proof.",
+          "Zero orphans on the population scan is required before RI proven.",
+        ],
+      );
+      onApplyAction?.(action);
+      return;
+    }
+    if (action.kind === "fix_orphans") {
+      // Do not claim applied / re-validating — DataFlow cannot invent parent rows.
+      onApplyAction?.(action);
       return;
     }
     pendingVerifyRef.current = true;
@@ -1380,7 +1516,10 @@ export function ValidateDashboard({
   return (
     <section className={`df2-vd df2-vd-${heroTone}`} aria-label="Validation dashboard">
       <header className="df2-vd-hero">
-        <div className={`df2-vd-hero-ring tone-${heroTone}`} aria-hidden>
+        <div
+          className={`df2-vd-hero-ring tone-${heroTone}${heroRing.indeterminate ? " is-indeterminate" : ""}${!heroRing.indeterminate && heroRing.pct >= 100 ? " is-complete" : ""}`}
+          aria-hidden
+        >
           <svg viewBox="0 0 72 72">
             <circle cx="36" cy="36" r="30" className="df2-vd-hero-track" />
             <circle
@@ -1388,13 +1527,14 @@ export function ValidateDashboard({
               cy="36"
               r="30"
               className="df2-vd-hero-fill"
-              strokeDasharray={`${((running ? Math.min(92, 18 + elapsedMs / 80) : readiness) / 100) * 188.5} 188.5`}
+              pathLength={100}
+              strokeDasharray={ringDasharray(heroRing.pct, { indeterminate: heroRing.indeterminate })}
               transform="rotate(-90 36 36)"
             />
           </svg>
           <div className="df2-vd-hero-ring-label">
             <strong>
-              {running ? formatElapsed(elapsedMs) : Math.round(Number(readiness) || 0)}
+              {running ? formatElapsed(elapsedMs) : heroRing.pct}
               <small>{running ? "" : "%"}</small>
             </strong>
             <span>{heroReadyLabel}</span>
@@ -1418,7 +1558,7 @@ export function ValidateDashboard({
             </span>
             <h3>
               {running
-                ? "Engine running G1–G8…"
+                ? "Engine running G1–G9…"
                 : preflight
                   ? executiveSummary?.title ?? (
                     decision === "approve" && preflight.passed
@@ -1446,16 +1586,12 @@ export function ValidateDashboard({
                 ? " root cause(s)"
                 : " blocked"}
             </span>
-            {displayBlockers.length > 0 && blockedCount > displayBlockers.length && (
-              <span
-                className="df2-vd-count skip"
-                title="Gate checks absorbed into root causes — not separate operator blockers"
-              >
-                <strong>{blockedCount}</strong> absorbed gates
-              </span>
-            )}
-            <span className="df2-vd-count skip"><strong>{skippedCount}</strong> skipped</span>
-            <span className="df2-vd-count total"><strong>{totalGates}</strong> total rules</span>
+            <span
+              className="df2-vd-count skip"
+              title={skippedCount > 0 ? "Skipped gates are N/A — they do not shrink a finished ring" : undefined}
+            >
+              <strong>{skippedCount}</strong> skipped
+            </span>
           </div>
 
           {!running && preflight && executiveSummary && !preflight.passed && (
@@ -1486,6 +1622,8 @@ export function ValidateDashboard({
                 && preflight.referential_integrity.coverage !== "none")
             )
           ) && (
+            <details className="df2-vd-hero-details">
+              <summary>Coverage & proof notes</summary>
             <div className="df2-vd-soft-hints" role="note">
               <p className="df2-vd-soft-hints-label">Constraint coverage & advisories</p>
               {preflight.referential_integrity?.note && (
@@ -1517,44 +1655,13 @@ export function ValidateDashboard({
                 );
               })}
             </div>
-          )}
-
-          {!running && preflight && (qualityGrade || confidenceBand) && (
-            <div className="df2-vd-proof-chips" aria-label="Proof grade">
-              {qualityGrade && qualityGrade !== "not_profiled" ? (
-                <span className={`df2-vd-proof-chip grade-${qualityGrade}`} title="Overall proof quality grade from the engine">
-                  Quality · {qualityGrade}
-                </span>
-              ) : qualityNotProfiled ? (
-                <span className="df2-vd-proof-chip grade-review" title="Sample quality was not calculated for this run">
-                  Quality · not profiled
-                </span>
-              ) : null}
-              {confidenceBand ? (
-                <span
-                  className={`df2-vd-proof-chip band-${decision === "approve" ? confidenceBand : "review"}`}
-                  title="Mapping / evidence confidence band — not Execute clearance"
-                >
-                  Confidence · {confidenceBand}
-                </span>
-              ) : null}
-              {typeof semantic === "number" && semantic > 0 ? (
-                <span className="df2-vd-proof-chip is-score" title="Semantic mapping score">
-                  Semantic · {(semantic * 100).toFixed(0)}%
-                </span>
-              ) : null}
-            </div>
+            </details>
           )}
 
           {running && (
-            <>
-              <p className="df2-vd-hero-summary">
-                Evaluating source, destination, schema, mapping, dry-run, DDL, capacity, and reconcile.
-              </p>
-              <div className="df2-vd-progress is-indeterminate" role="status" aria-live="polite">
-                <span className="df2-vd-progress-fill" style={{ width: "40%" }} />
-              </div>
-            </>
+            <p className="df2-vd-hero-summary">
+              Evaluating source, destination, schema, mapping, dry-run, DDL, capacity, and reconcile. The timer is wall-clock — not a guessed percent.
+            </p>
           )}
           {!running && preflight?.passed && (
             <p className="df2-vd-hero-summary">
@@ -1600,6 +1707,53 @@ export function ValidateDashboard({
               </ul>
             )}
           </div>
+        </div>
+      )}
+
+      {callableNote && !running && (
+        <div className="df2-vd-callable" role="status">
+          <DtIcon name="database" size={16} />
+          <div>
+            <strong>Callable extract — result-set snapshot</strong>
+            <p>{callableNote}</p>
+          </div>
+        </div>
+      )}
+
+      {showDestShape && destShape && !running && (
+        <div className="df2-vd-shape" role="status">
+          <DtIcon name="layers" size={16} />
+          <div className="df2-vd-shape-copy">
+            <strong>{destShape.headline || "Dest-exists shape classified"}</strong>
+            <p>
+              {destShape.detail
+                || "Writes are name-addressed. Dest-only columns stay off SET. CDC remains at-least-once upsert."}
+            </p>
+            {destShapeExtras.length > 0 && (
+              <p>
+                Extra source: {destShapeExtras.join(", ")} — remap or omit, never silent drop.
+              </p>
+            )}
+            {destShapePreserve.length > 0 && (
+              <p>
+                Dest-only preserve: {destShapePreserve.join(", ")} — off SET.
+              </p>
+            )}
+          </div>
+          {destShapeCta && (
+            <Button
+              size="sm"
+              variant="primary"
+              leadingIcon={<DtIcon name={ACTION_ICON[destShapeCta.kind] ?? "layers"} size={14} />}
+              onClick={() => handleSuggestedAction({
+                kind: destShapeCta.kind,
+                label: destShapeCta.label,
+                column: destShapeCta.column,
+              })}
+            >
+              {destShapeCta.label}
+            </Button>
+          )}
         </div>
       )}
 
@@ -1831,10 +1985,24 @@ export function ValidateDashboard({
                     Fix bad data…
                   </Button>
                 )}
+                {isFkOrphanBlock && orphanBarActions.map((action, i) => (
+                  <Button
+                    key={`${action.kind}-${action.column ?? ""}-${i}`}
+                    size="sm"
+                    variant={i === 0 ? "primary" : "secondary"}
+                    disabled={remediating || (!onApplyAction && action.kind !== "fix_orphans")}
+                    leadingIcon={<DtIcon name={ACTION_ICON[action.kind] ?? "alert"} size={14} />}
+                    onClick={() => handleSuggestedAction(action)}
+                    title={action.label}
+                  >
+                    {action.label}
+                  </Button>
+                ))}
                 {!isTypeMismatchBlock
                   && !showEncodingRemediation
                   && !isPrivilegeBlock
                   && !isConnectionBlock
+                  && !isFkOrphanBlock
                   && onReviewMappings && (
                   <Button
                     size="sm"
@@ -2472,6 +2640,11 @@ export function ValidateDashboard({
                               action.kind === "review_mappings"
                               || action.kind === "change_target_type"
                               || action.kind === "open_mapping"
+                            ))
+                            && !(isFkOrphanBlock && (
+                              action.kind === "fix_orphans"
+                              || action.kind === "run_population_orphan_scan"
+                              || action.kind === "review_mappings"
                             )),
                           ),
                         )
@@ -2488,6 +2661,8 @@ export function ValidateDashboard({
                               && action.kind !== "quarantine_and_rerun"
                               && action.kind !== "fix_source_keys"
                               && action.kind !== "review_mappings"
+                              && action.kind !== "fix_orphans"
+                              && action.kind !== "run_population_orphan_scan"
                             }
                             title={action.label}
                             leadingIcon={<DtIcon name={ACTION_ICON[action.kind] ?? "sparkle"} size={14} />}
@@ -2572,12 +2747,13 @@ export function ValidateDashboard({
                   <span className={`df2-vd-rule-status status-${status}`}>
                     {status === "pass" && <DtIcon name="check" size={11} />}
                     {status === "block" && <DtIcon name="x" size={11} />}
+                    {status === "warn" && <DtIcon name="alert" size={11} />}
                     {status === "running" && <Spinner size="sm" label="" />}
                     {STATUS_LABEL[status] ?? status}
                   </span>
                 </div>
                 <strong className="df2-vd-rule-label">{meta.label}</strong>
-                {(status === "block" || status === "running" || status === "pending") && (
+                {(status === "block" || status === "warn" || status === "running" || status === "pending") && (
                   <p className="df2-vd-rule-desc">{meta.rule}</p>
                 )}
                 {status !== "pending" && status !== "pass" && message && (
@@ -3002,6 +3178,11 @@ export function ValidateDashboard({
                   {item.why && !b.id.includes("dry_run") && (
                     <span className="df2-vd-blocker-why">{item.why}</span>
                   )}
+                  {schemaDriftCompatibilityHeadline(b.details) && (
+                    <p className="df2-vd-blocker-fix-note">
+                      {schemaDriftCompatibilityHeadline(b.details)}
+                    </p>
+                  )}
                   {(
                     b.details?.compliance_ack_required === true
                     || /pii\/compliance|compliance review/i.test(b.message)
@@ -3028,17 +3209,7 @@ export function ValidateDashboard({
                       )}
                     </div>
                   )}
-                  {(
-                    (
-                      b.details?.remediation_kind === "acknowledge_schema_drift"
-                      || (
-                        b.details?.ack_required === true
-                        && b.details?.remediation_kind !== "acknowledge_fk_risk"
-                        && b.id !== "constraint_fk"
-                      )
-                      || /schema change detected|schema drift/i.test(b.message)
-                    )
-                  ) && onAcknowledgeSchemaDrift && (
+                  {schemaDriftAllowsAcknowledge(b.details) && onAcknowledgeSchemaDrift && (
                     <div className="df2-vd-blocker-actions df2-vd-fix-actions">
                       <Button
                         size="sm"
@@ -3059,6 +3230,20 @@ export function ValidateDashboard({
                           Open Map to include columns
                         </Button>
                       )}
+                    </div>
+                  )}
+                  {schemaDriftRequiresRemap(b.details) && onReviewMappings && (
+                    <div className="df2-vd-blocker-actions df2-vd-fix-actions">
+                      <Button
+                        size="sm"
+                        variant="primary"
+                        leadingIcon={<DtIcon name="layers" size={14} />}
+                        onClick={() => onReviewMappings()}
+                        disabled={running}
+                        title="Hard-breaking schema change — remap or re-sign the contract. Acknowledge cannot green this gate."
+                      >
+                        Open Map to fix breaking change
+                      </Button>
                     </div>
                   )}
                   {(

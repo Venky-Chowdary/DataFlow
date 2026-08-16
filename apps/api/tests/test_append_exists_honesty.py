@@ -149,4 +149,7 @@ def test_streaming_append_still_fails_without_sample_proof():
             validation_mode="strict",
         )
     assert report["passed"] is False
-    assert "sample" in report["message"].lower()
+    # Dest-before is unknown, so extra dest rows are an unverified append
+    # delta — not a whole-table checksum mismatch and not a sample pass.
+    assert "unverified" in report["message"].lower()
+    assert "checksum mismatch" not in report["message"].lower()

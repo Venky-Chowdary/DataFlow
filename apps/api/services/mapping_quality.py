@@ -419,6 +419,12 @@ def classify_mapping_confidence(
     return {
         "confidence_class": cls,
         "confidence_class_label": CONFIDENCE_CLASS_LABELS[cls],
+        "type_path_class": str(mapping.get("conversion_class") or ""),
+        "semantic_role": str(
+            mapping.get("semantic_role")
+            or profile.get("semantic_role")
+            or ""
+        ),
         "anchor": anchor,
         "axes": {
             "mapping": round(mapping_axis, 3),
@@ -438,6 +444,16 @@ def apply_confidence_class(
     cls = str(classification.get("confidence_class") or "")
     conf = float(confidence)
     if cls == "create_new_projected":
+        conv = str(classification.get("type_path_class") or "").lower()
+        if conv in {"equivalent", "identity"}:
+            role = str(classification.get("semantic_role") or "").lower()
+            if role in {"categorical", "market_segment"}:
+                return round(min(0.88, max(conf, 0.82)), 3)
+            return round(min(IDENTITY_PASSTHROUGH_CONF_CAP, max(conf, 0.91)), 3)
+        if conv in {"widening", "lossless"}:
+            return round(min(0.90, max(conf, 0.86)), 3)
+        if conv in {"representation", "normalization"}:
+            return round(min(0.89, max(conf, 0.82)), 3)
         return round(min(conf, IDENTITY_PASSTHROUGH_CONF_CAP), 3)
     if cls == "exact_name_type":
         # Exact proven pairs should read near-certain, not 0.93.
@@ -587,6 +603,27 @@ def refine_mappings_with_quality(
 
         delta, notes = score_mapping_pair(m, source_profile=profile)
         out = dict(m)
+        if not out.get("semantic_role"):
+            from services.semantic_analyzer import analyze_column
+
+            schema_row = src_by_name.get(src_name, {})
+            analyzed = analyze_column(
+                src_name,
+                str(out.get("source_type") or schema_row.get("inferred_type") or "VARCHAR"),
+                [str(x) for x in (schema_row.get("samples") or [])],
+            )
+            out["semantic_role"] = analyzed.get("semantic_role")
+        if not out.get("conversion_class") and out.get("source_type") and (
+            out.get("target_type") or out.get("dest_type")
+        ):
+            from services.conversion_contract import classify_conversion
+
+            out["conversion_class"] = classify_conversion(
+                str(out.get("source_type") or out.get("inferred_type") or ""),
+                str(out.get("target_type") or out.get("dest_type") or ""),
+                dest_db=destination_db_type,
+                transform=str(out.get("transform") or "none"),
+            ).get("conversion_class")
         conf = min(0.99, max(0.0, float(m.get("confidence", 0.0)) + delta))
         classification = classify_mapping_confidence(
             out,

@@ -63,7 +63,13 @@ def apply_policy_gates(
         })
 
     if policy_gates:
-        gates = [*result.get("gates", []), *policy_gates]
+        policy_ids = {str(g.get("id") or "") for g in policy_gates}
+        base = [
+            g
+            for g in (result.get("gates") or [])
+            if str(g.get("id") or "") not in policy_ids
+        ]
+        gates = [*base, *policy_gates]
         blockers.extend(
             {"id": g["id"], "message": g["message"], "details": g.get("details", {})}
             for g in policy_gates

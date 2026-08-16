@@ -155,10 +155,10 @@
   border-radius: var(--df-radius-card, 12px);
 }
 
-/* Pipeline / connector cards equal minimum */
+/* Pipeline / connector cards — list density, never tile-tall */
 .df2-connector-card,
 .df2-pipeline-card {
-  min-height: 196px;
+  min-height: 0;
   border-radius: var(--df-radius-card, 12px);
 }
 
@@ -209,12 +209,13 @@
  * parents use overflow:hidden (laptop density tokens, not CSS zoom).
  */
 .df2-app .df2-content-inner:not(.df2-content-studio):not(.df2-content-flush) {
-  padding: 4px max(12px, var(--df-page-gutter, 16px)) 16px;
+  padding: 16px 20px 24px;
+  background: var(--df-bg-canvas, #f3f5f7);
   box-sizing: border-box;
 }
 .df2-app .df2-page:not(.df2-page-transfer-studio) {
-  padding-left: max(16px, var(--df-page-gutter, 16px));
-  padding-right: max(16px, var(--df-page-gutter, 16px));
+  padding-left: 0;
+  padding-right: 0;
   box-sizing: border-box;
 }
 .df2-app .df2-content-studio .df2-transfer-studio-shell {
@@ -278,6 +279,10 @@
 .df2-card-footer .df2-btn.df2-btn-block {
   flex: 1 1 auto;
   width: 100%;
+}
+
+.df2-map-footer-actions .df2-btn-primary {
+  max-width: none;
 }
 
 /* Pilot inside app shell — fill content area */

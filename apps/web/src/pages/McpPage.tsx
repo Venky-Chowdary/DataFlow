@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { DtIcon } from "../components/DtIcon";
 import { EmptyState } from "../components/ui/EmptyState";
 import { SectionLoader } from "../components/LoadingState";
+import { Button } from "../components/ui/Button";
 import { FilterTabs } from "../components/ui/FilterTabs";
 import { FilterBar } from "../components/ui/FilterBar";
 import { PageFrame } from "../components/ui/PageFrame";
@@ -147,14 +148,13 @@ export function McpPage() {
               </span>
             </div>
             <div className="df2-mcp-endpoint-actions">
-              <button
-                type="button"
-                className="df2-btn df2-btn-primary"
+              <Button
+                variant="primary"
                 onClick={() => copyText(mcpBase, "MCP server URL")}
+                leadingIcon={<DtIcon name="check" size={14} />}
               >
-                <DtIcon name="check" size={14} />
                 {copied === "MCP server URL" ? "Copied MCP URL" : "Copy MCP URL"}
-              </button>
+              </Button>
             </div>
           </section>
 

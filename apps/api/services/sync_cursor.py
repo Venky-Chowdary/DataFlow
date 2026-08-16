@@ -323,6 +323,7 @@ def resolve_incremental_read_scope(
     dest_type: str,
     dest_database: str,
     dest_object: str,
+    source: Any = None,
 ) -> IncrementalReadScope:
     """Resolve the cursor state of a route — the read side's own view of it.
 
@@ -336,10 +337,17 @@ def resolve_incremental_read_scope(
     cursor_column = (contract.cursor_field if contract else "").strip()
     if not cursor_column:
         return IncrementalReadScope()
+    object_name = source_object
+    if source is not None:
+        from services.procedure_source import source_object_for_cursor
+
+        token = source_object_for_cursor(source, fallback="")
+        if token:
+            object_name = token
     cursor_key = build_cursor_key(
         source_type=source_type,
         source_database=source_database,
-        source_object=source_object,
+        source_object=object_name,
         dest_type=dest_type,
         dest_database=dest_database,
         dest_object=dest_object,

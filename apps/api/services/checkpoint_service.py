@@ -94,6 +94,9 @@ class Checkpoint:
     #: How many rejection details were dropped once the sample cap was reached,
     #: so the UI can say "showing N of M" instead of implying the list is whole.
     rejected_details_truncated: int = 0
+    #: Pre-write destination COUNT from the first batch. Resume must restore
+    #: this — a mid-run COUNT is not a "before" and would invent a false delta.
+    target_rows_before: int | None = None
 
     def add_rejected_details(self, details: list[dict[str, Any]] | None) -> None:
         """Append rejection evidence, keeping the checkpoint document bounded.
@@ -154,6 +157,7 @@ class Checkpoint:
             "coerced_null_rows": self.coerced_null_rows,
             "rejected_details": self.rejected_details,
             "rejected_details_truncated": self.rejected_details_truncated,
+            "target_rows_before": self.target_rows_before,
         }
 
     @classmethod
@@ -268,7 +272,9 @@ def evaluate_resume_safety(
     Returns ok / age_hours / reasons / warnings. Refuses when there is no
     durable progress token, the checkpoint is older than
     DATAFLOW_RESUME_MAX_AGE_HOURS (when set >0), or write_mode drifted vs
-    the saved transfer request. Delivery remains at-least-once.
+    the saved transfer request. A CDC cursor-gap job is a sanctioned restart
+    (``gap_restart``) even without a checkpoint — the durable cursor is the
+    problem. Delivery remains at-least-once.
     """
     import os
 
@@ -283,6 +289,22 @@ def evaluate_resume_safety(
             "at-least-once upsert, not exactly-once."
         ),
     }
+    job = job or {}
+    from services.cdc_cursor_gap import job_has_cursor_gap
+
+    if job_has_cursor_gap(job):
+        out["ok"] = True
+        out["gap_restart"] = True
+        out["warnings"].append(
+            "CDC cursor-gap recovery restarts the run — not a checkpoint continuation. "
+            "when_needed snapshots current source keys then streams from the new tip. "
+            "Purged-window events are gone. Not migration_proven."
+        )
+        out["honesty"] = (
+            "Gap recovery is at-least-once upsert of the current source population, "
+            "not continuous CDC across the lost window."
+        )
+        return out
     if checkpoint is None:
         out["reasons"].append(
             "No durable checkpoint - use Retry from start or re-run from Transfer Studio."

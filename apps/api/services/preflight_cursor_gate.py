@@ -90,6 +90,7 @@ def resolve_read_scope(
             source_type=source_type,
             source_database=str(src_cfg.get("database") or ""),
             source_object=source_table,
+            source=src_cfg,
             dest_type=(destination_db_type or "").strip().lower(),
             dest_database=str(dst_cfg.get("database") or ""),
             dest_object=destination_table,
@@ -144,6 +145,7 @@ def build_sync_contract_gate(
     source_columns: list[str] | None,
     pass_status: str,
     block_status: str,
+    source_read_mode: str = "",
 ) -> dict[str, Any]:
     """The g9 gate: is this route's sync contract complete and semantically sound?
 
@@ -188,7 +190,12 @@ def build_sync_contract_gate(
                         unknown_pk.append(f"{stream}.{name}")
 
     issues: list[str] = []
-    if sync in {"scd2", "mirror"}:
+    from services.procedure_source import callable_sync_refusal
+
+    refused = callable_sync_refusal(sync, source_read_mode=source_read_mode)
+    if refused:
+        issues.append(refused)
+    if sync in {"scd2", "mirror"} and not refused:
         if multi_stream:
             issues.append(
                 f"{sync.upper()} is not supported for multi-stream transfers"
@@ -199,7 +206,7 @@ def build_sync_contract_gate(
             issues.append(
                 f"{sync.upper()} requires a SQL table destination (not '{dest}')"
             )
-    if sync == "cdc":
+    if sync == "cdc" and not refused:
         if kind in {"file", "cloud"}:
             issues.append("CDC requires a database source (not file/cloud)")
         elif src and src not in CDC_CAPABLE_SOURCES:

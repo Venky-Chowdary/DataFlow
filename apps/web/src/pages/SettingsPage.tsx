@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { DtIcon } from "../components/DtIcon";
+import { Button } from "../components/ui/Button";
 import { EmptyState } from "../components/ui/EmptyState";
 import { SectionLoader } from "../components/LoadingState";
 import { FilterTabs } from "../components/ui/FilterTabs";
@@ -35,7 +36,7 @@ type AuditLog = {
   level: "info" | "success" | "warn" | "error";
 };
 
-export function SettingsPage() {
+export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => void }) {
   const { toast } = useToast();
   const { confirm } = useConfirm();
   const [tab, setTab] = useState<TabId>("general");
@@ -385,20 +386,27 @@ export function SettingsPage() {
                       </div>
                       <div className="df2-settings-field">
                         <label>Default destination</label>
-                        <input className="df2-input" placeholder="Configure via Connectors" disabled />
+                        {onOpenConnectors ? (
+                          <button type="button" className="df2-btn df2-btn-ghost" onClick={onOpenConnectors}>
+                            Manage on Connectors
+                          </button>
+                        ) : (
+                          <p className="df2-settings-hint">Set the write target on each connector — not a workspace-wide default.</p>
+                        )}
                       </div>
                     </div>
-                    <p className="df2-settings-hint">Completed jobs older than retention are archived. Default destination is managed on Connectors.</p>
+                    <p className="df2-settings-hint">Completed jobs older than retention are archived. Write targets stay on each connector.</p>
                   </div>
                   <div className="df2-settings-section-footer">
-                    <button
-                      type="button"
-                      className="df2-btn df2-btn-primary"
+                    <Button
+                      variant="primary"
                       disabled={settingsLoading || settingsSaving}
+                      loading={settingsSaving}
+                      loadingLabel="Saving…"
                       onClick={() => void saveWorkspaceSettings()}
                     >
-                      {settingsSaving ? "Saving…" : "Save changes"}
-                    </button>
+                      Save changes
+                    </Button>
                   </div>
                 </section>
               </>
@@ -409,7 +417,7 @@ export function SettingsPage() {
                 <div className="df2-settings-section-head">
                   <div>
                     <h2>Security & compliance</h2>
-                    <p>Platform-wide controls for data protection and access governance.</p>
+                    <p>Posture report from the control plane — badges are observed state, not toggles.</p>
                   </div>
                   <span className={`df2-badge ${posture?.environment === "production" ? "df2-badge-live" : "df2-badge-muted"}`}>
                     {posture?.environment === "production" ? "Production" : "Development"}

@@ -114,3 +114,19 @@ def get_connection(
         require_strict_sql_mode=require_strict,
     )
     return conn
+
+
+def enable_autocommit(conn: Any) -> None:
+    """Enable autocommit on a PyMySQL connection without shadowing the method.
+
+    ``conn.autocommit`` is a *method*. Assignment ``conn.autocommit = True``
+    replaces it with a bool; ``get_autocommit()`` stays False, so ``close()``
+    rolls back DELETE. CDC tombstones then report rowcount 1 while dest
+    ``COUNT(*)`` does not drop — leftover rows after a source delete.
+    psycopg2's ``autocommit`` *is* a property; this helper is MySQL-only.
+    """
+    setter = getattr(conn, "autocommit", None)
+    if callable(setter):
+        setter(True)
+        return
+    conn.autocommit = True

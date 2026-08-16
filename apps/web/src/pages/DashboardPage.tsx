@@ -1,18 +1,17 @@
 import { useEffect, useMemo, useState } from "react";
 import { ConnectorIcon } from "../app/brand-icons";
 import { Connector, PipelineSchedule, TransferJob } from "../lib/types";
-import { fetchCatalogStats, fetchOpsDlq, fetchOpsFreshness } from "../lib/api";
+import { fetchOpsDlq, fetchOpsFreshness } from "../lib/api";
 import { formatRelativeTime } from "../lib/connectionWorkbench";
 import {
   buildStatusDistribution,
   buildThroughputSeries,
-  sparklineFromThroughput,
 } from "../lib/overviewAnalytics";
+import { destProvenCount, formatJobRowMetric } from "../lib/conservationLedger";
 import { isJobSuccess, jobStatusBadgeClass, jobStatusLabel } from "../lib/uiUtils";
 import { DtIcon } from "../components/DtIcon";
 import { DataPlaneFlow } from "../components/overview/DataPlaneFlow";
 import {
-  MetricGlassTile,
   StatusDonut,
   ThroughputChart,
   ThroughputChartPlaceholder,
@@ -74,13 +73,6 @@ export function DashboardPage({
   onOpenJob,
   onOpenPipeline,
 }: DashboardPageProps) {
-  const [catalogStats, setCatalogStats] = useState<{
-    live: number;
-    total: number;
-    transfer_live?: number;
-    unique_drivers?: number;
-    catalog_tiles?: number;
-  } | null>(null);
   const [opsLagSeconds, setOpsLagSeconds] = useState<number | null>(null);
   const [dlqCount, setDlqCount] = useState<number | null>(null);
   const [freshness, setFreshness] = useState<{
@@ -94,15 +86,6 @@ export function DashboardPage({
   } | null>(null);
 
   useEffect(() => {
-    fetchCatalogStats()
-      .then((s) => setCatalogStats({
-        live: s.live,
-        total: s.total,
-        transfer_live: s.transfer_live,
-        unique_drivers: s.unique_drivers ?? s.transfer_live ?? s.live,
-        catalog_tiles: s.catalog_tiles ?? s.transfer_live_tiles,
-      }))
-      .catch(() => setCatalogStats(null));
     fetchOpsFreshness(60)
       .then((f) => {
         setOpsLagSeconds(f.worst_lag_seconds);
@@ -128,7 +111,10 @@ export function DashboardPage({
   const completed = jobs.filter((j) => isJobSuccess(j.status));
   const failed = jobs.filter((j) => j.status === "failed");
   const running = jobs.filter((j) => j.status === "running" || j.status === "pending");
-  const totalRecords = completed.reduce((sum, j) => sum + (j.records_processed || 0), 0);
+  const destMeasured = completed
+    .map((j) => destProvenCount(j))
+    .filter((n): n is number => n != null);
+  const totalRecords = destMeasured.reduce((sum, n) => sum + n, 0);
   const successRate = jobs.length ? Math.round((completed.length / jobs.length) * 100) : null;
   const healthyConnectors = connectors.filter((c) => c.last_test_ok !== false).length;
   const enabledPipelines = schedules.filter((s) => s.enabled).length;
@@ -143,7 +129,6 @@ export function DashboardPage({
 
   const throughputSeries = useMemo(() => buildThroughputSeries(jobs), [jobs]);
   const statusSlices = useMemo(() => buildStatusDistribution(jobs), [jobs]);
-  const throughputSpark = useMemo(() => sparklineFromThroughput(throughputSeries), [throughputSeries]);
 
   const topology = useMemo(
     () => buildDataPlaneTopology(connectors, jobs, schedules),
@@ -217,6 +202,11 @@ export function DashboardPage({
                 Open jobs
               </button>
             )}
+            {failed.length === 0 && dlqCount != null && dlqCount > 0 && onOpenJobs && (
+              <button type="button" className="df2-overview-attention-action" onClick={onOpenJobs}>
+                Open quarantine
+              </button>
+            )}
             {freshnessStale && !failed.length && onOpenPipeline && freshness?.alerts?.[0]?.schedule_id && (
               <button
                 type="button"
@@ -252,56 +242,14 @@ export function DashboardPage({
           onOpenPipeline={onOpenPipeline}
           onOpenJob={onOpenJob}
         />
-        <section className="df2-overview-v3-kpis" aria-label="Key metrics">
-          <MetricGlassTile
-            label="Rows moved"
-            value={jobs.length ? totalRecords.toLocaleString() : "—"}
-            sub={jobs.length ? "Completed transfers" : "No transfers yet"}
-            icon="trend"
-            tone="teal"
-            sparkline={throughputSpark}
-          />
-          <MetricGlassTile
-            label="Success rate"
-            value={successRate != null ? `${successRate}%` : "—"}
-            sub={jobs.length ? `${completed.length} of ${jobs.length} jobs` : "No jobs yet"}
-            icon="check"
-            tone="green"
-            ring={successRate}
-          />
-          <MetricGlassTile
-            label="Connections"
-            value={connectors.length}
-            sub={`${healthyConnectors} healthy`}
-            icon="connectors"
-            tone={healthyConnectors < connectors.length ? "amber" : "default"}
-            ring={connectors.length ? Math.round((healthyConnectors / connectors.length) * 100) : null}
-          />
-          <MetricGlassTile
-            label="Unique drivers"
-            value={catalogStats?.unique_drivers ?? catalogStats?.transfer_live ?? catalogStats?.live ?? "—"}
-            sub={
-              catalogStats?.catalog_tiles
-                ? `${catalogStats.catalog_tiles} catalog tiles · ${catalogStats.total} total`
-                : catalogStats?.total
-                  ? `${catalogStats.total} catalog entries · ${enabledPipelines} pipelines`
-                  : enabledPipelines
-                    ? `${enabledPipelines} pipelines enabled`
-                    : "Loading…"
-            }
-            icon="activity"
-            tone="teal"
-          />
-        </section>
-
         <section className="df2-overview-v3-analytics" aria-label="Analytics">
           <article className="df2-overview-v3-card df2-overview-v3-card--chart">
             <header className="df2-overview-v3-card-head">
               <div>
                 <h2 className="df2-overview-v3-card-title">Throughput</h2>
-                <p className="df2-overview-v3-card-sub">Rows moved per day · last 7 days</p>
+                <p className="df2-overview-v3-card-sub">Conserved dest rows per day · append dest Δ, not dest after · unmeasured omitted</p>
               </div>
-              <span className="df2-overview-v3-card-badge">{totalRecords.toLocaleString()} total rows</span>
+              <span className="df2-overview-v3-card-badge">{totalRecords.toLocaleString()} conserved</span>
             </header>
             <div className="df2-overview-v3-card-body df2-overview-v3-chart-body">
               {hasThroughput ? (
@@ -409,7 +357,9 @@ export function DashboardPage({
                             <td><CopyIdChip id={job._id} label="Job" compact /></td>
                             <td><span className={jobStatusBadgeClass(job.status)}>{jobStatusLabel(job.status)}</span></td>
                             <td className="df2-col-progress"><JobProgressCell job={job} /></td>
-                            <td className="df2-overview-rows">{job.records_processed?.toLocaleString() ?? "—"}</td>
+                            <td className="df2-overview-rows" title={formatJobRowMetric(job).title}>
+                              {formatJobRowMetric(job).value}
+                            </td>
                             <td className="df2-overview-rows">
                               {(job.rejected_rows ?? 0) > 0 ? (
                                 <span className="df2-badge df2-badge-warn" title="Open Jobs → Inspect quarantine for row-level findings">

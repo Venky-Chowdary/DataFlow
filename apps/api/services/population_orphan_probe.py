@@ -149,6 +149,22 @@ def probe_population_fk_orphans(
     }
     fks = [fk for fk in (foreign_keys or []) if isinstance(fk, dict)]
     child = (child_table or "").strip()
+    try:
+        from services.procedure_source import is_callable_source
+
+        if is_callable_source(source_config):
+            return {
+                **empty,
+                "coverage": "n/a",
+                "note": (
+                    "Stored-procedure / SQL extract is a result-set snapshot — "
+                    "population orphan scan is not run against a procedure name."
+                ),
+                "skipped": True,
+                "reason": "callable_source",
+            }
+    except Exception:
+        pass
     if not fks:
         return {**empty, "note": "No FK metadata — population orphan scan skipped."}
     if not child:

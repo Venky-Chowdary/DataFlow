@@ -170,5 +170,63 @@ def test_stream_mirror_sqlite_to_sqlite():
             "d" * 24,
         )
         assert result2.success, result2.error
+        ledger2 = result2.row_accounting or {}
+        assert ledger2.get("reactivated") == 0, ledger2
+        assert ledger2.get("inferred_deletes") == 0, ledger2
+
+        with sqlite3.connect(db_path) as conn:
+            conn.execute("DELETE FROM src WHERE id IN ('0','1','2','3','4')")
+            conn.commit()
+
+        result3 = engine.execute_tracked(
+            TransferRequest(
+                source=_endpoint(db_path, "src"),
+                destination=_endpoint(db_path, "dst"),
+                sync_mode="mirror",
+                stream_contracts=[
+                    {"selected": True, "primary_key": "id", "sync_mode": "mirror"}
+                ],
+                mappings=mappings,
+                validation_mode="strict",
+                skip_preflight=False,
+            ),
+            "e" * 24,
+        )
+        assert result3.success, result3.error
+        ledger3 = result3.row_accounting or {}
+        assert ledger3.get("conservation_kind") == "mirror", ledger3
+        assert ledger3.get("inferred_deletes") == 5, ledger3
+        assert ledger3.get("reactivated") == 0, ledger3
+        assert ledger3.get("active_count") == 45, ledger3
+        assert ledger3.get("dest_count") == 50, ledger3
+
+        with sqlite3.connect(db_path) as conn:
+            for i in range(5):
+                conn.execute(
+                    "INSERT INTO src (id, name) VALUES (?, ?)",
+                    (str(i), f"Item {i}"),
+                )
+            conn.commit()
+
+        result4 = engine.execute_tracked(
+            TransferRequest(
+                source=_endpoint(db_path, "src"),
+                destination=_endpoint(db_path, "dst"),
+                sync_mode="mirror",
+                stream_contracts=[
+                    {"selected": True, "primary_key": "id", "sync_mode": "mirror"}
+                ],
+                mappings=mappings,
+                validation_mode="strict",
+                skip_preflight=False,
+            ),
+            "f" * 24,
+        )
+        assert result4.success, result4.error
+        ledger4 = result4.row_accounting or {}
+        assert ledger4.get("inferred_deletes") == 0, ledger4
+        assert ledger4.get("reactivated") == 5, ledger4
+        assert ledger4.get("active_count") == 50, ledger4
+        assert ledger4.get("dest_count") == 50, ledger4
     finally:
         _safe_unlink(db_path)

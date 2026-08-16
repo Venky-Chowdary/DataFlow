@@ -963,6 +963,17 @@ def _is_calendar_year_number(
     return not _samples_look_temporal(source_samples)
 
 
+def _samples_need_numeric_parse(source_samples: list[str] | None) -> bool:
+    """True when declared-numeric samples still look like text that must parse."""
+    if not source_samples:
+        return False
+    for raw in source_samples[:12]:
+        text = str(raw).strip()
+        if any(mark in text for mark in ("$", "€", "£", "¥", "%", ",")):
+            return True
+    return False
+
+
 def infer_transform_for_mapping(
     source_col: str,
     target_col: str,
@@ -989,12 +1000,16 @@ def infer_transform_for_mapping(
     samples_temporal = _samples_look_temporal(source_samples)
     src_temporal = src in {"datetime", "date", "timestamp", "time"}
 
-    # Zero-scale DECIMAL/NUMBER targets (e.g. Snowflake NUMBER(38,0)) are integer
-    # carriers, so an integer source should be coerced with the integer transform.
+    # Native numeric wire already is a number — do not invent a string parse.
+    # Parse integer/decimal is reserved for text/unknown sources, or dirty
+    # CSV/Excel cells that still carry currency / grouping marks.
+    _native_numeric = src in {"integer", "decimal", "float"} and not _samples_need_numeric_parse(
+        source_samples
+    )
     if tgt == "decimal" and target_type:
         _p, _s = parse_numeric_precision_scale(target_type)
         if _s == 0 and src == "integer":
-            return "integer"
+            return "none" if _native_numeric else "integer"
 
     # Explicit, non-generic target type wins; if the source is already numeric
     # use a direct numeric transform, otherwise apply semantic transforms.
@@ -1005,16 +1020,16 @@ def infer_transform_for_mapping(
             # do not invent active_text / null out the existing flag column.
             if src == "boolean" or _samples_prefer_boolean_over_integer(source_samples):
                 return "boolean"
-            return "integer"
+            return "none" if _native_numeric else "integer"
         if tgt == "decimal":
             if src in {"string", "text", "unknown"} and semantic == "currency":
                 return "currency"
             if src in {"string", "text", "unknown"} and semantic == "percentage":
                 return "percentage"
-            return "decimal"
+            return "none" if _native_numeric else "decimal"
         if tgt == "float":
-            # Wire as decimal transform — IEEE float DDL is chosen by type_system.
-            return "decimal"
+            # Native float/decimal/int already numeric — IEEE DDL is type_system.
+            return "none" if _native_numeric else "decimal"
         if tgt == "boolean":
             return "boolean"
         if tgt in {"json", "array"}:
@@ -1055,12 +1070,13 @@ def infer_transform_for_mapping(
             return "none"
 
     # Source type is the pivot when the target is generic (e.g., VARCHAR).
+    # Native numerics stay identity; string sources still need a parse guard.
     if src == "integer":
-        return "integer"
+        return "none"
     if src == "decimal":
-        return "decimal"
+        return "none"
     if src == "float":
-        return "decimal"
+        return "none"
     if src == "boolean":
         return "boolean"
     if src in {"json", "array"}:

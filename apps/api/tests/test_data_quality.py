@@ -207,6 +207,31 @@ def test_batch_drift_detector_warns_on_mean_shift():
     assert any("mean drift" in w for w in warnings)
 
 
+def test_records_audit_matches_matrix_without_retaining_rows():
+    """File-stream dict rows must hard-block the same duplicates as the matrix."""
+    rows = [["1", "100"], ["2", "200"], ["1", "300"]]
+    records = [
+        {"id": "1", "amount": "100"},
+        {"id": "2", "amount": "200"},
+        {"id": "1", "amount": "300"},
+    ]
+    matrix = run_integrity_audit(
+        headers=["id", "amount"],
+        rows=rows,
+        column_types={"id": "INTEGER", "amount": "DECIMAL"},
+        dest_kind="postgresql",
+    )
+    from_records = run_integrity_audit(
+        headers=["id", "amount"],
+        records=records,
+        column_types={"id": "INTEGER", "amount": "DECIMAL"},
+        dest_kind="postgresql",
+    )
+    assert not matrix.passed
+    assert not from_records.passed
+    assert matrix.issues[0] == from_records.issues[0]
+
+
 def test_maximum_mode_escalates_warnings_to_blockers():
     # 9 zeros + one large value gives a z-score > 3 on the large value.
     rows = [["0"] for _ in range(9)] + [["1000"]]

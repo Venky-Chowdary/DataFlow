@@ -20,6 +20,8 @@ interface ValidateActionsRailProps {
   executeBlockedReason?: string;
   /** CDC retention Check control (SQL Server / Oracle) — shown above footer when present. */
   cdcRetentionSlot?: ReactNode;
+  /** Bind a signed data contract before Execute (plans + schedules persist this). */
+  contractSlot?: ReactNode;
   /** Primary remediation for the top blocker (e.g. open identity settings). */
   onPrimaryFix?: () => void;
   primaryFixLabel?: string;
@@ -52,6 +54,7 @@ export function ValidateActionsRail({
   executeBlocked = false,
   executeBlockedReason,
   cdcRetentionSlot,
+  contractSlot,
   onPrimaryFix,
   primaryFixLabel,
   onBack,
@@ -105,6 +108,11 @@ export function ValidateActionsRail({
       {cdcRetentionSlot ? (
         <div className="df2-validate-footer-cdc" aria-label="CDC retention">
           {cdcRetentionSlot}
+        </div>
+      ) : null}
+      {contractSlot ? (
+        <div className="df2-validate-footer-contract" aria-label="Data contract">
+          {contractSlot}
         </div>
       ) : null}
 

@@ -13,6 +13,7 @@ from pathlib import Path
 from services.create_new_risk_stamp import (
     apply_create_new_risk_stamps as _apply_create_new_risk_stamps,
 )
+from services.schematic_index import IDENTITY_KIND_LEAVES as _IDENTITY_KIND_LEAVES
 
 _model_cache = None
 
@@ -763,6 +764,27 @@ def _normalize(name: str) -> str:
     return re.sub(r"_+", "_", s).rstrip("_")
 
 
+def _folded_ident(name: str) -> str:
+    """Case- and underscore-insensitive identifier (UserID ≡ userid ≡ user_id)."""
+    return _normalize(name).replace("_", "")
+
+
+def _dest_fold_collisions(target_columns: list[str]) -> set[str]:
+    """Destination names that share a folded identifier with a sibling column.
+
+    Postgres/Snowflake fold ``UserID`` and ``userid`` onto one slot; MySQL
+    keeps both. Either way Map must not auto-approve a pin onto one of them.
+    """
+    buckets: dict[str, list[str]] = {}
+    for tgt in target_columns:
+        buckets.setdefault(_folded_ident(tgt), []).append(tgt)
+    collided: set[str] = set()
+    for names in buckets.values():
+        if len(names) > 1:
+            collided.update(names)
+    return collided
+
+
 def _exact_name_unambiguous(
     source: str, target: str, target_columns: list[str]
 ) -> bool:
@@ -773,12 +795,12 @@ def _exact_name_unambiguous(
     within the review band even when the winner is a literal name equality, so
     a gap test alone marks re-runs of a table DataFlow itself created as
     ambiguous forever. Name equality is only genuinely ambiguous when a second
-    destination column normalizes to the same name.
+    destination column folds to the same identifier (``UserID`` vs ``userid``).
     """
-    src_norm = _normalize(source)
-    if not src_norm or _normalize(target) != src_norm:
+    src_fold = _folded_ident(source)
+    if not src_fold or _folded_ident(target) != src_fold:
         return False
-    return sum(1 for t in target_columns if _normalize(t) == src_norm) == 1
+    return sum(1 for t in target_columns if _folded_ident(t) == src_fold) == 1
 
 
 def _expand_abbrev(token: str) -> str:
@@ -889,6 +911,22 @@ _DOMAIN_LEAVES = frozenset({
     "address", "email", "phone", "time", "uuid", "hash", "index", "seq",
 })
 _GENERIC_LEAVES = _DOMAIN_LEAVES | _ENTITY_STOPWORDS
+# Same-entity ``id`` vs ``key`` is a false friend (CRM id ≠ warehouse surrogate).
+# Identity-kind leaves live in schematic_index.IDENTITY_KIND_LEAVES (SSOT).
+# Typed measure subtypes that must appear on the destination. ``tax`` is not
+# ``total``; a generic amount bucket is not a proven tax/discount/salary column.
+_MEASURE_KIND_TOKENS = frozenset({
+    "tax", "vat", "gst", "discount", "net", "gross", "fee", "tip", "duty",
+    "freight", "salary", "commission", "bonus", "payment", "unit",
+})
+_MONEY_LEAVES = frozenset({"amount", "total", "balance", "price", "cost"})
+# Count/quantity is not money. Fivetran/Airbyte-class operators lose trust when
+# ``order_qty`` auto-pins onto ``order_amt`` because both share ``order``.
+_COUNT_LEAVES = frozenset({"quantity", "count", "units", "pieces"})
+# created vs updated is polarity, not a license to ADD a sibling timestamp.
+_TEMPORAL_POLARITY = frozenset({"created", "updated", "modified", "deleted", "inserted"})
+# Below G4 strict (~0.85) even if Map forgets requires_review.
+_AMBIGUOUS_PAIR_CAP = 0.78
 
 
 def _qualifier_tokens(name: str) -> set[str]:
@@ -1007,6 +1045,165 @@ def _entity_agreement(source: str, target: str) -> float:
     if not src_q and not tgt_q:
         return 0.55
     return 0.35
+
+
+def _identity_kind_leaves(name: str) -> set[str]:
+    return {t for t in _semantic_form(name).split("_") if t} & _IDENTITY_KIND_LEAVES
+
+
+def _identity_leaf_mismatch(source: str, target: str) -> bool:
+    """True when both names carry identity-kind leaves that are not the same token.
+
+    ``cust_id`` vs ``customer_id`` shares leaf ``id`` (pin). ``cust_id`` vs
+    ``customer_key`` is the same entity with a different identity kind — Map
+    must confirm. High lexical similarity must not skip G4.
+    """
+    src = _identity_kind_leaves(source)
+    tgt = _identity_kind_leaves(target)
+    if not src or not tgt:
+        return False
+    return src != tgt
+
+
+def _measure_kind_tokens(name: str) -> set[str]:
+    return {t for t in _semantic_form(name).split("_") if t} & _MEASURE_KIND_TOKENS
+
+
+def _measure_kind_mismatch(source: str, target: str) -> bool:
+    """True when the source is a typed measure the destination does not share.
+
+    ``tax_amt`` vs ``tax_amount`` shares ``tax``. ``tax_amt`` vs ``total_amount``
+    looks like a compound amount bucket because ``total`` is a domain leaf —
+    that must not auto-pin as identity. ``order_qty`` vs ``order_amt`` shares
+    the entity but not the measure family (count ≠ money).
+    """
+    src = _measure_kind_tokens(source)
+    tgt = _measure_kind_tokens(target)
+    if src and src.isdisjoint(tgt):
+        return True
+    src_money = bool(_money_leaves(source))
+    tgt_money = bool(_money_leaves(target))
+    src_count = bool(_count_leaves(source))
+    tgt_count = bool(_count_leaves(target))
+    return (src_money and tgt_count) or (src_count and tgt_money)
+
+
+def _money_leaves(name: str) -> set[str]:
+    return {t for t in _semantic_form(name).split("_") if t} & _MONEY_LEAVES
+
+
+def _count_leaves(name: str) -> set[str]:
+    return {t for t in _semantic_form(name).split("_") if t} & _COUNT_LEAVES
+
+
+def _shared_money_family(source: str, target: str) -> bool:
+    return bool(_money_leaves(source) and _money_leaves(target))
+
+
+def _entity_conflict_requires_review(source: str, target: str) -> bool:
+    """True when both sides name different entities (user ≠ customer).
+
+    Schematic index collapse (``user_id`` → canonical ``customer_id``) must
+    not skip G4. Shared money families still propose with review elsewhere.
+    """
+    if _shared_money_family(source, target):
+        return False
+    return _entity_agreement(source, target) == 0.0
+
+
+def _temporal_polarity_conflict(source: str, target: str) -> bool:
+    src = {t for t in _semantic_form(source).split("_") if t} & _TEMPORAL_POLARITY
+    tgt = {t for t in _semantic_form(target).split("_") if t} & _TEMPORAL_POLARITY
+    return bool(src and tgt and src != tgt)
+
+
+def _reason_forces_review(reason: str) -> bool:
+    return "review required" in (reason or "").lower()
+
+
+# Stable Map review kinds — UI / RAG / Proof consume this stamp, not English
+# parsing alone. Airbyte schema review is all-or-nothing (#74892 / #78427);
+# these kinds keep quantity≠amount and user≠customer off Approve-eligible.
+REVIEW_KIND_MEASURE = "measure_kind"
+REVIEW_KIND_ENTITY = "entity_identity"
+REVIEW_KIND_DEST_COLLISION = "dest_collision"
+REVIEW_KIND_IDENTITY_LEAF = "identity_leaf"
+REVIEW_KIND_TEMPORAL = "temporal_polarity"
+REVIEW_KIND_LOSSY = "lossy"
+REVIEW_KIND_CREATE_NEW = "create_new"
+REVIEW_KIND_GENERIC = "generic"
+
+FALSE_FRIEND_REVIEW_KINDS = frozenset(
+    {
+        REVIEW_KIND_MEASURE,
+        REVIEW_KIND_ENTITY,
+        REVIEW_KIND_DEST_COLLISION,
+        REVIEW_KIND_IDENTITY_LEAF,
+        REVIEW_KIND_TEMPORAL,
+    }
+)
+
+
+def classify_review_kind(
+    *,
+    source: str,
+    target: str,
+    reason: str = "",
+    requires_review: bool = False,
+    create_new: bool = False,
+    dest_collisions: set[str] | None = None,
+) -> str | None:
+    """Classify why Map held a pair. None when the pair does not need review."""
+    if not requires_review:
+        return None
+    text = (reason or "").lower()
+    collisions = dest_collisions or set()
+    if target in collisions or "destination identifier collision" in text:
+        return REVIEW_KIND_DEST_COLLISION
+    if "measure-kind mismatch" in text or (
+        source and target and _measure_kind_mismatch(source, target)
+    ):
+        return REVIEW_KIND_MEASURE
+    if "identity leaf mismatch" in text or (
+        source and target and _identity_leaf_mismatch(source, target)
+    ):
+        return REVIEW_KIND_IDENTITY_LEAF
+    if "temporal polarity" in text or (
+        source and target and _temporal_polarity_conflict(source, target)
+    ):
+        return REVIEW_KIND_TEMPORAL
+    if (
+        "entity qualifier conflict" in text
+        or "conflicting entity qualifiers" in text
+        or (source and target and _entity_conflict_requires_review(source, target))
+    ):
+        return REVIEW_KIND_ENTITY
+    if "lossy type pair" in text:
+        return REVIEW_KIND_LOSSY
+    if create_new:
+        return REVIEW_KIND_CREATE_NEW
+    return REVIEW_KIND_GENERIC
+
+
+def _stamp_review_kinds(
+    mappings: list[dict],
+    dest_collisions: set[str] | None = None,
+) -> list[dict]:
+    collisions = dest_collisions or set()
+    for row in mappings:
+        kind = classify_review_kind(
+            source=str(row.get("source") or ""),
+            target=str(row.get("target") or ""),
+            reason=str(row.get("reasoning") or ""),
+            requires_review=bool(row.get("requires_review")),
+            create_new=bool(row.get("create_new")),
+            dest_collisions=collisions,
+        )
+        if kind:
+            row["review_kind"] = kind
+        else:
+            row.pop("review_kind", None)
+    return mappings
 
 
 def _is_bare_domain_leaf(name: str) -> bool:
@@ -1202,6 +1399,23 @@ def _score_pair(
 
     def _finish(score: float, reason: str) -> tuple[float, str]:
         adjusted = max(0.0, min(0.995, float(score) - type_penalty + type_boost + sample_boost))
+        review_bits: list[str] = []
+        if _identity_leaf_mismatch(source, target):
+            src_l = "/".join(sorted(_identity_kind_leaves(source)))
+            tgt_l = "/".join(sorted(_identity_kind_leaves(target)))
+            adjusted = min(adjusted, _AMBIGUOUS_PAIR_CAP)
+            review_bits.append(f"identity leaf mismatch ({src_l}≠{tgt_l})")
+        if _measure_kind_mismatch(source, target):
+            adjusted = min(adjusted, _AMBIGUOUS_PAIR_CAP)
+            review_bits.append("measure-kind mismatch")
+        if _entity_conflict_requires_review(source, target):
+            adjusted = min(adjusted, _AMBIGUOUS_PAIR_CAP)
+            review_bits.append("entity qualifier conflict")
+        if _temporal_polarity_conflict(source, target):
+            adjusted = min(adjusted, _AMBIGUOUS_PAIR_CAP)
+            review_bits.append("temporal polarity conflict")
+        if review_bits:
+            reason = f"{reason} · {' · '.join(review_bits)} — review required"
         return adjusted, reason
 
     if src_norm == tgt_norm:
@@ -1226,6 +1440,26 @@ def _score_pair(
     agreement = _entity_agreement(source, target)
     if agreement == 0.0:
         form_ratio = _similarity(src_sem, tgt_sem_raw)
+        if _shared_money_family(source, target):
+            # Same measure family, different entity (order_amt vs payment_amount).
+            # Propose below G4 so Map confirms — do not auto-pin, and do not hide
+            # the only dest amount behind create_new.
+            return _finish(
+                min(_AMBIGUOUS_PAIR_CAP, 0.58 + form_ratio * 0.22),
+                "Conflicting entity qualifiers on same measure — review required",
+            )
+        if _identity_kind_leaves(source) or _identity_kind_leaves(target):
+            # user_id vs customer_id is a dest candidate, not a license to ADD
+            # a sibling column. Propose below G4 — never invent, never auto-pin.
+            return _finish(
+                min(_AMBIGUOUS_PAIR_CAP, 0.58 + form_ratio * 0.22),
+                "Conflicting entity qualifiers on identity — review required",
+            )
+        if _temporal_polarity_conflict(source, target):
+            return _finish(
+                min(_AMBIGUOUS_PAIR_CAP, 0.58 + form_ratio * 0.22),
+                "Conflicting temporal polarity — review required",
+            )
         return _finish(min(0.42, form_ratio * 0.55), "Conflicting entity qualifiers")
 
     src_canon = _canonical_form(source)
@@ -1236,18 +1470,21 @@ def _score_pair(
             return _finish(0.76, "Canonical schematic resolution (specific→bare leaf)")
         return _finish(0.99, "Canonical schematic resolution (exact target)")
     if src_canon and tgt_canon and src_canon == tgt_canon and _qualifiers_compatible(source, target):
-        src_q = _qualifier_tokens(source)
-        tgt_q = _qualifier_tokens(target)
-        if not src_q and tgt_q:
-            pass  # generic → specific: fall through
-        elif src_q and _is_bare_domain_leaf(target):
-            return _finish(0.76, "Canonical schematic resolution (specific→generic)")
-        elif src_q and not tgt_q:
-            pass  # compound domain target — fall through
-        elif _normalize(target) == _normalize(expanded):
-            return _finish(0.985, "Canonical schematic resolution (expanded form)")
+        if _identity_leaf_mismatch(source, target):
+            pass  # same canonical ``id`` is not proven identity when leaves differ
         else:
-            return _finish(0.93, "Canonical schematic resolution")
+            src_q = _qualifier_tokens(source)
+            tgt_q = _qualifier_tokens(target)
+            if not src_q and tgt_q:
+                pass  # generic → specific: fall through
+            elif src_q and _is_bare_domain_leaf(target):
+                return _finish(0.76, "Canonical schematic resolution (specific→generic)")
+            elif src_q and not tgt_q:
+                pass  # compound domain target — fall through
+            elif _normalize(target) == _normalize(expanded):
+                return _finish(0.985, "Canonical schematic resolution (expanded form)")
+            else:
+                return _finish(0.93, "Canonical schematic resolution")
 
     if _normalize(target) == _normalize(expanded):
         return _finish(0.94, "Abbreviation expansion match")
@@ -1485,6 +1722,62 @@ def _alternatives(
 IDENTITY_PASSTHROUGH_CONFIDENCE = 0.84
 
 
+def _create_new_physical_why_type(src_type: str, stamp: str, dest_db: str) -> str:
+    """Dest-physical type for create-new Why / conversion class.
+
+    ``ddl_type(snowflake, BIGINT)`` stays ``BIGINT``, but writers emit
+    ``NUMBER(38,0)``. Classify against that carrier so BIGINT→NUMBER is
+    lossless widening, not a false identity.
+    """
+    from services.decision_kernel import ddl_type, materialize_dest_ddl, normalize_logical_type
+
+    why = (stamp or src_type or "").strip() or src_type
+    if not dest_db:
+        return why
+    try:
+        materialized = materialize_dest_ddl(dest_db, why) or why
+    except Exception:
+        materialized = why
+    logical = normalize_logical_type(src_type)
+    if logical == "integer":
+        family = ddl_type(dest_db, "INTEGER")
+        family_u = (family or "").upper().replace(" ", "")
+        if family and family_u not in {"INTEGER", "BIGINT", "INT", "INT64", "SMALLINT"}:
+            return family
+    return materialized
+
+
+def authority_mappings(
+    source_columns: list[str],
+    target_columns: list[str],
+    **kwargs,
+) -> list[dict]:
+    """Single Map SSOT for RAG / Pilot / LLM / enhanced AI.
+
+    Those layers retrieve evidence and explain. They must not invent a second
+    confidence or assignment. Transfer, Validate, and G4 already consume
+    ``map_columns`` — AI surfaces must too.
+    """
+    return map_columns(source_columns, target_columns, **kwargs)
+
+
+def pair_mapping_authority(source: str, target: str) -> dict:
+    """Single-pair view of the Map SSOT for RAG suggest/retrieve."""
+    rows = map_columns([source], [target])
+    row = rows[0] if rows else {}
+    return {
+        "source": source,
+        "proposed_target": row.get("target"),
+        "confidence": float(row.get("confidence") or 0),
+        "requires_review": bool(row.get("requires_review")),
+        "create_new": bool(row.get("create_new")),
+        "reasoning": str(row.get("reasoning") or ""),
+        "assignment_strategy": str(row.get("assignment_strategy") or ""),
+        "review_kind": row.get("review_kind"),
+        "authority": "semantic_mapper.map_columns",
+    }
+
+
 def map_columns(
     source_columns: list[str],
     target_columns: list[str],
@@ -1496,6 +1789,7 @@ def map_columns(
     destination_table_exists: bool | None = None,
 ) -> list[dict]:
     from services.semantic_analyzer import analyze_column
+    from services.conversion_contract import classify_conversion, create_new_mapping_reason
     from services.decision_kernel import (
         create_new_mapping_target_type,
         ddl_type,
@@ -1542,15 +1836,23 @@ def map_columns(
             map_target_type = create_new_mapping_target_type(
                 src_type, dest_db, samples=src_samples.get(src)
             )
+            why_type = _create_new_physical_why_type(
+                src_type, map_target_type or dest_native, dest_db
+            )
             if confirmed_missing:
+                classified = classify_conversion(
+                    src_type,
+                    why_type,
+                    dest_db=dest_db,
+                    transform="none",
+                )
                 out.append(
                     {
                         "source": src,
                         "target": _semantic_form(src),
                         "confidence": IDENTITY_PASSTHROUGH_CONFIDENCE,
-                        "reasoning": (
-                            f"New destination table — identity mapping; "
-                            f"types will CREATE on first write as {dest_native}"
+                        "reasoning": create_new_mapping_reason(
+                            src_type, why_type, dest_db=dest_db
                         ),
                         "user_override": False,
                         "requires_review": True,
@@ -1558,6 +1860,8 @@ def map_columns(
                         "target_type": map_target_type,
                         "assignment_strategy": "identity_passthrough",
                         "create_new": True,
+                        "conversion_class": classified.get("conversion_class"),
+                        "semantic_role": src_roles.get(src),
                     }
                 )
             else:
@@ -1587,7 +1891,7 @@ def map_columns(
                         "requires_review": True,
                     }
                 )
-        return _apply_create_new_risk_stamps(out, dest_db)
+        return _stamp_review_kinds(_apply_create_new_risk_stamps(out, dest_db))
 
     idf = _build_idf(source_columns + target_columns)
     all_doc_lens = [len(_tokenize(c)) for c in source_columns + target_columns]
@@ -1613,6 +1917,7 @@ def map_columns(
             pair_scores[(source, target)] = (score, reason)
 
     assigned_sources: set[str] = set()
+    dest_collisions = _dest_fold_collisions(target_columns)
     optimal = _optimal_assignment(source_columns, target_columns, pair_scores)
     for source in source_columns:
         assigned = optimal.get(source)
@@ -1648,6 +1953,17 @@ def map_columns(
         elif reason.startswith("Exact") and score_gap >= 0.08:
             # Decisive Exact with compatible types — review not required.
             requires_review = False
+        if (
+            _reason_forces_review(reason)
+            or _identity_leaf_mismatch(source, target)
+            or _measure_kind_mismatch(source, target)
+            or _entity_conflict_requires_review(source, target)
+        ):
+            requires_review = True
+        if target in dest_collisions:
+            requires_review = True
+            score = min(float(score), _AMBIGUOUS_PAIR_CAP)
+            reason = f"{reason} · destination identifier collision — review required"
         assigned_sources.add(source)
         used_targets.add(target)
         mappings.append(
@@ -1736,6 +2052,16 @@ def map_columns(
                 if near_lossy:
                     requires_review = True
                     near_score = min(float(near_score), 0.84)
+                if (
+                    _identity_leaf_mismatch(source, near_tgt)
+                    or _measure_kind_mismatch(source, near_tgt)
+                    or _entity_conflict_requires_review(source, near_tgt)
+                ):
+                    requires_review = True
+                    near_score = min(float(near_score), _AMBIGUOUS_PAIR_CAP)
+                if near_tgt in dest_collisions:
+                    requires_review = True
+                    near_score = min(float(near_score), _AMBIGUOUS_PAIR_CAP)
                 mappings.append(
                     {
                         "source": source,
@@ -1895,6 +2221,15 @@ def map_columns(
             source, best_target, target_columns
         ):
             requires_review = False
+        if best_target and (
+            _reason_forces_review(best_reason)
+            or _identity_leaf_mismatch(source, best_target)
+            or _measure_kind_mismatch(source, best_target)
+            or _entity_conflict_requires_review(source, best_target)
+            or best_target in dest_collisions
+        ):
+            requires_review = True
+            best_score = min(float(best_score), _AMBIGUOUS_PAIR_CAP)
         mappings.append(
             {
                 "source": source,
@@ -1921,6 +2256,9 @@ def map_columns(
                 row["assignment_strategy"] = "hungarian_with_greedy_patch"
 
     mappings.sort(key=lambda m: source_columns.index(m["source"]))
-    return _apply_create_new_risk_stamps(
-        mappings, dest_db, source_samples=src_samples
+    return _stamp_review_kinds(
+        _apply_create_new_risk_stamps(
+            mappings, dest_db, source_samples=src_samples
+        ),
+        dest_collisions,
     )

@@ -10,11 +10,23 @@ from connectors.writer_common import (
     resolve_target_columns,
     transform_error_policy_for_validation_mode,
 )
-from services.dest_precount import PRECOUNT_KEY
+from services.dest_precount import (
+    OVERWRITE_SOURCE_KEYS_KEY,
+    PRECOUNT_KEY,
+    VECTOR_IDENTITY_ENGINES,
+    records_to_key_tuples,
+    stamp_artifact_census,
+    stamp_keyset_census,
+    stamp_scd2_census,
+    stamp_vector_census,
+)
 from services.reconcile_coverage import (
     SOURCE_DIGEST_ENGINE_POPULATION,
     SOURCE_DIGEST_REMAPPED_ROWS,
+    SOURCE_DIGEST_SOURCE_REREAD,
+    SOURCE_DIGEST_WRITE_PASS,
     SOURCE_DIGEST_WRITER_ACK,
+    WHOLE_TABLE_NOT_COMPARABLE,
     WRITTEN_BATCH_KEYS,
 )
 from services.reconciliation import (
@@ -42,6 +54,9 @@ def _finalize_reconcile(
     snap = None
     if isinstance(dest_summary, dict):
         snap = dest_summary.get("source_snapshot")
+        raw_before = dest_summary.get(PRECOUNT_KEY)
+        if out.get(PRECOUNT_KEY) is None and isinstance(raw_before, int):
+            out[PRECOUNT_KEY] = raw_before
     if isinstance(snap, dict) and snap:
         out["source_snapshot"] = dict(snap)
     return out
@@ -57,6 +72,44 @@ def _dest_types_from_mappings(mappings: list[dict]) -> dict[str, str]:
     }
 
 
+def _compute_source_checksum_from_spool(
+    source_spool: Any,
+    columns: list[str],
+    mappings: list[dict],
+    source_schema: dict[str, str] | None,
+    target_cols: list[str] | None,
+    *,
+    dest_db_type: str = "",
+    dest_types: dict[str, str] | None = None,
+    validation_mode: str = "strict",
+    destination_pk_columns: list[str] | None = None,
+) -> tuple[str, str]:
+    """Remap Gate-8 from the engine spool in bundles — never rebuild ``records``."""
+    from connectors.engine_record_spill import iter_fingerprints_from_spool
+    from services.fingerprint_accumulator import FingerprintAccumulator
+
+    if target_cols is None:
+        target_cols, _ = resolve_target_columns(
+            mappings, source_schema or {}, preserve_case=True
+        )
+    acc = FingerprintAccumulator()
+    policy = transform_error_policy_for_validation_mode(validation_mode)
+    acc.add_many(
+        iter_fingerprints_from_spool(
+            source_spool,
+            mappings,
+            target_cols,
+            headers=list(getattr(source_spool, "headers", None) or columns),
+            column_types=source_schema or {},
+            dest_db_type=dest_db_type or "",
+            dest_types=dest_types or {},
+            error_policy=policy,
+            destination_pk_columns=destination_pk_columns,
+        )
+    )
+    return acc.digest(), SOURCE_DIGEST_REMAPPED_ROWS
+
+
 def _compute_source_checksum(
     records: list[dict],
     columns: list[str],
@@ -69,19 +122,34 @@ def _compute_source_checksum(
     dest_types: dict[str, str] | None = None,
     validation_mode: str = "strict",
     destination_pk_columns: list[str] | None = None,
+    source_spool: Any = None,
 ) -> tuple[str, str]:
     """Return ``(digest, provenance)`` for the source side of Gate-8.
 
-    When source ``records`` are available, always remap and fingerprint them.
-    Preferring the writer checksum first made Gate-8 circular: dest digest was
-    compared to the writer's own ack, not to the remapped source population.
+    When source ``records`` or an engine ``source_spool`` are available, always
+    remap and fingerprint them. Preferring the writer checksum first made
+    Gate-8 circular: dest digest was compared to the writer's own ack, not to
+    the remapped source population.
 
-    The writer checksum remains the fallback when no records were supplied, and
-    the provenance is returned with it so the report can say so. That fallback
-    is not a corner case: a streaming pass hands over no rows, which is exactly
-    how the large tables move, and labelling those runs ``full_checksum`` claimed
-    two independent digests had agreed when only one digest existed.
+    The writer checksum remains the fallback when no records or spool were
+    supplied, and the provenance is returned with it so the report can say so.
+    That fallback is not a corner case: a streaming pass hands over no rows,
+    which is exactly how the large tables move, and labelling those runs
+    ``full_checksum`` claimed two independent digests had agreed when only one
+    digest existed.
     """
+    if source_spool is not None and getattr(source_spool, "row_count", 0):
+        return _compute_source_checksum_from_spool(
+            source_spool,
+            columns,
+            mappings,
+            source_schema,
+            target_cols,
+            dest_db_type=dest_db_type,
+            dest_types=dest_types,
+            validation_mode=validation_mode,
+            destination_pk_columns=destination_pk_columns,
+        )
     if not records:
         return str(writer_checksum or ""), SOURCE_DIGEST_WRITER_ACK
     _, data_rows = records_to_matrix(records, columns)
@@ -259,6 +327,19 @@ def _maybe_engine_profile_ladder(
     """
     if source_endpoint is None or getattr(source_endpoint, "kind", "") != "database":
         return None
+    from services.procedure_source import is_callable_source
+
+    if is_callable_source(source_endpoint):
+        # CALL/SELECT is not a physical table — profiling get_orders would
+        # read a colliding relation and publish false Gate-8 proof.
+        return None
+    from services.sync_cursor import is_overwrite_sync
+
+    # Whole-table aggregates are not the batch that an append/upsert wrote.
+    # Profiling them would mix historical rows into Gate-8 L1/L2.
+    sync = str(dest_summary.get("sync_mode") or "")
+    if sync and not is_overwrite_sync(sync):
+        return None
     from services.column_profile import engine_profile_ladder, profile_supported
     from services.verification_ladder import (
         MAX_LADDER_ROWS,
@@ -312,7 +393,7 @@ def _maybe_engine_profile_ladder(
         ladder = engine_profile_ladder(
             source_engine=source_type,
             source_cfg=src_cfg,
-            source_schema=str(source_endpoint.schema or src_cfg.get("schema") or "public"),
+            source_schema=str(source_endpoint.schema or src_cfg.get("schema") or ""),
             source_table=str(
                 source_endpoint.table
                 or source_endpoint.collection
@@ -321,7 +402,7 @@ def _maybe_engine_profile_ladder(
             ),
             dest_engine=dest_type,
             dest_cfg=dst_cfg,
-            dest_schema=str(dst_cfg.get("schema") or dest_summary.get("schema") or "public"),
+            dest_schema=str(dst_cfg.get("schema") or dest_summary.get("schema") or ""),
             dest_table=str(
                 endpoint.table or dest_summary.get("table") or dst_cfg.get("table") or ""
             ),
@@ -382,19 +463,19 @@ def _maybe_attach_verification_ladder(
     if engine_profile is not None:
         return engine_profile
 
-    if dest_type not in {"sqlite", "postgresql", "redshift"}:
-        return report
-
-    # L2/L4/L5 localization is in-memory. Decide from the counts we already have
-    # rather than after both populations are resident: a 10M-row destination
-    # cost ~15 GB here before run_five_layer_verification could decline it.
     known = max(
         _as_count(report.get("source_rows")),
         _as_count(report.get("target_rows")),
         len(records or []),
     )
     if known > MAX_LADDER_ROWS:
+        # Every oversized dest, not just PG/SQLite: a MySQL/MariaDB route that
+        # could not profile must still name the decline instead of returning a
+        # bare Gate-8 report with no ladder at all.
         return _ladder_declined(report, known, MAX_LADDER_ROWS)
+
+    if dest_type not in {"sqlite", "postgresql", "redshift"}:
+        return report
     target_cols = _mapped_targets(mappings, columns) if mappings else list(columns or [])
     if not target_cols:
         return report
@@ -445,34 +526,37 @@ def _maybe_attach_verification_ladder(
         return report
 
     if source_endpoint is not None and not source_rows:
-        src_type = resolve_driver_type(source_endpoint.format)
-        src_cfg = resolve_connector_config(source_endpoint)
-        try:
-            if src_type == "sqlite":
-                source_rows = read_sqlite_rows(
-                    database=str(src_cfg.get("database") or ""),
-                    table=str(source_endpoint.table or src_cfg.get("table") or ""),
-                    columns=target_cols,
-                    connection_string=str(src_cfg.get("connection_string") or ""),
-                    host=str(src_cfg.get("host") or ""),
-                )
-            elif src_type in {"postgresql", "redshift"}:
-                source_rows = read_postgres_rows(
-                    host=str(src_cfg.get("host") or ""),
-                    port=int(src_cfg.get("port") or 5432),
-                    database=str(src_cfg.get("database") or ""),
-                    username=str(src_cfg.get("username") or ""),
-                    password=str(src_cfg.get("password") or ""),
-                    schema=str(src_cfg.get("schema") or "public"),
-                    table=str(source_endpoint.table or src_cfg.get("table") or ""),
-                    columns=target_cols,
-                    connection_string=str(src_cfg.get("connection_string") or ""),
-                    ssl=bool(src_cfg.get("ssl", False)),
-                )
-        except PopulationTooLarge as exc:
-            return _ladder_declined(report, exc.rows_read, exc.budget)
-        except Exception as exc:
-            logging.getLogger(__name__).debug("ladder source load failed: %s", exc)
+        from services.procedure_source import is_callable_source
+
+        if not is_callable_source(source_endpoint):
+            src_type = resolve_driver_type(source_endpoint.format)
+            src_cfg = resolve_connector_config(source_endpoint)
+            try:
+                if src_type == "sqlite":
+                    source_rows = read_sqlite_rows(
+                        database=str(src_cfg.get("database") or ""),
+                        table=str(source_endpoint.table or src_cfg.get("table") or ""),
+                        columns=target_cols,
+                        connection_string=str(src_cfg.get("connection_string") or ""),
+                        host=str(src_cfg.get("host") or ""),
+                    )
+                elif src_type in {"postgresql", "redshift"}:
+                    source_rows = read_postgres_rows(
+                        host=str(src_cfg.get("host") or ""),
+                        port=int(src_cfg.get("port") or 5432),
+                        database=str(src_cfg.get("database") or ""),
+                        username=str(src_cfg.get("username") or ""),
+                        password=str(src_cfg.get("password") or ""),
+                        schema=str(src_cfg.get("schema") or "public"),
+                        table=str(source_endpoint.table or src_cfg.get("table") or ""),
+                        columns=target_cols,
+                        connection_string=str(src_cfg.get("connection_string") or ""),
+                        ssl=bool(src_cfg.get("ssl", False)),
+                    )
+            except PopulationTooLarge as exc:
+                return _ladder_declined(report, exc.rows_read, exc.budget)
+            except Exception as exc:
+                logging.getLogger(__name__).debug("ladder source load failed: %s", exc)
 
     if not source_rows or not target_rows:
         return report
@@ -482,6 +566,27 @@ def _maybe_attach_verification_ladder(
         for m in mappings
         if m.get("target") and (m.get("target_type") or m.get("inferredType"))
     }
+    from services.sync_cursor import is_overwrite_sync
+
+    sync_mode = str(
+        dest_summary.get("sync_mode") or dest_summary.get("effective_sync_mode") or ""
+    )
+    allow_extra = (
+        not is_overwrite_sync(sync_mode)
+        and sync_mode.lower() not in {"full_refresh_mirror", "mirror", "scd2"}
+    )
+    raw_before = dest_summary.get(PRECOUNT_KEY)
+    dest_before = int(raw_before) if isinstance(raw_before, int) else None
+    from services.row_conservation import (
+        CENSUS_KEY,
+        KIND_KEYED,
+        KeyCensus,
+        conservation_kind,
+    )
+
+    kind = conservation_kind(sync_mode, dest_count_before=dest_before)
+    census = KeyCensus.from_mapping(dest_summary.get(CENSUS_KEY))
+    keyed = kind == KIND_KEYED
     ladder = run_five_layer_verification(
         source_rows=source_rows,
         target_rows=target_rows,
@@ -496,6 +601,11 @@ def _maybe_attach_verification_ladder(
         target_checksum=str(report.get("target_checksum") or ""),
         dest_db_type=dest_type,
         dest_types=dest_types,
+        allow_extra_rows=allow_extra,
+        checksum_scope=str(report.get("checksum_scope") or ""),
+        target_rows_before=dest_before,
+        keyed_cardinality=keyed,
+        keyed_expected_delta=census.expected_delta if keyed and census else None,
         # maximum: always run L4/L5. strict/balanced: localize only on L3 fail.
         always_localize=str(validation_mode or "").lower() == "maximum",
     )
@@ -568,6 +678,16 @@ def _schema_state_evidence(
     src_table = str(source_endpoint.table or src_cfg.get("table") or "")
     if not src_table:
         return {}
+    from services.procedure_source import is_callable_source
+
+    if is_callable_source(source_endpoint) or is_callable_source(src_cfg):
+        return {
+            "skipped": True,
+            "reason": "callable_source",
+            "note": (
+                "Physical catalog compare is not run against a CALL/SELECT stream name."
+            ),
+        }
 
     from services.dialect_profiles import schema_from_cfg
     from services.physical_state_diff import verify_physical_state
@@ -715,6 +835,14 @@ def _engine_population_digests(
     if not pairs:
         return None
 
+    from services.procedure_source import is_callable_source
+
+    if is_callable_source(source_endpoint):
+        # CALL/SELECT extract is not a physical table — engine checksum would
+        # probe a fake relation named after the procedure. Row accounting stays
+        # on dest COUNT / committed_offset.
+        return None
+
     source_table = source_endpoint.table or source_endpoint.collection or ""
     if not source_table or not dest_table:
         return None
@@ -774,6 +902,7 @@ def run_reconciliation(
     source_schema: dict[str, str] | None = None,
     validation_mode: str = "strict",
     source_endpoint: EndpointConfig | None = None,
+    source_spool: Any = None,
 ) -> dict[str, Any]:
     """Verify row counts and checksums against the destination."""
     # Destination facts a row checksum cannot prove (generator watermarks today).
@@ -782,6 +911,11 @@ def run_reconciliation(
     # paths below run before it is known, and the report must never claim two
     # independent digests agreed when only the writer's was available.
     digest_provenance: dict[str, str] = {"source": ""}
+    # Late-bound: populated once driver/schema/table are resolved. _finalize
+    # is defined before those names exist; file-export returns must not stamp.
+    vector_stamp_ctx: dict[str, Any] = {}
+    keyset_stamp_ctx: dict[str, Any] = {}
+    scd2_stamp_ctx: dict[str, Any] = {}
 
     def _finalize(payload: dict[str, Any]) -> dict[str, Any]:
         if digest_provenance["source"] and "source_checksum_provenance" not in payload:
@@ -792,6 +926,48 @@ def run_reconciliation(
         # Property 3 — carry source snapshot id onto the reconcile report /
         # migration certificate surface.
         stamped = _finalize_reconcile(payload, dest_summary=dest_summary)
+        msg = str(stamped.get("message") or "")
+        assurance = str(stamped.get("assurance_level") or "")
+        # Writer-ack / empty dest digest must never keep the reconcile() theatre
+        # line "Row fidelity verified — source and target checksums match".
+        if msg.lower().startswith("row fidelity verified") and assurance not in {
+            "full_checksum",
+        }:
+            rows = stamped.get("target_rows") or stamped.get("source_rows") or 0
+            stamped["message"] = (
+                f"Writer acknowledgment for {rows} row(s) — source digest was "
+                "the write-pass hash, not an independent dest read-back. "
+                "Not migration_proven."
+            )
+        if vector_stamp_ctx:
+            stamped = stamp_vector_census(
+                stamped,
+                vector_stamp_ctx.get("cfg"),
+                schema=str(vector_stamp_ctx.get("schema") or ""),
+                table_name=str(vector_stamp_ctx.get("table_name") or ""),
+                dest_engine=str(vector_stamp_ctx.get("engine") or ""),
+            )
+        if keyset_stamp_ctx:
+            stamped = stamp_keyset_census(
+                stamped,
+                keyset_stamp_ctx.get("cfg"),
+                schema=str(keyset_stamp_ctx.get("schema") or ""),
+                table_name=str(keyset_stamp_ctx.get("table_name") or ""),
+                dest_engine=str(keyset_stamp_ctx.get("engine") or ""),
+                key_columns=list(keyset_stamp_ctx.get("key_columns") or []),
+                keys=keyset_stamp_ctx.get("keys"),
+            )
+        leftover_n = dest_summary.get("leftover_deleted") if isinstance(dest_summary, dict) else None
+        if isinstance(leftover_n, int) and leftover_n >= 0:
+            stamped["leftover_deleted"] = leftover_n
+        if scd2_stamp_ctx:
+            stamped = stamp_scd2_census(
+                stamped,
+                scd2_stamp_ctx.get("cfg"),
+                schema=str(scd2_stamp_ctx.get("schema") or ""),
+                table_name=str(scd2_stamp_ctx.get("table_name") or ""),
+                dest_engine=str(scd2_stamp_ctx.get("engine") or ""),
+            )
         # Property 5 — attach L1–L5 ladder when both populations are available.
         try:
             stamped = _maybe_attach_verification_ladder(
@@ -871,28 +1047,41 @@ def run_reconciliation(
         # Object/file exports have no destination cell read-back. Writer checksum
         # proves bytes landed, not per-cell fidelity. Operational write may pass;
         # never stamp migration_proven / cell-fidelity Gate-8 green.
+        # Independent artifact COUNT (re-open the file) is dest cardinality —
+        # writer ``rows_written`` never closes conservation.
         checksum = str(writer_checksum or dest_summary.get("checksum") or "").strip()
-        return _finalize({
-            "passed": True,
-            "unproven": True,
-            "skipped_readback": True,
-            "migration_proven": False,
-            "message": (
+        payload = stamp_artifact_census(
+            {
+                "passed": True,
+                "unproven": True,
+                "skipped_readback": True,
+                "migration_proven": False,
+                "message": (
+                    "File/object export wrote successfully — Gate-8 cell fidelity "
+                    "unproven (no destination read-back). "
+                    + (
+                        f"Writer checksum present ({checksum[:16]}…) — count/bytes only."
+                        if checksum
+                        else "No writer checksum; treat as operational pass only."
+                    )
+                ),
+                "source_rows": source_rows,
+                "rejected_rows": rejected_rows,
+                "coerced_null_rows": coerced_null_rows,
+                "rows_skipped": rows_skipped,
+                "checksum": checksum,
+            },
+            dest_summary,
+            fmt=endpoint.format,
+        )
+        counted = payload.get("artifact_row_count")
+        if isinstance(counted, int) and counted >= 0:
+            payload["message"] = (
                 "File/object export wrote successfully — Gate-8 cell fidelity "
-                "unproven (no destination read-back). "
-                + (
-                    f"Writer checksum present ({checksum[:16]}…) — count/bytes only."
-                    if checksum
-                    else "No writer checksum; treat as operational pass only."
-                )
-            ),
-            "source_rows": source_rows,
-            "target_rows": rows_written,
-            "rejected_rows": rejected_rows,
-            "coerced_null_rows": coerced_null_rows,
-            "rows_skipped": rows_skipped,
-            "checksum": checksum,
-        })
+                "unproven (no destination cell read-back). Independent artifact "
+                f"record count is {counted:,}. Writer acknowledgement is diagnostic."
+            )
+        return _finalize(payload)
 
     from .connector_capabilities import resolve_driver_type
 
@@ -905,6 +1094,29 @@ def run_reconciliation(
 
     schema = dest_summary.get("schema") or schema_from_cfg(db_type, cfg)
     table_name = dest_summary.get("table") or endpoint.table or endpoint.collection or ""
+    if db_type in VECTOR_IDENTITY_ENGINES:
+        vector_stamp_ctx.update(
+            cfg=cfg,
+            schema=schema,
+            table_name=table_name,
+            engine=db_type,
+        )
+    from services.sync_cursor import normalize_sync_mode
+
+    if normalize_sync_mode(
+        str(
+            dest_summary.get("sync_mode")
+            or dest_summary.get("effective_sync_mode")
+            or ""
+        ),
+        default="",
+    ) == "scd2":
+        scd2_stamp_ctx.update(
+            cfg=cfg,
+            schema=schema,
+            table_name=table_name,
+            engine=db_type,
+        )
 
     mapping_dicts = mappings or [{"source": col, "target": col} for col in columns]
     dest_types = _dest_types_from_mappings(mapping_dicts)
@@ -952,6 +1164,68 @@ def run_reconciliation(
         except Exception as exc:
             logging.getLogger(__name__).debug(
                 "Gate-8 identity resolve skipped: %s", exc, exc_info=exc
+            )
+    # Complete overwrite snapshot + dest PK: split MISSING_TARGET from
+    # EXTRA_TARGET. Incremental CDC must not pass a batch as S (that would
+    # invent leftover dest keys and look like inferred deletes).
+    from services.sync_cursor import is_overwrite_sync
+
+    key_tuples = None
+    if (
+        is_overwrite_sync(
+            str(
+                dest_summary.get("sync_mode")
+                or dest_summary.get("effective_sync_mode")
+                or ""
+            )
+        )
+        and pk_cols
+        and db_type
+        not in {"pgvector", "pinecone", "qdrant", "weaviate", "milvus", "email"}
+        and isinstance(source_rows, int)
+        and not resumed_from
+    ):
+        if records and source_rows == len(records):
+            key_tuples = records_to_key_tuples(
+                records, [str(c) for c in pk_cols], mapping_dicts
+            )
+        else:
+            stamped = dest_summary.get(OVERWRITE_SOURCE_KEYS_KEY)
+            if isinstance(stamped, list) and len(stamped) == source_rows:
+                try:
+                    key_tuples = [tuple(t) for t in stamped]
+                except TypeError:
+                    key_tuples = None
+        if key_tuples:
+            # Complete overwrite snapshot MERGE: hard-DELETE dest keys not
+            # in S *before* dest COUNT / checksum. Incremental CDC never
+            # enters this gate. Measure-without-apply is DMS EXTRA_TARGET;
+            # apply-without-this-gate is Airbyte issue #6383.
+            try:
+                from services.row_conservation import apply_inferred_leftover_deletes
+
+                deleted = apply_inferred_leftover_deletes(
+                    db_type=db_type,
+                    cfg=cfg,
+                    schema=str(schema or ""),
+                    table_name=str(table_name or ""),
+                    key_columns=[str(c) for c in pk_cols],
+                    keys=key_tuples,
+                    complete_snapshot=True,
+                )
+                if deleted:
+                    dest_summary["leftover_deleted"] = int(deleted)
+            except Exception as exc:
+                logging.getLogger(__name__).warning(
+                    "Overwrite leftover MERGE skipped: %s", exc, exc_info=exc
+                )
+            keyset_stamp_ctx.update(
+                cfg=cfg,
+                schema=schema,
+                table_name=table_name,
+                engine=db_type,
+                key_columns=[str(c) for c in pk_cols],
+                keys=key_tuples,
             )
     try:
         identity_state = _identity_watermark_evidence(
@@ -1017,7 +1291,9 @@ def run_reconciliation(
     # otherwise leave it empty and decline the comparison further down rather
     # than compare two different scopes.
     source_checksum_scope_note = ""
-    if resumed_from and not (resume_full_source_rows and records):
+    if resumed_from and not (
+        resume_full_source_rows and (records or source_spool is not None)
+    ):
         source_checksum_scope_note = (
             f"Resumed after {resumed_from:,} previously committed row(s): this pass "
             "read only the remaining slice, so no source digest covering the whole "
@@ -1028,6 +1304,23 @@ def run_reconciliation(
     source_checksum_provenance = ""
     if source_checksum_scope_note:
         source_checksum = ""
+    elif str(dest_summary.get("checksum_mode") or "") == "inline_write_pass" and writer_checksum:
+        # Phase F1 fingerprints are remapped source rows hashed during the write,
+        # not the destination writer's ack copied onto both sides.
+        source_checksum = str(writer_checksum)
+        source_checksum_provenance = SOURCE_DIGEST_WRITE_PASS
+        digest_provenance["source"] = source_checksum_provenance
+    elif (
+        str(dest_summary.get("checksum_mode") or "") == "source_reread"
+        and writer_checksum
+    ):
+        # Second warehouse scan after the write. Streaming hands records=[] so
+        # _compute_source_checksum would otherwise stamp writer_ack on this
+        # digest and refuse full_checksum — the hole that kept Snowflake→Postgres
+        # at Trust 86 / writer-ack after an independent re-read.
+        source_checksum = str(writer_checksum)
+        source_checksum_provenance = SOURCE_DIGEST_SOURCE_REREAD
+        digest_provenance["source"] = source_checksum_provenance
     else:
         source_checksum, source_checksum_provenance = _compute_source_checksum(
             records,
@@ -1042,6 +1335,7 @@ def run_reconciliation(
             dest_types=dest_types,
             validation_mode=validation_mode,
             destination_pk_columns=[str(c) for c in pk_cols if c] or None,
+            source_spool=source_spool,
         )
         digest_provenance["source"] = source_checksum_provenance
 
@@ -1176,6 +1470,64 @@ def run_reconciliation(
             pk_column=None,
         )
 
+    if db_type == "pgvector":
+        # Physical embedding COUNT(*) is chunk cardinality, not source-row
+        # conservation. Do not run Gate-8 as reader == vector COUNT(*) —
+        # 2 documents / 5 chunks would fail (or invent a surplus if stuffed
+        # as dest population). Identity COUNT(DISTINCT source_id) is stamped
+        # in _finalize. Embeddings are opaque: cell fidelity stays unproven.
+        measured = isinstance(target_rows, int) and target_rows >= 0
+        return _finalize({
+            "passed": measured,
+            "unproven": True,
+            "skipped_readback": True,
+            "migration_proven": False,
+            "message": (
+                "pgvector write completed — Gate-8 embedding cell fidelity "
+                "unproven (opaque vectors). Independent identity is "
+                "COUNT(DISTINCT source_id); physical vector COUNT(*) and "
+                "writer chunk-upsert acknowledgement are diagnostic."
+                if measured
+                else (
+                    "pgvector destination read-back unavailable — identity "
+                    "COUNT(DISTINCT source_id) could not be compared. Writer "
+                    "chunk-upsert acknowledgement is not destination proof."
+                )
+            ),
+            "source_rows": source_rows,
+            "target_rows": target_rows if measured else None,
+            "source_checksum": source_checksum,
+            "target_checksum": target_checksum if measured else "",
+            "rejected_rows": rejected_rows,
+            "coerced_null_rows": coerced_null_rows,
+            "rows_skipped": rows_skipped,
+        })
+
+    if db_type in VECTOR_IDENTITY_ENGINES:
+        # dest-only REST engines: no SQL chunk COUNT.
+        # Never stuff writer upsert ack into target_rows — that is the
+        # dest_only writer_ack lie. Identity is stamped in _finalize.
+        return _finalize({
+            "passed": True,
+            "unproven": True,
+            "skipped_readback": True,
+            "migration_proven": False,
+            "message": (
+                f"{db_type} write completed — Gate-8 embedding cell fidelity "
+                "unproven (opaque vectors). Independent identity is "
+                "COUNT(DISTINCT source_id); collection rowCount / "
+                "points_count and writer chunk-upsert acknowledgement "
+                "are diagnostic."
+            ),
+            "source_rows": source_rows,
+            "target_rows": None,
+            "source_checksum": source_checksum,
+            "target_checksum": "",
+            "rejected_rows": rejected_rows,
+            "coerced_null_rows": coerced_null_rows,
+            "rows_skipped": rows_skipped,
+        })
+
     strict_checksum = validation_mode in ("strict", "maximum")
 
     if source_checksum_scope_note and target_rows >= 0:
@@ -1184,7 +1536,6 @@ def run_reconciliation(
         # cardinality and say plainly that population fidelity is not proven —
         # never compare two different populations and call the difference
         # corruption.
-        from services.reconcile_coverage import WHOLE_TABLE_NOT_COMPARABLE
         from services.reconciliation import ReconciliationReport
 
         expected_rows = max(source_rows - dropped_rows - rows_skipped, 0)
@@ -1326,9 +1677,10 @@ def run_reconciliation(
 
     # No read-back verifier available for this destination.
     if target_rows < 0:
-        # dest_only sinks (pgvector, milvus, …) have no independent SQL read-back
-        # by design — fail-closed strict mode would ban every production write.
-        # Accept writer-ack when row counts match; surface that read-back was N/A.
+        # dest_only sinks (milvus, pinecone, …) have no independent SQL
+        # identity read-back by design — fail-closed strict mode would ban
+        # every production write. pgvector identity is stamped above; do not
+        # accept writer-ack as dest population for that driver.
         dest_only = False
         try:
             from src.transfer.connector_capabilities import _DRIVER_CAPS
@@ -1381,6 +1733,40 @@ def run_reconciliation(
                 "sample_compare": sample_compare,
             })
         if rows_written_accounted == expected_written:
+            # Warehouse/SQL dests advertise an independent COUNT/digest. A
+            # missing verifier there is a Gate-8 failure, not a green writer-ack.
+            # dest_only / no-read sinks (email, Redis, Kafka) still ack.
+            _warehouse_readback = {
+                "postgresql",
+                "mysql",
+                "snowflake",
+                "bigquery",
+                "sqlserver",
+                "oracle",
+                "sqlite",
+                "generic_sql",
+                "databricks",
+                "mongodb",
+            }
+            dest_key = str(db_type or "").strip().lower()
+            if dest_key in _warehouse_readback and not dest_only:
+                return _finalize({
+                    "passed": False,
+                    "unproven": True,
+                    "message": (
+                        f"Writer acknowledged {rows_written:,} rows but Gate-8 has no "
+                        f"independent destination read-back for '{db_type}'. "
+                        "Not migration_proven."
+                    ),
+                    "source_rows": source_rows,
+                    "target_rows": -1,
+                    "source_checksum": source_checksum,
+                    "target_checksum": "",
+                    "rejected_rows": rejected_rows,
+                    "coerced_null_rows": coerced_null_rows,
+                    "rows_skipped": rows_skipped,
+                    "sample_compare": sample_compare,
+                })
             return _finalize({
                 "passed": True,
                 "message": (
@@ -1446,28 +1832,42 @@ def run_reconciliation(
         and source_rows == 0
         and int(rows_written or 0) == 0
         and dropped_rows == 0
-        and (rows_before is None or target_rows == rows_before)
     ):
-        unchanged = (
-            f"destination unchanged at {target_rows:,} row(s)"
-            if rows_before is not None
-            else f"destination holds {target_rows:,} row(s); pre-write count unknown"
-        )
-        return _finalize({
-            "passed": True,
-            "message": (
-                "No new source rows since the last watermark — nothing written, "
-                f"{unchanged}."
-            ),
-            "source_rows": 0,
-            "target_rows": target_rows,
-            "source_checksum": source_checksum,
-            "target_checksum": target_checksum,
-            "rejected_rows": rejected_rows,
-            "coerced_null_rows": coerced_null_rows,
-            "rows_skipped": rows_skipped,
-            "assurance_level": "no_op_destination_unchanged",
-        })
+        if rows_before is None:
+            return _finalize({
+                "passed": False,
+                "unproven": True,
+                "message": (
+                    "No new source rows since the last watermark — nothing written, "
+                    f"but pre-write destination count was not measured "
+                    f"(destination now holds {target_rows:,} row(s)). "
+                    "Not migration_proven."
+                ),
+                "source_rows": 0,
+                "target_rows": target_rows,
+                "source_checksum": source_checksum,
+                "target_checksum": target_checksum,
+                "rejected_rows": rejected_rows,
+                "coerced_null_rows": coerced_null_rows,
+                "rows_skipped": rows_skipped,
+                "assurance_level": "none",
+            })
+        if target_rows == rows_before:
+            return _finalize({
+                "passed": True,
+                "message": (
+                    "No new source rows since the last watermark — nothing written, "
+                    f"destination unchanged at {target_rows:,} row(s)."
+                ),
+                "source_rows": 0,
+                "target_rows": target_rows,
+                "source_checksum": source_checksum,
+                "target_checksum": target_checksum,
+                "rejected_rows": rejected_rows,
+                "coerced_null_rows": coerced_null_rows,
+                "rows_skipped": rows_skipped,
+                "assurance_level": "no_op_destination_unchanged",
+            })
 
     # Streaming append/upsert soft-pass of extra dest rows without a stashed
     # sample cannot claim key-aligned proof (Airbyte/Fivetran honesty bar).
@@ -1484,7 +1884,7 @@ def run_reconciliation(
     ):
         from services.reconciliation import ReconciliationReport
 
-        return ReconciliationReport(
+        return _finalize(ReconciliationReport(
             passed=False,
             source_rows=source_rows,
             target_rows=target_rows,
@@ -1496,7 +1896,7 @@ def run_reconciliation(
             ),
             rejected_rows=rejected_rows,
             coerced_null_rows=coerced_null_rows,
-        ).to_dict()
+        ).to_dict())
 
     # Upsert/append into a larger sink: whole-table digests are not comparable to
     # the batch. Re-fingerprint destination WHERE pk IN (batch keys) while keeping
@@ -1514,7 +1914,6 @@ def run_reconciliation(
         and target_rows > expected_batch
         and source_checksum
         and target_checksum
-        and source_checksum != target_checksum
         and str(db_type) in KEYED_READBACK_ENGINES
     ):
         _keyed_rows, keyed_checksum = verify_target(

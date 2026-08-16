@@ -14,6 +14,7 @@ import {
   findDuplicateKeyRoot,
   isDuplicateIdentitySignal,
 } from "./validateIssueGrouping.js";
+import { totalPages } from "./columnWorkbench.js";
 import type { PreflightResult } from "./types.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -89,6 +90,38 @@ describe("Transfer Studio chrome contracts", () => {
     assert.match(src, /decision === "review"[\s\S]*executiveSummary\?\.subtitle/);
   });
 
+  it("Map step keeps Continue in the wizard footer and pages columns when needed", () => {
+    const mapStep = readFileSync(join(webRoot, "pages/transfer/TransferMapStep.tsx"), "utf8");
+    const review = readFileSync(join(webRoot, "components/ColumnReviewPanel.tsx"), "utf8");
+    const studio = readFileSync(join(webRoot, "styles/transfer-studio.css"), "utf8");
+    const workbench = readFileSync(join(webRoot, "styles/column-workbench.css"), "utf8");
+
+    assert.match(mapStep, /\{continueToValidate\}/);
+    assert.match(mapStep, /Continue to Validate →/);
+    assert.doesNotMatch(mapStep, /footerAction=/);
+    assert.doesNotMatch(review, /footerAction/);
+    assert.match(review, /pages > 1 &&/);
+    assert.match(review, /df2-column-review-pager/);
+    assert.match(review, /Mapping column pages/);
+    assert.doesNotMatch(review, /compact && sampleRows && sampleRows\.length > 0 \? "is-split"/);
+
+    assert.match(
+      studio,
+      /df2-map-step-panel > \.df2-card-footer\.df2-wizard-footer\.df2-map-footer \{[\s\S]*max-height:\s*none !important/,
+    );
+    assert.match(studio, /df2-map-step-panel \.df2-card-body,[\s\S]*padding:\s*4px 8px 0 !important/);
+    assert.match(studio, /grid-template-rows:\s*minmax\(0, 1fr\) !important/);
+    assert.match(
+      workbench,
+      /df2-map-step-workspace\.is-full-editor \{[\s\S]*grid-template-rows:\s*minmax\(0, 1fr\) !important/,
+    );
+    assert.doesNotMatch(workbench, /minmax\(0, min\(42vh, 380px\)\)/);
+    assert.doesNotMatch(workbench, /header-height, 60px\) - 40px/);
+    assert.equal(totalPages(8, 50), 1);
+    assert.equal(totalPages(51, 50), 2);
+    assert.equal(totalPages(100, 25), 4);
+  });
+
   it("source-probe duplicate signal is recognized for Fix routing", () => {
     assert.equal(
       isDuplicateIdentitySignal("id: duplicate key values from source probe (a×4)"),
@@ -116,5 +149,26 @@ describe("Transfer Studio chrome contracts", () => {
     assert.ok(root);
     assert.equal(root!.primaryKey, "id");
     assert.match(root!.fixHint, /Primary key|unique column|dedupe/i);
+  });
+
+  it("workspace list rows share compact density — Connectors match Contracts/Schedules", () => {
+    const tokens = readFileSync(join(webRoot, "styles/tokens.css"), "utf8");
+    const consistency = readFileSync(join(webRoot, "styles/ui-consistency.css"), "utf8");
+    const connectors = readFileSync(join(webRoot, "styles/connectors-page.css"), "utf8");
+    const enterprise = readFileSync(join(webRoot, "styles/enterprise-ui.css"), "utf8");
+    const card = readFileSync(join(webRoot, "components/ui/ConnectorCard.tsx"), "utf8");
+
+    assert.match(tokens, /--df-list-row-min-h:\s*48px/);
+    assert.match(tokens, /--df-list-row-pad-y:\s*8px/);
+    assert.match(tokens, /--df-list-row-title:\s*13px/);
+    assert.match(tokens, /@media \(min-width: 1920px\)/);
+    assert.match(tokens, /@media \(max-height: 800px\)/);
+    assert.doesNotMatch(consistency, /min-height:\s*196px/);
+    assert.match(connectors, /\.df2-connector-row \{[\s\S]*min-height:\s*var\(--df-list-row-min-h/);
+    assert.match(enterprise, /\.df2-contract-row \{[\s\S]*min-height:\s*var\(--df-list-row-min-h/);
+    assert.match(enterprise, /\.df2-pipeline-row \{[\s\S]*min-height:\s*var\(--df-list-row-min-h/);
+    assert.match(enterprise, /\.df2-connector-row,\s*\n\s*\.df2-contract-row,\s*\n\s*\.df2-pipeline-row/);
+    assert.match(card, /df2-btn-label/);
+    assert.match(card, /size=\{16\}/);
   });
 });

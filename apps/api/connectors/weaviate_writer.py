@@ -11,6 +11,7 @@ import importlib.util
 import json
 import re
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -270,6 +271,148 @@ def _weaviate_live_property_types(schema_doc: dict[str, Any] | None) -> dict[str
         out.setdefault(name.lower(), carrier)
         out.setdefault(name.upper(), carrier)
     return out
+
+
+_WEAVIATE_OBJECT_PAGE = 100
+
+
+def _weaviate_object_source_id(obj: Any) -> Any:
+    if not isinstance(obj, dict):
+        return None
+    props = obj.get("properties")
+    if not isinstance(props, dict):
+        return None
+    if "source_id" in props:
+        return props.get("source_id")
+    return props.get("sourceId")
+
+
+def _weaviate_aggregate_count(
+    session: Any,
+    base_url: str,
+    hdrs: dict[str, str],
+    class_name: str,
+) -> int | None:
+    """Physical object COUNT — truncation bound only, never dest identity."""
+    query = f"{{ Aggregate {{ {class_name} {{ meta {{ count }} }} }} }}"
+    resp = session.post(
+        f"{base_url}/v1/graphql",
+        data=json.dumps({"query": query}),
+        headers=hdrs,
+        timeout=30,
+    )
+    if resp.status_code != 200:
+        return None
+    try:
+        body = resp.json()
+    except Exception:
+        return None
+    if not isinstance(body, dict) or body.get("errors"):
+        return None
+    data = body.get("data")
+    if not isinstance(data, dict):
+        return None
+    agg = data.get("Aggregate")
+    if not isinstance(agg, dict):
+        return None
+    rows = agg.get(class_name)
+    if not isinstance(rows, list) or not rows:
+        return 0
+    meta = rows[0].get("meta") if isinstance(rows[0], dict) else None
+    if not isinstance(meta, dict):
+        return None
+    raw = meta.get("count")
+    try:
+        n = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return n if n >= 0 else None
+
+
+def scan_source_ids(
+    cfg: Mapping[str, Any],
+    *,
+    table_name: str,
+    max_entities: int = 20_000,
+) -> tuple[str, list[Any]]:
+    """Dest-engine property ``source_id`` values. Never Aggregate ``meta.count``.
+
+    Weaviate ``Aggregate { meta { count } }`` is physical objects (chunks).
+    Identity is DISTINCT ``source_id`` from a complete object listing of the
+    class the writer filled. A truncated offset window is never DISTINCT of
+    a prefix. Missing class is 0 (create-on-first-write).
+
+    Returns ``(state, values)`` matching Milvus/Qdrant/Pinecone.
+    """
+    table = str(table_name or "").strip()
+    if not table:
+        return "unmeasured", []
+    try:
+        session = _requests_session()
+        api_key = str(cfg.get("api_key") or cfg.get("password") or "")
+        base_url = _base_url(
+            str(cfg.get("host") or ""),
+            int(cfg.get("port") or 8080),
+            bool(cfg.get("ssl", False)),
+            str(cfg.get("connection_string") or ""),
+        )
+        hdrs = _headers(api_key)
+        class_name = _class_name(table)
+        schema_resp = session.get(
+            f"{base_url}/v1/schema/{class_name}", headers=hdrs, timeout=10
+        )
+        if schema_resp.status_code == 404:
+            return "missing", []
+        if schema_resp.status_code != 200:
+            return "unmeasured", []
+        try:
+            schema_doc = schema_resp.json()
+        except Exception:
+            return "unmeasured", []
+        props = _weaviate_live_property_types(
+            schema_doc if isinstance(schema_doc, dict) else None
+        )
+        if "source_id" not in {str(k).lower() for k in props}:
+            return "no_field", []
+        cap = int(max_entities)
+        physical = _weaviate_aggregate_count(session, base_url, hdrs, class_name)
+        if physical is None:
+            return "unmeasured", []
+        if physical == 0:
+            return "complete", []
+        if physical > cap:
+            return "truncated", []
+        values: list[Any] = []
+        offset = 0
+        while offset < physical:
+            page = min(_WEAVIATE_OBJECT_PAGE, physical - offset)
+            listed = session.get(
+                f"{base_url}/v1/objects",
+                headers=hdrs,
+                params={"class": class_name, "limit": page, "offset": offset},
+                timeout=30,
+            )
+            if listed.status_code != 200:
+                return "unmeasured", []
+            try:
+                body = listed.json()
+            except Exception:
+                return "unmeasured", []
+            objects = body.get("objects") if isinstance(body, dict) else None
+            if not isinstance(objects, list):
+                return "unmeasured", []
+            if not objects:
+                break
+            for obj in objects:
+                values.append(_weaviate_object_source_id(obj))
+                if len(values) > cap:
+                    return "truncated", []
+            offset += len(objects)
+        if len(values) > physical:
+            return "truncated", []
+        return "complete", values
+    except Exception:
+        return "unmeasured", []
 
 
 def write_mapped_rows(

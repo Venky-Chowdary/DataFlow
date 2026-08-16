@@ -200,14 +200,24 @@ _OPERATOR_FAILURE_RULES: tuple[tuple[tuple[str, ...], dict[str, str]], ...] = (
             "cdc_lsn_gap",
             "cdc_scn_gap",
             "cdc_binlog_gap",
+            "cdc_slot_gap",
+            "cdc_ct_gap",
+            "cdc_oplog_gap",
             "cdc_cursor_gap",
             "before capture retention",
             "before available redo",
             "min_lsn",
+            "min_valid_version",
+            "last_sync_version",
+            "change tracking",
             "oldest_available",
             "gtid_purged",
             "binary log",
             "binlog",
+            "wal_status",
+            "replication slot",
+            "changestreamhistorylost",
+            "resume point may no longer be in the oplog",
             "ora-01291",
             "ora-01292",
         ),
@@ -217,8 +227,10 @@ _OPERATOR_FAILURE_RULES: tuple[tuple[tuple[str, ...], dict[str, str]], ...] = (
             "confidence": "high",
             "title": "CDC cursor gap (retention / failover)",
             "fix": (
-                "Reset the CDC watermark, set snapshot to when_needed or initial, then re-run. "
-                "Continuous CDC across the gap is not possible."
+                "If snapshot_mode=when_needed, Resume — the engine snapshots current "
+                "source keys then streams from the new tip. initial/never stay fail-closed "
+                "until you change mode or reset the watermark. Purged-window events are gone. "
+                "Not continuous CDC, not migration_proven."
             ),
         },
     ),
@@ -537,6 +549,37 @@ def format_exception_message(error: Exception | str) -> str:
     return msg
 
 
+def _cursor_gap_fix(error: Any) -> str:
+    """Operator next step from the snapshot plan, not a generic reset slogan."""
+    plan = getattr(error, "snapshot_plan", None) or {}
+    action = str(plan.get("next_action") or "")
+    mode = str(plan.get("snapshot_mode") or "")
+    if action == "set_when_needed" or mode == "never":
+        return (
+            "Set snapshot_mode=when_needed, then Resume. The engine will snapshot "
+            "current source keys and stream from the new tip. snapshot_mode=never "
+            "forbids a recovery snapshot. Purged-window events are gone — not "
+            "continuous CDC, not migration_proven."
+        )
+    if mode in {"when_needed", "always", "initial_only"}:
+        return (
+            "Resume — engine will snapshot current source keys, then stream from "
+            "the new tip. Purged-window events are gone. At-least-once upsert, not "
+            "continuous CDC, not migration_proven."
+        )
+    if mode == "initial" or action == "set_when_needed":
+        return (
+            "snapshot_mode=initial will not snapshot again. Reset the CDC watermark "
+            "or set when_needed, then Resume. Purged-window events are gone."
+        )
+    return (
+        "If snapshot_mode=when_needed, Resume — the engine snapshots current source "
+        "keys then streams from the new tip. Otherwise reset the watermark or set "
+        "when_needed. Purged-window events are gone. Not continuous CDC, not "
+        "migration_proven."
+    )
+
+
 def humanize_transfer_failure(error: Exception | str) -> dict[str, Any]:
     """Turn a raw driver exception into an operator-facing failure summary.
 
@@ -672,11 +715,7 @@ def humanize_transfer_failure(error: Exception | str) -> dict[str, Any]:
                     f"(resume={error.resume or '?'}, retained={error.retained or '?'}). "
                     "Continuous CDC across the gap is not possible."
                 ),
-                "fix": (
-                    "Reset the CDC watermark in Job Theater, set snapshot mode to "
-                    "when_needed or initial, then re-run. Do not claim continuous CDC "
-                    "across an AG / Data Guard / archive-purge gap."
-                ),
+                "fix": _cursor_gap_fix(error),
                 "raw": raw,
                 "retriable": False,
                 "confidence": "high",
@@ -753,6 +792,24 @@ def humanize_transfer_failure(error: Exception | str) -> dict[str, Any]:
             "retriable": False,
             "confidence": confidence,
         }
+    if "circuit_breaker_open" in text or (
+        "circuit breaker" in text and "is open" in text
+    ):
+        return {
+            "code": "circuit_breaker_open",
+            "category": "contract",
+            "title": "Contract circuit breaker is OPEN",
+            "message": raw,
+            "fix": (
+                "Reset the breaker after you fix the contract violation "
+                "(Contracts or Validate bind), then re-run. "
+                "Do not enqueue while the breaker is OPEN."
+            ),
+            "raw": raw,
+            "retriable": False,
+            "confidence": "high",
+        }
+
     # Unknown — never invent a specific root cause or fake remediation path.
     return {
         "code": "transfer_failed",

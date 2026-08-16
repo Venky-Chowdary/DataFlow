@@ -46,7 +46,14 @@ def _try_copy_fast_path(
     cannot prove belongs on the row path, which knows how to reconcile the
     differences this one refuses to guess at.
     """
+    from services.procedure_source import is_callable_source
     from services.sync_cursor import is_overwrite_sync
+
+    # Studio may set source.table to the procedure stream name (e.g. get_orders).
+    # COPY of a colliding real table would move the wrong population — refuse.
+    if is_callable_source(source) or is_callable_source(src_cfg):
+        logger.info("COPY fast path declined: callable source is a result set, not a table")
+        return None
 
     if (
         incremental
@@ -130,7 +137,7 @@ def _try_copy_fast_path(
     dest_summary: dict[str, Any] = {
         "type": dest_type,
         "table": dest_table,
-        "rows_written": result.rows_copied,
+        "rows_written": result.source_rows,
         "checksum": result.target_checksum,
         "load_method": "copy_binary_server_to_server",
         "source_row_count": result.source_rows,
@@ -144,12 +151,12 @@ def _try_copy_fast_path(
         # Secondary indexes reproduced after the load — carried, not dropped, so
         # the destination enforces the same rules and reads at the same cost.
         "indexes_carried": list(result.indexes_carried or ()),
+        "proof_scope": result.proof_scope,
     }
     ddl_log = [
         f"COPY {source_table} → {dest_table} "
-        f"({result.rows_copied:,} rows, binary, server-to-server)",
-        "Gate-8: source digest taken inside the read snapshot; destination "
-        "digest re-read after load — both computed by the engine.",
+        f"({result.source_rows:,} rows, binary, server-to-server)",
+        "Gate-8: mapped-column population checksum inside the source snapshot.",
     ]
     if result.indexes_carried:
         ddl_log.append(

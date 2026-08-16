@@ -2,19 +2,37 @@
 
 from __future__ import annotations
 
+import os
 from io import BytesIO
-from typing import Iterator
+from typing import Any, Iterator
 
 from services.tabular_rows import is_blank_row
 from services.value_serializer import cell_to_string
 
+XLS_UNSUPPORTED_MSG = (
+    "Legacy .xls is not supported. Save the workbook as .xlsx and retry."
+)
+
 __all__ = [
+    "XLS_UNSUPPORTED_MSG",
+    "cell_to_string",
     "count_excel_rows",
     "is_blank_row",
     "iter_excel_batches",
+    "iter_excel_dicts",
     "parse_excel_preview",
+    "require_xlsx",
     "sheet_headers",
 ]
+
+
+def require_xlsx(path_or_name: str | os.PathLike[str] | bytes | None) -> None:
+    """Refuse BIFF .xls — openpyxl only reads Office Open XML (.xlsx)."""
+    if path_or_name is None or isinstance(path_or_name, (bytes, bytearray)):
+        return
+    name = str(path_or_name).lower()
+    if name.endswith(".xls") and not name.endswith(".xlsx"):
+        raise ValueError(XLS_UNSUPPORTED_MSG)
 
 
 def sheet_headers(first_row: tuple) -> list[str]:
@@ -26,14 +44,28 @@ def sheet_headers(first_row: tuple) -> list[str]:
     return headers
 
 
-def _load_workbook(content: bytes):
+def _load_workbook(content: bytes | Any):
+    """openpyxl workbook from bytes or a seekable binary handle.
+
+    Dest gzip Excel spools a decompressed image (workbook formats are not
+    sequential). ``load_workbook`` already accepts a file-like; wrapping
+    that image in a second ``BytesIO`` would be a third copy.
+    """
     try:
         from openpyxl import load_workbook
     except ImportError as exc:
         raise ValueError(
             "Excel import is not ready on this platform node. Datawrap bundles file parsers — retry shortly."
         ) from exc
-    return load_workbook(BytesIO(content), read_only=True, data_only=True)
+    if isinstance(content, (bytes, bytearray)):
+        stream: Any = BytesIO(content)
+    else:
+        stream = content
+        try:
+            stream.seek(0)
+        except Exception as exc:
+            raise ValueError("Excel workbook source is not seekable") from exc
+    return load_workbook(stream, read_only=True, data_only=True)
 
 
 def parse_excel_preview(content: bytes, preview_rows: int = 100) -> tuple[list[str], list[list[str]], int]:
@@ -64,22 +96,26 @@ def parse_excel_preview(content: bytes, preview_rows: int = 100) -> tuple[list[s
     return headers, preview, total
 
 
-def iter_excel_batches(content: bytes, chunk_size: int) -> Iterator[list[dict]]:
-    """Stream Excel rows as dict batches without loading the full sheet into RAM."""
+def iter_excel_dicts(content: bytes | Any) -> Iterator[dict]:
+    """Value-bearing Excel records. Same population as ``count_excel_rows``.
+
+    Header is not a record. ``is_blank_row`` (formatting-only used-range)
+    is not a record. Extra cells beyond the header refuse silent column
+    drop — ingest already raised; Gate-8 must not hash a truncated row.
+    ``max_row`` is not dest population. Gate-8 cell checksum and dest
+    sample walk this iterator.
+    """
     wb = _load_workbook(content)
     ws = wb.active
     if ws is None:
         wb.close()
         return
-
     row_iter = ws.iter_rows(values_only=True)
     first = next(row_iter, None)
     if not first:
         wb.close()
         return
-
     headers = sheet_headers(first)
-    batch: list[dict] = []
     try:
         for row in row_iter:
             if is_blank_row(row):
@@ -90,36 +126,32 @@ def iter_excel_batches(content: bytes, chunk_size: int) -> Iterator[list[dict]]:
                     "columns; refuse silent column drop — widen the header row "
                     "or fix the sheet"
                 )
-            record = {
+            yield {
                 headers[i]: cell_to_string(c)
                 for i, c in enumerate(row[: len(headers)])
             }
-            batch.append(record)
-            if len(batch) >= chunk_size:
-                yield batch
-                batch = []
-        if batch:
-            yield batch
     finally:
         wb.close()
 
 
-def count_excel_rows(content: bytes) -> int:
+def iter_excel_batches(content: bytes, chunk_size: int) -> Iterator[list[dict]]:
+    """Stream Excel rows as dict batches without loading the full sheet into RAM."""
+    batch: list[dict] = []
+    for record in iter_excel_dicts(content):
+        batch.append(record)
+        if len(batch) >= chunk_size:
+            yield batch
+            batch = []
+    if batch:
+        yield batch
+
+
+def count_excel_rows(content: bytes | Any) -> int:
     """Count rows that carry values.
 
     ``max_row`` is the used range, which formatting inflates; using it as the
     source cardinality makes reconciliation compare against rows that were
-    never read.
+    never read. Extra cells beyond the header raise — dest COUNT then
+    stays unmeasured rather than hashing a truncated row.
     """
-    wb = _load_workbook(content)
-    ws = wb.active
-    if ws is None:
-        wb.close()
-        return 0
-    try:
-        row_iter = ws.iter_rows(values_only=True)
-        if next(row_iter, None) is None:
-            return 0
-        return sum(1 for row in row_iter if not is_blank_row(row))
-    finally:
-        wb.close()
+    return sum(1 for _ in iter_excel_dicts(content))

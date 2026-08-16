@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from ..knowledge.semantic_patterns import SEMANTIC_PATTERNS
-from ..knowledge.synonyms import are_synonyms, resolve_canonical
+from ..knowledge.synonyms import resolve_canonical
 from ..knowledge.type_conversions import suggest_type_conversion
 from .provider import DataTransferLLMProvider, DataTransferLocalProvider
 
@@ -165,49 +165,36 @@ class DataTransferReasoningChain:
             1.0,
         ))
 
-        for i, src_col in enumerate(source_columns):
-            src_analysis = self.analyze_column(
-                src_col, (source_samples or {}).get(src_col, [])
-            )
-            best_target = None
-            best_score = 0.0
-            best_reason = ""
+        from services.semantic_mapper import authority_mappings
 
-            for tgt_col in target_columns:
-                if tgt_col in used_targets:
-                    continue
+        source_schemas = None
+        if source_samples:
+            source_schemas = [
+                {
+                    "name": col,
+                    "inferred_type": "VARCHAR",
+                    "samples": list(source_samples.get(col) or [])[:8],
+                }
+                for col in source_columns
+            ]
+        assigned = authority_mappings(
+            source_columns,
+            target_columns,
+            source_schemas=source_schemas,
+        )
+        by_source = {str(m.get("source")): m for m in assigned}
 
-                # Synonym check
-                if are_synonyms(src_col, tgt_col):
-                    score, reason = 0.95, "Synonym match"
-                elif src_col.lower().replace("_", "") == tgt_col.lower().replace("_", ""):
-                    score, reason = 0.98, "Normalized exact match"
-                elif src_col.lower() == tgt_col.lower():
-                    score, reason = 0.96, "Case-insensitive match"
-                else:
-                    tgt_analysis = self.analyze_column(tgt_col)
-                    src_ans = src_analysis.answer if isinstance(src_analysis.answer, dict) else {}
-                    tgt_ans = tgt_analysis.answer if isinstance(tgt_analysis.answer, dict) else {}
-
-                    if src_ans.get("semantic_type") and src_ans["semantic_type"] == tgt_ans.get("semantic_type"):
-                        score, reason = 0.88, f"Same semantic type: {src_ans['semantic_type']}"
-                    elif resolve_canonical(src_col) == resolve_canonical(tgt_col):
-                        score, reason = 0.90, "Same canonical form"
-                    else:
-                        rag_mapping = self.rag.suggest_mapping(src_col, tgt_col)
-                        score = rag_mapping.confidence
-                        reason = rag_mapping.reasoning or "RAG similarity"
-
-                if score > best_score:
-                    best_score = score
-                    best_target = tgt_col
-                    best_reason = reason
-
-            if best_target and best_score > 0.5:
+        for src_col in source_columns:
+            row = by_source.get(src_col) or {}
+            tgt = str(row.get("target") or "")
+            conf = float(row.get("confidence") or 0)
+            if tgt and not row.get("create_new") and conf > 0.5:
+                src_analysis = self.analyze_column(
+                    src_col, (source_samples or {}).get(src_col, [])
+                )
                 src_ans = src_analysis.answer if isinstance(src_analysis.answer, dict) else {}
-                tgt_analysis = self.analyze_column(best_target)
+                tgt_analysis = self.analyze_column(tgt)
                 tgt_ans = tgt_analysis.answer if isinstance(tgt_analysis.answer, dict) else {}
-
                 transform = None
                 if src_ans.get("inferred_type") != tgt_ans.get("inferred_type"):
                     conv = suggest_type_conversion(
@@ -215,22 +202,23 @@ class DataTransferReasoningChain:
                         tgt_ans.get("inferred_type", "string"),
                     )
                     transform = conv["method"] if conv else None
-
                 mappings.append({
                     "source_column": src_col,
-                    "target_column": best_target,
-                    "confidence": round(best_score, 3),
-                    "reason": best_reason,
+                    "target_column": tgt,
+                    "confidence": round(conf, 3),
+                    "reason": str(row.get("reasoning") or "map_columns SSOT"),
+                    "requires_review": bool(row.get("requires_review")),
                     "transformation_needed": transform is not None,
                     "suggested_transformation": transform,
                 })
-                used_targets.add(best_target)
+                used_targets.add(tgt)
             else:
                 mappings.append({
                     "source_column": src_col,
-                    "target_column": "<unmapped>",
-                    "confidence": 0.0,
-                    "reason": "No suitable match found",
+                    "target_column": "<unmapped>" if not tgt or row.get("create_new") else tgt,
+                    "confidence": round(conf, 3) if tgt else 0.0,
+                    "reason": str(row.get("reasoning") or "No suitable match found"),
+                    "requires_review": True,
                     "transformation_needed": False,
                     "suggested_transformation": None,
                 })

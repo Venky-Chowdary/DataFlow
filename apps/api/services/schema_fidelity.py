@@ -20,8 +20,13 @@ import re
 from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Iterable
 
+from services.collation_carry import destination_column_collations, plan_collation_carry
+from services.decimal_identity import plan_decimal_identity_carry
+from services.encoding_capacity import plan_encoding_carry
 from services.identity_carry import plan_identity_carry
+from services.offset_label import plan_offset_label_carry
 from services.physical_placement_ddl import plan_physical_placement, verify_placement
+from services.unicode_form import plan_unicode_form_carry
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +43,10 @@ REQUIRED_ASPECTS: tuple[str, ...] = (
     "identity_sequence",
     "generated",
     "collation",
+    "offset_label",
+    "encoding",
+    "decimal",
+    "unicode_form",
     "charset",
     "index",
     "partitioning",
@@ -143,6 +152,7 @@ class SourceSchemaCatalog:
     generated_columns: list[str] = field(default_factory=list)
     identity_columns: list[str] = field(default_factory=list)
     collations: dict[str, str] = field(default_factory=dict)
+    charsets: dict[str, str] = field(default_factory=dict)
     comments: dict[str, str] = field(default_factory=dict)
     # Tri-state: None means the source catalog was not read for this aspect.
     has_partitioning: bool | None = None
@@ -370,6 +380,7 @@ def build_catalog_from_introspect(
         generated_columns=list(keys.get("generated_columns") or []),
         identity_columns=list(keys.get("identity_columns") or []),
         collations=dict(keys.get("collations") or {}),
+        charsets=dict(keys.get("charsets") or {}),
         comments=dict(keys.get("comments") or {}),
         has_partitioning=_partitioning_flag(keys),
         has_enums=_tristate(keys.get("has_enums")),
@@ -448,6 +459,7 @@ def catalog_from_payload(payload: Any) -> SourceSchemaCatalog | None:
             generated_columns=list(payload.get("generated_columns") or []),
             identity_columns=list(payload.get("identity_columns") or []),
             collations=dict(payload.get("collations") or {}),
+            charsets=dict(payload.get("charsets") or {}),
             comments=dict(payload.get("comments") or {}),
             has_partitioning=_partitioning_flag(payload),
             has_enums=_tristate(payload.get("has_enums")),
@@ -599,26 +611,52 @@ def plan_create_new_fidelity(
         except ValueError:
             return None
 
+    def _dest_type(col: str) -> str:
+        try:
+            return str(target_types[dest_cols.index(col)] or "")
+        except (ValueError, IndexError):
+            return ""
+
     # --- CARRY: primary key ---
     pk_dest: list[str] = [
         c for c in (_dest_name_for_source(x) for x in catalog.primary_key) if c
     ]
     if catalog.primary_key and len(pk_dest) == len(catalog.primary_key):
-        quoted = ", ".join(_q(c, dest) for c in pk_dest)
-        table_constraints.append(f"PRIMARY KEY ({quoted})")
-        report.items.append(
-            SchemaFidelityItem(
-                aspect="primary_key",
-                name=",".join(pk_dest),
-                status="carried",
-                reason=(
-                    "PRIMARY KEY emitted on CREATE TABLE (provisional until "
-                    "destination catalog re-read)."
-                ),
-                source_detail=",".join(catalog.primary_key),
-                dest_ddl=f"PRIMARY KEY ({quoted})",
+        unindexable = [
+            c for c in pk_dest if dest in {"mysql", "mariadb"} and _mysql_index_requires_prefix(_dest_type(c))
+        ]
+        if unindexable:
+            report.items.append(
+                SchemaFidelityItem(
+                    aspect="primary_key",
+                    name=",".join(pk_dest),
+                    status="unsupported",
+                    reason=(
+                        "MySQL/MariaDB cannot PRIMARY KEY TEXT/BLOB/JSON without a "
+                        "prefix length; refusing an invented prefix (that would "
+                        "enforce a different uniqueness rule than the source). "
+                        f"Unindexable: {','.join(unindexable)}."
+                    ),
+                    source_detail=",".join(catalog.primary_key),
+                )
             )
-        )
+            pk_dest = []
+        else:
+            quoted = ", ".join(_q(c, dest) for c in pk_dest)
+            table_constraints.append(f"PRIMARY KEY ({quoted})")
+            report.items.append(
+                SchemaFidelityItem(
+                    aspect="primary_key",
+                    name=",".join(pk_dest),
+                    status="carried",
+                    reason=(
+                        "PRIMARY KEY emitted on CREATE TABLE (provisional until "
+                        "destination catalog re-read)."
+                    ),
+                    source_detail=",".join(catalog.primary_key),
+                    dest_ddl=f"PRIMARY KEY ({quoted})",
+                )
+            )
     elif catalog.primary_key:
         report.items.append(
             SchemaFidelityItem(
@@ -736,6 +774,23 @@ def plan_create_new_fidelity(
         dest_uk_s = [c for c in dest_uk if c]
         if set(dest_uk_s) == pk_set and pk_set:
             continue  # covered by PRIMARY KEY
+        if dest in {"mysql", "mariadb"} and any(
+            _mysql_index_requires_prefix(_dest_type(c)) for c in dest_uk_s
+        ):
+            report.items.append(
+                SchemaFidelityItem(
+                    aspect="unique",
+                    name=",".join(dest_uk_s),
+                    status="unsupported",
+                    reason=(
+                        "MySQL/MariaDB cannot UNIQUE-index TEXT/BLOB/JSON without a "
+                        "prefix length; refusing an invented prefix (that would "
+                        "enforce a different uniqueness rule than the source)."
+                    ),
+                    source_detail=",".join(uk),
+                )
+            )
+            continue
         quoted = ", ".join(_q(c, dest) for c in dest_uk_s)
         table_constraints.append(f"UNIQUE ({quoted})")
         struct_unique.append(list(dest_uk_s))
@@ -826,6 +881,107 @@ def plan_create_new_fidelity(
             ]
         suffixes.setdefault(dest_col, []).append(suffix)
 
+    # --- CARRY: collation equality (uniqueness polarity, not name-copy) ---
+    keyed_cols = set(pk_dest)
+    for uk in struct_unique:
+        keyed_cols.update(uk)
+    keyed_cols.update(str(c) for c in catalog.primary_key)
+    for uk in catalog.unique_keys:
+        keyed_cols.update(str(c) for c in uk)
+    collation_plan = plan_collation_carry(
+        catalog=catalog,
+        dest_dialect=dest,
+        dest_name_for_source=_dest_name_for_source,
+        dest_type_for_column=lambda c: (
+            target_types[dest_cols.index(c)] if c in dest_cols else ""
+        ),
+        unique_or_pk=keyed_cols,
+    )
+    charset_emitted = False
+    for decision in collation_plan.decisions:
+        report.items.append(SchemaFidelityItem(**decision.to_item_kwargs()))
+        if decision.dest_charset:
+            charset_emitted = True
+            report.items.append(
+                SchemaFidelityItem(
+                    aspect="charset",
+                    name=decision.dest_column,
+                    status=decision.status,
+                    reason=(
+                        f"Character set {decision.dest_charset} paired with "
+                        f"collation {decision.dest_collation or 'destination default'}."
+                    ),
+                    dest_ddl=(
+                        f"CHARACTER SET {decision.dest_charset}"
+                        if decision.status == "carried"
+                        else ""
+                    ),
+                )
+            )
+        prefixes = collation_plan.column_prefixes.get(decision.dest_column) or []
+        if prefixes and decision.status == "carried":
+            # MySQL: CHARACTER SET / COLLATE must sit on the type, before NOT NULL.
+            suffixes[decision.dest_column] = (
+                list(prefixes) + list(suffixes.get(decision.dest_column) or [])
+            )
+
+    offset_plan = plan_offset_label_carry(
+        catalog=catalog,
+        dest_dialect=dest,
+        dest_name_for_source=_dest_name_for_source,
+        dest_type_for_column=lambda c: (
+            target_types[dest_cols.index(c)] if c in dest_cols else ""
+        ),
+    )
+    for decision in offset_plan:
+        report.items.append(SchemaFidelityItem(**decision.to_item_kwargs()))
+
+    dest_charsets = {
+        d.dest_column: d.dest_charset
+        for d in collation_plan.decisions
+        if d.dest_charset
+    }
+    encoding_plan = plan_encoding_carry(
+        catalog=catalog,
+        dest_dialect=dest,
+        dest_name_for_source=_dest_name_for_source,
+        dest_type_for_column=lambda c: (
+            target_types[dest_cols.index(c)] if c in dest_cols else ""
+        ),
+        dest_charset_for_column=dest_charsets.get,
+    )
+    for decision in encoding_plan:
+        report.items.append(SchemaFidelityItem(**decision.to_item_kwargs()))
+
+    decimal_plan = plan_decimal_identity_carry(
+        catalog=catalog,
+        dest_dialect=dest,
+        dest_name_for_source=_dest_name_for_source,
+        dest_type_for_column=lambda c: (
+            target_types[dest_cols.index(c)] if c in dest_cols else ""
+        ),
+    )
+    for decision in decimal_plan:
+        report.items.append(SchemaFidelityItem(**decision.to_item_kwargs()))
+
+    dest_collations = {
+        d.dest_column: d.dest_collation
+        for d in collation_plan.decisions
+        if d.dest_collation
+    }
+    unicode_plan = plan_unicode_form_carry(
+        catalog=catalog,
+        dest_dialect=dest,
+        dest_name_for_source=_dest_name_for_source,
+        dest_type_for_column=lambda c: (
+            target_types[dest_cols.index(c)] if c in dest_cols else ""
+        ),
+        dest_collation_for_column=dest_collations.get,
+        unique_or_pk=keyed_cols,
+    )
+    for decision in unicode_plan:
+        report.items.append(SchemaFidelityItem(**decision.to_item_kwargs()))
+
     # --- CARRY: physical placement (partitioning / tablespace / clustering) ---
     placement = plan_physical_placement(
         source_storage=catalog.physical_storage,
@@ -848,6 +1004,12 @@ def plan_create_new_fidelity(
         skip_check=check_handled,
         skip_index=index_handled,
         skip_identity=bool(identity_plan.decisions),
+        skip_collation=bool(collation_plan.decisions),
+        skip_offset_label=bool(offset_plan),
+        skip_encoding=bool(encoding_plan),
+        skip_decimal=bool(decimal_plan),
+        skip_unicode_form=bool(unicode_plan),
+        skip_charset=charset_emitted,
     )
 
     # Column order — carried as mapping order (honest).
@@ -1019,6 +1181,74 @@ def certify_identity_on_destination(
             plan.identity_insert_columns = [
                 c for c in plan.identity_insert_columns if c != item.name
             ]
+
+
+def certify_collation_on_destination(
+    plan: CreateFidelityPlan | None,
+    *,
+    dialect: str,
+    schema: str,
+    table: str,
+    fetchall: Callable[[str, tuple[Any, ...]], Any],
+) -> None:
+    """Settle collation equality from the destination catalog, not the DDL.
+
+    Emitting ``COLLATE utf8mb4_bin`` is a claim. Engines silently ignore unknown
+    collations or substitute the table default (CI), which is exactly the DMS
+    failure this carry exists to prevent.
+    """
+    if plan is None:
+        return
+    items = [
+        i for i in plan.report.items
+        if i.aspect == "collation" and i.status == "carried"
+    ]
+    if not items:
+        return
+    from services.collation_carry import classify_equality, destination_column_collations
+
+    found = destination_column_collations(
+        dialect=dialect, schema=schema, table=table, fetchall=fetchall
+    )
+    for item in items:
+        if found is None:
+            item.status = "unknown"
+            item.reason = (
+                "The destination collation catalog could not be read after CREATE, "
+                "so equality is unverified. Emitted DDL is not proof. "
+                f"Would have: {item.reason}"
+            )
+            continue
+        folded = {k.casefold(): v for k, v in found.items()}
+        actual = folded.get(item.name.casefold(), "")
+        actual_eq = classify_equality(dialect, collation=actual)
+        ddl = (item.dest_ddl or "").upper()
+        want_cs = "_BIN" in ddl or 'COLLATE "C"' in ddl or "POSIX" in ddl
+        want_ci = "_CI" in ddl or "CI_AS" in ddl or "CI_AI" in ddl
+        if want_cs and actual_eq.case != "sensitive":
+            item.status = "unsupported"
+            item.reason = (
+                f"Destination catalog collates as {actual or 'default'} "
+                f"(case={actual_eq.case}); case-sensitive uniqueness was not taken. "
+                f"Attempted: {item.dest_ddl}."
+            )
+            item.dest_ddl = ""
+        elif want_ci and actual_eq.case != "insensitive":
+            item.status = "unsupported"
+            item.reason = (
+                f"Destination catalog collates as {actual or 'default'} "
+                f"(case={actual_eq.case}); case-insensitive equality was not taken. "
+                f"Attempted: {item.dest_ddl}."
+            )
+            item.dest_ddl = ""
+        elif not ddl:
+            # Destination-default CS (PostgreSQL). Empty/C/POSIX/default is CS.
+            if actual_eq.case == "insensitive":
+                item.status = "unsupported"
+                item.reason = (
+                    f"Destination default collation {actual or 'default'} is "
+                    "case-insensitive; source uniqueness was case-sensitive."
+                )
 
 
 # --------------------------------------------------------------------------
@@ -1829,6 +2059,81 @@ def certify_structure_on_destination(
             )
 
 
+def plan_covers_unique(
+    plan: CreateFidelityPlan | None,
+    columns: list[str] | None,
+) -> bool:
+    """True when CREATE already emits a PK or UNIQUE on exactly these columns.
+
+    Upsert writers must not add a second UNIQUE KEY for conflict columns the
+    Property 6 plan already carried — that is a duplicate index, not a
+    write-path requirement.
+    """
+    if plan is None or not columns:
+        return False
+    want = {str(c).casefold() for c in columns if str(c).strip()}
+    if not want:
+        return False
+    if plan.primary_key and {str(c).casefold() for c in plan.primary_key} == want:
+        return True
+    return any(
+        {str(c).casefold() for c in uk} == want
+        for uk in (plan.unique_constraints or [])
+    )
+
+
+def settle_create_new_on_destination(
+    plan: CreateFidelityPlan | None,
+    *,
+    dest_dialect: str,
+    dest_schema: str,
+    dest_table: str,
+    table_already_exists: bool,
+    execute: Callable[[str], Any],
+    fetchall: Callable[[str, tuple[Any, ...]], Any],
+    cursor: Any | None = None,
+) -> dict[str, Any] | None:
+    """Run post-CREATE DDL and certify from the destination catalog.
+
+    Callers render CREATE from the plan, then call this. An emitted clause is a
+    claim; only the destination catalog may settle ``carried``.
+    """
+    if plan is None:
+        return None
+    apply_post_create_sql(plan, execute)
+    if not table_already_exists:
+        certify_structure_on_destination(
+            plan,
+            dialect=dest_dialect,
+            schema=dest_schema,
+            table=dest_table,
+            fetchall=fetchall,
+        )
+        certify_identity_on_destination(
+            plan,
+            dialect=dest_dialect,
+            schema=dest_schema,
+            table=dest_table,
+            fetchall=fetchall,
+        )
+        certify_collation_on_destination(
+            plan,
+            dialect=dest_dialect,
+            schema=dest_schema,
+            table=dest_table,
+            fetchall=fetchall,
+        )
+        if cursor is not None:
+            certify_placement_on_destination(
+                plan,
+                dialect=dest_dialect,
+                cursor=cursor,
+                schema=dest_schema,
+                table=dest_table,
+            )
+    return plan.report.to_dict()
+
+
 def apply_post_create_sql(
     plan: CreateFidelityPlan | None,
     execute: Callable[[str], Any],
@@ -1909,6 +2214,19 @@ def empty_unsupported_report(
 # ---------------------------------------------------------------------------
 
 
+def _mysql_index_requires_prefix(typ: str) -> bool:
+    """True when MySQL/MariaDB would need a prefix length to index this type.
+
+    TEXT/BLOB/JSON cannot be a PRIMARY KEY or UNIQUE without a prefix. Inventing
+    ``(255)`` would enforce a different uniqueness rule than the source, so the
+    planner refuses rather than approximating.
+    """
+    u = re.sub(r"\s+", "", (typ or "").strip().upper())
+    if not u:
+        return False
+    return bool(re.match(r"^(TINY|MEDIUM|LONG)?(TEXT|BLOB)\b|^JSON\b", u))
+
+
 def _q(ident: str, dialect: str) -> str:
     from connectors.sql_identifiers import quote_sql_identifier
 
@@ -1962,7 +2280,24 @@ def _emit_check_aspect(
 
     payload = catalog.check_constraints_meta
     if not payload:
-        return False
+        # Legacy catalog shape: a list of predicate strings, no meta envelope.
+        # Same planner — never a second "v1 unsupported" path that drops a
+        # portable IN/comparison CHECK the meta path would carry.
+        raw = [
+            str(pred).strip()
+            for pred in (catalog.check_constraints or [])
+            if str(pred).strip()
+        ]
+        if not raw:
+            return False
+        payload = {
+            "dialect": catalog.dialect,
+            "status": "measured",
+            "items": [
+                {"name": f"check_{idx}", "predicate": pred, "columns": []}
+                for idx, pred in enumerate(raw, start=1)
+            ],
+        }
     status = str(payload.get("status") or "")
     if status != "measured":
         report.items.append(
@@ -2216,6 +2551,12 @@ def _emit_unsupported_catalog(
     skip_check: bool = False,
     skip_index: bool = False,
     skip_identity: bool = False,
+    skip_collation: bool = False,
+    skip_offset_label: bool = False,
+    skip_encoding: bool = False,
+    skip_decimal: bool = False,
+    skip_unicode_form: bool = False,
+    skip_charset: bool = False,
 ) -> None:
     if catalog.foreign_keys:
         for fk in catalog.foreign_keys[:20]:
@@ -2251,27 +2592,17 @@ def _emit_unsupported_catalog(
 
     if skip_check:
         pass
-    elif catalog.check_constraints:
-        for chk in catalog.check_constraints[:20]:
-            report.items.append(
-                SchemaFidelityItem(
-                    aspect="check",
-                    name="check",
-                    status="unsupported",
-                    reason="CHECK constraints are not carried on create-new in v1.",
-                    source_detail=str(chk)[:240],
-                )
-            )
     else:
-        # CHECK is not loaded from PG/SQLite catalogs yet — never certify absence.
+        # No CHECK catalog was measured (dialect without a reader, or probe
+        # never ran). Absence is unproven — never a silent skip.
         report.items.append(
             SchemaFidelityItem(
                 aspect="check",
                 name="*",
                 status="unsupported",
                 reason=(
-                    "CHECK constraints are not introspected for this source dialect "
-                    "in v1; refuse to certify absence."
+                    "CHECK constraints were not measured on this source catalog; "
+                    "refuse to certify absence."
                 ),
             )
         )
@@ -2338,20 +2669,63 @@ def _emit_unsupported_catalog(
             "Identity/sequence RESTART values are not carried; SERIAL polarity may widen.",
             "No identity columns flagged on source.",
         )
-    _aspect_list(
-        "collation",
-        bool(catalog.collations),
-        "Collation is annotated on introspect but not emitted on create-new DDL.",
-        "No per-column collations on source catalog.",
-    )
-    report.items.append(
-        SchemaFidelityItem(
-            aspect="charset",
-            name="*",
-            status="unknown",
-            reason="Character set is not introspected for this source dialect.",
+    if not skip_collation:
+        _aspect_list(
+            "collation",
+            bool(catalog.collations),
+            "Collation equality could not be planned for this destination.",
+            "No per-column collations on source catalog.",
         )
-    )
+    if not skip_offset_label:
+        _aspect_list(
+            "offset_label",
+            False,
+            "Originating offset label could not be planned for this destination.",
+            "No aware-temporal columns on the source catalog.",
+        )
+    if not skip_encoding:
+        _aspect_list(
+            "encoding",
+            bool(catalog.charsets),
+            "Unicode encoding capacity could not be planned for this destination.",
+            "No character columns on the source catalog.",
+        )
+    if not skip_decimal:
+        _aspect_list(
+            "decimal",
+            False,
+            "Exact decimal identity could not be planned for this destination.",
+            "No decimal/float columns on the source catalog.",
+        )
+    if not skip_unicode_form:
+        _aspect_list(
+            "unicode_form",
+            False,
+            "Unicode form / UCA canonical class could not be planned for this destination.",
+            "No character columns on the source catalog.",
+        )
+    if not skip_charset:
+        if catalog.charsets:
+            report.items.append(
+                SchemaFidelityItem(
+                    aspect="charset",
+                    name="*",
+                    status="unsupported",
+                    reason=(
+                        "Source character sets were measured but not emitted on "
+                        "create-new for this destination."
+                    ),
+                )
+            )
+        else:
+            report.items.append(
+                SchemaFidelityItem(
+                    aspect="charset",
+                    name="*",
+                    status="skipped",
+                    reason="No per-column character set measured on the source catalog.",
+                )
+            )
     _aspect_list(
         "comment",
         bool(catalog.comments),

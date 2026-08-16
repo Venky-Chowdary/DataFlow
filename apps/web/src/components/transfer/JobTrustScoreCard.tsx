@@ -44,6 +44,8 @@ export function JobTrustScoreCard({
       ? { label: "Open quarantine", onClick: onOpenQuarantine }
       : action.code === "reconcile" && onOpenValidate
         ? { label: "Open Validate", onClick: onOpenValidate }
+        : action.code === "append_delta" && onOpenValidate
+          ? { label: "Review Gate-8 proof", onClick: onOpenValidate }
         : action.code === "map" && onOpenMap
           ? { label: "Back to Map", onClick: onOpenMap }
           : action.code === "resume" && onResume
@@ -84,13 +86,13 @@ export function JobTrustScoreCard({
         </ul>
       )}
       <div className="df2-trust-score-next">
-        <DtIcon name={action.code === "ok" ? "check" : "alert"} size={14} />
+        <DtIcon name={action.code === "ok" || action.code === "append_delta" ? "check" : "alert"} size={14} />
         <div>
           <strong>Next step · {action.label}</strong>
           <span>{action.detail}</span>
         </div>
         {cta && (
-          <Button size="sm" variant={action.code === "ok" ? "ghost" : "secondary"} onClick={cta.onClick}>
+          <Button size="sm" variant={action.code === "ok" || action.code === "append_delta" ? "ghost" : "secondary"} onClick={cta.onClick}>
             {cta.label}
           </Button>
         )}

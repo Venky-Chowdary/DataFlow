@@ -233,7 +233,13 @@ TOOL_DEFINITIONS: list[dict] = [
     },
     {
         "name": "plan_transfer_route",
-        "description": "Plan an any-to-any transfer route with sync mode, schema policy, validation gates, and risk controls.",
+        "description": (
+            "Plan an any-to-any transfer route with sync mode, schema policy, validation gates, "
+            "and risk controls. When source, destination, and table resolve to saved connectors, "
+            "this delegates to plan_transfer and must forward contract_id, require_signed_contract, "
+            "validation_mode, and schema_policy — never invent a contract, skip_preflight, or "
+            "propagate_all. A generic sketch is not a plan for the operator's data."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
@@ -243,6 +249,18 @@ TOOL_DEFINITIONS: list[dict] = [
                 "table": {"type": "string", "description": "Source table — required for a real plan"},
                 "dest_table": {"type": "string", "description": "Destination table (defaults to the source name)"},
                 "sync_mode": {"type": "string"},
+                "leftover_nl": {
+                    "type": "string",
+                    "description": "Remaining operator prose (contract / migrate / data rules). Never parse skip_preflight.",
+                },
+                "validation_mode": {"type": "string", "enum": ["strict", "balanced", "lenient"]},
+                "schema_policy": {
+                    "type": "string",
+                    "enum": ["manual_review", "type_locked", "pause_on_change"],
+                    "description": "Spoken schema posture only — never invent propagate_all",
+                },
+                "contract_id": {"type": "string", "description": "Data contract to preview on the plan (read-only)"},
+                "require_signed_contract": {"type": "boolean"},
             },
             "required": [],
         },
@@ -250,16 +268,23 @@ TOOL_DEFINITIONS: list[dict] = [
     {
         "name": "plan_transfer",
         "description": (
-            "Plan a real transfer between two saved connectors: introspect both schemas live, "
+            "Plan a real transfer between two saved connectors: introspect both schemas live "
+            "(or peek a CALL/SELECT result — never treat a procedure stream name as a table), "
             "map columns, list type conversions and lossy casts, and run the 9 preflight gates. "
+            "CDC/SCD2/mirror are refused for procedure/query sources. "
             "Read-only — it never moves data. Use whenever the operator asks what a transfer "
-            "would do, or before starting one."
+            "would do, or before starting one. When a contract_id is supplied, the plan "
+            "names the bind and breaker (Confirm still fail-closed on SIGNED / OPEN)."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "source_connector_name": {"type": "string", "description": "Saved source connector"},
-                "source_table": {"type": "string", "description": "Source table or collection"},
+                "source_table": {"type": "string", "description": "Source table, collection, or a CALL/SELECT statement"},
+                "source_read_mode": {"type": "string", "description": "table, query, or procedure"},
+                "procedure_call": {"type": "string", "description": "CALL/EXEC text when source_read_mode is procedure"},
+                "source_query": {"type": "string", "description": "Read-only SELECT when source_read_mode is query"},
+                "procedure_params": {"type": "object", "description": "Bound :name parameters for CALL/SELECT"},
                 "dest_connector_name": {"type": "string", "description": "Saved destination connector"},
                 "dest_table": {"type": "string", "description": "Destination table (defaults to the source name)"},
                 "sync_mode": {
@@ -270,8 +295,15 @@ TOOL_DEFINITIONS: list[dict] = [
                     ),
                 },
                 "validation_mode": {"type": "string", "enum": ["strict", "balanced", "lenient"]},
+                "schema_policy": {
+                    "type": "string",
+                    "enum": ["manual_review", "type_locked", "pause_on_change"],
+                    "description": "Spoken schema posture only — never invent propagate_all",
+                },
+                "contract_id": {"type": "string", "description": "Data contract to preview on the plan (read-only)"},
+                "require_signed_contract": {"type": "boolean"},
             },
-            "required": ["source_table"],
+            "required": [],
         },
     },
     {
@@ -286,12 +318,24 @@ TOOL_DEFINITIONS: list[dict] = [
             "properties": {
                 "source_connector_name": {"type": "string"},
                 "source_table": {"type": "string"},
+                "source_read_mode": {"type": "string"},
+                "procedure_call": {"type": "string"},
+                "source_query": {"type": "string"},
+                "procedure_params": {"type": "object"},
                 "dest_connector_name": {"type": "string"},
                 "dest_table": {"type": "string"},
                 "sync_mode": {"type": "string"},
                 "limit": {"type": "integer", "description": "Cap rows moved (0 = all)"},
+                "validation_mode": {"type": "string", "enum": ["strict", "balanced", "lenient"]},
+                "schema_policy": {
+                    "type": "string",
+                    "enum": ["manual_review", "type_locked", "pause_on_change"],
+                    "description": "Spoken schema posture only — never invent propagate_all",
+                },
+                "contract_id": {"type": "string", "description": "Signed data contract to enforce on Confirm"},
+                "require_signed_contract": {"type": "boolean"},
             },
-            "required": ["source_table"],
+            "required": [],
         },
     },
     {
@@ -309,6 +353,7 @@ TOOL_DEFINITIONS: list[dict] = [
                 "has_cursor": {"type": "boolean"},
                 "has_primary_key": {"type": "boolean"},
                 "needs_history": {"type": "boolean"},
+                "source_read_mode": {"type": "string", "description": "table, query, or procedure"},
             },
             "required": [],
         },
@@ -360,7 +405,10 @@ TOOL_DEFINITIONS: list[dict] = [
     },
     {
         "name": "list_schedules",
-        "description": "List pipeline schedules (Pipelines page) with cadence, next run, and last status.",
+        "description": (
+            "List pipeline schedules (Pipelines page) with cadence, next run, last status, "
+            "and bound contract / breaker when one is set."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
@@ -371,7 +419,10 @@ TOOL_DEFINITIONS: list[dict] = [
     },
     {
         "name": "get_schedule",
-        "description": "Fetch one pipeline schedule by id or name.",
+        "description": (
+            "Fetch one pipeline schedule by id or name, including route, sync mode, "
+            "and bound contract / breaker when one is set."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
@@ -1580,6 +1631,11 @@ class DataPilotTools:
         table: str = "",
         dest_table: str = "",
         sync_mode: str = "",
+        leftover_nl: str = "",
+        contract_id: str = "",
+        require_signed_contract: Any = None,
+        validation_mode: str = "",
+        schema_policy: str = "",
     ) -> ToolResult:
         """Route guidance. Real plan when connectors resolve, honest sketch otherwise.
 
@@ -1587,7 +1643,24 @@ class DataPilotTools:
         gate list whose IDs did not exist in ``PREFLIGHT_GATES``. Now the named
         gates come from the registry, and naming a table gets the operator the
         engine's actual mapping and gate results instead of a guess.
+
+        Bind / validation / schema posture must survive the hop into
+        ``plan_transfer``. Unbound still leaves enforce unset. A generic sketch
+        names the requested posture but is not a plan for the operator's data.
         """
+        bind = resolve_transfer_bind_kwargs(
+            leftover_nl,
+            source,
+            destination,
+            contract_id=contract_id,
+            require_signed_contract=require_signed_contract,
+            validation_mode=validation_mode,
+            schema_policy=schema_policy,
+        )
+        source_clean, _ = parse_transfer_bind_and_rules(source)
+        dest_clean, _ = parse_transfer_bind_and_rules(destination)
+        source = (source_clean or source or "").strip()
+        destination = (dest_clean or destination or "").strip()
         if source and destination and table:
             from .transfer_tools import plan_transfer
 
@@ -1597,6 +1670,7 @@ class DataPilotTools:
                 dest_connector_name=destination,
                 dest_table=dest_table or table,
                 sync_mode=sync_mode or workload,
+                **bind,
             )
             if planned.success:
                 return planned
@@ -1615,6 +1689,7 @@ class DataPilotTools:
             "source": source or "source not specified",
             "destination": destination or "destination not specified",
             "required_gates": gate_ids,
+            **bind,
             "note": (
                 "This is the standard gate sequence, not a plan for your data. "
                 "Name two saved connectors and a table and I will introspect both "
@@ -1655,8 +1730,24 @@ class DataPilotTools:
         has_cursor: bool = False,
         has_primary_key: bool = False,
         needs_history: bool = False,
+        source_read_mode: str = "",
     ) -> ToolResult:
         w = workload.lower()
+        callable_src = (source_read_mode or "").strip().lower() in {"procedure", "query"}
+        if callable_src and ("cdc" in w or needs_history or "scd" in w or "mirror" in w):
+            return ToolResult(name="recommend_sync_mode", success=True, output={
+                "recommended_mode": "Full Refresh Append",
+                "reason": (
+                    "CALL/SELECT is a result-set snapshot, not a WAL/binlog or table "
+                    "identity. CDC, SCD2, and mirror are refused. Use full refresh, "
+                    "or incremental only when the procedure is cursor-stable."
+                ),
+                "requires": {
+                    "cursor": False,
+                    "primary_key": False,
+                    "cdc_log_access": False,
+                },
+            })
         if "cdc" in w:
             mode = "Incremental CDC"
             reason = "Source changes should be read from a log stream and resumed from cursor state."
@@ -1769,7 +1860,9 @@ class DataPilotTools:
         return None, None
 
     def _schedule_summary(self, s) -> dict:
-        return {
+        from services.schedule_store import schedule_bind_summary
+
+        row = {
             "id": s.id,
             "name": s.name,
             "enabled": s.enabled,
@@ -1778,11 +1871,20 @@ class DataPilotTools:
             "timezone": s.timezone,
             "source_table": s.source_table,
             "dest_table": s.dest_table,
+            "sync_mode": getattr(s, "sync_mode", "") or "",
             "next_run_at": s.next_run_at,
             "last_run_at": s.last_run_at,
             "last_status": s.last_status,
             "run_count": s.run_count,
         }
+        validation_mode = str(getattr(s, "validation_mode", "") or "").strip()
+        schema_policy = str(getattr(s, "schema_policy", "") or "").strip()
+        if validation_mode:
+            row["validation_mode"] = validation_mode
+        if schema_policy:
+            row["schema_policy"] = schema_policy
+        row.update(schedule_bind_summary(s))
+        return row
 
     def _list_schedules(self, limit: int = 20) -> ToolResult:
         from services.schedule_store import list_schedules
@@ -1815,7 +1917,15 @@ class DataPilotTools:
                 error="Which pipeline should I run? Give a schedule name or id.",
             )
         from .ack_ledger import get_ack_ledger
+        from services.schedule_store import assert_schedule_run_allowed
 
+        try:
+            bind = assert_schedule_run_allowed(sched)
+        except ValueError as exc:
+            return ToolResult(name="run_schedule_now", success=False, output=None, error=str(exc))
+
+        sync_mode = str(getattr(sched, "sync_mode", "") or "")
+        overwrite = sync_mode == "full_refresh_overwrite"
         preview = {
             "schedule_id": sched.id,
             "name": sched.name,
@@ -1823,8 +1933,15 @@ class DataPilotTools:
             "dest_connector_id": getattr(sched, "dest_connector_id", "") or "",
             "source_table": getattr(sched, "source_table", "") or "",
             "dest_table": getattr(sched, "dest_table", "") or "",
-            "sync_mode": getattr(sched, "sync_mode", "") or "",
+            "sync_mode": sync_mode,
+            **bind,
         }
+        validation_mode = str(getattr(sched, "validation_mode", "") or "").strip()
+        schema_policy = str(getattr(sched, "schema_policy", "") or "").strip()
+        if validation_mode:
+            preview["validation_mode"] = validation_mode
+        if schema_policy:
+            preview["schema_policy"] = schema_policy
         ack_id = get_ack_ledger().put(
             kind="run_schedule",
             payload={"schedule_id": sched.id, "name": sched.name},
@@ -1839,6 +1956,7 @@ class DataPilotTools:
                 "name": sched.name,
                 "label": f"Run pipeline “{sched.name}” now",
                 "risk": "mutate",
+                "destructive": overwrite,
                 "requires_confirm": True,
                 "ack_id": ack_id,
                 "preview": preview,
@@ -2009,6 +2127,13 @@ class DataPilotTools:
         sync_mode: str = "",
         schema_policy: str = "manual_review",
         validation_mode: str = "balanced",
+        source_timezone: str = "",
+        source_read_mode: str = "",
+        procedure_call: str = "",
+        source_query: str = "",
+        procedure_params: Any = None,
+        contract_id: str = "",
+        require_signed_contract: Any = None,
     ) -> ToolResult:
         from .transfer_tools import plan_transfer
 
@@ -2022,6 +2147,13 @@ class DataPilotTools:
             sync_mode=sync_mode,
             schema_policy=schema_policy,
             validation_mode=validation_mode,
+            source_timezone=source_timezone,
+            source_read_mode=source_read_mode,
+            procedure_call=procedure_call,
+            source_query=source_query,
+            procedure_params=procedure_params,
+            contract_id=contract_id,
+            require_signed_contract=require_signed_contract,
         )
 
     def _start_transfer(
@@ -2037,6 +2169,12 @@ class DataPilotTools:
         validation_mode: str = "balanced",
         limit: int = 0,
         source_timezone: str = "",
+        source_read_mode: str = "",
+        procedure_call: str = "",
+        source_query: str = "",
+        procedure_params: Any = None,
+        contract_id: str = "",
+        require_signed_contract: Any = None,
     ) -> ToolResult:
         from .transfer_tools import start_transfer
 
@@ -2052,6 +2190,12 @@ class DataPilotTools:
             validation_mode=validation_mode,
             limit=limit,
             source_timezone=source_timezone,
+            source_read_mode=source_read_mode,
+            procedure_call=procedure_call,
+            source_query=source_query,
+            procedure_params=procedure_params,
+            contract_id=contract_id,
+            require_signed_contract=require_signed_contract,
         )
 
     def _analyze_result(
@@ -2837,6 +2981,34 @@ _PLAN_ONLY_WORDS = (
     "check", "simulate", "estimate", "before i", "safe", "should i",
     "is it ok", "risk",
 )
+# Explicit bind only — never invent a contract from "data contract" / "open contracts".
+_CONTRACT_CLAUSE_RE = re.compile(
+    r"(?:,\s*)?(?:with|under|using|against|bind(?:ing)?|enforce(?:ing)?)\s+"
+    r"(?:the\s+)?(?:signed\s+)?(?:data\s+)?contract(?:\s+id)?\s*[:=]?\s*"
+    r"(?P<cid>[A-Za-z][A-Za-z0-9_.:-]{1,63})",
+    re.IGNORECASE,
+)
+_CONTRACT_ID_BARE_RE = re.compile(
+    r"\bcontract(?:\s+id)?\s*[:=]?\s*"
+    r"(?P<cid>[A-Za-z]{2,}[-_][A-Za-z0-9_.:-]+|[0-9a-fA-F]{8,})\s*$",
+    re.IGNORECASE,
+)
+_CONTRACT_ID_STOP = frozenset({
+    "id", "the", "a", "an", "my", "our", "this", "that", "data", "signed",
+})
+_VALIDATION_CLAUSE_RE = re.compile(
+    r"(?:,\s*)?(?:with|using|in)?\s*(?:strict|balanced|lenient)\s+validation\b",
+    re.IGNORECASE,
+)
+_RULES_CLAUSE_RE = re.compile(
+    r"(?:,\s*)?(?:following|per|under|obey(?:ing)?)\s+(?:the\s+)?(?:data|migration)\s+rules\b",
+    re.IGNORECASE,
+)
+_SCHEMA_CLAUSE_RE = re.compile(
+    r"(?:,\s*)?(?:with|using)?\s*(?:type-locked|type locked|lock types|lock type)\s+schema\b"
+    r"|(?:,\s*)?(?:with|using)?\s*pause\s+on\s+(?:schema\s+)?change\b",
+    re.IGNORECASE,
+)
 
 
 def _strip_transfer_tail(dest: str) -> tuple[str, str]:
@@ -2862,9 +3034,94 @@ def _strip_transfer_tail(dest: str) -> tuple[str, str]:
     return dest[: tail.start()].strip(), mode
 
 
+def parse_transfer_bind_and_rules(message: str) -> tuple[str, dict[str, Any]]:
+    """Pull explicit contract / validation / schema posture from NL.
+
+    Never invents a contract id. Never parses skip_preflight. Selecting a
+    contract defaults require-signed. ``migrate`` / data-or-migration-rules
+    language selects strict validation — the Studio fail-fast bar — without
+    relaxing schema_policy.
+    """
+    extras: dict[str, Any] = {}
+    original = str(message or "")
+    extras.update(parse_transfer_rule_posture(original.lower()))
+    extras.update(parse_transfer_schema_posture(original.lower()))
+    text = original
+    hit = _CONTRACT_CLAUSE_RE.search(text) or _CONTRACT_ID_BARE_RE.search(text)
+    if hit:
+        cid = str(hit.group("cid") or "").strip()
+        if cid and cid.lower() not in _CONTRACT_ID_STOP:
+            extras["contract_id"] = cid
+            extras["require_signed_contract"] = True
+            text = f"{text[:hit.start()]} {text[hit.end():]}"
+    text = _VALIDATION_CLAUSE_RE.sub(" ", text)
+    text = _RULES_CLAUSE_RE.sub(" ", text)
+    text = _SCHEMA_CLAUSE_RE.sub(" ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text, extras
+
+
+def resolve_transfer_bind_kwargs(
+    *texts: str,
+    contract_id: str = "",
+    require_signed_contract: Any = None,
+    validation_mode: str = "",
+    schema_policy: str = "",
+) -> dict[str, Any]:
+    """Merge spoken + explicit bind / data-rule posture. Never invents a bind.
+
+    Explicit kwargs win when set. Unbound leaves the dict without
+    ``contract_id`` so ``enforce_contract`` stays unset. ``skip_preflight``
+    and ``propagate_all`` are never returned.
+    """
+    parsed: dict[str, Any] = {}
+    for blob in texts:
+        if blob:
+            parsed.update(parse_transfer_bind_and_rules(str(blob))[1])
+    out: dict[str, Any] = {}
+    cid = str(contract_id or parsed.get("contract_id") or "").strip()
+    if cid:
+        out["contract_id"] = cid
+        if require_signed_contract is None:
+            out["require_signed_contract"] = bool(parsed.get("require_signed_contract", True))
+        else:
+            out["require_signed_contract"] = bool(require_signed_contract)
+    mode = str(validation_mode or parsed.get("validation_mode") or "").strip()
+    if mode in {"strict", "balanced", "lenient"}:
+        out["validation_mode"] = mode
+    policy = str(schema_policy or parsed.get("schema_policy") or "").strip()
+    if policy in {"manual_review", "type_locked", "pause_on_change"}:
+        out["schema_policy"] = policy
+    return out
+
+
+def parse_transfer_rule_posture(lowered: str) -> dict[str, Any]:
+    """Explicit validation posture. Empty when the tool default should stand."""
+    if any(w in lowered for w in ("lenient", "permissive", "best effort", "best-effort")):
+        return {"validation_mode": "lenient"}
+    if any(w in lowered for w in (
+        "strict", "zero loss", "zero-loss", "fail fast", "fail-fast",
+        "data rules", "migration rules", "migrate", "migration",
+    )):
+        return {"validation_mode": "strict"}
+    if "balanced" in lowered:
+        return {"validation_mode": "balanced"}
+    return {}
+
+
+def parse_transfer_schema_posture(lowered: str) -> dict[str, Any]:
+    """Explicit schema policy only — never invent propagate_all from chat."""
+    if "pause on" in lowered and "change" in lowered:
+        return {"schema_policy": "pause_on_change"}
+    if any(w in lowered for w in ("type-locked", "type locked", "lock types", "lock type")):
+        return {"schema_policy": "type_locked"}
+    return {}
+
+
 def parse_transfer_intent(message: str) -> dict | None:
     """Extract source/destination/table from a transfer request, or None."""
-    text = (message or "").strip()
+    cleaned, extras = parse_transfer_bind_and_rules(message)
+    text = cleaned.strip()
     if not text:
         return None
     match = (
@@ -2890,6 +3147,7 @@ def parse_transfer_intent(message: str) -> dict | None:
                     "dest_connector_name": dest[:80],
                     "sync_mode": mode,
                     "plan_only": True,  # missing source → plan/clarify, never mutate
+                    **extras,
                 }
         return None
     table = match.group("table").strip()
@@ -2910,6 +3168,7 @@ def parse_transfer_intent(message: str) -> dict | None:
         "sync_mode": mode,
         # Asking what a transfer *would* do must never stage a mutation.
         "plan_only": any(w in lowered for w in _PLAN_ONLY_WORDS),
+        **extras,
     }
 
 
@@ -3486,33 +3745,36 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
             "into mysql", "into warehouse",
         )
     ):
+        cleaned, extras = parse_transfer_bind_and_rules(message)
+        route_text = cleaned.lower()
         src, dst = "", ""
         route = re.search(
             r"(?:from|source|out of)\s+(.+?)\s+(?:to|into|->|destination)\s+(.+?)\s*$",
-            lower,
+            route_text,
         ) or re.search(
             r"move\s+(?:data|rows|records)?\s*(?:from\s+)?(.+?)\s+(?:to|into)\s+(.+?)\s*$",
-            lower,
+            route_text,
         ) or re.search(
             r"(?:cdc|copy|sync|replicate)\s+(?:data\s+)?(?:from\s+)?(.+?)\s+(?:to|into)\s+(.+?)\s*$",
-            lower,
+            route_text,
         ) or re.search(
             r"(?:plan|route)\s+(?:a\s+|the\s+)?(?:route\s+)?(?:from\s+)?(.+?)\s+(?:to|into)\s+(.+?)\s*$",
-            lower,
+            route_text,
         ) or re.search(
             r"(?:moving|move)\s+(?:data\s+)?(?:out\s+of\s+)?(.+?)\s+(?:into|to)\s+(.+?)\s*$",
-            lower,
+            route_text,
         ) or re.search(
             r"go\s+from\s+(.+?)\s+into\s+(.+?)\s*$",
-            lower,
+            route_text,
         )
         if route:
             src = _capture_connector_name(route.group(1))
             dst = _capture_connector_name(route.group(2))
         planned.append(("plan_transfer_route", {
-            "source": src or message[:80],
-            "destination": dst or message[-80:],
+            "source": src or cleaned[:80] or message[:80],
+            "destination": dst or cleaned[-80:] or message[-80:],
             "workload": "cdc" if "cdc" in lower else "unknown",
+            **{k: v for k, v in extras.items() if v},
         }))
         # Prefer route planning over a bare sync-mode recommendation.
         planned = [(n, a) for n, a in planned if n != "recommend_sync_mode"]

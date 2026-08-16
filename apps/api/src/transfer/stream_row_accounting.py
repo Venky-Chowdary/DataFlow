@@ -51,6 +51,32 @@ def stamp_source_row_count(
     dest_summary.pop("source_row_count", None)
 
 
+def begin_table_population(checkpoint: Any) -> None:
+    """Start a fresh population count for one table of a sequential multi-stream job.
+
+    The job checkpoint is shared across streams so a crash can resume the job,
+    but row offset / keyset / quarantine ledgers are *per table*. Leaving the
+    parent's offset in place made the child start at that count: Gate-8 then
+    compared two tables' source rows to the last table's destination.
+    """
+    if checkpoint is None:
+        return
+    checkpoint.offset = 0
+    checkpoint.chunk_index = 0
+    checkpoint.rows_processed = 0
+    checkpoint.file_offset = 0
+    checkpoint.cursor_value = None
+    checkpoint.cursor_column = ""
+    checkpoint.dynamodb_cursor = None
+    checkpoint.es_search_after = None
+    checkpoint.redis_scan_state = None
+    checkpoint.kafka_cursor = None
+    checkpoint.rejected_rows = 0
+    checkpoint.coerced_null_rows = 0
+    checkpoint.rejected_details = []
+    checkpoint.rejected_details_truncated = 0
+
+
 def stamp_incremental_no_op(dest_summary: dict[str, Any]) -> None:
     """Record an incremental pass that found nothing past its watermark.
 

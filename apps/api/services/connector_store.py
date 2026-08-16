@@ -66,22 +66,6 @@ def _resolve_connector_schema(
     return resolved or ""
 
 
-# Databases / warehouses / object stores that are valid as source *and* destination.
-# Catalog UI may pass role=source|destination from the filter tab — that must not
-# lock the saved profile into a one-sided capability.
-_BIDIRECTIONAL_TYPES = frozenset({
-    "mysql", "mariadb", "singlestore",
-    "postgresql", "postgres", "redshift", "cockroachdb", "timescaledb", "supabase",
-    "sqlserver", "mssql", "synapse", "oracle", "db2", "generic_sql",
-    "sqlite", "duckdb", "h2",
-    "mongodb", "dynamodb", "cassandra", "couchbase", "elasticsearch", "redis",
-    "snowflake", "bigquery", "databricks", "clickhouse", "trino", "presto", "questdb",
-    "s3", "amazon_s3", "gcs", "google_cloud_storage", "adls", "azure_blob", "azure_blob_storage",
-    "kafka", "apache_kafka", "iceberg", "apache_iceberg",
-    "salesforce", "hubspot",
-})
-
-
 def _store_path() -> Path:
     """Return the effective file store path.
 
@@ -122,6 +106,7 @@ class SavedConnector:
     workspace_id: str = ""
     last_tested_at: str | None = None
     last_test_ok: bool | None = None
+    last_used_at: str | None = None
     credentials_rotated_at: str | None = None
     created_at: str = field(default_factory=lambda: _now())
 
@@ -160,6 +145,7 @@ class SavedConnector:
             workspace_id=data.get("workspace_id", ""),
             last_tested_at=data.get("last_tested_at"),
             last_test_ok=data.get("last_test_ok") if "last_test_ok" in data else None,
+            last_used_at=data.get("last_used_at"),
             credentials_rotated_at=data.get("credentials_rotated_at"),
             created_at=data.get("created_at", _now()),
         )
@@ -569,6 +555,45 @@ def mark_tested(connector_id: str, ok: bool) -> None:
             connectors[i] = SavedConnector.from_dict({**c.to_dict(), **patch})
             _save_all(connectors)
             return
+
+
+def mark_used(*connector_ids: str | None) -> int:
+    """Stamp last_used_at on saved connectors that actually ran a transfer."""
+    now = _now()
+    patch = {"last_used_at": now}
+    seen: set[str] = set()
+    stamped = 0
+    for raw in connector_ids:
+        cid = str(raw or "").strip()
+        if not cid or cid in seen:
+            continue
+        seen.add(cid)
+        if _use_mongo():
+            try:
+                coll = _mongo_collection()
+                result = coll.update_one({"_id": cid}, {"$set": patch})
+                if result.matched_count:
+                    stamped += 1
+                    try:
+                        connectors = _load_all()
+                        for i, c in enumerate(connectors):
+                            if c.id == cid:
+                                connectors[i] = SavedConnector.from_dict({**c.to_dict(), **patch})
+                                _save_all(connectors)
+                                break
+                    except Exception as mirror_exc:
+                        logger.debug("File mirror mark_used skipped: %s", mirror_exc)
+                    continue
+            except Exception as exc:
+                logger.warning("MongoDB mark_used failed, falling back to file: %s", exc)
+        connectors = _load_all()
+        for i, c in enumerate(connectors):
+            if c.id == cid:
+                connectors[i] = SavedConnector.from_dict({**c.to_dict(), **patch})
+                _save_all(connectors)
+                stamped += 1
+                break
+    return stamped
 
 
 def mask_connector(c: SavedConnector) -> dict[str, Any]:

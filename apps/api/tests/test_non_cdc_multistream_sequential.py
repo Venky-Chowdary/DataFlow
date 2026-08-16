@@ -99,6 +99,13 @@ def test_non_cdc_sequential_uses_per_stream_mappings_and_remaps_tables() -> None
     assert len(summary["streams"]) == 2
     assert summary["streams"][0]["name"] == "a"
     assert summary["streams"][1]["status"] == "completed"
+    assert "row_accounting" in summary["streams"][0]
+    assert summary["streams"][0]["row_accounting"]["conservation_kind"] in {
+        "unmeasured",
+        "empty_pass",
+        "append_delta",
+        "keyed",
+    }
     assert any("MULTI-STREAM sequential" in line for line in ddl)
 
 

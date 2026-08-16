@@ -4,7 +4,7 @@ import { DtIcon } from "./DtIcon";
 import type { IndexedMapping } from "../lib/columnWorkbench";
 import { attentionMappings, mappingTier } from "../lib/columnWorkbench";
 import type { EditableMapping } from "../lib/mapping";
-import { engineStampedRiskChip } from "../lib/mapping";
+import { classifyMappingReview, engineStampedRiskChip, mappingReviewKindMeta } from "../lib/mapping";
 
 interface MappingIntelligencePanelProps {
   allMappings: EditableMapping[];
@@ -189,9 +189,17 @@ export function MappingIntelligencePanel({
                     </span>
                   )}
                   {mapping.isPii && <span className="df2-badge df2-badge-run df2-badge-xs">PII</span>}
-                  {mapping.requiresReview && !mapping.approved && !hasFidelity && (
-                    <span className="df2-badge df2-badge-run df2-badge-xs">review</span>
-                  )}
+                  {(() => {
+                    if (mapping.approved || hasFidelity) return null;
+                    const kind = classifyMappingReview(mapping);
+                    if (!kind && !mapping.requiresReview) return null;
+                    const meta = mappingReviewKindMeta(kind || "generic");
+                    return (
+                      <span className="df2-badge df2-badge-run df2-badge-xs" title={meta.detail}>
+                        {meta.chip}
+                      </span>
+                    );
+                  })()}
                 </button>
               </li>
             );

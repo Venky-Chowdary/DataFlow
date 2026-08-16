@@ -64,7 +64,7 @@ export const PAGE_META: Record<Screen | "login", PageMeta> = {
   connectors: {
     title: "Connectors",
     description:
-      "Manage sources and destinations — PostgreSQL, MySQL, MongoDB, SQL Server, Oracle, Snowflake, BigQuery, S3, Iceberg, and transfer-ready drivers with honest labels.",
+      "Manage sources and destinations — PostgreSQL, MySQL, MongoDB, SQL Server, Oracle, Snowflake, BigQuery, S3, Iceberg, and the rest of your stack.",
     keywords: "data connectors, PostgreSQL connector, Snowflake connector, S3 connector, database connection",
     robots: "noindex",
   },

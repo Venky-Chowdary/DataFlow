@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -102,6 +103,162 @@ def _pinecone_total_vector_count(
         return max(0, int(raw or 0))
     except (TypeError, ValueError):
         return 0
+
+
+_PINECONE_LIST_PAGE = 100
+_PINECONE_FETCH_BATCH = 100
+
+
+def _pinecone_vector_id(entry: Any) -> str:
+    if isinstance(entry, dict):
+        return str(entry.get("id") or "").strip()
+    return str(entry or "").strip()
+
+
+def _pinecone_metadata_source_id(vector: Any) -> Any:
+    if not isinstance(vector, dict):
+        return None
+    meta = vector.get("metadata")
+    if not isinstance(meta, dict):
+        return None
+    if "source_id" in meta:
+        return meta.get("source_id")
+    return meta.get("sourceId")
+
+
+def scan_source_ids(
+    cfg: Mapping[str, Any],
+    *,
+    table_name: str,
+    max_entities: int = 20_000,
+) -> tuple[str, list[Any]]:
+    """Dest-engine metadata ``source_id`` values. Never ``vectorCount``.
+
+    Pinecone ``describe_index_stats`` is physical vectors (the Fivetran
+    ``_deleted`` analogue for RAG: 2 documents → 5 chunks looks like
+    duplication). Identity is DISTINCT ``source_id`` from list+fetch of
+    the namespace the writer filled. Pod indexes that cannot ``/vectors/list``
+    stay unmeasured — never fall back to ``vectorCount``.
+
+    Returns ``(state, values)`` matching Milvus/Qdrant:
+
+    * ``missing`` — named namespace absent / empty (create-on-first-write → 0)
+    * ``no_field`` — fetched vectors have no ``source_id`` metadata
+    * ``truncated`` — physical cardinality exceeds the census bound
+    * ``complete`` — every listed vector's ``source_id`` is in ``values``
+    * ``unmeasured`` — auth / transport / list-unsupported / fetch failure
+    """
+    namespace = str(table_name or cfg.get("schema") or "").strip()
+    index_url = _index_url(
+        str(cfg.get("host") or ""),
+        str(cfg.get("connection_string") or ""),
+    )
+    if not index_url:
+        return "unmeasured", []
+    try:
+        session = _requests_session()
+        key = str(cfg.get("api_key") or cfg.get("password") or cfg.get("username") or "")
+        hdrs = _headers(key)
+        stats = session.get(
+            f"{index_url}/describe_index_stats", headers=hdrs, timeout=15
+        )
+        status = int(stats.status_code)
+        if status in {401, 403}:
+            return "unmeasured", []
+        if status == 404:
+            return "unmeasured", []
+        if status != 200:
+            return "unmeasured", []
+        try:
+            body = stats.json()
+        except Exception:
+            return "unmeasured", []
+        payload = body if isinstance(body, dict) else None
+        physical = _pinecone_total_vector_count(payload, namespace=namespace)
+        cap = int(max_entities)
+        if physical == 0:
+            return "complete", []
+        if physical > cap:
+            return "truncated", []
+        ids: list[str] = []
+        token = ""
+        while True:
+            params: dict[str, Any] = {"limit": _PINECONE_LIST_PAGE}
+            if namespace:
+                params["namespace"] = namespace
+            if token:
+                params["paginationToken"] = token
+            listed = session.get(
+                f"{index_url}/vectors/list",
+                headers=hdrs,
+                params=params,
+                timeout=30,
+            )
+            if listed.status_code in {404, 400, 501}:
+                # Pod-based indexes have no list API. vectorCount is not identity.
+                return "unmeasured", []
+            if listed.status_code != 200:
+                return "unmeasured", []
+            try:
+                page = listed.json()
+            except Exception:
+                return "unmeasured", []
+            rows = page.get("vectors") if isinstance(page, dict) else None
+            if not isinstance(rows, list):
+                return "unmeasured", []
+            for entry in rows:
+                vid = _pinecone_vector_id(entry)
+                if vid:
+                    ids.append(vid)
+                if len(ids) > cap:
+                    return "truncated", []
+            pagination = page.get("pagination") if isinstance(page, dict) else None
+            nxt = ""
+            if isinstance(pagination, dict):
+                nxt = str(pagination.get("next") or "").strip()
+            if not nxt:
+                break
+            token = nxt
+        if not ids:
+            # Stats said vectors exist but list returned none — lag or ACL, not empty.
+            return "unmeasured", []
+        if len(ids) > physical:
+            return "truncated", []
+        values: list[Any] = []
+        saw_field = False
+        for i in range(0, len(ids), _PINECONE_FETCH_BATCH):
+            chunk = ids[i : i + _PINECONE_FETCH_BATCH]
+            fetch_body: dict[str, Any] = {"ids": chunk}
+            if namespace:
+                fetch_body["namespace"] = namespace
+            fetched = session.post(
+                f"{index_url}/vectors/fetch",
+                data=json.dumps(fetch_body),
+                headers=hdrs,
+                timeout=60,
+            )
+            if fetched.status_code != 200:
+                return "unmeasured", []
+            try:
+                fetched_body = fetched.json()
+            except Exception:
+                return "unmeasured", []
+            vectors = fetched_body.get("vectors") if isinstance(fetched_body, dict) else None
+            if not isinstance(vectors, dict):
+                return "unmeasured", []
+            for vid in chunk:
+                vector = vectors.get(vid)
+                if isinstance(vector, dict) and (
+                    "source_id" in (vector.get("metadata") or {})
+                    or "sourceId" in (vector.get("metadata") or {})
+                ):
+                    saw_field = True
+                values.append(_pinecone_metadata_source_id(vector))
+        if not saw_field:
+            return "no_field", []
+        return "complete", values
+    except Exception:
+        return "unmeasured", []
 
 
 @dataclass

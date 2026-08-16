@@ -213,3 +213,68 @@ export function buildValidateHonestyControls(
     ].join(" "),
   };
 }
+
+export type SchemaEvolutionStamp = {
+  action?: string;
+  should_pause?: boolean;
+  compatibility?: string;
+  compatibility_note?: string;
+  hard_breaking?: unknown[];
+  soft_net_additive?: unknown[];
+};
+
+/**
+ * Acknowledge-this-run is only valid for manual_review additive/soft drift.
+ * Hard-breaking (Confluent NONE) must remap or re-sign — Airbyte "approve myself"
+ * silently continued on column drop; we refuse that here.
+ */
+export function schemaDriftAllowsAcknowledge(
+  details?: Record<string, unknown> | null,
+): boolean {
+  if (!details) return false;
+  if (details.remediation_kind !== "acknowledge_schema_drift") return false;
+  if (details.ack_required === false) return false;
+  const evolution = schemaEvolutionFromDetails(details);
+  if (evolution.should_pause) return false;
+  if ((evolution.hard_breaking?.length ?? 0) > 0) return false;
+  if (evolution.compatibility === "none") return false;
+  return true;
+}
+
+export function schemaEvolutionFromDetails(
+  details?: Record<string, unknown> | null,
+): SchemaEvolutionStamp {
+  const raw = details?.schema_evolution;
+  if (!raw || typeof raw !== "object") return {};
+  const evo = raw as SchemaEvolutionStamp;
+  return {
+    action: typeof evo.action === "string" ? evo.action : undefined,
+    should_pause: Boolean(evo.should_pause),
+    compatibility: typeof evo.compatibility === "string" ? evo.compatibility : undefined,
+    compatibility_note:
+      typeof evo.compatibility_note === "string" ? evo.compatibility_note : undefined,
+    hard_breaking: Array.isArray(evo.hard_breaking) ? evo.hard_breaking : undefined,
+    soft_net_additive: Array.isArray(evo.soft_net_additive) ? evo.soft_net_additive : undefined,
+  };
+}
+
+export function schemaDriftCompatibilityHeadline(
+  details?: Record<string, unknown> | null,
+): string {
+  const evo = schemaEvolutionFromDetails(details);
+  const compat = evo.compatibility;
+  if (!compat) return "";
+  if (evo.compatibility_note) return `Compatibility ${compat} — ${evo.compatibility_note}`;
+  return `Compatibility ${compat}`;
+}
+
+/** Hard-breaking drift (Confluent NONE) — remap / re-sign, never acknowledge. */
+export function schemaDriftRequiresRemap(
+  details?: Record<string, unknown> | null,
+): boolean {
+  if (!details) return false;
+  const evo = schemaEvolutionFromDetails(details);
+  if (evo.should_pause) return true;
+  if ((evo.hard_breaking?.length ?? 0) > 0) return true;
+  return evo.compatibility === "none";
+}

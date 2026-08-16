@@ -209,7 +209,7 @@ class ExecuteTransferRequest(BaseModel):
     require_signed_contract: bool = False
     # Locale for ambiguous day/month dates: 'DMY' (European/Indian/Australian), 'MDY' (US), or ''.
     date_locale: str = ""
-    # Delivery guarantee selector — only at_least_once is allowed (GA).
+    # Delivery guarantee — default at_least_once; exactly_once is opt-in.
     delivery_guarantee: str = "at_least_once"
     # Validate→Execute ack trail (must match Studio Validate acknowledgments).
     compliance_acknowledged: bool = False
@@ -439,6 +439,7 @@ async def map_columns_route(body: MapColumnsRequest):
         "destination_table_exists": body.destination_table_exists,
         "plan_summary": result.get("plan_summary", {}),
         "mapping_proof": result.get("mapping_proof", {}),
+        "shape_contract": result.get("shape_contract", {}),
         "quality_issues": result.get("quality_issues", []),
         # The engine computes these; dropping them here left the Map step
         # showing client-side guesses while the real verdict stayed server-side.
@@ -649,22 +650,40 @@ async def execute_transfer_json(
     idempotency_key: str = Header(default="", alias="Idempotency-Key"),
 ):
     """JSON transfer execute for SDK/GitOps — Form upload remains on POST /transfer/run."""
-    from services.execution_engine_contract import (
-        DeliveryGuaranteeError,
-        assert_delivery_guarantee_allowed,
+    from services.cdc_exactly_once import (
+        ExactlyOnceRouteError,
+        assert_requested_cdc_delivery,
+        dest_allow_append_only,
+        route_has_cdc_pk,
     )
+    from services.execution_engine_contract import DeliveryGuaranteeError
+    from services.procedure_source import is_callable_source
     from ..transfer.background import run_transfer_async
     from ..transfer.engine import DuplicateTransferSubmission, get_transfer_engine
     from ..transfer.models import EndpointConfig, TransferRequest
 
+    src_preview = EndpointConfig.from_dict(
+        body.source.kind, body.source.model_dump(by_alias=True)
+    )
+    dst_preview = EndpointConfig.from_dict(
+        body.destination.kind, body.destination.model_dump(by_alias=True)
+    )
     try:
-        assert_delivery_guarantee_allowed(body.delivery_guarantee)
-    except DeliveryGuaranteeError as exc:
+        assert_requested_cdc_delivery(
+            body.delivery_guarantee,
+            sync_mode=body.sync_mode or "",
+            dest_type=str(getattr(dst_preview, "format", "") or ""),
+            source_type=str(getattr(src_preview, "format", "") or ""),
+            has_primary_key=route_has_cdc_pk(body.stream_contracts),
+            allow_append_only=dest_allow_append_only(dst_preview),
+            callable_source=is_callable_source(src_preview),
+        )
+    except (DeliveryGuaranteeError, ExactlyOnceRouteError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     workspace_id = _resolve_write_workspace(request, workspace_id)
-    src = EndpointConfig.from_dict(body.source.kind, body.source.model_dump(by_alias=True))
-    dst = EndpointConfig.from_dict(body.destination.kind, body.destination.model_dump(by_alias=True))
+    src = src_preview
+    dst = dst_preview
     region = (
         (body.data_region or "").strip()
         or getattr(request.state, "data_region", "")
@@ -739,6 +758,18 @@ async def execute_transfer_json(
     )
 
     _residency_check(request, dst, region)
+    from src.transfer.contract_engine import stamp_request_contract
+
+    plan_policies = (plan_payload or {}).get("policies") if plan_payload else {}
+    try:
+        stamp_request_contract(
+            request_obj,
+            explicit_id=body.contract_id or "",
+            explicit_require=bool(body.require_signed_contract),
+            policies=plan_policies if isinstance(plan_policies, dict) else {},
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     engine = get_transfer_engine()
     try:
         job_id = engine._create_pending_job(request_obj)
@@ -831,6 +862,7 @@ async def execute_transfer_json(
         "reconciliation": result.reconciliation,
         "explanation": getattr(result, "explanation", "") or "",
         "mapping_proof": getattr(result, "mapping_proof", None) or {},
+        "row_accounting": getattr(result, "row_accounting", None) or {},
     }
 
 
@@ -894,6 +926,8 @@ async def run_universal_transfer(
     approved_decision_artifact_hash: str = Form(""),
     approved_ddl_identity_hash: str = Form(""),
     decision_artifact_json: str = Form(""),
+    contract_id: str = Form(""),
+    require_signed_contract: str = Form("false"),
     request: Request = None,
     workspace_id: str = Header(default="", alias="X-Workspace-Id"),
     idempotency_key: str = Header(default="", alias="Idempotency-Key"),
@@ -1049,6 +1083,7 @@ async def run_universal_transfer(
     form_schema_policy = (schema_policy or "").strip()
     form_write_via_staging = write_via_staging.lower() in ("true", "1", "yes")
     plan_payload = None
+    plan_policies: dict = {}
 
     if plan_id and plan_id.strip():
         from services.transfer_plan_service import merge_plan_into_run
@@ -1075,6 +1110,8 @@ async def run_universal_transfer(
                 request_obj.mappings = payload["mappings"]
                 request_obj.column_types = payload.get("column_types") or {}
             policies = payload.get("policies") or {}
+            if isinstance(policies, dict):
+                plan_policies = policies
             if not form_sync_mode:
                 request_obj.sync_mode = policies.get("sync_mode", request_obj.sync_mode)
             if not form_schema_policy:
@@ -1091,6 +1128,12 @@ async def run_universal_transfer(
                 plan_contracts = payload.get("stream_contracts") or policies.get("stream_contracts")
                 if isinstance(plan_contracts, list) and plan_contracts:
                     request_obj.stream_contracts = plan_contracts
+            from services.procedure_source import merge_callable_source_extra
+
+            request_obj.source.extra = merge_callable_source_extra(
+                request_obj.source.extra,
+                payload.get("source") or {},
+            )
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
     if mappings_json.strip() and not (plan_id and plan_id.strip()):
@@ -1130,6 +1173,18 @@ async def run_universal_transfer(
             logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
     _residency_check(request, destination, region)
+
+    from src.transfer.contract_engine import stamp_request_contract
+
+    try:
+        stamp_request_contract(
+            request_obj,
+            explicit_id=contract_id,
+            explicit_require=require_signed_contract.lower() in ("true", "1", "yes"),
+            policies=plan_policies,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     engine = get_transfer_engine()
     try:
@@ -1228,6 +1283,7 @@ async def run_universal_transfer(
         "reconciliation": result.reconciliation,
         "explanation": result.explanation,
         "mapping_proof": result.mapping_proof or {},
+        "row_accounting": getattr(result, "row_accounting", None) or {},
     }
 
 

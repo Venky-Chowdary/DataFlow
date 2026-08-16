@@ -69,6 +69,10 @@ def writer_extra_kwargs(
     how SFTP host-key trust came to be verified at Validate and absent at write.
     """
     common = common or {}
+    if driver == "snowflake":
+        from services.connector_auth import snowflake_session_kwargs
+
+        return snowflake_session_kwargs(cfg)
     if driver == "sftp":
         from connectors.sftp_common import host_key_settings
 

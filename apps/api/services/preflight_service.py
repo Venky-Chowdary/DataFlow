@@ -110,6 +110,31 @@ class FilePreflightContext(PreflightContext):
         Stripping risk_acknowledged / fidelity left Validate blocked after Map
         Accept risk (G3 probe severity + G9 coercion_safety).
         """
+        live = dest_types.get(m.target)
+        stamped = live or getattr(m, "target_type", None)
+        src_type = next(
+            (
+                c.inferred_type
+                for c in self.plan.source.columns
+                if c.name == m.source
+            ),
+            None,
+        )
+        if (
+            not live
+            and stamped
+            and src_type
+            and not bool(getattr(m, "user_override", False))
+        ):
+            try:
+                from services.decision_kernel import refuse_create_new_numeric_collapse
+
+                dest_db = str(getattr(self.plan.destination, "db_type", "") or "")
+                stamped = refuse_create_new_numeric_collapse(
+                    str(src_type), str(stamped), dest_db
+                )
+            except Exception:
+                pass
         return {
             "source": m.source,
             "target": m.target,
@@ -117,16 +142,9 @@ class FilePreflightContext(PreflightContext):
             "transform": getattr(m, "transform", None),
             "requires_review": bool(getattr(m, "requires_review", False)),
             "user_override": bool(getattr(m, "user_override", False)),
-            # Prefer live dest DDL; keep stamped create-new type when absent.
-            "target_type": dest_types.get(m.target) or getattr(m, "target_type", None),
-            "source_type": next(
-                (
-                    c.inferred_type
-                    for c in self.plan.source.columns
-                    if c.name == m.source
-                ),
-                None,
-            ),
+            # Prefer live dest DDL; refuse sample-invented create-new collapse.
+            "target_type": stamped,
+            "source_type": src_type,
             "create_new": bool(getattr(m, "create_new", False)),
             "struct_policy": getattr(m, "struct_policy", None) or None,
             "struct_derived": bool(getattr(m, "struct_derived", False)),
@@ -393,6 +411,49 @@ VALIDATION_CONFIDENCE_THRESHOLDS = {
 }
 
 
+def apply_readiness_honesty_caps(out: dict[str, Any]) -> dict[str, Any]:
+    """Cap Validate readiness when G9 uniqueness is sample-only.
+
+    Gate pass-ratio can be 100% while population uniqueness is unproven.
+    Fivetran/Airbyte do not call that certified-ready. Execute may still
+    proceed; the score must not look like a migration certificate.
+    """
+    payload = out if isinstance(out, dict) else {}
+    reasons: list[str] = []
+    for gate in payload.get("gates") or []:
+        if not isinstance(gate, dict):
+            continue
+        gid = str(gate.get("id") or "").lower()
+        details = gate.get("details") if isinstance(gate.get("details"), dict) else {}
+        coverage = str(details.get("coverage") or "").lower()
+        msg = str(gate.get("message") or "").lower()
+        if "g9" in gid or "data_integrity" in gid:
+            if (
+                coverage == "sample"
+                or "population uniqueness not proven" in msg
+                or "validate sample only" in msg
+            ):
+                reasons.append("g9_sample_uniqueness")
+        if "g5" in gid or "dry_run" in gid:
+            if (
+                coverage == "sample"
+                or details.get("sample_cap") is not None
+                or "sample" in msg
+                or gid == "g5_dry_run"
+            ):
+                reasons.append("g5_sample_dry_run")
+    if reasons:
+        try:
+            score = float(payload.get("readiness_score") or 0)
+        except (TypeError, ValueError):
+            score = 0.0
+        payload["readiness_score"] = min(score, 92.0)
+        if "g9_sample_uniqueness" in reasons:
+            payload["population_uniqueness_proven"] = False
+        payload["readiness_cap_reason"] = "+".join(dict.fromkeys(reasons))
+    return payload
+
+
 def confidence_threshold_for_mode(validation_mode: str | None) -> float:
     try:
         from services.validation_mode_contract import confidence_floor_for_mode
@@ -416,6 +477,9 @@ def run_transfer_policy_gates(
     source_type: str | None = None,
     source_kind: str = "file",
     write_via_staging: bool = False,
+    source_read_mode: str = "",
+    delivery_guarantee: str = "at_least_once",
+    allow_append_only: bool = False,
 ) -> list[dict[str, Any]]:
     """Validate enterprise run policy that sits above source/destination probes."""
     contracts = [c for c in stream_contracts or [] if c.get("selected", True)]
@@ -437,6 +501,7 @@ def run_transfer_policy_gates(
             source_columns=source_columns,
             pass_status=GateStatus.PASS.value,
             block_status=GateStatus.BLOCK.value,
+            source_read_mode=source_read_mode,
         )
     )
 
@@ -570,6 +635,20 @@ def run_transfer_policy_gates(
         )
 
 
+    from services.cdc_exactly_once import preflight_delivery_gate, route_has_cdc_pk
+
+    eos_gate = preflight_delivery_gate(
+        sync_mode=sync,
+        dest_type=dest,
+        source_type=src,
+        delivery_guarantee=delivery_guarantee,
+        has_primary_key=route_has_cdc_pk(contracts),
+        allow_append_only=allow_append_only,
+        callable_source=(source_read_mode or "").strip().lower() in {"procedure", "query"},
+    )
+    if eos_gate:
+        gates.append(eos_gate)
+
     # Redis KV TTL/EXPIRE is not a first-class transfer guarantee (soft warning).
     if dest in {"redis", "redis_enterprise", "amazon_elasticache_redis", "azure_cache_redis", "google_memorystore_redis"} or src in {
         "redis", "redis_enterprise", "amazon_elasticache_redis", "azure_cache_redis", "google_memorystore_redis",
@@ -626,6 +705,7 @@ def run_file_preflight(
     destination_can_create: bool | None = None,
     destination_can_write: bool | None = None,
     privilege_probe: dict[str, Any] | None = None,
+    redshift_staging_probe: dict[str, Any] | None = None,
     available_staging_bytes: int | None = None,
     destination_db_type: str = "postgresql",
     source_connector_id: str = "",
@@ -930,6 +1010,8 @@ def run_file_preflight(
                 m if isinstance(m, dict) else dict(m or {}),
                 table=str(destination_table or ""),
             ),
+            assignment_strategy=str(m.get("assignment_strategy") or "") or None,
+            review_kind=str(m.get("review_kind") or "") or None,
         )
         for m in mappings
     ]
@@ -1038,6 +1120,17 @@ def run_file_preflight(
             columns=source_cols,
             row_count_estimate=row_count,
             error=source_error,
+            source_read_mode=str(
+                (source_config or {}).get("source_read_mode")
+                or ((source_config or {}).get("extra") or {}).get("source_read_mode")
+                or ""
+            ),
+            db_type=str(
+                (source_config or {}).get("type")
+                or (source_config or {}).get("db_type")
+                or source_format
+                or ""
+            ),
         ),
         destination=DestinationConfig(
             kind="database",
@@ -1049,6 +1142,11 @@ def run_file_preflight(
             table_exists=dest_table_exists,
             error=destination_error,
             privilege_probe=privilege_probe,
+            redshift_staging_probe=redshift_staging_probe,
+            column_nullability=dict(destination_column_nullability or {}),
+            column_defaults=dict(destination_column_defaults or {}),
+            identity_columns=list(destination_identity_columns or []),
+            generated_columns=list(destination_generated_columns or []),
         ),
         mappings=plan_mappings,
         dry_run_passed=False,
@@ -1074,11 +1172,21 @@ def run_file_preflight(
     source_duplicate_probe_pk = ""
     source_duplicate_probe_status = ""
     source_duplicate_probe_message = ""
+    from services.procedure_source import is_callable_source, source_read_mode_of
+
+    callable_src = is_callable_source(source_config)
     source_duplicate_probe_expected = bool(
         (source_connector_id or source_config)
         and source_table
         and source_kind in ("database", "cloud")
+        and not callable_src
     )
+    if callable_src:
+        source_duplicate_probe_status = "skipped_callable"
+        source_duplicate_probe_message = (
+            "Stored-procedure / SQL extract is a result-set snapshot — "
+            "uniqueness GROUP BY is not run against a procedure name."
+        )
     if source_duplicate_probe_expected:
         try:
             from services.primary_key import resolve_primary_key_source_columns
@@ -1433,6 +1541,7 @@ def run_file_preflight(
         "validation_findings": [],
         "date_locale": date_locale,
         "privilege_probe": privilege_probe or {},
+        "redshift_staging_probe": redshift_staging_probe or {},
         "recommended_batch_size": min(
             recommended_batch_size(_src_fmt),
             recommended_batch_size(_tgt_fmt) or recommended_batch_size(_src_fmt),
@@ -1450,6 +1559,23 @@ def run_file_preflight(
             if isinstance(m, dict) and isinstance(m.get("risk_contract"), dict)
         ],
     }
+    if callable_src:
+        out["callable_extract"] = {
+            "mode": source_read_mode_of(source_config),
+            "catalog_probes": "skipped",
+            "note": (
+                "Result-set snapshot — FK catalog, uniqueness GROUP BY, and "
+                "population orphan scans are not run against a procedure name."
+            ),
+            "cdc": "refused",
+            "history_sync": "refused",
+            "incremental": "spool_cursor_filter_at_least_once",
+            "honesty": (
+                "CDC / SCD2 / mirror are refused on CALL/SELECT. Incremental "
+                "filters the spool with cursor > watermark (at-least-once). "
+                "Not exactly-once. Not a catalog-breadth claim."
+            ),
+        }
 
     # A gate that blocks a declared conversion must show up in the report every
     # other surface reads — otherwise Validate blocks while the panel under it
@@ -1486,11 +1612,16 @@ def run_file_preflight(
         column_defaults=destination_column_defaults,
         identity_columns=destination_identity_columns,
         generated_columns=destination_generated_columns,
+        dest_columns=list((destination_column_types or destination_column_nullability or {}).keys()),
     )
     out["source_coverage"] = src_coverage
     if isinstance(out.get("proof_bundle"), dict):
         out["proof_bundle"] = {**out["proof_bundle"], "source_coverage": src_coverage}
-    out["gates"] = [*out["gates"], *contract_gates]
+    # Hosted G13/G14/G15 replace package stubs (full dest nullability / identity).
+    contract_ids = {str(g.get("id") or "") for g in contract_gates}
+    out["gates"] = [
+        g for g in out["gates"] if str(g.get("id") or "") not in contract_ids
+    ] + list(contract_gates)
     if contract_blockers:
         out["blockers"] = [
             *out["blockers"],
@@ -1530,14 +1661,29 @@ def run_file_preflight(
         # Prefer source-introspected FKs for orphan probe (sample is source rows).
         probe_fks = list(destination_foreign_keys or [])
         try:
-            src_fks = load_source_foreign_keys(
-                source_connector_id=source_connector_id or "",
-                source_config=source_config,
-                source_table=source_table or "",
-            )
-            if src_fks:
-                probe_fks = src_fks
-                out["source_foreign_keys"] = src_fks
+            from services.procedure_source import is_callable_source
+
+            if is_callable_source(source_config):
+                src_fks = []
+                out["source_foreign_keys"] = []
+                out["source_fk_catalog"] = {
+                    "ran": False,
+                    "skipped": True,
+                    "reason": "callable_source",
+                    "note": (
+                        "Stored-procedure / SQL extract is a result-set snapshot — "
+                        "no catalog relation to probe for foreign keys."
+                    ),
+                }
+            else:
+                src_fks = load_source_foreign_keys(
+                    source_connector_id=source_connector_id or "",
+                    source_config=source_config,
+                    source_table=source_table or "",
+                )
+                if src_fks:
+                    probe_fks = src_fks
+                    out["source_foreign_keys"] = src_fks
         except Exception as src_fk_exc:
             logger.debug(
                 "source FK introspect skipped: %s", src_fk_exc, exc_info=src_fk_exc
@@ -1824,7 +1970,8 @@ def run_file_preflight(
                     "target_changed": drift.get("target_changed"),
                     "schema_evolution": evolution,
                     "rule_id": "schema_drift.breaking",
-                    "remediation_kind": "approve_schema_drift",
+                    "remediation_kind": "review_mappings",
+                    "ack_required": False,
                 },
             }
             out["gates"] = [*out["gates"], drift_gate]
@@ -2008,7 +2155,7 @@ def run_file_preflight(
     except Exception as mode_exc:
         logger.debug("validation mode stamp side-effects skipped: %s", mode_exc)
 
-    return apply_root_causes_to_preflight(out)
+    return apply_root_causes_to_preflight(apply_readiness_honesty_caps(out))
 
 
 def probe_destination(endpoint) -> tuple[bool, str]:
@@ -2401,4 +2548,12 @@ def inspect_destination_for_preflight(
                 logger.debug(
                     "mongodb auth_source persistence failed: %s", exc, exc_info=exc
                 )
+    db = (out.get("db_type") or "").lower()
+    if db in {"redshift", "amazon_redshift", "redshift_serverless"} and out.get("connected"):
+        from connectors.redshift_copy import probe_redshift_staging
+
+        probe_extra: dict[str, Any] = {}
+        probe_extra.update(dict(getattr(endpoint, "extra", None) or {}))
+        probe_extra.update(dict(dest_extra or {}))
+        out["redshift_staging_probe"] = probe_redshift_staging(probe_extra)
     return out
