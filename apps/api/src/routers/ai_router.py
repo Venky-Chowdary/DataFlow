@@ -565,7 +565,10 @@ async def api_rag_ingest(request: RAGIngestRequest):
 
 
 @router.post("/analyze/enhanced", response_model=EnhancedAnalysisResponse)
-async def api_analyze_enhanced(request: EnhancedAnalysisRequest):
+# Sync on purpose: the analysis is CPU-bound (retrieval + reasoning per column),
+# so FastAPI runs it on the threadpool. Declared `async` it held the event loop
+# and every other request queued behind one Map step.
+def api_analyze_enhanced(request: EnhancedAnalysisRequest):
     """RAG-enhanced schema analysis with chain-of-thought reasoning."""
     try:
         from ..ai import analyze_schema_enhanced
@@ -599,7 +602,7 @@ async def api_analyze_enhanced(request: EnhancedAnalysisRequest):
 
 
 @router.post("/map/enhanced", response_model=EnhancedMappingResponse)
-async def api_map_enhanced(request: EnhancedMappingRequest):
+def api_map_enhanced(request: EnhancedMappingRequest):
     """LLM + RAG powered column mapping with synonym intelligence."""
     try:
         from ..ai import generate_mappings_enhanced
