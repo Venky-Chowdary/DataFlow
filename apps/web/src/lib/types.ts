@@ -1321,6 +1321,15 @@ export interface ScheduleRun {
   coerced_null_rows: number;
   error: string;
   retry_scheduled?: boolean;
+  /** Why no further attempt was queued after this failure. */
+  retry_refused?: string;
+  /** Whether this failure can change on a later attempt, and what fixes it. */
+  failure_class?: {
+    kind: "transient" | "deterministic" | "unknown";
+    reason: string;
+    corrective_action: string;
+    retryable: boolean;
+  } | null;
   /** Independent dest COUNT(*) ledger copied from the completed job. */
   row_accounting?: import("./conservationLedger").ConservationLedger | null;
 }

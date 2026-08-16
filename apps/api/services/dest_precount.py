@@ -612,6 +612,18 @@ def destination_row_count(
         from services.dialect_profiles import warehouse_sql_quote_dialect
 
         dialect = warehouse_sql_quote_dialect(db_type)
+        # Snowflake and BigQuery answer through the driver the writer and the
+        # Gate-8 read-back already use. The SQLAlchemy route needs
+        # `snowflake-sqlalchemy` / `sqlalchemy-bigquery`, which the product does
+        # not ship: dest-*after* counted fine through the native client while
+        # dest-*before* came back unknowable, and a correct append was failed
+        # for having no delta to prove.
+        if dialect == "snowflake":
+            return _snowflake_row_count(cfg, schema=schema, table_name=table)
+
+        if dialect == "bigquery":
+            return _bigquery_row_count(cfg, schema=schema, table_name=table)
+
         if dialect:
             return _warehouse_sql_row_count(
                 db_type, cfg, schema=schema, table_name=table, dialect=dialect
@@ -1139,6 +1151,111 @@ def _warehouse_sql_row_count(
         if _is_missing_warehouse_relation(exc, dialect):
             return 0
         logger.warning("Warehouse dest COUNT(*) failed: %s", exc)
+        return None
+
+
+def _snowflake_row_count(
+    cfg: Mapping[str, Any],
+    *,
+    schema: str,
+    table_name: str,
+) -> int | None:
+    """Dest-engine ``COUNT(*)`` through the native Snowflake driver.
+
+    The same connection, warehouse selection and stored-name resolution the
+    Gate-8 read-back uses, so dest-before and dest-after count the same object:
+    a table created quoted-lowercase is not the folded upper-case name, and
+    counting the folded name would report a missing table as 0 against a
+    populated one. A table that genuinely does not exist is 0.
+    """
+    from connectors.snowflake_conn import (
+        _snowflake_object_missing,
+        get_connection,
+        normalize_account,
+        resolve_snowflake_table_name,
+        snowflake_qualified_table,
+    )
+    from connectors.sql_identifiers import quote_sql_identifier, require_safe_identifier
+
+    sch = str(schema or cfg.get("schema") or "").strip() or "PUBLIC"
+    warehouse = str(cfg.get("warehouse") or "")
+    conn = None
+    try:
+        conn = get_connection(
+            account=normalize_account(str(cfg.get("host") or "")),
+            username=str(cfg.get("username") or ""),
+            password=str(cfg.get("password") or ""),
+            database=str(cfg.get("database") or ""),
+            schema=sch,
+            warehouse=warehouse,
+            connection_string=str(cfg.get("connection_string") or ""),
+            role=str(cfg.get("role") or ""),
+            private_key=str(cfg.get("private_key") or ""),
+            private_key_passphrase=str(cfg.get("private_key_passphrase") or ""),
+        )
+        with conn.cursor() as cur:
+            if warehouse:
+                try:
+                    wh = require_safe_identifier(warehouse, preserve_case=True)
+                    cur.execute(f"USE WAREHOUSE {quote_sql_identifier(wh)}")
+                except Exception as exc:
+                    logger.warning("Snowflake USE WAREHOUSE failed: %s", exc)
+            resolved = resolve_snowflake_table_name(cur, sch, table_name)
+            if resolved is None:
+                return 0
+            qualified = snowflake_qualified_table(sch, resolved)
+            cur.execute(f"SELECT COUNT(*) FROM {qualified}")  # nosec B608
+            row = cur.fetchone()
+        return int(row[0]) if row else 0
+    except Exception as exc:
+        if _snowflake_object_missing(exc):
+            return 0
+        logger.warning("Snowflake dest COUNT(*) failed: %s", exc)
+        return None
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception as exc:  # pragma: no cover - close-time failure
+                logger.debug("Snowflake close failed: %s", exc)
+
+
+def _bigquery_row_count(
+    cfg: Mapping[str, Any],
+    *,
+    schema: str,
+    table_name: str,
+) -> int | None:
+    """Dest-engine ``COUNT(*)`` through the native BigQuery client.
+
+    A query, not ``Table.num_rows``: table metadata lags the streaming buffer,
+    and a stale estimate cannot prove an append delta. Missing table is 0.
+    """
+    from google.api_core.exceptions import NotFound
+
+    from connectors.bigquery_conn import get_client
+
+    project = str(cfg.get("database") or cfg.get("project_id") or "")
+    dataset = str(schema or cfg.get("schema") or cfg.get("dataset") or "")
+    if not project or not dataset:
+        return None
+    try:
+        client = get_client(
+            project_id=project,
+            credentials_path=str(cfg.get("connection_string") or ""),
+            service_account=str(cfg.get("service_account") or ""),
+            host=str(cfg.get("host") or ""),
+            port=int(cfg.get("port") or 0),
+        )
+        table_id = f"`{project}`.`{dataset}`.`{table_name}`"
+        rows = list(client.query(f"SELECT COUNT(*) AS n FROM {table_id}").result())  # nosec B608
+        return int(rows[0][0]) if rows else 0
+    except NotFound:
+        return 0
+    except Exception as exc:
+        if _is_missing_warehouse_relation(exc, "bigquery"):
+            return 0
+        logger.warning("BigQuery dest COUNT(*) failed: %s", exc)
         return None
 
 

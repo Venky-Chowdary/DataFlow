@@ -6915,65 +6915,163 @@ def test_sqlserver_login_failure_is_unmeasured_not_empty(monkeypatch: pytest.Mon
     assert engine.sql
 
 
+class _ScriptedSnowflakeCursor:
+    """Minimal Snowflake DBAPI cursor: records SQL, answers resolve + COUNT(*)."""
+
+    def __init__(self, sql: list[str], stored_name: str | None, count: int, error=None):
+        self.sql = sql
+        self._stored_name = stored_name
+        self._count = count
+        self._error = error
+        self._pending: tuple | None = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, sql, params=None):
+        self.sql.append(sql)
+        if "information_schema.tables" in sql.lower():
+            self._pending = (self._stored_name,) if self._stored_name else None
+            return self
+        if self._error is not None:
+            raise self._error
+        self._pending = (self._count,)
+        return self
+
+    def fetchone(self):
+        return self._pending
+
+
+class _ScriptedSnowflakeConnection:
+    def __init__(self, sql: list[str], stored_name: str | None, count: int, error=None):
+        self._sql = sql
+        self._stored_name = stored_name
+        self._count = count
+        self._error = error
+
+    def cursor(self):
+        return _ScriptedSnowflakeCursor(
+            self._sql, self._stored_name, self._count, self._error
+        )
+
+    def close(self):
+        return None
+
+
+def _patch_snowflake_native(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    stored_name: str | None,
+    count: int = 0,
+    error: Exception | None = None,
+    connect_error: Exception | None = None,
+) -> list[str]:
+    """Route the native Snowflake driver the dest count now shares with Gate-8."""
+    import connectors.snowflake_conn as sf
+
+    sql: list[str] = []
+
+    def _connect(**_kwargs):
+        if connect_error is not None:
+            raise connect_error
+        return _ScriptedSnowflakeConnection(sql, stored_name, count, error)
+
+    monkeypatch.setattr(sf, "get_connection", _connect)
+    return sql
+
+
 def test_snowflake_dest_count_is_engine_count_not_information_schema(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """Snowflake dest COUNT is SELECT COUNT(*), never INFORMATION_SCHEMA.ROW_COUNT."""
-    from sqlalchemy.exc import ProgrammingError
+    """Snowflake dest COUNT is SELECT COUNT(*) through the driver Gate-8 uses.
 
-    missing = _patch_warehouse(
-        monkeypatch,
-        _ScriptedWarehouseEngine(
-            error=ProgrammingError(
-                "SELECT",
-                {},
-                Exception("SQL compilation error: Object 'T' does not exist or not authorized."),
-            ),
-        ),
-    )
+    The SQLAlchemy route needs `snowflake-sqlalchemy`, which the product does
+    not ship: it returned unmeasured for every Snowflake append while dest-after
+    counted fine natively, so a correct append had no delta to prove.
+    """
+    missing = _patch_snowflake_native(monkeypatch, stored_name=None)
     assert destination_row_count("snowflake", {"host": "h"}, schema="PUBLIC", table_name="T") == 0
-    assert any('"PUBLIC"."T"' in sql for sql in missing.sql)
-    assert all("INFORMATION_SCHEMA" not in sql.upper() for sql in missing.sql)
+    assert missing, "the destination was interrogated, not assumed empty"
+    assert all("COUNT(*)" not in sql.upper() for sql in missing)
 
-    engine = _patch_warehouse(monkeypatch, _ScriptedWarehouseEngine(count=2, rows=[(1,), (2,)]))
-    cfg = {"host": "h", "schema": "PUBLIC"}
+    sql = _patch_snowflake_native(monkeypatch, stored_name="ORDERS", count=2)
+    cfg = {"host": "h", "schema": "PUBLIC", "username": "u", "password": "p"}
     assert destination_row_count("snowflake", cfg, schema="PUBLIC", table_name="ORDERS") == 2
-    assert any("COUNT(*)" in sql.upper() for sql in engine.sql)
-    listed = destination_key_list(
-        "snowflake", cfg, schema="PUBLIC", table_name="ORDERS", key_columns=["id"]
-    )
-    assert listed == [(1,), (2,)]
+    count_sql = [s for s in sql if "COUNT(*)" in s.upper()]
+    assert count_sql, sql
+    assert all("ROW_COUNT" not in s.upper() for s in count_sql)
+    assert any('"PUBLIC"."ORDERS"' in s for s in count_sql)
+
+
+def test_snowflake_dest_count_reads_the_stored_lowercase_table(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A quoted-lowercase table is not the folded name — count the stored one."""
+    sql = _patch_snowflake_native(monkeypatch, stored_name="sunday0816", count=200)
+    cfg = {"host": "h", "schema": "PUBLIC", "username": "u", "password": "p"}
+    assert destination_row_count("snowflake", cfg, schema="PUBLIC", table_name="SUNDAY0816") == 200
+    assert any('"sunday0816"' in s for s in sql if "COUNT(*)" in s.upper())
 
 
 def test_snowflake_auth_failure_is_unmeasured_not_empty(monkeypatch: pytest.MonkeyPatch):
-    _patch_warehouse(
+    _patch_snowflake_native(
         monkeypatch,
-        _ScriptedWarehouseEngine(error=RuntimeError("250001: Failed to connect to DB. Incorrect username or password")),
+        stored_name="T",
+        connect_error=RuntimeError(
+            "250001: Failed to connect to DB. Incorrect username or password"
+        ),
     )
     assert destination_row_count("snowflake", {"host": "h"}, schema="PUBLIC", table_name="T") is None
 
 
-def test_bigquery_dest_count_quotes_project_dataset_not_tables_row_count(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    from sqlalchemy.exc import ProgrammingError
+class _ScriptedBigQueryClient:
+    def __init__(self, sql: list[str], count: int, error=None):
+        self._sql = sql
+        self._count = count
+        self._error = error
 
-    missing = _patch_warehouse(
-        monkeypatch,
-        _ScriptedWarehouseEngine(
-            error=ProgrammingError("SELECT", {}, Exception("Not found: Table proj:ds.fresh")),
-        ),
+    def query(self, sql):
+        self._sql.append(sql)
+        if self._error is not None:
+            raise self._error
+        return self
+
+    def result(self):
+        return [(self._count,)]
+
+
+def _patch_bigquery_native(
+    monkeypatch: pytest.MonkeyPatch, *, count: int = 0, error: Exception | None = None
+) -> list[str]:
+    import connectors.bigquery_conn as bq
+
+    sql: list[str] = []
+    monkeypatch.setattr(
+        bq, "get_client", lambda **_kwargs: _ScriptedBigQueryClient(sql, count, error)
     )
-    cfg = {"project": "proj", "schema": "ds"}
+    return sql
+
+
+def test_bigquery_dest_count_queries_not_table_metadata(monkeypatch: pytest.MonkeyPatch):
+    from google.api_core.exceptions import NotFound
+
+    cfg = {"database": "proj", "schema": "ds"}
+    missing = _patch_bigquery_native(monkeypatch, error=NotFound("Table proj:ds.fresh"))
     assert destination_row_count("bigquery", cfg, schema="ds", table_name="fresh") == 0
-    assert any("`proj.ds.fresh`" in sql for sql in missing.sql)
+    assert any("`proj`.`ds`.`fresh`" in sql for sql in missing)
 
-    denied = _patch_warehouse(
-        monkeypatch,
-        _ScriptedWarehouseEngine(error=RuntimeError("403 Access Denied")),
-    )
+    sql = _patch_bigquery_native(monkeypatch, count=7)
+    assert destination_row_count("bigquery", cfg, schema="ds", table_name="fresh") == 7
+    # Table.num_rows lags the streaming buffer; a stale estimate is not a count.
+    assert all("__TABLES__" not in s.upper() for s in sql)
+    assert any("COUNT(*)" in s.upper() for s in sql)
+
+    denied = _patch_bigquery_native(monkeypatch, error=RuntimeError("403 Access Denied"))
     assert destination_row_count("bigquery", cfg, schema="ds", table_name="fresh") is None
-    assert denied.sql
+    assert denied
 
 
 def test_databricks_missing_table_is_zero(monkeypatch: pytest.MonkeyPatch):

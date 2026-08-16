@@ -1907,10 +1907,17 @@ def run_reconciliation(
     # are not comparable. Keyed fingerprint of written_ids proves the batch for
     # balanced and strict alike (strict_checksum only governs fail-closed severity
     # inside reconcile(), not whether we may re-scope the target digest).
+    # The keyed digest is only comparable to the source digest when the key list
+    # covers the *whole* batch. `written_ids` is capped (writer stash / bounded
+    # sample), so a 100-row append whose stash held 50 keys re-read 50 rows and
+    # compared them to the 100-row source digest — a guaranteed mismatch
+    # reported as "checksum mismatch (strict)" on a correct load. A partial key
+    # list is a diagnostic sample, not a scope: fall through to the append delta.
+    keys_cover_batch = bool(written_ids) and len(written_ids) >= expected_batch
     if (
         allow_extra
         and pk_column
-        and written_ids
+        and keys_cover_batch
         and target_rows > expected_batch
         and source_checksum
         and target_checksum

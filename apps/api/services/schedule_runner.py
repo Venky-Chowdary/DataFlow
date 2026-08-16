@@ -492,6 +492,7 @@ def _retry_decision(
     sync_mode: str | None = None,
     rows_committed: int = 0,
     rows_committed_known: bool = True,
+    job_doc: dict | None = None,
 ) -> dict:
     """Whether to start attempt ``attempt + 1``, and why not when refusing.
 
@@ -500,8 +501,14 @@ def _retry_decision(
     for an attempt that committed nothing — but re-running an append that
     already landed rows writes every one of them again, unattended and at the
     schedule's cadence, so it is refused with the operator pointed at Resume.
+
+    Safe to retry is not the same as worth retrying. A run refused by a
+    validation gate wrote nothing, so the duplicate check waves it through, and
+    the schedule then replays an identical deterministic verdict until the
+    budget is gone. Those are refused here with the corrective action named.
     """
     from services.execution_engine_contract import decide_retry_from_start
+    from services.failure_retry_policy import classify_job_failure
 
     if _is_success(status):
         return {"retry": False, "reason": ""}
@@ -510,6 +517,16 @@ def _retry_decision(
             "retry": False,
             "reason": f"Retry budget exhausted after {max_retries} attempt(s).",
         }
+    classification = classify_job_failure(job_doc)
+    if not classification.retryable:
+        reason = classification.reason
+        if classification.corrective_action:
+            reason = f"{reason} {classification.corrective_action}"
+        return {
+            "retry": False,
+            "reason": reason,
+            "failure_class": classification.to_dict(),
+        }
     decision = decide_retry_from_start(
         status=status,
         sync_mode=sync_mode,
@@ -517,8 +534,18 @@ def _retry_decision(
         rows_committed_known=rows_committed_known,
     )
     if not decision["allowed"]:
-        return {"retry": False, "reason": decision["reason"], "decision": decision}
-    return {"retry": True, "reason": "", "decision": decision}
+        return {
+            "retry": False,
+            "reason": decision["reason"],
+            "decision": decision,
+            "failure_class": classification.to_dict(),
+        }
+    return {
+        "retry": True,
+        "reason": "",
+        "decision": decision,
+        "failure_class": classification.to_dict(),
+    }
 
 
 def _should_retry(
@@ -529,6 +556,7 @@ def _should_retry(
     sync_mode: str | None = None,
     rows_committed: int = 0,
     rows_committed_known: bool = True,
+    job_doc: dict | None = None,
 ) -> bool:
     return bool(
         _retry_decision(
@@ -538,6 +566,7 @@ def _should_retry(
             sync_mode=sync_mode,
             rows_committed=rows_committed,
             rows_committed_known=rows_committed_known,
+            job_doc=job_doc,
         )["retry"]
     )
 
@@ -639,9 +668,13 @@ def _finalize_run(schedule_id: str, job_id: str, attempt: int, started_at: datet
         sync_mode=_normalize_sync_mode(sched.sync_mode, sched.primary_key),
         rows_committed=rows_committed,
         rows_committed_known=rows_known,
+        job_doc=job_doc,
     )
     if not decision["retry"] and decision["reason"] and not _is_success(status):
         entry["retry_refused"] = decision["reason"]
+    failure_class = decision.get("failure_class")
+    if failure_class and not _is_success(status):
+        entry["failure_class"] = failure_class
 
     if decision["retry"]:
         delay = max(0, sched.retry_backoff_seconds) * (attempt + 1)

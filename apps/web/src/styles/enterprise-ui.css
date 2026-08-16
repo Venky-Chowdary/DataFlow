@@ -10603,6 +10603,16 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   color: #b45309;
 }
 
+.df2-sched-attempt.is-blocked {
+  color: #b91c1c;
+  font-weight: 600;
+}
+
+.df2-sched-run-error p.df2-sched-run-fix {
+  color: #0f172a;
+  font-weight: 500;
+}
+
 .df2-sched-num-warn { color: #b45309; font-weight: 600; }
 
 .df2-sched-job-link {
