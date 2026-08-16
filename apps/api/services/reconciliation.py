@@ -512,6 +512,12 @@ def canonical_checksum_from_iter(
     return acc.digest()
 
 
+# Digest every checksum path produces for a population with no rows. Both
+# sides fold zero fingerprints into SHA-256, so this value is a proof of
+# emptiness rather than the absence of a digest.
+EMPTY_POPULATION_DIGEST: Final[str] = hashlib.sha256().hexdigest()
+
+
 def checksum_rows(
     rows: list[Any],
     columns: list[str] | None = None,
@@ -583,6 +589,18 @@ def reconcile(
     # redelivery) and must be excluded from the expected destination count.
     dropped_rows = max(max(rejected_rows, 0) - coerced_null_rows, 0)
     expected_rows = max(source_rows - dropped_rows - rows_skipped, 0)
+    if (
+        not source_checksum
+        and expected_rows == 0
+        and target_rows == 0
+        and target_checksum in {"", EMPTY_POPULATION_DIGEST}
+    ):
+        # Every source row was held out, so this run's projection is the empty
+        # population — a digest that is defined, not missing. The writer had no
+        # rows to hash and returned "", which then read as a mismatch against
+        # the destination's empty digest and failed an all-quarantined run that
+        # behaved exactly as the policy asked.
+        source_checksum = target_checksum
     row_count_ok = target_rows == expected_rows or (
         allow_extra_rows and target_rows >= expected_rows
     )

@@ -63,3 +63,46 @@ def test_engine_to_ui_coverage():
     assert UI_TO_ENGINE["cast_integer"] == "integer"
     assert UI_TO_ENGINE["parse_json"] == "json"
     assert UI_TO_ENGINE["identity_specialty"] == "none"
+
+def test_declared_numeric_source_still_validates_the_wire():
+    """A declared-INTEGER source column can still carry an unparsable cell.
+
+    Map calls INTEGER→INTEGER identity widening (no invented parse). The write
+    path must not take that as permission to hand the driver whatever the row
+    carried: one bad cell would fail the whole batch instead of quarantining
+    the row that caused it.
+    """
+    from connectors.writer_common import apply_transform
+
+    for src_type, dest_type in (
+        ("INTEGER", "INTEGER"),
+        ("DECIMAL(10,2)", "DECIMAL(10,2)"),
+        ("DOUBLE PRECISION", "DOUBLE PRECISION"),
+    ):
+        t = resolve_transform(
+            {"source": "amt", "target": "amt"},
+            column_types={"amt": src_type},
+            dest_types={"amt": dest_type},
+        )
+        assert t in {"integer", "decimal"}, (src_type, dest_type, t)
+        _value, err = apply_transform("bad", t)
+        assert err, f"{src_type}→{dest_type} accepted an unparsable cell"
+
+
+def test_numeric_wire_guard_leaves_text_and_declared_transforms_alone():
+    assert (
+        resolve_transform(
+            {"source": "note", "target": "note"},
+            column_types={"note": "INTEGER"},
+            dest_types={"note": "VARCHAR(50)"},
+        )
+        == "none"
+    )
+    assert (
+        resolve_transform(
+            {"source": "amt", "target": "amt", "transform": "currency"},
+            column_types={"amt": "VARCHAR"},
+            dest_types={"amt": "DECIMAL(10,2)"},
+        )
+        == "currency"
+    )

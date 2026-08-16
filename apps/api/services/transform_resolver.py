@@ -95,6 +95,30 @@ def _declares_zone(raw: str) -> bool:
     return str(raw or "").lower().startswith(ASSUME_TIMEZONE_PREFIX)
 
 
+# Typed numeric carriers and the transform that validates their wire.
+_NUMERIC_WIRE_GUARD: dict[str, str] = {
+    "integer": "integer",
+    "decimal": "decimal",
+    "float": "decimal",
+}
+
+
+def numeric_wire_guard(inferred: str, target_type: str) -> str:
+    """Re-arm cell validation when inference calls a numeric mapping identity.
+
+    Map answers a presentation question — a native numeric source widening into
+    a numeric destination is not an invented parse, so it infers ``none``. The
+    write path answers a different one: the row still arrives as untyped wire,
+    and a declared-INTEGER file/SaaS column carrying ``'bad'`` handed straight to
+    the driver fails the whole batch instead of quarantining one row. Identity
+    into a typed numeric carrier therefore still parses; a value that is already
+    numeric round-trips unchanged.
+    """
+    if str(inferred or "none").strip().lower() not in {"", "none", "identity"}:
+        return inferred
+    return _NUMERIC_WIRE_GUARD.get(normalize_logical_type(target_type), inferred)
+
+
 def _type_compatible_transform(target_type: str, raw: str) -> bool:
     """Return True if raw transform is compatible with the target logical type."""
     t = normalize_logical_type(target_type)
@@ -221,7 +245,7 @@ def resolve_transform(
         # same argument as a projection, so only proven-live carriers qualify.
         if typed_cast_incompatible_with_text_sink(inferred, target_type):
             return "none"
-    return inferred
+    return numeric_wire_guard(inferred, target_type)
 
 
 def attach_transforms_to_mappings(

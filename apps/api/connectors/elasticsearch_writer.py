@@ -576,12 +576,18 @@ def write_mapped_rows(
         from services.value_serializer import is_missing_sentinel
 
         for row_idx, row in enumerate(mapped_rows):
+            failed_column = ""
+            failed_value: Any = ""
             try:
                 # Omit DF_MISSING — never project JSON null (would wipe prior fields).
                 source: dict[str, Any] = {}
                 for i, value in enumerate(row):
                     if is_missing_sentinel(value):
                         continue
+                    failed_column = (
+                        target_cols[i] if i < len(target_cols) else ""
+                    )
+                    failed_value = value
                     wire = (
                         tgt_types[i]
                         if i < len(tgt_types) and str(tgt_types[i] or "").strip()
@@ -603,14 +609,19 @@ def write_mapped_rows(
             except (ValueError, TypeError) as cell_exc:
                 rejected_details.append({
                     "row": row_idx + 1,
-                    "column": "",
+                    # Name the cell: a refusal the operator cannot locate is a
+                    # dead end on a wide index.
+                    "column": failed_column,
                     "target": index,
-                    "value": "",
+                    "value": "" if failed_value is None else str(failed_value)[:200],
                     "reason": str(cell_exc)[:500],
                     "policy": "write_fail" if policy == "fail" else "write_quarantine",
                     "chars": [],
                 })
                 if policy == "fail":
+                    abort = reject_on_strict_policy(
+                        policy, rejected_details, "Elasticsearch"
+                    )
                     return WriteResult(
                         ok=False,
                         rows_written=0,
@@ -618,7 +629,7 @@ def write_mapped_rows(
                         target_schema=host or "localhost",
                         checksum="",
                         chunks_completed=0,
-                        error=str(cell_exc)[:500],
+                        error=abort or str(cell_exc)[:500],
                         rejected_details=list(rejected_details),
                     )
                 continue

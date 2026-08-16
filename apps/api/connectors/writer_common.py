@@ -992,7 +992,10 @@ def summarize_reject_findings(
     """
     seen: list[str] = []
     for d in rejected_details or []:
-        col = str(d.get("target") or d.get("column") or "").strip()
+        # ``target`` is the table/index the writer refused into; ``column`` is
+        # the cell. Preferring the table named the whole sink on every finding
+        # and left the operator to guess which column was bad.
+        col = str(d.get("column") or d.get("target") or "").strip()
         reason = " ".join(str(d.get("reason") or "").split())[:180]
         if not col and not reason:
             continue

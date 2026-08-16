@@ -483,3 +483,29 @@ def test_mysql_boolean_false_binds_as_zero():
         _to_mysql_value("", "JSON")
     assert _to_mysql_value({"a": 1}, "JSON") == '{"a":1}'
     assert _to_mysql_value("not-json", "JSON") == '"not-json"'
+
+
+def test_all_rows_held_out_is_an_empty_population_not_a_mismatch():
+    """Nothing to write is a provable outcome, not a checksum failure."""
+    from services.reconciliation import EMPTY_POPULATION_DIGEST
+
+    r = reconcile(
+        source_rows=1,
+        target_rows=0,
+        source_checksum="",
+        target_checksum=EMPTY_POPULATION_DIGEST,
+        rejected_rows=1,
+    )
+    assert r.passed
+    assert r.rejected_rows == 1
+
+
+def test_missing_source_digest_still_fails_when_rows_landed():
+    r = reconcile(
+        source_rows=2,
+        target_rows=2,
+        source_checksum="",
+        target_checksum="abc",
+    )
+    assert not r.passed
+    assert "Checksum mismatch" in r.message

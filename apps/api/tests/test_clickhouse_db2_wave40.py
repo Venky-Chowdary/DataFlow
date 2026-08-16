@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -67,7 +68,9 @@ def test_upsert_batch_clickhouse_skips_delete_insert_fallback():
     class _Conn:
         def execute(self, stmt, params=None):  # noqa: ANN001
             text = str(getattr(stmt, "text", stmt))
-            if "DELETE" in text.upper() or "delete" in str(stmt).lower():
+            # A DELETE *statement* — not the mirror-lattice probe
+            # `SELECT "_deleted" FROM t WHERE 1=0`, which merely contains it.
+            if re.match(r"\s*DELETE\b", text, flags=re.IGNORECASE):
                 calls.append("delete")
             elif stmt == "INSERT" or "INSERT" in text.upper():
                 calls.append("insert_exec")
