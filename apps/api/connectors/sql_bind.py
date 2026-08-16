@@ -14,6 +14,28 @@ import json
 import re
 from typing import Any
 
+# Bind normalize runs once per cell — a 10M-row load resolves these names ~60M
+# times, and a function-local import pays a module lookup and a failed
+# ``__path__`` attribute hook on each one. Neither module imports connectors,
+# so there is no cycle to avoid here.
+from connectors.sql_temporal import coerce_sql_temporal, sql_base_type
+from services.type_system import (
+    LOGICAL_GEOGRAPHY,
+    LOGICAL_INTERVAL,
+    LOGICAL_MAP,
+    LOGICAL_STRING,
+    LOGICAL_STRUCT,
+    LOGICAL_TEXT,
+    is_bitstring_carrier,
+    is_varying_bitstring_carrier,
+    is_year_carrier,
+    normalize_logical_type,
+    parse_bitstring_width,
+    parse_enum_or_set_ordered_members,
+    specialty_carrier_base,
+)
+from services.value_serializer import is_missing_sentinel
+
 # Canonical boolean wire only — SSOT with type_system / transform_engine.
 # Informal yes/on/y/no/n invents truth; quarantine or operator transform owns those.
 _TRUE_TOKENS = frozenset({"true", "t", "1"})
@@ -2202,16 +2224,10 @@ def normalize_sql_bind_value(
     """
     if value is None:
         return None
-    from services.value_serializer import is_missing_sentinel
-
     # Sparse CDC sentinel must survive bind normalize — writers omit from SET.
     if is_missing_sentinel(value):
         return value
-    from connectors.sql_temporal import coerce_sql_temporal, sql_base_type
-
     # ENUM/SET before sql_base_type — paren strip would drop member domain.
-    from services.type_system import parse_enum_or_set_ordered_members
-
     eng = (engine or "").strip().lower()
     enum_set = parse_enum_or_set_ordered_members(ddl_type)
     if enum_set is not None:
@@ -2240,8 +2256,6 @@ def normalize_sql_bind_value(
     upper = sql_base_type(ddl_type)
 
     # MySQL YEAR before INTEGER collapse — string '0' → 2000 polarity.
-    from services.type_system import is_year_carrier
-
     if is_year_carrier(ddl_type) or upper == "YEAR":
         return coerce_year_wire(value)
     # Oracle VARCHAR2/CHAR: zero-length string is stored as NULL (HVR write
@@ -2253,13 +2267,6 @@ def normalize_sql_bind_value(
         and value == ""
         and (eng in {"oracle", "oracledb", "oracle_autonomous"} or eng.startswith("oracle"))
     ):
-        from services.type_system import (
-            LOGICAL_STRING,
-            LOGICAL_TEXT,
-            normalize_logical_type,
-            specialty_carrier_base,
-        )
-
         if not specialty_carrier_base(ddl_type or upper) and (
             not upper
             or normalize_logical_type(ddl_type or upper) in {
@@ -2270,12 +2277,6 @@ def normalize_sql_bind_value(
             return None
     # BIT / VARBIT before BINARY — "BIT" must not fall through as boolean here
     # when width > 1 (caller passes BIT(32) etc.).
-    from services.type_system import (
-        is_bitstring_carrier,
-        is_varying_bitstring_carrier,
-        parse_bitstring_width,
-    )
-
     if is_bitstring_carrier(ddl_type) or upper in {"BIT VARYING", "VARBIT"} or (
         upper == "BIT" and parse_bitstring_width(ddl_type) not in {None, 1}
     ):
@@ -2459,14 +2460,6 @@ def normalize_sql_bind_value(
         "CURRENCY",
     } or upper.startswith(("DECIMAL(", "NUMERIC(", "NUMBER(", "BIGNUMERIC(")):
         return coerce_decimal_wire(value, ddl_type=ddl_type or upper, engine=eng)
-    from services.type_system import (
-        LOGICAL_GEOGRAPHY,
-        LOGICAL_INTERVAL,
-        LOGICAL_MAP,
-        LOGICAL_STRUCT,
-        normalize_logical_type,
-    )
-
     logical = normalize_logical_type(ddl_type or upper)
     if logical == LOGICAL_STRUCT:
         return coerce_struct_wire(value, engine=eng, ddl_type=ddl_type or upper)

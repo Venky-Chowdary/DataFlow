@@ -45,8 +45,12 @@ from services.transform_engine import (
     _parse_datetime,
     apply_transform,
 )
-from services.type_system import normalize_logical_type
-from services.value_serializer import json_default
+from services.type_system import instant_date_carrier, normalize_logical_type
+from services.value_serializer import cell_to_string, is_missing_sentinel, json_default
+
+# Fingerprinting runs once per cell on both the write and the read-back pass, so
+# resolving these names inside the function costs a module lookup per cell.
+from connectors.sql_bind import normalize_sql_bind_value
 
 logger = logging.getLogger(__name__)
 
@@ -3605,10 +3609,6 @@ def fingerprint_for_reconcile(
     Source samples and destination read-back must share this path so Mongo
     ``\"true\"`` / MySQL ``0`` / Postgres ``False`` compare as equal.
     """
-    from services.transform_engine import apply_transform
-    from services.type_system import instant_date_carrier
-    from services.value_serializer import cell_to_string, is_missing_sentinel
-
     ddl_type = instant_date_carrier(engine, ddl_type)
     wire: Any = value
     if is_missing_sentinel(value):
@@ -3643,8 +3643,6 @@ def fingerprint_for_reconcile(
 
     if ddl_type:
         try:
-            from connectors.sql_bind import normalize_sql_bind_value
-
             wire = normalize_sql_bind_value(wire, ddl_type, engine=engine)
         except Exception:
             pass
@@ -3668,8 +3666,6 @@ def normalize_cell(value: Any, *, ddl_type: str = "", engine: str = "") -> str:
         return _NULL_SENTINEL
     # Dense write materializes absent schemaless fields as SQL NULL; fingerprint
     # must match. Sparse CDC sample_compare skips DF_MISSING columns (omit-from-SET).
-    from services.value_serializer import is_missing_sentinel
-
     if is_missing_sentinel(value):
         return _NULL_SENTINEL
     if isinstance(value, str) and value.strip().lower() in {

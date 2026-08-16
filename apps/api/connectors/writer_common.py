@@ -4337,6 +4337,27 @@ def apply_write_quarantine_matrix_keeping_numbers(
             "source_row_numbers length must match mapped_rows "
             "(SQL / object-store bundle materialize)"
         )
+    # A clean batch keeps every row, so the numbers still line up and the
+    # matrix can derive its per-column type facts once instead of once per row.
+    # The moment anything is quarantined the batch verdict is discarded and the
+    # rows are re-run one at a time, because only then does a detail's ``row``
+    # name the source row rather than an index into the surviving list.
+    mark = len(rejected_details)
+    batch = apply_write_quarantine_matrix(
+        mapped_rows,
+        target_cols,
+        target_types,
+        rejected_details,
+        policy,
+        dialect_label=dialect_label,
+        mappings=mappings,
+        dest_db=dest_db,
+        source_row_numbers=None,
+    )
+    if len(batch) == len(mapped_rows) and len(rejected_details) == mark:
+        return batch, [int(n) for n in source_row_numbers]
+    del rejected_details[mark:]
+
     kept: list[tuple] = []
     nums: list[int] = []
     for row, src_row in zip(mapped_rows, source_row_numbers):
