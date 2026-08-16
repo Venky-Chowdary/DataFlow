@@ -30,3 +30,8 @@ apps/api/test
 .devin-files/
 apps/web/tsconfig.tsbuildinfo
 apps/api/data/proofs/
+*.env
+credentials.json
+*.pem
+*.key
+.credentials

@@ -209,7 +209,10 @@ class OracleFlashbackCdc:
                         handoff_scn = int(head[0] or 0) if head else 0
                     if mode == "scan":
                         cur.execute(
-                            f"SELECT * FROM {qualified} ORDER BY {order_sql}"  # nosec B608
+                            f"SELECT * FROM ("  # nosec B608
+                            f"SELECT t.*, ROW_NUMBER() OVER (ORDER BY {order_sql}) AS df_rn "
+                            f"FROM {qualified} t"
+                            f")"
                         )
                     while True:
                         if mode == "scan":

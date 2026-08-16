@@ -1398,7 +1398,15 @@ def build_mapped_rows_with_details(
             if is_intentional_omit(m):
                 continue
             if str(m.get("assignment_strategy") or "") == "pending_dest_schema":
-                continue
+                # Skip only when the target resolver excluded this column. When
+                # it is present in the resolved target set, create-new was
+                # confirmed (``table_exists is False``) and the value must flow —
+                # otherwise every row lands NULL (the direct-write create-new gap).
+                _pending_tgt = sanitize_identifier(
+                    str(m.get("target") or ""), preserve_case=preserve_case
+                )
+                if _pending_tgt not in target_index:
+                    continue
         except Exception:
             pass
         src = m["source"]
@@ -2255,7 +2263,17 @@ def resolve_target_columns(
 
             if is_intentional_omit(m) or not m.get("target"):
                 continue
-            if str(m.get("assignment_strategy") or "") == "pending_dest_schema":
+            # A pending_dest_schema stamp means "destination existence was
+            # unknown at Map time — do not invent a column." That honesty guard
+            # only applies while existence is still unproven. At the writer,
+            # ``table_exists is False`` is a *confirmed* create-new decision
+            # (``create_table=True``), so the pending mapping resolves to a
+            # create-new identity column (target=source, source/carrier type) —
+            # skipping it here is what produced the false "No column mappings".
+            if (
+                str(m.get("assignment_strategy") or "") == "pending_dest_schema"
+                and table_exists is not False
+            ):
                 continue
         except Exception:
             if not m.get("target"):

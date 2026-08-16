@@ -1589,26 +1589,16 @@ def _auto_map(
     else:
         sync_mode = resolve_effective_sync_mode(request.sync_mode)
         if is_overwrite_sync(sync_mode):
-            # Property 2: auto-derived identity maps must satisfy create-new
-            # gates — stamp CREATE authority so Kernel invents target_type
-            # instead of blocking with "lack Map target_type under partial Studio".
-            from services.column_case import column_type_or_none
+            from services.overwrite_typed_mapping import (
+                build_overwrite_create_new_mappings,
+            )
 
-            mappings = default_mappings(columns)
-            for m in mappings:
-                if not isinstance(m, dict):
-                    continue
-                m["create_new"] = True
-                m.setdefault("assignment_strategy", "create_compatible_new")
-                src_name = str(m.get("source") or "")
-                if src_name and not str(m.get("source_type") or "").strip():
-                    # Leave blank rather than stamping "TEXT" for a column the
-                    # introspected schema does not describe: a wrong declared
-                    # source type outranks sample evidence at invent and lands
-                    # the whole table as text.
-                    declared = column_type_or_none(schema, src_name)
-                    if declared:
-                        m["source_type"] = declared
+            mappings = build_overwrite_create_new_mappings(
+                columns=columns,
+                schema=schema,
+                sample_rows=sample_rows,
+                request=request,
+            )
         else:
             target_schema, dest_exists = _destination_schema_probe(
                 request.destination,

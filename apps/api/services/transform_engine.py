@@ -582,6 +582,36 @@ def _parse_decimal(value: str) -> str | None:
     # zeros caused money-fidelity regressions and false INTEGER inferences.
     return rendered
 
+def currency_samples_carry_markers(samples: list[str] | None) -> bool:
+    """True when sample values carry real currency / locale-money formatting.
+
+    Distinguishes a money column (``$1,000.00`` / ``€2.000,50`` / ``USD 100``)
+    from a plain numeric column that merely *shares a money-ish name* (``amount``
+    holding ``100``). Only the former is safe to normalise into a DECIMAL carrier
+    on create-new — a plain integer column must keep the engine's no-invent
+    honesty. Evidence is a currency symbol/code OR a locale grouping that the
+    numeric parser can still disambiguate to a finite decimal.
+    """
+    if not samples:
+        return False
+    parseable = 0
+    with_marker = 0
+    for raw in samples:
+        text = str(raw or "").strip()
+        if not text or text.lower() in NULL_SENTINELS:
+            continue
+        if _parse_decimal(text) is None:
+            continue
+        parseable += 1
+        stripped = _CURRENCY_RE.sub("", unicodedata.normalize("NFKC", text)).strip()
+        has_currency = stripped != text.strip()
+        has_grouping = ("," in text) or ("." in text and text.count(".") > 1)
+        if has_currency or has_grouping:
+            with_marker += 1
+    return parseable > 0 and with_marker > 0
+
+
+
 
 def _parse_integer(value: str) -> int | None:
     text = _normalize_numeric_text(value.strip())
@@ -1070,13 +1100,17 @@ def infer_transform_for_mapping(
             return "none"
 
     # Source type is the pivot when the target is generic (e.g., VARCHAR).
-    # Native numerics stay identity; string sources still need a parse guard.
+    # Native numerics stay identity; but a numeric-typed source whose textual
+    # values still carry currency symbols / locale grouping ($1,000.00, €2.000,50)
+    # must be normalised even into a text sink — otherwise the raw formatted
+    # string is written verbatim and money fidelity is lost. ``_native_numeric``
+    # is False exactly when the samples still need a parse.
     if src == "integer":
-        return "none"
+        return "none" if _native_numeric else "integer"
     if src == "decimal":
-        return "none"
+        return "none" if _native_numeric else "decimal"
     if src == "float":
-        return "none"
+        return "none" if _native_numeric else "decimal"
     if src == "boolean":
         return "boolean"
     if src in {"json", "array"}:

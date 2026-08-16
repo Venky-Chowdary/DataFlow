@@ -250,7 +250,12 @@ def write_mapped_rows(
             checksum=checksum, chunks_completed=chunks, driver="stub",
         )
 
-    target_cols, logical_types = resolve_target_columns(mappings, column_types, preserve_case=True)
+    target_cols, logical_types = resolve_target_columns(
+        mappings,
+        column_types,
+        preserve_case=True,
+        table_exists=False if create_table else None,
+    )
     if not target_cols:
         return WriteResult(
             ok=False,
