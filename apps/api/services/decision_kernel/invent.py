@@ -228,14 +228,16 @@ def _backfill_widened_type(
     )
     if not source_type:
         return ""
+    # Function-local: connectors.schema_drift imports the type layer, so a
+    # module-level import here would close an import cycle.
     try:
         from connectors.schema_drift import is_wider_type
-    except Exception:
+    except ImportError:
         return ""
     try:
         if is_wider_type(str(live_type), source_type, dest_db=dest_db):
             return source_type
-    except Exception:
+    except (ValueError, TypeError, KeyError):
         return ""
     return ""
 

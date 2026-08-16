@@ -1046,10 +1046,13 @@ def arrow_dtype_to_carrier(dtype: str | None) -> str | None:
     return None
 
 
-def normalize_logical_type(*args, **kwargs):
+# Shims below carry the real signature: an untyped ``*args`` delegate types as
+# ``Any``, which silently disabled type checking for every caller of the type
+# layer on both sides of the type_system / type_invent split.
+def normalize_logical_type(inferred: str | None) -> str:
     """Backward-compat shim — body in decision_kernel.type_invent."""
     from services.decision_kernel.type_invent import normalize_logical_type as _impl
-    return _impl(*args, **kwargs)
+    return _impl(inferred)
 
 
 
@@ -2306,10 +2309,10 @@ def ddl_carrier_type(inferred: str | None) -> str:
     return logical.upper() if logical else "VARCHAR"
 
 
-def ddl_type(*args, **kwargs):
+def ddl_type(db_type: str, inferred: object) -> str:
     """Backward-compat shim — body in decision_kernel.type_invent."""
     from services.decision_kernel.type_invent import ddl_type as _impl
-    return _impl(*args, **kwargs)
+    return _impl(db_type, inferred)  # type: ignore[arg-type]
 
 
 
@@ -5152,18 +5155,23 @@ def resolve_mapping_target_type(
 
 
 
-def promote_create_new_temporal_stamp(*args, **kwargs):
+def promote_create_new_temporal_stamp(
+    src_type: str, stamped: str, dest_db_type: str = ""
+) -> str:
     """Backward-compat shim — body in decision_kernel.type_invent."""
     from services.decision_kernel.type_invent import promote_create_new_temporal_stamp as _impl
-    return _impl(*args, **kwargs)
+    return _impl(src_type, stamped, dest_db_type)
 
 
 
 
-def create_new_mapping_target_type(*args, **kwargs):
+def create_new_mapping_target_type(
+    src_type: str, dest_db_type: str = "", *,
+    samples: list[object] | None = None, source_db: str = "",
+) -> str:
     """Backward-compat shim — body in decision_kernel.type_invent."""
     from services.decision_kernel.type_invent import create_new_mapping_target_type as _impl
-    return _impl(*args, **kwargs)
+    return _impl(src_type, dest_db_type, samples=samples, source_db=source_db)
 
 
 
@@ -5177,17 +5185,21 @@ def create_new_mapping_target_type(*args, **kwargs):
 # _PASS_THROUGH_REJECT_ON_DEST moved to services.decision_kernel.type_invent (Phase C2 invent body).
 
 
-def _is_explicit_physical_stamp(*args, **kwargs):
+def _is_explicit_physical_stamp(carrier: str, dest_db: str = "") -> bool:
     """Backward-compat shim — body in decision_kernel.type_invent."""
     from services.decision_kernel.type_invent import _is_explicit_physical_stamp as _impl
-    return _impl(*args, **kwargs)
+    return _impl(carrier, dest_db)
 
 
 
-def materialize_dest_ddl(*args, **kwargs):
+def materialize_dest_ddl(
+    db_type: str,
+    carrier: str | None,
+    source_type: str | None = None,
+) -> str:
     """Backward-compat shim — body in decision_kernel.type_invent."""
     from services.decision_kernel.type_invent import materialize_dest_ddl as _impl
-    return _impl(*args, **kwargs)
+    return _impl(db_type, carrier, source_type)
 
 
 
@@ -6238,17 +6250,17 @@ def integer_bit_width(inferred: str | None) -> int | None:
     return base
 
 
-def integer_width_carrier(*args, **kwargs):
+def integer_width_carrier(native: str | None) -> str | None:
     """Backward-compat shim — body in decision_kernel.type_invent."""
     from services.decision_kernel.type_invent import integer_width_carrier as _impl
-    return _impl(*args, **kwargs)
+    return _impl(native)
 
 
 
-def float_width_carrier(*args, **kwargs):
+def float_width_carrier(native: str | None) -> str | None:
     """Backward-compat shim — body in decision_kernel.type_invent."""
     from services.decision_kernel.type_invent import float_width_carrier as _impl
-    return _impl(*args, **kwargs)
+    return _impl(native)
 
 
 
@@ -6324,10 +6336,10 @@ def ddl_invent_bit_width(dest_db: str, carrier_or_logical: str | None) -> int | 
     return integer_bit_width(physical)
 
 
-def ddl_invent_never_narrower_than_table(*args, **kwargs):
+def ddl_invent_never_narrower_than_table(dest_db: str, logical: str) -> bool:
     """Backward-compat shim — body in decision_kernel.type_invent."""
     from services.decision_kernel.type_invent import ddl_invent_never_narrower_than_table as _impl
-    return _impl(*args, **kwargs)
+    return _impl(dest_db, logical)
 
 
 

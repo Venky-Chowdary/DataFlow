@@ -839,8 +839,10 @@ jobs:
         # Strict on services.decision_kernel; type_system follows as a skip-import smoke.
         working-directory: apps/api
         run: |
-          python -m mypy --config-file mypy.ini --follow-imports=skip services/decision_kernel
-          python -m mypy --config-file mypy.ini --follow-imports=skip services/type_system.py
+          # One invocation: with --follow-imports=skip, anything not named here
+          # resolves to Any, so checking type_system apart from the modules it
+          # delegates to left every invent path unchecked in both directions.
+          python -m mypy --config-file mypy.ini --follow-imports=skip services/decision_kernel services/type_system.py services/type_ddl_specialty.py
 
       - name: Assert optional RAG deps are not in default install
         run: |
