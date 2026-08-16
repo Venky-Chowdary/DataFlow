@@ -107,11 +107,14 @@ def _json_column_names(cur, schema: str, table: str) -> frozenset[str]:
         """,
         (schema, table),
     )
-    return frozenset(
-        str(name)
-        for name, data_type, udt_name in cur.fetchall()
-        if is_json_catalog_type(str(data_type or ""), str(udt_name or ""))
-    )
+    def _json_row(row) -> bool:
+        if len(row) < 2:
+            return False
+        data_type = str(row[1] or "")
+        udt_name = str(row[2] or "") if len(row) > 2 else ""
+        return is_json_catalog_type(data_type, udt_name)
+
+    return frozenset(str(row[0]) for row in cur.fetchall() if _json_row(row))
 
 
 def _ordered_column_names(cur, schema: str, table: str) -> list[str]:
