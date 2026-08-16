@@ -451,6 +451,12 @@
   box-shadow: 0 0 0 3px var(--df-focus, rgba(15, 118, 110, 0.18));
 }
 
+/* A field that carries our own clear must not also show Chrome's native search
+   ✕ — two clear controls, one of them unstyled, in the same input. */
+:is(label, div):has(> .df2-close-btn) > input[type="search"]::-webkit-search-cancel-button {
+  display: none;
+}
+
 .df2-close-btn-sm {
   width: 26px;
   height: 26px;

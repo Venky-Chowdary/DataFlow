@@ -131,6 +131,15 @@
   min-width: 34ch;
 }
 
+/* Route (`postgresql → snowflake`) and the check list are open-ended, and held
+   on one line they pushed the artifact ledger 1383px past its container at
+   1280. They wrap; timestamps, tier and counts stay on one line. */
+.df2-page-benchmarks-table td.df2-page-benchmarks-cell-wrap {
+  white-space: normal;
+  overflow-wrap: break-word;
+  min-width: 18ch;
+}
+
 /* Sentence columns kept the table wider than its container, so the evidence
    column paid for it with a scrollbar. Prose wraps; the artifact names do not. */
 .df2-page-benchmarks-table--prose td {

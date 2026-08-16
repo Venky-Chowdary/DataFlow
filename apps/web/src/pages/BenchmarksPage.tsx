@@ -309,14 +309,14 @@ export function BenchmarksPage() {
                                 <tr key={p.id}>
                                   <td>{new Date(p.mtime).toLocaleString()}</td>
                                   <td>{p.tier || "—"}</td>
-                                  <td>{p.route || "—"}</td>
+                                  <td className="df2-page-benchmarks-cell-wrap">{p.route || "—"}</td>
                                   <td>{p.rows != null ? formatNumber(p.rows) : "—"}</td>
                                   <td>
                                     <span className={`df2-badge ${p.success ? "df2-badge-success" : "df2-badge-warning"}`}>
                                       {p.success ? "pass" : "fail"}
                                     </span>
                                   </td>
-                                  <td>{(p.checks || []).join(", ") || "—"}</td>
+                                  <td className="df2-page-benchmarks-cell-wrap">{(p.checks || []).join(", ") || "—"}</td>
                                 </tr>
                               ))}
                             </tbody>
