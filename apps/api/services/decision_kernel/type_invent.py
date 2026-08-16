@@ -66,6 +66,8 @@ from services.type_system import (
     _with_collation_clause,
     arrow_dtype_to_carrier,
     avro_logical_token_to_carrier,
+    ddl_carrier_type,
+    destination_is_file_export,
     float_mantissa_bits,
     integer_bit_width,
     is_bitstring_carrier,
@@ -229,6 +231,35 @@ def normalize_logical_type(inferred: str | None) -> str:
 
 
 
+_FILE_EXPORT_DECIMAL_PRECISION: Final[int] = 38
+
+
+def _file_export_ddl(inferred: str | None) -> str:
+    """Type carried by a file/object export — class kept, declared width dropped.
+
+    An object export has no DDL, so the type comes from the format itself: JSON
+    numbers, Parquet/Avro typed columns. Collapsing to the TEXT default quotes
+    every integer, decimal and date, and downstream Athena/Spark then read a
+    typed source back as strings.
+
+    Widths are a different matter: a file has no column width to overflow, and
+    a source width inferred from a sample would quarantine every later row that
+    exceeds it. Keep the scale (it is the value's own precision) and widen the
+    precision to the decimal128 maximum the export formats carry.
+    """
+    carrier = ddl_carrier_type(inferred)
+    logical = normalize_logical_type(carrier)
+    if logical == LOGICAL_DECIMAL:
+        _, scale = parse_numeric_precision_scale(carrier)
+        if scale is None:
+            return carrier
+        return f"DECIMAL({_FILE_EXPORT_DECIMAL_PRECISION},{min(int(scale), _FILE_EXPORT_DECIMAL_PRECISION)})"
+    width = parse_string_carrier_width(carrier)
+    if width is not None and logical in {LOGICAL_STRING, LOGICAL_TEXT}:
+        return "VARCHAR"
+    return carrier
+
+
 def ddl_type(db_type: str, inferred: str | LogicalType | NativeType | None) -> str:
     """Map a logical source type to a destination-native DDL type.
 
@@ -275,6 +306,8 @@ def ddl_type(db_type: str, inferred: str | LogicalType | NativeType | None) -> s
         if t == LOGICAL_UUID:
             return "VARCHAR"
         # Fall through for other logicals via generic_sql mapping.
+    if destination_is_file_export(db_type):
+        return _file_export_ddl(inferred)
     db = _normalize_dest_db(db_type)
     nested = _nested_ddl_for_dest(db, inferred)
     if nested:

@@ -2108,6 +2108,33 @@ def _decimal_ddl_for_dest(db: str, inferred: str | None) -> str:
     return template.format(p=out_p, s=out_s)
 
 
+# Destinations that store files, not tables. They have no DDL and no catalog:
+# the export format carries the type (JSON numbers, Parquet/Avro typed columns).
+# Falling through to the TEXT default would quote every integer, decimal and
+# date, so Athena/Spark read strings back from a typed source.
+FILE_EXPORT_DESTS: Final[frozenset[str]] = frozenset(
+    {
+        "s3",
+        "amazon_s3",
+        "aws_s3",
+        "minio",
+        "s3_compatible",
+        "gcs",
+        "google_cloud_storage",
+        "adls",
+        "azure_blob",
+        "azure_data_lake",
+        "sftp",
+        "ftp",
+    }
+)
+
+
+def destination_is_file_export(db_type: str | None) -> bool:
+    """True when the destination is a file/object export with no DDL."""
+    return _normalize_dest_db(db_type) in FILE_EXPORT_DESTS
+
+
 def ddl_carrier_type(inferred: str | None) -> str:
     """Logical DDL carrier that keeps DECIMAL(p,s) / VECTOR(n) params.
 
