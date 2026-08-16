@@ -37,6 +37,15 @@ _DUP_RE = re.compile(
     re.I,
 )
 
+_ENCODING_RE = re.compile(
+    r"format-control character|control character|invisible character|"
+    r"bidi(?:rectional)? (?:control|override)|zero.?width|"
+    r"lone surrogate|unpaired surrogate|invalid (?:utf-?8|byte sequence|encoding)|"
+    r"mojibake|replacement character|byte order mark|\bBOM\b|"
+    r"mixed encodings|undecodable",
+    re.I,
+)
+
 _FIDELITY_GATE_IDS = frozenset(
     {
         "g3_schema_contract",
@@ -65,6 +74,15 @@ _DUP_GATE_IDS = frozenset(
         "g9_data_integrity",
     }
 )
+
+
+# One root cause, one primary action — the label has to be the action the
+# operator actually needs, not the fidelity remap for every kind of block.
+_PRIMARY_ACTION_LABELS: dict[str, str] = {
+    "encoding_normalization": "Open Map · normalize text",
+    "duplicate_identity": "Open Sync · choose identity key",
+    "mapping_confidence": "Open Map · confirm mapping",
+}
 
 
 @dataclass
@@ -129,7 +147,9 @@ class MigrationRootCause:
                 "suggested_actions": [
                     {
                         "kind": "open_map",
-                        "label": "Open Map · remap / Risk Contract",
+                        "label": _PRIMARY_ACTION_LABELS.get(
+                            self.kind, "Open Map · remap / Risk Contract"
+                        ),
                     }
                 ],
             },
@@ -263,6 +283,13 @@ def _is_fidelity_signal(
                 return False
     if details.get("fidelity_collapse") is True:
         return True
+    # Invisible / undecodable characters are an encoding root with its own fix
+    # (normalize or quarantine the rows). Absorbing them into fidelity collapse
+    # told operators to remap a type path that is not the problem — a TEXT→TEXT
+    # column was reported as collapsing fidelity because the G9 message says
+    # "integrity failed".
+    if _is_encoding_signal(message, details, gate_id):
+        return False
     kind = framing_kind or kind
     if kind in {
         "fidelity_collapse",
@@ -284,6 +311,22 @@ def _is_fidelity_signal(
     ):
         return True
     return False
+
+
+def _is_encoding_signal(
+    message: str,
+    details: dict[str, Any] | None,
+    gate_id: str,
+) -> bool:
+    """True for control-character / undecodable-byte findings on the sample."""
+    details = details or {}
+    if details.get("fidelity_collapse") is True:
+        return False
+    if details.get("encoding_issues"):
+        return True
+    if str(gate_id or "") not in {"g9_data_integrity", "g3_encoding", "g9_encoding"}:
+        return False
+    return bool(_ENCODING_RE.search(_blob(message, details)))
 
 
 def _is_transform_error_signal(
@@ -958,6 +1001,102 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
                 quarantine_policy=(
                     "holdout_rejected_rows under CAST_AND_CONTINUE / QUARANTINE_ROW "
                     "(see docs/MIGRATION_RISK_CONTRACT.md)"
+                ),
+                rollback_policy="DOCUMENT_ONLY",
+                documentation="docs/MIGRATION_RISK_CONTRACT.md",
+                impacted_gates=absorbed,
+                absorbed_blocker_ids=absorbed,
+                severity="block",
+            )
+        )
+
+    enc_gates = [
+        g
+        for g in gates
+        if g.get("status") == "block"
+        and _is_encoding_signal(
+            str(g.get("message") or ""), g.get("details") or {}, str(g.get("id") or "")
+        )
+    ]
+    enc_blockers = [
+        b
+        for b in blockers
+        if _is_encoding_signal(
+            str(b.get("message") or ""), b.get("details") or {}, str(b.get("id") or "")
+        )
+    ]
+    if enc_gates or enc_blockers:
+        absorbed = sorted(
+            {
+                *[str(g.get("id")) for g in enc_gates if g.get("id")],
+                *[str(b.get("id")) for b in enc_blockers if b.get("id")],
+            }
+        )
+        cols = []
+        chars: list[str] = []
+        transforms: list[str] = []
+        for src in enc_gates + enc_blockers:
+            details = src.get("details") or {}
+            cols.extend(_columns_from_details(details))
+            for issue in details.get("encoding_issues") or details.get("issues") or []:
+                if not isinstance(issue, dict):
+                    continue
+                col = issue.get("column") or issue.get("source")
+                if col:
+                    cols.append(str(col))
+                chars.extend(str(c) for c in (issue.get("chars") or []) if c)
+                sug = issue.get("suggested_transform")
+                if sug:
+                    transforms.append(str(sug))
+        cols = list(dict.fromkeys(cols))
+        chars = list(dict.fromkeys(chars))
+        transform = next(iter(dict.fromkeys(transforms)), "strip_controls")
+        char_label = f" ({', '.join(chars[:4])})" if chars else ""
+        col_label = ", ".join(cols[:5]) + (
+            f" (+{len(cols) - 5} more)" if len(cols) > 5 else ""
+        )
+        roots.append(
+            MigrationRootCause(
+                root_id=_root_id("encoding_normalization", cols, absorbed),
+                kind="encoding_normalization",
+                title="Invisible / undecodable characters in source text",
+                summary=(
+                    (
+                        f"{len(cols)} column(s) carry characters that do not "
+                        f"survive as data{char_label}: {col_label}"
+                    )
+                    if cols
+                    else f"Undecodable or invisible characters{char_label} on the Validate sample"
+                ),
+                business_impact=(
+                    "Zero-width, bidi and control characters silently break joins, "
+                    "lookups and exact-match search in the destination — the value "
+                    "looks identical to a human and compares unequal to a machine. "
+                    "The type path is not the problem, so remapping it fixes nothing."
+                ),
+                affected_columns=cols,
+                affected_rows_sample=sample_n,
+                estimated_total_rows=est_n,
+                risk_level="high",
+                recommended_fix=(
+                    f"Open Map → apply the '{transform}' transform to "
+                    f"{col_label or 'the affected column(s)'} → re-run Validate."
+                ),
+                alternative_fixes=[
+                    "Sign QUARANTINE_ROW to hold out affected rows instead of normalizing",
+                    "Normalize at the source (Unicode NFC + control strip) and re-read",
+                    "Accept the characters explicitly if the destination is a text archive",
+                ],
+                recovery_strategy=(
+                    "Normalization is applied on read, so already-written rows keep "
+                    "the original characters — rewrite the affected table after the "
+                    "transform is in place."
+                ),
+                expected_runtime_impact=(
+                    "Re-Validate is sample-scoped; the transform costs one pass per cell"
+                ),
+                quarantine_policy=(
+                    "holdout_rejected_rows under QUARANTINE_ROW when normalization is refused"
                 ),
                 rollback_policy="DOCUMENT_ONLY",
                 documentation="docs/MIGRATION_RISK_CONTRACT.md",

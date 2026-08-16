@@ -16,7 +16,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from services.auth_service import auth_required
+from src.services import auth_service as _auth_service
 
 
 class Permission:
@@ -212,8 +212,10 @@ class RBACMiddleware(BaseHTTPMiddleware):
     """Enforce role-based permissions for authenticated API requests."""
 
     async def dispatch(self, request: Request, call_next):
-        # RBAC only matters when authentication is enforced.
-        if not auth_required():
+        # RBAC only matters when authentication is enforced. Read it off the
+        # auth module per request rather than copying the symbol at import
+        # time, so RBAC can never enforce against a stale view of the setting.
+        if not _auth_service.auth_required():
             return await call_next(request)
 
         path = request.url.path

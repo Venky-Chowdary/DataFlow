@@ -44,8 +44,6 @@ def test_mcp_tools_list_is_reachable(client: TestClient):
 def test_mcp_tool_call_get_transfer_capabilities(client: TestClient, monkeypatch):
     # When platform auth is off (local), tools/call remains usable for DX.
     monkeypatch.setattr("src.services.auth_service.auth_required", lambda: False)
-    monkeypatch.setattr("src.middleware.auth_middleware.auth_required", lambda: False)
-    monkeypatch.setattr("services.rbac.auth_required", lambda: False)
     response = client.post(
         "/api/v1/mcp/tools/call",
         json={"name": "get_transfer_capabilities", "arguments": {}},
@@ -58,8 +56,6 @@ def test_mcp_tool_call_get_transfer_capabilities(client: TestClient, monkeypatch
 
 def test_mcp_tool_call_rejected_without_bearer_when_auth_on(client: TestClient, monkeypatch):
     monkeypatch.setattr("src.services.auth_service.auth_required", lambda: True)
-    monkeypatch.setattr("src.middleware.auth_middleware.auth_required", lambda: True)
-    monkeypatch.setattr("services.rbac.auth_required", lambda: True)
     response = client.post(
         "/api/v1/mcp/tools/call",
         json={"name": "get_transfer_capabilities", "arguments": {}},

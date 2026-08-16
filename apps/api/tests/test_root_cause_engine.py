@@ -165,6 +165,66 @@ def test_fidelity_summary_reads_type_path_from_the_coercion_probe():
     assert "order_ts TIMESTAMP_NTZ → DATETIME" in root.summary
 
 
+def _encoding_preflight() -> dict:
+    """G9 encoding finding on a TEXT → TEXT column — nothing about the type path."""
+    return {
+        "passed": False,
+        "row_count": 4,
+        "gates": [
+            {
+                "id": "g9_data_integrity",
+                "status": "block",
+                "message": (
+                    "Data integrity failed: txt: format-control character "
+                    "detected (U+200B) — normalize before transfer"
+                ),
+                "details": {
+                    "encoding_issues": [
+                        {
+                            "column": "txt",
+                            "row": 2,
+                            "chars": ["U+200B"],
+                            "message": "format-control character detected (U+200B)",
+                            "suggested_transform": "strip_controls",
+                        }
+                    ],
+                    "evidence_scope": {"sample_rows": 4},
+                },
+            }
+        ],
+        "blockers": [],
+    }
+
+
+def test_control_characters_are_not_a_fidelity_collapse_root():
+    """TEXT → TEXT cannot collapse fidelity — remapping the type fixes nothing.
+
+    The G9 message says "integrity failed", which the fidelity matcher read as a
+    lossy type path and answered with the wrong corrective action.
+    """
+    roots = build_root_causes(_encoding_preflight())
+    kinds = [r.kind for r in roots]
+    assert "fidelity_collapse" not in kinds, kinds
+    assert kinds == ["encoding_normalization"], kinds
+
+
+def test_encoding_root_names_the_column_character_and_transform():
+    root = build_root_causes(_encoding_preflight())[0]
+    assert "txt" in root.summary
+    assert "U+200B" in root.summary
+    assert "strip_controls" in root.recommended_fix
+    assert root.affected_columns == ["txt"]
+
+
+def test_encoding_gate_stamped_fidelity_collapse_stays_fidelity():
+    """An explicit fidelity stamp still wins — charset narrowing is a real cast."""
+    pf = _encoding_preflight()
+    pf["gates"][0]["details"]["fidelity_collapse"] = True
+    kinds = [r.kind for r in build_root_causes(pf)]
+    assert "fidelity_collapse" in kinds, kinds
+    assert "encoding_normalization" not in kinds, kinds
+
+
 def test_apply_collapses_operator_blockers():
     pf = apply_root_causes_to_preflight(_fidelity_preflight())
     assert len(pf["root_causes"]) == 1

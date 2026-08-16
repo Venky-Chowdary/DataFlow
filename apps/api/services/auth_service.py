@@ -1,27 +1,18 @@
-"""Compatibility shim: canonical auth_service lives in src.services.auth_service."""
+"""Compatibility shim: canonical auth_service lives in src.services.auth_service.
+
+Attributes are resolved on the canonical module at *access* time. A star-style
+``from src.services.auth_service import auth_required`` would copy the binding
+into this module, so a later rebinding of the canonical symbol (a feature flag
+flip, a patched dependency) left two live answers to "is auth required?" in one
+process — the middleware imported through this shim kept enforcing while the
+canonical module said otherwise.
+"""
+
 from __future__ import annotations
 
-from src.services.auth_service import (
-    _ALLOW_DEV_USER,
-    _DEV_USER,
-    _LEGACY_SHA256_RE,
-    _REAUTH_SECRET,
-    _REQUIRE_AUTH,
-    _TOKEN_TTL_SEC,
-    _legacy_verify,
-    _load_users,
-    _normalize_secret,
-    _token_secret,
-    auth_bootstrap_status,
-    auth_required,
-    authenticate,
-    create_token,
-    hash_password,
-    lookup_user,
-    public_user,
-    verify_password,
-    verify_token,
-)
+from typing import Any
+
+from src.services import auth_service as _canonical
 
 __all__ = [
     "_REAUTH_SECRET",
@@ -44,3 +35,11 @@ __all__ = [
     "verify_token",
     "public_user",
 ]
+
+
+def __getattr__(name: str) -> Any:
+    return getattr(_canonical, name)
+
+
+def __dir__() -> list[str]:
+    return sorted(set(__all__) | set(dir(_canonical)))
