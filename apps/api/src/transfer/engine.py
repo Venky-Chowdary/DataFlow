@@ -1562,7 +1562,11 @@ def _drop_destination_table(destination: EndpointConfig) -> bool:
 
     from connectors.table_manager import TableDropError, drop_table
 
-    from .adapters import resolve_connector_config, resolve_dest_table
+    from .adapters import (
+        carry_dest_spelling_across_drop,
+        resolve_connector_config,
+        resolve_dest_table,
+    )
     from .connector_capabilities import resolve_driver_type
 
     try:
@@ -1577,6 +1581,7 @@ def _drop_destination_table(destination: EndpointConfig) -> bool:
             "unknown", f"could not resolve destination for drop: {exc}"
         ) from exc
 
+    carry_dest_spelling_across_drop(destination, db_type, cfg, table_name, schema)
     try:
         return drop_table(db_type, cfg, table_name, schema)
     except TableDropError as exc:

@@ -623,6 +623,8 @@ def _write_batch(
     if resolve_driver_type(dest_type) == "generic_sql":
         from connectors.generic_sql import write_mapped_rows
 
+        from .connector_dispatch import writer_extra_kwargs as _writer_extra
+
         type_name = cfg.get("type", "") or dest_type
         from connectors.write_resilience import build_write_batch_key
 
@@ -658,6 +660,7 @@ def _write_batch(
             file_batch_idx=chunk_idx,
             destination_column_nullability=dest_nullability,
             destination_column_types=dest_column_types,
+            **_writer_extra("generic_sql", cfg=cfg, dest=dest),
             **source_handoff,
         )
         if not result.ok:
@@ -2955,6 +2958,9 @@ def _drop_destination_endpoint(destination: EndpointConfig) -> bool:
             "unknown", f"could not resolve destination for drop: {exc}"
         ) from exc
 
+    from .adapters import carry_dest_spelling_across_drop
+
+    carry_dest_spelling_across_drop(destination, db_type, cfg, table_name, schema)
     try:
         return drop_table(db_type, cfg, table_name, schema)
     except TableDropError as exc:

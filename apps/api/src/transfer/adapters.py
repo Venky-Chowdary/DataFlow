@@ -2630,6 +2630,44 @@ def write_destination_file(
     )
 
 
+#: Destinations whose catalog folds unquoted identifiers to one case.
+_CASE_FOLDING_DESTS = frozenset({"oracle", "snowflake", "db2"})
+
+
+def carry_dest_spelling_across_drop(
+    destination: Any,
+    db_type: str,
+    cfg: dict[str, Any],
+    table_name: str,
+    schema: str | None,
+) -> None:
+    """Remember the destination's stored spelling before an overwrite drops it.
+
+    On Oracle/Snowflake a table that does not exist is created under the folded
+    (upper-case) name, which is right for a first load and wrong for an
+    overwrite: a quoted lower-case destination came back as a *different* object
+    and everything reading the old identifier found nothing.
+    """
+    import logging
+
+    if db_type.lower() not in _CASE_FOLDING_DESTS:
+        return
+    try:
+        from connectors.generic_sql import physical_table_spelling
+
+        prior = physical_table_spelling(cfg, table_name, schema)
+    except ImportError as exc:  # SQLAlchemy-less install: nothing to preserve.
+        logging.getLogger(__name__).debug(
+            "pre-drop spelling probe failed for %s: %s", table_name, exc
+        )
+        return
+    if prior:
+        destination.extra = {
+            **(getattr(destination, "extra", None) or {}),
+            "dest_table_prior_spelling": prior,
+        }
+
+
 def resolve_endpoint_dict(
     endpoint_dict: dict[str, Any], workspace_id: str | None = None
 ) -> dict[str, Any]:

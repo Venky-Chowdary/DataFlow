@@ -1017,8 +1017,32 @@ _ORACLE_WIRES: Final = {"oracle", "oracledb", "oracle_autonomous", "oracle_adw",
 _MSSQL_WIRES: Final = {"sqlserver", "mssql", "azure_sql", "synapse", "azure_synapse"}
 
 
+def physical_table_spelling(
+    cfg: dict[str, Any], table: str, schema: str | None = None
+) -> str:
+    """Spelling the catalog stores for ``table``, or ``""`` when it is absent.
+
+    Callers that are about to drop and recreate a destination need the spelling
+    *before* the drop: afterwards the table is gone and the recreate can only
+    guess the engine's folding convention.
+    """
+    if not SQLALCHEMY_AVAILABLE or not table:
+        return ""
+    from services.sql_object_identity import resolve_object_identity
+
+    engine = _engine(cfg)
+    try:
+        ident = resolve_object_identity(engine, table, schema or _schema_name(cfg))
+        return ident.table if (ident.resolved and ident.exists) else ""
+    except Exception as exc:  # noqa: BLE001 — unreadable catalog: caller decides
+        logger.debug("physical spelling probe failed for %s: %s", table, exc)
+        return ""
+    finally:
+        release_engine(engine)
+
+
 def _resolve_physical_table_ident(
-    engine: Any, table: str, schema: str | None
+    engine: Any, table: str, schema: str | None, prior_spelling: str = ""
 ) -> tuple[str, str | None]:
     """Physical spelling of a destination on case-folding engines.
 
@@ -1047,6 +1071,11 @@ def _resolve_physical_table_ident(
         return table, schema
     if ident.exists:
         return ident.table, ident.schema
+    if prior_spelling and prior_spelling.casefold() == table.casefold():
+        # full_refresh just dropped this table: recreating it folded would move
+        # the destination to a different identifier than the one the operator
+        # (and everything reading it) points at.
+        return prior_spelling, schema
     return folded, folded_schema
 
 
@@ -1096,11 +1125,24 @@ def _stored_column_spellings(
     does not exist. ``denormalize_name`` is the dialect's own inverse and keeps
     a deliberately quoted lower-case column quoted.
     """
+    from sqlalchemy.sql import quoted_name
+
+    inspector = inspect(bind)
     try:
-        cols = inspect(bind).get_columns(table, schema=schema)
+        cols = inspector.get_columns(table, schema=schema)
     except Exception as exc:  # noqa: BLE001 — unreadable catalog: keep Map names
         logger.debug("column spelling probe failed for %s: %s", table, exc)
-        return {}
+        cols = []
+    if not cols:
+        # The probe folds the *table* name too, so a deliberately quoted
+        # lower-case table (``"scn_dst"``) read as absent and every column kept
+        # its Map spelling: appending into it asked Oracle for ``"email"`` beside
+        # the stored ``EMAIL`` and failed with ORA-00904 on a column plainly there.
+        try:
+            cols = inspector.get_columns(quoted_name(table, True), schema=schema)
+        except Exception as exc:  # noqa: BLE001 — unreadable catalog: keep Map names
+            logger.debug("quoted column spelling probe failed for %s: %s", table, exc)
+            return {}
     denormalize = getattr(
         getattr(engine, "dialect", None), "denormalize_name", lambda n: n
     )
@@ -2591,6 +2633,42 @@ def introspect_table_schema(
         release_engine(engine)
 
 
+def _drop_table_sql(engine: Any, qualified: str, table: str) -> str:
+    """Conditional DROP in the dialect's own spelling.
+
+    ``DROP TABLE IF EXISTS`` is a syntax error on Oracle (ORA-00933) and did not
+    exist before SQL Server 2016, so the statement failed and the drop fell
+    through to a fallback that could no-op silently.
+    """
+    dialect = str(getattr(getattr(engine, "dialect", None), "name", "") or "").lower()
+    if dialect == "oracle":
+        return (
+            f"BEGIN EXECUTE IMMEDIATE 'DROP TABLE {qualified}'; "
+            "EXCEPTION WHEN OTHERS THEN IF SQLCODE != -942 THEN RAISE; END IF; END;"
+        )
+    if dialect == "mssql":
+        return f"IF OBJECT_ID('{table}', 'U') IS NOT NULL DROP TABLE {qualified}"
+    return f"DROP TABLE IF EXISTS {qualified}"
+
+
+def _require_table_gone(engine: Any, table: str, schema: str | None) -> None:
+    """Prove the drop happened; a no-op drop is silent data corruption.
+
+    ``full_refresh`` treats a successful drop as "the destination is empty" and
+    then loads. When the DROP addressed a name the engine folded differently it
+    reported success while every row stayed, so the refresh appended onto rows it
+    had declared cleared — duplicated keys at best, doubled data at worst.
+    """
+    from services.sql_object_identity import resolve_object_identity
+
+    ident = resolve_object_identity(engine, table, schema)
+    if ident.resolved and ident.exists:
+        raise RuntimeError(
+            f"DROP TABLE reported success but {schema or ''}.{table} is still in "
+            "the catalog — refusing to treat the destination as cleared."
+        )
+
+
 def drop_table(cfg: dict[str, Any], table: str, schema: str | None = None) -> bool:
     """Drop a table using SQLAlchemy dialect-aware DDL with a raw fallback.
 
@@ -2610,15 +2688,24 @@ def drop_table(cfg: dict[str, Any], table: str, schema: str | None = None) -> bo
         table, schema = _resolve_physical_table_ident(engine, table, schema)
         qualified = _qualified_table_ref(cfg, table, schema)
         with engine.connect() as conn:
-            conn.execute(sa.text(f"DROP TABLE IF EXISTS {qualified}"))
+            conn.execute(sa.text(_drop_table_sql(engine, qualified, table)))
             conn.commit()
+        _require_table_gone(engine, table, schema)
         return True
     except Exception as primary_exc:
         # Some dialects reject the raw IF EXISTS form; retry via dialect DDL
         # before giving up, but surface the original error if that also fails.
         try:
-            table_obj = sa.Table(table, sa.MetaData(), schema=schema)
+            from sqlalchemy.sql import quoted_name
+
+            # Quoted: an unquoted Table() name is case-insensitive, so on Oracle
+            # the fallback compiled ``DROP TABLE scn_dst``, checkfirst read the
+            # folded SCN_DST as absent, and the drop became a silent no-op.
+            table_obj = sa.Table(
+                quoted_name(table, True), sa.MetaData(), schema=schema
+            )
             table_obj.drop(engine, checkfirst=True)
+            _require_table_gone(engine, table, schema)
             return True
         except Exception as fallback_exc:
             logger.error(
@@ -4537,7 +4624,14 @@ def write_mapped_rows(
     engine = _engine(cfg)
     schema_name = _schema_name(cfg)
     table_name, schema_name = _resolve_physical_table_ident(
-        engine, table_name, schema_name
+        engine,
+        table_name,
+        schema_name,
+        prior_spelling=str(
+            _kwargs.get("dest_table_prior_spelling")
+            or cfg.get("dest_table_prior_spelling")
+            or ""
+        ),
     )
 
     # SQL Server writes must fail closed on ANSI_WARNINGS — engine connect soft-applies

@@ -68,6 +68,36 @@ def writer_extra_kwargs(
     cannot reach the adapter path and be dropped by the streaming one — which is
     how SFTP host-key trust came to be verified at Validate and absent at write.
     """
+    return {
+        **_route_wide_writer_kwargs(cfg, dest),
+        **_driver_writer_kwargs(driver, cfg=cfg, dest=dest, common=common),
+    }
+
+
+def _route_wide_writer_kwargs(cfg: dict[str, Any], dest: Any) -> dict[str, Any]:
+    """Writer kwargs every driver needs, on every path.
+
+    ``dest_table_prior_spelling`` is the spelling a destination had before an
+    overwrite dropped it: without it a case-folding engine recreates the table
+    under the folded name and the object the operator pointed at is gone.
+    """
+    prior = str(
+        cfg.get("dest_table_prior_spelling")
+        or (cfg.get("extra") or {}).get("dest_table_prior_spelling")
+        or (getattr(dest, "extra", None) or {}).get("dest_table_prior_spelling")
+        or ""
+    )
+    return {"dest_table_prior_spelling": prior} if prior else {}
+
+
+def _driver_writer_kwargs(
+    driver: str,
+    *,
+    cfg: dict[str, Any],
+    dest: Any = None,
+    common: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Kwargs only this driver needs."""
     common = common or {}
     if driver == "snowflake":
         from services.connector_auth import snowflake_session_kwargs
