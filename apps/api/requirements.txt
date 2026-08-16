@@ -5,6 +5,7 @@ fastapi>=0.104.0
 uvicorn[standard]>=0.24.0
 python-multipart>=0.0.31
 pydantic>=2.5.0
+pydantic-settings>=2.0.0  # services.config BaseSettings — required for app boot
 eval_type_backport>=0.2.0
 
 # Dataframe / numeric helpers (heavy embedding models are optional — see requirements-rag.txt)
