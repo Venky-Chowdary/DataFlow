@@ -1792,7 +1792,20 @@ def _stream_database_transfer_impl(
         if total_rows is not None and fetch_offset >= total_rows and src_type != "dynamodb":
             return None
         batch_limit = _batch_limit(fetch_offset)
-        if last_batch is not None and len(last_batch.rows) < chunk_size:
+        # A short page only proves the source is drained when the reader owned
+        # the page size. A held snapshot scan hands back whatever ``fetchmany``
+        # buffered (DuckDB returns one vector), and a catalog count that still
+        # exceeds the rows read says more remain — stopping there drops rows
+        # while every count and checksum agrees on the truncated set.
+        page_may_be_partial = bool(last_batch is not None and last_batch.rows) and (
+            bool(src_scan.get("started"))
+            or (total_rows is not None and fetch_offset < total_rows)
+        )
+        if (
+            last_batch is not None
+            and len(last_batch.rows) < chunk_size
+            and not page_may_be_partial
+        ):
             if (
                 src_type
                 in (
