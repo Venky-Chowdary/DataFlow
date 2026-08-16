@@ -8,7 +8,6 @@ visible mid-pagination. SQLite binds a deferred transaction snapshot.
 from __future__ import annotations
 
 import os
-import socket
 import threading
 import time
 import uuid
@@ -23,27 +22,10 @@ os.environ.setdefault("DATAFLOW_DISABLE_OBJECT_STORE", "1")
 from src.transfer import stream as stream_mod
 from src.transfer.engine import UniversalTransferEngine
 from src.transfer.models import EndpointConfig, TransferRequest
+from tests.helpers.live_env import pg_creds, pg_up
 
 
-def _pg_up() -> bool:
-    try:
-        with socket.create_connection(("127.0.0.1", 5432), timeout=0.4):
-            return True
-    except OSError:
-        return False
-
-
-def _pg_creds() -> dict:
-    return {
-        "host": os.environ.get("P3_PG_HOST", os.environ.get("P2_PG_HOST", "127.0.0.1")),
-        "port": int(os.environ.get("P3_PG_PORT", os.environ.get("P2_PG_PORT", "5432"))),
-        "database": os.environ.get("P3_PG_DB", os.environ.get("P2_PG_DB", "postgres")),
-        "username": os.environ.get("P3_PG_USER", os.environ.get("P2_PG_USER", "postgres")),
-        "password": os.environ.get("P3_PG_PASSWORD", os.environ.get("P2_PG_PASSWORD", "admin")),
-    }
-
-
-@pytest.mark.skipif(not _pg_up(), reason="PostgreSQL not reachable")
+@pytest.mark.skipif(not pg_up("P3"), reason="PostgreSQL not reachable")
 def test_pg_full_refresh_hides_concurrent_inserts_under_rr(monkeypatch):
     """Live proof: inserts committed after RR starts must not appear in dest."""
     import psycopg2
@@ -51,7 +33,7 @@ def test_pg_full_refresh_hides_concurrent_inserts_under_rr(monkeypatch):
     # Small pages so the transfer spans multiple round-trips.
     monkeypatch.setattr(stream_mod, "CHUNK_SIZE", 2)
 
-    creds = _pg_creds()
+    creds = pg_creds("P3")
     src_table = f"p3_src_{uuid.uuid4().hex[:8]}"
     dst_table = f"p3_dst_{uuid.uuid4().hex[:8]}"
     conn = psycopg2.connect(

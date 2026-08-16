@@ -10,8 +10,6 @@ wire; live PG CREATE must be ``int8`` and hold int64 values bit-exactly.
 
 from __future__ import annotations
 
-import os
-import socket
 import sqlite3
 import tempfile
 import uuid
@@ -27,6 +25,7 @@ from services.decision_kernel import (
 )
 from services.schema_introspect import _introspect_sqlite
 from services.type_system import integer_bit_width
+from tests.helpers.live_env import pg_creds, pg_up
 
 
 def test_sqlite_integer_affinity_introspects_as_bigint():
@@ -82,21 +81,7 @@ def test_invent_from_sqlite_introspect_carrier_is_never_int32():
         path.unlink(missing_ok=True)
 
 
-def _pg_reachable() -> bool:
-    try:
-        with socket.create_connection(
-            (
-                os.environ.get("ITEM1_PG_HOST", "127.0.0.1"),
-                int(os.environ.get("ITEM1_PG_PORT", "5432")),
-            ),
-            timeout=0.4,
-        ):
-            return True
-    except OSError:
-        return False
-
-
-@pytest.mark.skipif(not _pg_reachable(), reason="PostgreSQL not reachable")
+@pytest.mark.skipif(not pg_up("ITEM1"), reason="PostgreSQL not reachable")
 def test_live_pg_create_from_sqlite_affinity_carrier_holds_int64():
     path = Path(tempfile.gettempdir()) / f"item1_sqlite3_{uuid.uuid4().hex[:8]}.db"
     table = f"item1_sqlite_pg_{uuid.uuid4().hex[:10]}"
@@ -117,11 +102,12 @@ def test_live_pg_create_from_sqlite_affinity_carrier_holds_int64():
         stamp_v = invent_dest_type(
             types["v"], dest_db="postgresql", context=InventContext.CREATE_NEW
         )
-        host = os.environ.get("ITEM1_PG_HOST", "127.0.0.1")
-        port = int(os.environ.get("ITEM1_PG_PORT", "5432"))
-        database = os.environ.get("ITEM1_PG_DB", "postgres")
-        username = os.environ.get("ITEM1_PG_USER", "postgres")
-        password = os.environ.get("ITEM1_PG_PASSWORD", "admin")
+        creds = pg_creds("ITEM1")
+        host = creds["host"]
+        port = creds["port"]
+        database = creds["database"]
+        username = creds["username"]
+        password = creds["password"]
         result = write_mapped_rows(
             host=host,
             port=port,

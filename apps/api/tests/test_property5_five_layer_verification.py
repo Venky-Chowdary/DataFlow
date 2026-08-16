@@ -27,36 +27,7 @@ from services.verification_ladder import (
 )
 from src.transfer.engine import UniversalTransferEngine
 from src.transfer.models import EndpointConfig, TransferRequest
-
-
-def _pg_creds() -> dict:
-    return {
-        "host": os.environ.get("P5_PG_HOST", os.environ.get("P2_PG_HOST", "127.0.0.1")),
-        "port": int(os.environ.get("P5_PG_PORT", os.environ.get("P2_PG_PORT", "5432"))),
-        "database": os.environ.get("P5_PG_DB", os.environ.get("P2_PG_DB", "dataflow")),
-        "username": os.environ.get("P5_PG_USER", os.environ.get("P2_PG_USER", "dataflow")),
-        "password": os.environ.get("P5_PG_PASSWORD", os.environ.get("P2_PG_PASSWORD", "dataflow")),
-    }
-
-
-def _pg_up() -> bool:
-    """True only when this host can authenticate — TCP-open is not enough."""
-    creds = _pg_creds()
-    try:
-        import psycopg2
-
-        conn = psycopg2.connect(
-            host=creds["host"],
-            port=creds["port"],
-            dbname=creds["database"],
-            user=creds["username"],
-            password=creds["password"],
-            connect_timeout=2,
-        )
-        conn.close()
-        return True
-    except Exception:
-        return False
+from tests.helpers.live_env import pg_creds, pg_up
 
 
 def _build_population(n: int = 500) -> list[dict]:
@@ -243,11 +214,11 @@ def test_sqlite_transfer_ladder_localizes_post_write_drift(tmp_path: Path):
     assert int(hit["target_value"]) == 999999
 
 
-@pytest.mark.skipif(not _pg_up(), reason="PostgreSQL not reachable")
+@pytest.mark.skipif(not pg_up("P5"), reason="PostgreSQL not reachable")
 def test_pg_five_layer_localizes_injected_drift():
     import psycopg2
 
-    creds = _pg_creds()
+    creds = pg_creds("P5")
     src_table = f"p5_src_{uuid.uuid4().hex[:8]}"
     dst_table = f"p5_dst_{uuid.uuid4().hex[:8]}"
     conn = psycopg2.connect(
