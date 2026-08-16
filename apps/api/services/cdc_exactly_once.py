@@ -87,6 +87,11 @@ from services.cdc_effectively_once import (
 PLATFORM_EXACTLY_ONCE_CLAIMED = False
 ALGORITHM = "dest_owned_watermark_txn"
 WATERMARK_TABLE = "_df_cdc_eos_watermarks"
+# Oracle rejects an unquoted identifier that starts with "_" (ORA-00911), and
+# quoting it would pin a lower-case name that the catalog inspector then has to
+# be told about at every call site. Oracle destinations therefore host the same
+# table under an Oracle-legal name.
+WATERMARK_TABLE_ORACLE = "df_cdc_eos_watermarks"
 DELIVERY_SEMANTICS_EOS = "exactly_once_dest_owned_watermark_txn"
 DELIVERY_SEMANTICS_ALO = "at_least_once_idempotent_apply"
 

@@ -1,4 +1,4 @@
-"""Live CDC exactly-once proof: real Postgres / MySQL destinations.
+"""Live CDC exactly-once proof: real Postgres / MySQL / Oracle / SQL Server.
 
 The dest-owned watermark protocol was only ever exercised against SQLite, where
 one process holds one file lock and a transaction cannot be observed by anyone
@@ -17,7 +17,7 @@ rather than being rounded to green.
 
 Usage::
 
-    python scripts/live_cdc_exactly_once_proof.py            # pg + mysql
+    python scripts/live_cdc_exactly_once_proof.py            # every engine
     python scripts/live_cdc_exactly_once_proof.py postgresql
 
 Artifact: /home/ubuntu/repro/cdc_exactly_once_live_results.json
@@ -72,7 +72,49 @@ ENGINES: dict[str, dict[str, Any]] = {
         username="root",
         password="dataflow",
     ),
+    "oracle": dict(
+        type="oracle",
+        host="127.0.0.1",
+        port=1521,
+        database="FREEPDB1",
+        username="system",
+        password="dataflow",
+    ),
+    "sqlserver": dict(
+        type="sqlserver",
+        host="127.0.0.1",
+        port=1433,
+        database="dataflow",
+        username="sa",
+        password="DataFlow_CDC_2022!",
+    ),
 }
+
+_QUOTE = {"mysql": ("`", "`"), "sqlserver": ("[", "]")}
+
+
+def quoted(engine: str, name: str) -> str:
+    open_q, close_q = _QUOTE.get(engine, ('"', '"'))
+    return f"{open_q}{name}{close_q}"
+
+
+def _drop_sql(engine: str, table: str) -> str:
+    """Dialect-correct conditional drop.
+
+    Oracle has no ``IF EXISTS`` and SQL Server only gained it in 2016, so the
+    harness has to speak each dialect or the clean slate silently fails and the
+    next scenario measures the previous scenario's rows.
+    """
+    q = quoted(engine, table)
+    if engine == "oracle":
+        return (
+            "BEGIN EXECUTE IMMEDIATE 'DROP TABLE ' || '" + q + "'; "
+            "EXCEPTION WHEN OTHERS THEN IF SQLCODE != -942 THEN RAISE; END IF; END;"
+        )
+    if engine == "sqlserver":
+        return f"IF OBJECT_ID('{table}', 'U') IS NOT NULL DROP TABLE {q}"
+    return f"DROP TABLE IF EXISTS {q}"
+
 
 MAPPINGS = [
     {"source": "id", "target": "id", "confidence": 1.0},
@@ -103,7 +145,7 @@ def drop(engine: str, tables: list[str]) -> None:
     try:
         with eng.begin() as conn:
             for t in tables:
-                conn.execute(text(f'DROP TABLE IF EXISTS "{t}"' if engine != "mysql" else f"DROP TABLE IF EXISTS `{t}`"))
+                conn.execute(text(_drop_sql(engine, t)))
             try:
                 conn.execute(text(f"DELETE FROM {WATERMARK_TABLE}"))
             except Exception:
@@ -166,11 +208,16 @@ def rows_of(engine: str, table: str) -> list[tuple]:
     from services.engine_pool import release_engine
     from sqlalchemy import text
 
-    q = f"`{table}`" if engine == "mysql" else f'"{table}"'
+    q = quoted(engine, table)
     eng = _engine(dict(ENGINES[engine]))
     try:
         with eng.begin() as conn:
-            res = conn.execute(text(f"SELECT id, v, {DF_LSN_COL} FROM {q} ORDER BY id"))
+            # Every column quoted: the dest tables are created case-sensitively,
+            # and Oracle folds a bare ``v`` to ``V`` (ORA-00904).
+            cols = ", ".join(quoted(engine, c) for c in ("id", "v", DF_LSN_COL))
+            res = conn.execute(
+                text(f"SELECT {cols} FROM {q} ORDER BY {quoted(engine, 'id')}")
+            )
             return [tuple(r) for r in res]
     finally:
         release_engine(eng)

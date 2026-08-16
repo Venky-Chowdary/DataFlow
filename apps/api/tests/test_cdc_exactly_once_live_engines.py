@@ -1,10 +1,12 @@
-"""CDC exactly-once against live Postgres / MySQL destinations.
+"""CDC exactly-once against live Postgres / MySQL / Oracle / SQL Server dests.
 
 The dest-owned watermark protocol was only ever proven on SQLite, which hides
-three things real engines do: MySQL rejects ANSI-quoted identifiers, PostgreSQL
-aborts the whole transaction when any statement fails, and MySQL commits
-implicitly on DDL. Each of those broke exactly-once on a route the product lists
-as wired, so the proofs live here against the engines themselves.
+what real engines do: MySQL rejects ANSI-quoted identifiers, PostgreSQL aborts
+the whole transaction when any statement fails, MySQL commits implicitly on DDL,
+and Oracle both rejects a leading-underscore table name and folds an unquoted
+lower-case name to upper case when it reads its own catalog. Each of those broke
+exactly-once on a route the product lists as wired, so the proofs live here
+against the engines themselves.
 
 Skips when a container port is unreachable — never green by absence.
 """
@@ -25,6 +27,7 @@ if str(_API_ROOT) not in sys.path:
 
 from connectors.cdc_eos_sa import (  # noqa: E402
     _quote_char,
+    _wm_ref,
     sa_dest_engine_count,
     sa_dest_watermark_view,
 )
@@ -35,6 +38,8 @@ from connectors.cdc_eos_sql import (  # noqa: E402
 )
 from services.cdc_engine import ChangeBatch  # noqa: E402
 from services.cdc_exactly_once import (  # noqa: E402
+    WATERMARK_TABLE,
+    WATERMARK_TABLE_ORACLE,
     EosBundleStream,
     EosCrash,
     decide_eos_apply,
@@ -56,6 +61,22 @@ ENGINES: dict[str, dict[str, Any]] = {
         database="dataflow",
         username="root",
         password="dataflow",
+    ),
+    "oracle": dict(
+        type="oracle",
+        host="127.0.0.1",
+        port=1521,
+        database="FREEPDB1",
+        username="system",
+        password="dataflow",
+    ),
+    "sqlserver": dict(
+        type="sqlserver",
+        host="127.0.0.1",
+        port=1433,
+        database="dataflow",
+        username="sa",
+        password="DataFlow_CDC_2022!",
     ),
 }
 
@@ -132,18 +153,34 @@ def _wm_lsn(engine: str, table: str, key: str) -> str | None:
     ).committed_lsn
 
 
+def _quoted(engine: str, name: str) -> str:
+    char = _quote_char(engine)
+    return f"[{name}]" if char == "[" else f"{char}{name}{char}"
+
+
+def _drop_sql(engine: str, table: str) -> str:
+    """Oracle has no IF EXISTS and SQL Server needs OBJECT_ID."""
+    name = _quoted(engine, table)
+    if engine == "oracle":
+        return (
+            "BEGIN EXECUTE IMMEDIATE 'DROP TABLE ' || '" + name + "'; "
+            "EXCEPTION WHEN OTHERS THEN IF SQLCODE != -942 THEN RAISE; END IF; END;"
+        )
+    if engine == "sqlserver":
+        return f"IF OBJECT_ID('{table}', 'U') IS NOT NULL DROP TABLE {name}"
+    return f"DROP TABLE IF EXISTS {name}"
+
+
 def _drop(engine: str, tables: list[str]) -> None:
     from connectors.generic_sql import _engine
     from services.engine_pool import release_engine
     from sqlalchemy import text
 
-    q = _quote_char(engine if engine != "postgresql" else "postgresql")
     eng = _engine(dict(ENGINES[engine]))
     try:
         with eng.begin() as conn:
             for t in tables:
-                name = f"`{t}`" if q == "`" else f'"{t}"'
-                conn.execute(text(f"DROP TABLE IF EXISTS {name}"))
+                conn.execute(text(_drop_sql(engine, t)))
     finally:
         release_engine(eng)
 
@@ -165,6 +202,45 @@ def test_older_lsn_replay_is_not_a_payload_conflict() -> None:
         dest_checksum="bbb",
     )
     assert action == "already_committed"
+
+
+def test_watermark_table_name_is_oracle_legal() -> None:
+    """ORA-00911: an unquoted Oracle identifier cannot start with an underscore.
+
+    The watermark DDL is the first statement of any exactly-once apply, so this
+    one character failed every CDC batch on every Oracle destination.
+    """
+    assert _wm_ref("oracle") == WATERMARK_TABLE_ORACLE
+    assert not _wm_ref("oracle").startswith("_")
+    for dialect in ("postgresql", "mysql", "sqlserver", "sqlite"):
+        assert _wm_ref(dialect) == WATERMARK_TABLE
+
+
+@pytest.mark.parametrize("engine", sorted(ENGINES))
+def test_live_existing_columns_sees_a_case_sensitive_table(engine: str) -> None:
+    """Additive column detection must read the table we actually created.
+
+    Oracle's catalog folds an unquoted lower-case name to upper case, so a table
+    created as "eos_t_cols" reported *no* columns; every column was then re-added
+    and the apply died with ORA-01430 on the first batch.
+    """
+    from connectors.cdc_eos_sa import _existing_columns
+    from connectors.generic_sql import _engine
+    from services.engine_pool import release_engine
+
+    _require(engine)
+    table = "eos_t_cols"
+    key = "t-cols|" + uuid.uuid4().hex[:8]
+    _drop(engine, [table])
+    _apply(engine, table, _batch("0/100", inserts=[{"id": "1", "v": "a"}]), key=key)
+
+    eng = _engine(dict(ENGINES[engine]))
+    try:
+        with eng.connect() as conn:
+            present = _existing_columns(conn, table)
+    finally:
+        release_engine(eng)
+    assert {"id", "v"} <= present
 
 
 @pytest.mark.parametrize("engine", sorted(ENGINES))

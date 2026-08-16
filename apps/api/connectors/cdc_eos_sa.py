@@ -16,6 +16,7 @@ from connectors.lsn_guards import DF_LSN_COL
 from connectors.sql_identifiers import quote_sql_identifier, require_safe_identifier
 from services.cdc_exactly_once import (
     WATERMARK_TABLE,
+    WATERMARK_TABLE_ORACLE,
     DestWmView,
     EosApplyResult,
     EosBundleResult,
@@ -108,8 +109,19 @@ def _q(name: str, dialect: str = "") -> str:
     return quote_sql_identifier(name, _quote_char(dialect))
 
 
+def _wm_ref(dialect: str) -> str:
+    """Watermark table name for this dialect.
+
+    Oracle rejects an unquoted identifier starting with ``_`` (ORA-00911), so on
+    Oracle destinations the watermark DDL failed and with it every EOS apply on
+    the very first batch. Oracle gets the Oracle-legal spelling; every other
+    dialect keeps the historical name so existing tables keep working.
+    """
+    return WATERMARK_TABLE_ORACLE if dialect in _ORACLE_LIKE else WATERMARK_TABLE
+
+
 def _wm_ddl(dialect: str) -> str:
-    table = WATERMARK_TABLE
+    table = _wm_ref(dialect)
     if dialect in _MSSQL_LIKE:
         return (
             f"IF OBJECT_ID('{table}', 'U') IS NULL "
@@ -175,15 +187,15 @@ def _lock_watermark_sql(dialect: str, *, with_seq: bool = True) -> str:
         cols = f"{cols}, resume_blob, apply_seq, window_id, snapshot_signal_id, window_hi_pk"
     if dialect in _FOR_UPDATE_LIKE:
         return (
-            f"SELECT {cols} FROM {WATERMARK_TABLE} "
+            f"SELECT {cols} FROM {_wm_ref(dialect)} "
             f"WHERE stream_key = :k FOR UPDATE"
         )
     if dialect in _MSSQL_LIKE:
         return (
-            f"SELECT {cols} FROM {WATERMARK_TABLE} "
+            f"SELECT {cols} FROM {_wm_ref(dialect)} "
             f"WITH (UPDLOCK, ROWLOCK) WHERE stream_key = :k"
         )
-    return f"SELECT {cols} FROM {WATERMARK_TABLE} WHERE stream_key = :k"
+    return f"SELECT {cols} FROM {_wm_ref(dialect)} WHERE stream_key = :k"
 
 
 def _lock_watermark(conn: Any, dialect: str, stream_key: str) -> DestWmView:
@@ -226,7 +238,7 @@ def _upsert_watermark_sql(dialect: str) -> str:
     )
     if dialect in _MYSQL_LIKE:
         return (
-            f"INSERT INTO {WATERMARK_TABLE} ({cols}) "
+            f"INSERT INTO {_wm_ref(dialect)} ({cols}) "
             f"VALUES (:k, :lsn, :bid, :at, :obj, :ep, :fe, :prev, :ph, :ck) "
             f"ON DUPLICATE KEY UPDATE committed_lsn = VALUES(committed_lsn), "
             f"batch_id = VALUES(batch_id), committed_at = VALUES(committed_at), "
@@ -236,7 +248,7 @@ def _upsert_watermark_sql(dialect: str) -> str:
         )
     if dialect in _MSSQL_LIKE:
         return (
-            f"MERGE {WATERMARK_TABLE} WITH (HOLDLOCK) AS t "
+            f"MERGE {_wm_ref(dialect)} WITH (HOLDLOCK) AS t "
             f"USING (SELECT :k AS stream_key, :lsn AS committed_lsn, :bid AS batch_id, "
             f":at AS committed_at, :obj AS dest_object, :ep AS epoch, :fe AS fence_epoch, "
             f":prev AS prev_lsn, :ph AS phase, :ck AS apply_checksum) AS s "
@@ -253,7 +265,7 @@ def _upsert_watermark_sql(dialect: str) -> str:
         )
     if dialect in _ORACLE_LIKE:
         return (
-            f"MERGE INTO {WATERMARK_TABLE} t "
+            f"MERGE INTO {_wm_ref(dialect)} t "
             f"USING (SELECT :k AS stream_key, :lsn AS committed_lsn, :bid AS batch_id, "
             f":at AS committed_at, :obj AS dest_object, :ep AS epoch, :fe AS fence_epoch, "
             f":prev AS prev_lsn, :ph AS phase, :ck AS apply_checksum FROM dual) s "
@@ -270,7 +282,7 @@ def _upsert_watermark_sql(dialect: str) -> str:
         )
     if dialect in _SNOW_LIKE:
         return (
-            f"MERGE INTO {WATERMARK_TABLE} t "
+            f"MERGE INTO {_wm_ref(dialect)} t "
             f"USING (SELECT :k AS stream_key, :lsn AS committed_lsn, :bid AS batch_id, "
             f":at AS committed_at, :obj AS dest_object, :ep AS epoch, :fe AS fence_epoch, "
             f":prev AS prev_lsn, :ph AS phase, :ck AS apply_checksum) s "
@@ -286,7 +298,7 @@ def _upsert_watermark_sql(dialect: str) -> str:
             f"s.apply_checksum)"
         )
     return (
-        f"INSERT INTO {WATERMARK_TABLE} ({cols}) "
+        f"INSERT INTO {_wm_ref(dialect)} ({cols}) "
         f"VALUES (:k, :lsn, :bid, :at, :obj, :ep, :fe, :prev, :ph, :ck) "
         f"ON CONFLICT (stream_key) DO UPDATE SET "
         f"committed_lsn = excluded.committed_lsn, batch_id = excluded.batch_id, "
@@ -306,11 +318,23 @@ def _existing_columns(conn: Any, table_name: str) -> set[str]:
     transaction and every following statement raised ``InFailedSqlTransaction``.
     """
     from sqlalchemy import inspect as sa_inspect
+    from sqlalchemy.exc import SQLAlchemyError
+    from sqlalchemy.sql import quoted_name
 
+    inspector = sa_inspect(conn)
     try:
-        cols = sa_inspect(conn).get_columns(table_name)
-    except Exception:
-        return set()
+        cols = inspector.get_columns(table_name)
+    except SQLAlchemyError:
+        cols = []
+    if not cols:
+        # Oracle (and any UPPER-case-default catalog) folds an unquoted lower-case
+        # name to upper case when it reads the dictionary, so a table we created
+        # as "eos_clean" reported no columns at all — and every column was then
+        # re-added, failing with ORA-01430 on the first CDC batch.
+        try:
+            cols = inspector.get_columns(quoted_name(table_name, True))
+        except SQLAlchemyError:
+            return set()
     return {str(c.get("name") or "").lower() for c in cols}
 
 
@@ -359,8 +383,8 @@ def _ensure_wm_columns(conn: Any, dialect: str) -> None:
             )
         )),
     ]
-    table_q = WATERMARK_TABLE
-    present = _existing_columns(conn, WATERMARK_TABLE)
+    table_q = _wm_ref(dialect)
+    present = _existing_columns(conn, table_q)
     for col, typ in adds:
         if col.lower() in present:
             continue
@@ -546,7 +570,7 @@ def _sa_write_watermark(
     if resume_blob or apply_seq or window_id or snapshot_signal_id or window_hi_pk:
         conn.execute(
             text(
-                f"UPDATE {WATERMARK_TABLE} SET resume_blob = :rb, apply_seq = :seq, "
+                f"UPDATE {_wm_ref(dialect)} SET resume_blob = :rb, apply_seq = :seq, "
                 f"window_id = :wid, snapshot_signal_id = :sid, window_hi_pk = :hi "
                 f"WHERE stream_key = :k"
             ),
@@ -1069,7 +1093,7 @@ def sa_dest_watermark_view(
                         f"SELECT committed_lsn, epoch, fence_epoch, phase, "
                         f"apply_checksum, resume_blob, apply_seq, window_id, "
                         f"snapshot_signal_id, window_hi_pk "
-                        f"FROM {WATERMARK_TABLE} WHERE stream_key = :k"
+                        f"FROM {_wm_ref(dialect)} WHERE stream_key = :k"
                     ),
                     {"k": stream_key},
                 ).fetchone()
@@ -1093,7 +1117,7 @@ def sa_dest_resume_blob(dest_cfg: dict[str, Any], stream_key: str, dest_type: st
             try:
                 row = conn.execute(
                     text(
-                        f"SELECT resume_blob FROM {WATERMARK_TABLE} WHERE stream_key = :k"
+                        f"SELECT resume_blob FROM {_wm_ref(dialect)} WHERE stream_key = :k"
                     ),
                     {"k": stream_key},
                 ).fetchone()
@@ -1117,7 +1141,7 @@ def sa_dest_watermark_lsn(dest_cfg: dict[str, Any], stream_key: str, dest_type: 
             try:
                 row = conn.execute(
                     text(
-                        f"SELECT committed_lsn FROM {WATERMARK_TABLE} WHERE stream_key = :k"
+                        f"SELECT committed_lsn FROM {_wm_ref(dialect)} WHERE stream_key = :k"
                     ),
                     {"k": stream_key},
                 ).fetchone()
