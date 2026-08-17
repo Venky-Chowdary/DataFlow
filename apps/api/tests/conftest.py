@@ -1,5 +1,6 @@
 """Pytest configuration — isolate tests from live infrastructure."""
 
+import logging
 import os
 import socket
 import sys
@@ -31,12 +32,161 @@ import services as _canonical_services  # noqa: E402,F401
 os.environ.setdefault("DATAFLOW_JOB_STORE", "memory")
 os.environ.setdefault("DATAFLOW_DISABLE_OBJECT_STORE", "1")
 
+
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers",
+        "fake_mongo: leftover MERGE uses an in-memory collection (no live Mongo)",
+    )
+
+# fakesnow keeps the emulated warehouse in a DuckDB file, and DuckDB allows a
+# single writer per file. Under `pytest -n` every worker would open the same
+# default path and all but one would die on "Conflicting lock is held", so the
+# Snowflake matrices only pass when the suite runs serially. Give each xdist
+# worker its own catalog; the product already reads this override.
+_xdist_worker = os.environ.get("PYTEST_XDIST_WORKER")
+if _xdist_worker:
+    os.environ.setdefault(
+        "FAKESNOW_DB_PATH",
+        str(_api_root / "data" / f"fakesnow_data_{_xdist_worker}"),
+    )
+
 # Slim CI images omit sentence-transformers; use a deterministic hash embedder
 # so vector destination matrices still exercise the write path.
 try:
     import sentence_transformers  # noqa: F401
 except ImportError:
     os.environ.setdefault("DATAFLOW_EMBEDDING_MODEL", "hash/32")
+
+
+#: Bucket the object-store matrix routes read and write.
+LOCAL_OBJECT_STORE_BUCKET = "dataflow-matrix"
+
+
+@pytest.fixture()
+def local_object_store(_local_object_store_server: str) -> str:
+    """Session endpoint with the matrix bucket guaranteed to exist *now*.
+
+    ``moto.mock_aws()`` resets moto's in-process backends, so any test that opens
+    that context manager wipes the bucket this server was started with. The
+    object-store routes then failed with ``NoSuchBucket`` in a full-suite run and
+    passed in isolation — a harness artefact that looks exactly like a product
+    defect, which is worse than a skip. Re-assert the bucket per test.
+    """
+    if not _local_object_store_server:
+        return ""
+    import boto3
+    from botocore.exceptions import ClientError
+
+    client = boto3.client(
+        "s3",
+        endpoint_url=_local_object_store_server,
+        aws_access_key_id="test",
+        aws_secret_access_key="test",
+        region_name="us-east-1",
+    )
+    try:
+        client.head_bucket(Bucket=LOCAL_OBJECT_STORE_BUCKET)
+    except ClientError:
+        try:
+            client.create_bucket(Bucket=LOCAL_OBJECT_STORE_BUCKET)
+        except ClientError as exc:
+            logging.getLogger(__name__).info("bucket re-create failed: %s", exc)
+            return ""
+    return _local_object_store_server
+
+
+@pytest.fixture(scope="session")
+def _local_object_store_server() -> str:
+    """Endpoint URL of a local S3, or ``""`` when one cannot be started.
+
+    Object-store routes were the largest block of never-executed transfers —
+    they need an endpoint to be reachable, and no cloud account exists here, so
+    the matrix skipped them and nothing reported what they did. That is how an
+    S3 source came to land three ``text`` columns where the identical file
+    upload landed ``bigint``/``numeric``/``date``.
+
+    ``moto`` answers the S3 API in-process, and the connectors already accept a
+    custom endpoint, so the routes become executable without credentials. An
+    externally provided ``DATAFLOW_TEST_S3_ENDPOINT`` (MinIO, a real account)
+    wins; without moto the value is empty and callers skip honestly rather than
+    reporting a pass nothing proved.
+    """
+    external = os.environ.get("DATAFLOW_TEST_S3_ENDPOINT", "").strip()
+    if external:
+        yield external
+        return
+
+    try:
+        import boto3
+        from moto.server import ThreadedMotoServer
+    except ImportError:
+        yield ""
+        return
+
+    # Port 0 lets the OS assign, so parallel workers never collide.
+    server = ThreadedMotoServer(ip_address="127.0.0.1", port=0, verbose=False)
+    try:
+        server.start()
+    except Exception as exc:  # noqa: BLE001 — an unstartable emulator is a skip
+        logging.getLogger(__name__).info("local object store unavailable: %s", exc)
+        yield ""
+        return
+
+    host, port = server.get_host_and_port()
+    endpoint = f"http://{host}:{port}"
+    try:
+        boto3.client(
+            "s3",
+            endpoint_url=endpoint,
+            aws_access_key_id="test",
+            aws_secret_access_key="test",
+            region_name="us-east-1",
+        ).create_bucket(Bucket=LOCAL_OBJECT_STORE_BUCKET)
+        yield endpoint
+    finally:
+        try:
+            server.stop()
+        except Exception as exc:  # noqa: BLE001 — teardown must not fail a run
+            logging.getLogger(__name__).info("object store stop failed: %s", exc)
+
+
+@pytest.fixture(scope="session")
+def local_sftp():
+    """A real local SFTP server, or ``None`` when paramiko is unavailable.
+
+    SFTP was the one named connector with no live route: it could read and
+    write but declared ``introspect: False`` / ``preflight: False``, so every
+    test it had patched ``connect_sftp`` and asserted on the mock. paramiko
+    ships the server half of the protocol, so the routes run for real here —
+    with the generated host key pinned, which exercises the verification path
+    instead of the ``insecure_ignore`` escape.
+    """
+    import tempfile
+
+    try:
+        from tests.sftp_test_server import start_sftp_server
+    except ImportError:
+        try:
+            from sftp_test_server import start_sftp_server
+        except ImportError:
+            yield None
+            return
+
+    root = tempfile.mkdtemp(prefix="df_sftp_")
+    try:
+        details, runner = start_sftp_server(root)
+    except Exception as exc:  # noqa: BLE001 — an unstartable server is a skip
+        logging.getLogger(__name__).info("local sftp unavailable: %s", exc)
+        yield None
+        return
+    try:
+        yield details
+    finally:
+        try:
+            runner.stop()
+        except Exception as exc:  # noqa: BLE001 — teardown must not fail a run
+            logging.getLogger(__name__).info("sftp stop failed: %s", exc)
 
 
 @pytest.fixture(autouse=True)
@@ -61,11 +211,105 @@ def _is_mongo_reachable() -> bool:
         return False
 
 
+def _is_postgresql_auth_ok(
+    *,
+    host: str = "localhost",
+    port: int = 5432,
+    database: str = "dataflow",
+    user: str = "dataflow",
+    password: str = "dataflow",
+) -> bool:
+    """Port open ≠ role/password valid (common on shared localhost:5432)."""
+    try:
+        socket.create_connection((host, port), timeout=1.0).close()
+    except Exception:
+        return False
+    try:
+        import psycopg2
+
+        conn = psycopg2.connect(
+            host=host,
+            port=port,
+            dbname=database,
+            user=user,
+            password=password,
+            connect_timeout=3,
+        )
+        conn.close()
+        return True
+    except Exception:
+        return False
+
+
 def pytest_collection_modifyitems(config, items):
-    """Skip MongoDB-specific tests when no local MongoDB emulator is running."""
-    if _is_mongo_reachable():
-        return
-    skip_mongo = pytest.mark.skip(reason="MongoDB not reachable on this runner")
-    for item in items:
-        if "mongodb" in item.nodeid.lower():
-            item.add_marker(skip_mongo)
+    """Skip live-service tests when emulators are absent or unauthenticated."""
+    if not _is_mongo_reachable():
+        skip_mongo = pytest.mark.skip(reason="MongoDB not reachable on this runner")
+        for item in items:
+            if "mongodb" in item.nodeid.lower() and "fake_mongo" not in item.keywords:
+                item.add_marker(skip_mongo)
+
+    # Live execute_tracked / CDC PG paths hard-code dataflow/dataflow.
+    # Port-open-only skips previously failed with auth errors mid-test.
+    if not _is_postgresql_auth_ok():
+        skip_pg = pytest.mark.skip(
+            reason=(
+                "PostgreSQL auth failed for dataflow/dataflow on localhost:5432 "
+                "(skip_honest — port open ≠ usable)"
+            )
+        )
+        for item in items:
+            nid = item.nodeid.lower()
+            path = str(getattr(item, "path", "") or getattr(item, "fspath", "")).lower()
+            live_pg = (
+                "execute_tracked" in nid
+                and (
+                    "postgres" in nid
+                    or "postgresql" in nid
+                    or "pgvector" in nid
+                )
+            ) or (
+                "execute_tracked" in path
+                and (
+                    "postgres" in path
+                    or "postgresql" in path
+                    or "pgvector" in path
+                )
+            ) or any(
+                token in nid
+                for token in (
+                    "cdc_postgres",
+                    "cross_schema_edge_types",
+                    "csv_to_postgres_upsert",
+                    "[pgvector]",
+                    "mongodb_to_postgresql",
+                    "pilot_aggregation_wave89",
+                    "pilot_transfer_wave92",
+                    "pilot_transfer_matrix_wave93",
+                    "postgresql_to_postgresql_incremental",
+                    "postgresql_writer_dedupe",
+                    "postgresql_writer_upsert_dedupes",
+                    "security_hardening_e2e",
+                    "live_duplicate_key_probe",
+                    "source_duplicate_probe_live",
+                    "csv_to_postgresql_hostile",
+                )
+            ) or (
+                "postgresql_to_postgresql_incremental" in path
+                or "postgresql_writer_dedupe" in path
+                or "security_hardening_e2e" in path
+                or "source_duplicate_probe_live" in path
+            ) or (
+                "live_emulator" in nid
+                and ("[postgresql]" in nid or "[pgvector]" in nid)
+            ) or (
+                "pilot_aggregation" in path
+                or "mongodb_to_postgresql" in path
+                or "pilot_transfer_wave92" in path
+                or (
+                    "pilot_transfer_matrix_wave93" in path
+                    and "live_cross_engine" in nid
+                )
+            )
+            if live_pg:
+                item.add_marker(skip_pg)

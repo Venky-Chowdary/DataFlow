@@ -107,28 +107,108 @@ class TestKeysetBookmarkTieBreak:
     """A strict `>` on a non-unique bookmark drops every tied row at a page edge."""
 
     def test_composite_watermark_carries_the_primary_key(self):
+        """Encoded with the canonical separator, which no column value can hold.
+
+        A pipe can appear inside a text cursor value, so a watermark joined with
+        one was indistinguishable from a bare value carrying a pipe.
+        """
+        from services.keyset_pagination import KEYSET_SEP
+
         rows = [["2024-01-01", "a"], ["2024-01-01", "b"], ["2024-01-01", "c"]]
         headers = ["updated_at", "id"]
-        assert max_cursor_value(rows, headers, "updated_at", "id") == "2024-01-01|c"
+        assert (
+            max_cursor_value(rows, headers, "updated_at", "id")
+            == f"2024-01-01{KEYSET_SEP}c"
+        )
 
     def test_without_a_tiebreak_the_watermark_cannot_distinguish_peers(self):
         """This is the shape of the bug: the bookmark alone loses b and c."""
         rows = [["2024-01-01", "a"], ["2024-01-01", "b"], ["2024-01-01", "c"]]
         headers = ["updated_at", "id"]
+        from services.keyset_pagination import KEYSET_SEP
+
         bare = max_cursor_value(rows, headers, "updated_at")
         assert bare == "2024-01-01"
         # Seeking `updated_at > '2024-01-01'` skips the untransferred peers.
-        assert "|" not in bare
+        assert KEYSET_SEP not in bare
 
     def test_stream_requires_unique_evidence_before_using_keyset(self):
-        """No PK evidence must fall back to OFFSET rather than risk silent loss."""
+        """No PK evidence must fall back to OFFSET rather than risk silent loss.
+
+        Phase F2: full composite ``keyset_order_cols`` (or incremental cursor)
+        gates seek reads; OFFSET when the PK list is empty.
+        """
+        from services.keyset_pagination import decide_keyset_pagination
+
+        common = dict(
+            src_type="postgresql",
+            keyset_col="updated_at",
+            keyset_tiebreak="",
+            incremental=False,
+            offset=0,
+            chunk_index=0,
+            cursor_after=None,
+            snapshot_scan=False,
+        )
+        no_key = decide_keyset_pagination(keyset_order_cols=[], **common)
+        assert no_key.use_keyset is False
+        assert no_key.pagination_mode == "offset"
+
+        with_key = decide_keyset_pagination(keyset_order_cols=["id"], **common)
+        assert with_key.use_keyset is True
+        assert with_key.pagination_mode == "keyset"
+
+        # An unsupported source cannot seek even with a declared key.
+        assert (
+            decide_keyset_pagination(
+                keyset_order_cols=["id"], **{**common, "src_type": "csv"}
+            ).pagination_mode
+            == "offset"
+        )
+
         source = Path("src/transfer/stream.py").read_text(encoding="utf-8")
-        assert "keyset_unique or bool(keyset_tiebreak)" in source, (
-            "keyset pagination must require a unique bookmark or a PK tie-break"
+        assert "decide_keyset_pagination(" in source, (
+            "stream must use the shared decision, not a second copy of it"
         )
-        assert "cursor_primary_key=keyset_tiebreak or None" in source, (
-            "the keyset read must pass its tie-break through to the reader"
+        assert "cursor_key_columns" in source, (
+            "composite keyset must pass ordered key columns to the reader"
         )
+
+    def test_a_resume_without_a_bookmark_falls_back_instead_of_reseeking(self):
+        """Offset says rows landed; seeking from the top would re-read them."""
+        from services.keyset_pagination import decide_keyset_pagination
+
+        decision = decide_keyset_pagination(
+            src_type="postgresql",
+            keyset_order_cols=["id"],
+            keyset_col="id",
+            keyset_tiebreak="",
+            incremental=False,
+            offset=5000,
+            chunk_index=2,
+            cursor_after=None,
+            snapshot_scan=False,
+        )
+        assert decision.use_keyset is False
+        assert decision.resume_fallback is True
+        assert decision.pagination_mode == "offset"
+
+    def test_an_incremental_cursor_seeks_with_a_tiebreak(self):
+        from services.keyset_pagination import decide_keyset_pagination
+
+        decision = decide_keyset_pagination(
+            src_type="mysql",
+            keyset_order_cols=[],
+            keyset_col="updated_at",
+            keyset_tiebreak="id",
+            incremental=True,
+            offset=0,
+            chunk_index=0,
+            cursor_after=None,
+            snapshot_scan=False,
+        )
+        assert decision.use_keyset is True
+        assert decision.order_cols == ["updated_at", "id"]
 
 
 class TestReconcileChecksumIsMemoryBounded:

@@ -139,3 +139,24 @@ def test_preflight_bundle_approve_never_means_migration_proven():
     assert "post-write" in (bundle.get("evidence_summary") or "").lower() or bundle[
         "reconciliation"
     ].get("preview")
+
+
+def test_append_delta_is_not_migration_proven():
+    a = classify_post_write_assurance(
+        {
+            "passed": True,
+            "phase": "post_write_row_count",
+            "coverage": "row_count",
+            "assurance_level": "row_count",
+            "checksum_scope": "whole_table_not_comparable",
+            "source_checksum": "aaa",
+            "target_checksum": "bbb",
+            "checksum_match": False,
+            "message": "Append delta verified (200 row(s) appended: 100 → 300).",
+        }
+    )
+    assert a["migration_proven"] is False
+    assert a["claim_level"] == "row_count"
+    assert a["checksum_match"] is False
+    assert a["post_write_verified"] is True
+

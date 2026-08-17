@@ -70,12 +70,16 @@ def test_zendesk_writer_creates_ticket(mapped_data):
     from connectors import zendesk_writer
 
     resp = _mock_response({"ticket": {"id": 12345, "subject": "Bug report"}})
-    with patch.object(zendesk_writer, "request", return_value=resp) as mock_req:
+    with patch(
+        "connectors.zendesk.describe_fields",
+        side_effect=RuntimeError("describe mocked down"),
+    ), patch.object(zendesk_writer, "request", return_value=resp) as mock_req:
         result = zendesk_writer.write_mapped_rows(
             host="https://mycompany.zendesk.com",
             username="user@example.com",
             password="token",
             table_name="tickets",
+            write_mode="insert",
             **mapped_data,
         )
 
@@ -99,12 +103,16 @@ def test_zendesk_writer_updates_ticket_with_id():
         ],
     }
     resp = _mock_response({"ticket": {"id": 98765, "subject": "Updated subject"}})
-    with patch.object(zendesk_writer, "request", return_value=resp) as mock_req:
+    with patch(
+        "connectors.zendesk.describe_fields",
+        side_effect=RuntimeError("describe mocked down"),
+    ), patch.object(zendesk_writer, "request", return_value=resp) as mock_req:
         result = zendesk_writer.write_mapped_rows(
             host="https://mycompany.zendesk.com",
             api_key="user@example.com:token",
             table_name="tickets",
             write_mode="update",
+            conflict_columns=["id"],
             **data,
         )
 
@@ -122,12 +130,16 @@ def test_zendesk_writer_quarantines_non_auth_error():
 
     resp = MagicMock()
     resp.raise_for_status.side_effect = requests.exceptions.HTTPError("400 validation")
-    with patch.object(zendesk_writer, "request", return_value=resp):
+    with patch(
+        "connectors.zendesk.describe_fields",
+        side_effect=RuntimeError("describe mocked down"),
+    ), patch.object(zendesk_writer, "request", return_value=resp):
         result = zendesk_writer.write_mapped_rows(
             host="https://mycompany.zendesk.com",
             username="user@example.com",
             password="token",
             table_name="tickets",
+            write_mode="insert",
             headers=["subject"],
             data_rows=[["Bad"]],
             mappings=[{"source": "subject", "target": "subject"}],

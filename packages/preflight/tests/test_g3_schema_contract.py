@@ -222,6 +222,44 @@ def test_g3_declared_lossy_not_sample_soft_passed_without_risk_ack():
     assert result_ack.status.value == "pass"
 
 
+def test_g3_failed_samples_pass_with_cast_and_continue_contract():
+    """Signed CAST_AND_CONTINUE: sample cast failures hold out — G3 must not re-block."""
+
+    class _Ctx(PreflightContext):
+        def coercion_report(self):
+            return {
+                "sampled_rows": 2,
+                "by_source": {
+                    "qty": {
+                        "severity": "block",
+                        "sampled": 2,
+                        "failed": 1,
+                        "sentinel_nulls": 0,
+                        "sample_failures": ["row 2: cannot cast 'x' to INTEGER"],
+                    }
+                },
+            }
+
+    plan = _ctx(
+        {"qty": "VARCHAR"},
+        {"qty": "INTEGER"},
+        [("qty", "qty")],
+    ).plan
+    blocked = gate_g3_schema_contract(_Ctx(plan=plan))
+    assert blocked.status.value == "block"
+
+    _clear_with_contract(
+        plan.mappings[0],
+        source_type="VARCHAR",
+        destination_type="INTEGER",
+        execution_policy="CAST_AND_CONTINUE",
+    )
+    cleared = gate_g3_schema_contract(_Ctx(plan=plan))
+    assert cleared.status.value == "pass", cleared.message
+    details = (cleared.details or {}).get("issues_detail") or []
+    assert any(d.get("contracted_holdout") for d in details)
+
+
 def test_g3_objectid_to_text_risk_contract_clears_block():
     """ObjectId→TEXT is domain polarity — Risk Contract unlocks; hex values stay."""
     plan = _ctx(
@@ -557,6 +595,81 @@ def test_g3_not_null_contract_blocks_when_samples_contain_nulls():
     ))
     assert result.status.value == "block"
     assert any("not null" in i.lower() for i in (result.details or {}).get("issues", []))
+
+
+def test_g3_not_null_blocks_stop_column_null_invent_policy():
+    """STOP_COLUMN / coerce cannot invent NULL into a NOT NULL destination."""
+    plan = TransferPlan(
+        source=SourceConfig(
+            kind="file",
+            connected=True,
+            parseable=True,
+            columns=[ColumnSchema(name="email", inferred_type="VARCHAR", nullable=True)],
+            row_count_estimate=10,
+        ),
+        destination=DestinationConfig(
+            kind="database",
+            connected=True,
+            can_write=True,
+            can_create_table=True,
+            target_columns=[
+                ColumnSchema(name="email", inferred_type="VARCHAR", nullable=False)
+            ],
+        ),
+        mappings=[ColumnMapping(source="email", target="email", confidence=0.95)],
+    )
+    _clear_with_contract(
+        plan.mappings[0],
+        source_type="VARCHAR",
+        destination_type="VARCHAR",
+        execution_policy="STOP_COLUMN",
+        reason="omit bad email cells",
+    )
+    result = gate_g3_schema_contract(
+        PreflightContext(plan=plan, sample_rows=[{"email": "a@b.com"}])
+    )
+    assert result.status.value == "block", result.message
+    details = (result.details or {}).get("issues_detail") or []
+    assert any(d.get("null_invent_policy_blocked") for d in details)
+
+
+def test_g3_none_target_omit_does_not_500():
+    """Intentional omit / None target must not AttributeError on NOT NULL loop."""
+    plan = TransferPlan(
+        source=SourceConfig(
+            kind="file",
+            connected=True,
+            parseable=True,
+            columns=[
+                ColumnSchema(name="keep", inferred_type="VARCHAR"),
+                ColumnSchema(name="drop", inferred_type="VARCHAR"),
+            ],
+            row_count_estimate=10,
+        ),
+        destination=DestinationConfig(
+            kind="database",
+            connected=True,
+            can_write=True,
+            can_create_table=True,
+            target_columns=[
+                ColumnSchema(name="keep", inferred_type="VARCHAR", nullable=False),
+            ],
+        ),
+        mappings=[
+            ColumnMapping(source="keep", target="keep", confidence=0.95),
+            ColumnMapping(
+                source="drop",
+                target=None,
+                confidence=0.0,
+                transform="omit",
+            ),
+        ],
+    )
+    result = gate_g3_schema_contract(
+        PreflightContext(plan=plan, sample_rows=[{"keep": "x", "drop": "y"}])
+    )
+    # Must not raise — status may pass or block on other grounds.
+    assert result.status.value in {"pass", "block", "warn"}
 
 
 def test_g3_empty_dest_without_stamp_blocks():

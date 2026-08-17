@@ -20,11 +20,11 @@ from connectors.saas_common import (
     token,
 )
 from connectors.writer_common import (
+    reject_on_strict_policy,
     WriteResult,
     apply_write_quarantine_matrix,
     build_mapped_rows_with_details,
     gate8_writer_meta,
-    resolve_mapping_dest_types,
     resolve_target_columns,
     transform_error_policy,
 )
@@ -111,7 +111,63 @@ def zendesk_field_to_carrier(field: dict[str, Any]) -> str:
         return "VARCHAR(19)"
     if ftype == "lookup":
         return "VARCHAR(64)"
-    return f"VARCHAR({_ZENDESK_TEXT_CHARS})"
+    # Unknown / new Zendesk custom field types — refuse soft VARCHAR invent.
+    return ""
+
+
+def _zendesk_system_seed_carriers(target_cols: list[str]) -> dict[str, str]:
+    """Documented ticket/user system columns when Describe omits them."""
+    from services.type_system import format_enum_domain_carrier
+
+    out: dict[str, str] = {}
+    for col in target_cols:
+        if not col:
+            continue
+        low = str(col).lower()
+        if low == "subject":
+            out[col] = f"VARCHAR({_ZENDESK_SUBJECT_CHARS})"
+        elif low in {"description", "comment", "body"}:
+            out[col] = f"VARCHAR({_ZENDESK_COMMENT_CHARS})"
+        elif low == "status":
+            out[col] = format_enum_domain_carrier(_ZENDESK_STATUS_VALUES)
+        elif low == "priority":
+            out[col] = format_enum_domain_carrier(_ZENDESK_PRIORITY_VALUES)
+        elif low in {"type", "ticket_type"}:
+            out[col] = format_enum_domain_carrier(_ZENDESK_TYPE_VALUES)
+        elif low in {"email", "name"}:
+            out[col] = "VARCHAR(255)"
+        elif low == "id":
+            # Ticket / user primary key — documented integer id wire.
+            out[col] = "INTEGER"
+    return out
+
+
+def _zendesk_live_carriers(
+    target_cols: list[str],
+    describe_fields: list[dict[str, Any]] | None,
+    *,
+    include_seeds: bool = True,
+) -> dict[str, str]:
+    """Live Describe carriers; optional system seeds (never Map VARCHAR invent)."""
+    live: dict[str, str] = {}
+    for f in describe_fields or []:
+        if not isinstance(f, dict):
+            continue
+        carrier = zendesk_field_to_carrier(f)
+        if not str(carrier or "").strip():
+            continue
+        # Zendesk Ticket Fields API uses raw_title (system key) + title (label);
+        # live Describe fixtures and admin payloads may omit ``name``.
+        for key in (f.get("name"), f.get("raw_title"), f.get("title"), f.get("id")):
+            if key is None or key == "":
+                continue
+            live[str(key)] = carrier
+    if include_seeds:
+        for col, carrier in _zendesk_system_seed_carriers(target_cols).items():
+            if str(col).lower() in {str(k).lower() for k in live}:
+                continue
+            live[col] = carrier
+    return live
 
 
 def resolve_zendesk_dest_types(
@@ -121,45 +177,35 @@ def resolve_zendesk_dest_types(
     *,
     logical_types: list[str] | None = None,
     describe_fields: list[dict[str, Any]] | None = None,
+    studio_types: dict[str, Any] | None = None,
 ) -> dict[str, str]:
-    """Prefer live Zendesk field schema; else Map/source carriers."""
-    live: dict[str, str] = {}
-    for f in describe_fields or []:
-        if not isinstance(f, dict):
-            continue
-        carrier = zendesk_field_to_carrier(f)
-        for key in (f.get("name"), f.get("title"), f.get("id")):
-            if key is None or key == "":
-                continue
-            live[str(key)] = carrier
-    # Well-known system columns when Describe is partial / scoped out.
-    known = {str(k).lower() for k in live}
-    from services.type_system import format_enum_domain_carrier
+    """Prefer live Zendesk field schema; else Map/source carriers.
 
-    for col in target_cols:
-        low = str(col).lower()
-        if low in known:
-            continue
-        if low == "subject":
-            live[col] = f"VARCHAR({_ZENDESK_SUBJECT_CHARS})"
-        elif low in {"description", "comment", "body"}:
-            live[col] = f"VARCHAR({_ZENDESK_COMMENT_CHARS})"
-        elif low == "status":
-            live[col] = format_enum_domain_carrier(_ZENDESK_STATUS_VALUES)
-        elif low == "priority":
-            live[col] = format_enum_domain_carrier(_ZENDESK_PRIORITY_VALUES)
-        elif low in {"type", "ticket_type"}:
-            live[col] = format_enum_domain_carrier(_ZENDESK_TYPE_VALUES)
-        elif low in {"email", "name"}:
-            live[col] = "VARCHAR(255)"
-        known.add(low)
-    return resolve_mapping_dest_types(
+    When Describe fields are supplied or Studio typed carriers, never soft-fill
+    unknown Meta types with Map ``VARCHAR`` — parity with the write-path
+    ``merge_saas_live_types`` gate. Documented system seeds always count as
+    live carriers (subject/status/id…) — same as write-path ``studio_for_gate``.
+    """
+    from connectors.saas_common import resolve_saas_live_or_map_dest_types
+
+    seeds = _zendesk_system_seed_carriers(target_cols)
+    if describe_fields is not None:
+        live = _zendesk_live_carriers(
+            target_cols, describe_fields, include_seeds=True
+        )
+    else:
+        # Always seed system carriers — never Map invent subject/status/id
+        # when Describe is down (write path merges the same seeds).
+        live = dict(seeds)
+    return resolve_saas_live_or_map_dest_types(
         target_cols,
         mappings,
         column_types,
+        live_carriers=live,
+        live_schema_present=describe_fields is not None or bool(live),
+        studio_types=studio_types,
         logical_types=logical_types,
-        live_types=live,
-        default="VARCHAR",
+        product="Zendesk",
     )
 
 
@@ -266,7 +312,17 @@ def write_mapped_rows(
         mappings, column_types, preserve_case=True
     )
     policy = transform_error_policy(error_policy)
+    live_dest = _kwargs.get("destination_column_types")
+    # Documented system carriers count as Studio-class for the Describe gate
+    # (subject/priority/id…) — never Map invent, but do not block when Meta is down.
+    seeds = _zendesk_system_seed_carriers(target_cols)
+    studio_for_gate: dict[str, Any] = dict(seeds)
+    if isinstance(live_dest, dict):
+        for key, typ in live_dest.items():
+            if key and str(typ or "").strip():
+                studio_for_gate[str(key)] = str(typ).strip()
     describe_fields: list[dict[str, Any]] | None = None
+    describe_exc: Exception | None = None
     try:
         from connectors.zendesk import describe_fields as zd_describe_fields
 
@@ -282,15 +338,56 @@ def write_mapped_rows(
             },
             obj,
         )
-    except Exception:
-        describe_fields = None
-    dest_types = resolve_zendesk_dest_types(
-        target_cols,
-        mappings,
-        column_types,
-        logical_types=logical_types,
-        describe_fields=describe_fields,
+    except Exception as exc:
+        describe_exc = exc
+    from connectors.saas_common import gate_saas_describe
+
+    gate = gate_saas_describe(
+        product="Zendesk",
+        object_name=obj,
+        fields=describe_fields,
+        exc=describe_exc,
+        target_cols=target_cols,
+        studio_types=studio_for_gate if studio_for_gate else None,
     )
+    if not gate.ok:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=obj,
+            target_schema=shop_host,
+            checksum="",
+            chunks_completed=0,
+            error=gate.error,
+            driver="zendesk",
+        )
+    describe_fields = gate.fields
+    # Live Describe only. System seeds fill Studio gaps — never override Studio.
+    live = _zendesk_live_carriers(target_cols, describe_fields, include_seeds=False)
+    studio = live_dest if isinstance(live_dest, dict) else {}
+    fallback: dict[str, Any] = dict(seeds)
+    for key, typ in studio.items():
+        if key and str(typ or "").strip():
+            fallback[str(key)] = str(typ).strip()
+    from connectors.saas_common import merge_saas_live_types
+
+    dest_types, cov_err = merge_saas_live_types(
+        live,
+        target_cols,
+        studio_types=fallback,
+        product="Zendesk",
+    )
+    if cov_err:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=obj,
+            target_schema=shop_host,
+            checksum="",
+            chunks_completed=0,
+            error=cov_err,
+            driver="zendesk",
+        )
     mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
         headers=headers,
         data_rows=data_rows,
@@ -300,8 +397,11 @@ def write_mapped_rows(
         error_policy=policy,
         dest_types=dest_types,
         preserve_case=True,
+        dest_kind="zendesk",
+        destination_pk_columns=list(conflict_columns or []) or None,
+        destination_column_nullability=_kwargs.get("destination_column_nullability"),
     )
-    tgt_types = [str(dest_types.get(c, "VARCHAR") or "VARCHAR") for c in target_cols]
+    tgt_types = [str(dest_types.get(c) or "").strip() for c in target_cols]
     mapped_rows = apply_write_quarantine_matrix(
         mapped_rows,
         target_cols,
@@ -311,7 +411,8 @@ def write_mapped_rows(
         dialect_label="Zendesk",
         mappings=mappings,
     )
-    if transform_errors and policy == "fail":
+    _map_abort = reject_on_strict_policy(policy, rejected_details, 'Zendesk', transform_errors)
+    if _map_abort:
         return WriteResult(
             ok=False,
             rows_written=0,
@@ -319,7 +420,7 @@ def write_mapped_rows(
             target_schema=shop_host,
             checksum="",
             chunks_completed=0,
-            error=f"Transform errors: {'; '.join(transform_errors[:3])}",
+            error=_map_abort or f"Transform errors: {'; '.join(transform_errors[:3])}",
             rejected_details=rejected_details,
             driver="zendesk",
         )
@@ -343,21 +444,144 @@ def write_mapped_rows(
 
         record_id = None
         if mode in upsert_modes:
-            candidates = list(conflict_columns or ["id"])
-            for c in candidates:
+            from services.value_serializer import is_missing_sentinel
+
+            candidates = [c for c in (conflict_columns or []) if c]
+            if not candidates:
+                from connectors.writer_common import append_write_quarantine_detail
+
+                detail = {
+                    "row": i + 1,
+                    "column": "",
+                    "target": obj,
+                    "value": "",
+                    "reason": (
+                        "Zendesk upsert requires conflict_columns/primary_key — "
+                        "refuse inventing default 'id'"
+                    ),
+                    "policy": "write_fail" if policy == "fail" else "write_quarantine",
+                    "values": row_dict,
+                }
+                append_write_quarantine_detail(
+                    all_rejected,
+                    detail,
+                    mapped_row=tuple(row_dict.get(c) for c in target_cols),
+                    target_cols=target_cols,
+                )
+                warnings.append(detail["reason"])
+                if policy == "fail":
+                    return WriteResult(
+                        ok=False,
+                        rows_written=written,
+                        table_name=obj,
+                        target_schema=shop_host,
+                        checksum=digest.hexdigest()[:32] if written else "",
+                        chunks_completed=chunks,
+                        error=detail["reason"],
+                        rejected_details=all_rejected,
+                        rejected_rows=len(all_rejected),
+                        warnings=warnings,
+                        driver="zendesk",
+                    )
+                continue
+            # Zendesk REST updates by numeric resource id only — never take a
+            # secondary conflict column when ``id`` is empty.
+            id_cols = [c for c in candidates if (c or "").lower() == "id"]
+            if not id_cols:
+                from connectors.writer_common import append_write_quarantine_detail
+
+                detail = {
+                    "row": i + 1,
+                    "column": str(candidates[0]),
+                    "target": obj,
+                    "value": "",
+                    "reason": (
+                        "Zendesk upsert requires conflict column 'id' — "
+                        "refuse create invent from non-id keys "
+                        "(would duplicate under at-least-once retry)"
+                    ),
+                    "policy": "write_fail" if policy == "fail" else "write_quarantine",
+                    "values": row_dict,
+                }
+                append_write_quarantine_detail(
+                    all_rejected,
+                    detail,
+                    mapped_row=tuple(row_dict.get(c) for c in target_cols),
+                    target_cols=target_cols,
+                )
+                warnings.append(detail["reason"])
+                if policy == "fail":
+                    return WriteResult(
+                        ok=False,
+                        rows_written=written,
+                        table_name=obj,
+                        target_schema=shop_host,
+                        checksum=digest.hexdigest()[:32] if written else "",
+                        chunks_completed=chunks,
+                        error=detail["reason"],
+                        rejected_details=all_rejected,
+                        rejected_rows=len(all_rejected),
+                        warnings=warnings,
+                        driver="zendesk",
+                    )
+                continue
+            for c in id_cols:
                 val = row_dict.get(c)
+                if val is None or is_missing_sentinel(val):
+                    continue
                 if val:
                     record_id = str(val).strip() or None
                     break
-            # Zendesk updates require a numeric object id; otherwise create.
-            if record_id and not record_id.isdigit():
-                warnings.append(f"row {i}: Zendesk update id must be numeric; creating instead.")
-                record_id = None
+            # Zendesk updates require a numeric object id — never invent create.
+            if not record_id or not record_id.isdigit():
+                from connectors.writer_common import append_write_quarantine_detail
+
+                detail = {
+                    "row": i + 1,
+                    "column": str(id_cols[0]),
+                    "target": obj,
+                    "value": str(record_id or ""),
+                    "reason": (
+                        "Zendesk upsert missing numeric id — refuse create invent "
+                        "(would duplicate tickets/users under at-least-once retry)"
+                    ),
+                    "policy": "write_fail" if policy == "fail" else "write_quarantine",
+                    "values": row_dict,
+                }
+                append_write_quarantine_detail(
+                    all_rejected,
+                    detail,
+                    mapped_row=tuple(row_dict.get(c) for c in target_cols),
+                    target_cols=target_cols,
+                )
+                warnings.append(detail["reason"])
+                if policy == "fail":
+                    return WriteResult(
+                        ok=False,
+                        rows_written=written,
+                        table_name=obj,
+                        target_schema=shop_host,
+                        checksum=digest.hexdigest()[:32] if written else "",
+                        chunks_completed=chunks,
+                        error=detail["reason"],
+                        rejected_details=all_rejected,
+                        rejected_rows=len(all_rejected),
+                        warnings=warnings,
+                        driver="zendesk",
+                    )
+                continue
 
         update = mode in upsert_modes and bool(record_id)
-        payload = {
-            singular: {k: v for k, v in row_dict.items() if k.lower() != "id"}
-        }
+        from connectors.writer_common import omit_missing_fields
+
+        # STOP_COLUMN / coerce_null → DF_MISSING must omit, never leak the
+        # sentinel string into Zendesk API payloads. Empty strings omit too —
+        # never invent CRM field clears on upsert (HubSpot/Salesforce class).
+        body = omit_missing_fields(
+            ((k, v) for k, v in row_dict.items() if k.lower() != "id"),
+            drop_empty=True,
+        )
+        payload = {singular: body}
         url = _make_url(shop_host, obj, record_id if update else None)
         method = "PUT" if update else "POST"
 
@@ -397,12 +621,19 @@ def write_mapped_rows(
                 "row": i,
                 "column": "",
                 "target": obj,
-                "value": str(record_id or row_dict),
+                "value": record_id,
                 "reason": humanize_http_error(exc, "zendesk"),
                 "policy": policy,
                 "values": payload,
             }
-            all_rejected.append(detail)
+            from connectors.writer_common import append_write_quarantine_detail
+
+            append_write_quarantine_detail(
+                all_rejected,
+                detail,
+                mapped_row=tuple(row_dict.get(c) for c in target_cols),
+                target_cols=target_cols,
+            )
             if policy == "fail":
                 return WriteResult(
                     ok=False,
@@ -425,6 +656,22 @@ def write_mapped_rows(
 
     if on_checkpoint:
         on_checkpoint(len(mapped_rows), written, 1)
+
+    _final_abort = reject_on_strict_policy(policy, all_rejected, "Zendesk")
+    if _final_abort:
+        return WriteResult(
+            ok=False,
+            rows_written=written,
+            table_name=obj,
+            target_schema=shop_host,
+            checksum=digest.hexdigest()[:32],
+            chunks_completed=chunks or 1,
+            error=_final_abort,
+            rejected_details=all_rejected,
+            rejected_rows=len(all_rejected),
+            warnings=warnings,
+            driver="zendesk",
+        )
 
     return WriteResult(
         ok=True,

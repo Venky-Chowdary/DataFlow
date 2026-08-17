@@ -3,6 +3,9 @@
  * Keep IDs aligned with apps/api/services/preflight_service.py allowed sets.
  */
 
+/** Must match apps/api/services/coercion_probe.py PREFLIGHT_SAMPLE_LIMIT (Validate≡Execute). */
+export const PREFLIGHT_SAMPLE_LIMIT = 500;
+
 export type SyncModeId =
   | "full_refresh_overwrite"
   | "full_refresh_append"
@@ -74,13 +77,13 @@ export const VALIDATION_MODES: {
 export type DateLocaleId = "" | "DMY" | "MDY";
 
 export const SYNC_MODES: { id: SyncModeId; label: string; detail: string }[] = [
-  { id: "full_refresh_overwrite", label: "Full overwrite", detail: "Drop/replace destination, then load the full snapshot." },
-  { id: "full_refresh_append", label: "Full append", detail: "Keep existing rows; append the full snapshot (100k + 100k → 200k)." },
-  { id: "incremental_append", label: "Incremental append", detail: "Cursor-based new rows only — never rewrites history." },
-  { id: "incremental_deduped", label: "Incremental deduped", detail: "Cursor + primary key upserts for a final table." },
+  { id: "full_refresh_overwrite", label: "Full overwrite", detail: "Drop/replace destination, then load the full snapshot. Destroys existing rows." },
+  { id: "full_refresh_append", label: "Full append", detail: "Keep existing rows; insert the full snapshot again (best for “load more” of a whole file)." },
+  { id: "incremental_append", label: "Incremental append", detail: "Cursor-based new rows only — requires a cursor column; never rewrites history." },
+  { id: "incremental_deduped", label: "Incremental deduped", detail: "Cursor + primary key upserts when the table already has keys you may update." },
   { id: "cdc", label: "CDC", detail: "Log-based changes with cursor + key; at-least-once upsert until proven otherwise." },
   { id: "scd2", label: "SCD Type 2", detail: "Versioned history with valid-from / valid-to; requires primary key." },
-  { id: "mirror", label: "Mirror", detail: "Keep destination in sync with soft-deletes for missing keys; requires primary key." },
+  { id: "mirror", label: "Mirror", detail: "Soft-delete dest keys missing from the source (_deleted). Physical COUNT(*) stays; active population is COUNT(*) WHERE NOT _deleted. Requires primary key." },
 ];
 
 export const SCHEMA_POLICIES: { id: SchemaPolicyId; label: string; detail: string }[] = [
@@ -155,17 +158,22 @@ export function availableSyncModes(opts: {
   sourceDriver: string;
   sourceKind: "file" | "database" | "cloud" | string;
   isMultiStream: boolean;
+  sourceReadMode?: string;
+  destWriteMode?: string;
 }): { id: SyncModeId; label: string; detail: string }[] {
   const dest = (opts.destDriver || "").toLowerCase();
   const src = (opts.sourceDriver || "").toLowerCase();
   const fileish = opts.sourceKind === "file" || opts.sourceKind === "cloud";
+  const callable = opts.sourceReadMode === "procedure" || opts.sourceReadMode === "query"
+    || opts.destWriteMode === "procedure" || opts.destWriteMode === "query";
   return SYNC_MODES.filter((mode) => {
     if (mode.id === "scd2" || mode.id === "mirror") {
+      if (callable) return false;
       if (opts.isMultiStream) return false;
       if (!dest || !SQL_HISTORY_SYNC_DESTS.has(dest)) return false;
     }
     if (mode.id === "cdc") {
-      if (fileish) return false;
+      if (fileish || callable) return false;
       if (src && !CDC_CAPABLE_SOURCES.has(src)) return false;
     }
     return true;
@@ -175,6 +183,26 @@ export function availableSyncModes(opts: {
 export const SYNC_MODE_META: Record<string, { label: string; detail: string }> = Object.fromEntries(
   SYNC_MODES.map((m) => [m.id, { label: m.label, detail: m.detail }]),
 );
+SYNC_MODE_META.full_refresh_mirror = SYNC_MODE_META.mirror;
+
+/** Operator-facing sync mode — engine aliases like full_refresh_mirror stay Mirror. */
+export function formatSyncModeLabel(mode?: string | null): string {
+  const raw = String(mode || "").trim();
+  if (!raw) return "—";
+  return SYNC_MODE_META[raw]?.label ?? raw.replace(/_/g, " ");
+}
+
+export function formatSchemaPolicyLabel(policy?: string | null): string {
+  const raw = String(policy || "").trim();
+  if (!raw) return "—";
+  return SCHEMA_POLICIES.find((p) => p.id === raw)?.label ?? raw.replace(/_/g, " ");
+}
+
+export function formatValidationModeLabel(mode?: string | null): string {
+  const raw = String(mode || "").trim();
+  if (!raw) return "—";
+  return VALIDATION_MODES.find((v) => v.id === raw)?.label ?? raw.replace(/_/g, " ");
+}
 
 export const DATE_LOCALES: { id: DateLocaleId; label: string; detail: string }[] = [
   { id: "", label: "Auto", detail: "Infer day/month order from source sample; fail closed if ambiguous." },

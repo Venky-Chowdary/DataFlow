@@ -137,6 +137,12 @@
   --df-font-sans: "IBM Plex Sans", "Plus Jakarta Sans", system-ui, -apple-system, sans-serif;
   --df-font-display: "Plus Jakarta Sans", "IBM Plex Sans", system-ui, sans-serif;
   --df-font-mono: "JetBrains Mono", "IBM Plex Mono", ui-monospace, monospace;
+  --df-fs-xs: 11px;
+  --df-fs-sm: 12.5px;
+  --df-fs-md: 13.5px;
+  --df-fs-lg: 15px;
+  --df-fs-xl: 18px;
+  --df-fs-title: 15px;
 
   --df-header-height: 60px;
   --df-sidebar-width: 252px;
@@ -148,22 +154,51 @@
   --df-radius-md: 8px;
   --df-radius-lg: 10px;
   --df-radius-xl: 14px;
-  --df-radius-card: 10px;
-  --df-radius-panel: 12px;
-  --df-radius-tile: 10px;
+  --df-radius-card: 8px;
+  --df-radius-panel: 8px;
+  --df-radius-tile: 8px;
 
-  /* Buttons + form controls share one height so toolbars never look ragged */
+  /* Buttons + form controls share one height so toolbars never look ragged.
+     The workspace control ladder is exactly these six rungs — every clickable
+     surface picks one of them, and nothing hardcodes its own height:
+       action        --df-btn-height / -sm / -lg
+       field         --df-control-height / -sm
+       tab           --df-tab-height
+       icon-only     --df-icon-btn-size
+       chip / pill   --df-chip-height
+       inline action --df-inline-action-h (min hit target --df-min-target) */
   --df-btn-height: 36px;
   --df-btn-height-sm: 30px;
   --df-btn-height-lg: 40px;
   --df-control-height: 36px;
   --df-control-height-sm: 32px;
-  --df-toolbar-h: 36px;
+  --df-toolbar-h: var(--df-btn-height);
+  --df-tab-height: 34px;
+  --df-icon-btn-size: 28px;
+  --df-chip-height: 28px;
+  --df-inline-action-h: 24px;
+  --df-min-target: 24px;
+  /* Width the fixed Pilot edge tab occupies; page gutters reserve it so it can
+     never sit on top of a page action. Keep in step with .df2-copilot-edge-open. */
+  --df-copilot-edge-w: 32px;
 
   --df-table-row-height: 44px;
   --df-table-row-height-sm: 36px;
   --df-table-cell-pad-y: 11px;
   --df-table-cell-pad-x: 14px;
+
+  /* Workspace list rows — Connectors / Contracts / Schedules share one density.
+     Stay compact on large screens; do not inflate into tiles. */
+  --df-list-row-pad-y: 8px;
+  --df-list-row-pad-x: 12px;
+  --df-list-row-min-h: 48px;
+  --df-list-row-min-h-dual: 60px;
+  --df-list-row-title: 13px;
+  --df-list-row-meta: 11.5px;
+  --df-list-row-gap: 10px;
+  --df-list-row-icon: 16px;
+  --df-list-row-action: 26px;
+  --df-list-row-hover: color-mix(in srgb, var(--df-brand-muted) 70%, #fff);
   --df-table-head-bg: var(--df-surface-muted);
   --df-table-row-hover: color-mix(in srgb, var(--df-brand-muted) 70%, #fff);
   --df-table-row-stripe: color-mix(in srgb, var(--df-bg-subtle) 55%, #fff);
@@ -344,6 +379,9 @@ body:has(.df2-app) #root {
   max-height: 100%;
   overflow: hidden;
   box-sizing: border-box;
+  font-family: var(--df-font-sans);
+  font-size: var(--df-fs-md);
+  color: var(--df-text-primary);
 }
 
 /* ≤1680 CSS px — typical 14–16" laptop at 100% browser zoom */
@@ -354,6 +392,9 @@ body:has(.df2-app) #root {
     --df-btn-height-lg: 36px;
     --df-control-height: 32px;
     --df-control-height-sm: 28px;
+    --df-tab-height: 32px;
+    --df-icon-btn-size: 26px;
+    --df-chip-height: 26px;
     --df-header-height: 52px;
     --df-sidebar-width: 220px;
     --df-page-gutter: 12px;
@@ -388,6 +429,73 @@ body:has(.df2-app) #root {
     --df-card-pad: 10px;
     --df-rail-width: 320px;
     font-size: 12.5px;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   List-row density ladder — the ONE owner of workspace row geometry.
+
+   Every ``--df-list-row-*`` value for every viewport is declared in this block
+   and nowhere else. It used to be spread over four width queries that all match
+   a 1280px viewport plus a height query, and because each one shrank the row
+   again they compounded: the most common enterprise screen (1280x800) resolved
+   to a 38px row with 4px of vertical padding and 11px meta text, which is what
+   made Connectors / Contracts / Schedules look cramped and inconsistent with
+   Jobs. Density is a function of width only — a short viewport is a reason to
+   scroll, not a reason to make a row untappable.
+
+   Floor, held at every breakpoint: min-height >= 44px (WCAG 2.5.5 target size,
+   matching Fluent/Carbon compact rows), pad-y >= 6px, meta >= 11.5px, action
+   control >= 24px. Ranges below are exclusive, so exactly one applies.
+   Guarded by apps/web/src/styles/listRowDensity.test.ts.
+   --------------------------------------------------------------------------- */
+
+/* Declared on :root, not `.df2-app` — drawers and modals render in a portal on
+   <body>, and scoping the steps to the app shell left every slide-over row
+   frozen at the wide default whatever the viewport. */
+
+/* Compact — small laptops and split-screen windows. */
+@media (max-width: 1366px) {
+  :root {
+    --df-list-row-pad-y: 6px;
+    --df-list-row-pad-x: 10px;
+    --df-list-row-min-h: 44px;
+    --df-list-row-min-h-dual: 56px;
+    --df-list-row-title: 12.5px;
+    --df-list-row-meta: 11.5px;
+    --df-list-row-gap: 8px;
+    --df-list-row-icon: 15px;
+    --df-list-row-action: 24px;
+  }
+}
+
+/* Standard — 14-16" laptops, the default working density. */
+@media (min-width: 1367px) and (max-width: 1919px) {
+  :root {
+    --df-list-row-pad-y: 7px;
+    --df-list-row-pad-x: 12px;
+    --df-list-row-min-h: 46px;
+    --df-list-row-min-h-dual: 58px;
+    --df-list-row-title: 13px;
+    --df-list-row-meta: 11.5px;
+    --df-list-row-gap: 10px;
+    --df-list-row-icon: 16px;
+    --df-list-row-action: 26px;
+  }
+}
+
+/* Wide — desktop monitors. Extra air horizontally and one step of height. */
+@media (min-width: 1920px) {
+  :root {
+    --df-list-row-pad-y: 8px;
+    --df-list-row-pad-x: 14px;
+    --df-list-row-min-h: 48px;
+    --df-list-row-min-h-dual: 60px;
+    --df-list-row-title: 13px;
+    --df-list-row-meta: 12px;
+    --df-list-row-gap: 12px;
+    --df-list-row-icon: 16px;
+    --df-list-row-action: 26px;
   }
 }
 

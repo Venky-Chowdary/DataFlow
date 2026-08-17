@@ -48,10 +48,19 @@ export function inferTransferFailureHint(
   if (
     text.includes("cdc_lsn_gap")
     || text.includes("cdc_scn_gap")
+    || text.includes("cdc_binlog_gap")
+    || text.includes("cdc_slot_gap")
+    || text.includes("cdc_ct_gap")
+    || text.includes("cdc_oplog_gap")
     || text.includes("cdc_cursor_gap")
+    || text.includes("wal_status=lost")
     || text.includes("before capture retention")
     || text.includes("before available redo")
     || text.includes("min_lsn")
+    || text.includes("min_valid_version")
+    || text.includes("last_sync_version")
+    || text.includes("changestreamhistorylost")
+    || text.includes("resume point may no longer be in the oplog")
     || text.includes("oldest_available")
     || text.includes("ora-01291")
     || text.includes("ora-01292")
@@ -62,7 +71,7 @@ export function inferTransferFailureHint(
       confidence: "high",
       fix:
         errorFix
-        || "Reset the CDC watermark in Job Theater, set snapshot mode to when_needed or initial, then re-run. Continuous CDC across an AG / Data Guard / archive-purge gap is not possible.",
+        || "If snapshot_mode=when_needed, Resume — the engine snapshots current source keys then streams from the new tip. initial/never stay fail-closed until you change mode or reset the watermark. Purged-window events are gone. Not continuous CDC.",
     };
   }
   if (
@@ -195,6 +204,19 @@ export function inferTransferFailureHint(
     };
   }
   if (
+    text.includes("no durable checkpoint to resume")
+    || text.includes("restart-from-zero would duplicate")
+  ) {
+    return {
+      code: errorCode || "resume_without_checkpoint",
+      title: errorTitle || "Resume needs a committed checkpoint",
+      confidence: "high",
+      fix:
+        errorFix
+        || "This job never saved durable progress (0 rows). Do not Resume — re-run from Validate, or start a new transfer. After a deploy/restart, claim workers now restart zero-progress jobs from the beginning instead of false-failing Resume.",
+    };
+  }
+  if (
     text.includes("ambiguous_write_outcome")
     || text.includes("cannot be safely retried")
     || text.includes("unknown outcome")
@@ -206,6 +228,19 @@ export function inferTransferFailureHint(
       fix:
         errorFix
         || "Resume this job from the last committed chunk. Datawrap stopped instead of re-sending the batch because this destination cannot deduplicate a replay. To make retries automatic, switch the sync mode to upsert with a primary key.",
+    };
+  }
+  if (
+    text.includes("circuit_breaker_open")
+    || (text.includes("circuit breaker") && text.includes("is open"))
+  ) {
+    return {
+      code: errorCode || "circuit_breaker_open",
+      title: errorTitle || "Contract circuit breaker is OPEN",
+      confidence: "high",
+      fix:
+        errorFix
+        || "Reset the breaker after you fix the contract violation (Contracts or Validate bind), then re-run. Do not enqueue while the breaker is OPEN.",
     };
   }
   if (

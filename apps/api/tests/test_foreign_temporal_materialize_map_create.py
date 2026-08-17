@@ -19,9 +19,11 @@ _GAP_CASES: list[tuple[str, str]] = [
     ("sqlserver", "TIMESTAMPTZ"),
     ("sqlserver", "TIMESTAMP_NTZ"),
     ("sqlserver", "TIMESTAMP WITH TIME ZONE"),
-    # MySQL — TIMESTAMP/DATETIME → DATETIME(6); TIME → TIME(6)
+    # MySQL — TIMESTAMP/DATETIME → DATETIME(6); TIME → TIME(6).
+    # ``TIMESTAMP(6)`` is deliberately absent: it is not a foreign token on
+    # MySQL but the dest-native instant carrier. See
+    # test_mysql_parameterized_timestamp_is_a_native_dest_carrier.
     ("mysql", "TIMESTAMP"),
-    ("mysql", "TIMESTAMP(6)"),
     ("mysql", "DATETIME"),
     ("mysql", "TIME"),
     ("mysql", "DATETIME2"),
@@ -121,6 +123,24 @@ def test_sqlserver_timestamp_never_rowversion_invent():
 def test_mysql_timestamp_becomes_datetime6_not_session_tz():
     assert materialize_dest_ddl("mysql", "TIMESTAMP") == "DATETIME(6)"
     assert materialize_dest_ddl("mysql", "DATETIME") == "DATETIME(6)"
+
+
+def test_mysql_parameterized_timestamp_is_a_native_dest_carrier():
+    """``TIMESTAMP(p)`` reads differently as a source token and a dest carrier.
+
+    As a *source* token it is PostgreSQL/Oracle wall-clock, so create-new must
+    land ``DATETIME(6)`` and never invent session-TZ semantics. As a *dest*
+    carrier it is MySQL's own instant carrier — the spelling Map stamps for a
+    TZ-aware source and the spelling INFORMATION_SCHEMA reports back — so the
+    writer must keep it. Collapsing the two roles retyped an instant column as
+    wall-clock and quarantined every offset-bearing row it could hold.
+    """
+    assert ddl_type("mysql", "TIMESTAMP(6)") == "DATETIME(6)"
+    assert materialize_dest_ddl("mysql", "TIMESTAMP(6)") == "TIMESTAMP(6)"
+    # The live catalog reports lower case; that is the same physical column.
+    assert materialize_dest_ddl("mysql", "timestamp(6)") == "timestamp(6)"
+    # A TZ-aware source still reaches that carrier through Map.
+    assert materialize_dest_ddl("mysql", "TIMESTAMPTZ") == "TIMESTAMP(6)"
 
 
 def test_snowflake_timestamp_becomes_ntz_polarity():

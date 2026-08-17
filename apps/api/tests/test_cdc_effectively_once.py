@@ -41,7 +41,8 @@ def test_honesty_dict_explicit_delivery_classes() -> None:
     classes = h["delivery_classes"]
     assert set(classes.keys()) == {"exactly_once", "at_least_once", "at_most_once"}
     assert classes["exactly_once"]["claimed"] is False
-    assert classes["exactly_once"]["available"] is False
+    assert classes["exactly_once"]["available"] is True
+    assert classes["exactly_once"]["opt_in"] is True
     assert classes["at_least_once"]["claimed"] is True
     assert classes["at_least_once"]["default"] is True
     assert classes["at_most_once"]["claimed"] is False

@@ -3,9 +3,15 @@
 from __future__ import annotations
 
 import sys
+import uuid
 from pathlib import Path
 from typing import Any
 
+from services.acknowledgment_contract import (
+    Acknowledgments,
+    acknowledgments_from_policies,
+    audit_acknowledgments,
+)
 from services.audit_log import append_audit_event
 from services.transfer_plan_store import (
     TransferPlanRecord,
@@ -77,7 +83,9 @@ def run_plan_mapping(
     policies = getattr(plan, "policies", None) or {}
     dest = plan.destination if isinstance(plan.destination, dict) else {}
     src = plan.source if isinstance(plan.source, dict) else {}
-    table_exists = dest.get("table_exists")
+    dest_extra = dest.get("extra") if isinstance(dest.get("extra"), dict) else {}
+    # Prefer nested extra (Studio SSOT) then flat root (legacy plans).
+    table_exists = dest_extra.get("table_exists", dest.get("table_exists"))
     if not isinstance(table_exists, bool):
         table_exists = None
     result = run_mapping_pipeline(
@@ -141,7 +149,18 @@ def sync_plan_mappings(plan_id: str, mappings: list[dict[str, Any]]) -> Transfer
     return plan
 
 
-def run_plan_preflight(plan_id: str) -> dict[str, Any]:
+def run_plan_preflight(
+    plan_id: str,
+    *,
+    acknowledgments: Acknowledgments | None = None,
+) -> dict[str, Any]:
+    """Run preflight for a persisted plan, honouring operator acknowledgments.
+
+    ``acknowledgments`` is what the operator just attested on Validate. It is
+    recorded on the plan (stamped with the mapping revision it was granted for)
+    so Execute and a page reload see the same attestation, and so a remap cannot
+    inherit a green from the shape it replaced.
+    """
     (
         apply_policy_gates,
         confidence_threshold_for_mode,
@@ -177,11 +196,13 @@ def run_plan_preflight(plan_id: str) -> dict[str, Any]:
         dest_api_key=dest.get("api_key"),
         dest_service_account=dest.get("service_account"),
         dest_kind=dest.get("kind", "database"),
+        dest_extra=dest.get("extra") if isinstance(dest.get("extra"), dict) else {},
     )
 
     live_target_schema = dest_meta.get("column_types") or {}
-    # Prefer live introspect; fall back to plan snapshot only when meta is empty
-    # AND the table is known to exist (never for create-new / unknown).
+    # Prefer live introspect. Never fall back to Map stamps when the table
+    # exists but live schema is empty — that greens empties as VARCHAR while
+    # write binds physical DATE/INT (client-deploy wipe cliff).
     table_exists = (
         dest_meta.get("table_exists")
         if isinstance(dest_meta.get("table_exists"), bool)
@@ -192,31 +213,92 @@ def run_plan_preflight(plan_id: str) -> dict[str, Any]:
         )
     )
     if not live_target_schema and table_exists is True:
-        live_target_schema = plan.target_schema or {}
+        live_target_schema = {}
     live_target_columns = list(live_target_schema.keys()) if live_target_schema else plan.target_columns
+
+    ack = acknowledgments or Acknowledgments()
+    if ack.any_claimed:
+        updated = update_plan(
+            plan_id,
+            {"policies": ack.as_policies(mapping_version=plan.active_version)},
+        )
+        plan = updated or plan
+        audit_acknowledgments(
+            ack,
+            resource=f"plan/{plan_id}",
+            details={
+                "mapping_version": plan.active_version,
+                "destination_table": dest.get("table") or dest.get("collection") or "",
+            },
+        )
+    else:
+        ack = acknowledgments_from_policies(
+            plan.policies, mapping_version=plan.active_version
+        )
 
     policies = plan.policies
     validation_mode = policies.get("validation_mode", "balanced")
     threshold = confidence_threshold_for_mode(validation_mode)
 
-    sample_rows = plan.sample_rows or None
-    if not sample_rows and plan.source.get("kind") == "database" and plan.source_columns:
-        try:
-            source_endpoint = EndpointConfig.from_dict(plan.source.get("kind", "database"), plan.source)
-            records, _headers, _schema = read_source_database(
-                source_endpoint, limit=100, raise_on_truncate=False
-            )
-            sample_rows = records[:100] if records else None
-        except Exception:
-            sample_rows = None
+    from services.coercion_probe import PREFLIGHT_SAMPLE_LIMIT
+    from services.primary_key import extract_contract_primary_key_columns
 
-    from services.primary_key import extract_contract_primary_key
+    sample_rows = list(plan.sample_rows or []) or None
+    # Studio often persists a 25-row snapshot. Execute preflight samples up to
+    # PREFLIGHT_SAMPLE_LIMIT — refetch when the cache is thinner so Validate
+    # cannot Approve on a sample Execute will expand and then block.
+    if (
+        plan.source.get("kind") == "database"
+        and plan.source_columns
+        and (not sample_rows or len(sample_rows) < PREFLIGHT_SAMPLE_LIMIT)
+    ):
+        try:
+            source_endpoint = EndpointConfig.from_dict(
+                plan.source.get("kind", "database"), plan.source
+            )
+            records, _headers, _schema = read_source_database(
+                source_endpoint,
+                limit=PREFLIGHT_SAMPLE_LIMIT,
+                raise_on_truncate=False,
+            )
+            fetched = records[:PREFLIGHT_SAMPLE_LIMIT] if records else None
+            if fetched and (not sample_rows or len(fetched) >= len(sample_rows)):
+                sample_rows = fetched
+        except Exception:
+            pass
+    if sample_rows and len(sample_rows) > PREFLIGHT_SAMPLE_LIMIT:
+        sample_rows = sample_rows[:PREFLIGHT_SAMPLE_LIMIT]
 
     # Previous = revision snapshot (or empty for legacy revisions without snapshot).
     prev_cols = list(rev.source_columns or [])
     prev_schema = dict(rev.source_schema or {})
 
+    stream_contracts = list(policies.get("stream_contracts") or [])
+    dest_table = str(dest.get("table") or dest.get("collection") or "")
+    # Full composite — never truncate to first column (Validate≡Execute probe SSOT).
+    contract_pk_cols = extract_contract_primary_key_columns(
+        stream_contracts, stream_name=dest_table, fallback_first=False
+    )
+    if not contract_pk_cols:
+        selected = [
+            c for c in stream_contracts if isinstance(c, dict) and c.get("selected", True)
+        ]
+        if len(selected) == 1:
+            contract_pk_cols = extract_contract_primary_key_columns(selected)
+    contract_pk = ",".join(contract_pk_cols) if contract_pk_cols else None
+
+    source = plan.source if isinstance(plan.source, dict) else {}
+    source_connector_id = str(source.get("connector_id") or "")
+    source_table = str(source.get("table") or source.get("collection") or "")
+    dest_db_type = (
+        dest_meta.get("db_type") or dest.get("format") or dest.get("type") or "postgresql"
+    ).lower()
+    source_kind = str(source.get("kind") or "file")
+    source_format = str(source.get("format") or source.get("kind") or "file")
+
     # run_file_preflight is the SSOT for drift + gates — do not re-detect/overwrite.
+    # Source connector/table/config + stream_contracts required for uniqueness probe
+    # (Studio plan Validate must not skip the probe Execute will run).
     pf = run_file_preflight(
         columns=plan.source_columns,
         column_types=plan.source_schema,
@@ -225,8 +307,8 @@ def run_plan_preflight(plan_id: str) -> dict[str, Any]:
         destination_connected=bool(dest_meta.get("connected")),
         destination_error=None if dest_meta.get("connected") else dest_meta.get("message"),
         source_connected=True,
-        source_kind=plan.source.get("kind", "file"),
-        source_format=plan.source.get("format") or plan.source.get("kind", "file"),
+        source_kind=source_kind,
+        source_format=source_format,
         sync_mode=policies.get("sync_mode", "full_refresh_overwrite"),
         sample_rows=sample_rows,
         confidence_threshold=threshold,
@@ -234,20 +316,38 @@ def run_plan_preflight(plan_id: str) -> dict[str, Any]:
         date_locale=policies.get("date_locale", ""),
         destination_column_types=live_target_schema,
         destination_column_nullability=dest_meta.get("column_nullability") or {},
+        destination_column_defaults=dest_meta.get("column_defaults") or {},
+        destination_identity_columns=dest_meta.get("identity_columns") or [],
+        destination_generated_columns=dest_meta.get("generated_columns") or [],
         destination_table_exists=table_exists,
         destination_can_create=dest_meta.get("can_create_table"),
         destination_can_write=dest_meta.get("can_write"),
         privilege_probe=dest_meta.get("privilege_probe"),
-        destination_db_type=(dest_meta.get("db_type") or dest.get("format") or dest.get("type") or "postgresql").lower(),
+        redshift_staging_probe=dest_meta.get("redshift_staging_probe"),
+        destination_db_type=dest_db_type,
+        source_connector_id=source_connector_id,
+        source_config=dict(source) if source else None,
+        source_table=source_table,
+        destination_table=dest_table,
         schema_policy=policies.get("schema_policy", "manual_review"),
         backfill_new_fields=bool(policies.get("backfill_new_fields")),
         stored_source_fp=rev.source_schema_hash or "",
         stored_target_fp=rev.target_schema_hash or "",
         previous_source_columns=prev_cols or None,
         previous_source_schema=prev_schema or None,
-        contract_primary_key=extract_contract_primary_key(policies.get("stream_contracts")),
+        contract_primary_key=contract_pk,
         destination_pk_columns=dest_meta.get("primary_key_columns") or dest_meta.get("pk_columns"),
         destination_unique_keys=dest_meta.get("unique_keys") or [],
+        destination_foreign_keys=dest_meta.get("foreign_keys") or [],
+        # Without the destination connection the append key-collision probe cannot
+        # run, and Validate greens a batch Execute then refuses on the same key.
+        destination_config=dest_meta.get("_probe_cfg") or None,
+        stream_contracts=stream_contracts,
+        compliance_acknowledged=ack.compliance,
+        schema_drift_acknowledged=ack.schema_drift,
+        fk_risk_acknowledged=ack.fk_risk,
+        acknowledgment_actor=ack.actor,
+        acknowledgment_reason=ack.reason,
     )
     pf = apply_policy_gates(
         pf,
@@ -255,12 +355,19 @@ def run_plan_preflight(plan_id: str) -> dict[str, Any]:
             sync_mode=policies.get("sync_mode", "full_refresh_overwrite"),
             schema_policy=policies.get("schema_policy", "manual_review"),
             validation_mode=validation_mode,
-            stream_contracts=policies.get("stream_contracts"),
+            stream_contracts=stream_contracts,
             backfill_new_fields=bool(policies.get("backfill_new_fields")),
             source_columns=plan.source_columns,
+            dest_type=dest_db_type,
+            source_type=source_format,
+            source_kind=source_kind,
+            write_via_staging=bool(policies.get("write_via_staging")),
+            source_read_mode=str(
+                (source.get("source_read_mode") or (source.get("extra") or {}).get("source_read_mode") or "")
+            ),
         ),
         validation_mode=validation_mode,
-        destination_db_type=(dest_meta.get("db_type") or dest.get("format") or dest.get("type") or "postgresql").lower(),
+        destination_db_type=dest_db_type,
     )
 
     if pf.get("effective_mappings"):
@@ -273,6 +380,10 @@ def run_plan_preflight(plan_id: str) -> dict[str, Any]:
         bucket = pf.setdefault("warnings", [])
         if note not in bucket:
             bucket.append(note)
+    # Every preflight verdict must be citable: the persisted run id is the handle
+    # Execute is unlocked against, so it travels back with the result instead of
+    # leaving the caller to infer a run that has no identity.
+    pf["run_id"] = str(pf.get("run_id") or f"pf_{uuid.uuid4().hex[:12]}")
     add_preflight_run(plan_id, pf)
     drift = pf.get("schema_drift") or {}
     append_audit_event(
@@ -282,6 +393,7 @@ def run_plan_preflight(plan_id: str) -> dict[str, Any]:
         details={
             "passed": pf.get("passed"),
             "readiness_score": pf.get("readiness_score"),
+            "run_id": pf["run_id"],
             "mapping_version": rev.version,
             "mapping_hash": rev.mapping_hash,
             "drift_detected": drift.get("drift_detected"),
@@ -322,7 +434,10 @@ def build_run_payload(plan_id: str) -> dict[str, Any]:
         sync_mode=str((plan.policies or {}).get("sync_mode") or ""),
     )
 
-    return {
+    from src.transfer.contract_engine import resolve_bound_contract
+
+    cid, require = resolve_bound_contract(policies=plan.policies)
+    payload = {
         "plan_id": plan_id,
         "mapping_version": rev.version,
         "mapping_hash": rev.mapping_hash,
@@ -333,6 +448,10 @@ def build_run_payload(plan_id: str) -> dict[str, Any]:
         "column_types": plan.source_schema,
         "policies": plan.policies,
     }
+    if cid:
+        payload["contract_id"] = cid
+        payload["require_signed_contract"] = require
+    return payload
 
 
 def merge_plan_into_run(

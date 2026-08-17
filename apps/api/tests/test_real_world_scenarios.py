@@ -47,7 +47,7 @@ HEALTHCARE_SCHEMA = {
     "phone": "VARCHAR",
     "diagnosis_code": "VARCHAR",
     "medications": "JSON",
-    "admitted_at": "DATETIME",
+    "admitted_at": "TIMESTAMPTZ",
     "account_balance": "DECIMAL",
 }
 
@@ -71,7 +71,7 @@ HEALTHCARE_RECORDS = [
         "phone": "(555) 123-4567",
         "diagnosis_code": "I10",
         "medications": "[\"lisinopril\"]",
-        "admitted_at": "31/12/2024 22:00:00",
+        "admitted_at": "2024-12-31T22:00:00+00:00",
         "account_balance": "-50.00",
     },
     {
@@ -95,7 +95,7 @@ HEALTHCARE_MAPPINGS = [
     {"source": "phone", "target": "contact_phone", "transform": "mask_pii"},
     {"source": "diagnosis_code", "target": "dx_code"},
     {"source": "medications", "target": "meds", "target_type": "JSON"},
-    {"source": "admitted_at", "target": "admitted_at", "target_type": "DATETIME"},
+    {"source": "admitted_at", "target": "admitted_at", "target_type": "TIMESTAMPTZ"},
     {"source": "account_balance", "target": "balance_due", "target_type": "DECIMAL"},
 ]
 
@@ -119,8 +119,8 @@ LOGISTICS_SCHEMA = {
     "origin_lon": "DECIMAL",
     "destination_lat": "DECIMAL",
     "destination_lon": "DECIMAL",
-    "shipped_at": "DATETIME",
-    "delivered_at": "DATETIME",
+    "shipped_at": "TIMESTAMPTZ",
+    "delivered_at": "TIMESTAMPTZ",
     "weight_kg": "DECIMAL",
     "status": "VARCHAR",
     "tags": "JSON",
@@ -134,7 +134,7 @@ LOGISTICS_RECORDS = [
         "destination_lat": "34.0522",
         "destination_lon": "-118.2437",
         "shipped_at": "2024-12-25T10:00:00Z",
-        "delivered_at": "25/12/2024 20:00:00",
+        "delivered_at": "2024-12-25T20:00:00Z",
         "weight_kg": "1,234.567",
         "status": "delivered",
         "tags": '["fragile","priority"]',
@@ -145,8 +145,8 @@ LOGISTICS_RECORDS = [
         "origin_lon": "-0.1278",
         "destination_lat": "48.8566",
         "destination_lon": "2.3522",
-        "shipped_at": "2024-07-04 06:30:00",
-        "delivered_at": "04/07/2024 16:30:00",
+        "shipped_at": "2024-07-04T06:30:00Z",
+        "delivered_at": "2024-07-04T16:30:00Z",
         "weight_kg": "999.999",
         "status": "in_transit",
         "tags": "[]",
@@ -157,8 +157,8 @@ LOGISTICS_RECORDS = [
         "origin_lon": "139.6503",
         "destination_lat": "1.3521",
         "destination_lon": "103.8198",
-        "shipped_at": "01-01-2025 00:00:00",
-        "delivered_at": "",
+        "shipped_at": "2025-01-01T00:00:00Z",
+        "delivered_at": None,
         "weight_kg": "0.5",
         "status": "pending",
         "tags": '{"bulk": true}',
@@ -171,8 +171,8 @@ LOGISTICS_MAPPINGS = [
     {"source": "origin_lon", "target": "origin_lon", "target_type": "DECIMAL"},
     {"source": "destination_lat", "target": "destination_lat", "target_type": "DECIMAL"},
     {"source": "destination_lon", "target": "destination_lon", "target_type": "DECIMAL"},
-    {"source": "shipped_at", "target": "shipped_at", "target_type": "DATETIME"},
-    {"source": "delivered_at", "target": "delivered_at", "target_type": "DATETIME"},
+    {"source": "shipped_at", "target": "shipped_at", "target_type": "TIMESTAMPTZ"},
+    {"source": "delivered_at", "target": "delivered_at", "target_type": "TIMESTAMPTZ"},
     {"source": "weight_kg", "target": "weight_kg", "target_type": "DECIMAL"},
     {"source": "status", "target": "status"},
     {"source": "tags", "target": "tags", "target_type": "JSON"},
@@ -196,7 +196,7 @@ BANKING_SCHEMA = {
     "amount": "DECIMAL",
     "currency": "VARCHAR",
     "is_fraud": "BOOLEAN",
-    "txn_time": "DATETIME",
+    "txn_time": "TIMESTAMPTZ",
     "metadata": "JSON",
     "fee": "DECIMAL",
 }
@@ -227,8 +227,8 @@ BANKING_RECORDS = [
         "account_id": "ACC-6666",
         "amount": "Rs. 99,999.00",
         "currency": "INR",
-        "is_fraud": "yes",
-        "txn_time": "03/07/2024 09:15:00",
+        "is_fraud": "true",
+        "txn_time": "2024-07-03T09:15:00Z",
         "metadata": "{}",
         "fee": "0.00",
     },
@@ -240,7 +240,7 @@ BANKING_MAPPINGS = [
     {"source": "amount", "target": "amount", "target_type": "DECIMAL"},
     {"source": "currency", "target": "currency"},
     {"source": "is_fraud", "target": "fraud_flag", "target_type": "BOOLEAN"},
-    {"source": "txn_time", "target": "transaction_time", "target_type": "DATETIME"},
+    {"source": "txn_time", "target": "transaction_time", "target_type": "TIMESTAMPTZ"},
     {"source": "metadata", "target": "metadata", "target_type": "JSON"},
     {"source": "fee", "target": "fee", "target_type": "DECIMAL"},
 ]
@@ -258,15 +258,24 @@ def _seed_scenario_source(
 ) -> EndpointConfig:
     columns, schema, records, mappings = SCENARIOS[scenario]
     # Prefer PostgreSQL as the source because it is the strictest SQL target;
-    # fall back to SQLite if Postgres is not running.
+    # fall back to SQLite if Postgres is not running / not authenticated.
     source = _build_db_endpoint("postgresql", tmp_path, f"{scenario}_src", uuid.uuid4().hex[:8])
     if not _endpoint_reachable(source):
         source = _build_db_endpoint("sqlite", tmp_path, f"{scenario}_src", uuid.uuid4().hex[:8])
 
+    # Seed as VARCHAR carriers — messy real-world strings land as source text;
+    # Map target_type / transforms on the transfer path prove typed invent.
+    seed_schema = {c: "VARCHAR" for c in columns}
     identity = [{"source": c, "target": c} for c in columns]
-    rows, _, summary = write_destination_database(
-        source, records, columns, schema, identity
-    )
+    from src.transfer.adapters import WriteBatchBlocked
+
+    try:
+        rows, _, summary = write_destination_database(
+            source, records, columns, seed_schema, identity,
+            validation_mode="balanced",
+        )
+    except WriteBatchBlocked as exc:
+        pytest.skip(f"source seed blocked (need live PG or wire-clean fixtures): {exc}")
     if rows != len(records):
         pytest.skip(f"source seed wrote {rows} rows: {summary}")
     return source

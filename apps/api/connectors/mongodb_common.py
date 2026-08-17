@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from typing import Any
-from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
+from urllib.parse import parse_qs, urlencode
 
 # PyMongo clients manage their own connection pools and are thread-safe. Reusing a
 # single client per connection string removes per-batch connection handshake
@@ -14,37 +14,82 @@ _mongo_client_cache: dict[str, Any] = {}
 logger = logging.getLogger(__name__)
 
 
-def _mongo_client(conn_str: str) -> Any:
-    """Return a cached MongoClient for ``conn_str``."""
+def _new_mongo_client(conn_str: str) -> Any:
+    """Build a fresh, *uncached* MongoClient.
+
+    CDC change-stream consumers own their client lifecycle (they call
+    ``close()`` on job end / lease release). They must NOT share the process
+    pool, or a single stream shutdown would kill every concurrent bulk reader
+    and writer on the same URI. Bulk paths use :func:`_mongo_client` (pooled);
+    streaming paths use this.
+    """
     from pymongo import MongoClient
 
-    if conn_str not in _mongo_client_cache:
-        _mongo_client_cache[conn_str] = MongoClient(
-            conn_str,
-            serverSelectionTimeoutMS=10000,
-            socketTimeoutMS=120000,
-            connectTimeoutMS=10000,
-            maxPoolSize=10,
-        )
-    return _mongo_client_cache[conn_str]
+    return MongoClient(
+        conn_str,
+        serverSelectionTimeoutMS=10000,
+        socketTimeoutMS=120000,
+        connectTimeoutMS=10000,
+        maxPoolSize=10,
+    )
+
+
+def _client_is_closed(client: Any) -> bool:
+    """Best-effort detection that a MongoClient has been closed.
+
+    PyMongo exposes no public ``closed`` flag, but a closed client raises
+    ``InvalidOperation`` on every operation. ``_topology._closed`` flips to
+    ``True`` on ``close()`` and is stable across 4.x — use it defensively so a
+    poisoned cache entry is rebuilt rather than handed back dead.
+    """
+    topology = getattr(client, "_topology", None)
+    if topology is None:
+        return False
+    return bool(getattr(topology, "_closed", False))
+
+
+def _mongo_client(conn_str: str) -> Any:
+    """Return a cached, live MongoClient for ``conn_str``.
+
+    Self-healing: if the cached client was closed by another code path, evict
+    and rebuild it so callers never receive a ``Cannot use MongoClient after
+    close`` client. This makes the shared pool robust even when a sibling job
+    (e.g. a CDC stream on an older build) closes a client it did not own.
+    """
+    cached = _mongo_client_cache.get(conn_str)
+    if cached is not None and not _client_is_closed(cached):
+        return cached
+    if cached is not None:
+        _mongo_client_cache.pop(conn_str, None)
+    client = _new_mongo_client(conn_str)
+    _mongo_client_cache[conn_str] = client
+    return client
+
+
+def close_mongo_client(conn_str: str) -> None:
+    """Close and evict the pooled client for ``conn_str`` (never leave it dead)."""
+    client = _mongo_client_cache.pop(conn_str, None)
+    if client is not None:
+        try:
+            client.close()
+        except Exception as exc:  # pragma: no cover — teardown must not raise
+            logger.warning("Exception suppressed during mongo client close: %s", exc)
 
 
 def _is_localhost(uri: str) -> bool:
     """Detect whether a URI points to localhost and should be returned as-is."""
-    parsed = urlparse(uri)
-    netloc = parsed.netloc or ""
-    # Strip userinfo and port.
-    host = (netloc.split(":")[-2] if "@" in netloc and ":" in netloc.split("@")[-1] else netloc.split(":")[0])
-    if "@" in host:
-        host = host.split("@")[-1]
-    return host.lower() in ("localhost", "127.0.0.1", "::1")
+    from connectors.url_authority import parse_url_authority
+
+    host = parse_url_authority(uri).host.lower()
+    return host in ("localhost", "127.0.0.1", "::1")
 
 
 def mongodb_database_from_uri(uri: str) -> str:
     """Return the database name encoded in a MongoDB URI path, if any."""
+    from connectors.url_authority import parse_url_authority
+
     try:
-        parsed = urlparse(uri.strip())
-        path = (parsed.path or "").strip("/")
+        path = parse_url_authority(uri.strip()).path.strip("/")
         if path and not path.startswith("?"):
             return path
     except Exception as exc:
@@ -76,7 +121,10 @@ def normalize_mongodb_connection_string(
     credentials are injected into the netloc (common for Railway/Atlas pastes
     that separate host URI from login fields).
     """
+    from dataclasses import replace
     from urllib.parse import quote_plus
+
+    from connectors.url_authority import parse_url_authority, rebuild_url
 
     uri = connection_string.strip()
     host = host or "localhost"
@@ -92,8 +140,8 @@ def normalize_mongodb_connection_string(
     if not uri.startswith(("mongodb://", "mongodb+srv://")):
         return uri
 
-    parsed = urlparse(uri)
-    qs = parse_qs(parsed.query, keep_blank_values=True)
+    authority = parse_url_authority(uri)
+    qs = parse_qs(authority.query, keep_blank_values=True)
 
     # If the user pasted a connection string pointing to localhost but also
     # filled host/port, prefer the explicit form fields.
@@ -103,13 +151,9 @@ def normalize_mongodb_connection_string(
             ssl=ssl, auth_source=auth_source,
         )
 
-    # Inject form credentials when the URI has no userinfo (host-only paste).
-    netloc = parsed.netloc or ""
-    if username and "@" not in netloc:
-        auth = f"{quote_plus(username)}:{quote_plus(password)}" if password else quote_plus(username)
-        netloc = f"{auth}@{netloc}"
-
-    path = parsed.path
+    user = username or authority.user
+    secret = password or authority.password
+    path = authority.path
     if database:
         if not path or path == "/":
             path = f"/{database}"
@@ -130,4 +174,4 @@ def normalize_mongodb_connection_string(
         qs["ssl"] = ["true"]
 
     query = urlencode({k: v[0] if v else "" for k, v in qs.items()}, doseq=False)
-    return urlunparse((parsed.scheme, netloc, path, parsed.params, query, parsed.fragment))
+    return rebuild_url(replace(authority, path=path, query=query), user=user, password=secret)

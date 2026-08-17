@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "policy": "freeze",
+  "description": "Phase F8 — god-module LOC freeze. Fail CI if a listed file grows past max_lines. Lower max only after a real extraction; never raise without ADR note in docs/GOD_MODULE_DECOMPOSITION.md.",
+  "modules": [
+    {"path": "services/type_system.py", "max_lines": 7450, "facade": "services.decision_kernel.type_invent"},
+    {"path": "services/reconciliation.py", "max_lines": 4700, "facade": "services.reconciliation_api"},
+    {"path": "services/target_sample.py", "max_lines": 1650, "facade": "services.reconciliation"},
+    {"path": "connectors/generic_sql.py", "max_lines": 5600, "facade": "connectors.merge_registry"},
+    {"path": "connectors/writer_common.py", "max_lines": 5120, "facade": "connectors.writer_common_api"},
+    {"path": "src/transfer/engine.py", "max_lines": 5200, "facade": "services.decision_kernel.execute_gate"},
+    {"path": "services/schema_introspect.py", "max_lines": 4800, "facade": "services.decision_kernel"},
+    {"path": "src/transfer/stream.py", "max_lines": 3350, "facade": "src.transfer.stream_foreign_keys"},
+    {"path": "src/transfer/adapters.py", "max_lines": 2450, "facade": null},
+    {"path": "services/semantic_mapper.py", "max_lines": 1980, "facade": "services.create_new_risk_stamp"},
+    {"path": "services/preflight_service.py", "max_lines": 2500, "facade": "services.decision_kernel.validation"}
+  ]
+}

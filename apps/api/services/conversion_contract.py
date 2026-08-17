@@ -23,11 +23,28 @@ CONVERSION_CONTRACT_VERSION = "conversion_contract.v1"
 
 
 class ConversionClass(str, Enum):
-    """Charter 7-class taxonomy — never collapse to silent green."""
+    """Conversion taxonomy (Phase C3) — never collapse to silent green.
 
+    Charter gate classes (``needs_*`` / ``lossy`` / ``unsupported``) remain the
+    Execute blockers. Safe-path subclasses refine former ``lossless`` so Map
+    cells explain *why* the path is safe (identity / widen / equivalent / …).
+    """
+
+    # --- Safe-path detail (Phase C3 full set) ---
+    IDENTITY = "identity"
+    EQUIVALENT = "equivalent"
     LOSSLESS = "lossless"
+    REPRESENTATION = "representation"
+    NORMALIZATION = "normalization"
+    WIDENING = "widening"
+    # --- Risk / fidelity ---
+    NARROWING = "narrowing"
+    SEMANTIC = "semantic"
+    POTENTIALLY_LOSSY = "potentially_lossy"
     LOSSY = "lossy"
     UNSUPPORTED = "unsupported"
+    MANUAL = "manual"
+    # --- Gate / operator action (Module 12 charter — keep stable) ---
     NEEDS_TRANSFORM = "needs_transform"
     NEEDS_USER_APPROVAL = "needs_user_approval"
     NEEDS_QUARANTINE = "needs_quarantine"
@@ -72,7 +89,7 @@ class DdlIdentityError(Exception):
 
 
 def _logical(src: str, tgt: str) -> tuple[str, str]:
-    from services.type_system import normalize_logical_type
+    from services.decision_kernel.types import normalize_logical_type
 
     return normalize_logical_type(src), normalize_logical_type(tgt)
 
@@ -84,19 +101,20 @@ def invents_unproven_capacity(
     dest_db: str = "",
 ) -> bool:
     """True when dest stamp invents precision/scale/TZ the source never proved."""
+    from services.decision_kernel.types import normalize_logical_type
     from services.type_system import (
         LOGICAL_DECIMAL,
         bignumeric_capacity_would_invent,
         decimal_params_would_narrow,
         is_timezone_polarity_loss,
-        normalize_logical_type,
         parse_numeric_precision_scale,
     )
 
-    if decimal_params_would_narrow(source_type, target_type):
+    if decimal_params_would_narrow(source_type, target_type, dest_db=dest_db):
         sp, ss = parse_numeric_precision_scale(source_type)
         tp, ts = parse_numeric_precision_scale(target_type)
         # Bare → parametric or proven → bare: invent / invent-default.
+        # Postgres bare NUMERIC is unbounded — not an invent (helper already False).
         if (sp is None and ss is None and (tp is not None or ts is not None)) or (
             tp is None and ts is None and (sp is not None or ss is not None)
         ):
@@ -115,9 +133,13 @@ def invents_unproven_capacity(
         tgt_has_fsp = "(" in tgt_u
         if not src_has_fsp and tgt_has_fsp:
             return True
-    # INTEGER→DECIMAL(p,s) invents scale/precision the integer never proved.
+    # INTEGER→DECIMAL(p,s>0) invents fractional scale the integer never proved.
+    # Zero-scale NUMBER/DECIMAL is the dest integer carrier (Snowflake NUMBER(38,0))
+    # — that is lossless widening, not an invented scale.
     if src_l in {"integer", "bigint", "smallint", "tinyint"} and tgt_l == "decimal":
         tp, ts = parse_numeric_precision_scale(target_type)
+        if ts == 0:
+            return False
         if tp is not None or ts is not None:
             return True
     # Bare/unbounded string → VARCHAR(n) invents length the source never proved.
@@ -132,6 +154,61 @@ def invents_unproven_capacity(
     return False
 
 
+def _safe_path_conversion_class(
+    source_type: str,
+    target_type: str,
+    *,
+    dest_db: str = "",
+) -> ConversionClass:
+    """Refine a non-lossy path into Identity / Widening / Equivalent / …"""
+    from services.decision_kernel.types import normalize_logical_type
+    from services.type_system import (
+        integer_bit_width,
+        integer_storage_bounds,
+        parse_numeric_precision_scale,
+    )
+
+    src_u = (source_type or "").strip().upper().replace(" ", "")
+    tgt_u = (target_type or "").strip().upper().replace(" ", "")
+    if src_u and src_u == tgt_u:
+        return ConversionClass.IDENTITY
+
+    src_l = normalize_logical_type(source_type)
+    tgt_l = normalize_logical_type(target_type)
+
+    # Integer → zero-scale NUMBER/DECIMAL is the dest integer carrier (widening).
+    if src_l in {"integer", "bigint", "smallint", "tinyint"} and tgt_l == "decimal":
+        _p, _s = parse_numeric_precision_scale(target_type)
+        if _s == 0:
+            return ConversionClass.WIDENING
+    if src_l == tgt_l:
+        sw = integer_bit_width(source_type)
+        tw = integer_bit_width(target_type)
+        if sw is None or tw is None:
+            # Ambiguous ``INT``/``INTEGER`` keyword: invent refuses a width, but
+            # the *storage* SSOT resolves it per engine so INTEGER → BIGINT
+            # still reads as widening instead of a vague "equivalent".
+            src_b = integer_storage_bounds(source_type, dest_db=dest_db)
+            tgt_b = integer_storage_bounds(target_type, dest_db=dest_db)
+            if src_b and tgt_b:
+                sw = src_b[1].bit_length()
+                tw = tgt_b[1].bit_length()
+        if sw is not None and tw is not None:
+            if tw > sw:
+                return ConversionClass.WIDENING
+            if tw < sw:
+                return ConversionClass.NARROWING
+        # Same logical family, different native spelling (e.g. INT8 vs BIGINT).
+        if src_u != tgt_u:
+            return ConversionClass.EQUIVALENT
+        return ConversionClass.IDENTITY
+
+    # Cross-logical but oracle said non-lossy (e.g. specialty wire preserve).
+    if src_l in {"string", "text"} and tgt_l in {"string", "text"}:
+        return ConversionClass.REPRESENTATION
+    return ConversionClass.LOSSLESS
+
+
 def classify_conversion(
     source_type: str,
     target_type: str,
@@ -143,10 +220,11 @@ def classify_conversion(
 ) -> dict[str, Any]:
     """Classify one source→target path into the charter ConversionClass.
 
-    Never returns lossless when invent / lossy / unsupported evidence exists.
+    Never returns a safe-path class when invent / lossy / unsupported evidence
+    exists. Safe paths are refined (identity/widening/…) per Phase C3.
     """
+    from services.decision_kernel.types import is_lossy_coercion
     from services.mapping_proof import transform_fidelity
-    from services.type_system import is_lossy_coercion
 
     src = (source_type or "").strip()
     tgt = (target_type or "").strip()
@@ -189,6 +267,7 @@ def classify_conversion(
         }
 
     if lossy and not risk_acknowledged:
+        detail = _safe_path_conversion_class(src, tgt, dest_db=dest_db)
         return {
             "conversion_class": ConversionClass.NEEDS_USER_APPROVAL.value,
             "reason": (
@@ -198,12 +277,19 @@ def classify_conversion(
             "invents_capacity": invent,
             "lossy": True,
             "requires_risk_contract": True,
+            "detail_class": detail.value,
             "contract_version": CONVERSION_CONTRACT_VERSION,
         }
 
     if lossy and risk_acknowledged:
+        detail = _safe_path_conversion_class(src, tgt, dest_db=dest_db)
+        ack_class = (
+            ConversionClass.NARROWING
+            if detail is ConversionClass.NARROWING
+            else ConversionClass.LOSSY
+        )
         return {
-            "conversion_class": ConversionClass.LOSSY.value,
+            "conversion_class": ack_class.value,
             "reason": f"{src} → {tgt} is lossy under an approved Risk Contract.",
             "invents_capacity": invent,
             "lossy": True,
@@ -234,14 +320,53 @@ def classify_conversion(
             "contract_version": CONVERSION_CONTRACT_VERSION,
         }
 
+    safe = _safe_path_conversion_class(src, tgt, dest_db=dest_db)
     return {
-        "conversion_class": ConversionClass.LOSSLESS.value,
-        "reason": f"{src} → {tgt} round-trips without invent or declared loss.",
+        "conversion_class": safe.value,
+        "reason": f"{src} → {tgt} round-trips without invent or declared loss ({safe.value}).",
         "invents_capacity": False,
         "lossy": False,
         "requires_risk_contract": False,
         "contract_version": CONVERSION_CONTRACT_VERSION,
     }
+
+
+_CREATE_NEW_CLASS_LABELS: dict[ConversionClass, str] = {
+    ConversionClass.IDENTITY: "identity",
+    ConversionClass.EQUIVALENT: "lossless equivalent",
+    ConversionClass.WIDENING: "lossless widening",
+    ConversionClass.LOSSLESS: "lossless widening",
+    ConversionClass.REPRESENTATION: "lossless representation",
+    ConversionClass.NORMALIZATION: "lossless normalization",
+}
+
+
+def create_new_mapping_reason(
+    source_type: str,
+    dest_native: str,
+    *,
+    dest_db: str = "",
+) -> str:
+    """Operator Why text for confirmed-missing dest — class, not a flat 'identity'."""
+    classified = classify_conversion(
+        source_type,
+        dest_native,
+        dest_db=dest_db,
+        transform="none",
+    )
+    raw = str(classified.get("conversion_class") or "")
+    try:
+        cls = ConversionClass(raw)
+    except ValueError:
+        cls = ConversionClass.LOSSLESS
+    if cls == ConversionClass.NEEDS_USER_APPROVAL:
+        label = "projected CREATE — capacity not dest-proven"
+    else:
+        label = _CREATE_NEW_CLASS_LABELS.get(cls, raw.replace("_", " ") or "projected CREATE")
+    return (
+        f"New destination table — {label}; "
+        f"types will CREATE on first write as {dest_native}"
+    )
 
 
 def classify_mapping(
@@ -285,17 +410,24 @@ def classify_mapping(
     )
 
 
-def approved_mapping_ddl_fingerprint(
+def ddl_identity_columns(
     mappings: list[dict[str, Any]] | None,
     *,
     dest_db: str = "",
-) -> str:
-    """Stable hash of approved Map stamps after ``materialize_dest_ddl``.
+) -> list[dict[str, str]]:
+    """Canonical destination DDL each mapping row materializes to.
 
-    Map → materialize must equal Execute CREATE/ALTER stamps. Any drift changes
-    this fingerprint and requires re-validation.
+    Identity is the *physical column contract*: target name plus the DDL the
+    destination will actually receive. Map stamp spelling is deliberately not
+    part of it — a live catalog reporting ``VARCHAR(255) COLLATE utf8mb4_…``
+    for the operator's ``VARCHAR(255)`` materializes to the same column, and
+    so does ``TIMESTAMP`` vs ``TIMESTAMP_NTZ(6)`` on MySQL. Transforms are the
+    conversion contract's concern (Decision Artifact), not DDL.
+
+    A stamp that cannot be materialized keeps its raw text, marked, so an
+    unmaterializable stamp never hashes equal to a materialized one.
     """
-    from services.type_system import materialize_dest_ddl
+    from services.decision_kernel.types import materialize_dest_ddl
 
     rows: list[dict[str, str]] = []
     for m in mappings or []:
@@ -308,24 +440,77 @@ def approved_mapping_ddl_fingerprint(
         if not src or not tgt:
             continue
         stamp = str(m.get("target_type") or m.get("dest_type") or "").strip()
-        wire = materialize_dest_ddl(dest_db, stamp) if stamp else ""
-        rows.append(
-            {
-                "source": src,
-                "target": tgt,
-                "map_stamp": stamp,
-                "materialized_ddl": str(wire or ""),
-                "transform": str(m.get("transform") or "none"),
-            }
+        src_type = str(m.get("source_type") or m.get("inferred_type") or "")
+        wire = (
+            str(materialize_dest_ddl(dest_db, stamp, source_type=src_type) or "")
+            if stamp
+            else ""
         )
+        if stamp and not wire:
+            wire = f"unmaterialized:{stamp}"
+        rows.append({"source": src, "target": tgt, "materialized_ddl": wire})
     rows.sort(key=lambda r: (r["source"], r["target"]))
+    return rows
+
+
+def approved_mapping_ddl_fingerprint(
+    mappings: list[dict[str, Any]] | None,
+    *,
+    dest_db: str = "",
+) -> str:
+    """Stable hash of approved Map stamps after ``materialize_dest_ddl``.
+
+    Map → materialize must equal Execute CREATE/ALTER stamps. Any drift changes
+    this fingerprint and requires re-validation.
+    """
     payload = {
         "version": CONVERSION_CONTRACT_VERSION,
         "dest_db": (dest_db or "").strip().lower(),
-        "columns": rows,
+        "columns": ddl_identity_columns(mappings, dest_db=dest_db),
     }
     blob = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def ddl_identity_divergence(
+    approved_columns: list[dict[str, Any]] | None,
+    mappings: list[dict[str, Any]] | None,
+    *,
+    dest_db: str = "",
+    limit: int = 5,
+) -> list[str]:
+    """Per-column ``approved → current`` lines for a fingerprint mismatch.
+
+    Empty when the approved column set was not carried alongside the hash: a
+    hash alone cannot name what diverged, and inventing a cause is worse than
+    saying nothing.
+    """
+    if not approved_columns:
+        return []
+    approved = {
+        (str(r.get("target") or ""), str(r.get("source") or "")): str(
+            r.get("materialized_ddl") or ""
+        )
+        for r in approved_columns
+        if isinstance(r, dict)
+    }
+    current = {
+        (r["target"], r["source"]): r["materialized_ddl"]
+        for r in ddl_identity_columns(mappings, dest_db=dest_db)
+    }
+    lines: list[str] = []
+    for key in sorted(set(approved) | set(current)):
+        was, now = approved.get(key), current.get(key)
+        if was == now:
+            continue
+        col = key[0] or key[1]
+        if was is None:
+            lines.append(f"{col}: not in approved Map → {now}")
+        elif now is None:
+            lines.append(f"{col}: {was} → dropped from Map")
+        else:
+            lines.append(f"{col}: {was} → {now}")
+    return lines[:limit]
 
 
 def assert_ddl_identity(
@@ -333,6 +518,7 @@ def assert_ddl_identity(
     mappings: list[dict[str, Any]] | None,
     *,
     dest_db: str = "",
+    approved_columns: list[dict[str, Any]] | None = None,
 ) -> str:
     """Fail closed when materialize/Execute DDL diverges from approved Map."""
     expected = (approved_fingerprint or "").strip().lower()
@@ -344,9 +530,13 @@ def assert_ddl_identity(
         )
     actual = approved_mapping_ddl_fingerprint(mappings, dest_db=dest_db)
     if actual.lower() != expected:
+        diverged = ddl_identity_divergence(
+            approved_columns, mappings, dest_db=dest_db
+        )
+        detail = f" Diverged: {'; '.join(diverged)}." if diverged else ""
         raise DdlIdentityError(
             "DDL identity mismatch — Map stamp / materialize diverged from last "
-            "Validate approval. Re-validate before Execute.",
+            f"Validate approval. Re-validate before Execute.{detail}",
             expected=expected,
             actual=actual,
         )
@@ -366,6 +556,7 @@ def ddl_identity_report(
     return {
         "contract_version": CONVERSION_CONTRACT_VERSION,
         "ddl_identity_hash": fp,
+        "columns": ddl_identity_columns(mappings, dest_db=dest_db),
         "approved_ddl_identity_hash": approved or None,
         "matches_approved": matches,
         "dest_db": (dest_db or "").strip().lower(),

@@ -14,11 +14,14 @@ if str(_API_ROOT) not in sys.path:
 
 
 @pytest.fixture
-def auth_env(monkeypatch):
+def auth_env(monkeypatch, tmp_path):
     """Isolate auth-service module state for each test."""
+    monkeypatch.setenv("DATAFLOW_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("DATAWRAP_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("DATAFLOW_AUTH_SECRET", "unit-test-secret-value")
     monkeypatch.setenv("DATAFLOW_ADMIN_EMAIL", "admin@example.com")
     monkeypatch.setenv("DATAFLOW_ADMIN_PASSWORD", "strong-password-123")
+    monkeypatch.setenv("DATAFLOW_AUTH_LEGACY_TOKENS", "0")
 
 
 def test_hash_password_and_verify_bcrypt(auth_env):
@@ -60,20 +63,27 @@ def test_expired_token_is_rejected(auth_env):
     from src.services.auth_service import create_token, verify_token
 
     token, _ = create_token("user@example.com")
-    # Fast-forward past the TTL.
-    token = token.replace(str(int(time.time()) + 86400), str(int(time.time()) - 1))
-    assert verify_token(token) is None
+    # Rewrite expires segment (email:expires:jti:sig) to the past and re-sign.
+    email, _expires_s, jti, _sig = token.rsplit(":", 3)
+    past = str(int(time.time()) - 1)
+    payload = f"{email}:{past}:{jti}"
+    from src.services.auth_service import _token_secret
+    import hashlib
+    import hmac
+
+    sig = hmac.new(_token_secret().encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()
+    assert verify_token(f"{payload}:{sig}") is None
 
 
 def test_production_rejects_default_secret(monkeypatch):
     import src.services.auth_service as auth_mod
 
     monkeypatch.setattr(auth_mod, "is_production", lambda: True)
-    monkeypatch.setattr(auth_mod, "_REAUTH_SECRET", "dev-change-me-before-production")
+    monkeypatch.setenv("DATAFLOW_AUTH_SECRET", "dev-change-me-before-production")
+    monkeypatch.setenv("DATAWRAP_AUTH_SECRET", "dev-change-me-before-production")
 
     with pytest.raises(RuntimeError):
         auth_mod._token_secret()
-
 
 def test_authenticate_with_env_credentials(auth_env):
     from src.services.auth_service import authenticate
@@ -98,8 +108,20 @@ def test_normalize_secret_handles_dollar_escape(auth_env, monkeypatch):
 def test_auth_bootstrap_status_reports_admin(auth_env):
     from src.services.auth_service import auth_bootstrap_status
 
-    status = auth_bootstrap_status()
-    assert status["admin_email_configured"] is True
-    assert status["admin_password_configured"] is True
-    assert status["user_count"] >= 1
-    assert "admin@example.com" in status["emails"]
+    # Public payload — exact ITEM 3 contract; no enumeration aids.
+    public = auth_bootstrap_status()
+    assert public == {
+        "auth_required": public["auth_required"],
+        "has_users": True,
+    }
+    assert set(public.keys()) == {"auth_required", "has_users"}
+    assert "emails" not in public
+    assert "user_count" not in public
+    assert "admin_password_length" not in public
+
+    sensitive = auth_bootstrap_status(include_sensitive=True)
+    assert sensitive["admin_email_configured"] is True
+    assert sensitive["admin_password_configured"] is True
+    assert sensitive["user_count"] >= 1
+    assert "emails" not in sensitive
+    assert "admin_password_length" not in sensitive

@@ -1,4 +1,5 @@
 import { GENERIC_SQL_INFO } from "./genericSqlMap";
+import { isPlaceholderSnowflakeAccount, SNOWFLAKE_PLACEHOLDER_HOST_MSG, validateSnowflakeConnectionString } from "./snowflakeUrl";
 import {
   getConnectorDefaults,
   getRestApiDefaultObject,
@@ -16,7 +17,9 @@ export type AuthMode =
   | "service_account"
   | "aws_keys"
   | "api_key"
-  | "file_path";
+  | "file_path"
+  | "key_pair"
+  | "pat";
 
 /** Single form field descriptor. */
 export interface FormField {
@@ -37,7 +40,21 @@ export interface AuthModeConfig {
   label: string;
   fields: FormField[];
   validate: (values: Record<string, unknown>) => string | null;
+  /** One-line operator copy shown on the setup rail. */
+  description?: string;
 }
+
+/** Default rail copy — Snowflake and others override per mode when needed. */
+export const AUTH_MODE_DETAIL: Record<AuthMode, string> = {
+  user_pass: "Host, username, and password for this system.",
+  connection_string: "Login URL. If the password contains @, encode it as %40.",
+  service_account: "JSON key or file path for cloud identity.",
+  aws_keys: "Access key ID and secret access key.",
+  api_key: "API token issued by this service.",
+  file_path: "Local path or object-store URI.",
+  key_pair: "PKCS#8 private key assigned on the user.",
+  pat: "Programmatic access token. Snowflake sends it as password=.",
+};
 
 /** Complete per-connector form configuration. */
 export interface ConnectorFormConfig {
@@ -100,8 +117,14 @@ function requiredAny(values: Record<string, unknown>, keys: string[], message: s
   return message;
 }
 
-function auth(mode: AuthMode, label: string, fields: FormField[], validate: (values: Record<string, unknown>) => string | null): AuthModeConfig {
-  return { value: mode, label, fields, validate };
+function auth(
+  mode: AuthMode,
+  label: string,
+  fields: FormField[],
+  validate: (values: Record<string, unknown>) => string | null,
+  description?: string,
+): AuthModeConfig {
+  return { value: mode, label, fields, validate, description: description || AUTH_MODE_DETAIL[mode] };
 }
 
 /** Generic SQL placeholder derived from the generic SQL map. */
@@ -150,7 +173,7 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
   const isEmail = resolved === "email";
   const isSQLite = resolved === "sqlite";
   const isDuckDB = resolved === "duckdb";
-  const isFile = ["csv", "tsv", "json", "jsonl", "ndjson", "parquet", "excel", "avro", "orc", "xml"].includes(resolved);
+  const isFile = ["csv", "tsv", "json", "jsonl", "ndjson", "parquet", "excel", "avro", "orc", "xml", "pdf", "docx", "html"].includes(resolved);
   const isAzure = resolved === "adls";
   const isSaaS = ["salesforce", "hubspot", "stripe"].includes(resolved) || resolved === "rest_api";
   const isNoSqlSource = ["influxdb", "neo4j", "couchbase"].includes(resolved);
@@ -230,13 +253,13 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
     );
   } else if (isSnowflake) {
     userPassFields.push(
-      text("host", "Account host", { placeholder: "account.snowflakecomputing.com" }),
+      text("host", "Account host", { placeholder: "myorg-acctname" }),
       text("username", "Username"),
       password("password", "Password"),
       text("database", "Database"),
       text("schema", "Schema", { placeholder: "PUBLIC" }),
       text("warehouse", "Warehouse", { placeholder: "COMPUTE_WH" }),
-      text("authRole", "Role", { placeholder: "ACCOUNTADMIN", optional: true })
+      text("authRole", "Role", { placeholder: "Default role", optional: true })
     );
   } else if (isRedis) {
     userPassFields.push(
@@ -393,9 +416,9 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
     );
   } else if (isSnowflake) {
     connStrFields.push(
-      textarea("connection_string", "Snowflake URL", {
-        rows: 2,
-        placeholder: "snowflake://user:pass@account/db/schema?warehouse=COMPUTE_WH&role=ACCOUNTADMIN",
+      textarea("connection_string", "Snowflake login URL", {
+        rows: 3,
+        placeholder: "snowflake://USER:PASSWORD@myorg-acctname/DATABASE/SCHEMA?warehouse=COMPUTE_WH",
       })
     );
   } else if (isSQLite || isDuckDB) {
@@ -410,6 +433,7 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
       textarea("connection_string", "Connection string", {
         rows: 2,
         placeholder: isSnowflake ? "" : genericSqlPlaceholder(type),
+        hint: "SQLAlchemy-style login URL. If the password contains @, encode it as %40 — or use Username & password.",
       })
     );
   }
@@ -571,8 +595,11 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
         if (!isGcp && !isAws && !isElastic && !isRedis && !isSQLite && !isDuckDB && !fmt(values, "host")) {
           return "Host is required.";
         }
+        if (isSnowflake && isPlaceholderSnowflakeAccount(fmt(values, "host"))) {
+          return SNOWFLAKE_PLACEHOLDER_HOST_MSG;
+        }
         if (
-          !["gcs", "bigquery", "s3", "dynamodb", "adls", "elasticsearch", "redis", "sqlite", "duckdb"].includes(resolved) &&
+          !["gcs", "bigquery", "s3", "dynamodb", "adls", "elasticsearch", "redis", "sqlite", "duckdb", "snowflake"].includes(resolved) &&
           (values.port as number) <= 0
         ) {
           return "Port is required.";
@@ -600,11 +627,56 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
     );
   }
 
+  if (isSnowflake) {
+    authModes.push(
+      auth("pat", "Programmatic access token", [
+        text("host", "Account host", { placeholder: "myorg-acctname" }),
+        text("username", "Username"),
+        password("password", "Programmatic access token"),
+        text("database", "Database"),
+        text("schema", "Schema", { placeholder: "PUBLIC", optional: true }),
+        text("warehouse", "Warehouse", { placeholder: "COMPUTE_WH" }),
+        text("authRole", "Role", { placeholder: "Leave blank for default role", optional: true }),
+      ], (values) => {
+        if (!fmt(values, "host")) return "Account host is required.";
+        if (isPlaceholderSnowflakeAccount(fmt(values, "host"))) return SNOWFLAKE_PLACEHOLDER_HOST_MSG;
+        if (!fmt(values, "username")) return "Username is required.";
+        if (!fmt(values, "password")) return "Programmatic access token is required.";
+        return null;
+      }, "Token from Snowsight.")
+    );
+    authModes.push(
+      auth("key_pair", "Key-pair (JWT)", [
+        text("host", "Account host", { placeholder: "myorg-acctname" }),
+        text("username", "Username"),
+        textarea("privateKey", "PKCS#8 private key", {
+          rows: 6,
+          placeholder: "-----BEGIN PRIVATE KEY-----",
+        }),
+        password("password", "Key passphrase (optional)", { optional: true }),
+        text("database", "Database"),
+        text("schema", "Schema", { placeholder: "PUBLIC", optional: true }),
+        text("warehouse", "Warehouse", { placeholder: "COMPUTE_WH" }),
+        text("authRole", "Role", { placeholder: "Leave blank for default role", optional: true }),
+      ], (values) => {
+        if (!fmt(values, "host")) return "Account host is required.";
+        if (isPlaceholderSnowflakeAccount(fmt(values, "host"))) return SNOWFLAKE_PLACEHOLDER_HOST_MSG;
+        if (!fmt(values, "username")) return "Username is required.";
+        if (!fmt(values, "privateKey")) return "PKCS#8 private key is required.";
+        return null;
+      }, "PKCS#8 private key.")
+    );
+  }
+
   if (connStrFields.length) {
     authModes.push(
-      auth("connection_string", isEmail ? "SMTP URL" : isSftp ? "SFTP URL" : "Connection string", connStrFields, (values) =>
-        required(values, "connection_string", isEmail ? "SMTP URL" : isSftp ? "SFTP URL" : "Connection string")
-      )
+      auth("connection_string", isEmail ? "SMTP URL" : isSftp ? "SFTP URL" : "Connection string", connStrFields, (values) => {
+        const label = isEmail ? "SMTP URL" : isSftp ? "SFTP URL" : "Connection string";
+        const missing = required(values, "connection_string", label);
+        if (missing) return missing;
+        if (isSnowflake) return validateSnowflakeConnectionString(fmt(values, "connection_string"));
+        return null;
+      })
     );
   }
 
@@ -644,8 +716,12 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
         }
         if (resolved === "salesforce") {
           const h = String(fmt(values, "host") || "").toLowerCase();
-          if (h.includes("login.salesforce.com") || h.includes("test.salesforce.com")) {
-            return "Use your org instance URL (*.my.salesforce.com), not login.salesforce.com.";
+          if (
+            h.includes("login.salesforce.com") ||
+            h.includes("test.salesforce.com") ||
+            h.includes("yourorg.my.salesforce.com")
+          ) {
+            return "Use your org instance URL (*.my.salesforce.com), not login.salesforce.com or the yourorg placeholder.";
           }
         }
         if (resolved === "weaviate" || resolved === "milvus") {
@@ -696,7 +772,7 @@ function inferDefaultAuthMode(resolved: string): AuthMode {
   if (["salesforce", "hubspot", "stripe", "rest_api"].includes(resolved)) return "api_key";
   if (resolved === "elasticsearch") return "api_key";
   if (["weaviate", "pinecone"].includes(resolved)) return "api_key";
-  if (["csv", "tsv", "json", "jsonl", "ndjson", "parquet", "excel"].includes(resolved)) return "file_path";
+  if (["csv", "tsv", "json", "jsonl", "ndjson", "parquet", "excel", "avro", "orc", "xml", "pdf", "docx", "html"].includes(resolved)) return "file_path";
   return "user_pass";
 }
 

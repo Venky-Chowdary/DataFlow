@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -67,7 +68,9 @@ def test_upsert_batch_clickhouse_skips_delete_insert_fallback():
     class _Conn:
         def execute(self, stmt, params=None):  # noqa: ANN001
             text = str(getattr(stmt, "text", stmt))
-            if "DELETE" in text.upper() or "delete" in str(stmt).lower():
+            # A DELETE *statement* — not the mirror-lattice probe
+            # `SELECT "_deleted" FROM t WHERE 1=0`, which merely contains it.
+            if re.match(r"\s*DELETE\b", text, flags=re.IGNORECASE):
                 calls.append("delete")
             elif stmt == "INSERT" or "INSERT" in text.upper():
                 calls.append("insert_exec")
@@ -167,8 +170,12 @@ def test_build_table_clickhouse_uses_replacing_when_conflict():
         db_type="clickhouse",
         conflict_columns=["id"],
     )
+    # Compile with the real dialect: the MagicMock engine has no DDL compiler,
+    # so compiling against it returned a mock repr that matched nothing.
+    from clickhouse_sqlalchemy.drivers.http.base import ClickHouseDialect
+
     # Engine kwargs are attached as table.args / dialect_options depending on version.
-    ddl = str(sa.schema.CreateTable(table).compile(dialect=engine.dialect))
+    ddl = str(sa.schema.CreateTable(table).compile(dialect=ClickHouseDialect()))
     assert "ReplacingMergeTree" in ddl or "replacingmergetree" in ddl.lower()
 
 

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import logging
 import sys
+from collections.abc import Mapping
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -30,16 +32,25 @@ from services.connector_capability_registry import (
     classify_payload,
     recommended_batch_size,
 )
+from services.data_profiler import source_types_are_authoritative
 from services.db_type_utils import SCHEMALESS_DESTS, normalize_dest_kind
-from services.primary_key import resolve_primary_key_source
-from services.source_duplicate_probe import probe_source_duplicate_keys
+from services.destination_key_collision_probe import probe_append_key_collisions
+from services.preflight_fk_gate import build_fk_block
+from services.coercion_gate_reconcile import reconcile_coercion_report
+from services.preflight_source_catalog import load_source_foreign_keys
+from services.destination_requirements_gate import build_mapping_contract_gates
+from services.preflight_cursor_gate import (
+    build_sync_contract_gate,
+    resolve_read_scope as _resolve_read_scope,
+)
+from services.source_duplicate_probe import probe_source_duplicate_keys_result
 from services.transform_engine import (
     infer_date_locale,
     reset_active_date_locale,
     set_active_date_locale,
 )
 from services.validation_plan import build_validation_plan
-from services.value_serializer import cell_to_string
+from services.value_serializer import cell_to_string, project_row_cells
 
 
 def _hydrate_risk_contract(
@@ -75,14 +86,22 @@ class FilePreflightContext(PreflightContext):
         self,
         plan: TransferPlan,
         sample_rows: list[dict] | None = None,
+        destination_collision: Any = None,
         source_duplicate_findings: list[dict[str, Any]] | None = None,
         source_duplicate_probe_ran: bool = False,
         source_duplicate_probe_pk: str = "",
+        source_duplicate_probe_status: str = "",
+        source_duplicate_probe_message: str = "",
+        source_duplicate_probe_expected: bool = False,
     ):
         super().__init__(plan=plan, sample_rows=sample_rows or [])
+        self.destination_collision = destination_collision
         self.source_duplicate_findings = source_duplicate_findings or []
         self.source_duplicate_probe_ran = bool(source_duplicate_probe_ran)
         self.source_duplicate_probe_pk = str(source_duplicate_probe_pk or "")
+        self.source_duplicate_probe_status = str(source_duplicate_probe_status or "")
+        self.source_duplicate_probe_message = str(source_duplicate_probe_message or "")
+        self.source_duplicate_probe_expected = bool(source_duplicate_probe_expected)
 
     def _mapping_dict_for_probe(self, m: Any, dest_types: dict[str, str]) -> dict[str, Any]:
         """Serialize plan mappings for coercion / integrity — keep Map Accept risk.
@@ -90,6 +109,31 @@ class FilePreflightContext(PreflightContext):
         Stripping risk_acknowledged / fidelity left Validate blocked after Map
         Accept risk (G3 probe severity + G9 coercion_safety).
         """
+        live = dest_types.get(m.target)
+        stamped = live or getattr(m, "target_type", None)
+        src_type = next(
+            (
+                c.inferred_type
+                for c in self.plan.source.columns
+                if c.name == m.source
+            ),
+            None,
+        )
+        if (
+            not live
+            and stamped
+            and src_type
+            and not bool(getattr(m, "user_override", False))
+        ):
+            try:
+                from services.decision_kernel import refuse_create_new_numeric_collapse
+
+                dest_db = str(getattr(self.plan.destination, "db_type", "") or "")
+                stamped = refuse_create_new_numeric_collapse(
+                    str(src_type), str(stamped), dest_db
+                )
+            except Exception:
+                pass
         return {
             "source": m.source,
             "target": m.target,
@@ -97,17 +141,15 @@ class FilePreflightContext(PreflightContext):
             "transform": getattr(m, "transform", None),
             "requires_review": bool(getattr(m, "requires_review", False)),
             "user_override": bool(getattr(m, "user_override", False)),
-            # Prefer live dest DDL; keep stamped create-new type when absent.
-            "target_type": dest_types.get(m.target) or getattr(m, "target_type", None),
-            "source_type": next(
-                (
-                    c.inferred_type
-                    for c in self.plan.source.columns
-                    if c.name == m.source
-                ),
-                None,
-            ),
+            # Prefer live dest DDL; refuse sample-invented create-new collapse.
+            "target_type": stamped,
+            "source_type": src_type,
             "create_new": bool(getattr(m, "create_new", False)),
+            "struct_policy": getattr(m, "struct_policy", None) or None,
+            "struct_derived": bool(getattr(m, "struct_derived", False)),
+            "struct_parent": getattr(m, "struct_parent", None) or None,
+            "structural_class": getattr(m, "structural_class", None) or None,
+            "child_table_spec": getattr(m, "child_table_spec", None) or None,
             "fidelity": getattr(m, "fidelity", None) or None,
             "type_narrowing": bool(getattr(m, "type_narrowing", False)),
             "risk_acknowledged": bool(getattr(m, "risk_acknowledged", False)),
@@ -126,10 +168,12 @@ class FilePreflightContext(PreflightContext):
             ]
 
         headers = list(self.sample_rows[0].keys()) if self.sample_rows else []
-        # Use cell_to_string so nested lists/dicts from schemaless sources become
-        # valid JSON strings instead of Python repr() artifacts.
+        # Nested lists/dicts from schemaless sources become valid JSON strings
+        # instead of Python repr() artifacts; a key the document does not carry
+        # stays the missing sentinel rather than an empty string the typed
+        # transforms would reject as a cast failure.
         scanned = self.sample_rows[:sample_size]
-        rows = [[cell_to_string(row.get(h, "")) for h in headers] for row in scanned]
+        rows = [project_row_cells(row, headers) for row in scanned]
         self._last_dry_run_meta = {
             "sample_rows_scanned": len(scanned),
             "sample_rows_available": len(self.sample_rows),
@@ -312,7 +356,7 @@ class FilePreflightContext(PreflightContext):
         ]
         mode = getattr(self.plan, "validation_mode", "strict") or "strict"
         sync_mode = getattr(self.plan, "sync_mode", "") or ""
-        return audit(
+        report = audit(
             source_columns=source_columns,
             mappings=mapping_dicts,
             source_schemas=source_schemas,
@@ -330,7 +374,30 @@ class FilePreflightContext(PreflightContext):
             source_duplicate_findings=self.source_duplicate_findings,
             source_duplicate_probe_ran=self.source_duplicate_probe_ran,
             source_duplicate_probe_pk=self.source_duplicate_probe_pk,
+            source_duplicate_probe_status=self.source_duplicate_probe_status,
+            source_duplicate_probe_message=self.source_duplicate_probe_message,
+            source_duplicate_probe_expected=self.source_duplicate_probe_expected,
+            dest_table_exists=getattr(self.plan.destination, "table_exists", None),
         )
+        # Normalize/hybrid without a valid child_table_spec — fail closed in G9.
+        try:
+            from services.structural_array import array_strategy_gate_issues
+
+            array_issues = array_strategy_gate_issues(
+                mapping_dicts,
+                known_source_columns=set(source_columns),
+            )
+        except Exception:
+            array_issues = []
+        if array_issues:
+            issues = list(report.get("issues") or [])
+            issues.extend(array_issues)
+            report = {
+                **report,
+                "issues": issues,
+                "blocks_transfer": True,
+            }
+        return report
 
 
 VALIDATION_CONFIDENCE_THRESHOLDS = {
@@ -343,6 +410,49 @@ VALIDATION_CONFIDENCE_THRESHOLDS = {
 }
 
 
+def apply_readiness_honesty_caps(out: dict[str, Any]) -> dict[str, Any]:
+    """Cap Validate readiness when G9 uniqueness is sample-only.
+
+    Gate pass-ratio can be 100% while population uniqueness is unproven.
+    Fivetran/Airbyte do not call that certified-ready. Execute may still
+    proceed; the score must not look like a migration certificate.
+    """
+    payload = out if isinstance(out, dict) else {}
+    reasons: list[str] = []
+    for gate in payload.get("gates") or []:
+        if not isinstance(gate, dict):
+            continue
+        gid = str(gate.get("id") or "").lower()
+        details = gate.get("details") if isinstance(gate.get("details"), dict) else {}
+        coverage = str(details.get("coverage") or "").lower()
+        msg = str(gate.get("message") or "").lower()
+        if "g9" in gid or "data_integrity" in gid:
+            if (
+                coverage == "sample"
+                or "population uniqueness not proven" in msg
+                or "validate sample only" in msg
+            ):
+                reasons.append("g9_sample_uniqueness")
+        if "g5" in gid or "dry_run" in gid:
+            if (
+                coverage == "sample"
+                or details.get("sample_cap") is not None
+                or "sample" in msg
+                or gid == "g5_dry_run"
+            ):
+                reasons.append("g5_sample_dry_run")
+    if reasons:
+        try:
+            score = float(payload.get("readiness_score") or 0)
+        except (TypeError, ValueError):
+            score = 0.0
+        payload["readiness_score"] = min(score, 92.0)
+        if "g9_sample_uniqueness" in reasons:
+            payload["population_uniqueness_proven"] = False
+        payload["readiness_cap_reason"] = "+".join(dict.fromkeys(reasons))
+    return payload
+
+
 def confidence_threshold_for_mode(validation_mode: str | None) -> float:
     try:
         from services.validation_mode_contract import confidence_floor_for_mode
@@ -352,39 +462,6 @@ def confidence_threshold_for_mode(validation_mode: str | None) -> float:
         return VALIDATION_CONFIDENCE_THRESHOLDS.get(
             (validation_mode or "strict").lower(), 0.85
         )
-
-
-# Destinations that honor SCD2 / mirror streaming paths (must match Studio gating).
-_SQL_HISTORY_SYNC_DESTS = frozenset({
-    "postgresql",
-    "mysql",
-    "sqlite",
-    "snowflake",
-    "bigquery",
-    "redshift",
-    "generic_sql",
-    "sqlserver",
-    "mssql",
-    "oracle",
-    "duckdb",
-})
-
-# Sources that can drive CDC (log / change-stream) in production.
-_CDC_CAPABLE_SOURCES = frozenset({
-    "postgresql",
-    "mysql",
-    "sqlserver",
-    "mssql",
-    "oracle",
-    "mongodb",
-    "azure_sql_database",
-    "microsoft_sql_server",
-    "amazon_rds_sql_server",
-    "amazon_rds_postgresql",
-    "amazon_rds_mysql",
-    "amazon_aurora_postgresql",
-    "amazon_aurora_mysql",
-})
 
 
 def run_transfer_policy_gates(
@@ -399,6 +476,9 @@ def run_transfer_policy_gates(
     source_type: str | None = None,
     source_kind: str = "file",
     write_via_staging: bool = False,
+    source_read_mode: str = "",
+    delivery_guarantee: str = "at_least_once",
+    allow_append_only: bool = False,
 ) -> list[dict[str, Any]]:
     """Validate enterprise run policy that sits above source/destination probes."""
     contracts = [c for c in stream_contracts or [] if c.get("selected", True)]
@@ -408,110 +488,21 @@ def run_transfer_policy_gates(
     dest = (dest_type or "").strip().lower()
     src = (source_type or "").strip().lower()
     kind = (source_kind or "file").strip().lower()
-    multi_stream = len(contracts) > 1
-    requires_cursor = sync in {"incremental_append", "incremental_deduped", "cdc"}
-    requires_primary_key = sync in {
-        "upsert",
-        "incremental_deduped",
-        "cdc",
-        "scd2",
-        "mirror",
-    }
-
-    missing_cursor = [
-        c.get("name") or c.get("stream") or "stream"
-        for c in contracts
-        if requires_cursor and not (c.get("cursor_field") or c.get("cursor"))
-    ]
-    missing_primary_key = [
-        c.get("name") or c.get("stream") or "stream"
-        for c in contracts
-        if requires_primary_key and not (c.get("primary_key") or c.get("primary_keys"))
-    ]
-
-    # Live column check — typo'd cursor/PK names must fail at Validate, not mid-run.
-    source_col_set = {
-        str(c).strip().lower() for c in (source_columns or []) if str(c).strip()
-    }
-    unknown_cursor: list[str] = []
-    unknown_pk: list[str] = []
-    if source_col_set:
-        for c in contracts:
-            stream = c.get("name") or c.get("stream") or "stream"
-            if requires_cursor:
-                cursor = str(c.get("cursor_field") or c.get("cursor") or "").strip()
-                if cursor and cursor.lower() not in source_col_set:
-                    unknown_cursor.append(f"{stream}.{cursor}")
-            if requires_primary_key:
-                raw_pk = c.get("primary_key") or c.get("primary_keys") or []
-                pk_fields = [raw_pk] if isinstance(raw_pk, str) else list(raw_pk or [])
-                for pk in pk_fields:
-                    name = str(pk).strip()
-                    if name and name.lower() not in source_col_set:
-                        unknown_pk.append(f"{stream}.{name}")
-
     gates: list[dict[str, Any]] = []
-    sync_issues: list[str] = []
-    if sync in {"scd2", "mirror"}:
-        if multi_stream:
-            sync_issues.append(
-                f"{sync.upper()} is not supported for multi-stream transfers"
-            )
-        elif not dest:
-            sync_issues.append(
-                f"{sync.upper()} requires a SQL table destination"
-            )
-        elif dest not in _SQL_HISTORY_SYNC_DESTS:
-            sync_issues.append(
-                f"{sync.upper()} requires a SQL table destination (not '{dest}')"
-            )
-    if sync == "cdc":
-        if kind in {"file", "cloud"}:
-            sync_issues.append("CDC requires a database source (not file/cloud)")
-        elif src and src not in _CDC_CAPABLE_SOURCES:
-            sync_issues.append(
-                f"CDC is not supported for source type '{src}'"
-            )
-    if missing_cursor:
-        sync_issues.append(f"Missing cursor field for {', '.join(missing_cursor[:5])}")
-    if missing_primary_key:
-        sync_issues.append(
-            f"Missing primary key for {', '.join(missing_primary_key[:5])}"
+    gates.append(
+        build_sync_contract_gate(
+            contracts,
+            sync=sync,
+            validation=validation,
+            dest=dest,
+            src=src,
+            kind=kind,
+            source_columns=source_columns,
+            pass_status=GateStatus.PASS.value,
+            block_status=GateStatus.BLOCK.value,
+            source_read_mode=source_read_mode,
         )
-    if unknown_cursor:
-        sync_issues.append(
-            f"Cursor field not in source schema: {', '.join(unknown_cursor[:5])}"
-        )
-    if unknown_pk:
-        sync_issues.append(
-            f"Primary key not in source schema: {', '.join(unknown_pk[:5])}"
-        )
-
-    if sync_issues:
-        gates.append(
-            {
-                "id": "g9_sync_contract",
-                "status": GateStatus.BLOCK.value,
-                "message": "Sync mode contract incomplete",
-                "duration_ms": 0,
-                "details": {"issues": sync_issues, "sync_mode": sync},
-            }
-        )
-    else:
-        gates.append(
-            {
-                "id": "g9_sync_contract",
-                "status": GateStatus.PASS.value,
-                "message": f"Sync contract valid for {sync.replace('_', ' ')}",
-                "duration_ms": 0,
-                "details": {
-                    "sync_mode": sync,
-                    "streams": len(contracts),
-                    "requires_cursor": requires_cursor,
-                    "requires_primary_key": requires_primary_key,
-                },
-            }
-        )
+    )
 
     schema_issues: list[str] = []
     allowed_schema = {
@@ -643,6 +634,20 @@ def run_transfer_policy_gates(
         )
 
 
+    from services.cdc_exactly_once import preflight_delivery_gate, route_has_cdc_pk
+
+    eos_gate = preflight_delivery_gate(
+        sync_mode=sync,
+        dest_type=dest,
+        source_type=src,
+        delivery_guarantee=delivery_guarantee,
+        has_primary_key=route_has_cdc_pk(contracts),
+        allow_append_only=allow_append_only,
+        callable_source=(source_read_mode or "").strip().lower() in {"procedure", "query"},
+    )
+    if eos_gate:
+        gates.append(eos_gate)
+
     # Redis KV TTL/EXPIRE is not a first-class transfer guarantee (soft warning).
     if dest in {"redis", "redis_enterprise", "amazon_elasticache_redis", "azure_cache_redis", "google_memorystore_redis"} or src in {
         "redis", "redis_enterprise", "amazon_elasticache_redis", "azure_cache_redis", "google_memorystore_redis",
@@ -664,229 +669,19 @@ def run_transfer_policy_gates(
     return gates
 
 
-def is_compliance_only_block(proof_blockers: list[str]) -> bool:
-    """Return True when every proof blocker is purely a PII/compliance review."""
-    if not proof_blockers:
-        return False
-    return all(
-        "PII/compliance" in b or "compliance review" in b.lower()
-        for b in proof_blockers
-    )
-
-
-def apply_policy_gates(
-    result: dict[str, Any],
-    policy_gates: list[dict[str, Any]],
-    validation_mode: str = "strict",
-    destination_db_type: str = "postgresql",
-) -> dict[str, Any]:
-    proof_bundle = result.get("proof_bundle") or {}
-    transfer_decision = (proof_bundle.get("transfer_decision") or {}).get("decision")
-    proof_blockers = (proof_bundle.get("transfer_decision") or {}).get("blockers") or []
-    compliance_only = bool(
-        (proof_bundle.get("transfer_decision") or {}).get("compliance_only")
-    ) or is_compliance_only_block(proof_blockers)
-
-    is_strict = (validation_mode or "strict").lower() in {"strict", "maximum"}
-
-    # In non-strict modes, PII/compliance review is a warning, not a hard blocker.
-    # In strict mode, compliance-only stays a dedicated ack gate (Approve PII CTA)
-    # rather than masquerading as a failed schema/data check.
-    if is_strict:
-        active_proof_blockers = list(proof_blockers)
-    else:
-        active_proof_blockers = [
-            b
-            for b in proof_blockers
-            if "PII/compliance" not in b and "compliance review" not in b.lower()
-        ]
-
-    blockers = [
-        {"id": b["id"], "message": b["message"], "details": b.get("details", {})}
-        for b in result.get("blockers", [])
-    ]
-    for idx, message in enumerate(active_proof_blockers):
-        is_compliance = (
-            "PII/compliance" in str(message) or "compliance review" in str(message).lower()
-        )
-        blockers.append({
-            "id": f"proof_{idx}",
-            "message": str(message),
-            "details": {
-                "compliance_ack_required": bool(is_compliance and compliance_only),
-                "remediation_kind": "acknowledge_compliance" if is_compliance else "fix_proof",
-            },
-        })
-
-    if policy_gates:
-        gates = [*result.get("gates", []), *policy_gates]
-        blockers.extend(
-            {"id": g["id"], "message": g["message"], "details": g.get("details", {})}
-            for g in policy_gates
-            if g.get("status") == GateStatus.BLOCK.value
-        )
-    else:
-        gates = list(result.get("gates", []))
-
-    passed_count = sum(1 for g in gates if g.get("status") == GateStatus.PASS.value)
-    total_gates = len(gates)
-    has_blocks = any(g.get("status") == GateStatus.BLOCK.value for g in gates)
-
-    proof_blocks = (
-        transfer_decision in {"block", "review"} or proof_bundle.get("passed") is False
-    )
-    if proof_blocks and not is_strict:
-        if active_proof_blockers:
-            proof_blocks = True
-        else:
-            proof_blocks = False
-
-    if proof_blocks:
-        has_blocks = True
-
-    if proof_bundle:
-        proof_bundle = {**proof_bundle}
-        base_decision = proof_bundle.get("transfer_decision") or {}
-        if has_blocks:
-            gate_blocker_messages = [b["message"] for b in blockers]
-            decision_blockers = list(base_decision.get("blockers") or [])
-            for msg in gate_blocker_messages:
-                if msg not in decision_blockers:
-                    decision_blockers.append(msg)
-            # Compliance-only: keep decision=review so the UI shows Approve PII,
-            # not a generic "schema failed" block with contradictory 12/12 passed.
-            decision_label = "review" if compliance_only and not any(
-                g.get("status") == GateStatus.BLOCK.value for g in gates
-            ) else "block"
-            proof_bundle["passed"] = False
-            proof_bundle["transfer_decision"] = {
-                "decision": decision_label,
-                "blockers": decision_blockers,
-                "compliance_only": compliance_only,
-                "reason": "; ".join(decision_blockers)
-                if decision_blockers
-                else "Preflight gates blocked the transfer",
-                "warnings": [],
-            }
-        else:
-            # No hard gate blocks; downgrade proof decision to review/approve and surface
-            # compliance warnings so the UI shows the risk without disabling the transfer.
-            warnings = [b for b in proof_blockers if b not in active_proof_blockers]
-            decision = (
-                "review"
-                if (transfer_decision in {"block", "review"} or compliance_only)
-                else "approve"
-            )
-            proof_bundle["passed"] = True
-            proof_bundle["transfer_decision"] = {
-                "decision": decision,
-                "blockers": [],
-                "compliance_only": False,
-                "reason": (
-                    "No blocking issues detected"
-                    if not warnings
-                    else "; ".join(warnings)
-                ),
-                "warnings": warnings,
-            }
-
-    from services.preflight_rules import enrich_blockers
-    from services.root_cause_engine import apply_root_causes_to_preflight
-
-    dest_kind = normalize_dest_kind(destination_db_type)
-    enriched_blockers = enrich_blockers(
-        blockers,
-        dest_kind=dest_kind,
-        validation_mode=validation_mode,
-    )
-
-    return apply_root_causes_to_preflight({
-        **result,
-        "passed": not has_blocks,
-        "passed_count": passed_count,
-        "total_gates": total_gates,
-        "readiness_score": round(passed_count / max(total_gates, 1) * 100, 1),
-        "gates": gates,
-        "blockers": enriched_blockers,
-        "proof_bundle": proof_bundle,
-    })
+# F8: policy-gate merge lives in preflight_policy_gates (single authority).
+from services.preflight_policy_gates import (  # noqa: E402
+    apply_policy_gates,
+    is_compliance_only_block,
+)
 
 
 @_with_date_locale
-def _load_source_foreign_keys(
-    *,
-    source_connector_id: str = "",
-    source_config: dict[str, Any] | None = None,
-    source_table: str = "",
-    workspace_id: str | None = None,
-) -> list[dict[str, Any]]:
-    """Introspect source-table FOREIGN KEYs when a live SQL source is available.
-
-    Returns [] when unsupported — never invents FK metadata.
-    """
-    table = (source_table or "").strip()
-    if not table:
-        return []
-    if not source_connector_id and not source_config:
-        return []
-
-    cfg: dict[str, Any] | None = None
-    db_type = ""
-    if source_connector_id:
-        from services.connector_probe import probe_cfg_from_saved
-        from services.connector_store import get_connector
-
-        conn = get_connector(source_connector_id, workspace_id=workspace_id)
-        if conn:
-            cfg = probe_cfg_from_saved(conn)
-            db_type = (conn.type or "").lower()
-    if cfg is None and source_config:
-        cfg = dict(source_config)
-        db_type = (
-            cfg.get("type") or cfg.get("db_type") or cfg.get("format") or ""
-        ).lower()
-    if not cfg or not db_type:
-        return []
-    cfg = dict(cfg)
-    cfg.setdefault("type", db_type)
-
-    # Only engines with real FK catalog readers today.
-    if db_type not in {
-        "postgresql",
-        "postgres",
-        "cockroachdb",
-        "timescaledb",
-        "supabase",
-        "mysql",
-        "mariadb",
-        "singlestore",
-    }:
-        return []
-
-    from services.schema_introspect import introspect_schema
-
-    info = introspect_schema(
-        db_type,
-        host=str(cfg.get("host") or ""),
-        port=int(cfg.get("port") or 5432),
-        database=str(cfg.get("database") or ""),
-        username=str(cfg.get("username") or ""),
-        password=str(cfg.get("password") or ""),
-        schema=str(cfg.get("schema") or "public"),
-        connection_string=str(cfg.get("connection_string") or ""),
-        ssl=bool(cfg.get("ssl", False)),
-        table=table,
-    )
-    if not info.get("ok"):
-        return []
-    return list(info.get("foreign_keys") or [])
-
-
 def run_file_preflight(
     *,
     columns: list[str],
     column_types: dict[str, str],
-    row_count: int,
+    row_count: int | None,
     mappings: list[dict[str, Any]],
     column_nullability: dict[str, bool] | None = None,
     destination_connected: bool = False,
@@ -902,10 +697,14 @@ def run_file_preflight(
     validation_mode: str = "strict",
     destination_column_types: dict[str, str] | None = None,
     destination_column_nullability: dict[str, bool] | None = None,
+    destination_column_defaults: dict[str, str] | None = None,
+    destination_identity_columns: list[str] | None = None,
+    destination_generated_columns: list[str] | None = None,
     destination_table_exists: bool | None = None,
     destination_can_create: bool | None = None,
     destination_can_write: bool | None = None,
     privilege_probe: dict[str, Any] | None = None,
+    redshift_staging_probe: dict[str, Any] | None = None,
     available_staging_bytes: int | None = None,
     destination_db_type: str = "postgresql",
     source_connector_id: str = "",
@@ -923,6 +722,8 @@ def run_file_preflight(
     destination_pk_columns: list[str] | None = None,
     destination_unique_keys: list[dict[str, Any]] | None = None,
     destination_foreign_keys: list[dict[str, Any]] | None = None,
+    destination_config: Mapping[str, Any] | None = None,
+    stream_contracts: list[dict[str, Any]] | None = None,
     date_locale: str = "",
     cursor_fields: list[str] | None = None,
     compliance_acknowledged: bool = False,
@@ -931,11 +732,27 @@ def run_file_preflight(
     acknowledgment_actor: str = "",
     acknowledgment_reason: str = "",
     run_population_orphan_scan: bool = False,
+    resume: bool = False,
 ) -> dict[str, Any]:
     """Run preflight gates for file/DB Studio transfers (G1–G9 + host policy)."""
 
-    if row_count <= 0 and sample_rows:
-        row_count = len(sample_rows)
+    # Canonical sync vocabulary — G9/DDL/policy must match writers (insert→append).
+    try:
+        from services.sync_cursor import normalize_sync_mode
+
+        sync_mode = normalize_sync_mode(sync_mode)
+    except Exception:
+        sync_mode = (sync_mode or "").strip().lower() or "full_refresh_append"
+
+    # Sources with no cheap cardinality — a DynamoDB Scan, a Kafka topic, a
+    # search index — report ``None`` rather than inventing a total, which is the
+    # honest answer and used to crash this comparison before a single gate ran.
+    # Unknown and zero are handled the same way here (size from the sample);
+    # the distinction stays visible downstream, where an unmeasured source count
+    # is already reported as such rather than as a measured zero.
+    row_count_known = isinstance(row_count, int) and row_count > 0
+    if not row_count_known:
+        row_count = len(sample_rows or [])
 
     # Preflight is a sample-based safety check, not a full table scan.  Cap the
     # sample size so very large file previews or database samples cannot make the
@@ -964,6 +781,7 @@ def run_file_preflight(
                 row["risk_acknowledged"] = True
         hydrated_mappings.append(row)
     mappings = hydrated_mappings
+    _unstamped_additive: list[str] = []
 
     # If the operator did not specify a locale for ambiguous day/month dates,
     # scan the sample for an unambiguous majority before any date coercion.
@@ -978,7 +796,16 @@ def run_file_preflight(
     # If the caller did not supply rich source types, infer them from the sample
     # rows. This keeps schemaless sources (MongoDB, DynamoDB, Redis, S3 JSON) from
     # being treated as all-VARCHAR against a typed warehouse target.
-    if sample_rows and columns:
+    # A relational source that genuinely declares TEXT for every column is not
+    # a schemaless source: re-inferring it turned a SQLite ``id TEXT`` holding
+    # "0".."49" into INTEGER here while Execute kept TEXT, so Validate approved a
+    # DDL Execute refused to materialize — and had they agreed, leading zeros
+    # would have been dropped on the destination.
+    if (
+        sample_rows
+        and columns
+        and not source_types_are_authoritative(source_kind, source_format)
+    ):
         generic_types = {"", "varchar", "text", "string"}
         if not column_types or all(
             (column_types.get(c) or "").lower() in generic_types for c in columns
@@ -997,6 +824,85 @@ def run_file_preflight(
                     }
             except Exception as exc:
                 logger.debug("preflight schema inference failed: %s", exc, exc_info=exc)
+
+    # Additive / create-new under backfill: Decision Kernel stamps target_type
+    # after source types are known — same invent path writers honor (never bare
+    # VARCHAR invent at Execute after Validate green). Use the same effective
+    # backfill authority as Execute (schema policy + create_new maps).
+    effective_backfill = bool(backfill_new_fields)
+    try:
+        from services.batch_progress import effective_backfill_new_fields
+
+        effective_backfill = bool(
+            effective_backfill_new_fields(
+                backfill_new_fields=bool(backfill_new_fields),
+                schema_policy=schema_policy,
+                mappings=mappings,
+            )
+        )
+    except Exception:
+        effective_backfill = bool(backfill_new_fields)
+    try:
+        from services.decision_kernel import stamp_additive_mapping_types
+
+        samples_by_src: dict[str, list] = {}
+        for row in sample_rows or []:
+            if not isinstance(row, dict):
+                continue
+            for k, v in row.items():
+                if v is None:
+                    continue
+                samples_by_src.setdefault(str(k), []).append(v)
+        for k in list(samples_by_src.keys()):
+            samples_by_src[k] = samples_by_src[k][:32]
+        # Validate must invent under the same source-engine identity Execute
+        # binds: the engine id decides code-page-safe carriers and whether a
+        # declared numeric domain may be sample-narrowed. Unbound here, Map
+        # stamped a carrier Execute would not, and the two DDL identities
+        # diverged before a single row moved.
+        from services.source_engine_scope import (
+            active_source_engine,
+            bind_source_engine,
+        )
+
+        src_engine = (source_format or "").strip().lower() or (
+            (source_kind or "").strip().lower()
+            if (source_kind or "").strip().lower() not in {"database", "cloud", ""}
+            else ""
+        )
+        stamp_scope = (
+            bind_source_engine(src_engine)
+            if src_engine and not active_source_engine()
+            else nullcontext()
+        )
+        with stamp_scope:
+            mappings, _unstamped_additive = stamp_additive_mapping_types(
+                mappings,
+                dest_db=destination_db_type or "",
+                live_dest_types=destination_column_types or {},
+                source_types=column_types or {},
+                samples_by_source=samples_by_src,
+                backfill_new_fields=bool(effective_backfill),
+                dest_table_exists=destination_table_exists,
+            )
+    except Exception as stamp_exc:
+        # Fail-closed: stamp failure must surface as unstamped additives, not
+        # clear the list and let Validate green-wash Map VARCHAR invent.
+        logger.warning(
+            "additive Map stamp failed (fail-closed): %s", stamp_exc, exc_info=stamp_exc
+        )
+        _unstamped_additive = [
+            str(m.get("target") or m.get("source") or "?")
+            for m in (mappings or [])
+            if isinstance(m, dict)
+            and (
+                bool(m.get("create_new"))
+                or str(m.get("assignment_strategy") or "")
+                in {"create_compatible_new", "identity_passthrough"}
+                or effective_backfill
+            )
+            and not str(m.get("target_type") or m.get("dest_type") or "").strip()
+        ]
 
     # Source nullability defaults to True (unknown), which is the safe reading
     # for files. For an introspected database source it is knowable, and
@@ -1031,10 +937,29 @@ def run_file_preflight(
         tgt = m.get("target") or ""
         if not tgt:
             continue
-        inferred = dest_types.get(
-            tgt,
-            m.get("target_type") or column_types.get(m["source"], "VARCHAR"),
-        ).upper()
+        live = dest_types.get(tgt)
+        if live is None:
+            live = next(
+                (
+                    dest_types[k]
+                    for k in dest_types
+                    if str(k).lower() == str(tgt).lower()
+                ),
+                None,
+            )
+        # Existing table: only live introspect counts as dest_types for Validate.
+        # Map target_type fallback greens empties as VARCHAR while write binds
+        # physical DATE/INT — refuse that false-green invent.
+        if destination_table_exists is True:
+            if not live:
+                continue
+            inferred = str(live).upper()
+        else:
+            inferred = str(
+                live
+                or m.get("target_type")
+                or column_types.get(m["source"], "VARCHAR")
+            ).upper()
         # Prefer explicit map; else case-insensitive lookup; default nullable=True
         # (create-new / unknown) so we never invent NOT NULL.
         if tgt in dest_nulls:
@@ -1066,6 +991,14 @@ def run_file_preflight(
                 m.get("struct_derived") or m.get("structDerived", False)
             ),
             struct_parent=m.get("struct_parent") or m.get("structParent"),
+            structural_class=m.get("structural_class") or m.get("structuralClass"),
+            child_table_spec=(
+                m.get("child_table_spec")
+                if isinstance(m.get("child_table_spec"), dict)
+                else m.get("childTableSpec")
+                if isinstance(m.get("childTableSpec"), dict)
+                else None
+            ),
             fidelity=(m.get("fidelity") or None),
             type_narrowing=bool(m.get("type_narrowing") or m.get("typeNarrowing", False)),
             risk_acknowledged=bool(
@@ -1076,6 +1009,8 @@ def run_file_preflight(
                 m if isinstance(m, dict) else dict(m or {}),
                 table=str(destination_table or ""),
             ),
+            assignment_strategy=str(m.get("assignment_strategy") or "") or None,
+            review_kind=str(m.get("review_kind") or "") or None,
         )
         for m in mappings
     ]
@@ -1087,15 +1022,14 @@ def run_file_preflight(
     if available_staging_bytes is None:
         available_staging_bytes = _available_staging_bytes(est_bytes)
 
+    # Unknown privilege must not invent create-new (Pilot often omits the flag).
     dest_can_create = (
-        destination_can_create
-        if destination_can_create is not None
-        else destination_connected
+        bool(destination_can_create) if destination_can_create is not None else False
     )
     dest_can_write = (
-        destination_can_write
+        bool(destination_can_write)
         if destination_can_write is not None
-        else destination_connected
+        else bool(destination_connected)
     )
     # Keep tri-state: None = probe unknown. Never coerce unknown → create-new.
     dest_table_exists = destination_table_exists
@@ -1185,6 +1119,17 @@ def run_file_preflight(
             columns=source_cols,
             row_count_estimate=row_count,
             error=source_error,
+            source_read_mode=str(
+                (source_config or {}).get("source_read_mode")
+                or ((source_config or {}).get("extra") or {}).get("source_read_mode")
+                or ""
+            ),
+            db_type=str(
+                (source_config or {}).get("type")
+                or (source_config or {}).get("db_type")
+                or source_format
+                or ""
+            ),
         ),
         destination=DestinationConfig(
             kind="database",
@@ -1196,6 +1141,11 @@ def run_file_preflight(
             table_exists=dest_table_exists,
             error=destination_error,
             privilege_probe=privilege_probe,
+            redshift_staging_probe=redshift_staging_probe,
+            column_nullability=dict(destination_column_nullability or {}),
+            column_defaults=dict(destination_column_defaults or {}),
+            identity_columns=list(destination_identity_columns or []),
+            generated_columns=list(destination_generated_columns or []),
         ),
         mappings=plan_mappings,
         dry_run_passed=False,
@@ -1215,16 +1165,32 @@ def run_file_preflight(
 
     # Source-side duplicate-key probe: a small sample can miss duplicates in large
     # tables, so query the source directly when we have a resolved identity key.
+    # Never stamp full_selected coverage unless status == "ran".
     source_duplicate_findings: list[dict[str, Any]] = []
     source_duplicate_probe_ran = False
     source_duplicate_probe_pk = ""
-    if (
+    source_duplicate_probe_status = ""
+    source_duplicate_probe_message = ""
+    from services.procedure_source import is_callable_source, source_read_mode_of
+
+    callable_src = is_callable_source(source_config)
+    source_duplicate_probe_expected = bool(
         (source_connector_id or source_config)
         and source_table
         and source_kind in ("database", "cloud")
-    ):
+        and not callable_src
+    )
+    if callable_src:
+        source_duplicate_probe_status = "skipped_callable"
+        source_duplicate_probe_message = (
+            "Stored-procedure / SQL extract is a result-set snapshot — "
+            "uniqueness GROUP BY is not run against a procedure name."
+        )
+    if source_duplicate_probe_expected:
         try:
-            source_pk = resolve_primary_key_source(
+            from services.primary_key import resolve_primary_key_source_columns
+
+            source_pk_cols = resolve_primary_key_source_columns(
                 mappings=mappings,
                 source_columns=columns,
                 dest_kind=dest_kind,
@@ -1232,25 +1198,82 @@ def run_file_preflight(
                 purpose="uniqueness",
                 destination_pk_columns=destination_pk_columns,
                 contract_primary_key=contract_primary_key,
+                stream_contracts=stream_contracts,
+                stream_name=str(destination_table or source_table or ""),
             )
-            if source_pk:
-                source_duplicate_probe_pk = source_pk
-                source_duplicate_findings = probe_source_duplicate_keys(
+            if source_pk_cols:
+                source_duplicate_probe_pk = ",".join(source_pk_cols)
+                probe_result = probe_source_duplicate_keys_result(
                     source_connector_id=source_connector_id,
                     source_config=source_config,
                     source_table=source_table,
-                    primary_key=source_pk,
+                    primary_key=source_pk_cols[0],
+                    primary_key_columns=source_pk_cols,
                 )
-                source_duplicate_probe_ran = True
+                source_duplicate_findings = list(probe_result.findings or [])
+                source_duplicate_probe_status = probe_result.status
+                source_duplicate_probe_message = probe_result.message
+                source_duplicate_probe_ran = bool(probe_result.ran)
+            else:
+                source_duplicate_probe_status = "skipped_no_pk"
+                source_duplicate_probe_message = (
+                    "No uniqueness primary key resolved — probe not run"
+                )
+                # Without a PK the probe was not expected to prove uniqueness.
+                source_duplicate_probe_expected = False
         except Exception as exc:
             logger.warning("Source duplicate-key probe skipped: %s", exc, exc_info=exc)
+            source_duplicate_probe_status = "error"
+            source_duplicate_probe_message = f"Source uniqueness probe skipped: {exc}"[:400]
+
+    # Destination-side collision probe: an append into a table that already
+    # enforces this key is a deterministic write abort, so it must be a Validate
+    # blocker rather than a duplicate-key error after Execute starts.
+    # The rows this run will read. An incremental append past a watermark only
+    # writes the delta, so the collision probe must judge the delta — probing
+    # the whole table refused every run after the first, on every engine.
+    read_scope = _resolve_read_scope(
+        sync_mode=sync_mode,
+        stream_contracts=stream_contracts,
+        source_format=source_format,
+        source_config=source_config,
+        source_table=source_table,
+        destination_db_type=destination_db_type,
+        destination_config=destination_config,
+        destination_table=destination_table,
+    )
+    destination_collision = probe_append_key_collisions(
+        mappings=mappings,
+        source_columns=columns,
+        sample_rows=sample_rows or [],
+        sync_mode=sync_mode,
+        dest_kind=dest_kind,
+        validation_mode=validation_mode,
+        destination_config=destination_config,
+        destination_db_type=destination_db_type,
+        destination_table=destination_table,
+        destination_table_exists=dest_table_exists,
+        destination_pk_columns=destination_pk_columns,
+        destination_unique_keys=destination_unique_keys,
+        contract_primary_key=contract_primary_key,
+        stream_contracts=stream_contracts,
+        source_table=source_table,
+        resume=resume,
+        incremental_cursor_column=read_scope.cursor_column,
+        incremental_watermark=read_scope.watermark,
+        incremental_tiebreak_column=read_scope.primary_key,
+    )
 
     ctx = FilePreflightContext(
         plan,
         sample_rows,
+        destination_collision=destination_collision,
         source_duplicate_findings=source_duplicate_findings,
         source_duplicate_probe_ran=source_duplicate_probe_ran,
         source_duplicate_probe_pk=source_duplicate_probe_pk,
+        source_duplicate_probe_status=source_duplicate_probe_status,
+        source_duplicate_probe_message=source_duplicate_probe_message,
+        source_duplicate_probe_expected=source_duplicate_probe_expected,
     )
     # Always collect every reachable gate on Validate. fail_fast=True hid G6 DDL
     # behind G5 integrity blocks and forced a multi-run fix loop. Transfer still
@@ -1285,34 +1308,70 @@ def run_file_preflight(
         acknowledgment_reason=acknowledgment_reason,
     )
 
-    # Module 12 — Conversion Contract + Map→DDL identity stamp (never invent green).
+    # Module 12 + Phase C11 — Conversion Contract, DDL identity, Decision Artifact.
     try:
-        from services.conversion_contract import (
-            classify_mapping,
+        from services.decision_kernel import (
+            assess_mapping_risk,
+            build_artifact_from_mappings,
             ddl_identity_report,
+            orchestrate_validation_summary,
         )
 
         dest_for_ddl = (destination_db_type or "").strip().lower()
+        src_for_cap = (source_connector_id or "").strip().lower()
+        decision_art = build_artifact_from_mappings(
+            list(mappings or []),
+            dest_db=dest_for_ddl,
+            source_db=src_for_cap,
+            route_id=f"validate:{dest_for_ddl or 'unknown'}",
+            sync_mode=str(sync_mode or "full_refresh_overwrite"),
+        )
+        conv_cols = [
+            {
+                "source": m.get("source"),
+                "target": m.get("target"),
+                **assess_mapping_risk(m, destination_db_type=dest_for_ddl),
+            }
+            for m in (mappings or [])[:80]
+            if isinstance(m, dict)
+        ]
+        art_dict = decision_art.to_dict()
+        # Gates already ran — classify into Validation Orchestrator buckets.
+        def _gate_row(g) -> dict:
+            if isinstance(g, dict):
+                return {
+                    "id": str(g.get("id") or g.get("gate_id") or ""),
+                    "status": str(g.get("status") or ""),
+                    "message": str(g.get("message") or ""),
+                }
+            gid = getattr(g, "gate_id", "")
+            status = getattr(g, "status", "")
+            return {
+                "id": str(getattr(gid, "value", gid) or ""),
+                "status": str(getattr(status, "value", status) or ""),
+                "message": str(getattr(g, "message", "") or ""),
+            }
+
+        validation_orch = orchestrate_validation_summary(
+            decision_artifact=art_dict,
+            gates=[_gate_row(g) for g in list(getattr(result, "gates", None) or [])],
+            blockers=[
+                {**_gate_row(b), "status": "block"}
+                for b in list(getattr(result, "blockers", None) or [])
+            ],
+        )
         proof_bundle = {
             **proof_bundle,
             "ddl_identity": ddl_identity_report(
                 list(mappings or []),
                 dest_db=dest_for_ddl,
             ),
+            "decision_artifact": art_dict,
+            "decision_artifact_hash": decision_art.content_hash,
+            "validation_orchestrator": validation_orch,
             "conversion_contract": {
                 "version": "conversion_contract.v1",
-                "columns": [
-                    {
-                        "source": m.get("source"),
-                        "target": m.get("target"),
-                        **classify_mapping(
-                            m,
-                            destination_db_type=dest_for_ddl,
-                        ),
-                    }
-                    for m in (mappings or [])[:80]
-                    if isinstance(m, dict)
-                ],
+                "columns": conv_cols,
             },
         }
     except Exception as conv_exc:
@@ -1358,6 +1417,47 @@ def run_file_preflight(
                 "details": {"ddl_identity": ddl_id},
             }
         )
+    # Additive ADD without Kernel stamp must not leave Execute as the first refuse.
+    create_unstamped = [
+        str(m.get("target") or "")
+        for m in (mappings or [])
+        if isinstance(m, dict)
+        and str(m.get("target") or "").strip()
+        and str(m.get("assignment_strategy") or "") != "pending_dest_schema"
+        and (
+            m.get("create_new")
+            or str(m.get("assignment_strategy") or "")
+            in {"create_compatible_new", "identity_passthrough"}
+            or backfill_new_fields
+        )
+        and not str(m.get("target_type") or m.get("dest_type") or "").strip()
+        and str(m.get("target") or "") not in (destination_column_types or {})
+        and str(m.get("target") or "").lower()
+        not in {str(k).lower() for k in (destination_column_types or {})}
+    ]
+    create_unstamped = list(dict.fromkeys([c for c in create_unstamped if c]))
+    additive_stamp_blocked = False
+    if create_unstamped or _unstamped_additive:
+        cols = list(dict.fromkeys([*_unstamped_additive, *create_unstamped]))
+        sample = ", ".join(repr(c) for c in cols[:5])
+        more = f" (+{len(cols) - 5} more)" if len(cols) > 5 else ""
+        blockers.append(
+            {
+                "id": "g6_additive_stamp",
+                "message": (
+                    f"Additive column(s) {sample}{more} lack Map target_type under "
+                    "partial Studio — Decision Kernel refuse VARCHAR ADD invent. "
+                    "Re-run Map (create-new stamp) or disable backfill_new_fields."
+                ),
+                "details": {
+                    "columns": cols[:20],
+                    "backfill_new_fields": bool(backfill_new_fields),
+                    "kind": "additive_map_stamp_required",
+                },
+            }
+        )
+        additive_stamp_blocked = True
+
     enriched_blockers = enrich_blockers(
         blockers,
         dest_kind=dest_kind,
@@ -1385,7 +1485,7 @@ def run_file_preflight(
     )
 
     out = {
-        "passed": result.passed,
+        "passed": bool(result.passed) and not additive_stamp_blocked,
         "passed_count": result.passed_count,
         "total_gates": result.total_gates,
         "readiness_score": round(
@@ -1400,8 +1500,35 @@ def run_file_preflight(
                 "details": g.details,
             }
             for g in result.gates
-        ],
+        ]
+        + (
+            [
+                {
+                    "id": "g6_additive_stamp",
+                    "status": "block",
+                    "message": enriched_blockers[-1]["message"]
+                    if additive_stamp_blocked and enriched_blockers
+                    else "Additive Map stamp required",
+                    "duration_ms": 0,
+                    "details": {"kind": "additive_map_stamp_required"},
+                }
+            ]
+            if additive_stamp_blocked
+            else []
+        ),
         "blockers": enriched_blockers,
+        # Echo Kernel-stamped additive types so Map/Execute share Validate authority.
+        "stamped_mappings": [
+            {
+                "source": str(m.get("source") or ""),
+                "target": str(m.get("target") or ""),
+                "target_type": str(m.get("target_type") or ""),
+                "create_new": bool(m.get("create_new")),
+                "assignment_strategy": str(m.get("assignment_strategy") or ""),
+            }
+            for m in (mappings or [])
+            if isinstance(m, dict) and str(m.get("target_type") or "").strip()
+        ],
         "schema_drift": drift,
         "ddl_issues": ddl_issues,
         "sample_quality": sample_quality,
@@ -1409,8 +1536,11 @@ def run_file_preflight(
         "payload_shape": payload_shape,
         "validation_plan": validation_plan.to_dict(),
         "coercion_report": ctx.coercion_report(),
+        # Canonical Kernel findings — Map / Proof / root-cause must not re-classify.
+        "validation_findings": [],
         "date_locale": date_locale,
         "privilege_probe": privilege_probe or {},
+        "redshift_staging_probe": redshift_staging_probe or {},
         "recommended_batch_size": min(
             recommended_batch_size(_src_fmt),
             recommended_batch_size(_tgt_fmt) or recommended_batch_size(_src_fmt),
@@ -1428,6 +1558,84 @@ def run_file_preflight(
             if isinstance(m, dict) and isinstance(m.get("risk_contract"), dict)
         ],
     }
+    if callable_src:
+        out["callable_extract"] = {
+            "mode": source_read_mode_of(source_config),
+            "catalog_probes": "skipped",
+            "note": (
+                "Result-set snapshot — FK catalog, uniqueness GROUP BY, and "
+                "population orphan scans are not run against a procedure name."
+            ),
+            "cdc": "refused",
+            "history_sync": "refused",
+            "incremental": "spool_cursor_filter_at_least_once",
+            "honesty": (
+                "CDC / SCD2 / mirror are refused on CALL/SELECT. Incremental "
+                "filters the spool with cursor > watermark (at-least-once). "
+                "Not exactly-once. Not a catalog-breadth claim."
+            ),
+        }
+
+    # A gate that blocks a declared conversion must show up in the report every
+    # other surface reads — otherwise Validate blocks while the panel under it
+    # says there are no blocking failures.
+    out["coercion_report"] = reconcile_coercion_report(
+        out.get("coercion_report"), out.get("gates")
+    )
+
+    # Stamp Decision Kernel ValidationFindings onto Validate SSOT (coercion → findings).
+    try:
+        from services.decision_kernel import findings_from_coercion_report
+
+        _vf = findings_from_coercion_report(
+            out.get("coercion_report"),
+            dest_db=str(destination_db_type or ""),
+        )
+        out["validation_findings"] = _vf
+        if isinstance(out.get("proof_bundle"), dict) and _vf:
+            out["proof_bundle"] = {
+                **out["proof_bundle"],
+                "validation_findings": _vf,
+                "validation_finding_schema": "validation_finding_v1",
+            }
+    except Exception as vf_exc:
+        logger.warning("validation_findings stamp failed: %s", vf_exc, exc_info=vf_exc)
+
+    # Mapping contract — every source column accounted for (G13) and every
+    # required destination column filled (G14).
+    src_coverage, contract_gates, contract_blockers = build_mapping_contract_gates(
+        source_columns=list(columns or []),
+        mappings=list(mappings or []),
+        destination_table_exists=destination_table_exists,
+        column_nullability=destination_column_nullability,
+        column_defaults=destination_column_defaults,
+        identity_columns=destination_identity_columns,
+        generated_columns=destination_generated_columns,
+        dest_columns=list((destination_column_types or destination_column_nullability or {}).keys()),
+    )
+    out["source_coverage"] = src_coverage
+    if isinstance(out.get("proof_bundle"), dict):
+        out["proof_bundle"] = {**out["proof_bundle"], "source_coverage": src_coverage}
+    # Hosted G13/G14/G15 replace package stubs (full dest nullability / identity).
+    contract_ids = {str(g.get("id") or "") for g in contract_gates}
+    out["gates"] = [
+        g for g in out["gates"] if str(g.get("id") or "") not in contract_ids
+    ] + list(contract_gates)
+    if contract_blockers:
+        out["blockers"] = [
+            *out["blockers"],
+            *enrich_blockers(
+                contract_blockers,
+                dest_kind=dest_kind,
+                validation_mode=validation_mode,
+            ),
+        ]
+        out["passed"] = False
+    out["passed_count"] = sum(1 for g in out["gates"] if g.get("status") == "pass")
+    out["total_gates"] = len(out["gates"])
+    out["readiness_score"] = round(
+        out["passed_count"] / max(out["total_gates"], 1) * 100, 1
+    )
 
     # FK / relational constraint findings + sample orphan probe.
     # Schema unmapped-FK + sample orphans fail closed in strict/maximum unless
@@ -1452,14 +1660,29 @@ def run_file_preflight(
         # Prefer source-introspected FKs for orphan probe (sample is source rows).
         probe_fks = list(destination_foreign_keys or [])
         try:
-            src_fks = _load_source_foreign_keys(
-                source_connector_id=source_connector_id or "",
-                source_config=source_config,
-                source_table=source_table or "",
-            )
-            if src_fks:
-                probe_fks = src_fks
-                out["source_foreign_keys"] = src_fks
+            from services.procedure_source import is_callable_source
+
+            if is_callable_source(source_config):
+                src_fks = []
+                out["source_foreign_keys"] = []
+                out["source_fk_catalog"] = {
+                    "ran": False,
+                    "skipped": True,
+                    "reason": "callable_source",
+                    "note": (
+                        "Stored-procedure / SQL extract is a result-set snapshot — "
+                        "no catalog relation to probe for foreign keys."
+                    ),
+                }
+            else:
+                src_fks = load_source_foreign_keys(
+                    source_connector_id=source_connector_id or "",
+                    source_config=source_config,
+                    source_table=source_table or "",
+                )
+                if src_fks:
+                    probe_fks = src_fks
+                    out["source_foreign_keys"] = src_fks
         except Exception as src_fk_exc:
             logger.debug(
                 "source FK introspect skipped: %s", src_fk_exc, exc_info=src_fk_exc
@@ -1567,50 +1790,12 @@ def run_file_preflight(
             validation_mode=validation_mode,
             fk_risk_acknowledged=bool(fk_risk_acknowledged),
         ):
-            block_msgs = [
-                str(f.get("message") or f.get("code") or "Foreign key coverage incomplete")
-                for f in findings
-                if isinstance(f, dict)
-                and str(f.get("severity") or "").lower() in {"block", "ack_required"}
-            ]
-            fk_msg = (
-                block_msgs[0]
-                if block_msgs
-                else "Destination FK columns unmapped — transfer blocked"
+            fk_msg, fk_details = build_fk_block(
+                findings,
+                ri_posture=ri_posture,
+                population_orphan_probe_ran=pop_ran,
+                sample_orphan_probe_ran=bool(orphan_report.get("ran")),
             )
-            if any(
-                isinstance(f, dict)
-                and f.get("coverage") == "population_orphan_probe"
-                and str(f.get("severity") or "").lower() in {"block", "ack_required"}
-                for f in findings
-            ):
-                coverage = "population_orphan_probe"
-            elif any(
-                isinstance(f, dict) and f.get("coverage") == "sample_orphan_probe"
-                for f in findings
-                if str(f.get("severity") or "").lower() in {"block", "ack_required"}
-            ):
-                coverage = "sample_orphan_probe"
-            else:
-                coverage = "destination_fk_metadata"
-            fk_details = {
-                "findings": findings,
-                "coverage": coverage,
-                "remediation_kind": "acknowledge_fk_risk",
-                "ack_required": True,
-                "population_orphan_proven": bool(ri_posture.get("proven")),
-                "population_orphan_probe_ran": pop_ran,
-                "sample_orphan_probe_ran": bool(orphan_report.get("ran")),
-                "rule_id": (
-                    "constraint_fk.population_orphan"
-                    if coverage == "population_orphan_probe"
-                    else (
-                        "constraint_fk.sample_orphan"
-                        if coverage == "sample_orphan_probe"
-                        else "constraint_fk.unmapped"
-                    )
-                ),
-            }
             fk_gate = {
                 "id": "constraint_fk",
                 "status": "block",
@@ -1730,7 +1915,7 @@ def run_file_preflight(
             pass
 
     # Schema drift is its own rule — never masquerade as Target DDL.
-    # Airbyte rule: hard-breaking ALWAYS pauses (even under propagate_*).
+    # Datawrap rule: hard-breaking ALWAYS pauses (even under propagate_*).
     # Propagate auto-applies additive; manual_review keeps existing mappings.
     evolution = drift.get("schema_evolution") or {}
     action = evolution.get("action")
@@ -1766,7 +1951,7 @@ def run_file_preflight(
             if hard and isinstance(hard[0], dict) and hard[0].get("kind"):
                 drift_msg = (
                     f"Breaking schema change: {hard[0].get('kind')} "
-                    "— sync paused for review (Airbyte-class fail-closed)"
+                    "— sync paused for review (Datawrap fail-closed)"
                 )
             elif drift.get("issues"):
                 drift_msg = str(drift["issues"][0])
@@ -1784,7 +1969,8 @@ def run_file_preflight(
                     "target_changed": drift.get("target_changed"),
                     "schema_evolution": evolution,
                     "rule_id": "schema_drift.breaking",
-                    "remediation_kind": "approve_schema_drift",
+                    "remediation_kind": "review_mappings",
+                    "ack_required": False,
                 },
             }
             out["gates"] = [*out["gates"], drift_gate]
@@ -1968,343 +2154,15 @@ def run_file_preflight(
     except Exception as mode_exc:
         logger.debug("validation mode stamp side-effects skipped: %s", mode_exc)
 
-    return apply_root_causes_to_preflight(out)
+    return apply_root_causes_to_preflight(apply_readiness_honesty_caps(out))
 
 
-def probe_destination(endpoint) -> tuple[bool, str]:
-    """Live connectivity probe for database destinations (Gate G2).
-
-    When a saved ``connector_id`` is set, use the exact same probe as
-    Connectors → Test so Validate never invents different credentials.
-    """
-    if endpoint.kind != "database":
-        return True, "Non-database destination"
-
-    if getattr(endpoint, "connector_id", None):
-        from services.connector_probe import probe_saved_connector
-
-        ok, msg, _cfg = probe_saved_connector(endpoint.connector_id)
-        return ok, msg
-
-    from src.transfer.adapters import resolve_connector_config, resolve_dest_table
-    from src.transfer.connector_registry import run_probe
-
-    cfg = resolve_connector_config(endpoint)
-    db_type = (cfg.get("type") or endpoint.format or "").lower()
-    if db_type == "dynamodb":
-        cfg["table"] = resolve_dest_table(db_type, endpoint)
-    return run_probe(db_type, cfg)
-
-
-def _available_staging_bytes(estimated_bytes: int) -> int:
-    """Estimate writable staging capacity from local exports volume."""
-    import shutil
-    from pathlib import Path
-
-    export_dir = Path(__file__).resolve().parents[2] / "exports"
-    export_dir.mkdir(parents=True, exist_ok=True)
-    try:
-        usage = shutil.disk_usage(export_dir)
-        # Reserve 15% headroom; require at least 3× estimated transfer size
-        usable = int(usage.free * 0.85)
-        required = max(estimated_bytes * 3, 1_048_576)
-        return max(usable, required) if usable >= required else usable
-    except OSError:
-        return max(estimated_bytes * 3, 8_388_608)
-
-
-def inspect_destination_for_preflight(
-    *,
-    connector_id: str | None = None,
-    dest_type: str | None = None,
-    dest_host: str | None = None,
-    dest_port: int | None = None,
-    dest_database: str | None = None,
-    dest_table: str | None = None,
-    dest_collection: str | None = None,
-    dest_schema: str | None = None,
-    dest_username: str | None = None,
-    dest_password: str | None = None,
-    dest_connection_string: str | None = None,
-    dest_warehouse: str | None = None,
-    dest_auth_source: str | None = None,
-    dest_auth_mode: str | None = None,
-    dest_auth_role: str | None = None,
-    dest_api_key: str | None = None,
-    dest_service_account: str | None = None,
-    dest_kind: str = "database",
-) -> dict[str, Any]:
-    """Introspect destination for table existence and column schema."""
-    out: dict[str, Any] = {
-        "connected": False,
-        "table_exists": None,
-        "can_create_table": False,
-        "column_types": {},
-        "column_nullability": {},
-        "columns": [],
-        "db_type": (dest_type or "").lower(),
-        "message": "",
-    }
-    if dest_kind == "file_export":
-        out["connected"] = True
-        out["can_create_table"] = True
-        out["message"] = "File export destination"
-        return out
-
-    from src.transfer.models import EndpointConfig
-
-    if connector_id:
-        # CRITICAL: Validate G2 must use the same decrypted secrets as Connectors Test.
-        # Never rebuild an EndpointConfig from empty Studio form fields (password /
-        # connection_string omitted when connector_id is set) — that path defaulted
-        # host→localhost and produced "auth failed" while Test still passed.
-        from services.connector_probe import (
-            endpoint_from_saved_connector,
-            probe_saved_connector,
-        )
-
-        ok, msg, cfg = probe_saved_connector(connector_id)
-        db_type = (cfg.get("type") or dest_type or "").lower()
-        out["db_type"] = db_type
-        out["_saved_cfg"] = cfg
-        if not ok:
-            out["connected"] = False
-            out["message"] = msg or "Destination unreachable"
-            return out
-
-        endpoint = endpoint_from_saved_connector(
-            connector_id,
-            table=dest_table or "",
-            collection=dest_collection or dest_table or "",
-            schema=dest_schema or "",
-            database=dest_database or "",
-        )
-        if not endpoint:
-            out["message"] = f"Connector '{connector_id}' not found"
-            return out
-        # Prefer operator-chosen auth_source override from Studio when present.
-        if dest_auth_source:
-            endpoint.auth_source = dest_auth_source
-    elif dest_host or dest_connection_string:
-        db_type = (dest_type or "mongodb").lower()
-        out["db_type"] = db_type
-        from services.dialect_profiles import normalize_schema
-
-        endpoint = EndpointConfig(
-            kind="database",
-            format=db_type,
-            host=dest_host or "localhost",
-            port=int(dest_port or 0),
-            database=dest_database or "",
-            schema=normalize_schema(db_type, dest_schema, username=dest_username) or "",
-            table=dest_table or "",
-            collection=dest_collection or dest_table or "",
-            username=dest_username or "",
-            password=dest_password or "",
-            connection_string=dest_connection_string or "",
-            warehouse=dest_warehouse or "",
-            auth_source=dest_auth_source or "",
-            auth_mode=dest_auth_mode or "",
-            auth_role=dest_auth_role or "",
-            api_key=dest_api_key or "",
-            service_account=dest_service_account or "",
-        )
-    else:
-        out["message"] = "Destination not configured"
-        return out
-
-    # Same honesty contract as /transfer/introspect: never steal columns from
-    # another DB/schema when Validate re-probes the destination.
-    endpoint.extra = {**(endpoint.extra or {}), "introspect_purpose": "destination"}
-
-    from src.transfer.endpoint_intelligence import introspect_endpoint
-
-    info = introspect_endpoint(endpoint)
-    # Connectivity already proven via probe_saved_connector when connector_id set;
-    # trust that over a second introspect failure (schema-only hiccups).
-    if connector_id and out.get("db_type"):
-        out["connected"] = True
-        if not info.get("connected"):
-            # Schema introspect failed but ping passed — keep connected, surface note.
-            out["message"] = info.get("message") or msg or "Connected"
-        else:
-            out["message"] = info.get("message") or msg or "Connected"
-    else:
-        out["connected"] = bool(info.get("connected"))
-        out["message"] = info.get("message", "")
-    schema = info.get("schema") or {}
-    cols = info.get("columns") or list(schema.keys())
-    out["columns"] = cols
-    out["column_types"] = schema
-    out["column_nullability"] = {
-        str(k): bool(v)
-        for k, v in dict(info.get("schema_nullability") or {}).items()
-    }
-    # Live UNIQUE / PK catalog — feeds identity uniqueness + append PK enforce.
-    out["primary_key_columns"] = list(info.get("primary_key_columns") or [])
-    out["unique_keys"] = list(info.get("unique_keys") or [])
-    out["pk_columns"] = list(out["primary_key_columns"])
-    # Pass through FK metadata when introspect provides it — never invent FKs.
-    out["foreign_keys"] = list(
-        info.get("foreign_keys") or info.get("destination_foreign_keys") or []
-    )
-    # Advisory-key / introspect honesty notes (BQ NOT ENFORCED, Redshift
-    # informational, Snowflake NOT ENFORCED) — warn-only, never invent blockers.
-    dest_warnings = [str(w) for w in (info.get("warnings") or []) if w]
-    if dest_warnings:
-        out["warnings"] = dest_warnings
-        out["schema_warnings"] = dest_warnings
-    stream = dest_collection or dest_table or endpoint.collection or endpoint.table
-    # Prefer introspect's explicit existence (True / False / None). Recomputing
-    # with exact string match broke public.jobs vs jobs and wiped create-new.
-    if "table_exists" in info:
-        out["table_exists"] = info.get("table_exists")
-    elif stream and cols:
-        out["table_exists"] = True
-    elif stream and info.get("objects"):
-        from src.transfer.endpoint_intelligence import _object_name_match
-
-        names = [
-            str(o.get("name") or "")
-            for o in (info.get("objects") or [])
-            if isinstance(o, dict)
-        ]
-        matched = _object_name_match(names, str(stream))
-        out["table_exists"] = bool(matched)
-    out["can_create_table"] = out["connected"]
-    out["can_write"] = out["connected"]
-
-    # Enterprise G2: measure write/create via privilege metadata (never CREATE/INSERT probe).
-    if out["connected"]:
-        try:
-            from services.destination_privilege_probe import (
-                probe_destination_privileges,
-                resolve_write_flags,
-            )
-
-            cfg: dict[str, Any] = {}
-            if out.get("_saved_cfg"):
-                cfg = dict(out.pop("_saved_cfg") or {})
-            elif connector_id:
-                from services.connector_probe import probe_saved_connector
-
-                _ok, _msg, cfg = probe_saved_connector(connector_id)
-            else:
-                cfg = {
-                    "host": getattr(endpoint, "host", "") or "",
-                    "port": int(getattr(endpoint, "port", 0) or 0),
-                    "database": getattr(endpoint, "database", "") or "",
-                    "username": getattr(endpoint, "username", "") or "",
-                    "password": getattr(endpoint, "password", "") or "",
-                    "connection_string": getattr(endpoint, "connection_string", "")
-                    or "",
-                    "schema": getattr(endpoint, "schema", "") or "",
-                    "type": out.get("db_type") or "",
-                    "warehouse": getattr(endpoint, "warehouse", "")
-                    or dest_warehouse
-                    or "",
-                    "role": getattr(endpoint, "auth_role", "") or dest_auth_role or "",
-                    "service_account": getattr(endpoint, "service_account", "")
-                    or dest_service_account
-                    or "",
-                    "ssl": bool(getattr(endpoint, "ssl", False)),
-                }
-
-            probe_schema = str(
-                dest_schema
-                or cfg.get("schema")
-                or cfg.get("dataset")
-                or getattr(endpoint, "schema", "")
-                or ""
-            )
-            probe = probe_destination_privileges(
-                out.get("db_type") or cfg.get("type") or "",
-                host=str(cfg.get("host") or ""),
-                port=int(cfg.get("port") or 0),
-                database=str(cfg.get("database") or cfg.get("project_id") or ""),
-                schema=probe_schema,
-                table=str(
-                    dest_table
-                    or dest_collection
-                    or getattr(endpoint, "table", "")
-                    or getattr(endpoint, "collection", "")
-                    or ""
-                ),
-                username=str(cfg.get("username") or ""),
-                password=str(cfg.get("password") or ""),
-                connection_string=str(cfg.get("connection_string") or ""),
-                table_exists=(
-                    out.get("table_exists")
-                    if isinstance(out.get("table_exists"), bool)
-                    else None
-                ),
-                ssl=bool(cfg.get("ssl") or False),
-                warehouse=str(
-                    cfg.get("warehouse")
-                    or dest_warehouse
-                    or getattr(endpoint, "warehouse", "")
-                    or ""
-                ),
-                role=str(
-                    cfg.get("role")
-                    or cfg.get("auth_role")
-                    or dest_auth_role
-                    or getattr(endpoint, "auth_role", "")
-                    or ""
-                ),
-                account=str(cfg.get("account") or cfg.get("host") or ""),
-                project_id=str(cfg.get("project_id") or cfg.get("database") or ""),
-                dataset=str(cfg.get("dataset") or probe_schema),
-                service_account=str(
-                    cfg.get("service_account")
-                    or dest_service_account
-                    or getattr(endpoint, "service_account", "")
-                    or ""
-                ),
-                location=str(cfg.get("location") or ""),
-                auth_source=str(
-                    cfg.get("auth_source")
-                    or dest_auth_source
-                    or getattr(endpoint, "auth_source", "")
-                    or ""
-                ),
-                api_key=str(
-                    cfg.get("api_key") or getattr(endpoint, "api_key", "") or ""
-                ),
-            )
-            can_write, can_create, priv_meta = resolve_write_flags(True, probe)
-            out["can_write"] = can_write
-            out["can_create_table"] = can_create
-            out["privilege_probe"] = priv_meta
-            if probe.status == "denied" and probe.detail:
-                # Surface explicit deny in message without wiping connectivity success.
-                out["message"] = probe.detail
-            elif probe.status == "unavailable" and probe.detail:
-                out["privilege_probe_warning"] = probe.detail
-        except Exception as exc:  # noqa: BLE001
-            out["privilege_probe"] = {
-                "status": "unavailable",
-                "detail": str(exc),
-                "can_write": None,
-                "can_create_table": None,
-            }
-    # Persist auto-resolved Mongo authSource so Validate/Execute match Connectors Test.
-    resolved_auth = (getattr(endpoint, "auth_source", "") or "").strip()
-    if (
-        out["connected"]
-        and resolved_auth
-        and (out.get("db_type") or "").lower() == "mongodb"
-    ):
-        out["auth_source"] = resolved_auth
-        if connector_id:
-            try:
-                from services.connector_store import get_connector, update_connector
-
-                conn = get_connector(connector_id)
-                if conn and (conn.auth_source or "") != resolved_auth:
-                    update_connector(connector_id, {"auth_source": resolved_auth})
-            except Exception as exc:
-                logger.debug(
-                    "mongodb auth_source persistence failed: %s", exc, exc_info=exc
-                )
-    return out
+# --------------------------------------------------------------------------- #
+# Destination probe / shape inspection lives in its own module (Phase F8 size
+# freeze) and is re-exported here so every existing import keeps working.
+# --------------------------------------------------------------------------- #
+from services.preflight_destination import (  # noqa: E402,F401
+    _available_staging_bytes,
+    inspect_destination_for_preflight,
+    probe_destination,
+)

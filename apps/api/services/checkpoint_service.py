@@ -29,9 +29,9 @@ logger = logging.getLogger(__name__)
 #: Hard cap on quarantine evidence carried inside a checkpoint document.
 #: The checkpoint is rewritten on every chunk and lives inside the job record,
 #: so this list is the one field that can push the document past MongoDB's
-#: 16 MB limit and break resume entirely. 500 rows is far more than an operator
-#: reads, and the exact count still lives in ``rejected_rows``.
-MAX_REJECTED_DETAILS = int(getenv_brand("MAX_REJECTED_DETAILS", "500") or 500)
+#: 16 MB limit and break resume entirely. Preview rows are slimmed; the exact
+#: count still lives in ``rejected_rows`` and the DLQ ledger.
+MAX_REJECTED_DETAILS = int(getenv_brand("MAX_REJECTED_DETAILS", "80") or 80)
 
 #: Operator-facing message when checkpoint persistence fails (fail-closed).
 CHECKPOINT_PERSISTENCE_FAILED = (
@@ -83,12 +83,20 @@ class Checkpoint:
     # Metadata
     updated_at: str = field(default_factory=_now)
     rejected_rows: int = 0
+    #: Cumulative count of rows whose cell(s) were coerced to NULL and KEPT. Gate-8
+    #: conservation is ``source - (rejected - coerced_null) - skipped``; on resume
+    #: both counters must be restored or first-pass quarantine is lost and a
+    #: correct resumed load falsely fails conservation.
+    coerced_null_rows: int = 0
     #: Bounded sample of quarantined rows. ``rejected_rows`` remains the exact
     #: count; this list is evidence for the operator, not the ledger.
     rejected_details: list[dict[str, Any]] = field(default_factory=list)
     #: How many rejection details were dropped once the sample cap was reached,
     #: so the UI can say "showing N of M" instead of implying the list is whole.
     rejected_details_truncated: int = 0
+    #: Pre-write destination COUNT from the first batch. Resume must restore
+    #: this — a mid-run COUNT is not a "before" and would invent a false delta.
+    target_rows_before: int | None = None
 
     def add_rejected_details(self, details: list[dict[str, Any]] | None) -> None:
         """Append rejection evidence, keeping the checkpoint document bounded.
@@ -101,12 +109,18 @@ class Checkpoint:
         """
         if not details:
             return
+        try:
+            from services.job_document_budget import slim_rejected_detail
+
+            slimmed = [slim_rejected_detail(d) for d in details]
+        except Exception:
+            slimmed = list(details)
         room = MAX_REJECTED_DETAILS - len(self.rejected_details)
         if room > 0:
-            self.rejected_details.extend(details[:room])
-            overflow = len(details) - room
+            self.rejected_details.extend(slimmed[:room])
+            overflow = len(slimmed) - room
         else:
-            overflow = len(details)
+            overflow = len(slimmed)
         if overflow > 0:
             self.rejected_details_truncated += overflow
 
@@ -140,8 +154,10 @@ class Checkpoint:
             "status": self.status,
             "updated_at": self.updated_at,
             "rejected_rows": self.rejected_rows,
+            "coerced_null_rows": self.coerced_null_rows,
             "rejected_details": self.rejected_details,
             "rejected_details_truncated": self.rejected_details_truncated,
+            "target_rows_before": self.target_rows_before,
         }
 
     @classmethod
@@ -256,7 +272,9 @@ def evaluate_resume_safety(
     Returns ok / age_hours / reasons / warnings. Refuses when there is no
     durable progress token, the checkpoint is older than
     DATAFLOW_RESUME_MAX_AGE_HOURS (when set >0), or write_mode drifted vs
-    the saved transfer request. Delivery remains at-least-once.
+    the saved transfer request. A CDC cursor-gap job is a sanctioned restart
+    (``gap_restart``) even without a checkpoint — the durable cursor is the
+    problem. Delivery remains at-least-once.
     """
     import os
 
@@ -271,6 +289,22 @@ def evaluate_resume_safety(
             "at-least-once upsert, not exactly-once."
         ),
     }
+    job = job or {}
+    from services.cdc_cursor_gap import job_has_cursor_gap
+
+    if job_has_cursor_gap(job):
+        out["ok"] = True
+        out["gap_restart"] = True
+        out["warnings"].append(
+            "CDC cursor-gap recovery restarts the run — not a checkpoint continuation. "
+            "when_needed snapshots current source keys then streams from the new tip. "
+            "Purged-window events are gone. Not migration_proven."
+        )
+        out["honesty"] = (
+            "Gap recovery is at-least-once upsert of the current source population, "
+            "not continuous CDC across the lost window."
+        )
+        return out
     if checkpoint is None:
         out["reasons"].append(
             "No durable checkpoint - use Retry from start or re-run from Transfer Studio."

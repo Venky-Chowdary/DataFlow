@@ -248,6 +248,13 @@
   color: var(--df-text-primary, #0f172a);
 }
 
+/* Active when left nav is expanded — same language as IDE layout toggles. */
+.df2-app:not(.df2-sidebar-nav-compact) .df2-sidebar-collapse-btn[aria-pressed="true"] {
+  color: var(--df-brand, #0d9488);
+  border-color: color-mix(in srgb, var(--df-brand, #0d9488) 35%, #e2e8f0);
+  background: var(--df-brand-muted, #f0fdfa);
+}
+
 /* ─── User footer (Cursor-style) ─── */
 .df2-sidebar-user {
   display: flex;
@@ -995,19 +1002,20 @@ select.df2-select {
 
 .df2-connector-select-row {
   display: flex;
-  align-items: center;
+  align-items: stretch;
   gap: 10px;
+  min-height: var(--df-control-height, 36px);
 }
 
 .df2-connector-select-icon {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 40px;
-  height: 40px;
-  flex-shrink: 0;
+  width: auto;
+  aspect-ratio: 1;
+  flex: 0 0 auto;
   border: 1px solid var(--df-border, #e2e8f0);
-  border-radius: 10px;
+  border-radius: var(--df-radius-md, 8px);
   background: #fff;
 }
 
@@ -1354,14 +1362,15 @@ textarea.df2-pilot-composer textarea {
     margin-left: 0 !important;
     flex: 1 1 auto;
     min-width: 0;
+    min-height: 0;
     width: auto;
     max-width: 100%;
     box-sizing: border-box;
     height: 100%;
     max-height: 100%;
-    overflow-y: auto;
-    overflow-x: hidden;
-    -webkit-overflow-scrolling: touch;
+    /* Topbar (Workspace + search) is a sibling of .df2-content — never
+       put the scrollport on .df2-main or chrome leaves the viewport. */
+    overflow: hidden;
   }
 
   .df2-app.df2-sidebar-nav-compact .df2-main {
@@ -2295,6 +2304,12 @@ textarea.df2-pilot-composer textarea {
   color: #94a3b8;
 }
 
+@media (max-width: 560px) {
+  .df2-intelligence-stats {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 .df2-type-mapping-list {
   display: flex;
   flex-direction: column;
@@ -2445,6 +2460,14 @@ textarea.df2-pilot-composer textarea {
 
 .df2-rail-split strong {
   color: var(--df-text-primary, #0f172a) !important;
+}
+
+.df2-rail-split.is-warn strong {
+  color: #b45309 !important;
+}
+
+.df2-rail-split.is-danger strong {
+  color: #b91c1c !important;
 }
 
 .df2-algorithm-list div {
@@ -4456,6 +4479,18 @@ textarea.df2-pilot-composer textarea {
   gap: 8px;
 }
 
+@media (max-width: 720px) {
+  .df2-intelligence-stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 560px) {
+  .df2-intelligence-stats {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 .df2-compact-empty-padded {
   padding: 24px 16px;
 }
@@ -4968,7 +5003,7 @@ textarea.df2-pilot-composer textarea {
   gap: 8px 10px;
   align-items: center;
   padding: 14px 14px 12px;
-  border-radius: 12px;
+  border-radius: var(--df-radius-card, 8px);
   background: linear-gradient(180deg, #fff 0%, #f8fafc 100%);
   border: 1px solid #e2e8f0;
   box-shadow: 0 2px 8px rgba(15, 23, 42, 0.05);
@@ -5765,6 +5800,12 @@ textarea.df2-pilot-composer textarea {
 .df-section-loader .dt-loading-block {
   width: 100%;
   max-width: 360px;
+}
+
+.df2-page.df2-route-loading {
+  display: grid;
+  place-items: center;
+  min-height: min(60vh, 520px);
 }
 
 .dt-loading-block {

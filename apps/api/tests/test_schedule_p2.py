@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import threading
 from datetime import datetime, timezone
 
 import pytest
@@ -129,6 +128,52 @@ def test_create_schedule_persists_new_fields(temp_store):
     assert reloaded.next_run_at is not None
     parsed = datetime.fromisoformat(reloaded.next_run_at)
     assert parsed.tzinfo is not None
+
+
+def test_create_schedule_persists_studio_data_and_migration_rules(temp_store):
+    sched = store.create_schedule({
+        "name": "Migrate orders type-locked",
+        "source_connector_id": "src-1",
+        "source_table": "orders",
+        "dest_connector_id": "dst-1",
+        "dest_table": "orders_wh",
+        "interval": "daily",
+        "sync_mode": "incremental",
+        "validation_mode": "strict",
+        "schema_policy": "type_locked",
+        "backfill_new_fields": False,
+    })
+    reloaded = store.get_schedule(sched.id)
+    assert reloaded.validation_mode == "strict"
+    assert reloaded.schema_policy == "type_locked"
+    assert reloaded.backfill_new_fields is False
+    assert not hasattr(reloaded, "skip_preflight") or not getattr(reloaded, "skip_preflight", False)
+
+
+def test_create_schedule_persists_cdc_exactly_once_delivery(temp_store):
+    sched = store.create_schedule({
+        "name": "CDC EOS orders",
+        "source_connector_id": "src-1",
+        "source_table": "orders",
+        "dest_connector_id": "dst-1",
+        "dest_table": "orders_wh",
+        "interval": "daily",
+        "sync_mode": "cdc",
+        "primary_key": "id",
+        "delivery_guarantee": "exactly_once",
+    })
+    reloaded = store.get_schedule(sched.id)
+    assert reloaded.delivery_guarantee == "exactly_once"
+    legacy = store.PipelineSchedule.from_dict({
+        "id": "legacy-eos",
+        "name": "old",
+        "source_connector_id": "a",
+        "source_table": "t",
+        "dest_connector_id": "b",
+        "dest_table": "u",
+        "interval": "daily",
+    })
+    assert legacy.delivery_guarantee == "at_least_once"
 
 
 def test_create_schedule_rejects_bad_cron(temp_store):
@@ -269,6 +314,48 @@ def test_build_request_incremental_append_without_pk():
     assert req.stream_contracts[0]["sync_mode"] == "incremental_append"
 
 
+def test_build_request_procedure_stamps_extra_and_refuses_cdc():
+    sched = store.PipelineSchedule.from_dict({
+        "id": "s-proc", "name": "n", "source_connector_id": "src", "source_table": "get_orders",
+        "dest_connector_id": "dst", "dest_table": "orders_wh", "interval": "daily",
+        "source_read_mode": "procedure",
+        "procedure_call": "CALL get_orders(:since)",
+        "procedure_params": {"since": "2024-01-01"},
+        "sync_mode": "full_refresh_append",
+    })
+    req = runner.build_schedule_request(sched, _SRC_CONN, _DST_CONN)
+    assert req.source.extra.get("source_read_mode") == "procedure"
+    assert req.source.extra.get("procedure_call") == "CALL get_orders(:since)"
+    assert req.source.extra.get("procedure_params") == {"since": "2024-01-01"}
+    from services.procedure_source import is_callable_source
+
+    assert is_callable_source(req.source)
+
+    bad = store.PipelineSchedule.from_dict({
+        "id": "s-cdc", "name": "n", "source_connector_id": "src", "source_table": "get_orders",
+        "dest_connector_id": "dst", "dest_table": "orders_wh", "interval": "hourly",
+        "source_read_mode": "procedure",
+        "procedure_call": "CALL get_orders()",
+        "sync_mode": "cdc",
+    })
+    with pytest.raises(ValueError, match="snapshot|CDC"):
+        runner.build_schedule_request(bad, _SRC_CONN, _DST_CONN)
+
+
+def test_create_schedule_refuses_scd2_on_procedure(temp_store):
+    with pytest.raises(ValueError, match="table identity|snapshot|SCD2"):
+        store.create_schedule({
+            "name": "proc",
+            "source_connector_id": "a",
+            "source_table": "get_orders",
+            "dest_connector_id": "b",
+            "dest_table": "u",
+            "source_read_mode": "procedure",
+            "procedure_call": "CALL get_orders()",
+            "sync_mode": "scd2",
+        })
+
+
 def test_build_request_cdc():
     sched = store.PipelineSchedule.from_dict({
         "id": "s4", "name": "n", "source_connector_id": "src", "source_table": "orders",
@@ -302,26 +389,24 @@ def test_should_retry_logic():
     assert runner._should_retry("completed_with_quarantine", attempt=0, max_retries=2) is False
 
 
-def test_finalize_run_retries_on_failure(temp_store, monkeypatch):
+def test_finalize_run_parks_a_durable_retry_on_failure(temp_store, monkeypatch):
     sched = _make(store, max_retries=1, retry_backoff_seconds=0)
-    monkeypatch.setattr(runner, "_job_doc", lambda jid: {"status": "failed", "error": "boom"})
-
-    dispatched = {}
-    fired = threading.Event()
-
-    def fake_dispatch(schedule_id, attempt=0):
-        dispatched["attempt"] = attempt
-        fired.set()
-        return "job-retry"
-
-    monkeypatch.setattr(runner, "_dispatch_transfer", fake_dispatch)
+    monkeypatch.setattr(
+        runner,
+        "_job_doc",
+        lambda jid: {"status": "failed", "error": "boom", "records_processed": 0},
+    )
 
     runner._finalize_run(sched.id, "job-0", attempt=0, started_at=datetime.now(timezone.utc))
-    assert fired.wait(2.0), "retry was not dispatched"
-    assert dispatched["attempt"] == 1
-    # An intermediate retry entry is recorded.
+
+    # The retry is store state, not an in-process timer, so it survives the
+    # restart that a rolling deploy performs between the two attempts.
     reloaded = store.get_schedule(sched.id)
+    assert reloaded.retry_attempt == 1
+    assert reloaded.retry_at is not None
+    assert reloaded.running is False
     assert any(r.get("retry_scheduled") for r in reloaded.run_history)
+    assert sched.id in {s.id for s in store.due_schedules()}
 
 
 def test_finalize_run_records_terminal_failure_without_retry(temp_store, monkeypatch):
@@ -350,6 +435,31 @@ def test_finalize_run_success_records_and_notifies(temp_store, monkeypatch):
     assert reloaded.last_status == "completed"
     assert reloaded.run_history[-1]["records_transferred"] == 100
     assert notified["status"] == "completed"
+
+
+def test_run_entry_copies_dest_count_ledger_not_only_writer_ack():
+    started = datetime.now(timezone.utc)
+    entry = runner._run_entry(
+        "job-ledger",
+        "completed",
+        0,
+        started,
+        {
+            "records_processed": 10_000,
+            "rejected_rows": 0,
+            "coerced_null_rows": 0,
+            "row_accounting": {
+                "dest_count": 4,
+                "writer_ack": 10_000,
+                "balanced": True,
+                "conservation_kind": "overwrite",
+                "rows_written_source": "gate8_dest_readback",
+            },
+        },
+    )
+    assert entry["records_transferred"] == 10_000
+    assert entry["row_accounting"]["dest_count"] == 4
+    assert entry["row_accounting"]["writer_ack"] == 10_000
 
 
 def test_missing_connector_records_failed_history(temp_store, monkeypatch):

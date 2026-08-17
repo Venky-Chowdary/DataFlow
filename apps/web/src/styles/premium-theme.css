@@ -1017,6 +1017,20 @@
   color: #0f766e;
 }
 
+.df2-column-false-friend {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  margin-top: 6px;
+  max-width: 22rem;
+}
+
+.df2-column-false-friend .df2-label-hint {
+  margin: 0;
+  color: #92400e;
+}
+
 .df2-column-review-table-wrap {
   overflow-x: auto;
   border: 1px solid var(--df-line);

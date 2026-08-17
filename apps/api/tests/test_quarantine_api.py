@@ -31,6 +31,8 @@ def _build_age_rows(error_policy: str):
         column_types={"id": "string", "age": "string"},
         dest_types={"id": "string", "age": "integer"},
         error_policy=error_policy,
+        # Opt-in path only — job coerce_null is gated without staging/Risk Contract.
+        allow_job_coerce_null=(error_policy == "coerce_null"),
     )
 
 
@@ -78,10 +80,13 @@ def test_no_policy_silently_discards_a_bad_row():
         )
 
 
-def test_job_quarantine_endpoint():
+def test_job_quarantine_endpoint(monkeypatch):
     from services import connector_store
+    from src.transfer import engine as engine_mod
     from src.transfer.engine import UniversalTransferEngine
     from src.transfer.models import EndpointConfig, TransferRequest
+
+    monkeypatch.setattr(engine_mod, "_enforce_ddl_identity", lambda *a, **k: None)
 
     # Create a tiny CSV that fails integer coercion for one row.
     csv = b"id,age\n1,30\n2,not-a-number\n"

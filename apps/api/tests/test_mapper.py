@@ -24,7 +24,8 @@ def test_txn_dt_maps_to_transaction_date():
 def test_infers_target_when_no_targets():
     mappings = map_columns(["PAY_AMT"], [], destination_table_exists=False)
     assert mappings[0]["target"] == "payment_amount"
-    assert mappings[0]["confidence"] >= 0.72
+    # Create-new invent floor is 0.70 (lexical rename without live targets).
+    assert mappings[0]["confidence"] >= 0.70
 
 
 def test_hr_salary_amt():

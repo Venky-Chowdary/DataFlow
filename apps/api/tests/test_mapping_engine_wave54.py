@@ -38,6 +38,19 @@ def test_create_new_varchar_width_cap_oracle():
     )
     kinds = {r["kind"] for r in risks}
     assert "varchar_width_cap" in kinds or "varchar_narrow" in kinds or "lossy_coercion" in kinds or "precision_collapse" in kinds
+    assert any(r.get("severity") == "block" for r in risks)
+
+
+def test_create_new_clob_clears_varchar_width_cap():
+    """Honest unbounded create-new must not keep a false width-cap chip."""
+    risks = assess_create_new_type_risk(
+        "VARCHAR(5000)",
+        "CLOB",
+        destination_db_type="oracle",
+    )
+    kinds = {r["kind"] for r in risks}
+    assert "varchar_width_cap" not in kinds
+    assert "varchar_narrow" not in kinds
 
 
 def test_create_new_timezone_polarity_risk():

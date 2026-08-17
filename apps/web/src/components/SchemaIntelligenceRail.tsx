@@ -10,6 +10,7 @@ import {
 } from "../lib/schemaIntelligence";
 import type { EditableMapping } from "../lib/mapping";
 import type { EnhancedAnalysis, PreflightResult, TransferPlan, TransferResult } from "../lib/types";
+import { destHeadline, destMetricToneClass, writerHeadline } from "../lib/conservationLedger";
 
 interface SchemaIntelligenceRailProps {
   step: number;
@@ -64,6 +65,8 @@ export function SchemaIntelligenceRail({
   const blockers = typeRisks.filter((r) => r.severity === "block");
   const warnings = typeRisks.filter((r) => r.severity === "warn");
   const formatLabel = inferSourceFormatLabel(analysis, sourceFormat);
+  const destMetric = result ? destHeadline(result) : null;
+  const writerMetric = result ? writerHeadline(result) : null;
   const advantages = buildCompetitiveAdvantages({
     sourceKind,
     destType,
@@ -234,12 +237,16 @@ export function SchemaIntelligenceRail({
         </div>
       )}
 
-      {result?.success && (
+      {result?.success && destMetric && writerMetric && (
         <div className="df2-rail-panel">
-          <div className="df2-rail-kicker">Reconciliation</div>
+          <div className="df2-rail-kicker">Conservation</div>
+          <div className={`df2-rail-split ${destMetricToneClass(destMetric)}`}>
+            <span>{destMetric.label}</span>
+            <strong title={destMetric.title}>{destMetric.value}</strong>
+          </div>
           <div className="df2-rail-split">
-            <span>Rows written</span>
-            <strong>{result.records_transferred?.toLocaleString() ?? "0"}</strong>
+            <span>{writerMetric.label}</span>
+            <strong title={writerMetric.title}>{writerMetric.value}</strong>
           </div>
           {result.reconciliation?.message && (
             <p className="df2-rail-note">{result.reconciliation.message}</p>

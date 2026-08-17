@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import sys
 from datetime import datetime, time, timezone
 from pathlib import Path
@@ -24,7 +25,7 @@ def test_sql_base_type_preserves_timestamptz_with_precision():
     assert sql_base_type("TIMESTAMP(6) WITHOUT TIME ZONE") == "TIMESTAMP"
     assert sql_base_type("DATETIME(6)") == "DATETIME"
     assert sql_base_type("DECIMAL(10,2)") == "DECIMAL"
-    assert sql_base_type("TIME(6) WITH TIME ZONE") == "TIME WITH TIME ZONE"
+    assert sql_base_type("TIME(6) WITH TIME ZONE") == "TIMETZ"
     assert sql_base_type("DATETIMEOFFSET(7)") == "TIMESTAMPTZ"
 
 
@@ -61,14 +62,16 @@ def test_normalize_sql_bind_timestamptz_precision_ddl():
 
 
 def test_generic_sql_to_sa_value_uses_ddl_tz_polarity():
-    from connectors.generic_sql import _to_sa_value
+    from connectors.generic_sql import _sa_type_for_logical, _to_sa_value
 
-    # logical collapsed to datetime must still honor ddl_type WITH TIME ZONE.
+    # Logical collapsed to datetime must still honor SA timezone=True from DDL.
+    sa_t = _sa_type_for_logical("TIMESTAMP WITH TIME ZONE", "postgresql", "postgresql")
+    assert getattr(sa_t, "timezone", False) is True
     got = _to_sa_value(
         "2024-08-09T01:58:42Z",
         "datetime",
-        None,
-        "TIMESTAMP WITH TIME ZONE",
+        sa_t,
+        "postgresql",
         "postgresql",
     )
     assert isinstance(got, datetime)
@@ -100,7 +103,9 @@ def test_upsert_batch_routes_hive_impala_and_skips_delete():
     class _Conn:
         def execute(self, stmt, params=None):  # noqa: ANN001
             text = str(getattr(stmt, "text", stmt))
-            if "DELETE" in text.upper():
+            # A DELETE *statement* — not the mirror-lattice probe
+            # `SELECT "_deleted" FROM t WHERE 1=0`, which merely contains it.
+            if re.match(r"\s*DELETE\b", text, flags=re.IGNORECASE):
                 calls.append("delete")
             return MagicMock(rowcount=1)
 

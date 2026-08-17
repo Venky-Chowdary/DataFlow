@@ -27,13 +27,22 @@ from services.transform_engine import apply_transform  # noqa: E402
         ("1.5E+3", "integer", 1500),
         ("  42  ", "integer", 42),
         ("true", "boolean", True),
-        ("N", "boolean", False),
+        ("false", "boolean", False),
+        ("0", "boolean", False),
+        ("f", "boolean", False),
     ],
 )
 def test_transform_parses_critical_formats(raw: str, transform: str, expected):
     value, err = apply_transform(raw, transform)
     assert err is None, f"Failed to parse {raw!r}: {err}"
     assert str(value) == str(expected) or value == expected
+
+
+def test_transform_refuses_informal_boolean_N():
+    """Canonical boolean wire is true/t/1 and false/f/0 — refuse Airbyte-class Y/N invent."""
+    _, err = apply_transform("N", "boolean")
+    assert err is not None
+    assert "Invalid boolean" in err
 
 
 def test_transform_rejects_invalid_decimal():
@@ -150,11 +159,15 @@ def test_integrity_blocks_duplicate_primary_keys():
         {"order_id": "ORD-2"},
     ]
     mappings = [{"source": "order_id", "target": "order_id", "confidence": 0.99}]
+    # Uniqueness resolution no longer invents PK from ``*_id`` alone — upsert
+    # sync (or an explicit destination PK) is required to enforce duplicates.
     report = run_integrity_audit(
         source_columns=["order_id"],
         mappings=mappings,
         sample_rows=rows,
         validation_mode="strict",
+        sync_mode="upsert",
+        destination_pk_columns=["order_id"],
     )
     dup_check = next((c for c in report["checks"] if c["check"] == "duplicate_keys"), None)
     assert dup_check is not None
@@ -183,9 +196,12 @@ def test_integrity_balanced_still_blocks_dupes_on_upsert():
     assert dup_check.get("warnings") or dup_check.get("issues")
 
 
-def test_integrity_source_probe_blocks_even_balanced_append():
-    """Full-table probe findings must keep Validate red after Quarantine/balanced."""
-    # Clean sample (would pass sample-only) + probe says 153 keys repeat.
+def test_integrity_source_probe_warns_append_without_dest_unique():
+    """Append/create-new without dest UNIQUE: probe dups warn — do not hard-block.
+
+    Operators hit Validate-green / Execute-red when sample missed dups but Execute
+    probed; append into a projected CREATE table legally allows duplicate keys.
+    """
     rows = [{"id": "unique-a"}, {"id": "unique-b"}, {"id": "unique-c"}]
     mappings = [{"source": "id", "target": "id", "confidence": 0.99, "primary_key": True}]
     findings = [
@@ -200,6 +216,36 @@ def test_integrity_source_probe_blocks_even_balanced_append():
         destination_db_type="postgresql",
         sync_mode="full_refresh_append",
         contract_primary_key="id",
+        destination_pk_columns=[],
+        source_duplicate_findings=findings,
+        source_duplicate_probe_ran=True,
+        source_duplicate_probe_pk="id",
+    )
+    dup_check = next((c for c in report["checks"] if c["check"] == "duplicate_keys"), None)
+    assert dup_check is not None
+    assert dup_check["blocks_transfer"] is False
+    assert dup_check["passed"] is True
+    warn_blob = " ".join(str(w) for w in (dup_check.get("warnings") or []))
+    assert "source probe" in warn_blob.lower() or "duplicate" in (dup_check.get("note") or "").lower()
+
+
+def test_integrity_source_probe_blocks_append_when_dest_pk_covers():
+    """Append into a table whose PK/UNIQUE covers the key still fail-closes on probe."""
+    rows = [{"id": "unique-a"}, {"id": "unique-b"}, {"id": "unique-c"}]
+    mappings = [{"source": "id", "target": "id", "confidence": 0.99, "primary_key": True}]
+    findings = [
+        {"value": "507f1f77bcf86cd799439011", "count": 4},
+        {"value": "507f1f77bcf86cd799439012", "count": 3},
+    ]
+    report = run_integrity_audit(
+        source_columns=["id"],
+        mappings=mappings,
+        sample_rows=rows,
+        validation_mode="balanced",
+        destination_db_type="postgresql",
+        sync_mode="full_refresh_append",
+        contract_primary_key="id",
+        destination_pk_columns=["id"],
         source_duplicate_findings=findings,
         source_duplicate_probe_ran=True,
         source_duplicate_probe_pk="id",
@@ -468,3 +514,67 @@ def test_strip_controls_skip_is_case_insensitive():
     assert enc is not None
     assert enc["blocks_transfer"] is False
     assert not enc["issues"]
+
+
+def test_transform_dry_run_blocks_empty_url_without_contract():
+    """Empty image→url cells hard-block G9 transform_dry_run until Risk Contract."""
+    report = run_integrity_audit(
+        source_columns=["image"],
+        mappings=[
+            {
+                "source": "image",
+                "target": "image",
+                "confidence": 0.95,
+                "transform": "url",
+                "target_type": "TEXT",
+            }
+        ],
+        source_schemas=[{"name": "image", "inferred_type": "TEXT"}],
+        sample_rows=[{"image": ""}, {"image": ""}, {"image": "https://ok.example/a.png"}],
+        destination_db_type="postgres",
+        validation_mode="strict",
+    )
+    transform = next((c for c in report["checks"] if c["check"] == "transform_dry_run"), None)
+    assert transform is not None
+    assert transform["passed"] is False
+    assert transform["blocks_transfer"] is True
+    assert transform.get("kind") == "transform_errors"
+    # Prose note must not pollute issues[] (fake column extraction).
+    assert not any(str(i).startswith("Preflight blocked") for i in transform.get("issues") or [])
+    assert transform.get("note") and "Preflight blocked" in str(transform["note"])
+
+
+def test_transform_dry_run_passes_empty_url_with_cast_and_continue():
+    """Parity with G8: CAST_AND_CONTINUE demotes empty-url off G9 hard block."""
+    from preflight.risk_contract import make_clearing_risk_contract
+
+    contract = make_clearing_risk_contract(
+        column="image",
+        source_type="TEXT",
+        destination_type="TEXT",
+        execution_policy="CAST_AND_CONTINUE",
+        reason="quarantine empty urls",
+    )
+    report = run_integrity_audit(
+        source_columns=["image"],
+        mappings=[
+            {
+                "source": "image",
+                "target": "image",
+                "confidence": 0.95,
+                "transform": "url",
+                "target_type": "TEXT",
+                "risk_contract": contract,
+            }
+        ],
+        source_schemas=[{"name": "image", "inferred_type": "TEXT"}],
+        sample_rows=[{"image": ""}, {"image": ""}, {"image": "https://ok.example/a.png"}],
+        destination_db_type="postgres",
+        validation_mode="strict",
+    )
+    transform = next((c for c in report["checks"] if c["check"] == "transform_dry_run"), None)
+    assert transform is not None
+    assert transform["passed"] is True, transform
+    assert transform["blocks_transfer"] is False
+    assert int(transform.get("contracted_holdout_count") or 0) >= 1
+    assert transform.get("contracted_holdouts")

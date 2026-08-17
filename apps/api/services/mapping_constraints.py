@@ -113,15 +113,52 @@ def detect_duplicate_targets(mappings: list[dict]) -> list[str]:
 
 
 def unmapped_sources(source_columns: list[str], mappings: list[dict]) -> list[str]:
-    """Sources with no map row and no intentional-omit policy."""
-    accounted = {
-        str(m.get("source") or "")
-        for m in mappings
-        if m.get("source") and (m.get("target") or is_intentional_omit(m))
+    """Sources with no write mapping and no intentional-omit policy.
+
+    A row that names a source but carries no target and no omission policy
+    used to count as accounted, so a mapping the pipeline had already dropped
+    kept its source out of this list and the column left silently.
+    """
+    return classify_source_coverage(source_columns, mappings)["unaccounted"]
+
+
+def classify_source_coverage(
+    source_columns: list[str] | None,
+    mappings: list[dict] | None,
+) -> dict[str, Any]:
+    """Account for every source column: written, declared omitted, or neither.
+
+    A source column the operator never mentioned is not a decision — it is an
+    unanswered question. Writing anyway drops it silently, which is the failure
+    mode this product exists to prevent (30 source columns into a 20-column
+    destination must not quietly become 20). Callers gate on
+    ``unaccounted``; ``omitted`` is the operator's recorded decision and
+    belongs in the decision artifact and proof bundle.
+    """
+    cols = [str(c) for c in (source_columns or []) if str(c).strip()]
+    written: list[str] = []
+    omitted: list[str] = []
+    for m in mappings or []:
+        if not isinstance(m, dict):
+            continue
+        src = str(m.get("source") or "").strip()
+        if not src:
+            continue
+        if is_intentional_omit(m):
+            omitted.append(src)
+        elif str(m.get("target") or "").strip():
+            written.append(src)
+    written_l = {_norm(s) for s in written}
+    omitted_l = {_norm(s) for s in omitted}
+    unaccounted = [c for c in cols if _norm(c) not in written_l and _norm(c) not in omitted_l]
+    return {
+        "source_count": len(cols),
+        "written": written,
+        "omitted": omitted,
+        "unaccounted": unaccounted,
+        "accounted": len(cols) - len(unaccounted),
+        "complete": not unaccounted,
     }
-    # Also treat any mapping with a source as accounted — omit rows keep the source.
-    accounted |= {str(m.get("source") or "") for m in mappings if m.get("source")}
-    return [s for s in source_columns if s not in accounted]
 
 
 def mapping_plan_summary(

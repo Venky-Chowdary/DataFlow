@@ -94,8 +94,14 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
         if (!(p.stale || p.severity === "warn" || p.severity === "critical")) continue;
         const prev = map[p.schedule_id];
         const sev = p.severity || (p.stale ? "warn" : "ok");
-        if (!prev || p.lag_seconds > prev.lag) {
-          map[p.schedule_id] = { lag: p.lag_seconds, severity: sev };
+        // Proven seconds may be null when only WAL/binlog bytes prove behind.
+        const lag = typeof p.lag_seconds === "number" && Number.isFinite(p.lag_seconds)
+          ? p.lag_seconds
+          : typeof p.lag_bytes === "number" && Number.isFinite(p.lag_bytes)
+            ? Math.max(0, p.lag_bytes / 1_048_576) // MB as display proxy when seconds unknown
+            : 0;
+        if (!prev || lag > prev.lag) {
+          map[p.schedule_id] = { lag, severity: sev };
         }
       }
       setFreshnessLag(map);
@@ -448,43 +454,44 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
                     if (f) void handleImportFile(f);
                   }}
                 />
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  loading={gitopsBusy}
-                  onClick={() => void handleExportFleet()}
-                  title="Export schedules + contracts as dataflow.yaml"
-                >
-                  Export YAML
-                </Button>
-                <label
-                  className="df2-policy-toggle"
-                  title="CD/staging: refuse schedules unless contract_id is SIGNED"
-                  style={{ display: "inline-flex", alignItems: "center", gap: "0.35rem", margin: 0 }}
-                >
-                  <input
-                    type="checkbox"
-                    checked={gitopsRequireSigned}
-                    onChange={(e) => setGitopsRequireSigned(e.target.checked)}
-                  />
-                  <span style={{ fontSize: "0.8rem", whiteSpace: "nowrap" }}>Require signed</span>
-                </label>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  loading={gitopsBusy}
-                  onClick={() => importInputRef.current?.click()}
-                  title={
-                    gitopsRequireSigned
-                      ? "Plan then apply with signed-contract gate"
-                      : "Plan then apply a dataflow.yaml manifest"
-                  }
-                >
-                  Import YAML
-                </Button>
-                <Button size="sm" variant="primary" onClick={openCreate}>
-                  New pipeline
-                </Button>
+                <div className="df2-toolbar-actions-cluster" role="group" aria-label="Schedule actions">
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    loading={gitopsBusy}
+                    onClick={() => void handleExportFleet()}
+                    title="Export schedules + contracts as dataflow.yaml"
+                  >
+                    Export YAML
+                  </Button>
+                  <label
+                    className="df2-toolbar-gitops-toggle"
+                    title="CD/staging: refuse schedules unless contract_id is SIGNED"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={gitopsRequireSigned}
+                      onChange={(e) => setGitopsRequireSigned(e.target.checked)}
+                    />
+                    <span>Require signed</span>
+                  </label>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    loading={gitopsBusy}
+                    onClick={() => importInputRef.current?.click()}
+                    title={
+                      gitopsRequireSigned
+                        ? "Plan then apply with signed-contract gate"
+                        : "Plan then apply a dataflow.yaml manifest"
+                    }
+                  >
+                    Import YAML
+                  </Button>
+                  <Button size="sm" variant="primary" onClick={openCreate}>
+                    New schedule
+                  </Button>
+                </div>
               </>
             ) : undefined
           }
@@ -494,7 +501,7 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
       {showForm && (
         <div className="df2-pipeline-form is-active">
           <PageSection
-            title={editing ? "Edit pipeline" : "Create recurring sync"}
+            title={editing ? "Edit schedule" : "Create recurring sync"}
             subtitle={editing ? editing.name : "Schedule source → destination with your saved connectors"}
             className="df2-pipeline-form-card"
             actions={
@@ -530,7 +537,7 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
             action={
               !showForm ? (
                 <Button variant="primary" onClick={openCreate}>
-                  Create pipeline
+                  Create schedule
                 </Button>
               ) : undefined
             }
@@ -540,12 +547,12 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
             compact
             icon="activity"
             title={`No ${filter === "active" ? "active" : "paused"} schedules`}
-            description="Try another filter or create a new pipeline."
+            description="Try another filter or create a new schedule."
           />
         ) : (
           <div className="df2-pipeline-rows" role="list" aria-label="Schedules">
             <div className="df2-pipeline-rows-head" aria-hidden>
-              <span className="df2-pipeline-rows-head-name">Pipeline</span>
+              <span className="df2-pipeline-rows-head-name">Schedule</span>
               <span>Cadence</span>
               <span>Mode</span>
               <span>Last run</span>

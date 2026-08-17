@@ -14,9 +14,12 @@ if str(_API_ROOT) not in sys.path:
 
 
 def test_mcp_tools_call_requires_auth_when_enforced(monkeypatch):
+    # Patch the canonical auth module only. The middleware and RBAC resolve
+    # ``auth_required`` on it per request, so there is no per-module copy to
+    # patch — and patching those copies left enforcement on for the rest of the
+    # session, because monkeypatch recorded the already-patched stub as the
+    # original to restore.
     monkeypatch.setattr("src.services.auth_service.auth_required", lambda: True)
-    monkeypatch.setattr("src.middleware.auth_middleware.auth_required", lambda: True)
-    monkeypatch.setattr("services.rbac.auth_required", lambda: True)
     monkeypatch.setattr(
         "src.routers.mcp_router._mcp_authenticated",
         lambda _req: False,

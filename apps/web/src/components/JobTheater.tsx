@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ConnectorIcon } from "../app/brand-icons";
+import { loadMethodDescription, loadMethodLabel } from "../lib/loadMethod";
 import { DtIcon } from "./DtIcon";
 import { Spinner } from "./LoadingState";
 import { CopyIdChip } from "./ui/CopyIdChip";
@@ -8,6 +9,7 @@ import {
   cancelJob,
   executeJobRollback,
   fetchJobMappingProof,
+  resetContractBreaker,
   resumeJob,
   streamJobProgress,
   type RepairMapping,
@@ -17,9 +19,13 @@ import { isJobSuccess, isJobTerminal, jobStatusBadgeClass, jobStatusLabel } from
 import { LoadHistoryPanel } from "./transfer/LoadHistoryPanel";
 import { NotificationDeliveryStrip } from "./transfer/NotificationDeliveryStrip";
 import { QuarantinePanel } from "./transfer/QuarantinePanel";
-import { Gate8ProofCard } from "./transfer/Gate8ProofCard";
+import { Gate8ProofCard, gate8AppendIdentity, isGate8AppendDelta, isGate8KeyedBatch } from "./transfer/Gate8ProofCard";
 import { JobTrustScoreCard } from "./transfer/JobTrustScoreCard";
+import { ConservationLedgerCard } from "./transfer/ConservationLedgerCard";
+import { destHeadline, destMetricCompact, destMetricToneClass, writerAckDisagrees, writerHeadline, conservationCompleteCopy } from "../lib/conservationLedger";
 import { inferTransferFailureHint, isDestinationCapacityFailure } from "../lib/transferFailure";
+import { ringDasharray } from "../lib/progressRing";
+import { contractIdFromBreakerFailure } from "../lib/contractBreakerUi";
 import { CdcLeaseConflictPanel } from "./transfer/CdcLeaseConflictPanel";
 import { CdcCursorGapPanel } from "./transfer/CdcCursorGapPanel";
 import { CdcRetentionPanel } from "./transfer/CdcRetentionPanel";
@@ -29,6 +35,8 @@ import { writeJobEventLog } from "../lib/jobEventLog";
 import { useToast } from "./Toast";
 import { MappingProofDrawer, type MappingProof } from "./MappingProofDrawer";
 import { hashForScreen } from "../lib/appNavigation";
+import { callableExtractNote } from "../lib/destExistsShape";
+import { cdcDeliveryResultCopy } from "../lib/cdcExactlyOnce";
 
 function asMappingProof(raw: unknown): MappingProof | null {
   if (!raw || typeof raw !== "object") return null;
@@ -116,6 +124,15 @@ function formatDuration(ms: number): string {
   if (s < 60) return `${s}s`;
   const m = Math.floor(s / 60);
   return `${m}m ${s % 60}s`;
+}
+
+/** Remaining-time label; hours stay readable on multi-hour cutovers. */
+function formatEta(seconds: number): string {
+  const s = Math.max(Math.ceil(seconds), 0);
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.ceil(s / 60)}m`;
+  const h = Math.floor(s / 3600);
+  return `${h}h ${Math.round((s % 3600) / 60)}m`;
 }
 
 function toEpochMs(value?: string): number | null {
@@ -258,8 +275,8 @@ export function JobTheater({
           const quarantine = update.status === "completed_with_quarantine";
           append(
             quarantine
-              ? `Job completed with quarantine — ${processed.toLocaleString()} rows landed; some rows held out or coerced to NULL`
-              : `Job completed — ${processed.toLocaleString()} rows transferred`,
+              ? `Job completed with quarantine — ${conservationCompleteCopy(update, { quarantine: true })}`
+              : `Job completed — ${conservationCompleteCopy(update)}`,
           );
           onComplete?.(update);
         }
@@ -301,9 +318,16 @@ export function JobTheater({
     try {
       const res = await resumeJob(jobId);
       const nextId = res.job_id || jobId;
+      // A full refresh replaces the destination, so the server restarts it
+      // rather than continuing. Saying "continuing from the last checkpoint"
+      // for that run described something that did not happen.
       toast({
-        title: "Resume started",
-        message: "Continuing from the last checkpoint in Transfer Studio.",
+        title: res.restarted ? "Transfer restarted" : "Resume started",
+        message:
+          res.message
+          || (res.restarted
+            ? "Full refresh re-run from the beginning — it replaces the destination, so there is nothing to resume into."
+            : "Continuing from the last checkpoint in Transfer Studio."),
         tone: "success",
       });
       onResumed?.(nextId);
@@ -396,6 +420,9 @@ export function JobTheaterView({
   const { toast } = useToast();
   const total = job.total_rows ?? 0;
   const processed = job.records_processed ?? 0;
+  const destMetric = destHeadline(job);
+  const writerMetric = writerHeadline(job);
+  const ackDisagrees = writerAckDisagrees(job);
   const isFailed = job.status === "failed";
   const isCancelled = job.status === "cancelled";
   const isComplete = isJobSuccess(job.status);
@@ -406,6 +433,7 @@ export function JobTheaterView({
     ? PHASES.findIndex((p) => p.id === "reconcile")
     : phaseIndex(job.phase, job.status);
   const [mappingProofOpen, setMappingProofOpen] = useState(false);
+  const [resettingBreaker, setResettingBreaker] = useState(false);
   const [rollbackBusy, setRollbackBusy] = useState(false);
   const [resolvedProof, setResolvedProof] = useState<MappingProof | null>(() => asMappingProof(job.mapping_proof));
 
@@ -442,6 +470,11 @@ export function JobTheaterView({
   const duplicateKeyFailure =
     failureHint?.code === "duplicate_primary_key"
     || /duplicate redis key|duplicate primary key|conflict on '/i.test(String(job.error || job.message || ""));
+  const breakerContractId = contractIdFromBreakerFailure({
+    error: job.error || job.message,
+    errorDetails: job.error_details || null,
+  });
+  const breakerFailure = failureHint?.code === "circuit_breaker_open" || Boolean(breakerContractId);
 
   // Prefer row-derived progress while writing. Once reconcile starts (or all rows
   // are written), hold 99% — never imply "done" until status is terminal success.
@@ -501,6 +534,7 @@ export function JobTheaterView({
   const warningCount = Array.isArray(destinationSummary.warnings) ? destinationSummary.warnings.length : 0;
   const checksum = typeof destinationSummary.checksum === "string" ? destinationSummary.checksum : "";
   const loadMethod = typeof destinationSummary.load_method === "string" ? destinationSummary.load_method : "";
+  const callableNote = callableExtractNote(preflight, job);
   const batchSize = Number(job.chunk_size ?? destinationSummary.chunk_size ?? 0) || 0;
   const jobRps = Number(job.records_per_second ?? destinationSummary.records_per_second ?? 0) || 0;
   const displayRps = isComplete && jobRps > 0 ? Math.round(jobRps) : throughput;
@@ -567,20 +601,37 @@ export function JobTheaterView({
     return `${phaseLabel} — ${processed.toLocaleString()}${total > 0 ? ` / ${total.toLocaleString()}` : ""} rows…`;
   })();
 
+  // Server estimate is measured from persisted checkpoints and survives a page
+  // reload; the browser-side rate is only a fallback for the first intervals.
+  const estimate = job.runtime_estimate;
   const eta = useMemo(() => {
+    if (!isRunning || reconciling) return null;
+    const p50 = estimate?.available ? estimate.remaining_seconds_p50 : null;
+    if (typeof p50 === "number" && p50 > 0) return formatEta(p50);
     const rps = displayRps;
-    if (!isRunning || reconciling || rps <= 0 || total <= processed) return null;
-    const secs = Math.ceil((total - processed) / rps);
-    return secs < 60 ? `${secs}s` : `${Math.ceil(secs / 60)}m`;
-  }, [isRunning, reconciling, displayRps, total, processed]);
+    if (rps <= 0 || total <= processed) return null;
+    return formatEta((total - processed) / rps);
+  }, [isRunning, reconciling, estimate, displayRps, total, processed]);
+
+  const etaDetail = useMemo(() => {
+    if (!isRunning || reconciling) return "";
+    if (!estimate) return "";
+    if (!estimate.available) return estimate.reason || "";
+    const worst = estimate.remaining_seconds_p90;
+    const rate = estimate.rows_per_second_p50;
+    const parts: string[] = [];
+    if (typeof worst === "number" && worst > 0) parts.push(`worst case ${formatEta(worst)}`);
+    if (typeof rate === "number" && rate > 0) {
+      parts.push(`measured ${Math.round(rate).toLocaleString()} rows/s over ${estimate.intervals_observed ?? 0} intervals`);
+    }
+    return parts.join(" · ");
+  }, [isRunning, reconciling, estimate]);
 
   const slowSnowflakeTip =
     destType === "snowflake"
     && displayRps > 0
     && displayRps < 100
     && (loadMethod === "insert" || !loadMethod);
-
-  const ringCircumference = 2 * Math.PI * 24;
 
   return (
     <div className={`df2-theater-v3 ${isRunning ? "is-live" : ""} ${isFailed || isCancelled ? "is-failed" : ""} ${isComplete ? "is-done" : ""}`}>
@@ -652,12 +703,44 @@ export function JobTheaterView({
               {rejectedRows > 0 ? `${rejectedRows.toLocaleString()} quarantined (data-quality findings — separate from this load failure). ` : ""}
               {job.chunk_current != null
                 ? `Checkpoint at batch ${job.chunk_current}${job.chunk_total != null ? `/${job.chunk_total}` : ""}.`
-                : "Use Resume below if a checkpoint was saved."}
+                : processed > 0
+                  ? "Use Resume below if a checkpoint was saved."
+                  : "Re-run from Validate or start a new transfer — Resume needs a committed checkpoint."}
             </p>
             <div className="df2-theater-v3-alert-actions">
               {duplicateKeyFailure && onBackToMap && (
                 <button type="button" className="df2-btn df2-btn-primary" onClick={onBackToMap}>
                   <DtIcon name="layers" size={16} /> Open Map · set PK
+                </button>
+              )}
+              {breakerFailure && breakerContractId && (
+                <button
+                  type="button"
+                  className="df2-btn df2-btn-primary"
+                  disabled={resettingBreaker}
+                  onClick={() => {
+                    void (async () => {
+                      setResettingBreaker(true);
+                      try {
+                        await resetContractBreaker(breakerContractId);
+                        toast({
+                          title: "Breaker reset",
+                          message: "Re-run from Validate. The contract must still be SIGNED.",
+                          tone: "success",
+                        });
+                      } catch (e) {
+                        toast({
+                          title: "Could not reset breaker",
+                          message: (e as Error).message,
+                          tone: "error",
+                        });
+                      } finally {
+                        setResettingBreaker(false);
+                      }
+                    })();
+                  }}
+                >
+                  <DtIcon name="shield" size={16} /> {resettingBreaker ? "Resetting…" : "Reset breaker"}
                 </button>
               )}
               {!earlyFail
@@ -719,21 +802,37 @@ export function JobTheaterView({
         cursorKey={job.cdc_lease_cursor_key}
         onResume={onResume}
         resuming={resuming}
+        hideGap={Boolean(job.cdc_cursor_gap)}
       />
       {(job.cdc_plugin || job.watermark || job.cdc_delivery || job.sync_mode === "cdc") && job._id && (
         <CdcIncrementalSnapshotPanel jobId={job._id} enabled />
       )}
+      {callableNote && (
+        <div className="df2-vd-callable" role="status">
+          <DtIcon name="database" size={16} />
+          <div>
+            <strong>Callable extract — result-set snapshot</strong>
+            <p>{callableNote}</p>
+          </div>
+        </div>
+      )}
 
       {!earlyFail && (isComplete || isFailed || isCancelled || isQuarantine) && (
-        <JobTrustScoreCard
-          job={job}
-          onOpenQuarantine={rejectedRows > 0 ? () => {
-            document.getElementById("df2-theater-quarantine")?.scrollIntoView({ behavior: "smooth", block: "start" });
-          } : undefined}
-          onOpenValidate={duplicateKeyFailure ? undefined : onBackToValidate}
-          onOpenMap={duplicateKeyFailure ? undefined : onBackToMap}
-          onResume={duplicateKeyFailure ? undefined : onResume}
-        />
+        <>
+          <ConservationLedgerCard
+            job={job}
+            onOpenValidate={duplicateKeyFailure ? undefined : onBackToValidate}
+          />
+          <JobTrustScoreCard
+            job={job}
+            onOpenQuarantine={rejectedRows > 0 ? () => {
+              document.getElementById("df2-theater-quarantine")?.scrollIntoView({ behavior: "smooth", block: "start" });
+            } : undefined}
+            onOpenValidate={duplicateKeyFailure ? undefined : onBackToValidate}
+            onOpenMap={duplicateKeyFailure ? undefined : onBackToMap}
+            onResume={duplicateKeyFailure ? undefined : onResume}
+          />
+        </>
       )}
 
       {slowSnowflakeTip && (
@@ -742,7 +841,7 @@ export function JobTheaterView({
           <div>
             <strong>Low Snowflake throughput on this job</strong>
             <p>
-              ~{displayRps.toLocaleString()} rows/s with load method {loadMethod || "insert"}.
+              ~{displayRps.toLocaleString()} rows/s using {loadMethodLabel(loadMethod || "insert")}.
               Prefer COPY INTO / larger batches (warehouse stream path) after redeploy if you still see INSERT-only loads.
             </p>
           </div>
@@ -751,7 +850,7 @@ export function JobTheaterView({
 
       <div className={`df2-theater-v3-progress-block${reconciling ? " is-reconciling" : ""}`}>
         <div className="df2-theater-v3-progress-top">
-          <div className={`df2-theater-v3-ring ${isFailed ? "is-failed" : isComplete ? "is-done" : reconciling ? "is-reconcile" : ""}`} aria-hidden>
+          <div className={`df2-theater-v3-ring ${isFailed ? "is-failed" : isComplete ? "is-done" : reconciling ? "is-reconcile" : ""}${indeterminate && isRunning && !reconciling ? " is-indeterminate" : ""}`} aria-hidden>
             <svg viewBox="0 0 56 56">
               <circle cx="28" cy="28" r="24" className="track" />
               <circle
@@ -759,7 +858,8 @@ export function JobTheaterView({
                 cy="28"
                 r="24"
                 className="fill"
-                strokeDasharray={`${(progress / 100) * ringCircumference} ${ringCircumference}`}
+                pathLength={100}
+                strokeDasharray={ringDasharray(progress, { indeterminate: Boolean(indeterminate && isRunning && !reconciling) })}
                 transform="rotate(-90 28 28)"
               />
             </svg>
@@ -813,20 +913,39 @@ export function JobTheaterView({
           </div>
         </div>
         <div className="df2-theater-v3-bar-legend">
-          <span>{processed.toLocaleString()} rows</span>
+          <span
+            className={(isComplete || isQuarantine) ? destMetricToneClass(destMetric) : undefined}
+            title={isComplete || isQuarantine ? destMetric.title : writerMetric.title}
+          >
+            {isComplete || isQuarantine
+              ? destMetricCompact(destMetric)
+              : `${processed.toLocaleString()} written so far`}
+          </span>
           {total > 0 && <span>{total.toLocaleString()} total</span>}
           {reconciling && <span className="df2-theater-v3-bar-legend-note">99% reserved for reconcile proof</span>}
         </div>
       </div>
 
       <div className="df2-theater-v3-metrics">
-        <article className="df2-theater-v3-metric">
+        <article
+          className={`df2-theater-v3-metric${isComplete || isQuarantine ? ` ${destMetricToneClass(destMetric)}` : ""}`}
+          title={isComplete || isQuarantine ? destMetric.title : writerMetric.title}
+        >
           <DtIcon name="trend" size={16} />
           <div>
-            <strong>{processed.toLocaleString()}</strong>
-            <span>Rows moved</span>
+            <strong>{isComplete || isQuarantine ? destMetric.value : processed.toLocaleString()}</strong>
+            <span>{isComplete || isQuarantine ? destMetric.label : "Written so far"}</span>
           </div>
         </article>
+        {ackDisagrees && (isComplete || isQuarantine || isFailed) && (
+          <article className="df2-theater-v3-metric" title={writerMetric.title}>
+            <DtIcon name="alert" size={16} />
+            <div>
+              <strong>{writerMetric.value}</strong>
+              <span>{writerMetric.label}</span>
+            </div>
+          </article>
+        )}
         {total > 0 && (
           <article className="df2-theater-v3-metric">
             <DtIcon name="database" size={16} />
@@ -844,10 +963,13 @@ export function JobTheaterView({
           </div>
         </article>
         {loadMethod && (
-          <article className="df2-theater-v3-metric" title="Snowflake/warehouse load path for this job">
+          <article
+            className="df2-theater-v3-metric"
+            title={loadMethodDescription(loadMethod)}
+          >
             <DtIcon name="transfer" size={16} />
             <div>
-              <strong>{loadMethod}</strong>
+              <strong>{loadMethodLabel(loadMethod)}</strong>
               <span>Load method</span>
             </div>
           </article>
@@ -861,12 +983,12 @@ export function JobTheaterView({
             </div>
           </article>
         )}
-        {eta && (
-          <article className="df2-theater-v3-metric">
+        {(eta || etaDetail) && (
+          <article className="df2-theater-v3-metric" title={etaDetail || undefined}>
             <DtIcon name="gate" size={16} />
             <div>
-              <strong>{eta}</strong>
-              <span>ETA</span>
+              <strong>{eta ?? "—"}</strong>
+              <span>{eta ? "ETA (p50)" : "ETA unavailable"}</span>
             </div>
           </article>
         )}
@@ -894,11 +1016,38 @@ export function JobTheaterView({
           </article>
         )}
         {job.cdc_lag_seconds != null && Number.isFinite(Number(job.cdc_lag_seconds)) && (
-          <article className="df2-theater-v3-metric">
+          <article
+            className="df2-theater-v3-metric"
+            title={
+              job.cdc_lag_basis
+                ? `Proven lag basis: ${job.cdc_lag_basis} (heartbeat is liveness only)`
+                : "Proven CDC lag — heartbeat is liveness only, not catch-up"
+            }
+          >
             <DtIcon name="activity" size={16} />
             <div>
               <strong>{`${Number(job.cdc_lag_seconds).toFixed(1)}s`}</strong>
-              <span>CDC lag</span>
+              <span>
+                {job.cdc_lag_basis === "wal_bytes"
+                  ? "CDC lag (WAL catch-up)"
+                  : job.cdc_lag_basis === "commit_ts"
+                    ? "CDC lag (commit)"
+                    : "CDC lag"}
+              </span>
+            </div>
+          </article>
+        )}
+        {job.cdc_lag_seconds == null
+          && job.replication_lag_bytes != null
+          && Number(job.replication_lag_bytes) > 1_048_576 && (
+          <article
+            className="df2-theater-v3-metric"
+            title="Seconds lag unknown while WAL/binlog is behind — not claimed caught up"
+          >
+            <DtIcon name="alert" size={16} />
+            <div>
+              <strong>Unknown</strong>
+              <span>CDC lag (bytes behind)</span>
             </div>
           </article>
         )}
@@ -907,7 +1056,13 @@ export function JobTheaterView({
             <DtIcon name="database" size={16} />
             <div>
               <strong>{job.cdc_plugin || "CDC"}</strong>
-              <span>{job.cdc_delivery || "at-least-once"}{job.cdc_slot_name ? ` · ${job.cdc_slot_name}` : ""}</span>
+              <span>{cdcDeliveryResultCopy({
+                cdcDelivery: job.cdc_delivery,
+                exactlyOnceActive: Boolean(job.exactly_once_active),
+                destLsn: job.eos_committed_lsn,
+                fenceEpoch: job.eos_fence_epoch,
+                protocol: job.exactly_once_protocol,
+              })}{job.cdc_slot_name ? ` · ${job.cdc_slot_name}` : ""}</span>
             </div>
           </article>
         )}
@@ -949,12 +1104,136 @@ export function JobTheaterView({
             </div>
           </article>
         )}
+        {job.cdc_slot_active != null && (
+          <article
+            className="df2-theater-v3-metric"
+            title={
+              String(job.cdc_plugin || "").toLowerCase().includes("sqlserver")
+                ? "SQL Server CDC lease / capture catalog — inactive means another worker may hold the capture"
+                : "Live pg_replication_slots.active — false means no consumer is attached to this slot"
+            }
+          >
+            <DtIcon name={job.cdc_slot_active ? "check" : "alert"} size={16} />
+            <div>
+              <strong>{job.cdc_slot_active ? "Active" : "Inactive"}</strong>
+              <span>
+                {(() => {
+                  const p = String(job.cdc_plugin || "").toLowerCase();
+                  const catalog = p.includes("mysql") || p.includes("binlog")
+                    ? "Binlog"
+                    : p.includes("sqlserver") || p.includes("mssql")
+                      ? "Capture"
+                      : "Slot";
+                  if (job.cdc_wal_status) return `${catalog} · wal_status=${job.cdc_wal_status}`;
+                  return catalog === "Binlog"
+                    ? "Binlog catalog"
+                    : catalog === "Capture"
+                      ? "Capture catalog"
+                      : "Replication slot";
+                })()}
+              </span>
+            </div>
+          </article>
+        )}
         {job.cdc_confirmed_flush_lsn && (
-          <article className="df2-theater-v3-metric" title="Slot confirmed_flush_lsn — WAL older than this can be recycled">
+          <article
+            className="df2-theater-v3-metric"
+            title={
+              String(job.cdc_plugin || "").toLowerCase().includes("sqlserver")
+                ? "Consumer resume LSN — changes at/after this position are still unread or in flight"
+                : "Slot confirmed_flush_lsn — WAL older than this can be recycled"
+            }
+          >
             <DtIcon name="database" size={16} />
             <div>
               <strong className="df2-mono">{String(job.cdc_confirmed_flush_lsn)}</strong>
-              <span>Confirmed flush LSN</span>
+              <span>
+                {String(job.cdc_plugin || "").toLowerCase().includes("sqlserver")
+                  ? "Resume LSN"
+                  : "Confirmed flush LSN"}
+              </span>
+            </div>
+          </article>
+        )}
+        {(job.cdc_min_lsn || job.cdc_restart_lsn) && (
+          <article
+            className="df2-theater-v3-metric"
+            title={
+              job.cdc_min_lsn || String(job.cdc_plugin || "").toLowerCase().includes("sqlserver")
+                ? "Capture min_lsn — oldest change still retained; resume below this is a gap"
+                : "Slot restart_lsn — oldest WAL segment this slot still requires"
+            }
+          >
+            <DtIcon name="database" size={16} />
+            <div>
+              <strong className="df2-mono">
+                {String(job.cdc_min_lsn || job.cdc_restart_lsn)}
+              </strong>
+              <span>
+                {job.cdc_min_lsn || String(job.cdc_plugin || "").toLowerCase().includes("sqlserver")
+                  ? "Min LSN (retention)"
+                  : "Restart LSN"}
+              </span>
+            </div>
+          </article>
+        )}
+        {job.cdc_max_lsn && (
+          <article
+            className="df2-theater-v3-metric"
+            title="Capture max_lsn — highest LSN committed into CDC tables (scan progress)"
+          >
+            <DtIcon name="database" size={16} />
+            <div>
+              <strong className="df2-mono">{String(job.cdc_max_lsn)}</strong>
+              <span>
+                Capture max LSN
+                {job.cdc_max_lsn_time
+                  ? ` · ${String(job.cdc_max_lsn_time).replace("T", " ").slice(0, 19)}`
+                  : ""}
+              </span>
+            </div>
+          </article>
+        )}
+        {job.cdc_capture_stall && (
+          <article
+            className="df2-theater-v3-metric df2-theater-v3-metric-warn"
+            title={String(
+              job.cdc_capture_stall_reason
+                || "CDC capture agent stalled — reader at frozen max_lsn is not catch-up",
+            )}
+          >
+            <DtIcon name="alert" size={16} />
+            <div>
+              <strong>
+                {job.cdc_capture_latency_seconds != null
+                  ? `${Number(job.cdc_capture_latency_seconds).toFixed(0)}s latency`
+                  : "Stalled"}
+              </strong>
+              <span>Capture scan unhealthy</span>
+            </div>
+          </article>
+        )}
+        {job.cdc_capture_stall_unknown && !job.cdc_capture_stall && (
+          <article
+            className="df2-theater-v3-metric"
+            title={String(
+              job.cdc_capture_stall_reason
+                || "dm_cdc_log_scan_sessions unavailable — capture health unknown",
+            )}
+          >
+            <DtIcon name="alert" size={16} />
+            <div>
+              <strong>Unknown</strong>
+              <span>Capture scan health</span>
+            </div>
+          </article>
+        )}
+        {job.cdc_capture_instance && (
+          <article className="df2-theater-v3-metric" title="SQL Server CDC capture instance">
+            <DtIcon name="database" size={16} />
+            <div>
+              <strong className="df2-mono">{String(job.cdc_capture_instance)}</strong>
+              <span>Capture instance</span>
             </div>
           </article>
         )}
@@ -1095,7 +1374,7 @@ export function JobTheaterView({
             <div key={stream.name} className="df2-theater-v3-stream">
               <strong>{stream.name}</strong>
               <span>{stream.status || "—"}</span>
-              <span>{(stream.records_processed ?? 0).toLocaleString()} rows</span>
+              <span>{(stream.records_processed ?? 0).toLocaleString()} events</span>
               {stream.cdc_lag_seconds != null && (
                 <span>{Number(stream.cdc_lag_seconds).toFixed(1)}s lag</span>
               )}
@@ -1116,10 +1395,21 @@ export function JobTheaterView({
             <span className="df2-theater-cdc-chip is-ok">Shared log reader · one slot / server_id</span>
           )}
           {job.snapshot_mode && (
-            <span className="df2-theater-cdc-chip">Snapshot · {job.snapshot_mode}</span>
+            <span className="df2-theater-cdc-chip">
+              Snapshot · {job.snapshot_mode}
+              {job.snapshot_plan?.lost_window ? " · lost window (not continuous CDC)" : ""}
+            </span>
           )}
           {job.cdc_delivery && (
-            <span className="df2-theater-cdc-chip">{job.cdc_delivery} delivery</span>
+            <span className="df2-theater-cdc-chip">
+              {cdcDeliveryResultCopy({
+                cdcDelivery: job.cdc_delivery,
+                exactlyOnceActive: Boolean(job.exactly_once_active),
+                destLsn: job.eos_committed_lsn,
+                fenceEpoch: job.eos_fence_epoch,
+                protocol: job.exactly_once_protocol,
+              })}
+            </span>
           )}
           {job.cdc_row_filter && (
             <span className="df2-theater-cdc-chip" title="SQL Server CDC row_filter_option">
@@ -1189,20 +1479,39 @@ export function JobTheaterView({
         <article className="df2-theater-v3-sla-card">
           <span>Checksum evidence</span>
           <strong>
-            {job.reconciliation?.target_checksum
-              ? String(job.reconciliation.target_checksum).slice(0, 12)
-              : checksum
-                ? checksum.slice(0, 12)
-                : "Pending"}
+            {(() => {
+              const recon = job.reconciliation;
+              if (recon && (isGate8AppendDelta(recon) || isGate8KeyedBatch(recon))) {
+                const id = gate8AppendIdentity(recon);
+                if (id.destBefore != null && id.written != null) {
+                  return `${id.destBefore.toLocaleString()} → ${id.destAfter.toLocaleString()}`;
+                }
+              }
+              if (job.reconciliation?.target_checksum) {
+                return String(job.reconciliation.target_checksum).slice(0, 12);
+              }
+              return checksum ? checksum.slice(0, 12) : "Pending";
+            })()}
           </strong>
           <small>
-            {job.reconciliation?.source_checksum && job.reconciliation?.target_checksum
-              ? (job.reconciliation.source_checksum === job.reconciliation.target_checksum
-                ? "Gate-8 source ↔ dest match"
-                : "Gate-8 checksum mismatch")
-              : checksum
-                ? "Writer checksum captured"
-                : "Captured on completion"}
+            {(() => {
+              const recon = job.reconciliation;
+              if (recon && isGate8KeyedBatch(recon) && recon.passed) {
+                return "This run’s keys verified — extra dest rows outside proof";
+              }
+              if (recon && isGate8AppendDelta(recon)) {
+                const id = gate8AppendIdentity(recon);
+                return id.deltaOk
+                  ? "Append delta verified — whole-table digests not comparable"
+                  : "Whole-table digests not comparable (append delta)";
+              }
+              if (recon?.source_checksum && recon?.target_checksum) {
+                return recon.source_checksum === recon.target_checksum
+                  ? "Gate-8 source ↔ dest match"
+                  : "Gate-8 checksum mismatch";
+              }
+              return checksum ? "Writer checksum captured" : "Captured on completion";
+            })()}
           </small>
         </article>
       </div>
@@ -1339,7 +1648,7 @@ export function JobTheaterView({
           <DtIcon name="check" size={18} />
           <div>
             <strong>Success</strong>
-            <p>{job.message || `${processed.toLocaleString()} rows transferred successfully`}</p>
+            <p>{conservationCompleteCopy(job)}</p>
             {droppedRows === 0 && coercedNullRows === 0 && (
               <p className="df2-theater-v3-alert-note">
                 No write-time quarantine — every sampled cell fit after Validate remediations
@@ -1355,11 +1664,7 @@ export function JobTheaterView({
           <DtIcon name="alert" size={18} />
           <div>
             <strong>Completed with quarantine — not full fidelity</strong>
-            <p>
-              {processed.toLocaleString()} rows landed
-              {droppedRows > 0 ? `, ${droppedRows.toLocaleString()} held out in quarantine` : ""}
-              {coercedNullRows > 0 ? `, ${coercedNullRows.toLocaleString()} value(s) coerced to NULL` : ""}. Review the details below.
-            </p>
+            <p>{conservationCompleteCopy(job, { quarantine: true })} Review the details below.</p>
           </div>
         </div>
       )}

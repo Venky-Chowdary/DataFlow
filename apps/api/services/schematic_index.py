@@ -8,12 +8,19 @@ Used by the semantic mapper for O(1) abbreviation / alias resolution.
 from __future__ import annotations
 
 import logging
-import pickle  # nosec B403
+import pickle  # nosec B403 - dump only; reads go through safe_pickle
 import re
 from functools import lru_cache
 from pathlib import Path
 
-_CACHE_PATH = Path(__file__).resolve().parents[1] / "data" / "schematic_index.cache.pkl"
+# Bump when synonym / identity-kind rules change so stale pickles cannot
+# keep over-collapsed pairs (user_id→customer_id, sku→product_id).
+_CACHE_VERSION = 3
+_CACHE_PATH = (
+    Path(__file__).resolve().parents[1]
+    / "data"
+    / f"schematic_index.v{_CACHE_VERSION}.cache.pkl"
+)
 
 # Enterprise data-warehouse prefixes/suffixes seen in real schemas
 _PREFIXES = (
@@ -54,8 +61,10 @@ def _build_index() -> dict[str, str]:
     """Build inverted index variant → canonical. Target ~1M entries."""
     if _CACHE_PATH.exists():
         try:
-            with open(_CACHE_PATH, "rb") as f:
-                cached = pickle.load(f)  # nosec B301
+            from services.safe_pickle import load_restricted
+
+            # Pure str→str dict cache — no class may be resolved out of it.
+            cached = load_restricted(_CACHE_PATH, allowed_modules=frozenset())
             if isinstance(cached, dict) and len(cached) > 10_000:
                 return cached
         except Exception as exc:
@@ -148,6 +157,12 @@ _DOMAIN_LEAVES = frozenset({
     "address", "email", "phone", "time", "uuid", "hash", "index", "seq",
     "amt", "num", "nbr", "no", "cd", "dt", "ts",
 })
+# Identity-kind leaves are not interchangeable. Synonym retrieval lists
+# ``key`` / ``pk`` / ``uuid`` under canonical ``id``, which would otherwise
+# boost ``customer_id`` onto warehouse ``customer_key`` at 0.97.
+IDENTITY_KIND_LEAVES = frozenset({
+    "id", "key", "pk", "code", "uuid", "guid", "oid", "sku",
+})
 # Back-compat alias used by older call sites.
 _GENERIC_LEAVES = _DOMAIN_LEAVES | _ENTITY_STOPWORDS
 
@@ -171,6 +186,25 @@ def _qualifier_stems_overlap(a: set[str], b: set[str]) -> bool:
             if len(x) >= 3 and len(y) >= 3 and (x.startswith(y) or y.startswith(x)):
                 return True
     return False
+
+
+def _qualifiers_synonymous(src_q: set[str], tgt_q: set[str]) -> bool:
+    """True when two qualifier sets name the same thing in different words.
+
+    Compared by canonical form rather than surface token. A synonym pair differs
+    in spelling by definition — ``salary`` against ``compensation`` shares no
+    characters — so a raw token comparison calls every genuine synonym a
+    conflicting entity, which is the opposite of what the dictionary is for.
+    Qualifiers with no canonical entry fall back to their own surface, so
+    ``billing`` against ``shipping`` still conflicts.
+    """
+    if not src_q and not tgt_q:
+        return True
+    if not src_q or not tgt_q:
+        return False
+    left = {lookup_schematic(q) or q for q in src_q}
+    right = {lookup_schematic(q) or q for q in tgt_q}
+    return left == right
 
 
 def qualifiers_compatible(source: str, target: str) -> bool:
@@ -205,8 +239,24 @@ def schematic_match_boost(source: str, target: str) -> float | None:
         src_tokens = (src_tokens - {"amt"}) | {"amount"}
     if "amt" in tgt_tokens:
         tgt_tokens = (tgt_tokens - {"amt"}) | {"amount"}
+    src_id = src_tokens & IDENTITY_KIND_LEAVES
+    tgt_id = tgt_tokens & IDENTITY_KIND_LEAVES
+    if src_id and tgt_id and src_id != tgt_id:
+        # Surface ``id`` vs ``key`` is not proven identity, even when the
+        # million-variant index collapsed both onto canonical ``id``.
+        return None
     src_q = _entity_qualifiers(src_tokens)
     tgt_q = _entity_qualifiers(tgt_tokens)
+    # Distinct entities (user ≠ customer, client ≠ customer) must not inherit
+    # a 0.95 boost just because the synonym dictionary over-collapsed them.
+    if (
+        src_q
+        and tgt_q
+        and src_q.isdisjoint(tgt_q)
+        and not _qualifier_stems_overlap(src_q, tgt_q)
+        and not _qualifiers_synonymous(src_q, tgt_q)
+    ):
+        return None
 
     src_canon = lookup_schematic(source)
     tgt_canon = lookup_schematic(target)
@@ -220,10 +270,19 @@ def schematic_match_boost(source: str, target: str) -> float | None:
             return 0.76
         return 0.99 if not src_q else 0.95
 
+    # Same canonical form and qualifiers that mean the same thing: one concept,
+    # two spellings. Checked before the disjoint-token veto below, which would
+    # otherwise reject every synonym pair — differing surface tokens are what
+    # makes them synonyms, so the veto read ``salary`` against ``compensation``
+    # as a conflict between two entities and refused to map them at all.
+    same_canonical = bool(src_canon and tgt_canon and src_canon == tgt_canon)
+    if same_canonical and _qualifiers_synonymous(src_q, tgt_q):
+        return 0.97
+
     if src_q and tgt_q and src_q.isdisjoint(tgt_q):
         return None
 
-    if src_canon and tgt_canon and src_canon == tgt_canon:
+    if same_canonical:
         if not src_q and tgt_q:
             return None
         if src_q and tgt_is_bare_leaf:

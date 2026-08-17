@@ -51,6 +51,12 @@ jobs:
         run: |
           python -m pytest tests/test_evidence_pack.py -q --tb=short
 
+      - name: God-module size budgets (Phase F8)
+        working-directory: apps/api
+        run: |
+          python scripts/check_module_size_budgets.py
+          python scripts/connector_capability_matrix_report.py
+
       - name: Upload evidence artifacts
         if: always()
         uses: actions/upload-artifact@v4
@@ -61,6 +67,133 @@ jobs:
             apps/api/data/proofs/EVIDENCE_CATALOG.md
             apps/api/data/proofs/abbreviation_coverage.json
             apps/api/data/proofs/mapping_connector_pair_matrix/
+            apps/api/data/proofs/module_size_budgets.json
+            apps/api/data/proofs/connector_capability_matrix.json
+
+  # AI ITEM 1 — full Map/LLM suite with no network and no API keys.
+  # Proves offline claim: LLM cannot change mapping decisions / checksums.
+  ai-offline-correctness:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install API deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r apps/api/requirements.txt
+
+      - name: Offline LLM-off correctness (ITEM 1)
+        working-directory: apps/api
+        env:
+          PYTHONPATH: .
+          DATAFLOW_JOB_STORE: memory
+          DATAFLOW_DISABLE_OBJECT_STORE: "1"
+          # Empty keys + unreachable Ollama — no network LLM. Policy-off is
+          # asserted inside test_offline_env_forces_llm_policy_off; mock tests
+          # patch is_llm_enabled when they need the suggest path.
+          OPENAI_API_KEY: ""
+          ANTHROPIC_API_KEY: ""
+          OLLAMA_HOST: "http://127.0.0.1:9"
+        run: |
+          python -m pytest \
+            tests/test_item1_llm_never_correctness_path.py \
+            tests/test_llm_mapping.py \
+            -q --tb=short
+
+  # Property 2 — no-config transfer must never be blocked by additive/DDL gates.
+  # Services make the full golden matrix (PG/MySQL/Mongo) runnable with zero skips.
+  no-config-transfer:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: public.ecr.aws/docker/library/postgres:16
+        env:
+          POSTGRES_USER: dataflow
+          POSTGRES_PASSWORD: dataflow
+          POSTGRES_DB: dataflow
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd="pg_isready -U dataflow -d dataflow"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=10
+      mysql:
+        image: public.ecr.aws/docker/library/mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: dataflow
+          MYSQL_DATABASE: dataflow
+          MYSQL_USER: dataflow
+          MYSQL_PASSWORD: dataflow
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h 127.0.0.1 -u root -pdataflow"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=10
+      mongo:
+        image: public.ecr.aws/docker/library/mongo:7
+        ports:
+          - 27017:27017
+        # Without a healthcheck the step can start before mongod accepts
+        # connections; the Mongo routes then skip, and the no-skip guard fails
+        # the job for an image that was configured correctly.
+        options: >-
+          --health-cmd="mongosh --quiet --eval 'db.adminCommand({ping:1}).ok'"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install API deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r apps/api/requirements.txt
+
+      - name: Golden-path no-config transfer (Property 2)
+        working-directory: apps/api
+        env:
+          PYTHONPATH: .
+          DATAFLOW_JOB_STORE: memory
+          DATAFLOW_DISABLE_OBJECT_STORE: "1"
+          P2_PG_HOST: 127.0.0.1
+          P2_PG_PORT: "5432"
+          P2_PG_DB: dataflow
+          P2_PG_USER: dataflow
+          P2_PG_PASSWORD: dataflow
+          P2_MYSQL_HOST: 127.0.0.1
+          P2_MYSQL_PORT: "3306"
+          P2_MYSQL_DB: dataflow
+          P2_MYSQL_USER: dataflow
+          P2_MYSQL_PASSWORD: dataflow
+          P2_MONGO_URI: mongodb://127.0.0.1:27017
+        run: |
+          # Fail the job if any golden-path test is skipped (services must be up).
+          out="$(mktemp)"
+          set +e
+          python -m pytest tests/test_property2_golden_path_never_blocked.py -q --tb=short | tee "$out"
+          rc=${PIPESTATUS[0]}
+          set -e
+          if grep -Eq '[1-9][0-9]* skipped' "$out"; then
+            echo "Property 2 golden path must not skip when CI services are present" >&2
+            cat "$out" >&2
+            exit 1
+          fi
+          exit "$rc"
 
   # Fast GitOps gate — no databases. Validates example manifest + CLI plan/apply proofs.
   gitops:
@@ -150,6 +283,14 @@ jobs:
         image: public.ecr.aws/docker/library/mongo:7
         ports:
           - 27017:27017
+        # Without a healthcheck the step can start before mongod accepts
+        # connections; the Mongo routes then skip, and the no-skip guard fails
+        # the job for an image that was configured correctly.
+        options: >-
+          --health-cmd="mongosh --quiet --eval 'db.adminCommand({ping:1}).ok'"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
       # MySQL 8 enables ROW-based binlog by default, so MySQL matrix + binlog
       # CDC tests run here instead of silently skipping.
       mysql:
@@ -279,6 +420,7 @@ jobs:
           PY
 
       - name: Run tests
+        id: api_tests
         run: npm run test
         env:
           DATAFLOW_JOB_STORE: memory
@@ -292,7 +434,11 @@ jobs:
           PGPASSWORD: dataflow
           PGDATABASE: dataflow
 
+      # Phase B9 — proof steps MUST run even when Run tests fails (audit §3.2).
+      # Never silently omit CDC / warehouse evidence from the CI record.
       - name: CDC matrix report
+        id: cdc_matrix
+        if: ${{ !cancelled() && (success() || failure()) }}
         run: npm run test:cdc
         env:
           DATAFLOW_JOB_STORE: memory
@@ -311,31 +457,120 @@ jobs:
           DATAFLOW_CDC_LEASE_REDIS_URL: redis://127.0.0.1:6379/15
 
       - name: Warehouse SKU proof report
+        id: warehouse_sku
+        if: ${{ !cancelled() && (success() || failure()) }}
         # Always-on Snowflake (fakesnow) + BigQuery (goccy emulator) proof.
         # SaaS reverse-ETL destinations (Salesforce/HubSpot) skip without creds.
         working-directory: apps/api
         run: |
-          python -m pytest \
-            tests/test_production_sku_matrix.py \
-            tests/test_execute_tracked_csv_to_bigquery.py \
-            tests/test_execute_tracked_csv_to_bigquery_upsert.py \
-            tests/test_execute_tracked_csv_to_snowflake_upsert.py \
-            -k "snowflake or bigquery" \
-            -q --tb=short --durations=0 \
-            | tee warehouse_sku_report.txt
-          passed=$(grep -oP '^\d+(?= passed)' warehouse_sku_report.txt | head -1 || echo "0")
-          skipped=$(grep -oP '^\d+(?= skipped)' warehouse_sku_report.txt | head -1 || echo "0")
+          set +e
+          python scripts/warehouse_sku_report.py
+          code=$?
           echo "### Warehouse SKU proof" >> "$GITHUB_STEP_SUMMARY"
-          echo "- ${passed:-0} passed, ${skipped:-0} skipped (Snowflake via fakesnow, BigQuery via emulator)" >> "$GITHUB_STEP_SUMMARY"
-          echo "- SaaS reverse-ETL endpoints (Salesforce/HubSpot) skipped when credentials are absent" >> "$GITHUB_STEP_SUMMARY"
+          if [ -f data/proofs/warehouse_sku_report.json ]; then
+            python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          from pathlib import Path
+          p = Path("data/proofs/warehouse_sku_report.json")
+          d = json.loads(p.read_text(encoding="utf-8"))
+          print(f"- **{'PASS' if d.get('exit_code') == 0 else 'FAIL'}** — {d.get('passed', 0)} passed, {d.get('failed', 0)} failed, {d.get('skipped', 0)} skipped")
+          for reason in d.get("skip_reasons") or []:
+              print(f"- skip: {reason}")
+          print("- Artifact: `apps/api/data/proofs/warehouse_sku_report.json`")
+          PY
+          else
+            echo "- **NO ARTIFACT** — warehouse_sku_report.py did not write proof JSON" >> "$GITHUB_STEP_SUMMARY"
+            code=1
+          fi
+          exit $code
         env:
           DATAFLOW_JOB_STORE: memory
           DATAFLOW_DISABLE_OBJECT_STORE: "1"
           DATAFLOW_PII_HASH_KEY: test-pii-key
           DATAFLOW_ALLOW_STUB_WRITES: "1"
+          DATAFLOW_FAKESNOW_KEEP_PATCH: "1"
+
+      - name: TRANSFER_READY certification matrix
+        id: transfer_ready_matrix
+        if: ${{ !cancelled() && (success() || failure()) }}
+        # Phase E2 — publish PRODUCTION_SKU × unique_drivers honesty artifact.
+        working-directory: apps/api
+        run: |
+          python scripts/transfer_ready_matrix_report.py
+          echo "### TRANSFER_READY matrix" >> "$GITHUB_STEP_SUMMARY"
+          python - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json
+          from pathlib import Path
+          p = Path("data/proofs/transfer_ready_matrix.json")
+          d = json.loads(p.read_text(encoding="utf-8"))
+          print(f"- unique_drivers: {d.get('unique_driver_count')}")
+          print(f"- PRODUCTION_SKU routes: {d.get('production_sku_route_count')}")
+          print("- Artifact: `apps/api/data/proofs/transfer_ready_matrix.json`")
+          PY
+
+      - name: Upload migration proof artifacts
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: migration-proof-ci
+          if-no-files-found: warn
+          path: |
+            apps/api/data/proofs/cdc_matrix_report.json
+            apps/api/data/proofs/warehouse_sku_report.json
+            apps/api/data/proofs/transfer_ready_matrix.json
+
+      - name: Frontend unit contracts
+        id: frontend_tests
+        if: ${{ !cancelled() && (success() || failure()) }}
+        run: npm run test:web
 
       - name: Build web
+        id: web_build
+        if: ${{ !cancelled() && (success() || failure()) }}
         run: npm run build
+
+      - name: Frontend chunk budgets (Phase F9)
+        id: chunk_budgets
+        if: ${{ !cancelled() && steps.web_build.outcome == 'success' }}
+        working-directory: apps/web
+        run: node scripts/check_chunk_budgets.mjs
+
+      # Surface which gate failed when earlier steps failed but proofs still ran.
+      - name: Fail job if api tests or proof gates failed
+        if: ${{ always() && !cancelled() }}
+        run: |
+          api="${{ steps.api_tests.outcome }}"
+          cdc="${{ steps.cdc_matrix.outcome }}"
+          wh="${{ steps.warehouse_sku.outcome }}"
+          trm="${{ steps.transfer_ready_matrix.outcome }}"
+          fe="${{ steps.frontend_tests.outcome }}"
+          web="${{ steps.web_build.outcome }}"
+          # A budget that cannot fail the job is not a budget: chunk_budgets ran
+          # but its outcome was never read, so an oversized bundle merged green.
+          chunks="${{ steps.chunk_budgets.outcome }}"
+          echo "api_tests=$api cdc_matrix=$cdc warehouse_sku=$wh transfer_ready_matrix=$trm frontend=$fe web_build=$web chunk_budgets=$chunks"
+          fail=0
+          for name_out in "api_tests:$api" "cdc_matrix:$cdc" "warehouse_sku:$wh" "transfer_ready_matrix:$trm" "frontend_tests:$fe" "web_build:$web" "chunk_budgets:$chunks"; do
+            name="${name_out%%:*}"
+            out="${name_out##*:}"
+            # skipped only acceptable when job cancelled mid-flight; otherwise require success
+            if [ "$out" != "success" ]; then
+              fail=1
+            fi
+          done
+          echo "### Merge gate (B9)" >> "$GITHUB_STEP_SUMMARY"
+          echo "- api_tests: \`$api\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- cdc_matrix: \`$cdc\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- warehouse_sku: \`$wh\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- transfer_ready_matrix: \`$trm\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- frontend_tests: \`$fe\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- web_build: \`$web\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- chunk_budgets: \`$chunks\`" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$fail" -ne 0 ]; then
+            echo "Red CI blocks merge — fix failing gates before claiming production readiness." >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          echo "- All required gates green (api + CDC + warehouse SKU + TRANSFER_READY matrix + frontend + web build + chunk budgets)." >> "$GITHUB_STEP_SUMMARY"
 
   # Separate job: SQL Server image is large/slow; keep main CI lean.
   cdc-sqlserver:
@@ -583,8 +818,31 @@ jobs:
 
       - name: Install audit tools and default API deps
         run: |
-          python -m pip install --upgrade pip pip-audit bandit
+          python -m pip install --upgrade pip pip-audit bandit ruff mypy
           python -m pip install -r apps/api/requirements.txt
+
+      - name: Ruff baseline (Phase B8 allowlist)
+        # Start narrow — BLE001/S110/DTZ001/F401 on Decision Kernel + Phase A/B paths.
+        # Expand allowlist as modules are cleaned; full tree is not yet green.
+        working-directory: apps/api
+        run: >
+          ruff check
+          --config ruff.toml
+          services/decision_kernel
+          services/auth_rate_limit.py
+          services/auto_create_lifecycle.py
+          src/services/auth_service.py
+          connectors/elasticsearch_writer.py
+          connectors/sqlite_writer.py
+
+      - name: Mypy Decision Kernel (Phase B8)
+        # Strict on services.decision_kernel; type_system follows as a skip-import smoke.
+        working-directory: apps/api
+        run: |
+          # One invocation: with --follow-imports=skip, anything not named here
+          # resolves to Any, so checking type_system apart from the modules it
+          # delegates to left every invent path unchecked in both directions.
+          python -m mypy --config-file mypy.ini --follow-imports=skip services/decision_kernel services/type_system.py services/type_ddl_specialty.py
 
       - name: Assert optional RAG deps are not in default install
         run: |
@@ -604,7 +862,9 @@ jobs:
       - name: bandit high-severity gate (production code)
         # Fail on High only — Medium SQL f-string debt is tracked separately;
         # key identifier paths are hardened via connectors/sql_identifiers.py.
+        # Posture + false-positive catalogue: docs/SECURITY_SCANNING.md
         run: >
-          bandit -r apps/api/connectors apps/api/services apps/api/src
+          bandit -c bandit.yaml
+          -r apps/api/connectors apps/api/services apps/api/src
           -lll
           -q

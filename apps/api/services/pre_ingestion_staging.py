@@ -127,20 +127,25 @@ def write_via_pre_ingestion_staging(
     #    the rows the operator needs to diagnose. The original cell value is still
     #    preserved in rejected_details for DLQ and replay.
     _drop_table(stage_ep)
-    staged_n, stage_ddl, stage_summary = write_destination_database(
-        stage_ep,
-        records,
-        columns,
-        schema,
-        mappings,
-        on_checkpoint=on_checkpoint,
-        validation_mode="balanced",
-        backfill_new_fields=backfill_new_fields,
-        write_mode="insert",
-        conflict_columns=None,
-        job_id=f"{job_id}_stg" if job_id else None,
-        error_policy="coerce_null",
-    )
+    # Staging diagnose may coerce_null so the landing table retains every row;
+    # primary promote still uses validation_mode policy (never invent silent NULL).
+    from connectors.writer_common import allow_job_coerce_null_writes
+
+    with allow_job_coerce_null_writes(True):
+        staged_n, stage_ddl, stage_summary = write_destination_database(
+            stage_ep,
+            records,
+            columns,
+            schema,
+            mappings,
+            on_checkpoint=on_checkpoint,
+            validation_mode="balanced",
+            backfill_new_fields=backfill_new_fields,
+            write_mode="insert",
+            conflict_columns=None,
+            job_id=f"{job_id}_stg" if job_id else None,
+            error_policy="coerce_null",
+        )
     ddl_log.extend(list(stage_ddl or [])[:50])
     ddl_log.append(f"PRE-INGESTION STAGE: {staged_n} row(s) → {stage_ep.table}")
 
@@ -183,7 +188,7 @@ def write_via_pre_ingestion_staging(
             "promoted_rows": 0,
             "rejected_rows": len(rejected_row_nums),
             "coerced_null_rows": 0,
-            "rejected_details": rejected_details[:2000],
+            "rejected_details": list(rejected_details),
             "warnings": list(stage_summary.get("warnings") or [])[:10],
         }
         ddl_log.append(
@@ -210,7 +215,7 @@ def write_via_pre_ingestion_staging(
             "promoted_rows": 0,
             "rejected_rows": len(rejected_row_nums),
             "coerced_null_rows": 0,
-            "rejected_details": rejected_details[:2000],
+            "rejected_details": list(rejected_details),
             "warnings": list(stage_summary.get("warnings") or [])[:10],
         }
         ddl_log.append("PRE-INGESTION PROMOTE: 0 clean rows (all quarantined)")
@@ -244,8 +249,12 @@ def write_via_pre_ingestion_staging(
     summary["staged_rows"] = int(staged_n or 0)
     summary["promoted_rows"] = int(promoted_n or 0)
     summary["rejected_rows"] = len(rejected_row_nums)
+    # Gate-8 population = rows offered to staging, not the already-filtered
+    # promote batch. Using promote source_row_count double-subtracts rejects.
+    summary["source_row_count"] = int(staged_n or 0)
     summary["coerced_null_rows"] = 0
-    summary["rejected_details"] = rejected_details[:2000]
+    summary["rejected_details"] = list(rejected_details)
+    summary["rejected_details_sample"] = list(rejected_details)[:200]
     if stage_summary.get("warnings"):
         summary["warnings"] = list(stage_summary.get("warnings") or [])[:10]
     return int(promoted_n or 0), ddl_log, summary

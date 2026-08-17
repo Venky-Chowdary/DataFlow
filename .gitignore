@@ -30,3 +30,16 @@ apps/api/test
 .devin-files/
 apps/web/tsconfig.tsbuildinfo
 apps/api/data/proofs/
+*.env
+credentials.json
+*.pem
+*.key
+.credentials
+
+# Vendor agent scaffolding (Emergent): pod-local cron, job markers, scratch
+# reports and working-memory notes. None of it is product, and the cron file
+# points at an external webhook host, so it must not ride in a release branch.
+.emergent/
+test_reports/
+memory/
+/.gitconfig

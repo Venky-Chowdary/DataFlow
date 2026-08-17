@@ -6,9 +6,13 @@ Two paths:
    REST / Glue / SQL / Nessie): uses ``pyiceberg`` to read/write real Iceberg
    tables. Supports append, overwrite, and MERGE/upsert via ``Table.upsert``.
 
-2. Legacy filesystem CoW mode (bare local path, no catalog): keeps the original
-   V2 metadata-file writer for backwards compatibility and environments without
-   ``pyiceberg``.
+2. Filesystem mode (bare local path, no catalog): V2 metadata-file writer.
+   Overwrite/replace stay copy-on-write. Upserts write Iceberg v2
+   equality-delete files for updated keys plus a new data file at the
+   same snapshot sequence (spec: equality deletes apply only when
+   ``data_seq < delete_seq``, so the new image survives). CDC and
+   leftover-MERGE deletes write equality-delete files. Dest-engine
+   COUNT / leftover listing apply the same MoR kernel.
 """
 
 from __future__ import annotations
@@ -20,7 +24,7 @@ import re
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
 from services.value_serializer import json_default
 
@@ -29,6 +33,8 @@ from connectors.writer_common import (
     _rejected_row_count,
     apply_write_quarantine_matrix,
     build_mapped_rows_with_details,
+    reject_on_strict_policy,
+    resolve_conflict_targets,
     resolve_target_columns,
     transform_error_policy,
 )
@@ -49,6 +55,33 @@ def _pyiceberg_available() -> bool:
         return False
 
 
+def _iceberg_effective_write_mode(
+    write_mode: str,
+    *,
+    sync_mode: str = "",
+    file_batch_idx: int = 0,
+) -> str:
+    """Overwrite sync replaces the snapshot once; later chunks append.
+
+    Iceberg ``drop_table`` is unsupported, so full-refresh overwrite cannot
+    clear dest via table_manager. Insert/append of S onto D would duplicate
+    keys and leftover MERGE would refuse (unique PK ≠ COUNT). First chunk
+    of overwrite sync is snapshot replace — leftover MERGE then sees dest=S.
+    """
+    from services.sync_cursor import is_overwrite_sync
+
+    mode = (write_mode or "append").lower()
+    upsert_modes = {"upsert", "merge", "cdc", "incremental_deduped"}
+    idx = int(file_batch_idx or 0)
+    if is_overwrite_sync(sync_mode) and mode not in upsert_modes:
+        if idx in (0, 1):
+            return "overwrite" if mode in {"insert", "append", ""} else mode
+        return "append"
+    if mode in {"overwrite", "replace"} and idx > 1:
+        return "append"
+    return mode
+
+
 def _warehouse_root(host: str, database: str, connection_string: str) -> Path:
     raw = (connection_string or database or host or "").strip()
     if raw.startswith("file://"):
@@ -65,14 +98,19 @@ def _logical_to_iceberg_type(logical: str) -> str:
     CREATE cannot leave bare ``DECIMAL`` (quarantine no-op) or pass through
     ``DECIMAL(40,10)`` that Arrow would silently clamp.
     """
-    from services.type_system import (
-        LOGICAL_DECIMAL,
-        ddl_type,
-        materialize_dest_ddl,
-        normalize_logical_type,
-    )
+    from services.decision_kernel import ddl_type, materialize_dest_ddl, normalize_logical_type
+    from services.type_system import LOGICAL_DECIMAL
 
     raw = (logical or "string").strip()
+    norm = normalize_logical_type(raw)
+    # Bare logical vocabulary → DDL_TYPES SSOT (harness: writer ≡ ddl_type).
+    if (
+        "(" not in raw
+        and "<" not in raw
+        and "[" not in raw
+        and raw.strip().lower() == norm
+    ):
+        return ddl_type("iceberg", raw)
     # Nested ARRAY/LIST/T[] stamps go through materialize so list<float> spelling
     # and float leaves stay authoritative (no dual ddl_type invent path).
     stamped = materialize_dest_ddl("iceberg", raw)
@@ -81,9 +119,7 @@ def _logical_to_iceberg_type(logical: str) -> str:
     if bare in {"REAL", "FLOAT4", "FLOAT32", "HALF", "FLOAT16", "FLOAT"}:
         return "float"
     # Map≡CREATE decimal honesty: bare → decimal(38,10); oversize → string.
-    if normalize_logical_type(raw) == LOGICAL_DECIMAL or normalize_logical_type(
-        stamped
-    ) == LOGICAL_DECIMAL:
+    if norm == LOGICAL_DECIMAL or normalize_logical_type(stamped) == LOGICAL_DECIMAL:
         return ddl_type("iceberg", raw)
     return stamped
 
@@ -95,7 +131,8 @@ def _ensure_iceberg_decimal_carrier(type_str: str) -> str:
     ``(p,s)``. Over Iceberg max precision → ``string`` (fail-closed) — never
     leave a bare or oversize stamp that Arrow would invent/clamp.
     """
-    from services.type_system import LOGICAL_DECIMAL, ddl_type, normalize_logical_type
+    from services.decision_kernel import ddl_type, normalize_logical_type
+    from services.type_system import LOGICAL_DECIMAL
 
     raw = (type_str or "string").strip()
     if normalize_logical_type(raw) != LOGICAL_DECIMAL:
@@ -153,6 +190,13 @@ def _decimal_target_types_for_iceberg_write(
             if pa_mod.types.is_time(ftype):
                 out.append("TIME")
                 continue
+            if pa_mod.types.is_floating(ftype):
+                # Map VARCHAR + physical float — empty must quarantine before Arrow.
+                if pa_mod.types.is_float64(ftype):
+                    out.append("DOUBLE")
+                else:
+                    out.append("FLOAT")
+                continue
             if pa_mod.types.is_binary(ftype) or pa_mod.types.is_large_binary(ftype):
                 out.append("BINARY")
                 continue
@@ -165,12 +209,8 @@ def _decimal_target_types_for_iceberg_write(
         if not raw:
             raw = str(dest_types.get(col) or "string")
         # Preserve fixed(L) / BINARY(n) from mapped create-new carriers.
-        from services.type_system import (
-            LOGICAL_BINARY,
-            ddl_type,
-            normalize_logical_type,
-            parse_binary_carrier_width,
-        )
+        from services.decision_kernel import ddl_type, normalize_logical_type
+        from services.type_system import LOGICAL_BINARY, parse_binary_carrier_width
 
         if normalize_logical_type(raw) == LOGICAL_BINARY:
             width = parse_binary_carrier_width(raw)
@@ -204,9 +244,15 @@ def _apply_iceberg_write_quarantine(
 
 
 def _iceberg_type_to_logical_carrier(iceberg_type: Any) -> str:
-    """Map committed Iceberg field type back to a logical carrier for Parquet writes."""
+    """Map committed Iceberg field type back to a logical carrier for Parquet writes.
+
+    Empty / missing types return ``""`` — never invent ``string`` (that would
+    soft-green incomplete metadata past require_physical / rematerialize).
+    """
     if isinstance(iceberg_type, dict):
-        kind = str(iceberg_type.get("type") or "").lower()
+        kind = str(iceberg_type.get("type") or "").strip().lower()
+        if not kind:
+            return ""
         if kind == "decimal":
             p = int(iceberg_type.get("precision") or 38)
             s = int(iceberg_type.get("scale") or 0)
@@ -222,8 +268,12 @@ def _iceberg_type_to_logical_carrier(iceberg_type: Any) -> str:
             return "BINARY"
         if kind in {"list", "map", "struct"}:
             return "JSON"
-        return kind or "string"
-    t = str(iceberg_type or "string").lower()
+        return kind
+    if iceberg_type is None:
+        return ""
+    t = str(iceberg_type).strip().lower()
+    if not t:
+        return ""
     m_fixed = re.match(r"fixed\s*\[\s*(\d+)\s*\]", t) or re.match(
         r"fixed\s*\(\s*(\d+)\s*\)", t
     )
@@ -233,8 +283,9 @@ def _iceberg_type_to_logical_carrier(iceberg_type: Any) -> str:
         "string": "string",
         "long": "BIGINT",
         "int": "INT",
-        "double": "float",
-        "float": "float",
+        # Iceberg double is float64 — never collapse to float32 via "float".
+        "double": "DOUBLE",
+        "float": "FLOAT",
         "boolean": "boolean",
         "date": "date",
         "timestamptz": "timestamptz",
@@ -243,7 +294,7 @@ def _iceberg_type_to_logical_carrier(iceberg_type: Any) -> str:
         "uuid": "uuid",
         "time": "time",
     }
-    return mapping.get(t, t or "string")
+    return mapping.get(t, t)
 
 
 def _write_types_from_schema(
@@ -256,8 +307,157 @@ def _write_types_from_schema(
         name = str(field.get("name") or "")
         if not name:
             continue
-        out[name] = _iceberg_type_to_logical_carrier(field.get("type"))
+        carrier = _iceberg_type_to_logical_carrier(field.get("type"))
+        # Incomplete metadata must not wipe Studio/Map with invent-empty "".
+        if carrier:
+            out[name] = carrier
     return out
+
+
+def _physical_carriers_from_arrow(arrow_schema: Any, pa_mod: Any) -> dict[str, str]:
+    """Map committed Arrow fields → logical carriers for rematerialize compare."""
+    physical: dict[str, str] = {}
+    names = list(getattr(arrow_schema, "names", []) or [])
+    for name in names:
+        carriers = _decimal_target_types_for_iceberg_write(
+            [name],
+            {},
+            arrow_schema=arrow_schema,
+            pa_mod=pa_mod,
+        )
+        if carriers:
+            physical[name] = carriers[0]
+            physical.setdefault(name.lower(), carriers[0])
+            physical.setdefault(name.upper(), carriers[0])
+    return physical
+
+
+def _iceberg_map_rows(
+    *,
+    headers: list[str],
+    data_rows: list,
+    mappings: list,
+    target_cols: list[str],
+    column_types: dict[str, str] | None,
+    dest_types: dict[str, str],
+    policy: Any,
+    conflict_columns: list[str] | None = None,
+    destination_column_nullability: Any = None,
+) -> tuple[list[tuple], list[str], list[dict]]:
+    """One Map pass against settled dest types. Callers must not Map twice."""
+    return build_mapped_rows_with_details(
+        headers=headers,
+        data_rows=data_rows,
+        mappings=mappings,
+        target_cols=target_cols,
+        column_types=column_types,
+        error_policy=policy,
+        dest_types=dest_types,
+        preserve_case=True,
+        dest_kind="iceberg",
+        destination_pk_columns=list(conflict_columns or []) or None,
+        destination_column_nullability=destination_column_nullability,
+    )
+
+
+def _iceberg_rematerialize_if_physical_differs(
+    *,
+    physical: dict[str, str],
+    dest_types: dict[str, str],
+    target_cols: list[str],
+    headers: list[str],
+    data_rows: list,
+    mappings: list,
+    column_types: dict[str, str] | None,
+    logical_types: list[str],
+    policy: Any,
+    conflict_columns: list[str] | None = None,
+    destination_column_nullability: Any = None,
+    force_remap: bool = False,
+) -> tuple[list[tuple], list[str], list[dict], dict[str, str]] | None:
+    """Rebuild mapped rows from source when live DDL carriers differ from Map.
+
+    Returns ``(mapped_rows, transform_errors, rejected_details, live_dest_types)``
+    or ``None`` when carriers already match (caller keeps Map-built batch).
+
+    ``force_remap`` covers deferred Map under partial Studio (empty batch).
+
+    Additive schema-evolution columns (Map targets not yet on the table) keep
+    Map stamps; existing live columns rematerialize without Map VARCHAR invent.
+    """
+    from connectors.writer_common import rematerialize_live_dest_types
+
+    if not physical:
+        return None
+    covered_cols: list[str] = []
+    covered_physical: dict[str, str] = {}
+    for c in target_cols or []:
+        if not c:
+            continue
+        hit = (
+            physical.get(c)
+            or physical.get(str(c).lower())
+            or physical.get(str(c).upper())
+        )
+        if hit and str(hit).strip():
+            covered_cols.append(c)
+            covered_physical[c] = str(hit).strip()
+    if not covered_cols:
+        return None
+    live_partial = rematerialize_live_dest_types(
+        covered_physical, covered_cols, product="Iceberg"
+    )
+    if live_partial is None:
+        return None
+    # Preserve Map stamps for additive columns not yet on the table.
+    live_dest_types = dict(dest_types or {})
+    live_dest_types.update(live_partial)
+    carriers_differ = any(
+        str(dest_types.get(c) or "").strip().upper()
+        != str(live_dest_types.get(c) or "").strip().upper()
+        for c in covered_cols
+    )
+    if not carriers_differ and not force_remap:
+        return None
+    # Partial Studio + deferred Map: additive targets not on live physical must
+    # carry an explicit Map target_type — never soft-fill from column_types /
+    # "string" defaults (create-new refuse parity).
+    if force_remap:
+        from services.mapping_constraints import write_mappings
+
+        by_tgt: dict[str, dict] = {}
+        for mapping in write_mappings(list(mappings or [])):
+            tgt = str(mapping.get("target") or "").strip()
+            if tgt and tgt not in by_tgt:
+                by_tgt[tgt] = mapping
+                by_tgt.setdefault(tgt.lower(), mapping)
+        for col in target_cols or []:
+            if not col:
+                continue
+            if str(live_dest_types.get(col) or "").strip():
+                continue
+            mapping = by_tgt.get(col) or by_tgt.get(str(col).lower()) or {}
+            stamp = str(mapping.get("target_type") or "").strip()
+            if not stamp:
+                return None
+            live_dest_types[col] = stamp
+    mapped_rows, transform_errors, rejected_details = _iceberg_map_rows(
+        headers=headers,
+        data_rows=data_rows,
+        mappings=mappings,
+        target_cols=target_cols,
+        column_types=column_types,
+        dest_types=live_dest_types,
+        policy=policy,
+        conflict_columns=conflict_columns,
+        destination_column_nullability=destination_column_nullability,
+    )
+    return (
+        mapped_rows,
+        list(transform_errors or []),
+        rejected_details,
+        live_dest_types,
+    )
 
 
 def _load_metadata(meta_path: Path) -> dict[str, Any] | None:
@@ -266,13 +466,130 @@ def _load_metadata(meta_path: Path) -> dict[str, Any] | None:
     return json.loads(meta_path.read_text(encoding="utf-8"))
 
 
+def snapshot_data_files(
+    table_dir: Path, current_meta: dict[str, Any] | None
+) -> list[tuple[str, Path]]:
+    """Current snapshot data-file paths. Missing file raises (fail closed).
+
+    Dest COUNT sums dest-engine population of these files (Parquet footer /
+    JSONL line stream). Upsert CoW still materializes rows from the same
+    list. Metadata ``record-count`` is writer-stamped and is not dest.
+    """
+    if not current_meta:
+        return []
+    out: list[tuple[str, Path]] = []
+    for ref in current_meta.get("data-files") or []:
+        rel = str(ref.get("path") or "").strip()
+        if not rel:
+            raise ValueError("Iceberg metadata references a data-file with empty path")
+        path = table_dir / rel
+        if not path.exists():
+            raise ValueError(
+                f"Iceberg data-file missing for upsert merge: {rel} "
+                "(refuse silent row loss — repair snapshot or rewrite table)"
+            )
+        out.append((rel, path))
+    return out
+
+
+def snapshot_has_delete_files(current_meta: dict[str, Any] | None) -> bool:
+    """True when the snapshot lists delete files (MoR).
+
+    Dest COUNT / leftover listing apply Iceberg v2 position/equality and
+    v3 deletion vectors through ``iceberg_mor``. Footer sum without MoR
+    would lie.
+    """
+    if not current_meta:
+        return False
+    deletes = current_meta.get("delete-files") or current_meta.get("delete_files") or []
+    return bool(deletes)
+
+
+def _snapshot_delete_files(current_meta: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not current_meta:
+        return []
+    refs = current_meta.get("delete-files") or current_meta.get("delete_files") or []
+    return [dict(ref) for ref in refs if isinstance(ref, dict)]
+
+
+def _optional_sequence(ref: dict[str, Any]) -> int | None:
+    raw = ref.get("sequence-number")
+    if raw is None or raw == "":
+        raw = ref.get("sequence_number")
+    if raw is None or raw == "":
+        return None
+    return int(raw)
+
+
+def _max_iceberg_sequence(
+    data_files: Sequence[dict[str, Any]],
+    delete_files: Sequence[dict[str, Any]] = (),
+) -> int:
+    max_seq = 0
+    for ref in list(data_files) + list(delete_files):
+        seq = _optional_sequence(ref)
+        if seq is not None:
+            max_seq = max(max_seq, seq)
+    return max_seq
+
+
+def _ensure_data_file_sequences(data_files: list[dict[str, Any]]) -> None:
+    """Stamp missing data-file sequence-number to 1 (equality deletes need it)."""
+    for ref in data_files:
+        if _optional_sequence(ref) is None:
+            ref["sequence-number"] = 1
+
+
+def _equality_ids_for_columns(
+    schema_json: dict[str, Any], pk_cols: Sequence[str]
+) -> list[int]:
+    by_name: dict[str, int] = {}
+    for field in schema_json.get("fields") or []:
+        name = str(field.get("name") or "").strip()
+        if not name:
+            continue
+        try:
+            by_name[name] = int(field.get("id"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"Iceberg schema field {name!r} missing integer id"
+            ) from exc
+    ids: list[int] = []
+    for col in pk_cols:
+        if col not in by_name:
+            raise ValueError(
+                f"Iceberg equality-delete PK {col!r} is not in the snapshot schema"
+            )
+        ids.append(by_name[col])
+    return ids
+
+
 def _evolve_schema(
     existing: dict[str, Any] | None,
     columns: list[str],
     column_types: dict[str, str],
+    *,
+    require_types: bool = False,
 ) -> tuple[dict[str, Any], list[str]]:
-    """Return (schema_json, notes). Additive-only evolution; type_locked conflicts noted."""
+    """Return (schema_json, notes). Additive-only evolution; type_locked conflicts noted.
+
+    ``require_types`` (partial Studio): refuse missing carriers instead of inventing
+    Iceberg ``string`` for additive columns.
+    """
     notes: list[str] = []
+
+    def _carrier_for(name: str) -> str:
+        typ = str((column_types or {}).get(name) or "").strip()
+        if typ:
+            return typ
+        if require_types:
+            raise ValueError(
+                f"Iceberg additive column {name!r} lacks Studio/live type and "
+                "Map target_type under partial Studio — refuse string evolve invent. "
+                "Stamp the column on Map or re-run destination schema introspect."
+            )
+        return "string"
+
     if existing is None:
         fields = []
         for i, name in enumerate(columns, start=1):
@@ -280,7 +597,7 @@ def _evolve_schema(
                 "id": i,
                 "name": name,
                 "required": False,
-                "type": _logical_to_iceberg_type(column_types.get(name, "string")),
+                "type": _logical_to_iceberg_type(_carrier_for(name)),
             })
         return {
             "type": "struct",
@@ -293,16 +610,18 @@ def _evolve_schema(
     next_id = max((int(f.get("id", 0)) for f in fields), default=0) + 1
     for name in columns:
         if name in by_name:
-            want = _logical_to_iceberg_type(column_types.get(name, "string"))
+            want = _logical_to_iceberg_type(
+                str((column_types or {}).get(name) or "").strip() or "string"
+            )
             have = by_name[name].get("type")
-            if have != want:
+            if have != want and str((column_types or {}).get(name) or "").strip():
                 notes.append(f"type_locked: keep {name}:{have} (incoming {want})")
             continue
         fields.append({
             "id": next_id,
             "name": name,
             "required": False,
-            "type": _logical_to_iceberg_type(column_types.get(name, "string")),
+            "type": _logical_to_iceberg_type(_carrier_for(name)),
         })
         notes.append(f"schema_evolve: added column {name}")
         next_id += 1
@@ -310,57 +629,103 @@ def _evolve_schema(
     return {"type": "struct", "schema-id": schema_id, "fields": fields}, notes
 
 
+def _read_snapshot_data_file(
+    rel: str, path: Path, columns: Sequence[str]
+) -> list[dict[str, Any]]:
+    """Fail-closed read of one snapshot data file (JSONL/Parquet)."""
+    cols = [str(c) for c in columns]
+    rows: list[dict[str, Any]] = []
+    if rel.endswith(".parquet") or str(path).endswith(".parquet"):
+        try:
+            import pyarrow.parquet as pq
+
+            table = pq.read_table(path)
+            for batch in table.to_pylist():
+                rows.append({c: batch.get(c) for c in cols})
+        except Exception as exc:
+            raise ValueError(
+                f"Iceberg Parquet data-file unreadable for upsert merge: {rel}: {exc}"
+            ) from exc
+        return rows
+    try:
+        with path.open(encoding="utf-8") as fh:
+            for line_no, line in enumerate(fh, start=1):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                except Exception as exc:
+                    raise ValueError(
+                        f"Iceberg JSONL data-file corrupt at {rel}:{line_no}: {exc}"
+                    ) from exc
+                rows.append({c: obj.get(c) for c in cols})
+    except ValueError:
+        raise
+    except Exception as exc:
+        raise ValueError(
+            f"Iceberg JSONL data-file unreadable for upsert merge: {rel}: {exc}"
+        ) from exc
+    return rows
+
+
+def _project_snapshot_file(
+    rel: str, path: Path | None, cols: Sequence[str]
+) -> list[dict[str, Any]] | None:
+    """MoR project callback. Unreadable → None (unmeasured), never raw resurrect."""
+    if path is None:
+        return None
+    try:
+        return _read_snapshot_data_file(rel or str(path), path, cols)
+    except ValueError:
+        return None
+
+
 def _load_existing_rows(table_dir: Path, columns: list[str], current_meta: dict[str, Any] | None) -> list[dict[str, Any]]:
-    """Load all rows referenced by current metadata data-files (JSONL/Parquet).
+    """Load surviving snapshot rows (MoR when delete files exist).
 
     Fail-closed: missing or unreadable referenced files abort the upsert so we
     never silently drop existing rows (Airbyte/warehouse silent-loss class).
+    Delete files must be applied here — a raw data-file scan would resurrect
+    CDC / leftover-MERGE keys that dest COUNT already treats as gone.
+    Dest COUNT does not use this materialization — it footers the same files
+    and applies the same MoR kernel.
     """
-    if not current_meta:
-        return []
-    rows: list[dict[str, Any]] = []
-    for ref in current_meta.get("data-files") or []:
-        rel = str(ref.get("path") or "").strip()
-        if not rel:
-            raise ValueError("Iceberg metadata references a data-file with empty path")
-        path = table_dir / rel
-        if not path.exists():
-            raise ValueError(
-                f"Iceberg data-file missing for upsert merge: {rel} "
-                "(refuse silent row loss — repair snapshot or rewrite table)"
-            )
-        if rel.endswith(".parquet"):
-            try:
-                import pyarrow.parquet as pq
+    files = snapshot_data_files(table_dir, current_meta)
+    if snapshot_has_delete_files(current_meta):
+        from connectors.iceberg_mor import filesystem_mor_snapshot_rows
 
-                table = pq.read_table(path)
-                for batch in table.to_pylist():
-                    rows.append({c: batch.get(c) for c in columns})
-            except Exception as exc:
-                raise ValueError(
-                    f"Iceberg Parquet data-file unreadable for upsert merge: {rel}: {exc}"
-                ) from exc
-        else:
-            try:
-                with path.open(encoding="utf-8") as fh:
-                    for line_no, line in enumerate(fh, start=1):
-                        line = line.strip()
-                        if not line:
-                            continue
-                        try:
-                            obj = json.loads(line)
-                        except Exception as exc:
-                            raise ValueError(
-                                f"Iceberg JSONL data-file corrupt at {rel}:{line_no}: {exc}"
-                            ) from exc
-                        rows.append({c: obj.get(c) for c in columns})
-            except ValueError:
-                raise
-            except Exception as exc:
-                raise ValueError(
-                    f"Iceberg JSONL data-file unreadable for upsert merge: {rel}: {exc}"
-                ) from exc
+        surviving = filesystem_mor_snapshot_rows(
+            table_dir,
+            current_meta or {},
+            files,
+            cols=columns,
+            project_file=_project_snapshot_file,
+        )
+        if surviving is None:
+            raise ValueError(
+                "Iceberg MoR snapshot unreadable for upsert/delete merge "
+                "(refuse silent resurrect of deleted keys)"
+            )
+        return surviving
+    rows: list[dict[str, Any]] = []
+    for rel, path in files:
+        rows.extend(_read_snapshot_data_file(rel, path, columns))
     return rows
+
+
+def _upsert_pk_key(row: dict[str, Any], pk_cols: Sequence[str]) -> tuple:
+    """Comparable PK tuple. Never stringify None → ``\"None\"``."""
+    from connectors.writer_common import _is_nullish_conflict_key
+
+    out: list[str] = []
+    for col in pk_cols:
+        val = row.get(col)
+        if _is_nullish_conflict_key(val):
+            out.append("")
+        else:
+            out.append(str(val))
+    return tuple(out)
 
 
 def _merge_upsert_rows(
@@ -375,21 +740,35 @@ def _merge_upsert_rows(
     No LSN on either side → last wins (batch overwrite). Sparse CDC: ``DF_MISSING``
     keys are omitted and never wipe prior column values.
     """
-    from connectors.writer_common import compare_lsn
+    from connectors.writer_common import compare_lsn, _is_nullish_conflict_key
     from services.value_serializer import is_missing_sentinel
-
-    def _key(row: dict[str, Any]) -> tuple:
-        return tuple(str(row.get(c, "")) for c in pk_cols)
 
     def _present(row: dict[str, Any]) -> dict[str, Any]:
         return {k: v for k, v in row.items() if not is_missing_sentinel(v)}
 
     best: dict[tuple, dict[str, Any]] = {}
     for row in existing:
-        best[_key(row)] = dict(row)
+        key = _upsert_pk_key(row, pk_cols)
+        if any(_is_nullish_conflict_key(row.get(c)) for c in pk_cols):
+            continue
+        best[key] = dict(row)
     for row in incoming:
         clean = _present(row)
-        key = _key(row)
+        # Sparse/empty PK must quarantine upstream — refuse invent duplicates here.
+        from connectors.writer_common import assert_sparse_upsert_has_pk
+
+        try:
+            if any(is_missing_sentinel(v) for v in row.values()):
+                assert_sparse_upsert_has_pk(clean, pk_cols)
+        except ValueError:
+            raise
+        if any(_is_nullish_conflict_key(clean.get(c)) for c in pk_cols):
+            raise ValueError(
+                "Iceberg dense upsert has null/empty primary-key column(s) "
+                f"{[c for c in pk_cols if _is_nullish_conflict_key(clean.get(c))]}; "
+                "refuse NULL=NULL invent duplicates"
+            )
+        key = _upsert_pk_key(row, pk_cols)
         prev = best.get(key)
         if prev is None:
             # Sparse insert of an unknown PK would invent NULL for absent columns
@@ -414,6 +793,58 @@ def _merge_upsert_rows(
             best[key] = merged
     return list(best.values())
 
+
+def _mor_upsert_delta(
+    existing: list[dict[str, Any]],
+    incoming: list[dict[str, Any]],
+    *,
+    pk_cols: list[str],
+    lsn_col: str = "_df_lsn",
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """MoR upsert payload: new data-file rows + equality-delete PK rows.
+
+    Inserts write only a new data image. Updates write an equality delete
+    of the surviving PK (old data files keep their bytes) plus the merged
+    image. LSN-discarded keys are omitted (no snapshot). ``_merge_upsert_rows``
+    still validates sparse/null PK rules and produces the merged images.
+    """
+    from connectors.writer_common import compare_lsn, _is_nullish_conflict_key
+    from services.value_serializer import is_missing_sentinel
+
+    merged = _merge_upsert_rows(
+        existing, incoming, pk_cols=pk_cols, lsn_col=lsn_col
+    )
+    merged_by = {_upsert_pk_key(row, pk_cols): row for row in merged}
+    existing_by: dict[tuple, dict[str, Any]] = {}
+    for row in existing:
+        key = _upsert_pk_key(row, pk_cols)
+        if any(_is_nullish_conflict_key(row.get(c)) for c in pk_cols):
+            continue
+        existing_by[key] = row
+    last_incoming: dict[tuple, dict[str, Any]] = {}
+    for row in incoming:
+        last_incoming[_upsert_pk_key(row, pk_cols)] = row
+
+    new_rows: list[dict[str, Any]] = []
+    eq_deletes: list[dict[str, Any]] = []
+    for key, row in last_incoming.items():
+        applied = merged_by.get(key)
+        if applied is None:
+            continue
+        prev = existing_by.get(key)
+        clean = {
+            k: v for k, v in row.items() if not is_missing_sentinel(v)
+        }
+        if prev is None:
+            new_rows.append(applied)
+            continue
+        if lsn_col in clean or lsn_col in prev:
+            if compare_lsn(clean.get(lsn_col), prev.get(lsn_col)) <= 0:
+                continue
+        new_rows.append(applied)
+        eq_deletes.append({c: prev.get(c) for c in pk_cols})
+    return new_rows, eq_deletes
+
 def _row_as_dict(columns: list[str], row: Any) -> dict[str, Any]:
     if isinstance(row, dict):
         return {c: row.get(c) for c in columns}
@@ -429,154 +860,16 @@ def _row_tuple(columns: list[str], row: Any) -> tuple:
 
 def _logical_to_arrow_type(logical: str, pa: Any) -> Any:
     """Map Datawrap logical / Iceberg DDL carrier → pyarrow type (fail-closed decimals)."""
-    from services.type_system import (
-        LOGICAL_BINARY,
-        LOGICAL_BOOLEAN,
-        LOGICAL_DATE,
-        LOGICAL_DATETIME,
-        LOGICAL_DECIMAL,
-        LOGICAL_FLOAT,
-        LOGICAL_INTEGER,
-        LOGICAL_TIME,
-        normalize_logical_type,
-        parse_numeric_precision_scale,
-    )
+    from services.arrow_write import logical_to_arrow_type
 
-    raw = (logical or "string").strip()
-    logical_n = normalize_logical_type(raw)
-    if logical_n == LOGICAL_BOOLEAN:
-        return pa.bool_()
-    if logical_n == LOGICAL_INTEGER:
-        return pa.int64()
-    if logical_n == LOGICAL_FLOAT:
-        raw_u = raw.upper().split("(", 1)[0].strip()
-        if raw_u in {"REAL", "FLOAT4", "HALF", "FLOAT16", "FLOAT32", "BINARY_FLOAT", "FLOAT"}:
-            return pa.float32()
-        return pa.float64()
-    if logical_n == LOGICAL_DECIMAL:
-        # Map≡CREATE: honor ddl_type SSOT — bare → (38,10); oversize → string.
-        # Never silently clamp DECIMAL(40,10) → decimal128(38,10).
-        from services.type_system import ddl_type
-
-        wire = ddl_type("iceberg", raw)
-        if normalize_logical_type(wire) != LOGICAL_DECIMAL:
-            return pa.large_string()
-        precision, scale = parse_numeric_precision_scale(wire)
-        if precision is None:
-            # SSOT should always parameterize Iceberg decimals; refuse invent.
-            return pa.large_string()
-        p = int(precision)
-        s = int(scale) if scale is not None else 0
-        if p < 1 or p > 38 or s < 0 or s > p:
-            return pa.large_string()
-        return pa.decimal128(p, s)
-    if logical_n == LOGICAL_DATE:
-        return pa.date32()
-    if logical_n == LOGICAL_DATETIME:
-        # Prefer timezone-aware when source declared TIMESTAMPTZ.
-        raw_u = raw.upper().replace("_", " ")
-        if "TIMESTAMPTZ" in raw_u or "WITH TIME ZONE" in raw_u or "TIMESTAMP TZ" in raw_u:
-            return pa.timestamp("us", tz="UTC")
-        return pa.timestamp("us")
-    if logical_n == LOGICAL_TIME:
-        return pa.time64("us")
-    if logical_n == LOGICAL_BINARY:
-        from services.type_system import parse_binary_carrier_width
-
-        width = parse_binary_carrier_width(raw)
-        if width is not None and width > 0:
-            # Iceberg fixed(L) — exact byte width (spec); never silent truncate.
-            return pa.binary(int(width))
-        return pa.large_binary()
-    # PyIceberg maps Iceberg string -> large_string; use it consistently.
-    return pa.large_string()
+    return logical_to_arrow_type(logical, pa, dialect="iceberg")
 
 
 def _coerce_arrow_cell(value: Any, arrow_type: Any, pa: Any) -> Any:
     """Coerce a Python cell into the declared Arrow type; raise on hard failure."""
-    from datetime import date, datetime, time
-    from decimal import Decimal, InvalidOperation
+    from services.arrow_write import coerce_arrow_cell
 
-    from services.value_serializer import is_missing_sentinel
-
-    if is_missing_sentinel(value):
-        raise ValueError(
-            "DF_MISSING reached Arrow coerce — sparse CDC must overlay onto "
-            "existing rows before building the Arrow batch"
-        )
-    if value is None:
-        return None
-    if value == "":
-        # Keep empty string for string carriers — never invent NULL from "".
-        if pa.types.is_string(arrow_type) or pa.types.is_large_string(arrow_type):
-            return ""
-        return None
-    if pa.types.is_decimal(arrow_type):
-        try:
-            if isinstance(value, Decimal):
-                return value
-            return Decimal(str(value))
-        except (InvalidOperation, ValueError, TypeError) as exc:
-            raise ValueError(f"cannot cast {value!r} to decimal") from exc
-    if pa.types.is_floating(arrow_type):
-        return float(value)
-    if pa.types.is_integer(arrow_type):
-        from decimal import Decimal
-
-        if isinstance(value, bool):
-            return int(value)
-        if isinstance(value, int):
-            return value
-        if isinstance(value, float):
-            if not value.is_integer():
-                raise ValueError(
-                    f"cannot coerce non-integral float {value!r} to INTEGER "
-                    "without truncation"
-                )
-            return int(value)
-        if isinstance(value, Decimal):
-            if value != value.to_integral_value():
-                raise ValueError(
-                    f"cannot coerce non-integral decimal {value!r} to INTEGER "
-                    "without truncation"
-                )
-            return int(value)
-        return int(value)
-    if pa.types.is_boolean(arrow_type):
-        if isinstance(value, bool):
-            return value
-        text = str(value).strip().lower()
-        if text in {"1", "true", "t", "yes", "y"}:
-            return True
-        if text in {"0", "false", "f", "no", "n"}:
-            return False
-        raise ValueError(f"cannot cast {value!r} to boolean")
-    if pa.types.is_timestamp(arrow_type):
-        if isinstance(value, datetime):
-            return value
-        return datetime.fromisoformat(str(value).replace("Z", "+00:00"))
-    if pa.types.is_date(arrow_type):
-        if isinstance(value, datetime):
-            return value.date()
-        if isinstance(value, date):
-            return value
-        return date.fromisoformat(str(value)[:10])
-    if pa.types.is_time(arrow_type):
-        if isinstance(value, time):
-            return value
-        if isinstance(value, datetime):
-            return value.time()
-        return time.fromisoformat(str(value))
-    if pa.types.is_binary(arrow_type) or pa.types.is_large_binary(arrow_type):
-        if value is None:
-            return None
-        from connectors.sql_bind import coerce_binary_wire
-
-        # Same SSOT as SQL BYTEA/BLOB — refuse silent UTF-8 invent on invalid wire.
-        return coerce_binary_wire(value)
-    if isinstance(value, (dict, list)):
-        return json.dumps(value, default=json_default)
-    return str(value)
+    return coerce_arrow_cell(value, arrow_type, pa, dialect="iceberg")
 
 
 def _write_data_file(
@@ -645,6 +938,44 @@ def _write_data_file(
             fh.write(line + "\n")
             digest.update(line.encode())
     return rel, len(dict_rows), digest.hexdigest()[:16], warnings
+
+
+def _write_equality_delete_file(
+    data_dir: Path,
+    columns: list[str],
+    rows: list[dict[str, Any]],
+    *,
+    column_types: dict[str, str] | None = None,
+) -> tuple[str, int, str]:
+    """Write Iceberg v2 equality-delete parquet (PK columns only).
+
+    Dest COUNT applies these via ``iceberg_mor`` (content=2). JSONL is not
+    a legal equality-delete carrier — refuse if pyarrow is missing.
+    """
+    try:
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+    except ImportError as exc:
+        raise ValueError(
+            "Iceberg equality-delete write requires pyarrow"
+        ) from exc
+    data_dir.mkdir(parents=True, exist_ok=True)
+    file_id = uuid.uuid4().hex
+    types = column_types or {}
+    dict_rows = [{c: row.get(c) for c in columns} for row in rows]
+    arrow_types = [_logical_to_arrow_type(types.get(c, "string"), pa) for c in columns]
+    schema = pa.schema([(c, t) for c, t in zip(columns, arrow_types)])
+    arrays = []
+    for col, at in zip(columns, arrow_types):
+        cells = [_coerce_arrow_cell(r.get(col), at, pa) for r in dict_rows]
+        arrays.append(pa.array(cells, type=at))
+    table = pa.Table.from_arrays(arrays, schema=schema)
+    rel = f"data/{file_id}-eq-deletes.parquet"
+    path = data_dir.parent / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pq.write_table(table, path)
+    digest = hashlib.sha256(path.read_bytes())
+    return rel, len(dict_rows), digest.hexdigest()[:16]
 
 
 def _checksum_arrow_table(pa_table: Any) -> str:
@@ -760,11 +1091,19 @@ def _scan_existing_by_pk(
     existing: dict[tuple, dict[str, Any]] = {}
 
     def _absorb(arrow_table: Any) -> None:
+        from connectors.writer_common import _is_nullish_conflict_key
+
         names = arrow_table.column_names
         columns = {name: arrow_table.column(name).to_pylist() for name in names}
         for idx in range(arrow_table.num_rows):
             row = {name: columns[name][idx] for name in names}
-            existing[tuple(str(row.get(c, "")) for c in pk_cols)] = row
+            if any(_is_nullish_conflict_key(row.get(c)) for c in pk_cols):
+                continue
+            key = tuple(
+                "" if _is_nullish_conflict_key(row.get(c)) else str(row.get(c))
+                for c in pk_cols
+            )
+            existing[key] = row
 
     unique_keys = list(dict.fromkeys(key_tuples))
     wanted = {
@@ -835,9 +1174,9 @@ def _write_mapped_rows_pyiceberg(
     conflict_columns: list[str] | None,
     sync_mode: str = "",
     file_batch_idx: int = 0,
+    destination_column_nullability: dict[str, bool] | None = None,
 ) -> WriteResult:
     """Write a batch through a real pyiceberg catalog with MERGE/upsert support."""
-    from services.sync_cursor import is_overwrite_sync
     if pa is None:
         return WriteResult(
             ok=False,
@@ -875,57 +1214,53 @@ def _write_mapped_rows_pyiceberg(
     target_schema = ".".join(namespace + (table,))
 
     target_cols, target_types = resolve_target_columns(mappings, column_types, preserve_case=True)
-    dest_types = {
-        target_cols[i]: (
-            mappings[i].get("target_type")
-            or column_types.get(mappings[i]["source"])
-            or (target_types[i] if i < len(target_types) else "string")
-        )
-        for i in range(len(target_cols))
-    }
-    policy = transform_error_policy(error_policy)
-    mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
-        headers=headers,
-        data_rows=data_rows,
-        mappings=mappings,
-        target_cols=target_cols,
-        column_types=column_types,
-        error_policy=policy,
-        dest_types=dest_types,
-        preserve_case=True,
+    if conflict_columns:
+        try:
+            conflict_columns = resolve_conflict_targets(
+                conflict_columns, target_cols, strict=True
+            )
+        except ValueError as exc:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=endpoint.get("table", ""),
+                target_schema="",
+                checksum="",
+                chunks_completed=0,
+                error=str(exc),
+                driver="iceberg",
+            )
+    from connectors.writer_common import resolve_studio_or_map_dest_types
+
+    live_dest = None
+    if isinstance(endpoint, dict):
+        live_dest = endpoint.get("destination_column_types") or endpoint.get("schema_types")
+    dest_types, studio_err = resolve_studio_or_map_dest_types(
+        target_cols,
+        mappings,
+        column_types,
+        logical_types=target_types,
+        studio_types=live_dest if isinstance(live_dest, dict) else None,
+        product="Iceberg",
+        dest_db="iceberg",
     )
-    if transform_errors and policy == "fail":
-        return WriteResult(
-            ok=False,
-            rows_written=0,
-            table_name=table,
-            target_schema=target_schema,
-            checksum="",
-            chunks_completed=0,
-            error=f"Transform errors: {'; '.join(transform_errors[:3])}",
-            rejected_details=rejected_details,
-            driver="iceberg",
-        )
+    policy = transform_error_policy(error_policy)
+    # Map once after live overlay — never Map-then-remap a second concatenated
+    # image (SQL warehouse order). Partial Studio defers Map until create-new
+    # refuse / live Arrow rematerialize. Honesty: this write still holds the
+    # mapped image until Arrow returns; it does not stream finished bundles.
+    mapped_rows: list[tuple] = []
+    transform_errors: list[str] = []
+    rejected_details: list[dict] = []
+    # Defer empty / strict abort until after physical load + rematerialize —
+    # Map INT/BOOL stamps can empty the batch while live STRING would keep rows.
 
-    if not mapped_rows:
-        return WriteResult(
-            ok=True,
-            rows_written=0,
-            table_name=table,
-            target_schema=target_schema,
-            checksum="",
-            chunks_completed=1,
-            rejected_details=rejected_details,
-            rejected_rows=_rejected_row_count(
-                data_rows, mapped_rows, rejected_details, policy
-            ),
-            driver="iceberg",
-        )
-
+    table_existed = False
     try:
         catalog = load_catalog(endpoint)
         identifier = namespace + (table,)
         tbl = catalog.load_table(identifier)
+        table_existed = True
     except NoSuchTableError:
         if not create_table:
             return WriteResult(
@@ -941,10 +1276,23 @@ def _write_mapped_rows_pyiceberg(
                 ),
                 driver="iceberg",
             )
+        # Create-new: partial Studio must not soft-bind Map string invent.
+        if studio_err:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=table,
+                target_schema=target_schema,
+                checksum="",
+                chunks_completed=0,
+                error=studio_err,
+                driver="iceberg",
+            )
         ensure_namespace(catalog, namespace)
         arrow_types = [_logical_to_arrow_type(dest_types.get(c, "string"), pa) for c in target_cols]
         arrow_schema = pa.schema([(c, t) for c, t in zip(target_cols, arrow_types)])
         tbl = catalog.create_table(identifier, schema=arrow_schema)
+        table_existed = False
     except Exception as exc:
         return WriteResult(
             ok=False,
@@ -957,23 +1305,176 @@ def _write_mapped_rows_pyiceberg(
             driver="iceberg",
         )
 
-    mode = (write_mode or "append").lower()
+    mode = _iceberg_effective_write_mode(
+        write_mode, sync_mode=sync_mode, file_batch_idx=file_batch_idx
+    )
     upsert_modes = {"upsert", "merge", "cdc", "incremental_deduped"}
-    # Multi-chunk full-refresh overwrite: only the first chunk may replace the
-    # destination; later chunks append to the same snapshot. This mirrors the
-    # Redis prefix-clear-once contract and avoids losing all but the final chunk.
-    if is_overwrite_sync(sync_mode) and mode not in upsert_modes:
-        if file_batch_idx in (0, 1):
-            if mode == "insert":
-                mode = "overwrite"
-        else:
-            mode = "append"
-    elif mode in {"overwrite", "replace"} and file_batch_idx > 1:
-        mode = "append"
 
     try:
         existing_arrow = tbl.schema().as_arrow()
-        arrow_types = [_logical_to_arrow_type(dest_types.get(c, "string"), pa) for c in target_cols]
+        # Rematerialize from source when committed Arrow carriers ≠ Map stamps
+        # (VARCHAR→int/date/decimal invent cliff — same class as PG/Snowflake).
+        if table_existed:
+            from connectors.writer_common import require_physical_types_for_existing_table
+
+            physical = _physical_carriers_from_arrow(existing_arrow, pa)
+            existing_names = {
+                str(n) for n in (getattr(existing_arrow, "names", None) or [])
+            }
+            # Only gate columns already on the table — additive union_by_name
+            # fields are not in Arrow yet and must not trip require_physical.
+            mapped_existing = [
+                c for c in target_cols if c and c in existing_names
+            ]
+            # Studio may fill gaps; always require_physical on existing fields
+            # (same Mongo/ES bar — never skip when Studio is complete but Arrow sparse).
+            if mapped_existing:
+                effective = dict(physical)
+                if isinstance(live_dest, dict):
+                    for c in mapped_existing:
+                        if (
+                            effective.get(c)
+                            or effective.get(str(c).lower())
+                            or effective.get(str(c).upper())
+                        ):
+                            continue
+                        st = str(live_dest.get(c) or "").strip()
+                        if st:
+                            effective[c] = st
+                phys_err = require_physical_types_for_existing_table(
+                    table_existed=True,
+                    physical=effective,
+                    dialect_label="Iceberg",
+                    target_cols=mapped_existing,
+                )
+                if phys_err:
+                    return WriteResult(
+                        ok=False,
+                        rows_written=0,
+                        table_name=table,
+                        target_schema=target_schema,
+                        checksum="",
+                        chunks_completed=0,
+                        error=phys_err,
+                        driver="iceberg",
+                    )
+                physical = effective
+            _force_remap = bool(studio_err)
+            remat = _iceberg_rematerialize_if_physical_differs(
+                physical=physical,
+                dest_types=dest_types,
+                target_cols=target_cols,
+                headers=headers,
+                data_rows=data_rows,
+                mappings=mappings,
+                column_types=column_types,
+                logical_types=target_types,
+                policy=policy,
+                conflict_columns=conflict_columns,
+                destination_column_nullability=destination_column_nullability,
+                force_remap=_force_remap,
+            )
+            if remat is not None:
+                mapped_rows, transform_errors, rejected_details, dest_types = remat
+            elif _force_remap:
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=table,
+                    target_schema=target_schema,
+                    checksum="",
+                    chunks_completed=0,
+                    error=(
+                        "Iceberg live DDL incomplete for mapped columns — "
+                        "refuse Map VARCHAR rematerialize invent. Re-run "
+                        "destination schema introspect and retry."
+                    ),
+                    rejected_details=rejected_details,
+                    driver="iceberg",
+                )
+
+        if not mapped_rows:
+            mapped_rows, transform_errors, rejected_details = _iceberg_map_rows(
+                headers=headers,
+                data_rows=data_rows,
+                mappings=mappings,
+                target_cols=target_cols,
+                column_types=column_types,
+                dest_types=dest_types,
+                policy=policy,
+                conflict_columns=conflict_columns,
+                destination_column_nullability=destination_column_nullability,
+            )
+
+        _map_abort = reject_on_strict_policy(
+            policy, rejected_details, "Iceberg", transform_errors
+        )
+        if _map_abort:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=table,
+                target_schema=target_schema,
+                checksum="",
+                chunks_completed=0,
+                error=_map_abort,
+                rejected_details=rejected_details,
+                driver="iceberg",
+            )
+        if not mapped_rows:
+            _empty_abort = reject_on_strict_policy(policy, rejected_details, "Iceberg")
+            if _empty_abort:
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=table,
+                    target_schema=target_schema,
+                    checksum="",
+                    chunks_completed=0,
+                    error=_empty_abort,
+                    rejected_details=rejected_details,
+                    rejected_rows=_rejected_row_count(
+                        data_rows, mapped_rows, rejected_details, policy
+                    ),
+                    driver="iceberg",
+                )
+            return WriteResult(
+                ok=True,
+                rows_written=0,
+                table_name=table,
+                target_schema=target_schema,
+                checksum="",
+                chunks_completed=1,
+                rejected_details=rejected_details,
+                rejected_rows=_rejected_row_count(
+                    data_rows, mapped_rows, rejected_details, policy
+                ),
+                driver="iceberg",
+            )
+
+        arrow_types: list[Any] = []
+        for c in target_cols:
+            carrier = str(dest_types.get(c) or "").strip()
+            if not carrier:
+                if studio_err:
+                    return WriteResult(
+                        ok=False,
+                        rows_written=0,
+                        table_name=table,
+                        target_schema=target_schema,
+                        checksum="",
+                        chunks_completed=0,
+                        error=(
+                            f"Iceberg additive column {c!r} lacks Studio/live type "
+                            "and Map target_type under partial Studio — refuse "
+                            "string union_by_name invent. Stamp the column on Map "
+                            "or re-run destination schema introspect."
+                        ),
+                        rejected_details=rejected_details,
+                        driver="iceberg",
+                    )
+                carrier = "string"
+            arrow_types.append(_logical_to_arrow_type(carrier, pa))
         type_locked_warnings: list[str] = []
         new_fields: list[tuple[str, Any]] = []
         for c, at in zip(target_cols, arrow_types):
@@ -995,6 +1496,24 @@ def _write_mapped_rows_pyiceberg(
             existing_arrow = tbl.schema().as_arrow()
 
         final_arrow = existing_arrow
+        schema_extra_cols = [n for n in final_arrow.names if n not in set(target_cols)]
+        # Overwrite replaces the whole table: partial Map would NULL-wipe dest-only cols.
+        if mode in {"overwrite", "replace"} and schema_extra_cols:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=table,
+                target_schema=target_schema,
+                checksum="",
+                chunks_completed=0,
+                error=(
+                    "Iceberg overwrite Map omits destination columns "
+                    f"{schema_extra_cols[:12]} — would NULL-wipe them. "
+                    "Map every column or use upsert/merge to preserve unmapped fields."
+                ),
+                driver="iceberg",
+                rejected_details=rejected_details,
+            )
         # Fail-closed quarantine before pa.array (one bad row must not abort the batch).
         quarantine_types = _decimal_target_types_for_iceberg_write(
             target_cols,
@@ -1009,7 +1528,34 @@ def _write_mapped_rows_pyiceberg(
             rejected_details,
             policy,
         )
+        _post_q_abort = reject_on_strict_policy(policy, rejected_details, "Iceberg")
+        if _post_q_abort:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=table,
+                target_schema=target_schema,
+                checksum="",
+                chunks_completed=0,
+                error=_post_q_abort,
+                rejected_details=rejected_details,
+                driver="iceberg",
+            )
         if not mapped_rows:
+            _empty_abort = reject_on_strict_policy(policy, rejected_details, "Iceberg")
+            if _empty_abort:
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=table,
+                    target_schema=target_schema,
+                    checksum="",
+                    chunks_completed=0,
+                    error=_empty_abort,
+                    rejected_details=rejected_details,
+                    warnings=type_locked_warnings[:20],
+                    driver="iceberg",
+                )
             return WriteResult(
                 ok=True,
                 rows_written=0,
@@ -1019,8 +1565,8 @@ def _write_mapped_rows_pyiceberg(
                 chunks_completed=1,
                 rejected_details=rejected_details,
                 rejected_rows=_rejected_row_count(
-                data_rows, mapped_rows, rejected_details, policy
-            ),
+                    data_rows, mapped_rows, rejected_details, policy
+                ),
                 warnings=type_locked_warnings[:20],
                 driver="iceberg",
             )
@@ -1030,11 +1576,12 @@ def _write_mapped_rows_pyiceberg(
         from connectors.writer_common import (
             DF_LSN_COL,
             assert_sparse_upsert_has_pk,
+            partition_dense_upsert_rows,
             row_has_missing_sentinel,
             sparse_present_bindings,
         )
         from services.cdc_effectively_once import should_apply_pk_row
-        from services.value_serializer import is_missing_sentinel
+        from services.value_serializer import cell_to_string, is_missing_sentinel
 
         if mode in upsert_modes:
             pk_cols = [c for c in (conflict_columns or []) if c in target_cols]
@@ -1046,17 +1593,56 @@ def _write_mapped_rows_pyiceberg(
                     target_schema=target_schema,
                     checksum="",
                     chunks_completed=0,
-                    error=(
-                        "Iceberg upsert/merge requires explicit conflict_columns "
-                        "(record key); refusing to invent PK from the first column"
-                    ),
+                    error="Iceberg upsert requires conflict_columns that match mapped targets",
                     driver="iceberg",
+                    rejected_details=rejected_details,
                 )
-            # A scan is only needed when the batch carries sparse fields to
-            # overlay or an LSN to compare against the destination.
-            needs_scan = DF_LSN_COL in target_cols or any(
-                row_has_missing_sentinel(_row_tuple(target_cols, r))
-                for r in mapped_rows
+            # Shared dense empty-PK quarantine (SQL_NULL / blank / DF_MISSING keys).
+            before_pk = len(mapped_rows)
+            mapped_rows = partition_dense_upsert_rows(
+                mapped_rows,
+                pk_cols,
+                target_cols=target_cols,
+                rejected_details=rejected_details,
+                policy=policy,
+            )
+            if len(mapped_rows) < before_pk:
+                _pk_abort = reject_on_strict_policy(policy, rejected_details, "Iceberg")
+                if _pk_abort:
+                    return WriteResult(
+                        ok=False,
+                        rows_written=0,
+                        table_name=table,
+                        target_schema=target_schema,
+                        checksum="",
+                        chunks_completed=0,
+                        error=_pk_abort,
+                        rejected_details=rejected_details,
+                        driver="iceberg",
+                    )
+                if not mapped_rows:
+                    return WriteResult(
+                        ok=True,
+                        rows_written=0,
+                        table_name=table,
+                        target_schema=target_schema,
+                        checksum="",
+                        chunks_completed=1,
+                        rejected_details=rejected_details,
+                        rejected_rows=_rejected_row_count(
+                            data_rows, mapped_rows, rejected_details, policy
+                        ),
+                        driver="iceberg",
+                    )
+            # A scan is needed for sparse/LSN overlay OR to preserve dest-only
+            # columns that pyiceberg upsert would otherwise NULL-wipe.
+            needs_scan = (
+                bool(schema_extra_cols)
+                or DF_LSN_COL in target_cols
+                or any(
+                    row_has_missing_sentinel(_row_tuple(target_cols, r))
+                    for r in mapped_rows
+                )
             )
             existing_by_pk: dict[tuple, dict[str, Any]] = {}
             if needs_scan:
@@ -1083,30 +1669,49 @@ def _write_mapped_rows_pyiceberg(
                         driver="iceberg",
                     )
             # Fold in arrival order so same-PK twice in one batch is correct.
-            for raw in mapped_rows:
+            fold_kept: list[tuple] = []
+            for row_idx, raw in enumerate(mapped_rows):
                 row_dict = _row_as_dict(target_cols, raw)
                 row_values = _row_tuple(target_cols, raw)
                 if row_has_missing_sentinel(row_values):
                     present = sparse_present_bindings(row_values, target_cols)
-                    assert_sparse_upsert_has_pk(present, pk_cols)
+                    try:
+                        assert_sparse_upsert_has_pk(present, pk_cols)
+                    except ValueError as exc:
+                        sample = ""
+                        try:
+                            sample = cell_to_string(
+                                next(iter(present.values()), "")
+                            )[:120]
+                        except Exception:
+                            sample = ""
+                        rejected_details.append(
+                            {
+                                "row": row_idx + 1,
+                                "column": "*",
+                                "value": sample,
+                                "reason": str(exc)[:300],
+                                "policy": policy,
+                            }
+                        )
+                        continue
                     key = tuple(str(present.get(c, "")) for c in pk_cols)
                     base = existing_by_pk.get(key)
                     if base is None:
-                        return WriteResult(
-                            ok=False,
-                            rows_written=0,
-                            table_name=table,
-                            target_schema=target_schema,
-                            checksum="",
-                            chunks_completed=0,
-                            error=(
-                                "Iceberg sparse CDC insert of unknown primary key "
-                                f"{key!r} refused — would invent NULL for absent "
-                                "fields. Require a full row image (no DF_MISSING) "
-                                "or an existing destination row to overlay."
-                            ),
-                            driver="iceberg",
+                        rejected_details.append(
+                            {
+                                "row": row_idx + 1,
+                                "column": "*",
+                                "value": str(key)[:120],
+                                "reason": (
+                                    "Iceberg sparse CDC insert of unknown primary key "
+                                    f"{key!r} refused — would invent NULL for absent "
+                                    "fields"
+                                ),
+                                "policy": policy,
+                            }
                         )
+                        continue
                     if DF_LSN_COL in present and not should_apply_pk_row(
                         existing_lsn=base.get(DF_LSN_COL),
                         incoming_lsn=present[DF_LSN_COL],
@@ -1115,6 +1720,7 @@ def _write_mapped_rows_pyiceberg(
                     merged = dict(base)
                     merged.update(present)
                     existing_by_pk[key] = merged
+                    fold_kept.append(raw)
                 else:
                     key = tuple(str(row_dict.get(c, "")) for c in pk_cols)
                     base = existing_by_pk.get(key)
@@ -1131,26 +1737,98 @@ def _write_mapped_rows_pyiceberg(
                         **(base or {}),
                         **{k: v for k, v in row_dict.items() if not is_missing_sentinel(v)},
                     }
-            # Emit one dense row per PK touched by this batch (plus untouched
-            # existing rows are left alone via upsert join).
+                    fold_kept.append(raw)
+            _fold_abort = reject_on_strict_policy(policy, rejected_details, "Iceberg")
+            if _fold_abort:
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=table,
+                    target_schema=target_schema,
+                    checksum="",
+                    chunks_completed=0,
+                    error=_fold_abort,
+                    rejected_details=rejected_details,
+                    driver="iceberg",
+                )
+            # Emit one dense row per PK touched by this batch. Include every
+            # committed schema field so unmapped dest columns keep prior values
+            # (Arrow r.get(missing)→None must not NULL-wipe them on upsert).
             batch_keys = {
                 tuple(str(_row_as_dict(target_cols, r).get(c, "")) for c in pk_cols)
-                for r in mapped_rows
+                for r in fold_kept
             }
+            emit_cols = list(final_arrow.names)
             mapped_rows = [
-                tuple(existing_by_pk[k].get(c) for c in target_cols)
+                tuple(existing_by_pk[k].get(c) for c in emit_cols)
                 for k in batch_keys
                 if k in existing_by_pk
             ]
 
-        dict_rows = [_row_as_dict(target_cols, r) for r in mapped_rows]
-        for d in dict_rows:
-            for k, v in d.items():
-                if is_missing_sentinel(v):
-                    raise ValueError(
-                        f"Iceberg write refused residual DF_MISSING on column {k!r} "
-                        "— would invent NULL. Sparse overlay must expand first."
-                    )
+        # Append/overwrite are dense Arrow writes — STOP_COLUMN DF_MISSING must
+        # materialize to NULL (same as pre-omit semantics), never raise or leak
+        # the sentinel string into Parquet. Upsert path overlays sparse first.
+        if mode not in upsert_modes:
+            from connectors.writer_common import materialize_missing_as_null_for_dense_write
+
+            mapped_rows = materialize_missing_as_null_for_dense_write(mapped_rows)
+
+        arrow_cols = (
+            list(final_arrow.names) if mode in upsert_modes else list(target_cols)
+        )
+        dict_rows = [_row_as_dict(arrow_cols, r) for r in mapped_rows]
+        kept_dicts: list[dict[str, Any]] = []
+        for row_idx, d in enumerate(dict_rows):
+            try:
+                for k, v in d.items():
+                    if is_missing_sentinel(v):
+                        raise ValueError(
+                            f"Iceberg write refused residual DF_MISSING on column {k!r} "
+                            "— would invent NULL. Sparse overlay must expand first."
+                        )
+                for field in final_arrow:
+                    # Append path: only Map columns present; extras stay None for INSERT.
+                    # Upsert path: d must carry overlay values for dest-only fields.
+                    _coerce_arrow_cell(d.get(field.name), field.type, pa)
+                kept_dicts.append(d)
+            except ValueError as exc:
+                rejected_details.append(
+                    {
+                        "row": row_idx + 1,
+                        "column": "*",
+                        "value": "",
+                        "reason": str(exc)[:300],
+                        "policy": policy,
+                    }
+                )
+        _arrow_abort = reject_on_strict_policy(policy, rejected_details, "Iceberg")
+        if _arrow_abort:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=table,
+                target_schema=target_schema,
+                checksum="",
+                chunks_completed=0,
+                error=_arrow_abort,
+                rejected_details=rejected_details,
+                driver="iceberg",
+            )
+        dict_rows = kept_dicts
+        if not dict_rows:
+            return WriteResult(
+                ok=True,
+                rows_written=0,
+                table_name=table,
+                target_schema=target_schema,
+                checksum="",
+                chunks_completed=1,
+                rejected_details=rejected_details,
+                rejected_rows=_rejected_row_count(
+                    data_rows, [], rejected_details, policy
+                ),
+                driver="iceberg",
+            )
         arrays = []
         for field in final_arrow:
             at = field.type
@@ -1183,6 +1861,24 @@ def _write_mapped_rows_pyiceberg(
 
     if on_checkpoint:
         on_checkpoint(rows_written, rows_written, 1)
+
+    _final_abort = reject_on_strict_policy(policy, rejected_details, "Iceberg")
+    if _final_abort:
+        return WriteResult(
+            ok=False,
+            rows_written=rows_written,
+            table_name=table,
+            target_schema=target_schema,
+            checksum=checksum,
+            chunks_completed=1,
+            error=_final_abort,
+            rejected_details=rejected_details,
+            rejected_rows=_rejected_row_count(
+                data_rows, mapped_rows, rejected_details, policy
+            ),
+            warnings=type_locked_warnings[:20],
+            driver="iceberg",
+        )
 
     return WriteResult(
         ok=True,
@@ -1259,6 +1955,11 @@ def _write_mapped_rows_filesystem(
     mappings = mappings or []
     column_types = column_types or {}
     table = (table_name or "events").strip()
+    write_mode = _iceberg_effective_write_mode(
+        write_mode,
+        sync_mode=str(_kwargs.get("sync_mode") or ""),
+        file_batch_idx=int(_kwargs.get("file_batch_idx") or 0),
+    )
 
     try:
         root = _warehouse_root(host, database, connection_string)
@@ -1302,32 +2003,41 @@ def _write_mapped_rows_filesystem(
     meta_dir.mkdir(parents=True, exist_ok=True)
 
     target_cols, target_types = resolve_target_columns(mappings, column_types, preserve_case=True)
-    dest_types = {
-        target_cols[i]: (
-            mappings[i].get("target_type")
-            or column_types.get(mappings[i]["source"])
-            or (target_types[i] if i < len(target_types) else "string")
-        )
-        for i in range(len(target_cols))
-    }
-    policy = transform_error_policy(error_policy)
-    mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
-        headers=headers,
-        data_rows=data_rows,
-        mappings=mappings,
-        target_cols=target_cols,
-        column_types=column_types,
-        error_policy=policy,
-        dest_types=dest_types,
-        preserve_case=True,
+    if conflict_columns:
+        try:
+            conflict_columns = resolve_conflict_targets(
+                conflict_columns, target_cols, strict=True
+            )
+        except ValueError as exc:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=table,
+                target_schema=str(table_dir),
+                checksum="",
+                chunks_completed=0,
+                error=str(exc),
+                driver="iceberg",
+            )
+    from connectors.writer_common import resolve_studio_or_map_dest_types
+
+    live_dest = _kwargs.get("destination_column_types") or _kwargs.get("schema_types")
+    dest_types, studio_err = resolve_studio_or_map_dest_types(
+        target_cols,
+        mappings,
+        column_types,
+        logical_types=target_types,
+        studio_types=live_dest if isinstance(live_dest, dict) else None,
+        product="Iceberg",
+        dest_db="iceberg",
     )
-    if transform_errors and policy == "fail":
-        return WriteResult(
-            ok=False, rows_written=0, table_name=table, target_schema=str(table_dir),
-            checksum="", chunks_completed=0,
-            error=f"Transform errors: {'; '.join(transform_errors[:3])}",
-            rejected_details=rejected_details, driver="iceberg",
-        )
+    policy = transform_error_policy(error_policy)
+    # Map once after committed overlay — never Map-then-remap. Honesty: this
+    # filesystem path still holds the mapped image until the snapshot write.
+    mapped_rows: list[tuple] = []
+    transform_errors: list[str] = []
+    rejected_details: list[dict] = []
+    # Defer strict abort until after committed-schema rematerialize.
 
     # Find current metadata version
     versions = sorted(meta_dir.glob("v*.metadata.json"))
@@ -1336,10 +2046,153 @@ def _write_mapped_rows_filesystem(
     if current_meta and "schema" in current_meta and not current_schema:
         current_schema = current_meta.get("schema")
 
-    schema_json, evolve_notes = _evolve_schema(current_schema, target_cols, dest_types)
+    # Create-new metadata: partial Studio must not soft-bind Map string invent.
+    if current_schema is None and studio_err:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=table,
+            target_schema=str(table_dir),
+            checksum="",
+            chunks_completed=0,
+            error=studio_err,
+            driver="iceberg",
+        )
+
+    # Rematerialize against committed carriers BEFORE evolve — never commit
+    # additive Iceberg ``string`` invent then clobber Map stamps (partial Studio).
+    evolve_notes: list[str] = []
+    write_types = dict(dest_types or {})
+    if current_schema:
+        from connectors.writer_common import require_physical_types_for_existing_table
+
+        committed_physical: dict[str, str] = {}
+        for field in current_schema.get("fields") or []:
+            name = str(field.get("name") or "")
+            if not name:
+                continue
+            committed_physical[name] = _iceberg_type_to_logical_carrier(
+                field.get("type")
+            )
+        existing_names = set(committed_physical)
+        mapped_existing = [c for c in target_cols if c and c in existing_names]
+        effective = dict(committed_physical)
+        if isinstance(live_dest, dict):
+            for c in mapped_existing:
+                if (
+                    effective.get(c)
+                    or effective.get(str(c).lower())
+                    or effective.get(str(c).upper())
+                ):
+                    continue
+                st = str(live_dest.get(c) or "").strip()
+                if st:
+                    effective[c] = st
+        if mapped_existing:
+            phys_err = require_physical_types_for_existing_table(
+                table_existed=True,
+                physical=effective,
+                dialect_label="Iceberg",
+                target_cols=mapped_existing,
+            )
+            if phys_err:
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=table,
+                    target_schema=str(table_dir),
+                    checksum="",
+                    chunks_completed=0,
+                    error=phys_err,
+                    rejected_details=rejected_details,
+                    driver="iceberg",
+                )
+        _force_remap = bool(studio_err)
+        remat = _iceberg_rematerialize_if_physical_differs(
+            physical=effective if effective else committed_physical,
+            dest_types=dest_types,
+            target_cols=target_cols,
+            headers=headers,
+            data_rows=data_rows,
+            mappings=mappings,
+            column_types=column_types,
+            logical_types=target_types,
+            policy=policy,
+            conflict_columns=conflict_columns,
+            destination_column_nullability=_kwargs.get("destination_column_nullability"),
+            force_remap=_force_remap,
+        )
+        if remat is not None:
+            mapped_rows, transform_errors, rejected_details, dest_types = remat
+        elif _force_remap:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=table,
+                target_schema=str(table_dir),
+                checksum="",
+                chunks_completed=0,
+                error=(
+                    "Iceberg live DDL incomplete for mapped columns — "
+                    "refuse Map VARCHAR rematerialize invent. Re-run "
+                    "destination schema introspect and retry."
+                ),
+                rejected_details=rejected_details,
+                driver="iceberg",
+            )
+
+    if not mapped_rows:
+        mapped_rows, transform_errors, rejected_details = _iceberg_map_rows(
+            headers=headers,
+            data_rows=data_rows,
+            mappings=mappings,
+            target_cols=target_cols,
+            column_types=column_types,
+            dest_types=dest_types,
+            policy=policy,
+            conflict_columns=conflict_columns,
+            destination_column_nullability=_kwargs.get("destination_column_nullability"),
+        )
+
+    try:
+        schema_json, evolve_notes = _evolve_schema(
+            current_schema,
+            target_cols,
+            dest_types,
+            require_types=bool(studio_err),
+        )
+    except ValueError as evolve_exc:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=table,
+            target_schema=str(table_dir),
+            checksum="",
+            chunks_completed=0,
+            error=str(evolve_exc),
+            rejected_details=rejected_details,
+            driver="iceberg",
+        )
     # Always write Parquet/JSONL using committed field types — never diverge from
     # type_locked metadata (incoming dest_types may differ).
     write_types = _write_types_from_schema(schema_json, dest_types)
+
+    _map_abort = reject_on_strict_policy(
+        policy, rejected_details, "Iceberg", transform_errors
+    )
+    if _map_abort:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=table,
+            target_schema=str(table_dir),
+            checksum="",
+            chunks_completed=0,
+            error=_map_abort,
+            rejected_details=rejected_details,
+            driver="iceberg",
+        )
+
     # Fail-closed quarantine against committed schema — never let one overflow
     # row abort the whole Parquet/Arrow batch.
     mapped_rows = _apply_iceberg_write_quarantine(
@@ -1351,13 +2204,55 @@ def _write_mapped_rows_filesystem(
         rejected_details,
         policy,
     )
+    _post_q_abort = reject_on_strict_policy(policy, rejected_details, "Iceberg")
+    if _post_q_abort:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=table,
+            target_schema=str(table_dir),
+            checksum="",
+            chunks_completed=0,
+            error=_post_q_abort,
+            rejected_details=rejected_details,
+            driver="iceberg",
+        )
     file_warnings: list[str] = []
+    schema_cols_all = [
+        str(f.get("name") or "")
+        for f in (schema_json.get("fields") or [])
+        if f.get("name")
+    ]
+    schema_extra_fs = [c for c in schema_cols_all if c not in set(target_cols)]
+    # Parity with catalog: overwrite of a partial Map NULL-wipes dest-only cols.
+    if (
+        write_mode in {"overwrite", "replace"}
+        and current_meta
+        and schema_extra_fs
+    ):
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=table,
+            target_schema=str(table_dir),
+            checksum="",
+            chunks_completed=0,
+            error=(
+                "Iceberg overwrite Map omits destination columns "
+                f"{schema_extra_fs[:12]} — would NULL-wipe them. "
+                "Map every column or use upsert/merge to preserve unmapped fields."
+            ),
+            rejected_details=rejected_details,
+            driver="iceberg",
+        )
     if write_mode in {"overwrite", "replace"} and current_meta:
         # Drop prior data refs; keep schema evolution
         current_meta = None
 
     mode = (write_mode or "append").lower()
     upsert_modes = {"upsert", "merge", "cdc", "incremental_deduped"}
+    mor_upsert = False
+    pending_eq_rows: list[dict[str, Any]] = []
     if mode in upsert_modes:
         pk_cols = [c for c in (conflict_columns or []) if c in target_cols]
         if not pk_cols:
@@ -1375,14 +2270,128 @@ def _write_mapped_rows_filesystem(
                 rejected_details=rejected_details,
                 driver="iceberg",
             )
-        existing_rows = _load_existing_rows(table_dir, target_cols, current_meta)
-        incoming = [_row_as_dict(target_cols, r) for r in mapped_rows]
-        merged = _merge_upsert_rows(existing_rows, incoming, pk_cols=pk_cols)
-        rel_path, n_written, checksum, file_warnings = _write_data_file(
-            table_dir / "data", target_cols, merged, column_types=write_types
+        # Shared dense empty-PK quarantine (parity with catalog path).
+        from connectors.writer_common import partition_dense_upsert_rows
+
+        before_pk = len(mapped_rows)
+        mapped_rows = partition_dense_upsert_rows(
+            mapped_rows,
+            pk_cols,
+            target_cols=target_cols,
+            rejected_details=rejected_details,
+            policy=policy,
         )
-        operation = "overwrite"  # Iceberg CoW upsert lands as overwrite snapshot
-        data_files = [{"path": rel_path, "record-count": n_written, "checksum": checksum}]
+        if len(mapped_rows) < before_pk:
+            _pk_abort = reject_on_strict_policy(policy, rejected_details, "Iceberg")
+            if _pk_abort:
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=table,
+                    target_schema=str(table_dir),
+                    checksum="",
+                    chunks_completed=0,
+                    error=_pk_abort,
+                    rejected_details=rejected_details,
+                    driver="iceberg",
+                )
+            if not mapped_rows:
+                return WriteResult(
+                    ok=True,
+                    rows_written=0,
+                    table_name=table,
+                    target_schema=str(table_dir),
+                    checksum="",
+                    chunks_completed=1,
+                    rejected_details=rejected_details,
+                    rejected_rows=_rejected_row_count(
+                        data_rows, mapped_rows, rejected_details, policy
+                    ),
+                    driver="iceberg",
+                )
+        # CoW rewrite must keep every committed schema field — Map-only load
+        # would drop dest-only columns from the snapshot.
+        schema_cols = [
+            str(f.get("name") or "")
+            for f in (schema_json.get("fields") or [])
+            if f.get("name")
+        ]
+        load_cols = schema_cols or list(target_cols)
+        existing_rows = _load_existing_rows(table_dir, load_cols, current_meta)
+        incoming = [_row_as_dict(target_cols, r) for r in mapped_rows]
+        try:
+            merged = _merge_upsert_rows(existing_rows, incoming, pk_cols=pk_cols)
+        except ValueError as exc:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=table,
+                target_schema=str(table_dir),
+                checksum="",
+                chunks_completed=0,
+                error=str(exc)[:500],
+                rejected_details=rejected_details,
+                driver="iceberg",
+            )
+        prior_data_refs = [
+            dict(ref)
+            for ref in ((current_meta or {}).get("data-files") or [])
+            if isinstance(ref, dict) and str(ref.get("path") or "").strip()
+        ]
+        if prior_data_refs:
+            try:
+                new_rows, pending_eq_rows = _mor_upsert_delta(
+                    existing_rows, incoming, pk_cols=pk_cols
+                )
+            except ValueError as exc:
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=table,
+                    target_schema=str(table_dir),
+                    checksum="",
+                    chunks_completed=0,
+                    error=str(exc)[:500],
+                    rejected_details=rejected_details,
+                    driver="iceberg",
+                )
+            if not new_rows:
+                return WriteResult(
+                    ok=True,
+                    rows_written=0,
+                    table_name=table,
+                    target_schema=str(table_dir),
+                    checksum="",
+                    chunks_completed=1,
+                    rejected_details=rejected_details,
+                    rejected_rows=_rejected_row_count(
+                        data_rows, mapped_rows, rejected_details, policy
+                    ),
+                    driver="iceberg",
+                )
+            rel_path, n_written, checksum, file_warnings = _write_data_file(
+                table_dir / "data",
+                load_cols,
+                new_rows,
+                column_types=write_types,
+            )
+            mor_upsert = True
+            operation = "overwrite"
+            data_files = prior_data_refs + [
+                {
+                    "path": rel_path,
+                    "record-count": n_written,
+                    "checksum": checksum,
+                }
+            ]
+        else:
+            rel_path, n_written, checksum, file_warnings = _write_data_file(
+                table_dir / "data", load_cols, merged, column_types=write_types
+            )
+            operation = "overwrite"
+            data_files = [
+                {"path": rel_path, "record-count": n_written, "checksum": checksum}
+            ]
     else:
         rel_path, n_written, checksum, file_warnings = _write_data_file(
             table_dir / "data", target_cols, mapped_rows, column_types=write_types
@@ -1393,6 +2402,66 @@ def _write_mapped_rows_filesystem(
         ]
         if mode in {"overwrite", "replace"}:
             data_files = [{"path": rel_path, "record-count": n_written, "checksum": checksum}]
+
+    compact = (
+        not mor_upsert
+        and (mode in upsert_modes or mode in {"overwrite", "replace"})
+    )
+    prior_deletes = [] if compact else _snapshot_delete_files(current_meta)
+    prior_data = [dict(ref) for ref in data_files[:-1]] if data_files else []
+    _ensure_data_file_sequences(prior_data)
+    if compact:
+        delete_files: list[dict[str, Any]] = []
+        write_strategy = "copy-on-write"
+        new_seq = 1
+    else:
+        delete_files = prior_deletes
+        write_strategy = "merge-on-read" if (delete_files or pending_eq_rows or mor_upsert) else "copy-on-write"
+        new_seq = _max_iceberg_sequence(prior_data, delete_files) + 1
+    if mor_upsert and pending_eq_rows:
+        try:
+            eq_rel, eq_n, eq_ck = _write_equality_delete_file(
+                table_dir / "data",
+                list(pk_cols),
+                pending_eq_rows,
+                column_types=write_types,
+            )
+        except ValueError as exc:
+            if "requires pyarrow" not in str(exc):
+                raise
+            rel_path, n_written, checksum, file_warnings = _write_data_file(
+                table_dir / "data", load_cols, merged, column_types=write_types
+            )
+            data_files = [
+                {
+                    "path": rel_path,
+                    "record-count": n_written,
+                    "checksum": checksum,
+                    "sequence-number": 1,
+                }
+            ]
+            delete_files = []
+            write_strategy = "copy-on-write"
+            new_seq = 1
+            prior_data = []
+            pending_eq_rows = []
+            mor_upsert = False
+        else:
+            delete_files.append(
+                {
+                    "path": eq_rel,
+                    "content": 2,
+                    "equality-ids": _equality_ids_for_columns(schema_json, pk_cols),
+                    "sequence-number": new_seq,
+                    "record-count": eq_n,
+                    "checksum": eq_ck,
+                }
+            )
+            write_strategy = "merge-on-read"
+    if data_files:
+        newest = dict(data_files[-1])
+        newest["sequence-number"] = new_seq
+        data_files = prior_data + [newest]
 
     snapshot_id = int(time.time() * 1000)
     now_ms = snapshot_id
@@ -1409,9 +2478,10 @@ def _write_mapped_rows_filesystem(
             "operation": operation,
             "added-records": str(n_written),
             "added-data-files": "1",
+            "added-delete-files": str(1 if mor_upsert and pending_eq_rows else 0),
             "dataflow.checksum": checksum,
             "dataflow.write_mode": mode,
-            "dataflow.write_strategy": "copy-on-write",
+            "dataflow.write_strategy": write_strategy,
         },
         "manifest-list": rel_path,
         "schema-id": schema_json.get("schema-id", 0),
@@ -1436,9 +2506,10 @@ def _write_mapped_rows_filesystem(
             "dataflow.engine": "iceberg_writer",
             "dataflow.evolve": ",".join(evolve_notes) if evolve_notes else "",
             "dataflow.write_mode": mode,
-            "dataflow.write_strategy": "copy-on-write",
+            "dataflow.write_strategy": write_strategy,
         },
         "data-files": data_files,
+        "delete-files": delete_files,
     }
 
     # Atomic commit: write temp then rename; update version-hint
@@ -1450,6 +2521,24 @@ def _write_mapped_rows_filesystem(
 
     if on_checkpoint:
         on_checkpoint(n_written, n_written, 1)
+
+    _final_abort = reject_on_strict_policy(policy, rejected_details, "Iceberg")
+    if _final_abort:
+        return WriteResult(
+            ok=False,
+            rows_written=n_written,
+            table_name=table,
+            target_schema=str(table_dir),
+            checksum=checksum,
+            chunks_completed=1,
+            error=_final_abort,
+            rejected_details=rejected_details,
+            rejected_rows=_rejected_row_count(
+                data_rows, mapped_rows, rejected_details, policy
+            ),
+            warnings=(list(evolve_notes) + list(file_warnings))[:20],
+            driver="iceberg",
+        )
 
     return WriteResult(
         ok=True,
@@ -1540,6 +2629,7 @@ def write_mapped_rows(
             conflict_columns=conflict_columns,
             sync_mode=sync_mode,
             file_batch_idx=file_batch_idx,
+            destination_column_nullability=_kwargs.get("destination_column_nullability"),
         )
 
     return _write_mapped_rows_filesystem(
@@ -1581,23 +2671,144 @@ def _resolve_iceberg_table_dir(cfg: dict[str, Any], table_name: str, schema: str
     return table_dir
 
 
+def _iceberg_pk_columns(primary_key_column: str | Sequence[str]) -> list[str]:
+    from services.cdc_snapshot_window import _pk_columns
+
+    return _pk_columns(primary_key_column)
+
+
+def _iceberg_row_pk(row: dict[str, Any], pk_cols: Sequence[str]) -> str | None:
+    from services.cdc_snapshot_window import _pk_value
+
+    return _pk_value(row, pk_cols)
+
+
+def _iceberg_split_key(key: str, width: int) -> list[str]:
+    """Split a leftover/CDC address into PK parts. Arity mismatch is fail-closed.
+
+    Composite identity uses the CDC unit separator (same as SQL leftover
+    MERGE). A comma-joined ``9,9`` or a single leftover of a 2-col PK is
+    not a row identity — returning 0 here would look like an idempotent
+    miss and let leftover rows survive.
+    """
+    from services.cdc_snapshot_window import _PK_SEP
+
+    text = str(key)
+    if width <= 1:
+        return [text]
+    parts = text.split(_PK_SEP)
+    if len(parts) != width:
+        raise ValueError(
+            f"Iceberg composite delete key arity {len(parts)} != {width}"
+        )
+    return parts
+
+
+def _iceberg_typed_literal(tbl: Any, column: str, raw: Any) -> Any:
+    """Bind a leftover/CDC key part to the Iceberg field type.
+
+    Digit strings on a string PK must stay strings (LongLiteral cannot
+    convert into string). Integer/long fields take int. Decimal/date/
+    timestamp/uuid bind to the field type. Fail closed on a missing
+    field or a value that cannot convert — never guess.
+    """
+    from datetime import date, datetime
+    from decimal import Decimal
+
+    from pyiceberg.types import (
+        BooleanType,
+        DateType,
+        DecimalType,
+        DoubleType,
+        FloatType,
+        IntegerType,
+        LongType,
+        TimestampType,
+        TimestamptzType,
+        UUIDType,
+    )
+
+    field = tbl.schema().find_field(column, case_sensitive=False)
+    ftype = getattr(field, "field_type", None)
+    if ftype is None:
+        raise ValueError(f"Iceberg delete: unknown field {column!r}")
+    text = str(raw)
+    try:
+        if isinstance(ftype, (IntegerType, LongType)):
+            return int(text)
+        if isinstance(ftype, BooleanType):
+            return text.strip().lower() in {"1", "true", "t", "yes"}
+        if isinstance(ftype, (DoubleType, FloatType)):
+            return float(text)
+        if isinstance(ftype, DecimalType):
+            return Decimal(text)
+        if isinstance(ftype, DateType):
+            return date.fromisoformat(text[:10])
+        if isinstance(ftype, (TimestampType, TimestamptzType)):
+            return datetime.fromisoformat(text.replace("Z", "+00:00"))
+        if isinstance(ftype, UUIDType):
+            import uuid as _uuid
+
+            return _uuid.UUID(text)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"Iceberg delete: {column!r} value {text!r} does not bind "
+            f"to {type(ftype).__name__}"
+        ) from exc
+    return text
+
+
+def _iceberg_delete_predicate(tbl: Any, pk_cols: list[str], work_keys: set[str]) -> Any:
+    """Dest-engine leftover/CDC delete predicate.
+
+    Single column: ``IN``. Composite: ``OR`` of ``AND`` equalities — the
+    same identity SQL leftover MERGE uses. A joined key whose arity does
+    not match the PK is fail-closed (never a concatenated column name).
+    """
+    from pyiceberg.expressions import And, EqualTo, In, Or
+
+    if not pk_cols or not work_keys:
+        raise ValueError("Iceberg delete requires PK columns and keys")
+    width = len(pk_cols)
+    if width == 1:
+        col = pk_cols[0]
+        return In(col, [_iceberg_typed_literal(tbl, col, k) for k in work_keys])
+    terms: list[Any] = []
+    for key in work_keys:
+        parts = _iceberg_split_key(key, width)
+        equals = [
+            EqualTo(pk_cols[i], _iceberg_typed_literal(tbl, pk_cols[i], parts[i]))
+            for i in range(width)
+        ]
+        terms.append(And(*equals))
+    if len(terms) == 1:
+        return terms[0]
+    return Or(*terms)
+
+
 def delete_by_primary_keys(
     cfg: dict[str, Any],
     table_name: str,
-    primary_key_column: str,
+    primary_key_column: str | Sequence[str],
     keys: list[str],
     schema: str | None = None,
     *,
     incoming_lsn: str | None = None,
     lsn_column: str = "_df_lsn",
 ) -> int:
-    """CDC delete with LSN guard for filesystem CoW and pyiceberg catalogs.
+    """CDC / leftover-MERGE delete with LSN guard (filesystem MoR + catalogs).
 
-    Stale deletes that would wipe a newer ``_df_lsn`` row are skipped
-    (at-least-once redelivery safety). Returns the number of rows removed.
+    ``primary_key_column`` is one column or an ordered composite. Composite
+    keys use the CDC unit separator (same as SQL leftover MERGE), never a
+    literal ``order_id,line_id`` column. Stale deletes that would wipe a
+    newer ``_df_lsn`` row are skipped (at-least-once redelivery). Filesystem
+    deletes write Iceberg v2 equality-delete files (content=2) and keep
+    existing data files. Returns the number of surviving keys deleted after
+    the LSN filter.
     """
     if not keys:
         return 0
+    pk_cols = _iceberg_pk_columns(primary_key_column)
     key_set = {str(k) for k in keys}
     endpoint = {
         **cfg,
@@ -1612,7 +2823,7 @@ def delete_by_primary_keys(
     if write_path == "catalog":
         return _delete_pyiceberg(
             endpoint,
-            primary_key_column,
+            pk_cols,
             key_set,
             incoming_lsn=incoming_lsn,
             lsn_column=lsn_column,
@@ -1620,7 +2831,7 @@ def delete_by_primary_keys(
     return _delete_filesystem(
         cfg,
         table_name,
-        primary_key_column,
+        pk_cols,
         key_set,
         schema=schema,
         incoming_lsn=incoming_lsn,
@@ -1630,7 +2841,7 @@ def delete_by_primary_keys(
 
 def _filter_delete_keys_by_lsn(
     rows: list[dict[str, Any]],
-    primary_key_column: str,
+    pk_cols: Sequence[str],
     key_set: set[str],
     *,
     incoming_lsn: str | None,
@@ -1640,14 +2851,13 @@ def _filter_delete_keys_by_lsn(
 
     if not incoming_lsn:
         return set(key_set)
-    existing = {
-        str(r.get(primary_key_column)): r.get(lsn_column)
-        for r in rows
-        if str(r.get(primary_key_column)) in key_set
-    }
-    # Keys absent from table: treat as already deleted (idempotent).
-    for k in key_set:
-        existing.setdefault(k, None)
+    existing: dict[str, Any] = {}
+    for row in rows:
+        pk = _iceberg_row_pk(row, pk_cols)
+        if pk is not None and pk in key_set:
+            existing[pk] = row.get(lsn_column)
+    for key in key_set:
+        existing.setdefault(key, None)
     kept = filter_keys_for_lsn_delete(list(key_set), existing, incoming_lsn)
     return {str(k) for k in kept}
 
@@ -1655,7 +2865,7 @@ def _filter_delete_keys_by_lsn(
 def _delete_filesystem(
     cfg: dict[str, Any],
     table_name: str,
-    primary_key_column: str,
+    pk_cols: list[str],
     key_set: set[str],
     *,
     schema: str | None,
@@ -1674,21 +2884,125 @@ def _delete_filesystem(
         return 0
     schema_json = (current_meta.get("schemas") or [{}])[-1] or current_meta.get("schema") or {}
     columns = [str(f.get("name")) for f in (schema_json.get("fields") or []) if f.get("name")]
-    if primary_key_column not in columns:
-        columns = list(columns) + [primary_key_column]
+    for col in pk_cols:
+        if col not in columns:
+            columns.append(col)
     existing = _load_existing_rows(table_dir, columns, current_meta)
     work_keys = _filter_delete_keys_by_lsn(
         existing,
-        primary_key_column,
+        pk_cols,
         key_set,
         incoming_lsn=incoming_lsn,
         lsn_column=lsn_column,
     )
     if not work_keys:
         return 0
-    kept = [r for r in existing if str(r.get(primary_key_column)) not in work_keys]
-    deleted = len(existing) - len(kept)
+    width = len(pk_cols)
+    for key in work_keys:
+        _iceberg_split_key(key, width)
+    delete_rows = [
+        {c: row.get(c) for c in pk_cols}
+        for row in existing
+        if (_iceberg_row_pk(row, pk_cols) or "") in work_keys
+    ]
+    if not delete_rows:
+        return 0
     write_types = _write_types_from_schema(schema_json, {})
+    try:
+        rel_path, n_written, checksum = _write_equality_delete_file(
+            table_dir / "data",
+            list(pk_cols),
+            delete_rows,
+            column_types=write_types,
+        )
+    except ValueError as exc:
+        if "requires pyarrow" not in str(exc):
+            raise
+        return _delete_filesystem_cow(
+            table_dir,
+            meta_dir,
+            versions,
+            current_meta,
+            schema_json,
+            columns,
+            existing,
+            work_keys,
+            pk_cols,
+            write_types,
+        )
+    data_files = [dict(ref) for ref in (current_meta.get("data-files") or []) if isinstance(ref, dict)]
+    _ensure_data_file_sequences(data_files)
+    delete_files = _snapshot_delete_files(current_meta)
+    delete_seq = _max_iceberg_sequence(data_files, delete_files) + 1
+    equality_ids = _equality_ids_for_columns(schema_json, pk_cols)
+    delete_files.append(
+        {
+            "path": rel_path,
+            "content": 2,
+            "equality-ids": equality_ids,
+            "sequence-number": delete_seq,
+            "record-count": n_written,
+            "checksum": checksum,
+        }
+    )
+    snapshot_id = int(time.time() * 1000)
+    snapshots = list(current_meta.get("snapshots") or [])
+    snapshots.append({
+        "snapshot-id": snapshot_id,
+        "timestamp-ms": snapshot_id,
+        "summary": {
+            "operation": "delete",
+            "added-delete-files": "1",
+            "deleted-records": str(len(delete_rows)),
+            "dataflow.checksum": checksum,
+            "dataflow.write_mode": "cdc_delete",
+            "dataflow.write_strategy": "merge-on-read",
+            "dataflow.deleted_keys": str(len(delete_rows)),
+        },
+        "manifest-list": rel_path,
+        "schema-id": schema_json.get("schema-id", 0),
+    })
+    new_version = int(versions[-1].stem[1:].split(".")[0]) + 1
+    metadata = {
+        **current_meta,
+        "last-updated-ms": snapshot_id,
+        "snapshots": snapshots,
+        "current-snapshot-id": snapshot_id,
+        "data-files": data_files,
+        "delete-files": delete_files,
+        "properties": {
+            **(current_meta.get("properties") or {}),
+            "dataflow.write_mode": "cdc_delete",
+            "dataflow.write_strategy": "merge-on-read",
+        },
+    }
+    meta_path = meta_dir / f"v{new_version}.metadata.json"
+    tmp = meta_path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(metadata, indent=2, default=json_default), encoding="utf-8")
+    os.replace(tmp, meta_path)
+    (meta_dir / "version-hint.text").write_text(str(new_version), encoding="utf-8")
+    return len(delete_rows)
+
+
+def _delete_filesystem_cow(
+    table_dir: Path,
+    meta_dir: Path,
+    versions: list[Path],
+    current_meta: dict[str, Any],
+    schema_json: dict[str, Any],
+    columns: list[str],
+    existing: list[dict[str, Any]],
+    work_keys: set[str],
+    pk_cols: list[str],
+    write_types: dict[str, str],
+) -> int:
+    """CoW rewrite when equality-delete parquet cannot be written (no pyarrow)."""
+    kept = [
+        row
+        for row in existing
+        if (_iceberg_row_pk(row, pk_cols) or "") not in work_keys
+    ]
+    deleted = len(existing) - len(kept)
     rel_path, n_written, checksum, _warnings = _write_data_file(
         table_dir / "data",
         columns,
@@ -1718,7 +3032,15 @@ def _delete_filesystem(
         "last-updated-ms": snapshot_id,
         "snapshots": snapshots,
         "current-snapshot-id": snapshot_id,
-        "data-files": [{"path": rel_path, "record-count": n_written, "checksum": checksum}],
+        "data-files": [
+            {
+                "path": rel_path,
+                "record-count": n_written,
+                "checksum": checksum,
+                "sequence-number": 1,
+            }
+        ],
+        "delete-files": [],
         "properties": {
             **(current_meta.get("properties") or {}),
             "dataflow.write_mode": "cdc_delete",
@@ -1735,7 +3057,7 @@ def _delete_filesystem(
 
 def _delete_pyiceberg(
     endpoint: dict[str, Any],
-    primary_key_column: str,
+    pk_cols: list[str],
     key_set: set[str],
     *,
     incoming_lsn: str | None,
@@ -1745,34 +3067,49 @@ def _delete_pyiceberg(
 
     config = parse_iceberg_catalog_config(endpoint)
     catalog = load_catalog(endpoint)
-    identifier = config.table_identifier
+    identifier = config["namespace"] + (config["table_name"],)
     tbl = catalog.load_table(identifier)
-    scanned = tbl.scan().to_arrow()
-    rows: list[dict[str, Any]] = []
-    for i in range(scanned.num_rows):
-        rows.append(
-            {name: scanned.column(name)[i].as_py() for name in scanned.column_names}
+    work_keys = {str(k) for k in key_set}
+    if incoming_lsn:
+        # CDC LSN guard projects pk (+ lsn) only. Overwrite leftover MERGE
+        # has no LSN and must not materialize scan().to_arrow() of the table.
+        select_cols = list(dict.fromkeys([*pk_cols, lsn_column]))
+        scanned = tbl.scan().select(*select_cols).to_arrow()
+        rows: list[dict[str, Any]] = []
+        for i in range(scanned.num_rows):
+            rows.append(
+                {
+                    name: scanned.column(name)[i].as_py()
+                    for name in scanned.column_names
+                }
+            )
+        work_keys = _filter_delete_keys_by_lsn(
+            rows,
+            pk_cols,
+            work_keys,
+            incoming_lsn=incoming_lsn,
+            lsn_column=lsn_column,
         )
-    work_keys = _filter_delete_keys_by_lsn(
-        rows,
-        primary_key_column,
-        key_set,
-        incoming_lsn=incoming_lsn,
-        lsn_column=lsn_column,
-    )
+        work_keys = {
+            pk
+            for row in rows
+            if (pk := _iceberg_row_pk(row, pk_cols)) is not None and pk in work_keys
+        }
     if not work_keys:
         return 0
-    kept = [r for r in rows if str(r.get(primary_key_column)) not in work_keys]
-    deleted = len(rows) - len(kept)
-    if deleted == 0:
-        return 0
-    if pa is None:
-        raise RuntimeError("pyarrow required for Iceberg CDC deletes")
-    arrays = []
-    for name in scanned.column_names:
-        field = scanned.schema.field(name)
-        cells = [r.get(name) for r in kept]
-        arrays.append(pa.array(cells, type=field.type))
-    remaining = pa.Table.from_arrays(arrays, schema=scanned.schema)
-    tbl.overwrite(remaining)
-    return deleted
+    try:
+        tbl.delete(delete_filter=_iceberg_delete_predicate(tbl, pk_cols, work_keys))
+    except Exception:
+        if len(pk_cols) != 1:
+            raise
+        from pyiceberg.types import StringType
+
+        field = tbl.schema().find_field(pk_cols[0], case_sensitive=False)
+        ftype = getattr(field, "field_type", None)
+        # Quoted-string IN is only valid for string PKs. A numeric In()
+        # failure falling through to strings would no-op leftover MERGE.
+        if not isinstance(ftype, StringType):
+            raise
+        quoted = ", ".join("'" + str(k).replace("'", "''") + "'" for k in work_keys)
+        tbl.delete(delete_filter=f"{pk_cols[0]} IN ({quoted})")
+    return len(work_keys)

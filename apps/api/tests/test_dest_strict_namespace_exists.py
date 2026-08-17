@@ -105,8 +105,8 @@ def test_attach_db_sample_destination_purpose_passes_strict_namespace():
         "src.transfer.endpoint_intelligence.resolve_connector_config",
         return_value={"type": "mysql", "database": "railway", "host": "h", "port": 3306},
     ), patch(
-        "src.transfer.endpoint_intelligence._introspect_table_schema",
-        return_value={},
+        "src.transfer.endpoint_intelligence._introspect_table_schema_rich",
+        return_value=({}, {}, {}),
     ) as intro:
         _attach_db_sample(out, endpoint)
 

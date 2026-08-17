@@ -2,13 +2,15 @@ import { useEffect, useState } from "react";
 import { DtIcon } from "../components/DtIcon";
 import { EmptyState } from "../components/ui/EmptyState";
 import { SectionLoader } from "../components/LoadingState";
+import { Button } from "../components/ui/Button";
 import { FilterTabs } from "../components/ui/FilterTabs";
 import { FilterBar } from "../components/ui/FilterBar";
 import { PageFrame } from "../components/ui/PageFrame";
 import { PageShell } from "../components/ui/PageShell";
 import { useToast } from "../components/Toast";
 import { API_BASE } from "../lib/types";
-import { fetchMcpManifest, fetchMcpLogs, fetchMcpStatus } from "../lib/api";
+import { fetchMcpLogs, fetchMcpStatus } from "../lib/api";
+
 const INTEGRATIONS = [
   {
     id: "cursor",
@@ -54,8 +56,8 @@ const INTEGRATIONS = [
     id: "chatgpt",
     label: "Custom GPT",
     icon: "activity",
-    desc: "OpenAPI action pointing at tool endpoint",
-    snippet: `POST ${API_BASE}/mcp/tools/call
+    desc: "OpenAPI action pointing at the MCP endpoint",
+    snippet: `POST ${API_BASE.replace(/\/api\/v1$/, "")}/api/v1/mcp/tools/call
 Authorization: Bearer <api-key>`,
   },
 ];
@@ -72,7 +74,6 @@ type McpLog = {
 
 export function McpPage() {
   const { toast } = useToast();
-  const [manifest, setManifest] = useState<Record<string, unknown> | null>(null);
   const [status, setStatus] = useState<Record<string, unknown> | null>(null);
   const [logs, setLogs] = useState<McpLog[]>([]);
   const [loading, setLoading] = useState(true);
@@ -81,26 +82,26 @@ export function McpPage() {
   const [logFilter, setLogFilter] = useState<"all" | "ok" | "error">("all");
 
   const mcpBase = `${API_BASE.replace(/\/api\/v1$/, "")}/api/v1/mcp`;
-  const toolUrl = `${mcpBase}/tools/call`;
 
   useEffect(() => {
     setLoading(true);
     Promise.all([
-      fetchMcpManifest().then(setManifest).catch(() => setManifest(null)),
       fetchMcpStatus().then(setStatus).catch(() => setStatus({ status: "offline" })),
-      fetchMcpLogs(50).then((rows) =>
-        setLogs(
-          rows.map((r) => ({
-            id: r.id,
-            time: new Date(r.time).toLocaleTimeString(),
-            ts: new Date(r.time).getTime(),
-            tool: r.tool,
-            client: r.client,
-            status: r.status === "ok" ? "ok" : "error",
-            ms: r.ms,
-          })),
-        ),
-      ).catch(() => setLogs([])),
+      fetchMcpLogs(50)
+        .then((rows) =>
+          setLogs(
+            rows.map((r) => ({
+              id: r.id,
+              time: new Date(r.time).toLocaleTimeString(),
+              ts: new Date(r.time).getTime(),
+              tool: r.tool,
+              client: r.client,
+              status: r.status === "ok" ? "ok" : "error",
+              ms: r.ms,
+            })),
+          ),
+        )
+        .catch(() => setLogs([])),
     ]).finally(() => setLoading(false));
   }, []);
 
@@ -111,7 +112,6 @@ export function McpPage() {
     setTimeout(() => setCopied(null), 2000);
   };
 
-  const tools = (manifest?.tools as unknown[]) ?? [];
   const online = status?.status === "online";
   const filteredLogs = logFilter === "all" ? logs : logs.filter((l) => l.status === logFilter);
   const okCount = logs.filter((l) => l.status === "ok").length;
@@ -122,11 +122,11 @@ export function McpPage() {
       wide
       className="df2-page-mcp"
       title="MCP Server"
-      description="Agent tools for Cursor, Claude, and VS Code — same preflight and proof path."
+      description="Connect Cursor, Claude, or VS Code — agents use the same preflight and proof path as the UI."
     >
       {loading ? (
         <PageFrame className="df2-mcp-workspace">
-          <SectionLoader title="Loading MCP server" hint="Fetching manifest and status…" />
+          <SectionLoader title="Loading MCP server" hint="Checking endpoint status…" />
         </PageFrame>
       ) : (
         <PageFrame className="df2-mcp-workspace df2-stack">
@@ -138,44 +138,39 @@ export function McpPage() {
                   {online ? "Online" : "Offline"}
                 </span>
               </div>
-              <code className="df2-mcp-endpoint-url" title={mcpBase}>{mcpBase}</code>
+              <code className="df2-mcp-endpoint-url" title={mcpBase}>
+                {mcpBase}
+              </code>
               <span className="df2-mcp-endpoint-meta">
                 {online
-                  ? `${tools.length} tools · invoke at `
-                  : "Endpoint not responding · invoke at "}
-                <code>{toolUrl}</code>
+                  ? "Paste this URL into your agent client — tools load automatically from the server."
+                  : "Endpoint not responding. Start the API, then retry setup."}
               </span>
             </div>
             <div className="df2-mcp-endpoint-actions">
-              <button
-                type="button"
-                className="df2-btn df2-btn-primary"
+              <Button
+                variant="primary"
                 onClick={() => copyText(mcpBase, "MCP server URL")}
+                leadingIcon={<DtIcon name="check" size={14} />}
               >
-                <DtIcon name="check" size={14} />
                 {copied === "MCP server URL" ? "Copied MCP URL" : "Copy MCP URL"}
-              </button>
-              <button
-                type="button"
-                className="df2-btn"
-                onClick={() => copyText(toolUrl, "Tool invoke URL")}
-              >
-                {copied === "Tool invoke URL" ? "Copied tool URL" : "Copy tool invoke URL"}
-              </button>
+              </Button>
             </div>
           </section>
 
           <div className="df2-mcp-layout">
             <div className="df2-mcp-panel df2-mcp-panel--integrations">
               <div className="df2-mcp-panel-head">
-                <h2>Client integrations</h2>
+                <h2>Client setup</h2>
               </div>
               <div className="df2-mcp-panel-body">
                 <div className="df2-mcp-integration-list">
                   {INTEGRATIONS.map((item) => (
                     <div key={item.id} className="df2-mcp-integration-row">
                       <div className="df2-cell-main">
-                        <div className="df2-cell-icon"><DtIcon name={item.icon} size={20} /></div>
+                        <div className="df2-cell-icon">
+                          <DtIcon name={item.icon} size={20} />
+                        </div>
                         <div>
                           <div className="df2-cell-title">{item.label}</div>
                           <div className="df2-cell-meta">{item.desc}</div>
@@ -198,7 +193,12 @@ export function McpPage() {
                       <button
                         type="button"
                         className="df2-btn df2-btn-sm df2-btn-primary"
-                        onClick={() => copyText(INTEGRATIONS.find((i) => i.id === expandedId)!.snippet, "Setup snippet")}
+                        onClick={() =>
+                          copyText(
+                            INTEGRATIONS.find((i) => i.id === expandedId)!.snippet,
+                            "Setup snippet",
+                          )
+                        }
                       >
                         {copied === "Setup snippet" ? "Copied" : "Copy snippet"}
                       </button>
@@ -210,13 +210,13 @@ export function McpPage() {
 
             <div className="df2-mcp-panel df2-mcp-panel--logs">
               <div className="df2-mcp-panel-head">
-                <h2>Request log</h2>
+                <h2>Recent activity</h2>
               </div>
               {logs.length > 0 && (
                 <div className="df2-mcp-panel-filters">
-                  <FilterBar ariaLabel="Filter MCP request log">
+                  <FilterBar ariaLabel="Filter MCP activity">
                     <FilterTabs
-                      ariaLabel="Filter MCP request log"
+                      ariaLabel="Filter MCP activity"
                       value={logFilter}
                       onChange={setLogFilter}
                       items={[
@@ -247,58 +247,45 @@ export function McpPage() {
                             <EmptyState
                               compact
                               icon="activity"
-                              title={logs.length === 0 ? "No MCP invocations yet" : "No matching requests"}
+                              title={
+                                logs.length === 0
+                                  ? "No agent calls yet"
+                                  : "No matching requests"
+                              }
                               description={
                                 logs.length === 0
-                                  ? "Tool calls from Cursor, Claude, or VS Code appear here in real time."
-                                  : "Try another filter to browse the request log."
+                                  ? "After you connect Cursor or Claude, invocations show here."
+                                  : "Try another filter."
                               }
                             />
                           </td>
                         </tr>
                       ) : (
                         filteredLogs.map((log) => (
-                        <tr key={log.id}>
-                          <td>{log.time}</td>
-                          <td><code>{log.tool}</code></td>
-                          <td>{log.client}</td>
-                          <td>
-                            <span className={`df2-mcp-log-status df2-mcp-log-status--${log.status === "ok" ? "ok" : "err"}`}>
-                              {log.status === "ok" ? "200" : "500"}
-                            </span>
-                          </td>
-                          <td>{log.ms} ms</td>
-                        </tr>
-                      ))
+                          <tr key={log.id}>
+                            <td>{log.time}</td>
+                            <td>
+                              <code>{log.tool}</code>
+                            </td>
+                            <td>{log.client}</td>
+                            <td>
+                              <span
+                                className={`df2-mcp-log-status df2-mcp-log-status--${
+                                  log.status === "ok" ? "ok" : "err"
+                                }`}
+                              >
+                                {log.status === "ok" ? "200" : "500"}
+                              </span>
+                            </td>
+                            <td>{log.ms} ms</td>
+                          </tr>
+                        ))
                       )}
                     </tbody>
                   </table>
                 </div>
               </div>
             </div>
-          </div>
-
-          <div className="df2-mcp-tools-section">
-            <h2>Available tools ({tools.length})</h2>
-            {tools.length === 0 ? (
-              <EmptyState
-                icon="zap"
-                title="No tools registered"
-                description="Start the API with MCP enabled to expose agent tools for transfers and connector tests."
-              />
-            ) : (
-              <div className="df2-mcp-grid">
-                {tools.map((t: unknown) => {
-                  const tool = t as { name: string; description: string };
-                  return (
-                    <div key={tool.name} className="df2-mcp-tile">
-                      <code>{tool.name}</code>
-                      <p className="df2-cell-meta">{tool.description}</p>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
           </div>
         </PageFrame>
       )}

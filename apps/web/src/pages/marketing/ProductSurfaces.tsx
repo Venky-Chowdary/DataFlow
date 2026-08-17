@@ -1,4 +1,4 @@
-import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
+import { type CSSProperties, type ReactNode } from "react";
 import { MarketingHeroBand } from "../../components/marketing/MarketingHeroBand";
 import { MarketingReveal } from "../../components/marketing/MarketingReveal";
 import { MarketingSectionFooter } from "../../components/marketing/MarketingSectionFooter";
@@ -8,6 +8,19 @@ import {
   MappingCinema,
   ProofCinema,
 } from "../../components/landing/AlgorithmCinema";
+import {
+  CadenceDialArt,
+  GateCombArt,
+  IntentArt,
+  PolicyDoorArt,
+  ReadLensArt,
+  RunSpineArt,
+} from "../../components/marketing/hero-art/productArt";
+import {
+  CutoverArt,
+  WarehouseLayersArt,
+  WatermarkArt,
+} from "../../components/marketing/hero-art/solutionArt";
 import type { PublicRoute } from "../../lib/publicNavigation";
 import {
   AlgoBlock,
@@ -30,31 +43,6 @@ function StatsStrip({ items }: { items: { value: string; label: string }[] }) {
         </div>
       ))}
     </div>
-  );
-}
-
-function Shot({
-  label,
-  caption,
-  children,
-  tone = "light",
-}: {
-  label: string;
-  caption: string;
-  children: ReactNode;
-  tone?: "light" | "ink";
-}) {
-  return (
-    <figure className={`lp-mkt-shot lp-mkt-shot--${tone}`}>
-      <div className="lp-mkt-shot-chrome">
-        <span className="lp-mkt-shot-dots" aria-hidden>
-          <i /><i /><i />
-        </span>
-        <span className="lp-mkt-shot-label">{label}</span>
-      </div>
-      <div className="lp-mkt-shot-body">{children}</div>
-      <figcaption>{caption}</figcaption>
-    </figure>
   );
 }
 
@@ -183,197 +171,6 @@ function Chapter({
   );
 }
 
-/* ─── Unique hero mocks ─────────────────────────────────────────── */
-
-function TransferStudioMock() {
-  const [gate, setGate] = useState(0);
-  const gates = REAL_PREFLIGHT_GATES.map((g) => `${g.id} ${g.title}`);
-  useEffect(() => {
-    const id = window.setInterval(() => setGate((g) => (g + 1) % REAL_PREFLIGHT_GATES.length), 900);
-    return () => window.clearInterval(id);
-  }, []);
-
-  return (
-    <Shot label="Transfer Studio · Orders migration" caption="Live preflight advancing through nine fail-fast gates (G1–G9) before write.">
-      <div className="lp-mkt-ui-grid lp-mkt-ui-grid--studio">
-        <div className="lp-mkt-ui-pane">
-          <h4>Semantic map</h4>
-          {[
-            ["order_amt", "payment_amount", "0.93"],
-            ["cust_email", "email", "0.91"],
-            ["order_id", "order_key", "0.88"],
-          ].map(([s, d, c]) => (
-            <div key={s} className="lp-mkt-ui-map-row">
-              <code>{s}</code>
-              <span className="lp-mkt-ui-map-arrow" aria-hidden>→</span>
-              <code>{d}</code>
-              <em>{c}</em>
-            </div>
-          ))}
-        </div>
-        <div className="lp-mkt-ui-pane">
-          <h4>Preflight · {Math.min(gate + 1, 8)}/8</h4>
-          <div className="lp-mkt-ui-progress" aria-hidden>
-            <i style={{ width: `${((gate + 1) / 8) * 100}%` }} />
-          </div>
-          <ul className="lp-mkt-ui-gates">
-            {gates.map((g, i) => (
-              <li key={g} className={i <= gate ? "is-pass" : "is-pending"}>
-                <span>{g}</span>
-                <em>{i <= gate ? "pass" : "…"}</em>
-              </li>
-            ))}
-          </ul>
-        </div>
-      </div>
-    </Shot>
-  );
-}
-
-function JobTheaterMock() {
-  const [phase, setPhase] = useState(0);
-  const phases = ["Queued", "Profiling", "Writing", "Reconciling", "Complete"];
-  useEffect(() => {
-    const id = window.setInterval(() => setPhase((p) => (p + 1) % phases.length), 1100);
-    return () => window.clearInterval(id);
-  }, [phases.length]);
-  const pct = [8, 28, 62, 88, 100][phase];
-
-  return (
-    <Shot label="Job Theater · job_7f3a91" caption="Batch progress, phase timeline, and proof counters update as the engine runs.">
-      <div className="lp-mkt-ui-theater">
-        <div className="lp-mkt-ui-theater-head">
-          <strong>CSV → PostgreSQL · orders</strong>
-          <span className={`lp-mkt-ui-phase is-${phases[phase].toLowerCase()}`}>{phases[phase]}</span>
-        </div>
-        <div className="lp-mkt-ui-progress lp-mkt-ui-progress--lg" aria-hidden>
-          <i style={{ width: `${pct}%` }} />
-        </div>
-        <div className="lp-mkt-ui-metrics">
-          <div><strong>12,480</strong><span>Source rows</span></div>
-          <div><strong>{phase >= 2 ? "12,471" : "—"}</strong><span>Written</span></div>
-          <div><strong>{phase >= 2 ? "9" : "—"}</strong><span>Quarantined</span></div>
-          <div><strong>{phase >= 4 ? "OK" : "…"}</strong><span>Checksum</span></div>
-        </div>
-        <ol className="lp-mkt-ui-timeline">
-          {phases.map((p, i) => (
-            <li key={p} className={i <= phase ? "is-done" : ""}>
-              <span className="lp-mkt-ui-timeline-dot" />
-              {p}
-            </li>
-          ))}
-        </ol>
-      </div>
-    </Shot>
-  );
-}
-
-function PipelinesMock() {
-  const rows = [
-    { name: "Orders hourly", cadence: "Every hour", mode: "Watermark", next: "12 min", status: "healthy" },
-    { name: "Customers daily", cadence: "Daily 02:00 UTC", mode: "Upsert", next: "5h", status: "healthy" },
-    { name: "Events → Snowflake", cadence: "Every 15 min", mode: "Append", next: "3 min", status: "drift" },
-  ];
-  return (
-    <Shot label="Pipelines · workspace schedules" caption="Cadence, write mode, and health for every recurring sync — one glance.">
-      <table className="lp-mkt-ui-table">
-        <thead>
-          <tr>
-            <th>Pipeline</th>
-            <th>Cadence</th>
-            <th>Mode</th>
-            <th>Next</th>
-            <th>Health</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((r) => (
-            <tr key={r.name}>
-              <td><strong>{r.name}</strong></td>
-              <td>{r.cadence}</td>
-              <td><code>{r.mode}</code></td>
-              <td>{r.next}</td>
-              <td><span className={`lp-mkt-ui-pill is-${r.status}`}>{r.status}</span></td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </Shot>
-  );
-}
-
-function QueryMock() {
-  return (
-    <Shot label="Query Playground · PostgreSQL / analytics" caption="Ad-hoc SQL against live connectors — preview rows, then export or hand off to Transfer Studio.">
-      <div className="lp-mkt-ui-query">
-        <pre className="lp-mkt-ui-sql">{`SELECT order_id, payment_amount, email
-FROM orders
-WHERE created_at >= NOW() - INTERVAL '7 days'
-LIMIT 200;`}</pre>
-        <div className="lp-mkt-ui-result-bar">
-          <span>200 rows · 48 ms</span>
-          <span className="lp-mkt-ui-pill is-healthy">preview</span>
-        </div>
-        <table className="lp-mkt-ui-table lp-mkt-ui-table--compact">
-          <thead>
-            <tr><th>order_id</th><th>payment_amount</th><th>email</th></tr>
-          </thead>
-          <tbody>
-            <tr><td>ord_1842</td><td>129.00</td><td>a@retail.co</td></tr>
-            <tr><td>ord_1843</td><td>48.50</td><td>b@retail.co</td></tr>
-            <tr><td>ord_1844</td><td>312.10</td><td>c@retail.co</td></tr>
-          </tbody>
-        </table>
-      </div>
-    </Shot>
-  );
-}
-
-function PilotMock() {
-  return (
-    <Shot label="Datawrap Pilot · triage chat" caption="Natural language over the same engine — failed gates, mapping fixes, and Job Theater handoff.">
-      <div className="lp-mkt-ui-chat">
-        <div className="lp-mkt-ui-bubble is-user">
-          Why did the Orders → BigQuery job fail preflight?
-        </div>
-        <div className="lp-mkt-ui-bubble is-bot">
-          Gate <strong>Type coercion</strong> blocked <code>order_amt</code> (STRING) → <code>payment_amount</code> (NUMERIC).
-          214 sample values contain currency symbols. Pin a coerce rule or quarantine those rows.
-        </div>
-        <div className="lp-mkt-ui-chat-actions">
-          <span>Open Job Theater</span>
-          <span>Fix mapping</span>
-          <span>Quarantine policy</span>
-        </div>
-      </div>
-    </Shot>
-  );
-}
-
-function McpMock() {
-  return (
-    <Shot label="MCP · Cursor agent tools" caption="Agents call the same governed tools — never raw destination passwords.">
-      <div className="lp-mkt-ui-mcp">
-        <div className="lp-mkt-ui-mcp-tool">
-          <code>datawrap.transfer.run</code>
-          <span className="lp-mkt-ui-pill is-healthy">allowed</span>
-        </div>
-        <pre className="lp-mkt-ui-sql">{`{
-  "source": "pg.public.orders",
-  "destination": "bq.analytics.orders",
-  "mode": "upsert",
-  "preflight": true
-}`}</pre>
-        <ul className="lp-mkt-ui-mcp-log">
-          <li className="is-pass">RBAC: transfer:execute ✓</li>
-          <li className="is-pass">Preflight 8/8 ✓</li>
-          <li className="is-pass">Job job_7f3a91 queued → Job Theater</li>
-        </ul>
-      </div>
-    </Shot>
-  );
-}
-
 /* ─── Product pages ─────────────────────────────────────────────── */
 
 export function TransferStudioPage({
@@ -392,11 +189,11 @@ export function TransferStudioPage({
       ctaSecondary="See Job Theater"
       onPrimary={onGetStarted}
       onSecondary={() => onNavigate("product-jobs")}
-      heroVisual={<TransferStudioMock />}
+      heroVisual={<GateCombArt />}
       liveFrames={PRODUCT_FRAMES.transfer}
       liveTitle="Transfer Studio in the live workspace"
       stats={[
-        { value: "G1–G8", label: "Real preflight gates" },
+        { value: "G1–G9", label: "Real preflight gates" },
         { value: "Any→any", label: "Route coverage" },
         { value: "≥0.85", label: "Default confidence floor" },
         { value: "Proof", label: "Checksum after write" },
@@ -422,7 +219,7 @@ export function TransferStudioPage({
             { label: "Connect", sub: "Drivers · files" },
             { label: "Profile", sub: "Types · keys" },
             { label: "Map", sub: "Semantics · confidence", accent: true },
-            { label: "Preflight", sub: "G1–G8", accent: true },
+            { label: "Preflight", sub: "G1–G9", accent: true },
             { label: "Write", sub: "Quarantine" },
             { label: "Prove", sub: "Checksums" },
           ]}
@@ -464,13 +261,15 @@ export function TransferStudioPage({
         <ProofCallout>
           <strong>Why this beats name matching.</strong>
           <p>
-            Source <code>order_amt</code> (NUMERIC) → destination <code>payment_amount</code> scores high on role + type
-            even when names never matched. A STRING with currency symbols trying to land in NUMERIC fails G4/G5 instead of writing garbage.
+            Source <code>order_amt</code> (NUMERIC) → destination <code>total_amount</code> scores on
+            the order qualifier + type. <code>payment_amount</code> is a different money column —
+            both being amounts is not identity. A STRING with currency symbols trying to land in
+            NUMERIC fails G4/G5 instead of writing garbage.
           </p>
         </ProofCallout>
       </Chapter>
 
-      <Chapter id="ts-gates" kicker="Preflight · G1–G8" title="nine core gates from the real engine — fail-fast before write">
+      <Chapter id="ts-gates" kicker="Preflight · G1–G9" title="nine core gates from the real engine — fail-fast before write">
         <div className="lp-mkt-prose">
           <p>
             These are not marketing labels. They map to <code>GateId</code> in Datawrap&apos;s preflight package.
@@ -483,7 +282,7 @@ export function TransferStudioPage({
       <Chapter id="ts-write" kicker="Execute" title="Write path: quarantine, then prove">
         <AlgoBlock
           title="Load + reconcile"
-          lead="After G1–G8 pass, the engine chunks rows, applies mapped transforms, writes with the chosen mode, and isolates bad rows. Success is not “job finished” — it is checksum-matched proof."
+          lead="After G1–G9 pass, the engine chunks rows, applies mapped transforms, writes with the chosen mode, and isolates bad rows. Success is not “job finished” — it is checksum-matched proof."
           steps={[
             {
               name: "Chunk + transform",
@@ -491,7 +290,7 @@ export function TransferStudioPage({
             },
             {
               name: "Destination write",
-              detail: "Append, overwrite, upsert, or watermark incremental — validated earlier by the write plan / DDL gates.",
+              detail: "Table upsert/append, dest Query (one INSERT/MERGE/UPDATE with binds), or dest stored procedure (one CALL per row). Failed dest SQL quarantines. CDC refuses callable dest writes.",
             },
             {
               name: "Quarantine isolate",
@@ -521,7 +320,7 @@ export function TransferStudioPage({
         <div className="lp-mkt-scenario">
           <ol>
             <li>Upload <code>sample-orders.csv</code> and select PostgreSQL <code>public.orders</code> (or Load sample in Studio).</li>
-            <li>Review map: <code>order_amt → payment_amount</code> (high confidence), <code>cust_email → email</code>.</li>
+            <li>Review map: <code>order_amt → total_amount</code> (qualifier pin), <code>cust_id → customer_key</code> (review — G4 holds; id ≠ warehouse key).</li>
             <li>Preflight: G1–G3 pass; G5 flags currency-symbol rows — quarantine policy captures them.</li>
             <li>Write clean rows; Job Theater shows checksum match on written set + quarantined rows with reasons.</li>
           </ol>
@@ -547,7 +346,7 @@ export function JobTheaterPage({
       ctaSecondary="Transfer Studio"
       onPrimary={onGetStarted}
       onSecondary={() => onNavigate("product-transfer")}
-      heroVisual={<JobTheaterMock />}
+      heroVisual={<RunSpineArt />}
       liveFrames={PRODUCT_FRAMES.jobs}
       liveTitle="Job Theater with real reconcile evidence"
       stats={[
@@ -575,7 +374,7 @@ export function JobTheaterPage({
         <PacketFlow
           nodes={[
             { label: "Queue", sub: "Accepted plan" },
-            { label: "Preflight", sub: "G1–G8", accent: true },
+            { label: "Preflight", sub: "G1–G9", accent: true },
             { label: "Write", sub: "Batches", accent: true },
             { label: "Quarantine", sub: "Bad rows" },
             { label: "Reconcile", sub: "Checksums" },
@@ -661,7 +460,7 @@ export function PipelinesPage({
       ctaSecondary="Recurring sync guide"
       onPrimary={onGetStarted}
       onSecondary={() => onNavigate("solution-sync")}
-      heroVisual={<PipelinesMock />}
+      heroVisual={<CadenceDialArt />}
       liveFrames={PRODUCT_FRAMES.pipelines}
       liveTitle="Pipelines in the live workspace"
       stats={[
@@ -691,7 +490,7 @@ export function PipelinesPage({
             { label: "Plan", sub: "Studio map" },
             { label: "Schedule", sub: "Cron · cadence", accent: true },
             { label: "Tick", sub: "Enqueue job" },
-            { label: "Preflight", sub: "G1–G8", accent: true },
+            { label: "Preflight", sub: "G1–G9", accent: true },
             { label: "Sync", sub: "Mode · watermark" },
             { label: "Proof", sub: "Theater" },
           ]}
@@ -712,7 +511,7 @@ export function PipelinesPage({
               detail: "For incremental mode, read the last high-water mark; select only new/changed rows.",
             },
             {
-              name: "Run G1–G8",
+              name: "Run G1–G9",
               detail: "Full preflight every tick. Schema drift or confidence regressions block instead of writing wrong shapes.",
             },
             {
@@ -731,7 +530,7 @@ export function PipelinesPage({
         <AlgorithmCinemaBand
           kicker="CDC"
           title="Snapshot handoff, then idempotent streaming upserts"
-          lead="Pipelines default to at-least-once upserts on the primary key. The snapshot window backfills, LSN 0/16A2B40 hands off, and streaming ticks apply — until exactly-once is proven for a route, we say so."
+          lead="Pipelines start with a consistent snapshot, hand off at a logical cursor, then stream upserts on the primary key so a retried tick cannot corrupt the destination."
           compact
         >
           <CdcCinema />
@@ -768,7 +567,7 @@ export function QueryPlaygroundPage({
       ctaSecondary="Connectors"
       onPrimary={onGetStarted}
       onSecondary={() => onNavigate("integrations")}
-      heroVisual={<QueryMock />}
+      heroVisual={<ReadLensArt />}
       liveFrames={PRODUCT_FRAMES.query}
       liveTitle="Query Playground in the live workspace"
       stats={[
@@ -784,9 +583,11 @@ export function QueryPlaygroundPage({
       <Chapter id="qy-what" kicker="What it is" title="Exploration that respects connector boundaries">
         <div className="lp-mkt-prose">
           <p>
-            Query Playground is for discovery and validation — not a second write path. You query through the same
-            connector credentials and RBAC as the rest of the workspace, with preview limits so exploratory SELECTs
-            cannot accidentally become full-table pulls.
+            Query Playground is for discovery and validation — not a second write path. It is read-only: SELECT/WITH
+            only; CALL and DML are refused here. Dest INSERT/MERGE and dest CALL live on Transfer Studio Destination
+            write (Query / Stored procedure), with quarantine on failure. You query through the same connector
+            credentials and RBAC as the rest of the workspace, with preview limits so exploratory SELECTs cannot
+            accidentally become full-table pulls.
           </p>
           <p>
             When a query defines the slice you want to move, hand off to Transfer Studio to attach mapping, preflight,
@@ -828,7 +629,7 @@ export function QueryPlaygroundPage({
             },
             {
               name: "Promote",
-              detail: "Handoff creates/updates a Studio plan — mapping + G1–G8 still required before write.",
+              detail: "Handoff creates/updates a Studio plan — mapping + G1–G9 still required before write.",
             },
           ]}
         />
@@ -865,7 +666,7 @@ export function DataPilotPage({
       ctaSecondary="MCP Server"
       onPrimary={onGetStarted}
       onSecondary={() => onNavigate("product-mcp")}
-      heroVisual={<PilotMock />}
+      heroVisual={<IntentArt />}
       liveFrames={PRODUCT_FRAMES.pilot}
       liveTitle="Datawrap Pilot in the live workspace"
       stats={[
@@ -896,7 +697,7 @@ export function DataPilotPage({
             },
             {
               name: "Explain failure",
-              detail: "Translate G1–G8 blockers into plain language (e.g. G4 confidence, G5 dry-run cast failures).",
+              detail: "Translate G1–G9 blockers into plain language (e.g. G4 confidence, G5 dry-run cast failures).",
             },
             {
               name: "Propose fix",
@@ -933,7 +734,7 @@ export function McpServerPage({
       ctaSecondary="Security overview"
       onPrimary={onGetStarted}
       onSecondary={() => onNavigate("security")}
-      heroVisual={<McpMock />}
+      heroVisual={<PolicyDoorArt />}
       liveFrames={PRODUCT_FRAMES.mcp}
       liveTitle="Agent runs still land in the real workspace"
       stats={[
@@ -959,7 +760,7 @@ export function McpServerPage({
             { label: "Agent", sub: "Cursor · Claude" },
             { label: "MCP", sub: "Tools · auth", accent: true },
             { label: "RBAC", sub: "Workspace roles" },
-            { label: "Engine", sub: "Map · G1–G8", accent: true },
+            { label: "Engine", sub: "Map · G1–G9", accent: true },
             { label: "Job", sub: "Theater" },
             { label: "Audit", sub: "Immutable log" },
           ]}
@@ -984,7 +785,7 @@ export function McpServerPage({
               detail: "Agent supplies connector IDs + mode; ambiguous maps still require review flags.",
             },
             {
-              name: "Preflight G1–G8",
+              name: "Preflight G1–G9",
               detail: "Identical gates as Studio. Blockers return structured evidence to the agent.",
             },
             {
@@ -1005,8 +806,8 @@ export function McpServerPage({
       <Chapter id="mcp-tools" kicker="Tooling" title="Representative tool groups">
         <div className="lp-mkt-prose">
           <p>
-            Tools group cleanly around <strong>catalog &amp; connectors</strong> (transfer-ready drivers and
-            connection health), <strong>transfer plans</strong> (create/update maps without skipping review flags
+            Tools group cleanly around <strong>catalog &amp; connectors</strong> (warehouses, lakes, databases, and
+            apps), <strong>transfer plans</strong> (create/update maps without skipping review flags
             on ambiguous edges), <strong>run &amp; status</strong> (enqueue governed runs and poll phases + proof),
             and <strong>quarantine read</strong> (sample bad rows for agent-assisted fixes, still policy-scoped).
             The API surface is thin on purpose — the engine, not the wrapper, decides what is safe.
@@ -1033,11 +834,11 @@ export function MigrationsSolutionPage({
       ctaSecondary="Open Transfer Studio"
       onPrimary={onGetStarted}
       onSecondary={() => onNavigate("product-transfer")}
-      heroVisual={<TransferStudioMock />}
+      heroVisual={<CutoverArt />}
       outcomes={[
         {
           title: "Semantic column matching",
-          body: "Roles and type fit outrank string names — order_amt lines up with payment_amount when the meaning matches.",
+          body: "Roles and qualifiers outrank string names — order_amt lines up with total_amount, not payment_amount, when both money columns exist.",
         },
         {
           title: "Human review on ambiguous edges",
@@ -1077,7 +878,7 @@ export function MigrationsSolutionPage({
       caps={[
         {
           title: "Messy real-world schemas",
-          body: "Amounts, emails, and identifiers align even when column names diverge across ERP, CRM, and warehouse copies.",
+          body: "Amounts, emails, and identifiers align when qualifiers match. Same-role collisions (order vs payment; CRM id vs warehouse key) wait for Map review.",
         },
         {
           title: "Quarantine you can act on",
@@ -1114,14 +915,17 @@ export function WarehouseSolutionPage({
 }) {
   return (
     <div className="lp-mkt-page lp-wh-v3">
-      <section className="lp-wh-hero" aria-label="Warehouse loading">
-        <div className="lp-shell lp-wh-hero-inner">
-          <div className="lp-wh-hero-copy">
-            <p className="lp-mkt-kicker">Solution · Warehouse loading</p>
+      <section className="lp-sol-hero lp-sol-hero--ink" aria-label="Warehouse loading">
+        <div className="lp-sol-hero-inner">
+          <div className="lp-sol-hero-copy">
+            <p className="lp-pricing-hero-kicker">
+              <span className="lp-pricing-hero-dot" aria-hidden />
+              Solution · Warehouse loading
+            </p>
             <h1>Bulk loads finance can archive</h1>
-            <p className="lp-wh-lead">
-              Snowflake, BigQuery, and Redshift — with destination probes, capacity checks, and
-              reconciliation reports. Same nine core gates as every other Datawrap path.
+            <p className="lp-sol-hero-lead">
+              Snowflake, BigQuery, Redshift, and Databricks — native MERGE loaders, destination
+              probes, capacity checks, and a reconcile report finance can archive.
             </p>
             <div className="lp-hero-cta">
               <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={onGetStarted}>
@@ -1132,7 +936,9 @@ export function WarehouseSolutionPage({
               </button>
             </div>
           </div>
-          <div className="lp-wh-hero-visual">{<JobTheaterMock />}</div>
+          <div className="lp-sol-hero-visual">
+            <WarehouseLayersArt />
+          </div>
         </div>
       </section>
 
@@ -1141,7 +947,7 @@ export function WarehouseSolutionPage({
           <span>Snowflake</span>
           <span>BigQuery</span>
           <span>Redshift</span>
-          <span>Native drivers</span>
+          <span>Databricks</span>
           <span>Checksum MATCH</span>
         </div>
       </section>
@@ -1159,7 +965,7 @@ export function WarehouseSolutionPage({
               <ul className="lp-wh-list">
                 <li>Write rights and role checks before any bulk path starts</li>
                 <li>Slot / capacity estimates surfaced for operators</li>
-                <li>Same G1–G8 contract as Studio migrations — no warehouse shortcut</li>
+                <li>Same G1–G9 contract as Studio migrations — no warehouse shortcut</li>
               </ul>
             </div>
             <aside className="lp-wh-panel" aria-label="Preflight snapshot">
@@ -1170,7 +976,7 @@ export function WarehouseSolutionPage({
               <div><span>Reachability</span><em>ok</em></div>
               <div><span>Privileges</span><em>write granted</em></div>
               <div><span>Capacity</span><em>slots available</em></div>
-              <div><span>Preflight</span><em>8 / 8</em></div>
+              <div><span>Preflight</span><em>9 / 9</em></div>
             </aside>
           </div>
         </section>
@@ -1281,7 +1087,7 @@ export function SyncSolutionPage({
       ctaSecondary="Pipelines product"
       onPrimary={onGetStarted}
       onSecondary={() => onNavigate("product-pipelines")}
-      heroVisual={<PipelinesMock />}
+      heroVisual={<WatermarkArt />}
       outcomes={[
         {
           title: "Cadence you choose",
@@ -1324,8 +1130,8 @@ export function SyncSolutionPage({
       ]}
       caps={[
         {
-          title: "Honest CDC handoff",
-          body: "Snapshot + LSN handoff, then streaming upserts on primary keys. At-least-once until exactly-once is proven.",
+          title: "CDC snapshot, then stream",
+          body: "A consistent snapshot backfills, then streaming upserts land on the primary key so redelivery is safe.",
         },
         {
           title: "Idempotent upserts",
@@ -1340,7 +1146,7 @@ export function SyncSolutionPage({
         <AlgorithmCinemaBand
           kicker="CDC"
           title="Snapshot + LSN handoff, then streaming upserts"
-          lead="Honest CDC: start with a snapshot window, hand off at a logical LSN, and stream idempotent upserts. At-least-once is the default until exactly-once is proven."
+          lead="Start with a snapshot window, hand off at a logical cursor, and stream idempotent upserts. Redelivery is safe by design."
           compact
         >
           <CdcCinema />
@@ -1388,12 +1194,7 @@ function SolutionShell({
 }) {
   return (
     <div className="lp-mkt-page lp-sol-v2">
-      <section className="lp-sol-hero" aria-label={kicker}>
-        <div className="lp-sol-hero-waves" aria-hidden>
-          <span className="lp-wave-grid" />
-          <span className="lp-wave-glow lp-wave-glow--1" />
-          <span className="lp-wave-glow lp-wave-glow--2" />
-        </div>
+      <section className="lp-sol-hero lp-sol-hero--ink" aria-label={kicker}>
         <div className="lp-sol-hero-inner">
           <div className="lp-sol-hero-copy">
             <p className="lp-pricing-hero-kicker">

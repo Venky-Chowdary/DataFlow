@@ -29,7 +29,7 @@ describe("remapToTypeForMismatch", () => {
     assert.equal(remapToTypeForMismatch("FLOAT", "DECIMAL(38,10)"), "DOUBLE");
     assert.equal(remapToTypeForMismatch("DECIMAL(38,10)", "INTEGER"), "DECIMAL(38,10)");
     assert.equal(remapToTypeForMismatch("TIMESTAMPTZ", "TIMESTAMP_NTZ"), "TIMESTAMPTZ");
-    assert.equal(remapToTypeForMismatch("VARCHAR", "NUMBER(38,0)"), "VARCHAR");
+    assert.equal(remapToTypeForMismatch("VARCHAR", "NUMBER(38,0)"), "NUMBER(38,0)");
     // Create-new dialect twins — keep destination text/json, never invent VARCHAR.
     assert.equal(remapToTypeForMismatch("TEXT COLLATE UTF8MB4_0900_AI_CI", "TEXT"), "TEXT");
     assert.equal(remapToTypeForMismatch("JSON", "JSONB"), "JSONB");
@@ -338,6 +338,36 @@ describe("buildExecutiveSummary", () => {
     assert.match(summary!.subtitle, /review-grade/i);
     assert.ok(!/Execute unlocked/i.test(summary!.subtitle));
   });
+
+  it("softens Ready copy when uniqueness is sample-only", () => {
+    const pf = basePreflight({
+      passed: true,
+      passed_count: 13,
+      gates: [
+        {
+          id: "g9_data_integrity",
+          status: "pass",
+          message: "9/9 integrity checks passed (Validate sample — population uniqueness not proven)",
+          duration_ms: 1,
+          details: {
+            evidence_scope: { coverage: "sample", note: "sample only" },
+            source_uniqueness_probe: { ran: false, coverage: "sample" },
+          },
+        },
+      ],
+      proof_bundle: {
+        transfer_decision: {
+          decision: "approve",
+          blockers: [],
+          reason: "gates clear",
+        },
+      } as never,
+    });
+    const summary = buildExecutiveSummary(pf);
+    assert.ok(summary);
+    assert.match(summary!.title, /sample-only/i);
+    assert.ok(!/Ready to transfer/i.test(summary!.title));
+  });
 });
 
 describe("isEncodingIntegritySignal", () => {
@@ -463,5 +493,18 @@ describe("rankAndDedupeSuggestedActions", () => {
     assert.equal(out.filter((a) => a.kind === "open_bad_data_fix" || a.kind === "normalize_control_chars" || a.kind === "quarantine_and_rerun").length, 1);
     assert.equal(out.filter((a) => a.kind === "map_column" || a.kind === "review_mappings").length, 1);
     assert.equal(out.filter((a) => a.kind === "change_target_type").length, 1);
+  });
+
+  it("keeps orphan scan and fix-parents as distinct CTAs and ranks scan first", () => {
+    const out = rankAndDedupeSuggestedActions([
+      { kind: "review_mappings", column: "customer_id", label: "Review FK mapping" },
+      { kind: "fix_orphans", column: "customer_id", label: "Fix parent rows / load order" },
+      { kind: "run_population_orphan_scan", label: "Run population orphan scan" },
+    ]);
+    assert.equal(out[0]?.kind, "run_population_orphan_scan");
+    assert.deepEqual(
+      out.map((a) => a.kind),
+      ["run_population_orphan_scan", "fix_orphans", "review_mappings"],
+    );
   });
 });

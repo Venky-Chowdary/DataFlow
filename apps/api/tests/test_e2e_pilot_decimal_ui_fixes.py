@@ -48,7 +48,8 @@ def test_e2e_pilot_meta_is_natural_not_rag_shard(pilot, prompt):
     assert "semantic type:" not in answer
     assert "pallet id" not in answer
     assert "_(6 trained knowledge matches)_" not in (resp.answer or "")
-    assert "data pilot" in answer
+    # Brand: Datawrap Pilot (legacy "Data Pilot" retired).
+    assert "datawrap pilot" in answer or "data pilot" in answer
     # Must describe capabilities in natural language
     assert any(
         phrase in answer
@@ -59,8 +60,9 @@ def test_e2e_pilot_meta_is_natural_not_rag_shard(pilot, prompt):
 def test_e2e_pilot_hi_greeting_short(pilot):
     resp = pilot.chat("hi", history=[], data_context=None)
     assert resp.method == "greeting"
-    assert "data pilot" in (resp.answer or "").lower()
-    assert "semantic type:" not in (resp.answer or "").lower()
+    answer = (resp.answer or "").lower()
+    assert "datawrap pilot" in answer or "data pilot" in answer
+    assert "semantic type:" not in answer
 
 
 def test_e2e_pilot_infer_tools_meta_only_describe():
@@ -111,8 +113,16 @@ def test_e2e_snowflake_stub_write_survives_huge_decimal():
         error_policy="quarantine",
     )
     assert result.ok, result.error
-    assert result.rows_written == 3
-    # Either quarantined or fitted via wider NUMBER — never bare Overflow class dump
+    # A bare DECIMAL Map stamp materializes as NUMBER(38,10) on both sides
+    # (Map ≡ CREATE), so the two values that exceed it are quarantined with an
+    # actionable reason rather than silently truncated or written under a type
+    # the operator never approved. Ledger stays balanced: 3 = 1 + 2.
+    assert result.rows_written == 1
+    assert len(result.rejected_details) == 2
+    assert result.rows_written + len(result.rejected_details) == 3
+    for detail in result.rejected_details:
+        assert "NUMBER(38,10)" in str(detail.get("reason") or "")
+    # Never a bare Overflow class dump.
     assert "[<class" not in (result.error or "")
 
 
@@ -184,8 +194,10 @@ def test_e2e_snowflake_partial_written_preserved_on_error(monkeypatch):
 
 def test_e2e_quarantine_panel_uses_light_inspect_surface():
     web_root = _API_ROOT.parent / "web"
-    panel = (web_root / "src/components/transfer/QuarantinePanel.tsx").read_text()
-    css = (web_root / "src/styles/enterprise-ui.css").read_text()
+    panel = (web_root / "src/components/transfer/QuarantinePanel.tsx").read_text(
+        encoding="utf-8"
+    )
+    css = (web_root / "src/styles/enterprise-ui.css").read_text(encoding="utf-8")
     assert "df2-quarantine-inspect" in panel
     assert 'className="df2-job-log-panel is-result' not in panel.split("Inspect findings")[0][-200:]
     # Findings table must not sit only on dark job-log body without light override

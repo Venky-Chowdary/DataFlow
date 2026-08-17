@@ -68,16 +68,28 @@ def encode_pg_resume_token(
     *,
     lsn: str | None = None,
     phase: str = "streaming",
+    last_pk: str = "",
+    table: str = "",
 ) -> str:
     """Compact watermark: slot + optional consistent-point LSN + phase.
 
     Phase is ``snapshot`` while the initial table dump is in progress and
     ``streaming`` once the dump finishes and logical decoding owns the cursor.
-    Legacy bare slot names remain valid inputs via :func:`decode_pg_resume_token`.
+    Mid-dump progress is ``table`` + URL-encoded ``last_pk`` (PK values may
+    contain ``|`` / ``=``). Streaming tokens omit both so handoff equality
+    stays slot+LSN+phase. Legacy bare slot names remain valid inputs via
+    :func:`decode_pg_resume_token`.
     """
+    from urllib.parse import quote
+
     parts = [f"slot={slot}", f"phase={phase}"]
     if lsn:
         parts.append(f"lsn={lsn}")
+    if phase == "snapshot":
+        if table:
+            parts.append(f"table={quote(str(table), safe='')}")
+        if last_pk:
+            parts.append(f"last_pk={quote(str(last_pk), safe='')}")
     return "|".join(parts)
 
 
@@ -116,6 +128,27 @@ def decode_pg_resume_token(
     return slot, lsn, phase
 
 
+def decode_pg_snapshot_progress(token: str | None) -> tuple[str, str]:
+    """Return ``(table, last_pk)`` from a PG watermark. Empty when streaming/legacy."""
+    from urllib.parse import unquote
+
+    if not token or "=" not in str(token):
+        return "", ""
+    table = ""
+    last_pk = ""
+    for part in str(token).split("|"):
+        if "=" not in part:
+            continue
+        key, value = part.split("=", 1)
+        key = key.strip().lower()
+        value = value.strip()
+        if key == "table" and value:
+            table = unquote(value)
+        elif key == "last_pk" and value:
+            last_pk = unquote(value)
+    return table, last_pk
+
+
 def _lsn_at_or_before(candidate: str, watermark: str) -> bool:
     """Whether ``candidate`` is no newer than ``watermark``.
 
@@ -142,8 +175,10 @@ def _lsn_at_or_before(candidate: str, watermark: str) -> bool:
 
 def _parse_value(raw: str) -> str:
     """Strip PostgreSQL test_decoding quotes and null markers."""
+    from services.value_serializer import SQL_NULL_SENTINEL
+
     if raw == "null" or raw == "None":
-        return ""
+        return SQL_NULL_SENTINEL
     if len(raw) >= 2 and raw.startswith("'") and raw.endswith("'"):
         return raw[1:-1].replace("''", "'")
     return raw
@@ -247,10 +282,11 @@ class PostgreSqlChangeStreamCdc:
         if not self.tables:
             raise ValueError("PostgreSQL CDC requires at least one table")
         self.table = self.tables[0]
-        self.primary_keys = {
-            t: str((primary_keys or {}).get(t) or primary_key or "id")
-            for t in self.tables
-        }
+        from services.cdc_identity import require_cdc_primary_keys_map
+
+        self.primary_keys = require_cdc_primary_keys_map(
+            self.tables, primary_key=primary_key, primary_keys=primary_keys
+        )
         self.primary_key = self.primary_keys[self.table]
         self.cursor_key = cursor_key
         self.columns = columns
@@ -265,7 +301,14 @@ class PostgreSqlChangeStreamCdc:
         )
         self.slot_name = slot
         self.consistent_point_lsn = lsn
+        self.snapshot_table, self.snapshot_last_pk = decode_pg_snapshot_progress(
+            resume_token
+        )
+        self._resume_snapshot = phase == "snapshot"
         self.phase = phase if phase != "initial" else "snapshot"
+        self.resume_token = resume_token
+        # Streaming resume must never recreate a missing/lost slot (silent WAL skip).
+        self._resume_expected = bool(lsn) or phase == "streaming"
         self.output_plugin = output_plugin or self._select_plugin()
         self.source_key = connection_fingerprint(
             {**cfg, "type": "postgresql"},
@@ -274,10 +317,17 @@ class PostgreSqlChangeStreamCdc:
         self.decode_schema: dict[str, Any] = {}
         self.last_ddl_at: str | None = None
         self._last_event_at: datetime | None = None
+        # Source commit clock when decoder exposes it (pgoutput rarely does).
+        self._last_event_commit_at: datetime | None = None
         self._last_heartbeat_at: datetime | None = None
+        self._lag_observation: dict[str, Any] | None = None
+        self._slot_catalog_cache: dict[str, Any] | None = None
+        self._slot_catalog_cache_at: float = 0.0
         self._schema_ready = False
         self._pending_ack_lsn: str | None = None
         self._pgoutput_decoder = None
+        self._streaming_transport = None
+        self._streaming_attempted = False
         self.publication_name = _publication_name(self.database, slot_table, cursor_key)
         self._processed_signal_ids: set[str] = set()
         self.signal_table = str(cfg.get("signal_table") or "dataflow_signal")
@@ -348,16 +398,118 @@ class PostgreSqlChangeStreamCdc:
             return "pgoutput"
         return preferred or "pgoutput"
 
+    def _slot_catalog_status(self, *, max_age_sec: float = 2.0) -> dict[str, Any]:
+        """Live ``pg_replication_slots`` proof for Theater / Freshness.
+
+        Returns ``active``, ``restart_lsn``, ``confirmed_flush_lsn``, ``wal_status``
+        (PG13+), ``plugin``, ``slot_exists``. Cached briefly so poll loops do not
+        open a connection per decoded row.
+        """
+        import time as _time
+
+        now = _time.monotonic()
+        if (
+            self._slot_catalog_cache is not None
+            and (now - float(self._slot_catalog_cache_at or 0.0)) < max(0.25, float(max_age_sec))
+        ):
+            return dict(self._slot_catalog_cache)
+
+        out: dict[str, Any] = {
+            "slot_exists": False,
+            "active": None,
+            "restart_lsn": None,
+            "confirmed_flush_lsn": None,
+            "wal_status": None,
+            "plugin": self.output_plugin,
+        }
+        try:
+            with self._conn() as conn:
+                with conn.cursor() as cur:
+                    # PG13+ exposes wal_status (reserved/extended/unreserved/lost).
+                    row = None
+                    has_wal_status = False
+                    try:
+                        cur.execute(
+                            """
+                            SELECT active,
+                                   restart_lsn::text,
+                                   confirmed_flush_lsn::text,
+                                   plugin,
+                                   wal_status
+                            FROM pg_replication_slots
+                            WHERE slot_name = %s
+                            """,
+                            (self.slot_name,),
+                        )
+                        row = cur.fetchone()
+                        has_wal_status = True
+                    except Exception as col_exc:
+                        msg = str(col_exc).lower()
+                        if "wal_status" not in msg and "undefined" not in msg:
+                            raise
+                        try:
+                            conn.rollback()
+                        except Exception:
+                            pass
+                        cur.execute(
+                            """
+                            SELECT active,
+                                   restart_lsn::text,
+                                   confirmed_flush_lsn::text,
+                                   plugin
+                            FROM pg_replication_slots
+                            WHERE slot_name = %s
+                            """,
+                            (self.slot_name,),
+                        )
+                        row = cur.fetchone()
+                    if row:
+                        out["slot_exists"] = True
+                        out["active"] = bool(row[0]) if row[0] is not None else None
+                        out["restart_lsn"] = str(row[1]) if row[1] else None
+                        out["confirmed_flush_lsn"] = str(row[2]) if row[2] else None
+                        if row[3]:
+                            out["plugin"] = str(row[3])
+                            self.output_plugin = str(row[3])
+                        if has_wal_status and len(row) > 4 and row[4]:
+                            out["wal_status"] = str(row[4])
+                try:
+                    conn.commit()
+                except Exception:
+                    pass
+        except Exception as exc:
+            _logger.debug("slot catalog probe failed for %s: %s", self.slot_name, exc)
+            out["probe_error"] = str(exc)[:200]
+
+        self._slot_catalog_cache = dict(out)
+        self._slot_catalog_cache_at = now
+        return out
+
     def cdc_metadata(self) -> dict[str, Any]:
         """Operator-visible CDC status for Job Theater / Validate."""
+        lag_sec = self.replication_lag_seconds()
+        obs = dict(self._lag_observation or {})
+        slot = self._slot_catalog_status()
+        confirmed = (
+            slot.get("confirmed_flush_lsn")
+            or self.consistent_point_lsn
+        )
         return {
-            "plugin": self.output_plugin,
+            "plugin": slot.get("plugin") or self.output_plugin,
             "slot_name": self.slot_name,
             "publication_name": self.publication_name if self.output_plugin == "pgoutput" else None,
             "phase": self.phase,
             "consistent_point_lsn": self.consistent_point_lsn,
-            "replication_lag_bytes": self.replication_lag_bytes(),
-            "replication_lag_seconds": self.replication_lag_seconds(),
+            "replication_lag_bytes": obs.get("replication_lag_bytes", self.replication_lag_bytes()),
+            "replication_lag_seconds": lag_sec,
+            "cdc_lag_basis": obs.get("cdc_lag_basis"),
+            "cdc_heartbeat_age_sec": obs.get("cdc_heartbeat_age_sec"),
+            "freshness_severity": obs.get("freshness_severity"),
+            "active": slot.get("active"),
+            "slot_exists": slot.get("slot_exists"),
+            "restart_lsn": slot.get("restart_lsn"),
+            "confirmed_flush_lsn": confirmed,
+            "wal_status": slot.get("wal_status"),
             "delivery": "at-least-once",
             **self._lease.theater_fields(),
         }
@@ -417,11 +569,20 @@ class PostgreSqlChangeStreamCdc:
         except Exception:
             return False
 
-    def _resume_token(self, *, phase: str | None = None) -> str:
+    def _resume_token(
+        self,
+        *,
+        phase: str | None = None,
+        last_pk: str = "",
+        table: str = "",
+    ) -> str:
+        p = phase or self.phase
         return encode_pg_resume_token(
             self.slot_name,
             lsn=self.consistent_point_lsn,
-            phase=phase or self.phase,
+            phase=p,
+            last_pk=last_pk if p == "snapshot" else "",
+            table=table if p == "snapshot" else "",
         )
 
     def _read_slot_lsn(self, cur) -> str | None:
@@ -440,14 +601,58 @@ class PostgreSqlChangeStreamCdc:
         value = row[0] or row[1]
         return str(value) if value else None
 
-    def _ensure_slot(self) -> str | None:
+    def _ensure_slot(self, *, allow_create: bool = True, recreate_if_lost: bool = False) -> str | None:
         """Create the logical slot if needed; return consistent-point LSN.
 
         Slot is created *before* the initial snapshot so WAL from the snapshot
         window is retained (Debezium / PG logical-decoding handoff pattern).
+
+        Poll/resume must pass ``allow_create=False``. Creating a slot at current
+        WAL while a watermark exists skips the lost window — silent CDC loss.
+        Snapshot recovery may pass ``recreate_if_lost=True`` to drop an
+        invalidated ``wal_status=lost`` slot and establish a new consistent point.
         Semantics remain at-least-once; destination upserts must be idempotent.
         """
         self._acquire_cdc_lease()
+        catalog = self._slot_catalog_status(max_age_sec=0)
+        wal = str(catalog.get("wal_status") or "").strip().lower()
+        exists = bool(catalog.get("slot_exists"))
+        if exists and wal == "lost":
+            if not recreate_if_lost:
+                from services.cdc_cursor_gap import CdcSlotGapError
+
+                raise CdcSlotGapError(
+                    (
+                        f"PostgreSQL slot {self.slot_name} wal_status=lost. "
+                        "Poll will not recreate it at current WAL (that skips the lost window). "
+                        "when_needed snapshots current source keys then streams from the new tip. "
+                        "Not continuous CDC, not migration_proven."
+                    ),
+                    slot_name=self.slot_name,
+                    wal_status="lost",
+                    restart_lsn=str(catalog.get("restart_lsn") or ""),
+                    confirmed_flush_lsn=str(
+                        catalog.get("confirmed_flush_lsn") or self.consistent_point_lsn or ""
+                    ),
+                    cursor_key=self.cursor_key,
+                )
+            self._drop_replication_slot()
+            exists = False
+        if not exists and not allow_create:
+            from services.cdc_cursor_gap import CdcSlotGapError
+
+            raise CdcSlotGapError(
+                (
+                    f"PostgreSQL slot {self.slot_name} is missing. "
+                    "Creating it now would start at current WAL and skip the lost window. "
+                    "when_needed snapshots current source keys then streams from the new tip. "
+                    "Not continuous CDC, not migration_proven."
+                ),
+                slot_name=self.slot_name,
+                wal_status="slot_missing",
+                confirmed_flush_lsn=str(self.consistent_point_lsn or ""),
+                cursor_key=self.cursor_key,
+            )
         with self._conn() as conn:
             with conn.cursor() as cur:
                 cur.execute(
@@ -455,6 +660,7 @@ class PostgreSqlChangeStreamCdc:
                     (self.slot_name,),
                 )
                 row = cur.fetchone()
+                created_new = False
                 if row is None:
                     try:
                         cur.execute(
@@ -472,14 +678,65 @@ class PostgreSqlChangeStreamCdc:
                             raise
                     created = cur.fetchone()
                     lsn = str(created[0]) if created and created[0] else None
+                    created_new = True
                 else:
                     # Honor existing slot plugin (cannot change without drop).
                     self.output_plugin = row[0] or self.output_plugin
                     lsn = self._read_slot_lsn(cur)
             conn.commit()
-        if lsn and not self.consistent_point_lsn:
+        self._slot_catalog_cache = None
+        if lsn and (created_new or not self.consistent_point_lsn):
             self.consistent_point_lsn = lsn
         return self.consistent_point_lsn
+
+    def _drop_replication_slot(self) -> None:
+        """Drop an invalidated slot so snapshot can create a new consistent point."""
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SELECT pg_drop_replication_slot(%s)", (self.slot_name,))
+            conn.commit()
+        self._slot_catalog_cache = None
+        _logger.warning(
+            "Dropped PostgreSQL slot %s (wal_status=lost) so snapshot can recreate "
+            "a consistent point. Lost-window events are gone.",
+            self.slot_name,
+        )
+
+    def _assert_slot_within_retention(self) -> None:
+        """Fail-closed before peek when the slot is missing or wal_status=lost."""
+        if self.phase == "snapshot":
+            return
+        catalog = self._slot_catalog_status(max_age_sec=0)
+        from services.cdc_retention_probe import classify_pg_slot_retention
+
+        probe = classify_pg_slot_retention(
+            slot_exists=catalog.get("slot_exists"),
+            wal_status=str(catalog.get("wal_status") or ""),
+            restart_lsn=str(catalog.get("restart_lsn") or ""),
+            confirmed_flush_lsn=str(
+                catalog.get("confirmed_flush_lsn") or self.consistent_point_lsn or ""
+            ),
+            watermark=self.consistent_point_lsn,
+            resume_expected=bool(getattr(self, "_resume_expected", False)),
+            cursor_key=self.cursor_key,
+            slot_name=self.slot_name,
+        )
+        try:
+            self._cdc_retention = probe
+        except Exception:
+            pass
+        if probe.status != "gap":
+            return
+        from services.cdc_cursor_gap import CdcSlotGapError
+
+        raise CdcSlotGapError(
+            probe.message,
+            slot_name=self.slot_name,
+            wal_status=str(catalog.get("wal_status") or probe.retained),
+            restart_lsn=str(catalog.get("restart_lsn") or ""),
+            confirmed_flush_lsn=str(catalog.get("confirmed_flush_lsn") or ""),
+            cursor_key=self.cursor_key,
+        )
 
     def replication_lag_bytes(self) -> int | None:
         """Return WAL lag for this slot, or None if unavailable."""
@@ -502,11 +759,20 @@ class PostgreSqlChangeStreamCdc:
         return None
 
     def replication_lag_seconds(self) -> float | None:
-        """Seconds since the last decoded event / heartbeat, when known."""
-        anchor = self._last_event_at or self._last_heartbeat_at
-        if anchor is None:
-            return None
-        return max(0.0, (datetime.now(timezone.utc) - anchor).total_seconds())
+        """Proven CDC lag seconds — never heartbeat age (Debezium-class honesty).
+
+        Returns ``0`` when ``pg_wal_lsn_diff`` proves catch-up; ``None`` when
+        behind on WAL without a source commit timestamp (basis ``wal_bytes``).
+        """
+        from services.cdc_lag_honesty import observe_cdc_lag
+
+        obs = observe_cdc_lag(
+            last_event_commit_at=self._last_event_commit_at,
+            last_heartbeat_at=self._last_heartbeat_at,
+            replication_lag_bytes=self.replication_lag_bytes(),
+        )
+        self._lag_observation = obs
+        return obs.get("cdc_lag_seconds")
 
     def heartbeat(self) -> None:
         """Keep the lease alive and release WAL an idle slot no longer needs.
@@ -574,7 +840,7 @@ class PostgreSqlChangeStreamCdc:
             from services.cdc_incremental_snapshot import list_signals
 
             return any(
-                str(getattr(sig, "status", "")) in {"pending", "in_progress"}
+                str(getattr(sig, "status", "")) in {"pending", "running", "in_progress"}
                 for sig in list_signals(self.source_key)
             )
         except Exception as exc:
@@ -798,15 +1064,29 @@ class PostgreSqlChangeStreamCdc:
         """
         from connectors.postgresql_reader import _cell, _order_by_clause
         from connectors.sql_identifiers import quote_column_list, quote_table_ref
+        from connectors.sql_snapshot_scan import fetch_scan_page
+        from services.cdc_snapshot_resume import (
+            classify_snapshot_resume,
+            last_pk_from_records,
+            quoted_pk_columns,
+            snapshot_keyset_sql,
+        )
 
         # pgoutput requires the publication before the slot retains WAL for it.
         if self.output_plugin == "pgoutput":
             self._ensure_publication()
             self._ensure_replica_identity()
-        self._ensure_slot()
+        self._ensure_slot(allow_create=True, recreate_if_lost=True)
+        resume_table = self.snapshot_table if self._resume_snapshot else ""
+        resume_last_pk = self.snapshot_last_pk if self._resume_snapshot else ""
+        keep_lsn = bool(self._resume_snapshot and self.consistent_point_lsn)
         self.phase = "snapshot"
         self._ensure_decode_schema(resume_offset=self.slot_name)
         self.heartbeat()
+
+        tables = list(self.tables)
+        if resume_table in tables:
+            tables = tables[tables.index(resume_table) :]
 
         with self._conn() as conn:
             # One RR transaction spans all tables so the multi-table dump shares
@@ -816,11 +1096,16 @@ class PostgreSqlChangeStreamCdc:
                 conn.autocommit = False
                 with conn.cursor() as cur:
                     cur.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
-                    cur.execute("SELECT pg_current_wal_lsn()::text")
-                    snap_lsn_row = cur.fetchone()
-                    if snap_lsn_row and snap_lsn_row[0]:
-                        self.consistent_point_lsn = str(snap_lsn_row[0])
-                    for table_name in self.tables:
+                    if not keep_lsn:
+                        cur.execute("SELECT pg_current_wal_lsn()::text")
+                        snap_lsn_row = cur.fetchone()
+                        if snap_lsn_row and snap_lsn_row[0]:
+                            self.consistent_point_lsn = str(snap_lsn_row[0])
+                    for table_name in tables:
+                        table_last_pk = resume_last_pk if table_name == resume_table else ""
+                        mode = classify_snapshot_resume(last_pk=table_last_pk, offset=0)
+                        pk_cols = self._pk_columns_for(table_name)
+                        quoted = quoted_pk_columns(pk_cols, '"')
                         order_by = _order_by_clause(
                             cur, self.schema, table_name, self.columns
                         )
@@ -831,15 +1116,26 @@ class PostgreSqlChangeStreamCdc:
                             preserve_case=True,
                         )
                         col_sql = quote_column_list(self.columns, quote_char='"')
-                        query = (
-                            f"SELECT {col_sql} FROM {table_ref} "  # nosec B608
-                            f"ORDER BY {order_by} LIMIT %s OFFSET %s"
-                        )
-                        offset = 0
                         headers: list[str] = list(self.columns or [])
+                        if mode == "scan":
+                            cur.execute(
+                                f"SELECT {col_sql} FROM {table_ref} "  # nosec B608
+                                f"ORDER BY {order_by}"
+                            )
                         while True:
-                            cur.execute(query, (self.batch_size, offset))
-                            fetched = cur.fetchall()
+                            if mode == "keyset":
+                                sql, params = snapshot_keyset_sql(
+                                    table_ref=table_ref,
+                                    quoted_pk_columns=quoted,
+                                    last_pk=table_last_pk,
+                                    limit=self.batch_size,
+                                    dialect="postgresql",
+                                    select_list=col_sql,
+                                )
+                                cur.execute(sql, params)
+                                fetched = cur.fetchall() or []
+                            else:
+                                fetched = fetch_scan_page(cur, self.batch_size)
                             if not fetched:
                                 break
                             if cur.description:
@@ -848,12 +1144,18 @@ class PostgreSqlChangeStreamCdc:
                                 {headers[i]: _cell(v) for i, v in enumerate(row)}
                                 for row in fetched
                             ]
+                            table_last_pk = (
+                                last_pk_from_records(records, pk_cols) or table_last_pk
+                            )
                             yield ChangeBatch(
                                 inserts=records,
-                                resume_token=self._resume_token(phase="snapshot"),
+                                resume_token=self._resume_token(
+                                    phase="snapshot",
+                                    last_pk=table_last_pk,
+                                    table=table_name,
+                                ),
                                 table=table_name,
                             )
-                            offset += len(fetched)
                             if len(fetched) < self.batch_size:
                                 break
                 conn.commit()
@@ -870,8 +1172,12 @@ class PostgreSqlChangeStreamCdc:
                     _logger.warning("Exception suppressed: %s", exc, exc_info=exc)
 
         self.phase = "streaming"
+        self.snapshot_last_pk = ""
+        self.snapshot_table = ""
+        self._resume_snapshot = False
+        self.resume_token = self._resume_token(phase="streaming")
         yield ChangeBatch(
-            resume_token=self._resume_token(phase="streaming"),
+            resume_token=self.resume_token,
             ack_barrier=True,
         )
 
@@ -963,6 +1269,74 @@ class PostgreSqlChangeStreamCdc:
                     exc,
                 )
 
+    def _ensure_streaming_transport(self) -> Any:
+        """Phase F4 — optional START_REPLICATION transport (feature-flagged)."""
+        if self._streaming_attempted:
+            return self._streaming_transport
+        self._streaming_attempted = True
+        try:
+            from connectors.postgresql_cdc_transport import (
+                open_streaming_transport_or_none,
+                selected_pg_cdc_transport,
+            )
+
+            if selected_pg_cdc_transport() != "streaming":
+                return None
+            dsn = {
+                "host": self.cfg.get("host"),
+                "port": int(self.cfg.get("port") or 5432),
+                "dbname": self.cfg.get("database") or self.database,
+                "user": self.cfg.get("username"),
+                "password": self.cfg.get("password"),
+            }
+            if self.cfg.get("connection_string"):
+                # Prefer DSN string when operators supply it.
+                dsn = {"dsn": self.cfg["connection_string"]}
+            self._streaming_transport = open_streaming_transport_or_none(
+                dsn_kwargs=dsn,
+                slot_name=self.slot_name,
+                publication_name=self.publication_name,
+                output_plugin=self.output_plugin,
+            )
+        except Exception as exc:
+            _logger.warning("CDC streaming transport init failed: %s", exc)
+            self._streaming_transport = None
+        return self._streaming_transport
+
+    def _peek_or_stream_rows(self, cur: Any) -> list[tuple[Any, Any]]:
+        """Return ``(lsn, payload)`` rows from streaming transport or peek SQL."""
+        transport = self._ensure_streaming_transport()
+        if transport is not None:
+            changes = transport.poll(limit=self.batch_size)
+            if changes:
+                return [(c.lsn, c.payload) for c in changes]
+            # Empty poll — still valid; do not fall through to peek on the same
+            # slot (would race with the replication connection).
+            return []
+        if self.output_plugin == "pgoutput":
+            cur.execute(
+                """
+                SELECT lsn::text, data
+                FROM pg_logical_slot_peek_binary_changes(
+                    %s, NULL, %s,
+                    'proto_version', '1',
+                    'publication_names', %s
+                )
+                """,
+                (self.slot_name, self.batch_size, self.publication_name),
+            )
+        else:
+            cur.execute(
+                """
+                SELECT lsn::text, data
+                FROM pg_logical_slot_peek_changes(
+                    %s, NULL, %s, 'include-xids', '1'
+                )
+                """,
+                (self.slot_name, self.batch_size),
+            )
+        return list(cur.fetchall() or [])
+
     def ack(self, resume_token: Any = None) -> None:
         """Advance the slot confirmed_flush_lsn after successful destination apply.
 
@@ -982,6 +1356,22 @@ class PostgreSqlChangeStreamCdc:
                 lsn = token_lsn
         if not lsn:
             return
+        # Phase F4 — streaming: confirmed flush via replication feedback only
+        # (slot_advance on a second connection races the replication session).
+        if self._streaming_transport is not None:
+            try:
+                self._streaming_transport.ack(lsn)
+                self.consistent_point_lsn = lsn
+                self._pending_ack_lsn = None
+                return
+            except Exception as exc:
+                _logger.warning(
+                    "CDC streaming ack feedback failed for slot %s at %s: %s",
+                    self.slot_name,
+                    lsn,
+                    exc,
+                )
+                raise
         try:
             with self._conn() as conn:
                 with conn.cursor() as cur:
@@ -1095,10 +1485,14 @@ class PostgreSqlChangeStreamCdc:
 
     def _peek_stream_events_during_chunk(self, sig: Any) -> list[dict[str, Any]]:
         """Peek WAL (no ack) for DDD-3 stream-wins during an incremental snapshot chunk."""
+        from services.cdc_cursor_gap import CdcCursorGapError
+
         try:
-            self._ensure_slot()
+            self._ensure_slot(allow_create=False)
             if self.output_plugin == "pgoutput":
                 self._ensure_publication()
+        except CdcCursorGapError:
+            raise
         except Exception:
             return []
         events: list[dict[str, Any]] = []
@@ -1218,6 +1612,12 @@ class PostgreSqlChangeStreamCdc:
             parse_test_decoding_table,
         )
 
+        # Crash mid-dump must finish the snapshot. Forcing streaming here
+        # decoded WAL while undumped PK ranges were never written (silent loss).
+        if self.phase == "snapshot":
+            yield from self.snapshot()
+            return
+
         self._poll_signal_table()
 
         for table_name in self.tables:
@@ -1227,12 +1627,14 @@ class PostgreSqlChangeStreamCdc:
                 fetch_chunk=self._fetch_incremental_chunk,
                 stream_events_during_chunk=self._peek_stream_events_during_chunk,
                 max_chunks_per_poll=1,
+                dest_resume=self.resume_token,
             )
 
         if self.output_plugin == "pgoutput":
             self._ensure_publication()
             self._ensure_replica_identity()
-        self._ensure_slot()
+        self._assert_slot_within_retention()
+        self._ensure_slot(allow_create=not bool(getattr(self, "_resume_expected", False)))
         self.phase = "streaming"
         self._ensure_decode_schema(resume_offset=self.slot_name)
         self._maybe_record_schema_change(offset=self.slot_name)
@@ -1240,29 +1642,7 @@ class PostgreSqlChangeStreamCdc:
 
         with self._conn() as conn:
             with conn.cursor() as cur:
-                if self.output_plugin == "pgoutput":
-                    cur.execute(
-                        """
-                        SELECT lsn::text, data
-                        FROM pg_logical_slot_peek_binary_changes(
-                            %s, NULL, %s,
-                            'proto_version', '1',
-                            'publication_names', %s
-                        )
-                        """,
-                        (self.slot_name, self.batch_size, self.publication_name),
-                    )
-                else:
-                    cur.execute(
-                        """
-                        SELECT lsn::text, data
-                        FROM pg_logical_slot_peek_changes(
-                            %s, NULL, %s, 'include-xids', '1'
-                        )
-                        """,
-                        (self.slot_name, self.batch_size),
-                    )
-                rows = cur.fetchall()
+                rows = self._peek_or_stream_rows(cur)
             conn.commit()
 
         buf = MultiTableTransactionBuffer()

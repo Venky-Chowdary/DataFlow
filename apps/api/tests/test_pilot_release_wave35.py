@@ -80,7 +80,10 @@ def test_refuse_reply_for_remove_connector():
 
     agent = DataPilotAgent()
     resp = agent.chat("remove the Warehouse connector")
-    assert "search_knowledge" not in {t.name for t in (resp.tools_used or [])}
+    def _tool_name(t):
+        return t.get("name") if isinstance(t, dict) else getattr(t, "name", None)
+
+    assert "search_knowledge" not in {_tool_name(t) for t in (resp.tools_used or [])}
     lower = (resp.answer or "").lower()
     assert "delete" in lower or "ui" in lower or "not sure" in lower or "can't" in lower or "cannot" in lower
 

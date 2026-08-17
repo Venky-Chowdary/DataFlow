@@ -127,6 +127,104 @@ def test_one_fidelity_root_not_three_blockers():
     assert root.documentation
 
 
+def test_fidelity_summary_names_the_type_path_not_just_the_column():
+    """A bare column name makes the operator hunt Map for what is wrong with it.
+
+    The pair is the finding, and it is what lets them judge the verdict — the
+    reported Snowflake→MySQL block named neither column nor types.
+    """
+    root = next(
+        r for r in build_root_causes(_fidelity_preflight()) if r.kind == "fidelity_collapse"
+    )
+    assert "country_auto_detected TEXT → INTEGER" in root.summary
+
+
+def test_fidelity_summary_reads_type_path_from_the_coercion_probe():
+    pf = {
+        "passed": False,
+        "gates": [
+            {
+                "id": "g3_schema_contract",
+                "status": "block",
+                "message": "1 type coercion issue(s)",
+                "details": {"fidelity_collapse": True, "columns": ["order_ts"]},
+            }
+        ],
+        "coercion_report": {
+            "columns": [
+                {
+                    "source": "order_ts",
+                    "source_type": "TIMESTAMP_NTZ",
+                    "target_type": "DATETIME",
+                    "severity": "block",
+                }
+            ]
+        },
+    }
+    root = next(r for r in build_root_causes(pf) if r.kind == "fidelity_collapse")
+    assert "order_ts TIMESTAMP_NTZ → DATETIME" in root.summary
+
+
+def _encoding_preflight() -> dict:
+    """G9 encoding finding on a TEXT → TEXT column — nothing about the type path."""
+    return {
+        "passed": False,
+        "row_count": 4,
+        "gates": [
+            {
+                "id": "g9_data_integrity",
+                "status": "block",
+                "message": (
+                    "Data integrity failed: txt: format-control character "
+                    "detected (U+200B) — normalize before transfer"
+                ),
+                "details": {
+                    "encoding_issues": [
+                        {
+                            "column": "txt",
+                            "row": 2,
+                            "chars": ["U+200B"],
+                            "message": "format-control character detected (U+200B)",
+                            "suggested_transform": "strip_controls",
+                        }
+                    ],
+                    "evidence_scope": {"sample_rows": 4},
+                },
+            }
+        ],
+        "blockers": [],
+    }
+
+
+def test_control_characters_are_not_a_fidelity_collapse_root():
+    """TEXT → TEXT cannot collapse fidelity — remapping the type fixes nothing.
+
+    The G9 message says "integrity failed", which the fidelity matcher read as a
+    lossy type path and answered with the wrong corrective action.
+    """
+    roots = build_root_causes(_encoding_preflight())
+    kinds = [r.kind for r in roots]
+    assert "fidelity_collapse" not in kinds, kinds
+    assert kinds == ["encoding_normalization"], kinds
+
+
+def test_encoding_root_names_the_column_character_and_transform():
+    root = build_root_causes(_encoding_preflight())[0]
+    assert "txt" in root.summary
+    assert "U+200B" in root.summary
+    assert "strip_controls" in root.recommended_fix
+    assert root.affected_columns == ["txt"]
+
+
+def test_encoding_gate_stamped_fidelity_collapse_stays_fidelity():
+    """An explicit fidelity stamp still wins — charset narrowing is a real cast."""
+    pf = _encoding_preflight()
+    pf["gates"][0]["details"]["fidelity_collapse"] = True
+    kinds = [r.kind for r in build_root_causes(pf)]
+    assert "fidelity_collapse" in kinds, kinds
+    assert "encoding_normalization" not in kinds, kinds
+
+
 def test_apply_collapses_operator_blockers():
     pf = apply_root_causes_to_preflight(_fidelity_preflight())
     assert len(pf["root_causes"]) == 1
@@ -214,8 +312,148 @@ def test_single_unrelated_blocker_does_not_invent_fidelity_root():
     assert not any(r.kind == "fidelity_collapse" for r in roots)
 
 
+def test_g8_transform_errors_are_not_fidelity_collapse_root():
+    """Empty url coerce on image→image must not look like type-path fidelity collapse."""
+    from services.root_cause_engine import build_root_causes
+
+    pf = {
+        "gates": [
+            {
+                "id": "g8_reconciliation",
+                "status": "block",
+                "message": (
+                    "Dry-run reconciliation failed — transform errors: "
+                    "row 285 image→image: Empty value cannot coerce to url (+1 more)"
+                ),
+                "details": {
+                    "kind": "transform_errors",
+                    "errors": [
+                        "row 285 image→image: Empty value cannot coerce to url",
+                    ],
+                },
+            }
+        ],
+        "blockers": [
+            {
+                "id": "g8_reconciliation",
+                "message": (
+                    "Dry-run reconciliation failed — transform errors: "
+                    "row 285 image→image: Empty value cannot coerce to url"
+                ),
+                "details": {"kind": "transform_errors"},
+            }
+        ],
+        "coercion_report": {"sampled_rows": 306},
+    }
+    roots = build_root_causes(pf)
+    assert not any(r.kind == "fidelity_collapse" for r in roots)
+    assert any(r.kind == "sample_transform" for r in roots)
+
+
+def test_g5_transform_errors_are_not_fidelity_collapse_root():
+    """G5 empty-url dry-run must be sample_transform — not Lossy / fidelity collapse."""
+    from services.root_cause_engine import build_root_causes
+
+    pf = {
+        "gates": [
+            {
+                "id": "g5_dry_run",
+                "status": "block",
+                "message": "Dry-run failed: image→image: Empty value cannot coerce to url",
+                "details": {
+                    "kind": "transform_errors",
+                    "errors": ["image→image: Empty value cannot coerce to url"],
+                },
+            },
+            {
+                "id": "g9_data_integrity",
+                "status": "block",
+                "message": (
+                    "Data integrity failed: image→image: Empty value cannot coerce to url"
+                ),
+                "details": {
+                    "kind": "transform_errors",
+                    "issues": ["image→image: Empty value cannot coerce to url"],
+                    "note": (
+                        "Preflight blocked the transfer (0 rows written). "
+                        "Findings below are for inspection."
+                    ),
+                },
+            },
+        ],
+        "blockers": [
+            {
+                "id": "g5_dry_run",
+                "message": "Dry-run failed: image→image: Empty value cannot coerce to url",
+                "details": {"kind": "transform_errors"},
+            },
+            {
+                "id": "g9_data_integrity",
+                "message": "Data integrity failed: image→image: Empty value cannot coerce to url",
+                "details": {
+                    "kind": "transform_errors",
+                    "issues": [
+                        "Preflight blocked the transfer (0 rows written). Findings.",
+                        "image→image: Empty value cannot coerce to url",
+                    ],
+                },
+            },
+        ],
+        "coercion_report": {
+            "sampled_rows": 306,
+            "columns": [
+                {
+                    "source": "country_auto_detected",
+                    "fidelity_collapse": True,
+                    "severity": "warn",
+                },
+                {
+                    "source": "image",
+                    "severity": "block",
+                },
+            ],
+        },
+    }
+    roots = build_root_causes(pf)
+    assert not any(r.kind == "fidelity_collapse" for r in roots), roots
+    xf = [r for r in roots if r.kind == "sample_transform"]
+    assert len(xf) == 1, roots
+    assert "image" in xf[0].affected_columns
+    assert "Preflight blocked the transfer" not in xf[0].affected_columns
+    # Signed/warn fidelity columns must not re-inflate a fidelity root.
+    assert "country_auto_detected" not in xf[0].affected_columns
+
+
+def test_g9_duplicate_integrity_is_not_fidelity_collapse_root():
+    """Duplicate-key integrity failures must stay duplicate_identity — not Accept cast."""
+    from services.root_cause_engine import build_root_causes
+
+    pf = {
+        "gates": [
+            {
+                "id": "g9_data_integrity",
+                "status": "block",
+                "message": "Data integrity failed: id: duplicate key values in sample",
+                "details": {"duplicate_keys": 3, "identity_duplicates": True},
+            }
+        ],
+        "blockers": [
+            {
+                "id": "g9_data_integrity",
+                "message": "Data integrity failed: id: duplicate key values in sample",
+                "details": {"duplicate_keys": 3},
+            }
+        ],
+    }
+    roots = build_root_causes(pf)
+    assert not any(r.kind == "fidelity_collapse" for r in roots), roots
+    assert any(r.kind == "duplicate_identity" for r in roots)
+
+
 def test_risk_unacknowledged_is_not_zero_column_fidelity_collapse():
     """Map→Validate: missing contracts list columns — never '0 columns collapse'."""
+    from services.root_cause_engine import build_root_causes
+
     pf = {
         "gates": [
             {

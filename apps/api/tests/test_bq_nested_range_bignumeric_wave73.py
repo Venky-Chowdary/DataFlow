@@ -29,13 +29,14 @@ def test_bq_array_struct_dtype_strings_not_text():
 
     assert _bq_to_logical("ARRAY") == "ARRAY"
     assert _bq_to_logical("ARRAY<STRING>") == "ARRAY<TEXT>"
-    assert _bq_to_logical("ARRAY<INT64>") == "ARRAY<INTEGER>"
-    assert _bq_to_logical("ARRAY<STRUCT<a:INT64>>") == "ARRAY<STRUCT<a:INTEGER>>"
+    # INT64 keeps 64-bit carrier — never collapse to INTEGER/INT32.
+    assert _bq_to_logical("ARRAY<INT64>") == "ARRAY<BIGINT>"
+    assert _bq_to_logical("ARRAY<STRUCT<a:INT64>>") == "ARRAY<STRUCT<a:BIGINT>>"
 
     assert _bq_to_logical("STRUCT") == "STRUCT"
     assert _bq_to_logical("RECORD") == "STRUCT"
-    assert _bq_to_logical("STRUCT<a:INT64, b:STRING>") == "STRUCT<a:INTEGER, b:TEXT>"
-    assert _bq_to_logical("STRUCT<a INT64, b STRING>") == "STRUCT<a:INTEGER, b:TEXT>"
+    assert _bq_to_logical("STRUCT<a:INT64, b:STRING>") == "STRUCT<a:BIGINT, b:TEXT>"
+    assert _bq_to_logical("STRUCT<a INT64, b STRING>") == "STRUCT<a:BIGINT, b:TEXT>"
 
     assert normalize_logical_type("ARRAY<INTEGER>") == "array"
     assert normalize_logical_type("STRUCT<a:INTEGER>") == "struct"
@@ -136,7 +137,7 @@ def test_bq_field_repeated_record_still_nested():
         scale=None,
         max_length=None,
     )
-    assert _bq_field_to_logical(parent) == "ARRAY<STRUCT<id:INTEGER>>"
+    assert _bq_field_to_logical(parent) == "ARRAY<STRUCT<id:BIGINT>>"
 
     bare_array = SimpleNamespace(
         name="tags",

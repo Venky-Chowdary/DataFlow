@@ -127,7 +127,7 @@ def test_evaluate_resume_safety_refuses_empty_and_stale(monkeypatch):
 
 @pytest.mark.parametrize(
     "resource",
-    ["explanation", "mapping-proof", "proof-pack", "resume"],
+    ["explanation", "mapping-proof", "proof-pack", "certificate", "resume"],
 )
 def test_job_subroute_access_matrix_denies_foreign_workspace(monkeypatch, resource):
     """Every job-scoped surface shares the fail-closed workspace gate (404 posture)."""

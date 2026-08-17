@@ -18,13 +18,13 @@ from connectors.saas_common import (
     request,
     token,
 )
-from connectors.saas_write_carriers import stripe_live_types_for_columns
+from connectors.saas_write_carriers import merge_stripe_catalog_types
 from connectors.writer_common import (
+    reject_on_strict_policy,
     WriteResult,
     apply_write_quarantine_matrix,
     build_mapped_rows_with_details,
     gate8_writer_meta,
-    resolve_mapping_dest_types,
     resolve_target_columns,
     transform_error_policy,
 )
@@ -39,26 +39,49 @@ def resolve_stripe_dest_types(
     *,
     logical_types: list[str] | None = None,
     object_type: str = "customers",
+    studio_types: dict[str, Any] | None = None,
+    live_types: dict[str, str] | None = None,
 ) -> dict[str, str]:
-    """Prefer Stripe API-documented field limits; else Map/source carriers."""
-    live = stripe_live_types_for_columns(object_type, target_cols)
-    return resolve_mapping_dest_types(
-        target_cols,
-        mappings,
-        column_types,
-        logical_types=logical_types,
-        live_types=live,
-        default="VARCHAR",
+    """Prefer Stripe OpenAPI catalog (+ Studio overlay); never bare Map invent.
+
+    Always runs ``merge_stripe_catalog_types`` coverage (or trusts a pre-merged
+    ``live_types`` from the write path). Gaps are omitted — never soft-filled
+    with Map ``VARCHAR`` (HubSpot/CRM resolve parity).
+    """
+    if live_types is not None:
+        # Write path already gated merge — return covered carriers only.
+        return {
+            str(k): str(v)
+            for k, v in live_types.items()
+            if k and str(v or "").strip()
+        }
+    live, _err = merge_stripe_catalog_types(
+        object_type, target_cols, studio_types=studio_types
     )
+    # Covered carriers only — never Map VARCHAR invent for catalog gaps.
+    return {str(k): str(v) for k, v in live.items() if k and str(v or "").strip()}
 
 
 def _row_id(row: dict[str, Any], conflict_columns: list[str] | None) -> str | None:
-    """Return the Stripe object id if the row provides one."""
+    """Return the Stripe object id if the row provides one.
+
+    Empty conflict_columns must not invent a default ``id`` lookup — callers
+    quarantine when this returns None under upsert.
+    """
+    from services.value_serializer import is_missing_sentinel
+
     candidates = [c for c in (conflict_columns or []) if c]
     if not candidates:
-        candidates = ["id"]
-    for c in candidates:
+        return None
+    # Stripe Admin REST updates by resource ``id`` only — never take a
+    # secondary conflict column (email/customer) as the URL identity.
+    id_cols = [c for c in candidates if (c or "").lower() == "id"]
+    if not id_cols:
+        return None
+    for c in id_cols:
         val = row.get(c)
+        if val is None or is_missing_sentinel(val):
+            continue
         if val:
             return str(val).strip() or None
     return None
@@ -110,14 +133,32 @@ def write_mapped_rows(
         mappings, column_types, preserve_case=True
     )
     policy = transform_error_policy(error_policy)
-    # Stripe has no Describe API — use documented OpenAPI field maxima so
-    # email/phone/metadata overflow quarantines before inventing bad customers.
+    # Stripe has no Describe API — OpenAPI catalog∩Studio coverage gate so
+    # uncatalogued Map VARCHAR cannot invent empty→null / overflow customers.
+    live_dest = _kwargs.get("destination_column_types")
+    catalog_live, catalog_err = merge_stripe_catalog_types(
+        obj,
+        target_cols,
+        studio_types=live_dest if isinstance(live_dest, dict) else None,
+    )
+    if catalog_err:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=obj,
+            target_schema="",
+            checksum="",
+            chunks_completed=0,
+            error=catalog_err,
+            driver="stripe",
+        )
     dest_types = resolve_stripe_dest_types(
         target_cols,
         mappings,
         column_types,
         logical_types=logical_types,
         object_type=obj,
+        live_types=catalog_live,
     )
     mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
         headers=headers,
@@ -128,8 +169,11 @@ def write_mapped_rows(
         error_policy=policy,
         dest_types=dest_types,
         preserve_case=True,
+        dest_kind="stripe",
+        destination_pk_columns=list(conflict_columns or []) or None,
+        destination_column_nullability=_kwargs.get("destination_column_nullability"),
     )
-    tgt_types = [str(dest_types.get(c, "VARCHAR") or "VARCHAR") for c in target_cols]
+    tgt_types = [str(dest_types.get(c) or "").strip() for c in target_cols]
     mapped_rows = apply_write_quarantine_matrix(
         mapped_rows,
         target_cols,
@@ -139,7 +183,8 @@ def write_mapped_rows(
         dialect_label="Stripe",
         mappings=mappings,
     )
-    if transform_errors and policy == "fail":
+    _map_abort = reject_on_strict_policy(policy, rejected_details, 'Stripe', transform_errors)
+    if _map_abort:
         return WriteResult(
             ok=False,
             rows_written=0,
@@ -147,7 +192,7 @@ def write_mapped_rows(
             target_schema="",
             checksum="",
             chunks_completed=0,
-            error=f"Transform errors: {'; '.join(transform_errors[:3])}",
+            error=_map_abort or f"Transform errors: {'; '.join(transform_errors[:3])}",
             rejected_details=rejected_details,
             driver="stripe",
         )
@@ -170,11 +215,48 @@ def write_mapped_rows(
             row_dict = dict(zip(target_cols, row))
 
         record_id = _row_id(row_dict, conflict_columns) if mode in upsert_modes else None
-        payload = {
-            k: v
-            for k, v in row_dict.items()
-            if k not in ("id", "Id") and v is not None and str(v) != ""
-        }
+        from connectors.writer_common import omit_missing_fields
+
+        # STOP_COLUMN / coerce_null → DF_MISSING must omit, never leak the
+        # sentinel string into Stripe API payloads.
+        payload = omit_missing_fields(
+            ((k, v) for k, v in row_dict.items() if k not in ("id", "Id"))
+        )
+
+        if mode in upsert_modes and not record_id:
+            from connectors.writer_common import append_write_quarantine_detail
+
+            detail = {
+                "row": i + 1,
+                "column": "id",
+                "reason": (
+                    "Stripe upsert requires conflict column 'id' with a value — "
+                    "refuse inventing default id / create invent "
+                    "(would duplicate customers/objects on retry)"
+                ),
+                "values": row_dict,
+                "policy": "write_fail" if policy == "fail" else "write_quarantine",
+            }
+            append_write_quarantine_detail(
+                all_rejected,
+                detail,
+                mapped_row=tuple(row_dict.get(c) for c in target_cols),
+                target_cols=target_cols,
+            )
+            if policy == "fail":
+                return WriteResult(
+                    ok=False,
+                    rows_written=written,
+                    table_name=obj,
+                    target_schema="",
+                    checksum="",
+                    chunks_completed=chunks,
+                    error=detail["reason"],
+                    rejected_details=all_rejected,
+                    warnings=warnings,
+                    driver="stripe",
+                )
+            continue
 
         if record_id and mode in upsert_modes:
             url = f"{base}/v1/{obj}/{record_id}"
@@ -219,12 +301,19 @@ def write_mapped_rows(
                 "row": i,
                 "column": "",
                 "target": obj,
-                "value": str(record_id or row_dict),
+                "value": record_id,
                 "reason": humanize_http_error(exc, "stripe"),
                 "policy": policy,
                 "values": row_dict,
             }
-            all_rejected.append(detail)
+            from connectors.writer_common import append_write_quarantine_detail
+
+            append_write_quarantine_detail(
+                all_rejected,
+                detail,
+                mapped_row=tuple(row_dict.get(c) for c in target_cols),
+                target_cols=target_cols,
+            )
             if policy == "fail":
                 return WriteResult(
                     ok=False,
@@ -247,6 +336,22 @@ def write_mapped_rows(
 
     if on_checkpoint:
         on_checkpoint(len(mapped_rows), written, 1)
+
+    _final_abort = reject_on_strict_policy(policy, all_rejected, "Stripe")
+    if _final_abort:
+        return WriteResult(
+            ok=False,
+            rows_written=written,
+            table_name=obj,
+            target_schema=base,
+            checksum=digest.hexdigest()[:32],
+            chunks_completed=chunks or 1,
+            error=_final_abort,
+            rejected_details=all_rejected,
+            rejected_rows=len(all_rejected),
+            warnings=warnings,
+            driver="stripe",
+        )
 
     return WriteResult(
         ok=True,

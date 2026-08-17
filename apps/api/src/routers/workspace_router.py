@@ -737,14 +737,13 @@ async def get_security_report(request: Request):
 
 
 def _baseline_competitors() -> list[dict[str, Any]]:
-    """Publicly disclosed baseline figures for representative data products.
+    """Approximate mid-market ELT baselines for procurement context (synthetic).
 
-    These numbers are approximate mid-market baselines from vendor documentation
-    and independent benchmarks; they are not a guarantee of any specific workload.
+    Figures are illustrative industry ranges — not named vendor SLAs or guarantees.
     """
     return [
         {
-            "product": "Fivetran",
+            "product": "Managed ELT (high)",
             "typical_rps": 4000,
             "memory_mb": 2048,
             "resume_from_checkpoint": True,
@@ -752,20 +751,20 @@ def _baseline_competitors() -> list[dict[str, Any]]:
             "notes": "Throughput depends on source API rate limits and destination load",
         },
         {
-            "product": "Airbyte",
+            "product": "Open-source ELT workers",
             "typical_rps": 2500,
             "memory_mb": 1024,
             "resume_from_checkpoint": True,
             "observed_max_rows": 100_000_000,
-            "notes": "Open-source connector pods; scale limited by worker memory",
+            "notes": "Connector pods; scale limited by worker memory",
         },
         {
-            "product": "Stitch",
+            "product": "Lightweight Singer-class",
             "typical_rps": 1800,
             "memory_mb": 1024,
             "resume_from_checkpoint": False,
             "observed_max_rows": 10_000_000,
-            "notes": "Singer-based replication; row-by-row logging overhead",
+            "notes": "Row-by-row logging overhead on smaller pipelines",
         },
     ]
 
@@ -798,7 +797,7 @@ def _markdown_benchmark_report(report: dict[str, Any]) -> str:
 
 @router.get("/proofs/ledger")
 async def get_proof_ledger():
-    """Customer-visible migration proof ledger (SKU + fidelity + vs Airbyte)."""
+    """Customer-visible migration proof ledger (SKU + fidelity + integrity comparison)."""
     from services.proof_ledger import build_proof_ledger
 
     return JSONResponse(build_proof_ledger())

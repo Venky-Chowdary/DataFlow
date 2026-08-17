@@ -4,7 +4,7 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { classifyGate8Status, isGate8IdentityUnproven, isGate8PreWriteSimulation, isGate8SampleVerified, isGate8WriterAckOnly } from "./Gate8ProofCard";
+import { classifyGate8Status, gate8AppendIdentity, isGate8AppendDelta, isGate8IdentityUnproven, isGate8KeyedBatch, isGate8PreWriteSimulation, isGate8SampleVerified, isGate8WriterAckOnly } from "./Gate8ProofCard";
 
 /** Mirror of Gate8ProofCard expected-dest math (quarantine hold-out). */
 function gate8ExpectedDest(sourceRows: number, rejectedRows: number, coercedNullRows: number) {
@@ -104,6 +104,38 @@ describe("Gate-8 pre-write simulation honesty", () => {
     );
   });
 
+  it("classifyGate8Status labels independent source re-read as full pass", () => {
+    const view = classifyGate8Status({
+      passed: true,
+      phase: "post_write_verified",
+      assurance_level: "full_checksum",
+      coverage: "full_checksum",
+      source_checksum: "aaa",
+      target_checksum: "aaa",
+      source_checksum_provenance: "independent_source_reread",
+      migration_proven: true,
+    });
+    assert.equal(view.fullPass, true);
+    assert.equal(view.tone, "ok");
+    assert.match(view.label, /independent re-read/i);
+  });
+
+  it("classifyGate8Status never labels write-pass dest read-back as Passed", () => {
+    const view = classifyGate8Status({
+      passed: true,
+      phase: "post_write_write_pass",
+      assurance_level: "write_pass_dest_readback",
+      coverage: "write_pass_dest_readback",
+      source_checksum: "aaa",
+      target_checksum: "aaa",
+      migration_proven: false,
+      message: "Destination read-back matches the write-pass fingerprint (150000 rows).",
+    });
+    assert.equal(view.fullPass, false);
+    assert.equal(view.tone, "warn");
+    assert.match(view.label, /write-pass/i);
+  });
+
   it("classifyGate8Status never labels writer-ack as Passed", () => {
     const view = classifyGate8Status({
       passed: true,
@@ -111,6 +143,20 @@ describe("Gate-8 pre-write simulation honesty", () => {
       message: "Transfer verified by writer: 10 rows written (read-back verifier not available)",
     });
     assert.equal(view.label, "Writer ack");
+    assert.equal(view.fullPass, false);
+    assert.equal(view.tone, "warn");
+  });
+
+  it("classifyGate8Status never labels file-export unproven as Passed", () => {
+    const view = classifyGate8Status({
+      passed: true,
+      unproven: true,
+      skipped_readback: true,
+      migration_proven: false,
+      coverage: "none",
+      message: "File export checksum recorded (no destination read-back)",
+    });
+    assert.equal(view.label, "Unproven (no read-back)");
     assert.equal(view.fullPass, false);
     assert.equal(view.tone, "warn");
   });
@@ -222,4 +268,64 @@ describe("Gate-8 sample-verified reverse-ETL honesty", () => {
     assert.equal(view.tone, "warn");
     assert.equal(view.fullPass, false);
   });
+
+  it("strict full append dest-before is append delta, not checksum fail or Verified", () => {
+    const report = {
+      passed: true,
+      phase: "post_write_row_count",
+      coverage: "row_count",
+      assurance_level: "row_count",
+      checksum_scope: "whole_table_not_comparable",
+      source_checksum: "aaa",
+      target_checksum: "bbb",
+      checksum_match: false,
+      migration_proven: false,
+      source_rows: 200,
+      target_rows: 300,
+      message: "Append delta verified (200 row(s) appended: 100 → 300). Whole-table digests are not comparable.",
+    };
+    assert.equal(isGate8AppendDelta(report), true);
+    assert.equal(isGate8AppendDelta(undefined), false);
+    assert.equal(isGate8KeyedBatch(undefined), false);
+    const view = classifyGate8Status(report);
+    assert.equal(view.label, "Append delta");
+    assert.equal(view.tone, "warn");
+    assert.equal(view.fullPass, false);
+  });
+
+  it("dest-before identity is dest after − dest before, not dest − source", () => {
+    const id = gate8AppendIdentity({
+      passed: true,
+      source_rows: 200,
+      target_rows: 300,
+      target_rows_before: 100,
+      checksum_scope: "whole_table_not_comparable",
+    });
+    assert.equal(id.destBefore, 100);
+    assert.equal(id.destAfter, 300);
+    assert.equal(id.written, 200);
+    assert.equal(id.expected, 200);
+    assert.equal(id.deltaOk, true);
+  });
+
+  it("keyed-batch extra dest is batch verified, not fullPass", () => {
+    const report = {
+      passed: true,
+      phase: "post_write_verified",
+      coverage: "full_checksum",
+      checksum_scope: "written_batch_keys",
+      source_checksum: "abc",
+      target_checksum: "abc",
+      checksum_match: true,
+      population_proof: false,
+      source_rows: 200,
+      target_rows: 300,
+      target_rows_before: 100,
+    };
+    assert.equal(isGate8KeyedBatch(report), true);
+    const view = classifyGate8Status(report);
+    assert.equal(view.label, "Batch verified");
+    assert.equal(view.fullPass, false);
+  });
 });
+

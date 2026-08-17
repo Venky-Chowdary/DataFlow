@@ -20,6 +20,24 @@ def test_apply_transform_phone():
     assert apply_transform("555-123-4567", "phone") == ("555-123-4567", None)
 
 
+def test_empty_semantic_transform_errors_not_silent_null():
+    val, err = apply_transform("", "phone")
+    assert val is None
+    assert err and "Empty value" in err
+
+
+def test_typed_null_sentinel_errors_not_silent_null():
+    val, err = apply_transform("n/a", "integer")
+    assert val is None
+    assert err and "Null sentinel" in err
+
+
+def test_identity_preserves_whitespace_only():
+    val, err = apply_transform("   ", "identity")
+    assert err is None
+    assert val == "   "
+
+
 def test_apply_transform_email():
     assert apply_transform("  User@Example.COM  ", "email") == ("user@example.com", None)
 
@@ -39,6 +57,7 @@ def test_apply_transform_currency():
     assert apply_transform("€100", "currency") == ("100", None)
     value, err = apply_transform("free", "currency")
     assert err is not None
+    assert value is None
 
 
 def test_apply_transform_percentage():
@@ -50,7 +69,9 @@ def test_apply_transform_postal():
 
 
 def test_infer_transform_chooses_phone_for_string_target():
-    assert infer_transform_for_mapping("phone_number", "phone_number", "VARCHAR", "VARCHAR") == "phone"
+    # TEXT/VARCHAR sinks must not invent phone/url/email pipelines — remap or
+    # explicit Map stamp only (parity with image→TEXT empty-url honesty).
+    assert infer_transform_for_mapping("phone_number", "phone_number", "VARCHAR", "VARCHAR") == "none"
 
 
 def test_infer_transform_preserves_currency_for_string_target():

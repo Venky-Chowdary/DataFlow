@@ -9,10 +9,11 @@ from __future__ import annotations
 
 import logging
 import re
+from collections.abc import Iterable
 from typing import Any
 
 from connectors.sql_identifiers import quote_sql_identifier, quote_table_ref
-from services.type_system import is_lossy_coercion, normalize_logical_type
+from services.decision_kernel import is_lossy_coercion, normalize_logical_type
 
 logger = logging.getLogger(__name__)
 
@@ -118,10 +119,11 @@ def _minimum_string_length_for(old_type: str) -> int | None:
     return None
 
 
-def is_wider_type(old_type: str, new_type: str) -> bool:
+def is_wider_type(old_type: str, new_type: str, *, dest_db: str = "") -> bool:
     """True when new_type can hold all values of old_type without loss."""
     old_type = old_type or "VARCHAR"
     new_type = new_type or "VARCHAR"
+    dest_db = (dest_db or "").strip()
     old_logical = normalize_logical_type(old_type)
     new_logical = normalize_logical_type(new_type)
 
@@ -203,7 +205,7 @@ def is_wider_type(old_type: str, new_type: str) -> bool:
         return new_len >= min_len
 
     # Other cross-logical promotions rely on the type-system safe-promotion list.
-    return not is_lossy_coercion(old_type, new_type, dest_db="")
+    return not is_lossy_coercion(old_type, new_type, dest_db=dest_db)
 
 
 def _information_schema_type_to_str(
@@ -257,6 +259,55 @@ def _information_schema_type_to_str(
     return upper
 
 
+_CASE_FOLDING_DIALECTS: frozenset[str] = frozenset(
+    {"oracle", "snowflake", "db2", "ibm_db_sa", "mysql", "mariadb", "mssql", "sqlserver"}
+)
+
+
+def _quote_added_columns(dialect: Any, existing_names: list[str]) -> bool | None:
+    """Whether ADD COLUMN must force-quote, following the table's own convention.
+
+    Force-quoting a lower-case name on Oracle adds ``"extra"``, a case-sensitive
+    column the client's own ``SELECT extra`` cannot see, sitting beside the
+    folded ``EXTRA`` columns of the table it was added to. ``None`` lets the
+    dialect quote only when the name requires it, which is what an ordinary
+    ``CREATE TABLE`` does — but a table whose columns really are stored
+    lower-case keeps force-quoting, so drift matches what is already there.
+    """
+    denormalize = getattr(dialect, "denormalize_name", None)
+    if (
+        not callable(denormalize)
+        or not existing_names
+        or not getattr(dialect, "requires_name_normalize", False)
+    ):
+        # A dialect that does not fold reports names as they are stored, so the
+        # quoted Map spelling is already the right one.
+        return True
+    stored = [str(denormalize(name) or name) for name in existing_names]
+    return None if all(s == s.upper() for s in stored) else True
+
+
+def existing_column_index(
+    dialect: str, existing_names: Iterable[str]
+) -> dict[str, str]:
+    """``{lookup key: catalog name}`` for matching a target against a table.
+
+    Reflection normalises an Oracle ``LABEL`` to ``label``, so an exact-match
+    lookup missed the column and drift either re-added it or skipped a widen
+    the row needed. Engines that fold or compare case-insensitively get a
+    folded key as well; PostgreSQL does not, because ``"Foo"`` and ``"foo"``
+    are two different columns there and guessing would alter the wrong one.
+    """
+    index: dict[str, str] = {}
+    fold = (dialect or "").lower() in _CASE_FOLDING_DIALECTS
+    for name in existing_names:
+        text = str(name)
+        index.setdefault(text, text)
+        if fold:
+            index.setdefault(text.casefold(), text)
+    return index
+
+
 def _quote_col(dialect: str, name: str) -> str:
     dialect = (dialect or "").lower()
     if dialect in ("mysql", "mariadb"):
@@ -265,6 +316,52 @@ def _quote_col(dialect: str, name: str) -> str:
         safe = name.replace("]", "]]")
         return f"[{safe}]"
     return quote_sql_identifier(name, '"')
+
+
+def _dialect_type_vocabulary(dialect: str) -> frozenset[str]:
+    """Type names a dialect actually understands, from its own SQLAlchemy map.
+
+    ``ischema_names`` is the dialect's own reflection vocabulary, so it answers
+    "can this engine spell this type" without a hand-maintained list that would
+    drift from the drivers.
+    """
+    try:
+        from sqlalchemy.dialects import registry
+    except ImportError:  # pragma: no cover - SQLAlchemy is a hard dependency
+        return frozenset()
+    canonical = {
+        "postgres": "postgresql",
+        "oracle_db": "oracle",
+        "sqlserver": "mssql",
+        "mariadb": "mysql",
+    }.get(dialect, dialect)
+    try:
+        dialect_cls = registry.load(canonical)
+    except Exception:  # noqa: BLE001 - unknown/3rd-party dialect: materialize
+        return frozenset()
+    names = getattr(dialect_cls, "ischema_names", None)
+    if not isinstance(names, dict):
+        return frozenset()
+    return frozenset(str(name).upper() for name in names)
+
+
+def materialize_widen_type(dialect: str, new_type: str) -> str:
+    """Physical spelling of a widen carrier for ``dialect``.
+
+    Canonical Map carriers (``timestamp_ntz``, ``BOOLEAN``, ``TEXT`` on Oracle)
+    are translated; anything the engine already understands passes through
+    unchanged so Map stamp and ALTER DDL stay byte-identical.
+    """
+    raw = (new_type or "").strip()
+    if not raw:
+        return new_type
+    bare = re.split(r"[(\s]", raw, maxsplit=1)[0].upper()
+    vocabulary = _dialect_type_vocabulary((dialect or "").lower())
+    if bare in vocabulary:
+        return raw
+    from services.decision_kernel import ddl_type
+
+    return ddl_type(dialect, raw) or raw
 
 
 # Substrings that must never appear in a generated DDL type string.
@@ -308,9 +405,19 @@ def _build_widen_ddl(
     new_type: str,
     existing_type: str | None = None,
 ) -> str:
-    """Generate a single ALTER COLUMN / MODIFY COLUMN statement."""
+    """Generate a single ALTER COLUMN / MODIFY COLUMN statement.
+
+    ``new_type`` arrives from the Map stamp, which speaks the canonical carrier
+    vocabulary (``timestamp_ntz``, ``BOOLEAN``, ``TEXT``) rather than any one
+    engine's DDL. Emitting it verbatim produced ``ORA-22858`` on the live
+    matrix (``MODIFY ("day" timestamp_ntz)``), so every dialect materializes
+    its physical spelling here — the one place all widen paths funnel through.
+    A carrier the engine already understands is emitted verbatim so Map and
+    ALTER stay identical (SQL Server ``NUMERIC(10,2)`` is not rewritten to its
+    ``DECIMAL`` synonym).
+    """
     dialect = (dialect or "").lower()
-    new_type = _sanitize_ddl_type(new_type)
+    new_type = _sanitize_ddl_type(materialize_widen_type(dialect, new_type))
     table_ref = quote_table_ref(table_name, schema, dialect=dialect, sanitize=False)
     col_q = _quote_col(dialect, col)
 
@@ -350,6 +457,49 @@ def _build_widen_ddl(
         raise NotImplementedError("SQLite cannot ALTER COLUMN TYPE")
 
     raise NotImplementedError(f"Unsupported dialect for column widen: {dialect}")
+
+
+# Engine errors that mean "this column cannot be converted in place", not
+# "the tool built bad SQL". Oracle refuses cross-family MODIFY outright
+# (ORA-22858) and refuses any datatype change on a populated column
+# (ORA-01439); SQL Server and PostgreSQL surface their own variants.
+_IN_PLACE_CONVERSION_ERRORS: tuple[str, ...] = (
+    "ora-22858",
+    "ora-01439",
+    "ora-01440",
+    "cannot be cast automatically",
+    "operator does not exist",
+    "conversion failed when converting",
+)
+
+
+def widen_refusal_message(
+    column: str,
+    existing_type: str | None,
+    new_type: str,
+    exc: Exception,
+) -> str:
+    """Operator-actionable text for an engine that refuses an in-place ALTER."""
+    return (
+        f"Destination column {column!r} is {existing_type or 'unknown'} and the "
+        f"mapping needs {new_type}; this engine cannot convert it in place "
+        f"({exc}). Migrate to a new destination table, or map the column to "
+        f"its existing type and accept a risk contract."
+    )
+
+
+class WidenNotSupported(RuntimeError):
+    """Engine refused an in-place column conversion — fail closed, never guess."""
+
+
+def raise_widen_refusal(
+    column: str, existing_type: str | None, new_type: str, exc: Exception
+) -> None:
+    """Re-raise an engine ALTER refusal as an actionable schema-drift error."""
+    if any(token in str(exc).lower() for token in _IN_PLACE_CONVERSION_ERRORS):
+        raise WidenNotSupported(
+            widen_refusal_message(column, existing_type, new_type, exc)
+        ) from exc
 
 
 def _fetch_existing_columns(
@@ -477,12 +627,24 @@ def widen_existing_columns_native(
     *,
     backfill: bool = False,
     skip_cols: list[str] | None = None,
+    source_types: dict[str, str] | None = None,
+    suppressed_out: dict[str, str] | None = None,
 ) -> list[str]:
     """Issue ALTER COLUMN / MODIFY COLUMN to widen columns that are now too narrow.
 
     Returns the list of DDL statements executed.  ``backfill`` must be True for any
     DDL to be issued.  The function is idempotent: repeated calls will only emit
     ALTER statements when the target type is wider than the existing catalog type.
+
+    ``source_types`` (column → source logical type) suppresses widens that are an
+    artifact of create-new materialization rather than real drift: a destination
+    the writer would *invent* as BIGINT is no reason to ALTER an operator's
+    existing INTEGER column when the source column is itself INTEGER. Only a
+    carrier that cannot hold the incoming source type is widened.
+
+    ``suppressed_out`` receives ``column -> existing physical type`` for every
+    such suppressed widen, so the caller can keep its declared types equal to
+    the DDL that actually exists.
     """
     if not backfill or not target_cols or not target_types:
         return []
@@ -505,7 +667,19 @@ def widen_existing_columns_native(
         if col not in existing:
             continue
         existing_type = existing[col]
-        if not is_wider_type(existing_type, new_type):
+        if not is_wider_type(existing_type, new_type, dest_db=dialect):
+            continue
+        source_type = str((source_types or {}).get(col) or "").strip()
+        if source_type and not is_lossy_coercion(source_type, existing_type, dest_db=dialect):
+            if suppressed_out is not None:
+                suppressed_out[col] = existing_type
+            logger.debug(
+                "Widen skipped for %s.%s: existing %s already holds source %s",
+                table_name,
+                col,
+                existing_type,
+                source_type,
+            )
             continue
         try:
             ddl = _build_widen_ddl(
@@ -534,6 +708,7 @@ def widen_existing_columns_native(
             logger.warning(
                 "Widen failed for %s.%s: %s", table_name, col, exc, exc_info=exc
             )
+            raise_widen_refusal(col, existing_type, new_type, exc)
             raise
     return log
 
@@ -565,13 +740,17 @@ def add_missing_columns(
     if not inspector.has_table(table_name, schema=schema):
         return []
 
-    existing = {c["name"] for c in inspector.get_columns(table_name, schema=schema)}
-    missing = [c for c in target_cols if c not in existing]
+    dialect = engine.dialect
+    dialect_name = getattr(dialect, "name", "")
+    existing_names = [
+        c["name"] for c in inspector.get_columns(table_name, schema=schema)
+    ]
+    existing = existing_column_index(dialect_name, existing_names)
+    quote_new_columns = _quote_added_columns(dialect, existing_names)
+    missing = [c for c in target_cols if c not in existing and c.casefold() not in existing]
     if not missing:
         return []
 
-    dialect = engine.dialect
-    dialect_name = getattr(dialect, "name", "")
     keyword = (
         "ADD COLUMN" if dialect_name not in ("mssql", "oracle", "sybase") else "ADD"
     )
@@ -579,7 +758,6 @@ def add_missing_columns(
     # SQLite rejects "ADD COLUMN IF NOT EXISTS" (syntax error near EXISTS).
     if_not_exists = " IF NOT EXISTS" if supports_if_not_exists else ""
     log: list[str] = []
-    quoted_schema = f'"{schema}"' if schema else None
 
     def _column_exists_error(exc: Exception) -> bool:
         text = str(exc).lower()
@@ -593,20 +771,30 @@ def add_missing_columns(
             )
         )
 
+    # The T-SQL compiler resolves a column's owning Table to emit its DDL
+    # fragment ("mssql requires Table-bound columns in order to generate DDL"),
+    # so an unbound Column silently disabled add-column drift on every SQL
+    # Server destination. Bind the columns to a throwaway Table, which also
+    # gives the dialect's own preparer the correct quoting for the table
+    # reference (backticks / brackets / case-preserving quotes) instead of the
+    # hardcoded ANSI double quotes this used to emit.
+    bound = sa.Table(
+        table_name,
+        sa.MetaData(),
+        *[
+            sa.Column(col, sa_col_types[col], quote=quote_new_columns)
+            for col in missing
+            if sa_col_types.get(col) is not None
+        ],
+        schema=schema,
+        quote=True,
+    )
+    qualified = dialect.identifier_preparer.format_table(bound)
+
     def _run(conn: Any) -> None:
-        for col in missing:
-            sa_type = sa_col_types.get(col)
-            if sa_type is None:
-                continue
-            col_ddl = str(
-                sa.schema.CreateColumn(sa.Column(col, sa_type, quote=True)).compile(
-                    dialect=dialect
-                )
-            )
-            if quoted_schema:
-                qualified = f'{quoted_schema}."{table_name}"'
-            else:
-                qualified = f'"{table_name}"'
+        for column in list(bound.columns):
+            col = column.name
+            col_ddl = str(sa.schema.CreateColumn(column).compile(dialect=dialect))
             alter = f"ALTER TABLE {qualified} {keyword}{if_not_exists} {col_ddl}"
             try:
                 conn.execute(sa.text(alter))

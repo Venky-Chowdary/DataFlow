@@ -7,13 +7,19 @@ import {
   MAPPING_TRANSFORMS,
   STRUCT_POLICIES,
   applyDestTypeChange,
+  applyOperatorRemapDest,
   applyStructPolicyChange,
   acknowledgeMappingRisk,
   applyTransformChange,
   approveMappingHonestly,
   approveMappingsHonestly,
   canWidenMapping,
+  classifyMappingReview,
+  confirmFalseFriendMapping,
   countApproveEligible,
+  isFalseFriendReview,
+  mappingHealthSummary,
+  mappingReviewKindMeta,
   EXECUTION_POLICY_OPTIONS,
   flagExistingEnumBooleanConflict,
   isArrayLogicalType,
@@ -24,11 +30,15 @@ import {
   isStructLogicalType,
   createNewRiskDetail,
   engineStampedRiskChip,
+  formatColumnProfileStrip,
   hasCreateNewTypeRisk,
   mappingAckDoneLabel,
   mappingAckLabel,
   mappingAckTier,
   mappingRequiresRiskAck,
+  mappingRiskChipState,
+  clearExistingDestTypeOverride,
+  isExistingDestTypeOverride,
   pipelineTransformChip,
   widenMappingToVarchar,
   type EditableMapping,
@@ -48,6 +58,11 @@ import {
   paginateMappings,
   totalPages,
 } from "../lib/columnWorkbench";
+import {
+  mapBandLabel,
+  partitionMapBands,
+  shouldCollapseSafeBand,
+} from "../lib/mapSafeBand";
 import { destTypeSelectOptions, normalizeDestTypeValue, typeBadgeClass } from "../lib/typeDisplay";
 
 interface ColumnReviewPanelProps {
@@ -140,7 +155,10 @@ export function ColumnReviewPanel({
   const [pageSize, setPageSize] = useState<ColumnPageSize>(50);
   const [previewPage, setPreviewPage] = useState(1);
   const [previewPageSize, setPreviewPageSize] = useState(12);
+  const [safeBandExpanded, setSafeBandExpanded] = useState(false);
+  const [readyBandExpanded, setReadyBandExpanded] = useState(false);
   const rowRefs = useRef<Map<string, HTMLTableRowElement>>(new Map());
+  const destInputRefs = useRef<Map<string, HTMLInputElement>>(new Map());
 
   const search = searchProp ?? internalSearch;
   const setSearch = onSearchChange ?? setInternalSearch;
@@ -162,10 +180,26 @@ export function ColumnReviewPanel({
     [mappings, search, filter, sort, confidenceThreshold],
   );
 
-  const pages = totalPages(filtered.length, pageSize);
+  // Safe-band accordion only on unfiltered "all" — Issues filter stays flat.
+  const useSafeBands = filter === "all" && !search.trim();
+  const mapBands = useMemo(() => partitionMapBands(filtered), [filtered]);
+  const collapseSafe = useSafeBands && shouldCollapseSafeBand(mapBands) && !safeBandExpanded;
+  const collapseReady = useSafeBands && mapBands.ready.length >= 2 && !readyBandExpanded;
+
+  const displayItems = useMemo(() => {
+    if (!useSafeBands) return filtered;
+    return [
+      ...mapBands.attention,
+      ...(collapseSafe ? [] : mapBands.safe),
+      ...(collapseReady ? [] : mapBands.ready),
+      ...mapBands.omitted,
+    ];
+  }, [useSafeBands, filtered, mapBands, collapseSafe, collapseReady]);
+
+  const pages = totalPages(displayItems.length, pageSize);
   const pageItems = useMemo(
-    () => paginateMappings(filtered, page, pageSize),
-    [filtered, page, pageSize],
+    () => paginateMappings(displayItems, page, pageSize),
+    [displayItems, page, pageSize],
   );
 
   const needsReview = mappings.filter((m) => needsMappingReview(m, confidenceThreshold));
@@ -184,7 +218,13 @@ export function ColumnReviewPanel({
 
   useEffect(() => {
     setPage(1);
-  }, [search, filter, sort, pageSize, mappings.length]);
+  }, [search, filter, sort, pageSize, mappings.length, safeBandExpanded, readyBandExpanded]);
+
+  useEffect(() => {
+    // New Map payload — re-collapse safe band (Issues-first default).
+    setSafeBandExpanded(false);
+    setReadyBandExpanded(false);
+  }, [mappings.length]);
 
   useEffect(() => {
     setPreviewPage(1);
@@ -232,9 +272,22 @@ export function ColumnReviewPanel({
     onChange(approveMappingsHonestly(mappings));
   };
 
+  const approveAllSafe = () => {
+    const safeIndexes = new Set(mapBands.safe.map((item) => item.index));
+    if (safeIndexes.size === 0) return;
+    onChange(
+      mappings.map((m, i) => (safeIndexes.has(i) ? approveMappingHonestly(m) : m)),
+    );
+    setSafeBandExpanded(false);
+  };
+
   const approveOne = (index: number) => {
     const m = mappings[index];
     if (!m) return;
+    if (isFalseFriendReview(m) && !m.falseFriendConfirmed) {
+      updateMapping(index, confirmFalseFriendMapping(m));
+      return;
+    }
     // Fidelity / STRUCT / specialty need explicit risk ack — bare Approve must not clear G4.
     if (mappingRequiresRiskAck(m)) {
       const chosen = policyBySource[m.source];
@@ -266,6 +319,20 @@ export function ColumnReviewPanel({
   };
 
   const eligibleApproveCount = countApproveEligible(mappings);
+  const health = useMemo(
+    () => mappingHealthSummary(mappings, confidenceThreshold),
+    [mappings, confidenceThreshold],
+  );
+  const focusDestInput = (source: string) => {
+    const input = destInputRefs.current.get(source);
+    if (input) {
+      input.focus();
+      input.select();
+      return;
+    }
+    const row = rowRefs.current.get(source);
+    row?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  };
 
   const focusIssues = () => {
     setFilter("review");
@@ -306,8 +373,8 @@ export function ColumnReviewPanel({
     return () => window.removeEventListener("keydown", onKey);
   }, [mappings, onChange]);
 
-  const pageStart = filtered.length === 0 ? 0 : (page - 1) * pageSize + 1;
-  const pageEnd = Math.min(page * pageSize, filtered.length);
+  const pageStart = displayItems.length === 0 ? 0 : (page - 1) * pageSize + 1;
+  const pageEnd = Math.min(page * pageSize, displayItems.length);
 
   const previewRows = useMemo(() => {
     if (!sampleRows || sampleRows.length === 0) return [];
@@ -376,7 +443,6 @@ export function ColumnReviewPanel({
       className={[
         "df2-column-review",
         compact ? "is-compact is-editor" : "",
-        compact && sampleRows && sampleRows.length > 0 ? "is-split" : "",
         isDialog ? "is-dialog" : "",
       ].filter(Boolean).join(" ")}
     >
@@ -516,7 +582,7 @@ export function ColumnReviewPanel({
             {search && (
               <button
                 type="button"
-                className="df2-column-workbench-clear"
+                className="df2-close-btn df2-close-btn-sm df2-column-workbench-clear"
                 onClick={() => setSearch("")}
                 aria-label="Clear search"
               >
@@ -526,7 +592,7 @@ export function ColumnReviewPanel({
           </div>
           <div className="df2-column-workbench-actions">
             {tableControls}
-            {filterCounts.review > 0 && (
+            {filterCounts.review > 0 && !compact && (
               <button type="button" className="df2-btn df2-btn-sm" onClick={focusIssues}>
                 <DtIcon name="alert" size={14} /> Issues ({filterCounts.review})
               </button>
@@ -544,7 +610,17 @@ export function ColumnReviewPanel({
           </div>
         </div>
 
-        {needsReview.length > 0 && filter === "review" && !compact && (
+        {health.falseFriendCount > 0 && (
+          <div className="df2-column-review-alert" role="status">
+            <DtIcon name="alert" size={16} />
+            <span>
+              <strong>{health.headline}</strong>
+              {" — "}
+              {health.detail}
+            </span>
+          </div>
+        )}
+        {needsReview.length > 0 && filter === "review" && !compact && health.falseFriendCount === 0 && (
           <div className="df2-column-review-alert" role="status">
             <DtIcon name="alert" size={16} />
             <span>
@@ -566,6 +642,30 @@ export function ColumnReviewPanel({
               <strong>New destination table</strong>
               {" — create-new fields; types will CREATE on first write"}
               {destType ? ` with ${destType}-native DDL` : ""}.
+              {mappings.filter(
+                (m) =>
+                  m.createNew
+                  && (m.fidelity || "").toLowerCase() === "preserve"
+                  && !mappingRequiresRiskAck(m)
+                  && !isIntentionalOmit(m),
+              ).length >= 3 && (
+                <>
+                  {" "}
+                  <strong>
+                    {mappings.filter(
+                      (m) =>
+                        m.createNew
+                        && (m.fidelity || "").toLowerCase() === "preserve"
+                        && !mappingRequiresRiskAck(m)
+                        && !isIntentionalOmit(m),
+                    ).length}{" "}
+                    equivalent
+                  </strong>
+                  {" mappings (lossless type path) — use "}
+                  <strong>Approve eligible</strong>
+                  {" once; no Risk Contract required."}
+                </>
+              )}
               {mappings.some((m) => hasCreateNewTypeRisk(m)) && (
                 <>
                   {" "}
@@ -622,6 +722,53 @@ export function ColumnReviewPanel({
 
       </div>
 
+      {useSafeBands && (collapseSafe || collapseReady || safeBandExpanded || readyBandExpanded) && (
+        <div className="df2-map-band-bar" role="region" aria-label="Map safe-band groups">
+          {mapBands.attention.length > 0 && (
+            <span className="df2-map-band-chip is-attention">
+              {mapBandLabel("attention", mapBands.attention.length)}
+            </span>
+          )}
+          {mapBands.safe.length > 0 && (
+            <div className="df2-map-band-actions">
+              <button
+                type="button"
+                className={`df2-map-band-chip is-safe${collapseSafe ? " is-collapsed" : ""}`}
+                onClick={() => setSafeBandExpanded((v) => !v)}
+                aria-expanded={!collapseSafe}
+                title="Preserve / safe-normalize rows — collapse so Issues stay primary"
+              >
+                <DtIcon name={collapseSafe ? "chevron-right" : "chevron-down"} size={14} />
+                {mapBandLabel("safe", mapBands.safe.length)}
+                {collapseSafe ? " · Expand" : " · Collapse"}
+              </button>
+              {mapBands.safe.length > 0 && (
+                <button
+                  type="button"
+                  className="df2-btn df2-btn-sm df2-btn-primary"
+                  onClick={approveAllSafe}
+                  title="Approve only preserve / safe-normalize rows — never risk or specialty"
+                >
+                  Approve safe ({mapBands.safe.length})
+                </button>
+              )}
+            </div>
+          )}
+          {mapBands.ready.length >= 2 && (
+            <button
+              type="button"
+              className={`df2-map-band-chip is-ready${collapseReady ? " is-collapsed" : ""}`}
+              onClick={() => setReadyBandExpanded((v) => !v)}
+              aria-expanded={!collapseReady}
+            >
+              <DtIcon name={collapseReady ? "chevron-right" : "chevron-down"} size={14} />
+              {mapBandLabel("ready", mapBands.ready.length)}
+              {collapseReady ? " · Expand" : " · Collapse"}
+            </button>
+          )}
+        </div>
+      )}
+
       <div className="df2-column-review-table-wrap df2-column-review-scroll">
         <table className="df2-column-review-table df2-column-review-table-sticky">
           <thead>
@@ -665,13 +812,25 @@ export function ColumnReviewPanel({
                       {(() => {
                         const engineRisk = engineStampedRiskChip(m);
                         if (!engineRisk || omitted) return null;
-                        if (!m.riskAcknowledged) {
+                        const riskState = mappingRiskChipState(m);
+                        if (riskState === "open") {
                           return (
                             <span
                               className="df2-badge df2-badge-run df2-badge-xs"
                               title={engineRisk.detail}
                             >
                               {engineRisk.label}
+                            </span>
+                          );
+                        }
+                        if (riskState === "fail_closed") {
+                          const policy = m.riskContract?.execution_policy || "fail-closed";
+                          return (
+                            <span
+                              className="df2-badge df2-badge-run df2-badge-xs"
+                              title={`Contract signed with ${policy} — that policy stops the write, so Validate stays blocked. Re-sign with a continue policy to proceed. ${engineRisk.detail}`}
+                            >
+                              contract · {policy} · blocked
                             </span>
                           );
                         }
@@ -684,9 +843,20 @@ export function ColumnReviewPanel({
                           </span>
                         );
                       })()}
-                      {m.requiresReview && !m.approved && !omitted && !mappingRequiresRiskAck(m) && (
-                        <span className="df2-badge df2-badge-run df2-badge-xs">ambiguous</span>
-                      )}
+                      {(() => {
+                        if (omitted || m.approved || mappingRequiresRiskAck(m)) return null;
+                        const kind = classifyMappingReview(m);
+                        if (!kind) return null;
+                        const meta = mappingReviewKindMeta(kind);
+                        return (
+                          <span
+                            className="df2-badge df2-badge-run df2-badge-xs"
+                            title={meta.detail}
+                          >
+                            {meta.chip}
+                          </span>
+                        );
+                      })()}
                       {(m.semanticRole === "string_enum" || isEnumToBooleanConflict(m)) && !omitted && (
                         <span className="df2-badge df2-badge-warn df2-badge-xs" title="Status/lifecycle labels — not true/false">
                           string enum
@@ -694,8 +864,24 @@ export function ColumnReviewPanel({
                       )}
                     </div>
                   </td>
-                  <td className="df2-column-sample" title={m.sample}>
-                    {m.sample ? (m.sample.length > 40 ? `${m.sample.slice(0, 40)}…` : m.sample) : "—"}
+                  <td className="df2-column-sample">
+                    <div className="df2-column-sample-stack">
+                      <span title={m.sample}>
+                        {m.sample ? (m.sample.length > 40 ? `${m.sample.slice(0, 40)}…` : m.sample) : "—"}
+                      </span>
+                      {(() => {
+                        const strip = formatColumnProfileStrip(m.columnProfile);
+                        if (!strip) return null;
+                        return (
+                          <span
+                            className="df2-column-profile-strip"
+                            title="Sample profile from Map engine (null rate · range · observed precision/scale)"
+                          >
+                            {strip}
+                          </span>
+                        );
+                      })()}
+                    </div>
                   </td>
                   <td className={`df2-column-type ${typeBadgeClass(m.inferredType)}`}>
                     <span className="df2-type-badge">{m.inferredType ?? "string"}</span>
@@ -712,7 +898,11 @@ export function ColumnReviewPanel({
                       <input
                         className="df2-input df2-column-target-input"
                         value={m.target}
-                        onChange={(e) => updateMapping(index, { target: e.target.value, approved: false })}
+                        ref={(el) => {
+                          if (el) destInputRefs.current.set(m.source, el);
+                          else destInputRefs.current.delete(m.source);
+                        }}
+                        onChange={(e) => updateMapping(index, applyOperatorRemapDest(m, e.target.value))}
                         aria-label={`Destination name for ${m.source}`}
                       />
                       <select
@@ -751,20 +941,44 @@ export function ColumnReviewPanel({
                           ))}
                         </select>
                       )}
-                      {!omitted && (isArrayLogicalType(m.inferredType) || isArrayLogicalType(m.destType) || m.structPolicy === "explode_rows") && !m.structDerived && (
+                      {!omitted && (isArrayLogicalType(m.inferredType) || isArrayLogicalType(m.destType) || m.structPolicy === "explode_rows" || m.structPolicy === "normalize_child_table" || m.structPolicy === "hybrid_json_and_child") && !m.structDerived && (
+                        <>
                         <select
                           className="df2-input df2-select df2-column-struct-policy"
-                          value={m.structPolicy === "explode_rows" ? "explode_rows" : "store_as_json"}
+                          value={
+                            m.structPolicy === "explode_rows"
+                            || m.structPolicy === "normalize_child_table"
+                            || m.structPolicy === "hybrid_json_and_child"
+                              ? m.structPolicy
+                              : "store_as_json"
+                          }
                           onChange={(e) =>
                             onChange(applyStructPolicyChange(mappings, index, e.target.value as StructPolicy))
                           }
                           aria-label={`ARRAY policy for ${m.source}`}
-                          title={ARRAY_POLICIES.find((p) => p.id === (m.structPolicy === "explode_rows" ? "explode_rows" : "store_as_json"))?.detail}
+                          title={
+                            ARRAY_POLICIES.find((p) => p.id === (m.structPolicy ?? "store_as_json"))?.detail
+                            || (m.structuralClass ? `Detected ${m.structuralClass}` : undefined)
+                          }
                         >
                           {ARRAY_POLICIES.map((p) => (
                             <option key={p.id} value={p.id}>{p.label}</option>
                           ))}
                         </select>
+                        {m.structuralClass && (
+                          <span className="df2-col-badge-struct" title="Sample-aware array shape">
+                            {m.structuralClass.replace(/_/g, " ")}
+                          </span>
+                        )}
+                        {(m.structPolicy === "normalize_child_table" || m.structPolicy === "hybrid_json_and_child") && m.childTableSpec && (
+                          <span
+                            className="df2-col-badge-struct"
+                            title={`Child ${m.childTableSpec.child_table}: ${(m.childTableSpec.columns || []).map((c) => c.name).join(", ")}`}
+                          >
+                            → {m.childTableSpec.child_table}
+                          </span>
+                        )}
+                        </>
                       )}
                       {!omitted && (
                       <div className="df2-column-dest-badges">
@@ -790,6 +1004,16 @@ export function ColumnReviewPanel({
                         {m.structPolicy === "explode_rows" && !m.structDerived && (
                           <span className="df2-col-badge-struct" title="Array row explode (capped)">
                             explode
+                          </span>
+                        )}
+                        {m.structPolicy === "hybrid_json_and_child" && !m.structDerived && (
+                          <span className="df2-col-badge-struct" title="Parent JSON + child table">
+                            hybrid
+                          </span>
+                        )}
+                        {m.structPolicy === "normalize_child_table" && !m.structDerived && (
+                          <span className="df2-col-badge-struct" title="Normalized child table">
+                            normalize
                           </span>
                         )}
                         {m.structDerived && m.structParent && (
@@ -826,6 +1050,20 @@ export function ColumnReviewPanel({
                           </button>
                         </div>
                       )}
+                      {!omitted && isFalseFriendReview(m) && !m.approved && (
+                        <div className="df2-column-false-friend" role="note">
+                          <p className="df2-label-hint">
+                            {mappingReviewKindMeta(classifyMappingReview(m) || "generic").detail}
+                          </p>
+                          <button
+                            type="button"
+                            className="df2-btn df2-btn-primary df2-btn-sm"
+                            onClick={() => focusDestInput(m.source)}
+                          >
+                            {mappingReviewKindMeta(classifyMappingReview(m) || "generic").primaryLabel}
+                          </button>
+                        </div>
+                      )}
                       {!omitted && isExistingEnumBooleanConflict(m) && (
                         <button
                           type="button"
@@ -834,6 +1072,16 @@ export function ColumnReviewPanel({
                           onClick={() => updateMapping(index, flagExistingEnumBooleanConflict(m))}
                         >
                           Remap / ALTER required
+                        </button>
+                      )}
+                      {!omitted && !isExistingEnumBooleanConflict(m) && isExistingDestTypeOverride(m) && (
+                        <button
+                          type="button"
+                          className="df2-btn df2-btn-sm df2-btn-ghost"
+                          title={`Withdraw the ALTER request and keep the physical type ${m.destType || "as-is"} — remaining fidelity loss still needs a Risk Contract`}
+                          onClick={() => updateMapping(index, clearExistingDestTypeOverride(m))}
+                        >
+                          Keep {m.destType || "physical type"}
                         </button>
                       )}
                       {!omitted && isEnumToBooleanConflict(m) && canWidenMapping(m) && (
@@ -929,7 +1177,7 @@ export function ColumnReviewPanel({
                             <option value="">Policy…</option>
                             {EXECUTION_POLICY_OPTIONS.map((p) => (
                               <option key={p.id} value={p.id}>
-                                {p.label}
+                                {p.continueUnlock ? p.label : `${p.label} — keeps Validate blocked`}
                               </option>
                             ))}
                           </select>
@@ -942,7 +1190,9 @@ export function ColumnReviewPanel({
                             mappingRequiresRiskAck(m) && !policyBySource[m.source]
                           }
                           title={
-                            mappingRequiresRiskAck(m)
+                            isFalseFriendReview(m)
+                              ? mappingReviewKindMeta(classifyMappingReview(m) || "generic").detail
+                              : mappingRequiresRiskAck(m)
                               ? (!policyBySource[m.source]
                                 ? "Choose an execution policy first — no hidden defaults"
                                 : createNewRiskDetail(m)
@@ -953,7 +1203,9 @@ export function ColumnReviewPanel({
                               : undefined
                           }
                         >
-                          {mappingAckLabel(m)}
+                          {isFalseFriendReview(m)
+                            ? mappingReviewKindMeta(classifyMappingReview(m) || "generic").confirmLabel
+                            : mappingAckLabel(m)}
                         </button>
                       </div>
                     )}
@@ -964,7 +1216,9 @@ export function ColumnReviewPanel({
             {pageItems.length === 0 && (
               <tr>
                 <td colSpan={showTransforms ? 9 : 8} className="df2-column-review-empty-row">
-                  No columns match your search or filter. Try clearing filters or broadening your search.
+                  {useSafeBands && collapseSafe && filtered.length > 0
+                    ? "Safe mappings are collapsed — expand the safe band above, or use Issues to focus risk rows."
+                    : "No columns match your search or filter. Try clearing filters or broadening your search."}
                 </td>
               </tr>
             )}
@@ -972,17 +1226,23 @@ export function ColumnReviewPanel({
         </table>
       </div>
 
-      {(compact || filtered.length > pageSize) && (
+      {(compact || pages > 1) && (
         <div className="df2-column-review-footer df2-column-workbench-pagination">
           {compact && (
             <span>
-              {filtered.length === 0
-                ? "No matching columns"
-                : `Rows ${pageStart.toLocaleString()}–${pageEnd.toLocaleString()} of ${filtered.length.toLocaleString()}`}
+              {displayItems.length === 0
+                ? (useSafeBands && collapseSafe && filtered.length > 0
+                  ? "Safe band collapsed"
+                  : "No matching columns")
+                : `Rows ${pageStart.toLocaleString()}–${pageEnd.toLocaleString()} of ${displayItems.length.toLocaleString()}${
+                  useSafeBands && (collapseSafe || collapseReady)
+                    ? ` (${filtered.length.toLocaleString()} total)`
+                    : ""
+                }`}
             </span>
           )}
-          {filtered.length > pageSize && (
-            <div className="df2-column-workbench-pagination">
+          {pages > 1 && (
+            <div className="df2-column-workbench-pagination df2-column-review-pager" role="navigation" aria-label="Mapping column pages">
               <button
                 type="button"
                 className="df2-btn df2-btn-sm"

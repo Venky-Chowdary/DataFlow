@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { DtIcon } from "../components/DtIcon";
+import { Button } from "../components/ui/Button";
 import { EmptyState } from "../components/ui/EmptyState";
 import { SectionLoader } from "../components/LoadingState";
 import { PageFrame } from "../components/ui/PageFrame";
@@ -151,7 +152,7 @@ export function BenchmarksPage() {
 
           {tab === "integrity" && (
             <>
-              <PageSection title="Why Datawrap beats Airbyte on integrity">
+              <PageSection title="Why integrity proofs beat connect() theater">
                 <p className="df2-page-benchmarks-intro">
                   Connection tests prove a socket opened. These proofs prove rows, types, quarantine, and
                   checksums survive the full write path — the bar for “any schema → anywhere.”
@@ -226,23 +227,23 @@ export function BenchmarksPage() {
                     )}
 
                     <div className="df2-page-benchmarks-section">
-                      <h3>Datawrap vs Airbyte — integrity dimensions</h3>
+                      <h3>Integrity dimensions vs industry ELT baselines</h3>
                       <div className="df2-page-benchmarks-table-wrap">
-                        <table className="df2-page-benchmarks-table">
+                        <table className="df2-page-benchmarks-table df2-page-benchmarks-table--prose">
                           <thead>
                             <tr>
                               <th>Dimension</th>
                               <th>Datawrap</th>
-                              <th>Airbyte</th>
+                              <th>Industry ELT</th>
                               <th>Proof surface</th>
                             </tr>
                           </thead>
                           <tbody>
-                            {ledger.vs_airbyte.map((row) => (
+                            {ledger.integrity_comparison.map((row) => (
                               <tr key={row.dimension}>
                                 <td><strong>{row.dimension}</strong></td>
                                 <td>{row.dataflow}</td>
-                                <td>{row.airbyte}</td>
+                                <td>{row.industry_elt}</td>
                                 <td><code>{row.proof}</code></td>
                               </tr>
                             ))}
@@ -308,14 +309,14 @@ export function BenchmarksPage() {
                                 <tr key={p.id}>
                                   <td>{new Date(p.mtime).toLocaleString()}</td>
                                   <td>{p.tier || "—"}</td>
-                                  <td>{p.route || "—"}</td>
+                                  <td className="df2-page-benchmarks-cell-wrap">{p.route || "—"}</td>
                                   <td>{p.rows != null ? formatNumber(p.rows) : "—"}</td>
                                   <td>
                                     <span className={`df2-badge ${p.success ? "df2-badge-success" : "df2-badge-warning"}`}>
                                       {p.success ? "pass" : "fail"}
                                     </span>
                                   </td>
-                                  <td>{(p.checks || []).join(", ") || "—"}</td>
+                                  <td className="df2-page-benchmarks-cell-wrap">{(p.checks || []).join(", ") || "—"}</td>
                                 </tr>
                               ))}
                             </tbody>
@@ -353,7 +354,7 @@ export function BenchmarksPage() {
                 </div>
               </div>
               <p className="df2-page-benchmarks-intro">
-                Secondary to integrity: synthetic CSV → SQLite throughput vs public Fivetran / Airbyte / Stitch
+                Secondary to integrity: synthetic CSV → SQLite throughput vs illustrative mid-market ELT
                 baselines. Speed without quarantine and checksums is not a migration proof.
               </p>
 
@@ -372,13 +373,24 @@ export function BenchmarksPage() {
                   ))}
                 </div>
                 <div className="df2-page-benchmarks-actions">
-                  <button type="button" className="df2-btn df2-btn-secondary" onClick={handleDownload} disabled={!report || running}>
-                    <DtIcon name="download" size={14} /> Report
-                  </button>
-                  <button type="button" className="df2-btn df2-btn-primary" onClick={handleRun} disabled={running}>
-                    {running ? <span className="df2-spin"><DtIcon name="spinner" size={14} /></span> : <DtIcon name="play" size={14} />}
-                    {running ? "Running…" : "Run benchmark"}
-                  </button>
+                  <Button
+                    variant="secondary"
+                    onClick={handleDownload}
+                    disabled={!report || running}
+                    leadingIcon={<DtIcon name="download" size={14} />}
+                  >
+                    Report
+                  </Button>
+                  <Button
+                    variant="primary"
+                    onClick={handleRun}
+                    disabled={running}
+                    loading={running}
+                    loadingLabel="Running…"
+                    leadingIcon={<DtIcon name="play" size={14} />}
+                  >
+                    Run benchmark
+                  </Button>
                 </div>
               </div>
 

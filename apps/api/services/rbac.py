@@ -16,7 +16,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from services.auth_service import auth_required
+from src.services import auth_service as _auth_service
 
 
 class Permission:
@@ -62,6 +62,10 @@ _ROLE_PERMISSIONS: dict[str, set[str]] = {
         Permission.AUDIT_READ,
         Permission.WORKSPACE_READ,
         Permission.QUERY_USE,
+        # Asking the assistant is a read: Pilot gates each tool it reaches by the
+        # same permission as the REST route that performs it, so ai.use lets a
+        # viewer ask "why did this job fail" without letting it run anything.
+        Permission.AI_USE,
     },
     "editor": {
         Permission.JOB_READ,
@@ -86,6 +90,7 @@ _ROLE_PERMISSIONS: dict[str, set[str]] = {
         Permission.AUDIT_READ,
         Permission.WORKSPACE_READ,
         Permission.QUERY_USE,
+        Permission.AI_USE,
     },
     "admin": _ALL_PERMISSIONS,
 }
@@ -98,11 +103,13 @@ _PUBLIC_PATHS = {
     "/openapi.json",
     "/redoc",
     "/api/v1/auth/login",
+    "/api/v1/auth/logout",
     "/api/v1/auth/bootstrap",
     "/api/v1/auth/sso/providers",
     "/api/v1/auth/sso/start",
     "/api/v1/auth/sso/callback",
     "/auth/login",
+    "/auth/logout",
     "/auth/bootstrap",
     "/auth/sso/providers",
     "/api/v1/transfer/capabilities",
@@ -131,6 +138,13 @@ _PATH_RULES: list[tuple[str, str, str]] = [
     ("*", "/api/v1/schedules/", Permission.SCHEDULE_MANAGE),
     ("GET", "/api/v1/audit/", Permission.AUDIT_READ),
     ("*", "/api/v1/ai/", Permission.AI_USE),
+    # Pilot. Talking to the assistant is ai.use for every role; what the turn is
+    # allowed to *do* is decided per tool (src/ai/copilot/tool_permissions.py),
+    # so a viewer can ask questions but cannot reach a mutating tool. Confirm
+    # re-checks the permission of the specific staged mutation. Training rewrites
+    # workspace-wide knowledge, so it stays with workspace administration.
+    ("POST", "/api/v1/copilot/train", Permission.WORKSPACE_MANAGE),
+    ("*", "/api/v1/copilot/", Permission.AI_USE),
     # MCP tool execution is an AI surface — same permission as Pilot tools.
     ("POST", "/api/v1/mcp/tools/call", Permission.AI_USE),
     ("GET", "/api/v1/mcp/logs", Permission.AI_USE),
@@ -144,14 +158,16 @@ _PATH_RULES: list[tuple[str, str, str]] = [
 
 
 def normalize_role(role: str | None) -> str:
+    """Map role labels to the closed set {admin, editor, operator, viewer}.
+
+    Phase D5 — unknown / legacy labels (including ``Workspace tester``) fail
+    closed to **viewer**, never escalate to editor.
+    """
     if not role:
         return "viewer"
     role = str(role).strip().lower()
     if role in ("admin", "editor", "operator", "viewer"):
         return role
-    # Map legacy/test roles to editor so the dev user keeps working.
-    if "tester" in role or "test" in role:
-        return "editor"
     return "viewer"
 
 
@@ -208,8 +224,10 @@ class RBACMiddleware(BaseHTTPMiddleware):
     """Enforce role-based permissions for authenticated API requests."""
 
     async def dispatch(self, request: Request, call_next):
-        # RBAC only matters when authentication is enforced.
-        if not auth_required():
+        # RBAC only matters when authentication is enforced. Read it off the
+        # auth module per request rather than copying the symbol at import
+        # time, so RBAC can never enforce against a stale view of the setting.
+        if not _auth_service.auth_required():
             return await call_next(request)
 
         path = request.url.path

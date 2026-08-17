@@ -18,7 +18,7 @@ from fastapi import (
     Request,
     UploadFile,
 )
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, PlainTextResponse, Response
 from pydantic import BaseModel, ConfigDict, Field
 from services.team_store import can_read_workspace, can_write_workspace
 from services.value_serializer import cell_to_string
@@ -150,7 +150,9 @@ def _resolve_write_workspace(request: Request, x_workspace_id: str = Header(defa
         raise HTTPException(status_code=403, detail="Write access to workspace denied")
     return workspace_id
 class EndpointDTO(BaseModel):
-    model_config = ConfigDict(populate_by_name=True)
+    # Allow Studio flat keys (schema_types, table_exists, …) so EndpointConfig.from_dict
+    # can fold them into extra — never silently strip live DDL / existence SSOT.
+    model_config = ConfigDict(populate_by_name=True, extra="allow")
 
     kind: str = Field(..., description="file | database | file_export")
     format: str = Field("", description="csv, json, mongodb, postgresql, snowflake")
@@ -207,8 +209,20 @@ class ExecuteTransferRequest(BaseModel):
     require_signed_contract: bool = False
     # Locale for ambiguous day/month dates: 'DMY' (European/Indian/Australian), 'MDY' (US), or ''.
     date_locale: str = ""
-    # Delivery guarantee selector — only at_least_once is allowed (GA).
+    # Delivery guarantee — default at_least_once; exactly_once is opt-in.
     delivery_guarantee: str = "at_least_once"
+    # Validate→Execute ack trail (must match Studio Validate acknowledgments).
+    compliance_acknowledged: bool = False
+    schema_drift_acknowledged: bool = False
+    fk_risk_acknowledged: bool = False
+    acknowledgment_actor: str = ""
+    acknowledgment_reason: str = ""
+    # Phase C11 — pin Validate Decision Artifact (64-hex content_hash).
+    approved_decision_artifact_hash: str = ""
+    decision_artifact: dict = Field(default_factory=dict)
+    # Map→DDL fingerprint the operator saw pass at Validate. Without it Execute
+    # can only re-check its own derived stamps against themselves.
+    approved_ddl_identity_hash: str = ""
 
 
 class MapColumnsRequest(BaseModel):
@@ -229,6 +243,10 @@ class MapColumnsRequest(BaseModel):
     # "database"/"warehouse" means source_schema came from introspected DDL, so
     # sample inference must not re-guess DECIMAL(12,2) down to a bare DECIMAL.
     source_kind: str = ""
+    # Source engine id ("postgresql", "oracle", "csv"…). Text encoding polarity
+    # is a property of the source engine: a Unicode-only source must not be
+    # stamped onto a code-page destination carrier.
+    source_db_type: str = ""
     # Module 13 — prior operator mappings (user_override / risk contracts) must
     # survive re-map; engine alternatives attach as engine_suggestion only.
     prior_mappings: list[dict] = Field(default_factory=list)
@@ -391,6 +409,7 @@ async def map_columns_route(body: MapColumnsRequest):
             source_samples=body.source_samples or None,
             validation_mode=body.validation_mode,
             destination_db_type=body.destination_db_type or "",
+            source_db_type=(body.source_db_type or body.file_format or "").lower(),
             schema_policy=body.schema_policy or "manual_review",
             sync_mode=body.sync_mode or "",
             destination_table_exists=body.destination_table_exists,
@@ -420,6 +439,7 @@ async def map_columns_route(body: MapColumnsRequest):
         "destination_table_exists": body.destination_table_exists,
         "plan_summary": result.get("plan_summary", {}),
         "mapping_proof": result.get("mapping_proof", {}),
+        "shape_contract": result.get("shape_contract", {}),
         "quality_issues": result.get("quality_issues", []),
         # The engine computes these; dropping them here left the Map step
         # showing client-side guesses while the real verdict stayed server-side.
@@ -548,12 +568,45 @@ async def map_transfer_plan(plan_id: str, body: PlanMapRequest):
         raise HTTPException(status_code=404, detail=str(e)) from e
 
 
+class PlanPreflightRequest(BaseModel):
+    """Operator attestations posted with a persisted-plan preflight run.
+
+    Validate is where a PII/drift/FK risk is accepted, so this transport must
+    carry the attestation — a body-less call cannot clear a compliance gate.
+    """
+
+    compliance_acknowledged: bool = False
+    schema_drift_acknowledged: bool = False
+    fk_risk_acknowledged: bool = False
+    acknowledgment_actor: str = ""
+    acknowledgment_reason: str = ""
+
+
 @router.post("/plans/{plan_id}/preflight")
-async def preflight_transfer_plan(plan_id: str):
+async def preflight_transfer_plan(
+    plan_id: str,
+    body: PlanPreflightRequest | None = None,
+):
+    from services.acknowledgment_contract import (
+        AcknowledgmentRefused,
+        resolve_acknowledgments,
+    )
     from services.transfer_plan_service import run_plan_preflight
 
+    payload = body or PlanPreflightRequest()
     try:
-        return run_plan_preflight(plan_id)
+        ack = resolve_acknowledgments(
+            compliance=payload.compliance_acknowledged,
+            schema_drift=payload.schema_drift_acknowledged,
+            fk_risk=payload.fk_risk_acknowledged,
+            actor=payload.acknowledgment_actor,
+            reason=payload.acknowledgment_reason,
+        )
+    except AcknowledgmentRefused as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+    try:
+        return run_plan_preflight(plan_id, acknowledgments=ack)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
@@ -630,22 +683,40 @@ async def execute_transfer_json(
     idempotency_key: str = Header(default="", alias="Idempotency-Key"),
 ):
     """JSON transfer execute for SDK/GitOps — Form upload remains on POST /transfer/run."""
-    from services.execution_engine_contract import (
-        DeliveryGuaranteeError,
-        assert_delivery_guarantee_allowed,
+    from services.cdc_exactly_once import (
+        ExactlyOnceRouteError,
+        assert_requested_cdc_delivery,
+        dest_allow_append_only,
+        route_has_cdc_pk,
     )
+    from services.execution_engine_contract import DeliveryGuaranteeError
+    from services.procedure_source import is_callable_source
     from ..transfer.background import run_transfer_async
     from ..transfer.engine import DuplicateTransferSubmission, get_transfer_engine
     from ..transfer.models import EndpointConfig, TransferRequest
 
+    src_preview = EndpointConfig.from_dict(
+        body.source.kind, body.source.model_dump(by_alias=True)
+    )
+    dst_preview = EndpointConfig.from_dict(
+        body.destination.kind, body.destination.model_dump(by_alias=True)
+    )
     try:
-        assert_delivery_guarantee_allowed(body.delivery_guarantee)
-    except DeliveryGuaranteeError as exc:
+        assert_requested_cdc_delivery(
+            body.delivery_guarantee,
+            sync_mode=body.sync_mode or "",
+            dest_type=str(getattr(dst_preview, "format", "") or ""),
+            source_type=str(getattr(src_preview, "format", "") or ""),
+            has_primary_key=route_has_cdc_pk(body.stream_contracts),
+            allow_append_only=dest_allow_append_only(dst_preview),
+            callable_source=is_callable_source(src_preview),
+        )
+    except (DeliveryGuaranteeError, ExactlyOnceRouteError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     workspace_id = _resolve_write_workspace(request, workspace_id)
-    src = EndpointConfig.from_dict(body.source.kind, body.source.model_dump(by_alias=True))
-    dst = EndpointConfig.from_dict(body.destination.kind, body.destination.model_dump(by_alias=True))
+    src = src_preview
+    dst = dst_preview
     region = (
         (body.data_region or "").strip()
         or getattr(request.state, "data_region", "")
@@ -677,6 +748,16 @@ async def execute_transfer_json(
         triggered_by=_actor_email(request),
         idempotency_key=idempotency_key,
         delivery_guarantee=body.delivery_guarantee or "at_least_once",
+        compliance_acknowledged=bool(body.compliance_acknowledged),
+        schema_drift_acknowledged=bool(body.schema_drift_acknowledged),
+        fk_risk_acknowledged=bool(body.fk_risk_acknowledged),
+        acknowledgment_actor=str(body.acknowledgment_actor or "").strip(),
+        acknowledgment_reason=str(body.acknowledgment_reason or "").strip(),
+        approved_decision_artifact_hash=str(
+            body.approved_decision_artifact_hash or ""
+        ).strip(),
+        approved_ddl_identity_hash=str(body.approved_ddl_identity_hash or "").strip(),
+        decision_artifact=dict(body.decision_artifact or {}),
     )
     from services.batch_progress import effective_backfill_new_fields
 
@@ -710,6 +791,18 @@ async def execute_transfer_json(
     )
 
     _residency_check(request, dst, region)
+    from src.transfer.contract_engine import stamp_request_contract
+
+    plan_policies = (plan_payload or {}).get("policies") if plan_payload else {}
+    try:
+        stamp_request_contract(
+            request_obj,
+            explicit_id=body.contract_id or "",
+            explicit_require=bool(body.require_signed_contract),
+            policies=plan_policies if isinstance(plan_policies, dict) else {},
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     engine = get_transfer_engine()
     try:
         job_id = engine._create_pending_job(request_obj)
@@ -802,6 +895,7 @@ async def execute_transfer_json(
         "reconciliation": result.reconciliation,
         "explanation": getattr(result, "explanation", "") or "",
         "mapping_proof": getattr(result, "mapping_proof", None) or {},
+        "row_accounting": getattr(result, "row_accounting", None) or {},
     }
 
 
@@ -857,6 +951,16 @@ async def run_universal_transfer(
     data_region: str = Form(""),
     date_locale: str = Form(""),
     delivery_guarantee: str = Form("at_least_once"),
+    compliance_acknowledged: str = Form("false"),
+    schema_drift_acknowledged: str = Form("false"),
+    fk_risk_acknowledged: str = Form("false"),
+    acknowledgment_actor: str = Form(""),
+    acknowledgment_reason: str = Form(""),
+    approved_decision_artifact_hash: str = Form(""),
+    approved_ddl_identity_hash: str = Form(""),
+    decision_artifact_json: str = Form(""),
+    contract_id: str = Form(""),
+    require_signed_contract: str = Form("false"),
     request: Request = None,
     workspace_id: str = Header(default="", alias="X-Workspace-Id"),
     idempotency_key: str = Header(default="", alias="Idempotency-Key"),
@@ -986,7 +1090,25 @@ async def run_universal_transfer(
         triggered_by=_actor_email(request),
         idempotency_key=idempotency_key,
         delivery_guarantee=delivery_guarantee or "at_least_once",
+        compliance_acknowledged=compliance_acknowledged.lower() in ("true", "1", "yes"),
+        schema_drift_acknowledged=schema_drift_acknowledged.lower() in ("true", "1", "yes"),
+        fk_risk_acknowledged=fk_risk_acknowledged.lower() in ("true", "1", "yes"),
+        acknowledgment_actor=(acknowledgment_actor or "").strip() or _actor_email(request),
+        acknowledgment_reason=(acknowledgment_reason or "").strip(),
+        approved_decision_artifact_hash=(approved_decision_artifact_hash or "").strip(),
+        approved_ddl_identity_hash=(approved_ddl_identity_hash or "").strip(),
     )
+    if decision_artifact_json.strip():
+        try:
+            import json as _json
+
+            parsed_art = _json.loads(decision_artifact_json)
+            if isinstance(parsed_art, dict):
+                request_obj.decision_artifact = parsed_art
+        except Exception as exc:
+            logging.getLogger(__name__).warning(
+                "decision_artifact_json parse failed: %s", exc, exc_info=exc
+            )
     # Explicit form fields win over stored plan policies (plan used to force
     # validation_mode=strict and re-block encoding after Studio quarantine).
     form_validation_mode = (validation_mode or "").strip()
@@ -994,6 +1116,7 @@ async def run_universal_transfer(
     form_schema_policy = (schema_policy or "").strip()
     form_write_via_staging = write_via_staging.lower() in ("true", "1", "yes")
     plan_payload = None
+    plan_policies: dict = {}
 
     if plan_id and plan_id.strip():
         from services.transfer_plan_service import merge_plan_into_run
@@ -1020,6 +1143,8 @@ async def run_universal_transfer(
                 request_obj.mappings = payload["mappings"]
                 request_obj.column_types = payload.get("column_types") or {}
             policies = payload.get("policies") or {}
+            if isinstance(policies, dict):
+                plan_policies = policies
             if not form_sync_mode:
                 request_obj.sync_mode = policies.get("sync_mode", request_obj.sync_mode)
             if not form_schema_policy:
@@ -1036,6 +1161,12 @@ async def run_universal_transfer(
                 plan_contracts = payload.get("stream_contracts") or policies.get("stream_contracts")
                 if isinstance(plan_contracts, list) and plan_contracts:
                     request_obj.stream_contracts = plan_contracts
+            from services.procedure_source import merge_callable_source_extra
+
+            request_obj.source.extra = merge_callable_source_extra(
+                request_obj.source.extra,
+                payload.get("source") or {},
+            )
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
     if mappings_json.strip() and not (plan_id and plan_id.strip()):
@@ -1075,6 +1206,18 @@ async def run_universal_transfer(
             logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
     _residency_check(request, destination, region)
+
+    from src.transfer.contract_engine import stamp_request_contract
+
+    try:
+        stamp_request_contract(
+            request_obj,
+            explicit_id=contract_id,
+            explicit_require=require_signed_contract.lower() in ("true", "1", "yes"),
+            policies=plan_policies,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     engine = get_transfer_engine()
     try:
@@ -1173,6 +1316,7 @@ async def run_universal_transfer(
         "reconciliation": result.reconciliation,
         "explanation": result.explanation,
         "mapping_proof": result.mapping_proof or {},
+        "row_accounting": getattr(result, "row_accounting", None) or {},
     }
 
 
@@ -1291,6 +1435,80 @@ async def verify_transfer_proof_pack(body: ProofPackVerifyBody):
 
     result = verify_signed_proof_pack(body.pack if isinstance(body.pack, dict) else {})
     return result
+
+
+@router.get("/{job_id}/certificate")
+async def get_migration_certificate(job_id: str, request: Request, format: str = "json"):
+    """Per-run Migration Certificate: row accounting, quarantine, verdict, signature.
+
+    ``format=markdown`` returns the operator-facing page, ``format=pdf`` the
+    audit deliverable; the JSON form is the signed artifact that
+    ``/certificate/verify`` checks.
+    """
+    from services.audit_log import actor_from_request, append_audit_event
+    from services.migration_certificate import (
+        build_migration_certificate,
+        render_certificate_markdown,
+    )
+
+    from ..services.mongodb_service import get_mongodb_service
+
+    try:
+        mongo = get_mongodb_service()
+        job = mongo.get_job(job_id)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e)) from e
+    if not job or not _can_access_job(request, job):
+        raise HTTPException(status_code=404, detail="Job not found")
+
+    actor = actor_from_request(request)
+    cert = build_migration_certificate({**job, "id": job_id}, actor=actor)
+    try:
+        append_audit_event(
+            action="migration_certificate.export",
+            resource=f"job:{job_id}",
+            actor=actor,
+            level="info",
+            details={
+                "content_sha256": cert.get("content_sha256"),
+                "verdict": (cert.get("verdict") or {}).get("headline"),
+            },
+        )
+    except Exception as exc:
+        logging.getLogger(__name__).warning(
+            "certificate audit failed: %s", exc, exc_info=exc
+        )
+    if format == "markdown":
+        return PlainTextResponse(
+            render_certificate_markdown(cert), media_type="text/markdown"
+        )
+    if format == "pdf":
+        from services.certificate_pdf import render_certificate_pdf
+
+        return Response(
+            content=render_certificate_pdf(cert),
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": (
+                    f'attachment; filename="migration-certificate-{job_id}.pdf"'
+                )
+            },
+        )
+    return cert
+
+
+class CertificateVerifyBody(BaseModel):
+    certificate: dict = Field(default_factory=dict)
+
+
+@router.post("/certificate/verify")
+async def verify_migration_certificate_endpoint(body: CertificateVerifyBody):
+    """Verify a Migration Certificate's hash, signature, and claim legitimacy."""
+    from services.migration_certificate import verify_migration_certificate
+
+    return verify_migration_certificate(
+        body.certificate if isinstance(body.certificate, dict) else {}
+    )
 
 
 class RollbackExecuteBody(BaseModel):

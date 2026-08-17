@@ -25,6 +25,11 @@ CDC_TARGETS = [
     "tests/test_cdc_snapshot_lsn_handoff.py",
     "tests/test_cdc_snapshot_window.py",
     "tests/test_cdc_incremental_snapshot.py",
+    "tests/test_postgresql_cdc_transport_f4.py",
+    "tests/test_iceberg_cdc_delete.py",
+    "tests/test_iceberg_deletion_vector.py",
+    "tests/test_iceberg_upsert.py",
+    "tests/test_scn_mongo_iceberg_cow_wave81.py",
     "tests/test_cdc_lsn_stamp.py",
     "tests/test_cdc_schema_history.py",
     "tests/test_cdc_multistream_mappings.py",
@@ -108,6 +113,16 @@ def main() -> int:
     out = (proc.stdout or "") + (proc.stderr or "")
     passed, failed, skipped, summary_line = parse_pytest_summary(out)
 
+    skip_reasons: list[str] = []
+    if missing:
+        skip_reasons.append(f"missing test modules: {', '.join(missing)}")
+    if not (os.environ.get("PGHOST") or os.environ.get("DATABASE_URL") or "").strip():
+        skip_reasons.append("PGHOST/DATABASE_URL unset — PG logical CDC ITs may skip")
+    if not (os.environ.get("MYSQL_HOST") or "").strip():
+        skip_reasons.append("MYSQL_HOST unset — MySQL binlog ITs may skip")
+    if (os.environ.get("DATAFLOW_ORACLE_ENABLE") or "").strip() not in {"1", "true", "yes"}:
+        skip_reasons.append("Oracle CDC live IT env-gated (DATAFLOW_ORACLE_ENABLE≠1)")
+
     proof = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "suite": "cdc_matrix",
@@ -118,9 +133,11 @@ def main() -> int:
         "failed": failed,
         "skipped": skipped,
         "summary_line": summary_line,
+        "skip_reasons": skip_reasons,
         "honesty": {
             "delivery_default": "at-least-once upsert",
             "exactly_once_claimed": False,
+            "exactly_once_route_opt_in": True,
             "effectively_once_pk_sinks": True,
             "append_only_sinks_gated": True,
             "sqlserver_lsn_gap_fail_closed": True,

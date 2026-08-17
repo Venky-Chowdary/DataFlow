@@ -10,7 +10,9 @@ from connectors.writer_common import (
 def test_sanitize_identifier_preserves_mongodb_id():
     # MongoDB's primary key must survive normalization.
     assert sanitize_identifier("_id") == "_id"
-    assert sanitize_identifier("_id_") == "_id"
+    # Trailing underscores are kept: stripping them made "_id_" and "_id"
+    # the same destination column.
+    assert sanitize_identifier("_id_") == "_id_"
     assert sanitize_identifier("customer_id") == "customer_id"
     assert sanitize_identifier("NAME") == "name"
 
@@ -39,13 +41,17 @@ def test_quarantine_policy_holds_out_bad_rows():
 
 
 def test_coerce_null_policy_preserves_row_count():
-    mapped, errors = build_mapped_rows(
+    from connectors.writer_common import build_mapped_rows_with_details
+
+    mapped, errors, details = build_mapped_rows_with_details(
         headers=["is_active"],
         data_rows=[["true"], ["maybe"]],
         mappings=[{"source": "is_active", "target": "is_active", "transform": "boolean"}],
         target_cols=["is_active"],
         column_types={"is_active": "BOOLEAN"},
         error_policy="coerce_null",
+        allow_job_coerce_null=True,
     )
     assert mapped == [(True,), (None,)]
     assert errors
+    assert details and details[0]["policy"] == "coerce_null"

@@ -13,6 +13,7 @@ import json
 import math
 import re
 import uuid
+from collections.abc import Mapping
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal, InvalidOperation, Overflow
 from enum import Enum
@@ -29,12 +30,73 @@ SQL_NULL_SENTINEL = "__DF_SQL_NULL__"
 
 # Document field absent (Mongo/Dynamo schemaless) — distinct from explicit null.
 # Sparse CDC upsert: omit the key from SET (never wipe destination with NULL).
-# Dense INSERT/COPY/full-refresh: materialize as SQL NULL (union schema).
+# Dense INSERT/COPY/full-refresh / coerce_null: materialize as SQL NULL.
+#
+# In-memory cells use the ``Missing`` singleton (never a customer-visible string).
+# ``DF_MISSING_SENTINEL`` remains the quarantine/wire spelling for durable JSON;
+# ``is_missing_sentinel`` accepts both. Mapped-row public APIs must never return
+# the bare string (audit §2.4).
+class _MissingType:
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "Missing"
+
+    def __bool__(self) -> bool:
+        return False
+
+    def __eq__(self, other: object) -> bool:
+        return other is self or other == "__DF_MISSING__"
+
+    def __hash__(self) -> int:
+        return hash("__DF_MISSING__")
+
+
+Missing = _MissingType()
 DF_MISSING_SENTINEL = "__DF_MISSING__"
 
 
 def is_missing_sentinel(value: Any) -> bool:
-    return value == DF_MISSING_SENTINEL
+    return value is Missing or value == DF_MISSING_SENTINEL
+
+
+# Wire spellings that mean "no value here" — a DuckDB reader adds its own.
+NULL_WIRE_SENTINELS: frozenset[str] = frozenset(
+    {SQL_NULL_SENTINEL, DF_MISSING_SENTINEL, "__df_ddb_null__"}
+)
+
+
+def is_null_evidence(value: Any) -> bool:
+    """True when a cell carries no type evidence (NULL / absent / blank)."""
+    if value is None or value is Missing:
+        return True
+    text = str(value).strip()
+    return not text or text in NULL_WIRE_SENTINELS
+
+
+def evidence_samples(values: Any, *, limit: int | None = None) -> list[str]:
+    """Sample values usable as type evidence.
+
+    A NULL is the *absence* of evidence, never evidence of text. Feeding the
+    wire sentinel to inference made an all-NULL ``DECIMAL(7,3)`` column look
+    like non-numeric strings, so Map invented a lossy ``<col>_text`` LONGTEXT
+    destination for a column whose declared type was perfectly representable.
+    """
+    out = [str(v).strip() for v in (values or []) if not is_null_evidence(v)]
+    return out[:limit] if limit else out
+
+
+def public_mapped_cell(value: Any, *, dense_null: bool = False) -> Any:
+    """Normalize a mapped cell for public / writer consumption.
+
+    ``dense_null=True`` (INSERT / coerce_null): Missing → None.
+    Otherwise keep ``Missing`` singleton (omit-from-SET); never the wire string.
+    """
+    if value is Missing:
+        return None if dense_null else Missing
+    if value == DF_MISSING_SENTINEL:
+        return None if dense_null else Missing
+    return value
 
 
 def safe_decimal_text(value: Decimal) -> str | None:
@@ -172,6 +234,38 @@ def _decimal_to_json(value: Decimal) -> Any:
     return safe_decimal_text(value)
 
 
+def _demote_exactly_representable(value: Any) -> Any:
+    """Return floats where binary64 is exact, Decimals where it is not."""
+    if isinstance(value, Decimal):
+        try:
+            as_float = float(value)
+        except (OverflowError, ValueError, InvalidOperation):
+            return value
+        if math.isfinite(as_float) and Decimal(repr(as_float)) == value:
+            return as_float
+        return value
+    if isinstance(value, list):
+        return [_demote_exactly_representable(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _demote_exactly_representable(v) for k, v in value.items()}
+    return value
+
+
+def json_loads_exact(text: str, *, parse_constant: Any = None) -> Any:
+    """``json.loads`` that does not round numbers off through binary64.
+
+    The stdlib parses every non-integer JSON number into a float, so
+    ``12345678901234567890.123456789`` comes back as ``1.2345678901234567e+19``
+    — digits gone, silently, on a value the source stated exactly. Numbers that
+    binary64 *can* hold exactly are still returned as floats so JSON output
+    keeps its usual shape; only the ones that would lose digits stay ``Decimal``,
+    which ``_decimal_to_json`` then writes as exact text per this module's
+    documented policy.
+    """
+    parsed = json.loads(text, parse_float=Decimal, parse_constant=parse_constant)
+    return _demote_exactly_representable(parsed)
+
+
 def _json_default(value: Any) -> Any:
     """Fallback for values that the stdlib json encoder does not understand.
 
@@ -239,6 +333,33 @@ def _json_default(value: Any) -> Any:
     return str(value)
 
 
+def project_row_cells(
+    row: Mapping[str, Any], headers: list[str], *, preserve_sql_null: bool = False
+) -> list[str]:
+    """Project a record onto ``headers`` — absent key ≠ empty string.
+
+    Schemaless and sparse sources (Mongo documents, DynamoDB items, NDJSON,
+    API payloads) omit keys entirely. Defaulting those to ``""`` made Validate
+    report ``Empty value cannot coerce to decimal`` for a field the document
+    simply does not carry, blocking a transfer whose write path would have
+    omitted the key (sparse upsert) or written SQL NULL (dense insert). The
+    missing sentinel keeps that distinction all the way to the writer.
+    """
+    out: list[str] = []
+    for h in headers:
+        if h not in row:
+            out.append(DF_MISSING_SENTINEL)
+            continue
+        cell = row[h]
+        # ``cell_to_string`` flattens the sentinel to "" so exports never leak
+        # it; a reader that already marked the field absent must keep it here.
+        if is_missing_sentinel(cell):
+            out.append(DF_MISSING_SENTINEL)
+            continue
+        out.append(cell_to_string(cell, preserve_sql_null=preserve_sql_null))
+    return out
+
+
 def cell_to_string(value: Any, *, preserve_sql_null: bool = False) -> str:
     """Convert a typed Python value into a canonical intermediate string.
 
@@ -259,9 +380,14 @@ def cell_to_string(value: Any, *, preserve_sql_null: bool = False) -> str:
     if value is None:
         return SQL_NULL_SENTINEL if preserve_sql_null else ""
 
+    # Sparse CDC / STOP_COLUMN / coerce omit — never serialize the sentinel into
+    # CSV/JSON/export wires (would look like a real client value).
+    if is_missing_sentinel(value):
+        return ""
+
     # Missing-like values (pd.NA, np.nan, etc.) where value != value.
     if _is_na(value):
-        return ""
+        return SQL_NULL_SENTINEL if preserve_sql_null else ""
 
     if isinstance(value, bool):
         return "true" if value else "false"
@@ -333,18 +459,31 @@ def cell_to_string(value: Any, *, preserve_sql_null: bool = False) -> str:
     return str(value)
 
 
-def sanitize_json_value(value: Any) -> Any:
+def sanitize_json_value(value: Any, *, refuse_nonfinite: bool = True) -> Any:
     """Recursively convert a value into a JSON-serializable Python object.
 
     Unlike `_json_default`, this is a pre-processor: it returns values that
-    `json.dumps` can serialize without needing a `default` callback. It replaces
-    `NaN` / `Infinity` / missing values with `None`, converts `Decimal` to numbers
-    (or strings when they overflow float), encodes bytes as base64, and normalizes
-    datetime / UUID / ObjectId / Binary / numpy values. Strings are left as-is.
+    `json.dumps` can serialize without needing a `default` callback. It converts
+    ``Decimal`` to exact text (or numbers when safe), encodes bytes as base64, and
+    normalizes datetime / UUID / ObjectId / Binary / numpy values. Strings are
+    left as-is.
+
+    Non-finite floats/Decimals and NA-like values raise by default (write path
+    must quarantine, never invent JSON null). Pass ``refuse_nonfinite=False``
+    for read/display surfaces that need a null placeholder.
     """
     if value is None:
         return None
+    if is_missing_sentinel(value):
+        if refuse_nonfinite:
+            raise ValueError(
+                "DF_MISSING sentinel refused for JSON sanitize — omit the key "
+                "before serialize (STOP_COLUMN / sparse CDC)"
+            )
+        return None
     if _is_na(value):
+        if refuse_nonfinite:
+            raise ValueError("non-finite / NA value refused for JSON write")
         return None
     if isinstance(value, bool):
         return value
@@ -353,10 +492,16 @@ def sanitize_json_value(value: Any) -> Any:
     if isinstance(value, float):
         if math.isfinite(value):
             return value
+        if refuse_nonfinite:
+            raise ValueError(f"non-finite float refused for JSON write: {value!r}")
         return None
     if isinstance(value, str):
         return value
     if isinstance(value, Decimal):
+        if value.is_nan() or value.is_infinite():
+            if refuse_nonfinite:
+                raise ValueError(f"non-finite Decimal refused for JSON write: {value!r}")
+            return None
         return _decimal_to_json(value)
     if isinstance(value, datetime):
         return value.isoformat()
@@ -372,7 +517,9 @@ def sanitize_json_value(value: Any) -> Any:
         return str(value)
     if _is_decimal128(value):
         try:
-            return sanitize_json_value(value.to_decimal())
+            return sanitize_json_value(
+                value.to_decimal(), refuse_nonfinite=refuse_nonfinite
+            )
         except (Overflow, InvalidOperation, ValueError, TypeError):
             try:
                 return str(value)
@@ -381,21 +528,32 @@ def sanitize_json_value(value: Any) -> Any:
     if _is_binary(value):
         return base64.b64encode(value.value).decode("ascii")
     if isinstance(value, Enum):
-        return sanitize_json_value(value.value)
+        return sanitize_json_value(value.value, refuse_nonfinite=refuse_nonfinite)
     if isinstance(value, (bytes, bytearray, memoryview)):
         return base64.b64encode(bytes(value)).decode("ascii")
     if hasattr(value, "ndim") and hasattr(value, "tolist"):
         if value.ndim == 0 and hasattr(value, "item") and callable(value.item):
-            return sanitize_json_value(value.item())
-        return sanitize_json_value(value.tolist())
+            return sanitize_json_value(
+                value.item(), refuse_nonfinite=refuse_nonfinite
+            )
+        return sanitize_json_value(value.tolist(), refuse_nonfinite=refuse_nonfinite)
     if value.__class__.__name__ in {"NAType", "NaTType"}:
+        if refuse_nonfinite:
+            raise ValueError("pandas NA/NaT refused for JSON write")
         return None
     if isinstance(value, (set, tuple, frozenset)):
-        return [sanitize_json_value(v) for v in value]
+        return [
+            sanitize_json_value(v, refuse_nonfinite=refuse_nonfinite) for v in value
+        ]
     if isinstance(value, dict):
-        return {str(k): sanitize_json_value(v) for k, v in value.items()}
+        return {
+            str(k): sanitize_json_value(v, refuse_nonfinite=refuse_nonfinite)
+            for k, v in value.items()
+        }
     if isinstance(value, list):
-        return [sanitize_json_value(v) for v in value]
+        return [
+            sanitize_json_value(v, refuse_nonfinite=refuse_nonfinite) for v in value
+        ]
     # Last resort: never emit repr() artifacts.
     return str(value)
 

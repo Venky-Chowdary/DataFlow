@@ -12,7 +12,7 @@ import logging
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Mapping
 
 from services.cron_schedule import CronError, validate_cron
 from services.cron_schedule import next_run as _cron_next_run
@@ -32,6 +32,8 @@ SYNC_MODES = {
     "full_refresh_overwrite",
     "full_refresh_append",
     "incremental",
+    "incremental_append",
+    "incremental_deduped",
     "cdc",
     "scd2",
     "mirror",
@@ -46,6 +48,12 @@ SCHEMA_POLICIES = {
 }
 # Keep only the most recent N runs per schedule so the history document stays small.
 RUN_HISTORY_LIMIT = 25
+# Window between taking a claim and its job becoming visible; a claim whose job
+# has ended is reclaimable once this has passed.
+CLAIM_GRACE = timedelta(minutes=5)
+# Only used when the job cannot be looked up at all — a claim of unknown state
+# must not wedge a schedule forever.
+CLAIM_MAX_RUNTIME = timedelta(hours=4)
 
 _file_import_attempted = False
 
@@ -115,15 +123,37 @@ class PipelineSchedule:
     validation_mode: str = "strict"
     schema_policy: str = "manual_review"
     backfill_new_fields: bool = False
+    # CDC dest-owned watermark EOS is opt-in; default stays at_least_once.
+    delivery_guarantee: str = "at_least_once"
     mappings: list[dict] = field(default_factory=list)
     stream_contracts: list[dict] = field(default_factory=list)
     cursor_column: str = ""  # watermark column for incremental syncs
     primary_key: str = ""  # key for idempotent incremental/cdc upserts
+    #: Callable extract — persist the CALL/SELECT, not just the stream label.
+    source_read_mode: str = ""
+    procedure_call: str = ""
+    source_query: str = ""
+    procedure_params: dict[str, Any] = field(default_factory=dict)
     cursor_value: str = ""  # last observed watermark (advances each run)
     workspace_id: str = ""
     # Data contract — when set, scheduled runs enforce the signed contract.
     contract_id: str = ""
     require_signed_contract: bool = False
+    #: The source shape observed on the last successful run, so a later run can
+    #: tell a renamed or retyped column from one that was always that way. A
+    #: schedule that remembers only its cursor cannot notice that the column it
+    #: reads changed meaning, which is the largest single cause of pipeline
+    #: incidents and the one that keeps succeeding while writing wrong values.
+    source_schema: dict[str, str] = field(default_factory=dict)
+    source_schema_fingerprint: str = ""
+    source_schema_observed_at: str = ""
+    #: Live source primary-key columns observed with the type map. PK-only
+    #: identity changes keep the same col→type map, so a type-only baseline
+    #: cannot see them — Confluent NONE / Airbyte hard-break.
+    source_primary_key: list[str] = field(default_factory=list)
+    #: Dual Run campaign: consecutive parallel-run cycles on this route.
+    #: ``evaluate_campaign`` is the kernel; this is durable memory for it.
+    fidelity_campaign: dict[str, Any] = field(default_factory=dict)
     # Retry policy applied on run failure.
     max_retries: int = 0
     retry_backoff_seconds: int = 60
@@ -136,9 +166,20 @@ class PipelineSchedule:
     last_job_id: str | None = None
     last_status: str | None = None
     run_count: int = 0
+    #: Due instants that elapsed without a run (outage, overrun, paused deploy).
+    #: Counted rather than dropped so a cadence gap is visible after the fact.
+    missed_window_count: int = 0
+    last_missed_windows: int = 0
+    #: A pending retry is durable state, not an in-process timer: a redeploy
+    #: between attempt 1 and attempt 2 must not drop the retry on the floor.
+    retry_at: str | None = None
+    retry_attempt: int = 0
     running: bool = False
     running_instance: str = ""
     running_started_at: str | None = None
+    #: The job the claim was taken for. Liveness of that job — not a clock —
+    #: decides whether the claim may be reclaimed.
+    running_job_id: str = ""
     run_history: list[dict] = field(default_factory=list)
     created_at: str = field(default_factory=lambda: _now())
 
@@ -162,10 +203,23 @@ class PipelineSchedule:
             validation_mode=data.get("validation_mode") or "strict",
             schema_policy=data.get("schema_policy") or "manual_review",
             backfill_new_fields=bool(data.get("backfill_new_fields", False)),
+            delivery_guarantee=(
+                str(data.get("delivery_guarantee") or "at_least_once")
+                .strip()
+                .lower()
+                .replace("-", "_")
+                or "at_least_once"
+            ),
             mappings=list(data.get("mappings") or []),
             stream_contracts=list(data.get("stream_contracts") or []),
             cursor_column=(data.get("cursor_column") or "").strip(),
             primary_key=(data.get("primary_key") or "").strip(),
+            source_read_mode=str(data.get("source_read_mode") or "").strip().lower(),
+            procedure_call=str(data.get("procedure_call") or "").strip(),
+            source_query=str(data.get("source_query") or "").strip(),
+            procedure_params=dict(data.get("procedure_params") or {})
+            if isinstance(data.get("procedure_params"), dict)
+            else {},
             cursor_value=str(data.get("cursor_value") or ""),
             workspace_id=(data.get("workspace_id") or "").strip(),
             contract_id=(data.get("contract_id") or "").strip(),
@@ -175,6 +229,21 @@ class PipelineSchedule:
                     bool((data.get("contract_id") or "").strip()),
                 )
             ),
+            source_schema={
+                str(k): str(v)
+                for k, v in (data.get("source_schema") or {}).items()
+                if not isinstance(v, (dict, list))
+            },
+            source_schema_fingerprint=str(data.get("source_schema_fingerprint") or ""),
+            source_schema_observed_at=str(data.get("source_schema_observed_at") or ""),
+            source_primary_key=[
+                str(p).strip()
+                for p in (data.get("source_primary_key") or [])
+                if str(p).strip()
+            ],
+            fidelity_campaign=dict(data.get("fidelity_campaign") or {})
+            if isinstance(data.get("fidelity_campaign"), dict)
+            else {},
             max_retries=max(0, int(data.get("max_retries", 0) or 0)),
             retry_backoff_seconds=max(0, int(data.get("retry_backoff_seconds", 60) or 0)),
             notify_on_failure=bool(data.get("notify_on_failure", True)),
@@ -184,9 +253,14 @@ class PipelineSchedule:
             last_job_id=data.get("last_job_id"),
             last_status=data.get("last_status"),
             run_count=int(data.get("run_count", 0)),
+            missed_window_count=max(0, int(data.get("missed_window_count", 0) or 0)),
+            last_missed_windows=max(0, int(data.get("last_missed_windows", 0) or 0)),
+            retry_at=data.get("retry_at"),
+            retry_attempt=max(0, int(data.get("retry_attempt", 0) or 0)),
             running=bool(data.get("running", False)),
             running_instance=data.get("running_instance", ""),
             running_started_at=data.get("running_started_at"),
+            running_job_id=(data.get("running_job_id") or "").strip(),
             run_history=list(data.get("run_history") or []),
             created_at=data.get("created_at", _now()),
         )
@@ -224,6 +298,52 @@ def compute_next_run(
         return _cron_next_run(cron, base, tz or "UTC").isoformat()
     delta = INTERVALS.get(interval, INTERVALS["daily"])
     return (base.astimezone(timezone.utc) + delta).isoformat()
+
+
+#: Ceiling on how many skipped windows are counted; an outage of months on a
+#: minutely cron must not turn a bookkeeping update into an unbounded loop.
+MISSED_WINDOW_SCAN_LIMIT = 1000
+
+
+def count_missed_windows(
+    *,
+    cron: str,
+    interval: str,
+    tz: str,
+    next_run_at: str | None,
+    now: datetime | None = None,
+) -> int:
+    """How many due instants elapsed before this run, excluding the one running.
+
+    A scheduler outage, a paused deployment or a run that overran its own
+    cadence leaves due times in the past. The next beat runs the schedule once
+    and the next due time is recomputed from the present, so the windows in
+    between disappear with nothing recording that they were skipped — an
+    operator reading `Runs: 7` cannot tell it should have been 10.
+    """
+    due = _parse_ts(next_run_at)
+    if due is None:
+        return 0
+    current = now or datetime.now(timezone.utc)
+    if due.tzinfo is None:
+        due = due.replace(tzinfo=timezone.utc)
+    if due > current:
+        return 0
+    cron = (cron or "").strip()
+    missed = 0
+    cursor = due
+    for _ in range(MISSED_WINDOW_SCAN_LIMIT):
+        if cron:
+            try:
+                cursor = _cron_next_run(cron, cursor, tz or "UTC")
+            except CronError:
+                return missed
+        else:
+            cursor = cursor + INTERVALS.get(interval, INTERVALS["daily"])
+        if cursor > current:
+            return missed
+        missed += 1
+    return missed
 
 
 def next_run_for(sched: PipelineSchedule, from_time: datetime | None = None) -> str:
@@ -351,9 +471,55 @@ def assert_signed_contract(contract_id: str, *, require_signed: bool) -> None:
         raise ValueError(f"Contract {contract_id} not found")
     if require_signed and contract.status != ContractStatus.SIGNED:
         raise ValueError(
-            f"Contract {contract_id} must be SIGNED before scheduling "
+            f"Contract {contract_id} must be SIGNED before this run "
             f"(current status: {contract.status.value})"
         )
+
+
+def schedule_bind_summary(sched: Any) -> dict[str, Any]:
+    """Read-only bind preview for Pilot list/get. Never invents. Never raises.
+
+    OPEN / unsigned binds still appear so the operator can see why Run is
+    refused. Cron and Confirm use ``assert_schedule_run_allowed`` instead.
+    """
+    try:
+        from services.contract_store import bound_contract_preview
+    except ImportError:  # pragma: no cover
+        from src.services.contract_store import bound_contract_preview
+
+    return bound_contract_preview(
+        getattr(sched, "contract_id", None) or "",
+        require_signed=bool(getattr(sched, "require_signed_contract", False)),
+    )
+
+
+def assert_schedule_run_allowed(sched: Any) -> dict[str, Any]:
+    """Fail-closed SIGNED + breaker for a scheduled run. Returns bind preview.
+
+    Cron, Pilot staging, and Pilot Confirm share this check. An unbound
+    schedule returns ``{}`` so enforce stays unset (same as Studio).
+    """
+    cid = (getattr(sched, "contract_id", None) or "").strip()
+    require = bool(getattr(sched, "require_signed_contract", False))
+    if cid or require:
+        assert_signed_contract(cid, require_signed=require)
+    if cid:
+        try:
+            from services.contract_store import assert_contract_breaker_allows
+        except ImportError:  # pragma: no cover
+            from src.services.contract_store import assert_contract_breaker_allows
+
+        assert_contract_breaker_allows(cid)
+    return schedule_bind_summary(sched)
+
+
+def _assert_callable_schedule_sync(data: Mapping[str, Any] | None, sync_mode: str) -> None:
+    """Refuse CDC/SCD2/mirror on a persisted CALL/SELECT extract."""
+    from services.procedure_source import callable_sync_refusal, source_read_mode_of
+
+    reason = callable_sync_refusal(sync_mode, source_read_mode=source_read_mode_of(data or {}))
+    if reason:
+        raise ValueError(reason)
 
 
 def create_schedule(data: dict[str, Any]) -> PipelineSchedule:
@@ -367,6 +533,7 @@ def create_schedule(data: dict[str, Any]) -> PipelineSchedule:
     require_signed = bool(data.get("require_signed_contract", bool(contract_id)))
     if contract_id or require_signed:
         assert_signed_contract(contract_id, require_signed=require_signed)
+    _assert_callable_schedule_sync(data, sync_mode)
     sched = PipelineSchedule.from_dict({
         **data,
         "id": str(uuid.uuid4()),
@@ -406,6 +573,7 @@ def update_schedule(schedule_id: str, data: dict[str, Any]) -> PipelineSchedule 
         )
         if (enabling or contract_changed) and (contract_id or require_signed):
             assert_signed_contract(contract_id, require_signed=require_signed)
+        _assert_callable_schedule_sync(merged, sync_mode)
         merged["contract_id"] = contract_id
         merged["require_signed_contract"] = require_signed
         updated = PipelineSchedule.from_dict(merged)
@@ -427,15 +595,47 @@ def delete_schedule(schedule_id: str) -> bool:
     return True
 
 
+def _job_is_live(job_id: str) -> bool | None:
+    """Whether the claimed job is still in flight. ``None`` when unknowable."""
+    if not job_id:
+        return None
+    try:
+        from services.job_status import is_terminal
+        from services.mongodb_service import get_mongodb_service
+
+        job = get_mongodb_service().get_job(job_id)
+    except Exception:
+        return None
+    if not job:
+        return False
+    return not is_terminal(job.get("status"))
+
+
 def _is_running_stale(sched: PipelineSchedule) -> bool:
-    """Return True if a schedule's running flag is too old to be trustworthy."""
+    """Return True if a schedule's running flag may be reclaimed.
+
+    A clock alone cannot answer this: a 40 GB migration legitimately runs for
+    hours, and reclaiming it mid-flight starts a second writer against the same
+    destination. So the claimed job's own state decides — a job still in flight
+    holds the claim for as long as it runs, and a job that ended or vanished
+    releases it after a short grace period rather than hours later. The elapsed
+    ceiling applies only when the job cannot be looked up at all.
+    """
     if not sched.running:
         return True
     started = _parse_ts(sched.running_started_at)
     if started is None:
         return True
-    # Allow a generous 4-hour runtime before treating a run as stale.
-    return (datetime.now(timezone.utc) - started) > timedelta(hours=4)
+    age = datetime.now(timezone.utc) - started
+    live = _job_is_live(sched.running_job_id)
+    if live is True:
+        return False
+    if live is False:
+        # The run is over (or its job record is gone) but the claim was never
+        # cleared — a crashed or killed worker. Grace covers the window between
+        # job creation and the claim being written.
+        return age > CLAIM_GRACE
+    return age > CLAIM_MAX_RUNTIME
 
 
 def mark_schedule_running(schedule_id: str, instance: str) -> PipelineSchedule | None:
@@ -459,6 +659,7 @@ def mark_schedule_running(schedule_id: str, instance: str) -> PipelineSchedule |
             "running": True,
             "running_instance": instance,
             "running_started_at": now,
+            "running_job_id": "",
         })
         schedules[i] = updated
         _save_all(schedules)
@@ -477,10 +678,24 @@ def clear_schedule_running(schedule_id: str) -> PipelineSchedule | None:
             "running": False,
             "running_instance": "",
             "running_started_at": None,
+            "running_job_id": "",
         })
         schedules[i] = updated
         _save_all(schedules)
         return updated
+
+
+def set_running_job(schedule_id: str, job_id: str) -> PipelineSchedule | None:
+    """Record which job the running claim is held for."""
+    schedules = _load_all()
+    for i, s in enumerate(schedules):
+        if s.id != schedule_id:
+            continue
+        updated = PipelineSchedule.from_dict({**s.to_dict(), "running_job_id": job_id})
+        schedules[i] = updated
+        _save_all(schedules)
+        return updated
+    return None
     return None
 
 
@@ -503,9 +718,16 @@ def mark_schedule_run(
     for i, s in enumerate(schedules):
         if s.id != schedule_id:
             continue
+        missed = count_missed_windows(
+            cron=s.cron, interval=s.interval, tz=s.timezone, next_run_at=s.next_run_at
+        )
         history = list(s.run_history)
         if run_entry:
-            history.append(run_entry)
+            entry = dict(run_entry)
+            if missed:
+                entry["missed_windows"] = missed
+                entry["scheduled_for"] = s.next_run_at
+            history.append(entry)
             history = history[-RUN_HISTORY_LIMIT:]
         payload = {
             **s.to_dict(),
@@ -514,14 +736,57 @@ def mark_schedule_run(
             "last_job_id": job_id,
             "last_status": status or s.last_status,
             "run_count": s.run_count + 1,
+            "missed_window_count": s.missed_window_count + missed,
+            "last_missed_windows": missed,
+            "retry_at": None,
+            "retry_attempt": 0,
             "running": False,
             "running_instance": "",
             "running_started_at": None,
+            "running_job_id": "",
             "run_history": history,
         }
         if cursor_value is not None:
             payload["cursor_value"] = str(cursor_value)
         updated = PipelineSchedule.from_dict(payload)
+        schedules[i] = updated
+        _save_all(schedules)
+        return updated
+    return None
+
+
+def schedule_retry(
+    schedule_id: str,
+    *,
+    retry_at: datetime,
+    attempt: int,
+    run_entry: dict[str, Any] | None = None,
+) -> PipelineSchedule | None:
+    """Park a failed attempt for another try without ending the schedule's run.
+
+    The retry is written to the store and the running claim released, so the
+    next beat picks it up through the same concurrency guard as any other run.
+    Holding the attempt in an in-process timer instead loses it whenever the
+    service restarts — routine on a rolling deploy — and leaves the schedule
+    flagged running until the staleness window expires hours later.
+    """
+    schedules = _load_all()
+    for i, s in enumerate(schedules):
+        if s.id != schedule_id:
+            continue
+        history = list(s.run_history)
+        if run_entry:
+            history = (history + [run_entry])[-RUN_HISTORY_LIMIT:]
+        updated = PipelineSchedule.from_dict({
+            **s.to_dict(),
+            "retry_at": retry_at.astimezone(timezone.utc).isoformat(),
+            "retry_attempt": max(0, int(attempt)),
+            "running": False,
+            "running_instance": "",
+            "running_started_at": None,
+            "running_job_id": "",
+            "run_history": history,
+        })
         schedules[i] = updated
         _save_all(schedules)
         return updated
@@ -564,6 +829,13 @@ def due_schedules(now: datetime | None = None) -> list[PipelineSchedule]:
         if not s.enabled:
             continue
         if s.running and not _is_running_stale(s):
+            continue
+        retry_at = _parse_ts(s.retry_at)
+        if retry_at is not None:
+            # A parked retry owns the schedule until it runs: the cadence must
+            # not start a fresh attempt on top of the one still owed.
+            if retry_at <= current:
+                due.append(s)
             continue
         nxt = _parse_ts(s.next_run_at)
         if nxt is None or nxt <= current:

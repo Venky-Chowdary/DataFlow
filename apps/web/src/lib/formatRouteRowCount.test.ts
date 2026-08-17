@@ -13,6 +13,12 @@ describe("formatRouteRowCount", () => {
     assert.match(r.full, /100/);
   });
 
+  it("compacts a 30k-class MySQL table instead of looking like the 100-row preview", () => {
+    const r = formatRouteRowCount(30_432);
+    assert.equal(r.short, "30k rows");
+    assert.match(r.full, /30,?432/);
+  });
+
   it("compacts 100000 to 100k without truncating the k", () => {
     const r = formatRouteRowCount(100_000);
     assert.equal(r.short, "100k rows");

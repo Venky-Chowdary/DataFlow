@@ -6,7 +6,27 @@ from services.transform_engine import apply_transform, dry_run_sample, infer_tra
 
 
 def test_infer_decimal_for_amount():
-    assert infer_transform("AMT", "payment_amount", "VARCHAR") == "decimal"
+    from services.transform_engine import infer_transform_for_mapping
+
+    # Numeric destination: amount heuristic may select decimal.
+    assert (
+        infer_transform_for_mapping("AMT", "payment_amount", "VARCHAR", "DECIMAL")
+        == "decimal"
+    )
+    # TEXT sink: never invent a decimal cast that strips currency markers.
+    assert (
+        infer_transform_for_mapping("AMT", "payment_amount", "VARCHAR", "VARCHAR")
+        == "none"
+    )
+
+
+def test_infer_no_url_invent_on_text_image_column():
+    """MySQL image VARCHAR → Postgres TEXT must not invent url (empty→quarantine tax)."""
+    from services.transform_engine import infer_transform_for_mapping
+
+    assert infer_transform_for_mapping("image", "image", "VARCHAR", "TEXT") == "none"
+    assert infer_transform_for_mapping("image", "image", "VARCHAR", "VARCHAR") == "none"
+    assert infer_transform_for_mapping("email", "email", "VARCHAR", "TEXT") == "none"
 
 
 def test_apply_decimal():

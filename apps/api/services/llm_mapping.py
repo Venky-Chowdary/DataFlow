@@ -45,7 +45,10 @@ def _hold_invented_transform(
     if base is not None and ("transform" in base or "transformation" in base):
         pick["transform"] = base.get("transform", base.get("transformation"))
     else:
-        pick["transform"] = None
+        # Do not stamp transform=None — that forces Execute to "none" and blocks
+        # deterministic type-driven transforms (integer/decimal). Leave unset.
+        pick.pop("transform", None)
+        pick.pop("transformation", None)
     pick["requires_review"] = True
     note = (
         f"LLM suggested transform '{suggested}' — human accept required before Execute"
@@ -242,61 +245,75 @@ def refine_mappings_with_llm(
             meta["llm_error"] = "no_valid_mappings"
             return baseline_mappings, meta
 
+        # ITEM 1 — LLM never decides fidelity. Baseline (deterministic Map) is
+        # the authority for source→target and Execute transform. LLM output is
+        # attached as suggestions only; operators must approve remaps on Map.
         merged: list[dict[str, Any]] = []
         used_targets: set[str] = set()
         baseline_by_source = {m["source"]: m for m in baseline_mappings}
+        suggestion_count = 0
 
-        # Module 13 — never silently overwrite operator-locked baseline rows.
         from services.mapping_engine_contract import is_operator_locked
 
         for src in source_columns:
             base = baseline_by_source.get(src)
             llm = llm_by_source.get(src)
-            if base and is_operator_locked(base):
-                kept = dict(base)
-                if llm and (
-                    str(llm.get("target") or "") != str(base.get("target") or "")
-                    or str(llm.get("transform") or "") != str(base.get("transform") or "none")
-                ):
-                    kept["engine_suggestion"] = {
-                        "target": llm.get("target"),
-                        "transform": llm.get("transform"),
-                        "confidence": llm.get("confidence"),
-                        "reasoning": llm.get("reasoning"),
-                        "suppressed": True,
-                        "reason": "operator_locked_mapping_not_silently_overwritten",
-                    }
-                merged.append(kept)
-                tgt = str(kept.get("target") or "").lower()
-                if tgt:
-                    used_targets.add(tgt)
+            if not base:
+                # No deterministic row — do not invent a mapping from LLM alone.
                 continue
-            if llm and llm["target"].lower() not in used_targets:
-                pick = {**(base or {}), **llm}
-                if base and llm["confidence"] < base.get("confidence", 0):
-                    pick = {**llm, **base, "reasoning": f"{llm['reasoning']} · baseline={base.get('confidence', 0):.0%}"}
-                score_gap, requires_review = _compute_llm_review(src, llm, base)
-                pick["score_gap"] = score_gap
-                pick["requires_review"] = requires_review
-                pick = _hold_invented_transform(pick, base, llm)
-                pick["method"] = "hybrid_llm"
-                pick["agent"] = "LLMMappingAgent"
+            pick = dict(base)
+            tgt = str(pick.get("target") or "").lower()
+            if tgt:
+                used_targets.add(tgt)
+            if not llm:
                 merged.append(pick)
-                used_targets.add(pick["target"].lower())
-            elif base:
-                merged.append(base)
+                continue
 
-        for src, llm in llm_by_source.items():
-            if src not in {m["source"] for m in merged} and llm["target"].lower() not in used_targets:
-                held = _hold_invented_transform(dict(llm), None, llm)
-                merged.append(held)
-                used_targets.add(held["target"].lower())
+            llm_tgt = str(llm.get("target") or "")
+            base_tgt = str(base.get("target") or "")
+            differs = (
+                llm_tgt.lower() != base_tgt.lower()
+                or (
+                    _norm_transform(llm.get("transform"))
+                    not in _IDENTITY_TRANSFORMS
+                    and _norm_transform(llm.get("transform"))
+                    != _norm_transform(base.get("transform") or base.get("transformation"))
+                )
+            )
+            if differs or is_operator_locked(base):
+                pick["engine_suggestion"] = {
+                    "target": llm.get("target"),
+                    "transform": llm.get("transform"),
+                    "confidence": llm.get("confidence"),
+                    "reasoning": llm.get("reasoning"),
+                    "suppressed": True,
+                    "reason": (
+                        "operator_locked_mapping_not_silently_overwritten"
+                        if is_operator_locked(base)
+                        else "llm_suggest_only_deterministic_decides"
+                    ),
+                }
+                if llm_tgt and llm_tgt.lower() != base_tgt.lower():
+                    pick["suggested_target"] = llm_tgt
+                suggestion_count += 1
+                pick["requires_review"] = True
+            score_gap, _review = _compute_llm_review(src, llm, base)
+            pick["score_gap"] = score_gap
+            pick = _hold_invented_transform(pick, base, llm)
+            pick["llm_consulted"] = True
+            pick["method"] = str(base.get("method") or "deterministic")
+            # Telemetry only — agent tag must not imply LLM owned the decision.
+            if pick.get("agent") in {None, "", "LLMMappingAgent"}:
+                pick["agent"] = base.get("agent") or "DeterministicMapper"
+            merged.append(pick)
 
         meta.update({
             "llm_used": True,
             "llm_provider": response.provider,
-            "strategy": "hybrid_llm_bm25",
+            "strategy": "llm_suggest_deterministic_decide",
             "llm_mapping_count": len(llm_by_source),
+            "llm_suggestion_count": suggestion_count,
+            "llm_decides": False,
         })
         return merged or baseline_mappings, meta
 

@@ -7,7 +7,8 @@ import io
 import json
 import sys
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -112,31 +113,34 @@ def test_file_to_duckdb_preserves_types(fmt: str):
         rows = conn.execute(f'SELECT id, amount, note, created, active, meta, tags FROM "{table_name}" ORDER BY id').fetchall()
         conn.close()
 
-        # Normalized values: decimals as float, dates/timestamps as datetime, bools as bool, empty JSON as None
+        # Decimal source text lands on an exact DECIMAL carrier (never a float that
+        # rounds), bools as bool, empty JSON as None. The source timestamps carry no
+        # offset, so the destination keeps them naive — stamping UTC would invent a
+        # zone the file never declared.
         assert len(rows) == 3
         assert rows[0] == (
             1,
-            pytest.approx(1000.0),
+            Decimal("1000.0000"),
             "hello",
-            datetime(2024, 1, 15, 0, 0, 0, tzinfo=timezone.utc),
+            datetime(2024, 1, 15, 0, 0, 0),
             True,
             '{"k":"v"}',
             '["a","b"]',
         )
         assert rows[1] == (
             2,
-            pytest.approx(2000.5),
+            Decimal("2000.5000"),
             None,
-            datetime(2024, 2, 28, 14, 30, 0, tzinfo=timezone.utc),
+            datetime(2024, 2, 28, 14, 30, 0),
             False,
             None,
             None,
         )
         assert rows[2] == (
             3,
-            pytest.approx(3.14),
+            Decimal("3.1400"),
             "null",
-            datetime(2024, 3, 1, 0, 0, 0, tzinfo=timezone.utc),
+            datetime(2024, 3, 1, 0, 0, 0),
             True,
             '{}',
             '[]',

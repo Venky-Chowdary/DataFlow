@@ -36,7 +36,8 @@ def test_type_mismatch_suggests_remap_not_strip():
     assert "quarantine_and_rerun" not in kinds
     widen = next(a for a in actions if a["kind"] == "change_target_type")
     assert widen["column"] == "population"
-    assert widen["to_type"] == "VARCHAR"
+    # Dialect text invent (TEXT/VARCHAR) — never keep truncated NUMBER(38,0.
+    assert widen["to_type"].upper() in {"VARCHAR", "TEXT", "STRING"}
 
 
 def test_destination_auth_suggests_check_connection_not_strip():

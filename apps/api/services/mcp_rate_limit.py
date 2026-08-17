@@ -2,6 +2,9 @@
 
 Fail-open when disabled. When enabled, excess calls return retry_after_sec so
 the router can emit HTTP 429. Treat MCP as a production API surface forever.
+
+``TokenBucketStore`` is the shared primitive reused by login throttling
+(audit ITEM 4) — do not re-implement a second bucket.
 """
 
 from __future__ import annotations
@@ -38,8 +41,65 @@ class _Bucket:
     updated_at: float = field(default_factory=time.monotonic)
 
 
-_LOCK = threading.Lock()
-_BUCKETS: dict[str, _Bucket] = {}
+class TokenBucketStore:
+    """Thread-safe in-process token buckets keyed by principal string."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._buckets: dict[str, _Bucket] = {}
+
+    def clear(self) -> None:
+        with self._lock:
+            self._buckets.clear()
+
+    def consume(
+        self,
+        key: str,
+        *,
+        capacity: float,
+        refill_per_sec: float,
+        max_keys: int = 5000,
+    ) -> dict[str, float | bool | str]:
+        """Consume one token for ``key``.
+
+        Returns ``{"allowed": True, ...}`` or
+        ``{"allowed": False, "retry_after_sec": N}``.
+        """
+        principal = (key or "anonymous").strip().lower() or "anonymous"
+        capacity = max(1.0, float(capacity))
+        refill_per_sec = max(0.05, float(refill_per_sec))
+        now = time.monotonic()
+
+        with self._lock:
+            bucket = self._buckets.get(principal)
+            if bucket is None:
+                bucket = _Bucket(tokens=capacity, updated_at=now)
+                self._buckets[principal] = bucket
+            elapsed = max(0.0, now - bucket.updated_at)
+            bucket.tokens = min(capacity, bucket.tokens + elapsed * refill_per_sec)
+            bucket.updated_at = now
+            if bucket.tokens < 1.0:
+                need = 1.0 - bucket.tokens
+                retry = need / refill_per_sec
+                return {
+                    "allowed": False,
+                    "retry_after_sec": max(0.1, round(retry, 2)),
+                    "principal": principal,
+                }
+            bucket.tokens -= 1.0
+            if len(self._buckets) > max(100, int(max_keys)):
+                oldest = sorted(self._buckets.items(), key=lambda kv: kv[1].updated_at)[:500]
+                for drop_key, _ in oldest:
+                    self._buckets.pop(drop_key, None)
+            return {
+                "allowed": True,
+                "principal": principal,
+                "tokens_remaining": round(bucket.tokens, 2),
+            }
+
+
+# MCP tool-call store (process-local).
+_MCP_STORE = TokenBucketStore()
 
 
 def rate_limit_enabled() -> bool:
@@ -49,44 +109,26 @@ def rate_limit_enabled() -> bool:
 
 
 def check_mcp_rate_limit(principal: str) -> dict[str, float | bool | str]:
-    """Consume one token for ``principal``.
-
-    Returns ``{"allowed": True, ...}`` or ``{"allowed": False, "retry_after_sec": N}``.
-    """
+    """Consume one token for ``principal``."""
     if not rate_limit_enabled():
         return {"allowed": True, "disabled": True}
 
-    key = (principal or "anonymous").strip().lower() or "anonymous"
-    capacity = max(1.0, _env_float("DATAFLOW_MCP_RATE_BURST", 30.0))
-    refill_per_sec = max(0.1, _env_float("DATAFLOW_MCP_RATE_QPS", 5.0))
-    now = time.monotonic()
-
-    with _LOCK:
-        bucket = _BUCKETS.get(key)
-        if bucket is None:
-            bucket = _Bucket(tokens=capacity, updated_at=now)
-            _BUCKETS[key] = bucket
-        elapsed = max(0.0, now - bucket.updated_at)
-        bucket.tokens = min(capacity, bucket.tokens + elapsed * refill_per_sec)
-        bucket.updated_at = now
-        if bucket.tokens < 1.0:
-            need = 1.0 - bucket.tokens
-            retry = need / refill_per_sec
-            return {
-                "allowed": False,
-                "retry_after_sec": max(0.1, round(retry, 2)),
-                "principal": key,
-            }
-        bucket.tokens -= 1.0
-        # Bound map growth for long-lived processes.
-        if len(_BUCKETS) > _env_int("DATAFLOW_MCP_RATE_MAX_KEYS", 5000):
-            oldest = sorted(_BUCKETS.items(), key=lambda kv: kv[1].updated_at)[:500]
-            for drop_key, _ in oldest:
-                _BUCKETS.pop(drop_key, None)
-        return {"allowed": True, "principal": key, "tokens_remaining": round(bucket.tokens, 2)}
+    return _MCP_STORE.consume(
+        principal,
+        capacity=_env_float("DATAFLOW_MCP_RATE_BURST", 30.0),
+        refill_per_sec=_env_float("DATAFLOW_MCP_RATE_QPS", 5.0),
+        max_keys=_env_int("DATAFLOW_MCP_RATE_MAX_KEYS", 5000),
+    )
 
 
 def reset_mcp_rate_limits() -> None:
     """Test helper — clear in-memory buckets."""
-    with _LOCK:
-        _BUCKETS.clear()
+    _MCP_STORE.clear()
+
+
+__all__ = [
+    "TokenBucketStore",
+    "check_mcp_rate_limit",
+    "rate_limit_enabled",
+    "reset_mcp_rate_limits",
+]

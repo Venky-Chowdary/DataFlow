@@ -45,7 +45,7 @@ _SAFE_PROMOTIONS = frozenset({
     ("integer", "double"),
     ("integer", "number"),
     ("float", "double"),
-    ("float", "decimal"),
+    # float→decimal is IEEE→fixed-point invent — not a safe promotion (lossy).
     ("float", "number"),
     ("date", "timestamp"),
     ("boolean", "integer"),
@@ -54,6 +54,15 @@ _SAFE_PROMOTIONS = frozenset({
 })
 
 _IDENTITY_TRANSFORMS = frozenset({"", "none", "identity", "cast", "auto", "passthrough"})
+
+# Typed parse guards quarantine unparseable cells; within one family they do not
+# change a parseable value.
+_PARSE_GUARD_FAMILIES: tuple[frozenset[str], ...] = (
+    frozenset({"decimal", "numeric", "number", "integer", "int", "bigint", "float", "double"}),
+    frozenset({"date", "datetime", "timestamp", "time"}),
+    frozenset({"json", "array", "struct", "map"}),
+    frozenset({"string", "text", "varchar"}),
+)
 
 
 def _is_passthrough_transform(transform: str, src_logical: str, tgt_logical: str) -> bool:
@@ -71,7 +80,19 @@ def _is_passthrough_transform(transform: str, src_logical: str, tgt_logical: str
     xf = (transform or "").strip().lower()
     if xf in _IDENTITY_TRANSFORMS:
         return True
-    return bool(src_logical) and xf == src_logical == tgt_logical
+    if bool(src_logical) and xf == src_logical == tgt_logical:
+        return True
+    # The guard is also a passthrough when it names the *family* both sides
+    # share: DOUBLE→DOUBLE arrives labelled ``decimal`` because the numeric
+    # parse guard is family-wide, and reading that as a custom transform
+    # demoted identical-schema columns to semantic_inference (0.78) — below the
+    # G4 floor, on a column whose fidelity verdict is ``preserve``.
+    for family in _PARSE_GUARD_FAMILIES:
+        if xf in family and src_logical in family and tgt_logical in family:
+            return True
+    return False
+
+
 _STRUCTURAL_LOGICALS = frozenset({"json", "array", "struct", "map"})
 
 _TEMPORAL_NAME_TERMS = frozenset({"date", "time", "dt", "timestamp", "created", "updated"})
@@ -192,7 +213,82 @@ def analyze_column_profile(name: str, samples: list[str]) -> dict[str, Any]:
             bool_ratio >= 0.5 and _contains_term(name, {"flag", "is_", "has_", "active", "enabled", "verified"})
         )
 
+        # Sample-aware DECIMAL(p,s) / IEEE kind for Map profiling strip.
+        if numeric_ratio >= 0.5 or profile["likely_numeric"]:
+            try:
+                from services.decimal_observe import observe_numeric_samples
+
+                obs = observe_numeric_samples(vals)
+                if obs.get("kind") not in {None, "empty"}:
+                    profile["observed_precision"] = obs.get("precision")
+                    profile["observed_scale"] = obs.get("scale")
+                    profile["numeric_kind"] = obs.get("kind")
+                    profile["suggested_carrier"] = obs.get("carrier")
+                    profile["ieee_signals"] = obs.get("ieee_signals") or []
+            except Exception:
+                pass
+            nums: list[float] = []
+            for v in vals:
+                try:
+                    nums.append(float(v.replace(",", "").replace("$", "").replace("£", "").replace("€", "")))
+                except ValueError:
+                    continue
+            if nums:
+                profile["min"] = min(nums)
+                profile["max"] = max(nums)
+
     return profile
+
+
+def merge_column_profile(
+    base: dict[str, Any],
+    *,
+    schema_row: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Merge analyzer profile with data_profiler statistics for Map strip SSOT."""
+    out = dict(base or {})
+    src = schema_row or {}
+    if src.get("null_rate") is not None:
+        out["null_rate"] = src.get("null_rate")
+    if src.get("distinct_ratio") is not None:
+        out["unique_ratio"] = src.get("distinct_ratio")
+    stats = src.get("statistics") if isinstance(src.get("statistics"), dict) else {}
+    for key in (
+        "min",
+        "max",
+        "mean",
+        "observed_precision",
+        "observed_scale",
+        "numeric_kind",
+        "suggested_carrier",
+        "ieee_signals",
+    ):
+        if stats.get(key) is not None and out.get(key) is None:
+            out[key] = stats.get(key)
+    return out
+
+
+def column_profile_for_map(profile: dict[str, Any] | None) -> dict[str, Any]:
+    """Compact column_profile stamped onto mappings for Map / Validate."""
+    p = profile or {}
+    keys = (
+        "null_rate",
+        "unique_ratio",
+        "min",
+        "max",
+        "observed_precision",
+        "observed_scale",
+        "numeric_kind",
+        "suggested_carrier",
+        "ieee_signals",
+        "likely_identifier",
+        "likely_email",
+        "likely_uuid",
+        "likely_date",
+        "likely_boolean",
+        "semantic_pattern_score",
+    )
+    return {k: p[k] for k in keys if k in p and p[k] is not None}
 
 
 def _logical_type(type_str: str) -> str:
@@ -213,10 +309,34 @@ def _logical_type(type_str: str) -> str:
         return "string"
 
 
+def _is_dialect_sanctioned_carrier(
+    source_type: str, target_type: str, dest_db: str
+) -> bool:
+    """True when the destination column is exactly the carrier our DDL would create.
+
+    A cross-family pair is normally weak evidence, but ``DECIMAL(12,2) → TEXT``
+    on SQLite is the exact-digit carrier :func:`materialize_dest_ddl` itself
+    picks — re-running a migration into a table DataFlow created must not score
+    its own DDL as an incompatible-type conflict.
+    """
+    if not dest_db or not source_type or not target_type:
+        return False
+    from services.type_system import materialize_dest_ddl
+
+    try:
+        expected = str(materialize_dest_ddl(dest_db, source_type) or "").strip()
+    except Exception:
+        return False
+    if not expected:
+        return False
+    return _logical_type(expected) == _logical_type(target_type)
+
+
 def classify_mapping_confidence(
     mapping: dict,
     *,
     source_profile: dict[str, Any] | None = None,
+    destination_db_type: str = "",
 ) -> dict[str, Any]:
     """Return evidence class + calibrated axes (not a single opaque %).
 
@@ -245,7 +365,13 @@ def classify_mapping_confidence(
     sparse = len(samples) < 3
     name_exact = src_l == tgt_l or src_l.replace("_", "") == tgt_l.replace("_", "")
     type_same = src_logical == tgt_logical
-    safe_promo = (src_logical, tgt_logical) in _SAFE_PROMOTIONS
+    safe_promo = (src_logical, tgt_logical) in _SAFE_PROMOTIONS or (
+        _is_dialect_sanctioned_carrier(
+            str(mapping.get("source_type") or mapping.get("inferred_type") or ""),
+            str(mapping.get("target_type") or mapping.get("dest_type") or ""),
+            destination_db_type,
+        )
+    )
     structural = src_logical in _STRUCTURAL_LOGICALS and tgt_logical in _STRUCTURAL_LOGICALS
     pattern = float(profile.get("semantic_pattern_score") or 0.0)
     null_rate = float(profile.get("null_rate") or 0.0)
@@ -293,6 +419,12 @@ def classify_mapping_confidence(
     return {
         "confidence_class": cls,
         "confidence_class_label": CONFIDENCE_CLASS_LABELS[cls],
+        "type_path_class": str(mapping.get("conversion_class") or ""),
+        "semantic_role": str(
+            mapping.get("semantic_role")
+            or profile.get("semantic_role")
+            or ""
+        ),
         "anchor": anchor,
         "axes": {
             "mapping": round(mapping_axis, 3),
@@ -312,6 +444,16 @@ def apply_confidence_class(
     cls = str(classification.get("confidence_class") or "")
     conf = float(confidence)
     if cls == "create_new_projected":
+        conv = str(classification.get("type_path_class") or "").lower()
+        if conv in {"equivalent", "identity"}:
+            role = str(classification.get("semantic_role") or "").lower()
+            if role in {"categorical", "market_segment"}:
+                return round(min(0.88, max(conf, 0.82)), 3)
+            return round(min(IDENTITY_PASSTHROUGH_CONF_CAP, max(conf, 0.91)), 3)
+        if conv in {"widening", "lossless"}:
+            return round(min(0.90, max(conf, 0.86)), 3)
+        if conv in {"representation", "normalization"}:
+            return round(min(0.89, max(conf, 0.82)), 3)
         return round(min(conf, IDENTITY_PASSTHROUGH_CONF_CAP), 3)
     if cls == "exact_name_type":
         # Exact proven pairs should read near-certain, not 0.93.
@@ -442,6 +584,7 @@ def refine_mappings_with_quality(
     mappings: list[dict],
     *,
     source_schemas: list[dict] | None = None,
+    destination_db_type: str = "",
 ) -> list[dict]:
     """Apply cross-field quality scoring to each mapping."""
     src_by_name = {s["name"]: s for s in (source_schemas or [])}
@@ -452,13 +595,41 @@ def refine_mappings_with_quality(
         if src_name not in profile_cache:
             src = src_by_name.get(src_name, {})
             samples = [str(x) for x in (src.get("samples") or [])]
-            profile_cache[src_name] = analyze_column_profile(src_name, samples)
+            profile_cache[src_name] = merge_column_profile(
+                analyze_column_profile(src_name, samples),
+                schema_row=src,
+            )
         profile = profile_cache[src_name]
 
         delta, notes = score_mapping_pair(m, source_profile=profile)
         out = dict(m)
+        if not out.get("semantic_role"):
+            from services.semantic_analyzer import analyze_column
+
+            schema_row = src_by_name.get(src_name, {})
+            analyzed = analyze_column(
+                src_name,
+                str(out.get("source_type") or schema_row.get("inferred_type") or "VARCHAR"),
+                [str(x) for x in (schema_row.get("samples") or [])],
+            )
+            out["semantic_role"] = analyzed.get("semantic_role")
+        if not out.get("conversion_class") and out.get("source_type") and (
+            out.get("target_type") or out.get("dest_type")
+        ):
+            from services.conversion_contract import classify_conversion
+
+            out["conversion_class"] = classify_conversion(
+                str(out.get("source_type") or out.get("inferred_type") or ""),
+                str(out.get("target_type") or out.get("dest_type") or ""),
+                dest_db=destination_db_type,
+                transform=str(out.get("transform") or "none"),
+            ).get("conversion_class")
         conf = min(0.99, max(0.0, float(m.get("confidence", 0.0)) + delta))
-        classification = classify_mapping_confidence(out, source_profile=profile)
+        classification = classify_mapping_confidence(
+            out,
+            source_profile=profile,
+            destination_db_type=destination_db_type,
+        )
         conf = apply_confidence_class(conf, classification)
         out["confidence"] = round(conf, 3)
         out["confidence_class"] = classification["confidence_class"]
@@ -478,19 +649,7 @@ def refine_mappings_with_quality(
                 out["requires_review"] = True
         if classification["confidence_class"] in {"weak_or_conflicted", "custom_transform_sparse"}:
             out["requires_review"] = True
-        out["column_profile"] = {
-            k: profile[k]
-            for k in (
-                "null_rate",
-                "unique_ratio",
-                "likely_identifier",
-                "likely_email",
-                "likely_uuid",
-                "likely_date",
-                "likely_boolean",
-                "semantic_pattern_score",
-            )
-        }
+        out["column_profile"] = column_profile_for_map(profile)
         refined.append(out)
     return refined
 

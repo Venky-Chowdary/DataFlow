@@ -1,0 +1,154 @@
+{
+  "name": "cdc_exactly_once_matrix",
+  "algorithm": "dest_owned_watermark_txn",
+  "protocol": "dest_authoritative_keyset_bundle",
+  "platform_exactly_once_claimed": false,
+  "delivery_default": "at_least_once",
+  "measured_floor": 1.0,
+  "pass": 15,
+  "fail": 0,
+  "skip": 0,
+  "cases": [
+    {
+      "id": "sqlite_cdc_pk_upsert",
+      "dest": "sqlite",
+      "sync_mode": "cdc",
+      "eligible": true,
+      "reason": "dest_owned_watermark_txn",
+      "wired": true,
+      "pass": true
+    },
+    {
+      "id": "postgres_cdc_wired",
+      "dest": "postgresql",
+      "sync_mode": "cdc",
+      "eligible": true,
+      "reason": "dest_owned_watermark_txn",
+      "wired": true,
+      "pass": true
+    },
+    {
+      "id": "mysql_cdc_wired",
+      "dest": "mysql",
+      "sync_mode": "cdc",
+      "eligible": true,
+      "reason": "dest_owned_watermark_txn",
+      "wired": true,
+      "pass": true
+    },
+    {
+      "id": "sqlserver_cdc_wired",
+      "dest": "sqlserver",
+      "sync_mode": "cdc",
+      "eligible": true,
+      "reason": "dest_owned_watermark_txn",
+      "wired": true,
+      "pass": true
+    },
+    {
+      "id": "generic_sql_cdc_wired",
+      "dest": "generic_sql",
+      "sync_mode": "cdc",
+      "eligible": true,
+      "reason": "dest_owned_watermark_txn",
+      "wired": true,
+      "pass": true
+    },
+    {
+      "id": "duckdb_cdc_wired",
+      "dest": "duckdb",
+      "sync_mode": "cdc",
+      "eligible": true,
+      "reason": "dest_owned_watermark_txn",
+      "wired": true,
+      "pass": true
+    },
+    {
+      "id": "oracle_cdc_wired",
+      "dest": "oracle",
+      "sync_mode": "cdc",
+      "eligible": true,
+      "reason": "dest_owned_watermark_txn",
+      "wired": true,
+      "pass": true
+    },
+    {
+      "id": "snowflake_cdc_wired",
+      "dest": "snowflake",
+      "sync_mode": "cdc",
+      "eligible": true,
+      "reason": "dest_owned_watermark_txn",
+      "wired": true,
+      "pass": true
+    },
+    {
+      "id": "azure_sql_alias_wired",
+      "dest": "azure_sql_database",
+      "sync_mode": "cdc",
+      "eligible": true,
+      "reason": "dest_owned_watermark_txn",
+      "wired": true,
+      "pass": true
+    },
+    {
+      "id": "sqlite_callable_refused",
+      "dest": "sqlite",
+      "sync_mode": "cdc",
+      "eligible": false,
+      "reason": "exactly_once_refuses_callable_source",
+      "wired": false,
+      "pass": true
+    },
+    {
+      "id": "csv_append_not_txn",
+      "dest": "csv",
+      "sync_mode": "cdc",
+      "eligible": false,
+      "reason": "exactly_once_dest_not_transactional",
+      "wired": false,
+      "pass": true
+    },
+    {
+      "id": "sqlite_full_refresh_refused",
+      "dest": "sqlite",
+      "sync_mode": "full_refresh_overwrite",
+      "eligible": false,
+      "reason": "exactly_once_requires_cdc_sync",
+      "wired": false,
+      "pass": true
+    },
+    {
+      "id": "sqlite_append_only_refused",
+      "dest": "sqlite",
+      "sync_mode": "cdc",
+      "eligible": false,
+      "reason": "exactly_once_refuses_append_only",
+      "wired": false,
+      "pass": true
+    },
+    {
+      "id": "iceberg_not_txn",
+      "dest": "iceberg",
+      "sync_mode": "cdc",
+      "eligible": false,
+      "reason": "exactly_once_dest_not_transactional",
+      "wired": false,
+      "pass": true
+    },
+    {
+      "id": "kafka_not_txn",
+      "dest": "kafka",
+      "sync_mode": "cdc",
+      "eligible": false,
+      "reason": "exactly_once_dest_not_transactional",
+      "wired": false,
+      "pass": true
+    }
+  ],
+  "notes": [
+    "100% means this named fixture only \u2014 not live warehouse CDC.",
+    "Protocol dest_authoritative_keyset_bundle: dest SSOT + Open fence (no data) + dest resume blob + last-op-per-PK + dest load-reduce-store + shared-log N-table dest txn + dest-owned DDD-3 stream-wins + dest-owned snapshot window_id + dest-owned signal_id/keyset last_pk + Open fast-forward of snapshot signal last_pk + checksum quarantine + dest-LSN-gated quarantine replay + bundle min-LSN + dest-monotonic apply_seq + post-commit dest verify before source ack.",
+    "Wired dests: sqlite (native) plus SQLAlchemy dest-txn for postgresql/mysql/sqlserver/duckdb/generic_sql/oracle/snowflake.",
+    "File/Iceberg/Kafka dests stay fail-closed."
+  ]
+}

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from importlib import reload
 
 
@@ -134,9 +135,15 @@ def test_apply_require_signed_contracts_blocks_unsigned(tmp_path, monkeypatch):
     reload(cs)
     reload(gm)
 
+    # DATAFLOW_DATA_DIR only isolates the file fallback. The contract and
+    # schedule stores prefer MongoDB when it is up, which every worker shares,
+    # so fixed names collide with a parallel run or a previous one's leftovers.
+    unique = uuid.uuid4().hex[:8]
+    schedule_name = f"staging-gated-{unique}"
+
     store = cs.get_contract_store()
     draft = DataContract(
-        name="staging-orders",
+        name=f"staging-orders-{unique}",
         source={"type": "postgresql"},
         destination={"type": "snowflake"},
     )
@@ -150,9 +157,9 @@ def test_apply_require_signed_contracts_blocks_unsigned(tmp_path, monkeypatch):
             {
                 "apiVersion": "dataflow.space/v1",
                 "kind": "PipelineSchedule",
-                "metadata": {"name": "staging-gated"},
+                "metadata": {"name": schedule_name},
                 "spec": {
-                    "name": "staging-gated",
+                    "name": schedule_name,
                     "source_connector_id": "s1",
                     "source_table": "orders",
                     "dest_connector_id": "d1",
@@ -175,4 +182,4 @@ def test_apply_require_signed_contracts_blocks_unsigned(tmp_path, monkeypatch):
     ok = gm.apply_manifest(manifest, require_signed_contracts=True)
     assert ok["failed"] == 0
     assert ok["applied"] == 1
-    assert any(s.name == "staging-gated" for s in ss.list_schedules())
+    assert any(s.name == schedule_name for s in ss.list_schedules())

@@ -34,7 +34,45 @@ _TYPE_ALIASES = {
     "snowflake": "snowflake",
     "mysql": "mysql",
     "sqlite": "sqlite",
+    "sql server": "sqlserver",
+    "sqlserver": "sqlserver",
+    "mssql": "sqlserver",
+    "ms sql": "sqlserver",
+    "ms sql server": "sqlserver",
+    "azure sql": "sqlserver",
+    "maria": "mariadb",
+    "mariadb": "mariadb",
+    "oracle": "oracle",
+    "redshift": "redshift",
+    "databricks": "databricks",
+    "duckdb": "duckdb",
 }
+
+# A dialect name is not a connector: "Postgres" says *what kind*, never *which
+# instance*. Guessing an instance is how data lands in the wrong database, so
+# these resolve only when exactly one saved connector is of that type.
+_DIALECT_WORDS = frozenset({*_TYPE_ALIASES, *_TYPE_ALIASES.values()})
+# Words that name a *family* of databases and no dialect at all. "transfer to sql"
+# says even less than "to postgres", so it can never resolve to an instance.
+_FAMILY_WORDS = frozenset({"sql", "database", "db", "warehouse", "lake", "lakehouse"})
+_ENGINE_WORDS = _DIALECT_WORDS | _FAMILY_WORDS
+
+
+def _normalize_needle(needle: str) -> str:
+    return (needle or "").strip().lower().removesuffix(" connector").strip()
+
+
+def _engine_word(needle: str) -> str:
+    """Return the canonical engine type a phrase names, or "" if it names none."""
+    n = _normalize_needle(needle)
+    if n not in _DIALECT_WORDS:
+        return ""
+    return _TYPE_ALIASES.get(n, n)
+
+
+def _is_family_word(needle: str) -> bool:
+    """True for "sql" / "database" / "warehouse" — a family, not even a dialect."""
+    return _normalize_needle(needle) in _FAMILY_WORDS
 
 
 def _match_score(needle: str, label: str, ctype: str = "") -> float:
@@ -46,6 +84,11 @@ def _match_score(needle: str, label: str, ctype: str = "") -> float:
         return 0.0
     if label_l == n:
         return 100.0
+    if _is_family_word(n):
+        # "sql" / "database" / "warehouse" name a family, not an instance. Matching
+        # one to a saved connector is a guess, and a guess writes to the wrong
+        # database — so only an exact name match (above) may resolve it.
+        return 0.0
     if label_l.startswith(n) or n.startswith(label_l):
         return 85.0 - abs(len(label_l) - len(n)) * 0.2
     if n in label_l:
@@ -77,9 +120,7 @@ def _pick_connector(needle: str, candidates: list[dict[str, Any]]) -> dict[str, 
         if score > 0:
             scored.append((score, d))
     if not scored:
-        raise AmbiguousConnectorError(
-            f'No connector matched “{needle}”. Name a saved connector from Connectors.'
-        )
+        raise AmbiguousConnectorError(_no_match_message(needle, candidates))
     scored.sort(key=lambda x: (-x[0], str(x[1].get("name") or "").lower()))
     best_score, best = scored[0]
     # Exact / near-exact name wins alone
@@ -95,10 +136,38 @@ def _pick_connector(needle: str, candidates: list[dict[str, Any]]) -> dict[str, 
         if name and name not in names:
             names.append(name)
     listed = ", ".join(f"**{n}**" for n in names)
-    raise AmbiguousConnectorError(
-        f"Which connector did you mean? {listed}",
-        candidates=names,
+    engine = _engine_word(needle)
+    question = (
+        f"“{needle}” is a database type, so it names more than one saved {engine} "
+        f"connector. Which connector did you mean? {listed}"
+        if engine
+        else f"Which connector did you mean? {listed}"
     )
+    raise AmbiguousConnectorError(question, candidates=names)
+
+
+def _no_match_message(needle: str, candidates: list[dict[str, Any]]) -> str:
+    """Say precisely what is missing — a type with no instance, or an unknown name."""
+    engine = _engine_word(needle)
+    saved = [str(d.get("name") or "").strip() for d in candidates]
+    saved = [n for n in saved if n]
+    listed = ", ".join(f"**{n}**" for n in saved[:6]) or "none yet"
+    # Keep "no connector matched" in every branch: the agent's recovery step and
+    # the client both read it to offer the saved list instead of a dead end.
+    head = f"No connector matched “{needle}”"
+    tail = f"Name a saved connector from Connectors. Saved connectors: {listed}."
+    if engine:
+        return (
+            f"{head} — that is a database type, not a saved connector, and no "
+            f"{engine} connector is saved, so there is no instance to point this at. "
+            f"{tail}"
+        )
+    if _is_family_word(needle):
+        return (
+            f"{head} — that names a family of databases, not one instance, so there "
+            f"is nothing to point this at. {tail}"
+        )
+    return f"{head}, and I will not guess which database you meant. {tail}"
 
 
 def _connector_dict(connector_id: str = "", name: str = "") -> dict[str, Any] | None:
@@ -237,16 +306,46 @@ def introspect_connector_table(
         auth_source=str(cfg.get("auth_source") or ""),
     )
     ok = bool(info.get("ok"))
+    columns = _normalize_columns(info) if ok else []
     return {
         "ok": ok,
         "error": str(info.get("error") or ""),
         "db_type": db_type,
-        "columns": _normalize_columns(info) if ok else [],
+        "columns": columns,
         "tables": info.get("tables") or [],
         "config": cfg,
         "endpoint": endpoint,
         "raw": info,
+        "table_exists": _measured_table_exists(endpoint, ok=ok, has_columns=bool(columns)),
     }
+
+
+def _measured_table_exists(endpoint: Any, *, ok: bool, has_columns: bool) -> bool | None:
+    """Ask the catalog whether the table is there, rather than read an error string.
+
+    ``introspect_schema`` answers "what are this table's columns", so an absent
+    table and a table whose metadata could not be loaded both come back as a
+    successful call with none. Callers were left inferring the difference from
+    error text, which no engine promises to phrase any particular way, and a
+    destination that was simply missing came back as ``None`` — neither
+    create-new nor a failure, so Validate had nothing to approve.
+
+    Only the ambiguous case pays for the extra look: columns already prove the
+    table exists.
+    """
+    if has_columns:
+        return True
+    if not ok:
+        return None
+    try:
+        from src.transfer.endpoint_intelligence import introspect_endpoint
+
+        probed = introspect_endpoint(endpoint)
+    except Exception as exc:
+        logging.getLogger(__name__).info("table existence probe unavailable: %s", exc)
+        return None
+    exists = probed.get("table_exists")
+    return exists if isinstance(exists, bool) else None
 
 
 def _normalize_columns(info: dict[str, Any]) -> list[dict[str, Any]]:
@@ -348,7 +447,8 @@ def list_connector_objects(
                 name = str(obj).strip()
             if name:
                 objects.append(name)
-        objects = objects[: max(1, min(int(limit or 100), 500))]
+        total = len(objects)
+        objects = objects[: max(1, int(limit or 100))]
         return _tool_result(
             "list_connector_objects",
             success=True,
@@ -359,6 +459,13 @@ def list_connector_objects(
                 "connected": bool(info.get("connected")),
                 "objects": objects,
                 "count": len(objects),
+                # Callers that resolve a name against this list need to know the
+                # difference between "not on this connector" and "not in the page
+                # I was shown" — a schema with more objects than the display limit
+                # is ordinary, and treating the window as the whole inventory
+                # reports existing tables as missing.
+                "total": total,
+                "truncated": total > len(objects) or bool(info.get("objects_truncated")),
                 "message": info.get("message") or "",
                 "database": conn.get("database"),
                 "schema": conn.get("schema"),

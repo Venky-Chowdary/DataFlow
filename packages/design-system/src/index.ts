@@ -105,3 +105,9 @@ export { TransferHub } from "./components/TransferHub";
 export { TransferCta } from "./components/TransferCta";
 export { TransferProgress } from "./components/TransferProgress";
 export type { GateItem, MappingRow, StatusTile } from "./types";
+export {
+  BRAND_COLORS,
+  BRAND_MARK_GEOMETRY,
+  BRAND_MARK_VIEWBOX,
+  brandMarkSvg,
+} from "./brand/mark";

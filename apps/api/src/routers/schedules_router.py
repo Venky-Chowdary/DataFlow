@@ -29,6 +29,8 @@ SyncMode = Literal[
     "full_refresh_overwrite",
     "full_refresh_append",
     "incremental",
+    "incremental_append",
+    "incremental_deduped",
     "cdc",
     "scd2",
     "mirror",
@@ -57,10 +59,15 @@ class ScheduleCreate(BaseModel):
     validation_mode: str = "strict"
     schema_policy: SchemaPolicy = "manual_review"
     backfill_new_fields: bool = False
+    delivery_guarantee: str = "at_least_once"
     mappings: list[dict[str, Any]] = Field(default_factory=list)
     stream_contracts: list[dict[str, Any]] = Field(default_factory=list)
     cursor_column: str = ""
     primary_key: str = ""
+    source_read_mode: str = ""
+    procedure_call: str = ""
+    source_query: str = ""
+    procedure_params: dict[str, Any] = Field(default_factory=dict)
     workspace_id: str = ""
     contract_id: str = ""
     require_signed_contract: Optional[bool] = None
@@ -84,10 +91,15 @@ class ScheduleUpdate(BaseModel):
     validation_mode: Optional[str] = None
     schema_policy: Optional[SchemaPolicy] = None
     backfill_new_fields: Optional[bool] = None
+    delivery_guarantee: Optional[str] = None
     mappings: Optional[list[dict[str, Any]]] = None
     stream_contracts: Optional[list[dict[str, Any]]] = None
     cursor_column: Optional[str] = None
     primary_key: Optional[str] = None
+    source_read_mode: Optional[str] = None
+    procedure_call: Optional[str] = None
+    source_query: Optional[str] = None
+    procedure_params: Optional[dict[str, Any]] = None
     workspace_id: Optional[str] = None
     contract_id: Optional[str] = None
     require_signed_contract: Optional[bool] = None
@@ -112,9 +124,14 @@ class ScheduleResponse(BaseModel):
     validation_mode: str = "strict"
     schema_policy: str = "manual_review"
     backfill_new_fields: bool = False
+    delivery_guarantee: str = "at_least_once"
     cursor_column: str = ""
     primary_key: str = ""
     cursor_value: str = ""
+    source_read_mode: str = ""
+    procedure_call: str = ""
+    source_query: str = ""
+    procedure_params: dict[str, Any] = Field(default_factory=dict)
     workspace_id: str = ""
     contract_id: str = ""
     require_signed_contract: bool = False
@@ -128,10 +145,23 @@ class ScheduleResponse(BaseModel):
     last_job_id: Optional[str] = None
     last_status: Optional[str] = None
     run_count: int = 0
+    # A retry owed after a failed attempt, and cadence windows that elapsed with
+    # no run: both are invisible from run_count alone.
+    retry_at: Optional[str] = None
+    retry_attempt: int = 0
+    missed_window_count: int = 0
+    last_missed_windows: int = 0
     running: bool = False
     created_at: str
     # Pipeline Detail needs schema map without a second Transfer Studio hop.
     mappings: list[dict[str, Any]] = Field(default_factory=list)
+    # The source shape this schedule last read. A run is refused when a column
+    # it carries changes type, is dropped or is renamed, so the operator has to
+    # be able to see the baseline that judged it — otherwise the refusal is a
+    # dead end rather than a finding.
+    source_schema: dict[str, str] = Field(default_factory=dict)
+    source_schema_fingerprint: str = ""
+    source_schema_observed_at: str = ""
     mapping_count: int = 0
 
     @classmethod
@@ -160,9 +190,11 @@ class ScheduleSummaryResponse(BaseModel):
     validation_mode: str = "strict"
     schema_policy: str = "manual_review"
     backfill_new_fields: bool = False
+    delivery_guarantee: str = "at_least_once"
     cursor_column: str = ""
     primary_key: str = ""
     cursor_value: str = ""
+    source_read_mode: str = ""
     workspace_id: str = ""
     contract_id: str = ""
     require_signed_contract: bool = False
@@ -176,6 +208,10 @@ class ScheduleSummaryResponse(BaseModel):
     last_job_id: Optional[str] = None
     last_status: Optional[str] = None
     run_count: int = 0
+    retry_at: Optional[str] = None
+    retry_attempt: int = 0
+    missed_window_count: int = 0
+    last_missed_windows: int = 0
     running: bool = False
     created_at: str
     mapping_count: int = 0
@@ -378,6 +414,77 @@ async def get_pipeline_history(schedule_id: str, limit: int = 25):
         raise HTTPException(status_code=404, detail="Schedule not found")
     history = list(reversed(sched.run_history))[: max(1, min(limit, 100))]
     return {"schedule_id": schedule_id, "runs": history}
+
+
+@router.post("/{schedule_id}/accept-source-schema")
+async def accept_source_schema(schedule_id: str):
+    """Record the source's current shape as this schedule's baseline.
+
+    A run refused for source drift is a finding, not a verdict: the operator has
+    to be able to look at what changed and say whether the mapping still holds.
+    Without this the refusal had no exit — the message asked for a review that no
+    control performed, which is the dead end this product exists to remove.
+
+    Deliberately explicit. Re-baselining is the operator asserting the change is
+    understood, so it is never done for them by a retry.
+    """
+    from datetime import datetime, timezone
+
+    from services.schedule_runner import (
+        _apply_callable_schedule_source,
+        _endpoint_from_connector,
+        _resolve_connector,
+        probe_schedule_source_schema,
+    )
+    from services.source_schema_memory import fingerprint_source
+
+    sched = get_schedule(schedule_id)
+    if not sched:
+        raise HTTPException(status_code=404, detail="Schedule not found")
+
+    src = _resolve_connector(sched.source_connector_id)
+    if not src:
+        raise HTTPException(
+            status_code=400,
+            detail="Source connector is unavailable — cannot read the current schema.",
+        )
+    try:
+        endpoint = _endpoint_from_connector(src, sched.source_table)
+        _apply_callable_schedule_source(endpoint, sched)
+        info = probe_schedule_source_schema(endpoint) or {}
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502, detail=f"Could not read the source schema: {exc}"
+        ) from exc
+
+    schema = {str(k): str(v) for k, v in (info.get("schema") or {}).items()}
+    if not schema:
+        raise HTTPException(
+            status_code=502,
+            detail="Source returned no schema — nothing to record as a baseline.",
+        )
+    columns = [str(c) for c in (info.get("columns") or schema.keys())]
+    fingerprint = fingerprint_source(columns, schema)
+    updated = update_schedule(
+        schedule_id,
+        {
+            "source_schema": schema,
+            "source_schema_fingerprint": fingerprint,
+            "source_schema_observed_at": datetime.now(timezone.utc).isoformat(),
+        },
+    )
+    if not updated:
+        raise HTTPException(status_code=404, detail="Schedule not found")
+    return {
+        "success": True,
+        "schedule_id": schedule_id,
+        "source_schema_fingerprint": fingerprint,
+        "columns": len(schema),
+        "message": (
+            f"Baseline updated to the source's current shape ({len(schema)} columns). "
+            "The next run compares against this."
+        ),
+    }
 
 
 @router.post("/{schedule_id}/run")

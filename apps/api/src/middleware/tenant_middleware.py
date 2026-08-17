@@ -23,8 +23,10 @@ _PUBLIC_PREFIXES = (
     "/api/v1/health",
     "/",
     "/api/v1/auth/login",
+    "/api/v1/auth/logout",
     "/api/v1/auth/bootstrap",
     "/auth/login",
+    "/auth/logout",
     "/auth/bootstrap",
     "/auth/sso/providers",
     "/api/v1/auth/sso/providers",
@@ -51,13 +53,10 @@ def _is_public_path(path: str) -> bool:
 
 
 def _client_ip(request: Request) -> str:
-    for header in ("x-forwarded-for", "x-real-ip"):
-        value = request.headers.get(header, "")
-        if value:
-            return value.split(",")[0].strip()
-    if request.client and request.client.host:
-        return request.client.host
-    return ""
+    """Phase D1 — trust-boundary aware (never left-most XFF by default)."""
+    from services.client_ip import client_ip_from_request
+
+    return client_ip_from_request(request)
 
 
 class TenantMiddleware(BaseHTTPMiddleware):

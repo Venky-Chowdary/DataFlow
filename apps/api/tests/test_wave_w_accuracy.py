@@ -7,6 +7,19 @@ from unittest.mock import MagicMock, patch
 import pytest
 import responses
 
+# Live Describe now runs before the write and is refused when unavailable, so
+# these fixtures answer it — the strict-policy path stays the one under test.
+SF_DESCRIBE = [
+    {"name": "External_Id__c", "type": "string", "length": 255, "externalId": True,
+     "createable": True, "updateable": True},
+    {"name": "Name", "type": "string", "length": 255, "createable": True,
+     "updateable": True},
+]
+HUBSPOT_DESCRIBE = [
+    {"name": "email", "type": "string", "fieldType": "text"},
+    {"name": "firstname", "type": "string", "fieldType": "text"},
+]
+
 
 def test_salesforce_writer_strict_policy_blocks_partial_activation():
     from connectors.salesforce_writer import write_mapped_rows
@@ -18,7 +31,9 @@ def test_salesforce_writer_strict_policy_blocks_partial_activation():
         {"success": False, "errors": [{"message": "DUPLICATE_VALUE"}]},
     ]
 
-    with patch("connectors.salesforce_writer.request", return_value=mock_resp):
+    with patch(
+        "connectors.salesforce.describe_sobject", return_value=SF_DESCRIBE
+    ), patch("connectors.salesforce_writer.request", return_value=mock_resp):
         result = write_mapped_rows(
             host="example.my.salesforce.com",
             api_key="token",
@@ -57,7 +72,9 @@ def test_hubspot_writer_strict_policy_blocks_api_errors():
         "errors": [{"message": "PROPERTY_DOESNT_EXIST", "context": {}}],
     }
 
-    with patch("connectors.hubspot_writer.request", return_value=mock_resp):
+    with patch(
+        "connectors.hubspot.describe_properties", return_value=HUBSPOT_DESCRIBE
+    ), patch("connectors.hubspot_writer.request", return_value=mock_resp):
         result = write_mapped_rows(
             host="api.hubapi.com",
             api_key="token",
@@ -116,7 +133,11 @@ def test_elasticsearch_transform_fail_skips_bulk():
             )
 
     assert result.ok is False
-    assert "Transform errors" in (result.error or "")
+    # The refusal names the cell it refused over — a bare "Transform errors"
+    # left the operator to guess which column of the batch was bad.
+    error = result.error or ""
+    assert "blocks partial write" in error
+    assert "amount" in error
     bulk.assert_not_called()
 
 
@@ -128,7 +149,17 @@ def test_pinecone_strict_policy_blocks_partial_vectors():
             {"id": "a", "content": "ok", "embedding": [0.1, 0.2, 0.3]},
             {"id": "b", "content": "bad", "embedding": None},
         ]
-        with patch("connectors.pinecone_writer._requests_session") as sess_factory:
+        # The writer reads describe_index_stats before it maps anything (no
+        # payload DDL API, so an unread index is refused rather than bound as
+        # Map VARCHAR). The proof that a partial batch is blocked is therefore
+        # "no upsert was posted", not "no session was opened".
+        session = MagicMock()
+        stats = MagicMock(status_code=200, content=b"{}")
+        stats.json.return_value = {"dimension": 3, "totalVectorCount": 0}
+        session.get.return_value = stats
+        with patch(
+            "connectors.pinecone_writer._requests_session", return_value=session
+        ) as sess_factory:
             result = write_mapped_rows(
                 host="https://example.pinecone.io",
                 port=443,
@@ -149,14 +180,24 @@ def test_pinecone_strict_policy_blocks_partial_vectors():
 
     assert result.ok is False
     assert "strict error policy" in (result.error or "").lower()
-    sess_factory.assert_not_called()
+    assert sess_factory.called
+    session.post.assert_not_called()
 
 
 def test_weaviate_batch_object_errors_fail_strict():
     from connectors.weaviate_writer import write_mapped_rows
 
     session = MagicMock()
+    # The class schema is read before the batch — an unread one is refused, so
+    # the batch-ack path under test needs live property types here.
     schema_ok = MagicMock(status_code=200)
+    schema_ok.json.return_value = {
+        "class": "DataflowChunk",
+        "properties": [
+            {"name": "id", "dataType": ["text"]},
+            {"name": "content", "dataType": ["text"]},
+        ],
+    }
     batch_resp = MagicMock(status_code=200, content=b"[]")
     batch_resp.json.return_value = [
         {"id": "11111111-1111-1111-1111-111111111111", "result": {"status": "SUCCESS"}},

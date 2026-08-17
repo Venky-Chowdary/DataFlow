@@ -75,9 +75,14 @@ def test_refine_with_mock_llm(_mock_avail):
         )
 
     assert meta["llm_used"] is True
-    assert meta["strategy"] == "hybrid_llm_bm25"
+    assert meta["strategy"] == "llm_suggest_deterministic_decide"
+    assert meta.get("llm_decides") is False
     amt = next(m for m in merged if m["source"] == "AMT")
-    assert amt["target"] == "payment_amount"
+    # Baseline target wins — LLM remap is suggestion only (ITEM 1).
+    assert amt["target"] == "amount"
+    assert amt.get("suggested_target") == "payment_amount"
+    assert amt.get("requires_review") is True
+    assert (amt.get("engine_suggestion") or {}).get("target") == "payment_amount"
 
 
 def test_llm_provider_available_does_not_crash():
@@ -156,7 +161,7 @@ def test_ai_never_decides_preflight_gates():
 
 
 def test_pipeline_does_not_reapply_held_llm_transform():
-    """attach_transforms must not infer over an LLM invent hold."""
+    """Deterministic transforms may apply; LLM invent must stay suggested-only."""
     from services.transform_resolver import attach_transforms_to_mappings, resolve_transform
 
     held = {
@@ -168,11 +173,12 @@ def test_pipeline_does_not_reapply_held_llm_transform():
         "suggested_transform": "currency",
         "requires_review": True,
     }
-    assert resolve_transform(held, column_types={"AMT": "VARCHAR"}) == "none"
+    resolved = resolve_transform(held, column_types={"AMT": "VARCHAR"})
+    assert resolved != "currency"
     attached = attach_transforms_to_mappings(
         [held], column_types={"AMT": "VARCHAR"}, dest_types={"amount": "DECIMAL"},
     )
-    assert attached[0]["transform"] == "none"
+    assert attached[0]["transform"] != "currency"
     assert attached[0]["suggested_transform"] == "currency"
     assert attached[0]["llm_invented_transform"] is True
 

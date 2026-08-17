@@ -64,12 +64,12 @@ export const PAGE_META: Record<Screen | "login", PageMeta> = {
   connectors: {
     title: "Connectors",
     description:
-      "Manage sources and destinations — PostgreSQL, MySQL, MongoDB, SQL Server, Oracle, Snowflake, BigQuery, S3, Iceberg, and transfer-ready drivers with honest labels.",
+      "Manage sources and destinations — PostgreSQL, MySQL, MongoDB, SQL Server, Oracle, Snowflake, BigQuery, S3, Iceberg, and the rest of your stack.",
     keywords: "data connectors, PostgreSQL connector, Snowflake connector, S3 connector, database connection",
     robots: "noindex",
   },
   schedules: {
-    title: "Pipelines",
+    title: "Schedules",
     description:
       "Schedule recurring data syncs — hourly, daily, or weekly pipelines with monitoring and failure alerts.",
     keywords: "scheduled data sync, recurring ETL, pipeline scheduler, cron data transfer",
@@ -113,9 +113,9 @@ export const PAGE_META: Record<Screen | "login", PageMeta> = {
   benchmarks: {
     title: "Benchmarks",
     description:
-      "Reproducible scale proofs — Datawrap throughput, memory, and correctness vs Fivetran, Airbyte, and Stitch baselines.",
+      "Reproducible scale proofs — Datawrap throughput, memory, and correctness on named routes and fixtures you can re-run.",
     keywords:
-      "Datawrap benchmark, ETL throughput, data transfer performance, Fivetran vs Airbyte, rows per second",
+      "Datawrap benchmark, ETL throughput, data transfer performance, rows per second",
     robots: "noindex",
   },
   contracts: {

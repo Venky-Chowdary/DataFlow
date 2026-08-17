@@ -92,7 +92,7 @@ def apply_signal_row(
     signal_type: str,
     data: Any,
     default_table: str = "",
-    primary_key: str = "id",
+    primary_key: str = "",
 ) -> dict[str, Any] | None:
     """Map one signal-table row into Datawrap incremental snapshot APIs."""
     from services.cdc_incremental_snapshot import (
@@ -104,10 +104,14 @@ def apply_signal_row(
     stype = str(signal_type or "").strip().lower().replace("_", "-")
     payload = _parse_data(data)
     tables = _collections(payload) or ([default_table] if default_table else [])
-    pk = str(payload.get("primary_key") or payload.get("pk") or primary_key or "id")
     chunk = int(payload.get("chunk_size") or payload.get("chunk-size") or 1000)
 
     if stype in {"execute-snapshot", "incremental", "execute-incremental-snapshot"}:
+        pk = str(payload.get("primary_key") or payload.get("pk") or primary_key or "").strip()
+        if not pk:
+            raise ValueError(
+                "CDC signal primary_key required — refuse inventing default 'id'"
+            )
         created = []
         for table in tables:
             # Strip schema prefix for claim matching (connectors use bare table names).
@@ -144,7 +148,7 @@ def poll_signal_table(
     source_key: str,
     table: str = DEFAULT_TABLE,
     default_table: str = "",
-    primary_key: str = "id",
+    primary_key: str = "",
     processed_ids: set[str] | None = None,
     dialect: str = "postgresql",
     limit: int = 50,

@@ -5,6 +5,7 @@ fastapi>=0.104.0
 uvicorn[standard]>=0.24.0
 python-multipart>=0.0.31
 pydantic>=2.5.0
+pydantic-settings>=2.0.0  # services.config BaseSettings — required for app boot
 eval_type_backport>=0.2.0
 
 # Dataframe / numeric helpers (heavy embedding models are optional — see requirements-rag.txt)
@@ -43,6 +44,7 @@ pyiceberg[pyarrow,sql-sqlite,glue,rest-sigv4,s3fs]>=0.11.1
 fastavro>=1.9.0
 xmltodict>=0.13.0
 pypdf>=4.0.0
+reportlab>=4.2,<5
 python-docx>=1.1.0
 pypdfium2>=4.30.0
 Pillow>=10.0.0
@@ -51,6 +53,7 @@ pytesseract>=0.3.10
 # Security
 cryptography>=42.0.0
 bcrypt>=4.1.0
+defusedxml>=0.7.1  # XXE-safe XML parse for coerce_xml_wire
 python3-saml>=1.16.0,<1.17.0
 xmlsec>=1.3.9,<2.0.0
 

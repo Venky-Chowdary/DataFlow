@@ -7,9 +7,9 @@ import logging
 import os
 from services.brand_env import getenv_brand
 import socket
-import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
+from typing import Any
 
 from services.schedule_store import due_schedules
 
@@ -135,6 +135,62 @@ def _resolve_connector(connector_id: str) -> dict | None:
         return None
 
 
+def _apply_callable_schedule_source(source, sched) -> None:
+    """Stamp CALL/SELECT fields onto the endpoint so the reader is not a table scan."""
+    mode = str(getattr(sched, "source_read_mode", "") or "").strip().lower()
+    call = str(getattr(sched, "procedure_call", "") or "").strip()
+    query = str(getattr(sched, "source_query", "") or "").strip()
+    params = getattr(sched, "procedure_params", None) or {}
+    if mode not in {"procedure", "query"} and not call and not query:
+        return
+    if mode not in {"procedure", "query"}:
+        mode = "procedure" if call else "query"
+    extra = dict(getattr(source, "extra", None) or {})
+    extra["source_read_mode"] = mode
+    if call:
+        extra["procedure_call"] = call
+    if query:
+        extra["source_query"] = query
+    if isinstance(params, dict) and params:
+        extra["procedure_params"] = {str(k): v for k, v in params.items()}
+    source.extra = extra
+
+
+def probe_schedule_source_schema(source) -> dict[str, Any]:
+    """Read the extract shape. CALL/SELECT peeks — never a colliding table."""
+    from services.procedure_source import (
+        close_callable_spool,
+        is_callable_source,
+        read_callable_batch,
+    )
+
+    if is_callable_source(source):
+        from src.transfer.models import endpoint_to_dict
+
+        cfg = endpoint_to_dict(source)
+        try:
+            batch = read_callable_batch(cfg, offset=0, limit=1, peek=True)
+        finally:
+            close_callable_spool()
+        headers = [str(h) for h in (batch.headers or []) if str(h).strip()]
+        meta = getattr(batch, "meta", None) or {}
+        native = meta.get("native_types") if isinstance(meta, dict) else {}
+        schema: dict[str, str] = {}
+        if isinstance(native, dict):
+            schema = {str(k): str(v) for k, v in native.items() if str(k).strip()}
+        for name in headers:
+            schema.setdefault(name, "VARCHAR")
+        return {
+            "schema": schema,
+            "columns": headers or list(schema.keys()),
+            "primary_key_columns": [],
+        }
+
+    from src.transfer.endpoint_intelligence import introspect_endpoint
+
+    return introspect_endpoint(source) or {}
+
+
 def _endpoint_from_connector(conn: dict, table: str):
     from src.transfer.models import EndpointConfig
 
@@ -181,8 +237,12 @@ def build_schedule_request(sched, src: dict, dst: dict):
 
     source = _endpoint_from_connector(src, sched.source_table)
     destination = _endpoint_from_connector(dst, sched.dest_table)
+    _apply_callable_schedule_source(source, sched)
 
     effective_mode = _normalize_sync_mode(sched.sync_mode, sched.primary_key)
+    from services.procedure_source import assert_callable_sync_allowed
+
+    assert_callable_sync_allowed(effective_mode, source)
     stream_contracts = list(sched.stream_contracts or [])
     if not stream_contracts and effective_mode not in ("full_refresh_overwrite", "full_refresh_append"):
         stream_contracts = [{
@@ -196,12 +256,11 @@ def build_schedule_request(sched, src: dict, dst: dict):
             "validation_mode": sched.validation_mode,
         }]
 
-    contract_id = (getattr(sched, "contract_id", None) or "").strip()
-    require_signed = bool(getattr(sched, "require_signed_contract", False))
-    if contract_id or require_signed:
-        from services.schedule_store import assert_signed_contract
+    from services.schedule_store import assert_schedule_run_allowed
 
-        assert_signed_contract(contract_id, require_signed=require_signed)
+    bind = assert_schedule_run_allowed(sched)
+    contract_id = str(bind.get("contract_id") or "").strip()
+    require_signed = bool(bind.get("require_signed_contract", False))
 
     # Fail-closed: open CDC Map-review for this source pauses scheduled runs.
     sync_l = str(getattr(sched, "sync_mode", "") or "").strip().lower()
@@ -254,6 +313,8 @@ def build_schedule_request(sched, src: dict, dst: dict):
         sync_mode=effective_mode,
         schema_policy=schema_policy,
         validation_mode=sched.validation_mode or "strict",
+        delivery_guarantee=getattr(sched, "delivery_guarantee", None)
+        or "at_least_once",
         backfill_new_fields=effective_backfill_new_fields(
             backfill_new_fields=bool(sched.backfill_new_fields),
             schema_policy=schema_policy,
@@ -267,9 +328,104 @@ def build_schedule_request(sched, src: dict, dst: dict):
     )
 
 
+def _guard_source_schema_drift(sched: Any, request: Any) -> None:
+    """Refuse a scheduled run whose source changed shape since the last one.
+
+    Raises ``ValueError`` so the caller records it the same way it records a
+    contract refusal — before a row moves. The damaging drift is the kind that
+    would otherwise succeed: a column that keeps its name and changes type loads
+    cleanly and writes wrong values, and nothing downstream reports an error.
+
+    A source that cannot be introspected is left alone. Refusing a nightly load
+    because a probe timed out is the false alarm that gets the check switched
+    off, and an unread schema is not evidence of a change.
+    """
+    from services.source_schema_memory import evaluate_source_drift
+
+    previous = dict(getattr(sched, "source_schema", None) or {})
+    previous_pk = [
+        str(p).strip()
+        for p in (getattr(sched, "source_primary_key", None) or [])
+        if str(p).strip()
+    ]
+    try:
+        info = probe_schedule_source_schema(request.source) or {}
+    except Exception as exc:
+        logger.info(
+            "Schedule %s source schema probe unavailable: %s",
+            getattr(sched, "id", ""),
+            exc,
+        )
+        return
+    current = {
+        str(k): str(v)
+        for k, v in dict(info.get("schema") or {}).items()
+        if not isinstance(v, (dict, list))
+    }
+    if not current:
+        return
+    current_pk = [
+        str(p).strip()
+        for p in (info.get("primary_key_columns") or [])
+        if str(p).strip()
+    ]
+    cursor = str(getattr(sched, "cursor_column", "") or "").strip()
+
+    verdict = evaluate_source_drift(
+        previous_schema=previous,
+        current_schema=current,
+        current_columns=list(info.get("columns") or current.keys()),
+        mappings=list(getattr(request, "mappings", None) or []),
+        schema_policy=str(getattr(sched, "schema_policy", "") or "manual_review"),
+        dest_db=str(getattr(request.destination, "format", "") or ""),
+        previous_primary_key=previous_pk,
+        current_primary_key=current_pk,
+        cursor_fields=[cursor] if cursor else None,
+    )
+    if verdict.blocks:
+        raise ValueError(
+            f"{verdict.summary} Review the mapping and re-approve, or set "
+            "schema_policy to propagate the change deliberately."
+        )
+    _remember_source_schema(
+        sched, current, verdict.fingerprint, primary_key=current_pk
+    )
+
+
+def _remember_source_schema(
+    sched: Any,
+    schema: dict[str, str],
+    fingerprint: str,
+    *,
+    primary_key: list[str] | None = None,
+) -> None:
+    """Record the shape this run read, so the next one has something to compare."""
+    pk = [str(p).strip() for p in (primary_key or []) if str(p).strip()]
+    same_fp = fingerprint == getattr(sched, "source_schema_fingerprint", "")
+    same_pk = pk == list(getattr(sched, "source_primary_key", None) or [])
+    if not fingerprint or (same_fp and same_pk):
+        return
+    try:
+        from services.schedule_store import update_schedule
+
+        update_schedule(
+            str(getattr(sched, "id", "")),
+            {
+                "source_schema": dict(schema),
+                "source_schema_fingerprint": fingerprint,
+                "source_schema_observed_at": datetime.now(timezone.utc).isoformat(),
+                "source_primary_key": pk,
+            },
+        )
+    except Exception as exc:
+        # Losing the baseline costs a later comparison, never this run.
+        logger.info("Schedule source schema not recorded: %s", exc)
+
+
 def _run_entry(job_id: str, status: str, attempt: int, started_at: datetime, job_doc: dict | None) -> dict:
     doc = job_doc or {}
     finished = datetime.now(timezone.utc)
+    ledger = doc.get("row_accounting") if isinstance(doc.get("row_accounting"), dict) else {}
     return {
         "job_id": job_id,
         "status": status,
@@ -281,6 +437,7 @@ def _run_entry(job_id: str, status: str, attempt: int, started_at: datetime, job
         "rejected_rows": int(doc.get("rejected_rows", 0) or 0),
         "coerced_null_rows": int(doc.get("coerced_null_rows", 0) or 0),
         "error": (doc.get("error") or "")[:500],
+        "row_accounting": dict(ledger),
     }
 
 
@@ -319,15 +476,99 @@ def _notify_schedule(sched, job_id: str, status: str, job_doc: dict | None) -> N
         logger.exception("Failed to send schedule notification for %s", sched.id)
 
 
-_SUCCESS_STATUSES = frozenset({"completed", "completed_with_quarantine", "success"})
-
-
 def _is_success(status: str | None) -> bool:
-    return (status or "") in _SUCCESS_STATUSES
+    # One vocabulary: a local copy drifts from the canonical statuses the engine
+    # actually writes, and a status this set does not know is read as a failure.
+    from services.job_status import is_completed
+
+    return is_completed(status)
 
 
-def _should_retry(status: str | None, attempt: int, max_retries: int) -> bool:
-    return (not _is_success(status)) and attempt < max_retries
+def _retry_decision(
+    status: str | None,
+    attempt: int,
+    max_retries: int,
+    *,
+    sync_mode: str | None = None,
+    rows_committed: int = 0,
+    rows_committed_known: bool = True,
+    job_doc: dict | None = None,
+) -> dict:
+    """Whether to start attempt ``attempt + 1``, and why not when refusing.
+
+    A scheduled retry is a *from-zero* run: it builds a fresh request and reads
+    the source from the beginning. That is safe for a convergent sync mode and
+    for an attempt that committed nothing — but re-running an append that
+    already landed rows writes every one of them again, unattended and at the
+    schedule's cadence, so it is refused with the operator pointed at Resume.
+
+    Safe to retry is not the same as worth retrying. A run refused by a
+    validation gate wrote nothing, so the duplicate check waves it through, and
+    the schedule then replays an identical deterministic verdict until the
+    budget is gone. Those are refused here with the corrective action named.
+    """
+    from services.execution_engine_contract import decide_retry_from_start
+    from services.failure_retry_policy import classify_job_failure
+
+    if _is_success(status):
+        return {"retry": False, "reason": ""}
+    if attempt >= max_retries:
+        return {
+            "retry": False,
+            "reason": f"Retry budget exhausted after {max_retries} attempt(s).",
+        }
+    classification = classify_job_failure(job_doc)
+    if not classification.retryable:
+        reason = classification.reason
+        if classification.corrective_action:
+            reason = f"{reason} {classification.corrective_action}"
+        return {
+            "retry": False,
+            "reason": reason,
+            "failure_class": classification.to_dict(),
+        }
+    decision = decide_retry_from_start(
+        status=status,
+        sync_mode=sync_mode,
+        rows_committed=rows_committed,
+        rows_committed_known=rows_committed_known,
+    )
+    if not decision["allowed"]:
+        return {
+            "retry": False,
+            "reason": decision["reason"],
+            "decision": decision,
+            "failure_class": classification.to_dict(),
+        }
+    return {
+        "retry": True,
+        "reason": "",
+        "decision": decision,
+        "failure_class": classification.to_dict(),
+    }
+
+
+def _should_retry(
+    status: str | None,
+    attempt: int,
+    max_retries: int,
+    *,
+    sync_mode: str | None = None,
+    rows_committed: int = 0,
+    rows_committed_known: bool = True,
+    job_doc: dict | None = None,
+) -> bool:
+    return bool(
+        _retry_decision(
+            status,
+            attempt,
+            max_retries,
+            sync_mode=sync_mode,
+            rows_committed=rows_committed,
+            rows_committed_known=rows_committed_known,
+            job_doc=job_doc,
+        )["retry"]
+    )
 
 
 def _job_doc(job_id: str) -> dict | None:
@@ -339,12 +580,75 @@ def _job_doc(job_id: str) -> dict | None:
         return None
 
 
+def _observe_parallel_run(sched: Any, job_doc: dict | None = None) -> None:
+    """Record one Dual Run cycle after a successful overwrite load.
+
+    Never fails the transfer. Append/incremental dests are not the same
+    population as the source — auto-running would false-diverge every night
+    (the Full Append dest-Δ lesson). On-demand checks still run via the API.
+
+    Column-profile screening runs first; Gate-8 from this job is recorded
+    last so the campaign tail is the snapshot compare (Google Dual Run
+    output identity), not the KPI screen.
+    """
+    from services.continuous_fidelity import (
+        population_comparable,
+        record_gate8_cycle,
+        run_and_record_campaign,
+    )
+
+    if not population_comparable(getattr(sched, "sync_mode", None)):
+        return
+    src = _resolve_connector(sched.source_connector_id)
+    dst = _resolve_connector(sched.dest_connector_id)
+    if not src or not dst:
+        return
+    campaign = dict(getattr(sched, "fidelity_campaign", None) or {})
+    try:
+        request = build_schedule_request(sched, src, dst)
+        _report, campaign = run_and_record_campaign(
+            campaign,
+            source=request.source,
+            destination=request.destination,
+            mappings=list(getattr(request, "mappings", None) or []),
+            workspace_id=str(getattr(sched, "workspace_id", "") or ""),
+        )
+    except Exception as exc:
+        logger.info(
+            "Schedule %s parallel-run profile skipped: %s",
+            getattr(sched, "id", ""),
+            exc,
+        )
+    try:
+        recon = (job_doc or {}).get("reconciliation")
+        campaign = record_gate8_cycle(campaign, recon if isinstance(recon, dict) else None)
+    except Exception as exc:
+        logger.info(
+            "Schedule %s Gate-8 Dual Run cycle skipped: %s",
+            getattr(sched, "id", ""),
+            exc,
+        )
+    try:
+        from services.schedule_store import update_schedule
+
+        update_schedule(
+            str(getattr(sched, "id", "")),
+            {"fidelity_campaign": campaign},
+        )
+    except Exception as exc:
+        logger.info(
+            "Schedule %s parallel-run observation skipped: %s",
+            getattr(sched, "id", ""),
+            exc,
+        )
+
+
 def _finalize_run(schedule_id: str, job_id: str, attempt: int, started_at: datetime) -> None:
     """Handle a finished scheduled run: retry on failure, else record + notify."""
     from services.schedule_store import (
         get_schedule,
         mark_schedule_run,
-        record_run_history,
+        schedule_retry,
     )
 
     sched = get_schedule(schedule_id)
@@ -354,17 +658,39 @@ def _finalize_run(schedule_id: str, job_id: str, attempt: int, started_at: datet
     status = (job_doc or {}).get("status") or "failed"
     entry = _run_entry(job_id, status, attempt, started_at, job_doc)
 
-    if _should_retry(status, attempt, sched.max_retries):
-        record_run_history(schedule_id, {**entry, "retry_scheduled": True})
+    from services.execution_engine_contract import committed_rows_of
+
+    rows_committed, rows_known = committed_rows_of(job_doc)
+    decision = _retry_decision(
+        status,
+        attempt,
+        sched.max_retries,
+        sync_mode=_normalize_sync_mode(sched.sync_mode, sched.primary_key),
+        rows_committed=rows_committed,
+        rows_committed_known=rows_known,
+        job_doc=job_doc,
+    )
+    if not decision["retry"] and decision["reason"] and not _is_success(status):
+        entry["retry_refused"] = decision["reason"]
+    failure_class = decision.get("failure_class")
+    if failure_class and not _is_success(status):
+        entry["failure_class"] = failure_class
+
+    if decision["retry"]:
         delay = max(0, sched.retry_backoff_seconds) * (attempt + 1)
+        retry_at = datetime.now(timezone.utc) + timedelta(seconds=delay)
         logger.warning(
-            "Schedule %s attempt %s failed; retrying in %ss", schedule_id, attempt + 1, delay
+            "Schedule %s attempt %s failed; retrying at %s",
+            schedule_id,
+            attempt + 1,
+            retry_at.isoformat(),
         )
-        timer = threading.Timer(
-            delay, lambda: _dispatch_transfer(schedule_id, attempt=attempt + 1)
+        schedule_retry(
+            schedule_id,
+            retry_at=retry_at,
+            attempt=attempt + 1,
+            run_entry={**entry, "retry_scheduled": True, "retry_at": retry_at.isoformat()},
         )
-        timer.daemon = True
-        timer.start()
         return
 
     cursor_value = None
@@ -373,6 +699,8 @@ def _finalize_run(schedule_id: str, job_id: str, attempt: int, started_at: datet
     mark_schedule_run(
         schedule_id, job_id, status=status, run_entry=entry, cursor_value=cursor_value
     )
+    if _is_success(status):
+        _observe_parallel_run(sched, job_doc)
     _notify_schedule(sched, job_id, status, job_doc)
 
 
@@ -412,6 +740,7 @@ def _dispatch_transfer(schedule_id: str, attempt: int = 0) -> str | None:
 
     try:
         request = build_schedule_request(sched, src, dst)
+        _guard_source_schema_drift(sched, request)
     except ValueError as exc:
         logger.error("Schedule %s blocked by contract policy: %s", schedule_id, exc)
         mark_schedule_run(
@@ -435,6 +764,11 @@ def _dispatch_transfer(schedule_id: str, attempt: int = 0) -> str | None:
     engine = get_transfer_engine()
     job_id = engine._create_pending_job(request)
     started_at = datetime.now(timezone.utc)
+    from services.schedule_store import set_running_job
+
+    # Bind the claim to this job so a long migration keeps it and a crashed one
+    # gives it back, instead of both being judged by the same wall clock.
+    set_running_job(schedule_id, job_id)
     future = run_transfer_async(job_id, request)
     future.add_done_callback(
         lambda _f, sid=schedule_id, jid=job_id, a=attempt, ts=started_at: _finalize_run(sid, jid, a, ts)
@@ -460,7 +794,9 @@ def _run_schedule(schedule_id: str) -> str | None:
         logger.info("Schedule %s skipped — a run is already in progress", schedule_id)
         return None
 
-    job_id = _dispatch_transfer(schedule_id, attempt=0)
+    # A parked retry resumes its own attempt count; the budget is per run, not
+    # per beat, or a schedule that fails every time retries forever.
+    job_id = _dispatch_transfer(schedule_id, attempt=sched.retry_attempt if sched.retry_at else 0)
     if job_id is None:
         # Fail-closed paths (missing connector / contract) already call
         # mark_schedule_run which clears ``running``. Belt-and-suspenders clear.

@@ -112,7 +112,7 @@ def test_poll_yields_insert_update_delete(base_cfg: dict) -> None:
     client = MagicMock()
     client.__getitem__ = MagicMock(return_value=db)
 
-    with patch("connectors.mongodb_change_stream._mongo_client", return_value=client):
+    with patch("connectors.mongodb_change_stream._new_mongo_client", return_value=client):
         reader = MongodbChangeStreamCdc(
             base_cfg,
             collection="orders",

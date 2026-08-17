@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from typing import Any
 
 from connectors.mongodb_common import (
@@ -21,6 +22,9 @@ from services.value_serializer import sanitize_json_value
 router = APIRouter(prefix="/query", tags=["query"])
 
 _MAX_ROWS = 10_000
+# Rows sampled for result-set type inference. Bounded so a 10k-row preview
+# does not pay a full scan just to label columns.
+_TYPE_SAMPLE_ROWS = 200
 _READ_ONLY_SQL_PATTERN = re.compile(r"^\s*SELECT\s+", re.IGNORECASE)
 
 _MONGODB_WRITE_STAGES = {"$out", "$merge"}
@@ -154,6 +158,50 @@ class QueryResult(BaseModel):
     column_schema: dict[str, str]
     row_count: int
     truncated: bool
+    # Server-side wall clock for the query itself, so the console reports
+    # engine time rather than round-trip time.
+    duration_ms: float = 0.0
+    # How ``column_schema`` was derived. Result-set types are inferred from the
+    # returned values, NOT read from the source DDL — a console must not imply
+    # it is showing declared types. Transfer Studio's introspect path is the
+    # authority for DDL identity.
+    column_type_source: str = "inferred_from_values"
+
+
+class QuerySchemaRequest(BaseModel):
+    connector_id: str = Field(..., description="Saved connector id to introspect")
+    database: str = Field("", description="Database/namespace override")
+    schema_name: str = Field("", description="Schema override")
+    object_name: str = Field("", description="Optional single table/collection to expand")
+
+
+class QuerySchemaColumn(BaseModel):
+    name: str
+    type: str = ""
+    nullable: bool | None = None
+    primary_key: bool = False
+
+
+class QuerySchemaObject(BaseModel):
+    name: str
+    type: str = "table"
+    schema_name: str = ""
+    columns: list[QuerySchemaColumn] = Field(default_factory=list)
+    row_estimate: int = 0
+
+
+class QuerySchemaResult(BaseModel):
+    connected: bool
+    connector_type: str = ""
+    database: str = ""
+    objects: list[QuerySchemaObject] = Field(default_factory=list)
+    message: str = ""
+    warnings: list[str] = Field(default_factory=list)
+    # Whatever the connector's own introspection reported. Deliberately not
+    # called "ddl": catalog-backed engines return declared types, while
+    # dynamically typed sources (SQLite, Mongo, CSV) return value-inferred
+    # ones, and this endpoint must not present the second as the first.
+    type_source: str = "connector_introspection"
 
 
 class QueryExportResult(BaseModel):
@@ -197,6 +245,7 @@ async def query_execute(
     if not connector:
         raise HTTPException(status_code=404, detail="Connector not found")
 
+    started = time.perf_counter()
     try:
         rows, columns, schema, truncated = _run_query(connector, body)
         return QueryResult(
@@ -204,7 +253,10 @@ async def query_execute(
             rows=rows,
             column_schema=schema,
             row_count=len(rows),
-            truncated=truncated,
+            # A full page of rows means the limit may have cut the result short;
+            # say so rather than implying the operator saw everything.
+            truncated=truncated or len(rows) >= body.limit,
+            duration_ms=round((time.perf_counter() - started) * 1000, 3),
         )
     except HTTPException:
         raise
@@ -282,6 +334,129 @@ async def query_export(
         )
     except Exception as e:
         return QueryExportResult(success=False, error=str(e), format=body.format)
+
+
+@router.post("/schema", response_model=QuerySchemaResult)
+async def query_schema(
+    body: QuerySchemaRequest,
+    request: Request,
+    x_workspace_id: str | None = Header(None, alias="X-Workspace-Id"),
+):
+    """List queryable objects for a connector, and columns for one object.
+
+    Backs the console's schema browser and schema-aware autocomplete. Reuses
+    the transfer engine's ``introspect_endpoint`` rather than adding a second
+    introspection path, so the console sees exactly the objects and native
+    types Transfer Studio sees.
+
+    Two-phase by design: an unqualified call lists objects only, and columns
+    are fetched per object on expand. Listing columns for every table up front
+    is what makes schema browsers unusable on large estates.
+    """
+    workspace_id = x_workspace_id or ""
+    _check_workspace_read(request, workspace_id)
+
+    from services.connector_probe import endpoint_from_saved_connector
+
+    endpoint = endpoint_from_saved_connector(
+        body.connector_id,
+        table=body.object_name,
+        collection=body.object_name,
+        schema=body.schema_name,
+        database=body.database,
+        workspace_id=workspace_id,
+    )
+    if endpoint is None:
+        raise HTTPException(status_code=404, detail="Connector not found")
+
+    from src.transfer.endpoint_intelligence import introspect_endpoint
+
+    endpoint.extra = {**(endpoint.extra or {}), "introspect_purpose": "source"}
+    try:
+        info = introspect_endpoint(endpoint)
+    except Exception as exc:
+        logging.getLogger(__name__).warning(
+            "Query schema introspection failed for %s: %s", body.connector_id, exc
+        )
+        raise HTTPException(
+            status_code=400, detail=f"Schema introspection failed: {exc}"
+        ) from exc
+
+    col_types: dict[str, str] = dict(info.get("schema") or {})
+    col_names: list[str] = list(info.get("columns") or [])
+    # Nullability and keys are already loaded by introspect_endpoint; dropping
+    # them would force the browser into a second round trip for data it has.
+    col_nulls: dict[str, Any] = dict(info.get("schema_nullability") or {})
+    pk_cols = {
+        str(c).lower() for c in (info.get("primary_key_columns") or []) if c
+    }
+    expanded: list[QuerySchemaColumn] = [
+        QuerySchemaColumn(
+            name=name,
+            type=str(col_types.get(name) or ""),
+            # Absent nullability stays None — "unknown", never a cheerful
+            # nullable=True the catalog never said.
+            nullable=(
+                bool(col_nulls[name]) if name in col_nulls else None
+            ),
+            primary_key=name.lower() in pk_cols,
+        )
+        for name in col_names
+    ]
+
+    objects: list[QuerySchemaObject] = []
+    for obj in info.get("objects") or []:
+        if not isinstance(obj, dict):
+            continue
+        name = str(obj.get("name") or "")
+        if not name:
+            continue
+        is_target = bool(body.object_name) and _object_matches(name, body.object_name)
+        objects.append(
+            QuerySchemaObject(
+                name=name,
+                type=str(obj.get("type") or "table"),
+                schema_name=body.schema_name or endpoint.schema or "",
+                # Columns only ever attach to the object that was asked for.
+                columns=expanded if is_target else [],
+                row_estimate=int(info.get("row_estimate") or 0) if is_target else 0,
+            )
+        )
+
+    # A requested object that the connector does not list (e.g. a Mongo
+    # collection created outside the sampled namespace) still returns its
+    # columns rather than silently vanishing from the browser.
+    if body.object_name and expanded and not any(o.columns for o in objects):
+        objects.append(
+            QuerySchemaObject(
+                name=body.object_name,
+                type="table",
+                schema_name=body.schema_name or endpoint.schema or "",
+                columns=expanded,
+            )
+        )
+
+    return QuerySchemaResult(
+        connected=bool(info.get("connected")),
+        connector_type=str(info.get("format") or ""),
+        database=body.database or endpoint.database or "",
+        objects=objects,
+        message=str(info.get("message") or ""),
+        # Advisory-key honesty notes (BigQuery/Redshift/Snowflake do not
+        # enforce PKs) must reach the console, not die at the adapter edge.
+        warnings=[str(w) for w in (info.get("warnings") or []) if w],
+    )
+
+
+def _object_matches(listed: str, requested: str) -> bool:
+    """Compare object names ignoring case and schema qualification.
+
+    Introspection may list ``public.jobs`` while the browser asked for
+    ``jobs`` (or the reverse), and Snowflake upper-cases everything.
+    """
+    a = listed.strip().strip('"').lower()
+    b = requested.strip().strip('"').lower()
+    return a == b or a.split(".")[-1] == b.split(".")[-1]
 
 
 def _export_to_connector(
@@ -434,13 +609,48 @@ def _normalize_rows(rows: list[dict]) -> tuple[list[dict], list[str], dict[str, 
     cleaned = []
     for r in rows:
         cleaned.append({k: _jsonify_value(r.get(k)) for k in keys})
-    schema = {k: "string" for k in keys}
-    return cleaned, keys, schema, False
+    return cleaned, keys, _column_schema(keys, cleaned), False
 
 
 def _jsonify_value(value: Any) -> Any:
     """Return a JSON-safe Python value (no Python repr() artifacts)."""
-    return sanitize_json_value(value)
+    # Query display: null placeholder for NA/NaN is OK — write paths refuse.
+    return sanitize_json_value(value, refuse_nonfinite=False)
+
+
+def _column_schema(columns: list[str], rows: list[dict[str, Any]]) -> dict[str, str]:
+    """Infer a canonical logical type per result column from returned values.
+
+    Routes through ``schema_inference.infer_schema_map`` — the single choke
+    point every other introspect path uses — so the console reports the same
+    logical vocabulary as Map/Validate instead of labelling every column
+    ``string``. This is inference over the result set, not the source DDL:
+    callers surface it as such via ``QueryResult.column_type_source``.
+
+    Inference never fails a query; if it raises, columns fall back to
+    ``unknown`` rather than losing the rows the operator asked for.
+    """
+    if not columns:
+        return {}
+    if not rows:
+        return {c: "unknown" for c in columns}
+    try:
+        from services.schema_inference import infer_schema_map
+
+        samples_by_field = {
+            c: [
+                "" if r.get(c) is None else str(r.get(c))
+                for r in rows[:_TYPE_SAMPLE_ROWS]
+            ]
+            for c in columns
+        }
+        schema, _intel = infer_schema_map(samples_by_field)
+        return {c: str(schema.get(c) or "unknown") for c in columns}
+    except Exception as exc:
+        logging.getLogger(__name__).warning(
+            "Result-set type inference failed; reporting unknown: %s", exc
+        )
+        return {c: "unknown" for c in columns}
 
 
 def _build_mongodb_connection_string(connector) -> str:
@@ -516,8 +726,7 @@ def _run_sql_query(connector, body):
                 if i >= body.limit:
                     break
                 rows.append({columns[j]: _jsonify_value(v) for j, v in enumerate(row)})
-        schema = {c: "string" for c in columns}
-        return rows, columns, schema, False
+        return rows, columns, _column_schema(columns, rows), False
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Query failed: {exc}") from exc
 
@@ -534,33 +743,36 @@ def _run_snowflake_query(connector, body):
     if not _is_safe_sql(raw_query):
         raise HTTPException(status_code=400, detail="Only safe read/metadata queries are allowed in the playground")
 
-    try:
-        import snowflake.connector
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Snowflake driver unavailable: {exc}") from exc
+    from connectors.snowflake_conn import classify_snowflake_connect_error, get_connection
+    from services.connector_auth import engine_login_role
 
-    account = connector.host or connector.connection_string or ""
-    # Strip the well-known domain suffix if the user entered the full host.
-    if account.endswith(".snowflakecomputing.com"):
-        account = account[: -len(".snowflakecomputing.com")]
     database = body.database or connector.database or ""
     schema = connector.schema or "PUBLIC"
     warehouse = connector.warehouse or ""
-    role = getattr(connector, "auth_role", "")
 
     conn = None
     try:
-        conn = snowflake.connector.connect(
-            account=account,
-            user=connector.username or "",
+        conn = get_connection(
+            account=connector.host or "",
+            username=connector.username or "",
             password=connector.password or "",
             database=database,
             schema=schema,
             warehouse=warehouse,
-            role=role or None,
+            connection_string=getattr(connector, "connection_string", "") or "",
+            role=engine_login_role(
+                getattr(connector, "auth_role", ""),
+                getattr(connector, "role", ""),
+            ),
+            private_key=getattr(connector, "private_key", "") or "",
+            private_key_passphrase=connector.password or "",
         )
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"Could not connect to Snowflake: {exc}") from exc
+        classified = classify_snowflake_connect_error(str(exc))
+        raise HTTPException(
+            status_code=400,
+            detail=f"Could not connect to Snowflake: {classified or exc}",
+        ) from exc
 
     try:
         clean_query = raw_query.rstrip(";")
@@ -588,8 +800,7 @@ def _run_snowflake_query(connector, body):
                 if i >= body.limit:
                     break
                 rows.append({columns[j]: _jsonify_value(v) for j, v in enumerate(row)})
-        schema = {c: "string" for c in columns}
-        return rows, columns, schema, False
+        return rows, columns, _column_schema(columns, rows), False
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Query failed: {exc}") from exc
     finally:

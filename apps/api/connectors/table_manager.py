@@ -13,6 +13,35 @@ from connectors.mongodb_common import (
 
 logger = logging.getLogger(__name__)
 
+# Destinations whose DELETE / LSN fetch go through SQLAlchemy generic_sql.
+# Membership is dialect family (Azure SQL ≡ SQL Server, RDS Oracle ≡ Oracle),
+# not a catalog-id allow-list that leftover MERGE can miss.
+_GENERIC_SQL_MUTATE_ENGINES = frozenset(
+    {
+        "generic_sql",
+        "snowflake",
+        "bigquery",
+        "duckdb",
+        "databricks",
+    }
+)
+
+
+def _generic_sql_cfg(cfg: dict[str, Any], dt: str) -> dict[str, Any]:
+    """Engine builder reads ``type``; catalog ``mssql`` quotes as sqlserver."""
+    out = {**cfg, "db_type": "sqlserver" if dt == "mssql" else dt}
+    if not str(out.get("type") or "").strip():
+        out["type"] = out["db_type"]
+    return out
+
+
+def _routes_generic_sql_mutate(dt: str) -> bool:
+    from services.dialect_profiles import warehouse_sql_quote_dialect
+
+    if dt in _GENERIC_SQL_MUTATE_ENGINES:
+        return True
+    return warehouse_sql_quote_dialect(dt) is not None
+
 
 def _sqlite_path_from_cfg(cfg: dict[str, Any]) -> str:
     """Resolve a SQLite filesystem path from endpoint config.
@@ -96,6 +125,13 @@ def drop_table(
         return _drop_mongodb(cfg, table_name, schema)
     if dt == "snowflake":
         return _drop_snowflake(cfg, table_name, schema)
+    if dt == "clickhouse":
+        return _drop_clickhouse(cfg, table_name, schema)
+    if _routes_generic_sql_mutate(dt):
+        # Oracle / SQL Server / BigQuery / DuckDB / Databricks: overwrite
+        # must DROP, not leftover-MERGE after insert-append (duplicate PKs
+        # make unique ≠ COUNT and leftover MERGE refuses).
+        return _drop_generic_sql(_generic_sql_cfg(cfg, dt), table_name, schema)
     return False
 
 
@@ -161,7 +197,7 @@ def _drop_snowflake(cfg: dict[str, Any], table_name: str, schema: str | None) ->
 
 
 def _drop_mysql(cfg: dict[str, Any], table_name: str, schema: str | None) -> bool:
-    from connectors.mysql_conn import get_connection
+    from connectors.mysql_conn import enable_autocommit, get_connection
 
     try:
         # DDL purpose: short lock wait so full_refresh overwrite cannot hang a
@@ -176,7 +212,7 @@ def _drop_mysql(cfg: dict[str, Any], table_name: str, schema: str | None) -> boo
             ssl=bool(cfg.get("ssl")),
             purpose="ddl",
         )
-        conn.autocommit = True
+        enable_autocommit(conn)
         with conn.cursor() as cur:
             cur.execute(f"DROP TABLE IF EXISTS `{table_name}`")
         conn.close()
@@ -208,6 +244,31 @@ def _drop_generic_sql(cfg: dict[str, Any], table_name: str, schema: str | None) 
         return generic_sql.drop_table(cfg, table_name, schema)
     except Exception as exc:
         raise TableDropError(table_name, exc) from exc
+
+
+def _drop_clickhouse(cfg: dict[str, Any], table_name: str, schema: str | None) -> bool:
+    """Overwrite DROP — leftover MERGE cannot undo insert-append duplicates."""
+    import sqlalchemy as sa
+    from connectors.generic_sql import get_sqlalchemy_engine
+    from connectors.sql_identifiers import quote_table_ref
+    from services.engine_pool import release_engine
+
+    sch = (schema or cfg.get("schema") or "").strip() or None
+    table_ref = quote_table_ref(table_name, sch, dialect="clickhouse")
+    engine_cfg = {**cfg, "type": cfg.get("type") or "clickhouse"}
+    engine = get_sqlalchemy_engine(engine_cfg)
+    try:
+        with engine.connect() as conn:
+            conn.execute(sa.text(f"DROP TABLE IF EXISTS {table_ref}"))  # nosec B608
+            try:
+                conn.commit()
+            except Exception:
+                pass
+        return True
+    except Exception as exc:
+        raise TableDropError(table_name, exc) from exc
+    finally:
+        release_engine(engine)
 
 
 def _drop_mongodb(cfg: dict[str, Any], table_name: str, schema: str | None) -> bool:
@@ -275,7 +336,7 @@ def delete_by_primary_keys(
         return _iceberg_delete(
             cfg,
             table_name,
-            pk_col if isinstance(pk_col, str) else ",".join(pk_cols),
+            pk_cols,
             list(keys),
             schema=schema,
             incoming_lsn=incoming_lsn,
@@ -322,28 +383,14 @@ def delete_by_primary_keys(
         return _delete_generic_sql(cfg, table_name, pk_cols[0], work_keys, schema)
     if dt == "mongodb":
         return _delete_mongodb(cfg, table_name, pk_cols[0], work_keys)
-    if dt in {
-        "sqlserver",
-        "mssql",
-        "oracle",
-        "oracle_db",
-        "oracle_autonomous_warehouse",
-        "snowflake",
-        "bigquery",
-        "duckdb",
-        "databricks",
-        "synapse_analytics",
-        "azure_sql_database",
-        "amazon_rds_sql_server",
-        "google_cloud_sql_sql_server",
-        "azure_synapse_dedicated",
-        "azure_synapse_serverless",
-    }:
+    if dt == "clickhouse":
+        return _delete_clickhouse(cfg, table_name, pk_cols, work_keys, schema)
+    if _routes_generic_sql_mutate(dt):
         # Route warehouse/SQL dialects through the generic SQLAlchemy deleter.
         from connectors.generic_sql import delete_by_primary_keys as _generic_delete
 
         return _generic_delete(
-            {**cfg, "db_type": dt if dt != "mssql" else "sqlserver"},
+            _generic_sql_cfg(cfg, dt),
             table_name,
             pk_cols[0],
             work_keys,
@@ -434,30 +481,10 @@ def _fetch_pk_lsn_map(
         finally:
             conn.close()
         return existing
-    if dt in {
-        "generic_sql",
-        "sqlserver",
-        "mssql",
-        "oracle",
-        "snowflake",
-        "bigquery",
-        "sqlite",
-        "duckdb",
-        "databricks",
-        "synapse_analytics",
-        "azure_sql_database",
-        "amazon_rds_sql_server",
-        "google_cloud_sql_sql_server",
-        "azure_synapse_dedicated",
-        "azure_synapse_serverless",
-        "oracle_db",
-        "oracle_autonomous_warehouse",
-    }:
+    if dt == "sqlite" or _routes_generic_sql_mutate(dt):
         from connectors.generic_sql import fetch_pk_lsn_map
 
-        sa_cfg = {**cfg, "db_type": dt if dt != "mssql" else "sqlserver"}
-        if "type" not in sa_cfg:
-            sa_cfg["type"] = sa_cfg.get("db_type") or dt
+        sa_cfg = _generic_sql_cfg(cfg, dt)
         return fetch_pk_lsn_map(
             sa_cfg,
             table_name,
@@ -718,24 +745,11 @@ def _delete_composite(
         return _delete_mysql_composite(cfg, table_name, pk_cols, tuples, schema)
     if dt == "sqlite":
         return _delete_sqlite_composite(cfg, table_name, pk_cols, tuples, schema)
-    if dt in {
-        "generic_sql",
-        "sqlserver",
-        "mssql",
-        "oracle",
-        "snowflake",
-        "bigquery",
-        "duckdb",
-        "databricks",
-        "synapse_analytics",
-        "azure_sql_database",
-        "amazon_rds_sql_server",
-        "google_cloud_sql_sql_server",
-        "azure_synapse_dedicated",
-        "azure_synapse_serverless",
-    }:
+    if dt == "clickhouse":
+        return _delete_clickhouse(cfg, table_name, pk_cols, keys, schema)
+    if _routes_generic_sql_mutate(dt):
         return _delete_generic_sql_composite(
-            {**cfg, "db_type": dt if dt != "mssql" else "sqlserver"},
+            _generic_sql_cfg(cfg, dt),
             table_name,
             pk_cols,
             tuples,
@@ -819,7 +833,7 @@ def _delete_mysql_composite(
     tuples: list[tuple[Any, ...]],
     schema: str | None,
 ) -> int:
-    from connectors.mysql_conn import get_connection
+    from connectors.mysql_conn import enable_autocommit, get_connection
 
     try:
         conn = get_connection(
@@ -831,7 +845,7 @@ def _delete_mysql_composite(
             connection_string=cfg.get("connection_string", ""),
             ssl=bool(cfg.get("ssl")),
         )
-        conn.autocommit = True
+        enable_autocommit(conn)
         where, _ = _composite_or_and_clause(
             pk_cols, len(tuples), quote_char="`", placeholder="%s"
         )
@@ -842,6 +856,7 @@ def _delete_mysql_composite(
                 binds,
             )
             deleted = cur.rowcount
+        conn.commit()
         conn.close()
         return deleted
     except Exception as exc:
@@ -955,7 +970,7 @@ def _delete_postgresql(cfg: dict[str, Any], table_name: str, pk_col: str, keys: 
 
 
 def _delete_mysql(cfg: dict[str, Any], table_name: str, pk_col: str, keys: list[str], schema: str | None) -> int:
-    from connectors.mysql_conn import get_connection
+    from connectors.mysql_conn import enable_autocommit, get_connection
 
     try:
         conn = get_connection(
@@ -967,11 +982,12 @@ def _delete_mysql(cfg: dict[str, Any], table_name: str, pk_col: str, keys: list[
             connection_string=cfg.get("connection_string", ""),
             ssl=bool(cfg.get("ssl")),
         )
-        conn.autocommit = True
+        enable_autocommit(conn)
         placeholders = ",".join(["%s"] * len(keys))
         with conn.cursor() as cur:
             cur.execute(f"DELETE FROM `{table_name}` WHERE `{pk_col}` IN ({placeholders})", keys)  # nosec B608
             deleted = cur.rowcount
+        conn.commit()
         conn.close()
         return deleted
     except Exception as exc:
@@ -1025,7 +1041,104 @@ def _delete_mongodb(cfg: dict[str, Any], table_name: str, pk_col: str, keys: lis
         )
         client = _mongo_client(conn_str)
         db_name = cfg.get("database") or mongodb_database_from_uri(conn_str) or "test"
-        result = client[db_name][table_name].delete_many({pk_col: {"$in": keys}})
+        coll = client[db_name][table_name]
+        bound = _mongo_bind_keys(coll, pk_col, keys)
+        result = coll.delete_many({pk_col: {"$in": bound}})
         return result.deleted_count
     except Exception as exc:
         raise DestinationDeleteError(table_name, exc) from exc
+
+
+def _mongo_bind_keys(coll: Any, pk_col: str, keys: list[str]) -> list[Any]:
+    """Bind leftover/CDC keys to the collection's stored PK type.
+
+    Digit strings against ObjectId hex stay ObjectId. Digit strings against
+    int stay int. String PKs stay strings — same Iceberg leftover typing.
+    """
+    sample = None
+    try:
+        doc = coll.find_one({pk_col: {"$exists": True}}, {pk_col: 1})
+        if isinstance(doc, dict):
+            sample = doc.get(pk_col)
+    except Exception:
+        sample = None
+    out: list[Any] = []
+    for raw in keys:
+        out.append(_mongo_typed_key(raw, sample))
+    return out
+
+
+def _mongo_typed_key(raw: Any, sample: Any) -> Any:
+    text = str(raw)
+    if sample is None:
+        return raw
+    type_name = type(sample).__name__
+    if type_name == "ObjectId":
+        from bson import ObjectId
+
+        return ObjectId(text)
+    if isinstance(sample, bool):
+        return text.strip().lower() in {"1", "true", "t", "yes"}
+    if isinstance(sample, int) and not isinstance(sample, bool):
+        return int(text)
+    if isinstance(sample, float):
+        return float(text)
+    return text
+
+
+def _delete_clickhouse(
+    cfg: dict[str, Any],
+    table_name: str,
+    pk_cols: list[str],
+    keys: list[str],
+    schema: str | None,
+) -> int:
+    """Leftover MERGE delete: ALTER DELETE + wait until COUNT(*) FINAL can see it.
+
+    ClickHouse mutations are async. Stamping leftover_deleted before
+    ``SYSTEM WAIT MUTATIONS`` would claim extra=0 while FINAL still holds
+    the leftover row. Wait failure is fail-closed, not leftover_deleted=0.
+    """
+    import sqlalchemy as sa
+    from connectors.generic_sql import get_sqlalchemy_engine
+    from connectors.sql_identifiers import quote_sql_identifier, quote_table_ref
+    from services.engine_pool import release_engine
+    from services.row_conservation import coerce_pk_part, parse_delete_keys
+
+    sch = (schema or cfg.get("schema") or "").strip() or None
+    table_ref = quote_table_ref(table_name, sch, dialect="clickhouse")
+    quoted = [quote_sql_identifier(c, "`") for c in pk_cols]
+    tuples = parse_delete_keys(keys, len(pk_cols))
+    if not tuples:
+        return 0
+    clauses: list[str] = []
+    params: dict[str, Any] = {}
+    for i, tup in enumerate(tuples):
+        parts: list[str] = []
+        for j, col in enumerate(quoted):
+            name = f"k{i}_{j}"
+            parts.append(f"{col} = :{name}")
+            params[name] = coerce_pk_part(tup[j])
+        clauses.append("(" + " AND ".join(parts) + ")")
+    where_sql = " OR ".join(clauses)
+    mutate = f"ALTER TABLE {table_ref} DELETE WHERE {where_sql}"  # nosec B608
+    engine_cfg = {**cfg, "type": cfg.get("type") or "clickhouse"}
+    engine = get_sqlalchemy_engine(engine_cfg)
+    try:
+        with engine.connect() as conn:
+            conn.execute(sa.text(mutate), params)
+            try:
+                conn.execute(sa.text("SYSTEM WAIT MUTATIONS"))
+            except Exception as wait_exc:
+                raise DestinationDeleteError(table_name, wait_exc) from wait_exc
+            try:
+                conn.commit()
+            except Exception:
+                pass
+        return len(tuples)
+    except DestinationDeleteError:
+        raise
+    except Exception as exc:
+        raise DestinationDeleteError(table_name, exc) from exc
+    finally:
+        release_engine(engine)

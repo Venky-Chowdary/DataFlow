@@ -5,6 +5,11 @@ import { FilterTabs } from "../ui/FilterTabs";
 import { DtIcon } from "../DtIcon";
 import type { StreamFieldContract } from "../../lib/streamContracts";
 import { resolveStreamFields } from "../../lib/streamContracts";
+import {
+  CURSOR_SEMANTICS,
+  CURSOR_SEMANTICS_LABELS,
+  evaluateCursorSemantics,
+} from "../../lib/cursorSemantics";
 
 export type DestSyncMode =
   | "full_refresh_overwrite"
@@ -75,6 +80,8 @@ interface DestinationAdvancedDrawerProps {
   /** Shared fallbacks when a stream has no override yet. */
   defaultCursor: string;
   defaultPrimaryKey: string;
+  /** Declared cursor meaning shared by streams without an override. */
+  defaultCursorSemantics?: string;
   sourceColumns: string[];
   sourceSchema: Record<string, string>;
   /** Per-stream columns when multi-stream schemas diverge. */
@@ -91,6 +98,7 @@ interface DestinationAdvancedDrawerProps {
   onDateLocaleChange: (locale: DestDateLocale) => void;
   onBackfillChange: (value: boolean) => void;
   onStreamCursorChange: (stream: string, value: string) => void;
+  onStreamCursorSemanticsChange: (stream: string, value: string) => void;
   onStreamPrimaryKeyChange: (stream: string, value: string) => void;
   /** Heuristic suggestions for empty cursor / PK selects. */
   suggestedCursor?: string;
@@ -110,6 +118,11 @@ interface DestinationAdvancedDrawerProps {
   onPriorityColumnChange?: (value: string) => void;
   onPriorityDirectionChange?: (value: "asc" | "desc") => void;
   onRowLimitChange?: (value: number) => void;
+  /** CDC dest-owned watermark EOS (opt-in). Default at_least_once. */
+  deliveryGuarantee?: "at_least_once" | "exactly_once";
+  onDeliveryGuaranteeChange?: (value: "at_least_once" | "exactly_once") => void;
+  /** True when the destination writer can share one dest transaction. */
+  exactlyOnceWired?: boolean;
   /** CDC → append-only dest opt-in (duplicates on redelivery). */
   allowAppendOnly?: boolean;
   onAllowAppendOnlyChange?: (value: boolean) => void;
@@ -188,6 +201,7 @@ export function DestinationAdvancedDrawer({
   streamFields,
   defaultCursor,
   defaultPrimaryKey,
+  defaultCursorSemantics = "",
   sourceColumns,
   sourceSchema,
   sourceColumnsByStream = {},
@@ -203,6 +217,7 @@ export function DestinationAdvancedDrawer({
   onDateLocaleChange,
   onBackfillChange,
   onStreamCursorChange,
+  onStreamCursorSemanticsChange,
   onStreamPrimaryKeyChange,
   suggestedCursor = "",
   suggestedPrimaryKey = "",
@@ -216,6 +231,9 @@ export function DestinationAdvancedDrawer({
   onPriorityColumnChange,
   onPriorityDirectionChange,
   onRowLimitChange,
+  deliveryGuarantee = "at_least_once",
+  onDeliveryGuaranteeChange,
+  exactlyOnceWired = false,
   allowAppendOnly = false,
   onAllowAppendOnlyChange,
   multiSubnetFailover = false,
@@ -289,16 +307,39 @@ export function DestinationAdvancedDrawer({
             <strong>{activeMode.label}</strong>
             <p>{activeMode.detail}</p>
             {syncMode === "full_refresh_overwrite" && (
-              <p className="is-warn">Replaces destination rows — existing data is dropped before load.</p>
+              <p className="is-warn">Replaces destination rows — existing data is dropped before load. Do not use when you need to keep rows already in the table.</p>
             )}
             {syncMode === "full_refresh_append" && (
-              <p>Keeps existing destination rows and inserts the full snapshot again.</p>
+              <p>
+                <strong>Load more into an existing table:</strong> keeps every destination row and
+                inserts the full source snapshot again (100k existing + 100k file → 200k). Duplicate
+                primary keys will fail or quarantine — use Incremental deduped / Upsert when keys
+                may collide.
+              </p>
+            )}
+            {syncMode === "incremental_append" && (
+              <p>
+                Requires a <strong>cursor column</strong> (e.g. updated_at / id). Only rows newer than
+                the last watermark are inserted. Without a cursor, Validate blocks — pick Full append
+                to reload the whole file into an existing table.
+              </p>
+            )}
+            {syncMode === "incremental_deduped" && (
+              <p>
+                Cursor + <strong>primary key</strong> upserts: new keys insert, existing keys update.
+                Best when the destination table already has data and the source re-sends changed rows.
+              </p>
             )}
             {syncMode === "cdc" && (
               <p>Change delivery is <strong>at-least-once upsert</strong>. Exactly-once and at-most-once are not claimed.</p>
             )}
             {syncMode === "mirror" && (
-              <p>Missing source keys are soft-deleted on the destination (not hard-deleted).</p>
+              <p>
+                Missing source keys are <strong>soft-deleted</strong> on the destination
+                (<code>_deleted</code>), not hard-deleted. Physical <code>COUNT(*)</code> stays;
+                the conservation identity is dest-engine <code>COUNT(*) WHERE NOT _deleted</code>.
+                Writer acknowledgement is not active population.
+              </p>
             )}
           </aside>
         )}
@@ -410,16 +451,41 @@ export function DestinationAdvancedDrawer({
               <option value="initial_only">initial_only — snapshot then stop</option>
               <option value="when_needed">when_needed — snapshot if resume missing/broken</option>
             </select>
+            <label className="df2-label" htmlFor="df2-adv-delivery" style={{ marginTop: "0.75rem" }}>
+              CDC delivery guarantee
+            </label>
+            <select
+              id="df2-adv-delivery"
+              className="df2-input df2-select"
+              value={deliveryGuarantee}
+              onChange={(e) => {
+                const next = e.target.value === "exactly_once" ? "exactly_once" : "at_least_once";
+                onDeliveryGuaranteeChange?.(next);
+                if (next === "exactly_once" && allowAppendOnly) {
+                  onAllowAppendOnlyChange?.(false);
+                }
+              }}
+              disabled={!onDeliveryGuaranteeChange}
+            >
+              <option value="at_least_once">at_least_once — default upsert (PK + _df_lsn)</option>
+              <option value="exactly_once">
+                exactly_once — dest-owned watermark + shared-log bundle (opt-in)
+              </option>
+            </select>
             <small className="df2-label-hint">
-              Delivery guarantee is fixed to <strong>at_least_once</strong> (API field{" "}
-              <code>delivery_guarantee</code>). Exactly-once and at-most-once are refused.
-              Prefer PK upsert / <code>_df_lsn</code> guards — append-only opt-in below allows duplicates on redelivery.
+              Default stays <strong>at_least_once</strong>. Exactly-once commits apply and a dest
+              watermark in one transaction
+              {exactlyOnceWired
+                ? " on this destination. Dest LSN is source of truth on resume; a stolen-lease writer cannot commit."
+                : " — this destination is not transactional and fails closed"}
+              {" "}At-most-once is not offered. Append-only below is incompatible with exactly-once.
             </small>
             {onAllowAppendOnlyChange && (
               <label className="df2-policy-toggle" style={{ marginTop: "0.75rem" }}>
                 <input
                   type="checkbox"
                   checked={allowAppendOnly}
+                  disabled={deliveryGuarantee === "exactly_once"}
                   onChange={(e) => onAllowAppendOnlyChange(e.target.checked)}
                 />
                 <span>
@@ -740,7 +806,11 @@ export function DestinationAdvancedDrawer({
               ? "Primary key is required for this sync mode (upsert / CDC / mirror / SCD2)."
               : "Full refresh · Append / Overwrite does not require a unique primary key. "
                 + "You can still set one for documentation; duplicate id values will not block Validate."}
-            {requiresCursor ? " Cursor is required for incremental / CDC." : ""}
+            {requiresCursor
+              ? " Cursor is required for incremental / CDC, and what it means in the "
+                + "source decides what this sync can capture \u2014 a column name cannot "
+                + "establish that, so declare it."
+              : ""}
           </p>
           {names.length > 1 && (
             <p className="df2-label-hint" style={{ margin: "0 0 10px" }}>
@@ -754,6 +824,7 @@ export function DestinationAdvancedDrawer({
                   <th>Stream</th>
                   <th>Mode</th>
                   <th>Cursor</th>
+                  <th>Cursor means</th>
                   <th>Primary key</th>
                   <th>Policy</th>
                   <th>Status</th>
@@ -766,6 +837,7 @@ export function DestinationAdvancedDrawer({
                     streamFields,
                     defaultCursor,
                     defaultPrimaryKey,
+                    defaultCursorSemantics,
                   );
                   const streamCols = sourceColumnsByStream[streamName]?.length
                     ? sourceColumnsByStream[streamName]
@@ -773,10 +845,17 @@ export function DestinationAdvancedDrawer({
                   const streamSchema = sourceSchemaByStream[streamName] && Object.keys(sourceSchemaByStream[streamName]).length
                     ? sourceSchemaByStream[streamName]
                     : sourceSchema;
+                  const semantics = evaluateCursorSemantics({
+                    syncMode,
+                    cursorField: fields.cursorField,
+                    declared: fields.cursorSemantics || "",
+                    validationMode,
+                  });
                   const rowNeeds =
                     streamCols.length > 0
                     && ((requiresCursor && (!fields.cursorField || !streamCols.includes(fields.cursorField)))
-                      || (requiresPrimaryKey && (!fields.primaryKeyField || !streamCols.includes(fields.primaryKeyField))));
+                      || (requiresPrimaryKey && (!fields.primaryKeyField || !streamCols.includes(fields.primaryKeyField)))
+                      || semantics.status === "block");
                   return (
                     <tr key={streamName}>
                       <td>
@@ -812,6 +891,25 @@ export function DestinationAdvancedDrawer({
                       <td>
                         <select
                           className="df2-input df2-select df2-stream-select"
+                          value={fields.cursorSemantics || ""}
+                          disabled={!requiresCursor || !fields.cursorField}
+                          onChange={(e) =>
+                            onStreamCursorSemanticsChange(streamName, e.target.value)}
+                          aria-label={`Cursor semantics for ${streamName}`}
+                        >
+                          <option value="">
+                            {requiresCursor ? "Declare meaning" : "Not required"}
+                          </option>
+                          {CURSOR_SEMANTICS.map((value) => (
+                            <option key={value} value={value}>
+                              {CURSOR_SEMANTICS_LABELS[value]}
+                            </option>
+                          ))}
+                        </select>
+                      </td>
+                      <td>
+                        <select
+                          className="df2-input df2-select df2-stream-select"
                           value={fields.primaryKeyField && streamCols.includes(fields.primaryKeyField)
                             ? fields.primaryKeyField
                             : ""}
@@ -834,6 +932,12 @@ export function DestinationAdvancedDrawer({
                         <span className={`df2-badge ${rowNeeds ? "df2-badge-run" : "df2-badge-live"}`}>
                           {streamCols.length ? (rowNeeds ? "Needs contract" : "Valid") : "Pending"}
                         </span>
+                        {semantics.reason && (
+                          <small className="df2-label-hint df2-stream-cursor-note">
+                            {semantics.reason}
+                            {semantics.primaryAction ? ` \u2192 ${semantics.primaryAction}.` : ""}
+                          </small>
+                        )}
                       </td>
                     </tr>
                   );
@@ -847,7 +951,7 @@ export function DestinationAdvancedDrawer({
           <p className="df2-label-hint" style={{ margin: "12px 0 0" }}>
             {syncMode === "scd2"
               ? "SCD Type 2 requires a primary key on each stream to version rows (valid-from / valid-to)."
-              : "Mirror sync requires a primary key on each stream to detect and soft-delete rows missing from the source."}
+              : "Mirror sync requires a primary key on each stream. Dest keys missing from the source are flagged _deleted; physical COUNT(*) does not drop."}
             {streamNeedsReview ? " Select a primary key above before running." : ""}
           </p>
         )}

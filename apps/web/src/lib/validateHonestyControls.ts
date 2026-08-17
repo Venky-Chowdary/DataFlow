@@ -33,9 +33,19 @@ export interface ConversionClassHonesty {
   note: string;
 }
 
+export interface DecisionArtifactHonesty {
+  present: boolean;
+  contentHash: string | null;
+  schemaVersion: string | null;
+  headline: string;
+  note: string;
+}
+
 export interface ValidateHonestyControls {
   referentialIntegrity: ReferentialIntegrityHonesty;
   conversionClasses: ConversionClassHonesty;
+  /** Phase C11/C12 — Decision Artifact authority from Validate. */
+  decisionArtifact: DecisionArtifactHonesty;
   /** Opt-in population orphan scan — expensive; default false. */
   populationScanRequested: boolean;
   migrationProven: boolean;
@@ -108,7 +118,13 @@ export function buildConversionClassHonesty(
 
   const needsApproval = counts["needs_user_approval"] || 0;
   const unsupported = counts["unsupported"] || 0;
-  const lossless = counts["lossless"] || 0;
+  const lossless =
+    (counts["lossless"] || 0)
+    + (counts["identity"] || 0)
+    + (counts["equivalent"] || 0)
+    + (counts["widening"] || 0)
+    + (counts["representation"] || 0)
+    + (counts["normalization"] || 0);
 
   let headline: string;
   if (columns.length === 0) {
@@ -118,7 +134,7 @@ export function buildConversionClassHonesty(
   } else if (unsupported > 0) {
     headline = `${unsupported} unsupported conversion(s) — remap required`;
   } else {
-    headline = `${lossless} lossless · ${columns.length} column(s) classified`;
+    headline = `${lossless} safe-path · ${columns.length} column(s) classified`;
   }
 
   return {
@@ -143,6 +159,22 @@ export function buildValidateHonestyControls(
   const migrationProven = Boolean(preflight?.proof_bundle?.migration_proven);
   const ddlIdentityHash =
     preflight?.proof_bundle?.ddl_identity?.ddl_identity_hash || null;
+  const art = preflight?.proof_bundle?.decision_artifact;
+  const artHash =
+    preflight?.proof_bundle?.decision_artifact_hash
+    || art?.content_hash
+    || null;
+  const artPresent = Boolean(artHash && String(artHash).length === 64);
+  const decisionArtifact: DecisionArtifactHonesty = {
+    present: artPresent,
+    contentHash: artHash ? String(artHash) : null,
+    schemaVersion: art?.schema_version ? String(art.schema_version) : null,
+    headline: artPresent
+      ? `Decision Artifact stamped (${String(artHash).slice(0, 12)}…)`
+      : "Decision Artifact missing — re-run Validate before Execute",
+    note:
+      "Execute consumes this immutable artifact hash — UI never re-derives invent/risk.",
+  };
   const hsRaw =
     (preflight?.proof_bundle as Record<string, unknown> | undefined)?.historical_success
     ?? (preflight as Record<string, unknown> | null | undefined)?.historical_success;
@@ -168,6 +200,7 @@ export function buildValidateHonestyControls(
   return {
     referentialIntegrity: ri,
     conversionClasses,
+    decisionArtifact,
     populationScanRequested: Boolean(opts?.populationScanRequested),
     migrationProven,
     ddlIdentityHash,
@@ -179,4 +212,69 @@ export function buildValidateHonestyControls(
       "Historical success is measured or unmeasured — never invented.",
     ].join(" "),
   };
+}
+
+export type SchemaEvolutionStamp = {
+  action?: string;
+  should_pause?: boolean;
+  compatibility?: string;
+  compatibility_note?: string;
+  hard_breaking?: unknown[];
+  soft_net_additive?: unknown[];
+};
+
+/**
+ * Acknowledge-this-run is only valid for manual_review additive/soft drift.
+ * Hard-breaking (Confluent NONE) must remap or re-sign — Airbyte "approve myself"
+ * silently continued on column drop; we refuse that here.
+ */
+export function schemaDriftAllowsAcknowledge(
+  details?: Record<string, unknown> | null,
+): boolean {
+  if (!details) return false;
+  if (details.remediation_kind !== "acknowledge_schema_drift") return false;
+  if (details.ack_required === false) return false;
+  const evolution = schemaEvolutionFromDetails(details);
+  if (evolution.should_pause) return false;
+  if ((evolution.hard_breaking?.length ?? 0) > 0) return false;
+  if (evolution.compatibility === "none") return false;
+  return true;
+}
+
+export function schemaEvolutionFromDetails(
+  details?: Record<string, unknown> | null,
+): SchemaEvolutionStamp {
+  const raw = details?.schema_evolution;
+  if (!raw || typeof raw !== "object") return {};
+  const evo = raw as SchemaEvolutionStamp;
+  return {
+    action: typeof evo.action === "string" ? evo.action : undefined,
+    should_pause: Boolean(evo.should_pause),
+    compatibility: typeof evo.compatibility === "string" ? evo.compatibility : undefined,
+    compatibility_note:
+      typeof evo.compatibility_note === "string" ? evo.compatibility_note : undefined,
+    hard_breaking: Array.isArray(evo.hard_breaking) ? evo.hard_breaking : undefined,
+    soft_net_additive: Array.isArray(evo.soft_net_additive) ? evo.soft_net_additive : undefined,
+  };
+}
+
+export function schemaDriftCompatibilityHeadline(
+  details?: Record<string, unknown> | null,
+): string {
+  const evo = schemaEvolutionFromDetails(details);
+  const compat = evo.compatibility;
+  if (!compat) return "";
+  if (evo.compatibility_note) return `Compatibility ${compat} — ${evo.compatibility_note}`;
+  return `Compatibility ${compat}`;
+}
+
+/** Hard-breaking drift (Confluent NONE) — remap / re-sign, never acknowledge. */
+export function schemaDriftRequiresRemap(
+  details?: Record<string, unknown> | null,
+): boolean {
+  if (!details) return false;
+  const evo = schemaEvolutionFromDetails(details);
+  if (evo.should_pause) return true;
+  if ((evo.hard_breaking?.length ?? 0) > 0) return true;
+  return evo.compatibility === "none";
 }

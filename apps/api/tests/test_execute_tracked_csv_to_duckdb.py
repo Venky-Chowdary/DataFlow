@@ -7,6 +7,7 @@ import io
 import os
 import sys
 import uuid
+from decimal import Decimal
 from datetime import date
 from pathlib import Path
 
@@ -73,9 +74,21 @@ def test_messy_csv_to_duckdb_preserves_types():
         rows = conn.execute(f'SELECT * FROM "{table_name}" ORDER BY id').fetchall()
         conn.close()
 
-        assert rows[0] == (1, 1000.0, None, date(2024, 1, 15), True, '{"k":"v"}', '["a","b"]')
-        assert rows[1] == (2, 2000.5, "hello", date(2024, 2, 28), False, None, None)
-        assert rows[2] == (3, 3.14, "null", date(2024, 3, 1), True, '{}', '[]')
+        # Money-like columns land as DECIMAL, so compare the exact numeric
+        # value rather than a float literal that cannot represent 3.14.
+        def _row(r):
+            return (r[0], Decimal(str(r[1])), *r[2:])
+
+        assert _row(rows[0]) == (
+            1, Decimal("1000.0"), None, date(2024, 1, 15), True,
+            '{"k":"v"}', '["a","b"]',
+        )
+        assert _row(rows[1]) == (
+            2, Decimal("2000.5"), "hello", date(2024, 2, 28), False, None, None,
+        )
+        assert _row(rows[2]) == (
+            3, Decimal("3.14"), "null", date(2024, 3, 1), True, '{}', '[]',
+        )
     finally:
         try:
             os.unlink(path)

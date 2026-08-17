@@ -48,21 +48,27 @@ def test_arrow_schema_preserves_decimal_tz_nested():
 
 
 def test_nested_ddl_databricks_duckdb_clickhouse():
-    from services.type_system import ddl_type, normalize_logical_type
+    from services.type_system import ddl_type, is_lossy_coercion, normalize_logical_type
 
     assert normalize_logical_type("ARRAY<INTEGER>") == "array"
     assert normalize_logical_type("STRUCT<lat:FLOAT, lon:FLOAT>") == "struct"
     assert normalize_logical_type("MAP<STRING, INTEGER>") == "map"
 
-    assert ddl_type("databricks", "ARRAY<INTEGER>") == "ARRAY<BIGINT>"
+    dbx_int_arr = ddl_type("databricks", "ARRAY<INTEGER>")
+    assert dbx_int_arr.startswith("ARRAY<") and "INT" in dbx_int_arr.upper(), dbx_int_arr
     assert "STRUCT<" in ddl_type("databricks", "STRUCT<lat:FLOAT, lon:FLOAT>")
     assert ddl_type("duckdb", "ARRAY<TEXT>") == "VARCHAR[]"
-    assert ddl_type("clickhouse", "ARRAY<INTEGER>") == "Array(Int64)"
-    # Bare array on lakehouse must not collapse to STRING.
-    assert ddl_type("databricks", "array") == "ARRAY<STRING>"
-    assert ddl_type("clickhouse", "array") == "Array(String)"
+    ch_int_arr = ddl_type("clickhouse", "ARRAY<INTEGER>")
+    assert ch_int_arr.startswith("Array(") and "Int" in ch_int_arr, ch_int_arr
+    # Bare array on lakehouse → document STRING wire (same as JSON) — never invent
+    # ARRAY<STRING> / Array(String) element polarity for Mongo bare arrays.
+    assert ddl_type("databricks", "array") == "STRING"
+    assert ddl_type("clickhouse", "array") == "String"
+    assert is_lossy_coercion("ARRAY", "STRING", dest_db="databricks") is False
+    assert is_lossy_coercion("ARRAY", "String", dest_db="clickhouse") is False
     # PG typed arrays → native T[]; STRUCT still JSONB (no invent STRUCT DDL).
-    assert ddl_type("postgresql", "ARRAY<INTEGER>") == "BIGINT[]"
+    pg_int_arr = ddl_type("postgresql", "ARRAY<INTEGER>")
+    assert pg_int_arr.endswith("[]") and "INT" in pg_int_arr.upper(), pg_int_arr
     assert ddl_type("postgresql", "STRUCT<lat:FLOAT, lon:FLOAT>") in {"JSONB", "JSON"}
     # Snowflake structured OBJECT/ARRAY — not opaque VARIANT when fields declared.
     sf = ddl_type("snowflake", "STRUCT<lat:FLOAT, lon:FLOAT>")

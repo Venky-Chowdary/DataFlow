@@ -19,6 +19,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+from services.blocker_titles import blocker_title
 from services.preflight_rules import explain_gate, explain_issue
 
 
@@ -53,12 +54,18 @@ def _parse_type_mismatch_columns(text: str) -> list[tuple[str, str]]:
 
 
 def _parse_type_mismatch_pairs(text: str) -> list[tuple[str, str, str, str]]:
-    """Extract (source, source_type, target, target_type) from mismatch messages."""
+    """Extract (source, source_type, target, target_type) from mismatch messages.
+
+    Type tokens may nest parentheses (``NUMBER(38,0)``, ``DECIMAL(10,2)``) — a
+    naive ``[^)]+`` truncates at the first ``)`` and corrupts Remap CTAs.
+    """
     import re
 
     out: list[tuple[str, str, str, str]] = []
+    # One level of nesting covers dialect carriers used in dry-run / G3 messages.
+    type_tok = r"((?:[^()]|\([^()]*\))+)"
     for m in re.finditer(
-        r"([A-Za-z_][\w]*)\s*\(([^)]+)\)\s*→\s*([A-Za-z_][\w]*)\s*\(([^)]+)\)",
+        rf"([A-Za-z_][\w]*)\s*\({type_tok}\)\s*→\s*([A-Za-z_][\w]*)\s*\({type_tok}\)",
         text or "",
     ):
         out.append(
@@ -472,7 +479,11 @@ def explain_validation(
         ]
         issues.append({
             "gate": gate_id,
-            "title": guidance.get("title", gate_id),
+            "title": blocker_title(
+                gate_id,
+                b.get("message", ""),
+                catalog_title=guidance.get("title", ""),
+            ),
             "severity": "block",
             "what": b.get("message", ""),
             "why": guidance.get("why", ""),

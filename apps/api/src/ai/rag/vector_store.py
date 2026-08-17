@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 from services.brand_env import getenv_brand
 import uuid
@@ -17,6 +18,11 @@ from typing import Optional
 from services.value_serializer import json_default
 
 from .embedding_service import get_embedding_service
+
+try:
+    import numpy as np
+except ImportError:  # slim API hosts — the pure-Python path below still answers
+    np = None  # type: ignore[assignment]
 
 _vector_store: Optional["DataTransferVectorStore"] = None
 
@@ -44,8 +50,35 @@ class DataTransferVectorStore:
         self._backend = "memory"
         self._collection = None
         self._memory_docs: list[dict] = []
+        # Cosine over the whole store runs per analyzed column, so the corpus is
+        # kept pre-normalized: a search is then one dot product per document
+        # (one matrix product under numpy) instead of re-deriving both norms
+        # 2 x n x dim times per query.
+        self._unit_rows: list[list[float]] = []
+        self._unit_matrix = None
         self._embedding_service = get_embedding_service()
         self._init_backend()
+
+    @staticmethod
+    def _unit(vector) -> list[float]:
+        values = [float(v) for v in vector]
+        norm = math.sqrt(sum(v * v for v in values))
+        if norm == 0.0:
+            return values
+        return [v / norm for v in values]
+
+    def _index_unit_rows(self) -> None:
+        """Rebuild the normalized corpus matrix after documents change."""
+        if np is None or not self._unit_rows:
+            self._unit_matrix = None
+            return
+        width = len(self._unit_rows[0])
+        if any(len(row) != width for row in self._unit_rows):
+            # Mixed dimensions (backend switched mid-process): fall back to the
+            # per-row path, which skips mismatched documents instead of failing.
+            self._unit_matrix = None
+            return
+        self._unit_matrix = np.asarray(self._unit_rows, dtype=float)
 
     def _init_backend(self):
         os.makedirs(self.persist_dir, exist_ok=True)
@@ -103,22 +136,40 @@ class DataTransferVectorStore:
             clean_metas.append(clean)
 
         embeddings = self._embedding_service.embed(texts)
+        embedding_rows = (
+            embeddings.tolist() if hasattr(embeddings, "tolist") else list(embeddings)
+        )
 
         if self._backend == "chromadb":
             self._collection.upsert(
                 ids=ids,
                 documents=texts,
                 metadatas=clean_metas,
-                embeddings=embeddings.tolist(),
+                embeddings=embedding_rows,
             )
         else:
+            # Upsert by id, matching the ChromaDB branch. Appending blindly let
+            # a second ingest duplicate the whole knowledge base: a long-lived
+            # API had grown 349 documents into 20190, and retrieval cost — which
+            # is linear in the corpus — grew with it.
+            position = {doc["id"]: i for i, doc in enumerate(self._memory_docs)}
             for i, text in enumerate(texts):
-                self._memory_docs.append({
+                record = {
                     "id": ids[i],
                     "text": text,
                     "metadata": clean_metas[i],
-                    "embedding": embeddings[i],
-                })
+                    "embedding": embedding_rows[i],
+                }
+                unit = self._unit(embedding_rows[i])
+                existing = position.get(ids[i])
+                if existing is None:
+                    position[ids[i]] = len(self._memory_docs)
+                    self._memory_docs.append(record)
+                    self._unit_rows.append(unit)
+                else:
+                    self._memory_docs[existing] = record
+                    self._unit_rows[existing] = unit
+            self._index_unit_rows()
 
         return ids
 
@@ -154,23 +205,38 @@ class DataTransferVectorStore:
             return docs
 
         # Memory fallback
-        query_emb = self._embedding_service.embed_single(query)
-        scored = []
-        for doc in self._memory_docs:
-            if filter_metadata:
-                match = all(
-                    doc["metadata"].get(k) == v for k, v in filter_metadata.items()
-                )
-                if not match:
-                    continue
-            sim = self._embedding_service.similarity(query_emb, doc["embedding"])
-            scored.append(VectorDocument(
-                id=doc["id"],
-                text=doc["text"],
-                metadata=doc["metadata"],
-                score=sim,
-            ))
+        query_unit = self._unit(self._embedding_service.embed_single(query))
+        keep = [
+            i
+            for i, doc in enumerate(self._memory_docs)
+            if not filter_metadata
+            or all(doc["metadata"].get(k) == v for k, v in filter_metadata.items())
+        ]
+        if not keep:
+            return []
 
+        if self._unit_matrix is not None and len(query_unit) == self._unit_matrix.shape[1]:
+            sims = self._unit_matrix[keep] @ np.asarray(query_unit, dtype=float)
+            scores = [float(s) for s in sims]
+        else:
+            scores = []
+            for i in keep:
+                row = self._unit_rows[i]
+                scores.append(
+                    sum(x * y for x, y in zip(row, query_unit))
+                    if len(row) == len(query_unit)
+                    else 0.0
+                )
+
+        scored = [
+            VectorDocument(
+                id=self._memory_docs[i]["id"],
+                text=self._memory_docs[i]["text"],
+                metadata=self._memory_docs[i]["metadata"],
+                score=score,
+            )
+            for i, score in zip(keep, scores)
+        ]
         scored.sort(key=lambda d: d.score, reverse=True)
         return scored[:n_results]
 
@@ -189,6 +255,8 @@ class DataTransferVectorStore:
             )
         else:
             self._memory_docs.clear()
+            self._unit_rows.clear()
+            self._index_unit_rows()
 
 
 def get_vector_store() -> DataTransferVectorStore:

@@ -102,6 +102,68 @@ def mapping_risk_cleared(mapping: Any) -> bool:
     return mapping_has_clearing_risk_contract(mapping)
 
 
+def _mapping_source(mapping: Any) -> str:
+    if isinstance(mapping, dict):
+        return str(mapping.get("source") or "").strip()
+    return str(getattr(mapping, "source", None) or "").strip()
+
+
+def _mapping_target(mapping: Any) -> str:
+    if isinstance(mapping, dict):
+        return str(mapping.get("target") or "").strip()
+    return str(getattr(mapping, "target", None) or "").strip()
+
+
+def partition_transform_dry_run_errors(
+    errors: list[str] | None,
+    mappings: list[Any] | None,
+) -> tuple[list[str], list[str]]:
+    """Split dry-run errors into hard blocks vs continue-policy holdouts.
+
+    G8 already demotes cast failures when the mapping carries a verified
+    continue-policy Risk Contract. G5 / G9 must use the same partition so
+    signed CAST_AND_CONTINUE / QUARANTINE_ROW does not leave Sample dry-run
+    and Data integrity blocked while Gate-8 passes.
+    """
+    import re
+
+    hard: list[str] = []
+    contracted: list[str] = []
+    maps = list(mappings or [])
+    by_pair: dict[tuple[str, str], Any] = {}
+    by_source: dict[str, Any] = {}
+    for m in maps:
+        src = _mapping_source(m)
+        tgt = _mapping_target(m) or src
+        if src:
+            by_pair[(src, tgt)] = m
+            by_source.setdefault(src, m)
+
+    pair_re = re.compile(
+        r"^(?:row\s+\d+\s+)?(.+?)\s*(?:→|->)\s*(.+?)\s*:",
+        re.I,
+    )
+    for raw in errors or []:
+        line = str(raw or "").strip()
+        if not line:
+            continue
+        # Missing source column is always a hard structural failure.
+        if line.lower().startswith("source column missing"):
+            hard.append(line)
+            continue
+        m = pair_re.match(line)
+        mapping = None
+        if m:
+            src = m.group(1).strip()
+            tgt = m.group(2).strip()
+            mapping = by_pair.get((src, tgt)) or by_source.get(src)
+        if mapping is not None and mapping_risk_cleared(mapping):
+            contracted.append(line)
+        else:
+            hard.append(line)
+    return hard, contracted
+
+
 def sign_risk_contract_payload(payload: dict[str, Any]) -> str:
     digest = hashlib.sha256(_canonical_payload(payload).encode("utf-8")).hexdigest()
     return f"mrc-sha256:{digest}"

@@ -41,12 +41,28 @@ def _enrich_from_message(issue: dict[str, Any]) -> dict[str, Any]:
     return enriched
 
 
+def _issue_is_non_blocking_warn(issue: dict[str, Any]) -> bool:
+    """Skip Risk-Contract-signed / severity=warn noise — not write rejects."""
+    sev = str(issue.get("severity") or "").strip().lower()
+    if sev in ("warn", "warning", "info", "ok", "pass"):
+        return True
+    text = str(issue.get("reason") or issue.get("message") or "").lower()
+    if "risk contract signed" in text or "continue-policy risk contract" in text:
+        return True
+    return False
+
+
 def _collect_issue_lists(preflight: dict[str, Any] | None) -> list[dict[str, Any]]:
     if not preflight:
         return []
     out: list[dict[str, Any]] = []
     for gate in preflight.get("gates") or []:
         if not isinstance(gate, dict):
+            continue
+        # Passed/warn gates often still carry review-grade coercion notes.
+        # Quarantine is for blocking findings — never invent rejects from green gates.
+        status = str(gate.get("status") or "").strip().lower()
+        if status in ("pass", "passed", "ok", "skip", "skipped", "warn", "warning"):
             continue
         details = gate.get("details") or {}
         if not isinstance(details, dict):
@@ -65,7 +81,7 @@ def _collect_issue_lists(preflight: dict[str, Any] | None) -> list[dict[str, Any
                 continue
             for item in raw:
                 parsed = _as_issue_dict(item)
-                if parsed:
+                if parsed and not _issue_is_non_blocking_warn(parsed):
                     out.append(_enrich_from_message(parsed))
         # Nested integrity payload
         for nested_key in ("integrity_issues", "checks"):
@@ -73,7 +89,7 @@ def _collect_issue_lists(preflight: dict[str, Any] | None) -> list[dict[str, Any
             if isinstance(nested, list):
                 for item in nested:
                     parsed = _as_issue_dict(item)
-                    if parsed:
+                    if parsed and not _issue_is_non_blocking_warn(parsed):
                         out.append(_enrich_from_message(parsed))
     for blocker in preflight.get("blockers") or []:
         if not isinstance(blocker, dict):
@@ -87,11 +103,13 @@ def _collect_issue_lists(preflight: dict[str, Any] | None) -> list[dict[str, Any
             or []
         ):
             parsed = _as_issue_dict(item)
-            if parsed:
+            if parsed and not _issue_is_non_blocking_warn(parsed):
                 out.append(_enrich_from_message(parsed))
         msg = blocker.get("message")
         if msg and not out:
-            out.append(_enrich_from_message({"message": str(msg), "reason": str(msg)}))
+            parsed = _enrich_from_message({"message": str(msg), "reason": str(msg)})
+            if not _issue_is_non_blocking_warn(parsed):
+                out.append(parsed)
         if isinstance(guidance, dict) and guidance.get("fix") and out:
             for row in out:
                 row.setdefault("suggested_fix", guidance.get("fix"))
@@ -117,6 +135,8 @@ def _pair_key(issue: dict[str, Any]) -> tuple[str, str, str]:
 
 def quarantine_rows_from_preflight(preflight: dict[str, Any] | None) -> list[dict[str, Any]]:
     """Return rejected_details-shaped rows for Inspect Quarantine."""
+    from connectors.writer_common import quarantine_cell_wire
+
     issues = _collect_issue_lists(preflight)
     rows: list[dict[str, Any]] = []
     seen: set[tuple[Any, ...]] = set()
@@ -163,11 +183,12 @@ def quarantine_rows_from_preflight(preflight: dict[str, Any] | None) -> list[dic
                 suggested_transform = "strip_controls"
             else:
                 suggested_transform = None
+        wired = quarantine_cell_wire(value)
         detail: dict[str, Any] = {
             "row": row_i,
             "column": column or None,
             "target": target or column or None,
-            "value": "" if value is None else str(value)[:500],
+            "value": wired[:500],
             "reason": reason[:500],
             "policy": "preflight_quarantine",
             "chars": issue.get("chars"),
@@ -177,8 +198,8 @@ def quarantine_rows_from_preflight(preflight: dict[str, Any] | None) -> list[dic
             "source_type": issue.get("source_type"),
             "target_type": issue.get("target_type"),
         }
-        if column and value is not None:
-            detail["values"] = {column: str(value)[:500]}
+        if column:
+            detail["values"] = {column: wired}
         rows.append(detail)
         if len(rows) >= 200:
             break
@@ -190,14 +211,66 @@ def quarantine_rows_from_preflight(preflight: dict[str, Any] | None) -> list[dic
         return rows
 
 
-def merge_job_quarantine(job: dict[str, Any] | None) -> list[dict[str, Any]]:
-    """Prefer write-time rejected_details; fall back to preflight findings."""
+def merge_job_quarantine(
+    job: dict[str, Any] | None,
+    *,
+    hydrate_dlq: bool = True,
+) -> list[dict[str, Any]]:
+    """Prefer write-time rejected_details; hydrate durable DLQ when truncated.
+
+    Job status stores a sample (``[:2000]``). Full quarantine bodies live in the
+    control-plane DLQ — Inspect must not pretend the sample is complete.
+    """
     if not job:
         return []
     details = list(job.get("rejected_details") or [])
+    dest = job.get("destination_summary") if isinstance(job.get("destination_summary"), dict) else {}
     if not details:
-        dest = job.get("destination_summary") or {}
-        details = list(dest.get("rejected_details") or [])
+        details = list((dest or {}).get("rejected_details") or [])
+
+    job_id = str(job.get("id") or job.get("job_id") or "").strip()
+    truncated = bool(
+        job.get("rejected_details_truncated")
+        or (dest or {}).get("rejected_details_truncated")
+    )
+    try:
+        total_hint = int(
+            job.get("rejected_details_total")
+            or job.get("rejected_rows")
+            or (dest or {}).get("rejected_details_total")
+            or (dest or {}).get("rejected_rows")
+            or 0
+        )
+    except (TypeError, ValueError):
+        total_hint = 0
+
+    if hydrate_dlq and job_id:
+        try:
+            from services.quarantine_dlq import quarantine_details_from_dlq
+
+            dlq_rows = quarantine_details_from_dlq(job_id)
+        except Exception:
+            dlq_rows = []
+        if dlq_rows and (
+            not details
+            or truncated
+            or len(dlq_rows) > len(details)
+            or (total_hint > 0 and len(details) < total_hint)
+        ):
+            details = dlq_rows
+
+    if not details:
+        details = quarantine_rows_from_preflight(job.get("preflight"))
+
     if details:
-        return details
-    return quarantine_rows_from_preflight(job.get("preflight"))
+        try:
+            from services.quarantine_dlq import apply_replay_overlay, job_quarantine_closure
+
+            return apply_replay_overlay(
+                details,
+                job_id=job_id,
+                closure=job_quarantine_closure(job),
+            )
+        except Exception:
+            return details
+    return []

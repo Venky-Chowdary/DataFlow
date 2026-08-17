@@ -19,6 +19,63 @@ from .adapters import (
 from .connector_capabilities import resolve_driver_type
 from .models import EndpointConfig
 from .type_mapper import ddl_type
+from services.procedure_source import is_callable_source
+
+
+def _dest_table_schema_only(endpoint: EndpointConfig) -> bool:
+    """Dest Map already has a table name — skip SHOW TABLES / second warehouse login."""
+    purpose = str((endpoint.extra or {}).get("introspect_purpose") or "").lower()
+    return purpose == "destination" and bool(
+        str(endpoint.table or endpoint.collection or "").strip()
+    )
+
+
+def _is_absent_object_error(message: str) -> bool:
+    """True only when the catalog said the *table* is missing — not a login failure."""
+    low = (message or "").lower()
+    if any(
+        tok in low
+        for tok in (
+            "account does not exist",
+            "user does not exist",
+            "role does not exist",
+            "warehouse does not exist",
+            "database does not exist",
+            "incorrect username",
+            "250001",
+            "290404",
+            "390195",
+            "authentication",
+            "password",
+            "private key",
+            "jwt",
+        )
+    ):
+        return False
+    return any(
+        tok in low
+        for tok in (
+            "does not exist",
+            "not found",
+            "no such table",
+            "unknown table",
+            "002043",
+            "no columns for table",
+        )
+    )
+
+
+def _attach_dest_table_schema(out: dict, endpoint: EndpointConfig) -> dict:
+    """One metadata session for dest+table. Connect failure is not create-new."""
+    _attach_db_sample(out, endpoint)
+    exists = out.get("table_exists")
+    if out.get("columns") or exists in (True, False):
+        out["connected"] = True
+    else:
+        out["connected"] = False
+        if not out.get("message"):
+            out["message"] = "Destination schema probe failed"
+    return out
 
 
 def introspect_endpoint(
@@ -72,7 +129,14 @@ def introspect_endpoint(
     fmt = (resolved_fmt or "").lower()
     out["format"] = resolved_fmt
 
-    if fmt == "postgresql":
+    # pgvector is an extension, not a separate engine: the destination is an
+    # ordinary PostgreSQL table with a vector column, reached through the same
+    # connection config. Leaving it out of this branch meant existence and
+    # column types were never measured, so Validate refused create-new and
+    # overwrite for lack of facts one catalog query answers.
+    if fmt in {"postgresql", "pgvector"}:
+        if _dest_table_schema_only(endpoint):
+            return _attach_dest_table_schema(out, endpoint)
         from connectors.postgresql import test_postgresql
 
         probe = test_postgresql(
@@ -87,10 +151,14 @@ def introspect_endpoint(
         )
         out["connected"] = probe.ok
         out["objects"] = [{"name": t, "type": "table"} for t in probe.tables if not t.startswith("(")]
+        out["objects_truncated"] = bool(getattr(probe, "tables_truncated", False))
         out["message"] = probe.message if probe.ok else (probe.error or "Connection failed")
-        if endpoint.table and probe.ok:
-            if not _mark_table_listed_if_present(out, endpoint.table):
-                # Explicit missing — Transfer Studio create-new (do not leave null).
+        if probe.ok and (endpoint.table or is_callable_source(endpoint)):
+            if endpoint.table and not _mark_table_listed_if_present(out, endpoint.table):
+                # Absence from a bounded page is a hint, not proof. The SQL path
+                # below re-checks the specific table and is what Validate trusts;
+                # create-on-write is CREATE IF NOT EXISTS, so guessing "new" here
+                # is recoverable where refusing to answer would strand the run.
                 out["table_exists"] = False
             _attach_db_sample(out, endpoint)
         return out
@@ -168,8 +236,12 @@ def introspect_endpoint(
         return out
 
     if fmt == "snowflake":
+        if _dest_table_schema_only(endpoint):
+            return _attach_dest_table_schema(out, endpoint)
         from connectors.snowflake import test_snowflake
+        from services.connector_auth import snowflake_session_kwargs
 
+        purpose = str((endpoint.extra or {}).get("introspect_purpose") or "").lower()
         probe = test_snowflake(
             host=cfg["host"],
             port=cfg["port"] or 443,
@@ -180,18 +252,21 @@ def introspect_endpoint(
             connection_string=cfg.get("connection_string", ""),
             ssl=cfg.get("ssl", False),
             warehouse=cfg.get("warehouse", ""),
-            role=cfg.get("role", ""),
+            list_tables=not (purpose == "destination" and bool(endpoint.table)),
+            **snowflake_session_kwargs(cfg),
         )
         out["connected"] = probe.ok
         out["objects"] = [{"name": t, "type": "table"} for t in probe.tables if not t.startswith("(")]
         out["message"] = probe.message if probe.ok else (probe.error or "Connection failed")
-        if endpoint.table and probe.ok:
-            if not _mark_table_listed_if_present(out, endpoint.table):
+        if probe.ok and (endpoint.table or is_callable_source(endpoint)):
+            if endpoint.table and not _mark_table_listed_if_present(out, endpoint.table):
                 out["table_exists"] = False
             _attach_db_sample(out, endpoint)
         return out
 
     if fmt == "mysql":
+        if _dest_table_schema_only(endpoint):
+            return _attach_dest_table_schema(out, endpoint)
         from connectors.mysql import test_mysql
 
         probe = test_mysql(
@@ -207,13 +282,15 @@ def introspect_endpoint(
         out["connected"] = probe.ok
         out["objects"] = [{"name": t, "type": "table"} for t in probe.tables if not t.startswith("(")]
         out["message"] = probe.message if probe.ok else (probe.error or "Connection failed")
-        if endpoint.table and probe.ok:
-            if not _mark_table_listed_if_present(out, endpoint.table):
+        if probe.ok and (endpoint.table or is_callable_source(endpoint)):
+            if endpoint.table and not _mark_table_listed_if_present(out, endpoint.table):
                 out["table_exists"] = False
             _attach_db_sample(out, endpoint)
         return out
 
     if fmt == "bigquery":
+        if _dest_table_schema_only(endpoint):
+            return _attach_dest_table_schema(out, endpoint)
         from connectors.bigquery import test_bigquery
 
         probe = test_bigquery(
@@ -231,13 +308,15 @@ def introspect_endpoint(
         out["connected"] = probe.ok
         out["objects"] = [{"name": t, "type": "table"} for t in probe.tables if not t.startswith("(")]
         out["message"] = probe.message if probe.ok else (probe.error or "Connection failed")
-        if endpoint.table and probe.ok:
-            if not _mark_table_listed_if_present(out, endpoint.table):
+        if probe.ok and (endpoint.table or is_callable_source(endpoint)):
+            if endpoint.table and not _mark_table_listed_if_present(out, endpoint.table):
                 out["table_exists"] = False
             _attach_db_sample(out, endpoint)
         return out
 
     if fmt == "redshift":
+        if _dest_table_schema_only(endpoint):
+            return _attach_dest_table_schema(out, endpoint)
         from connectors.redshift import test_redshift
 
         probe = test_redshift(
@@ -249,8 +328,8 @@ def introspect_endpoint(
         out["connected"] = probe.ok
         out["objects"] = [{"name": t, "type": "table"} for t in probe.tables if not t.startswith("(")]
         out["message"] = probe.message if probe.ok else (probe.error or "Connection failed")
-        if endpoint.table and probe.ok:
-            if not _mark_table_listed_if_present(out, endpoint.table):
+        if probe.ok and (endpoint.table or is_callable_source(endpoint)):
+            if endpoint.table and not _mark_table_listed_if_present(out, endpoint.table):
                 out["table_exists"] = False
             _attach_db_sample(out, endpoint)
         return out
@@ -290,6 +369,37 @@ def introspect_endpoint(
             _attach_db_sample(out, endpoint)
         return out
 
+    if fmt == "sftp":
+        from connectors.sftp_common import test_sftp
+        from connectors.sftp_reader import list_files
+
+        # Existence is answered below from the directory listing; the probe only
+        # answers "can we reach the server". Conflating the two reported a
+        # reachable server as disconnected whenever the path was absent.
+        ok, message = test_sftp(**{**cfg, "require_object": False})
+        out["connected"] = ok
+        out["message"] = message
+        if not ok:
+            return out
+        directory = str(cfg.get("database") or "") or "/"
+        key = endpoint.table or endpoint.collection or ""
+        try:
+            names = list_files(cfg=cfg, directory=directory)
+        except Exception as exc:
+            # A directory we cannot list is unknown, never "the file is absent"
+            # — that answer would flip Map into create-new over a live file and
+            # overwrite it.
+            out["objects"] = []
+            out["sample_error"] = f"SFTP directory listing unavailable: {exc}"
+            return out
+        out["objects"] = [{"name": n, "type": "object"} for n in names[:200]]
+        if key:
+            # Existence is decided against the whole listing, not the 200 shown.
+            out["table_exists"] = key in set(names)
+            if out["table_exists"]:
+                _attach_db_sample(out, endpoint)
+        return out
+
     if fmt == "dynamodb":
         from connectors.dynamodb import test_dynamodb
 
@@ -318,6 +428,13 @@ def introspect_endpoint(
         out["connected"] = probe.ok
         out["objects"] = [{"name": t, "type": "keyspace"} for t in probe.tables]
         out["message"] = probe.message if probe.ok else (probe.error or "Connection failed")
+        if probe.ok and (endpoint.table or endpoint.collection):
+            # Sample the prefix for its document fields, as Mongo and
+            # Elasticsearch already do. Without this the auto-mapper saw a
+            # destination with no columns, mapped every source name to itself,
+            # and the write then failed on fields the keyspace does not have —
+            # even though the writer reads exactly these fields to type its bind.
+            _attach_db_sample(out, endpoint)
         return out
 
     if fmt == "elasticsearch":
@@ -349,7 +466,7 @@ def introspect_endpoint(
     }:
         out["connected"] = True
         out["message"] = f"{fmt.title()} connected — introspecting table schema"
-        if endpoint.table:
+        if endpoint.table or is_callable_source(endpoint):
             # Do NOT pre-seed objects with the typed name — that forced
             # table_exists=True for missing tables via _mark_table_listed_if_present.
             out["table_exists"] = False
@@ -389,6 +506,9 @@ def introspect_endpoint(
         except Exception:
             pass
         return out
+
+    if fmt in _SAAS_INTROSPECT_DRIVERS:
+        return _saas_introspect(out, endpoint, cfg, fmt)
 
     out["message"] = f"Introspection for `{fmt}` not yet implemented"
     return out
@@ -454,6 +574,10 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
         # Use the resolved saved-connector driver type if available, otherwise
         # fall back to the inline format string.
         fmt = (cfg.get("type") or endpoint.format or "").lower()
+
+        if is_callable_source(endpoint) or is_callable_source(cfg):
+            _attach_callable_source_sample(out, endpoint, cfg, fmt, sample_limit)
+            return
 
         if fmt == "mongodb":
             from services.schema_inference import infer_schema_map
@@ -571,13 +695,15 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
             return
 
         if fmt == "redis":
-            from connectors.redis_reader import read_keys_batch
+            from connectors.redis_reader import read_keys_batch, resolve_key_pattern
 
-            pattern = endpoint.table or endpoint.collection or endpoint.schema or "*"
+            pattern = resolve_key_pattern(
+                endpoint.table or endpoint.collection or endpoint.schema
+            )
             result = read_keys_batch(cfg=cfg, pattern=pattern, offset=0, limit=sample_limit)
             batch = result[0] if isinstance(result, tuple) else result
             out["columns"] = batch.headers
-            out["schema"] = {c: "string" for c in batch.headers}
+            out["schema"] = _schema_from_batch(batch)
             out["row_estimate"] = (batch.total_rows or 0)
             # Redis namespaces are logical key prefixes — an empty SCAN is not
             # proof the destination is missing (would falsely flip Map create-new).
@@ -598,7 +724,7 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
             if bucket and key:
                 batch = read_object(cfg=cfg, bucket=bucket, key=key, offset=0, limit=sample_limit)
                 out["columns"] = batch.headers
-                out["schema"] = {c: "string" for c in batch.headers}
+                out["schema"] = _schema_from_batch(batch)
                 out["row_estimate"] = (batch.total_rows or 0)
                 out["table_exists"] = True
                 _attach_batch_sample_rows(out, batch)
@@ -612,8 +738,24 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
             if bucket and key:
                 batch = read_object(cfg=cfg, bucket=bucket, key=key, offset=0, limit=sample_limit)
                 out["columns"] = batch.headers
-                out["schema"] = {c: "string" for c in batch.headers}
+                out["schema"] = _schema_from_batch(batch)
                 out["row_estimate"] = (batch.total_rows or 0)
+                out["table_exists"] = True
+                _attach_batch_sample_rows(out, batch)
+            return
+
+        if fmt == "sftp":
+            from connectors.sftp_reader import read_object
+
+            directory = str(cfg.get("database") or "") or "/"
+            key = endpoint.table or endpoint.collection or ""
+            if key:
+                batch = read_object(
+                    cfg=cfg, bucket=directory, key=key, offset=0, limit=sample_limit
+                )
+                out["columns"] = batch.headers
+                out["schema"] = _schema_from_batch(batch)
+                out["row_estimate"] = batch.total_rows or 0
                 out["table_exists"] = True
                 _attach_batch_sample_rows(out, batch)
             return
@@ -659,7 +801,7 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
                     if batch.headers:
                         out["columns"] = out.get("columns") or batch.headers
                         if not out.get("schema"):
-                            out["schema"] = {c: "string" for c in batch.headers}
+                            out["schema"] = _schema_from_batch(batch)
                         out["table_exists"] = True
                         if not out.get("row_estimate"):
                             out["row_estimate"] = batch.total_rows or len(batch.rows)
@@ -695,7 +837,7 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
                 result = read_index_batch(cfg=cfg, index=index, offset=0, limit=sample_limit)
                 batch = result[0] if isinstance(result, tuple) else result
                 out["columns"] = batch.headers
-                out["schema"] = {c: "string" for c in batch.headers}
+                out["schema"] = _schema_from_batch(batch)
                 out["row_estimate"] = (batch.total_rows or 0)
                 # Empty indexes still exist — row count must not drive create-new.
                 if exists is True or (batch.headers and exists is not False):
@@ -742,10 +884,23 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
             schema_map, schema_nulls, schema_keys = _introspect_table_schema_rich(
                 fmt, cfg, table, [], strict_namespace=strict_namespace
             )
+        probe_error = str((schema_keys or {}).get("probe_error") or "").strip()
+        if not schema_map and probe_error and not _is_absent_object_error(probe_error):
+            # Login / warehouse / role failure is not "table missing → create-new".
+            raise RuntimeError(probe_error)
         if schema_map:
             out["columns"] = list(schema_map.keys())
             out["schema"] = schema_map
             out["schema_nullability"] = schema_nulls
+            # Who fills a NOT NULL column when no mapping does — G14 refuses to
+            # call a required column safe without this.
+            out["schema_defaults"] = dict((schema_keys or {}).get("defaults") or {})
+            out["identity_columns"] = list(
+                (schema_keys or {}).get("identity_columns") or []
+            )
+            out["generated_columns"] = list(
+                (schema_keys or {}).get("generated_columns") or []
+            )
             out["primary_key_columns"] = list(
                 (schema_keys or {}).get("primary_key_columns") or []
             )
@@ -833,6 +988,102 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
         )
 
 
+#: SaaS drivers whose Describe is already modelled in ``schema_introspect``.
+#: They declared ``introspect: True`` and answered "not yet implemented" here,
+#: so a Salesforce or HubSpot *destination* could never prove its object exists
+#: and every route into one failed G2 on unknown existence. The metadata was
+#: written and reachable; only this dispatch was missing.
+_SAAS_INTROSPECT_DRIVERS = frozenset({"salesforce", "hubspot"})
+
+
+def _saas_introspect(
+    out: dict, endpoint: EndpointConfig, cfg: dict, fmt: str
+) -> dict:
+    """Describe-backed introspect for SaaS objects, via the canonical helper."""
+    from services.schema_introspect import introspect_schema
+
+    obj = endpoint.table or endpoint.collection or endpoint.database or ""
+    try:
+        info = introspect_schema(
+            fmt,
+            host=str(cfg.get("host") or ""),
+            port=int(cfg.get("port") or 443),
+            database=str(cfg.get("database") or ""),
+            username=str(cfg.get("username") or ""),
+            password=str(cfg.get("password") or ""),
+            connection_string=str(cfg.get("connection_string") or ""),
+            api_key=str(cfg.get("api_key") or ""),
+            table=obj,
+        )
+    except Exception as exc:
+        out["message"] = f"{fmt.title()} introspect failed: {exc}"
+        return out
+
+    objects = [str(t) for t in (info.get("tables") or []) if t]
+    if not info.get("ok"):
+        error = str(info.get("error") or f"{fmt.title()} introspect failed")
+        # Describe failing because the object is absent is a different answer
+        # from Describe failing because the session cannot read it. Only the
+        # first is proof, and neither means "create it" — a SaaS object cannot
+        # be created by a transfer.
+        if objects and obj and obj not in set(objects):
+            out["connected"] = True
+            out["table_exists"] = False
+            out["objects"] = [{"name": name, "type": "object"} for name in objects[:200]]
+            out["message"] = (
+                f"`{obj}` is not an object on this {fmt.title()} org. "
+                "Check the API name — objects cannot be created by a transfer."
+            )
+            return out
+        out["connected"] = bool(objects)
+        out["message"] = error
+        return out
+
+    out["connected"] = True
+    out["objects"] = [{"name": name, "type": "object"} for name in objects[:200]]
+    out["message"] = f"{fmt.title()} connected — {len(objects)} object(s)"
+    if not obj:
+        return out
+
+    columns = [c for c in (info.get("columns") or []) if c.get("name")]
+    # Existence is decided by the object list, not by whether Describe returned
+    # columns: an object that exists but describes empty is still not create-new.
+    out["table_exists"] = bool(columns) or obj in set(objects)
+    out["columns"] = [str(c["name"]) for c in columns]
+    out["schema"] = {
+        str(c["name"]): str(c.get("inferred_type") or "VARCHAR") for c in columns
+    }
+    out["column_nullability"] = {
+        str(c["name"]): bool(c.get("nullable", True)) for c in columns
+    }
+    for key in ("primary_key_columns", "unique_keys"):
+        if info.get(key):
+            out[key] = info[key]
+    return out
+
+
+def _schema_from_batch(batch: Any) -> dict[str, str]:
+    """Column types for a source that has no catalog to declare them.
+
+    Object stores, Redis and index sinks answer "what columns are here" from the
+    payload itself, so a bare ``string`` per header is a placeholder, not a
+    declaration. It was treated as one downstream: ``endpoint_source_column_types``
+    hands this to ``reconcile_source_types`` as the *declared* schema, which
+    outranks the reader's own inference by design — right for a relational
+    catalog, wrong here, and the result was that an S3 CSV landed three ``text``
+    columns where the identical upload landed ``bigint``/``numeric``/``date``.
+
+    Readers that can type their rows report it through ``meta['native_types']``.
+    Where a reader cannot, the placeholder stands and nothing changes.
+    """
+    headers = list(getattr(batch, "headers", None) or [])
+    meta = getattr(batch, "meta", None)
+    native = meta.get("native_types") if isinstance(meta, dict) else None
+    if isinstance(native, dict) and native:
+        return {c: str(native.get(c) or "string") for c in headers}
+    return {c: "string" for c in headers}
+
+
 def _attach_batch_sample_rows(out: dict, batch: Any, *, preview: int = 100) -> None:
     """Attach JSON-safe sample rows from a ReadBatch for Validate dry-run.
 
@@ -860,6 +1111,92 @@ def _attach_batch_sample_rows(out: dict, batch: Any, *, preview: int = 100) -> N
         out["message"] = (
             f"{out.get('message', '')} · source returned 0 sample rows (empty)"
         ).strip(" ·")
+
+
+def _attach_callable_source_sample(
+    out: dict,
+    endpoint: EndpointConfig,
+    cfg: dict,
+    fmt: str,
+    sample_limit: int,
+) -> None:
+    """Peek a CALL/EXEC/SELECT extract — columns come from the result set, not information_schema."""
+    from services.procedure_source import (
+        ProcedureSourceError,
+        parse_callable_source,
+        peek_callable_schema,
+        procedure_params_of,
+        procedure_text_of,
+        read_callable_batch,
+        source_read_mode_of,
+        stream_name_for_callable,
+    )
+
+    try:
+        spec = parse_callable_source(
+            procedure_text_of(endpoint) or procedure_text_of(cfg),
+            dialect=fmt or str(cfg.get("type") or ""),
+            mode=source_read_mode_of(endpoint) or source_read_mode_of(cfg),
+            params=procedure_params_of(endpoint) or procedure_params_of(cfg),
+        )
+        limit = max(1, min(int(sample_limit or 100), 100))
+        batch = read_callable_batch(cfg, offset=0, limit=limit, peek=True)
+        headers = list(batch.headers or [])
+        out["connected"] = True
+        out["table_exists"] = True
+        out["source_read_mode"] = spec.mode
+        out["procedure"] = spec.identifier
+        out["columns"] = headers
+        native = (batch.meta or {}).get("native_types") if isinstance(batch.meta, dict) else {}
+        if isinstance(native, dict) and native:
+            out["schema"] = {c: str(native.get(c) or "VARCHAR") for c in headers}
+        else:
+            schema, _intel = peek_callable_schema(headers, list(batch.rows or []))
+            out["schema"] = schema
+        out["objects"] = [{"name": spec.identifier, "type": spec.mode}]
+        out["row_estimate"] = int(batch.total_rows or len(batch.rows or []))
+        out["row_estimate_uncertain"] = True
+        out["message"] = (
+            f"{spec.verb} `{spec.identifier}` returned {len(headers)} column(s) "
+            f"(result-set snapshot — not CDC). Extra source columns stay visible on Map."
+        )
+        _attach_batch_sample_rows(out, batch)
+        if not endpoint.table:
+            endpoint.table = stream_name_for_callable(spec)
+    except ProcedureSourceError as exc:
+        out["connected"] = True
+        out["table_exists"] = False
+        out["columns"] = []
+        out["schema"] = {}
+        out["sample_error"] = str(exc)
+        out["message"] = str(exc)
+    except Exception as exc:
+        out["connected"] = True
+        out["table_exists"] = None
+        out["columns"] = out.get("columns") or []
+        out["schema"] = out.get("schema") or {}
+        out["sample_error"] = str(exc)
+        out["message"] = f"Procedure extract failed: {exc}"
+        logger.warning("callable source peek failed for %s: %s", fmt, exc, exc_info=exc)
+
+
+def apply_measured_row_estimate(
+    out: dict, total_rows: int | None, sample_len: int
+) -> None:
+    """Stamp population separately from the preview window.
+
+    A 100-row SELECT is not a 100-row table. When COUNT(*) (or equivalent)
+    measured the table, that number is the wizard volume. When it did not,
+    leave the estimate unknown — never publish ``len(sample)`` as population.
+    """
+    out["sample_row_count"] = int(sample_len)
+    if total_rows is not None and int(total_rows) >= 0:
+        out["row_estimate"] = int(total_rows)
+        out.pop("row_estimate_uncertain", None)
+        return
+    if out.get("row_estimate") in (None, 0):
+        out["row_estimate"] = 0
+        out["row_estimate_uncertain"] = True
 
 
 def _attach_sql_sample_rows(
@@ -902,8 +1239,18 @@ def _attach_sql_sample_rows(
         )
         # Cap preview reads to the same window Execute uses for preflight integrity.
         limit = max(1, min(int(sample_limit or 100), 100))
+        purpose = str((endpoint.extra or {}).get("introspect_purpose") or "").lower()
+        # Destination Map/Validate need columns and keys, not dest population
+        # and not a dest 100-row peek. That peek opened extra Snowflake logins
+        # and COUNT(*)'d the dest table — the "analyzing destination schema"
+        # hang and the preflight timeout.
+        if purpose == "destination" and out.get("columns"):
+            return
+        if purpose == "destination":
+            sample_ep.extra = {**(sample_ep.extra or {}), "skip_population_count": True}
+        stamp: dict[str, Any] = {}
         records, headers, inferred = read_source_database(
-            sample_ep, limit=limit, raise_on_truncate=False
+            sample_ep, limit=limit, raise_on_truncate=False, stamp_total=stamp
         )
         if headers and not out.get("columns"):
             out["columns"] = list(headers)
@@ -918,9 +1265,7 @@ def _attach_sql_sample_rows(
             safe_records.append({k: cell_to_string(row.get(k, "")) for k in (headers or out.get("columns") or [])})
         out["sample_data"] = safe_records
         out["data"] = safe_records
-        if out.get("row_estimate") in (None, 0) and records:
-            # Best-effort; full COUNT can be expensive on warehouses.
-            out["row_estimate"] = max(int(out.get("row_estimate") or 0), len(records))
+        apply_measured_row_estimate(out, stamp.get("total_rows"), len(safe_records))
         if not records:
             out["message"] = (
                 f"{out.get('message', '')} · table `{table}` is empty "

@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import json
 import sys
+from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -56,6 +58,9 @@ from tests.typed_fidelity_helpers import (  # noqa: E402
     seed_mysql_typed,
     seed_postgresql_decimal_sink,
     seed_postgresql_typed,
+    drop_snowflake_table,
+    read_snowflake_row,
+    seed_snowflake_typed_sink,
     snowflake_endpoint,
     sqlite_endpoint,
     sqlserver_endpoint,
@@ -146,24 +151,46 @@ def test_mongodb_to_postgresql_typed_preflight_on():
 
 
 def test_postgresql_to_snowflake_typed_preflight_on():
+    """Typed fidelity into a Snowflake sink that already exists.
+
+    Create-new is deliberately not exercised here: ``fakesnow`` is DuckDB
+    underneath and has no ``GRANTS`` catalog, so G2 cannot read the privileges
+    a create-new destination needs and fails closed. That refusal is correct —
+    against a real account ``SHOW GRANTS`` answers — and it is proven on its own
+    in the privilege-probe tests. Asserting it here would only prove the
+    emulator's shape.
+    """
     pytest.importorskip("fakesnow")
     require_ports(5432)
     src = uniq("tf_pg_sf_src")
     dst = uniq("tf_pg_sf_dst")
     seed_postgresql_typed(src)
+    seed_snowflake_typed_sink(dst)
     try:
         result = run_typed_transfer(pg_endpoint(src), snowflake_endpoint(dst))
         assert result.success is True, result.error
         assert result.records_transferred == 2
         assert_preflight_ran(result)
-        # fakesnow type metadata is limited — prove transfer + validate, and
-        # that FLOAT was proposed in DDL when available.
-        ddl = " ".join(result.ddl_executed or []).upper()
-        if ddl:
-            assert "FLOAT" in ddl or "DOUBLE" in ddl or "REAL" in ddl, ddl
         assert (result.reconciliation or {}).get("rejected_rows", 0) == 0
+
+        row = read_snowflake_row(dst, 1)
+        assert int(row["id"]) == 1
+        # NUMBER(12,4) must keep the scale, and must not arrive as a float.
+        assert Decimal(str(row["amt_dec"])) == Decimal("10.5000"), row["amt_dec"]
+        assert abs(float(row["amt_float"]) - 1500.0) < 1e-9
+        # SQL NULL and the empty string are different values.
+        assert row["note_null"] is None, f"NULL became {row['note_null']!r}"
+        assert row["note_empty"] == "", f"empty string became {row['note_empty']!r}"
+        assert row["flag"] in (True, 1, "true")
+        ts = row["ts_utc"]
+        assert ts is not None
+        if isinstance(ts, datetime):
+            if ts.tzinfo is not None:
+                ts = ts.astimezone(timezone.utc).replace(tzinfo=None)
+            assert ts == datetime(2024, 12, 31, 23, 59, 59), ts
     finally:
         drop_pg_table(src)
+        drop_snowflake_table(dst)
 
 
 def test_dynamodb_to_postgresql_typed_preflight_on():
@@ -217,6 +244,55 @@ def test_postgresql_to_mysql_typed_preflight_on():
         assert result.success is True, result.error
         assert result.records_transferred == 2
         assert_preflight_ran(result)
+        assert_mysql_typed_fidelity(dst)
+    finally:
+        drop_pg_table(src)
+        drop_mysql_table(dst)
+
+
+def test_postgresql_into_existing_mysql_timestamp_column():
+    """An existing ``TIMESTAMP`` sink is an instant carrier — not a wall clock.
+
+    ``created_at TIMESTAMP`` is the most common MySQL audit column. The writer
+    resolved its catalog spelling through the foreign-token rematerializer,
+    retyped it as ``DATETIME(6)``, and the NTZ guard then quarantined every
+    offset-bearing row — a total write failure against a column that stores
+    exactly those instants.
+    """
+    require_ports(5432, 3306)
+    import pymysql
+
+    src = uniq("tf_pg_myts_src")
+    dst = uniq("tf_pg_myts_dst")
+    seed_postgresql_typed(src)
+    conn = pymysql.connect(
+        host="localhost",
+        port=3306,
+        user="dataflow",
+        password="dataflow",
+        database="dataflow",
+        autocommit=True,
+    )
+    with conn.cursor() as cur:
+        cur.execute(
+            f"""
+            CREATE TABLE `{dst}` (
+              id INT PRIMARY KEY,
+              amt_dec DECIMAL(12,4) NOT NULL,
+              amt_float DOUBLE NOT NULL,
+              note_null TEXT,
+              note_empty VARCHAR(64) NOT NULL,
+              ts_utc TIMESTAMP(6) NOT NULL,
+              flag TINYINT(1) NOT NULL
+            )
+            """
+        )
+    conn.close()
+    try:
+        result = run_typed_transfer(pg_endpoint(src), mysql_endpoint(dst))
+        assert result.success is True, result.error
+        assert result.records_transferred == 2
+        assert (result.reconciliation or {}).get("rejected_rows", 0) == 0
         assert_mysql_typed_fidelity(dst)
     finally:
         drop_pg_table(src)

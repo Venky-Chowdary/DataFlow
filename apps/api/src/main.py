@@ -35,6 +35,7 @@ from .routers.automation_router import router as automation_router
 from .routers.catalog_router import router as catalog_router
 from .routers.connectors_router import router as connectors_router
 from .routers.contracts_router import router as contracts_router
+from .routers.fidelity_router import router as fidelity_router
 from .routers.resource_acl_router import router as resource_acl_router
 from .routers.cdc_mapping_review_router import router as cdc_mapping_review_router
 from .routers.transforms_router import router as transforms_router
@@ -158,6 +159,18 @@ async def lifespan(app: FastAPI):
 
             start_transfer_scheduler()
 
+            # Phase F5 — claim-queue pull on API when SCHEDULER_MODE resolves to claim.
+            try:
+                from services.scheduler_mode import scheduler_mode
+                from services.worker_fleet import start_api_claim_loop
+
+                if start_api_claim_loop():
+                    print(f"[+] API claim loop started (scheduler_mode={scheduler_mode()})")
+                else:
+                    print(f"[+] Transfer scheduler local mode (scheduler_mode={scheduler_mode()})")
+            except Exception as claim_exc:
+                print(f"[!] API claim loop not started: {claim_exc}")
+
             from .services.mongodb_service import get_mongodb_service
             from .services.worker_leases import get_worker_lease_store
             from .transfer.background import run_transfer_async
@@ -169,13 +182,40 @@ async def lifespan(app: FastAPI):
             for job in mongo.list_jobs(limit=200):
                 if job.get("status") in ("pending", "running", "paused", "retrying") and job.get("transfer_request"):
                     payload = job["transfer_request"]
-                    if payload.get("requires_file_reupload"):
-                        mongo.update_job_status(job["_id"], "failed", error="File re-upload required after restart")
-                        continue
                     if lease_store.is_held(job["_id"]):
                         continue
                     request = transfer_request_from_dict(payload)
-                    run_transfer_async(job["_id"], request, resume=True)
+                    try:
+                        from services.transfer_file_staging import (
+                            file_source_bytes_available,
+                            hydrate_file_source,
+                        )
+
+                        hydrate_file_source(request)
+                        if request.source.kind == "file" and not file_source_bytes_available(
+                            request
+                        ):
+                            mongo.update_job_status(
+                                job["_id"],
+                                "failed",
+                                error="File re-upload required after restart",
+                            )
+                            continue
+                    except Exception as hydrate_exc:
+                        logging.getLogger(__name__).warning(
+                            "Orphan resume hydrate failed for %s: %s",
+                            job.get("_id"),
+                            hydrate_exc,
+                        )
+                    from services.execution_engine_contract import resolve_reclaim_resume
+
+                    # Fresh pending / zero-progress reclaim → resume=False.
+                    # Forcing resume=True on append/Excel falsely fails Module 14.
+                    run_transfer_async(
+                        job["_id"],
+                        request,
+                        resume=resolve_reclaim_resume(job),
+                    )
                     resumed += 1
             print(f"[+] Orphaned job resume scan complete ({resumed} job(s) rescheduled)")
         except Exception as e:
@@ -393,6 +433,7 @@ app.include_router(audit_router, prefix="/api/v1")
 app.include_router(cdc_mapping_review_router, prefix="/api/v1")
 app.include_router(workspace_router, prefix="/api/v1")
 app.include_router(contracts_router, prefix="/api/v1")
+app.include_router(fidelity_router, prefix="/api/v1")
 app.include_router(resource_acl_router, prefix="/api/v1")
 app.include_router(transforms_router, prefix="/api/v1")
 app.include_router(query_router, prefix="/api/v1")

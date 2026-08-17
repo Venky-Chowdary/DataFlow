@@ -20,11 +20,11 @@ from connectors.saas_common import (
     token,
 )
 from connectors.writer_common import (
+    reject_on_strict_policy,
     WriteResult,
     apply_write_quarantine_matrix,
     build_mapped_rows_with_details,
     gate8_writer_meta,
-    resolve_mapping_dest_types,
     resolve_target_columns,
     transform_error_policy,
 )
@@ -109,7 +109,17 @@ def notion_property_to_carrier(
         return "VARCHAR(10000)"
     if t == "relation":
         return "VARCHAR(4000)"
-    return "VARCHAR"
+    if t in {"created_time", "last_edited_time"}:
+        return "TIMESTAMPTZ"
+    if t == "unique_id":
+        return "VARCHAR(64)"
+    # Structured / people / files — JSON polarity (not open VARCHAR invent).
+    if t in {"people", "files", "created_by", "last_edited_by", "place"}:
+        return "JSON"
+    # Computed / unknown property kinds — refuse soft VARCHAR; Studio gate.
+    if t in {"formula", "rollup", "verification", "button"} or not t:
+        return ""
+    return ""
 
 
 def resolve_notion_dest_types(
@@ -120,8 +130,16 @@ def resolve_notion_dest_types(
     logical_types: list[str] | None = None,
     properties: dict[str, str] | None = None,
     property_options: dict[str, list[str]] | None = None,
+    studio_types: dict[str, Any] | None = None,
 ) -> dict[str, str]:
-    """Prefer live Notion database property types; else Map/source carriers."""
+    """Prefer live Notion database property types; else Map/source carriers.
+
+    When properties are supplied or Studio typed carriers, never soft-fill
+    formula/unknown kinds with Map ``VARCHAR`` — parity with the write-path
+    ``merge_saas_live_types`` gate.
+    """
+    from connectors.saas_common import resolve_saas_live_or_map_dest_types
+
     opts = property_options or {}
     live = {
         name: notion_property_to_carrier(
@@ -130,14 +148,28 @@ def resolve_notion_dest_types(
         for name, typ in (properties or {}).items()
         if name and typ
     }
-    return resolve_mapping_dest_types(
-        target_cols,
+    live = {k: v for k, v in live.items() if str(v or "").strip()}
+    # Page id routes the write only when it is not a live Notion property.
+    live_l = {str(k).lower() for k in live}
+    routing_only = {"id"} - live_l
+    property_cols = [
+        c for c in (target_cols or []) if c and str(c).lower() not in routing_only
+    ]
+    merged = resolve_saas_live_or_map_dest_types(
+        property_cols if properties is not None else list(target_cols or []),
         mappings,
         column_types,
+        live_carriers=live,
+        live_schema_present=properties is not None,
+        studio_types=studio_types,
         logical_types=logical_types,
-        live_types=live,
-        default="VARCHAR",
+        product="Notion",
     )
+    if properties is not None:
+        for col in target_cols or []:
+            if col and str(col).lower() in routing_only and col not in merged:
+                merged[col] = "VARCHAR(64)"
+    return merged
 
 
 def _rich_text_chunks(text: str) -> list[dict[str, Any]]:
@@ -224,6 +256,12 @@ def _as_property_value(
     row_idx: int,
 ) -> Any:
     """Map a single cell value into a Notion property object value."""
+    from services.value_serializer import is_missing_sentinel
+
+    # STOP_COLUMN / coerce_null → DF_MISSING: omit property (never write sentinel).
+    if value is None or is_missing_sentinel(value):
+        return None
+
     text = ""
     if value is not None:
         text = str(value)
@@ -235,24 +273,46 @@ def _as_property_value(
         return {"rich_text": _rich_text_chunks(text)}
     if notion_type == "number":
         if text == "":
-            return {"number": None}
+            # Omit empty — never invent JSON null (destination wipe).
+            return None
         try:
             return {"number": float(text)}
-        except ValueError:
-            warnings.append(f"row {row_idx}: cannot coerce '{property_name}' to number")
-            return {"number": None}
+        except ValueError as exc:
+            raise ValueError(
+                f"Notion number property {property_name!r} refused {value!r} "
+                "(refuse silent NULL invent)"
+            ) from exc
     if notion_type == "url":
-        return {"url": text or None}
+        # Omit empty — never emit {"url": null} (destination wipe on upsert).
+        if text == "":
+            return None
+        return {"url": text}
     if notion_type == "email":
-        return {"email": text or None}
+        if text == "":
+            return None
+        return {"email": text}
     if notion_type == "phone_number":
-        return {"phone_number": text or None}
+        if text == "":
+            return None
+        return {"phone_number": text}
     if notion_type == "checkbox":
-        return {"checkbox": bool(value) and text.lower() not in {"false", "0", "", "no"}}
+        from connectors.sql_bind import coerce_boolean_wire
+
+        coerced = coerce_boolean_wire(value)
+        if not isinstance(coerced, bool):
+            raise ValueError(
+                f"Notion checkbox {property_name!r} refused {value!r} "
+                "(refuse boolean invent)"
+            )
+        return {"checkbox": coerced}
     if notion_type == "select":
-        return {"select": {"name": text} if text else None}
+        if text == "":
+            return None
+        return {"select": {"name": text}}
     if notion_type == "status":
-        return {"status": {"name": text} if text else None}
+        if text == "":
+            return None
+        return {"status": {"name": text}}
     if notion_type == "multi_select":
         # Accept CSV or semicolon (warehouse SET / HubSpot-class multi-select).
         import re as _re
@@ -264,9 +324,10 @@ def _as_property_value(
         ]
         return {"multi_select": names}
     if notion_type == "date":
-        if text:
-            return {"date": {"start": text}}
-        return {"date": None}
+        if not text:
+            # Omit empty — never {"date": null} wipe.
+            return None
+        return {"date": {"start": text}}
     if notion_type == "relation":
         ids = [_page_id(v) for v in text.split(",") if v.strip()]
         return {"relation": [{"id": i} for i in ids if i]}
@@ -330,9 +391,33 @@ def write_mapped_rows(
             driver="notion",
         )
 
+    target_cols, logical_types = resolve_target_columns(
+        mappings, column_types, preserve_case=True
+    )
+    policy = transform_error_policy(error_policy)
+    properties: dict[str, str] = {}
+    property_options: dict[str, list[str]] = {}
+    describe_exc: Exception | None = None
     try:
-        properties, property_options = _fetch_database_properties(database_id, access_token)
+        properties, property_options = _fetch_database_properties(
+            database_id, access_token
+        )
     except Exception as exc:
+        describe_exc = exc
+    from connectors.saas_common import gate_saas_describe
+
+    # Notion page payloads need live property kinds (title vs rich_text vs
+    # select options). Studio VARCHAR cannot reconstruct those — never allow
+    # Studio-typed Map fallback for Notion writes.
+    gate = gate_saas_describe(
+        product="Notion",
+        object_name=table_name or database_id,
+        fields=list(properties.items()) if properties else ([] if describe_exc is None else None),
+        exc=describe_exc,
+        target_cols=target_cols,
+        studio_types=None,
+    )
+    if not gate.ok:
         return WriteResult(
             ok=False,
             rows_written=0,
@@ -340,23 +425,49 @@ def write_mapped_rows(
             target_schema=database_id,
             checksum="",
             chunks_completed=0,
-            error=f"Unable to read Notion database schema: {humanize_http_error(exc, 'notion')}",
+            error=gate.error
+            or f"Unable to read Notion database schema: {humanize_http_error(describe_exc, 'notion')}",
             driver="notion",
         )
+    live = {
+        name: notion_property_to_carrier(
+            typ, option_names=property_options.get(str(name).lower()) or property_options.get(name)
+        )
+        for name, typ in properties.items()
+        if name and typ
+    }
+    live = {k: v for k, v in live.items() if str(v or "").strip()}
+    from connectors.saas_common import merge_saas_live_types
 
+    # Page id routes the write when it is not a live Notion property.
+    # Conflict keys that ARE live properties keep Describe carriers (not VARCHAR(64)).
+    live_l = {str(k).lower() for k in live}
+    routing = {str(c).lower() for c in (conflict_columns or []) if c}
+    routing.add("id")
+    routing_only = {c for c in routing if c not in live_l}
+    property_cols = [c for c in target_cols if c and str(c).lower() not in routing_only]
+    dest_types, cov_err = merge_saas_live_types(
+        live,
+        property_cols,
+        studio_types=None,
+        product="Notion",
+    )
+    if cov_err:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=table_name,
+            target_schema=database_id,
+            checksum="",
+            chunks_completed=0,
+            error=cov_err,
+            driver="notion",
+        )
+    for col in target_cols:
+        if col and str(col).lower() in routing_only and col not in dest_types:
+            # Notion page UUID routing — not a property width invent.
+            dest_types[col] = "VARCHAR(64)"
     title_name = _title_property(properties)
-    target_cols, logical_types = resolve_target_columns(
-        mappings, column_types, preserve_case=True
-    )
-    policy = transform_error_policy(error_policy)
-    dest_types = resolve_notion_dest_types(
-        target_cols,
-        mappings,
-        column_types,
-        logical_types=logical_types,
-        properties=properties,
-        property_options=property_options,
-    )
     mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
         headers=headers,
         data_rows=data_rows,
@@ -366,8 +477,11 @@ def write_mapped_rows(
         error_policy=policy,
         dest_types=dest_types,
         preserve_case=True,
+        dest_kind="notion",
+        destination_pk_columns=list(conflict_columns or []) or None,
+        destination_column_nullability=_kwargs.get("destination_column_nullability"),
     )
-    tgt_types = [str(dest_types.get(c, "VARCHAR") or "VARCHAR") for c in target_cols]
+    tgt_types = [str(dest_types.get(c) or "").strip() for c in target_cols]
     mapped_rows = apply_write_quarantine_matrix(
         mapped_rows,
         target_cols,
@@ -377,7 +491,8 @@ def write_mapped_rows(
         dialect_label="Notion",
         mappings=mappings,
     )
-    if transform_errors and policy == "fail":
+    _map_abort = reject_on_strict_policy(policy, rejected_details, 'Notion', transform_errors)
+    if _map_abort:
         return WriteResult(
             ok=False,
             rows_written=0,
@@ -385,7 +500,7 @@ def write_mapped_rows(
             target_schema=database_id,
             checksum="",
             chunks_completed=0,
-            error=f"Transform errors: {'; '.join(transform_errors[:3])}",
+            error=_map_abort or f"Transform errors: {'; '.join(transform_errors[:3])}",
             rejected_details=rejected_details,
             driver="notion",
         )
@@ -408,7 +523,45 @@ def write_mapped_rows(
 
         record_id = None
         if mode in upsert_modes:
-            candidates = list(conflict_columns or ["id"])
+            candidates = [c for c in (conflict_columns or []) if c]
+            if not candidates:
+                msg = (
+                    f"row {i}: Notion upsert requires conflict_columns/primary_key — "
+                    "refuse inventing default 'id'"
+                )
+                detail = {
+                    "row": i,
+                    "column": "",
+                    "target": table_name,
+                    "value": "",
+                    "reason": msg,
+                    "policy": policy,
+                    "values": dict(row_dict),
+                }
+                from connectors.writer_common import append_write_quarantine_detail
+
+                append_write_quarantine_detail(
+                    all_rejected,
+                    detail,
+                    mapped_row=tuple(row_dict.get(c) for c in target_cols),
+                    target_cols=target_cols,
+                )
+                warnings.append(msg)
+                if policy == "fail":
+                    return WriteResult(
+                        ok=False,
+                        rows_written=written,
+                        table_name=table_name,
+                        target_schema=database_id,
+                        checksum=digest.hexdigest()[:32] if written else "",
+                        chunks_completed=chunks,
+                        error=msg,
+                        rejected_details=all_rejected,
+                        rejected_rows=len(all_rejected),
+                        warnings=warnings[:20],
+                        driver="notion",
+                    )
+                continue
             for c in candidates:
                 val = row_dict.get(c)
                 if val:
@@ -417,37 +570,134 @@ def write_mapped_rows(
 
         notion_properties: dict[str, Any] = {}
         has_title = False
+        from services.value_serializer import is_missing_sentinel
+
         for col, val in row_dict.items():
             prop_type = properties.get(col.lower())
             if not prop_type:
-                warnings.append(f"row {i}: '{col}' does not exist in Notion database; skipped.")
+                msg = (
+                    f"row {i}: mapped column '{col}' does not exist in Notion "
+                    "database — quarantined (refuse silent skip)"
+                )
+                warnings.append(msg)
+                from connectors.writer_common import append_write_quarantine_detail
+
+                append_write_quarantine_detail(
+                    all_rejected,
+                    {
+                        "row": i,
+                        "column": col,
+                        "target": col,
+                        "value": val,
+                        "reason": msg,
+                        "policy": policy,
+                        "values": dict(row_dict),
+                    },
+                    mapped_row=tuple(row_dict.get(c) for c in target_cols),
+                    target_cols=target_cols,
+                )
+                if policy == "fail":
+                    return WriteResult(
+                        ok=False,
+                        rows_written=written,
+                        table_name=table_name,
+                        target_schema=database_id,
+                        checksum=digest.hexdigest()[:32],
+                        chunks_completed=chunks,
+                        error=msg,
+                        rejected_details=all_rejected,
+                        rejected_rows=len(all_rejected),
+                        warnings=warnings[:20],
+                        driver="notion",
+                    )
                 continue
             if prop_type in {"formula", "rollup", "created_by", "created_time", "last_edited_by", "last_edited_time", "files"}:
-                warnings.append(f"row {i}: '{col}' is read-only in Notion; skipped.")
+                msg = (
+                    f"row {i}: Notion property '{col}' is read-only ({prop_type}) "
+                    "— quarantined (refuse silent skip)"
+                )
+                warnings.append(msg)
+                from connectors.writer_common import append_write_quarantine_detail
+
+                append_write_quarantine_detail(
+                    all_rejected,
+                    {
+                        "row": i,
+                        "column": col,
+                        "target": col,
+                        "value": val,
+                        "reason": msg,
+                        "policy": policy,
+                        "values": dict(row_dict),
+                    },
+                    mapped_row=tuple(row_dict.get(c) for c in target_cols),
+                    target_cols=target_cols,
+                )
+                if policy == "fail":
+                    return WriteResult(
+                        ok=False,
+                        rows_written=written,
+                        table_name=table_name,
+                        target_schema=database_id,
+                        checksum=digest.hexdigest()[:32],
+                        chunks_completed=chunks,
+                        error=msg,
+                        rejected_details=all_rejected,
+                        rejected_rows=len(all_rejected),
+                        warnings=warnings[:20],
+                        driver="notion",
+                    )
                 continue
-            prop_value = _as_property_value(val, prop_type, col, warnings, i)
+            try:
+                prop_value = _as_property_value(val, prop_type, col, warnings, i)
+            except ValueError as cell_exc:
+                msg = str(cell_exc)
+                detail = {
+                    "row": i,
+                    "column": col,
+                    "target": col,
+                    "value": val,
+                    "reason": msg,
+                    "policy": policy,
+                    "values": dict(row_dict),
+                }
+                from connectors.writer_common import append_write_quarantine_detail
+
+                append_write_quarantine_detail(
+                    all_rejected,
+                    detail,
+                    mapped_row=tuple(row_dict.get(c) for c in target_cols),
+                    target_cols=target_cols,
+                )
+                warnings.append(msg)
+                if policy == "fail":
+                    return WriteResult(
+                        ok=False,
+                        rows_written=written,
+                        table_name=table_name,
+                        target_schema=database_id,
+                        checksum=digest.hexdigest()[:32],
+                        chunks_completed=chunks,
+                        error=msg,
+                        rejected_details=all_rejected,
+                        rejected_rows=len(all_rejected),
+                        warnings=warnings[:20],
+                        driver="notion",
+                    )
+                continue
             if prop_value is not None:
                 notion_properties[col] = prop_value
-                if prop_type == "title" and val is not None and str(val):
+                if prop_type == "title" and val is not None and not is_missing_sentinel(val) and str(val):
                     has_title = True
 
         if title_name and not has_title:
-            # Notion requires a title on create; fall back to the first non-empty value.
-            fallback_value = ""
-            fallback_col = ""
-            for col, val in row_dict.items():
-                if val is not None and str(val).strip():
-                    fallback_value = str(val).strip()
-                    fallback_col = col
-                    break
-            if fallback_value:
-                notion_properties[title_name] = _as_property_value(fallback_value, "title", title_name, warnings, i)
-                warnings.append(
-                    f"row {i}: missing Notion title; used '{fallback_col}' value as fallback title."
+            # Notion requires a title on create — never invent from an unrelated
+            # mapped field (schema/value invent outside honest Map).
+            if not record_id:
+                msg = (
+                    f"row {i}: Notion create/upsert requires title property "
+                    f"'{title_name}' — refuse inventing title from other columns"
                 )
-                has_title = True
-            else:
-                msg = f"row {i}: Notion requires a title property; no value available."
                 detail = {
                     "row": i,
                     "column": title_name,
@@ -457,7 +707,14 @@ def write_mapped_rows(
                     "policy": policy,
                     "values": dict(row_dict),
                 }
-                all_rejected.append(detail)
+                from connectors.writer_common import append_write_quarantine_detail
+
+                append_write_quarantine_detail(
+                    all_rejected,
+                    detail,
+                    mapped_row=tuple(row_dict.get(c) for c in target_cols),
+                    target_cols=target_cols,
+                )
                 warnings.append(msg)
                 if policy == "fail":
                     return WriteResult(
@@ -479,6 +736,44 @@ def write_mapped_rows(
             url = f"https://{DEFAULT_HOST}/v1/pages/{record_id}"
             method = "PATCH"
             payload: dict[str, Any] = {"properties": notion_properties}
+        elif mode in upsert_modes:
+            msg = (
+                f"row {i}: Notion upsert missing page id — refuse create invent "
+                "(would duplicate pages under at-least-once retry)"
+            )
+            detail = {
+                "row": i,
+                "column": str((conflict_columns or [""])[0] if conflict_columns else ""),
+                "target": table_name,
+                "value": "",
+                "reason": msg,
+                "policy": policy,
+                "values": dict(row_dict),
+            }
+            from connectors.writer_common import append_write_quarantine_detail
+
+            append_write_quarantine_detail(
+                all_rejected,
+                detail,
+                mapped_row=tuple(row_dict.get(c) for c in target_cols),
+                target_cols=target_cols,
+            )
+            warnings.append(msg)
+            if policy == "fail":
+                return WriteResult(
+                    ok=False,
+                    rows_written=written,
+                    table_name=table_name,
+                    target_schema=database_id,
+                    checksum=digest.hexdigest()[:32],
+                    chunks_completed=chunks,
+                    error=msg,
+                    rejected_details=all_rejected,
+                    rejected_rows=len(all_rejected),
+                    warnings=warnings[:20],
+                    driver="notion",
+                )
+            continue
         else:
             url = f"https://{DEFAULT_HOST}/v1/pages"
             method = "POST"
@@ -522,12 +817,19 @@ def write_mapped_rows(
                 "row": i,
                 "column": "",
                 "target": table_name,
-                "value": str(record_id or row_dict),
+                "value": record_id,
                 "reason": humanize_http_error(exc, "notion"),
                 "policy": policy,
-                "values": payload,
+                "values": payload if isinstance(payload, dict) else dict(row_dict),
             }
-            all_rejected.append(detail)
+            from connectors.writer_common import append_write_quarantine_detail
+
+            append_write_quarantine_detail(
+                all_rejected,
+                detail,
+                mapped_row=tuple(row_dict.get(c) for c in target_cols),
+                target_cols=target_cols,
+            )
             if policy == "fail":
                 return WriteResult(
                     ok=False,
@@ -550,6 +852,22 @@ def write_mapped_rows(
 
     if on_checkpoint:
         on_checkpoint(len(mapped_rows), written, 1)
+
+    _final_abort = reject_on_strict_policy(policy, all_rejected, "Notion")
+    if _final_abort:
+        return WriteResult(
+            ok=False,
+            rows_written=written,
+            table_name=table_name,
+            target_schema=database_id,
+            checksum=digest.hexdigest()[:32],
+            chunks_completed=chunks or 1,
+            error=_final_abort,
+            rejected_details=all_rejected,
+            rejected_rows=len(all_rejected),
+            warnings=warnings[:20],
+            driver="notion",
+        )
 
     return WriteResult(
         ok=True,

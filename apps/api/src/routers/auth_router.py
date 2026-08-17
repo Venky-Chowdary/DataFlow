@@ -21,6 +21,7 @@ from ..services.auth_service import (
     create_token,
     lookup_user,
     public_user,
+    revoke_token,
 )
 
 try:
@@ -183,13 +184,14 @@ def _require_sso_authorization(email: str) -> None:
         )
 
 
-def _redirect_with_token(email: str, expires_at: int) -> RedirectResponse:
+def _redirect_with_token(email: str, expires_at: int | None = None) -> RedirectResponse:
     """Return the token in the URL fragment so it is not sent to the server or logged."""
-    token, _ = create_token(str(email))
+    token, minted_expires = create_token(str(email))
+    exp = int(expires_at) if expires_at is not None else minted_expires
     params = urlencode(
         {
             "sso_token": token,
-            "expires_at": str(expires_at),
+            "expires_at": str(exp),
             "sso_email": email,
         }
     )
@@ -471,7 +473,6 @@ async def sso_callback(sso_type: str, code: str = "", state: str = "", error: st
 
         _require_sso_authorization(email)
 
-        _, expires_at = create_token(str(email))
         try:
             from services.audit_log import append_audit_event
 
@@ -485,7 +486,7 @@ async def sso_callback(sso_type: str, code: str = "", state: str = "", error: st
         except Exception as exc:
             logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
-        return _redirect_with_token(email, expires_at)
+        return _redirect_with_token(email)
     except HTTPException:
         raise
     except Exception as exc:
@@ -537,7 +538,6 @@ async def sso_post_callback(sso_type: str, request: Request):
 
     _require_sso_authorization(email)
 
-    _, expires_at = create_token(str(email))
     try:
         from services.audit_log import append_audit_event
 
@@ -551,19 +551,82 @@ async def sso_post_callback(sso_type: str, request: Request):
     except Exception as exc:
         logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
-    return _redirect_with_token(email, expires_at)
+    return _redirect_with_token(email)
 
 
 @router.get("/bootstrap")
-async def auth_bootstrap():
-    """Operator-safe auth diagnostics (no secrets) — which emails are configured."""
-    return auth_bootstrap_status()
+async def auth_bootstrap(request: Request):
+    """Public auth diagnostics — no account enumeration (audit ITEM 3)."""
+    # Authenticated operators get richer deploy diagnostics (still no secrets).
+    sensitive = False
+    try:
+        from ..services.auth_service import lookup_user, verify_token
+
+        auth = (request.headers.get("authorization") or "").strip()
+        if auth.lower().startswith("bearer "):
+            email = verify_token(auth.split(" ", 1)[1].strip())
+            sensitive = bool(email and lookup_user(email))
+    except Exception as exc:
+        logging.getLogger(__name__).error(
+            "auth bootstrap token inspection failed; returning public payload only",
+            exc_info=exc,
+        )
+        sensitive = False
+    return auth_bootstrap_status(include_sensitive=sensitive)
+
+
+def _login_client_ip(request: Request) -> str:
+    from services.client_ip import client_ip_from_request
+
+    return client_ip_from_request(request) or "unknown"
+
+
+@router.post("/logout")
+async def logout(request: Request):
+    """Revoke the current Bearer session (Phase D3). Idempotent."""
+    auth = (request.headers.get("authorization") or "").strip()
+    token = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
+    revoked = False
+    if token:
+        try:
+            revoked = bool(revoke_token(token))
+        except Exception as exc:
+            logging.getLogger(__name__).warning("logout revoke failed: %s", exc)
+    try:
+        from services.audit_log import append_audit_event
+
+        append_audit_event(
+            action="auth.logout",
+            resource="/auth/logout",
+            actor=getattr(request.state, "user_email", None) or "anonymous",
+            level="success",
+            details={"revoked": revoked},
+        )
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+    return {"ok": True, "revoked": revoked}
 
 
 @router.post("/login")
-async def login(body: LoginRequest):
+async def login(body: LoginRequest, request: Request):
+    from services.auth_rate_limit import (
+        check_login_rate_limit,
+        record_login_failure,
+        record_login_success,
+    )
+
+    ip = _login_client_ip(request)
+    limited = check_login_rate_limit(ip=ip, email=body.email)
+    if not limited.get("allowed"):
+        retry = float(limited.get("retry_after_sec") or 60)
+        raise HTTPException(
+            status_code=429,
+            detail="Too many login attempts. Try again later.",
+            headers={"Retry-After": str(int(max(1, retry)))},
+        )
+
     status = auth_bootstrap_status()
-    if status["user_count"] == 0:
+    if not status.get("has_users"):
         raise HTTPException(
             status_code=503,
             detail=(
@@ -576,6 +639,7 @@ async def login(body: LoginRequest):
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     if not user:
+        record_login_failure(ip=ip, email=body.email)
         raise HTTPException(
             status_code=401,
             detail=(
@@ -584,6 +648,7 @@ async def login(body: LoginRequest):
                 "and redeploy the API."
             ),
         )
+    record_login_success(ip=ip, email=body.email)
     try:
         token, expires_at = create_token(user["email"])
     except RuntimeError as exc:

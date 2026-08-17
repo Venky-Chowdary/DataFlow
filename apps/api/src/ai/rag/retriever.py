@@ -80,13 +80,21 @@ class DataTransferRetriever:
         source_col: str,
         target_col: str,
     ) -> dict:
-        """Retrieve knowledge for column mapping."""
+        """Retrieve knowledge for column mapping.
+
+        Confidence and review come from ``map_columns`` (Map SSOT). RAG
+        documents explain; they must not auto-approve user_id→customer_id
+        because both end in ``id``.
+        """
+        from services.semantic_mapper import pair_mapping_authority
+
         src_result = self.retrieve(source_col, n_results=3, doc_type="semantic_pattern")
         tgt_result = self.retrieve(target_col, n_results=3, doc_type="semantic_pattern")
 
         is_synonym = are_synonyms(source_col, target_col)
         src_canonical = resolve_canonical(source_col)
         tgt_canonical = resolve_canonical(target_col)
+        authority = pair_mapping_authority(source_col, target_col)
 
         return {
             "source": {
@@ -103,9 +111,13 @@ class DataTransferRetriever:
             },
             "are_synonyms": is_synonym,
             "same_canonical": src_canonical == tgt_canonical,
-            "mapping_confidence": self._mapping_confidence(
-                source_col, target_col, is_synonym, src_canonical, tgt_canonical
-            ),
+            "mapping_confidence": authority["confidence"],
+            "requires_review": authority["requires_review"],
+            "create_new": authority["create_new"],
+            "proposed_target": authority["proposed_target"],
+            "authority_reasoning": authority["reasoning"],
+            "authority": authority["authority"],
+            "review_kind": authority.get("review_kind"),
         }
 
     def _match_pattern(self, query: str) -> str | None:
@@ -136,14 +148,11 @@ class DataTransferRetriever:
         self,
         source: str,
         target: str,
-        is_synonym: bool,
-        src_canonical: str,
-        tgt_canonical: str,
+        is_synonym: bool = False,
+        src_canonical: str = "",
+        tgt_canonical: str = "",
     ) -> float:
-        if source.lower() == target.lower():
-            return 0.98
-        if is_synonym or src_canonical == tgt_canonical:
-            return 0.92
-        if src_canonical.split("_")[-1] == tgt_canonical.split("_")[-1]:
-            return 0.80
-        return 0.5
+        """Deprecated private score — kept for call sites; delegates to Map SSOT."""
+        from services.semantic_mapper import pair_mapping_authority
+
+        return pair_mapping_authority(source, target)["confidence"]

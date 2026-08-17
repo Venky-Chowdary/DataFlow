@@ -48,6 +48,9 @@ export function jobStatusBadgeClass(status: string): string {
 }
 
 export function connectorHealthLabel(status: string, lastTestOk?: boolean): string {
-  if (status === "error" || lastTestOk === false) return "Action needed";
+  // Probe result wins — a green last_test_ok must never read as "Action needed"
+  // just because a stale status string still says error.
+  if (lastTestOk === true) return "Ready";
+  if (lastTestOk === false || status === "error") return "Action needed";
   return "Ready";
 }

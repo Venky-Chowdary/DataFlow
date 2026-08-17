@@ -8,6 +8,8 @@ import {
   buildConversionClassHonesty,
   buildReferentialIntegrityHonesty,
   buildValidateHonestyControls,
+  schemaDriftAllowsAcknowledge,
+  schemaDriftRequiresRemap,
 } from "./validateHonestyControls.ts";
 import type { PreflightResult } from "./types.ts";
 
@@ -110,5 +112,75 @@ describe("validateHonestyControls", () => {
     assert.equal(honesty.historicalSuccess.measured, true);
     assert.equal(honesty.historicalSuccess.successRate, 0.97);
     assert.match(honesty.historicalSuccess.headline, /97\.0%/);
+  });
+
+  it("Phase C12 — Decision Artifact honesty from Validate proof_bundle", () => {
+    const hash = "a".repeat(64);
+    const preflight = {
+      proof_bundle: {
+        decision_artifact_hash: hash,
+        decision_artifact: {
+          schema_version: "decision_artifact_v1",
+          content_hash: hash,
+        },
+      },
+    } as unknown as PreflightResult;
+    const honesty = buildValidateHonestyControls(preflight);
+    assert.equal(honesty.decisionArtifact.present, true);
+    assert.equal(honesty.decisionArtifact.contentHash, hash);
+    assert.match(honesty.decisionArtifact.headline, /Decision Artifact stamped/i);
+
+    const missing = buildValidateHonestyControls({
+      proof_bundle: {},
+    } as unknown as PreflightResult);
+    assert.equal(missing.decisionArtifact.present, false);
+    assert.match(missing.decisionArtifact.headline, /missing/i);
+  });
+
+  it("never lets Acknowledge green a hard-breaking schema change", () => {
+    assert.equal(
+      schemaDriftAllowsAcknowledge({
+        remediation_kind: "acknowledge_schema_drift",
+        ack_required: true,
+        schema_evolution: {
+          action: "pause",
+          should_pause: true,
+          compatibility: "none",
+          hard_breaking: [{ kind: "narrow_type", column: "amount" }],
+        },
+      }),
+      false,
+    );
+    assert.equal(
+      schemaDriftRequiresRemap({
+        schema_evolution: {
+          action: "pause",
+          should_pause: true,
+          compatibility: "none",
+          hard_breaking: [{ kind: "type_change" }],
+        },
+      }),
+      true,
+    );
+    assert.equal(
+      schemaDriftAllowsAcknowledge({
+        remediation_kind: "acknowledge_schema_drift",
+        ack_required: true,
+        schema_evolution: {
+          action: "review",
+          should_pause: false,
+          compatibility: "forward",
+          hard_breaking: [],
+        },
+      }),
+      true,
+    );
+    assert.equal(
+      schemaDriftAllowsAcknowledge({
+        remediation_kind: "review_mappings",
+        schema_evolution: { should_pause: true, compatibility: "none" },
+      }),
+      false,
+    );
   });
 });

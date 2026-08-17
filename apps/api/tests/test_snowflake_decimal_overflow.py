@@ -70,7 +70,10 @@ def test_coerce_null_unfit_decimal_nulls_cell():
         details,
         policy="coerce_null",
     )
-    assert out[0][0] is None
+    assert out[0][0] is not None  # DF_MISSING omit sentinel, not SQL NULL wipe
+    from services.value_serializer import is_missing_sentinel
+
+    assert is_missing_sentinel(out[0][0])
     assert out[0][1] == "ok"
     assert details
 

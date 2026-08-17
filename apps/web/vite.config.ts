@@ -10,13 +10,32 @@ export default defineConfig({
     },
   },
   build: {
-    // Bundle the whole app into a single JS/CSS pair.  This removes runtime
-    // dynamic-import chunk fetches that can 404 after a production deploy
-    // when the user's browser still holds an older main bundle in memory.
-    cssCodeSplit: false,
+    // Phase F9 — route/vendor code-split. Hashed chunk filenames invalidate
+    // caches on deploy; prefer a full page reload after release notes rather
+    // than inlining everything into a 1.5MB monolith (audit §1.3 D5).
+    cssCodeSplit: true,
+    chunkSizeWarningLimit: 900,
     rollupOptions: {
       output: {
-        inlineDynamicImports: true,
+        manualChunks(id) {
+          if (id.includes("node_modules")) {
+            if (id.includes("react-dom") || id.includes("/react/")) {
+              return "react-vendor";
+            }
+            return "vendor";
+          }
+          const norm = id.replace(/\\/g, "/");
+          if (
+            norm.includes("/pages/TransferPage") ||
+            norm.includes("/pages/transfer/") ||
+            norm.includes("/components/transfer/")
+          ) {
+            return "transfer-studio";
+          }
+          if (norm.includes("/pages/marketing/")) {
+            return "marketing";
+          }
+        },
       },
     },
   },

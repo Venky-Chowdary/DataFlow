@@ -1,0 +1,19 @@
+# Phase B8 — baseline lint gate (audit §3.5). Expand paths in CI gradually;
+# do not widen selects until the allowlist is clean.
+target-version = "py312"
+line-length = 100
+
+[lint]
+select = [
+  "BLE001",  # blind except Exception
+  "S110",    # try-except-pass
+  "DTZ001",  # naive datetime
+  "F401",    # unused import
+]
+
+[lint.per-file-ignores]
+# Writer outer boundaries must return WriteResult — never raise through FastAPI.
+"connectors/elasticsearch_writer.py" = ["BLE001"]
+"connectors/sqlite_writer.py" = ["BLE001"]
+# Report scripts catch ImportError broadly when optional deps absent.
+"scripts/warehouse_sku_report.py" = ["BLE001"]

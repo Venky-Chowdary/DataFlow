@@ -11,13 +11,15 @@ from services.db_type_utils import (
     ci_get,
     normalize_dest_kind,
 )
-from services.type_system import (
+from services.decision_kernel import (
     ddl_type,
-    decimal_precision_would_truncate,
-    decimal_scale_would_truncate,
     is_lossy_coercion,
     is_precision_collapse_coercion,
     normalize_logical_type,
+)
+from services.type_system import (
+    decimal_precision_would_truncate,
+    decimal_scale_would_truncate,
     specialty_carrier_would_collapse,
     string_width_would_narrow,
     vector_dim_mismatch,
@@ -293,7 +295,12 @@ def evaluate_ddl_compatibility(
         from services.migration_risk_contract import mapping_has_clearing_risk_contract
 
         risk_cleared = mapping_has_clearing_risk_contract(m)
-        if not schemaless and tgt_type and is_lossy_coercion(src_type, tgt_type, dest_db=dest_kind):
+        if not schemaless and tgt_type and is_lossy_coercion(
+            src_type,
+            tgt_type,
+            dest_db=dest_kind,
+            dest_table_exists=table_exists,
+        ):
             # Align with G3: declared lossy never soft-passes on head samples
             # without a clearing Risk Contract.
             src_logical = normalize_logical_type(src_type)
@@ -310,7 +317,12 @@ def evaluate_ddl_compatibility(
                 elif (
                     src_logical == "decimal"
                     and tgt_logical == "decimal"
-                    and is_precision_collapse_coercion(src_type, tgt_type, dest_db=dest_kind)
+                    and is_precision_collapse_coercion(
+                        src_type,
+                        tgt_type,
+                        dest_db=dest_kind,
+                        dest_table_exists=table_exists,
+                    )
                 ):
                     note = " — DECIMAL(p,s) narrowing (scale/capacity shrink; accept risk or remap)"
                 elif src_logical == "datetime" and tgt_logical == "date":
@@ -322,7 +334,8 @@ def evaluate_ddl_compatibility(
                 elif specialty_carrier_would_collapse(src_type, tgt_type):
                     note = (
                         " — specialty polarity collapse "
-                        "(prefer VARCHAR(24)/BINARY(12) for ObjectId; bare TEXT/VARCHAR drops carrier domain)"
+                        "(prefer VARCHAR(24)/BINARY(12) for ObjectId; "
+                        "narrow VARCHAR(n<24) or non-text sinks drop the hex/binary wire)"
                     )
                 elif (
                     src_logical in {"string", "text"}
@@ -338,7 +351,12 @@ def evaluate_ddl_compatibility(
         if (
             not schemaless
             and tgt_type
-            and is_precision_collapse_coercion(src_type, tgt_type, dest_db=dest_kind)
+            and is_precision_collapse_coercion(
+                src_type,
+                tgt_type,
+                dest_db=dest_kind,
+                dest_table_exists=table_exists,
+            )
             and not risk_cleared
         ):
             if specialty_carrier_would_collapse(src_type, tgt_type):

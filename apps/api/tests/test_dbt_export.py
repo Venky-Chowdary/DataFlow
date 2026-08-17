@@ -1,4 +1,4 @@
-﻿"""dbt export hook — complement warehouse ELT, not a dbt Cloud product."""
+"""dbt export hook — complement warehouse ELT, not a dbt Cloud product."""
 
 from services.dbt_export import export_dbt_files
 from services.transform_models import DataTest, TransformModel

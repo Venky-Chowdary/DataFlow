@@ -11,9 +11,10 @@ if str(_API_ROOT) not in sys.path:
 
 
 def test_wide_zero_scale_decimal_not_collapsed_to_integer():
+    """Zero-scale that fits signed BIGINT must invent BIGINT — never INT32."""
     from services.type_system import normalize_logical_type, zero_scale_numeric_carrier
 
-    assert zero_scale_numeric_carrier(18) == "INTEGER"
+    assert zero_scale_numeric_carrier(18) == "BIGINT"
     assert zero_scale_numeric_carrier(19) == "DECIMAL(19,0)"
     assert zero_scale_numeric_carrier(38) == "DECIMAL(38,0)"
     assert normalize_logical_type("DECIMAL(18,0)") == "integer"
@@ -30,9 +31,10 @@ def test_sqlserver_oracle_snowflake_introspect_preserve_wide_zero_scale():
     )
 
     assert _sqlserver_to_logical("numeric(38,0)") == "DECIMAL(38,0)"
-    assert _sqlserver_to_logical("decimal(12,0)") == "INTEGER"
+    # DECIMAL(12,0) exceeds INT32 digit budget — BIGINT carrier (audit §2.1).
+    assert _sqlserver_to_logical("decimal(12,0)") == "BIGINT"
     assert _oracle_to_logical("NUMBER(38,0)") == "DECIMAL(38,0)"
-    assert _oracle_to_logical("NUMBER(10,0)") == "INTEGER"
+    assert _oracle_to_logical("NUMBER(10,0)") == "BIGINT"
     assert _sf_to_logical("NUMBER(38,0)") == "DECIMAL(38,0)"
 
 

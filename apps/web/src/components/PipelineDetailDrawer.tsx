@@ -5,13 +5,17 @@ import { Button } from "./ui/Button";
 import { Drawer } from "./ui/Drawer";
 import { FilterTabs } from "./ui/FilterTabs";
 import { ScheduleRunHistory } from "./schedules/ScheduleRunHistory";
-import { fetchContractBreaker, fetchJob, fetchSchedule, type ContractBreaker } from "../lib/api";
+import { fetchContractBreaker, fetchJob, fetchSchedule, runScheduleParallelCheck, type ContractBreaker } from "../lib/api";
 import {
   breakerBadgeClass,
   breakerBlocksRuns,
   breakerLabel,
+  campaignBadgeClass,
+  campaignLabel,
 } from "../lib/contractBreakerUi";
 import { computeJobTrustScore } from "../lib/jobTrustScore";
+import { destHeadline } from "../lib/conservationLedger";
+import { formatSyncModeLabel } from "../lib/transferConstants";
 import { Connector, PipelineSchedule, TransferJob } from "../lib/types";
 import { jobStatusBadgeClass, jobStatusLabel } from "../lib/uiUtils";
 
@@ -42,17 +46,6 @@ const INTERVAL_LABEL: Record<string, string> = {
   hourly: "Every hour",
   daily: "Daily",
   weekly: "Weekly",
-};
-
-const SYNC_MODE_LABEL: Record<string, string> = {
-  full_refresh_overwrite: "Full overwrite",
-  full_refresh_append: "Full append",
-  incremental: "Incremental",
-  incremental_append: "Incremental append",
-  incremental_deduped: "Incremental deduped",
-  cdc: "CDC",
-  scd2: "SCD Type 2",
-  mirror: "Mirror",
 };
 
 function formatWhen(iso: string | null | undefined): string {
@@ -92,6 +85,8 @@ export function PipelineDetailDrawer({
   const [lastJob, setLastJob] = useState<TransferJob | null>(null);
   const [breaker, setBreaker] = useState<ContractBreaker | null>(null);
   const [resettingBreaker, setResettingBreaker] = useState(false);
+  const [campaign, setCampaign] = useState<PipelineSchedule["fidelity_campaign"]>();
+  const [checkingParallel, setCheckingParallel] = useState(false);
 
   useEffect(() => {
     if (!open || !sched?.id) {
@@ -99,6 +94,7 @@ export function PipelineDetailDrawer({
       setMappings([]);
       setLastJob(null);
       setBreaker(null);
+      setCampaign(undefined);
       return;
     }
     let cancelled = false;
@@ -115,6 +111,7 @@ export function PipelineDetailDrawer({
         setMappingCount(
           typeof full.mapping_count === "number" ? full.mapping_count : maps.length,
         );
+        setCampaign(full.fidelity_campaign);
       })
       .catch(() => {
         if (!cancelled) {
@@ -160,16 +157,21 @@ export function PipelineDetailDrawer({
   const cadenceDetail = sched.cron
     ? `Wall clock in ${sched.timezone || "UTC"}`
     : "Rolling interval from last run — use Cron for a fixed daily time";
-  const syncLabel = SYNC_MODE_LABEL[sched.sync_mode] ?? sched.sync_mode;
+  const syncLabel = formatSyncModeLabel(sched.sync_mode);
   const rejected = Number(lastJob?.rejected_rows ?? 0);
   const coerced = Number(lastJob?.coerced_null_rows ?? 0);
   const lastTrust = lastJob ? computeJobTrustScore(lastJob) : null;
+  const lastDest = destHeadline(lastJob);
   const needsAttention =
     Boolean(sched.last_status && /fail|error/i.test(String(sched.last_status)))
     || rejected > 0
     || !sched.enabled
     || breakerOpen
+    || campaign?.verdict === "diverging"
     || (lastTrust != null && lastTrust.score < 60);
+
+  const liveCampaign = campaign || sched.fidelity_campaign;
+  const campaignVerdict = liveCampaign?.verdict;
 
   const handleResetBreaker = async () => {
     if (!sched.contract_id || !onResetBreaker) return;
@@ -182,6 +184,16 @@ export function PipelineDetailDrawer({
       /* parent toasts */
     } finally {
       setResettingBreaker(false);
+    }
+  };
+
+  const handleParallelCheck = async () => {
+    setCheckingParallel(true);
+    try {
+      const result = await runScheduleParallelCheck(sched.id);
+      if (result.campaign) setCampaign(result.campaign);
+    } finally {
+      setCheckingParallel(false);
     }
   };
 
@@ -204,6 +216,14 @@ export function PipelineDetailDrawer({
           {breakerState && (
             <span className={`df2-badge ${breakerBadgeClass(breakerState)}`} title="Data contract circuit breaker">
               {breakerLabel(breakerState)}
+            </span>
+          )}
+          {campaignVerdict && (
+            <span
+              className={`df2-badge ${campaignBadgeClass(campaignVerdict)}`}
+              title={liveCampaign?.next_action || "Parallel-run Dual Run campaign"}
+            >
+              {campaignLabel(campaignVerdict)}
             </span>
           )}
           <span className={`df2-badge ${sched.enabled ? "df2-badge-live" : "df2-badge-muted"}`}>
@@ -314,6 +334,22 @@ export function PipelineDetailDrawer({
           </div>
         )}
         <div className="df2-drawer-fact">
+          <span>Parallel run</span>
+          <strong
+            className={campaignVerdict === "diverging" ? "df2-text-warn" : undefined}
+            title={liveCampaign?.note || undefined}
+          >
+            {campaignVerdict
+              ? `${campaignLabel(campaignVerdict)}${
+                typeof liveCampaign?.consecutive_passes === "number"
+                  && typeof liveCampaign?.required_consecutive === "number"
+                  ? ` · ${liveCampaign.consecutive_passes}/${liveCampaign.required_consecutive}`
+                  : ""
+              }`
+              : "Not started"}
+          </strong>
+        </div>
+        <div className="df2-drawer-fact">
           <span>Last run</span>
           <strong>{formatWhen(sched.last_run_at)}</strong>
         </div>
@@ -330,8 +366,8 @@ export function PipelineDetailDrawer({
             <strong>{mappingCount || "—"}</strong>
           </div>
           <div className="df2-drawer-fact">
-            <span>Last rows</span>
-            <strong>{(lastJob?.records_processed ?? 0).toLocaleString()}</strong>
+            <span>{lastDest.label}</span>
+            <strong title={lastDest.title}>{lastDest.value}</strong>
           </div>
           <div className="df2-drawer-fact">
             <span>Quarantine</span>
@@ -423,6 +459,21 @@ export function PipelineDetailDrawer({
                 Circuit breaker is open — scheduled and manual runs stay blocked until you reset it (after fixing the contract drift or quality failure that tripped it).
               </p>
             )}
+            <p className="df2-drawer-empty-line">
+              {liveCampaign?.next_action
+                || "Parallel run compares live source vs destination column profiles (Google Dual Run cycles). Overwrite loads record a cycle automatically. Not per-cell Gate-8."}
+            </p>
+            <Button
+              size="sm"
+              variant="secondary"
+              loading={checkingParallel}
+              loadingLabel="Comparing…"
+              onClick={() => void handleParallelCheck()}
+              leadingIcon={<DtIcon name="shield" size={14} />}
+              title="Compare live source and destination now and record a Dual Run cycle"
+            >
+              Run parallel-run check
+            </Button>
           </section>
         )}
 
@@ -464,7 +515,7 @@ export function PipelineDetailDrawer({
               <h3><DtIcon name="jobs" size={14} /> Run history</h3>
               <span className="df2-drawer-count">{sched.run_count}</span>
             </div>
-            <ScheduleRunHistory scheduleId={sched.id} onOpenJob={onOpenJob} />
+            <ScheduleRunHistory scheduleId={sched.id} onOpenJob={onOpenJob} onEditMapping={onEdit} />
           </section>
         )}
 

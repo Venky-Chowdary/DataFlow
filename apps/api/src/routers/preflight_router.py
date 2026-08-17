@@ -7,6 +7,12 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+from services.acknowledgment_contract import (
+    AcknowledgmentRefused,
+    audit_acknowledgments,
+    resolve_acknowledgments,
+)
+
 from ..services.preflight_service import (
     apply_policy_gates,
     confidence_threshold_for_mode,
@@ -39,6 +45,9 @@ class MappingItem(BaseModel):
     struct_policy: str | None = None
     struct_derived: bool = False
     struct_parent: str | None = None
+    # Array normalize/hybrid — must survive Validate → Execute.
+    structural_class: str | None = None
+    child_table_spec: dict[str, Any] | None = None
     # Map Accept risk must survive /preflight/run — stripping these left G3/G4/G9
     # blocking after the operator already acknowledged lossy TEXT→INTEGER (etc.).
     fidelity: str | None = None
@@ -56,6 +65,8 @@ class PreflightRequest(BaseModel):
     mappings: list[MappingItem]
     connector_id: str | None = None
     source_connector_id: str | None = None
+    # Ad-hoc / inline source endpoint when no saved connector — uniqueness + orphan probes.
+    source_config: dict[str, Any] | None = None
     source_kind: str = "file"
     source_type: str | None = None
     source_table: str | None = None
@@ -100,6 +111,10 @@ class PreflightRequest(BaseModel):
     acknowledgment_reason: str = ""
     # Pre-ingestion staging (SQL destinations only) — Validate must fail closed.
     write_via_staging: bool = False
+    # Connector-specific dest settings (Redshift staging_bucket / iam_role, etc.).
+    dest_extra: dict[str, Any] | None = None
+    # CDC delivery — default at_least_once; exactly_once is opt-in and fail-closed.
+    delivery_guarantee: str = "at_least_once"
 
 
 def _schema_default(db_type: str) -> str:
@@ -156,6 +171,18 @@ async def run_preflight(body: PreflightRequest):
     if not body.mappings:
         raise HTTPException(status_code=400, detail="No column mappings provided")
 
+    # Refuse an unattributed attestation before any gate consumes it.
+    try:
+        ack = resolve_acknowledgments(
+            compliance=body.compliance_acknowledged,
+            schema_drift=body.schema_drift_acknowledged,
+            fk_risk=body.fk_risk_acknowledged,
+            actor=body.acknowledgment_actor,
+            reason=body.acknowledgment_reason,
+        )
+    except AcknowledgmentRefused as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     destination_connected = False
     dest_error: str | None = None
     dest_meta: dict = {}
@@ -179,6 +206,7 @@ async def run_preflight(body: PreflightRequest):
         dest_api_key=body.dest_api_key,
         dest_service_account=body.dest_service_account,
         dest_kind=body.dest_kind,
+        dest_extra=dict(body.dest_extra or {}),
     )
 
     if body.dest_kind == "file_export" or dest_meta.get("connected"):
@@ -196,25 +224,56 @@ async def run_preflight(body: PreflightRequest):
         if not source_connected:
             source_error = msg
 
+    # Validate must score the mappings against the schema Execute will read.
+    # Live source introspection wins over the browser's Map stamps; anything it
+    # cannot answer keeps the posted declaration.
+    from services.source_schema_authority import (
+        live_source_column_types,
+        reconcile_source_types,
+        restamp_mapping_source_types,
+    )
+
+    source_column_types, source_type_drift = reconcile_source_types(
+        body.column_types,
+        live_source_column_types(
+            source_connector_id=body.source_connector_id or "",
+            source_table=body.source_table or "",
+            source_collection=body.source_collection or "",
+        ),
+    )
+    preflight_mappings = restamp_mapping_source_types(
+        [m.model_dump() for m in body.mappings],
+        source_column_types,
+    )
+
     dest_column_types = dest_meta.get("column_types") or {}
-    # Prefer live introspect. Studio map is a fallback only when meta is empty
-    # and the table is known to exist — never override live types with stale UI state.
-    if not dest_column_types and dest_meta.get("table_exists") is True:
-        dest_column_types = body.destination_column_types or {}
-    elif not dest_column_types and dest_meta.get("table_exists") is None:
+    # Prefer live introspect. Never fall back to Studio Map stamps when the
+    # table exists but live schema is empty — that greens empties as VARCHAR.
+    if not dest_column_types and dest_meta.get("table_exists") is None:
         # Unknown existence: accept Studio types only as a hint for G6 width checks
         # when non-empty; drift path still treats unknown as non-live.
         dest_column_types = body.destination_column_types or {}
+    # table_exists True + empty live → keep {} (fail-closed Validate probe)
 
-    from services.primary_key import extract_contract_primary_key
+    from services.primary_key import extract_contract_primary_key_columns
 
-    contract_pk = extract_contract_primary_key(
+    # Full composite — never truncate to first column (source probe + G9 SSOT).
+    # Exact stream match; single-contract Studio may omit matching names.
+    _stream_name = body.dest_table or body.dest_collection or ""
+    contract_pk_cols = extract_contract_primary_key_columns(
         body.stream_contracts,
-        stream_name=body.dest_table or body.dest_collection or "",
+        stream_name=_stream_name,
+        fallback_first=False,
     )
-    # Prefer primary stream contract when dest name does not match a stream name.
-    if not contract_pk:
-        contract_pk = extract_contract_primary_key(body.stream_contracts)
+    if not contract_pk_cols:
+        selected = [
+            c
+            for c in (body.stream_contracts or [])
+            if isinstance(c, dict) and c.get("selected", True)
+        ]
+        if len(selected) == 1:
+            contract_pk_cols = extract_contract_primary_key_columns(selected)
+    contract_pk = ",".join(contract_pk_cols) if contract_pk_cols else None
 
     try:
         from services.tracing import get_correlation_id, start_span
@@ -238,9 +297,9 @@ async def run_preflight(body: PreflightRequest):
     ):
         result = run_file_preflight(
             columns=body.columns,
-            column_types=body.column_types,
+            column_types=source_column_types,
             row_count=body.row_count,
-            mappings=[m.model_dump() for m in body.mappings],
+            mappings=preflight_mappings,
             destination_connected=destination_connected,
             destination_error=dest_error,
             source_connected=source_connected,
@@ -253,12 +312,17 @@ async def run_preflight(body: PreflightRequest):
             confidence_threshold=confidence_threshold_for_mode(body.validation_mode),
             destination_column_types=dest_column_types,
             destination_column_nullability=dest_meta.get("column_nullability") or {},
+            destination_column_defaults=dest_meta.get("column_defaults") or {},
+            destination_identity_columns=dest_meta.get("identity_columns") or [],
+            destination_generated_columns=dest_meta.get("generated_columns") or [],
             destination_table_exists=dest_meta.get("table_exists"),
             destination_can_create=dest_meta.get("can_create_table"),
             destination_can_write=dest_meta.get("can_write"),
             privilege_probe=dest_meta.get("privilege_probe"),
+            redshift_staging_probe=dest_meta.get("redshift_staging_probe"),
             destination_db_type=(dest_meta.get("db_type") or body.dest_type or "postgresql").lower(),
             source_connector_id=body.source_connector_id or "",
+            source_config=body.source_config,
             source_table=(body.source_table or body.source_collection or ""),
             destination_table=(body.dest_table or body.dest_collection or ""),
             source_filename="",
@@ -268,80 +332,54 @@ async def run_preflight(body: PreflightRequest):
             destination_pk_columns=dest_meta.get("primary_key_columns") or dest_meta.get("pk_columns"),
             destination_unique_keys=dest_meta.get("unique_keys") or [],
             destination_foreign_keys=dest_meta.get("foreign_keys") or [],
+            destination_config=dest_meta.get("_probe_cfg") or None,
+            stream_contracts=list(body.stream_contracts or []),
             date_locale=body.date_locale,
-            compliance_acknowledged=bool(body.compliance_acknowledged),
-            schema_drift_acknowledged=bool(body.schema_drift_acknowledged),
-            fk_risk_acknowledged=bool(body.fk_risk_acknowledged),
+            compliance_acknowledged=ack.compliance,
+            schema_drift_acknowledged=ack.schema_drift,
+            fk_risk_acknowledged=ack.fk_risk,
             run_population_orphan_scan=bool(body.run_population_orphan_scan),
-            acknowledgment_actor=str(body.acknowledgment_actor or "").strip(),
-            acknowledgment_reason=str(body.acknowledgment_reason or "").strip(),
+            acknowledgment_actor=ack.actor,
+            acknowledgment_reason=ack.reason,
         )
-    if (
-        body.compliance_acknowledged
-        or body.schema_drift_acknowledged
-        or body.fk_risk_acknowledged
-    ):
-        actor = str(body.acknowledgment_actor or "").strip()
-        reason = str(body.acknowledgment_reason or "").strip()
-        if len(actor) < 2:
-            raise HTTPException(
-                status_code=400,
-                detail="acknowledgment_actor is required when acknowledging compliance, schema drift, or FK risk",
+    try:
+        audit_acknowledgments(
+            ack,
+            resource="preflight",
+            details={
+                "source_type": body.source_type,
+                "dest_type": body.dest_type,
+                "schema_policy": body.schema_policy,
+                "validation_mode": body.validation_mode,
+            },
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail="Could not record acknowledgment audit event — acknowledgment not accepted",
+        ) from exc
+    dest_identity = dest_meta.get("destination_identity")
+    if isinstance(dest_identity, dict) and dest_identity.get("database"):
+        # Show the effective destination before Execute — the write must never be
+        # the first place the operator learns which value won.
+        result["destination_identity"] = dest_identity
+        if dest_identity.get("conflict") and dest_identity.get("note"):
+            bucket = result.setdefault("warnings", [])
+            note = str(dest_identity["note"])
+            if note not in bucket:
+                bucket.append(note)
+    if source_type_drift:
+        # The operator's Map rows disagreed with the live source. Gates already
+        # ran on the live truth — say so instead of silently rescoring.
+        result["source_schema_drift"] = source_type_drift
+        bucket = result.setdefault("warnings", [])
+        for d in source_type_drift:
+            note = (
+                f"Source type re-read from live connector: {d['column']} "
+                f"{d['declared']} → {d['live']} (Map stamp was stale)"
             )
-        if len(reason) < 8:
-            raise HTTPException(
-                status_code=400,
-                detail="acknowledgment_reason is required (at least 8 characters)",
-            )
-        try:
-            from services.audit_log import append_audit_event
-
-            if body.compliance_acknowledged:
-                append_audit_event(
-                    action="preflight.acknowledge_compliance",
-                    resource="preflight",
-                    actor=actor,
-                    details={
-                        "source_type": body.source_type,
-                        "dest_type": body.dest_type,
-                        "validation_mode": body.validation_mode,
-                        "reason": reason,
-                    },
-                )
-            if body.schema_drift_acknowledged:
-                append_audit_event(
-                    action="preflight.acknowledge_schema_drift",
-                    resource="preflight",
-                    actor=actor,
-                    details={
-                        "source_type": body.source_type,
-                        "dest_type": body.dest_type,
-                        "schema_policy": body.schema_policy,
-                        "validation_mode": body.validation_mode,
-                        "reason": reason,
-                    },
-                )
-            if body.fk_risk_acknowledged:
-                append_audit_event(
-                    action="preflight.acknowledge_fk_risk",
-                    resource="preflight",
-                    actor=actor,
-                    details={
-                        "source_type": body.source_type,
-                        "dest_type": body.dest_type,
-                        "validation_mode": body.validation_mode,
-                        "coverage": "destination_fk_metadata",
-                        "population_orphan_proven": False,
-                        "reason": reason,
-                    },
-                )
-        except HTTPException:
-            raise
-        except Exception as exc:
-            raise HTTPException(
-                status_code=500,
-                detail="Could not record acknowledgment audit event — acknowledgment not accepted",
-            ) from exc
+            if note not in bucket:
+                bucket.append(note)
     # Advisory catalog honesty from destination introspect (warn-only).
     for w in dest_meta.get("warnings") or dest_meta.get("schema_warnings") or []:
         note = str(w).strip()
@@ -364,6 +402,13 @@ async def run_preflight(body: PreflightRequest):
             source_type=body.source_type,
             source_kind=body.source_kind or ("database" if body.source_connector_id else "file"),
             write_via_staging=bool(body.write_via_staging),
+            source_read_mode=str(
+                ((body.source_config or {}).get("source_read_mode")
+                 or ((body.source_config or {}).get("extra") or {}).get("source_read_mode")
+                 or "")
+            ),
+            delivery_guarantee=body.delivery_guarantee or "at_least_once",
+            allow_append_only=bool((body.dest_extra or {}).get("allow_append_only")),
         ),
         validation_mode=body.validation_mode,
     )
@@ -449,15 +494,22 @@ async def explain_preflight(body: ExplainRequest):
 class SchemaDriftRequest(BaseModel):
     old_schema: dict[str, Any] = Field(default_factory=dict)
     new_schema: dict[str, Any] = Field(default_factory=dict)
+    dest_db: str = ""
+    schema_policy: str = "manual_review"
 
 
 @router.post("/schema-drift")
 async def classify_schema_drift(body: SchemaDriftRequest):
-    """Classify schema evolution as additive vs breaking (approve/reject UX)."""
-    from services.schema_drift import classify_schema_change
+    """Classify schema evolution and stamp compatibility + pause/propagate/review."""
+    from services.schema_drift import classify_schema_evolution_report
 
     try:
-        return classify_schema_change(body.old_schema, body.new_schema)
+        return classify_schema_evolution_report(
+            body.old_schema,
+            body.new_schema,
+            dest_db=body.dest_db or "",
+            schema_policy=body.schema_policy or "manual_review",
+        )
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=str(e))
 

@@ -20,8 +20,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Sequence
 
-# Unit separator — unlikely in PK string values; stable for composite keys.
-_PK_SEP = "\x1f"
+from services.keyset_pagination import KEYSET_SEP as _PK_SEP
+from services.keyset_pagination import keyset_successor_predicate  # noqa: F401 — re-export SSOT
 
 
 def _pk_columns(primary_key: str | Sequence[str]) -> list[str]:
@@ -76,48 +76,6 @@ def _pk_row_dict(primary_key: str | Sequence[str], key: str) -> dict[str, Any]:
     return {cols[i]: (parts[i] if i < len(parts) else None) for i in range(len(cols))}
 
 
-def keyset_successor_predicate(
-    quoted_pk_columns: Sequence[str],
-    last_pk: str,
-    placeholder: str = "%s",
-) -> tuple[str, list[Any]]:
-    """Build a strict lexicographic ``> last_pk`` predicate for a chunk read.
-
-    For key columns ``(a, b, c)`` this produces::
-
-        (a > ?) OR (a = ? AND b > ?) OR (a = ? AND b = ? AND c > ?)
-
-    which is the only correct successor for a composite ordering — a naive
-    ``a > ?`` would skip every remaining row sharing the last chunk's leading
-    key value, and a per-column ``AND`` chain would skip rows that differ only
-    in the trailing column.
-
-    Shared by the MySQL and Postgres incremental-snapshot readers so both agree
-    on chunk boundaries and on the ``_PK_SEP`` encoding of ``last_pk``.
-
-    Raises ``ValueError`` when ``last_pk`` does not carry one part per key
-    column, because a silent arity mismatch would read the wrong range.
-    """
-    cols = list(quoted_pk_columns)
-    if not cols:
-        raise ValueError("keyset predicate requires at least one primary key column")
-    parts = last_pk.split(_PK_SEP) if len(cols) > 1 else [last_pk]
-    if len(parts) != len(cols):
-        raise ValueError(
-            f"composite last_pk arity mismatch: expected {len(cols)} parts, "
-            f"got {len(parts)}"
-        )
-    clauses: list[str] = []
-    params: list[Any] = []
-    for i, col in enumerate(cols):
-        equalities = " AND ".join(f"{cols[j]} = {placeholder}" for j in range(i))
-        greater = f"{col} > {placeholder}"
-        clauses.append(f"({greater})" if not equalities else f"({equalities} AND {greater})")
-        params.extend(parts[:i])
-        params.append(parts[i])
-    return " OR ".join(clauses), params
-
-
 @dataclass
 class WindowRow:
     pk: str
@@ -129,11 +87,15 @@ class WindowRow:
 @dataclass
 class SnapshotWindow:
     window_id: str
-    primary_key: str | list[str] = "id"
+    primary_key: str | list[str] = ""  # required — refuse inventing default "id"
     open: bool = False
     buffer: dict[str, WindowRow] = field(default_factory=dict)
     stream_overrides: int = 0
     snapshot_rows: int = 0
+
+    def __post_init__(self) -> None:
+        # Validate immediately so empty/default never invents wrong-row identity.
+        _pk_columns(self.primary_key)
 
     def open_window(self) -> None:
         self.open = True

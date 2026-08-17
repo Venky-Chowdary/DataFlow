@@ -1,4 +1,8 @@
-import { mappingRequiresRiskAck, type EditableMapping } from "./mapping";
+import {
+  hasCreateNewTypeRisk,
+  mappingRequiresRiskAck,
+  type EditableMapping,
+} from "./mapping";
 
 export type ColumnFilter =
   | "all"
@@ -56,7 +60,18 @@ export function isMappingReady(m: EditableMapping, _threshold: number): boolean 
 }
 
 export function needsMappingReview(m: EditableMapping, _threshold: number): boolean {
+  // Risk / lossy / specialty — real Issues filter.
   if (mappingRequiresRiskAck(m) && !m.riskAcknowledged) return true;
+  // Equivalent create-new / preserve rows need Approve, not "Issues" spam.
+  const fid = (m.fidelity || "").toLowerCase();
+  if (
+    !m.approved
+    && (fid === "preserve" || fid === "lossless")
+    && !m.typeNarrowing
+    && !hasCreateNewTypeRisk(m)
+  ) {
+    return false;
+  }
   return !m.approved;
 }
 

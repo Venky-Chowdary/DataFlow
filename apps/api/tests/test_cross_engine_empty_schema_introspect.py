@@ -40,12 +40,20 @@ def test_pipeline_existing_empty_targets_never_create_new_across_dest_families()
 
 
 def test_pg_cross_schema_recovery():
+    # _PG_COLUMN_SQL returns 10-tuples: name, dtype, nullable, identity,
+    # default, collation, coll_det, generated, type_oid, typ_type.
+    pg_cols = [
+        ("id", "text", "YES", "", None, "", True, "", 25, "b"),
+        ("title", "text", "YES", "", None, "", True, "", 25, "b"),
+    ]
     cur = MagicMock()
     cur.fetchall.side_effect = [
-        [],
-        [],
-        [("public", "jobs")],
-        [("id", "text", "YES"), ("title", "text", "YES")],
+        [],  # tables in wrong schema
+        [],  # columns in wrong schema
+        [("public", "jobs")],  # cross-schema recovery
+        pg_cols,  # columns in public
+        [],  # unique keys
+        [],  # foreign keys
     ]
     conn = MagicMock()
     conn.cursor.return_value.__enter__.return_value = cur
@@ -53,12 +61,18 @@ def test_pg_cross_schema_recovery():
     with patch("connectors.postgresql_conn.get_connection", return_value=conn), patch(
         "services.schema_introspect._refine_columns_by_samples",
         side_effect=lambda _c, cols, *_a, **_k: cols,
+    ), patch(
+        "services.schema_introspect._pg_fetch_unique_keys",
+        return_value={"primary_key_columns": [], "unique_keys": []},
+    ), patch(
+        "services.schema_introspect._fetch_foreign_keys",
+        return_value=([], {"status": "measured", "items": []}),
     ):
         result = _introspect_postgresql(
             host="h", port=5432, database="db", username="u", password="p",
             schema="wrong", connection_string="", ssl=True, table="jobs",
         )
-    assert result["ok"] is True
+    assert result["ok"] is True, result.get("error")
     assert result["schema"] == "public"
     assert [c["name"] for c in result["columns"]] == ["id", "title"]
 
@@ -89,13 +103,28 @@ def test_mysql_cross_database_recovery():
 
 
 def test_snowflake_cross_schema_recovery():
+    # Answer by SQL shape, not by call order: the column read walks a
+    # projection ladder, so a positional script silently tests the wrong query.
+    def answer(sql, *_args):
+        upper = str(sql).upper()
+        params = _args[0] if _args else ()
+        if "FROM INFORMATION_SCHEMA.COLUMNS" in upper:
+            schema_arg = str(params[0]).upper() if params else ""
+            cur._rows = (
+                [("ID", "NUMBER", "YES"), ("TITLE", "TEXT", "YES")]
+                if schema_arg == "PUBLIC"
+                else []
+            )
+        elif "FROM INFORMATION_SCHEMA.TABLES" in upper:
+            # The requested schema holds nothing; the table lives in PUBLIC.
+            cur._rows = [("PUBLIC", "JOBS")] if "TABLE_NAME) = UPPER" in upper else []
+        else:
+            cur._rows = []
+
     cur = MagicMock()
-    cur.fetchall.side_effect = [
-        [],
-        [],
-        [("PUBLIC", "JOBS")],
-        [("ID", "NUMBER", "YES"), ("TITLE", "TEXT", "YES")],
-    ]
+    cur._rows = []
+    cur.execute.side_effect = answer
+    cur.fetchall.side_effect = lambda: list(cur._rows)
     conn = MagicMock()
     conn.cursor.return_value.__enter__.return_value = cur
     conn.cursor.return_value.__exit__.return_value = False
@@ -135,10 +164,13 @@ def test_sqlserver_cross_schema_recovery():
             return FakeResult([])
         if "INFORMATION_SCHEMA.COLUMNS" in sql_u:
             if params and params.get("schema") == "dbo":
+                # 8-tuple matches live SELECT (precision/scale/len/dt_prec/collation/null).
                 return FakeResult([
-                    ("id", "varchar", None, None, "YES"),
-                    ("title", "nvarchar", None, None, "YES"),
+                    ("id", "varchar", None, None, 36, None, None, "YES"),
+                    ("title", "nvarchar", None, None, 200, None, None, "YES"),
                 ])
+            return FakeResult([])
+        if "SYS.COMPUTED_COLUMNS" in sql_u:
             return FakeResult([])
         return FakeResult([])
 
@@ -176,7 +208,7 @@ def test_oracle_cross_owner_recovery():
             return FakeResult([("APP", "JOBS")])
         if "FROM ALL_TABLES" in sql:
             return FakeResult([])
-        if "FROM ALL_TAB_COLUMNS" in sql:
+        if "FROM ALL_TAB_COL" in sql:  # ALL_TAB_COLS / ALL_TAB_COLUMNS
             if params and params.get("owner") == "APP":
                 return FakeResult([
                     ("ID", "VARCHAR2", None, None, "Y"),

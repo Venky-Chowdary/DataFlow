@@ -10,6 +10,10 @@ class ConnectResult:
     error: str | None = None
     message: str | None = None
     driver: str = "stub"
+    #: True when ``tables`` is a bounded page rather than the whole inventory.
+    #: Callers that resolve a name against this list must not read absence from
+    #: a truncated page as proof the object does not exist.
+    tables_truncated: bool = False
 
 
 @dataclass

@@ -63,7 +63,17 @@ def _redis_client(cfg: dict[str, Any]):
     import redis
 
     if cfg.get("connection_string"):
-        return redis.from_url(cfg["connection_string"], socket_timeout=30)
+        from connectors.url_authority import parse_url_authority, rebuild_url
+
+        raw = str(cfg["connection_string"]).strip()
+        parsed = parse_url_authority(raw)
+        if parsed.host and (cfg.get("username") or cfg.get("password")):
+            raw = rebuild_url(
+                parsed,
+                user=str(cfg.get("username") or parsed.user),
+                password=str(cfg.get("password") or parsed.password),
+            )
+        return redis.from_url(raw, socket_timeout=30)
     return redis.Redis(
         host=cfg.get("host") or "localhost",
         port=int(cfg.get("port") or 6379),
@@ -102,6 +112,33 @@ def _decode(value: Any) -> str:
 
 # Cap large Redis collections — overflow fails closed (never silent truncate).
 _REDIS_COLLECTION_CAP = 10_000
+
+
+def redis_key_for(prefix: str, identity: Any) -> str:
+    """Canonical ``prefix:identity`` key layout shared by write and read-back.
+
+    The identity is sanitized, so a row keyed ``1`` is stored at ``prefix:col_1``
+    rather than ``prefix:1``. Gate-8 has to rebuild the exact same key to
+    re-read a batch, and a second copy of this rule would silently stop matching
+    the moment either side changed.
+    """
+    from connectors.sql_identifiers import sanitize_identifier
+
+    return f"{prefix}:{sanitize_identifier(str(identity), preserve_case=True)}"
+
+
+def resolve_key_pattern(name: str | None) -> str:
+    """Turn a configured keyspace name into a SCAN MATCH pattern.
+
+    A Redis "table" is a key prefix, and the keys under it are
+    ``prefix:something`` — so scanning for the bare prefix matches only a key of
+    exactly that name, which is almost never what exists. Callers that skipped
+    this saw an empty keyspace and concluded the destination had no fields.
+    """
+    pattern = (name or "").strip() or "*"
+    if pattern != "*" and "*" not in pattern and "?" not in pattern:
+        return f"{pattern}:*"
+    return pattern
 
 
 def _read_redis_value(client: Any, key: str, ktype: str) -> str:
@@ -229,10 +266,24 @@ def read_keys_batch(
                         fieldnames.append(key)
             headers = union_attribute_keys(["redis_key", "redis_type"], fieldnames)
             flat_rows: list[list[str]] = []
+            from services.value_serializer import (
+                DF_MISSING_SENTINEL,
+                SQL_NULL_SENTINEL,
+                cell_to_string,
+            )
+
             for row, obj in zip(rows, object_values):
-                flat_rows.append(
-                    [row[0], row[2]] + [cell_to_string(obj.get(field, "")) for field in fieldnames]
-                )
+                cells: list[str] = [row[0], row[2]]
+                for field in fieldnames:
+                    if field not in obj:
+                        cells.append(DF_MISSING_SENTINEL)
+                    elif obj[field] is None:
+                        cells.append(SQL_NULL_SENTINEL)
+                    else:
+                        cells.append(
+                            cell_to_string(obj[field], preserve_sql_null=True)
+                        )
+                flat_rows.append(cells)
             rows = flat_rows
         else:
             headers = identity_headers

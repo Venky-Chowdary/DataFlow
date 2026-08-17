@@ -6,8 +6,11 @@ import { MultiStreamSchemaPreview } from "./MultiStreamSchemaPreview";
 import type { Connector } from "../../lib/types";
 import type { SourceKind } from "../ui/SourceKindTiles";
 import type { StreamSchemaPreview } from "../../lib/sourceStreams";
+import { UPLOAD_FORMATS } from "../../pages/transfer/studioConstants";
 
-const FILE_FORMATS = ["CSV", "JSON", "JSONL", "TSV", "Parquet", "PDF", "DOCX", "HTML"];
+/* One list of accepted upload formats for the whole Studio: the dropzone and
+   this panel used to carry separate literals and disagreed about Excel. */
+const FILE_FORMATS = UPLOAD_FORMATS;
 
 interface SourceStepAsideProps {
   sourceKind: SourceKind;

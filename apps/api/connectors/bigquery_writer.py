@@ -6,7 +6,7 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from services.type_system import materialize_dest_ddl
+from services.decision_kernel import materialize_dest_ddl
 
 from connectors.driver_guard import stub_writes_allowed
 from connectors.stub_writer import simulate_stub_write
@@ -16,9 +16,10 @@ from connectors.writer_common import (
     _coerced_null_row_count,
     _rejected_row_count,
     assert_sparse_upsert_has_pk,
-    build_mapped_rows_with_details,
+    bind_rows_keeping_numbers,
+    bind_sql_mapped_rows_with_quarantine,
     dedupe_rows,
-    dedupe_rows_by_pk_and_lsn,
+    dedupe_rows_by_pk_and_lsn_keeping_numbers,
     null_safe_merge_on,
     quarantine_currency_markers_into_numeric,
     quarantine_unfit_arrays,
@@ -37,12 +38,17 @@ from connectors.writer_common import (
     row_checksum,
     sanitize_identifier,
     sparse_present_bindings,
-    split_dense_sparse_rows,
+    reject_on_strict_policy,
+    resolve_conflict_targets,
+    resolve_row_number,
+    dedupe_rows_keeping_numbers,
+    split_dense_sparse_rows_with_numbers,
     transform_error_policy,
 )
 from connectors.writer_common import (
     WriteResult as _WriteResult,
 )
+from connectors.writer_common import writer_meta_with_source_rows
 
 
 @dataclass
@@ -185,11 +191,12 @@ def resolve_bigquery_decimal_target_types(
     logical_types: list[str],
     table_schema: list[Any] | None = None,
 ) -> list[str]:
-    """Prefer physical SchemaField (p,s / max_length); else Map/ddl wire.
+    """Prefer physical SchemaField (p,s / max_length / REPEATED); else Map/ddl wire.
 
     After Map≡CREATE, physical NUMERIC/BIGNUMERIC fields carry the approved
     ``(p,s)``. Quarantine must gate on that stamp (or mapped ddl) so append
-    paths never silently overflow into streaming/load errors.
+    paths never silently overflow into streaming/load errors. REPEATED fields
+    must rematerialize as ``ARRAY<T>`` — never scalar INT/STRING invent.
     """
     by_name: dict[str, Any] = {}
     if table_schema:
@@ -197,36 +204,18 @@ def resolve_bigquery_decimal_target_types(
             name = getattr(field, "name", None)
             if name:
                 by_name[str(name)] = field
+                by_name[str(name).lower()] = field
+                by_name[str(name).upper()] = field
 
     out: list[str] = []
     for col, logical in zip(target_cols, logical_types):
-        field = by_name.get(col)
+        field = by_name.get(col) or by_name.get(str(col).lower()) or by_name.get(str(col).upper())
         if field is not None:
-            ftype = str(getattr(field, "field_type", "") or "").upper()
-            if ftype in {"NUMERIC", "BIGNUMERIC", "DECIMAL"}:
-                precision = getattr(field, "precision", None)
-                scale = getattr(field, "scale", None)
-                if precision is not None and scale is not None:
-                    out.append(f"{ftype}({int(precision)},{int(scale)})")
-                else:
-                    out.append(ftype)
+            carrier = _bigquery_physical_field_carrier(field)
+            if carrier:
+                out.append(carrier)
                 continue
-            if ftype == "STRING":
-                max_len = getattr(field, "max_length", None)
-                if max_len is not None and int(max_len) > 0:
-                    out.append(f"STRING({int(max_len)})")
-                else:
-                    out.append("STRING")
-                continue
-            if ftype == "BYTES":
-                max_len = getattr(field, "max_length", None)
-                if max_len is not None and int(max_len) > 0:
-                    out.append(f"BYTES({int(max_len)})")
-                else:
-                    out.append("BYTES")
-                continue
-            out.append(ftype or bq_type(logical))
-            continue
+            # Empty field_type on live schema — never invent STRING; use Map ddl.
         # No physical field yet — legalize Map stamp to BQ wire for quarantine.
         fp = _bq_fixed_point_spec(logical)
         if fp is not None and fp[0] != "STRING" and fp[1] is not None and fp[2] is not None:
@@ -238,6 +227,40 @@ def resolve_bigquery_decimal_target_types(
     return out
 
 
+def _bigquery_physical_field_carrier(field: Any) -> str:
+    """Live SchemaField → bind carrier; REPEATED becomes ARRAY<T>; empty type refuses."""
+    ftype = str(getattr(field, "field_type", "") or "").upper().strip()
+    if not ftype:
+        return ""
+    mode = str(getattr(field, "mode", "") or "").upper().strip()
+    if ftype in {"NUMERIC", "BIGNUMERIC", "DECIMAL"}:
+        precision = getattr(field, "precision", None)
+        scale = getattr(field, "scale", None)
+        if precision is not None and scale is not None:
+            base = f"{ftype}({int(precision)},{int(scale)})"
+        else:
+            base = ftype
+    elif ftype == "STRING":
+        max_len = getattr(field, "max_length", None)
+        if max_len is not None and int(max_len) > 0:
+            base = f"STRING({int(max_len)})"
+        else:
+            base = "STRING"
+    elif ftype == "BYTES":
+        max_len = getattr(field, "max_length", None)
+        if max_len is not None and int(max_len) > 0:
+            base = f"BYTES({int(max_len)})"
+        else:
+            base = "BYTES"
+    elif ftype in {"RECORD", "STRUCT"}:
+        base = "STRUCT"
+    else:
+        base = ftype
+    if mode == "REPEATED" and not base.upper().startswith("ARRAY<"):
+        return f"ARRAY<{base}>"
+    return base
+
+
 def build_bigquery_merge_sql(
     target_table: str,
     staging_table: str,
@@ -247,7 +270,9 @@ def build_bigquery_merge_sql(
     lsn_column: str | None = None,
 ) -> str:
     """Build a BigQuery MERGE for PK upsert with optional monotonic LSN guard."""
-    conflict = [c for c in conflict_columns if c in target_cols]
+    from connectors.writer_common import resolve_conflict_targets
+
+    conflict = resolve_conflict_targets(conflict_columns, target_cols, strict=True)
     if not conflict:
         raise ValueError("BigQuery MERGE requires conflict_columns present in target_cols")
     on_clause = null_safe_merge_on(
@@ -323,8 +348,16 @@ def _bq_apply_sparse_upsert(
     conflict_columns: list[str],
     sparse_rows: list[tuple],
     bq_types: list[str],
+    rejected_details: list[dict[str, Any]] | None = None,
+    policy: str = "quarantine",
+    abort_on_reject: bool = False,
+    row_numbers: list[int] | None = None,
 ) -> tuple[int, int, list[tuple]]:
-    """Per-row BigQuery DML omitting DF_MISSING — never SET col=NULL for absent CDC fields."""
+    """Per-row BigQuery DML omitting DF_MISSING — never SET col=NULL for absent CDC fields.
+
+    When ``abort_on_reject`` is True (strict fail policy), validate every sparse
+    row before the first DML so a bad key cannot leave a partial MERGE batch.
+    """
     from connectors.writer_common import (
         DF_LSN_COL,
         assert_sparse_upsert_has_pk,
@@ -332,22 +365,87 @@ def _bq_apply_sparse_upsert(
         sparse_present_bindings,
     )
     from services.cdc_effectively_once import should_apply_pk_row
+    from services.value_serializer import cell_to_string
 
     bigquery = _bq_sdk()
-    conflict = [c for c in conflict_columns if c in target_cols]
+    from connectors.writer_common import resolve_conflict_targets
+
+    conflict = resolve_conflict_targets(conflict_columns, target_cols, strict=True)
     if not conflict:
         raise ValueError("sparse BigQuery upsert requires conflict_columns")
     type_by_col = {c: bq_types[i] for i, c in enumerate(target_cols)}
     written = 0
     skipped = 0
     checksum_rows: list[tuple] = []
-    for row in sparse_rows:
-        present = _bq_normalize_present(
-            sparse_present_bindings(row, target_cols),
-            target_cols,
-            bq_types,
-        )
-        assert_sparse_upsert_has_pk(present, conflict)
+    if abort_on_reject:
+        # Dry-run all sparse rows before the first DML — fail-closed.
+        for row_idx, row in enumerate(sparse_rows):
+            raw_present = sparse_present_bindings(row, target_cols)
+            try:
+                present = _bq_normalize_present(raw_present, target_cols, bq_types)
+                assert_sparse_upsert_has_pk(present, conflict)
+            except ValueError as exc:
+                if rejected_details is not None:
+                    sample = ""
+                    try:
+                        sample = cell_to_string(
+                            next(iter(raw_present.values()), "")
+                        )[:120]
+                    except Exception:
+                        sample = ""
+                    rejected_details.append(
+                        {
+                            "row": resolve_row_number(row_numbers, row_idx),
+                            "column": "*",
+                            "value": sample,
+                            "reason": str(exc)[:300],
+                            "policy": policy,
+                        }
+                    )
+                return 0, 0, []
+    for row_idx, row in enumerate(sparse_rows):
+        raw_present = sparse_present_bindings(row, target_cols)
+        # Pre-bind preferred. Residual refuse / empty PK → quarantine, not
+        # silent skip and not batch-abort.
+        try:
+            present = _bq_normalize_present(
+                raw_present,
+                target_cols,
+                bq_types,
+            )
+            assert_sparse_upsert_has_pk(present, conflict)
+        except ValueError as exc:
+            if abort_on_reject:
+                # Should not reach here after dry-run; refuse further DML.
+                if rejected_details is not None:
+                    rejected_details.append(
+                        {
+                            "row": resolve_row_number(row_numbers, row_idx),
+                            "column": "*",
+                            "value": "",
+                            "reason": str(exc)[:300],
+                            "policy": policy,
+                        }
+                    )
+                return written, skipped, checksum_rows
+            if rejected_details is not None:
+                sample = ""
+                try:
+                    sample = cell_to_string(
+                        next(iter(raw_present.values()), "")
+                    )[:120]
+                except Exception:
+                    sample = ""
+                rejected_details.append(
+                    {
+                        "row": resolve_row_number(row_numbers, row_idx),
+                        "column": "*",
+                        "value": sample,
+                        "reason": str(exc)[:300],
+                        "policy": policy,
+                    }
+                )
+            continue
         non_pk = {k: v for k, v in present.items() if k not in conflict}
 
         def _params(values: dict[str, Any], prefix: str) -> list[Any]:
@@ -448,6 +546,226 @@ def _bq_apply_sparse_upsert(
     return written, skipped, checksum_rows
 
 
+def _bq_apply_specialty_quarantine(
+    mapped_rows: list[tuple],
+    target_cols: list[str],
+    decimal_target_types: list[str],
+    rejected_details: list,
+    policy: Any,
+) -> list[tuple]:
+    """Dialect specialty gates for one bundle."""
+    mapped_rows = quarantine_currency_markers_into_numeric(
+        mapped_rows, target_cols, decimal_target_types, rejected_details, policy
+    )
+    mapped_rows = quarantine_unfit_decimals(
+        mapped_rows,
+        target_cols,
+        decimal_target_types,
+        rejected_details,
+        policy,
+        dialect_label="BigQuery NUMERIC",
+        dest_db="bigquery",
+    )
+    mapped_rows = quarantine_unfit_years(
+        mapped_rows, target_cols, decimal_target_types, rejected_details, policy
+    )
+    mapped_rows = quarantine_unfit_booleans(
+        mapped_rows, target_cols, decimal_target_types, rejected_details, policy
+    )
+    mapped_rows = quarantine_unfit_temporals(
+        mapped_rows, target_cols, decimal_target_types, rejected_details, policy
+    )
+    mapped_rows = quarantine_unfit_specialty_types(
+        mapped_rows, target_cols, decimal_target_types, rejected_details, policy
+    )
+    mapped_rows = quarantine_unfit_integers(
+        mapped_rows,
+        target_cols,
+        decimal_target_types,
+        rejected_details,
+        policy,
+        dialect_label="BigQuery INTEGER",
+        dest_db="bigquery",
+    )
+    mapped_rows = quarantine_unfit_bitstrings(
+        mapped_rows, target_cols, decimal_target_types, rejected_details, policy
+    )
+    mapped_rows = quarantine_unfit_binaries(
+        mapped_rows,
+        target_cols,
+        decimal_target_types,
+        rejected_details,
+        policy,
+        dialect_label="BigQuery BYTES",
+    )
+    mapped_rows = quarantine_unfit_enum_set(
+        mapped_rows, target_cols, decimal_target_types, rejected_details, policy
+    )
+    mapped_rows = quarantine_unfit_strings(
+        mapped_rows,
+        target_cols,
+        decimal_target_types,
+        rejected_details,
+        policy,
+        dialect_label="BigQuery STRING",
+    )
+    mapped_rows = quarantine_unfit_arrays(
+        mapped_rows,
+        target_cols,
+        decimal_target_types,
+        rejected_details,
+        policy,
+        dialect_label="BigQuery",
+    )
+    return quarantine_unfit_json(
+        mapped_rows,
+        target_cols,
+        decimal_target_types,
+        rejected_details,
+        policy,
+        dialect_label="BigQuery JSON",
+    )
+
+
+def _bq_finish_mapped_bundle(
+    bundle: Any,
+    *,
+    target_cols: list[str],
+    dest_types: dict[str, str],
+    decimal_target_types: list[str],
+    policy: Any,
+    conflict_columns: list[str] | None,
+    write_mode: str,
+    mappings: list,
+) -> Any:
+    from connectors.sql_write_materialize import finish_sql_mapped_bundle
+    from connectors.writer_common import combined_mapped_rows_for_checksum
+
+    finished = finish_sql_mapped_bundle(
+        bundle,
+        target_cols=target_cols,
+        target_types=decimal_target_types,
+        policy=policy,
+        dialect_label="BigQuery",
+        dest_db="bigquery",
+        mappings=mappings,
+        write_mode=write_mode,
+        conflict_columns=conflict_columns,
+    )
+    finished.dense_rows = _bq_apply_specialty_quarantine(
+        finished.dense_rows,
+        target_cols,
+        decimal_target_types,
+        finished.rejected_details,
+        policy,
+    )
+    finished.sparse_rows = _bq_apply_specialty_quarantine(
+        finished.sparse_rows,
+        target_cols,
+        decimal_target_types,
+        finished.rejected_details,
+        policy,
+    )
+    finished.dense_rows = bind_sql_mapped_rows_with_quarantine(
+        finished.dense_rows,
+        target_cols,
+        decimal_target_types,
+        finished.rejected_details,
+        policy,
+        engine="bigquery",
+        dialect_label="BigQuery",
+        mappings=mappings,
+        row_numbers=finished.dense_row_numbers or None,
+    )
+    if finished.sparse_rows:
+        finished.sparse_rows, finished.sparse_row_numbers = bind_rows_keeping_numbers(
+            finished.sparse_rows,
+            target_cols,
+            decimal_target_types,
+            finished.rejected_details,
+            policy,
+            engine="bigquery",
+            dialect_label="BigQuery",
+            mappings=mappings,
+            row_numbers=finished.sparse_row_numbers,
+        )
+    finished.checksum_rows = combined_mapped_rows_for_checksum(
+        finished.dense_rows, finished.sparse_rows
+    )
+    finished.target_types = list(decimal_target_types)
+    return finished
+
+
+def iter_bq_finished_bundles(
+    *,
+    headers: list[str],
+    data_rows: list,
+    mappings: list,
+    target_cols: list[str],
+    column_types: dict[str, str] | None,
+    dest_types: dict[str, str],
+    decimal_target_types: list[str],
+    policy: Any,
+    conflict_columns: list[str] | None,
+    write_mode: str,
+    destination_pk_columns: list[str] | None = None,
+    destination_column_nullability: Any = None,
+    records: list[dict[str, Any]] | None = None,
+    source_spool: Any = None,
+    extra: dict[str, Any] | None = None,
+    materialize_batch: int | None = None,
+) -> Any:
+    from connectors.sql_write_materialize import iter_finished_sql_bundles
+
+    def _finish(bundle):
+        return _bq_finish_mapped_bundle(
+            bundle,
+            target_cols=target_cols,
+            dest_types=dest_types,
+            decimal_target_types=decimal_target_types,
+            policy=policy,
+            conflict_columns=conflict_columns,
+            write_mode=write_mode,
+            mappings=mappings,
+        )
+
+    yield from iter_finished_sql_bundles(
+        finish=_finish,
+        headers=headers,
+        data_rows=data_rows,
+        mappings=mappings,
+        target_cols=target_cols,
+        column_types=column_types,
+        dest_types=dest_types,
+        error_policy=policy,
+        dest_kind="bigquery",
+        destination_pk_columns=list(destination_pk_columns or []) or None,
+        destination_column_nullability=destination_column_nullability,
+        records=records,
+        source_spool=source_spool,
+        extra=extra,
+        batch_size=materialize_batch,
+    )
+
+
+def _bq_scan_finished_bundles(**kwargs: Any) -> Any:
+    from connectors.sql_write_materialize import SqlWriteAccumulator
+
+    acc = SqlWriteAccumulator(
+        target_cols=kwargs["target_cols"],
+        dest_db_type="bigquery",
+        dest_types=kwargs.get("dest_types") if isinstance(kwargs.get("dest_types"), dict) else {},
+        dialect_label="BigQuery",
+    )
+    source_row_count = 0
+    for finished in iter_bq_finished_bundles(**kwargs):
+        acc.note_rejects(finished.rejected_details, finished.transform_errors)
+        source_row_count = finished.source_row_count
+        del finished
+    acc.stop_writing()
+    return acc, source_row_count
+
+
 def write_mapped_rows(
     *,
     host: str,
@@ -473,6 +791,14 @@ def write_mapped_rows(
     create_table: bool = True,
     **_kwargs: Any,
 ) -> WriteResult:
+    dest_nullability = _kwargs.get("destination_column_nullability")
+    live_dest_types = _kwargs.get("destination_column_types")
+    from connectors.sql_write_materialize import sql_source_from_writer
+
+    _sql_extra = (
+        _kwargs.get("dest_extra") if isinstance(_kwargs.get("dest_extra"), dict) else {}
+    )
+    _sql_src = sql_source_from_writer(_kwargs, _sql_extra)
     del username, password, ssl, warehouse, _kwargs
     from connectors.writer_common import resolve_writer_backfill
 
@@ -523,9 +849,11 @@ def write_mapped_rows(
             checksum=checksum, chunks_completed=chunks, driver="stub",
         )
 
-    from connectors.writer_common import sample_values_by_source_from_batch
+    from connectors.sql_write_materialize import sample_sql_source_values
 
-    batch_samples = sample_values_by_source_from_batch(headers, data_rows, mappings)
+    batch_samples = sample_sql_source_values(
+        headers, data_rows, mappings, records=_sql_src["records"]
+    )
     target_cols, logical_types = resolve_target_columns(
         mappings,
         column_types,
@@ -533,13 +861,26 @@ def write_mapped_rows(
         # Deny-create must match existing DDL; create-new keeps empty dest types.
         # Unknown existence must stay None — never invent True on append.
         table_exists=False if create_table else None,
+        dest_db="bigquery",
     )
     if not target_cols:
         return WriteResult(
             ok=False, rows_written=0, table_name=table_name, target_schema=dataset_id,
             checksum="", chunks_completed=0, error="No column mappings",
         )
-    dest_types = {target_cols[i]: logical_types[i] for i in range(len(target_cols))}
+    # Prefer Studio-probed live DDL over Map stamps; physical schema may refine later.
+    # Partial Studio must not soft-fill Map VARCHAR for create-new gaps.
+    from connectors.writer_common import resolve_studio_or_map_dest_types
+
+    dest_types, studio_err = resolve_studio_or_map_dest_types(
+        target_cols,
+        mappings,
+        column_types,
+        logical_types=logical_types,
+        studio_types=live_dest_types if isinstance(live_dest_types, dict) else None,
+        product="BigQuery",
+        dest_db="bigquery",
+    )
 
     try:
         from google.cloud import bigquery
@@ -558,14 +899,53 @@ def write_mapped_rows(
         )
         table_id = f"{project_id}.{dataset_id}.{table_name}"
 
-        schema_fields = [
-            bq_schema_field(bigquery, col, t) for col, t in zip(target_cols, logical_types)
-        ]
         dataset_ref = f"{project_id}.{dataset_id}"
-        if not create_table:
-            try:
-                client.get_table(table_id)
-            except Exception as exc:
+        # Probe existence first — create_table=True + exists_ok must still
+        # rematerialize against live DDL when the table already exists.
+        # Only treat NotFound/404 as missing; permission/throttle fail closed.
+        table_existed = False
+        physical_schema = None
+        try:
+            physical_schema = list(client.get_table(table_id).schema)
+            table_existed = True
+        except Exception as probe_exc:
+            msg = str(probe_exc).lower()
+            exc_name = type(probe_exc).__name__.lower()
+            not_found = (
+                "404" in msg
+                or "not found" in msg
+                or "notfound" in exc_name
+                or "does not exist" in msg
+            )
+            if not not_found:
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=table_name,
+                    target_schema=dataset_id,
+                    checksum="",
+                    chunks_completed=0,
+                    error=(
+                        f"BigQuery table probe failed for {table_id!r} — refuse Map bind "
+                        f"without physical schema (empty→NULL invent risk): {probe_exc}"
+                    ),
+                )
+            physical_schema = None
+            table_existed = False
+
+        if not table_existed:
+            # Create-new: partial Studio must not soft-bind Map VARCHAR for gaps.
+            if studio_err:
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=table_name,
+                    target_schema=dataset_id,
+                    checksum="",
+                    chunks_completed=0,
+                    error=studio_err,
+                )
+            if not create_table:
                 return WriteResult(
                     ok=False,
                     rows_written=0,
@@ -575,326 +955,553 @@ def write_mapped_rows(
                     chunks_completed=0,
                     error=(
                         f"BigQuery table {table_id!r} is missing or inaccessible "
-                        f"and create_table is disabled: {exc}"
+                        "and create_table is disabled"
                     ),
                 )
-        else:
+            # Build CREATE schema only after refuse — Map logicals OK when Studio absent.
+            schema_fields = [
+                bq_schema_field(
+                    bigquery,
+                    col,
+                    str(
+                        dest_types.get(col)
+                        or (logical_types[i] if i < len(logical_types) else "STRING")
+                    ),
+                )
+                for i, col in enumerate(target_cols)
+            ]
             existing_datasets = {ds.dataset_id for ds in client.list_datasets()}
             if dataset_id not in existing_datasets:
                 client.create_dataset(bigquery.Dataset(dataset_ref))
             table = bigquery.Table(table_id, schema=schema_fields)
             client.create_table(table, exists_ok=True)
+            # Re-probe after exists_ok — concurrent/pre-existing tables must still
+            # overlay live DDL (probe race must not invent Map VARCHAR bind).
+            try:
+                physical_schema = list(client.get_table(table_id).schema)
+                table_existed = True
+            except Exception as post_exc:
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=table_name,
+                    target_schema=dataset_id,
+                    checksum="",
+                    chunks_completed=0,
+                    error=(
+                        f"BigQuery table {table_id!r} create/exists_ok succeeded but "
+                        f"physical schema re-probe failed — refuse Map bind: {post_exc}"
+                    ),
+                )
+        elif create_table:
+            # Table exists — ensure dataset path still works for backfill below;
+            # do not recreate with Map stamps (would invent carriers).
+            pass
 
         if backfill_new_fields:
             table = client.get_table(table_id)
             existing = {f.name for f in table.schema}
-            new_fields = [
-                bq_schema_field(bigquery, col, t)
-                for col, t in zip(target_cols, logical_types)
-                if col not in existing
-            ]
+            new_fields = []
+            from services.mapping_constraints import write_mappings
+
+            by_tgt: dict[str, dict] = {}
+            for mapping in write_mappings(list(mappings or [])):
+                tgt = str(mapping.get("target") or "").strip()
+                if tgt and tgt not in by_tgt:
+                    by_tgt[tgt] = mapping
+                    by_tgt.setdefault(tgt.lower(), mapping)
+            for i, col in enumerate(target_cols):
+                if col in existing:
+                    continue
+                typ = str(dest_types.get(col) or "").strip()
+                if not typ:
+                    mapping = by_tgt.get(col) or by_tgt.get(str(col).lower()) or {}
+                    explicit = str(
+                        mapping.get("target_type") or mapping.get("dest_type") or ""
+                    ).strip()
+                    # Partial Studio: explicit Map stamp OK; never invent from
+                    # source/logical alone (generic_sql additive parity).
+                    if explicit and (
+                        studio_err
+                        or (isinstance(live_dest_types, dict) and live_dest_types)
+                    ):
+                        typ = explicit
+                        dest_types[col] = typ
+                    elif studio_err or (
+                        isinstance(live_dest_types, dict) and live_dest_types
+                    ):
+                        return WriteResult(
+                            ok=False,
+                            rows_written=0,
+                            table_name=table_name,
+                            target_schema=dataset_id,
+                            checksum="",
+                            chunks_completed=0,
+                            error=(
+                                f"BigQuery additive column {col!r} lacks Studio/live "
+                                "type and Map target_type under partial destination "
+                                "schema — refuse Map VARCHAR ADD invent. Stamp the "
+                                "column on Map or disable backfill_new_fields."
+                            ),
+                        )
+                    else:
+                        typ = (
+                            logical_types[i]
+                            if i < len(logical_types)
+                            else "STRING"
+                        )
+                new_fields.append(bq_schema_field(bigquery, col, typ))
             if new_fields:
                 table.schema = list(table.schema) + new_fields
                 client.update_table(table, ["schema"])
+                # Refresh physical after additive evolve.
+                try:
+                    physical_schema = list(client.get_table(table_id).schema)
+                    table_existed = True
+                except Exception as refresh_exc:
+                    return WriteResult(
+                        ok=False,
+                        rows_written=0,
+                        table_name=table_name,
+                        target_schema=dataset_id,
+                        checksum="",
+                        chunks_completed=0,
+                        error=(
+                            f"BigQuery physical schema refresh after backfill failed "
+                            f"for {table_id!r} — refuse Map bind: {refresh_exc}"
+                        ),
+                    )
 
-        mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
+        # Existing / post-create table: physical schema BEFORE map/transform so
+        # live types beat Map stamps (BOOLEAN→STRING invent cliff).
+        if table_existed:
+            from connectors.writer_common import require_physical_types_for_existing_table
+
+            if physical_schema is None:
+                try:
+                    physical_schema = list(client.get_table(table_id).schema)
+                except Exception as schema_exc:
+                    return WriteResult(
+                        ok=False,
+                        rows_written=0,
+                        table_name=table_name,
+                        target_schema=dataset_id,
+                        checksum="",
+                        chunks_completed=0,
+                        error=(
+                            f"BigQuery physical schema introspection failed for existing "
+                            f"table {table_id!r} — refuse silent Map VARCHAR bind "
+                            f"(empty→NULL invent risk): {schema_exc}"
+                        ),
+                    )
+            if not physical_schema:
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=table_name,
+                    target_schema=dataset_id,
+                    checksum="",
+                    chunks_completed=0,
+                    error=(
+                        f"BigQuery physical schema empty for existing table {table_id!r} — "
+                        "refuse silent Map VARCHAR bind (empty→NULL invent risk). "
+                        "Re-check dataset/table permissions and retry."
+                    ),
+                )
+            physical_map = {}
+            for f in physical_schema:
+                name = str(getattr(f, "name", "") or "")
+                if not name:
+                    continue
+                carrier = _bigquery_physical_field_carrier(f)
+                if not carrier:
+                    continue
+                physical_map[name] = carrier
+                physical_map[name.lower()] = carrier
+                physical_map[name.upper()] = carrier
+            if not physical_map:
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=table_name,
+                    target_schema=dataset_id,
+                    checksum="",
+                    chunks_completed=0,
+                    error=(
+                        f"BigQuery physical schema empty for existing table {table_id!r} — "
+                        "refuse silent Map VARCHAR bind (empty→NULL invent risk). "
+                        "Re-check dataset/table permissions and retry."
+                    ),
+                )
+            overlay_err = require_physical_types_for_existing_table(
+                table_existed=True,
+                physical=physical_map,
+                dialect_label="BigQuery",
+                target_cols=target_cols,
+            )
+            if overlay_err:
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=table_name,
+                    target_schema=dataset_id,
+                    checksum="",
+                    chunks_completed=0,
+                    error=overlay_err,
+                )
+            live_types = resolve_bigquery_decimal_target_types(
+                target_cols, logical_types, physical_schema
+            )
+            dest_types = {
+                target_cols[i]: live_types[i] for i in range(len(target_cols))
+            }
+
+        # Rebuild CREATE/MERGE staging schema from final dest_types (post-backfill
+        # + physical overlay) — never keep pre-backfill Map logical carriers.
+        # Partial Studio: refuse empty carriers instead of soft-binding STRING.
+        if studio_err:
+            missing = [
+                c
+                for c in target_cols
+                if c and not str(dest_types.get(c) or "").strip()
+            ]
+            if missing:
+                sample = ", ".join(repr(c) for c in missing[:12])
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=table_name,
+                    target_schema=dataset_id,
+                    checksum="",
+                    chunks_completed=0,
+                    error=(
+                        f"BigQuery mapped field(s) {sample} lack live/Map carriers "
+                        "under partial Studio — refuse STRING staging invent. "
+                        "Re-run destination schema introspect or stamp Map "
+                        "target_type for additive columns."
+                    ),
+                )
+        schema_fields = [
+            bq_schema_field(
+                bigquery,
+                col,
+                str(
+                    dest_types.get(col)
+                    or (logical_types[i] if i < len(logical_types) else "STRING")
+                ),
+            )
+            for i, col in enumerate(target_cols)
+        ]
+
+        from connectors.sql_write_materialize import (
+            SqlWriteAccumulator,
+            ensure_sql_source_spool,
+        )
+
+        transform_errors: list[str] = []
+        rejected_details: list = []
+        # Prefer physical table (p,s) so append into NUMERIC never silent-overflows.
+        if physical_schema is None:
+            try:
+                physical_schema = list(client.get_table(table_id).schema)
+            except Exception:
+                physical_schema = None
+        decimal_target_types = resolve_bigquery_decimal_target_types(
+            target_cols, logical_types, physical_schema
+        )
+        spool, close_spool = ensure_sql_source_spool(
+            headers=headers,
+            data_rows=data_rows,
+            records=_sql_src["records"],
+            mappings=mappings,
+            extra=_sql_extra,
+            source_spool=_sql_src.get("source_spool"),
+            spill_max=_sql_src.get("source_spill_max"),
+        )
+        source_row_count = int(getattr(spool, "row_count", 0) or 0)
+
+        def _cleanup_spool() -> None:
+            nonlocal close_spool
+            if not close_spool:
+                return
+            close_spool = False
+            try:
+                spool.close()
+            except Exception:
+                pass
+
+        write_acc = SqlWriteAccumulator(
+            target_cols=target_cols,
+            dest_db_type="bigquery",
+            dest_types=dest_types if isinstance(dest_types, dict) else {},
+            dialect_label="BigQuery",
+        )
+        try:
+            conflict = resolve_conflict_targets(conflict_columns, target_cols)
+        except ValueError as exc:
+            _cleanup_spool()
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=table_name,
+                target_schema=dataset_id,
+                checksum="",
+                chunks_completed=0,
+                error=str(exc),
+                rejected_details=rejected_details,
+                warnings=transform_errors,
+            )
+        if write_mode == "upsert" and conflict_columns and not conflict:
+            _cleanup_spool()
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=table_name,
+                target_schema=dataset_id,
+                checksum="",
+                chunks_completed=0,
+                error=(
+                    "BigQuery upsert conflict_columns do not match mapped targets "
+                    f"{list(conflict_columns)!r} vs {target_cols!r} — refuse silent "
+                    "sparse CDC drop"
+                ),
+                rejected_details=rejected_details,
+                warnings=transform_errors,
+            )
+        _bq_finish_kwargs = dict(
             headers=headers,
             data_rows=data_rows,
             mappings=mappings,
             target_cols=target_cols,
             column_types=column_types,
             dest_types=dest_types,
-            error_policy=policy,
+            decimal_target_types=decimal_target_types,
+            policy=policy,
+            conflict_columns=conflict,
+            write_mode=write_mode,
+            destination_pk_columns=list(conflict_columns or []) or None,
+            destination_column_nullability=dest_nullability,
+            records=None,
+            source_spool=spool,
+            extra=_sql_extra,
+            materialize_batch=_sql_src["materialize_batch"],
         )
-        # Prefer physical table (p,s) so append into NUMERIC never silent-overflows.
-        physical_schema = None
-        try:
-            physical_schema = list(client.get_table(table_id).schema)
-        except Exception:
-            physical_schema = None
-        decimal_target_types = resolve_bigquery_decimal_target_types(
-            target_cols, logical_types, physical_schema
-        )
-        mapped_rows = quarantine_currency_markers_into_numeric(
-            mapped_rows,
-            target_cols,
-            decimal_target_types,
-            rejected_details,
-            policy,
-        )
-        mapped_rows = quarantine_unfit_decimals(
-            mapped_rows,
-            target_cols,
-            decimal_target_types,
-            rejected_details,
-            policy,
-            dialect_label="BigQuery NUMERIC",
-        )
-        mapped_rows = quarantine_unfit_years(
-            mapped_rows,
-            target_cols,
-            decimal_target_types,
-            rejected_details,
-            policy,
-        )
-        mapped_rows = quarantine_unfit_booleans(
-            mapped_rows,
-            target_cols,
-            decimal_target_types,
-            rejected_details,
-            policy,
-        )
-        mapped_rows = quarantine_unfit_temporals(
-            mapped_rows,
-            target_cols,
-            decimal_target_types,
-            rejected_details,
-            policy,
-        )
-        mapped_rows = quarantine_unfit_specialty_types(
-            mapped_rows,
-            target_cols,
-            decimal_target_types,
-            rejected_details,
-            policy,
-        )
-        mapped_rows = quarantine_unfit_integers(
-            mapped_rows,
-            target_cols,
-            decimal_target_types,
-            rejected_details,
-            policy,
-            dialect_label="BigQuery INTEGER",
-        )
-        mapped_rows = quarantine_unfit_bitstrings(
-            mapped_rows,
-            target_cols,
-            decimal_target_types,
-            rejected_details,
-            policy,
-        )
-        mapped_rows = quarantine_unfit_binaries(
-            mapped_rows,
-            target_cols,
-            decimal_target_types,
-            rejected_details,
-            policy,
-            dialect_label="BigQuery BYTES",
-        )
-        mapped_rows = quarantine_unfit_enum_set(
-            mapped_rows,
-            target_cols,
-            decimal_target_types,
-            rejected_details,
-            policy,
-        )
-        mapped_rows = quarantine_unfit_strings(
-            mapped_rows,
-            target_cols,
-            decimal_target_types,
-            rejected_details,
-            policy,
-            dialect_label="BigQuery STRING",
-        )
-        # BigQuery REPEATED columns reject NULL elements and arrays of arrays, so
-        # the array gate must run here — the scalar gates above cannot see inside
-        # an ARRAY payload.
-        mapped_rows = quarantine_unfit_arrays(
-            mapped_rows,
-            target_cols,
-            decimal_target_types,
-            rejected_details,
-            policy,
-            dialect_label="BigQuery",
-        )
-        mapped_rows = quarantine_unfit_json(
-            mapped_rows,
-            target_cols,
-            decimal_target_types,
-            rejected_details,
-            policy,
-            dialect_label="BigQuery JSON",
-        )
-        sparse_rows: list[tuple] = []
-        rows_for_checksum: list[tuple] = list(mapped_rows)
-        if write_mode == "upsert" and conflict_columns:
-            mapped_rows, sparse_rows = split_dense_sparse_rows(mapped_rows)
-            if DF_LSN_COL in target_cols:
-                mapped_rows = dedupe_rows_by_pk_and_lsn(
-                    mapped_rows, conflict_columns, target_cols
+        if policy == "fail":
+            scan_acc, source_row_count = _bq_scan_finished_bundles(**_bq_finish_kwargs)
+            rejected_details = list(scan_acc.rejected_details)
+            transform_errors = list(scan_acc.transform_errors)
+            _map_abort = scan_acc.abort_error(policy)
+            if _map_abort:
+                _cleanup_spool()
+                return WriteResult(
+                    ok=False,
+                    rows_written=0,
+                    table_name=table_name,
+                    target_schema=dataset_id,
+                    checksum="",
+                    chunks_completed=0,
+                    error=_map_abort or f"Transform errors: {'; '.join(transform_errors[:3])}",
+                    rejected_details=rejected_details,
+                    warnings=transform_errors,
                 )
-            else:
-                mapped_rows = dedupe_rows(mapped_rows, conflict_columns, target_cols)
-        rejected_rows = _rejected_row_count(
-            data_rows, mapped_rows, rejected_details, policy, sparse_rows=sparse_rows
-        )
-        coerced_null_rows = _coerced_null_row_count(rejected_details, policy)
-        if transform_errors and policy == "fail":
-            return WriteResult(
-                ok=False, rows_written=0, table_name=table_name, target_schema=dataset_id,
-                checksum="", chunks_completed=0,
-                error=f"Transform errors: {'; '.join(transform_errors[:3])}",
-                rejected_rows=rejected_rows,
-                rejected_details=rejected_details,
-                warnings=transform_errors,
-            )
 
         from connectors.warehouse_temporal import (
             quarantine_from_bigquery_errors,
             records_for_bigquery,
         )
 
-        bq_types = [bq_type(t) for t in logical_types]
-        total = len(mapped_rows)
-        chunks = max(1, (total + CHUNK_SIZE - 1) // CHUNK_SIZE) if total else 0
+        # Prefer live/quarantine carriers (ARRAY<T> for REPEATED) over Map stamps —
+        # bq_type() strips to SchemaField names and would invent scalar STRING wire.
+        bq_types = []
+        for t in decimal_target_types:
+            raw = str(t or "").strip()
+            if raw.upper().startswith("ARRAY<") or raw.upper().startswith("STRUCT"):
+                bq_types.append(raw)
+            else:
+                bq_types.append(bq_type(raw))
         written = 0
         rows_skipped = 0
         chunks_completed = 0
-        use_merge = write_mode == "upsert" and any(c in target_cols for c in conflict_columns)
-
-        if sparse_rows and use_merge:
-            from connectors.writer_common import row_has_missing_sentinel
-
-            sparse_written, sparse_skipped, sparse_checksum = _bq_apply_sparse_upsert(
-                client,
-                table_id,
-                target_cols,
-                conflict_columns,
-                sparse_rows,
-                bq_types,
-            )
-            written += sparse_written
-            rows_skipped += sparse_skipped
-            rows_for_checksum = [
-                r for r in rows_for_checksum if not row_has_missing_sentinel(r)
-            ] + list(sparse_checksum)
-
-        if use_merge and mapped_rows:
+        chunks = max(1, (source_row_count + CHUNK_SIZE - 1) // CHUNK_SIZE) if source_row_count else 0
+        use_merge = write_mode == "upsert" and bool(conflict)
+        collect_map_details = policy != "fail"
+        writing = True
+        staging_id = None
+        if use_merge:
             staging_name = sanitize_identifier(f"{table_name}_stg_{uuid.uuid4().hex[:8]}")
             staging_id = f"{project_id}.{dataset_id}.{staging_name}"
             staging = bigquery.Table(staging_id, schema=schema_fields)
             client.create_table(staging, exists_ok=True)
-            try:
-                if is_local:
-                    # goccy/bigquery-emulator does not support load jobs; streaming
-                    # inserts into a staging table are immediately MERGE-readable.
-                    for chunk_idx in range(chunks):
-                        start = chunk_idx * CHUNK_SIZE
-                        batch = mapped_rows[start : start + CHUNK_SIZE]
-                        if not batch:
-                            break
-                        records = records_for_bigquery(batch, target_cols, bq_types)
+            load_config = bigquery.LoadJobConfig(
+                schema=schema_fields,
+                write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE,
+                source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
+            )
+        try:
+            for finished in iter_bq_finished_bundles(**_bq_finish_kwargs):
+                if collect_map_details:
+                    rejected_details.extend(finished.rejected_details)
+                    transform_errors.extend(finished.transform_errors)
+                if writing and reject_on_strict_policy(
+                    policy, rejected_details, "BigQuery", transform_errors
+                ):
+                    writing = False
+                    write_acc.stop_writing()
+                if not writing:
+                    del finished
+                    continue
+                if finished.sparse_rows and not use_merge:
+                    _cleanup_spool()
+                    return WriteResult(
+                        ok=False,
+                        rows_written=0,
+                        table_name=table_name,
+                        target_schema=dataset_id,
+                        checksum="",
+                        chunks_completed=0,
+                        error=(
+                            "BigQuery sparse CDC rows require upsert MERGE with resolvable "
+                            "conflict_columns — refuse silent drop of omit-from-SET updates"
+                        ),
+                        rejected_details=rejected_details,
+                        warnings=transform_errors,
+                    )
+                dense = list(finished.dense_rows)
+                if use_merge and dense:
+                    from connectors.writer_common import partition_dense_upsert_rows
+
+                    before_dense = len(dense)
+                    dense = partition_dense_upsert_rows(
+                        dense,
+                        conflict,
+                        target_cols=target_cols,
+                        rejected_details=rejected_details,
+                        policy=policy,
+                    )
+                    rows_skipped += before_dense - len(dense)
+                if finished.sparse_rows and use_merge:
+                    sparse_written, sparse_skipped, sparse_checksum = (
+                        _bq_apply_sparse_upsert(
+                            client,
+                            table_id,
+                            target_cols,
+                            conflict,
+                            finished.sparse_rows,
+                            bq_types,
+                            rejected_details=rejected_details,
+                            policy=policy,
+                            abort_on_reject=str(policy or "").lower() == "fail",
+                            row_numbers=finished.sparse_row_numbers,
+                        )
+                    )
+                    written += sparse_written
+                    rows_skipped += sparse_skipped
+                    write_acc.add_accepted(list(sparse_checksum))
+                if use_merge and dense and staging_id:
+                    records = records_for_bigquery(dense, target_cols, bq_types)
+                    if is_local:
                         errors = client.insert_rows_json(staging_id, records)
                         if errors:
-                            raise RuntimeError(f"BigQuery staging insert errors: {errors[:3]}")
-                        merge_sql = build_bigquery_merge_sql(
-                            table_id,
-                            staging_id,
-                            target_cols,
-                            conflict_columns,
-                            lsn_column=DF_LSN_COL if DF_LSN_COL in target_cols else None,
-                        )
-                        client.query(merge_sql).result()
-                        written += len(batch)
-                        chunks_completed = chunk_idx + 1
-                        if on_checkpoint:
-                            on_checkpoint(chunks_completed, chunks, written)
-                else:
-                    # Load jobs (not streaming inserts) so staging is immediately MERGE-readable.
-                    load_config = bigquery.LoadJobConfig(
-                        schema=schema_fields,
-                        write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE,
-                        source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
-                    )
-                    for chunk_idx in range(chunks):
-                        start = chunk_idx * CHUNK_SIZE
-                        batch = mapped_rows[start : start + CHUNK_SIZE]
-                        if not batch:
-                            break
-                        records = records_for_bigquery(batch, target_cols, bq_types)
+                            raise RuntimeError(
+                                f"BigQuery staging insert errors: {errors[:3]}"
+                            )
+                    else:
                         load_job = client.load_table_from_json(
                             records, staging_id, job_config=load_config
                         )
                         load_job.result()
-                        merge_sql = build_bigquery_merge_sql(
-                            table_id,
-                            staging_id,
-                            target_cols,
-                            conflict_columns,
-                            lsn_column=DF_LSN_COL if DF_LSN_COL in target_cols else None,
-                        )
-                        client.query(merge_sql).result()
-                        written += len(batch)
-                        chunks_completed = chunk_idx + 1
-                        if on_checkpoint:
-                            on_checkpoint(chunks_completed, chunks, written)
-            finally:
-                client.delete_table(staging_id, not_found_ok=True)
-        else:
-            for chunk_idx in range(chunks):
-                start = chunk_idx * CHUNK_SIZE
-                batch = mapped_rows[start : start + CHUNK_SIZE]
-                if not batch:
-                    break
-                records = records_for_bigquery(batch, target_cols, bq_types)
-                errors = client.insert_rows_json(table_id, records)
-                if errors:
-                    details, bad = quarantine_from_bigquery_errors(
-                        errors, batch, target_cols, row_offset=start, policy=policy,
+                    merge_sql = build_bigquery_merge_sql(
+                        table_id,
+                        staging_id,
+                        target_cols,
+                        conflict,
+                        lsn_column=DF_LSN_COL if DF_LSN_COL in target_cols else None,
                     )
-                    if policy in {"quarantine", "coerce_null"} and bad:
-                        rejected_details.extend(details)
-                        transform_errors.extend(d["reason"] for d in details[:5])
-                        # Streaming insert commits good rows; count only those.
-                        written += len(batch) - len(bad)
-                    elif policy == "fail":
-                        return WriteResult(
-                            ok=False,
-                            rows_written=written,
-                            table_name=table_name,
-                            target_schema=dataset_id,
-                            checksum="",
-                            chunks_completed=chunk_idx,
-                            error=str(errors[:2]),
-                            rejected_rows=rejected_rows + len(bad),
-                            rejected_details=rejected_details + details,
-                            warnings=transform_errors,
+                    client.query(merge_sql).result()
+                    written += len(dense)
+                elif not use_merge and dense:
+                    records = records_for_bigquery(dense, target_cols, bq_types)
+                    errors = client.insert_rows_json(table_id, records)
+                    if errors:
+                        details, bad = quarantine_from_bigquery_errors(
+                            errors,
+                            dense,
+                            target_cols,
+                            row_offset=max(finished.start - 1, 0),
+                            policy=policy,
                         )
+                        if policy in {"quarantine", "coerce_null"} and bad:
+                            rejected_details.extend(details)
+                            transform_errors.extend(d["reason"] for d in details[:5])
+                            written += len(dense) - len(bad)
+                        else:
+                            _cleanup_spool()
+                            return WriteResult(
+                                ok=False,
+                                rows_written=written,
+                                table_name=table_name,
+                                target_schema=dataset_id,
+                                checksum="",
+                                chunks_completed=chunks_completed,
+                                error=str(errors[:2]),
+                                rejected_details=rejected_details + details,
+                                warnings=transform_errors,
+                            )
                     else:
-                        # Unknown policy: fail closed with details, no silent drop.
-                        return WriteResult(
-                            ok=False,
-                            rows_written=written,
-                            table_name=table_name,
-                            target_schema=dataset_id,
-                            checksum="",
-                            chunks_completed=chunk_idx,
-                            error=str(errors[:2]),
-                            rejected_details=rejected_details + details,
-                            warnings=transform_errors,
-                        )
-                else:
-                    written += len(batch)
-                chunks_completed = chunk_idx + 1
+                        written += len(dense)
+                write_acc.add_accepted(dense)
+                chunks_completed += 1
                 if on_checkpoint:
-                    on_checkpoint(chunks_completed, chunks, written)
+                    on_checkpoint(chunks_completed, max(chunks, chunks_completed), written)
+                del finished
+        finally:
+            if staging_id:
+                client.delete_table(staging_id, not_found_ok=True)
+        rejected_rows = _rejected_row_count(
+            data_rows,
+            [()] * write_acc.accepted_row_count,
+            rejected_details,
+            policy,
+            source_row_count=source_row_count or None,
+        )
+        coerced_null_rows = _coerced_null_row_count(rejected_details, policy)
+        _final_abort = reject_on_strict_policy(policy, rejected_details, "BigQuery")
+        if _final_abort:
+            _cleanup_spool()
+            return WriteResult(
+                ok=False,
+                rows_written=written,
+                table_name=table_name,
+                target_schema=dataset_id,
+                checksum="",
+                chunks_completed=chunks_completed or chunks,
+                error=_final_abort,
+                rejected_rows=max(rejected_rows, len(data_rows) - written - rows_skipped),
+                rejected_details=rejected_details,
+                coerced_null_rows=coerced_null_rows,
+                rows_skipped=rows_skipped,
+                warnings=transform_errors,
+            )
 
+        _cleanup_spool()
         return WriteResult(
-            ok=True, rows_written=written, table_name=table_name, target_schema=dataset_id,
-            checksum=row_checksum(
-                rows_for_checksum,
-                target_cols,
-                dest_db_type="bigquery",
-                dest_types=dest_types,
-            ),
+            ok=True,
+            rows_written=written,
+            table_name=table_name,
+            target_schema=dataset_id,
+            checksum=write_acc.digest(),
             chunks_completed=chunks_completed or chunks,
             rejected_rows=max(rejected_rows, len(data_rows) - written - rows_skipped),
             rejected_details=rejected_details,
             coerced_null_rows=coerced_null_rows,
             rows_skipped=rows_skipped,
             warnings=transform_errors,
+            meta=writer_meta_with_source_rows(None, source_row_count),
         )
     except Exception as exc:
+        cleanup = locals().get("_cleanup_spool")
+        if callable(cleanup):
+            cleanup()
         return WriteResult(
             ok=False, rows_written=0, table_name=table_name, target_schema=dataset_id,
             checksum="", chunks_completed=0, error=str(exc),

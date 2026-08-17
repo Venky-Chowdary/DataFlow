@@ -4,20 +4,33 @@ from __future__ import annotations
 
 import logging
 import math
-import pickle  # nosec B403
 import re
-import sys
 from collections import Counter
 from difflib import SequenceMatcher
 from pathlib import Path
 
+from services.create_new_risk_stamp import (
+    apply_create_new_risk_stamps as _apply_create_new_risk_stamps,
+)
+from services.schematic_index import IDENTITY_KIND_LEAVES as _IDENTITY_KIND_LEAVES
+
 _model_cache = None
+
+
+def ml_baseline_path() -> Path:
+    return (
+        Path(__file__).resolve().parents[3]
+        / "packages"
+        / "ml"
+        / "models"
+        / "baseline.json"
+    )
 
 
 def ml_baseline_status() -> dict:
     """Operator-facing status for Map UI / Pilot — never silent about ML availability."""
     model = _load_ml_baseline()
-    path = Path(__file__).resolve().parents[3] / "packages" / "ml" / "models" / "baseline.pkl"
+    path = ml_baseline_path()
     return {
         "available": model is not None,
         "path": str(path),
@@ -32,28 +45,27 @@ def ml_baseline_status() -> dict:
 
 
 def _load_ml_baseline():
+    """Load the optional automap boost from a JSON vocabulary artifact.
+
+    Never a pickle: the boost is optional, so it must not be able to execute
+    code inside the transfer engine. A missing or malformed artifact degrades
+    to lexical + semantic + Hungarian mapping, it never fails a transfer.
+    """
     global _model_cache
     if _model_cache is not None:
         return _model_cache if _model_cache is not False else None
 
-    # Try to load the ML baseline model if it exists
     try:
-        model_path = Path(__file__).resolve().parents[3] / "packages" / "ml" / "models" / "baseline.pkl"
-        if model_path.exists():
-            # Adjust path so that baseline class can be loaded
-            pkg_path = str(Path(__file__).resolve().parents[3] / "packages")
-            if pkg_path not in sys.path:
-                sys.path.append(pkg_path)
-            # Ensure the picklable class is importable under a stable module path.
-            try:
-                import ml.baseline  # noqa: F401
-            except Exception:
-                pass
-            with model_path.open("rb") as f:
-                _model_cache = pickle.load(f)  # nosec B301
-                return _model_cache
+        from services.ml_baseline import load_baseline
+
+        model = load_baseline(ml_baseline_path())
+        if model is None:
+            _model_cache = False
+            return None
+        _model_cache = model
+        return _model_cache
     except Exception as exc:
-        # Cache negative result so a broken pickle does not spam every map_columns call.
+        # Cache negative result so a broken artifact does not spam every map_columns call.
         _model_cache = False
         logging.getLogger(__name__).warning(
             "ML baseline unavailable (%s); using lexical/semantic mapper only",
@@ -91,655 +103,7 @@ def _calibrated_confidence(
     return round(conf, 3)
 
 
-ABBREVIATIONS: dict[str, str] = {
-    # Amounts and quantities
-    "amt": "amount",
-    "amount": "amount",
-    "salary": "salary_amount",
-    "salary_amt": "salary_amount",
-    "salary_amount": "salary_amount",
-    "pay": "payment",
-    "pmt": "payment",
-    "pymt": "payment",
-    "pay_amt": "payment_amount",
-    "payment_amount": "payment_amount",
-    "tax": "tax",
-    "tax_amt": "tax_amount",
-    "tax_amount": "tax_amount",
-    "net": "net",
-    "net_amt": "net_amount",
-    "net_amount": "net_amount",
-    "gross": "gross",
-    "gross_amt": "gross_amount",
-    "gross_amount": "gross_amount",
-    "line": "line",
-    "line_amt": "line_amount",
-    "line_amount": "line_amount",
-    "bal": "balance",
-    "balance": "balance",
-    "tot": "total",
-    "total": "total",
-    "subtot": "subtotal",
-    "subtotal": "subtotal",
-    "disc": "discount",
-    "discount": "discount",
-    "qty": "quantity",
-    "quantity": "quantity",
-    "qty_ord": "quantity_ordered",
-    "quantity_ordered": "quantity_ordered",
-    "price": "price",
-    "prc": "price",
-    "unit_prc": "unit_price",
-    "unit_price": "unit_price",
-    "cost": "cost",
-    "unit_cost": "unit_cost",
-    # Dates and timestamps
-    "dt": "date",
-    "date": "date",
-    "ts": "timestamp",
-    "timestamp": "timestamp",
-    "created": "created",
-    "created_at": "created_at",
-    "created_dt": "created_at",
-    "created_date": "created_at",
-    "created_ts": "created_timestamp",
-    "created_timestamp": "created_timestamp",
-    "updated": "updated",
-    "updated_at": "updated_at",
-    "updated_dt": "updated_at",
-    "updated_date": "updated_at",
-    "updated_ts": "updated_timestamp",
-    "updated_timestamp": "updated_timestamp",
-    "mod": "modified",
-    "modified": "modified",
-    "modified_at": "modified_at",
-    "mod_at": "modified_at",
-    "mod_dt": "modified_at",
-    "modified_dt": "modified_at",
-    "modified_date": "modified_at",
-    "modified_ts": "modified_timestamp",
-    "modified_timestamp": "modified_timestamp",
-    "txn": "transaction",
-    "transaction": "transaction",
-    "txn_dt": "transaction_date",
-    "transaction_date": "transaction_date",
-    "txn_id": "transaction_id",
-    "transaction_id": "transaction_id",
-    "trans_dt": "transaction_date",
-    "trans_date": "transaction_date",
-    "hire_dt": "hire_date",
-    "hire_date": "hire_date",
-    "ship_dt": "ship_date",
-    "ship_date": "ship_date",
-    "del": "delivery",
-    "delivery": "delivery",
-    "del_dt": "delivery_date",
-    "delivery_date": "delivery_date",
-    "pay_dt": "payment_date",
-    "payment_dt": "payment_date",
-    "payment_date": "payment_date",
-    # Identifiers and customers
-    "no": "number",
-    "num": "number",
-    "nbr": "number",
-    "nr": "number",
-    "number": "number",
-    "ref": "reference",
-    "reference": "reference",
-    "ref_no": "reference_number",
-    "reference_number": "reference_number",
-    "inv": "invoice",
-    "invoice": "invoice",
-    "inv_no": "invoice_number",
-    "invoice_number": "invoice_number",
-    "ord": "order",
-    "order": "order",
-    "ord_id": "order_id",
-    "order_id": "order_id",
-    "order_no": "order_number",
-    "order_number": "order_number",
-    "cust": "customer",
-    "customer": "customer",
-    "cust_id": "customer_id",
-    "customer_id": "customer_id",
-    "cust_nm": "customer_name",
-    "customer_name": "customer_name",
-    "acct": "account",
-    "account": "account",
-    "acct_no": "account_number",
-    "acct_num": "account_number",
-    "account_number": "account_number",
-    "emp": "employee",
-    "employee": "employee",
-    "emp_id": "employee_id",
-    "employee_id": "employee_id",
-    "dept": "department",
-    "department": "department",
-    "dept_code": "department_code",
-    "dept_cd": "department_code",
-    "department_code": "department_code",
-    "ssn": "social_security_number",
-    "social_security_number": "social_security_number",
-    "ssn_num": "social_security_number",
-    "cc_num": "credit_card_number",
-    "cc_no": "credit_card_number",
-    "credit_card_number": "credit_card_number",
-    "card_num": "credit_card_number",
-    "gstin": "gst_number",
-    "gst_num": "gst_number",
-    "gst_number": "gst_number",
-    "pan_num": "pan_number",
-    "pan_number": "pan_number",
-    "iban": "iban",
-    "swift": "swift_code",
-    "swift_code": "swift_code",
-    # Warehouse / lake / object-store / CRM SaaS (demo-critical cloud routes)
-    "acct_id": "account_id",
-    "account_id": "account_id",
-    "org": "organization",
-    "org_id": "organization_id",
-    "organization_id": "organization_id",
-    "opp": "opportunity",
-    "opp_amt": "opportunity_amount",
-    "opportunity_amount": "opportunity_amount",
-    "lead_src": "lead_source",
-    "lead_source": "lead_source",
-    "close_dt": "close_date",
-    "close_date": "close_date",
-    "stage_nm": "stage_name",
-    "stage_name": "stage_name",
-    "rec_type": "record_type",
-    "record_type": "record_type",
-    "ext_id": "external_id",
-    "external_id": "external_id",
-    # Prefer compound abbreviations — bare wh/db/pk/fk/arr collide with
-    # unrelated columns (array payloads, key values, catalog shorthand).
-    "wh_id": "warehouse_id",
-    "warehouse_id": "warehouse_id",
-    "db_nm": "database_name",
-    "database_name": "database_name",
-    "sch_nm": "schema_name",
-    "schema_name": "schema_name",
-    "tbl_nm": "table_name",
-    "table_name": "table_name",
-    "col_nm": "column_name",
-    "column_name": "column_name",
-    "pk_col": "primary_key_column",
-    "primary_key_column": "primary_key_column",
-    "fk_col": "foreign_key_column",
-    "foreign_key_column": "foreign_key_column",
-    "row_cnt": "row_count",
-    "row_count": "row_count",
-    "byte_sz": "byte_size",
-    "byte_size": "byte_size",
-    "obj_key": "object_key",
-    "object_key": "object_key",
-    "bkt_nm": "bucket_name",
-    "bucket_name": "bucket_name",
-    "cont_nm": "container_name",
-    "container_name": "container_name",
-    "last_mod": "last_modified",
-    "last_modified": "last_modified",
-    "mrr": "monthly_recurring_revenue",
-    "monthly_recurring_revenue": "monthly_recurring_revenue",
-    "ann_rev": "annual_recurring_revenue",
-    "annual_recurring_revenue": "annual_recurring_revenue",
-    "tz_nm": "timezone_name",
-    "timezone_name": "timezone_name",
-    "churn_dt": "churn_date",
-    "churn_date": "churn_date",
-    "utm_src": "utm_source",
-    "utm_source": "utm_source",
-    "utm_med": "utm_medium",
-    "utm_medium": "utm_medium",
-    "utm_camp": "utm_campaign",
-    "utm_campaign": "utm_campaign",
-    "ip_addr": "ip_address",
-    "ip_address": "ip_address",
-    "mac_addr": "mac_address",
-    "mac_address": "mac_address",
-    "geo_cd": "geo_code",
-    "geo_code": "geo_code",
-    "reg_cd": "region_code",
-    "region_code": "region_code",
-    "lang_cd": "language_code",
-    "language_code": "language_code",
-    "locale_cd": "locale_code",
-    "locale_code": "locale_code",
-    "vat_num": "vat_number",
-    "vat_number": "vat_number",
-    "tin": "tax_identification_number",
-    "tax_identification_number": "tax_identification_number",
-    "ein": "employer_identification_number",
-    "employer_identification_number": "employer_identification_number",
-    "routing_num": "routing_number",
-    "routing_number": "routing_number",
-    "chk_num": "check_number",
-    "check_number": "check_number",
-    "wire_ref": "wire_reference",
-    "wire_reference": "wire_reference",
-    "fx_rate": "exchange_rate",
-    "exchange_rate": "exchange_rate",
-    "base_ccy": "base_currency",
-    "base_currency": "base_currency",
-    "quote_ccy": "quote_currency",
-    "quote_currency": "quote_currency",
-    "product": "product",
-    "prod": "product",
-    "prod_id": "product_id",
-    "product_id": "product_id",
-    "sku": "product_sku",
-    "product_sku": "product_sku",
-    "src": "source",
-    "source": "source",
-    "tgt": "target",
-    "target": "target",
-    "loc": "location",
-    "location": "location",
-    # Names and contact
-    "nm": "name",
-    "name": "name",
-    "fname": "first_name",
-    "first_name": "first_name",
-    "lname": "last_name",
-    "last_name": "last_name",
-    "full_name": "full_name",
-    "desc": "description",
-    "descr": "description",
-    "description": "description",
-    "addr": "address",
-    "address": "address",
-    "addr1": "address_line_1",
-    "addr_1": "address_line_1",
-    "address_line_1": "address_line_1",
-    "address1": "address_line_1",
-    "addr2": "address_line_2",
-    "addr_2": "address_line_2",
-    "address_line_2": "address_line_2",
-    "address2": "address_line_2",
-    "city_nm": "city_name",
-    "state_cd": "state_code",
-    "zip_cd": "postal_code",
-    "lat": "latitude",
-    "latitude": "latitude",
-    "lng": "longitude",
-    "lon": "longitude",
-    "longitude": "longitude",
-    "is_actv": "is_active",
-    "is_active": "is_active",
-    "amt_usd": "amount_usd",
-    "amount_usd": "amount_usd",
-    "disc_pct": "discount_percent",
-    "discount_percent": "discount_percent",
-    "discount_pct": "discount_percent",
-    "line_tot": "line_total",
-    "line_total": "line_total",
-    "cust_seg": "customer_segment",
-    "customer_segment": "customer_segment",
-    "po_num": "purchase_order_number",
-    "po_no": "purchase_order_number",
-    "purchase_order_number": "purchase_order_number",
-    "inv_num": "invoice_number",
-    "email": "email",
-    "e_mail": "email",
-    "email_addr": "email_address",
-    "email_address": "email_address",
-    "usr_email": "user_email",
-    "user_email": "user_email",
-    "usr": "user",
-    "user": "user",
-    "ship": "shipping",
-    "ship_addr": "shipping_address",
-    "ship_address": "shipping_address",
-    "shipping_addr": "shipping_address",
-    "shipping_address": "shipping_address",
-    "bill_addr": "billing_address",
-    "billing_addr": "billing_address",
-    "billing_address": "billing_address",
-    "mail_addr": "mailing_address",
-    "dob": "date_of_birth",
-    "date_of_birth": "date_of_birth",
-    "birth_date": "date_of_birth",
-    "birthdate": "date_of_birth",
-    "d_o_b": "date_of_birth",
-    "phone": "phone",
-    "tel": "phone",
-    "ph": "phone",
-    "ph_num": "phone",
-    "ph_no": "phone",
-    "ph_nbr": "phone",
-    "tel_num": "phone_number",
-    "tel_no": "phone_number",
-    "phone_number": "phone_number",
-    "phone_num": "phone_number",
-    "mobile": "mobile",
-    "mob": "mobile",
-    "cell": "mobile",
-    "mobile_phone": "mobile_phone",
-    "mobile_number": "mobile_number",
-    "mobile_num": "mobile_number",
-    "mob_num": "mobile_number",
-    "mob_phone": "mobile_phone",
-    "cell_phone": "mobile_phone",
-    "cell_num": "mobile_number",
-    # Status and location
-    "sts": "status",
-    "stat": "status",
-    "status": "status",
-    "zip": "postal_code",
-    "zipcode": "postal_code",
-    "postal": "postal_code",
-    "postal_code": "postal_code",
-    "country": "country",
-    "country_cd": "country_code",
-    "country_code": "country_code",
-    "cntry": "country",
-    "state": "state",
-    "state_code": "state_code",
-    "province": "province",
-    "province_code": "province_code",
-    "city": "city",
-    "city_name": "city_name",
-    "region": "region",
-    "region_code": "region_code",
-    "curr": "currency",
-    "currency": "currency",
-    "ccy": "currency_code",
-    "curr_cd": "currency_code",
-    "iso_curr": "currency_code",
-    "currency_code": "currency_code",
-    # --- Enterprise domain phrases (finance / healthcare / HR / logistics) ---
-    "status_cd": "order_status",
-    "order_status": "order_status",
-    "fx_rate": "exchange_rate",
-    "exchange_rate": "exchange_rate",
-    "value_dt": "value_date",
-    "value_date": "value_date",
-    "stmt_dt": "statement_date",
-    "statement_date": "statement_date",
-    "statement_dt": "statement_date",
-    "mrn": "medical_record_number",
-    "medical_record_number": "medical_record_number",
-    "admit_dt": "admission_date",
-    "admission_date": "admission_date",
-    "admission_dt": "admission_date",
-    "disch_dt": "discharge_date",
-    "discharge_date": "discharge_date",
-    "vitals_hr": "heart_rate",
-    "heart_rate": "heart_rate",
-    "vitals_bp_sys": "bp_systolic",
-    "bp_systolic": "bp_systolic",
-    "vitals_bp_dia": "bp_diastolic",
-    "bp_diastolic": "bp_diastolic",
-    "rx_norm": "rxnorm_code",
-    "rxnorm": "rxnorm_code",
-    "rxnorm_code": "rxnorm_code",
-    "pcp_id": "primary_care_provider_id",
-    "primary_care_provider_id": "primary_care_provider_id",
-    "mgr_id": "manager_id",
-    "manager_id": "manager_id",
-    "emp_status": "employment_status",
-    "employment_status": "employment_status",
-    "emp_type": "employment_type",
-    "employment_type": "employment_type",
-    "ship_id": "shipment_id",
-    "shipment_id": "shipment_id",
-    "eta_dt": "estimated_arrival_date",
-    "eta": "estimated_arrival_date",
-    "estimated_arrival_date": "estimated_arrival_date",
-    "dim_l": "dimension_length",
-    "dim_w": "dimension_width",
-    "dim_h": "dimension_height",
-    "dimension_length": "dimension_length",
-    "dimension_width": "dimension_width",
-    "dimension_height": "dimension_height",
-    "pkg_cnt": "package_count",
-    "package_count": "package_count",
-    "bol_no": "bill_of_lading_number",
-    "bol_num": "bill_of_lading_number",
-    "bill_of_lading_number": "bill_of_lading_number",
-    "po_no": "purchase_order_number",
-    "po_num": "purchase_order_number",
-    "purchase_order_number": "purchase_order_number",
-    "pat_id": "patient_id",
-    "patient_id": "patient_id",
-    "pat_dob": "date_of_birth",
-    "enc_id": "encounter_id",
-    "encounter_id": "encounter_id",
-    "diag_cd": "diagnosis_code",
-    "diagnosis_code": "diagnosis_code",
-    "proc_cd": "procedure_code",
-    "procedure_code": "procedure_code",
-    "prov_id": "provider_id",
-    "provider_id": "provider_id",
-    "npi": "npi_number",
-    "npi_number": "npi_number",
-    "ins_id": "insurance_id",
-    "insurance_id": "insurance_id",
-    "policy_no": "policy_number",
-    "policy_number": "policy_number",
-    "claim_amt": "claim_amount",
-    "claim_amount": "claim_amount",
-    "allowed_amt": "allowed_amount",
-    "paid_amt": "paid_amount",
-    "copay_amt": "copay_amount",
-    "deduct_amt": "deductible_amount",
-    "deductible_amount": "deductible_amount",
-    "icd10": "icd10_code",
-    "icd10_code": "icd10_code",
-    "cpt_cd": "cpt_code",
-    "cpt_code": "cpt_code",
-    "loinc": "loinc_code",
-    "loinc_code": "loinc_code",
-    "lab_result": "lab_result_value",
-    "lab_result_value": "lab_result_value",
-    "lab_unit": "lab_result_unit",
-    "lab_result_unit": "lab_result_unit",
-    "allergy_cd": "allergy_code",
-    "allergy_code": "allergy_code",
-    "med_name": "medication_name",
-    "medication_name": "medication_name",
-    "rx_norm_code": "rxnorm_code",
-    "emerg_contact": "emergency_contact_name",
-    "emergency_contact_name": "emergency_contact_name",
-    "emerg_phone": "emergency_contact_phone",
-    "emergency_contact_phone": "emergency_contact_phone",
-    "hipaa_flg": "hipaa_authorized",
-    "hipaa_authorized": "hipaa_authorized",
-    "consent_flg": "consent_flag",
-    "consent_flag": "consent_flag",
-    "emp_no": "employee_number",
-    "employee_number": "employee_number",
-    "dept_cd": "department_code",
-    "dept_nm": "department_name",
-    "department_name": "department_name",
-    "bonus_amt": "bonus_amount",
-    "comm_amt": "commission_amount",
-    "commission_amount": "commission_amount",
-    "work_email": "work_email",
-    "work_phone": "work_phone",
-    "loc_cd": "location_code",
-    "location_code": "location_code",
-    "fte": "fte_ratio",
-    "fte_ratio": "fte_ratio",
-    "bank_acct": "bank_account_number",
-    "bank_account_number": "bank_account_number",
-    "direct_dep_flg": "direct_deposit_flag",
-    "direct_deposit_flag": "direct_deposit_flag",
-    "pto_bal": "pto_balance",
-    "pto_balance": "pto_balance",
-    "sick_bal": "sick_balance",
-    "sick_balance": "sick_balance",
-    "perf_score": "performance_score",
-    "performance_score": "performance_score",
-    "last_review_dt": "last_review_date",
-    "last_review_date": "last_review_date",
-    "badge_no": "badge_number",
-    "badge_number": "badge_number",
-    "shift_cd": "shift_code",
-    "shift_code": "shift_code",
-    "union_flg": "union_member_flag",
-    "union_member_flag": "union_member_flag",
-    "remote_flg": "remote_worker_flag",
-    "remote_worker_flag": "remote_worker_flag",
-    "start_tm": "shift_start_time",
-    "shift_start_time": "shift_start_time",
-    "end_tm": "shift_end_time",
-    "shift_end_time": "shift_end_time",
-    "overtime_hrs": "overtime_hours",
-    "overtime_hours": "overtime_hours",
-    "regular_hrs": "regular_hours",
-    "regular_hours": "regular_hours",
-    "pay_period_end": "pay_period_end_date",
-    "pay_period_end_date": "pay_period_end_date",
-    "benefits_elig": "benefits_eligible",
-    "benefits_eligible": "benefits_eligible",
-    "rehire_flg": "rehire_eligible_flag",
-    "rehire_eligible_flag": "rehire_eligible_flag",
-    "tracking_no": "tracking_number",
-    "tracking_number": "tracking_number",
-    "carrier_cd": "carrier_code",
-    "carrier_code": "carrier_code",
-    "origin_zip": "origin_postal_code",
-    "origin_postal_code": "origin_postal_code",
-    "dest_zip": "destination_postal_code",
-    "destination_postal_code": "destination_postal_code",
-    "freight_amt": "freight_amount",
-    "freight_amount": "freight_amount",
-    "fuel_surcharge": "fuel_surcharge_amount",
-    "fuel_surcharge_amount": "fuel_surcharge_amount",
-    "bin_loc": "bin_location",
-    "bin_location": "bin_location",
-    "lot_no": "lot_number",
-    "lot_number": "lot_number",
-    "serial_no": "serial_number",
-    "serial_number": "serial_number",
-    "qty_shipped": "quantity_shipped",
-    "quantity_shipped": "quantity_shipped",
-    "qty_ordered": "quantity_ordered",
-    "qty_received": "quantity_received",
-    "quantity_received": "quantity_received",
-    "asn_id": "asn_id",
-    "trailer_no": "trailer_number",
-    "trailer_number": "trailer_number",
-    "seal_no": "seal_number",
-    "seal_number": "seal_number",
-    "hazmat_flg": "hazmat_flag",
-    "hazmat_flag": "hazmat_flag",
-    "temp_min": "temperature_min",
-    "temperature_min": "temperature_min",
-    "temp_max": "temperature_max",
-    "temperature_max": "temperature_max",
-    "stop_seq": "stop_sequence",
-    "stop_sequence": "stop_sequence",
-    "miles": "distance_miles",
-    "distance_miles": "distance_miles",
-    "delay_mins": "delay_minutes",
-    "delay_minutes": "delay_minutes",
-    "proof_del_flg": "proof_of_delivery_flag",
-    "proof_of_delivery_flag": "proof_of_delivery_flag",
-    "princ_amt": "principal_amount",
-    "principal_amount": "principal_amount",
-    "fee_amt": "fee_amount",
-    "fee_amount": "fee_amount",
-    "gl_cd": "gl_code",
-    "gl_code": "gl_code",
-    "cost_ctr": "cost_center",
-    "cost_center": "cost_center",
-    "debit_amt": "debit_amount",
-    "debit_amount": "debit_amount",
-    "credit_amt": "credit_amount",
-    "credit_amount": "credit_amount",
-    "posting_dt": "posting_date",
-    "posting_date": "posting_date",
-    "settlement_dt": "settlement_date",
-    "settlement_date": "settlement_date",
-    "bic": "bic_code",
-    "bic_code": "bic_code",
-    "routing_no": "routing_number",
-    "card_no": "card_number",
-    "card_number": "card_number",
-    "auth_cd": "auth_code",
-    "auth_code": "auth_code",
-    "ledger_bal": "ledger_balance",
-    "ledger_balance": "ledger_balance",
-    "avail_bal": "available_balance",
-    "available_balance": "available_balance",
-    "overdraft_lim": "overdraft_limit",
-    "overdraft_limit": "overdraft_limit",
-    "recon_flg": "reconciled_flag",
-    "reconciled_flag": "reconciled_flag",
-    "fiscal_yr": "fiscal_year",
-    "fiscal_year": "fiscal_year",
-    "fiscal_qtr": "fiscal_quarter",
-    "fiscal_quarter": "fiscal_quarter",
-    "aml_flg": "aml_flag",
-    "aml_flag": "aml_flag",
-    "wire_ref": "wire_reference",
-    "wire_reference": "wire_reference",
-    "ach_trace": "ach_trace_number",
-    "ach_trace_number": "ach_trace_number",
-    "vat_amt": "vat_amount",
-    "vat_amount": "vat_amount",
-    "invoice_amt": "invoice_amount",
-    "invoice_amount": "invoice_amount",
-    "int_rate": "interest_rate",
-    "disc_amt": "discount_amount",
-    "discount_amount": "discount_amount",
-    "promo_cd": "promo_code",
-    "promo_code": "promo_code",
-    "refund_amt": "refund_amount",
-    "refund_amount": "refund_amount",
-    "ship_method": "shipping_method",
-    "shipping_method": "shipping_method",
-    "gift_msg": "gift_message",
-    "gift_message": "gift_message",
-    "item_cnt": "item_count",
-    "item_count": "item_count",
-    "channel": "sales_channel",
-    "sales_channel": "sales_channel",
-    "gender_cd": "gender",
-    "ward_cd": "ward_code",
-    "ward_code": "ward_code",
-    "bed_no": "bed_number",
-    "bed_number": "bed_number",
-    # Evidence-grown from enterprise golden unresolved tokens (abbrev coverage CI).
-    "cd": "code",
-    "flg": "flag",
-    "flag": "flag",
-    "cnt": "count",
-    "count": "count",
-    "ctr": "center",
-    "msg": "message",
-    "message": "message",
-    "lim": "limit",
-    "limit": "limit",
-    "yr": "year",
-    "year": "year",
-    "qtr": "quarter",
-    "quarter": "quarter",
-    "hrs": "hours",
-    "hours": "hours",
-    "tm": "time",
-    "kg": "kilogram",
-    "kilogram": "kilogram",
-    "lb": "pound",
-    "pound": "pound",
-    "cvv": "card_verification_value",
-    "card_verification_value": "card_verification_value",
-    "bp": "blood_pressure",
-    "blood_pressure": "blood_pressure",
-    "vitals_hr": "vitals_heart_rate",
-    "vitals_heart_rate": "vitals_heart_rate",
-    "bill": "billing",
-    "billing": "billing",
-}
-try:
-    from services.domain_gazetteers import merge_abbreviations
-
-    ABBREVIATIONS = merge_abbreviations(ABBREVIATIONS)
-except Exception:  # pragma: no cover - gazetteer optional at import
-    pass
+from services.semantic_abbreviations import ABBREVIATIONS  # noqa: E402
 
 
 
@@ -749,6 +113,45 @@ def _normalize(name: str) -> str:
     s = s.lower()
     s = re.sub(r"[^a-z0-9]+", "_", s)
     return re.sub(r"_+", "_", s).rstrip("_")
+
+
+def _folded_ident(name: str) -> str:
+    """Case- and underscore-insensitive identifier (UserID ≡ userid ≡ user_id)."""
+    return _normalize(name).replace("_", "")
+
+
+def _dest_fold_collisions(target_columns: list[str]) -> set[str]:
+    """Destination names that share a folded identifier with a sibling column.
+
+    Postgres/Snowflake fold ``UserID`` and ``userid`` onto one slot; MySQL
+    keeps both. Either way Map must not auto-approve a pin onto one of them.
+    """
+    buckets: dict[str, list[str]] = {}
+    for tgt in target_columns:
+        buckets.setdefault(_folded_ident(tgt), []).append(tgt)
+    collided: set[str] = set()
+    for names in buckets.values():
+        if len(names) > 1:
+            collided.update(names)
+    return collided
+
+
+def _exact_name_unambiguous(
+    source: str, target: str, target_columns: list[str]
+) -> bool:
+    """True when ``target`` is the only column whose name equals ``source``.
+
+    Score gap measures how close the runner-up scored. In a table holding a
+    family of similar names (``id`` / ``big_id`` / ``uid``) the runner-up stays
+    within the review band even when the winner is a literal name equality, so
+    a gap test alone marks re-runs of a table DataFlow itself created as
+    ambiguous forever. Name equality is only genuinely ambiguous when a second
+    destination column folds to the same identifier (``UserID`` vs ``userid``).
+    """
+    src_fold = _folded_ident(source)
+    if not src_fold or _folded_ident(target) != src_fold:
+        return False
+    return sum(1 for t in target_columns if _folded_ident(t) == src_fold) == 1
 
 
 def _expand_abbrev(token: str) -> str:
@@ -859,6 +262,22 @@ _DOMAIN_LEAVES = frozenset({
     "address", "email", "phone", "time", "uuid", "hash", "index", "seq",
 })
 _GENERIC_LEAVES = _DOMAIN_LEAVES | _ENTITY_STOPWORDS
+# Same-entity ``id`` vs ``key`` is a false friend (CRM id ≠ warehouse surrogate).
+# Identity-kind leaves live in schematic_index.IDENTITY_KIND_LEAVES (SSOT).
+# Typed measure subtypes that must appear on the destination. ``tax`` is not
+# ``total``; a generic amount bucket is not a proven tax/discount/salary column.
+_MEASURE_KIND_TOKENS = frozenset({
+    "tax", "vat", "gst", "discount", "net", "gross", "fee", "tip", "duty",
+    "freight", "salary", "commission", "bonus", "payment", "unit",
+})
+_MONEY_LEAVES = frozenset({"amount", "total", "balance", "price", "cost"})
+# Count/quantity is not money. Fivetran/Airbyte-class operators lose trust when
+# ``order_qty`` auto-pins onto ``order_amt`` because both share ``order``.
+_COUNT_LEAVES = frozenset({"quantity", "count", "units", "pieces"})
+# created vs updated is polarity, not a license to ADD a sibling timestamp.
+_TEMPORAL_POLARITY = frozenset({"created", "updated", "modified", "deleted", "inserted"})
+# Below G4 strict (~0.85) even if Map forgets requires_review.
+_AMBIGUOUS_PAIR_CAP = 0.78
 
 
 def _qualifier_tokens(name: str) -> set[str]:
@@ -979,6 +398,165 @@ def _entity_agreement(source: str, target: str) -> float:
     return 0.35
 
 
+def _identity_kind_leaves(name: str) -> set[str]:
+    return {t for t in _semantic_form(name).split("_") if t} & _IDENTITY_KIND_LEAVES
+
+
+def _identity_leaf_mismatch(source: str, target: str) -> bool:
+    """True when both names carry identity-kind leaves that are not the same token.
+
+    ``cust_id`` vs ``customer_id`` shares leaf ``id`` (pin). ``cust_id`` vs
+    ``customer_key`` is the same entity with a different identity kind — Map
+    must confirm. High lexical similarity must not skip G4.
+    """
+    src = _identity_kind_leaves(source)
+    tgt = _identity_kind_leaves(target)
+    if not src or not tgt:
+        return False
+    return src != tgt
+
+
+def _measure_kind_tokens(name: str) -> set[str]:
+    return {t for t in _semantic_form(name).split("_") if t} & _MEASURE_KIND_TOKENS
+
+
+def _measure_kind_mismatch(source: str, target: str) -> bool:
+    """True when the source is a typed measure the destination does not share.
+
+    ``tax_amt`` vs ``tax_amount`` shares ``tax``. ``tax_amt`` vs ``total_amount``
+    looks like a compound amount bucket because ``total`` is a domain leaf —
+    that must not auto-pin as identity. ``order_qty`` vs ``order_amt`` shares
+    the entity but not the measure family (count ≠ money).
+    """
+    src = _measure_kind_tokens(source)
+    tgt = _measure_kind_tokens(target)
+    if src and src.isdisjoint(tgt):
+        return True
+    src_money = bool(_money_leaves(source))
+    tgt_money = bool(_money_leaves(target))
+    src_count = bool(_count_leaves(source))
+    tgt_count = bool(_count_leaves(target))
+    return (src_money and tgt_count) or (src_count and tgt_money)
+
+
+def _money_leaves(name: str) -> set[str]:
+    return {t for t in _semantic_form(name).split("_") if t} & _MONEY_LEAVES
+
+
+def _count_leaves(name: str) -> set[str]:
+    return {t for t in _semantic_form(name).split("_") if t} & _COUNT_LEAVES
+
+
+def _shared_money_family(source: str, target: str) -> bool:
+    return bool(_money_leaves(source) and _money_leaves(target))
+
+
+def _entity_conflict_requires_review(source: str, target: str) -> bool:
+    """True when both sides name different entities (user ≠ customer).
+
+    Schematic index collapse (``user_id`` → canonical ``customer_id``) must
+    not skip G4. Shared money families still propose with review elsewhere.
+    """
+    if _shared_money_family(source, target):
+        return False
+    return _entity_agreement(source, target) == 0.0
+
+
+def _temporal_polarity_conflict(source: str, target: str) -> bool:
+    src = {t for t in _semantic_form(source).split("_") if t} & _TEMPORAL_POLARITY
+    tgt = {t for t in _semantic_form(target).split("_") if t} & _TEMPORAL_POLARITY
+    return bool(src and tgt and src != tgt)
+
+
+def _reason_forces_review(reason: str) -> bool:
+    return "review required" in (reason or "").lower()
+
+
+# Stable Map review kinds — UI / RAG / Proof consume this stamp, not English
+# parsing alone. Airbyte schema review is all-or-nothing (#74892 / #78427);
+# these kinds keep quantity≠amount and user≠customer off Approve-eligible.
+REVIEW_KIND_MEASURE = "measure_kind"
+REVIEW_KIND_ENTITY = "entity_identity"
+REVIEW_KIND_DEST_COLLISION = "dest_collision"
+REVIEW_KIND_IDENTITY_LEAF = "identity_leaf"
+REVIEW_KIND_TEMPORAL = "temporal_polarity"
+REVIEW_KIND_LOSSY = "lossy"
+REVIEW_KIND_CREATE_NEW = "create_new"
+REVIEW_KIND_GENERIC = "generic"
+
+FALSE_FRIEND_REVIEW_KINDS = frozenset(
+    {
+        REVIEW_KIND_MEASURE,
+        REVIEW_KIND_ENTITY,
+        REVIEW_KIND_DEST_COLLISION,
+        REVIEW_KIND_IDENTITY_LEAF,
+        REVIEW_KIND_TEMPORAL,
+    }
+)
+
+
+def classify_review_kind(
+    *,
+    source: str,
+    target: str,
+    reason: str = "",
+    requires_review: bool = False,
+    create_new: bool = False,
+    dest_collisions: set[str] | None = None,
+) -> str | None:
+    """Classify why Map held a pair. None when the pair does not need review."""
+    if not requires_review:
+        return None
+    text = (reason or "").lower()
+    collisions = dest_collisions or set()
+    if target in collisions or "destination identifier collision" in text:
+        return REVIEW_KIND_DEST_COLLISION
+    if "measure-kind mismatch" in text or (
+        source and target and _measure_kind_mismatch(source, target)
+    ):
+        return REVIEW_KIND_MEASURE
+    if "identity leaf mismatch" in text or (
+        source and target and _identity_leaf_mismatch(source, target)
+    ):
+        return REVIEW_KIND_IDENTITY_LEAF
+    if "temporal polarity" in text or (
+        source and target and _temporal_polarity_conflict(source, target)
+    ):
+        return REVIEW_KIND_TEMPORAL
+    if (
+        "entity qualifier conflict" in text
+        or "conflicting entity qualifiers" in text
+        or (source and target and _entity_conflict_requires_review(source, target))
+    ):
+        return REVIEW_KIND_ENTITY
+    if "lossy type pair" in text:
+        return REVIEW_KIND_LOSSY
+    if create_new:
+        return REVIEW_KIND_CREATE_NEW
+    return REVIEW_KIND_GENERIC
+
+
+def _stamp_review_kinds(
+    mappings: list[dict],
+    dest_collisions: set[str] | None = None,
+) -> list[dict]:
+    collisions = dest_collisions or set()
+    for row in mappings:
+        kind = classify_review_kind(
+            source=str(row.get("source") or ""),
+            target=str(row.get("target") or ""),
+            reason=str(row.get("reasoning") or ""),
+            requires_review=bool(row.get("requires_review")),
+            create_new=bool(row.get("create_new")),
+            dest_collisions=collisions,
+        )
+        if kind:
+            row["review_kind"] = kind
+        else:
+            row.pop("review_kind", None)
+    return mappings
+
+
 def _is_bare_domain_leaf(name: str) -> bool:
     toks = {t for t in _semantic_form(name).split("_") if t} - _ENTITY_STOPWORDS
     return len(toks) == 1 and toks <= _DOMAIN_LEAVES
@@ -1018,7 +596,8 @@ def _identity_onto_numeric_landmine(source: str, src_type: str, tgt_type: str) -
     Without samples the old mapper bound ``_id``→NUMBER ``id`` (~0.73). Hex
     ObjectIds never fit INTEGER/NUMBER — refuse that Map landmine up front.
     """
-    from services.type_system import normalize_logical_type, specialty_carrier_base
+    from services.decision_kernel import normalize_logical_type
+    from services.type_system import specialty_carrier_base
 
     tgt = normalize_logical_type(tgt_type)
     if tgt not in {"integer", "decimal", "float"}:
@@ -1044,7 +623,7 @@ def _type_compat_penalty(
     Lossy pairs must not clear Map auto-approve / G4 after an Exact-name boost —
     demote hard enough that calibrated confidence stays ≤0.84.
     """
-    from services.type_system import is_lossy_coercion, normalize_logical_type
+    from services.decision_kernel import is_lossy_coercion, normalize_logical_type
 
     if not src_type or not tgt_type:
         return 0.0
@@ -1067,7 +646,7 @@ def _type_compat_penalty(
 
 def _type_aware_boost(src_type: str, tgt_type: str, *, dest_db: str = "") -> float:
     """Boost score for exact or highly compatible type matches."""
-    from services.type_system import is_lossy_coercion, normalize_logical_type
+    from services.decision_kernel import is_lossy_coercion, normalize_logical_type
 
     if not src_type or not tgt_type:
         return 0.0
@@ -1094,11 +673,24 @@ def _sample_consistency_boost(samples: list[str] | None, source_type: str, targe
     """Boost score when sample values parse cleanly for target logical type."""
     if not samples or len(samples) < 2:
         return 0.0
+    from services.decision_kernel import (
+        normalize_logical_type,
+        typed_cast_incompatible_with_text_sink,
+    )
     from services.transform_engine import apply_transform, infer_transform_for_mapping
 
     transform = infer_transform_for_mapping(
         "col", "col", source_type, target_type, source_samples=samples,
     )
+    if typed_cast_incompatible_with_text_sink(
+        transform, normalize_logical_type(target_type)
+    ):
+        # A text carrier stores the token verbatim, so scoring the samples
+        # through a typed cast measures a coercion the write never performs.
+        # Y/N inferred BOOLEAN parsed 0/2 here and demoted an exact-name match
+        # onto an existing TEXT column below the floor — Map then invented a
+        # BOOLEAN `<col>_text` beside the operator's own column.
+        return 0.0
     ok = 0
     checked = 0
     for raw in samples[:8]:
@@ -1158,6 +750,23 @@ def _score_pair(
 
     def _finish(score: float, reason: str) -> tuple[float, str]:
         adjusted = max(0.0, min(0.995, float(score) - type_penalty + type_boost + sample_boost))
+        review_bits: list[str] = []
+        if _identity_leaf_mismatch(source, target):
+            src_l = "/".join(sorted(_identity_kind_leaves(source)))
+            tgt_l = "/".join(sorted(_identity_kind_leaves(target)))
+            adjusted = min(adjusted, _AMBIGUOUS_PAIR_CAP)
+            review_bits.append(f"identity leaf mismatch ({src_l}≠{tgt_l})")
+        if _measure_kind_mismatch(source, target):
+            adjusted = min(adjusted, _AMBIGUOUS_PAIR_CAP)
+            review_bits.append("measure-kind mismatch")
+        if _entity_conflict_requires_review(source, target):
+            adjusted = min(adjusted, _AMBIGUOUS_PAIR_CAP)
+            review_bits.append("entity qualifier conflict")
+        if _temporal_polarity_conflict(source, target):
+            adjusted = min(adjusted, _AMBIGUOUS_PAIR_CAP)
+            review_bits.append("temporal polarity conflict")
+        if review_bits:
+            reason = f"{reason} · {' · '.join(review_bits)} — review required"
         return adjusted, reason
 
     if src_norm == tgt_norm:
@@ -1182,6 +791,26 @@ def _score_pair(
     agreement = _entity_agreement(source, target)
     if agreement == 0.0:
         form_ratio = _similarity(src_sem, tgt_sem_raw)
+        if _shared_money_family(source, target):
+            # Same measure family, different entity (order_amt vs payment_amount).
+            # Propose below G4 so Map confirms — do not auto-pin, and do not hide
+            # the only dest amount behind create_new.
+            return _finish(
+                min(_AMBIGUOUS_PAIR_CAP, 0.58 + form_ratio * 0.22),
+                "Conflicting entity qualifiers on same measure — review required",
+            )
+        if _identity_kind_leaves(source) or _identity_kind_leaves(target):
+            # user_id vs customer_id is a dest candidate, not a license to ADD
+            # a sibling column. Propose below G4 — never invent, never auto-pin.
+            return _finish(
+                min(_AMBIGUOUS_PAIR_CAP, 0.58 + form_ratio * 0.22),
+                "Conflicting entity qualifiers on identity — review required",
+            )
+        if _temporal_polarity_conflict(source, target):
+            return _finish(
+                min(_AMBIGUOUS_PAIR_CAP, 0.58 + form_ratio * 0.22),
+                "Conflicting temporal polarity — review required",
+            )
         return _finish(min(0.42, form_ratio * 0.55), "Conflicting entity qualifiers")
 
     src_canon = _canonical_form(source)
@@ -1192,18 +821,21 @@ def _score_pair(
             return _finish(0.76, "Canonical schematic resolution (specific→bare leaf)")
         return _finish(0.99, "Canonical schematic resolution (exact target)")
     if src_canon and tgt_canon and src_canon == tgt_canon and _qualifiers_compatible(source, target):
-        src_q = _qualifier_tokens(source)
-        tgt_q = _qualifier_tokens(target)
-        if not src_q and tgt_q:
-            pass  # generic → specific: fall through
-        elif src_q and _is_bare_domain_leaf(target):
-            return _finish(0.76, "Canonical schematic resolution (specific→generic)")
-        elif src_q and not tgt_q:
-            pass  # compound domain target — fall through
-        elif _normalize(target) == _normalize(expanded):
-            return _finish(0.985, "Canonical schematic resolution (expanded form)")
+        if _identity_leaf_mismatch(source, target):
+            pass  # same canonical ``id`` is not proven identity when leaves differ
         else:
-            return _finish(0.93, "Canonical schematic resolution")
+            src_q = _qualifier_tokens(source)
+            tgt_q = _qualifier_tokens(target)
+            if not src_q and tgt_q:
+                pass  # generic → specific: fall through
+            elif src_q and _is_bare_domain_leaf(target):
+                return _finish(0.76, "Canonical schematic resolution (specific→generic)")
+            elif src_q and not tgt_q:
+                pass  # compound domain target — fall through
+            elif _normalize(target) == _normalize(expanded):
+                return _finish(0.985, "Canonical schematic resolution (expanded form)")
+            else:
+                return _finish(0.93, "Canonical schematic resolution")
 
     if _normalize(target) == _normalize(expanded):
         return _finish(0.94, "Abbreviation expansion match")
@@ -1436,8 +1068,65 @@ def _alternatives(
 
 
 # Create-new / identity passthrough is "will CREATE", not "proven against existing dest".
-# Reserve 0.99 for existing-dest exact+sample match.
-IDENTITY_PASSTHROUGH_CONFIDENCE = 0.92
+# Cap under G4 auto-approve floor (~0.85) so operators must Approve before Validate
+# treats projected DDL as proven. Reserve ≥0.95 for existing-dest exact+sample match.
+IDENTITY_PASSTHROUGH_CONFIDENCE = 0.84
+
+
+def _create_new_physical_why_type(src_type: str, stamp: str, dest_db: str) -> str:
+    """Dest-physical type for create-new Why / conversion class.
+
+    ``ddl_type(snowflake, BIGINT)`` stays ``BIGINT``, but writers emit
+    ``NUMBER(38,0)``. Classify against that carrier so BIGINT→NUMBER is
+    lossless widening, not a false identity.
+    """
+    from services.decision_kernel import ddl_type, materialize_dest_ddl, normalize_logical_type
+
+    why = (stamp or src_type or "").strip() or src_type
+    if not dest_db:
+        return why
+    try:
+        materialized = materialize_dest_ddl(dest_db, why) or why
+    except Exception:
+        materialized = why
+    logical = normalize_logical_type(src_type)
+    if logical == "integer":
+        family = ddl_type(dest_db, "INTEGER")
+        family_u = (family or "").upper().replace(" ", "")
+        if family and family_u not in {"INTEGER", "BIGINT", "INT", "INT64", "SMALLINT"}:
+            return family
+    return materialized
+
+
+def authority_mappings(
+    source_columns: list[str],
+    target_columns: list[str],
+    **kwargs,
+) -> list[dict]:
+    """Single Map SSOT for RAG / Pilot / LLM / enhanced AI.
+
+    Those layers retrieve evidence and explain. They must not invent a second
+    confidence or assignment. Transfer, Validate, and G4 already consume
+    ``map_columns`` — AI surfaces must too.
+    """
+    return map_columns(source_columns, target_columns, **kwargs)
+
+
+def pair_mapping_authority(source: str, target: str) -> dict:
+    """Single-pair view of the Map SSOT for RAG suggest/retrieve."""
+    rows = map_columns([source], [target])
+    row = rows[0] if rows else {}
+    return {
+        "source": source,
+        "proposed_target": row.get("target"),
+        "confidence": float(row.get("confidence") or 0),
+        "requires_review": bool(row.get("requires_review")),
+        "create_new": bool(row.get("create_new")),
+        "reasoning": str(row.get("reasoning") or ""),
+        "assignment_strategy": str(row.get("assignment_strategy") or ""),
+        "review_kind": row.get("review_kind"),
+        "authority": "semantic_mapper.map_columns",
+    }
 
 
 def map_columns(
@@ -1451,7 +1140,11 @@ def map_columns(
     destination_table_exists: bool | None = None,
 ) -> list[dict]:
     from services.semantic_analyzer import analyze_column
-    from services.type_system import create_new_mapping_target_type, ddl_type
+    from services.conversion_contract import classify_conversion, create_new_mapping_reason
+    from services.decision_kernel import (
+        create_new_mapping_target_type,
+        ddl_type,
+    )
 
     floor = max(0.55, threshold - 0.3)
     src_roles: dict[str, str] = {}
@@ -1474,10 +1167,13 @@ def map_columns(
             tgt_roles[t["name"]] = analyzed["semantic_role"]
             tgt_types[t["name"]] = t.get("inferred_type", "VARCHAR")
     elif target_columns:
+        # Names-only without typed introspect: never invent proven VARCHAR.
+        # Existing tables must reload schema before create_compatible_new.
+        names_only_existing = destination_table_exists is True
         for t in target_columns:
             analyzed = analyze_column(t, "VARCHAR", [])
             tgt_roles[t] = analyzed["semantic_role"]
-            tgt_types[t] = "VARCHAR"
+            tgt_types[t] = "" if names_only_existing else "VARCHAR"
 
     if not target_columns:
         # Empty targets are NOT automatically create-new. Only invent CREATE when
@@ -1488,22 +1184,35 @@ def map_columns(
         for src in source_columns:
             src_type = src_types.get(src, "VARCHAR")
             dest_native = ddl_type(dest_db, src_type) if dest_db else src_type
-            map_target_type = create_new_mapping_target_type(src_type, dest_db)
+            map_target_type = create_new_mapping_target_type(
+                src_type, dest_db, samples=src_samples.get(src)
+            )
+            why_type = _create_new_physical_why_type(
+                src_type, map_target_type or dest_native, dest_db
+            )
             if confirmed_missing:
+                classified = classify_conversion(
+                    src_type,
+                    why_type,
+                    dest_db=dest_db,
+                    transform="none",
+                )
                 out.append(
                     {
                         "source": src,
                         "target": _semantic_form(src),
                         "confidence": IDENTITY_PASSTHROUGH_CONFIDENCE,
-                        "reasoning": (
-                            f"New destination table — identity mapping; "
-                            f"types will CREATE on first write as {dest_native}"
+                        "reasoning": create_new_mapping_reason(
+                            src_type, why_type, dest_db=dest_db
                         ),
                         "user_override": False,
+                        "requires_review": True,
                         "source_type": src_type,
                         "target_type": map_target_type,
                         "assignment_strategy": "identity_passthrough",
                         "create_new": True,
+                        "conversion_class": classified.get("conversion_class"),
+                        "semantic_role": src_roles.get(src),
                     }
                 )
             else:
@@ -1519,18 +1228,21 @@ def map_columns(
                         "confidence": 0.55,
                         "reasoning": (
                             f"{exists_note}. Retry destination schema load before Map "
-                            f"invents CREATE TABLE / identity passthrough "
-                            f"(projected type {dest_native})."
+                            "invents CREATE TABLE / identity passthrough "
+                            f"(projected type {dest_native} is advisory only — "
+                            "target_type left empty until Studio/Map stamp)."
                         ),
                         "user_override": False,
                         "source_type": src_type,
-                        "target_type": dest_native,
+                        # Never stamp source/projected DDL as dest — Validate would
+                        # invent fidelity greens under partial Studio.
+                        "target_type": "",
                         "assignment_strategy": "pending_dest_schema",
                         "create_new": False,
                         "requires_review": True,
                     }
                 )
-        return _apply_create_new_risk_stamps(out, dest_db)
+        return _stamp_review_kinds(_apply_create_new_risk_stamps(out, dest_db))
 
     idf = _build_idf(source_columns + target_columns)
     all_doc_lens = [len(_tokenize(c)) for c in source_columns + target_columns]
@@ -1556,6 +1268,7 @@ def map_columns(
             pair_scores[(source, target)] = (score, reason)
 
     assigned_sources: set[str] = set()
+    dest_collisions = _dest_fold_collisions(target_columns)
     optimal = _optimal_assignment(source_columns, target_columns, pair_scores)
     for source in source_columns:
         assigned = optimal.get(source)
@@ -1572,7 +1285,8 @@ def map_columns(
         src_type = src_types.get(source, "VARCHAR")
         tgt_type = tgt_types.get(target, "VARCHAR")
         try:
-            from services.type_system import is_lossy_coercion
+            from services.decision_kernel import is_lossy_coercion
+
             lossy_pair = is_lossy_coercion(src_type, tgt_type, dest_db=dest_db)
         except Exception:
             # Fail closed — unknown type authority must not green-path remaps.
@@ -1582,9 +1296,25 @@ def map_columns(
             requires_review = True
             score = min(float(score), 0.84)
             reason = f"{reason} · lossy type pair"
+        elif reason.startswith("Exact name match") and _exact_name_unambiguous(
+            source, target, target_columns
+        ):
+            # Unique name equality with compatible types — nothing to review.
+            requires_review = False
         elif reason.startswith("Exact") and score_gap >= 0.08:
             # Decisive Exact with compatible types — review not required.
             requires_review = False
+        if (
+            _reason_forces_review(reason)
+            or _identity_leaf_mismatch(source, target)
+            or _measure_kind_mismatch(source, target)
+            or _entity_conflict_requires_review(source, target)
+        ):
+            requires_review = True
+        if target in dest_collisions:
+            requires_review = True
+            score = min(float(score), _AMBIGUOUS_PAIR_CAP)
+            reason = f"{reason} · destination identifier collision — review required"
         assigned_sources.add(source)
         used_targets.add(target)
         mappings.append(
@@ -1596,6 +1326,7 @@ def map_columns(
                 ),
                 "reasoning": reason,
                 "user_override": False,
+                # May be relabeled to hungarian_with_greedy_patch after later passes.
                 "assignment_strategy": "optimal_bipartite_hungarian",
                 "alternatives": alternatives,
                 "score_gap": score_gap,
@@ -1604,6 +1335,10 @@ def map_columns(
                 "target_type": tgt_type,
             }
         )
+
+    # Audit §4.1 — greedy / near-form patches mean the global solution is no
+    # longer pure Hungarian; never keep the "optimal" label if we patch.
+    greedy_patched = False
 
     for source in source_columns:
         if source in assigned_sources:
@@ -1642,12 +1377,16 @@ def map_columns(
             near_sample = _sample_consistency_boost(
                 src_samples.get(source), src_type, near_tgt_type,
             )
-            if near_penalty >= 0.20 or near_sample <= -0.50:
+            # Only hard landmines (ObjectId→DECIMAL ≈0.92) clear near-form.
+            # Temporal polarity demotion (BQ TIMESTAMP ntz→instant ≈0.5) must still
+            # prefer the synonym column with review over inventing DATETIME.
+            if near_penalty >= 0.85 or near_sample <= -0.50:
                 near_tgt, near_ratio = "", 0.0
         if near_tgt and near_ratio >= 0.62 and (not best_target or best_score < floor or near_ratio > best_score):
             # Promote near form match into the assignment set.
             near_score = max(best_score, 0.55 + near_ratio * 0.40)
             if near_score >= floor or near_ratio >= 0.70:
+                greedy_patched = True
                 used_targets.add(near_tgt)
                 assigned_sources.add(source)
                 winner = alternatives[0]["confidence"] if alternatives else near_score
@@ -1656,13 +1395,24 @@ def map_columns(
                 requires_review = near_ratio < 0.85
                 near_tgt_type = tgt_types.get(near_tgt, "VARCHAR")
                 try:
-                    from services.type_system import is_lossy_coercion
+                    from services.decision_kernel import is_lossy_coercion
+
                     near_lossy = is_lossy_coercion(src_type, near_tgt_type, dest_db=dest_db)
                 except Exception:
                     near_lossy = True
                 if near_lossy:
                     requires_review = True
                     near_score = min(float(near_score), 0.84)
+                if (
+                    _identity_leaf_mismatch(source, near_tgt)
+                    or _measure_kind_mismatch(source, near_tgt)
+                    or _entity_conflict_requires_review(source, near_tgt)
+                ):
+                    requires_review = True
+                    near_score = min(float(near_score), _AMBIGUOUS_PAIR_CAP)
+                if near_tgt in dest_collisions:
+                    requires_review = True
+                    near_score = min(float(near_score), _AMBIGUOUS_PAIR_CAP)
                 mappings.append(
                     {
                         "source": source,
@@ -1690,13 +1440,40 @@ def map_columns(
                 continue
         # Prefer create-new text column over a lossy existing target (e.g. ObjectId → DECIMAL).
         if (not best_target or best_score < floor) and target_columns:
+            # Existing table + names-only (no typed schema) — refuse invent ADD COLUMN.
+            if destination_table_exists is True and not target_schemas:
+                greedy_patched = True
+                mappings.append(
+                    {
+                        "source": source,
+                        "target": _semantic_form(source),
+                        "confidence": 0.55,
+                        "reasoning": (
+                            "Destination table exists but column types were not loaded — "
+                            "retry destination schema introspect before inventing ADD COLUMN "
+                            "or create-compatible carriers."
+                        ),
+                        "user_override": False,
+                        "source_type": src_types.get(source, "VARCHAR"),
+                        # Empty dest stamp — never copy source_type (Validate invent cliff).
+                        "target_type": "",
+                        "assignment_strategy": "pending_dest_schema",
+                        "create_new": False,
+                        "requires_review": True,
+                        "alternatives": alternatives,
+                        "score_gap": 0.0,
+                    }
+                )
+                continue
             # Final gate: if any unused dest is a reasonable form match, map there
             # with review instead of inventing (avoids ph_number when phone exists).
             if near_tgt and near_ratio >= 0.50:
+                greedy_patched = True
                 used_targets.add(near_tgt)
                 near_tgt_type = tgt_types.get(near_tgt, "VARCHAR")
                 try:
-                    from services.type_system import is_lossy_coercion
+                    from services.decision_kernel import is_lossy_coercion
+
                     near_lossy = is_lossy_coercion(src_type, near_tgt_type, dest_db=dest_db)
                 except Exception:
                     near_lossy = True
@@ -1723,8 +1500,11 @@ def map_columns(
                     }
                 )
                 continue
+            greedy_patched = True
             dest_native = ddl_type(dest_db, src_type) if dest_db else src_type
-            map_target_type = create_new_mapping_target_type(src_type, dest_db)
+            map_target_type = create_new_mapping_target_type(
+                src_type, dest_db, samples=src_samples.get(source)
+            )
             # Prefer the original source name for ADD COLUMN (_id stays _id).
             # Semantic form alone collapses _id → id, then id_text — a name that
             # operators did not approve and that often never gets DDL.
@@ -1741,7 +1521,12 @@ def map_columns(
                 {
                     "source": source,
                     "target": candidate,
-                    "confidence": IDENTITY_PASSTHROUGH_CONFIDENCE,
+                    "confidence": _calibrated_confidence(
+                        IDENTITY_PASSTHROUGH_CONFIDENCE,
+                        score_gap=0.0,
+                        requires_review=True,
+                        hard_cap=0.84,
+                    ),
                     "reasoning": (
                         "No type-compatible destination column — map to a new field "
                         f"(create/ADD as {dest_native}); do not coerce into incompatible DDL"
@@ -1757,6 +1542,7 @@ def map_columns(
                 }
             )
             continue
+        greedy_patched = True
         if not best_target:
             best_target = _semantic_form(source)
             best_score = 0.55
@@ -1771,7 +1557,8 @@ def map_columns(
         src_type = src_types.get(source, "VARCHAR")
         tgt_type = tgt_types.get(best_target, "VARCHAR") if best_target else "VARCHAR"
         try:
-            from services.type_system import is_lossy_coercion
+            from services.decision_kernel import is_lossy_coercion
+
             lossy_pair = bool(
                 best_target and is_lossy_coercion(src_type, tgt_type, dest_db=dest_db)
             )
@@ -1781,6 +1568,19 @@ def map_columns(
             requires_review = True
             best_score = min(float(best_score), 0.84)
             best_reason = f"{best_reason} · lossy type pair"
+        elif best_target and _exact_name_unambiguous(
+            source, best_target, target_columns
+        ):
+            requires_review = False
+        if best_target and (
+            _reason_forces_review(best_reason)
+            or _identity_leaf_mismatch(source, best_target)
+            or _measure_kind_mismatch(source, best_target)
+            or _entity_conflict_requires_review(source, best_target)
+            or best_target in dest_collisions
+        ):
+            requires_review = True
+            best_score = min(float(best_score), _AMBIGUOUS_PAIR_CAP)
         mappings.append(
             {
                 "source": source,
@@ -1801,98 +1601,15 @@ def map_columns(
             }
         )
 
+    if greedy_patched:
+        for row in mappings:
+            if row.get("assignment_strategy") == "optimal_bipartite_hungarian":
+                row["assignment_strategy"] = "hungarian_with_greedy_patch"
+
     mappings.sort(key=lambda m: source_columns.index(m["source"]))
-    return _apply_create_new_risk_stamps(mappings, dest_db)
-
-
-def _apply_create_new_risk_stamps(
-    mappings: list[dict],
-    destination_db_type: str = "",
-) -> list[dict]:
-    """Stamp create-new type risks without importing mapping_pipeline (cycle-safe)."""
-    from services.type_system import (
-        assess_create_new_type_risk,
-        create_new_mapping_target_type,
-        is_lossy_coercion,
-        is_precision_collapse_coercion,
-        normalize_logical_type as _nlt,
+    return _stamp_review_kinds(
+        _apply_create_new_risk_stamps(
+            mappings, dest_db, source_samples=src_samples
+        ),
+        dest_collisions,
     )
-
-    out: list[dict] = []
-    for m in mappings:
-        row = dict(m)
-        # Only confirmed create-new strategies — never stamp pending schema as
-        # create-new (UI keeps createNew=false; inventing risks/DDL contradicts that).
-        strategy = str(row.get("assignment_strategy") or "")
-        is_create = bool(
-            row.get("create_new")
-            or strategy in {
-                "create_compatible_new",
-                "identity_passthrough",
-            }
-        )
-        if not is_create or strategy == "pending_dest_schema":
-            out.append(row)
-            continue
-        src = str(row.get("source_type") or "VARCHAR")
-        db = destination_db_type or str(row.get("dest_db_type") or "")
-        stamped = str(row.get("target_type") or "").strip()
-        physical_from_src = create_new_mapping_target_type(src, db) if db else ""
-        if db and stamped:
-            physical_from_stamp = create_new_mapping_target_type(stamped, db)
-            stamp_l = _nlt(stamped)
-            src_phys_l = _nlt(physical_from_src or src)
-            # Transform/pipeline may widen VARCHAR→DATETIME(6)/JSONB/UUID wire.
-            # Never erase that with source-derived TEXT create-new.
-            if stamp_l not in {"string", "text"} or src_phys_l not in {"string", "text"}:
-                tgt = physical_from_stamp or stamped
-            else:
-                tgt = physical_from_src or physical_from_stamp or stamped
-        elif db:
-            tgt = physical_from_src or src
-        else:
-            tgt = stamped or src
-        if tgt and tgt != stamped:
-            row["target_type"] = tgt
-        risks = assess_create_new_type_risk(src, tgt, destination_db_type=db)
-        if risks:
-            row["create_new_risks"] = risks
-            row["requires_review"] = True
-            kinds = ", ".join(sorted({r.get("kind", "") for r in risks if r.get("kind")}))
-            reason = str(row.get("reasoning") or "")
-            note = f"create-new type risk: {kinds}"
-            if note not in reason.lower():
-                row["reasoning"] = f"{reason} · {note}".strip(" ·")
-            if (
-                (not row.get("fidelity") or row.get("fidelity") == "lossless")
-                and (
-                    is_lossy_coercion(src, tgt, dest_db=db)
-                    or is_precision_collapse_coercion(src, tgt, dest_db=db)
-                )
-            ):
-                row["fidelity"] = "lossy_cast"
-            # Vary confidence: lossy create-new must not look like identity slam-dunk.
-            try:
-                base = float(row.get("confidence") or IDENTITY_PASSTHROUGH_CONFIDENCE)
-            except (TypeError, ValueError):
-                base = IDENTITY_PASSTHROUGH_CONFIDENCE
-            row["confidence"] = _calibrated_confidence(
-                base,
-                score_gap=float(row.get("score_gap") or 0.0),
-                requires_review=True,
-                hard_cap=0.88,
-                fidelity=str(row.get("fidelity") or ""),
-            )
-        elif strategy == "identity_passthrough":
-            # Same semantic form, no risk stamps → keep high but not flat 0.99.
-            src_l = src.strip().upper()
-            tgt_l = str(tgt or "").strip().upper()
-            if src_l and tgt_l and src_l == tgt_l:
-                row["confidence"] = round(min(float(row.get("confidence") or 0.95), 0.96), 3)
-            else:
-                row["confidence"] = round(
-                    min(float(row.get("confidence") or IDENTITY_PASSTHROUGH_CONFIDENCE), 0.93),
-                    3,
-                )
-        out.append(row)
-    return out

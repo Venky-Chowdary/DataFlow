@@ -34,11 +34,13 @@ from __future__ import annotations
 import json
 import logging
 import os
-from services.brand_env import getenv_brand
 import sys
+import time
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
 from typing import Any, Iterator
+
+from services.brand_env import getenv_brand
 
 #: Job currently being executed on this task/thread. Bound by
 #: :func:`job_log_context` so engine and connector logs self-identify.
@@ -158,9 +160,16 @@ class JsonFormatter(logging.Formatter):
     detail.
     """
 
+    def formatTime(self, record: logging.LogRecord, datefmt: str | None = None) -> str:
+        """ISO-8601 UTC with milliseconds — avoid ``%03d`` (invalid on Windows strftime)."""
+        ct = self.converter(record.created)
+        base = time.strftime("%Y-%m-%dT%H:%M:%S", ct)
+        ms = int(record.msecs)
+        return f"{base}.{ms:03d}Z"
+
     def format(self, record: logging.LogRecord) -> str:
         payload: dict[str, Any] = {
-            "ts": self.formatTime(record, "%Y-%m-%dT%H:%M:%S.%03dZ"),
+            "ts": self.formatTime(record),
             "level": record.levelname,
             "logger": record.name,
             "msg": record.getMessage(),

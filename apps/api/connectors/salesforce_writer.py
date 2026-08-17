@@ -17,6 +17,7 @@ from connectors.saas_common import (
     token,
 )
 from connectors.writer_common import (
+    reject_on_strict_policy,
     WriteResult,
     apply_write_quarantine_matrix,
     build_mapped_rows_with_details,
@@ -29,6 +30,24 @@ DEFAULT_HOST = "login.salesforce.com"
 API_VERSION = "v58.0"
 _CHUNK = 200
 _SF_ID_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZ012345"
+
+
+def _sf_field_api_name(name: str) -> str:
+    """Keep Salesforce API names including custom ``__c`` / ``__r`` suffixes.
+
+    Generic SQL ``sanitize_identifier`` collapses ``__`` → ``_``, which invents
+    wrong field API names and breaks External Id conflict columns on write.
+    """
+    import re
+
+    raw = (name or "").strip()
+    if not raw:
+        return raw
+    # Allow only Salesforce-legal identifier chars; never collapse underscores.
+    s = re.sub(r"[^a-zA-Z0-9_]", "_", raw)
+    if not s or s[0].isdigit():
+        s = f"f_{s or 'field'}"
+    return s[:255]
 
 
 def _require_instance_url(host: str) -> str:
@@ -61,7 +80,10 @@ def coerce_salesforce_id_wire(value: Any) -> str | None:
         )
     text = str(value).strip()
     if not text:
-        return None
+        raise ValueError(
+            "empty Salesforce Id — refuse silent NULL invent "
+            "(quarantine or omit lookup upstream)"
+        )
     if len(text) == 18:
         # Validate checksum matches 15-char body when body is well-formed.
         body = text[:15]
@@ -191,7 +213,6 @@ def salesforce_field_to_carrier(field: dict[str, Any]) -> str:
         "url",
         "encryptedstring",
         "combobox",
-        "anytype",
         "datacategorygroupreference",
         "junctionidlist",
     }:
@@ -199,8 +220,8 @@ def salesforce_field_to_carrier(field: dict[str, Any]) -> str:
             return f"VARCHAR({length_n})"
         return "VARCHAR"
 
-    # Compound address / geolocation — structured JSON envelope (not invent VARCHAR).
-    if ftype in {"address", "location", "complexvalue"}:
+    # Compound address / geolocation / polymorphic anyType — structured envelope.
+    if ftype in {"address", "location", "complexvalue", "anytype"}:
         return "JSON"
 
     if ftype in {"double", "currency", "percent", "number"}:
@@ -223,7 +244,8 @@ def salesforce_field_to_carrier(field: dict[str, Any]) -> str:
         return "TIME"
     if ftype == "base64":
         return "BINARY"
-    return "VARCHAR"
+    # Unknown SOAP type — refuse soft VARCHAR invent (Studio / remap required).
+    return ""
 
 
 def resolve_salesforce_dest_types(
@@ -232,29 +254,33 @@ def resolve_salesforce_dest_types(
     column_types: dict[str, str],
     *,
     describe_fields: list[dict[str, Any]] | None = None,
+    studio_types: dict[str, Any] | None = None,
 ) -> dict[str, str]:
-    """Prefer live Describe length/precision; else Map/source carriers."""
-    by_name: dict[str, dict[str, Any]] = {}
+    """Prefer live Describe length/precision; else Map/source carriers.
+
+    When Describe fields are supplied or Studio typed carriers, never soft-fill
+    unknown SOAP types with Map ``VARCHAR`` — parity with the write-path
+    ``merge_saas_live_types`` gate.
+    """
+    from connectors.saas_common import resolve_saas_live_or_map_dest_types
+
+    live: dict[str, str] = {}
     for f in describe_fields or []:
         name = str(f.get("name") or "").strip()
-        if name:
-            by_name[name.lower()] = f
-    out: dict[str, str] = {}
-    for i, col in enumerate(target_cols):
-        meta = by_name.get(col.lower())
-        if meta:
-            out[col] = salesforce_field_to_carrier(meta)
+        if not name:
             continue
-        mapped = ""
-        if i < len(mappings):
-            mapped = str(
-                mappings[i].get("target_type")
-                or mappings[i].get("dest_type")
-                or ""
-            )
-        src = str(mappings[i].get("source") or "") if i < len(mappings) else ""
-        out[col] = mapped or column_types.get(src) or column_types.get(col) or "VARCHAR"
-    return out
+        carrier = salesforce_field_to_carrier(f)
+        if str(carrier or "").strip():
+            live[name] = carrier
+    return resolve_saas_live_or_map_dest_types(
+        target_cols,
+        mappings,
+        column_types,
+        live_carriers=live,
+        live_schema_present=describe_fields is not None,
+        studio_types=studio_types,
+        product="Salesforce",
+    )
 
 
 def _normalize_salesforce_id_cells(
@@ -376,11 +402,37 @@ def write_mapped_rows(
         )
 
     target_cols, _ = resolve_target_columns(mappings, column_types, preserve_case=True)
+    # Rebuild targets with Salesforce API-name honesty (__c / __r preserved).
+    sf_cols: list[str] = []
+    for m in mappings or []:
+        try:
+            from services.mapping_constraints import is_intentional_omit
+
+            if is_intentional_omit(m):
+                continue
+        except Exception:
+            pass  # intentional omit helper optional
+        tgt = _sf_field_api_name(str(m.get("target") or ""))
+        if tgt and tgt not in sf_cols:
+            sf_cols.append(tgt)
+    if sf_cols:
+        target_cols = sf_cols
+    # Conflict columns must use the same API-name polarity as Map targets.
+    if conflict_columns:
+        conflict_columns = [
+            _sf_field_api_name(str(c)) for c in conflict_columns if str(c).strip()
+        ]
     policy = transform_error_policy(error_policy)
     # Live Describe when credentials allow — VARCHAR(n)/DECIMAL(p,s) for Bulk fit.
+    # Never degrade to Map VARCHAR invent on Describe failure (HubSpot class).
     describe_fields: list[dict[str, Any]] | None = None
     describe_warning = ""
+    live_dest = _kwargs.get("destination_column_types")
+    studio_live = isinstance(live_dest, dict) and all(
+        str(live_dest.get(c) or "").strip() for c in target_cols if c
+    )
     try:
+        from connectors.saas_common import is_auth_error
         from connectors.salesforce import describe_sobject
 
         cfg = {
@@ -394,10 +446,63 @@ def write_mapped_rows(
         }
         describe_fields = describe_sobject(cfg, sobject)
     except Exception as exc:
+        if is_auth_error(exc):
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=sobject,
+                target_schema="",
+                checksum="",
+                chunks_completed=0,
+                error=(
+                    f"Salesforce Describe auth failed: {exc} — "
+                    "refuse Map VARCHAR bind (empty→null invent risk)."
+                ),
+                driver="salesforce",
+            )
+        if not studio_live:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=sobject,
+                target_schema="",
+                checksum="",
+                chunks_completed=0,
+                error=(
+                    f"Salesforce Describe unavailable ({exc}) and Studio did not "
+                    "type all mapped fields — refuse Map VARCHAR bind "
+                    "(empty→null invent risk). Re-run destination schema "
+                    "introspect or refresh org credentials."
+                ),
+                driver="salesforce",
+            )
         describe_fields = None
         describe_warning = (
-            f"Salesforce Describe unavailable ({exc}); length/picklist quarantine "
-            "and formula-field filtering are degraded for this write"
+            f"Salesforce Describe unavailable ({exc}); using Studio-typed "
+            "carriers only for this write"
+        )
+
+    if describe_fields is not None and len(describe_fields) == 0:
+        if not studio_live:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=sobject,
+                target_schema="",
+                checksum="",
+                chunks_completed=0,
+                error=(
+                    f"Salesforce Describe returned no fields for {sobject!r} — "
+                    "refuse Map VARCHAR bind (empty→null invent risk). Confirm "
+                    "object API name and Describe access."
+                ),
+                driver="salesforce",
+            )
+        # Studio typed all fields — treat empty Describe as unavailable.
+        describe_fields = None
+        describe_warning = (
+            f"Salesforce Describe returned no fields for {sobject!r}; using "
+            "Studio-typed carriers only for this write"
         )
     # Skip formula / non-writable fields so a live demo does not explode on
     # Calculated fields the Map step may have suggested from Describe.
@@ -468,12 +573,52 @@ def write_mapped_rows(
             ),
             driver="salesforce",
         )
-    dest_types = resolve_salesforce_dest_types(
-        target_cols,
-        mappings,
-        column_types,
-        describe_fields=describe_fields,
-    )
+    if describe_fields:
+        live: dict[str, str] = {}
+        for f in describe_fields:
+            name = str(f.get("name") or "").strip()
+            if name:
+                live[name] = salesforce_field_to_carrier(f)
+        live = {k: v for k, v in live.items() if str(v or "").strip()}
+        from connectors.saas_common import merge_saas_live_types
+
+        dest_types, cov_err = merge_saas_live_types(
+            live,
+            target_cols,
+            studio_types=live_dest if isinstance(live_dest, dict) else None,
+            product="Salesforce",
+        )
+        if cov_err:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=sobject,
+                target_schema="",
+                checksum="",
+                chunks_completed=0,
+                error=cov_err,
+                driver="salesforce",
+            )
+    else:
+        from connectors.saas_common import merge_saas_live_types
+
+        dest_types, cov_err = merge_saas_live_types(
+            {},
+            target_cols,
+            studio_types=live_dest if isinstance(live_dest, dict) else None,
+            product="Salesforce",
+        )
+        if cov_err:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=sobject,
+                target_schema="",
+                checksum="",
+                chunks_completed=0,
+                error=cov_err,
+                driver="salesforce",
+            )
     mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
         headers=headers,
         data_rows=data_rows,
@@ -483,8 +628,11 @@ def write_mapped_rows(
         error_policy=policy,
         dest_types=dest_types,
         preserve_case=True,
+        dest_kind="salesforce",
+        destination_pk_columns=list(conflict_columns or []) or None,
+        destination_column_nullability=_kwargs.get("destination_column_nullability"),
     )
-    tgt_types = [str(dest_types.get(c, "VARCHAR") or "VARCHAR") for c in target_cols]
+    tgt_types = [str(dest_types.get(c) or "").strip() for c in target_cols]
     mapped_rows = apply_write_quarantine_matrix(
         mapped_rows,
         target_cols,
@@ -501,7 +649,8 @@ def write_mapped_rows(
         rejected_details,
         policy,
     )
-    if transform_errors and policy == "fail":
+    _map_abort = reject_on_strict_policy(policy, rejected_details, 'Salesforce', transform_errors)
+    if _map_abort:
         return WriteResult(
             ok=False,
             rows_written=0,
@@ -509,7 +658,7 @@ def write_mapped_rows(
             target_schema="",
             checksum="",
             chunks_completed=0,
-            error=f"Transform errors: {'; '.join(transform_errors[:3])}",
+            error=_map_abort or f"Transform errors: {'; '.join(transform_errors[:3])}",
             rejected_details=rejected_details,
             driver="salesforce",
         )
@@ -534,7 +683,14 @@ def write_mapped_rows(
     digest = hashlib.sha256()
     written_ids: list[str] = []
 
-    def _submit(records: list[dict[str, Any]], *, method: str, endpoint: str, row_base: int) -> None:
+    def _submit(
+        records: list[dict[str, Any]],
+        *,
+        method: str,
+        endpoint: str,
+        row_base: int,
+        mapped_batch: list[Any] | None = None,
+    ) -> None:
         nonlocal written, chunks
         if not records:
             return
@@ -565,11 +721,31 @@ def write_mapped_rows(
             else:
                 errs = item.get("errors") or [{"message": "unknown Salesforce error"}]
                 msg = errs[0].get("message", str(errs[0])) if isinstance(errs[0], dict) else str(errs[0])
-                rejected_details.append({
-                    "row_index": row_base + idx,
-                    "reason": msg,
-                    "values": records[idx] if idx < len(records) else {},
-                })
+                from connectors.writer_common import append_write_quarantine_detail
+
+                rec = records[idx] if idx < len(records) else {}
+                # Original mapped row preserves DF_MISSING / NULL; CRM rec omits them.
+                src_mapped: Any
+                if mapped_batch is not None and idx < len(mapped_batch):
+                    src_mapped = mapped_batch[idx]
+                else:
+                    src_mapped = tuple(
+                        rec.get(c) if isinstance(rec, dict) else None for c in target_cols
+                    )
+                append_write_quarantine_detail(
+                    rejected_details,
+                    {
+                        "row": row_base + idx + 1,
+                        "column": "",
+                        "target": sobject,
+                        "value": "",
+                        "reason": msg,
+                        "policy": "write_fail" if policy == "fail" else "write_quarantine",
+                        "values": rec if isinstance(rec, dict) else {},
+                    },
+                    mapped_row=src_mapped,
+                    target_cols=target_cols,
+                )
         batch_failures = sum(
             1 for item in results
             if isinstance(item, dict) and not item.get("success")
@@ -587,14 +763,24 @@ def write_mapped_rows(
         for i in range(0, len(mapped_rows), chunk):
             batch = mapped_rows[i : i + chunk]
             records = []
+            mapped_batch: list[Any] = []
             for row in batch:
                 if isinstance(row, dict):
                     pairs = row.items()
+                    mapped_src = tuple((row or {}).get(c) for c in target_cols)
                 else:
                     pairs = zip(target_cols, row)
-                rec = {k: v for k, v in pairs if v is not None and str(v) != ""}
+                    mapped_src = row if isinstance(row, (tuple, list)) else tuple(
+                        row[j] if j < len(row) else None for j in range(len(target_cols))
+                    )
+                from connectors.writer_common import omit_missing_fields
+
+                # STOP_COLUMN / coerce_null → DF_MISSING must omit, never leak
+                # "__DF_MISSING__" into Salesforce field values.
+                rec = omit_missing_fields(pairs)
                 rec.pop("attributes", None)
                 records.append(rec)
+                mapped_batch.append(mapped_src)
             if not records:
                 continue
 
@@ -603,31 +789,70 @@ def write_mapped_rows(
                     f"{url_base}/services/data/{API_VERSION}/composite/sobjects/"
                     f"{sobject}/{ext_field}"
                 )
-                _submit(records, method="PATCH", endpoint=endpoint, row_base=i)
+                _submit(
+                    records,
+                    method="PATCH",
+                    endpoint=endpoint,
+                    row_base=i,
+                    mapped_batch=mapped_batch,
+                )
             elif write_mode in {"upsert", "update"} and ext_field == "Id":
-                # Id present → PATCH update; Id missing → POST insert on upsert
-                # (update-only quarantines missing Id — never invent duplicates).
+                # Id present → PATCH update; Id missing → quarantine (never POST
+                # invent duplicates under at-least-once retry — HubSpot/Stripe class).
                 collections = f"{url_base}/services/data/{API_VERSION}/composite/sobjects"
-                with_id = [r for r in records if r.get("Id")]
-                without_id = [r for r in records if not r.get("Id")]
+                with_id: list[dict[str, Any]] = []
+                with_id_mapped: list[Any] = []
+                without_id: list[tuple[int, dict[str, Any], Any]] = []
+                for idx, rec in enumerate(records):
+                    if rec.get("Id"):
+                        with_id.append(rec)
+                        with_id_mapped.append(mapped_batch[idx])
+                    else:
+                        without_id.append((idx, rec, mapped_batch[idx]))
                 if with_id:
-                    _submit(with_id, method="PATCH", endpoint=collections, row_base=i)
-                if without_id and write_mode == "upsert":
-                    _submit(without_id, method="POST", endpoint=collections, row_base=i)
-                elif without_id:
-                    for idx, rec in enumerate(without_id):
-                        rejected_details.append({
-                            "row_index": i + idx,
-                            "reason": "Salesforce update requires Id — quarantined (no invent)",
-                            "values": rec,
-                        })
+                    _submit(
+                        with_id,
+                        method="PATCH",
+                        endpoint=collections,
+                        row_base=i,
+                        mapped_batch=with_id_mapped,
+                    )
+                if without_id:
+                    from connectors.writer_common import append_write_quarantine_detail
+
+                    for idx, rec, src_mapped in without_id:
+                        append_write_quarantine_detail(
+                            rejected_details,
+                            {
+                                "row": i + idx + 1,
+                                "column": "Id",
+                                "target": "Id",
+                                "value": None,
+                                "reason": (
+                                    "Salesforce upsert/update requires Id — quarantined "
+                                    "(refuse POST invent duplicates)"
+                                ),
+                                "policy": (
+                                    "write_fail" if policy == "fail" else "write_quarantine"
+                                ),
+                                "values": rec,
+                            },
+                            mapped_row=src_mapped,
+                            target_cols=target_cols,
+                        )
                     if policy == "fail":
                         raise RuntimeError(
-                            f"Salesforce update missing Id on {len(without_id)} record(s)"
+                            f"Salesforce upsert/update missing Id on {len(without_id)} record(s)"
                         )
             else:
                 endpoint = f"{url_base}/services/data/{API_VERSION}/composite/sobjects"
-                _submit(records, method="POST", endpoint=endpoint, row_base=i)
+                _submit(
+                    records,
+                    method="POST",
+                    endpoint=endpoint,
+                    row_base=i,
+                    mapped_batch=mapped_batch,
+                )
     except Exception as exc:
         return WriteResult(
             ok=False,
@@ -641,18 +866,16 @@ def write_mapped_rows(
             driver="salesforce",
         )
 
-    if rejected_details and policy == "fail":
+    _final_abort = reject_on_strict_policy(policy, rejected_details, "Salesforce")
+    if _final_abort:
         return WriteResult(
             ok=False,
-            rows_written=0,
+            rows_written=written,
             table_name=sobject,
             target_schema="",
-            checksum="",
-            chunks_completed=0,
-            error=(
-                f"Salesforce rejected {len(rejected_details)} record(s); "
-                "strict error policy blocks partial activation"
-            ),
+            checksum=digest.hexdigest()[:16] if written else "",
+            chunks_completed=chunks,
+            error=_final_abort,
             rejected_details=rejected_details,
             rejected_rows=len(rejected_details),
             driver="salesforce",

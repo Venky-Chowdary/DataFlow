@@ -263,7 +263,9 @@ def add_preflight_run(plan_id: str, preflight_result: dict[str, Any]) -> Transfe
         if plan.id != plan_id:
             continue
         run = {
-            "id": str(uuid.uuid4()),
+            # Reuse the caller's run id when it carries one, so the id the
+            # operator was handed is the id in plan history.
+            "id": str(preflight_result.get("run_id") or uuid.uuid4()),
             "time": _now(),
             "passed": bool(preflight_result.get("passed")),
             "readiness_score": preflight_result.get("readiness_score"),
