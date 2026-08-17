@@ -61,6 +61,18 @@ export function isLocalPreflight(preflight: { run_id?: string } | null | undefin
   return Boolean(preflight?.run_id?.startsWith("pf_local_"));
 }
 
+/**
+ * True only for a result the API identified with a run id.
+ *
+ * `!isLocalPreflight(pf)` is not the same test: a result with no run id at all
+ * passes it vacuously, so an unidentifiable verdict would unlock Execute. An
+ * unknown run is not an API run.
+ */
+export function isApiPreflight(preflight: { run_id?: string } | null | undefined): boolean {
+  const runId = String(preflight?.run_id || "").trim();
+  return runId.length > 0 && !runId.startsWith("pf_local_");
+}
+
 /** Client-side preflight for file → file export when the API is unavailable. */
 export function runLocalPreflight(input: LocalPreflightInput): PreflightResult {
   const threshold = input.confidenceThreshold ?? 0.85;

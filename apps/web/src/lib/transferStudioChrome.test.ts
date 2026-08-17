@@ -85,6 +85,15 @@ describe("Transfer Studio chrome contracts", () => {
     assert.doesNotMatch(src, /span>\{passed \? "ready" : "blocked"\}/);
   });
 
+  it("ValidateActionsRail offers Re-run Validate in every state, not only when blocked", () => {
+    const src = readFileSync(join(webRoot, "components/transfer/ValidateActionsRail.tsx"), "utf8");
+    assert.match(src, /Re-run Validate/);
+    // Gating the control on `blocked` stranded a green verdict: re-validating
+    // meant Back ▸ Continue to Validate.
+    assert.doesNotMatch(src, /\{\(blocked \|\| \(!preflight && !preflighting\)\) && \(/);
+    assert.match(src, /onClick=\{onRunPreflight\}/);
+  });
+
   it("ValidateDashboard surfaces review subtitle when passed", () => {
     const src = readFileSync(join(webRoot, "components/transfer/ValidateDashboard.tsx"), "utf8");
     assert.match(src, /decision === "review"[\s\S]*executiveSummary\?\.subtitle/);

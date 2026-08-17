@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -379,6 +380,10 @@ def run_plan_preflight(
         bucket = pf.setdefault("warnings", [])
         if note not in bucket:
             bucket.append(note)
+    # Every preflight verdict must be citable: the persisted run id is the handle
+    # Execute is unlocked against, so it travels back with the result instead of
+    # leaving the caller to infer a run that has no identity.
+    pf["run_id"] = str(pf.get("run_id") or f"pf_{uuid.uuid4().hex[:12]}")
     add_preflight_run(plan_id, pf)
     drift = pf.get("schema_drift") or {}
     append_audit_event(
@@ -388,6 +393,7 @@ def run_plan_preflight(
         details={
             "passed": pf.get("passed"),
             "readiness_score": pf.get("readiness_score"),
+            "run_id": pf["run_id"],
             "mapping_version": rev.version,
             "mapping_hash": rev.mapping_hash,
             "drift_detected": drift.get("drift_detected"),

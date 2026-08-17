@@ -147,16 +147,22 @@ export function ValidateActionsRail({
             </Button>
           ) : (
             <>
-              {(blocked || (!preflight && !preflighting)) && (
-                <Button
-                  variant={!preflight ? "primary" : "ghost"}
-                  onClick={onRunPreflight}
-                  loading={preflighting}
-                  leadingIcon={<DtIcon name="gate" size={16} />}
-                >
-                  {!preflight ? "Run preflight" : "Re-run"}
-                </Button>
-              )}
+              {/* Available in every state: a green verdict ages the moment the
+                  source, destination or mappings move, so re-running the same
+                  governed gates must not require a trip back through Map. */}
+              <Button
+                variant={!preflight ? "primary" : "ghost"}
+                onClick={onRunPreflight}
+                loading={preflighting}
+                leadingIcon={<DtIcon name="gate" size={16} />}
+                title={
+                  preflight
+                    ? "Discard this verdict and re-run the same API gates — acknowledgments and Risk Contracts still apply"
+                    : "Run API preflight gates"
+                }
+              >
+                {!preflight ? "Run preflight" : "Re-run Validate"}
+              </Button>
 
               {blocked && onPrimaryFix && primaryFixLabel && (
                 <Button

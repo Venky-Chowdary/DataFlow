@@ -158,7 +158,7 @@ import {
 import { standingAcknowledgmentReason } from "../lib/acknowledgments";
 import { parseCsvTextForPreview } from "../lib/csvPreview";
 import { runLocalFileExport } from "../lib/localFileExport";
-import { runLocalPreflight } from "../lib/localPreflight";
+import { isApiPreflight, runLocalPreflight } from "../lib/localPreflight";
 import { readJobEventLog } from "../lib/jobEventLog";
 import { destHeadline } from "../lib/conservationLedger";
 import { schemaIntrospectionFailureMessage } from "../lib/preflightMessages";
@@ -3963,7 +3963,7 @@ export function TransferPage({
         }
       }
       setPreflight(pf);
-      commitAcknowledgments(String(pf.run_id || "").startsWith("pf_local_") ? null : pf);
+      commitAcknowledgments(isApiPreflight(pf) ? pf : null);
       // Echo Kernel stamps + signed Risk Contracts from Validate onto Map.
       // Contract key MUST use post-hydrate mappings or Execute stays locked /
       // invalidation clears a green preflight when destType stamps change.
@@ -3987,7 +3987,7 @@ export function TransferPage({
           tone: "warning",
         });
       } else {
-        const isLocal = String(pf.run_id || "").startsWith("pf_local_");
+        const isLocal = !isApiPreflight(pf);
         const decision = pf.proof_bundle?.transfer_decision?.decision;
         if (isLocal || decision === "review") {
           toast({
@@ -4208,7 +4208,8 @@ export function TransferPage({
       return;
     }
     const decision = preflight?.proof_bundle?.transfer_decision?.decision;
-    const localPf = String(preflight?.run_id || "").startsWith("pf_local_");
+    // No run id is not an API run: an unidentifiable verdict never unlocks Execute.
+    const localPf = !isApiPreflight(preflight);
     if (!preflight?.passed || decision !== "approve" || localPf) {
       toast({
         title: localPf || decision === "review" ? "API Validate required" : "Preflight required",
@@ -4791,7 +4792,7 @@ export function TransferPage({
     preflight?.passed
     && validatedContractKey === validateContractKey
     && preflight.proof_bundle?.transfer_decision?.decision === "approve"
-    && !String(preflight.run_id || "").startsWith("pf_local_"),
+    && isApiPreflight(preflight),
   );
   const canExecute = Boolean(canConfigureDest && isGovernedExecuteReady);
 

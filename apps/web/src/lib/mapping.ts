@@ -631,6 +631,22 @@ export function mappingHasClearingRiskContract(m: EditableMapping): boolean {
   );
 }
 
+/**
+ * Where a risk row stands.
+ * - `open`: nothing signed yet
+ * - `accepted`: acknowledged with no policy on record that stops the write
+ * - `fail_closed`: a contract policy stops the write by design —
+ *   never call this "accepted", or Map claims clearance it does not have
+ */
+export type MappingRiskChipState = "open" | "accepted" | "fail_closed";
+
+export function mappingRiskChipState(m: EditableMapping): MappingRiskChipState {
+  if (!m.riskAcknowledged) return "open";
+  const policy = String(m.riskContract?.execution_policy || "").toUpperCase() as ExecutionPolicy;
+  if (policy && !CONTINUE_EXECUTION_POLICIES.has(policy)) return "fail_closed";
+  return "accepted";
+}
+
 export function mappingAckDoneLabel(m: EditableMapping): string {
   if (m.riskAcknowledged && mappingRequiresRiskAck(m)) {
     const policy = m.riskContract?.execution_policy;
@@ -906,6 +922,21 @@ export function acknowledgeMappingRisk(
 ): EditableMapping {
   if (!mappingRequiresRiskAck(m)) {
     return approveMappingHonestly(m);
+  }
+  // A contract cannot green a dest-type request Map will not perform: mapping
+  // never ALTERs a physical column, so signing here would promise DDL work the
+  // write path does not do. Same refusal as approveMappingHonestly.
+  if (isExistingEnumBooleanConflict(m) || isExistingDestTypeOverride(m)) {
+    return {
+      ...m,
+      approved: false,
+      requiresReview: true,
+      riskAcknowledged: false,
+      reason: [
+        m.reason,
+        `Risk Contract cannot cover an ALTER — restore destination type ${m.destType || "as-is"}, remap to a compatible column, or ALTER the destination first`,
+      ].filter(Boolean).join(" · "),
+    };
   }
   const policy = opts?.executionPolicy;
   if (!policy || !EXECUTION_POLICY_OPTIONS.some((p) => p.id === policy)) {
@@ -1505,11 +1536,47 @@ export function flagExistingTypeConflict(m: EditableMapping, destKind = "destina
   };
 }
 
+/** Reason tags stamped when Map refuses to change an existing physical column. */
+const EXISTING_DEST_OVERRIDE_TAGS: RegExp[] = [
+  /(?: · )?Existing [^·]*?cannot be changed from Map[^·]*/gu,
+  /(?: · )?Desired type [^·]*?requires ALTER or remap[^·]*/gu,
+  /(?: · )?Risk Contract cannot cover an ALTER[^·]*/gu,
+];
+
+/**
+ * Withdraw an ALTER request on an existing column.
+ *
+ * The override is detected from the reason tag, so a tag that outlives the
+ * operator's edit strands the row: bare Approve refuses it and a Risk Contract
+ * cannot cover it. Restoring the live physical type drops the tag; fidelity
+ * risk (narrowing, lossy cast) is untouched and still needs a contract.
+ */
+export function clearExistingDestTypeOverride(m: EditableMapping): EditableMapping {
+  const reason = EXISTING_DEST_OVERRIDE_TAGS
+    .reduce((acc, tag) => acc.replace(tag, ""), m.reason || "")
+    .replace(/^(?: · )+/u, "")
+    .trim();
+  return {
+    ...m,
+    reason,
+    approved: false,
+    requiresReview: mappingRequiresRiskAck(m),
+  };
+}
+
 /**
  * When the operator picks a new dest type on an existing column, keep the live
  * type in destType for preflight honesty and force review.
  */
 export function applyDestTypeChange(m: EditableMapping, nextDestType: string): EditableMapping {
+  if (
+    m.existsInDestination
+    && nextDestType
+    && nextDestType === m.destType
+    && isExistingDestTypeOverride(m)
+  ) {
+    return clearExistingDestTypeOverride(m);
+  }
   if (m.existsInDestination && nextDestType && nextDestType !== m.destType) {
     return {
       ...flagExistingTypeConflict(m, m.destType || "destination"),
@@ -2021,6 +2088,8 @@ export interface MappingHealthSummary {
   intentionalOmit: number;
   specialtyIdentity: number;
   existingTypeConflict: number;
+  /** Contracts signed with a policy that stops the write — Validate stays shut. */
+  failClosedContract: number;
   falseFriendCount: number;
   falseFriendKinds: Partial<Record<MappingReviewKind, number>>;
   weak: boolean;
@@ -2049,6 +2118,9 @@ export function mappingHealthSummary(
   ).length;
   const existingTypeConflict = active.filter(
     (m) => isExistingEnumBooleanConflict(m) || isExistingDestTypeOverride(m),
+  ).length;
+  const failClosedContract = active.filter(
+    (m) => mappingRiskChipState(m) === "fail_closed",
   ).length;
   const falseFriendKinds: Partial<Record<MappingReviewKind, number>> = {};
   for (const m of active) {
@@ -2093,6 +2165,9 @@ export function mappingHealthSummary(
       .map((k) => `${falseFriendKinds[k]} ${mappingReviewKindMeta(k).noun}`);
     headline = `${parts.join(" · ")} need confirm`;
     detail = "Approve eligible will not clear these. Remap the destination column, or Confirm this pair on the row.";
+  } else if (failClosedContract > 0) {
+    headline = `${failClosedContract} contract(s) signed with a fail-closed policy`;
+    detail = "FAIL_JOB / STOP_TABLE / ABORT_TRANSACTION / RETRY stop the write by design — re-sign with a continue policy (quarantine, skip, stop-column, cast-fail-quarantine) or fix the type path.";
   } else if (needsReview > 0 || lowConfidence > 0) {
     // One row can be both requiresReview and low-confidence — count unique mappings.
     const reviewCount = active.filter(
@@ -2117,6 +2192,7 @@ export function mappingHealthSummary(
     intentionalOmit,
     specialtyIdentity,
     existingTypeConflict,
+    failClosedContract,
     falseFriendCount,
     falseFriendKinds,
     weak,

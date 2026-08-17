@@ -34,6 +34,7 @@ import {
 } from "../lib/transferConstants";
 import { jobStudioDataRules } from "../lib/studioDataRules";
 import { jobStudioDeliveryGuarantee } from "../lib/cdcExactlyOnce";
+import { blockerTitle } from "../lib/preflightGates";
 import { clampPercent } from "../lib/progressRing";
 import { nextListSelection, shouldApplyInitialJobFocus } from "../lib/jobSelection";
 import { LoadHistoryPanel } from "../components/transfer/LoadHistoryPanel";
@@ -1576,7 +1577,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
             <ul className="df2-jobs-preflight-blockers">
               {jobPreflight.blockers.slice(0, 8).map((b) => (
                 <li key={b.id}>
-                  <strong>{b.id}</strong> — {b.message}
+                  <strong title={b.id}>{blockerTitle(b.id, b.message)}</strong> — {b.message}
                   {b.guidance?.fix ? <span className="df2-muted"> Fix: {b.guidance.fix}</span> : null}
                 </li>
               ))}

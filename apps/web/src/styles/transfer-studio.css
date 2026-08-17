@@ -8787,6 +8787,21 @@ button.df2-vd-assist-toggle:focus-visible {
   font-size: 12px;
   color: #475569;
 }
+.df2-map-blocker-list {
+  margin: 6px 0 0 24px;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 4px;
+  font-size: 12px;
+  color: #475569;
+}
+.df2-map-blocker-list > li > strong {
+  display: inline;
+  margin: 0;
+  color: #0f172a;
+  font-weight: 600;
+}
 .df2-map-footer-status strong {
   color: #0f172a;
   font-weight: 600;
