@@ -697,8 +697,8 @@
 
 .df2-job-name-rename-btn {
   flex: 0 0 auto;
-  height: 26px !important;
-  min-height: 26px !important;
+  height: var(--df-btn-height-sm) !important;
+  min-height: var(--df-btn-height-sm) !important;
   padding: 0 8px !important;
   font-size: 11px !important;
   gap: 4px;
@@ -706,7 +706,7 @@
 }
 
 .df2-job-name-rename-btn.is-compact {
-  width: 28px;
+  width: var(--df-btn-height-sm);
   padding: 0 !important;
 }
 
@@ -3521,7 +3521,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
    paint over filter tabs.
    ═══════════════════════════════════════════════════════════ */
 .df2-toolbar {
-  --df-toolbar-h: 38px;
+  --df-toolbar-h: var(--df-btn-height);
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -3746,9 +3746,9 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   flex: 0 0 auto;
   flex-wrap: nowrap !important;
   gap: 2px !important;
-  height: calc(var(--df-toolbar-h, 38px) - 6px) !important;
-  min-height: calc(var(--df-toolbar-h, 38px) - 6px) !important;
-  max-height: calc(var(--df-toolbar-h, 38px) - 6px) !important;
+  height: min(var(--df-tab-height), var(--df-toolbar-h)) !important;
+  min-height: min(var(--df-tab-height), var(--df-toolbar-h)) !important;
+  max-height: min(var(--df-tab-height), var(--df-toolbar-h)) !important;
   margin: 0 !important;
   padding: 0 !important;
   border: 0 !important;
@@ -3790,8 +3790,8 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   align-items: center;
   justify-content: center;
   flex: 0 0 auto;
-  height: calc(var(--df-toolbar-h, 38px) - 6px) !important;
-  min-height: calc(var(--df-toolbar-h, 38px) - 6px) !important;
+  height: min(var(--df-tab-height), var(--df-toolbar-h)) !important;
+  min-height: min(var(--df-tab-height), var(--df-toolbar-h)) !important;
   margin: 0 !important;
   padding: 0 12px !important;
   border: 0 !important;

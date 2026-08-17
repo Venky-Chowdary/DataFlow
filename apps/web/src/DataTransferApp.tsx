@@ -56,7 +56,7 @@ function LazyScreen({ label, children }: { label: string; children: ReactNode })
   return (
     <Suspense
       fallback={
-        <div className="df2-page" role="status" aria-live="polite">
+        <div className="df2-page df2-route-loading" aria-busy="true">
           <LoadingBlock title={`Loading ${label}…`} />
         </div>
       }
@@ -421,13 +421,18 @@ function AppShell({
   }, [screen, bootLoading]);
 
   const showCopilotRail = screen !== "pilot" && copilotOpen;
+  const showCopilotEdge = screen !== "pilot" && !copilotOpen;
   const currentNav = NAV.find((n) => n.id === screen);
   const offlineCopy = apiOfflineMessage();
   const runningJobsCount = jobs.filter((j) => j.status === "running" || j.status === "pending").length;
   const failedJobsCount = jobs.filter((j) => j.status === "failed").length;
   const unhealthyConnectorsCount = connectors.filter((c) => c.last_test_ok === false).length;
   return (
-    <div className={`df2-app ${showCopilotRail ? "df2-app-with-rail" : ""} ${sidebarNavCompact ? "df2-sidebar-nav-compact" : ""}`}>
+    <div
+      className={`df2-app ${showCopilotRail ? "df2-app-with-rail" : ""} ${
+        showCopilotEdge ? "df2-app-with-edge" : ""
+      } ${sidebarNavCompact ? "df2-sidebar-nav-compact" : ""}`}
+    >
       {mobileNavOpen && (
         <div className="df2-overlay" onClick={() => setMobileNavOpen(false)} role="presentation" />
       )}
@@ -818,7 +823,7 @@ function AppShell({
       )}
 
       {/* Mid-right edge tab only — no bottom-corner FAB (duplicates the rail Pilot). */}
-      {screen !== "pilot" && !copilotOpen && (
+      {showCopilotEdge && (
         <button
           type="button"
           className="df2-copilot-edge-open"

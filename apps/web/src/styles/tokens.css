@@ -158,13 +158,29 @@
   --df-radius-panel: 8px;
   --df-radius-tile: 8px;
 
-  /* Buttons + form controls share one height so toolbars never look ragged */
+  /* Buttons + form controls share one height so toolbars never look ragged.
+     The workspace control ladder is exactly these six rungs — every clickable
+     surface picks one of them, and nothing hardcodes its own height:
+       action        --df-btn-height / -sm / -lg
+       field         --df-control-height / -sm
+       tab           --df-tab-height
+       icon-only     --df-icon-btn-size
+       chip / pill   --df-chip-height
+       inline action --df-inline-action-h (min hit target --df-min-target) */
   --df-btn-height: 36px;
   --df-btn-height-sm: 30px;
   --df-btn-height-lg: 40px;
   --df-control-height: 36px;
   --df-control-height-sm: 32px;
-  --df-toolbar-h: 36px;
+  --df-toolbar-h: var(--df-btn-height);
+  --df-tab-height: 34px;
+  --df-icon-btn-size: 28px;
+  --df-chip-height: 28px;
+  --df-inline-action-h: 24px;
+  --df-min-target: 24px;
+  /* Width the fixed Pilot edge tab occupies; page gutters reserve it so it can
+     never sit on top of a page action. Keep in step with .df2-copilot-edge-open. */
+  --df-copilot-edge-w: 32px;
 
   --df-table-row-height: 44px;
   --df-table-row-height-sm: 36px;
@@ -376,6 +392,9 @@ body:has(.df2-app) #root {
     --df-btn-height-lg: 36px;
     --df-control-height: 32px;
     --df-control-height-sm: 28px;
+    --df-tab-height: 32px;
+    --df-icon-btn-size: 26px;
+    --df-chip-height: 26px;
     --df-header-height: 52px;
     --df-sidebar-width: 220px;
     --df-page-gutter: 12px;

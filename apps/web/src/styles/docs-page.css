@@ -1766,23 +1766,40 @@
 
 .docs-shot-reel-dots {
   display: flex;
-  gap: 6px;
-  margin-top: 10px;
+  gap: 2px;
+  margin-top: 6px;
 }
 
+/* The dot stays 8px; the button around it is a real target. */
 .docs-shot-reel-dots button {
-  width: 8px;
-  height: 8px;
+  display: grid;
+  place-items: center;
+  width: var(--df-min-target, 24px);
+  height: var(--df-min-target, 24px);
   padding: 0;
   border: 0;
-  border-radius: 999px;
-  background: #cbd5e1;
+  background: none;
   cursor: pointer;
 }
 
-.docs-shot-reel-dots button.is-active {
+.docs-shot-reel-dots .docs-shot-reel-dot {
+  display: block;
+  width: 8px;
+  height: 8px;
+  border-radius: 999px;
+  background: #cbd5e1;
+  transition: width var(--df-dur-fast, 120ms) var(--df-ease, ease), background var(--df-dur-fast, 120ms) var(--df-ease, ease);
+}
+
+.docs-shot-reel-dots button.is-active .docs-shot-reel-dot {
   width: 22px;
   background: #0f766e;
+}
+
+.docs-shot-reel-dots button:focus-visible {
+  outline: 2px solid #0f766e;
+  outline-offset: 2px;
+  border-radius: 6px;
 }
 
 .docs-figure--live {
