@@ -78,8 +78,8 @@
 }
 
 .df2-settings-nav button .df2-settings-nav-label {
-  font-size: 14px;
-  font-weight: 600;
+  font-size: var(--df-fs-md);
+  font-weight: var(--df-fw-semibold);
   color: #334155;
 }
 
@@ -128,7 +128,7 @@
 .df2-settings-section-head h2 {
   margin: 0;
   font-size: 16px;
-  font-weight: 650;
+  font-weight: 600;
   color: #0f172a;
 }
 
@@ -146,7 +146,7 @@
 .df2-settings-subhead {
   margin: 0 0 12px;
   font-size: 14px;
-  font-weight: 650;
+  font-weight: 600;
   color: var(--df-text-primary, #0f172a);
 }
 
@@ -268,8 +268,8 @@
 }
 
 .df2-settings-field label {
-  font-size: 13px;
-  font-weight: 600;
+  font-size: var(--df-fs-label);
+  font-weight: var(--df-fw-semibold);
   color: #334155;
 }
 
@@ -392,7 +392,7 @@
 .df2-settings-smtp-label {
   margin: 0 0 12px;
   font-size: 12px;
-  font-weight: 650;
+  font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.04em;
   color: #64748b;

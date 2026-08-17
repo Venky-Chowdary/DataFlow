@@ -21,7 +21,7 @@
 .dw-wordmark-text {
   display: block;
   font-family: var(--df-font-display);
-  font-weight: 750;
+  font-weight: var(--df-fw-bold);
   letter-spacing: -0.035em;
   color: var(--df-text-primary);
   font-size: 1.2rem;
@@ -45,7 +45,7 @@
 
 .lp-footer-brand-link .dw-wordmark-text {
   font-size: 0.95rem;
-  font-weight: 750;
+  font-weight: var(--df-fw-bold);
   color: #f8fafc;
 }
 
@@ -55,5 +55,5 @@
 }
 
 .df2-sidebar-brand .dw-wordmark-text {
-  font-size: 1.08rem;
+  font-size: 17px;
 }

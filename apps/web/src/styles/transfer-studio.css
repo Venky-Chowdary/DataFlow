@@ -418,7 +418,7 @@
 .df2-dest-procedure-hooks summary {
   cursor: pointer;
   font-size: 13px;
-  font-weight: 650;
+  font-weight: 600;
   color: var(--df-text-primary, #0f172a);
 }
 
@@ -444,7 +444,7 @@
   gap: 8px;
   color: #0f172a;
   font-size: 13px;
-  font-weight: 650;
+  font-weight: 600;
 }
 
 .df2-source-multistream-head svg {
@@ -521,7 +521,7 @@
   padding: 0.4rem 0.75rem;
   border-radius: 6px 6px 0 0;
   font: inherit;
-  font-size: 0.85rem;
+  font-size: 14px;
   cursor: pointer;
   color: var(--df2-muted, #64748b);
 }
@@ -549,7 +549,7 @@
   border-radius: 8px;
   border: 1px solid #f59e0b55;
   background: #fef3c740;
-  font-size: 0.875rem;
+  font-size: 14px;
 }
 
 .df2-map-stream-diverge strong {
@@ -571,7 +571,7 @@
   border-radius: 8px;
   border: 1px solid #f59e0b55;
   background: #fef3c740;
-  font-size: 0.875rem;
+  font-size: 14px;
 }
 
 .df2-vd-shape-copy {
@@ -602,7 +602,7 @@
   border-radius: 8px;
   border: 1px solid #94a3b855;
   background: #f8fafc;
-  font-size: 0.875rem;
+  font-size: 14px;
 }
 
 .df2-vd-callable strong {
@@ -624,7 +624,7 @@
   border-radius: 8px;
   border: 1px solid #f59e0b55;
   background: #fef3c740;
-  font-size: 0.875rem;
+  font-size: 14px;
   color: #92400e;
 }
 
@@ -962,7 +962,6 @@
 }
 
 .df2-page-transfer-studio .df2-page-title {
-  font-size: clamp(1.2rem, 1.6vw, 1.45rem);
   letter-spacing: -0.02em;
 }
 
@@ -1106,8 +1105,8 @@
 }
 
 .df2-wizard-studio .df2-wizard-label {
-  font-size: clamp(11px, 1vw, 12.5px);
-  font-weight: 650;
+  font-size: var(--df-fs-chip);
+  font-weight: 600;
   letter-spacing: -0.01em;
 }
 
@@ -1333,8 +1332,6 @@
 
 .df2-transfer-step-panel .df2-card-title {
   margin: 0;
-  font-size: clamp(15px, 1.4vw, 17px);
-  font-weight: 700;
   color: #0f172a;
 }
 
@@ -2047,7 +2044,7 @@ button.df2-map-band-chip:hover {
 
   .df2-wizard-studio .df2-wizard-label,
   .df2-wizard-compact .df2-wizard-label {
-    font-size: 0.68rem;
+    font-size: 11px;
   }
 
   .df2-wizard-studio .df2-wizard-step,
@@ -2068,7 +2065,7 @@ button.df2-map-band-chip:hover {
 .df2-type-badge {
   display: inline-block;
   font-size: 10px;
-  font-weight: 650;
+  font-weight: 600;
   letter-spacing: 0.02em;
   text-transform: uppercase;
   padding: 1px 6px;
@@ -2381,7 +2378,7 @@ th.df2-type-string .df2-type-badge {
   letter-spacing: 0.02em;
   text-transform: uppercase;
   color: #64748b;
-  font-weight: 650;
+  font-weight: 600;
 }
 
 .df2-page-transfer-studio .df2-dest-sync-summary,
@@ -2812,7 +2809,6 @@ th.df2-type-string .df2-type-badge {
   height: 32px !important;
   padding: 0 12px !important;
   border-radius: 8px !important;
-  font-size: 12.5px !important;
   font-weight: 600;
   box-sizing: border-box;
   flex-shrink: 0;
@@ -3031,7 +3027,7 @@ th.df2-type-string .df2-type-badge {
   align-items: center;
   gap: 6px 10px;
   font-size: 12px;
-  font-weight: 650;
+  font-weight: 600;
   color: #475569;
 }
 .df2-map-step-head-compact .is-warn { color: #b45309; }
@@ -3105,7 +3101,7 @@ th.df2-type-string .df2-type-badge {
 .df2-dest-advanced-drawer .df2-policy-option strong {
   display: block;
   font-size: 13px;
-  font-weight: 650;
+  font-weight: 600;
   line-height: 1.3;
   color: var(--df-text, #0f172a);
 }
@@ -3592,7 +3588,7 @@ th.df2-type-string .df2-type-badge {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-weight: 550;
+  font-weight: 600;
 }
 
 .df2-object-combobox-option-meta {
@@ -4368,7 +4364,7 @@ th.df2-type-string .df2-type-badge {
 .df2-transfer-analyzing-panel .df2-analyzing-title {
   margin: 0;
   font-size: 16px;
-  font-weight: 650;
+  font-weight: 600;
 }
 
 .df2-transfer-analyzing-panel .df2-mapping-progress {
@@ -4412,7 +4408,7 @@ th.df2-type-string .df2-type-badge {
 
 .df2-upload-title {
   color: #0f172a;
-  font-weight: 650;
+  font-weight: 600;
 }
 
 .df2-upload-sample-row {
@@ -4581,7 +4577,7 @@ th.df2-type-string .df2-type-badge {
 .df2-dest-engine-hint {
   margin: 8px 0 4px;
   font-size: 11px;
-  font-weight: 650;
+  font-weight: 600;
   color: #64748b;
   letter-spacing: 0.02em;
   text-transform: uppercase;
@@ -5472,7 +5468,7 @@ th.df2-type-string .df2-type-badge {
 
 .df2-run-launch h3 {
   margin: 0;
-  font-size: clamp(22px, 2.1vw, 28px);
+  font-size: var(--df-fs-page-title);
   line-height: 1.15;
   color: #0f172a;
 }
@@ -7181,7 +7177,7 @@ th.df2-type-string .df2-type-badge {
 }
 .df2-vd-hero-ring-label strong {
   font-size: clamp(11px, 2.4vw, 15px);
-  font-weight: 800;
+  font-weight: var(--df-fw-bold);
   color: #0f172a;
   line-height: 1;
   white-space: nowrap;
@@ -7219,7 +7215,7 @@ th.df2-type-string .df2-type-badge {
   padding: 4px 10px;
   border-radius: 999px;
   font-size: 11px;
-  font-weight: 800;
+  font-weight: var(--df-fw-bold);
   letter-spacing: 0.05em;
 }
 .df2-vd-decision .dt-nav-icon { display: inline-flex; }
@@ -7275,7 +7271,7 @@ th.df2-type-string .df2-type-badge {
 }
 .df2-vd-proof-chip {
   font-size: 11px;
-  font-weight: 650;
+  font-weight: 600;
   padding: 3px 8px;
   border-radius: 999px;
   border: 1px solid var(--df-border);
@@ -7416,7 +7412,7 @@ th.df2-type-string .df2-type-badge {
 .df2-vd-rule-dur {
   margin: 4px 0 0;
   font-size: 11px;
-  font-weight: 650;
+  font-weight: 600;
   color: #0f766e;
 }
 
@@ -7654,7 +7650,7 @@ th.df2-type-string .df2-type-badge {
 
 .df2-vd-map-proof-kpis strong {
   font-size: 15px;
-  font-weight: 750;
+  font-weight: 700;
   color: #0f766e;
   font-variant-numeric: tabular-nums;
   overflow: hidden;
@@ -7919,7 +7915,6 @@ th.df2-type-string .df2-type-badge {
   height: 32px !important;
   min-height: 32px !important;
   padding: 0 12px !important;
-  font-size: 12.5px !important;
   white-space: nowrap;
   box-sizing: border-box;
 }
@@ -8523,7 +8518,6 @@ button.df2-vd-assist-toggle:focus-visible {
   height: 32px !important;
   min-height: 32px !important;
   padding: 0 12px !important;
-  font-size: 12.5px !important;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -8869,7 +8863,6 @@ button.df2-vd-assist-toggle:focus-visible {
   height: 36px !important;
   min-height: 36px !important;
   padding: 0 14px !important;
-  font-size: 12.5px !important;
   white-space: nowrap;
 }
 .df2-vd-remediate-bar .df2-vd-cell-preview-hint {
@@ -9312,18 +9305,18 @@ button.df2-vd-assist-toggle:focus-visible {
   margin-bottom: 8px;
 }
 .df2-load-history-head strong {
-  font-size: 0.95rem;
+  font-size: 15px;
 }
 .df2-load-history-badge {
   margin-left: auto;
-  font-size: 0.75rem;
+  font-size: 12px;
   opacity: 0.75;
 }
 .df2-load-history-list,
 .df2-load-history-novel ul {
   margin: 8px 0 0;
   padding-left: 1.1rem;
-  font-size: 0.875rem;
+  font-size: 14px;
   line-height: 1.45;
 }
 .df2-load-history-novel {
@@ -9331,7 +9324,7 @@ button.df2-vd-assist-toggle:focus-visible {
 }
 .df2-load-history-novel strong {
   display: block;
-  font-size: 0.8rem;
+  font-size: 13px;
   margin-bottom: 4px;
 }
 .df2-load-history-ok,
@@ -9339,7 +9332,7 @@ button.df2-vd-assist-toggle:focus-visible {
 .df2-load-history-warn,
 .df2-load-history-volume {
   margin: 4px 0 0;
-  font-size: 0.875rem;
+  font-size: 14px;
   line-height: 1.45;
   opacity: 0.9;
 }
@@ -9348,7 +9341,7 @@ button.df2-vd-assist-toggle:focus-visible {
 }
 .df2-load-history-runs {
   margin-top: 10px;
-  font-size: 0.8rem;
+  font-size: 13px;
 }
 .df2-load-history-runs ol {
   margin: 6px 0 0;
@@ -9442,7 +9435,7 @@ button.df2-vd-assist-toggle:focus-visible {
   padding: 4px 10px;
   border-radius: 999px;
   font-size: 11px;
-  font-weight: 650;
+  font-weight: 600;
   letter-spacing: 0.01em;
   border: 1px solid #e2e8f0;
   background: #f8fafc;
@@ -9585,7 +9578,7 @@ button.df2-vd-assist-toggle:focus-visible {
 .df2-notify-strip-item.is-ok { background: #f0fdf4; }
 .df2-notify-strip-item.is-fail { background: #fef2f2; }
 .df2-notify-kind {
-  font-weight: 650;
+  font-weight: 600;
   text-transform: capitalize;
   color: #0f172a;
 }
@@ -9663,7 +9656,6 @@ button.df2-vd-assist-toggle:focus-visible {
   height: 30px !important;
   padding-top: 2px !important;
   padding-bottom: 2px !important;
-  font-size: 12px !important;
 }
 
 /* Compact Map callouts so the mapping table keeps viewport height */
@@ -9717,7 +9709,7 @@ button.df2-vd-assist-toggle:focus-visible {
   cursor: pointer;
   list-style: none;
   font-size: 12px;
-  font-weight: 650;
+  font-weight: 600;
   color: #475569;
   padding: 2px 0;
 }

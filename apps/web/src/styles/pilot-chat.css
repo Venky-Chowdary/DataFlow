@@ -142,7 +142,8 @@
   background: transparent;
   resize: none;
   outline: none;
-  font-size: 15px;
+  /* The chat composer deliberately reads one rung above a form field */
+  font-size: var(--df-fs-lg);
   line-height: 1.5;
   color: #0f172a;
   min-height: 44px;
