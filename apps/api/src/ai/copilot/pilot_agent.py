@@ -20,6 +20,7 @@ from ..knowledge.copilot_knowledge import DATA_PILOT_PERSONA, SUGGESTED_PROMPTS
 from .agent import CopilotResponse
 from .context_builder import get_context_builder
 from .data_analyst import get_data_analyst
+from .tool_permissions import bind_current_context, is_permission_denial
 from .tools import (
     TOOL_DEFINITIONS,
     ToolResult,
@@ -498,8 +499,9 @@ def _unmapped_intent_reply(message: str, ctx: dict[str, Any]) -> str:
         )
     if any(w in lower for w in ("schedule", "pipeline", "cron", "every hour", "daily", "nightly")):
         suggestions.append(
-            'I can list and trigger existing pipelines: "show my pipelines" or '
-            '"run schedule <name> now". Creating a new schedule still needs the UI.'
+            'I can create, list and trigger pipelines: "schedule users from '
+            'Local PG to Warehouse daily at 02:00 UTC", "show my pipelines", or '
+            '"run schedule <name> now".'
         )
     if any(w in lower for w in ("fix", "repair", "heal", "remediate", "quarantine")):
         suggestions.append(
@@ -765,13 +767,15 @@ class DataPilotAgent:
         if self._ollama_available_quick():
             llm_futs.append(
                 _executor.submit(
-                    self._ollama_agent, message, history or [], system, data_context
+                    bind_current_context(self._ollama_agent),
+                    message, history or [], system, data_context,
                 )
             )
         elif self.anthropic.is_available():
             llm_futs.append(
                 _executor.submit(
-                    self._anthropic_agent_loop, message, history or [], system, data_context
+                    bind_current_context(self._anthropic_agent_loop),
+                    message, history or [], system, data_context,
                 )
             )
         else:
@@ -785,7 +789,8 @@ class DataPilotAgent:
             if openai_ready:
                 llm_futs.append(
                     _executor.submit(
-                        self._openai_agent, message, history or [], system, data_context
+                        bind_current_context(self._openai_agent),
+                        message, history or [], system, data_context,
                     )
                 )
 
@@ -1017,7 +1022,8 @@ class DataPilotAgent:
         if not tr.success or not isinstance(tr.output, dict):
             err = (tr.error or "").strip()
             if err and (
-                err.startswith("Which ")
+                is_permission_denial(err)
+                or err.startswith("Which ")
                 or "did you mean" in err.lower()
                 or "no connector matched" in err.lower()
                 or "which connector" in err.lower()

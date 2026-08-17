@@ -62,6 +62,10 @@ _ROLE_PERMISSIONS: dict[str, set[str]] = {
         Permission.AUDIT_READ,
         Permission.WORKSPACE_READ,
         Permission.QUERY_USE,
+        # Asking the assistant is a read: Pilot gates each tool it reaches by the
+        # same permission as the REST route that performs it, so ai.use lets a
+        # viewer ask "why did this job fail" without letting it run anything.
+        Permission.AI_USE,
     },
     "editor": {
         Permission.JOB_READ,
@@ -86,6 +90,7 @@ _ROLE_PERMISSIONS: dict[str, set[str]] = {
         Permission.AUDIT_READ,
         Permission.WORKSPACE_READ,
         Permission.QUERY_USE,
+        Permission.AI_USE,
     },
     "admin": _ALL_PERMISSIONS,
 }
@@ -133,6 +138,13 @@ _PATH_RULES: list[tuple[str, str, str]] = [
     ("*", "/api/v1/schedules/", Permission.SCHEDULE_MANAGE),
     ("GET", "/api/v1/audit/", Permission.AUDIT_READ),
     ("*", "/api/v1/ai/", Permission.AI_USE),
+    # Pilot. Talking to the assistant is ai.use for every role; what the turn is
+    # allowed to *do* is decided per tool (src/ai/copilot/tool_permissions.py),
+    # so a viewer can ask questions but cannot reach a mutating tool. Confirm
+    # re-checks the permission of the specific staged mutation. Training rewrites
+    # workspace-wide knowledge, so it stays with workspace administration.
+    ("POST", "/api/v1/copilot/train", Permission.WORKSPACE_MANAGE),
+    ("*", "/api/v1/copilot/", Permission.AI_USE),
     # MCP tool execution is an AI surface — same permission as Pilot tools.
     ("POST", "/api/v1/mcp/tools/call", Permission.AI_USE),
     ("GET", "/api/v1/mcp/logs", Permission.AI_USE),

@@ -33,6 +33,50 @@ def test_ambiguous_connector_raises_instead_of_first_match():
         assert len(exc.candidates) >= 2
 
 
+def test_dialect_with_no_saved_instance_says_so_precisely():
+    """"Postgres" is a type. With no Postgres saved there is nothing to point at."""
+    pool = [{"name": "Prod Mongo", "type": "mongodb", "id": "a"}]
+    try:
+        _pick_connector("postgres", pool)
+        assert False, "expected AmbiguousConnectorError"
+    except AmbiguousConnectorError as exc:
+        assert "database type" in exc.message
+        assert "no postgresql connector is saved" in exc.message
+        # The agent's recovery step keys on this phrase to offer the saved list.
+        assert "no connector matched" in exc.message.lower()
+        # Never imply a connector exists that does not.
+        assert "Prod Mongo" in exc.message
+
+
+def test_unknown_connector_name_is_not_guessed():
+    pool = [{"name": "Prod Mongo", "type": "mongodb", "id": "a"}]
+    try:
+        _pick_connector("Analytics Lakehouse", pool)
+        assert False, "expected AmbiguousConnectorError"
+    except AmbiguousConnectorError as exc:
+        assert "will not guess" in exc.message
+
+
+def test_family_word_is_not_reported_as_a_dialect():
+    """"sql" names a family, so the message must not invent a "sql" engine type."""
+    pool = [{"name": "Prod Mongo", "type": "mongodb", "id": "a"}]
+    try:
+        _pick_connector("sql", pool)
+        assert False, "expected AmbiguousConnectorError"
+    except AmbiguousConnectorError as exc:
+        assert "family of databases" in exc.message
+        assert "sql connector is saved" not in exc.message
+
+
+def test_sql_server_aliases_resolve_to_the_saved_instance():
+    pool = [
+        {"name": "Prod MSSQL", "type": "sqlserver", "id": "a"},
+        {"name": "Local Postgres", "type": "postgresql", "id": "b"},
+    ]
+    for needle in ("sql server", "sqlserver", "mssql"):
+        assert _pick_connector(needle, pool)["id"] == "a", needle
+
+
 def test_clear_connector_winner_no_ambiguity():
     pool = [
         {"name": "Local Postgres", "type": "postgresql", "id": "a"},

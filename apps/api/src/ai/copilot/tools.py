@@ -11,6 +11,8 @@ from typing import Any, Callable
 from services.value_serializer import json_default
 
 from .data_analyst import get_data_analyst
+from .tool_permissions import current_caller_role, denial_message, is_tool_allowed
+from .transfer_rules import parse_transfer_data_rules
 
 
 @dataclass
@@ -448,6 +450,44 @@ TOOL_DEFINITIONS: list[dict] = [
         },
     },
     {
+        "name": "create_schedule",
+        "description": (
+            "Stage a recurring pipeline (schedule) between two saved connectors for the "
+            "operator to Confirm. Grounds the route against live schemas, requires "
+            "preflight to clear, and stores the approved mapping on the schedule. "
+            "Cadence is the operator's own wording — “nightly at 2am in Asia/Kolkata”, "
+            "“every 15 minutes”, “weekly on Monday”, or a 5-field cron. This creates "
+            "nothing on its own: the schedule exists only after Confirm."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "source_connector_name": {"type": "string"},
+                "source_table": {"type": "string"},
+                "dest_connector_name": {"type": "string"},
+                "dest_table": {"type": "string"},
+                "cadence": {
+                    "type": "string",
+                    "description": "Cadence wording, with time/timezone when stated",
+                },
+                "sync_mode": {"type": "string"},
+                "cursor_column": {
+                    "type": "string",
+                    "description": "Watermark column — required for incremental modes",
+                },
+                "name": {"type": "string", "description": "Schedule display name"},
+                "validation_mode": {"type": "string", "enum": ["strict", "balanced", "lenient"]},
+                "schema_policy": {
+                    "type": "string",
+                    "enum": ["manual_review", "type_locked", "pause_on_change"],
+                },
+                "contract_id": {"type": "string"},
+                "require_signed_contract": {"type": "boolean"},
+            },
+            "required": ["cadence"],
+        },
+    },
+    {
         "name": "list_contracts",
         "description": "List data contracts available in the workspace.",
         "input_schema": {
@@ -732,6 +772,7 @@ TOOL_FAMILIES: list[dict] = [
             "list_schedules",
             "get_schedule",
             "run_schedule_now",
+            "create_schedule",
             "list_contracts",
             "open_job",
             "open_schedule",
@@ -807,6 +848,7 @@ class DataPilotTools:
             "list_schedules": self._list_schedules,
             "get_schedule": self._get_schedule,
             "run_schedule_now": self._run_schedule_now,
+            "create_schedule": self._create_schedule,
             "list_contracts": self._list_contracts,
             "open_job": self._open_job,
             "open_schedule": self._open_schedule,
@@ -824,6 +866,18 @@ class DataPilotTools:
         handler = handlers.get(name)
         if not handler:
             return ToolResult(name=name, success=False, output=None, error=f"Unknown tool: {name}")
+        # One chokepoint for permissions: every path into a tool — the
+        # deterministic planner, an LLM tool loop, a recovery follow-up — comes
+        # through here, so none of them can reach a tool the caller's role does
+        # not hold.
+        role = current_caller_role()
+        if not is_tool_allowed(role, name):
+            return ToolResult(
+                name=name,
+                success=False,
+                output=None,
+                error=denial_message(role, name),
+            )
         try:
             return handler(**args)
         except TypeError as e:
@@ -2134,6 +2188,14 @@ class DataPilotTools:
         procedure_params: Any = None,
         contract_id: str = "",
         require_signed_contract: Any = None,
+        source_filter: dict | None = None,
+        upsert_key: str = "",
+        dedupe_key: str = "",
+        rule_questions: list | None = None,
+        applied_rules: list | None = None,
+        cadence: str = "",
+        all_tables: bool = False,
+        limit: int = 0,
     ) -> ToolResult:
         from .transfer_tools import plan_transfer
 
@@ -2154,6 +2216,13 @@ class DataPilotTools:
             procedure_params=procedure_params,
             contract_id=contract_id,
             require_signed_contract=require_signed_contract,
+            source_filter=source_filter,
+            upsert_key=upsert_key,
+            dedupe_key=dedupe_key,
+            rule_questions=rule_questions,
+            applied_rules=applied_rules,
+            cadence=cadence,
+            all_tables=all_tables,
         )
 
     def _start_transfer(
@@ -2175,6 +2244,13 @@ class DataPilotTools:
         procedure_params: Any = None,
         contract_id: str = "",
         require_signed_contract: Any = None,
+        source_filter: dict | None = None,
+        upsert_key: str = "",
+        dedupe_key: str = "",
+        rule_questions: list | None = None,
+        applied_rules: list | None = None,
+        cadence: str = "",
+        all_tables: bool = False,
     ) -> ToolResult:
         from .transfer_tools import start_transfer
 
@@ -2196,6 +2272,71 @@ class DataPilotTools:
             procedure_params=procedure_params,
             contract_id=contract_id,
             require_signed_contract=require_signed_contract,
+            source_filter=source_filter,
+            upsert_key=upsert_key,
+            dedupe_key=dedupe_key,
+            rule_questions=rule_questions,
+            applied_rules=applied_rules,
+            cadence=cadence,
+            all_tables=all_tables,
+        )
+
+    def _create_schedule(
+        self,
+        source_connector_id: str = "",
+        source_connector_name: str = "",
+        source_table: str = "",
+        dest_connector_id: str = "",
+        dest_connector_name: str = "",
+        dest_table: str = "",
+        sync_mode: str = "",
+        schema_policy: str = "manual_review",
+        validation_mode: str = "balanced",
+        cadence: str = "",
+        name: str = "",
+        cursor_column: str = "",
+        source_timezone: str = "",
+        source_read_mode: str = "",
+        procedure_call: str = "",
+        source_query: str = "",
+        procedure_params: Any = None,
+        contract_id: str = "",
+        require_signed_contract: Any = None,
+        source_filter: dict | None = None,
+        upsert_key: str = "",
+        dedupe_key: str = "",
+        rule_questions: list | None = None,
+        applied_rules: list | None = None,
+        limit: int = 0,
+    ) -> ToolResult:
+        from .schedule_tools import create_schedule
+
+        return create_schedule(
+            source_connector_id=source_connector_id,
+            source_connector_name=source_connector_name,
+            source_table=source_table,
+            dest_connector_id=dest_connector_id,
+            dest_connector_name=dest_connector_name,
+            dest_table=dest_table,
+            sync_mode=sync_mode,
+            schema_policy=schema_policy,
+            validation_mode=validation_mode,
+            cadence=cadence,
+            name=name,
+            cursor_column=cursor_column,
+            source_timezone=source_timezone,
+            source_read_mode=source_read_mode,
+            procedure_call=procedure_call,
+            source_query=source_query,
+            procedure_params=procedure_params,
+            contract_id=contract_id,
+            require_signed_contract=require_signed_contract,
+            source_filter=source_filter,
+            upsert_key=upsert_key,
+            dedupe_key=dedupe_key,
+            rule_questions=rule_questions,
+            applied_rules=applied_rules,
+            limit=limit,
         )
 
     def _analyze_result(
@@ -2747,6 +2888,8 @@ _TOOL_PRIORITY: dict[str, int] = {
     "list_connector_objects": 84,
     "create_connector": 82,
     "remediate_validation": 80,
+    # A cadence names a standing instruction, so it outranks a one-off run.
+    "create_schedule": 109,
     "run_schedule_now": 78,
     "get_job": 75,
     "get_preflight_run": 74,
@@ -2835,7 +2978,7 @@ def prune_planned_tools(planned: list[tuple[str, dict]]) -> list[tuple[str, dict
         names = {n for n, _ in planned}
     # A concrete transfer already contains the mapping, gates and route, so the
     # generic advice tools beside it are redundant noise.
-    if names & {"start_transfer", "plan_transfer"}:
+    if names & {"start_transfer", "plan_transfer", "create_schedule"}:
         planned = [
             (n, a) for n, a in planned
             if n not in (
@@ -2850,7 +2993,7 @@ def prune_planned_tools(planned: list[tuple[str, dict]]) -> list[tuple[str, dict
     if "get_job" in names or "get_preflight_run" in names or "open_job" in names:
         planned = [(n, a) for n, a in planned if n != "list_jobs"]
     # Job / remediate: keep inventory lists for triage ("why did validate fail").
-    if "run_schedule_now" in names or "create_connector" in names:
+    if names & {"run_schedule_now", "create_connector", "create_schedule"}:
         planned = [
             (n, a) for n, a in planned
             if n not in (
@@ -3118,9 +3261,105 @@ def parse_transfer_schema_posture(lowered: str) -> dict[str, Any]:
     return {}
 
 
+# An object named explicitly: "table users" / "the users table" / "collection events".
+_TABLE_PREFIX_RE = re.compile(
+    r"\b(?:from\s+|of\s+|in\s+|for\s+)?(?:the\s+)?(?:table|collection|dataset)\s+"
+    r"[`\"']?(?P<named>[A-Za-z_][\w.$]*)[`\"']?",
+    re.IGNORECASE,
+)
+_TABLE_SUFFIX_RE = re.compile(
+    r"\b(?:the\s+)?[`\"']?(?P<named>[A-Za-z_][\w.$]*)[`\"']?\s+(?:table|collection)\b",
+    re.IGNORECASE,
+)
+_ALL_TABLES_RE = re.compile(
+    r"\b(?:all|every|each)\s+(?:the\s+)?(?:tables?|collections?)\b"
+    r"|\b(?:whole|entire|full)\s+(?:database|schema|db)\b",
+    re.IGNORECASE,
+)
+_ROUTE_FROM_TO_RE = re.compile(
+    r"\b(?:from|out\s+of)\s+(?P<src>.+?)\s+(?:to|into|onto|over\s+to|->)\s+(?P<dst>.+?)"
+    r"(?=[,;?]|$)",
+    re.IGNORECASE,
+)
+_ROUTE_TO_FROM_RE = re.compile(
+    r"\b(?:to|into|onto)\s+(?P<dst>.+?)\s+(?:from|out\s+of)\s+(?P<src>.+?)(?=[,;?]|$)",
+    re.IGNORECASE,
+)
+_ROUTE_ARROW_RE = re.compile(
+    r"(?P<src>[A-Za-z0-9_][\w .\-]{0,48}?)\s*->\s*(?P<dst>[A-Za-z0-9_][\w .\-]{0,48})",
+    re.IGNORECASE,
+)
+_TRANSFER_VERB_RE = re.compile(rf"\b(?:{_TRANSFER_VERBS}|moving)\b", re.IGNORECASE)
+_BARE_OBJECT_WORDS = frozenset({
+    "data", "rows", "records", "everything", "all", "it", "them", "tables",
+    "table", "stuff", "things",
+})
+
+
+def _extract_named_table(text: str) -> tuple[str, str]:
+    """Pull an explicitly named object out of the route text.
+
+    "transfer data from sql to postgres from table users" states the table
+    after the destination — reading the tail as part of the destination's name
+    is why that phrasing used to resolve to nothing at all.
+    """
+    for pattern in (_TABLE_PREFIX_RE, _TABLE_SUFFIX_RE):
+        for match in pattern.finditer(text or ""):
+            name = match.group("named").strip()
+            # "transfer table users" — the verb is not the object being moved.
+            if name.lower() in _BARE_OBJECT_WORDS or _TRANSFER_VERB_RE.fullmatch(
+                name.lower()
+            ):
+                continue
+            stripped = f"{text[:match.start()]} {text[match.end():]}"
+            return name, re.sub(r"\s+", " ", stripped).strip().strip(",;").strip()
+    return "", (text or "").strip()
+
+
+def _extract_route_endpoints(text: str) -> tuple[str, str, str]:
+    """Return ``(source, destination, sync_mode)`` from route-only text."""
+    route = (
+        _ROUTE_FROM_TO_RE.search(text or "")
+        or _ROUTE_TO_FROM_RE.search(text or "")
+        or _ROUTE_ARROW_RE.search(text or "")
+    )
+    if not route:
+        return "", "", ""
+    src = _capture_connector_name(route.group("src"))
+    dst, mode = _strip_transfer_tail(route.group("dst").strip().strip("\"'"))
+    return src, _capture_connector_name(dst), mode
+
+
+def _asks_for_schema(lower: str) -> bool:
+    """True when the operator actually asked to see a schema, not just a transfer."""
+    return bool(
+        re.search(r"\b(?:schema|columns|column list|describe|ddl|data ?types)\b", lower)
+        and re.search(r"\b(?:show|list|what|describe|see|get|print|introspect)\b", lower)
+    )
+
+
+# Wording that turns a transfer request into a standing one. Only consulted when
+# a transfer route was already parsed, so "show my schedules" cannot reach it.
+_SCHEDULE_INTENT_RE = re.compile(
+    r"\b(?:schedule|scheduled|scheduling|automate|automated|recurring|"
+    r"repeat|repeatedly|on\s+a\s+schedule)\b",
+    re.IGNORECASE,
+)
+
+
 def parse_transfer_intent(message: str) -> dict | None:
-    """Extract source/destination/table from a transfer request, or None."""
-    cleaned, extras = parse_transfer_bind_and_rules(message)
+    """Extract source/destination/table/data rules from a transfer request.
+
+    Rule clauses are parsed and removed *before* the route is read, so
+    "…to Warehouse, only rows where status = active, upsert on id" resolves to
+    the connector **Warehouse** and a filter — not to a connector whose name is
+    the rest of the sentence. Rules the engine cannot apply come back as
+    questions on the intent; the caller must refuse rather than move data the
+    operator did not ask for.
+    """
+    cleaned, extras = parse_transfer_bind_and_rules(normalize_operator_typos(message))
+    cleaned, rules = parse_transfer_data_rules(cleaned)
+    extras.update(rules.as_intent_fields())
     text = cleaned.strip()
     if not text:
         return None
@@ -3129,7 +3368,45 @@ def parse_transfer_intent(message: str) -> dict | None:
         or _TRANSFER_TO_FROM_RE.search(text)
         or _TRANSFER_ARROW_RE.search(text)
     )
+    _matched_table = match.group("table").strip().lower() if match else ""
+    if match and (
+        _matched_table in _BARE_OBJECT_WORDS
+        or _TRANSFER_VERB_RE.fullmatch(_matched_table)
+    ):
+        # "transfer data from A to B from table users" — the object is named
+        # elsewhere in the sentence, so re-read the route without it.
+        match = None
     if not match:
+        named, route_text = _extract_named_table(text)
+        if named and _TRANSFER_VERB_RE.search(text):
+            src, dst, mode = _extract_route_endpoints(route_text)
+            if dst:
+                lowered = text.lower()
+                return {
+                    "source_table": named,
+                    "source_connector_name": src[:80],
+                    "dest_connector_name": dst[:80],
+                    "sync_mode": mode or normalize_sync_mode_for_message(lowered),
+                    # No source named, or a rule we could not apply: plan, never mutate.
+                    "plan_only": (
+                        not src
+                        or rules.blocking
+                        or any(w in lowered for w in _PLAN_ONLY_WORDS)
+                    ),
+                    **extras,
+                }
+        if _ALL_TABLES_RE.search(text) and _TRANSFER_VERB_RE.search(text):
+            src, dst, mode = _extract_route_endpoints(text)
+            if src or dst:
+                return {
+                    "source_table": "",
+                    "source_connector_name": src[:80],
+                    "dest_connector_name": dst[:80],
+                    "sync_mode": mode,
+                    "all_tables": True,
+                    "plan_only": True,
+                    **extras,
+                }
         # Table + destination only — still stage a plan so Confirm/clarify can ask source.
         soft = _TRANSFER_TO_ONLY_RE.search(text)
         if soft and not re.search(r"\bfrom\b|\bout\s+of\b", text, re.I):
@@ -3156,7 +3433,7 @@ def parse_transfer_intent(message: str) -> dict | None:
     if not table or not source or not dest:
         return None
     # Bare "data/rows/records" is not a real table — ask or plan the route instead.
-    if table.lower() in {"data", "rows", "records", "everything", "all", "it", "them"}:
+    if table.lower() in _BARE_OBJECT_WORDS:
         return None
     lowered = text.lower()
     if not mode:
@@ -3166,8 +3443,9 @@ def parse_transfer_intent(message: str) -> dict | None:
         "source_connector_name": source[:80],
         "dest_connector_name": dest[:80],
         "sync_mode": mode,
-        # Asking what a transfer *would* do must never stage a mutation.
-        "plan_only": any(w in lowered for w in _PLAN_ONLY_WORDS),
+        # Asking what a transfer *would* do must never stage a mutation, and
+        # neither may a request carrying a rule we could not apply.
+        "plan_only": rules.blocking or any(w in lowered for w in _PLAN_ONLY_WORDS),
         **extras,
     }
 
@@ -3181,16 +3459,34 @@ def normalize_sync_mode_for_message(lowered: str) -> str:
     return ""
 
 
+# High-frequency operator misspellings. A typo must not cost the operator the
+# whole intent: "tranfer" is still a transfer.
+_TYPO_FIXES: tuple[tuple[str, str], ...] = (
+    (r"\btra?ns?fe?r\b", "transfer"),
+    (r"\btrasfer\b", "transfer"),
+    (r"\bmigra?te?\b", "migrate"),
+    (r"\bschdule\b", "schedule"),
+    (r"\bmny\b", "many"),
+    (r"\btbls?\b", "tables"),
+    (r"\bcnt\b", "count"),
+    (r"\bconnectorz\b", "connectors"),
+    (r"\bdbs\b", "databases"),
+    (r"\bpostgress?ql\b", "postgresql"),
+    (r"\bposgres\b", "postgres"),
+)
+
+
+def normalize_operator_typos(message: str) -> str:
+    """Repair common misspellings before any intent parsing."""
+    text = message or ""
+    for pattern, replacement in _TYPO_FIXES:
+        text = re.sub(pattern, replacement, text, flags=re.I)
+    return text
+
+
 def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
     """Local tool routing when no LLM tool-use is available."""
-    # Light typo normalization for high-frequency operator misspellings.
-    message = re.sub(r"\btrasfer\b", "transfer", message or "", flags=re.I)
-    message = re.sub(r"\bschdule\b", "schedule", message or "", flags=re.I)
-    message = re.sub(r"\bmny\b", "many", message or "", flags=re.I)
-    message = re.sub(r"\btbls\b", "tables", message or "", flags=re.I)
-    message = re.sub(r"\bcnt\b", "count", message or "", flags=re.I)
-    message = re.sub(r"\bconnectorz\b", "connectors", message or "", flags=re.I)
-    message = re.sub(r"\bdbs\b", "databases", message or "", flags=re.I)
+    message = normalize_operator_typos(message)
     lower = message.lower()
     planned: list[tuple[str, dict]] = []
 
@@ -3733,7 +4029,19 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
     if transfer_intent:
         plan_only = transfer_intent.pop("plan_only", False)
         transfer_intent = {k: v for k, v in transfer_intent.items() if v}
-        planned.append(("plan_transfer" if plan_only else "start_transfer", transfer_intent))
+        # A cadence ("nightly at 2am") or an explicit "schedule this" is a
+        # standing instruction, not a single run — staging one run instead would
+        # move the data once and quietly never again.
+        recurring = bool(transfer_intent.get("cadence")) or (
+            bool(_SCHEDULE_INTENT_RE.search(lower))
+            and "run_schedule_now" not in {n for n, _ in planned}
+        )
+        if recurring and not plan_only:
+            planned.append(("create_schedule", {
+                k: v for k, v in transfer_intent.items() if k != "all_tables"
+            }))
+        else:
+            planned.append(("plan_transfer" if plan_only else "start_transfer", transfer_intent))
 
     if not transfer_intent and any(
         w in lower
@@ -4114,7 +4422,13 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
                 planned = [(n, a) for n, a in planned if n != "search_knowledge"]
 
     # Schedule tools always beat accidental sample parses ("details on schedule X").
-    if any(n in {"open_schedule", "get_schedule", "run_schedule_now", "list_schedules"} for n, _ in planned):
+    if any(
+        n in {
+            "open_schedule", "get_schedule", "run_schedule_now",
+            "list_schedules", "create_schedule",
+        }
+        for n, _ in planned
+    ):
         planned = [(n, a) for n, a in planned if n != "sample_connector_object"]
 
     # Explicit SQL — either "run this sql: …" or a genuinely pasted statement.
@@ -4508,7 +4822,7 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
             "list_connectors", "list_schedules", "aggregate_data",
             "list_connector_objects", "sample_connector_object", "plan_transfer",
             "start_transfer", "plan_transfer_route", "create_connector",
-            "run_schedule_now", "introspect_connector_schema",
+            "run_schedule_now", "create_schedule", "introspect_connector_schema",
         }
         names = {n for n, _ in planned}
         if planned and (names & keep):
@@ -4528,6 +4842,21 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
             planned = [(n, a) for n, a in planned if n != "explain_product"]
     elif not planned and _looks_like_domain_knowledge_query(lower):
         planned.append(("search_knowledge", {"query": message[:200]}))
+
+    # A stated transfer is the request; inventory/advice tools that merely share
+    # its vocabulary ("jobs", "upsert", "schema") must not answer in its place.
+    _staged = {n for n, _ in planned} & {
+        "start_transfer", "plan_transfer", "create_schedule"
+    }
+    if _staged:
+        planned = [
+            (n, a) for n, a in planned
+            if n not in {
+                "list_jobs", "recommend_sync_mode", "list_connectors",
+                "search_knowledge", "get_transfer_capabilities",
+            }
+            and not (n == "introspect_connector_schema" and not _asks_for_schema(lower))
+        ]
 
     # Deduplicate while preserving order
     seen: set[str] = set()

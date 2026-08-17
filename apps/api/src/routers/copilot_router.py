@@ -6,10 +6,26 @@ Customer-facing chat + separate training agent endpoints.
 
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from src.services import auth_service
+
 router = APIRouter(prefix="/copilot", tags=["AI Copilot"])
+
+
+def _caller(request: Request) -> tuple[str, str]:
+    """Return ``(role, actor)`` for the authenticated caller.
+
+    The role is empty when authentication is not enforced: an open
+    single-operator deployment has no identity to gate on, and Pilot has to keep
+    working there. The actor comes from the session rather than the request body
+    — an audit trail the client names itself is not an audit trail.
+    """
+    if not auth_service.auth_required():
+        return "", ""
+    user = getattr(request.state, "user", None) or {}
+    return str(user.get("role") or "viewer"), str(user.get("email") or "")
 
 
 class ChatMessage(BaseModel):
@@ -84,16 +100,24 @@ class TrainResponse(BaseModel):
 
 
 @router.post("/chat", response_model=CopilotChatResponse)
-async def copilot_chat(request: CopilotChatRequest):
+async def copilot_chat(request: CopilotChatRequest, http_request: Request):
     """
     Customer-facing AI Copilot chat.
     Uses trained knowledge from universal data + intent-aware responses.
+
+    The caller's role is bound around the turn, so every tool the agent reaches
+    — deterministic or LLM-chosen — is checked against the same permissions the
+    equivalent REST route enforces.
     """
     try:
         from ..ai.copilot import get_copilot_agent
+        from ..ai.copilot.tool_permissions import caller_role
+
         agent = get_copilot_agent()
         history = [{"role": m.role, "content": m.content} for m in request.history]
-        result = agent.chat(request.message, history, data_context=request.data_context)
+        role, _actor = _caller(http_request)
+        with caller_role(role):
+            result = agent.chat(request.message, history, data_context=request.data_context)
         return CopilotChatResponse(
             answer=result.answer,
             intent=result.intent,
@@ -139,6 +163,10 @@ async def _start_confirmed_transfer(payload: dict) -> dict:
         schema_policy=str(payload.get("schema_policy") or "manual_review"),
         validation_mode=str(payload.get("validation_mode") or "balanced"),
         limit=max(0, int(payload.get("limit") or 0)),
+        # The row rules the operator stated in chat and confirmed in the preview.
+        # Dropping them here would write rows they excluded, under a green proof.
+        source_filter=dict(payload.get("source_filter") or {}),
+        stream_contracts=list(payload.get("stream_contracts") or []),
         skip_preflight=False,
         triggered_by="data-pilot",
     )
@@ -166,14 +194,22 @@ async def _start_confirmed_transfer(payload: dict) -> dict:
 
 
 @router.post("/confirm")
-async def copilot_confirm(request: ConfirmActionRequest):
-    """Consume a Pilot mutation ack (create_connector / start_transfer / run_schedule).
+async def copilot_confirm(request: ConfirmActionRequest, http_request: Request):
+    """Consume a Pilot mutation ack (create_connector / start_transfer / run_schedule /
+    create_schedule).
 
     Secrets and schedule ids stay on the server ledger — the browser only sends ack_id.
+
+    Permission is re-checked here rather than trusted from staging time: staging
+    and confirming are separate requests, possibly minutes apart, and a role that
+    was revoked in between must not still be able to spend the approval. An ack
+    kind with no mapped permission is refused, so a future mutation cannot reach
+    a write by being unlisted.
     """
     from services.connector_store import create_connector
 
     from ..ai.copilot.ack_ledger import get_ack_ledger
+    from ..ai.copilot.tool_permissions import can_confirm_kind, confirm_denial_message
 
     ack_id = (request.ack_id or "").strip()
     if not ack_id:
@@ -187,9 +223,19 @@ async def copilot_confirm(request: ConfirmActionRequest):
             detail="Approval not found or expired. Ask Pilot to create the connector again.",
         )
 
+    role, session_actor = _caller(http_request)
+    if not can_confirm_kind(role, str(peek.get("kind") or "")):
+        raise HTTPException(
+            status_code=403,
+            detail=confirm_denial_message(role, str(peek.get("kind") or "")),
+        )
+    # The audit actor is the authenticated identity when there is one; the
+    # client-supplied name is only a fallback for open deployments.
+    actor = session_actor or request.actor or "pilot-ui"
+
     payload, err = ledger.claim(
         ack_id,
-        actor=request.actor or "pilot-ui",
+        actor=actor,
         reason=request.reason or "confirmed",
     )
     if err:
@@ -214,7 +260,7 @@ async def copilot_confirm(request: ConfirmActionRequest):
             raise HTTPException(status_code=400, detail=f"Failed to start transfer: {exc}") from exc
         ledger.finalize(
             ack_id,
-            actor=request.actor or "pilot-ui",
+            actor=actor,
             reason=request.reason or "confirmed",
             result=result,
         )
@@ -233,7 +279,7 @@ async def copilot_confirm(request: ConfirmActionRequest):
         }
         ledger.finalize(
             ack_id,
-            actor=request.actor or "pilot-ui",
+            actor=actor,
             reason=request.reason or "confirmed",
             result=result,
         )
@@ -279,7 +325,40 @@ async def copilot_confirm(request: ConfirmActionRequest):
         }
         ledger.finalize(
             ack_id,
-            actor=request.actor or "pilot-ui",
+            actor=actor,
+            reason=request.reason or "confirmed",
+            result=result,
+        )
+        return {"ok": True, "idempotent": False, "kind": kind, **result}
+
+    if kind == "create_schedule":
+        try:
+            from services.schedule_store import create_schedule as store_create_schedule
+
+            # The store owns cadence, sync-mode and signed-contract validation —
+            # chat supplies the payload, it does not get its own rule set.
+            sched = store_create_schedule(dict(payload))
+        except ValueError as exc:
+            ledger.release_claim(ack_id)
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            ledger.release_claim(ack_id)
+            raise HTTPException(
+                status_code=400, detail=f"Failed to create pipeline: {exc}"
+            ) from exc
+        result = {
+            "schedule_id": sched.id,
+            "name": sched.name,
+            "interval": sched.interval,
+            "cron": sched.cron,
+            "timezone": sched.timezone,
+            "sync_mode": sched.sync_mode,
+            "enabled": sched.enabled,
+            "next_run_at": sched.next_run_at or "",
+        }
+        ledger.finalize(
+            ack_id,
+            actor=actor,
             reason=request.reason or "confirmed",
             result=result,
         )
