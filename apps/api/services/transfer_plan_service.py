@@ -338,6 +338,9 @@ def run_plan_preflight(
         destination_pk_columns=dest_meta.get("primary_key_columns") or dest_meta.get("pk_columns"),
         destination_unique_keys=dest_meta.get("unique_keys") or [],
         destination_foreign_keys=dest_meta.get("foreign_keys") or [],
+        # Without the destination connection the append key-collision probe cannot
+        # run, and Validate greens a batch Execute then refuses on the same key.
+        destination_config=dest_meta.get("_probe_cfg") or None,
         stream_contracts=stream_contracts,
         compliance_acknowledged=ack.compliance,
         schema_drift_acknowledged=ack.schema_drift,

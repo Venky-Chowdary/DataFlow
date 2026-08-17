@@ -1790,6 +1790,29 @@ def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
     # first stored key, so the verdict belongs here, not in a duplicate-key error
     # after Execute has started.
     collision = getattr(ctx, "destination_collision", None)
+    collision_proven = ""
+    collision_unproven = ""
+    collision_evidence: dict[str, Any] = {}
+    if collision is not None:
+        collision_evidence = {
+            "status": str(getattr(collision, "status", "") or ""),
+            "key_column": getattr(collision, "key_column", "") or "",
+            "values_probed": int(getattr(collision, "values_probed", 0) or 0),
+        }
+        if not getattr(collision, "findings", None):
+            key = collision_evidence["key_column"] or "identity key"
+            if collision_evidence["status"] == "ran":
+                collision_proven = (
+                    f"Target DDL compatible — append batch probed against stored "
+                    f"{key} values, no collision"
+                )
+            else:
+                collision_unproven = (
+                    f"Append key collision on {key} was not probed "
+                    f"({getattr(collision, 'message', '') or collision_evidence['status']}) "
+                    "— the destination enforces this key, so Execute re-probes it "
+                    "and refuses the run if a stored key repeats."
+                )
     if collision is not None and getattr(collision, "findings", None):
         found = list(collision.findings)
         key = getattr(collision, "key_column", "") or "identity key"
@@ -1910,11 +1933,32 @@ def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
                     note="Sample uniqueness probe on identity key",
                 ),
             )
+    if collision_unproven:
+        # The probe that Execute will run could not run here. Claiming "Target DDL
+        # compatible" turns that gap into a green Validate the run then refuses,
+        # so say what is unknown instead of implying it was checked.
+        return _warn(
+            GateId.G6_TARGET_DDL,
+            collision_unproven,
+            start,
+            _scope(
+                {
+                    "scrubbed_drift_issues": scrubbed,
+                    "rule_id": "g6_target_ddl.append_collision_unproven",
+                    "collision_probe": collision_evidence,
+                },
+                coverage="none",
+                note="Destination key collision probe did not run",
+            ),
+        )
     return _pass(
         GateId.G6_TARGET_DDL,
-        "Target DDL compatible",
+        collision_proven or "Target DDL compatible",
         start,
-        _scope({"scrubbed_drift_issues": scrubbed}),
+        _scope(
+            {"scrubbed_drift_issues": scrubbed}
+            | ({"collision_probe": collision_evidence} if collision_evidence else {})
+        ),
     )
 
 
@@ -2891,6 +2935,17 @@ def _pass(gate_id: GateId, message: str, start: float, details: dict | None = No
     return GateResult(
         gate_id=gate_id,
         status=GateStatus.PASS,
+        message=message,
+        details=details or {},
+        duration_ms=(time.perf_counter() - start) * 1000,
+    )
+
+
+def _warn(gate_id: GateId, message: str, start: float, details: dict | None = None) -> GateResult:
+    """Gate ran but could not prove its claim — surfaced, never silently green."""
+    return GateResult(
+        gate_id=gate_id,
+        status=GateStatus.WARN,
         message=message,
         details=details or {},
         duration_ms=(time.perf_counter() - start) * 1000,
