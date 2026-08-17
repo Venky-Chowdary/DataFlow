@@ -153,6 +153,16 @@ blocker id (`proof_0` / `proof 0`) — including the AI-assist narrative and the
 and the "Approve PII for this transfer" button must render only when the API sets
 `compliance_ack_required: true`, never on a message regex match.
 
+The assist / explain surfaces render only after clicking **"Explain & fix with AI"**, and that panel
+sits far down an inner scroll container — scroll it into view first. An "no internal ids" assertion
+made with the panel closed passes vacuously. Assert with
+`document.body.innerText.match(/proof[ _]?0/gi)` **plus** per-selector checks on
+`div.df2-vd-assist-narrative > p`, `li.sev-block > strong`, and
+`li.sev-block span.df2-vd-explain-gate code`.
+
+Restarting the API **wipes in-process transfer plans**, so every post-restart Validate test has to be
+rebuilt from Source.
+
 Confirm no rows landed with a destination count, e.g.
 `docker exec df-pg psql -U postgres -d dataflow -tAc "SELECT count(*) FROM <table>;"`.
 
