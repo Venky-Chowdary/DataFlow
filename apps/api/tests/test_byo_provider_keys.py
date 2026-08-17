@@ -309,6 +309,88 @@ def test_test_key_endpoint_refuses_providers_without_cloud_keys(client):
     assert res.status_code == 400
 
 
+def test_rejected_key_stops_the_engine_promising_that_provider(store):
+    """A 401 means Pilot cannot use the provider, so the engine must not claim it."""
+    from src.ai.llm import provider as provider_mod
+
+    _save_key("openai", "sk-rejected-key")
+    provider_mod.clear_auth_failures()
+    assert provider_mod.pilot_engine_decision()["engine"] == "hybrid"
+
+    provider_mod._mark_provider_auth_failed("openai", "Error code: 401 - invalid_api_key")
+    try:
+        decision = provider_mod.pilot_engine_decision()
+        assert decision["engine"] == "local"
+        assert decision["configured_providers"] == []
+        assert "rejected" in decision["reason"].lower()
+        assert provider_mod.usable_cloud_providers() == []
+
+        caps = provider_mod.get_model_capabilities()
+        row = next(p for p in caps["providers"] if p["provider"] == "openai")
+        # The key is still saved — the card says so — but nothing promises it works.
+        assert row["configured"] is True
+        assert row["available"] is False
+        assert row["status"] == "invalid_key"
+        assert caps["pilot_engine"] == "local"
+        assert caps["configured_providers"] == []
+    finally:
+        provider_mod.clear_auth_failures()
+
+
+def test_disabling_a_provider_outranks_a_cached_rejection(store):
+    """Turning a provider off must explain itself, not blame its withheld key."""
+    from src.ai.llm import provider as provider_mod
+
+    _save_key("openai", "sk-rejected-key")
+    integrations_store.update_ai_provider("openai", {"enabled": False})
+    provider_mod._mark_provider_auth_failed("openai", "Error code: 401 - invalid_api_key")
+    try:
+        row = next(
+            p
+            for p in provider_mod.get_model_capabilities()["providers"]
+            if p["provider"] == "openai"
+        )
+        assert row["available"] is False
+        assert row["blocked_reason"] == "Disabled in Settings — enable it to let Pilot use it."
+    finally:
+        provider_mod.clear_auth_failures()
+
+
+def test_key_verification_is_bounded_and_reports_a_timeout(store, monkeypatch):
+    """Someone is waiting on the button, so a hung provider must not hang it."""
+    from src.ai.llm import provider as provider_mod
+
+    class _Timeout(Exception):
+        def __str__(self) -> str:
+            return "Request timed out."
+
+    class _Models:
+        def list(self):
+            raise _Timeout
+
+    class _FakeOpenAI:
+        seen: dict[str, object] = {}
+
+        def __init__(self, **kwargs):
+            _FakeOpenAI.seen = kwargs
+            self.models = _Models()
+
+    import openai
+
+    monkeypatch.setattr(openai, "OpenAI", _FakeOpenAI)
+    provider_mod.clear_auth_failures()
+    try:
+        ok, err = provider_mod.verify_cloud_api_key("openai", "sk-slow-key")
+        assert ok is False
+        assert "did not answer within" in err
+        assert _FakeOpenAI.seen["max_retries"] == 0
+        assert _FakeOpenAI.seen["timeout"] == provider_mod.VERIFY_TIMEOUT_SECONDS
+        # A timeout is not proof of a bad key, so the provider stays usable.
+        assert provider_mod._provider_auth_failed("openai") is False
+    finally:
+        provider_mod.clear_auth_failures()
+
+
 def test_credential_and_engine_routes_need_workspace_administration():
     """A viewer or editor cannot change whose model answers, or with which key."""
     from services.rbac import Permission, _required_permission, role_permissions

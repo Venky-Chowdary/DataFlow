@@ -50,6 +50,11 @@ def _mark_provider_auth_failed(name: str, err: str) -> bool:
     return False
 
 
+# A key check is a person waiting on a button, so it is bounded: one attempt,
+# a short deadline, and a plain timeout message instead of SDK backoff.
+VERIFY_TIMEOUT_SECONDS = 12.0
+
+
 def verify_cloud_api_key(provider: str, api_key: str) -> tuple[bool, str]:
     """Live-check a cloud key before persisting. Returns (ok, error_message)."""
     name = (provider or "").strip().lower()
@@ -61,14 +66,22 @@ def verify_cloud_api_key(provider: str, api_key: str) -> tuple[bool, str]:
         if name == "openai":
             from openai import OpenAI
 
-            OpenAI(api_key=api_key.strip()).models.list()
+            OpenAI(
+                api_key=api_key.strip(),
+                timeout=VERIFY_TIMEOUT_SECONDS,
+                max_retries=0,
+            ).models.list()
             _AUTH_FAILED_PROVIDERS.discard("openai")
             return True, ""
         import anthropic
         from services.integrations_store import resolve_provider_model
 
         model = resolve_provider_model("anthropic", "claude-sonnet-4-20250514")
-        anthropic.Anthropic(api_key=api_key.strip()).messages.create(
+        anthropic.Anthropic(
+            api_key=api_key.strip(),
+            timeout=VERIFY_TIMEOUT_SECONDS,
+            max_retries=0,
+        ).messages.create(
             model=model,
             max_tokens=1,
             messages=[{"role": "user", "content": "ping"}],
@@ -78,8 +91,15 @@ def verify_cloud_api_key(provider: str, api_key: str) -> tuple[bool, str]:
     except Exception as e:
         _mark_provider_auth_failed(name, str(e))
         msg = str(e)
-        if "invalid_api_key" in msg.lower() or "incorrect api key" in msg.lower() or "401" in msg:
+        low = msg.lower()
+        if "invalid_api_key" in low or "incorrect api key" in low or "401" in msg:
             return False, "Incorrect API key — paste a valid key from the provider console"
+        if "timeout" in low or "timed out" in low:
+            return (
+                False,
+                f"{name} did not answer within {int(VERIFY_TIMEOUT_SECONDS)}s — "
+                "the key was not verified. Try again.",
+            )
         return False, msg[:240]
 
 
@@ -512,6 +532,25 @@ MODEL_CAPABILITY_MATRIX = [
 ]
 
 
+def _saved_cloud_providers() -> list[str]:
+    """Cloud providers the operator enabled and gave a resolvable key."""
+    try:
+        from services.integrations_store import configured_ai_providers
+
+        return list(configured_ai_providers())
+    except Exception:
+        return []
+
+
+def usable_cloud_providers() -> list[str]:
+    """Saved providers Pilot can actually call — a rejected key is not usable.
+
+    A 401 seen this process means the engine must stop promising that provider,
+    even though the key is still saved and still shown as configured.
+    """
+    return [p for p in _saved_cloud_providers() if not _provider_auth_failed(p)]
+
+
 def _package_available(package: str) -> bool:
     if not package:
         return True
@@ -530,15 +569,10 @@ def pilot_engine_decision() -> dict:
     Settings turns Pilot hybrid; with nothing configured Pilot stays on the
     local engine, which always works offline.
     """
-    from services.integrations_store import (
-        configured_ai_providers,
-        get_pilot_engine_preference,
-    )
+    from services.integrations_store import get_pilot_engine_preference
 
-    try:
-        configured = list(configured_ai_providers())
-    except Exception:
-        configured = []
+    configured = usable_cloud_providers()
+    rejected = [p for p in _saved_cloud_providers() if _provider_auth_failed(p)]
 
     env_raw = (getenv_brand("PILOT_ENGINE") or "").strip().lower()
     if env_raw in {"local", "hybrid", "cloud"}:
@@ -590,6 +624,17 @@ def pilot_engine_decision() -> dict:
             "configured_providers": configured,
         }
 
+    if rejected:
+        return {
+            "engine": "local",
+            "source": "default",
+            "reason": (
+                f"The saved key for {', '.join(rejected)} was rejected — Pilot uses the "
+                "local engine until a valid key is saved."
+            ),
+            "configured_providers": [],
+        }
+
     return {
         "engine": "local",
         "source": "default",
@@ -614,12 +659,7 @@ def pick_narration_provider():
         "openai": (DataTransferOpenAIProvider, "openai_polish"),
         "anthropic": (DataTransferAnthropicProvider, "anthropic_polish"),
     }
-    try:
-        from services.integrations_store import configured_ai_providers
-
-        configured = configured_ai_providers()
-    except Exception:
-        configured = ()
+    configured = usable_cloud_providers()
 
     for name in configured:
         builder, method = builders.get(name, (None, ""))
@@ -665,7 +705,14 @@ def get_model_capabilities() -> dict:
         installed = _package_available(item.get("package", ""))
         available = provider.is_available()
         blocked_reason = ""
-        if _provider_auth_failed(item["provider"]):
+        provider_off = item["tier"] == "cloud" and not persisted.get("enabled", True)
+        if provider_off:
+            # Turning a provider off is the operator's own decision, so it
+            # outranks any stale rejection cached for its withheld key.
+            available = False
+            status = "configure"
+            blocked_reason = "Disabled in Settings — enable it to let Pilot use it."
+        elif _provider_auth_failed(item["provider"]):
             available = False
             status = "invalid_key"
             blocked_reason = (
