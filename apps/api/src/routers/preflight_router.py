@@ -7,6 +7,12 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+from services.acknowledgment_contract import (
+    AcknowledgmentRefused,
+    audit_acknowledgments,
+    resolve_acknowledgments,
+)
+
 from ..services.preflight_service import (
     apply_policy_gates,
     confidence_threshold_for_mode,
@@ -165,6 +171,18 @@ async def run_preflight(body: PreflightRequest):
     if not body.mappings:
         raise HTTPException(status_code=400, detail="No column mappings provided")
 
+    # Refuse an unattributed attestation before any gate consumes it.
+    try:
+        ack = resolve_acknowledgments(
+            compliance=body.compliance_acknowledged,
+            schema_drift=body.schema_drift_acknowledged,
+            fk_risk=body.fk_risk_acknowledged,
+            actor=body.acknowledgment_actor,
+            reason=body.acknowledgment_reason,
+        )
+    except AcknowledgmentRefused as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     destination_connected = False
     dest_error: str | None = None
     dest_meta: dict = {}
@@ -317,79 +335,29 @@ async def run_preflight(body: PreflightRequest):
             destination_config=dest_meta.get("_probe_cfg") or None,
             stream_contracts=list(body.stream_contracts or []),
             date_locale=body.date_locale,
-            compliance_acknowledged=bool(body.compliance_acknowledged),
-            schema_drift_acknowledged=bool(body.schema_drift_acknowledged),
-            fk_risk_acknowledged=bool(body.fk_risk_acknowledged),
+            compliance_acknowledged=ack.compliance,
+            schema_drift_acknowledged=ack.schema_drift,
+            fk_risk_acknowledged=ack.fk_risk,
             run_population_orphan_scan=bool(body.run_population_orphan_scan),
-            acknowledgment_actor=str(body.acknowledgment_actor or "").strip(),
-            acknowledgment_reason=str(body.acknowledgment_reason or "").strip(),
+            acknowledgment_actor=ack.actor,
+            acknowledgment_reason=ack.reason,
         )
-    if (
-        body.compliance_acknowledged
-        or body.schema_drift_acknowledged
-        or body.fk_risk_acknowledged
-    ):
-        actor = str(body.acknowledgment_actor or "").strip()
-        reason = str(body.acknowledgment_reason or "").strip()
-        if len(actor) < 2:
-            raise HTTPException(
-                status_code=400,
-                detail="acknowledgment_actor is required when acknowledging compliance, schema drift, or FK risk",
-            )
-        if len(reason) < 8:
-            raise HTTPException(
-                status_code=400,
-                detail="acknowledgment_reason is required (at least 8 characters)",
-            )
-        try:
-            from services.audit_log import append_audit_event
-
-            if body.compliance_acknowledged:
-                append_audit_event(
-                    action="preflight.acknowledge_compliance",
-                    resource="preflight",
-                    actor=actor,
-                    details={
-                        "source_type": body.source_type,
-                        "dest_type": body.dest_type,
-                        "validation_mode": body.validation_mode,
-                        "reason": reason,
-                    },
-                )
-            if body.schema_drift_acknowledged:
-                append_audit_event(
-                    action="preflight.acknowledge_schema_drift",
-                    resource="preflight",
-                    actor=actor,
-                    details={
-                        "source_type": body.source_type,
-                        "dest_type": body.dest_type,
-                        "schema_policy": body.schema_policy,
-                        "validation_mode": body.validation_mode,
-                        "reason": reason,
-                    },
-                )
-            if body.fk_risk_acknowledged:
-                append_audit_event(
-                    action="preflight.acknowledge_fk_risk",
-                    resource="preflight",
-                    actor=actor,
-                    details={
-                        "source_type": body.source_type,
-                        "dest_type": body.dest_type,
-                        "validation_mode": body.validation_mode,
-                        "coverage": "destination_fk_metadata",
-                        "population_orphan_proven": False,
-                        "reason": reason,
-                    },
-                )
-        except HTTPException:
-            raise
-        except Exception as exc:
-            raise HTTPException(
-                status_code=500,
-                detail="Could not record acknowledgment audit event — acknowledgment not accepted",
-            ) from exc
+    try:
+        audit_acknowledgments(
+            ack,
+            resource="preflight",
+            details={
+                "source_type": body.source_type,
+                "dest_type": body.dest_type,
+                "schema_policy": body.schema_policy,
+                "validation_mode": body.validation_mode,
+            },
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail="Could not record acknowledgment audit event — acknowledgment not accepted",
+        ) from exc
     dest_identity = dest_meta.get("destination_identity")
     if isinstance(dest_identity, dict) and dest_identity.get("database"):
         # Show the effective destination before Execute — the write must never be

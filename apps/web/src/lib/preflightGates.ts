@@ -124,3 +124,23 @@ export function gateCatalogEntry(id: string): GateCatalogEntry {
 export function gateLabel(id: string): string {
   return gateCatalogEntry(id).label;
 }
+
+/**
+ * Title for one blocker card / rail line.
+ *
+ * Proof-bundle blockers are positionally numbered (`proof_0`), not gates, so the
+ * gate catalog can only spell their internal id back at the operator. Name the
+ * cause from its own message instead — an operator must never be told the reason
+ * they cannot execute is "proof 0".
+ */
+export function isInternalGateId(id: string): boolean {
+  return /^proof_\d+$/i.test(String(id || ""));
+}
+
+export function blockerTitle(id: string, message?: string): string {
+  if (!isInternalGateId(id)) return gateLabel(id);
+  const text = String(message || "").trim();
+  if (!text) return "Transfer proof blocker";
+  const clause = text.split(/[.;\n]|\s—\s/)[0].trim() || text;
+  return clause.length > 72 ? `${clause.slice(0, 69).trimEnd()}…` : clause;
+}

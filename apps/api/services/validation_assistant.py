@@ -19,6 +19,7 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+from services.blocker_titles import blocker_title
 from services.preflight_rules import explain_gate, explain_issue
 
 
@@ -478,7 +479,11 @@ def explain_validation(
         ]
         issues.append({
             "gate": gate_id,
-            "title": guidance.get("title", gate_id),
+            "title": blocker_title(
+                gate_id,
+                b.get("message", ""),
+                catalog_title=guidance.get("title", ""),
+            ),
             "severity": "block",
             "what": b.get("message", ""),
             "why": guidance.get("why", ""),

@@ -155,6 +155,7 @@ import {
   JobProgress,
   ValidationSuggestedAction,
 } from "../lib/types";
+import { standingAcknowledgmentReason } from "../lib/acknowledgments";
 import { parseCsvTextForPreview } from "../lib/csvPreview";
 import { runLocalFileExport } from "../lib/localFileExport";
 import { runLocalPreflight } from "../lib/localPreflight";
@@ -3563,7 +3564,12 @@ export function TransferPage({
     const ackSchemaDrift = opts?.schemaDriftAcknowledged ?? schemaDriftAcknowledged;
     const ackFkRisk = opts?.fkRiskAcknowledged ?? fkRiskAcknowledged;
     const ackActor = readSession()?.email || readSession()?.name || "";
-    const ackReason = opts?.acknowledgmentReason || "";
+    const ackReason = (opts?.acknowledgmentReason || "").trim()
+      || standingAcknowledgmentReason({
+        compliance: ackCompliance,
+        schemaDrift: ackSchemaDrift,
+        fkRisk: ackFkRisk,
+      });
     if (
       (opts?.complianceAcknowledged || opts?.schemaDriftAcknowledged || opts?.fkRiskAcknowledged)
       && (!ackActor || ackActor.length < 2)
@@ -3586,6 +3592,34 @@ export function TransferPage({
       });
       return;
     }
+    const ackClaimed = Boolean(
+      opts?.complianceAcknowledged
+      || opts?.schemaDriftAcknowledged
+      || opts?.fkRiskAcknowledged,
+    );
+    // An attestation sticks only when the API says it recorded one. Claiming it
+    // optimistically shows "PII approved" over a run that is still blocked.
+    const commitAcknowledgments = (pf: PreflightResult | null) => {
+      if (opts?.complianceAcknowledged) {
+        const recorded = pf?.proof_bundle?.compliance?.acknowledged === true;
+        setComplianceAcknowledged(recorded);
+        toast(recorded
+          ? {
+            title: "PII approval recorded",
+            message: pf?.proof_bundle?.transfer_decision?.decision === "approve"
+              ? "Governance approval accepted — Execute is unlocked."
+              : "Governance approval accepted. Remaining blockers still hold Execute.",
+            tone: pf?.proof_bundle?.transfer_decision?.decision === "approve" ? "success" : "warning",
+          }
+          : {
+            title: "PII approval not recorded",
+            message: "The API did not return an acknowledged compliance record — Execute stays locked.",
+            tone: "error",
+          });
+      }
+      if (opts?.schemaDriftAcknowledged) setSchemaDriftAcknowledged(Boolean(pf));
+      if (opts?.fkRiskAcknowledged) setFkRiskAcknowledged(Boolean(pf));
+    };
     const threshold = confidenceThresholdForMode(activeValidation);
     if (
       sourceKind === "file"
@@ -3762,7 +3796,15 @@ export function TransferPage({
       if (planId) {
         try {
           await syncTransferPlanMappings(planId, mappings);
-          const pf = await preflightTransferPlan(planId);
+          // The plan transport must carry the attestation — a body-less call
+          // cannot clear a PII/drift/FK gate, and Execute would stay locked.
+          const pf = await preflightTransferPlan(planId, {
+            compliance_acknowledged: ackCompliance,
+            schema_drift_acknowledged: ackSchemaDrift,
+            fk_risk_acknowledged: ackFkRisk,
+            acknowledgment_actor: ackActor,
+            acknowledgment_reason: ackReason,
+          });
           // Never stamp plan approved on review-grade / soft-pass — Execute
           // unlock requires decision===approve (same bar as Validate rail).
           const decision = pf.proof_bundle?.transfer_decision?.decision;
@@ -3771,6 +3813,8 @@ export function TransferPage({
           }
           setPreflight(pf);
           setValidatedContractKey(buildValidateContractKey(activeMappings));
+          commitAcknowledgments(pf as PreflightResult);
+          if (ackClaimed) return;
           if (!pf.passed) {
             toast({
               title: "Validation incomplete",
@@ -3919,6 +3963,7 @@ export function TransferPage({
         }
       }
       setPreflight(pf);
+      commitAcknowledgments(String(pf.run_id || "").startsWith("pf_local_") ? null : pf);
       // Echo Kernel stamps + signed Risk Contracts from Validate onto Map.
       // Contract key MUST use post-hydrate mappings or Execute stays locked /
       // invalidation clears a green preflight when destType stamps change.
@@ -3934,6 +3979,7 @@ export function TransferPage({
         setColumnMappings(hydrateMaps);
       }
       setValidatedContractKey(buildValidateContractKey(hydrateMaps));
+      if (ackClaimed) return;
       if (!pf.passed) {
         toast({
           title: "Validation incomplete",
@@ -4395,11 +4441,11 @@ export function TransferPage({
         schemaDriftAcknowledged,
         fkRiskAcknowledged,
         acknowledgmentActor: readSession()?.email || readSession()?.name || undefined,
-        acknowledgmentReason: [
-          complianceAcknowledged ? "PII/compliance acknowledged on Validate" : "",
-          schemaDriftAcknowledged ? "Schema drift acknowledged on Validate" : "",
-          fkRiskAcknowledged ? "FK risk acknowledged on Validate" : "",
-        ].filter(Boolean).join("; ") || undefined,
+        acknowledgmentReason: standingAcknowledgmentReason({
+          compliance: complianceAcknowledged,
+          schemaDrift: schemaDriftAcknowledged,
+          fkRisk: fkRiskAcknowledged,
+        }) || undefined,
         approvedDecisionArtifactHash: approvedDecisionArtifactHash || undefined,
         approvedDdlIdentityHash: approvedDdlIdentityHash || undefined,
         contractId: boundContractId.trim() || undefined,
@@ -6345,9 +6391,8 @@ export function TransferPage({
             mappingProofSummary={mappingProofSummary}
             onRunPreflight={() => void executePreflight()}
             onAcknowledgeCompliance={() => {
-              setComplianceAcknowledged(true);
               toast({
-                title: "PII acknowledged",
+                title: "Submitting PII approval",
                 message: "Re-running Validate with governance approval for detected PII fields.",
                 tone: "info",
               });
@@ -6357,9 +6402,8 @@ export function TransferPage({
               });
             }}
             onAcknowledgeSchemaDrift={() => {
-              setSchemaDriftAcknowledged(true);
               toast({
-                title: "Schema drift acknowledged",
+                title: "Submitting schema-drift acknowledgment",
                 message: "Re-running Validate — existing mappings kept for this run (exception recorded).",
                 tone: "info",
               });
@@ -6369,9 +6413,8 @@ export function TransferPage({
               });
             }}
             onAcknowledgeFkRisk={() => {
-              setFkRiskAcknowledged(true);
               toast({
-                title: "FK risk acknowledged",
+                title: "Submitting FK-risk acknowledgment",
                 message: "Re-running Validate — FK mapping risk accepted for this run (RI not proven).",
                 tone: "info",
               });

@@ -89,6 +89,73 @@ computed style of the label span, not just `textContent`:
 })
 ```
 
+## Transfer Studio: preflight / Validate / acknowledgment testing
+
+Reaching Validate with a *chosen* blocker takes fixture control. What works:
+
+- **Reachable destination.** Saved "Prod Postgres *" connectors point at `127.0.0.1:5432`, which is
+  usually dead. Start `df-pg` (host port **5433**) and create a fresh connection through
+  Connectors ▸ New connection; Snowflake is not reachable in this env.
+- **Trip the PII gate on purpose.** `services/compliance_guard.py` marks `ssn` / `dob` / `account`
+  columns as high-risk, and any high-risk field forces `requires_review = True` regardless of the
+  0.45 risk-score floor. A 5-row file with `username,email,phone,ssn,dob,amount` is enough.
+- **Isolate PII as the *only* blocker.** An existing destination table whose column types differ even
+  slightly (e.g. dest `numeric(12,2)` vs source `DECIMAL(10,4)`) raises a `schema_drift`
+  `narrow_type` blocker that hides the compliance-only path. Match the dest type exactly
+  (`ALTER TABLE t ALTER COLUMN amount TYPE numeric(10,4)`) to get the clean
+  "Approve PII to unlock Execute" headline; mismatch it deliberately to test the mixed-blocker path.
+- **Two different preflight transports exist.** `TransferPage.executePreflight` calls
+  `preflightTransferPlan(planId)` → `POST /api/v1/transfer/plans/{id}/preflight` and `return`s early
+  whenever a plan is persisted; `POST /api/v1/preflight/run` is only reached when no plan exists.
+  Both now carry the same acknowledgment body (`compliance_acknowledged`, `acknowledgment_actor`,
+  `acknowledgment_reason`), and the plan service persists it on `plan.policies` stamped with the
+  mapping revision. Always confirm *which* endpoint fired before judging an ack result.
+- **A lossy type change on an existing destination column is a dead end at Map** (e.g. dest `int4`
+  for a `DECIMAL(10,4)` source): bulk "Approve eligible" excludes existing-DDL conflicts and
+  signing the risk contract still leaves "Continue to Validate" disabled. Build mixed-blocker
+  fixtures from **narrow text widths** instead (`phone varchar(6)`, `ssn varchar(4)`, matching
+  numeric type) — those pass Map and block Validate on `g6_target_ddl`.
+- **The footer Re-run control disappears once Validate is green.** To re-test acknowledgment
+  persistence, re-enter through Back ▸ Continue to Validate.
+
+### Capturing preflight request/response bodies
+
+Install the hook **before** clicking anything on Validate, and always record the body length —
+a length of 9 means the body was the string `"undefined"`, i.e. no payload was sent at all:
+
+```js
+(()=>{const of=window.fetch;window.__pfLog=[];window.fetch=async function(...a){
+  const url=typeof a[0]==='string'?a[0]:(a[0]&&a[0].url)||'';const init=a[1]||{};
+  const r=await of.apply(this,a);
+  if(/preflight/i.test(url))window.__pfLog.push({url,status:r.status,
+    req:typeof init.body==='string'?init.body:String(init.body),
+    resp:await r.clone().text().catch(()=>'<unreadable>')});
+  return r;};window.__errs=[];
+  addEventListener('error',e=>window.__errs.push(e.message));
+  addEventListener('unhandledrejection',e=>window.__errs.push(String(e.reason)));})()
+```
+
+Note this only sees `init.body`; if a call ever uses `new Request(url,{body})` or FormData you must
+extend it. Execute/run endpoints use **FormData**, not JSON. Filter on
+`/transfer/plans/<id>/preflight` specifically — the AI-assist call embeds a whole preflight payload
+in its own body and will otherwise be mistaken for "the last preflight call".
+
+### Reading the verdict
+
+Assert on the response, not the headline: `passed`, `proof_bundle.transfer_decision.decision`
+(`approve` / `review` / `block`), `.compliance_only`, `proof_bundle.compliance.acknowledged`, and
+`blockers[].details.compliance_ack_required`. Execute unlocks only when `passed === true` **and**
+`decision === "approve"` **and** the validated contract key still matches **and** `run_id` does not
+start with `pf_local_` — name the specific false condition rather than saying "still blocked".
+
+Two regressions worth re-checking on every Validate change: no surface may print an internal
+blocker id (`proof_0` / `proof 0`) — including the AI-assist narrative and the explain issue cards —
+and the "Approve PII for this transfer" button must render only when the API sets
+`compliance_ack_required: true`, never on a message regex match.
+
+Confirm no rows landed with a destination count, e.g.
+`docker exec df-pg psql -U postgres -d dataflow -tAc "SELECT count(*) FROM <table>;"`.
+
 ## Devin Secrets Needed
 
 None — local credentials come from the running API process environment.

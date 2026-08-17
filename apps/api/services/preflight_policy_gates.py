@@ -8,14 +8,17 @@ from preflight.models import GateStatus
 from services.db_type_utils import normalize_dest_kind
 
 
+def is_compliance_block_message(message: object) -> bool:
+    """True when this blocker text is a PII/compliance review, not a data defect."""
+    text = str(message or "")
+    return "PII/compliance" in text or "compliance review" in text.lower()
+
+
 def is_compliance_only_block(proof_blockers: list[str]) -> bool:
     """Return True when every proof blocker is purely a PII/compliance review."""
     if not proof_blockers:
         return False
-    return all(
-        "PII/compliance" in b or "compliance review" in b.lower()
-        for b in proof_blockers
-    )
+    return all(is_compliance_block_message(b) for b in proof_blockers)
 
 
 def apply_policy_gates(
@@ -30,6 +33,23 @@ def apply_policy_gates(
     compliance_only = bool(
         (proof_bundle.get("transfer_decision") or {}).get("compliance_only")
     ) or is_compliance_only_block(proof_blockers)
+
+    # A compliance acknowledgment can only ever clear a compliance blocker. Gates
+    # and non-proof blockers keep their own root causes, so the bundle's
+    # compliance-only claim (which sees the proof blockers alone) must be
+    # re-decided against the *merged* blocker list below — otherwise Validate
+    # offers "Approve PII to unlock Execute" while a schema/connectivity gate is
+    # the real reason, and the operator's approval looks like it did nothing.
+    non_compliance_candidates = [
+        *(str(b.get("message") or "") for b in result.get("blockers") or []),
+        *(
+            str(g.get("message") or "")
+            for g in policy_gates or []
+            if g.get("status") == GateStatus.BLOCK.value
+        ),
+    ]
+    if any(not is_compliance_block_message(m) for m in non_compliance_candidates):
+        compliance_only = False
 
     is_strict = (validation_mode or "strict").lower() in {"strict", "maximum"}
 
@@ -50,9 +70,7 @@ def apply_policy_gates(
         for b in result.get("blockers", [])
     ]
     for idx, message in enumerate(active_proof_blockers):
-        is_compliance = (
-            "PII/compliance" in str(message) or "compliance review" in str(message).lower()
-        )
+        is_compliance = is_compliance_block_message(message)
         blockers.append({
             "id": f"proof_{idx}",
             "message": str(message),

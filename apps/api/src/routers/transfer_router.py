@@ -568,12 +568,45 @@ async def map_transfer_plan(plan_id: str, body: PlanMapRequest):
         raise HTTPException(status_code=404, detail=str(e)) from e
 
 
+class PlanPreflightRequest(BaseModel):
+    """Operator attestations posted with a persisted-plan preflight run.
+
+    Validate is where a PII/drift/FK risk is accepted, so this transport must
+    carry the attestation — a body-less call cannot clear a compliance gate.
+    """
+
+    compliance_acknowledged: bool = False
+    schema_drift_acknowledged: bool = False
+    fk_risk_acknowledged: bool = False
+    acknowledgment_actor: str = ""
+    acknowledgment_reason: str = ""
+
+
 @router.post("/plans/{plan_id}/preflight")
-async def preflight_transfer_plan(plan_id: str):
+async def preflight_transfer_plan(
+    plan_id: str,
+    body: PlanPreflightRequest | None = None,
+):
+    from services.acknowledgment_contract import (
+        AcknowledgmentRefused,
+        resolve_acknowledgments,
+    )
     from services.transfer_plan_service import run_plan_preflight
 
+    payload = body or PlanPreflightRequest()
     try:
-        return run_plan_preflight(plan_id)
+        ack = resolve_acknowledgments(
+            compliance=payload.compliance_acknowledged,
+            schema_drift=payload.schema_drift_acknowledged,
+            fk_risk=payload.fk_risk_acknowledged,
+            actor=payload.acknowledgment_actor,
+            reason=payload.acknowledgment_reason,
+        )
+    except AcknowledgmentRefused as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+    try:
+        return run_plan_preflight(plan_id, acknowledgments=ack)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 

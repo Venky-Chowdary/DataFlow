@@ -2099,9 +2099,28 @@ export async function mapTransferPlan(
   return res.json();
 }
 
-export async function preflightTransferPlan(planId: string) {
+export type PreflightAcknowledgments = {
+  compliance_acknowledged?: boolean;
+  schema_drift_acknowledged?: boolean;
+  fk_risk_acknowledged?: boolean;
+  acknowledgment_actor?: string;
+  acknowledgment_reason?: string;
+};
+
+export async function preflightTransferPlan(
+  planId: string,
+  acknowledgments: PreflightAcknowledgments = {},
+) {
   const res = await apiFetch(`${API_BASE}/transfer/plans/${planId}/preflight`, {
     method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      compliance_acknowledged: acknowledgments.compliance_acknowledged ?? false,
+      schema_drift_acknowledged: acknowledgments.schema_drift_acknowledged ?? false,
+      fk_risk_acknowledged: acknowledgments.fk_risk_acknowledged ?? false,
+      acknowledgment_actor: acknowledgments.acknowledgment_actor ?? "",
+      acknowledgment_reason: acknowledgments.acknowledgment_reason ?? "",
+    }),
     timeoutMs: LONG_REQUEST_TIMEOUT_MS,
   });
   if (!res.ok) throw new Error(await parseApiError(res, "Plan preflight failed"));

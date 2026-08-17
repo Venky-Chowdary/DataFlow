@@ -7,7 +7,7 @@
  * ``validation_assistant._remap_to_type_for_mismatch`` so one-click Fix CTAs
  * do not invent bare VARCHAR for UUID/ObjectId/DECIMAL/temporal blockers.
  */
-import { gateLabel } from "./preflightGates.js";
+import { blockerTitle, gateLabel } from "./preflightGates.js";
 import type {
   CoercionColumn,
   PreflightGate,
@@ -535,7 +535,7 @@ export function buildDisplayBlockers(
       items.push({
         key: b.id,
         kind: "blocker",
-        title: gateLabel(b.id),
+        title: blockerTitle(b.id, b.message),
         message: b.message,
         issues: Array.isArray(b.details?.issue_texts)
           ? (b.details.issue_texts as string[])
@@ -593,7 +593,7 @@ export function buildDisplayBlockers(
     items.push({
       key: b.id,
       kind: "blocker",
-      title: gateLabel(b.id),
+      title: blockerTitle(b.id, b.message),
       message: b.message,
       issues: Array.isArray(b.details?.issue_texts)
         ? (b.details.issue_texts as string[])

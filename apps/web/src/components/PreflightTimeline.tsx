@@ -2,7 +2,7 @@ import { DtIcon } from "./DtIcon";
 import { Spinner } from "./LoadingState";
 import { PreflightResult } from "../lib/types";
 import { useEffect, useState } from "react";
-import { CORE_ENGINE_GATE_IDS, gateLabel } from "../lib/preflightGates";
+import { CORE_ENGINE_GATE_IDS, blockerTitle, gateLabel } from "../lib/preflightGates";
 import { ringDasharray, validateRingPercent } from "../lib/progressRing";
 
 const CORE_GATE_ORDER = [...CORE_ENGINE_GATE_IDS];
@@ -346,7 +346,7 @@ export function PreflightTimeline({
           <ul className="df2-preflight-diagnostics-list">
             {result.blockers.map((b) => (
               <li key={b.id}>
-                <strong>{gateLabel(b.id)}:</strong> {b.message}
+                <strong>{blockerTitle(b.id, b.message)}:</strong> {b.message}
                 {b.guidance && (
                   <div className="df2-preflight-diagnostics-guidance">
                     {b.guidance.why && <p><strong>Why:</strong> {b.guidance.why}</p>}

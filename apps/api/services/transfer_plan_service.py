@@ -6,6 +6,11 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from services.acknowledgment_contract import (
+    Acknowledgments,
+    acknowledgments_from_policies,
+    audit_acknowledgments,
+)
 from services.audit_log import append_audit_event
 from services.transfer_plan_store import (
     TransferPlanRecord,
@@ -143,7 +148,18 @@ def sync_plan_mappings(plan_id: str, mappings: list[dict[str, Any]]) -> Transfer
     return plan
 
 
-def run_plan_preflight(plan_id: str) -> dict[str, Any]:
+def run_plan_preflight(
+    plan_id: str,
+    *,
+    acknowledgments: Acknowledgments | None = None,
+) -> dict[str, Any]:
+    """Run preflight for a persisted plan, honouring operator acknowledgments.
+
+    ``acknowledgments`` is what the operator just attested on Validate. It is
+    recorded on the plan (stamped with the mapping revision it was granted for)
+    so Execute and a page reload see the same attestation, and so a remap cannot
+    inherit a green from the shape it replaced.
+    """
     (
         apply_policy_gates,
         confidence_threshold_for_mode,
@@ -198,6 +214,26 @@ def run_plan_preflight(plan_id: str) -> dict[str, Any]:
     if not live_target_schema and table_exists is True:
         live_target_schema = {}
     live_target_columns = list(live_target_schema.keys()) if live_target_schema else plan.target_columns
+
+    ack = acknowledgments or Acknowledgments()
+    if ack.any_claimed:
+        updated = update_plan(
+            plan_id,
+            {"policies": ack.as_policies(mapping_version=plan.active_version)},
+        )
+        plan = updated or plan
+        audit_acknowledgments(
+            ack,
+            resource=f"plan/{plan_id}",
+            details={
+                "mapping_version": plan.active_version,
+                "destination_table": dest.get("table") or dest.get("collection") or "",
+            },
+        )
+    else:
+        ack = acknowledgments_from_policies(
+            plan.policies, mapping_version=plan.active_version
+        )
 
     policies = plan.policies
     validation_mode = policies.get("validation_mode", "balanced")
@@ -303,11 +339,11 @@ def run_plan_preflight(plan_id: str) -> dict[str, Any]:
         destination_unique_keys=dest_meta.get("unique_keys") or [],
         destination_foreign_keys=dest_meta.get("foreign_keys") or [],
         stream_contracts=stream_contracts,
-        compliance_acknowledged=bool(policies.get("compliance_acknowledged")),
-        schema_drift_acknowledged=bool(policies.get("schema_drift_acknowledged")),
-        fk_risk_acknowledged=bool(policies.get("fk_risk_acknowledged")),
-        acknowledgment_actor=str(policies.get("acknowledgment_actor") or "").strip(),
-        acknowledgment_reason=str(policies.get("acknowledgment_reason") or "").strip(),
+        compliance_acknowledged=ack.compliance,
+        schema_drift_acknowledged=ack.schema_drift,
+        fk_risk_acknowledged=ack.fk_risk,
+        acknowledgment_actor=ack.actor,
+        acknowledgment_reason=ack.reason,
     )
     pf = apply_policy_gates(
         pf,

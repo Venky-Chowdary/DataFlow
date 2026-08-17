@@ -16,8 +16,10 @@ import { isLocalPreflight } from "../../lib/localPreflight";
 import {
   CORE_ENGINE_GATE_IDS,
   GATE_CATALOG,
+  blockerTitle,
   gateCatalogEntry,
   gateLabel,
+  isInternalGateId,
 } from "../../lib/preflightGates";
 import {
   buildDisplayBlockers,
@@ -60,6 +62,18 @@ const GATE_META: GateMeta[] = GATE_CATALOG.map((g) => ({
   icon: g.icon,
   rule: g.rule,
 }));
+
+/**
+ * Title for one assist / explain issue card. The assistant falls back to the
+ * blocker's internal id when a proof-bundle blocker has no gate catalog entry,
+ * so name the cause from its own text instead of showing `proof_0`.
+ */
+function explainIssueTitle(issue: { gate: string; title?: string; what?: string }): string {
+  if (isInternalGateId(issue.gate)) {
+    return blockerTitle(issue.gate, issue.what || issue.title);
+  }
+  return issue.title || gateLabel(issue.gate);
+}
 
 function metaForGate(id: string): GateMeta {
   const entry = gateCatalogEntry(id);
@@ -2470,11 +2484,13 @@ export function ValidateDashboard({
                           <ul>
                             {explainParts.blockers.map((issue, i) => (
                               <li key={`block-${issue.gate}-${issue.title}-${i}`} className="sev-block">
-                                <strong>{issue.title || gateLabel(issue.gate)}</strong>
-                                <span className="df2-vd-explain-gate is-muted" title={issue.gate}>
-                                  {gateLabel(issue.gate)}
-                                  <code>{issue.gate}</code>
-                                </span>
+                                <strong>{explainIssueTitle(issue)}</strong>
+                                {!isInternalGateId(issue.gate) && (
+                                  <span className="df2-vd-explain-gate is-muted" title={issue.gate}>
+                                    {gateLabel(issue.gate)}
+                                    <code>{issue.gate}</code>
+                                  </span>
+                                )}
                                 {issue.what && <p>{issue.what}</p>}
                                 {issue.why && <p className="df2-vd-explain-why"><em>Why:</em> {issue.why}</p>}
                                 {issue.fix && <p className="df2-vd-explain-fix"><em>Fix:</em> {issue.fix}</p>}
@@ -2510,11 +2526,13 @@ export function ValidateDashboard({
                             )}
                             {explainParts.warnings.map((issue, i) => (
                               <li key={`warn-${issue.gate}-${issue.title}-${i}`} className={`sev-${issue.severity}`}>
-                                <strong>{issue.title || gateLabel(issue.gate)}</strong>
-                                <span className="df2-vd-explain-gate is-muted" title={issue.gate}>
-                                  {gateLabel(issue.gate)}
-                                  <code>{issue.gate}</code>
-                                </span>
+                                <strong>{explainIssueTitle(issue)}</strong>
+                                {!isInternalGateId(issue.gate) && (
+                                  <span className="df2-vd-explain-gate is-muted" title={issue.gate}>
+                                    {gateLabel(issue.gate)}
+                                    <code>{issue.gate}</code>
+                                  </span>
+                                )}
                                 {issue.what && <p>{issue.what}</p>}
                                 {issue.why && <p className="df2-vd-explain-why"><em>Why:</em> {issue.why}</p>}
                                 {issue.fix && <p className="df2-vd-explain-fix"><em>Fix:</em> {issue.fix}</p>}
@@ -3183,10 +3201,18 @@ export function ValidateDashboard({
                       {schemaDriftCompatibilityHeadline(b.details)}
                     </p>
                   )}
-                  {(
-                    b.details?.compliance_ack_required === true
-                    || /pii\/compliance|compliance review/i.test(b.message)
-                  ) && onAcknowledgeCompliance && (
+                  {/* Only the API's own ack flag may offer an unlocking approval.
+                      A PII-shaped message with the flag false is a finding the
+                      operator cannot approve away — say so instead of a button
+                      that re-validates to the same block. */}
+                  {b.details?.compliance_ack_required === false
+                    && /pii\/compliance|compliance review/i.test(b.message) && (
+                    <p className="df2-vd-blocker-fix-note">
+                      PII approval does not clear this blocker — resolve the data or
+                      schema cause named above, then re-run Validate.
+                    </p>
+                  )}
+                  {b.details?.compliance_ack_required === true && onAcknowledgeCompliance && (
                     <div className="df2-vd-blocker-actions df2-vd-fix-actions">
                       <Button
                         size="sm"
