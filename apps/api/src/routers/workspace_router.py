@@ -105,6 +105,10 @@ class AiProviderBody(BaseModel):
     base_url: str | None = None
 
 
+class PilotEngineBody(BaseModel):
+    engine: str = Field(description="auto | local | hybrid | cloud")
+
+
 class ApiKeyCreateBody(BaseModel):
     name: str = Field(default="API key", max_length=64)
 
@@ -190,7 +194,9 @@ async def get_ai_providers():
 
 
 @router.patch("/ai-providers/{provider}")
-async def patch_ai_provider(provider: str, body: AiProviderBody, request: Request):
+def patch_ai_provider(provider: str, body: AiProviderBody, request: Request):
+    # Sync on purpose: the live key check does blocking network I/O, so FastAPI
+    # must run this in a worker thread instead of on the event loop.
     from services.audit_log import append_audit_event
     from services.integrations_store import update_ai_provider
 
@@ -222,6 +228,70 @@ async def patch_ai_provider(provider: str, body: AiProviderBody, request: Reques
         details={"provider": provider, "enabled": updated.get("enabled"), "model": updated.get("model")},
     )
     return updated
+
+
+@router.post("/ai-providers/{provider}/test")
+def test_ai_provider(provider: str):
+    """Live-check the stored key for a provider without asking for it again.
+
+    Sync on purpose: the check does blocking network I/O.
+    """
+    from services.integrations_store import resolve_provider_api_key
+
+    from ..ai.llm.provider import clear_auth_failures, get_model_capabilities, verify_cloud_api_key
+
+    if provider not in {"openai", "anthropic"}:
+        raise HTTPException(status_code=400, detail=f"{provider} has no cloud key to test")
+
+    clear_auth_failures()
+    key = resolve_provider_api_key(provider)
+    if not key:
+        return {
+            "ok": False,
+            "provider": provider,
+            "error": "No API key is saved for this provider.",
+            "capabilities": get_model_capabilities(),
+        }
+    ok, err = verify_cloud_api_key(provider, key)
+    return {
+        "ok": ok,
+        "provider": provider,
+        "error": "" if ok else (err or "API key rejected"),
+        "capabilities": get_model_capabilities(),
+    }
+
+
+@router.get("/pilot-engine")
+async def get_pilot_engine():
+    from services.integrations_store import get_pilot_engine_preference
+
+    from ..ai.llm.provider import pilot_engine_decision
+
+    decision = pilot_engine_decision()
+    return {"preference": get_pilot_engine_preference(), **decision}
+
+
+@router.patch("/pilot-engine")
+async def patch_pilot_engine(body: PilotEngineBody, request: Request):
+    from services.audit_log import append_audit_event
+    from services.integrations_store import set_pilot_engine_preference
+
+    from ..ai.llm.provider import pilot_engine_decision
+
+    try:
+        saved = set_pilot_engine_preference(body.engine)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    decision = pilot_engine_decision()
+    append_audit_event(
+        action="workspace.pilot_engine.update",
+        resource="/workspace/pilot-engine",
+        actor=_actor(request),
+        level="info",
+        details={"preference": saved, "engine": decision["engine"], "source": decision["source"]},
+    )
+    return {"preference": saved, **decision}
 
 
 @router.get("/api-keys")

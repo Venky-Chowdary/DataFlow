@@ -8,7 +8,7 @@ import { PageFrame } from "../components/ui/PageFrame";
 import { PageShell } from "../components/ui/PageShell";
 import { useToast } from "../components/Toast";
 import { useConfirm } from "../components/ui/ConfirmDialog";
-import { fetchAuditEvents, fetchAiProviderSettings, fetchModelCapabilities, fetchSsoConfigs, fetchSecurityPosture, downloadSecurityReport, fetchWorkspaceApiKeys, fetchWorkspaceSettings, ModelCapabilities, createWorkspaceApiKey, resolveApiBase, revokeWorkspaceApiKey, SecurityPosture, SsoConfig, SsoType, testSsoConfig, updateAiProviderSettings, updateSsoConfig, updateWorkspaceSettings, WorkspaceApiKey } from "../lib/api";
+import { fetchAuditEvents, fetchAiProviderSettings, fetchModelCapabilities, fetchPilotEngineStatus, PilotEngineChoice, PilotEngineStatus, testAiProviderKey, updatePilotEngine, fetchSsoConfigs, fetchSecurityPosture, downloadSecurityReport, fetchWorkspaceApiKeys, fetchWorkspaceSettings, ModelCapabilities, createWorkspaceApiKey, resolveApiBase, revokeWorkspaceApiKey, SecurityPosture, SsoConfig, SsoType, testSsoConfig, updateAiProviderSettings, updateSsoConfig, updateWorkspaceSettings, WorkspaceApiKey } from "../lib/api";
 import { NotificationSettings } from "./settings/NotificationSettings";
 import { TeamSettings } from "./settings/TeamSettings";
 import { TenantSettings } from "./settings/TenantSettings";
@@ -57,6 +57,9 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
   const [aiEditor, setAiEditor] = useState<string | null>(null);
   const [aiDraft, setAiDraft] = useState({ api_key: "", model: "", base_url: "", enabled: true });
   const [aiSaving, setAiSaving] = useState(false);
+  const [aiTesting, setAiTesting] = useState<string | null>(null);
+  const [engineStatus, setEngineStatus] = useState<PilotEngineStatus | null>(null);
+  const [engineSaving, setEngineSaving] = useState(false);
   const [apiKeys, setApiKeys] = useState<WorkspaceApiKey[]>([]);
   const [apiKeysLoading, setApiKeysLoading] = useState(false);
   const [apiKeyGenerating, setApiKeyGenerating] = useState(false);
@@ -105,6 +108,7 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
         }),
       )
       .finally(() => setModelCapabilitiesLoaded(true));
+    fetchPilotEngineStatus().then(setEngineStatus).catch(() => setEngineStatus(null));
     fetchSsoConfigs().then(setSsoConfigs).catch(() => setSsoConfigs(null));
     fetchWorkspaceSettings()
       .then((ws) => {
@@ -189,8 +193,17 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
     setAiSaving(true);
     try {
       await updateAiProviderSettings(aiEditor, aiDraft);
-      setModelCapabilities(await fetchModelCapabilities());
-      toast({ title: "AI provider updated", message: `${aiEditor} settings saved and applied.`, tone: "success" });
+      const [caps, engine] = await Promise.all([fetchModelCapabilities(), fetchPilotEngineStatus()]);
+      setModelCapabilities(caps);
+      setEngineStatus(engine);
+      toast({
+        title: "AI provider updated",
+        message:
+          engine.engine === "local"
+            ? `${aiEditor} saved. Pilot is still on the local engine — ${engine.reason}`
+            : `${aiEditor} saved. Pilot now answers through it (${engine.engine}).`,
+        tone: "success",
+      });
       setAiEditor(null);
     } catch (err) {
       toast({
@@ -200,6 +213,48 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
       });
     } finally {
       setAiSaving(false);
+    }
+  };
+
+  const testProviderKey = async (provider: string) => {
+    setAiTesting(provider);
+    try {
+      const result = await testAiProviderKey(provider);
+      setModelCapabilities(result.capabilities);
+      setEngineStatus(await fetchPilotEngineStatus());
+      toast({
+        title: result.ok ? `${provider} key works` : `${provider} key rejected`,
+        message: result.ok
+          ? "The provider accepted the saved key."
+          : result.error || "The provider rejected the saved key.",
+        tone: result.ok ? "success" : "error",
+      });
+    } catch (err) {
+      toast({
+        title: "Key test failed",
+        message: err instanceof Error ? err.message : "Could not test the saved key.",
+        tone: "error",
+      });
+    } finally {
+      setAiTesting(null);
+    }
+  };
+
+  const saveEngineChoice = async (engine: PilotEngineChoice) => {
+    setEngineSaving(true);
+    try {
+      const status = await updatePilotEngine(engine);
+      setEngineStatus(status);
+      setModelCapabilities(await fetchModelCapabilities());
+      toast({ title: "Pilot engine updated", message: status.reason, tone: "success" });
+    } catch (err) {
+      toast({
+        title: "Could not change engine",
+        message: err instanceof Error ? err.message : "Pilot engine setting was not saved.",
+        tone: "error",
+      });
+    } finally {
+      setEngineSaving(false);
     }
   };
 
@@ -607,6 +662,26 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                             : "Local deterministic engine active while model status loads."}
                         </p>
                       </div>
+                      <div className="df2-settings-field">
+                        <label htmlFor="pilot-engine">Pilot engine</label>
+                        <select
+                          id="pilot-engine"
+                          className="df2-select"
+                          disabled={engineSaving || !engineStatus}
+                          value={engineStatus?.preference ?? "auto"}
+                          onChange={(e) => void saveEngineChoice(e.target.value as PilotEngineChoice)}
+                        >
+                          <option value="auto">Auto — use a configured provider, else local</option>
+                          <option value="local">Local engine only</option>
+                          <option value="hybrid">Hybrid — local tools, provider wording</option>
+                          <option value="cloud">Cloud provider</option>
+                        </select>
+                        <p className="df2-settings-hint">
+                          {engineStatus
+                            ? `Resolved: ${engineStatus.engine} — ${engineStatus.reason}`
+                            : "Loading which engine Pilot will use…"}
+                        </p>
+                      </div>
                       <div className="df2-model-route">
                         {(modelCapabilities?.fallback_order ?? ["local", "ollama", "anthropic", "openai"]).map((provider, index) => (
                           <span key={provider}>
@@ -641,19 +716,34 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                         </span>
                       </div>
                       <p className="df2-model-best">{provider.best_for}</p>
+                      {provider.blocked_reason && (
+                        <p className="df2-settings-hint">{provider.blocked_reason}</p>
+                      )}
                       <div className="df2-model-roles">
                         {provider.roles.slice(0, 4).map((role) => (
                           <span key={role}>{role.replace(/_/g, " ")}</span>
                         ))}
                       </div>
                       {provider.provider !== "local" && (
-                        <button
-                          type="button"
-                          className="df2-btn df2-btn-sm df2-btn-primary"
-                          onClick={() => void openAiEditor(provider.provider, provider.default_model)}
-                        >
-                          {provider.available ? "Update credentials" : "Configure"}
-                        </button>
+                        <div className="df2-model-card-actions">
+                          <button
+                            type="button"
+                            className="df2-btn df2-btn-sm df2-btn-primary"
+                            onClick={() => void openAiEditor(provider.provider, provider.default_model)}
+                          >
+                            {provider.available ? "Update credentials" : "Configure"}
+                          </button>
+                          {provider.tier === "cloud" && provider.configured && (
+                            <button
+                              type="button"
+                              className="df2-btn df2-btn-sm"
+                              disabled={aiTesting === provider.provider}
+                              onClick={() => void testProviderKey(provider.provider)}
+                            >
+                              {aiTesting === provider.provider ? "Testing…" : "Test key"}
+                            </button>
+                          )}
+                        </div>
                       )}
                     </article>
                   ))}

@@ -651,6 +651,9 @@ export interface ModelCapabilities {
   active_model: string;
   agent_mode: string;
   pilot_engine?: string;
+  pilot_engine_source?: string;
+  pilot_engine_reason?: string;
+  configured_providers?: string[];
   fallback_order: string[];
   providers: {
     provider: string;
@@ -663,6 +666,7 @@ export interface ModelCapabilities {
     package_installed: boolean;
     available: boolean;
     status: string;
+    blocked_reason?: string;
   }[];
   guarantees: string[];
 }
@@ -2685,6 +2689,43 @@ export async function updateAiProviderSettings(provider: string, body: {
     body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error(await parseApiError(res, "Failed to save AI provider settings"));
+  return res.json();
+}
+
+export type PilotEngineChoice = "auto" | "local" | "hybrid" | "cloud";
+
+export type PilotEngineStatus = {
+  preference: PilotEngineChoice;
+  engine: string;
+  source: string;
+  reason: string;
+  configured_providers: string[];
+};
+
+export async function testAiProviderKey(provider: string): Promise<{
+  ok: boolean;
+  provider: string;
+  error: string;
+  capabilities: ModelCapabilities;
+}> {
+  const res = await apiFetch(`${API_BASE}/workspace/ai-providers/${provider}/test`, { method: "POST" });
+  if (!res.ok) throw new Error(await parseApiError(res, "Provider key test failed"));
+  return res.json();
+}
+
+export async function fetchPilotEngineStatus(): Promise<PilotEngineStatus> {
+  const res = await apiFetch(`${API_BASE}/workspace/pilot-engine`);
+  if (!res.ok) throw new Error("Failed to load Pilot engine setting");
+  return res.json();
+}
+
+export async function updatePilotEngine(engine: PilotEngineChoice): Promise<PilotEngineStatus> {
+  const res = await apiFetch(`${API_BASE}/workspace/pilot-engine`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ engine }),
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to save Pilot engine setting"));
   return res.json();
 }
 

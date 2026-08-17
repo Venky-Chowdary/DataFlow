@@ -522,35 +522,122 @@ def _package_available(package: str) -> bool:
         return False
 
 
-def resolve_pilot_engine() -> str:
-    """Single source of truth for Pilot engine selection.
+def pilot_engine_decision() -> dict:
+    """Which engine Pilot will use, and the reason — never a credential.
 
-    Local Datawrap engine is always the primary chatbot.
-    OpenAI / Anthropic / Ollama are optional add-ons — only used when the
-    operator explicitly sets DATAFLOW_PILOT_ENGINE=hybrid|cloud.
-    ``auto`` (default) == local.
+    Precedence: DATAFLOW_PILOT_ENGINE, then the saved workspace preference,
+    then ``auto``. Under ``auto`` a cloud provider the operator configured in
+    Settings turns Pilot hybrid; with nothing configured Pilot stays on the
+    local engine, which always works offline.
     """
-    raw = (getenv_brand("PILOT_ENGINE") or "auto").strip().lower()
-    if raw in {"hybrid", "cloud"}:
-        return raw
-    # auto / local / unset / anything else → local primary engine
-    return "local"
+    from services.integrations_store import (
+        configured_ai_providers,
+        get_pilot_engine_preference,
+    )
+
+    try:
+        configured = list(configured_ai_providers())
+    except Exception:
+        configured = []
+
+    env_raw = (getenv_brand("PILOT_ENGINE") or "").strip().lower()
+    if env_raw in {"local", "hybrid", "cloud"}:
+        return {
+            "engine": env_raw,
+            "source": "environment",
+            "reason": f"DATAFLOW_PILOT_ENGINE={env_raw} pins the engine.",
+            "configured_providers": configured,
+        }
+
+    try:
+        saved = get_pilot_engine_preference()
+    except Exception:
+        saved = "auto"
+
+    if saved == "local":
+        return {
+            "engine": "local",
+            "source": "workspace_setting",
+            "reason": "Settings → AI Models pins Pilot to the local engine.",
+            "configured_providers": configured,
+        }
+
+    if saved in {"hybrid", "cloud"}:
+        reason = (
+            f"Settings → AI Models selects {saved}; configured provider(s): "
+            f"{', '.join(configured)}."
+            if configured
+            else (
+                f"Settings → AI Models selects {saved}, but no provider key is "
+                "configured — Pilot answers on the local engine until one is saved."
+            )
+        )
+        return {
+            "engine": saved,
+            "source": "workspace_setting",
+            "reason": reason,
+            "configured_providers": configured,
+        }
+
+    if configured:
+        return {
+            "engine": "hybrid",
+            "source": "configured_provider",
+            "reason": (
+                f"Provider key configured for {', '.join(configured)} — Pilot runs its "
+                "tools locally, then uses that provider for the answer."
+            ),
+            "configured_providers": configured,
+        }
+
+    return {
+        "engine": "local",
+        "source": "default",
+        "reason": "No AI provider key configured — Pilot uses the local engine.",
+        "configured_providers": [],
+    }
+
+
+def resolve_pilot_engine() -> str:
+    """Single source of truth for Pilot engine selection."""
+    return pilot_engine_decision()["engine"]
 
 
 def pick_narration_provider():
-    """Optional polish providers when engine is explicitly hybrid/cloud.
+    """Optional polish provider when the engine is hybrid/cloud.
 
-    Never required for Pilot to work. Prefer self-hosted Ollama, then cloud.
+    Never required for Pilot to work. A provider the operator configured with a
+    key wins, because that is the one they asked us to use; otherwise a
+    self-hosted Ollama is preferred over nothing.
     """
+    builders = {
+        "openai": (DataTransferOpenAIProvider, "openai_polish"),
+        "anthropic": (DataTransferAnthropicProvider, "anthropic_polish"),
+    }
+    try:
+        from services.integrations_store import configured_ai_providers
+
+        configured = configured_ai_providers()
+    except Exception:
+        configured = ()
+
+    for name in configured:
+        builder, method = builders.get(name, (None, ""))
+        if builder is None:
+            continue
+        candidate = builder()
+        if candidate.is_available():
+            return candidate, method
+
     ollama = DataTransferOllamaProvider()
     if ollama.is_available():
         return ollama, "ollama_polish"
-    anthropic = DataTransferAnthropicProvider()
-    if anthropic.is_available():
-        return anthropic, "anthropic_polish"
-    openai = DataTransferOpenAIProvider()
-    if openai.is_available():
-        return openai, "openai_polish"
+    for name, (builder, method) in builders.items():
+        if name in configured:
+            continue
+        candidate = builder()
+        if candidate.is_available():
+            return candidate, method
     return None, ""
 
 
@@ -568,50 +655,61 @@ def get_model_capabilities() -> dict:
     rows = []
     for item in MODEL_CAPABILITY_MATRIX:
         provider = providers[item["provider"]]
-        env_key = item.get("env_key") or ""
         persisted = stored.get(item["provider"], {})
-        configured = bool(os.environ.get(env_key)) if env_key else item["provider"] in {"ollama", "local"}
-        if env_key and persisted.get("configured"):
+        # `configured` from the store already means "a key resolves and the
+        # provider is enabled" — env or encrypted store, never a masked value.
+        if item["provider"] == "local":
             configured = True
-        if item["provider"] == "ollama" and persisted.get("base_url"):
-            configured = True
+        else:
+            configured = bool(persisted.get("configured"))
         installed = _package_available(item.get("package", ""))
         available = provider.is_available()
+        blocked_reason = ""
         if _provider_auth_failed(item["provider"]):
             available = False
             status = "invalid_key"
+            blocked_reason = (
+                "The provider rejected this key (401). Save a valid key, or press "
+                "Test key to re-check it."
+            )
         elif available:
             status = "ready"
         elif item["tier"] == "cloud":
             status = "configure"
+            if not installed:
+                blocked_reason = (
+                    f"The {item['package']} Python package is not installed on the API host."
+                )
+            elif not persisted.get("enabled", True):
+                blocked_reason = "Disabled in Settings — enable it to let Pilot use it."
+            elif not configured:
+                blocked_reason = "No API key saved for this provider."
+            else:
+                blocked_reason = "A key is saved but did not load — re-save it."
         else:
             status = "offline"
+            if item["provider"] == "ollama":
+                blocked_reason = "No Ollama server answered at the configured base URL."
         rows.append({
             **item,
             "configured": configured,
             "package_installed": installed,
             "available": available,
             "status": status,
+            "blocked_reason": blocked_reason,
         })
 
     active_local = next((p for p in rows if p["provider"] == "local"), rows[-1])
-    engine = resolve_pilot_engine()
+    decision = pilot_engine_decision()
+    engine = decision["engine"]
     if engine in {"hybrid", "cloud"}:
-        # Opt-in narration only — still prefer Ollama when polishing.
+        _picked, picked_mode = pick_narration_provider()
+        picked_name = picked_mode.replace("_polish", "")
         active = next(
-            (p for p in rows if p["available"] and p["provider"] == "ollama"),
-            None,
-        ) or next(
-            (p for p in rows if p["available"] and p["provider"] != "local"),
+            (p for p in rows if p["provider"] == picked_name and p["available"]),
             active_local,
         )
-        agent_mode = "local_tools"
-        if providers["ollama"].is_available():
-            agent_mode = "ollama_polish"
-        elif providers["anthropic"].is_available():
-            agent_mode = "anthropic_polish"
-        elif providers["openai"].is_available():
-            agent_mode = "openai_polish"
+        agent_mode = picked_mode or "local_tools"
     else:
         active = active_local
         agent_mode = "local_tools"
@@ -620,13 +718,16 @@ def get_model_capabilities() -> dict:
         "active_model": active.get("default_model") or active.get("model") or "local",
         "agent_mode": agent_mode,
         "pilot_engine": engine,
+        "pilot_engine_source": decision["source"],
+        "pilot_engine_reason": decision["reason"],
+        "configured_providers": decision["configured_providers"],
         "fallback_order": ["local", "ollama", "anthropic", "openai"],
         "providers": rows,
         "guarantees": [
             "Primary chatbot = Datawrap local engine (NL → tools → compose). Works with zero cloud keys.",
-            "DATAFLOW_PILOT_ENGINE=auto|local (default): full Pilot chatbot offline — OpenAI/Anthropic/Ollama not required.",
-            "DATAFLOW_PILOT_ENGINE=hybrid|cloud: optional narration polish only; tools still run locally first.",
-            "OpenAI, Anthropic, and Ollama are user add-ons — never the first service provider.",
+            "Save a provider key in Settings and Pilot uses it automatically; with no key saved Pilot stays local.",
+            "DATAFLOW_PILOT_ENGINE, when set, overrides the workspace choice.",
+            "Cloud providers are optional and only narrate: tools, gates and proofs always run locally, so a provider outage changes wording, never correctness.",
             "Grounded tool results are executed once; mutations always require operator Confirm.",
             "Saving a cloud key in Settings live-checks it; invalid keys are rejected.",
         ],

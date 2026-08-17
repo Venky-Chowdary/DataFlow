@@ -763,36 +763,16 @@ class DataPilotAgent:
         from concurrent.futures import wait, FIRST_COMPLETED
 
         llm_futs: list = []
-        # Self-hosted Ollama first, then cloud — OpenAI is optional.
-        if self._ollama_available_quick():
+        # A provider the operator configured in Settings goes first — that is the
+        # one they asked us to use; a self-hosted Ollama is the fallback.
+        native = self._first_available_native_agent()
+        if native is not None:
             llm_futs.append(
                 _executor.submit(
-                    bind_current_context(self._ollama_agent),
+                    bind_current_context(native),
                     message, history or [], system, data_context,
                 )
             )
-        elif self.anthropic.is_available():
-            llm_futs.append(
-                _executor.submit(
-                    bind_current_context(self._anthropic_agent_loop),
-                    message, history or [], system, data_context,
-                )
-            )
-        else:
-            openai_ready = False
-            try:
-                from ..llm.provider import DataTransferOpenAIProvider
-
-                openai_ready = DataTransferOpenAIProvider().is_available()
-            except Exception:
-                openai_ready = False
-            if openai_ready:
-                llm_futs.append(
-                    _executor.submit(
-                        bind_current_context(self._openai_agent),
-                        message, history or [], system, data_context,
-                    )
-                )
 
         if not llm_futs:
             return _with_llm_footnote(polished, engine)
@@ -1016,6 +996,36 @@ class DataPilotAgent:
             return DataTransferOllamaProvider().is_available()
         except Exception:
             return False
+
+    def _first_available_native_agent(self):
+        """The native tool-loop runner to use, honouring the operator's choice.
+
+        Providers configured with a key in Settings (or via env) are tried in the
+        order the store reports them; a reachable self-hosted Ollama is the last
+        resort. ``None`` means Pilot answers from the local engine alone.
+        """
+        try:
+            from services.integrations_store import configured_ai_providers
+
+            configured = list(configured_ai_providers())
+        except Exception:
+            configured = []
+
+        for name in configured:
+            if name == "openai":
+                try:
+                    from ..llm.provider import DataTransferOpenAIProvider
+
+                    if DataTransferOpenAIProvider().is_available():
+                        return self._openai_agent
+                except Exception:
+                    continue
+            elif name == "anthropic" and self.anthropic.is_available():
+                return self._anthropic_agent_loop
+
+        if self._ollama_available_quick():
+            return self._ollama_agent
+        return None
 
     @staticmethod
     def _append_tool_actions(turn: PilotTurn, tr: ToolResult) -> None:

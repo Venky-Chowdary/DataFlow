@@ -5497,6 +5497,14 @@ body {
   margin-top: 12px;
 }
 
+.df2-model-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+}
+
 .df2-model-roles span,
 .df2-model-checks span {
   padding: 4px 7px;
