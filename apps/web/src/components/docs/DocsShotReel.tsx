@@ -53,9 +53,12 @@ export function DocsShotReel({ frames, intervalMs = 4200, className = "" }: Docs
               type="button"
               role="tab"
               aria-selected={i === index}
+              aria-label={`Show screenshot ${i + 1} of ${safe.length}: ${frame.alt}`}
               className={i === index ? "is-active" : ""}
               onClick={() => setIndex(i)}
-            />
+            >
+              <span className="docs-shot-reel-dot" aria-hidden />
+            </button>
           ))}
         </div>
       ) : null}

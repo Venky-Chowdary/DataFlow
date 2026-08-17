@@ -4865,7 +4865,6 @@ body {
 }
 
 .df2-btn {
-  height: 38px;
   border-color: #d7dfd8;
   background: rgba(255, 255, 255, 0.92);
   color: #26312a;
@@ -6212,15 +6211,23 @@ html,
 
 /* Toasts — notification system (authoritative styles; host rendered by ToastProvider) */
 
+/* Bottom-right, not under the topbar: a top-right stack landed on top of the
+   page header and the first field of every form (measured on Query and
+   Contracts), and it fought the Pilot edge tab for the same corner. Bottom
+   right also matches the small-screen placement below, so the notification
+   never moves house between widths. */
 .dt-toast-host {
   position: fixed;
-  top: calc(var(--df-header-height, 56px) + 12px);
+  bottom: 16px;
   right: 16px;
   z-index: var(--df-z-toast, 1100);
   display: flex;
-  flex-direction: column;
+  flex-direction: column-reverse;
   gap: 10px;
   width: var(--df-toast-width);
+  max-height: calc(100vh - var(--df-header-height, 56px) - 32px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
   pointer-events: none;
 }
 

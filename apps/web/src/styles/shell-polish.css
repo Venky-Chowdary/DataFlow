@@ -1002,19 +1002,20 @@ select.df2-select {
 
 .df2-connector-select-row {
   display: flex;
-  align-items: center;
+  align-items: stretch;
   gap: 10px;
+  min-height: var(--df-control-height, 36px);
 }
 
 .df2-connector-select-icon {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 40px;
-  height: 40px;
-  flex-shrink: 0;
+  width: auto;
+  aspect-ratio: 1;
+  flex: 0 0 auto;
   border: 1px solid var(--df-border, #e2e8f0);
-  border-radius: 10px;
+  border-radius: var(--df-radius-md, 8px);
   background: #fff;
 }
 
@@ -5002,7 +5003,7 @@ textarea.df2-pilot-composer textarea {
   gap: 8px 10px;
   align-items: center;
   padding: 14px 14px 12px;
-  border-radius: 12px;
+  border-radius: var(--df-radius-card, 8px);
   background: linear-gradient(180deg, #fff 0%, #f8fafc 100%);
   border: 1px solid #e2e8f0;
   box-shadow: 0 2px 8px rgba(15, 23, 42, 0.05);
@@ -5799,6 +5800,12 @@ textarea.df2-pilot-composer textarea {
 .df-section-loader .dt-loading-block {
   width: 100%;
   max-width: 360px;
+}
+
+.df2-page.df2-route-loading {
+  display: grid;
+  place-items: center;
+  min-height: min(60vh, 520px);
 }
 
 .dt-loading-block {

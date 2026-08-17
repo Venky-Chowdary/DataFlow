@@ -1843,15 +1843,13 @@ body {
 
 .df2-btn {
   font-size: 13px;
-  padding: 7px 14px;
-  min-height: 34px;
-  border-radius: 8px;
+  padding: 0 14px;
+  border-radius: var(--df-radius-md, 8px);
 }
 
 .df2-btn-lg {
   font-size: 14px;
-  padding: 9px 18px;
-  min-height: 38px;
+  padding: 0 18px;
 }
 
 .df2-card-head {
