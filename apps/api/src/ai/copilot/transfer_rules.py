@@ -24,6 +24,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from .schedule_cadence import cadence_qualifiers
+
 # Engine operator spellings (services.row_filter._FILTER_OPS). The analytics
 # filter parser uses "not_null"; the engine wants "is_not_null" — do not mix.
 _NEGATE = {
@@ -295,6 +297,21 @@ _RULES_PREFIX_RE = re.compile(
 )
 
 
+def _merged(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """Overlapping cuts merged, ordered back to front so indexes stay valid.
+
+    Two rules can claim overlapping words ("every monday" and "monday"); cutting
+    both separately would splice the route text at stale offsets.
+    """
+    merged: list[tuple[int, int]] = []
+    for start, end in sorted(set(spans)):
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return list(reversed(merged))
+
+
 def parse_transfer_data_rules(message: str) -> tuple[str, TransferDataRules]:
     """Split a transfer request into its route text and its data rules.
 
@@ -329,11 +346,12 @@ def parse_transfer_data_rules(message: str) -> tuple[str, TransferDataRules]:
         cadence = cadence or m.group(1).strip().lower()
         cut(m)
     if cadence:
-        questions.append(
-            f"Chat stages a single run, so it will not make this {cadence} on its own. "
-            "Create the recurring run in Schedules (or say “open schedules”) once "
-            "this transfer is proven."
-        )
+        # The time, weekday and zone that qualify the cadence travel with it —
+        # "nightly at 2am IST" is one instruction, and leaving the tail in the
+        # route text would name a connector "Warehouse at 2am IST".
+        for start, end in cadence_qualifiers(text):
+            cadence = f"{cadence} {text[start:end].strip()}".strip()
+            cuts.append((start, end))
 
     for m in _LIMIT_RE.finditer(text):
         try:
@@ -418,7 +436,7 @@ def parse_transfer_data_rules(message: str) -> tuple[str, TransferDataRules]:
         applied.append(f"upsert (dedupe) keyed on {dedupe_key}")
 
     route = text
-    for start, end in sorted(set(cuts), reverse=True):
+    for start, end in _merged(cuts):
         route = f"{route[:start]} {route[end:]}"
     route = re.sub(r"\s*,\s*(?=,|$)", "", route)
     route = re.sub(r"[,;]\s*$", "", route.strip())

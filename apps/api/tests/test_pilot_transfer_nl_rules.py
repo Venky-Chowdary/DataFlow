@@ -244,15 +244,16 @@ def test_masking_is_named_as_a_studio_control():
     assert "Map" in " ".join(rules.questions)
 
 
-def test_cadence_is_never_silently_scheduled():
+def test_cadence_is_carried_as_a_cadence_not_dropped_into_the_route():
+    # A cadence is now honoured by staging a schedule (see
+    # test_pilot_schedule_nl.py), so it must survive parsing intact — and must
+    # not be read as part of the destination connector's name.
     intent = parse_transfer_intent(
         "sync the orders collection from Mongo Prod into Snowflake DW nightly"
     )
     assert intent is not None
     assert intent["dest_connector_name"] == "Snowflake DW"
     assert intent["cadence"] == "nightly"
-    assert intent["plan_only"] is True
-    assert "Schedules" in " ".join(intent["rule_questions"])
 
 
 def test_all_tables_is_not_read_as_a_table_named_tables():

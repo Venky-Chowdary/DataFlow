@@ -11,6 +11,7 @@ from typing import Any, Callable
 from services.value_serializer import json_default
 
 from .data_analyst import get_data_analyst
+from .tool_permissions import current_caller_role, denial_message, is_tool_allowed
 from .transfer_rules import parse_transfer_data_rules
 
 
@@ -449,6 +450,44 @@ TOOL_DEFINITIONS: list[dict] = [
         },
     },
     {
+        "name": "create_schedule",
+        "description": (
+            "Stage a recurring pipeline (schedule) between two saved connectors for the "
+            "operator to Confirm. Grounds the route against live schemas, requires "
+            "preflight to clear, and stores the approved mapping on the schedule. "
+            "Cadence is the operator's own wording — “nightly at 2am in Asia/Kolkata”, "
+            "“every 15 minutes”, “weekly on Monday”, or a 5-field cron. This creates "
+            "nothing on its own: the schedule exists only after Confirm."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "source_connector_name": {"type": "string"},
+                "source_table": {"type": "string"},
+                "dest_connector_name": {"type": "string"},
+                "dest_table": {"type": "string"},
+                "cadence": {
+                    "type": "string",
+                    "description": "Cadence wording, with time/timezone when stated",
+                },
+                "sync_mode": {"type": "string"},
+                "cursor_column": {
+                    "type": "string",
+                    "description": "Watermark column — required for incremental modes",
+                },
+                "name": {"type": "string", "description": "Schedule display name"},
+                "validation_mode": {"type": "string", "enum": ["strict", "balanced", "lenient"]},
+                "schema_policy": {
+                    "type": "string",
+                    "enum": ["manual_review", "type_locked", "pause_on_change"],
+                },
+                "contract_id": {"type": "string"},
+                "require_signed_contract": {"type": "boolean"},
+            },
+            "required": ["cadence"],
+        },
+    },
+    {
         "name": "list_contracts",
         "description": "List data contracts available in the workspace.",
         "input_schema": {
@@ -733,6 +772,7 @@ TOOL_FAMILIES: list[dict] = [
             "list_schedules",
             "get_schedule",
             "run_schedule_now",
+            "create_schedule",
             "list_contracts",
             "open_job",
             "open_schedule",
@@ -808,6 +848,7 @@ class DataPilotTools:
             "list_schedules": self._list_schedules,
             "get_schedule": self._get_schedule,
             "run_schedule_now": self._run_schedule_now,
+            "create_schedule": self._create_schedule,
             "list_contracts": self._list_contracts,
             "open_job": self._open_job,
             "open_schedule": self._open_schedule,
@@ -825,6 +866,18 @@ class DataPilotTools:
         handler = handlers.get(name)
         if not handler:
             return ToolResult(name=name, success=False, output=None, error=f"Unknown tool: {name}")
+        # One chokepoint for permissions: every path into a tool — the
+        # deterministic planner, an LLM tool loop, a recovery follow-up — comes
+        # through here, so none of them can reach a tool the caller's role does
+        # not hold.
+        role = current_caller_role()
+        if not is_tool_allowed(role, name):
+            return ToolResult(
+                name=name,
+                success=False,
+                output=None,
+                error=denial_message(role, name),
+            )
         try:
             return handler(**args)
         except TypeError as e:
@@ -2228,6 +2281,64 @@ class DataPilotTools:
             all_tables=all_tables,
         )
 
+    def _create_schedule(
+        self,
+        source_connector_id: str = "",
+        source_connector_name: str = "",
+        source_table: str = "",
+        dest_connector_id: str = "",
+        dest_connector_name: str = "",
+        dest_table: str = "",
+        sync_mode: str = "",
+        schema_policy: str = "manual_review",
+        validation_mode: str = "balanced",
+        cadence: str = "",
+        name: str = "",
+        cursor_column: str = "",
+        source_timezone: str = "",
+        source_read_mode: str = "",
+        procedure_call: str = "",
+        source_query: str = "",
+        procedure_params: Any = None,
+        contract_id: str = "",
+        require_signed_contract: Any = None,
+        source_filter: dict | None = None,
+        upsert_key: str = "",
+        dedupe_key: str = "",
+        rule_questions: list | None = None,
+        applied_rules: list | None = None,
+        limit: int = 0,
+    ) -> ToolResult:
+        from .schedule_tools import create_schedule
+
+        return create_schedule(
+            source_connector_id=source_connector_id,
+            source_connector_name=source_connector_name,
+            source_table=source_table,
+            dest_connector_id=dest_connector_id,
+            dest_connector_name=dest_connector_name,
+            dest_table=dest_table,
+            sync_mode=sync_mode,
+            schema_policy=schema_policy,
+            validation_mode=validation_mode,
+            cadence=cadence,
+            name=name,
+            cursor_column=cursor_column,
+            source_timezone=source_timezone,
+            source_read_mode=source_read_mode,
+            procedure_call=procedure_call,
+            source_query=source_query,
+            procedure_params=procedure_params,
+            contract_id=contract_id,
+            require_signed_contract=require_signed_contract,
+            source_filter=source_filter,
+            upsert_key=upsert_key,
+            dedupe_key=dedupe_key,
+            rule_questions=rule_questions,
+            applied_rules=applied_rules,
+            limit=limit,
+        )
+
     def _analyze_result(
         self,
         result_id: str = "",
@@ -2777,6 +2888,8 @@ _TOOL_PRIORITY: dict[str, int] = {
     "list_connector_objects": 84,
     "create_connector": 82,
     "remediate_validation": 80,
+    # A cadence names a standing instruction, so it outranks a one-off run.
+    "create_schedule": 109,
     "run_schedule_now": 78,
     "get_job": 75,
     "get_preflight_run": 74,
@@ -2865,7 +2978,7 @@ def prune_planned_tools(planned: list[tuple[str, dict]]) -> list[tuple[str, dict
         names = {n for n, _ in planned}
     # A concrete transfer already contains the mapping, gates and route, so the
     # generic advice tools beside it are redundant noise.
-    if names & {"start_transfer", "plan_transfer"}:
+    if names & {"start_transfer", "plan_transfer", "create_schedule"}:
         planned = [
             (n, a) for n, a in planned
             if n not in (
@@ -2880,7 +2993,7 @@ def prune_planned_tools(planned: list[tuple[str, dict]]) -> list[tuple[str, dict
     if "get_job" in names or "get_preflight_run" in names or "open_job" in names:
         planned = [(n, a) for n, a in planned if n != "list_jobs"]
     # Job / remediate: keep inventory lists for triage ("why did validate fail").
-    if "run_schedule_now" in names or "create_connector" in names:
+    if names & {"run_schedule_now", "create_connector", "create_schedule"}:
         planned = [
             (n, a) for n, a in planned
             if n not in (
@@ -3223,6 +3336,15 @@ def _asks_for_schema(lower: str) -> bool:
         re.search(r"\b(?:schema|columns|column list|describe|ddl|data ?types)\b", lower)
         and re.search(r"\b(?:show|list|what|describe|see|get|print|introspect)\b", lower)
     )
+
+
+# Wording that turns a transfer request into a standing one. Only consulted when
+# a transfer route was already parsed, so "show my schedules" cannot reach it.
+_SCHEDULE_INTENT_RE = re.compile(
+    r"\b(?:schedule|scheduled|scheduling|automate|automated|recurring|"
+    r"repeat|repeatedly|on\s+a\s+schedule)\b",
+    re.IGNORECASE,
+)
 
 
 def parse_transfer_intent(message: str) -> dict | None:
@@ -3907,7 +4029,19 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
     if transfer_intent:
         plan_only = transfer_intent.pop("plan_only", False)
         transfer_intent = {k: v for k, v in transfer_intent.items() if v}
-        planned.append(("plan_transfer" if plan_only else "start_transfer", transfer_intent))
+        # A cadence ("nightly at 2am") or an explicit "schedule this" is a
+        # standing instruction, not a single run — staging one run instead would
+        # move the data once and quietly never again.
+        recurring = bool(transfer_intent.get("cadence")) or (
+            bool(_SCHEDULE_INTENT_RE.search(lower))
+            and "run_schedule_now" not in {n for n, _ in planned}
+        )
+        if recurring and not plan_only:
+            planned.append(("create_schedule", {
+                k: v for k, v in transfer_intent.items() if k != "all_tables"
+            }))
+        else:
+            planned.append(("plan_transfer" if plan_only else "start_transfer", transfer_intent))
 
     if not transfer_intent and any(
         w in lower
@@ -4288,7 +4422,13 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
                 planned = [(n, a) for n, a in planned if n != "search_knowledge"]
 
     # Schedule tools always beat accidental sample parses ("details on schedule X").
-    if any(n in {"open_schedule", "get_schedule", "run_schedule_now", "list_schedules"} for n, _ in planned):
+    if any(
+        n in {
+            "open_schedule", "get_schedule", "run_schedule_now",
+            "list_schedules", "create_schedule",
+        }
+        for n, _ in planned
+    ):
         planned = [(n, a) for n, a in planned if n != "sample_connector_object"]
 
     # Explicit SQL — either "run this sql: …" or a genuinely pasted statement.
@@ -4682,7 +4822,7 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
             "list_connectors", "list_schedules", "aggregate_data",
             "list_connector_objects", "sample_connector_object", "plan_transfer",
             "start_transfer", "plan_transfer_route", "create_connector",
-            "run_schedule_now", "introspect_connector_schema",
+            "run_schedule_now", "create_schedule", "introspect_connector_schema",
         }
         names = {n for n, _ in planned}
         if planned and (names & keep):
@@ -4705,7 +4845,9 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
 
     # A stated transfer is the request; inventory/advice tools that merely share
     # its vocabulary ("jobs", "upsert", "schema") must not answer in its place.
-    _staged = {n for n, _ in planned} & {"start_transfer", "plan_transfer"}
+    _staged = {n for n, _ in planned} & {
+        "start_transfer", "plan_transfer", "create_schedule"
+    }
     if _staged:
         planned = [
             (n, a) for n, a in planned
