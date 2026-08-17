@@ -292,25 +292,27 @@
    extra lines and the second row of idea cards came to rest sliced by the
    composer edge. Tightening the hero and clamping the idea description to one
    line keeps the whole state above the composer at 1024x900. */
+/* Scoped through .df2-app so the step out-specifies the unconditional hero and
+   idea sizes declared in enterprise-ui.css, which loads after this file. */
 @media (max-width: 1279px) {
-  .df2-pilot-v2 .df2-pilot-hero-icon {
+  .df2-app .df2-pilot-v2 .df2-pilot-hero-icon {
     margin-bottom: 4px;
   }
 
-  .df2-pilot-v2 .df2-pilot-title {
+  .df2-app .df2-pilot-v2 .df2-pilot-title {
     font-size: 19px;
   }
 
-  .df2-pilot-v2 .df2-pilot-subtitle {
+  .df2-app .df2-pilot-v2 .df2-pilot-subtitle {
     font-size: 12.5px;
     max-width: 440px;
   }
 
-  .df2-pilot-v2 .df2-pilot-idea {
+  .df2-app .df2-pilot-v2 .df2-pilot-idea {
     padding: 8px 10px;
   }
 
-  .df2-pilot-v2 .df2-pilot-idea-desc {
+  .df2-app .df2-pilot-v2 .df2-pilot-idea-desc {
     -webkit-line-clamp: 1;
   }
 }

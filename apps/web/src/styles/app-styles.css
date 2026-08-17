@@ -1210,9 +1210,9 @@ html:has(.df2-app) #root {
   min-height: var(--df-chip-height);
 }
 
-/* Inline text actions (copy id, rename, "open" links) stay visually compact but
+/* Inline text actions (copy id, "open" links) stay visually compact but
    claim a real target: padding grows the box, the label keeps its size. */
-.df2-app :is(.df2-copy-id-btn, .df2-job-name-rename-btn, .df2-overview-v3-link) {
+.df2-app :is(.df2-copy-id-btn, .df2-overview-v3-link) {
   min-height: var(--df-inline-action-h);
   display: inline-flex;
   align-items: center;
@@ -1231,10 +1231,15 @@ html:has(.df2-app) #root {
 /* The Pilot edge tab is fixed to the right edge. Reserve its width in the page
    gutter while it is showing — measured overlap before this: the Query editor
    textarea, the Benchmarks "Run fidelity proof" action, and the Contracts row
-   open control all sat underneath it at 1440px and below. */
+   open control all sat underneath it at 1440px and below. The gutter is set by
+   an `!important` shorthand above, so the reservation has to out-specify it or
+   it is silently dropped. */
 @media (min-width: 1024px) {
-  .df2-app.df2-app-with-edge .df2-content-inner {
-    padding-right: calc(var(--df-page-gutter, 24px) + var(--df-copilot-edge-w));
+  .df2-app.df2-app-with-edge
+    .df2-content-inner:not(.df2-content-flush):not(.df2-content-studio),
+  .df2-app.df2-app-with-edge .df2-content-inner.df2-content-flush,
+  .df2-app.df2-app-with-edge .df2-content-inner.df2-content-studio {
+    padding-right: calc(var(--df-page-gutter, 24px) + var(--df-copilot-edge-w)) !important;
   }
 }
 
