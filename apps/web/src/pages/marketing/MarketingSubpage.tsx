@@ -6,6 +6,15 @@ import {
   ProofCinema,
 } from "../../components/landing/AlgorithmCinema";
 import { MarketingInkHero } from "../../components/marketing/MarketingInkHero";
+import {
+  EvidencePlatesArt,
+  PlanLadderArt,
+} from "../../components/marketing/hero-art/companyArt";
+import {
+  LatticeArt,
+  PerimeterArt,
+  VaultArt,
+} from "../../components/marketing/hero-art/enterpriseArt";
 import { MarketingReveal } from "../../components/marketing/MarketingReveal";
 import { MarketingSectionFooter } from "../../components/marketing/MarketingSectionFooter";
 import { isHelpDocRoute } from "../../lib/helpDocs";
@@ -204,6 +213,11 @@ function PricingPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetStart
           { value: String(TRANSFER_READY_DRIVERS), label: "TRANSFER_READY drivers" },
           { value: "Custom", label: "Team & Enterprise" },
         ]}
+        aside={
+          <div className="lp-sales-hero-art">
+            <PlanLadderArt />
+          </div>
+        }
       />
 
       <MarketingReveal>
@@ -430,6 +444,11 @@ function EnterprisePage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetSt
           { value: "9 / 9", label: "Preflight required" },
           { value: "MATCH", label: "Dest-engine checksum" },
         ]}
+        aside={
+          <div className="lp-sales-hero-art">
+            <PerimeterArt />
+          </div>
+        }
       />
 
       <MarketingReveal>
@@ -541,6 +560,11 @@ function CustomersPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
           { value: String(TRANSFER_READY_DRIVERS), label: "TRANSFER_READY drivers" },
           { value: "0", label: "Silent drops by design" },
         ]}
+        aside={
+          <div className="lp-sales-hero-art">
+            <EvidencePlatesArt />
+          </div>
+        }
       />
 
       <section className="lp-cust3-metrics" aria-label="Who this is for">
@@ -871,6 +895,11 @@ function SecurityPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
           { value: "9 / 9", label: "Gates before write" },
           { value: "RBAC", label: "Studio · Pilot · MCP" },
         ]}
+        aside={
+          <div className="lp-sales-hero-art">
+            <VaultArt />
+          </div>
+        }
       />
 
       <MarketingReveal>
@@ -999,6 +1028,11 @@ function IntegrationsPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGet
           { value: "SQLA", label: "Generic SQL drivers" },
           { value: "DLQ", label: "Quarantine replay" },
         ]}
+        aside={
+          <div className="lp-sales-hero-art">
+            <LatticeArt readyCount={TRANSFER_READY_DRIVERS} />
+          </div>
+        }
       />
 
       <MarketingReveal>

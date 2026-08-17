@@ -6555,48 +6555,6 @@
   background: #f7f8fa;
 }
 
-.lp-wh-hero {
-  background:
-    radial-gradient(ellipse 60% 50% at 85% 20%, rgba(45, 212, 191, 0.16), transparent 55%),
-    linear-gradient(160deg, #071c1a 0%, #0a3d3a 50%, #0f766e 100%);
-  color: #ecfdf5;
-  padding: clamp(48px, 8vh, 84px) 0;
-}
-
-.lp-wh-hero-inner {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  gap: clamp(24px, 4vw, 40px);
-  align-items: center;
-}
-
-.lp-wh-hero-copy h1 {
-  font-family: var(--lp-font-display);
-  font-size: clamp(2.1rem, 4vw, 3.2rem);
-  font-weight: 760;
-  letter-spacing: -0.045em;
-  line-height: 1.08;
-  margin: 0 0 14px;
-  color: #fff;
-  max-width: 14ch;
-}
-
-.lp-wh-lead {
-  margin: 0 0 24px;
-  font-size: 16.5px;
-  line-height: 1.55;
-  color: rgba(236, 253, 245, 0.78);
-  max-width: 42ch;
-}
-
-.lp-wh-hero-visual {
-  min-width: 0;
-}
-
-.lp-wh-hero-visual > * {
-  max-width: 100%;
-}
-
 .lp-wh-rail {
   background: #fff;
   border-bottom: 1px solid var(--lp-line);
@@ -7815,7 +7773,6 @@
   .lp-cust3-featured-grid,
   .lp-cust3-story,
   .lp-cust3-metrics-row,
-  .lp-wh-hero-inner,
   .lp-wh-split-grid,
   .lp-wh-flow-list {
     grid-template-columns: 1fr !important;
