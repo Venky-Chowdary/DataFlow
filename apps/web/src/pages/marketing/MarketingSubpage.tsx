@@ -599,7 +599,7 @@ function CustomersPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
               {MARKETING_PROOF_HIGHLIGHTS.map((row) => (
                 <article key={row.title} className="lp-mkt-evidence-card">
                   <span className="lp-cust-industry">{row.stat}</span>
-                  <p><strong>{row.title}</strong> {row.body}</p>
+                  <p><strong>{row.title}.</strong> {row.body}</p>
                   <footer>
                     <strong>Measured {EVIDENCE_AS_OF}</strong>
                     <span>Live engines · destination re-read</span>
@@ -626,7 +626,7 @@ function CustomersPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
               {MARKETING_STACK.map((row) => (
                 <article key={row.family} className="lp-mkt-evidence-card">
                   <span className="lp-cust-industry">{row.family}</span>
-                  <p><strong>{row.items}</strong> {row.note}</p>
+                  <p><strong>{row.items}.</strong> {row.note}</p>
                 </article>
               ))}
             </div>

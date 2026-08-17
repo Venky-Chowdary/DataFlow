@@ -502,7 +502,7 @@ html:has(.lp) {
 }
 
 .lp-hero-mock {
-  width: min(1120px, 100%);
+  width: min(var(--lp-shell-max), 100%);
   margin: 52px auto 8px;
   border: 0;
   border-radius: 0;
@@ -870,7 +870,7 @@ html:has(.lp) {
 }
 
 .lp-section-head--left {
-  max-width: 1120px;
+  max-width: var(--lp-shell-max);
   text-align: left;
   margin-left: auto;
   margin-right: auto;
@@ -930,7 +930,7 @@ html:has(.lp) {
   align-items: center;
   justify-content: center;
   gap: 12px;
-  max-width: 1120px;
+  max-width: var(--lp-shell-max);
   margin: 28px auto 0;
   padding: 0 clamp(16px, 4vw, 40px);
   text-align: center;
@@ -961,7 +961,7 @@ html:has(.lp) {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 18px;
-  max-width: 1120px;
+  max-width: var(--lp-shell-max);
   margin: 0 auto;
 }
 
@@ -1014,7 +1014,7 @@ html:has(.lp) {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 16px;
-  max-width: 1120px;
+  max-width: var(--lp-shell-max);
   margin: 0 auto;
 }
 
@@ -1226,12 +1226,12 @@ html:has(.lp) {
 
 /* Tools */
 .lp-tools {
-  max-width: 1120px;
+  max-width: var(--lp-shell-max);
   margin: 0 auto;
 }
 
 .lp-marquee {
-  max-width: 1120px;
+  max-width: var(--lp-shell-max);
   margin: 0 auto 28px;
   display: grid;
   gap: 12px;
@@ -1338,7 +1338,7 @@ html:has(.lp) {
 
 .lp-enterprise {
   margin: 0 auto;
-  width: min(1120px, calc(100% - clamp(32px, 6vw, 80px)));
+  width: min(var(--lp-shell-max), calc(100% - clamp(32px, 6vw, 80px)));
   padding: clamp(36px, 5vw, 52px) 0;
   border-radius: 0;
   background: transparent;
@@ -2440,7 +2440,7 @@ html:has(.lp) {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 12px;
-  max-width: 1120px;
+  max-width: var(--lp-shell-max);
   margin: 0 auto 20px;
   padding: 0 clamp(16px, 4vw, 40px);
 }
@@ -2485,7 +2485,7 @@ html:has(.lp) {
 }
 
 .lp-compare-wrap {
-  max-width: 1120px;
+  max-width: var(--lp-shell-max);
   margin: 0 auto;
   padding: 0 clamp(16px, 4vw, 40px) 48px;
   overflow-x: auto;
@@ -2546,7 +2546,7 @@ html:has(.lp) {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 12px;
-  max-width: 1120px;
+  max-width: var(--lp-shell-max);
   margin: 0 auto;
   padding: 0 clamp(16px, 4vw, 40px) 48px;
 }
@@ -2580,7 +2580,7 @@ html:has(.lp) {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 12px;
-  max-width: 1120px;
+  max-width: var(--lp-shell-max);
   margin: 0 auto;
   padding: 0 clamp(16px, 4vw, 40px) 48px;
 }
@@ -2620,7 +2620,7 @@ html:has(.lp) {
 /* ─── Marketing sub-pages ─── */
 .lp-mkt-page {
   padding: 32px clamp(16px, 4vw, 40px) 64px;
-  max-width: 1120px;
+  max-width: var(--lp-shell-max);
   margin: 0 auto;
 }
 
@@ -3049,7 +3049,7 @@ html:has(.lp) {
   grid-template-columns: minmax(0, 1.05fr) minmax(280px, 0.95fr);
   gap: clamp(24px, 4vw, 48px);
   align-items: center;
-  max-width: 1120px;
+  max-width: var(--lp-shell-max);
   margin: 0 auto;
 }
 
@@ -3157,7 +3157,7 @@ html:has(.lp) {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 14px;
-  max-width: 1120px;
+  max-width: var(--lp-shell-max);
   margin: 0 auto;
   padding: 36px clamp(16px, 4vw, 40px);
 }
@@ -3506,7 +3506,7 @@ html:has(.lp) {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 12px;
-  max-width: 1120px;
+  max-width: var(--lp-shell-max);
   margin: 0 auto;
   padding: 28px clamp(16px, 4vw, 40px) 8px;
 }
@@ -3541,7 +3541,7 @@ html:has(.lp) {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
-  max-width: 1120px;
+  max-width: var(--lp-shell-max);
   margin: 0 auto;
   padding: 20px clamp(16px, 4vw, 40px) 8px;
 }
@@ -4331,7 +4331,7 @@ html:has(.lp) {
 }
 
 .lp-outcomes-rail-inner {
-  max-width: 1120px;
+  max-width: var(--lp-shell-max);
   margin: 0 auto;
   padding: 22px 26px;
   border-top: 1px solid #e2e8f0;
@@ -4394,7 +4394,7 @@ html:has(.lp) {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 14px;
-  max-width: 1120px;
+  max-width: var(--lp-shell-max);
   margin: 0 auto;
 }
 
@@ -10112,7 +10112,7 @@ html:has(.lp) {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 0;
-  max-width: 1120px;
+  max-width: var(--lp-shell-max);
   margin: -24px auto 8px;
   padding: 0;
   border: 1px solid #e2e8f0;
@@ -10151,7 +10151,7 @@ html:has(.lp) {
 
 .lp-cust-sectors,
 .lp-cust-stories {
-  max-width: 1120px;
+  max-width: var(--lp-shell-max);
   margin: 28px auto 0;
 }
 
@@ -10274,7 +10274,7 @@ html:has(.lp) {
 
 /* ── Contact sales layout ── */
 .lp-contact-stage {
-  max-width: 1120px;
+  max-width: var(--lp-shell-max);
   margin: -20px auto 48px;
   position: relative;
   z-index: 2;
@@ -10822,11 +10822,25 @@ html:has(.lp) {
   background: rgba(251, 191, 36, 0.16);
 }
 
+/*
+ * The chip sits under the column name, not beside it: at 167px a side-by-side
+ * chip forced `order_amt` to break mid-identifier, and a broken column name is
+ * the one thing this drawing must not show.
+ */
+.lp-cinema-field {
+  grid-template-columns: minmax(0, 1fr);
+  justify-items: start;
+  align-items: start;
+  gap: 6px;
+}
+
 .lp-cinema-field code {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 13px;
   color: #f8fafc;
   font-weight: 600;
+  overflow-wrap: normal;
+  word-break: keep-all;
 }
 
 .lp-cinema-field em {
@@ -12102,14 +12116,15 @@ html:has(.lp) {
 
 /* Observability in Action — journey stage, token colors, WCAG body contrast */
 .lp-obs {
-  padding: 72px 24px 80px;
+  /* One vertical rhythm across the page: the section-y token, not a local pair. */
+  padding: var(--lp-section-y) 24px;
   background:
     linear-gradient(180deg, #ffffff 0%, #f3f5f7 48%, #eef2f5 100%);
   border-top: 1px solid var(--lp-line);
 }
 
 .lp-obs-inner {
-  max-width: 1120px;
+  max-width: var(--lp-shell-max);
   margin: 0 auto;
 }
 
@@ -12581,7 +12596,7 @@ html:has(.lp) {
 
 .lp-home-market,
 .lp-home-depth {
-  padding: clamp(64px, 8vw, 88px) 0;
+  padding: var(--lp-section-y) 0;
 }
 
 .lp-home-market { background: #fff; border-top: 1px solid var(--lp-line, #e4e8ee); }
@@ -12667,7 +12682,7 @@ html:has(.lp) {
 }
 
 .lp-home-measured {
-  padding: clamp(64px, 8vw, 88px) 0;
+  padding: var(--lp-section-y) 0;
   background: #0c1b2e;
   color: #fff;
 }

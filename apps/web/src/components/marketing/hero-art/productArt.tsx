@@ -219,10 +219,10 @@ export function CadenceDialArt() {
         );
       })}
       <circle cx={cx} cy={cy} r="60" fill={INK.plate} stroke={INK.tealDeep} strokeWidth="1.5" />
-      <ArtText x={cx} y={cy - 4} anchor="middle" size={17}>
+      <ArtText x={cx} y={cy - 8} anchor="middle" size={17}>
         every tick
       </ArtText>
-      <ArtText x={cx} y={cy + 22} anchor="middle" size={14} tone="teal">
+      <ArtText x={cx} y={cy + 24} anchor="middle" size={14} tone="teal">
         runs G1–G9
       </ArtText>
       <g className="dw-hero-art-sweep" style={{ transformOrigin: `${cx}px ${cy}px` }}>
@@ -413,7 +413,7 @@ export function PolicyDoorArt() {
       <ArtText x={606} y={426} size={14} tone="muted">
         Unknown tool → admin-only,
       </ArtText>
-      <ArtText x={606} y={452} size={14} tone="muted">
+      <ArtText x={606} y={456} size={14} tone="muted">
         fail closed.
       </ArtText>
     </HeroArtFrame>

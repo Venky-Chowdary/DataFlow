@@ -304,6 +304,15 @@ export function getConnectorLabel(type: string, item?: { label?: string } | null
     });
 }
 
+/**
+ * Vendor spelling for a connector id — `postgresql` reads "PostgreSQL", never
+ * "Postgresql". Public pages render ids, so the catalog label is the only
+ * source that gets casing right; CSS `capitalize` cannot.
+ */
+export function connectorDisplayName(id: string): string {
+  return getConnectorLabel(id, CONNECTOR_CATALOG.find((c) => c.id === id));
+}
+
 export function getConnectorDefaults(type: string): { host: string; port: number; label: string } {
   const item = CONNECTOR_CATALOG.find((c) => c.id === type);
   const driver = resolveDriverType(type);

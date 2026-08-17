@@ -115,26 +115,29 @@
 }
 
 /*
- * Copy column and drawing share one baseline. The hero is the one band allowed
- * past the 1120 content shell — a schematic needs the width to stay legible.
+ * Copy column and drawing share one baseline, and the hero shares the body's
+ * content shell: one left edge and one right edge from the headline to the
+ * footer. The wider hero band bought drawing width at the price of a 100px jog
+ * under every hero, which is the misalignment a reader actually notices.
  */
 .lp .lp-mkt-hero-band--ink .lp-mkt-hero-grid,
 .lp .lp-sol-hero--ink .lp-sol-hero-inner,
 .lp .lp-sales-hero--ink .lp-sales-hero-inner {
-  width: min(1320px, calc(100% - clamp(28px, 5vw, 64px))) !important;
+  width: var(--lp-shell) !important;
   max-width: 100%;
   margin-inline: auto;
 }
 
 .lp .lp-mkt-hero-band--ink .lp-mkt-hero-grid {
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1.12fr) !important;
+  /* The drawing carries the argument, so it takes the larger share. */
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.24fr) !important;
   gap: clamp(28px, 4vw, 64px) !important;
   align-items: center;
 }
 
 .lp .lp-sales-hero--ink.lp-sales-hero--split .lp-sales-hero-inner,
 .lp .lp-sol-hero--ink .lp-sol-hero-inner {
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1.12fr) !important;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.24fr) !important;
   gap: clamp(28px, 4vw, 64px) !important;
   align-items: center;
 }
@@ -257,7 +260,7 @@
 }
 
 .lp .lp-hero--home .lp-hero-home-grid {
-  width: min(1320px, calc(100% - clamp(28px, 5vw, 64px))) !important;
+  width: var(--lp-shell) !important;
   max-width: 100%;
   margin-inline: auto;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr) !important;
@@ -322,13 +325,23 @@
 
 /* ─── Responsive: art keeps its aspect, never its own breakpoints ─ */
 
-@media (max-width: 1100px) {
-  .lp .lp-mkt-hero-band--ink .lp-mkt-hero-grid {
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) !important;
-  }
+/*
+ * Copy is set left, so its buttons are too. The shared CTA row centres itself,
+ * which only reads as centred once the column widens — a stacked hero would
+ * otherwise put the headline on the left edge and its actions in the middle.
+ */
+.lp .lp-mkt-hero-band--ink .lp-hero-cta,
+.lp .lp-sol-hero--ink .lp-hero-cta,
+.lp .lp-sales-hero--ink .lp-hero-cta {
+  justify-content: flex-start !important;
 }
 
-@media (max-width: 960px) {
+/*
+ * A tablet cannot hold a two-column hero and still leave the drawing readable:
+ * at 1024 a split column gave the art ~466px, which set its smallest type near
+ * 5px. Below this width the hero stacks and the drawing takes the whole shell.
+ */
+@media (max-width: 1100px) {
   .lp .lp-hero--home .lp-hero-home-grid,
   .lp .lp-sol-hero--ink .lp-sol-hero-inner,
   .lp .lp-mkt-hero-band--ink .lp-mkt-hero-grid,
@@ -336,7 +349,9 @@
   .lp .lp-sales-hero--split .lp-sales-hero-inner {
     grid-template-columns: minmax(0, 1fr) !important;
   }
+}
 
+@media (max-width: 960px) {
   .lp .lp-mkt-hero-band--ink .lp-mkt-hero-copy h1,
   .lp .lp-sol-hero--ink .lp-sol-hero-copy h1,
   .lp .lp-sales-hero--ink .lp-sales-hero-copy h1 {

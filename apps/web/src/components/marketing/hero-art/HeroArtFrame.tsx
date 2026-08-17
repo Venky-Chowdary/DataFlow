@@ -333,6 +333,7 @@ const MONO_ADVANCE = 0.6;
 const FIELD_NAME_SIZE = 13.5;
 const FIELD_TYPE_SIZE = 11;
 const FIELD_GAP = 14;
+const STACK_BELOW = 0.9;
 
 /** Column/field chip — typed, because type identity is the product's argument. */
 export function ArtField({
@@ -351,17 +352,24 @@ export function ArtField({
   tone?: "plate" | "teal" | "amber";
 }) {
   const stroke = tone === "teal" ? INK.tealDeep : tone === "amber" ? INK.amber : INK.plateEdge;
-  const need =
-    name.length * artType(FIELD_NAME_SIZE) * MONO_ADVANCE +
-    (type ? type.length * artType(FIELD_TYPE_SIZE) * MONO_ADVANCE + FIELD_GAP : 0);
-  const fit = Math.min(1, (w - 28) / need);
+  const nameNeed = name.length * artType(FIELD_NAME_SIZE) * MONO_ADVANCE;
+  const typeNeed = type ? type.length * artType(FIELD_TYPE_SIZE) * MONO_ADVANCE : 0;
+  const inline = Math.min(1, (w - 28) / (nameNeed + (type ? typeNeed + FIELD_GAP : 0)));
+  /*
+   * A long name plus a long type on one line only fits by shrinking both, and
+   * below this ratio the type annotation renders under 7px in a hero — which
+   * argues nothing. Those chips set the type on a second line inside the same
+   * chip height instead, so no drawing's layout moves and both stay readable.
+   */
+  const stacked = type !== undefined && inline < STACK_BELOW;
+  const fit = stacked ? Math.min(1, (w - 28) / Math.max(nameNeed, typeNeed)) : inline;
   return (
     <g>
       <rect x={x} y={y} width={w} height="44" rx="9" fill={INK.field0} stroke={stroke} strokeWidth="1.5" />
       <ArtText
         x={x + 14}
-        y={y + 29}
-        size={FIELD_NAME_SIZE * fit}
+        y={stacked ? y + 18 : y + 29}
+        size={(stacked ? FIELD_NAME_SIZE - 1 : FIELD_NAME_SIZE) * fit}
         mono
         tone={tone === "amber" ? "amber" : "strong"}
         weight={500}
@@ -369,7 +377,15 @@ export function ArtField({
         {name}
       </ArtText>
       {type ? (
-        <ArtText x={x + w - 14} y={y + 29} size={FIELD_TYPE_SIZE * fit} anchor="end" tone="muted" mono weight={500}>
+        <ArtText
+          x={x + w - 14}
+          y={stacked ? y + 39 : y + 29}
+          size={(stacked ? FIELD_TYPE_SIZE - 1 : FIELD_TYPE_SIZE) * fit}
+          anchor="end"
+          tone="muted"
+          mono
+          weight={500}
+        >
           {type}
         </ArtText>
       ) : null}
