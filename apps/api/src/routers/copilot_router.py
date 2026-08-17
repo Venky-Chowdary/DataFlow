@@ -139,6 +139,10 @@ async def _start_confirmed_transfer(payload: dict) -> dict:
         schema_policy=str(payload.get("schema_policy") or "manual_review"),
         validation_mode=str(payload.get("validation_mode") or "balanced"),
         limit=max(0, int(payload.get("limit") or 0)),
+        # The row rules the operator stated in chat and confirmed in the preview.
+        # Dropping them here would write rows they excluded, under a green proof.
+        source_filter=dict(payload.get("source_filter") or {}),
+        stream_contracts=list(payload.get("stream_contracts") or []),
         skip_preflight=False,
         triggered_by="data-pilot",
     )

@@ -34,7 +34,45 @@ _TYPE_ALIASES = {
     "snowflake": "snowflake",
     "mysql": "mysql",
     "sqlite": "sqlite",
+    "sql server": "sqlserver",
+    "sqlserver": "sqlserver",
+    "mssql": "sqlserver",
+    "ms sql": "sqlserver",
+    "ms sql server": "sqlserver",
+    "azure sql": "sqlserver",
+    "maria": "mariadb",
+    "mariadb": "mariadb",
+    "oracle": "oracle",
+    "redshift": "redshift",
+    "databricks": "databricks",
+    "duckdb": "duckdb",
 }
+
+# A dialect name is not a connector: "Postgres" says *what kind*, never *which
+# instance*. Guessing an instance is how data lands in the wrong database, so
+# these resolve only when exactly one saved connector is of that type.
+_DIALECT_WORDS = frozenset({*_TYPE_ALIASES, *_TYPE_ALIASES.values()})
+# Words that name a *family* of databases and no dialect at all. "transfer to sql"
+# says even less than "to postgres", so it can never resolve to an instance.
+_FAMILY_WORDS = frozenset({"sql", "database", "db", "warehouse", "lake", "lakehouse"})
+_ENGINE_WORDS = _DIALECT_WORDS | _FAMILY_WORDS
+
+
+def _normalize_needle(needle: str) -> str:
+    return (needle or "").strip().lower().removesuffix(" connector").strip()
+
+
+def _engine_word(needle: str) -> str:
+    """Return the canonical engine type a phrase names, or "" if it names none."""
+    n = _normalize_needle(needle)
+    if n not in _DIALECT_WORDS:
+        return ""
+    return _TYPE_ALIASES.get(n, n)
+
+
+def _is_family_word(needle: str) -> bool:
+    """True for "sql" / "database" / "warehouse" — a family, not even a dialect."""
+    return _normalize_needle(needle) in _FAMILY_WORDS
 
 
 def _match_score(needle: str, label: str, ctype: str = "") -> float:
@@ -46,6 +84,11 @@ def _match_score(needle: str, label: str, ctype: str = "") -> float:
         return 0.0
     if label_l == n:
         return 100.0
+    if _is_family_word(n):
+        # "sql" / "database" / "warehouse" name a family, not an instance. Matching
+        # one to a saved connector is a guess, and a guess writes to the wrong
+        # database — so only an exact name match (above) may resolve it.
+        return 0.0
     if label_l.startswith(n) or n.startswith(label_l):
         return 85.0 - abs(len(label_l) - len(n)) * 0.2
     if n in label_l:
@@ -77,9 +120,7 @@ def _pick_connector(needle: str, candidates: list[dict[str, Any]]) -> dict[str, 
         if score > 0:
             scored.append((score, d))
     if not scored:
-        raise AmbiguousConnectorError(
-            f'No connector matched “{needle}”. Name a saved connector from Connectors.'
-        )
+        raise AmbiguousConnectorError(_no_match_message(needle, candidates))
     scored.sort(key=lambda x: (-x[0], str(x[1].get("name") or "").lower()))
     best_score, best = scored[0]
     # Exact / near-exact name wins alone
@@ -95,10 +136,38 @@ def _pick_connector(needle: str, candidates: list[dict[str, Any]]) -> dict[str, 
         if name and name not in names:
             names.append(name)
     listed = ", ".join(f"**{n}**" for n in names)
-    raise AmbiguousConnectorError(
-        f"Which connector did you mean? {listed}",
-        candidates=names,
+    engine = _engine_word(needle)
+    question = (
+        f"“{needle}” is a database type, so it names more than one saved {engine} "
+        f"connector. Which connector did you mean? {listed}"
+        if engine
+        else f"Which connector did you mean? {listed}"
     )
+    raise AmbiguousConnectorError(question, candidates=names)
+
+
+def _no_match_message(needle: str, candidates: list[dict[str, Any]]) -> str:
+    """Say precisely what is missing — a type with no instance, or an unknown name."""
+    engine = _engine_word(needle)
+    saved = [str(d.get("name") or "").strip() for d in candidates]
+    saved = [n for n in saved if n]
+    listed = ", ".join(f"**{n}**" for n in saved[:6]) or "none yet"
+    # Keep "no connector matched" in every branch: the agent's recovery step and
+    # the client both read it to offer the saved list instead of a dead end.
+    head = f"No connector matched “{needle}”"
+    tail = f"Name a saved connector from Connectors. Saved connectors: {listed}."
+    if engine:
+        return (
+            f"{head} — that is a database type, not a saved connector, and no "
+            f"{engine} connector is saved, so there is no instance to point this at. "
+            f"{tail}"
+        )
+    if _is_family_word(needle):
+        return (
+            f"{head} — that names a family of databases, not one instance, so there "
+            f"is nothing to point this at. {tail}"
+        )
+    return f"{head}, and I will not guess which database you meant. {tail}"
 
 
 def _connector_dict(connector_id: str = "", name: str = "") -> dict[str, Any] | None:
