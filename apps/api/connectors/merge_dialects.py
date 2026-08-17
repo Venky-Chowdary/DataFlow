@@ -13,6 +13,7 @@ at-least-once idempotent applies, never exactly-once.
 from __future__ import annotations
 
 import contextlib
+import re
 from typing import Any
 
 import sqlalchemy as sa
@@ -868,3 +869,408 @@ def _existing_conflict_keys(
         for found in conn.execute(stmt):
             keys.add(tuple(found[j] for j in range(len(conflict_cols))))
     return keys
+
+
+# --------------------------------------------------------------------------- #
+# MSSQL / Oracle / ClickHouse / Firebird MERGE bodies and the sparse-column CDC
+# apply, moved out of ``generic_sql`` (Phase F8 size freeze). Same contract as
+# the rest of this module: an idempotent at-least-once apply, never a
+# DELETE+INSERT that would drop destination-owned columns.
+# --------------------------------------------------------------------------- #
+
+
+def _generic_apply_sparse_upsert(
+    conn: Any,
+    table_obj: sa.Table,
+    target_cols: list[str],
+    conflict_columns: list[str],
+    sparse_rows: list[dict[str, Any]],
+    *,
+    dialect_name: str = "",
+    rejected_details: list[dict[str, Any]] | None = None,
+    policy: str = "quarantine",
+) -> tuple[int, int, list[tuple]]:
+    """Per-row upsert omitting DF_MISSING — never SET col=NULL for absent CDC fields."""
+    from connectors.writer_common import resolve_conflict_targets, run_sparse_cdc_upsert
+    from services.value_serializer import is_missing_sentinel
+
+    conflict = resolve_conflict_targets(conflict_columns, target_cols, strict=True)
+    if not conflict:
+        raise ValueError("sparse SQLAlchemy upsert requires conflict_columns")
+
+    # Normalize dict rows to target_cols tuples for the shared loop.
+    from services.value_serializer import DF_MISSING_SENTINEL
+
+    as_tuples: list[tuple] = []
+    for row in sparse_rows:
+        as_tuples.append(
+            tuple(
+                (
+                    row[c]
+                    if c in row and not is_missing_sentinel(row.get(c))
+                    else DF_MISSING_SENTINEL
+                )
+                for c in target_cols
+            )
+        )
+
+    is_clickhouse = dialect_name == "clickhouse" or str(dialect_name).startswith(
+        "clickhouse"
+    )
+
+    def fetch_existing(pk_vals: list[Any]) -> tuple | None:
+        pk_clause = sa.and_(
+            *[table_obj.c[c] == pk_vals[i] for i, c in enumerate(conflict)]
+        )
+        cols = [table_obj.c[c] for c in target_cols if c in table_obj.c]
+        if len(cols) != len(target_cols):
+            # Missing physical columns — return None so insert path can run.
+            return None
+        if is_clickhouse:
+            # ReplacingMergeTree without FINAL can miss the current version and
+            # fall through to a partial INSERT that NULL-wipes omitted attrs.
+            from connectors.writer_common import quote_sql_identifier
+
+            parts = []
+            if table_obj.schema:
+                parts.append(quote_sql_identifier(table_obj.schema))
+            parts.append(quote_sql_identifier(table_obj.name))
+            table_ref = clickhouse_final_table_sql(".".join(parts))
+            col_sql = ", ".join(quote_sql_identifier(c) for c in target_cols)
+            where_sql = " AND ".join(
+                f"{quote_sql_identifier(c)} = :p{i}" for i, c in enumerate(conflict)
+            )
+            params = {f"p{i}": pk_vals[i] for i in range(len(conflict))}
+            found = conn.execute(
+                sa.text(f"SELECT {col_sql} FROM {table_ref} WHERE {where_sql}"),  # nosec B608
+                params,
+            ).fetchone()
+            return tuple(found) if found is not None else None
+        found = conn.execute(sa.select(*cols).where(pk_clause)).fetchone()
+        return tuple(found) if found is not None else None
+
+    def update_non_pk(non_pk: dict[str, Any], pk_vals: list[Any]) -> int:
+        if is_clickhouse:
+            # Mutations are not Airbyte-class upsert; force versioned INSERT path.
+            return 0
+        pk_clause = sa.and_(
+            *[table_obj.c[c] == pk_vals[i] for i, c in enumerate(conflict)]
+        )
+        result = conn.execute(sa.update(table_obj).where(pk_clause).values(**non_pk))
+        return int(getattr(result, "rowcount", 0) or 0)
+
+    def insert_present(present: dict[str, Any]) -> None:
+        conn.execute(sa.insert(table_obj).values(**present))
+
+    return run_sparse_cdc_upsert(
+        target_cols=target_cols,
+        conflict_columns=conflict,
+        sparse_rows=as_tuples,
+        fetch_existing_row=fetch_existing,
+        update_non_pk=update_non_pk,
+        insert_present=insert_present,
+        hydrate_versioned_insert=is_clickhouse,
+        rejected_details=rejected_details,
+        policy=policy,
+    )
+
+
+def _mssql_bracket(ident: str) -> str:
+    """Bracket-quote a SQL Server identifier (escape ``]``)."""
+    return "[" + str(ident).replace("]", "]]") + "]"
+
+
+def _mssql_qualified_table(table_obj: sa.Table) -> str:
+    parts = []
+    if table_obj.schema:
+        parts.append(_mssql_bracket(table_obj.schema))
+    parts.append(_mssql_bracket(table_obj.name))
+    return ".".join(parts)
+
+
+def _mssql_merge_upsert(
+    conn: Any,
+    table_obj: sa.Table,
+    rows: list[dict[str, Any]],
+    conflict_cols: list[str],
+    target_cols: list[str],
+    update_cols: list[str],
+) -> int:
+    """Native T-SQL MERGE with HOLDLOCK + NULL-safe ON; staging temp table.
+
+    Matches Airbyte/Fivetran-class SQL Server upsert: stage → MERGE → drop.
+    Caller must fall back to delete+insert when this raises.
+    """
+    from connectors.writer_common import null_safe_merge_on
+
+    if not rows:
+        return 0
+    stage = f"#df_mrg_{abs(hash((table_obj.name, tuple(conflict_cols)))) % 10_000_000}"
+    target = _mssql_qualified_table(table_obj)
+    col_sql = ", ".join(_mssql_bracket(c) for c in target_cols)
+    # Clone column shapes from target — never invent VARCHAR widths.
+    conn.execute(
+        sa.text(f"SELECT TOP 0 {col_sql} INTO {stage} FROM {target}")  # nosec B608
+    )
+    try:
+        placeholders = ", ".join(f":{c}" for c in target_cols)
+        insert_sql = sa.text(
+            f"INSERT INTO {stage} ({col_sql}) VALUES ({placeholders})"  # nosec B608
+        )
+        for row in rows:
+            params = {c: row.get(c) for c in target_cols}
+            conn.execute(insert_sql, params)
+
+        on_sql = null_safe_merge_on(
+            conflict_cols,
+            left_alias=_mssql_bracket("t"),
+            right_alias=_mssql_bracket("s"),
+            quote_column=_mssql_bracket,
+        )
+        insert_cols = ", ".join(_mssql_bracket(c) for c in target_cols)
+        insert_vals = ", ".join(
+            f"{_mssql_bracket('s')}.{_mssql_bracket(c)}" for c in target_cols
+        )
+        if update_cols:
+            set_sql = ", ".join(
+                f"{_mssql_bracket('t')}.{_mssql_bracket(c)} = "
+                f"{_mssql_bracket('s')}.{_mssql_bracket(c)}"
+                for c in update_cols
+            )
+            merge_sql = (
+                f"MERGE {target} WITH (HOLDLOCK) AS {_mssql_bracket('t')} "
+                f"USING {stage} AS {_mssql_bracket('s')} "
+                f"ON {on_sql} "
+                f"WHEN MATCHED THEN UPDATE SET {set_sql} "
+                f"WHEN NOT MATCHED BY TARGET THEN "
+                f"INSERT ({insert_cols}) VALUES ({insert_vals});"
+            )
+        else:
+            # Conflict-key-only rows: insert missing; leave matched alone.
+            merge_sql = (
+                f"MERGE {target} WITH (HOLDLOCK) AS {_mssql_bracket('t')} "
+                f"USING {stage} AS {_mssql_bracket('s')} "
+                f"ON {on_sql} "
+                f"WHEN NOT MATCHED BY TARGET THEN "
+                f"INSERT ({insert_cols}) VALUES ({insert_vals});"
+            )
+        conn.execute(sa.text(merge_sql))  # nosec B608
+        return len(rows)
+    finally:
+        with contextlib.suppress(Exception):
+            conn.execute(sa.text(f"DROP TABLE {stage}"))  # nosec B608
+
+
+def _oracle_quote(ident: str) -> str:
+    """Double-quote an Oracle identifier (escape embedded quotes)."""
+    return '"' + str(ident).replace('"', '""') + '"'
+
+
+def _oracle_qualified_table(table_obj: sa.Table) -> str:
+    parts = []
+    if table_obj.schema:
+        parts.append(_oracle_quote(table_obj.schema))
+    parts.append(_oracle_quote(table_obj.name))
+    return ".".join(parts)
+
+
+def _oracle_merge_upsert(
+    conn: Any,
+    table_obj: sa.Table,
+    rows: list[dict[str, Any]],
+    conflict_cols: list[str],
+    target_cols: list[str],
+    update_cols: list[str],
+) -> int:
+    """Native Oracle MERGE with NULL-safe ON via session staging table.
+
+    Stage → MERGE INTO … WHEN MATCHED / WHEN NOT MATCHED (Oracle has no
+    ``BY TARGET`` keyword). Prefer PRIVATE TEMPORARY TABLE (18c+); fall back to
+    a session GLOBAL TEMPORARY TABLE. Caller falls back to delete+insert on error.
+    Still at-least-once — not exactly-once.
+    """
+    from connectors.writer_common import null_safe_merge_on
+
+    if not rows:
+        return 0
+    suffix = abs(hash((table_obj.name, tuple(conflict_cols)))) % 10_000_000
+    # Private temp tables require the ORA$PTT_ prefix (Oracle default).
+    ptt = f"ORA$PTT_DF_MRG_{suffix}"
+    gtt = f"DF_MRG_{suffix}"
+    target = _oracle_qualified_table(table_obj)
+    col_sql = ", ".join(_oracle_quote(c) for c in target_cols)
+    stage_ref = ""
+    created: str | None = None
+    try:
+        try:
+            stage_ref = _oracle_quote(ptt)
+            conn.execute(
+                sa.text(
+                    f"CREATE PRIVATE TEMPORARY TABLE {stage_ref} "
+                    f"ON COMMIT PRESERVE DEFINITION AS "
+                    f"SELECT {col_sql} FROM {target} WHERE 1=0"  # nosec B608
+                )
+            )
+            created = "ptt"
+        except (sa.exc.SQLAlchemyError, OSError, ValueError):
+            # Older Oracle / privilege gap — try session GTT (definition may persist).
+            with contextlib.suppress(Exception):
+                conn.rollback()
+            stage_ref = _oracle_quote(gtt)
+            conn.execute(
+                sa.text(
+                    f"CREATE GLOBAL TEMPORARY TABLE {stage_ref} "
+                    f"ON COMMIT PRESERVE ROWS AS "
+                    f"SELECT {col_sql} FROM {target} WHERE 1=0"  # nosec B608
+                )
+            )
+            created = "gtt"
+
+        placeholders = ", ".join(f":{c}" for c in target_cols)
+        insert_sql = sa.text(
+            f"INSERT INTO {stage_ref} ({col_sql}) VALUES ({placeholders})"  # nosec B608
+        )
+        for row in rows:
+            conn.execute(insert_sql, {c: row.get(c) for c in target_cols})
+
+        on_sql = null_safe_merge_on(
+            conflict_cols,
+            left_alias="t",
+            right_alias="s",
+            quote_column=_oracle_quote,
+        )
+        insert_cols = ", ".join(_oracle_quote(c) for c in target_cols)
+        insert_vals = ", ".join(f"s.{_oracle_quote(c)}" for c in target_cols)
+        if update_cols:
+            set_sql = ", ".join(
+                f"t.{_oracle_quote(c)} = s.{_oracle_quote(c)}" for c in update_cols
+            )
+            merge_sql = (
+                f"MERGE INTO {target} t "
+                f"USING {stage_ref} s "
+                f"ON ({on_sql}) "
+                f"WHEN MATCHED THEN UPDATE SET {set_sql} "
+                f"WHEN NOT MATCHED THEN INSERT ({insert_cols}) "
+                f"VALUES ({insert_vals})"
+            )
+        else:
+            merge_sql = (
+                f"MERGE INTO {target} t "
+                f"USING {stage_ref} s "
+                f"ON ({on_sql}) "
+                f"WHEN NOT MATCHED THEN INSERT ({insert_cols}) "
+                f"VALUES ({insert_vals})"
+            )
+        conn.execute(sa.text(merge_sql))  # nosec B608
+        return len(rows)
+    finally:
+        if created == "gtt" and stage_ref:
+            # PTT drops with session/definition; GTT definition may linger.
+            with contextlib.suppress(Exception):
+                conn.execute(sa.text(f"TRUNCATE TABLE {stage_ref}"))
+            with contextlib.suppress(Exception):
+                conn.execute(sa.text(f"DROP TABLE {stage_ref}"))
+
+
+def _clickhouse_replacing_upsert(
+    conn: Any,
+    table_obj: sa.Table,
+    rows: list[dict[str, Any]],
+    conflict_cols: list[str],
+    target_cols: list[str],
+    update_cols: list[str],
+) -> int:
+    """Airbyte-class ClickHouse upsert: INSERT only into ReplacingMergeTree.
+
+    Dedup is **engine-level and lazy** (background merge / ``SELECT … FINAL``).
+    Never DELETE+INSERT — ClickHouse mutations race merges and are not
+    Fivetran/Airbyte-class upsert semantics. Still at-least-once.
+    """
+    del conflict_cols, update_cols  # identity is table ORDER BY / version col
+    if not rows:
+        return 0
+    result = conn.execute(table_obj.insert(), rows)
+    return max(0, getattr(result, "rowcount", None) or 0) or len(rows)
+
+
+def clickhouse_final_table_sql(table_ref: str) -> str:
+    """``FROM <table> FINAL`` — Gate-8 must collapse ReplacingMergeTree duplicates.
+
+    Airbyte ClickHouse destination docs: without FINAL (or OPTIMIZE), queries
+    may see duplicate keys after at-least-once INSERT upserts.
+    """
+    ref = (table_ref or "").strip()
+    if not ref:
+        raise ValueError("clickhouse table ref required for FINAL select")
+    # Idempotent if caller already appended FINAL.
+    if re.search(r"\bFINAL\b", ref, flags=re.IGNORECASE):
+        return ref
+    return f"{ref} FINAL"
+
+
+def _firebird_quote(ident: str) -> str:
+    return '"' + str(ident).replace('"', '""') + '"'
+
+
+def _firebird_qualified_table(table_obj: sa.Table) -> str:
+    parts = []
+    if table_obj.schema:
+        parts.append(_firebird_quote(table_obj.schema))
+    parts.append(_firebird_quote(table_obj.name))
+    return ".".join(parts)
+
+
+def _firebird_merge_upsert(
+    conn: Any,
+    table_obj: sa.Table,
+    rows: list[dict[str, Any]],
+    conflict_cols: list[str],
+    target_cols: list[str],
+    update_cols: list[str],
+) -> int:
+    """Native Firebird ``MERGE INTO`` with NULL-safe ON via ``RDB$DATABASE``.
+
+    Firebird 2.1+ MERGE; staging each row from ``RDB$DATABASE`` avoids inventing
+    GTT DDL without typed columns (Firebird Language Reference). Still
+    at-least-once.
+    """
+    from connectors.writer_common import null_safe_merge_on
+
+    if not rows:
+        return 0
+    target = _firebird_qualified_table(table_obj)
+    on_sql = null_safe_merge_on(
+        conflict_cols,
+        left_alias="t",
+        right_alias="s",
+        quote_column=_firebird_quote,
+    )
+    insert_cols = ", ".join(_firebird_quote(c) for c in target_cols)
+    insert_vals = ", ".join(f"s.{_firebird_quote(c)}" for c in target_cols)
+    set_sql = ""
+    if update_cols:
+        set_sql = ", ".join(
+            f"t.{_firebird_quote(c)} = s.{_firebird_quote(c)}" for c in update_cols
+        )
+    select_list = ", ".join(f":{c} AS {_firebird_quote(c)}" for c in target_cols)
+    for row in rows:
+        params = {c: row.get(c) for c in target_cols}
+        if set_sql:
+            merge_sql = (
+                f"MERGE INTO {target} AS t "
+                f"USING (SELECT {select_list} FROM RDB$DATABASE) AS s "
+                f"ON ({on_sql}) "
+                f"WHEN MATCHED THEN UPDATE SET {set_sql} "
+                f"WHEN NOT MATCHED THEN INSERT ({insert_cols}) "
+                f"VALUES ({insert_vals})"
+            )
+        else:
+            merge_sql = (
+                f"MERGE INTO {target} AS t "
+                f"USING (SELECT {select_list} FROM RDB$DATABASE) AS s "
+                f"ON ({on_sql}) "
+                f"WHEN NOT MATCHED THEN INSERT ({insert_cols}) "
+                f"VALUES ({insert_vals})"
+            )
+        conn.execute(sa.text(merge_sql), params)  # nosec B608
+    return len(rows)
