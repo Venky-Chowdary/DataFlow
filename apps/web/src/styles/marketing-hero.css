@@ -115,26 +115,29 @@
 }
 
 /*
- * Copy column and drawing share one baseline. The hero is the one band allowed
- * past the 1120 content shell — a schematic needs the width to stay legible.
+ * Copy column and drawing share one baseline, and the hero shares the body's
+ * content shell: one left edge and one right edge from the headline to the
+ * footer. The wider hero band bought drawing width at the price of a 100px jog
+ * under every hero, which is the misalignment a reader actually notices.
  */
 .lp .lp-mkt-hero-band--ink .lp-mkt-hero-grid,
 .lp .lp-sol-hero--ink .lp-sol-hero-inner,
 .lp .lp-sales-hero--ink .lp-sales-hero-inner {
-  width: min(1320px, calc(100% - clamp(28px, 5vw, 64px))) !important;
+  width: var(--lp-shell) !important;
   max-width: 100%;
   margin-inline: auto;
 }
 
 .lp .lp-mkt-hero-band--ink .lp-mkt-hero-grid {
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1.12fr) !important;
+  /* The drawing carries the argument, so it takes the larger share. */
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.24fr) !important;
   gap: clamp(28px, 4vw, 64px) !important;
   align-items: center;
 }
 
 .lp .lp-sales-hero--ink.lp-sales-hero--split .lp-sales-hero-inner,
 .lp .lp-sol-hero--ink .lp-sol-hero-inner {
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1.12fr) !important;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.24fr) !important;
   gap: clamp(28px, 4vw, 64px) !important;
   align-items: center;
 }
@@ -257,7 +260,7 @@
 }
 
 .lp .lp-hero--home .lp-hero-home-grid {
-  width: min(1320px, calc(100% - clamp(28px, 5vw, 64px))) !important;
+  width: var(--lp-shell) !important;
   max-width: 100%;
   margin-inline: auto;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr) !important;
@@ -275,15 +278,70 @@
   align-items: center;
 }
 
-/* ─── Responsive: art keeps its aspect, never its own breakpoints ─ */
+/* ─── Contact: the route runs the full band, under copy and form ── */
 
-@media (max-width: 1100px) {
-  .lp .lp-mkt-hero-band--ink .lp-mkt-hero-grid {
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) !important;
-  }
+/*
+ * The route drawing is the argument the form is asking for, so it spans both
+ * columns rather than competing with the form for the right column.
+ */
+.lp .lp-sales-hero--ink .lp-sales-hero-route {
+  grid-column: 1 / -1;
+  min-width: 0;
+  margin-top: clamp(2px, 0.6vw, 10px);
+}
+
+/*
+ * The wide band canvas would set its labels near 6px on a phone, so below the
+ * hero's stacking width the same three steps are carried by the step list.
+ */
+.lp .lp-sales-hero--ink .lp-sales-hero-steps--narrow {
+  display: none;
+}
+
+.lp .lp-sales-hero--ink .lp-sales-hero-mail span,
+.lp .lp-sales-hero--ink .lp-sales-hero-steps p {
+  color: rgba(180, 199, 219, 0.78) !important;
+}
+
+.lp .lp-sales-hero--ink .lp-sales-hero-steps strong {
+  color: #f2f7fc !important;
+}
+
+.lp .lp-sales-hero--ink .lp-sales-hero-steps li > span {
+  border-color: rgba(45, 212, 191, 0.34) !important;
+  background: rgba(45, 212, 191, 0.1) !important;
+  color: #5eead4 !important;
 }
 
 @media (max-width: 960px) {
+  .lp .lp-sales-hero--ink .lp-sales-hero-route {
+    display: none;
+  }
+
+  .lp .lp-sales-hero--ink .lp-sales-hero-steps--narrow {
+    display: grid;
+  }
+}
+
+/* ─── Responsive: art keeps its aspect, never its own breakpoints ─ */
+
+/*
+ * Copy is set left, so its buttons are too. The shared CTA row centres itself,
+ * which only reads as centred once the column widens — a stacked hero would
+ * otherwise put the headline on the left edge and its actions in the middle.
+ */
+.lp .lp-mkt-hero-band--ink .lp-hero-cta,
+.lp .lp-sol-hero--ink .lp-hero-cta,
+.lp .lp-sales-hero--ink .lp-hero-cta {
+  justify-content: flex-start !important;
+}
+
+/*
+ * A tablet cannot hold a two-column hero and still leave the drawing readable:
+ * at 1024 a split column gave the art ~466px, which set its smallest type near
+ * 5px. Below this width the hero stacks and the drawing takes the whole shell.
+ */
+@media (max-width: 1100px) {
   .lp .lp-hero--home .lp-hero-home-grid,
   .lp .lp-sol-hero--ink .lp-sol-hero-inner,
   .lp .lp-mkt-hero-band--ink .lp-mkt-hero-grid,
@@ -291,7 +349,9 @@
   .lp .lp-sales-hero--split .lp-sales-hero-inner {
     grid-template-columns: minmax(0, 1fr) !important;
   }
+}
 
+@media (max-width: 960px) {
   .lp .lp-mkt-hero-band--ink .lp-mkt-hero-copy h1,
   .lp .lp-sol-hero--ink .lp-sol-hero-copy h1,
   .lp .lp-sales-hero--ink .lp-sales-hero-copy h1 {

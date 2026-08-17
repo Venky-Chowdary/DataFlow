@@ -328,10 +328,10 @@ export function WatermarkArt() {
       </ArtLabel>
       <ArtField x={654} y={188} w={282} name="upsert by key" type="at-least-once" />
       <ArtField x={654} y={244} w={282} name="4 new · 0 rewritten" type="reconciled" tone="teal" />
-      <ArtText x={654} y={306} size={13} tone="muted">
+      <ArtText x={654} y={312} size={13} tone="muted">
         exactly-once only where
       </ArtText>
-      <ArtText x={654} y={332} size={13} tone="muted">
+      <ArtText x={654} y={338} size={13} tone="muted">
         proven for that route
       </ArtText>
 

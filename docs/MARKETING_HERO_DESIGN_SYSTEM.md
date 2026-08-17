@@ -28,7 +28,8 @@ to scale on a shared canvas, in the existing `--df-*` token palette.
 
 ## Shared canvas
 
-`HeroArtFrame` owns the parts that must never diverge: the 1000×640 viewBox, the
+`HeroArtFrame` owns the parts that must never diverge: the viewBox (1000×640 in a column
+beside the copy, or the 1700×440 band when a drawing runs the full hero width), the
 engineering grid, the ink field, the directional light, the teal/amber accents drawn from
 tokens, the stroke scale (1 / 1.5 / 2), the label type scale (11/13/16/22), the caption
 line, and the `role="img"` + `aria-label` contract. Art files provide only geometry.
@@ -52,11 +53,14 @@ line, and the `role="img"` + `aria-label` contract. Art files provide only geome
 | Integrations | **The lattice.** Connectors are a graph, not a wheel. | Nodes on the measured grid with typed lanes between families (file, OLTP, warehouse, object store). |
 | Pricing | **The plan ladder on one rail.** Tiers climb on cadence and security; the proof engine is not an upgrade. | Three rising step plates joined by dashed lifts, all standing on a single teal rail labelled `in every plan`; a struck-through `monthly active rows` states the meter we do not bill on. |
 | Customers | **Named evidence, and one plate we refuse to fill.** | Three plates carrying the recorded case counts (`48` / `43` / `14`) with their scope, the measured engines, a reread seal — and an empty dashed plate marked `logo wall · no invented marks`. |
+| Contact | **The pilot route.** A request becomes a scoped pilot on your own stack and ends in an artifact you keep. | A full-width band under the copy and the form: the caller's request plate, a dashed branch dead-ended at a cross (`no nurture queue`), then checkpoints `01 discovery` → `02 scoped pilot` → `03 reconcile`, terminating in a sealed `artifact you keep` plate. Annotated `skip_preflight is never set from this form`. |
 
-Two public surfaces deliberately carry no schematic: **Contact** already leads with the
-pilot request form (a drawing beside it would compete with the only control that matters)
-and **Help / docs** leads with the document index it is. Both use the same ink band,
-typography, and pill treatment as the rest of the system.
+**Contact** is the one band drawing: the form is the only control that matters, so the
+route runs the full width *beneath* it rather than competing for the right column, and
+below 960px — where band type would fall under 7px — the drawing is replaced by the same
+three steps as a text list. **Help / docs** still carries no schematic: it leads with the
+document index it is, with real product screenshots. **Privacy** and **Terms** are legal
+text behind a thin band. All use the same ink field, typography, and pill treatment.
 
 ## Background and typography
 

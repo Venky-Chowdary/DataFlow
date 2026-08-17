@@ -150,13 +150,13 @@ export function EvidencePlatesArt() {
         return (
           <g key={plate.claim}>
             <ArtPlate x={64} y={y} w={472} h={108} />
-            <ArtText x={92} y={y + 40} size={18} tone="teal" mono>
+            <ArtText x={92} y={y + 36} size={18} tone="teal" mono>
               {plate.stat}
             </ArtText>
-            <ArtText x={92} y={y + 70} size={16}>
+            <ArtText x={92} y={y + 72} size={16}>
               {plate.claim}
             </ArtText>
-            <ArtText x={92} y={y + 94} size={12} tone="muted">
+            <ArtText x={92} y={y + 98} size={12} tone="muted">
               {plate.scope}
             </ArtText>
             <ArtFilament x1={536} x2={628} y={y + 54} tone="teal" width={2} dashed />

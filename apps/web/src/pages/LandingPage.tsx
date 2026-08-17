@@ -11,6 +11,7 @@ import { ProofLoopArt } from "../components/marketing/hero-art/solutionArt";
 import { ObservabilityInAction } from "../components/landing/ObservabilityInAction";
 import { useRevealOnScroll } from "../hooks/useRevealOnScroll";
 import { BACKEND_SUITE, EVIDENCE_AS_OF, TRANSFER_READY_DRIVERS } from "../lib/provenEvidence";
+import { connectorDisplayName } from "../lib/connectorTypes";
 import type { PublicRoute } from "../lib/publicNavigation";
 
 export interface LandingHomeProps {
@@ -112,7 +113,7 @@ function ConnectorMarquee({
         {loop.map((id, i) => (
           <span key={`${id}-${i}`} className="lp-conn-marquee-tile">
             <ConnectorIcon id={id} size={30} />
-            <em>{id.replace(/_/g, " ")}</em>
+            <em>{connectorDisplayName(id)}</em>
           </span>
         ))}
       </div>
@@ -265,9 +266,9 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
               <span className="lp-hero-title-b">anywhere — proven.</span>
             </h1>
             <p className="lp-hero-sub">
-              Semantic mapping, nine preflight gates, quarantine, dest query/CALL, and dest-engine
-              checksum on every load — Transfer Studio, Pipelines, Pilot, and MCP.{" "}
-              {TRANSFER_READY_DRIVERS} TRANSFER_READY drivers. Catalog tiles are not live.
+              Datawrap maps your columns by meaning, refuses the write when a gate fails, and asks
+              the destination engine itself to prove what landed. One governed path for Studio,
+              Pipelines, Pilot, and MCP.
             </p>
             <div className="lp-hero-cta">
               <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={onGetStarted}>
@@ -303,9 +304,9 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
         <p className="lp-home-stack-label">Works with the stacks you already run</p>
         <div className="lp-home-stack-row">
           {STACK_IDS.map((id) => (
-            <span key={id} className="lp-home-stack-item" title={id}>
+            <span key={id} className="lp-home-stack-item" title={connectorDisplayName(id)}>
               <ConnectorIcon id={id} size={28} />
-              <em>{id}</em>
+              <em>{connectorDisplayName(id)}</em>
             </span>
           ))}
         </div>
@@ -481,8 +482,7 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
               <h3>Map · G1–G9 · quarantine · MATCH</h3>
               <p>
                 Extra source columns stay on Map. Dest INSERT/MERGE and dest CALL use binds only.
-                CDC default is at-least-once upsert until a route proves dest-owned exactly-once.{" "}
-                {TRANSFER_READY_DRIVERS} TRANSFER_READY drivers — catalog tiles are not claimed live.
+                CDC default is at-least-once upsert until a route proves dest-owned exactly-once.
               </p>
             </article>
           </div>
@@ -722,8 +722,8 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
         <div className="lp-home-final-inner">
           <h2>Ship a governed transfer today</h2>
           <p>
-            Start free on the same engine enterprises use for SSO, BYOK, and audit — semantic mapping,
-            nine core gates, quarantine, and checksum proof included.
+            Start free on the engine enterprises run behind SSO, BYOK, and audit. Your first load
+            ends the way every load should: a reconcile artifact you can hand to finance.
           </p>
           <div className="lp-hero-cta">
             <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={onGetStarted}>

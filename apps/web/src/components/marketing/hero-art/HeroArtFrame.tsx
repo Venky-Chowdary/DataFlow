@@ -13,6 +13,14 @@ export const ART_W = 1000;
 export const ART_H = 640;
 
 /**
+ * A drawing that runs the full width of a hero band (rather than sitting in a
+ * column beside the copy) needs a wider, shorter canvas, or it would be taller
+ * than the viewport. Declared here so the two canvases stay the only two.
+ */
+export const BAND_W = 1700;
+export const BAND_H = 440;
+
+/**
  * A hero drawing renders about 520–620 CSS px wide, so a 16-unit label would
  * land near 9px on screen. Type is therefore authored in geometry units and
  * scaled once, here, to stay legible at the width the frame actually gets.
@@ -78,13 +86,20 @@ export function HeroArtFrame({
   caption,
   className = "",
   focus,
+  canvas,
   defs,
   children,
-}: HeroArtProps & { focus?: FocalRegion; defs?: ReactNode; children: ReactNode }) {
+}: HeroArtProps & {
+  focus?: FocalRegion;
+  canvas?: { w: number; h: number };
+  defs?: ReactNode;
+  children: ReactNode;
+}) {
   // Ids must be unique per instance: two drawings on one page must not share defs.
   const uid = `dw${useId().replace(/[^a-z0-9]+/gi, "")}`;
   const narrow = useNarrowViewport();
-  const view = narrow && focus ? focus : { x: 0, y: 0, w: ART_W, h: ART_H };
+  const { w: cw, h: ch } = canvas ?? { w: ART_W, h: ART_H };
+  const view = narrow && focus ? focus : { x: 0, y: 0, w: cw, h: ch };
   return (
     <figure className={`dw-hero-art ${className}`.trim()}>
       <svg
@@ -111,14 +126,14 @@ export function HeroArtFrame({
           {defs}
         </defs>
 
-        <rect width={ART_W} height={ART_H} rx="20" fill={`url(#${uid}-field)`} />
-        <rect width={ART_W} height={ART_H} rx="20" fill={`url(#${uid}-grid)`} opacity="0.55" />
-        <rect width={ART_W} height={ART_H} rx="20" fill={`url(#${uid}-light)`} />
+        <rect width={cw} height={ch} rx="20" fill={`url(#${uid}-field)`} />
+        <rect width={cw} height={ch} rx="20" fill={`url(#${uid}-grid)`} opacity="0.55" />
+        <rect width={cw} height={ch} rx="20" fill={`url(#${uid}-light)`} />
         <rect
           x="0.75"
           y="0.75"
-          width={ART_W - 1.5}
-          height={ART_H - 1.5}
+          width={cw - 1.5}
+          height={ch - 1.5}
           rx="20"
           fill="none"
           stroke={INK.plateEdge}
@@ -318,6 +333,7 @@ const MONO_ADVANCE = 0.6;
 const FIELD_NAME_SIZE = 13.5;
 const FIELD_TYPE_SIZE = 11;
 const FIELD_GAP = 14;
+const STACK_BELOW = 0.9;
 
 /** Column/field chip — typed, because type identity is the product's argument. */
 export function ArtField({
@@ -336,17 +352,24 @@ export function ArtField({
   tone?: "plate" | "teal" | "amber";
 }) {
   const stroke = tone === "teal" ? INK.tealDeep : tone === "amber" ? INK.amber : INK.plateEdge;
-  const need =
-    name.length * artType(FIELD_NAME_SIZE) * MONO_ADVANCE +
-    (type ? type.length * artType(FIELD_TYPE_SIZE) * MONO_ADVANCE + FIELD_GAP : 0);
-  const fit = Math.min(1, (w - 28) / need);
+  const nameNeed = name.length * artType(FIELD_NAME_SIZE) * MONO_ADVANCE;
+  const typeNeed = type ? type.length * artType(FIELD_TYPE_SIZE) * MONO_ADVANCE : 0;
+  const inline = Math.min(1, (w - 28) / (nameNeed + (type ? typeNeed + FIELD_GAP : 0)));
+  /*
+   * A long name plus a long type on one line only fits by shrinking both, and
+   * below this ratio the type annotation renders under 7px in a hero — which
+   * argues nothing. Those chips set the type on a second line inside the same
+   * chip height instead, so no drawing's layout moves and both stay readable.
+   */
+  const stacked = type !== undefined && inline < STACK_BELOW;
+  const fit = stacked ? Math.min(1, (w - 28) / Math.max(nameNeed, typeNeed)) : inline;
   return (
     <g>
       <rect x={x} y={y} width={w} height="44" rx="9" fill={INK.field0} stroke={stroke} strokeWidth="1.5" />
       <ArtText
         x={x + 14}
-        y={y + 29}
-        size={FIELD_NAME_SIZE * fit}
+        y={stacked ? y + 18 : y + 29}
+        size={(stacked ? FIELD_NAME_SIZE - 1 : FIELD_NAME_SIZE) * fit}
         mono
         tone={tone === "amber" ? "amber" : "strong"}
         weight={500}
@@ -354,7 +377,15 @@ export function ArtField({
         {name}
       </ArtText>
       {type ? (
-        <ArtText x={x + w - 14} y={y + 29} size={FIELD_TYPE_SIZE * fit} anchor="end" tone="muted" mono weight={500}>
+        <ArtText
+          x={x + w - 14}
+          y={stacked ? y + 39 : y + 29}
+          size={(stacked ? FIELD_TYPE_SIZE - 1 : FIELD_TYPE_SIZE) * fit}
+          anchor="end"
+          tone="muted"
+          mono
+          weight={500}
+        >
           {type}
         </ArtText>
       ) : null}
