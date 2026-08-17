@@ -7,7 +7,7 @@ import {
 } from "../components/landing/AlgorithmCinema";
 import { TrustSection } from "../components/landing/TrustSection";
 import { ProofEvidenceSection } from "../components/landing/ProofEvidenceSection";
-import { LandingHeroFlow } from "../components/landing/LandingHeroFlow";
+import { ProofLoopArt } from "../components/marketing/hero-art/solutionArt";
 import { ObservabilityInAction } from "../components/landing/ObservabilityInAction";
 import { useRevealOnScroll } from "../hooks/useRevealOnScroll";
 import { BACKEND_SUITE, EVIDENCE_AS_OF, TRANSFER_READY_DRIVERS } from "../lib/provenEvidence";
@@ -252,16 +252,8 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
   return (
     <>
       {/* 1) Hero — brand-first, one headline, one visual */}
-      <section className="lp-hero lp-hero--home">
-        <div className="lp-hero-home-bg" aria-hidden>
-          <span className="lp-hero-home-mesh" />
-          <span className="lp-hero-home-glow lp-hero-home-glow--a" />
-          <span className="lp-hero-home-glow lp-hero-home-glow--b" />
-          <svg className="lp-hero-home-waves" viewBox="0 0 1440 180" preserveAspectRatio="none">
-            <path d="M0,90 C240,40 480,140 720,90 C960,40 1200,120 1440,70 L1440,180 L0,180 Z" />
-            <path d="M0,120 C300,70 540,160 840,110 C1080,70 1260,130 1440,100 L1440,180 L0,180 Z" />
-          </svg>
-        </div>
+      <section className="lp-hero lp-hero--home lp-hero--home-ink">
+        <div className="lp-hero-home-bg" aria-hidden />
         <div className="lp-hero-home-grid">
           <div className="lp-hero-copy">
             <p className="lp-hero-eyebrow">
@@ -282,7 +274,11 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
                 Try Datawrap free
                 <DtIcon name="arrow-right" size={16} />
               </button>
-              <button type="button" className="lp-btn lp-btn--outline lp-btn--lg" onClick={() => onNavigate("contact")}>
+              <button
+                type="button"
+                className="lp-btn lp-btn--outline lp-btn--lg lp-btn--on-ink"
+                onClick={() => onNavigate("contact")}
+              >
                 Contact sales
               </button>
             </div>
@@ -297,7 +293,7 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
             </p>
           </div>
           <div className="lp-hero-visual lp-hero-visual--stage">
-            <LandingHeroFlow />
+            <ProofLoopArt />
           </div>
         </div>
       </section>

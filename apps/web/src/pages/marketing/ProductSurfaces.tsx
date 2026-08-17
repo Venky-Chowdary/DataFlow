@@ -1,4 +1,4 @@
-import { useEffect, useState, type CSSProperties, type ReactNode } from "react";
+import { type CSSProperties, type ReactNode } from "react";
 import { MarketingHeroBand } from "../../components/marketing/MarketingHeroBand";
 import { MarketingReveal } from "../../components/marketing/MarketingReveal";
 import { MarketingSectionFooter } from "../../components/marketing/MarketingSectionFooter";
@@ -8,7 +8,19 @@ import {
   MappingCinema,
   ProofCinema,
 } from "../../components/landing/AlgorithmCinema";
-import { TransferStudioHeroShot } from "../../components/landing/ProductJourneyCinema";
+import {
+  CadenceDialArt,
+  GateCombArt,
+  IntentArt,
+  PolicyDoorArt,
+  ReadLensArt,
+  RunSpineArt,
+} from "../../components/marketing/hero-art/productArt";
+import {
+  CutoverArt,
+  WarehouseLayersArt,
+  WatermarkArt,
+} from "../../components/marketing/hero-art/solutionArt";
 import type { PublicRoute } from "../../lib/publicNavigation";
 import {
   AlgoBlock,
@@ -31,31 +43,6 @@ function StatsStrip({ items }: { items: { value: string; label: string }[] }) {
         </div>
       ))}
     </div>
-  );
-}
-
-function Shot({
-  label,
-  caption,
-  children,
-  tone = "light",
-}: {
-  label: string;
-  caption: string;
-  children: ReactNode;
-  tone?: "light" | "ink";
-}) {
-  return (
-    <figure className={`lp-mkt-shot lp-mkt-shot--${tone}`}>
-      <div className="lp-mkt-shot-chrome">
-        <span className="lp-mkt-shot-dots" aria-hidden>
-          <i /><i /><i />
-        </span>
-        <span className="lp-mkt-shot-label">{label}</span>
-      </div>
-      <div className="lp-mkt-shot-body">{children}</div>
-      <figcaption>{caption}</figcaption>
-    </figure>
   );
 }
 
@@ -184,156 +171,6 @@ function Chapter({
   );
 }
 
-/* ─── Unique hero mocks ─────────────────────────────────────────── */
-
-function TransferStudioMock() {
-  return <TransferStudioHeroShot />;
-}
-
-function JobTheaterMock() {
-  const [phase, setPhase] = useState(0);
-  const phases = ["Queued", "Profiling", "Writing", "Reconciling", "Complete"];
-  useEffect(() => {
-    const id = window.setInterval(() => setPhase((p) => (p + 1) % phases.length), 1100);
-    return () => window.clearInterval(id);
-  }, [phases.length]);
-  const pct = [8, 28, 62, 88, 100][phase];
-
-  return (
-    <Shot label="Job Theater · job_7f3a91" caption="Batch progress, phase timeline, and proof counters update as the engine runs.">
-      <div className="lp-mkt-ui-theater">
-        <div className="lp-mkt-ui-theater-head">
-          <strong>CSV → PostgreSQL · orders</strong>
-          <span className={`lp-mkt-ui-phase is-${phases[phase].toLowerCase()}`}>{phases[phase]}</span>
-        </div>
-        <div className="lp-mkt-ui-progress lp-mkt-ui-progress--lg" aria-hidden>
-          <i style={{ width: `${pct}%` }} />
-        </div>
-        <div className="lp-mkt-ui-metrics">
-          <div><strong>12,480</strong><span>Source rows</span></div>
-          <div><strong>{phase >= 2 ? "12,471" : "—"}</strong><span>Written</span></div>
-          <div><strong>{phase >= 2 ? "9" : "—"}</strong><span>Quarantined</span></div>
-          <div><strong>{phase >= 4 ? "OK" : "…"}</strong><span>Checksum</span></div>
-        </div>
-        <ol className="lp-mkt-ui-timeline">
-          {phases.map((p, i) => (
-            <li key={p} className={i <= phase ? "is-done" : ""}>
-              <span className="lp-mkt-ui-timeline-dot" />
-              {p}
-            </li>
-          ))}
-        </ol>
-      </div>
-    </Shot>
-  );
-}
-
-function PipelinesMock() {
-  const rows = [
-    { name: "Orders hourly", cadence: "Every hour", mode: "Watermark", next: "12 min", status: "healthy" },
-    { name: "Customers daily", cadence: "Daily 02:00 UTC", mode: "Upsert", next: "5h", status: "healthy" },
-    { name: "Events → Snowflake", cadence: "Every 15 min", mode: "Append", next: "3 min", status: "drift" },
-  ];
-  return (
-    <Shot label="Pipelines · workspace schedules" caption="Cadence, write mode, and health for every recurring sync — one glance.">
-      <table className="lp-mkt-ui-table">
-        <thead>
-          <tr>
-            <th>Pipeline</th>
-            <th>Cadence</th>
-            <th>Mode</th>
-            <th>Next</th>
-            <th>Health</th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((r) => (
-            <tr key={r.name}>
-              <td><strong>{r.name}</strong></td>
-              <td>{r.cadence}</td>
-              <td><code>{r.mode}</code></td>
-              <td>{r.next}</td>
-              <td><span className={`lp-mkt-ui-pill is-${r.status}`}>{r.status}</span></td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </Shot>
-  );
-}
-
-function QueryMock() {
-  return (
-    <Shot label="Query Playground · PostgreSQL / analytics" caption="Ad-hoc SQL against live connectors — preview rows, then export or hand off to Transfer Studio.">
-      <div className="lp-mkt-ui-query">
-        <pre className="lp-mkt-ui-sql">{`SELECT order_id, payment_amount, email
-FROM orders
-WHERE created_at >= NOW() - INTERVAL '7 days'
-LIMIT 200;`}</pre>
-        <div className="lp-mkt-ui-result-bar">
-          <span>200 rows · 48 ms</span>
-          <span className="lp-mkt-ui-pill is-healthy">preview</span>
-        </div>
-        <table className="lp-mkt-ui-table lp-mkt-ui-table--compact">
-          <thead>
-            <tr><th>order_id</th><th>payment_amount</th><th>email</th></tr>
-          </thead>
-          <tbody>
-            <tr><td>ord_1842</td><td>129.00</td><td>a@retail.co</td></tr>
-            <tr><td>ord_1843</td><td>48.50</td><td>b@retail.co</td></tr>
-            <tr><td>ord_1844</td><td>312.10</td><td>c@retail.co</td></tr>
-          </tbody>
-        </table>
-      </div>
-    </Shot>
-  );
-}
-
-function PilotMock() {
-  return (
-    <Shot label="Datawrap Pilot · triage chat" caption="Natural language over the same engine — failed gates, mapping fixes, and Job Theater handoff.">
-      <div className="lp-mkt-ui-chat">
-        <div className="lp-mkt-ui-bubble is-user">
-          Why did the Orders → BigQuery job fail preflight?
-        </div>
-        <div className="lp-mkt-ui-bubble is-bot">
-          Gate <strong>Type coercion</strong> blocked <code>pay_amt</code> (STRING) → <code>payment_amount</code> (NUMERIC).
-          214 sample values contain currency symbols. Pin a coerce rule or quarantine those rows.
-        </div>
-        <div className="lp-mkt-ui-chat-actions">
-          <span>Open Job Theater</span>
-          <span>Fix mapping</span>
-          <span>Quarantine policy</span>
-        </div>
-      </div>
-    </Shot>
-  );
-}
-
-function McpMock() {
-  return (
-    <Shot label="MCP · Cursor agent tools" caption="Agents call the same governed tools — never raw destination passwords.">
-      <div className="lp-mkt-ui-mcp">
-        <div className="lp-mkt-ui-mcp-tool">
-          <code>datawrap.transfer.run</code>
-          <span className="lp-mkt-ui-pill is-healthy">allowed</span>
-        </div>
-        <pre className="lp-mkt-ui-sql">{`{
-  "source": "pg.public.orders",
-  "destination": "bq.analytics.orders",
-  "mode": "upsert",
-  "preflight": true
-}`}</pre>
-        <ul className="lp-mkt-ui-mcp-log">
-          <li className="is-pass">RBAC: transfer:execute ✓</li>
-          <li className="is-pass">Preflight 9/9 ✓</li>
-          <li className="is-pass">Job job_7f3a91 queued → Job Theater</li>
-        </ul>
-      </div>
-    </Shot>
-  );
-}
-
 /* ─── Product pages ─────────────────────────────────────────────── */
 
 export function TransferStudioPage({
@@ -352,7 +189,7 @@ export function TransferStudioPage({
       ctaSecondary="See Job Theater"
       onPrimary={onGetStarted}
       onSecondary={() => onNavigate("product-jobs")}
-      heroVisual={<TransferStudioMock />}
+      heroVisual={<GateCombArt />}
       liveFrames={PRODUCT_FRAMES.transfer}
       liveTitle="Transfer Studio in the live workspace"
       stats={[
@@ -509,7 +346,7 @@ export function JobTheaterPage({
       ctaSecondary="Transfer Studio"
       onPrimary={onGetStarted}
       onSecondary={() => onNavigate("product-transfer")}
-      heroVisual={<JobTheaterMock />}
+      heroVisual={<RunSpineArt />}
       liveFrames={PRODUCT_FRAMES.jobs}
       liveTitle="Job Theater with real reconcile evidence"
       stats={[
@@ -623,7 +460,7 @@ export function PipelinesPage({
       ctaSecondary="Recurring sync guide"
       onPrimary={onGetStarted}
       onSecondary={() => onNavigate("solution-sync")}
-      heroVisual={<PipelinesMock />}
+      heroVisual={<CadenceDialArt />}
       liveFrames={PRODUCT_FRAMES.pipelines}
       liveTitle="Pipelines in the live workspace"
       stats={[
@@ -730,7 +567,7 @@ export function QueryPlaygroundPage({
       ctaSecondary="Connectors"
       onPrimary={onGetStarted}
       onSecondary={() => onNavigate("integrations")}
-      heroVisual={<QueryMock />}
+      heroVisual={<ReadLensArt />}
       liveFrames={PRODUCT_FRAMES.query}
       liveTitle="Query Playground in the live workspace"
       stats={[
@@ -829,7 +666,7 @@ export function DataPilotPage({
       ctaSecondary="MCP Server"
       onPrimary={onGetStarted}
       onSecondary={() => onNavigate("product-mcp")}
-      heroVisual={<PilotMock />}
+      heroVisual={<IntentArt />}
       liveFrames={PRODUCT_FRAMES.pilot}
       liveTitle="Datawrap Pilot in the live workspace"
       stats={[
@@ -897,7 +734,7 @@ export function McpServerPage({
       ctaSecondary="Security overview"
       onPrimary={onGetStarted}
       onSecondary={() => onNavigate("security")}
-      heroVisual={<McpMock />}
+      heroVisual={<PolicyDoorArt />}
       liveFrames={PRODUCT_FRAMES.mcp}
       liveTitle="Agent runs still land in the real workspace"
       stats={[
@@ -997,7 +834,7 @@ export function MigrationsSolutionPage({
       ctaSecondary="Open Transfer Studio"
       onPrimary={onGetStarted}
       onSecondary={() => onNavigate("product-transfer")}
-      heroVisual={<TransferStudioMock />}
+      heroVisual={<CutoverArt />}
       outcomes={[
         {
           title: "Semantic column matching",
@@ -1078,12 +915,15 @@ export function WarehouseSolutionPage({
 }) {
   return (
     <div className="lp-mkt-page lp-wh-v3">
-      <section className="lp-wh-hero" aria-label="Warehouse loading">
-        <div className="lp-shell lp-wh-hero-inner">
-          <div className="lp-wh-hero-copy">
-            <p className="lp-mkt-kicker">Solution · Warehouse loading</p>
+      <section className="lp-sol-hero lp-sol-hero--ink" aria-label="Warehouse loading">
+        <div className="lp-sol-hero-inner">
+          <div className="lp-sol-hero-copy">
+            <p className="lp-pricing-hero-kicker">
+              <span className="lp-pricing-hero-dot" aria-hidden />
+              Solution · Warehouse loading
+            </p>
             <h1>Bulk loads finance can archive</h1>
-            <p className="lp-wh-lead">
+            <p className="lp-sol-hero-lead">
               Snowflake, BigQuery, Redshift, and Databricks — native MERGE loaders, destination
               probes, capacity checks, and a reconcile report finance can archive.
             </p>
@@ -1096,7 +936,9 @@ export function WarehouseSolutionPage({
               </button>
             </div>
           </div>
-          <div className="lp-wh-hero-visual">{<JobTheaterMock />}</div>
+          <div className="lp-sol-hero-visual">
+            <WarehouseLayersArt />
+          </div>
         </div>
       </section>
 
@@ -1245,7 +1087,7 @@ export function SyncSolutionPage({
       ctaSecondary="Pipelines product"
       onPrimary={onGetStarted}
       onSecondary={() => onNavigate("product-pipelines")}
-      heroVisual={<PipelinesMock />}
+      heroVisual={<WatermarkArt />}
       outcomes={[
         {
           title: "Cadence you choose",
@@ -1352,12 +1194,7 @@ function SolutionShell({
 }) {
   return (
     <div className="lp-mkt-page lp-sol-v2">
-      <section className="lp-sol-hero" aria-label={kicker}>
-        <div className="lp-sol-hero-waves" aria-hidden>
-          <span className="lp-wave-grid" />
-          <span className="lp-wave-glow lp-wave-glow--1" />
-          <span className="lp-wave-glow lp-wave-glow--2" />
-        </div>
+      <section className="lp-sol-hero lp-sol-hero--ink" aria-label={kicker}>
         <div className="lp-sol-hero-inner">
           <div className="lp-sol-hero-copy">
             <p className="lp-pricing-hero-kicker">
