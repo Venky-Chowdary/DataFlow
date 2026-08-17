@@ -4,7 +4,10 @@
  * Run: npx --yes tsx --test apps/web/src/lib/piiAcknowledgment.test.ts
  */
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import { describe, it } from "node:test";
+import { fileURLToPath } from "node:url";
 import { standingAcknowledgmentReason } from "./acknowledgments.ts";
 import { blockerTitle, isInternalGateId } from "./preflightGates.ts";
 import { buildDisplayBlockers, buildExecutiveSummary } from "./validateIssueGrouping.ts";
@@ -83,6 +86,25 @@ describe("PII acknowledgment transport and naming", () => {
     const summary = buildExecutiveSummary(pf);
     assert.notEqual(summary.title, "Approve PII to unlock Execute");
     assert.ok(summary.untilLines.some((l) => /destination/i.test(l)));
+  });
+
+  it("renders no blocker heading straight from its id", () => {
+    // A positional id reaching a heading is how `proof_0` shipped as a reason;
+    // every blocker surface must resolve its own text through blockerTitle().
+    const surfaces = [
+      "../pages/JobsPage.tsx",
+      "../components/PreflightTimeline.tsx",
+      "../components/transfer/ValidateDashboard.tsx",
+    ];
+    for (const rel of surfaces) {
+      const file = path.resolve(path.dirname(fileURLToPath(import.meta.url)), rel);
+      const src = readFileSync(file, "utf8");
+      assert.doesNotMatch(
+        src,
+        /<strong>\{(?:b|blocker|issue)\.(?:id|gate)\}<\/strong>/,
+        `${rel} prints a raw blocker id as a heading`,
+      );
+    }
   });
 });
 

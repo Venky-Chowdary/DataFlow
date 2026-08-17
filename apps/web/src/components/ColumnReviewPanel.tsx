@@ -36,6 +36,9 @@ import {
   mappingAckLabel,
   mappingAckTier,
   mappingRequiresRiskAck,
+  mappingRiskChipState,
+  clearExistingDestTypeOverride,
+  isExistingDestTypeOverride,
   pipelineTransformChip,
   widenMappingToVarchar,
   type EditableMapping,
@@ -809,13 +812,25 @@ export function ColumnReviewPanel({
                       {(() => {
                         const engineRisk = engineStampedRiskChip(m);
                         if (!engineRisk || omitted) return null;
-                        if (!m.riskAcknowledged) {
+                        const riskState = mappingRiskChipState(m);
+                        if (riskState === "open") {
                           return (
                             <span
                               className="df2-badge df2-badge-run df2-badge-xs"
                               title={engineRisk.detail}
                             >
                               {engineRisk.label}
+                            </span>
+                          );
+                        }
+                        if (riskState === "fail_closed") {
+                          const policy = m.riskContract?.execution_policy || "fail-closed";
+                          return (
+                            <span
+                              className="df2-badge df2-badge-run df2-badge-xs"
+                              title={`Contract signed with ${policy} — that policy stops the write, so Validate stays blocked. Re-sign with a continue policy to proceed. ${engineRisk.detail}`}
+                            >
+                              contract · {policy} · blocked
                             </span>
                           );
                         }
@@ -1059,6 +1074,16 @@ export function ColumnReviewPanel({
                           Remap / ALTER required
                         </button>
                       )}
+                      {!omitted && !isExistingEnumBooleanConflict(m) && isExistingDestTypeOverride(m) && (
+                        <button
+                          type="button"
+                          className="df2-btn df2-btn-sm df2-btn-ghost"
+                          title={`Withdraw the ALTER request and keep the physical type ${m.destType || "as-is"} — remaining fidelity loss still needs a Risk Contract`}
+                          onClick={() => updateMapping(index, clearExistingDestTypeOverride(m))}
+                        >
+                          Keep {m.destType || "physical type"}
+                        </button>
+                      )}
                       {!omitted && isEnumToBooleanConflict(m) && canWidenMapping(m) && (
                         <button
                           type="button"
@@ -1152,7 +1177,7 @@ export function ColumnReviewPanel({
                             <option value="">Policy…</option>
                             {EXECUTION_POLICY_OPTIONS.map((p) => (
                               <option key={p.id} value={p.id}>
-                                {p.label}
+                                {p.continueUnlock ? p.label : `${p.label} — keeps Validate blocked`}
                               </option>
                             ))}
                           </select>

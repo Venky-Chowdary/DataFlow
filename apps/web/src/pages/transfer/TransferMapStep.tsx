@@ -13,6 +13,7 @@ import type { ColumnFilter } from "../../lib/columnWorkbench";
 import { countByFilter, needsMappingReview } from "../../lib/columnWorkbench";
 import type { EditableMapping } from "../../lib/mapping";
 import { mappingHealthSummary } from "../../lib/mapping";
+import { mapBlockerSummary } from "../../lib/mapBlockers";
 import type { UniqueKeySuggestion } from "../../lib/uniqueKeySuggestions";
 
 interface TransferMapStepProps {
@@ -186,6 +187,12 @@ export function TransferMapStep({
     [columnMappings, confidenceThreshold],
   );
 
+  // Same predicate as the Continue gate — the reason shown is the reason enforced.
+  const blockerSummary = useMemo(
+    () => mapBlockerSummary(columnMappings, confidenceThreshold),
+    [columnMappings, confidenceThreshold],
+  );
+
   /** Prefer API proof; refresh pair list from live edits so operators see current transforms. */
   const effectiveProof = useMemo(
     () => mergeMappingProof(mappingProof, columnMappings, {
@@ -223,10 +230,8 @@ export function TransferMapStep({
       onClick={onContinue}
       disabled={mappingReviewCount > 0}
       title={
-        mappingReviewCount > 0
-          ? (health.falseFriendCount > 0
-            ? health.detail
-            : `${mappingReviewCount} column(s) need Approve or Accept risk before Validate`)
+        blockerSummary.blockers.length > 0
+          ? `${blockerSummary.headline}\n${blockerSummary.detail}`
           : "Continue to Validate"
       }
     >
@@ -335,6 +340,25 @@ export function TransferMapStep({
       )}
 
       <div className="df2-card-body df2-map-step-body">
+        {blockerSummary.blockers.length > 0 && (
+          <details className="df2-map-stream-diverge is-compact" role="status" open>
+            <summary>
+              <DtIcon name="alert" size={16} />
+              <strong>{blockerSummary.headline}</strong>
+            </summary>
+            <ul className="df2-map-blocker-list">
+              {blockerSummary.blockers.slice(0, 6).map((b) => (
+                <li key={`${b.code}-${b.source}`}>
+                  <strong>{b.title}</strong>
+                  <span> — {b.action}</span>
+                </li>
+              ))}
+              {blockerSummary.blockers.length > 6 && (
+                <li>+{blockerSummary.blockers.length - 6} more — use the Review filter.</li>
+              )}
+            </ul>
+          </details>
+        )}
         {identityFixBanner && (
           <div className="df2-map-identity-banner is-compact" role="status">
             <DtIcon name="alert" size={16} />
