@@ -13,6 +13,14 @@ export const ART_W = 1000;
 export const ART_H = 640;
 
 /**
+ * A drawing that runs the full width of a hero band (rather than sitting in a
+ * column beside the copy) needs a wider, shorter canvas, or it would be taller
+ * than the viewport. Declared here so the two canvases stay the only two.
+ */
+export const BAND_W = 1700;
+export const BAND_H = 440;
+
+/**
  * A hero drawing renders about 520–620 CSS px wide, so a 16-unit label would
  * land near 9px on screen. Type is therefore authored in geometry units and
  * scaled once, here, to stay legible at the width the frame actually gets.
@@ -78,13 +86,20 @@ export function HeroArtFrame({
   caption,
   className = "",
   focus,
+  canvas,
   defs,
   children,
-}: HeroArtProps & { focus?: FocalRegion; defs?: ReactNode; children: ReactNode }) {
+}: HeroArtProps & {
+  focus?: FocalRegion;
+  canvas?: { w: number; h: number };
+  defs?: ReactNode;
+  children: ReactNode;
+}) {
   // Ids must be unique per instance: two drawings on one page must not share defs.
   const uid = `dw${useId().replace(/[^a-z0-9]+/gi, "")}`;
   const narrow = useNarrowViewport();
-  const view = narrow && focus ? focus : { x: 0, y: 0, w: ART_W, h: ART_H };
+  const { w: cw, h: ch } = canvas ?? { w: ART_W, h: ART_H };
+  const view = narrow && focus ? focus : { x: 0, y: 0, w: cw, h: ch };
   return (
     <figure className={`dw-hero-art ${className}`.trim()}>
       <svg
@@ -111,14 +126,14 @@ export function HeroArtFrame({
           {defs}
         </defs>
 
-        <rect width={ART_W} height={ART_H} rx="20" fill={`url(#${uid}-field)`} />
-        <rect width={ART_W} height={ART_H} rx="20" fill={`url(#${uid}-grid)`} opacity="0.55" />
-        <rect width={ART_W} height={ART_H} rx="20" fill={`url(#${uid}-light)`} />
+        <rect width={cw} height={ch} rx="20" fill={`url(#${uid}-field)`} />
+        <rect width={cw} height={ch} rx="20" fill={`url(#${uid}-grid)`} opacity="0.55" />
+        <rect width={cw} height={ch} rx="20" fill={`url(#${uid}-light)`} />
         <rect
           x="0.75"
           y="0.75"
-          width={ART_W - 1.5}
-          height={ART_H - 1.5}
+          width={cw - 1.5}
+          height={ch - 1.5}
           rx="20"
           fill="none"
           stroke={INK.plateEdge}
