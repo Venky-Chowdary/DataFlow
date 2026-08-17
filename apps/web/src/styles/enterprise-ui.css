@@ -646,7 +646,7 @@
 
 .df2-job-row-rows.is-dest {
   color: var(--df-brand-strong, #115e59);
-  font-weight: 650;
+  font-weight: 600;
 }
 
 .df2-job-row-rows.is-dest.is-warn {
@@ -768,7 +768,6 @@
   height: 32px !important;
   min-height: 32px !important;
   padding: 0 12px !important;
-  font-size: 12px !important;
 }
 
 .df2-job-name-editor-error {
@@ -819,7 +818,6 @@
   height: 28px !important;
   min-height: 28px !important;
   padding: 0 10px !important;
-  font-size: 12px !important;
 }
 
 .df2-job-row:hover {
@@ -1019,7 +1017,7 @@
   border-radius: 8px;
   font: inherit;
   font-size: 12.5px;
-  font-weight: 650;
+  font-weight: 600;
   letter-spacing: -0.01em;
   cursor: pointer;
   min-width: 0;
@@ -2724,7 +2722,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 .df2-pipe-card-title {
   margin: 0;
   font-size: 14px;
-  font-weight: 650;
+  font-weight: 600;
   letter-spacing: -0.01em;
   color: var(--df-text-primary, #111827);
   overflow: hidden;
@@ -3066,7 +3064,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 .lp-value-item strong {
   display: block;
   font-size: 13.5px;
-  font-weight: 650;
+  font-weight: 600;
   margin-bottom: 2px;
 }
 
@@ -3796,7 +3794,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   padding: 0 12px !important;
   border: 0 !important;
   border-radius: var(--df-radius-sm, 6px) !important;
-  font-size: 12.5px !important;
+  font-size: var(--df-fs-tab) !important;
   font-weight: 600 !important;
   line-height: 1 !important;
   white-space: nowrap;
@@ -3926,7 +3924,6 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   min-height: var(--df-toolbar-h) !important;
   max-height: var(--df-toolbar-h) !important;
   padding: 0 12px !important;
-  font-size: 12.5px !important;
   border-radius: 9px !important;
   box-sizing: border-box;
   flex: 0 0 auto;
@@ -4034,7 +4031,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 
 .df2-page-settings .df2-settings-section-head h2 {
   font-size: 15px !important;
-  font-weight: 650 !important;
+  font-weight: 600 !important;
 }
 
 .df2-page-settings .df2-settings-section-head p {
@@ -4048,7 +4045,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 .df2-page-settings .df2-settings-section-head h3 {
   margin: 0;
   font-size: 14px;
-  font-weight: 650;
+  font-weight: 600;
   color: var(--df-text-primary, #0f172a);
 }
 
@@ -4223,7 +4220,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   padding: 0 8px;
   border-radius: 999px;
   font-size: 11px;
-  font-weight: 650;
+  font-weight: 600;
   letter-spacing: 0.02em;
 }
 
@@ -4242,7 +4239,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 .df2-mcp-endpoint-url {
   display: block;
   font-size: 14px;
-  font-weight: 650;
+  font-weight: 600;
   color: var(--df-text-primary, #111827);
   word-break: break-all;
   font-family: var(--df-font-mono, ui-monospace, monospace);
@@ -4402,7 +4399,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   margin-left: auto;
   flex-shrink: 0;
   font-size: 11px;
-  font-weight: 650;
+  font-weight: 600;
   color: #64748b;
 }
 
@@ -4621,7 +4618,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 
 .df2-preflight.is-compact .df2-preflight-step-title {
   font-size: 12px;
-  font-weight: 650;
+  font-weight: 600;
   color: #0f172a;
   line-height: 1.25;
 }
@@ -4684,7 +4681,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 
 .df2-validate-rail-details > summary {
   font-size: 12px;
-  font-weight: 650;
+  font-weight: 600;
   color: #475569;
   padding: 4px 0;
 }
@@ -4731,7 +4728,6 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   min-height: var(--df-btn-height, 36px) !important;
   padding: 0 14px !important;
   border-radius: var(--df-radius-md, 8px) !important;
-  font-size: 12.5px !important;
   font-weight: 600 !important;
   flex: 0 0 auto !important;
   width: 100% !important;
@@ -4851,7 +4847,6 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   min-height: 36px !important;
   padding: 0 14px !important;
   border-radius: var(--df-radius-md, 8px) !important;
-  font-size: 12.5px !important;
   font-weight: 600 !important;
   white-space: nowrap !important;
 }
@@ -5097,7 +5092,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 
 .df2-progress-ring-label strong {
   font-size: 13px;
-  font-weight: 800;
+  font-weight: var(--df-fw-bold);
   color: #0f172a;
 }
 
@@ -5142,7 +5137,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   display: inline-block;
   margin-right: 8px;
   font-size: 11.5px;
-  font-weight: 650;
+  font-weight: 600;
   color: #334155;
 }
 
@@ -5205,12 +5200,12 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 
 .df2-theater-v3-bar-legend .is-warn {
   color: #b45309;
-  font-weight: 650;
+  font-weight: 600;
 }
 
 .df2-theater-v3-bar-legend .is-danger {
   color: #b91c1c;
-  font-weight: 650;
+  font-weight: 600;
 }
 
 .df2-theater-v3-streams {
@@ -5505,7 +5500,6 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   height: 28px !important;
   min-height: 28px !important;
   padding: 0 10px !important;
-  font-size: 11.5px !important;
   border-radius: 7px !important;
   background: #1f2937 !important;
   border-color: #374151 !important;
@@ -5629,7 +5623,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   gap: 8px;
   margin-bottom: 8px;
   font-size: 12.5px;
-  font-weight: 650;
+  font-weight: 600;
   color: #0f172a;
 }
 
@@ -5830,7 +5824,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   background: #fef3c7 !important;
   color: #78350f !important;
   border-bottom-color: #fde68a !important;
-  font-size: 11px !important;
+  font-size: var(--df-fs-xs) !important;
   font-weight: 700 !important;
   letter-spacing: 0.04em;
   text-transform: uppercase;
@@ -6167,7 +6161,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 
 .df2-result-metric span {
   font-size: 10.5px;
-  font-weight: 650;
+  font-weight: 600;
   letter-spacing: 0.02em;
   text-transform: uppercase;
   color: #64748b;
@@ -6213,7 +6207,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 
 .df2-result-meta-chip em {
   font-style: normal;
-  font-weight: 650;
+  font-weight: 600;
   color: #64748b;
   text-transform: uppercase;
   letter-spacing: 0.03em;
@@ -6221,7 +6215,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 }
 
 .df2-result-meta-chip strong {
-  font-weight: 650;
+  font-weight: 600;
   color: #0f172a;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -6330,7 +6324,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   list-style: none;
   padding: 10px 12px;
   font-size: 12px;
-  font-weight: 650;
+  font-weight: 600;
   color: #334155;
   user-select: none;
 }
@@ -6615,7 +6609,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   border: 1px solid #99f6e4;
   background: #f0fdfa;
   font-size: 12px;
-  font-weight: 650;
+  font-weight: 600;
   color: #0f766e;
   white-space: nowrap;
 }
@@ -7577,7 +7571,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 
 .df2-breadcrumb strong {
   color: var(--df-text-primary, #0f172a);
-  font-weight: 650;
+  font-weight: 600;
 }
 
 .df2-content {
@@ -7587,8 +7581,8 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 /* Shared enterprise page chrome */
 .df2-page-shell .df2-page-title,
 .df2-page .df2-page-title {
-  font-size: 22px;
-  font-weight: 750;
+  font-size: var(--df-fs-page-title);
+  font-weight: var(--df-fw-bold);
   letter-spacing: -0.03em;
 }
 
@@ -7651,12 +7645,12 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   color: var(--df-text-tertiary, #94a3b8);
   text-transform: uppercase;
   letter-spacing: 0.04em;
-  font-weight: 650;
+  font-weight: 600;
 }
 
 .df2-jobs-v3-summary-route strong {
   font-size: 14px;
-  font-weight: 650;
+  font-weight: 600;
 }
 
 .df2-jobs-v3-summary-phases {
@@ -8052,7 +8046,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 
 .df2-auth-card strong {
   font-size: 13px;
-  font-weight: 650;
+  font-weight: 600;
   color: var(--df-text-primary, #0f172a);
 }
 
@@ -8650,12 +8644,12 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 
 .df2-overview-attention strong {
   display: block;
-  font-size: 0.9rem;
+  font-size: 14px;
 }
 
 .df2-overview-attention p {
   margin: 0.2rem 0 0;
-  font-size: 0.85rem;
+  font-size: 14px;
   color: var(--df-text-muted, #64748b);
 }
 
@@ -8666,7 +8660,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   background: white;
   border-radius: 8px;
   padding: 0.4rem 0.75rem;
-  font-size: 0.8rem;
+  font-size: 13px;
   cursor: pointer;
 }
 
@@ -8708,12 +8702,12 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 
 .df2-freshness-slo strong {
   display: block;
-  font-size: 0.9rem;
+  font-size: 14px;
 }
 
 .df2-freshness-slo p {
   margin: 0.2rem 0 0;
-  font-size: 0.85rem;
+  font-size: 14px;
   color: var(--df-text-muted, #64748b);
 }
 
@@ -8731,7 +8725,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   align-items: center;
   justify-content: space-between;
   gap: 0.5rem;
-  font-size: 0.82rem;
+  font-size: 13px;
 }
 
 .df2-freshness-slo-actions {
@@ -8783,22 +8777,22 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 }
 
 .df2-trust-score-ring strong {
-  font-size: 1rem;
+  font-size: 16px;
 }
 
 .df2-trust-score-ring span {
-  font-size: 0.7rem;
+  font-size: 11px;
   opacity: 0.75;
 }
 
 .df2-trust-score h3 {
   margin: 0;
-  font-size: 0.95rem;
+  font-size: 15px;
 }
 
 .df2-trust-score-head p {
   margin: 0.2rem 0 0;
-  font-size: 0.82rem;
+  font-size: 13px;
   color: var(--df-text-muted, #64748b);
 }
 
@@ -8814,7 +8808,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   display: grid;
   grid-template-columns: 7rem 2.5rem 1fr;
   gap: 0.5rem;
-  font-size: 0.8rem;
+  font-size: 13px;
   align-items: baseline;
 }
 
@@ -8834,11 +8828,11 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 
 .df2-trust-score-next strong {
   display: block;
-  font-size: 0.85rem;
+  font-size: 14px;
 }
 
 .df2-trust-score-next span {
-  font-size: 0.8rem;
+  font-size: 13px;
   color: var(--df-text-muted, #64748b);
 }
 
@@ -8915,12 +8909,12 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 }
 
 .df2-conservation-ledger-count strong {
-  font-size: 1.05rem;
+  font-size: 16px;
   font-variant-numeric: tabular-nums;
 }
 
 .df2-conservation-ledger-count span {
-  font-size: 0.62rem;
+  font-size: 10px;
   letter-spacing: 0.04em;
   text-transform: uppercase;
   opacity: 0.75;
@@ -8945,8 +8939,8 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   border: 1px solid color-mix(in srgb, var(--df-brand, #0d9488) 28%, transparent);
   background: var(--df-brand-muted, #f0fdfa);
   color: var(--df-brand-strong, #115e59);
-  font-size: 0.68rem;
-  font-weight: 650;
+  font-size: 11px;
+  font-weight: 600;
   letter-spacing: 0.02em;
 }
 
@@ -8967,15 +8961,15 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 }
 
 .df2-conservation-ledger-compare article span {
-  font-size: 0.68rem;
-  font-weight: 650;
+  font-size: 11px;
+  font-weight: 600;
   letter-spacing: 0.04em;
   text-transform: uppercase;
   color: var(--df-text-muted, #64748b);
 }
 
 .df2-conservation-ledger-compare article strong {
-  font-size: 1.05rem;
+  font-size: 16px;
   font-variant-numeric: tabular-nums;
   letter-spacing: -0.02em;
 }
@@ -8996,7 +8990,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 
 .df2-conservation-ledger-head p {
   margin: 0.2rem 0 0;
-  font-size: 0.82rem;
+  font-size: 13px;
   color: var(--df-text-muted, #64748b);
 }
 
@@ -9006,7 +9000,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   border-radius: 8px;
   background: color-mix(in srgb, var(--df-brand-muted, #f0fdfa) 80%, white);
   font-family: var(--df-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
-  font-size: 0.78rem;
+  font-size: 12px;
   letter-spacing: -0.01em;
   color: var(--df-text-primary, #0f172a);
 }
@@ -9073,7 +9067,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 }
 
 .df2-conservation-ledger-chips span {
-  font-size: 0.68rem;
+  font-size: 11px;
   font-weight: 600;
   letter-spacing: 0.04em;
   text-transform: uppercase;
@@ -9081,7 +9075,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 }
 
 .df2-conservation-ledger-chips strong {
-  font-size: 0.92rem;
+  font-size: 15px;
   font-variant-numeric: tabular-nums;
 }
 
@@ -9096,17 +9090,17 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 
 .df2-conservation-ledger-ack strong {
   display: block;
-  font-size: 0.85rem;
+  font-size: 14px;
 }
 
 .df2-conservation-ledger-ack span {
-  font-size: 0.78rem;
+  font-size: 12px;
   color: var(--df-text-muted, #64748b);
 }
 
 .df2-conservation-ledger-note {
   margin: 0;
-  font-size: 0.8rem;
+  font-size: 13px;
   color: var(--df-text-muted, #64748b);
 }
 
@@ -9121,11 +9115,11 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 
 .df2-conservation-ledger-next strong {
   display: block;
-  font-size: 0.85rem;
+  font-size: 14px;
 }
 
 .df2-conservation-ledger-next span {
-  font-size: 0.8rem;
+  font-size: 13px;
   color: var(--df-text-muted, #64748b);
 }
 
@@ -9188,7 +9182,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 
 .df2-overview-v3-ops-chip strong {
   font-size: 15px;
-  font-weight: 800;
+  font-weight: var(--df-fw-bold);
 }
 
 .df2-overview-v3-ops-chip span {
@@ -9347,8 +9341,8 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 
 .df2-overview-v3 .df2-metric-glass-value {
   display: block;
-  font-size: 1.45rem;
-  font-weight: 800;
+  font-size: 24px;
+  font-weight: var(--df-fw-bold);
   letter-spacing: -0.03em;
   line-height: 1.1;
   color: var(--df-text-primary, #0f172a);
@@ -9428,7 +9422,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   padding: 5px 10px;
   border-radius: var(--df-radius-md, 8px);
   font-size: 11px;
-  font-weight: 650;
+  font-weight: 600;
   color: var(--df-text-secondary, #64748b);
   background: var(--df-surface-muted, #f8fafc);
   border: 1px solid var(--df-border, #e2e8f0);
@@ -9622,8 +9616,8 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 }
 
 .df2-overview-v3-score-label strong {
-  font-size: 1.15rem;
-  font-weight: 800;
+  font-size: 18px;
+  font-weight: var(--df-fw-bold);
   color: var(--df-brand-hover, #0f766e);
   line-height: 1;
 }
@@ -9662,7 +9656,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 .df2-overview-v3 .df2-overview-pipeline-list strong {
   display: block;
   font-size: 13px;
-  font-weight: 650;
+  font-weight: 600;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -9995,8 +9989,8 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 
 .df2-page-title {
   margin: 0;
-  font-size: 22px;
-  font-weight: 650;
+  font-size: var(--df-fs-page-title);
+  font-weight: var(--df-fw-bold);
   letter-spacing: -0.02em;
   color: var(--df-text-primary);
   line-height: 1.25;
@@ -10161,7 +10155,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 .df2-app .df2-badge,
 .df2-app [class*="df2-badge-"] {
   border-radius: var(--df-radius-sm, 6px);
-  font-weight: 650;
+  font-weight: 600;
   letter-spacing: 0.01em;
 }
 
@@ -10223,7 +10217,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 .df2-app .df2-sidebar .df2-nav-item.is-active {
   background: var(--df-brand-muted, #f0fdfa);
   color: var(--df-brand-strong, #115e59);
-  font-weight: 650;
+  font-weight: 600;
 }
 
 .df2-app .df2-sidebar .df2-nav-item.is-active::before {
@@ -10856,7 +10850,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 .df2-contract-name {
   margin: 0;
   font-size: 15px;
-  font-weight: 650;
+  font-weight: 600;
   line-height: 1.3;
 }
 
@@ -11039,7 +11033,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   z-index: 2;
   background: var(--df-table-head-bg) !important;
   color: var(--df-text-tertiary) !important;
-  font-size: 11px !important;
+  font-size: var(--df-fs-xs) !important;
   font-weight: 700 !important;
   letter-spacing: 0.045em;
   text-transform: uppercase;
@@ -11097,7 +11091,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   .df2-page-transfer-studio .df2-wizard-studio .df2-wizard-label-short {
     display: inline !important;
     font-size: 11px;
-    font-weight: 650;
+    font-weight: 600;
     letter-spacing: 0.01em;
     overflow: visible;
     text-overflow: clip;
@@ -12238,11 +12232,11 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 }
 
 .df2-page-jobs .df2-trust-score-ring strong {
-  font-size: 0.85rem;
+  font-size: 14px;
 }
 
 .df2-page-jobs .df2-trust-score-head p {
-  font-size: 0.75rem;
+  font-size: 12px;
   line-height: 1.3;
 }
 
@@ -12253,7 +12247,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 .df2-page-jobs .df2-trust-score-factors li {
   grid-template-columns: 6rem 2rem 1fr;
   gap: 0.3rem;
-  font-size: 0.72rem;
+  font-size: 12px;
   line-height: 1.25;
 }
 
@@ -12281,7 +12275,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 
 .df2-page-overview-v3 .df2-metric-glass-value,
 .df2-overview-v3 .df2-metric-glass-value {
-  font-size: 1.25rem;
+  font-size: 20px;
 }
 
 .df2-page-overview-v3 .df2-metric-glass-sub,

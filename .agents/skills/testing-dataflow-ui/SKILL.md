@@ -169,3 +169,67 @@ Confirm no rows landed with a destination count, e.g.
 ## Devin Secrets Needed
 
 None — local credentials come from the running API process environment.
+
+## Auditing workspace UI geometry (control heights, overlap, toasts, a11y)
+
+Helper scripts used for this (repo root, run from the repo so `playwright` resolves):
+`vp.mjs <w> <h>` (exact CSS viewport via CDP), `probe.mjs` (installs `window.__M` geometry probe),
+`route.mjs "<Nav label>" <out.png>` (sidebar click + screenshot + measure), `why.mjs <sel> <prop>`
+(CDP matched-CSS-rules, shows which rule actually wins), `crop.mjs`, `vis.mjs` (list visible buttons).
+
+Pitfalls that silently produce false results:
+
+- **The Devin browser ignores zoom keys** and is pinned by launch flags. Set exact widths with
+  `Emulation.setDeviceMetricsOverride` over CDP (Chrome exposes it on `127.0.0.1:29229`). The override
+  survives client disconnect and applies to the same tab you click in.
+- **Lazy routes paint an `aria-busy="true"` fallback first.** Measuring or screenshotting on a fixed
+  timeout captures "Loading ..." instead of the page. Always
+  `waitForFunction(() => !document.querySelector('[aria-busy="true"]'))` before asserting.
+- **`window.__M` (or any injected probe) is destroyed by a page reload / `page.goto`.** Re-run
+  `probe.mjs` after any reload, otherwise every route reports `__M not defined`.
+- **Keep-alive mounts duplicate page panels.** Measure only *visible* elements and scope click
+  selectors to the visible page root (e.g. `.df2-connectors-page:visible`), not `.df2-screen-panel`.
+- **aria-label beats visible text for `getByRole`.** The connector row button reads "Test" but its
+  accessible name is `Test <connector> connection`; a bare `:has-text("Test")` also matches the
+  sidebar user row (`Test test@gmail.com`) and will navigate you to Settings. Jobs detail tabs carry
+  count badges ("Log\n5"), so anchor only the start of the label.
+- **Token ownership differs per context.** `.df2-toolbar` declares its own `--df-toolbar-h` and forces
+  toolbar buttons to it with `!important`, so toolbar buttons legitimately differ from
+  `--df-btn-height-sm`. Read the token from the nearest toolbar, not from `.df2-app`.
+- **A later rule with equal specificity silently kills a media-query step.** Use `why.mjs` before
+  calling a responsive step "not applied" - and note an un-`!important` rule loses to an
+  `!important` one regardless of order (this is how the Pilot edge-tab content clearance can be
+  defeated by a generic `padding-right: 16px !important` on `.df2-content-inner`).
+- **Settings persistence needs a generous settle.** Reading `#timezone` ~2.5s after reload can catch
+  the pre-fetch default and look like a lost save. Wait longer, and cross-check
+  `GET /api/v1/workspace/settings`. Note `fetchWorkspaceSettings()` returns hardcoded defaults
+  (`Datawrap` / `UTC` / `90`) when the GET fails, so a backend failure is indistinguishable from
+  real data in the UI.
+- **The Docs screenshot reel autoplays (~3s).** Tab+Enter assertions race the timer; activate a dot
+  deterministically (focus index N, press Enter, compare `aria-selected` to N) instead. All six frame
+  `<img>` elements are always laid out, so "which frame is visible" cannot be read from img rects -
+  use the caption text or a cropped screenshot.
+- **Assert the computed style on the element the rule actually targets.** `justify-content: safe center`
+  lives on `.df2-pilot-main-inner`, while its scroll host `.df2-pilot-main-scroll` computes `normal` -
+  reading the host produced a false "fix not applied" verdict. Resolve the selector in the stylesheet
+  first, then measure that node.
+- Reset Pilot to its empty state with the **New chat** button before asserting empty-state layout.
+
+## Auditing workspace typography
+
+Read `getComputedStyle` family/size/weight/line-height on every visible text node across the 13
+authenticated routes at 1920/1440/1280/1024, group by *role* (button, field, tab, chip, label, th, td,
+heading, mono) and count variants per role. A role with many variants is the finding; a raw list of
+sizes is not.
+
+- **`document.fonts.check()` lies about weights.** It answers "yes" for `650` because the browser
+  matches the nearest shipped face, so a synthesised weight looks loaded. Compare requested
+  `font-weight` values in CSS against the `@fontsource/...` imports in `main.tsx` instead.
+- **Native controls do not inherit `font-family`.** A button with no family rule renders in the UA
+  font (Arial here) beside IBM Plex Sans body text, which reads as "inconsistent fonts" while every
+  stylesheet looks correct.
+- The workspace base `font-size` on `.df2-app` legitimately steps down for density
+  (13.5 → 13 → 12.5px), so an element with *no* size rule measures differently per width by design.
+  Only elements whose size comes from a role token should be expected to hold constant.
+- `.df2-page-title` currently renders nowhere in the workspace shell — measure before assuming a
+  class is live, or you will "fix" dead CSS.

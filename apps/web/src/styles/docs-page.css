@@ -176,8 +176,8 @@
 
 .df2-page-docs .df2-docs-hero-title {
   margin: 14px 0 0;
-  font-size: clamp(20px, 2.2vw, 26px);
-  font-weight: 720;
+  font-size: 26px;
+  font-weight: 700;
   letter-spacing: -0.025em;
   line-height: 1.2;
   color: #fff;
@@ -186,7 +186,7 @@
 .df2-page-docs .df2-docs-hero-sub {
   margin: 12px 0 0;
   max-width: 62ch;
-  font-size: 14.5px;
+  font-size: 14px;
   line-height: 1.6;
   color: rgba(226, 232, 240, 0.78);
 }
@@ -218,7 +218,7 @@
 .df2-page-docs .df2-docs-hero-stat strong {
   display: block;
   font-size: 22px;
-  font-weight: 760;
+  font-weight: 700;
   letter-spacing: -0.02em;
   color: #5eead4;
   font-variant-numeric: tabular-nums;
@@ -287,7 +287,7 @@
 .df2-page-docs .df2-docs-hero-progress button.is-active {
   background: rgba(45, 212, 191, 0.14);
   color: #5eead4;
-  font-weight: 650;
+  font-weight: 600;
 }
 
 .df2-page-docs .df2-docs-hero-progress-dot {
@@ -323,7 +323,7 @@
 
 .df2-page-docs .df2-docs-hero-progress button.is-active {
   color: var(--df-brand-hover, #0f766e);
-  font-weight: 650;
+  font-weight: 600;
   background: var(--df-brand-muted, #f0fdfa);
 }
 
@@ -399,7 +399,7 @@
 .df2-page-docs .df2-docs-toc-item.is-active {
   background: var(--df-brand-muted, #f0fdfa);
   color: var(--df-brand-hover, #0f766e);
-  font-weight: 650;
+  font-weight: 600;
 }
 
 .df2-page-docs .df2-docs-toc-item.is-active .dt-nav-icon {
@@ -440,6 +440,9 @@
   .df2-page-docs .df2-docs-hero {
     grid-template-columns: 1fr;
     gap: 20px;
+  }
+  .df2-page-docs .df2-docs-hero-title {
+    font-size: 22px;
   }
   .df2-page-docs .df2-docs-hero-progress {
     display: none;
@@ -605,7 +608,7 @@
   display: grid;
   place-items: center;
   font-size: 11px;
-  font-weight: 760;
+  font-weight: 700;
   color: var(--df-brand-hover, #0f766e);
   background: var(--df-brand-muted, #f0fdfa);
   border: 1px solid color-mix(in srgb, var(--df-brand, #0d9488) 25%, transparent);
@@ -649,7 +652,7 @@
 .docs-hero h1 {
   margin: 0 0 14px;
   font-size: clamp(2rem, 4vw, 2.75rem);
-  font-weight: 750;
+  font-weight: 700;
   letter-spacing: -0.03em;
   line-height: 1.12;
 }
@@ -657,14 +660,14 @@
 .docs-hero-lead {
   margin: 0 auto 28px;
   max-width: 62ch;
-  font-size: 1.05rem;
+  font-size: 16px;
   line-height: 1.55;
   color: #cbd5e1;
 }
 
 .docs-hero-empty {
   margin-top: 12px !important;
-  font-size: 0.95rem !important;
+  font-size: 15px !important;
 }
 
 .docs-search {
@@ -785,7 +788,7 @@
 
 .docs-featured-copy h2 {
   margin: 0 0 12px;
-  font-size: 1.6rem;
+  font-size: 26px;
   letter-spacing: -0.02em;
 }
 
@@ -845,7 +848,7 @@
 
 .docs-category-head h2 {
   margin: 0 0 6px;
-  font-size: 1.35rem;
+  font-size: 22px;
   letter-spacing: -0.02em;
 }
 
@@ -906,21 +909,21 @@
 .docs-card h3,
 .docs-product-card h3 {
   margin: 0;
-  font-size: 1rem;
+  font-size: 16px;
 }
 
 .docs-card p,
 .docs-product-card p {
   margin: 0;
   color: #64748b;
-  font-size: 0.9rem;
+  font-size: 14px;
   line-height: 1.45;
 }
 
 .docs-card-meta,
 .docs-card-link {
   font-size: 12px;
-  font-weight: 650;
+  font-weight: 600;
   color: #0d9488;
 }
 
@@ -951,7 +954,7 @@
 
 .docs-gallery-card span {
   font-size: 13px;
-  font-weight: 650;
+  font-weight: 600;
   color: #0f172a;
   padding: 0 4px 4px;
 }
@@ -993,7 +996,7 @@
   right: 10px;
   bottom: 10px;
   font-size: 11px;
-  font-weight: 650;
+  font-weight: 600;
   padding: 3px 7px;
   border-radius: 6px;
   background: rgba(2, 8, 23, 0.55);
@@ -1013,7 +1016,7 @@
 
 .docs-video-body h3 {
   margin: 6px 0 0;
-  font-size: 0.95rem;
+  font-size: 15px;
 }
 
 .docs-product-grid {
@@ -1038,14 +1041,14 @@
 
 .docs-faq-item h3 {
   margin: 0 0 8px;
-  font-size: 0.98rem;
+  font-size: 16px;
 }
 
 .docs-faq-item p {
   margin: 0;
   color: #64748b;
   line-height: 1.5;
-  font-size: 0.92rem;
+  font-size: 15px;
 }
 
 .docs-cta-band {
@@ -1062,7 +1065,7 @@
 
 .docs-cta-band h2 {
   margin: 0 0 6px;
-  font-size: 1.25rem;
+  font-size: 20px;
 }
 
 .docs-cta-band p {
@@ -1113,7 +1116,7 @@
   color: #0f766e;
   font: inherit;
   font-size: 13px;
-  font-weight: 650;
+  font-weight: 600;
   text-align: left;
   cursor: pointer;
 }
@@ -1126,7 +1129,7 @@
   margin: 0 0 8px;
   padding: 0 8px;
   font-size: 11px;
-  font-weight: 750;
+  font-weight: 700;
   letter-spacing: 0.06em;
   text-transform: uppercase;
   color: #94a3b8;
@@ -1158,7 +1161,7 @@
 .docs-sidebar-group button.is-active {
   background: #ecfdf5;
   color: #0f766e;
-  font-weight: 650;
+  font-weight: 600;
 }
 
 .docs-article {
@@ -1205,13 +1208,13 @@
   max-width: none;
   color: #475569;
   line-height: 1.55;
-  font-size: 1.05rem;
+  font-size: 16px;
 }
 
 .docs-article-meta {
   display: inline-block;
   font-size: 12px;
-  font-weight: 650;
+  font-weight: 600;
   color: #64748b;
   margin-bottom: 22px;
 }
@@ -1227,7 +1230,7 @@
 .docs-toc h2 {
   margin: 0 0 8px;
   font-size: 12px;
-  font-weight: 750;
+  font-weight: 700;
   letter-spacing: 0.05em;
   text-transform: uppercase;
   color: #94a3b8;
@@ -1252,7 +1255,7 @@
 
 .docs-section h2 {
   margin: 0 0 10px;
-  font-size: 1.35rem;
+  font-size: 22px;
   letter-spacing: -0.02em;
 }
 
@@ -1324,7 +1327,7 @@
 .docs-callout p {
   margin: 0;
   color: #334155;
-  font-size: 0.92rem;
+  font-size: 15px;
 }
 
 .docs-article-footer {
@@ -1348,7 +1351,7 @@
   padding: 12px 14px;
   font: inherit;
   font-size: 13px;
-  font-weight: 650;
+  font-weight: 600;
   color: #0f766e;
   cursor: pointer;
 }
@@ -1391,7 +1394,7 @@
   background: rgba(11, 18, 32, 0.72);
   color: #f8fafc;
   font-size: 11px;
-  font-weight: 650;
+  font-weight: 600;
   letter-spacing: 0.02em;
   pointer-events: none;
 }
@@ -1402,7 +1405,7 @@
 }
 
 .docs-steps li::marker {
-  font-weight: 750;
+  font-weight: 700;
   color: #0d9488;
 }
 
@@ -1422,7 +1425,7 @@
 }
 
 .df2-docs-walkthrough-steps li::marker {
-  font-weight: 750;
+  font-weight: 700;
   color: #0d9488;
 }
 
@@ -1601,7 +1604,7 @@
 
 .docs-space-start h2 {
   margin: 0 0 8px;
-  font-size: 1.15rem;
+  font-size: 18px;
 }
 
 .docs-space-start p {
@@ -1617,7 +1620,7 @@
 
 .docs-space-tree > h2 {
   margin: 0 0 16px;
-  font-size: 1.05rem;
+  font-size: 16px;
 }
 
 .docs-space-tree-grid {
@@ -1636,7 +1639,7 @@
 .docs-space-tree-group h3 {
   margin: 0 0 10px;
   font-size: 11px;
-  font-weight: 750;
+  font-weight: 700;
   letter-spacing: 0.06em;
   text-transform: uppercase;
   color: #94a3b8;
@@ -1677,7 +1680,7 @@
 
 .docs-space-tree-group button strong {
   font-size: 13px;
-  font-weight: 650;
+  font-weight: 600;
   color: #0f172a;
 }
 
@@ -1868,7 +1871,7 @@
     cursor: pointer;
     list-style: none;
     color: #0f172a;
-    font-weight: 650;
+    font-weight: 600;
     font-size: 14px;
   }
 
@@ -1919,7 +1922,7 @@
 }
 .docs-space-algorithm h2 {
   margin: 0 0 16px;
-  font-size: 1.15rem;
+  font-size: 18px;
   letter-spacing: -0.02em;
 }
 .docs-space-algorithm-steps {

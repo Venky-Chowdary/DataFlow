@@ -347,7 +347,7 @@
 
 .df2-map-proof-rail-pct {
   font-size: 12px;
-  font-weight: 750;
+  font-weight: 700;
   color: #0f766e;
   font-variant-numeric: tabular-nums;
 }
@@ -453,7 +453,7 @@
 
 .df2-map-proof-bar-row em {
   font-style: normal;
-  font-weight: 650;
+  font-weight: 600;
   text-align: right;
   color: #0f172a;
   font-variant-numeric: tabular-nums;
@@ -560,7 +560,7 @@
 
 .df2-map-step-metric strong {
   font-size: 15px;
-  font-weight: 750;
+  font-weight: 700;
   color: #0f766e;
   font-variant-numeric: tabular-nums;
 }
@@ -1193,7 +1193,7 @@
 
 .df2-column-workbench-stat strong {
   font-size: 18px;
-  font-weight: 750;
+  font-weight: 700;
   color: #0f172a;
   font-variant-numeric: tabular-nums;
 }
@@ -1376,7 +1376,7 @@
 }
 
 .df2-column-omit-target {
-  font-size: 0.8125rem;
+  font-size: 13px;
   color: #64748b;
   font-style: italic;
 }

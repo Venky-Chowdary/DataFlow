@@ -12,7 +12,7 @@
 
 .df2-sidebar-env strong {
   color: var(--df-text-primary, #0f172a) !important;
-  font-weight: 650;
+  font-weight: 600;
 }
 
 .df2-sidebar-env small {
@@ -306,7 +306,7 @@
 .df2-user-meta strong {
   display: block;
   font-size: 13px;
-  font-weight: 650;
+  font-weight: 600;
   color: var(--df-text-primary, #0f172a);
   white-space: nowrap;
   overflow: hidden;
@@ -385,15 +385,15 @@
   align-items: center;
   gap: 8px;
   font-size: 12px;
-  font-weight: 650;
+  font-weight: 600;
   color: var(--df-text-muted, #64748b);
   text-transform: uppercase;
   letter-spacing: 0.04em;
 }
 
 .df2-glance-tile strong {
-  font-size: 1.65rem;
-  font-weight: 750;
+  font-size: 26px;
+  font-weight: 700;
   line-height: 1.1;
   color: var(--df-text-primary, #0f172a);
   font-variant-numeric: tabular-nums;
@@ -461,7 +461,7 @@
 
 .df2-transfer-hero h2 {
   margin: 0 0 4px;
-  font-size: 1.15rem;
+  font-size: 18px;
   font-weight: 700;
   color: var(--df-text-primary, #0f172a);
 }
@@ -502,7 +502,7 @@
   padding: 6px 10px;
   border-radius: 999px;
   font-size: 11px;
-  font-weight: 650;
+  font-weight: 600;
   border: 1px solid var(--df-border, #e2e8f0);
   background: #fff;
   color: var(--df-text-muted, #64748b);
@@ -826,7 +826,7 @@ select.df2-select {
 
 .df2-mcp-tool-name {
   font-size: 13px;
-  font-weight: 650;
+  font-weight: 600;
   color: #0f766e !important;
 }
 
@@ -955,7 +955,7 @@ select.df2-select {
 
 .df2-source-kind-tile strong {
   font-size: 14px;
-  font-weight: 650;
+  font-weight: 600;
   color: var(--df-text-primary, #0f172a);
 }
 
@@ -1137,7 +1137,7 @@ textarea.df2-pilot-composer textarea {
 
 .df2-model-ops h2 {
   color: var(--df-text-primary, #0f172a) !important;
-  font-size: 1.35rem;
+  font-size: 22px;
 }
 
 .df2-model-ops p {
@@ -1155,7 +1155,7 @@ textarea.df2-pilot-composer textarea {
   color: var(--df-brand, #0f766e) !important;
   background: #fff !important;
   font-size: 11px;
-  font-weight: 650;
+  font-weight: 600;
 }
 
 .df2-model-grid {
@@ -1281,7 +1281,7 @@ textarea.df2-pilot-composer textarea {
 .df2-connector-card-title {
   margin: 0;
   font-size: 15px;
-  font-weight: 650;
+  font-weight: 600;
   color: var(--df-text-primary, #0f172a);
   white-space: nowrap;
   overflow: hidden;
@@ -1478,7 +1478,7 @@ textarea.df2-pilot-composer textarea {
 .df2-search-result-body strong {
   display: block;
   font-size: 13px;
-  font-weight: 650;
+  font-weight: 600;
   color: var(--df-text-primary, #0f172a);
   white-space: nowrap;
   overflow: hidden;
@@ -1496,7 +1496,7 @@ textarea.df2-pilot-composer textarea {
 
 .df2-search-result-kind {
   font-size: 10px;
-  font-weight: 650;
+  font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.04em;
   color: var(--df-text-muted, #94a3b8);
@@ -1589,7 +1589,7 @@ textarea.df2-pilot-composer textarea {
 
 .df2-cadence-tile strong {
   font-size: 14px;
-  font-weight: 650;
+  font-weight: 600;
   color: var(--df-text-primary, #0f172a);
 }
 
@@ -1697,7 +1697,7 @@ textarea.df2-pilot-composer textarea {
 
 .df2-pipeline-card-node span {
   font-size: 12px;
-  font-weight: 650;
+  font-weight: 600;
   color: var(--df-text-primary, #0f172a);
   white-space: nowrap;
   overflow: hidden;
@@ -1766,8 +1766,8 @@ textarea.df2-pilot-composer textarea {
 
 .df2-jobs-command-main h2 {
   margin: 6px 0 8px;
-  font-size: 1.25rem;
-  font-weight: 750;
+  font-size: 20px;
+  font-weight: 700;
   color: var(--df-text-primary, #0f172a) !important;
 }
 
@@ -2093,7 +2093,7 @@ textarea.df2-pilot-composer textarea {
 
 .df2-wizard-step.active .df2-wizard-label {
   color: var(--df-brand, #0f766e) !important;
-  font-weight: 650;
+  font-weight: 600;
 }
 
 /* ─── Migration pipeline animation ─── */
@@ -2157,7 +2157,7 @@ textarea.df2-pilot-composer textarea {
 
 .df2-connection-workbench-head h2 {
   margin: 6px 0 8px;
-  font-size: 1.15rem;
+  font-size: 18px;
   font-weight: 700;
   color: var(--df-text-primary, #0f172a);
 }
@@ -2250,7 +2250,7 @@ textarea.df2-pilot-composer textarea {
 
 .df2-intelligence-score strong {
   font-size: 28px;
-  font-weight: 800;
+  font-weight: var(--df-fw-bold);
   color: #0f766e;
   letter-spacing: -0.02em;
 }
@@ -2673,7 +2673,7 @@ textarea.df2-pilot-composer textarea {
 .df2-control-metric span {
   display: block;
   font-size: 11px;
-  font-weight: 650;
+  font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.04em;
   color: var(--df-text-muted, #64748b);
@@ -3881,7 +3881,7 @@ textarea.df2-pilot-composer textarea {
 .df2-overview-hero-title {
   margin: 0 0 8px;
   font-size: clamp(1.25rem, 2.2vw, 1.5rem);
-  font-weight: 750;
+  font-weight: 700;
   line-height: 1.25;
   color: var(--df-text-primary, #0f172a);
 }
@@ -3938,8 +3938,8 @@ textarea.df2-pilot-composer textarea {
 }
 
 .df2-overview-ring-val strong {
-  font-size: 1.15rem;
-  font-weight: 800;
+  font-size: 18px;
+  font-weight: var(--df-fw-bold);
   color: #0f766e;
   line-height: 1;
 }
@@ -4199,7 +4199,7 @@ textarea.df2-pilot-composer textarea {
 
 .df2-overview-action strong {
   font-size: 13px;
-  font-weight: 650;
+  font-weight: 600;
   color: var(--df-text-primary, #0f172a);
 }
 
@@ -4428,7 +4428,7 @@ textarea.df2-pilot-composer textarea {
 .df2-advantage-list strong {
   display: block;
   font-size: 12px;
-  font-weight: 650;
+  font-weight: 600;
   color: var(--df-text-primary, #0f172a);
   margin-bottom: 2px;
 }
@@ -4568,7 +4568,7 @@ textarea.df2-pilot-composer textarea {
   background: none;
   padding: 0;
   font-size: 13px;
-  font-weight: 650;
+  font-weight: 600;
   color: var(--df-brand, #0f766e);
   cursor: pointer;
   white-space: nowrap;
@@ -4655,8 +4655,8 @@ textarea.df2-pilot-composer textarea {
 }
 
 .df2-metric-glass-value {
-  font-size: 1.45rem;
-  font-weight: 800;
+  font-size: 24px;
+  font-weight: var(--df-fw-bold);
   line-height: 1.1;
   letter-spacing: -0.03em;
   color: var(--df-text-primary, #0f172a);
@@ -4839,8 +4839,8 @@ textarea.df2-pilot-composer textarea {
 }
 
 .df2-flow-cluster-count {
-  font-size: 1.35rem;
-  font-weight: 800;
+  font-size: 22px;
+  font-weight: var(--df-fw-bold);
   line-height: 1;
   color: #f0fdfa;
   font-variant-numeric: tabular-nums;
@@ -4953,7 +4953,7 @@ textarea.df2-pilot-composer textarea {
     0 12px 40px rgba(0, 0, 0, 0.25),
     0 0 0 1px rgba(255, 255, 255, 0.5) inset;
   font-size: 9px;
-  font-weight: 800;
+  font-weight: var(--df-fw-bold);
   letter-spacing: 0.12em;
   text-transform: uppercase;
   color: #0f766e;
@@ -5099,7 +5099,7 @@ textarea.df2-pilot-composer textarea {
   border: none;
   background: none;
   font-size: 12px;
-  font-weight: 650;
+  font-weight: 600;
   color: #0f766e;
   text-align: center;
   cursor: pointer;
@@ -5195,7 +5195,7 @@ textarea.df2-pilot-composer textarea {
   padding: 4px 10px;
   border-radius: 999px;
   font-size: 11px;
-  font-weight: 650;
+  font-weight: 600;
   color: #0f766e;
   background: #f0fdfa;
   border: 1px solid #99f6e4;
@@ -5269,13 +5269,13 @@ textarea.df2-pilot-composer textarea {
 
 .df2-donut-val {
   font-size: 14px;
-  font-weight: 800;
+  font-weight: var(--df-fw-bold);
   fill: #0f766e;
 }
 
 .df2-donut-lbl {
   font-size: 8px;
-  font-weight: 650;
+  font-weight: 600;
   fill: #94a3b8;
   text-transform: uppercase;
   letter-spacing: 0.08em;
@@ -6048,10 +6048,6 @@ textarea.df2-pilot-composer textarea {
   padding-bottom: 12px;
 }
 
-.df2-page-fit .df2-page-title {
-  font-size: clamp(20px, 2vw, 26px);
-}
-
 .df2-page-body {
   display: flex;
   flex-direction: column;
@@ -6103,7 +6099,7 @@ textarea.df2-pilot-composer textarea {
 .df2-jobs-command--compact h2 {
   margin: 0 0 4px;
   font-size: 15px;
-  font-weight: 650;
+  font-weight: 600;
 }
 
 .df2-jobs-command--compact p {

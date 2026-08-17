@@ -144,6 +144,33 @@
   --df-fs-xl: 18px;
   --df-fs-title: 15px;
 
+  /* Weights are only the four faces main.tsx actually ships. A rule asking for
+     650 or 760 does not render at 650 or 760 — CSS font matching serves the
+     nearest available face, so those values silently collapsed into each other
+     and made "semibold" mean two different things on two pages. */
+  --df-fw-regular: 400;
+  --df-fw-medium: 500;
+  --df-fw-semibold: 600;
+  --df-fw-bold: 700;
+
+  /* Type rungs for the control ladder — a control's size comes from its role,
+     not from the browser default (an unstyled button renders at 13.333px) or a
+     per-page literal. Keep in step with the height rungs below. */
+  --df-fs-btn: 13px;
+  --df-fs-btn-sm: 12px;
+  --df-fs-btn-lg: 13.5px;
+  --df-fs-field: 13px;
+  --df-fs-field-sm: 12px;
+  --df-fs-tab: 12.5px;
+  --df-fs-chip: 12px;
+  --df-fs-label: 12px;
+  /* One page title size for every route (it was 19–28px depending on which page
+     sheet loaded last, and fluid `vw` clamps made it a different size again at
+     every width). Card titles have one rung plus one documented dense rung. */
+  --df-fs-page-title: 22px;
+  --df-fs-card-title: 15px;
+  --df-fs-card-title-dense: 14px;
+
   --df-header-height: 60px;
   --df-sidebar-width: 252px;
   --df-content-max: none;
@@ -336,6 +363,31 @@ body,
   -moz-osx-font-smoothing: grayscale;
 }
 
+/* Form controls do not inherit type from their container — without this the UA
+   stylesheet wins and every button, input, select and textarea renders in the
+   system font (measured: 3,535 elements in Arial next to IBM Plex Sans body
+   text, including the sidebar nav, tab strips and every primary action). */
+button,
+input,
+select,
+textarea,
+optgroup {
+  font-family: inherit;
+}
+
+/* Size follows the same rule: an unstyled control took the UA default 13.333px
+   regardless of its surroundings. `:where()` keeps this at zero specificity, so
+   it only fills the gap where no rule has an opinion and never outranks one. */
+:where(button, input, select, textarea, optgroup) {
+  font-size: inherit;
+}
+
+/* A text entry with no rule of its own is still a field, so it reads at the
+   field rung rather than whatever size its container happens to carry. */
+:where(input, select, textarea) {
+  font-size: var(--df-fs-field);
+}
+
 /*
  * Laptop workspace density — enterprise-safe (no CSS `zoom`).
  *
@@ -402,6 +454,7 @@ body:has(.df2-app) #root {
     --df-card-pad: 12px;
     --df-card-head-pad: 10px 12px;
     --df-nav-item-height: 32px;
+    --df-fs-page-title: 20px;
     --df-table-row-height: 40px;
     --df-table-row-height-sm: 34px;
     --df-tile-min-h: 64px;
