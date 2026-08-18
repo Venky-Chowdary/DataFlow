@@ -443,3 +443,62 @@ record with `revoked_at`/`revoked_by` rather than deleting it.
 ### Occurrences and scopes render conditionally
 `seen N x` only renders when `occurrences > 1`, and requested scopes only render inside the
 expanded form. A collapsed-row probe correctly returns null for both - expand before asserting.
+
+## Schedules page: selectors and env traps that cost real time
+
+### Mongo database name is `datatransfer`, not `dataflow`
+Schedules persist in `datatransfer.pipeline_schedules` (Postgres data lives in the `dataflow`
+Postgres DB - the names do not match). A query against `dataflow.pipeline_schedules` returns `[]`
+and looks like "nothing persisted". Verify with:
+`docker exec df-mongo mongosh datatransfer --quiet --eval "db.pipeline_schedules.countDocuments({})"`
+The legacy blob is `datatransfer.schedule_store` (`_id: "primary"`); it may not exist at all, in
+which case you cannot observe the `superseded_by` marker being written - prove the
+no-resurrection property by outcome (hard reload shows nothing) instead.
+
+### Create-form selectors (these break the obvious locators)
+- The form's text inputs have **no `type` attribute** - only `class="df2-input"`. So
+  `input[type="text"]` matches nothing. Match on placeholder:
+  `Nightly orders sync` (name), `orders` (source table), `orders_warehouse` (dest table),
+  `10 10 * * *` (cron, only after clicking the Cron tab).
+- A **hidden `#studio-contract` `<select>` precedes the form's own selects**, so `select` nth-index
+  is off by one and `selectOption` times out on an invisible element. Use `select:visible`:
+  index 0 = source connector, 1 = destination connector, 2 = schema policy, 3 = contract.
+- The **destination connector defaults to the SQLite connector** - set it explicitly to the
+  Postgres one or the run targets the wrong database.
+- A previous script can leave the create form open, so `New schedule` no longer exists. Make scripts
+  state-aware: if `Create recurring sync` is in the body text, click `Cancel` first.
+- `button[aria-label^="Open "]` matches a hidden `aria-label="Open navigation"` mobile-nav button.
+  Match `[aria-label*="detail" i]` for the schedule detail drawer opener.
+
+### Sub-hourly cadence only exists on the Cron tab
+Presets are `Hourly` / `Daily` / `Weekly` only. For a 2-minute cadence click `Cron` and enter
+`*/2 * * * *`. The saved document then holds **both** `cron: "*/2 * * * *"` and a stale
+`interval: "daily"`; the cron wins (`next_run_at` advances every 2 minutes), so do not read
+`interval` as the effective cadence.
+
+### Deleting a schedule: drawer only, and no confirmation
+Schedule list cards expose **no** delete control - open the detail drawer
+(`Open <name> details`) to find `Delete`. There is no confirm dialog: one click destroys it.
+Always assert deletion on three surfaces (DOM, `GET /api/v1/schedules`, Mongo `countDocuments`),
+and specifically test deleting the **last** schedule - a >1-schedule test hides the historical
+"API says 200, schedule survives" bug.
+
+### Do not use `full_refresh_append` for repeat-beat tests
+Re-running an append schedule against a non-empty destination fails every beat with
+`Checksum mismatch (balanced): ... Destination has N extra row(s)` and **appends another copy each
+beat** (dest 5 -> 10 -> 15 -> ...). This masks whatever refusal you were trying to observe. Use
+full overwrite, or truncate the destination between beats, when the test needs repeated runs.
+
+### Parking a finding deterministically
+Driving a real source `ALTER TABLE` and waiting for a beat is slow and may be pre-empted by other
+failures. The reliable path is the runner's own refusal code path:
+`services.schedule_runner._open_finding(schedule_id, ApprovalRequired(...), attempt=1)`, pushing
+`next_run_at` ~6h out first so the live scheduler does not clobber the parked state. Use
+`scopes=("net_additive_drift", "replay_schema_drift_ack")` for an **approvable** finding and a
+`narrow_type` evidence kind with `scopes=()` for a **non-approvable** one. Label this in the report
+as a service-level park driven through product code, not a scheduler-observed drift.
+
+### Reason textarea at 390px may still clip
+The `min-height` control rule is gone (computed `min-height: 0px`), but the textarea is `rows=2`,
+which at 390px still hides part of a realistic two-line reason (`scrollHeight` 73 vs
+`clientHeight` 54). Measure at 390 **and** at desktop; desktop is clean (54 vs 54).
