@@ -437,6 +437,155 @@ def test_finalize_run_success_records_and_notifies(temp_store, monkeypatch):
     assert notified["status"] == "completed"
 
 
+def test_committed_append_that_cannot_be_replayed_parks_the_cadence(temp_store, monkeypatch):
+    """The append that grew a destination 5 → 25 across four identical beats.
+
+    The attempt committed rows, the retry was refused because a from-zero run
+    would duplicate them — and the cadence, which also starts from zero, has to
+    be held on a decision rather than left to append the same rows again.
+    """
+    sched = _make(store, max_retries=2, retry_backoff_seconds=0, sync_mode="full_refresh_append")
+    monkeypatch.setattr(runner, "_notify_schedule", lambda *a, **k: None)
+    monkeypatch.setattr(
+        runner,
+        "_job_doc",
+        lambda jid: {
+            "status": "failed",
+            "error": "checksum mismatch after load",
+            "records_processed": 5,
+            "row_accounting": {"writer_ack": 5, "dest_count": 5},
+        },
+    )
+
+    runner._finalize_run(sched.id, "job-0", attempt=0, started_at=datetime.now(timezone.utc))
+
+    reloaded = store.get_schedule(sched.id)
+    assert reloaded.run_history[-1].get("retry_refused")
+    assert store.has_open_approval(reloaded)
+    assert sched.id not in {s.id for s in store.due_schedules()}
+
+
+def test_deterministic_gate_refusal_parks_on_the_first_beat(temp_store, monkeypatch):
+    """A gate verdict is not a cadence event: it parks at once, retry budget or not."""
+    sched = _make(store, max_retries=2, retry_backoff_seconds=0)
+    monkeypatch.setattr(runner, "_notify_schedule", lambda *a, **k: None)
+    monkeypatch.setattr(
+        runner,
+        "_job_doc",
+        lambda jid: {
+            "status": "failed",
+            "phase": "validate",
+            "error": "schema drift requires manual review: column dep_time narrowed",
+            "records_processed": 0,
+        },
+    )
+
+    runner._finalize_run(sched.id, "job-0", attempt=0, started_at=datetime.now(timezone.utc))
+
+    reloaded = store.get_schedule(sched.id)
+    assert store.has_open_approval(reloaded)
+    assert reloaded.approval_request["evidence"]["park_reason"] == "deterministic_refusal"
+    assert sched.id not in {s.id for s in store.due_schedules()}
+
+
+def test_zero_retry_schedule_still_parks_a_gate_refusal(temp_store, monkeypatch):
+    """An exhausted budget is not an unclassified verdict — the gate refusal parks."""
+    sched = _make(store, max_retries=0)
+    monkeypatch.setattr(runner, "_notify_schedule", lambda *a, **k: None)
+    monkeypatch.setattr(
+        runner,
+        "_job_doc",
+        lambda jid: {
+            "status": "failed",
+            "phase": "validate",
+            "error": "schema drift requires manual review: column dep_time narrowed",
+            "records_processed": 0,
+        },
+    )
+
+    runner._finalize_run(sched.id, "job-0", attempt=0, started_at=datetime.now(timezone.utc))
+
+    reloaded = store.get_schedule(sched.id)
+    assert reloaded.approval_request["evidence"]["park_reason"] == "deterministic_refusal"
+    assert sched.id not in {s.id for s in store.due_schedules()}
+
+
+def test_parked_schedule_does_not_open_a_second_finding(temp_store, monkeypatch):
+    """One unresolved decision per schedule — a repeat must not fan out the inbox."""
+    sched = _make(store, max_retries=2)
+    monkeypatch.setattr(runner, "_notify_schedule", lambda *a, **k: None)
+    monkeypatch.setattr(
+        runner,
+        "_job_doc",
+        lambda jid: {
+            "status": "failed",
+            "phase": "validate",
+            "error": "schema drift requires manual review: column dep_time narrowed",
+            "records_processed": 0,
+        },
+    )
+
+    runner._finalize_run(sched.id, "job-0", attempt=0, started_at=datetime.now(timezone.utc))
+    first = store.get_schedule(sched.id).approval_request
+    runner._finalize_run(sched.id, "job-1", attempt=0, started_at=datetime.now(timezone.utc))
+    again = store.get_schedule(sched.id).approval_request
+
+    assert first["id"] and first["id"] == again["id"]
+    assert int(again.get("occurrences") or 1) == 2
+    assert store.has_open_approval(store.get_schedule(sched.id))
+
+
+def test_second_identical_unrecognised_failure_parks_instead_of_repeating(temp_store, monkeypatch):
+    """One beat is the benefit of the doubt; the same verdict twice is evidence."""
+    sched = _make(store, max_retries=0, retry_backoff_seconds=0, sync_mode="full_refresh_overwrite")
+    monkeypatch.setattr(runner, "_notify_schedule", lambda *a, **k: None)
+    monkeypatch.setattr(
+        runner,
+        "_job_doc",
+        lambda jid: {
+            "status": "failed",
+            "error": "source schema altered: column dep_time",
+            "records_processed": 0,
+        },
+    )
+
+    runner._finalize_run(sched.id, "job-0", attempt=0, started_at=datetime.now(timezone.utc))
+    assert not store.has_open_approval(store.get_schedule(sched.id))
+
+    runner._finalize_run(sched.id, "job-1", attempt=1, started_at=datetime.now(timezone.utc))
+    reloaded = store.get_schedule(sched.id)
+    assert store.has_open_approval(reloaded)
+    assert reloaded.approval_request["evidence"]["park_reason"] == "identical_failure_repeated"
+    assert sched.id not in {s.id for s in store.due_schedules()}
+
+
+def test_transient_failure_is_still_retried_not_parked(temp_store, monkeypatch):
+    sched = _make(store, max_retries=2, retry_backoff_seconds=0)
+    monkeypatch.setattr(runner, "_notify_schedule", lambda *a, **k: None)
+    monkeypatch.setattr(
+        runner,
+        "_job_doc",
+        lambda jid: {
+            "status": "failed",
+            "error": "connection reset by peer",
+            "records_processed": 0,
+        },
+    )
+
+    runner._finalize_run(sched.id, "job-0", attempt=0, started_at=datetime.now(timezone.utc))
+    reloaded = store.get_schedule(sched.id)
+    assert not store.has_open_approval(reloaded)
+    assert reloaded.retry_attempt == 1
+
+
+def test_failure_signature_ignores_row_numbers_and_ids():
+    a = {"error": "Snowflake rejected 27 cell finding(s) — arr_time (row 431) does not fit"}
+    b = {"error": "Snowflake rejected 31 cell finding(s) — arr_time (row 902) does not fit"}
+    assert runner._failure_signature(a) == runner._failure_signature(b)
+    other = {"error": "connection reset by peer"}
+    assert runner._failure_signature(a) != runner._failure_signature(other)
+
+
 def test_run_entry_copies_dest_count_ledger_not_only_writer_ack():
     started = datetime.now(timezone.utc)
     entry = runner._run_entry(
@@ -525,6 +674,13 @@ def test_import_file_schedules_into_mongo_when_empty(tmp_path, monkeypatch):
                 if k not in keep:
                     del mem[k]
 
+        def update_one(self, filt, update, upsert=False):
+            doc = mem.get(filt.get("_id"))
+            if doc is None:
+                return None
+            doc.update(dict(update.get("$set") or {}))
+            return doc
+
     class FakeDB:
         def __getitem__(self, name):
             return FakeColl()
@@ -575,6 +731,13 @@ def test_save_mongo_never_sets_id_path(monkeypatch):
             for k in list(mem):
                 if k not in keep:
                     del mem[k]
+
+        def update_one(self, filt, update, upsert=False):
+            doc = mem.get(filt.get("_id"))
+            if doc is None:
+                return None
+            doc.update(dict(update.get("$set") or {}))
+            return doc
 
         def find(self, *_a, **_k):
             return list(mem.values())

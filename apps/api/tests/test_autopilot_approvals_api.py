@@ -140,6 +140,59 @@ def test_an_anonymous_decision_is_refused(client, parked):
     assert reloaded.approval_request["status"] == "open"
 
 
+def test_a_signed_in_operator_decides_without_naming_themselves_twice(client, parked):
+    """The shipped client sends a session, not a hand-typed actor.
+
+    With enforcement off the browser still signs in, so the verified identity is
+    the decider — requiring ``X-Actor`` as well made the shipped approval control
+    unusable in the default single-operator configuration.
+    """
+    sched, request = parked
+    from src.routers import schedules_router
+
+    class _State:
+        user = {"email": "sam.operator@example.com", "role": "admin"}
+
+    class _Req:
+        state = _State()
+        headers: dict[str, str] = {}
+
+    assert schedules_router._decider(_Req()) == "sam.operator@example.com"
+    assert schedules_router._decider(_Req(), authorize=True) == "sam.operator@example.com"
+    assert sched.id and request["id"]
+
+
+def test_a_session_role_still_binds_when_enforcement_is_off(client, monkeypatch):
+    """Auth off is not authority on: a viewer session cannot decide."""
+    from src.routers import schedules_router
+    from src.services import auth_service
+
+    monkeypatch.setattr(auth_service, "auth_required", lambda: False)
+
+    class _State:
+        user = {"email": "vic.viewer@example.com", "role": "viewer"}
+
+    class _Req:
+        state = _State()
+        # Even a hand-typed actor cannot re-open a door the role closed.
+        headers = {"X-Actor": ACTOR}
+
+    with pytest.raises(Exception) as excinfo:
+        schedules_router._decider(_Req())
+    assert "403" in str(excinfo.value) or "denied" in str(excinfo.value).lower()
+
+
+def test_an_unauthenticated_single_operator_may_still_name_themselves(client, parked):
+    sched, request = parked
+    res = client.post(
+        f"/api/v1/schedules/{sched.id}/approvals/{request['id']}/approve",
+        json={"reason": REASON, "schema_drift": True},
+        headers={"X-Actor": ACTOR},
+    )
+    assert res.status_code == 200, res.text
+    assert res.json()["approval"]["resolved_by"] == ACTOR
+
+
 def test_approving_after_the_plan_moved_is_a_conflict_not_a_silent_sign_off(
     client, parked
 ):

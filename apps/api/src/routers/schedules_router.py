@@ -570,30 +570,36 @@ class AuthorizationGrant(BaseModel):
 def _decider(request: Request, *, authorize: bool = False) -> str:
     """The named human behind this decision, or 403.
 
-    The actor is taken from the session, never from the body: an audit trail the
-    client names itself is not an audit trail. When authentication is not enforced
-    (single-operator deployment) the caller must still name themselves, which the
-    ``X-Actor`` header carries.
+    The actor is taken from the verified session whenever there is one, never from
+    the body: an audit trail the client names itself is not an audit trail. A
+    signed-in operator therefore decides without naming themselves twice, and the
+    role on that identity is still enforced. Only when no identity was verified —
+    a single-operator deployment with enforcement off — may the caller name
+    themselves through the ``X-Actor`` header.
     """
     from services.rbac import Permission, has_permission
     from src.services import auth_service
 
-    if not auth_service.auth_required():
-        actor = str(request.headers.get("X-Actor") or "").strip()
-        if len(actor) < MIN_ACTOR_LEN:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "X-Actor must name the person making this decision "
-                    f"(at least {MIN_ACTOR_LEN} characters)."
-                ),
-            )
-        return actor
     user = getattr(request.state, "user", None) or {}
     needed = Permission.SCHEDULE_AUTHORIZE if authorize else Permission.SCHEDULE_MANAGE
-    if not has_permission(user, needed):
-        raise HTTPException(status_code=403, detail=f"Permission denied: {needed}")
-    return str(user.get("email") or user.get("name") or "").strip()
+    if user:
+        if not has_permission(user, needed):
+            raise HTTPException(status_code=403, detail=f"Permission denied: {needed}")
+        actor = str(user.get("email") or user.get("name") or "").strip()
+        if len(actor) >= MIN_ACTOR_LEN:
+            return actor
+    if not auth_service.auth_required():
+        actor = str(request.headers.get("X-Actor") or "").strip()
+        if len(actor) >= MIN_ACTOR_LEN:
+            return actor
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "X-Actor must name the person making this decision "
+                f"(at least {MIN_ACTOR_LEN} characters)."
+            ),
+        )
+    raise HTTPException(status_code=403, detail=f"Permission denied: {needed}")
 
 
 @router.get("/approvals/open")

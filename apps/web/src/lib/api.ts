@@ -1,6 +1,6 @@
 import { API_BASE, ActiveDataContext, Connector, EnhancedAnalysis, ParsedUpload, PipelineSchedule, TransferJob, TransferPlan } from "./types";
 import { coerceLastTestOk, statusFromLastTest } from "./connectorHealth";
-import { clearSession, getAuthToken } from "./session";
+import { clearSession, getAuthToken, getSessionActor } from "./session";
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 15000;
 const LONG_REQUEST_TIMEOUT_MS = 180000;
@@ -1554,6 +1554,20 @@ export async function fetchScheduleApprovalDetail(scheduleId: string): Promise<{
 }
 
 /**
+ * Headers for a call that records a human decision.
+ *
+ * The API names the decider from the identity it verified; `X-Actor` only carries
+ * the operator's name for a deployment that does not enforce authentication, so a
+ * decision is never anonymous there.
+ */
+function decisionHeaders(json: boolean): Record<string, string> {
+  const headers: Record<string, string> = json ? { "Content-Type": "application/json" } : {};
+  const actor = getSessionActor();
+  if (actor) headers["X-Actor"] = actor;
+  return headers;
+}
+
+/**
  * Approve one finding.
  *
  * `grantStanding` is the powerful half: it delegates the same signature to every
@@ -1582,7 +1596,7 @@ export async function approveScheduleFinding(
     )}/approve`,
     {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: decisionHeaders(true),
       body: JSON.stringify(payload),
     },
   );
@@ -1605,7 +1619,7 @@ export async function rejectScheduleFinding(
     )}/reject`,
     {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: decisionHeaders(true),
       body: JSON.stringify(payload),
     },
   );
@@ -1622,7 +1636,7 @@ export async function revokeScheduleAuthorization(
     `${API_BASE}/schedules/${encodeURIComponent(scheduleId)}/authorization?reason=${encodeURIComponent(
       reason,
     )}`,
-    { method: "DELETE" },
+    { method: "DELETE", headers: decisionHeaders(false) },
   );
   if (!res.ok) throw new Error(await parseApiError(res, "Could not revoke the authorization"));
   return res.json();

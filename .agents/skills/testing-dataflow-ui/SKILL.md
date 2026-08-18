@@ -232,4 +232,273 @@ sizes is not.
   (13.5 → 13 → 12.5px), so an element with *no* size rule measures differently per width by design.
   Only elements whose size comes from a role token should be expected to hold constant.
 - `.df2-page-title` currently renders nowhere in the workspace shell — measure before assuming a
-  class is live, or you will "fix" dead CSS.
+  class is live, or you will "fix" dead CSS. Every route's `<h1>` is also `.df2-sr-only` (clipped to
+  1×1px), so page-title font rungs have **no visible effect anywhere** in the workspace today; do not
+  claim to have visually verified a page-title size.
+
+### Prove the font that was actually rasterized, not the declared one
+
+A declared `font-family` only records what CSS *asked for*: if the face never loaded, the element still
+paints in a fallback and `getComputedStyle` looks perfect. Regex-over-CSS unit tests (e.g.
+`typeLadder.test.ts`) never render and cannot see this at all.
+
+- Use CDP `CSS.getPlatformFontsForNode` → `familyName` + `isCustomFont` + `glyphCount`. `isCustomFont:
+  false` means a *system* font painted (e.g. `Consolas`, `Arial`), which is the real defect signature.
+- **It returns an empty array on container nodes.** It only reports text in the node's own inline
+  boxes, so calling it on `.df2-app` yields `[]` and a false "no violations" pass. Call it per
+  text-carrying element. To keep it cheap, group visible elements by *distinct computed
+  `font-family` string* and probe one representative per group — fallback resolution depends only on
+  the declared list, so the group shares a verdict.
+- **Always run a negative control.** Inject `button,input,select,textarea{font-family:Arial!important}`,
+  confirm the probe reports Arial, then purge and re-measure. A probe that cannot detect an injected
+  Arial proves nothing about "no Arial".
+- A raw literal such as `font-family: ui-monospace, SFMono-Regular, Menlo, monospace` (no
+  `var(--df-font-mono, …)`) paints **Consolas** on Windows; children inherit it, so one missed sheet
+  silently drags whole subtrees (including `.df2-btn`s) off the workspace font.
+
+### `page.goto()` with a hash-only change does NOT reload — it corrupts injected-style cleanup
+
+`page.goto('http://127.0.0.1:5173/#/other')` from `#/current` is a *same-document* navigation. The
+document, and therefore anything added by `page.addStyleTag`, survives. This produced a spectacular
+false positive: an Arial override injected as a negative control persisted through every later
+"hard reload" and made all 13 routes report Arial everywhere.
+
+- For a genuine new document use `page.reload({waitUntil:'load'})` (set `location.hash` first if you
+  need a different route), and **assert the cleanup worked** before trusting any measurement:
+  `[...document.querySelectorAll('style')].filter(s => /Arial\s*!important/.test(s.textContent))`
+  must be empty.
+- Anything described as needing a "fresh first load" (the Pilot ≤1279px empty state) must use a real
+  reload; a hash nav silently re-measures the old document and can report a different clearance.
+
+### Page-level `!important` literals still beat the role ladder
+
+The type ladder in `app-styles.css` is later in source order but **not** `!important`, so any page
+sheet with `font-size: …!important` wins regardless of order — e.g.
+`.df2-job-name-rename-btn{font-size:11px!important}` keeps that button off the 12px `--df-fs-btn-sm`
+rung while its `.df2-btn-sm` peers sit at 12px. Grep the page sheets for `font-size:.*!important`
+before believing a role is uniform, and note `typeLadder.test.ts`'s guard only matches selectors
+containing `.df2-btn|tab|input|select` as a whole token, so bespoke names like
+`.df2-job-name-rename-btn` slip past it.
+
+## Auditing the BYO AI-provider slice (Settings → AI Models)
+
+### Restart the API after switching branches — it does not auto-reload
+
+The uvicorn command in this skill has no `--reload`, so a process started before a checkout keeps
+serving the old app. New routes then return **404** and the UI degrades *silently but plausibly*:
+`Settings → AI Models` shows a permanently **disabled** engine selector stuck on
+"Loading which engine Pilot will use…". That looks exactly like a frontend bug. Before filing anything,
+check `GET /api/v1/workspace/pilot-engine` — a 404 means stale process, not a defect. Kill it
+(`Get-CimInstance Win32_Process -Filter "Name='python.exe'"`, match `*uvicorn*8001*`) and restart.
+
+### Wait on real readiness signals, not a sleep
+
+The AI Models panel paints *before* its two fetches resolve: the engine hint starts at
+"Loading which engine Pilot will use…", the selector starts `disabled`, and the provider cards
+**do not exist at all** until `/copilot/models` lands. A fixed `waitForTimeout` reads that transient
+state and produces a false "selector disabled / no provider cards" failure even while the network log
+shows `200`s. Gate measurement on: selector present *and not disabled*, hint not matching
+`/^Loading which engine/`, and `document.querySelectorAll("article").length >= 3`.
+
+### Reaching a "no cloud key" state without destroying the operator's real key
+
+The box may hold a real encrypted provider key, so the honest baseline is
+`preference=auto, engine=hybrid, source=configured_provider` — not a clean no-key box. Two safe levers:
+
+- **Engine pin** — set the selector to `Local engine only`. Touches only the saved preference.
+- **Withhold the key** — set `ai_providers.<provider>.enabled=false` in
+  `apps/api/data/integrations.json`. `resolve_provider_api_key()` checks `ai_provider_enabled()`
+  *first*, so the key stops resolving while the encrypted blob stays byte-identical. This is the only
+  way to exercise the automatic no-key path, because **the Configure modal has no Enabled toggle**.
+
+Always `Copy-Item` the store to `integrations.json.audit-backup` first and restore with a sha256
+comparison afterwards. A blank API-key field in the modal is safe: `_encrypt_field(value, existing)`
+returns the existing blob when the value is empty or the mask, so "leave blank to keep" is honest.
+Never paste a real key; saving one is live-validated and a bad one is rejected with HTTP 400.
+
+### The provider auth-failure cache is in-memory, and a 401 makes the engine local
+
+A recorded 401 lives in a process-wide set, not on disk, so **restarting the API resets provider
+state** — the cheapest way back to a clean baseline. While it is set, the provider stays `configured`
+(the key really is saved) but drops out of `usable_cloud_providers()`, so the engine resolves to
+`local` with "The saved key for openai was rejected…" as its reason. Disabling a provider outranks a
+cached 401 in `blocked_reason`. Budget for all four reasons: `configure`, `invalid_key`, `offline`,
+`disabled`.
+
+### `Test key` does live network I/O, bounded to one attempt and 12s
+
+The route is synchronous and calls the provider SDK for real, with `max_retries=0` and a 12s deadline
+(`VERIFY_TIMEOUT_SECONDS`), so a hung provider returns "did not answer within 12s — the key was not
+verified" rather than stranding the button. Allow ~20s on `waitForResponse`; anything longer than that
+is a real defect, not a slow provider.
+
+Also note the button only renders when `tier === "cloud" && provider.configured`, so a provider with
+**no** key exposes no `Test key` button at all — the backend's "No API key is saved for this provider."
+branch is unreachable from the UI and must be reported as such rather than faked.
+
+### Playwright locator trap: filtering a card by its button label
+
+`page.locator("article").filter({ hasText: "Test key" })` stops matching the instant the label becomes
+"Testing…", so `innerText()` throws and an in-flight assertion silently reports "never seen". Filter
+cards on stable text (e.g. the model name `gpt-4o-mini`) and address the button by role.
+
+### Grounded Pilot question for engine testing
+
+Ask `How many rows are in ttd_orders_ok on Local PG 5433?`. On this box
+`public.ttd_orders_ok` has **5** rows while `ttd_orders` and `ttd_pii` have **0**, so a hallucinated or
+cached answer is distinguishable from a real one. A correct local run returns
+`method: pilot_local_engine` with `tools_used: [{name: "aggregate_data", summary: "count = 5"}]`, and
+the Pilot header shows an **Offline** pill when no cloud provider is available.
+
+### Distinguish state styling from drift
+
+Tabs legitimately render weight 600 when `.active`/`aria-selected` and 500 when inactive at the same
+12.5px. Bucket by role **and** state before calling a two-tuple role inconsistent. Likewise a UA rule
+(`strong,b{font-weight:bolder}`) can push inherited 600 to a computed **900** that no shipped face
+covers — that is a real synthesis risk but it comes from the UA sheet, not from a page literal.
+
+## Auditing Schedules: approval inbox / delegated authority (Autopilot)
+
+### The shipped UI cannot complete a decision when auth is disabled
+Decision routes resolve the actor via `schedules_router._decider()`. With `REQUIRE_AUTH=0`
+(the default off-production, and the default on this box) it demands an `X-Actor` header of
+>=2 chars and ignores any session. The web client never sends it - `apiFetch` only sets
+`Authorization`, and `grep -r "X-Actor" apps/web/src` returns 0 hits. So every approve/reject
+click returns:
+
+    400 {"detail":"X-Actor must name the person making this decision"}
+
+Test this in two modes and report them separately:
+- **Mode A (as shipped, auth off)**: prove the 400 on a real click. This is what a user hits.
+- **Mode B (auth on)**: the only config where items can be verified end-to-end.
+
+To drive the UI past the missing header without patching product code, inject it over CDP.
+Do NOT use `page.route()` - rewriting the request breaks the inbox refetch and the row
+disappears, which looks like a product bug:
+
+```js
+const cdp = await ctx.newCDPSession(page);
+await cdp.send("Network.enable");
+await cdp.send("Network.setExtraHTTPHeaders", { headers: { "X-Actor": "Autopilot Auditor" } });
+```
+
+### Auth-on startup needs an explicit ENV or the app exits
+`platform_config.is_production()` treats `REQUIRE_AUTH=1` with an unset `ENV` as production,
+then fails closed on missing Fernet secrets and localhost Mongo. Always set
+`DATAFLOW_ENV=development` alongside `DATAFLOW_REQUIRE_AUTH=1`. Run the auth-on instance on a
+**separate port** (e.g. 8002) and use throwaway local credentials only.
+
+### Two API instances share one store - kill the extra one before teardown
+An auth-on instance on 8002 runs its own scheduler against the same Mongo. It will rewrite
+schedules you are trying to delete and can re-run beats under you. Stop it first.
+
+### Deleting the LAST schedule silently fails (Mongo backend)
+`schedule_store._save_mongo` ends with `if seen: coll.delete_many({"_id": {"$nin": list(seen)}})`.
+Removing the final schedule leaves `seen` empty, so the guard is False and the doc is never
+removed - while `delete_schedule()` returns True and the API answers `200 {"success":true}`.
+Consequences for teardown and for tests:
+- Never trust a 200 from `DELETE /api/v1/schedules/{id}`; assert `list_schedules()` afterwards.
+- Deleting one of two works, so a "delete works" test with >1 schedule hides this entirely.
+- To clean up the last one, clear the collection directly:
+  `db["pipeline_schedules"].delete_many({})` (also check the legacy `schedule_store` blob).
+- With PR #52 this also strands the schedule's open approval in the inbox permanently.
+
+### Park a real finding with real DDL, not a fabricated approval
+`_guard_source_schema_drift` compares the schedule's remembered source fingerprint against the
+live table, so the product raises its own `ApprovalRequired` after a genuine `ALTER TABLE`:
+- **approvable** (soft/additive drift -> scopes `net_additive_drift`, `replay_schema_drift_ack`):
+  `ALTER TABLE ttd_orders_ok DROP COLUMN customer;`
+- **non-approvable** (`_NEVER_DELEGABLE` -> empty scopes, `approvable:false`):
+  `ALTER TABLE ttd_types_ok ALTER COLUMN price TYPE integer USING price::integer;` (narrow_type)
+
+`approvable == bool(requested_scopes)`. Never-delegable wording includes lossy, narrowing,
+precision loss, truncat, unsupported conversion, not null, primary key, cursor.
+
+**Dropping a column destroys its values.** Copy the table (or run a baseline transfer to a
+destination table) BEFORE mutating, so the original rows are recoverable at teardown. Restore
+with `ALTER TABLE ... ADD COLUMN` + `UPDATE ... FROM <destination>` and re-assert the exact
+column order, types and row values.
+
+### Use bare table names in schedules
+`source_table: "public.ttd_orders_ok"` gets double-prefixed by the runner:
+`relation "public.public.ttd_orders_ok" does not exist`. Use `ttd_orders_ok`.
+
+### Assert decisions on three surfaces
+A row vanishing from the inbox proves nothing (React could have dropped it). For every decision
+assert the DOM, the captured HTTP request/response, AND the schedule re-read from the store
+(`approval_request.status`, `resolved_by`, `resolved_reason`, `last_status`, `next_run_at`,
+`enabled`, `standing_authorization.max_uses`/`expires_at`). Approve-once mints `max_uses=1`
+expiring in ~1 day; standing grants use `max_uses=0` and the expiry you typed. Revoke keeps the
+record with `revoked_at`/`revoked_by` rather than deleting it.
+
+### Inbox layout: what is and is not a defect at narrow widths
+- The `source -> destination` route intentionally truncates
+  (`overflow:hidden; text-overflow:ellipsis; white-space:nowrap` + full route in `title`).
+  A generic clipping heuristic flags this as a false positive - check the matched styles.
+- Real defect at 390px: `@media (max-width:1023px)` forces
+  `min-height: var(--df-btn-height,36px)` on `.df2-input`, which includes the multi-line reason
+  `textarea`, so a realistic two-line reason hides ~21px of content (`scrollHeight` 55 vs
+  `clientHeight` 34). Measure `scrollHeight` vs `clientHeight` on the textarea after typing.
+
+### Occurrences and scopes render conditionally
+`seen N x` only renders when `occurrences > 1`, and requested scopes only render inside the
+expanded form. A collapsed-row probe correctly returns null for both - expand before asserting.
+
+## Schedules page: selectors and env traps that cost real time
+
+### Mongo database name is `datatransfer`, not `dataflow`
+Schedules persist in `datatransfer.pipeline_schedules` (Postgres data lives in the `dataflow`
+Postgres DB - the names do not match). A query against `dataflow.pipeline_schedules` returns `[]`
+and looks like "nothing persisted". Verify with:
+`docker exec df-mongo mongosh datatransfer --quiet --eval "db.pipeline_schedules.countDocuments({})"`
+The legacy blob is `datatransfer.schedule_store` (`_id: "primary"`); it may not exist at all, in
+which case you cannot observe the `superseded_by` marker being written - prove the
+no-resurrection property by outcome (hard reload shows nothing) instead.
+
+### Create-form selectors (these break the obvious locators)
+- The form's text inputs have **no `type` attribute** - only `class="df2-input"`. So
+  `input[type="text"]` matches nothing. Match on placeholder:
+  `Nightly orders sync` (name), `orders` (source table), `orders_warehouse` (dest table),
+  `10 10 * * *` (cron, only after clicking the Cron tab).
+- A **hidden `#studio-contract` `<select>` precedes the form's own selects**, so `select` nth-index
+  is off by one and `selectOption` times out on an invisible element. Use `select:visible`:
+  index 0 = source connector, 1 = destination connector, 2 = schema policy, 3 = contract.
+- The **destination connector defaults to the SQLite connector** - set it explicitly to the
+  Postgres one or the run targets the wrong database.
+- A previous script can leave the create form open, so `New schedule` no longer exists. Make scripts
+  state-aware: if `Create recurring sync` is in the body text, click `Cancel` first.
+- `button[aria-label^="Open "]` matches a hidden `aria-label="Open navigation"` mobile-nav button.
+  Match `[aria-label*="detail" i]` for the schedule detail drawer opener.
+
+### Sub-hourly cadence only exists on the Cron tab
+Presets are `Hourly` / `Daily` / `Weekly` only. For a 2-minute cadence click `Cron` and enter
+`*/2 * * * *`. The saved document then holds **both** `cron: "*/2 * * * *"` and a stale
+`interval: "daily"`; the cron wins (`next_run_at` advances every 2 minutes), so do not read
+`interval` as the effective cadence.
+
+### Deleting a schedule: drawer only, and no confirmation
+Schedule list cards expose **no** delete control - open the detail drawer
+(`Open <name> details`) to find `Delete`. There is no confirm dialog: one click destroys it.
+Always assert deletion on three surfaces (DOM, `GET /api/v1/schedules`, Mongo `countDocuments`),
+and specifically test deleting the **last** schedule - a >1-schedule test hides the historical
+"API says 200, schedule survives" bug.
+
+### Do not use `full_refresh_append` for repeat-beat tests
+Re-running an append schedule against a non-empty destination fails every beat with
+`Checksum mismatch (balanced): ... Destination has N extra row(s)` and **appends another copy each
+beat** (dest 5 -> 10 -> 15 -> ...). This masks whatever refusal you were trying to observe. Use
+full overwrite, or truncate the destination between beats, when the test needs repeated runs.
+
+### Parking a finding deterministically
+Driving a real source `ALTER TABLE` and waiting for a beat is slow and may be pre-empted by other
+failures. The reliable path is the runner's own refusal code path:
+`services.schedule_runner._open_finding(schedule_id, ApprovalRequired(...), attempt=1)`, pushing
+`next_run_at` ~6h out first so the live scheduler does not clobber the parked state. Use
+`scopes=("net_additive_drift", "replay_schema_drift_ack")` for an **approvable** finding and a
+`narrow_type` evidence kind with `scopes=()` for a **non-approvable** one. Label this in the report
+as a service-level park driven through product code, not a scheduler-observed drift.
+
+### Reason textarea at 390px may still clip
+The `min-height` control rule is gone (computed `min-height: 0px`), but the textarea is `rows=2`,
+which at 390px still hides part of a realistic two-line reason (`scrollHeight` 73 vs
+`clientHeight` 54). Measure at 390 **and** at desktop; desktop is clean (54 vs 54).

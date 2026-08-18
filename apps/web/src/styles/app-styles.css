@@ -711,6 +711,21 @@ html:has(.df2-app) #root {
   min-width: 0;
 }
 
+/* A multiline control is sized by its own text, never by the single-line control
+   or button height ladder — a fixed height clips every line after the first, and
+   a fixed row count clips the same text again once the column narrows. `rows`
+   stays the floor; `field-sizing` grows the box up to a readable ceiling. */
+.df2-app textarea.df2-input {
+  height: auto;
+  min-height: 0;
+  padding-top: 8px;
+  padding-bottom: 8px;
+  line-height: 1.45;
+  resize: vertical;
+  field-sizing: content;
+  max-height: 40vh;
+}
+
 /* Touch-friendly controls on small screens */
 @media (max-width: 1023px) {
   .df2-app .df2-btn,
