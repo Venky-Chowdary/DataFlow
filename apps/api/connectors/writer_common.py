@@ -8,6 +8,7 @@ import logging
 from services.brand_env import getenv_brand
 import re
 from collections.abc import Callable
+from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from decimal import Decimal
@@ -231,6 +232,74 @@ def saas_quarantine_values(payload: dict[str, Any] | None) -> dict[str, str]:
     }
 
 
+def active_quarantine_mappings(mappings: list[dict[str, Any]] | None):
+    """Context manager naming the Map that governs holdouts inside this write.
+
+    The shared type matrix passes its own ``mappings``, but connector-family
+    writers also stamp holdouts directly from bind / salvage paths (generic SQL
+    bind refusal, sparse upsert identity, document field refusal). Naming the Map
+    once around the whole write means those details resolve the same column
+    contract — no writer decides a signed policy on its own.
+    """
+
+    @contextmanager
+    def _cm():
+        token = _active_quarantine_mappings.set(list(mappings) if mappings else None)
+        try:
+            yield
+        finally:
+            _active_quarantine_mappings.reset(token)
+
+    return _cm()
+
+
+def contract_policy_for_target(
+    column: str,
+    mappings: list[dict[str, Any]] | None,
+) -> tuple[str, str]:
+    """The signed execution policy governing one destination column, if any.
+
+    Returns ``(execution_policy, risk_id)``, or ``("", "")`` when no mapping for
+    that column carries a Migration Risk Contract — then the job posture decides
+    alone, as before.
+
+    A write-time type holdout must be judged by the same contract the preflight
+    population scan judged: a signed continue policy is authority to hold the row
+    out under a strict job posture, and a signed fail-closed policy must abort even
+    under a lenient one. A present-but-unverifiable contract fails closed
+    (``FAIL_JOB``), never demoted to the job default.
+    """
+    from services.migration_risk_contract import (
+        mapping_declares_risk_contract,
+        mapping_risk_contract,
+    )
+
+    name = str(column or "").strip().lower()
+    if not name:
+        return "", ""
+    for m in mappings or []:
+        if isinstance(m, dict):
+            target = str(m.get("target") or m.get("target_column") or "").strip()
+            source = str(m.get("source") or m.get("source_column") or "").strip()
+        else:
+            target = str(getattr(m, "target", "") or "").strip()
+            source = str(getattr(m, "source", "") or "").strip()
+        if name not in {target.lower(), source.lower()}:
+            continue
+        if not mapping_declares_risk_contract(m):
+            continue
+        contract = mapping_risk_contract(m)
+        if contract is None:
+            return "FAIL_JOB", ""
+        policy = str(contract.execution_policy or "").strip().upper()
+        if policy == "CAST_FAIL_QUARANTINE":
+            policy = "CAST_AND_CONTINUE"
+        if not policy:
+            return "FAIL_JOB", str(contract.risk_id or "")
+        return policy, str(contract.risk_id or "")
+    return "", ""
+
+
 def append_write_quarantine_detail(
     rejected_details: list[dict[str, Any]],
     detail: dict[str, Any],
@@ -259,8 +328,19 @@ def append_write_quarantine_detail(
         d["values"] = {**base_values, **wired}
     else:
         d["values"] = base_values
+    maps = mappings if mappings is not None else _active_quarantine_mappings.get()
+    # The column's signed contract — not the job posture alone — decides whether
+    # this holdout aborts the load. Stamped here so every writer family inherits
+    # the same answer the preflight population scan gave.
+    if not str(d.get("execution_policy") or "").strip():
+        policy, risk_id = contract_policy_for_target(
+            str(d.get("target") or d.get("column") or ""), maps
+        )
+        if policy:
+            d["execution_policy"] = policy
+            if risk_id and not str(d.get("risk_id") or "").strip():
+                d["risk_id"] = risk_id
     if not (isinstance(d.get("source_values"), dict) and d["source_values"]):
-        maps = mappings if mappings is not None else _active_quarantine_mappings.get()
         if maps:
             src = project_quarantine_source_values(d["values"], maps)
             if src:
@@ -4022,7 +4102,10 @@ def apply_write_quarantine_matrix(
         )
         return kept
 
-    token = _active_quarantine_mappings.set(mappings)
+    # A caller that did not name a Map must not erase the one the write named.
+    token = _active_quarantine_mappings.set(
+        mappings if mappings is not None else _active_quarantine_mappings.get()
+    )
     try:
         label = (dialect_label or "destination").strip() or "destination"
         decimal_dest = (dest_db or "").strip() or _infer_dest_db_from_dialect_label(label)
