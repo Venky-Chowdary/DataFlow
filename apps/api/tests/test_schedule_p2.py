@@ -525,6 +525,13 @@ def test_import_file_schedules_into_mongo_when_empty(tmp_path, monkeypatch):
                 if k not in keep:
                     del mem[k]
 
+        def update_one(self, filt, update, upsert=False):
+            doc = mem.get(filt.get("_id"))
+            if doc is None:
+                return None
+            doc.update(dict(update.get("$set") or {}))
+            return doc
+
     class FakeDB:
         def __getitem__(self, name):
             return FakeColl()
@@ -575,6 +582,13 @@ def test_save_mongo_never_sets_id_path(monkeypatch):
             for k in list(mem):
                 if k not in keep:
                     del mem[k]
+
+        def update_one(self, filt, update, upsert=False):
+            doc = mem.get(filt.get("_id"))
+            if doc is None:
+                return None
+            doc.update(dict(update.get("$set") or {}))
+            return doc
 
         def find(self, *_a, **_k):
             return list(mem.values())

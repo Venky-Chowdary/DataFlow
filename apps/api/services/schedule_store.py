@@ -12,7 +12,7 @@ import logging
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from services.cron_schedule import CronError, validate_cron
 from services.cron_schedule import next_run as _cron_next_run
@@ -385,11 +385,26 @@ def _load_mongo(svc) -> list[PipelineSchedule]:
     doc = db["schedule_store"].find_one({"_id": "primary"})
     if not doc:
         return []
+    # Once the per-schedule store has written, an empty per-schedule store means
+    # "no schedules", not "read the blob" — otherwise deleting the last schedule
+    # resurrects every schedule the blob still holds.
+    if doc.get("superseded_by"):
+        return []
     return [PipelineSchedule.from_dict(s) for s in doc.get("schedules", [])]
 
 
-def _save_mongo(svc, schedules: list[PipelineSchedule]) -> None:
-    """Persist schedules as individual docs with version CAS (no whole-blob races)."""
+def _save_mongo(
+    svc,
+    schedules: list[PipelineSchedule],
+    *,
+    removed_ids: Sequence[str] = (),
+) -> None:
+    """Persist schedules as individual docs with version CAS (no whole-blob races).
+
+    ``removed_ids`` names schedules this write deletes. It is what makes deleting
+    the *last* schedule land: an empty snapshot carries no id to compare against,
+    so the "not in the snapshot" sweep below has nothing to sweep.
+    """
     db = svc.get_database()
     coll = db["pipeline_schedules"]
     seen = set()
@@ -420,6 +435,16 @@ def _save_mongo(svc, schedules: list[PipelineSchedule]) -> None:
     # Remove schedules deleted from the in-memory snapshot.
     if seen:
         coll.delete_many({"_id": {"$nin": list(seen)}})
+    gone = [sid for sid in removed_ids if sid and sid not in seen]
+    if gone:
+        coll.delete_many({"_id": {"$in": gone}})
+    # The per-schedule store is authoritative from the first write on, so a legacy
+    # blob must never answer a later read (see ``_load_mongo``).
+    if seen or gone:
+        db["schedule_store"].update_one(
+            {"_id": "primary"},
+            {"$set": {"superseded_by": "pipeline_schedules"}},
+        )
 
 
 def _load_all() -> list[PipelineSchedule]:
@@ -429,10 +454,10 @@ def _load_all() -> list[PipelineSchedule]:
     return _load_schedules_from_file(STORE_PATH)
 
 
-def _save_all(schedules: list[PipelineSchedule]) -> None:
+def _save_all(schedules: list[PipelineSchedule], *, removed_ids: Sequence[str] = ()) -> None:
     svc = _mongo_backend()
     if svc:
-        _save_mongo(svc, schedules)
+        _save_mongo(svc, schedules, removed_ids=removed_ids)
         return
     STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
     STORE_PATH.write_text(
@@ -606,7 +631,7 @@ def delete_schedule(schedule_id: str) -> bool:
     filtered = [s for s in schedules if s.id != schedule_id]
     if len(filtered) == len(schedules):
         return False
-    _save_all(filtered)
+    _save_all(filtered, removed_ids=(schedule_id,))
     return True
 
 
