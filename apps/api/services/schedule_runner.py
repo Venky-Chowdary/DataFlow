@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 from services.brand_env import getenv_brand
 import socket
 from concurrent.futures import ThreadPoolExecutor
@@ -596,12 +597,16 @@ def _retry_decision(
 
     if _is_success(status):
         return {"retry": False, "reason": ""}
+    classification = classify_job_failure(job_doc)
     if attempt >= max_retries:
+        # The budget being gone does not make the verdict unclassified: a schedule
+        # with no retries at all still has to park a gate refusal rather than
+        # replay it on the next beat.
         return {
             "retry": False,
             "reason": f"Retry budget exhausted after {max_retries} attempt(s).",
+            "failure_class": classification.to_dict(),
         }
-    classification = classify_job_failure(job_doc)
     if not classification.retryable:
         reason = classification.reason
         if classification.corrective_action:
@@ -727,6 +732,44 @@ def _observe_parallel_run(sched: Any, job_doc: dict | None = None) -> None:
         )
 
 
+def _failure_signature(entry: dict[str, Any] | None) -> str:
+    """A comparable identity for *why* a run failed, free of ids and counts."""
+    text = str((entry or {}).get("error") or "").strip().lower()
+    # Row numbers, job ids and timestamps differ between two identical verdicts.
+    text = re.sub(r"\b[0-9a-f]{16,}\b", "", text)
+    text = re.sub(r"\d+", "#", text)
+    return re.sub(r"\s+", " ", text)[:300]
+
+
+def _park_reason(sched: Any, decision: dict[str, Any], entry: dict[str, Any]) -> str:
+    """Why this failed beat must park instead of waiting for the next cadence.
+
+    Three cases, all of which repeat forever on their own:
+
+    - a gate refused the run (``deterministic``): the same inputs get the same
+      verdict on every beat;
+    - the retry was refused because the attempt already committed rows a
+      from-zero re-run cannot collapse — the *cadence* re-runs from zero too, so
+      every later beat appends the same rows again (this is how one failing
+      append grew a destination 5 → 25 rows across four beats);
+    - an unrecognised failure that has now produced the identical verdict twice
+      in a row: one retry was the benefit of the doubt, a second identical
+      verdict is evidence.
+    """
+    failure_class = decision.get("failure_class") or {}
+    kind = str(failure_class.get("kind") or "") if isinstance(failure_class, dict) else str(failure_class)
+    if kind == DETERMINISTIC:
+        return "deterministic_refusal"
+    if not decision.get("retry") and (decision.get("decision") or {}).get("allowed") is False:
+        return "committed_rows_cannot_be_replayed"
+    signature = _failure_signature(entry)
+    if signature:
+        previous = [r for r in list(getattr(sched, "run_history", None) or []) if not _is_success(r.get("status"))]
+        if previous and _failure_signature(previous[-1]) == signature:
+            return "identical_failure_repeated"
+    return ""
+
+
 def _finalize_run(schedule_id: str, job_id: str, attempt: int, started_at: datetime) -> None:
     """Handle a finished scheduled run: retry on failure, else record + notify."""
     from services.schedule_store import (
@@ -785,17 +828,24 @@ def _finalize_run(schedule_id: str, job_id: str, attempt: int, started_at: datet
     )
     if _is_success(status):
         _observe_parallel_run(sched, job_doc)
-    elif failure_class == DETERMINISTIC:
-        # A gate said no. It will say the same thing to every later beat, so the
-        # schedule is parked on the finding instead of failing nightly forever.
-        _open_finding(
-            schedule_id,
-            str((job_doc or {}).get("error") or decision.get("reason") or "")
-            or "The run was refused by a validation gate.",
-            attempt=attempt,
-            job_id=job_id,
-            evidence={"failure_class": failure_class, "phase": (job_doc or {}).get("phase", "")},
-        )
+    else:
+        park = _park_reason(sched, decision, entry)
+        if park:
+            # This beat's verdict will not change by itself, and the next beat
+            # would either replay it or — on an append with nothing to collapse
+            # a second copy — land the same rows again. Park on one finding.
+            _open_finding(
+                schedule_id,
+                str((job_doc or {}).get("error") or decision.get("reason") or "")
+                or "The run was refused by a validation gate.",
+                attempt=attempt,
+                job_id=job_id,
+                evidence={
+                    "failure_class": failure_class,
+                    "phase": (job_doc or {}).get("phase", ""),
+                    "park_reason": park,
+                },
+            )
     _notify_schedule(sched, job_id, status, job_doc)
 
 
