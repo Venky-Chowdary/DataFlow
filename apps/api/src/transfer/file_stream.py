@@ -15,7 +15,7 @@ import os
 from services.brand_env import getenv_brand
 import sys
 import tempfile
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from functools import partial
 from pathlib import Path
@@ -685,6 +685,31 @@ def _batch_iterator_for_type(
 
         return _avro_batches()
     raise ValueError(f"File type '{file_type}' does not support streaming ingest")
+
+
+def iter_source_rows(
+    content: bytes | str | os.PathLike,
+    filename: str,
+    batch_size: int = 50_000,
+) -> Iterator[dict]:
+    """Yield every source row of a streamable file as a dict.
+
+    A second read-only pass over the same bytes/path the write path streams, so
+    a pre-write check (population fit, for example) can decide the whole source
+    without materializing it. Raises for a file type that does not support
+    streaming ingest — the caller decides whether that is fatal.
+    """
+    try:
+        from services.file_parser import FileParser
+    except ImportError:  # pragma: no cover - api root on PYTHONPATH in tests
+        from src.services.file_parser import FileParser
+
+    raw_bytes = content if isinstance(content, bytes) else b""
+    file_type = FileParser.detect_file_type(filename, raw_bytes or None)
+    for batch in _batch_iterator_for_type(file_type, content, batch_size):
+        for row in batch:
+            if isinstance(row, dict):
+                yield row
 
 
 def should_stream_file(

@@ -855,6 +855,68 @@ def _preflight_sample_rows(records: list[dict[str, Any]] | None) -> list[dict[st
     return rows
 
 
+def _file_population_rows(
+    content: bytes | str | os.PathLike[str],
+    filename: str,
+) -> Iterator[dict[str, Any]]:
+    """Every source row of a file, for the pre-write population fit scan.
+
+    Read-only and lazy: the preflight scan pulls rows only for columns whose
+    declared source type can exceed a bounded destination carrier, so a file
+    with no narrowing mapping is never re-read. A source that cannot be
+    re-streamed yields nothing, which the scan reports as unmeasured evidence
+    rather than as proof of fit.
+    """
+    from .file_stream import iter_source_rows
+
+    try:
+        yield from iter_source_rows(content, filename)
+    except Exception as exc:  # noqa: BLE001 - unreadable source is unmeasured, never "fits"
+        logger.warning(
+            "population fit scan could not re-read %s: %s", filename, exc
+        )
+
+
+def _table_population_rows(
+    request: TransferRequest,
+    mappings: list[dict[str, Any]],
+    *,
+    column_types: dict[str, str],
+    dest_types: dict[str, str],
+    dest_db: str,
+) -> Iterator[dict[str, Any]]:
+    """Every source row of a table, projected to the bounded columns only.
+
+    Same pre-write question as the file path, asked of a relational/object
+    source: which declared narrowing can this population actually not survive.
+    The projection is resolved from the mappings themselves, so a table with no
+    bounded destination carrier issues no query at all. A reader that cannot be
+    paged independently yields nothing, which the scan reports as preview
+    evidence rather than as proof of fit.
+    """
+    from services.population_fit_scan import bounded_targets
+
+    from .source_peek import iter_stream_source_column_rows
+
+    try:
+        targets, _undecidable, _safe = bounded_targets(
+            mappings,
+            dest_types=dest_types,
+            source_types=column_types,
+            dest_db=dest_db,
+        )
+        wanted = sorted({t.source for t in targets if t.source})
+        if not wanted:
+            return
+        yield from iter_stream_source_column_rows(
+            request.source,
+            wanted,
+            limit=int(request.limit or 0),
+        )
+    except Exception as exc:  # noqa: BLE001 - unreadable source is unmeasured, never "fits"
+        logger.warning("population fit scan could not re-read source table: %s", exc)
+
+
 def _execute_preflight_parity_kwargs(
     request: TransferRequest,
     *,
@@ -2319,6 +2381,11 @@ class UniversalTransferEngine:
                     source_format=request.source.format,
                     sync_mode=request.sync_mode,
                     sample_rows=_preflight_sample_rows(records),
+                    # The whole batch is already in memory — decide bounded
+                    # destination carriers here instead of letting the writer
+                    # discover an unfit value mid-load.
+                    population_rows=records,
+                    rows_are_population=True,
                     confidence_threshold=confidence_threshold_for_mode(
                         request.validation_mode
                     ),
@@ -3448,6 +3515,23 @@ class UniversalTransferEngine:
                     source_format=request.source.format,
                     sync_mode=request.sync_mode,
                     sample_rows=_preflight_sample_rows(sample_rows),
+                    # Read-only projected re-read of the same table the write
+                    # loop is about to stream, so a narrowing carrier is decided
+                    # before the first batch. Skipped when a row filter is in
+                    # play: the scan would then judge rows this job never
+                    # writes, and a finding must describe *this* population.
+                    population_rows=(
+                        None
+                        if request.source_filter
+                        else _table_population_rows(
+                            request,
+                            mappings,
+                            column_types=schema,
+                            dest_types=dest_schema_types,
+                            dest_db=dst_fmt.lower(),
+                        )
+                    ),
+                    rows_are_population=not request.source_filter,
                     confidence_threshold=confidence_threshold_for_mode(
                         request.validation_mode
                     ),
@@ -4220,6 +4304,20 @@ class UniversalTransferEngine:
                     source_format=request.source.format,
                     sync_mode=request.sync_mode,
                     sample_rows=_preflight_sample_rows(sample_rows),
+                    # Second read-only pass over the same bytes the writer is
+                    # about to stream: a narrowing destination carrier is decided
+                    # before the first batch, not at row 431 with the load
+                    # half-done. Lazy — nothing is re-read when no mapped column
+                    # can exceed its destination carrier by declaration.
+                    population_rows=(
+                        None
+                        if request.source_filter
+                        else _file_population_rows(content, filename)
+                    ),
+                    # A filtered run writes a subset, so the unfiltered re-read
+                    # is not this job's population — fall back to preview
+                    # evidence rather than judging rows that never move.
+                    rows_are_population=not request.source_filter,
                     confidence_threshold=confidence_threshold_for_mode(
                         request.validation_mode
                     ),

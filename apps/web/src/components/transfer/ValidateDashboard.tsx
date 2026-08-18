@@ -43,6 +43,7 @@ import {
   extraSourceColumnsFromContract,
   shapeContractFromPreflight,
 } from "../../lib/destExistsShape";
+import { populationFitSummary } from "../../lib/populationFit";
 import { ringDasharray, validateRingPercent } from "../../lib/progressRing";
 import { BadDataFixDrawer, type BadDataIssue } from "./BadDataFixDrawer";
 import { Gate8ProofCard, type Gate8Reconciliation } from "./Gate8ProofCard";
@@ -1229,6 +1230,10 @@ export function ValidateDashboard({
       populationScanRequested: runPopulationOrphanScan,
     }),
     [preflight, runPopulationOrphanScan],
+  );
+  const populationFit = useMemo(
+    () => populationFitSummary(preflight?.population_fit),
+    [preflight],
   );
   const explainParts = useMemo(
     () => (explain?.issues?.length ? partitionExplainIssues(explain.issues) : null),
@@ -3003,6 +3008,21 @@ export function ValidateDashboard({
               <strong>ConversionClass</strong>
               <span>{honestyControls.conversionClasses.headline}</span>
             </li>
+            {populationFit ? (
+              <li>
+                <strong>Population fit</strong>
+                <span>
+                  {populationFit.headline}
+                  {populationFit.offenders.length > 0 &&
+                  populationFit.offenders[0].exampleRows.length > 0 ? (
+                    <em>
+                      {" "}· first at row{" "}
+                      {populationFit.offenders[0].exampleRows.slice(0, 3).join(", ")}
+                    </em>
+                  ) : null}
+                </span>
+              </li>
+            ) : null}
             <li>
               <strong>Historical success</strong>
               <span>{honestyControls.historicalSuccess.headline}</span>
