@@ -12,6 +12,14 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from services.schedule_store import due_schedules
+from services.failure_retry_policy import DETERMINISTIC
+from services.standing_authorization import (
+    CODE_NO_AUTHORIZATION,
+    SCOPE_NET_ADDITIVE_DRIFT,
+    AuthorizationDecision,
+    binding_from_schedule,
+    evaluate_authorization,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -305,6 +313,12 @@ def build_schedule_request(sched, src: dict, dst: dict):
 
     mappings = list(sched.mappings or [])
     schema_policy = sched.schema_policy or "manual_review"
+    # Autopilot: a scheduled run has nobody at the keyboard, so it carries the
+    # attestations a named human signed in advance — and only while the plan they
+    # signed is still the plan being run. With no valid grant these stay False and
+    # every gate decides exactly as it did before.
+    decision = authorization_for(sched)
+    acks = decision.acknowledgments
     return TransferRequest(
         source=source,
         destination=destination,
@@ -325,14 +339,48 @@ def build_schedule_request(sched, src: dict, dst: dict):
         contract_id=contract_id,
         enforce_contract=bool(contract_id),
         require_signed_contract=require_signed,
+        compliance_acknowledged=acks.compliance,
+        schema_drift_acknowledged=acks.schema_drift,
+        fk_risk_acknowledged=acks.fk_risk,
+        acknowledgment_actor=acks.actor if acks.any_claimed else "",
+        acknowledgment_reason=acks.reason if acks.any_claimed else "",
     )
 
 
-def _guard_source_schema_drift(sched: Any, request: Any) -> None:
+def authorization_for(sched: Any) -> AuthorizationDecision:
+    """What this schedule's standing authorization permits for the run at hand.
+
+    Recomputes the binding from the schedule as it stands now, so a grant signed
+    against a different mapping, source shape or policy authorizes nothing. Never
+    raises: an unreadable grant is no authority, not an outage.
+    """
+    try:
+        return evaluate_authorization(
+            getattr(sched, "standing_authorization", None),
+            binding_now=binding_from_schedule(sched),
+        )
+    except Exception as exc:  # noqa: BLE001 - unreadable authority is no authority
+        logger.warning(
+            "Schedule %s standing authorization unreadable — treating as absent: %s",
+            getattr(sched, "id", ""),
+            exc,
+        )
+        return AuthorizationDecision(
+            applies=False,
+            code=CODE_NO_AUTHORIZATION,
+            reason="The standing authorization could not be read.",
+            corrective_action="Re-grant the authorization.",
+        )
+
+
+def _guard_source_schema_drift(sched: Any, request: Any) -> bool:
     """Refuse a scheduled run whose source changed shape since the last one.
 
-    Raises ``ValueError`` so the caller records it the same way it records a
-    contract refusal — before a row moves. The damaging drift is the kind that
+    Returns whether the run proceeded *on delegated authority* rather than because
+    nothing changed, so the caller can record the authority as exercised.
+
+    Raises ``ApprovalRequired`` (a ``ValueError``) so the caller records it the way
+    it records a contract refusal — before a row moves. The damaging drift is the kind that
     would otherwise succeed: a column that keeps its name and changes type loads
     cleanly and writes wrong values, and nothing downstream reports an error.
 
@@ -340,7 +388,9 @@ def _guard_source_schema_drift(sched: Any, request: Any) -> None:
     because a probe timed out is the false alarm that gets the check switched
     off, and an unread schema is not evidence of a change.
     """
+    from services.schedule_approvals import KIND_SOURCE_DRIFT, ApprovalRequired
     from services.source_schema_memory import evaluate_source_drift
+    from services.standing_authorization import scopes_for_drift_kinds
 
     previous = dict(getattr(sched, "source_schema", None) or {})
     previous_pk = [
@@ -356,14 +406,14 @@ def _guard_source_schema_drift(sched: Any, request: Any) -> None:
             getattr(sched, "id", ""),
             exc,
         )
-        return
+        return False
     current = {
         str(k): str(v)
         for k, v in dict(info.get("schema") or {}).items()
         if not isinstance(v, (dict, list))
     }
     if not current:
-        return
+        return False
     current_pk = [
         str(p).strip()
         for p in (info.get("primary_key_columns") or [])
@@ -383,13 +433,47 @@ def _guard_source_schema_drift(sched: Any, request: Any) -> None:
         cursor_fields=[cursor] if cursor else None,
     )
     if verdict.blocks:
-        raise ValueError(
+        kinds = [str(e.get("kind") or "") for e in (verdict.breaking or [])]
+        scopes = scopes_for_drift_kinds(kinds)
+        decision = authorization_for(sched)
+        if SCOPE_NET_ADDITIVE_DRIFT in scopes and decision.allows(SCOPE_NET_ADDITIVE_DRIFT):
+            # A mapped drop or rename is destination-safe (nothing is dropped
+            # there) and the named granter accepted it in advance for exactly this
+            # plan. Proceeding is authorized; it is still recorded as authority
+            # exercised, never as a check that passed.
+            logger.info(
+                "Schedule %s net-additive source drift proceeding under "
+                "authorization %s: %s",
+                getattr(sched, "id", ""),
+                decision.grant_id,
+                verdict.summary,
+            )
+            _remember_source_schema(
+                sched, current, verdict.fingerprint, primary_key=current_pk
+            )
+            return True
+        raise ApprovalRequired(
             f"{verdict.summary} Review the mapping and re-approve, or set "
-            "schema_policy to propagate the change deliberately."
+            "schema_policy to propagate the change deliberately.",
+            kind=KIND_SOURCE_DRIFT,
+            code="SOURCE_SCHEMA_DRIFT",
+            corrective_action=(
+                "Open the schedule's Map, confirm the mapping still holds, then "
+                "accept the new source shape as the baseline."
+            ),
+            scopes=scopes,
+            evidence={
+                "summary": verdict.summary,
+                "compatibility": verdict.compatibility,
+                "breaking": list(verdict.breaking or [])[:20],
+                "additive": list(verdict.additive or [])[:20],
+                "source_schema_fingerprint": verdict.fingerprint,
+            },
         )
     _remember_source_schema(
         sched, current, verdict.fingerprint, primary_key=current_pk
     )
+    return False
 
 
 def _remember_source_schema(
@@ -701,7 +785,126 @@ def _finalize_run(schedule_id: str, job_id: str, attempt: int, started_at: datet
     )
     if _is_success(status):
         _observe_parallel_run(sched, job_doc)
+    elif failure_class == DETERMINISTIC:
+        # A gate said no. It will say the same thing to every later beat, so the
+        # schedule is parked on the finding instead of failing nightly forever.
+        _open_finding(
+            schedule_id,
+            str((job_doc or {}).get("error") or decision.get("reason") or "")
+            or "The run was refused by a validation gate.",
+            attempt=attempt,
+            job_id=job_id,
+            evidence={"failure_class": failure_class, "phase": (job_doc or {}).get("phase", "")},
+        )
     _notify_schedule(sched, job_id, status, job_doc)
+
+
+def _park_on_decision(
+    schedule_id: str,
+    exc: BaseException,
+    *,
+    attempt: int,
+    job_id: str = "",
+) -> None:
+    """Turn a pre-run refusal into a decision a human can act on.
+
+    The run is still recorded as failed — nothing here pretends a refused run
+    succeeded — but the schedule is additionally parked on one durable finding, so
+    the cadence stops replaying an answer that cannot change by itself.
+
+    Best effort: if the inbox write fails, the failed run is already recorded and
+    the schedule behaves exactly as it did before this existed.
+    """
+    from services.schedule_store import mark_schedule_run
+
+    message = str(exc)
+    now = datetime.now(timezone.utc).isoformat()
+    mark_schedule_run(
+        schedule_id,
+        job_id,
+        status="failed",
+        run_entry={
+            "job_id": job_id,
+            "status": "failed",
+            "attempt": attempt,
+            "started_at": now,
+            "finished_at": now,
+            "duration_seconds": 0,
+            "records_transferred": 0,
+            "rejected_rows": 0,
+            "coerced_null_rows": 0,
+            "error": message[:500],
+        },
+    )
+    _open_finding(schedule_id, exc, attempt=attempt, job_id=job_id)
+
+
+def _open_finding(
+    schedule_id: str,
+    exc: BaseException | str,
+    *,
+    attempt: int,
+    job_id: str = "",
+    evidence: dict[str, Any] | None = None,
+) -> None:
+    """Park the schedule on one finding, describing it in the operator's terms.
+
+    A structured ``ApprovalRequired`` already knows its code, scopes and corrective
+    action. Anything else is classified from its message, and only findings an
+    attestation could actually clear are offered as approvable — the rest name the
+    configuration change that has to happen instead.
+    """
+    from services.failure_retry_policy import classify_failure
+    from services.schedule_approvals import (
+        ApprovalRequired,
+        KIND_RUN_REFUSED,
+        build_approval_request,
+        open_approval_request,
+    )
+    from services.schedule_store import get_schedule
+    from services.standing_authorization import delegable_scopes_for
+
+    message = str(exc)
+    try:
+        sched = get_schedule(schedule_id)
+        if not sched:
+            return
+        if isinstance(exc, ApprovalRequired):
+            kind, code, scopes = exc.kind, exc.code, exc.scopes
+            corrective = exc.corrective_action
+            found = {**exc.evidence, **(evidence or {})}
+        else:
+            classification = classify_failure(error=message, phase="validate")
+            kind, code = KIND_RUN_REFUSED, "RUN_REFUSED"
+            scopes = delegable_scopes_for(message)
+            corrective = classification.corrective_action
+            found = {"failure_class": classification.kind, **(evidence or {})}
+        open_approval_request(
+            schedule_id,
+            build_approval_request(
+                kind=kind,
+                code=code,
+                finding=message[:1000],
+                corrective_action=corrective,
+                binding=binding_from_schedule(sched),
+                requested_scopes=scopes,
+                job_id=job_id,
+                run_attempt=attempt,
+                evidence=found,
+            ),
+        )
+    except Exception:
+        logger.exception("Schedule %s could not be parked on a decision", schedule_id)
+
+
+def _record_authorization_use(schedule_id: str, *, rebind: bool = False) -> None:
+    from services.schedule_approvals import record_authorization_use
+
+    try:
+        record_authorization_use(schedule_id, rebind=rebind)
+    except Exception:
+        # Bookkeeping must never fail an authorized run.
+        logger.exception("Schedule %s authorization use not recorded", schedule_id)
 
 
 def _dispatch_transfer(schedule_id: str, attempt: int = 0) -> str | None:
@@ -738,28 +941,13 @@ def _dispatch_transfer(schedule_id: str, attempt: int = 0) -> str | None:
         )
         return None
 
+    authorized_drift = False
     try:
         request = build_schedule_request(sched, src, dst)
-        _guard_source_schema_drift(sched, request)
+        authorized_drift = _guard_source_schema_drift(sched, request)
     except ValueError as exc:
-        logger.error("Schedule %s blocked by contract policy: %s", schedule_id, exc)
-        mark_schedule_run(
-            schedule_id,
-            "",
-            status="failed",
-            run_entry={
-                "job_id": "",
-                "status": "failed",
-                "attempt": attempt,
-                "started_at": datetime.now(timezone.utc).isoformat(),
-                "finished_at": datetime.now(timezone.utc).isoformat(),
-                "duration_seconds": 0,
-                "records_transferred": 0,
-                "rejected_rows": 0,
-                "coerced_null_rows": 0,
-                "error": str(exc)[:500],
-            },
-        )
+        logger.error("Schedule %s refused before any row moved: %s", schedule_id, exc)
+        _park_on_decision(schedule_id, exc, attempt=attempt)
         return None
     engine = get_transfer_engine()
     job_id = engine._create_pending_job(request)
@@ -769,6 +957,11 @@ def _dispatch_transfer(schedule_id: str, attempt: int = 0) -> str | None:
     # Bind the claim to this job so a long migration keeps it and a crashed one
     # gives it back, instead of both being judged by the same wall clock.
     set_running_job(schedule_id, job_id)
+    if request.acknowledgment_actor or authorized_drift:
+        # Delegated authority was exercised, and only now that a run actually
+        # exists to exercise it: counting earlier would spend a single-use
+        # approval on a job that never started.
+        _record_authorization_use(schedule_id, rebind=authorized_drift)
     future = run_transfer_async(job_id, request)
     future.add_done_callback(
         lambda _f, sid=schedule_id, jid=job_id, a=attempt, ts=started_at: _finalize_run(sid, jid, a, ts)

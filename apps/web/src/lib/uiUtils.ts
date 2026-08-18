@@ -33,6 +33,8 @@ export function jobStatusLabel(status: string): string {
       return "Pending";
     case "cancelled":
       return "Cancelled";
+    case "needs_approval":
+      return "Needs approval";
     default:
       return status ? status.charAt(0).toUpperCase() + status.slice(1).replace(/_/g, " ") : "Unknown";
   }
@@ -44,6 +46,8 @@ export function jobStatusBadgeClass(status: string): string {
   if (status === "completed_with_quarantine") return "df2-badge df2-badge-warn";
   if (status === "failed") return "df2-badge df2-badge-error";
   if (status === "running" || status === "pending") return "df2-badge df2-badge-run";
+  // Parked on a decision: not a failure, but nothing moves until someone answers.
+  if (status === "needs_approval") return "df2-badge df2-badge-warn";
   return "df2-badge df2-badge-muted";
 }
 

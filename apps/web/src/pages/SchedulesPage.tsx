@@ -10,6 +10,7 @@ import { PageSection } from "../components/ui/PageSection";
 import { PageShell } from "../components/ui/PageShell";
 import { PageToolbar } from "../components/ui/PageToolbar";
 import { ScheduleForm } from "../components/schedules/ScheduleForm";
+import { ApprovalInbox } from "../components/schedules/ApprovalInbox";
 import {
   PIPELINE_TABS,
   PipelineDetailDrawer,
@@ -24,6 +25,7 @@ import {
   exportDatawrapManifest,
   exportScheduleYaml,
   fetchContractBreaker,
+  fetchOpenScheduleApprovals,
   fetchOpsFreshness,
   fetchScheduleIntervals,
   fetchSchedules,
@@ -33,7 +35,13 @@ import {
   updateSchedule,
 } from "../lib/api";
 import { breakerBlocksRuns } from "../lib/contractBreakerUi";
-import { Connector, PipelineSchedule, ScheduleInput, ScheduleIntervals } from "../lib/types";
+import {
+  Connector,
+  PipelineSchedule,
+  ScheduleApprovalInboxItem,
+  ScheduleInput,
+  ScheduleIntervals,
+} from "../lib/types";
 
 interface SchedulesPageProps {
   connectors: Connector[];
@@ -64,6 +72,18 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
   const [breakers, setBreakers] = useState<Record<string, string>>({});
   /** schedule_id -> worst lag seconds when stale/critical */
   const [freshnessLag, setFreshnessLag] = useState<Record<string, { lag: number; severity: string }>>({});
+  /** Schedules parked on a deterministic finding, waiting on a named decision. */
+  const [approvals, setApprovals] = useState<ScheduleApprovalInboxItem[]>([]);
+
+  const loadApprovals = useCallback(async () => {
+    try {
+      setApprovals(await fetchOpenScheduleApprovals());
+    } catch {
+      // A viewer without schedule.read, or an older API: show no inbox rather than
+      // implying nothing is parked.
+      setApprovals([]);
+    }
+  }, []);
 
   const loadBreakers = useCallback(async (rows: PipelineSchedule[]) => {
     const ids = [...new Set(rows.map((s) => s.contract_id).filter(Boolean))] as string[];
@@ -117,11 +137,12 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
       setSchedules(rows);
       void loadBreakers(rows);
       void loadFreshness();
+      void loadApprovals();
     } catch (e) {
       console.error(e);
     }
     setLoading(false);
-  }, [loadBreakers, loadFreshness]);
+  }, [loadApprovals, loadBreakers, loadFreshness]);
 
   useEffect(() => {
     load();
@@ -521,6 +542,17 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
             />
           </PageSection>
         </div>
+      )}
+
+      {!loading && !showForm && approvals.length > 0 && (
+        <ApprovalInbox
+          items={approvals}
+          onDecided={async () => {
+            await load();
+            void onSchedulesChange?.();
+          }}
+          onOpenSchedule={(id) => openDrawer(id, "Overview")}
+        />
       )}
 
       <div className="df2-pipeline-workspace">

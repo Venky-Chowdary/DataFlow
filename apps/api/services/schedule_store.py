@@ -154,6 +154,15 @@ class PipelineSchedule:
     #: Dual Run campaign: consecutive parallel-run cycles on this route.
     #: ``evaluate_campaign`` is the kernel; this is durable memory for it.
     fidelity_campaign: dict[str, Any] = field(default_factory=dict)
+    #: Autopilot — a named human's advance signature for unattended runs, bound
+    #: by hash to the mapping and source shape it was granted against. Empty is
+    #: the safe default: with no grant the gates decide exactly as before.
+    #: ``services/standing_authorization.py`` owns its shape and its rules.
+    standing_authorization: dict[str, Any] = field(default_factory=dict)
+    #: An open finding waiting on a human. While this is set the cadence is
+    #: suppressed, because re-deciding an identical configuration against
+    #: identical catalogs produces an identical refusal — every night, forever.
+    approval_request: dict[str, Any] = field(default_factory=dict)
     # Retry policy applied on run failure.
     max_retries: int = 0
     retry_backoff_seconds: int = 60
@@ -243,6 +252,12 @@ class PipelineSchedule:
             ],
             fidelity_campaign=dict(data.get("fidelity_campaign") or {})
             if isinstance(data.get("fidelity_campaign"), dict)
+            else {},
+            standing_authorization=dict(data.get("standing_authorization") or {})
+            if isinstance(data.get("standing_authorization"), dict)
+            else {},
+            approval_request=dict(data.get("approval_request") or {})
+            if isinstance(data.get("approval_request"), dict)
             else {},
             max_retries=max(0, int(data.get("max_retries", 0) or 0)),
             retry_backoff_seconds=max(0, int(data.get("retry_backoff_seconds", 60) or 0)),
@@ -822,6 +837,18 @@ def connector_pair_busy(source_connector_id: str, dest_connector_id: str, exclud
     return False
 
 
+def has_open_approval(sched: Any) -> bool:
+    """True while a finding on this schedule is waiting on a human.
+
+    Only an unresolved request holds the cadence: a request that was approved or
+    rejected keeps its record for the audit trail but no longer blocks.
+    """
+    req = getattr(sched, "approval_request", None) or {}
+    if not isinstance(req, dict) or not req:
+        return False
+    return str(req.get("status") or "open").strip().lower() == "open"
+
+
 def due_schedules(now: datetime | None = None) -> list[PipelineSchedule]:
     current = now or datetime.now(timezone.utc)
     due: list[PipelineSchedule] = []
@@ -829,6 +856,11 @@ def due_schedules(now: datetime | None = None) -> list[PipelineSchedule]:
         if not s.enabled:
             continue
         if s.running and not _is_running_stale(s):
+            continue
+        if has_open_approval(s):
+            # A deterministic refusal waiting on a decision is not a cadence
+            # event: the same inputs would produce the same refusal, so running
+            # it again only buries the finding under identical failures.
             continue
         retry_at = _parse_ts(s.retry_at)
         if retry_at is not None:

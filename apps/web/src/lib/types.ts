@@ -1250,6 +1250,65 @@ export interface ScheduleInput {
   require_signed_contract?: boolean;
 }
 
+/**
+ * One durable finding a scheduled run was parked on.
+ *
+ * A gate that refuses an unattended run refuses identically on every later beat,
+ * so the schedule stops re-running and waits for a named decision instead.
+ */
+export interface ScheduleApproval {
+  id: string;
+  status: "open" | "approved" | "rejected" | string;
+  kind: string;
+  /** Stable refusal code, e.g. SOURCE_SCHEMA_DRIFT. */
+  code: string;
+  finding: string;
+  corrective_action: string;
+  /** False when no signature can clear it — the plan has to change instead. */
+  approvable: boolean;
+  requested_scopes: string[];
+  occurrences: number;
+  created_at: string;
+  last_seen_at?: string;
+  resolved_at?: string;
+  resolved_by?: string;
+  resolution_reason?: string;
+  job_id?: string;
+  run_attempt?: number;
+  evidence?: Record<string, unknown>;
+  binding?: Record<string, unknown>;
+  differences?: string[];
+}
+
+/** A named human's advance signature, bound to the exact plan they signed. */
+export interface StandingAuthorization {
+  id: string;
+  actor: string;
+  reason: string;
+  granted_at: string;
+  expires_at: string;
+  scopes: string[];
+  /** 1 for approve-once, 0 for every later run of the identical plan. */
+  max_uses: number;
+  uses: number;
+  last_used_at?: string;
+  revoked_at?: string;
+  revoked_by?: string;
+  revoked_reason?: string;
+}
+
+/** An inbox row: the parked schedule, and the decision it is waiting on. */
+export interface ScheduleApprovalInboxItem {
+  schedule_id: string;
+  schedule_name: string;
+  workspace_id: string;
+  source: string;
+  destination: string;
+  sync_mode: string;
+  enabled: boolean;
+  approval: ScheduleApproval;
+}
+
 /** Full schedule record (list/detail) — config plus read-only run state. */
 export interface PipelineSchedule {
   id: string;
@@ -1289,6 +1348,16 @@ export interface PipelineSchedule {
   /** Data contract bound to this pipeline (enforced when require_signed_contract). */
   contract_id?: string;
   require_signed_contract?: boolean;
+  /** Autopilot, on list summaries: this schedule is waiting on a decision. */
+  needs_approval?: boolean;
+  approval_id?: string;
+  approval_code?: string;
+  approval_finding?: string;
+  approvable?: boolean;
+  authorized?: boolean;
+  /** Autopilot, on GET /schedules/{id}: the full records behind those flags. */
+  approval_request?: ScheduleApproval | Record<string, never>;
+  standing_authorization?: StandingAuthorization | Record<string, never>;
   /** Present on GET /schedules/{id}; omitted from list summaries. */
   mappings?: { source: string; target: string; confidence?: number; transform?: string | null }[];
   mapping_count?: number;

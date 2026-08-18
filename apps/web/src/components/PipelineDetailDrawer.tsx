@@ -5,7 +5,14 @@ import { Button } from "./ui/Button";
 import { Drawer } from "./ui/Drawer";
 import { FilterTabs } from "./ui/FilterTabs";
 import { ScheduleRunHistory } from "./schedules/ScheduleRunHistory";
-import { fetchContractBreaker, fetchJob, fetchSchedule, runScheduleParallelCheck, type ContractBreaker } from "../lib/api";
+import {
+  fetchContractBreaker,
+  fetchJob,
+  fetchSchedule,
+  revokeScheduleAuthorization,
+  runScheduleParallelCheck,
+  type ContractBreaker,
+} from "../lib/api";
 import {
   breakerBadgeClass,
   breakerBlocksRuns,
@@ -16,7 +23,7 @@ import {
 import { computeJobTrustScore } from "../lib/jobTrustScore";
 import { destHeadline } from "../lib/conservationLedger";
 import { formatSyncModeLabel } from "../lib/transferConstants";
-import { Connector, PipelineSchedule, TransferJob } from "../lib/types";
+import { Connector, PipelineSchedule, StandingAuthorization, TransferJob } from "../lib/types";
 import { jobStatusBadgeClass, jobStatusLabel } from "../lib/uiUtils";
 
 export const PIPELINE_TABS = ["Overview", "Schema", "History", "Config"] as const;
@@ -87,6 +94,9 @@ export function PipelineDetailDrawer({
   const [resettingBreaker, setResettingBreaker] = useState(false);
   const [campaign, setCampaign] = useState<PipelineSchedule["fidelity_campaign"]>();
   const [checkingParallel, setCheckingParallel] = useState(false);
+  /** Standing authority currently recorded on this schedule, if any. */
+  const [authorization, setAuthorization] = useState<StandingAuthorization | null>(null);
+  const [revoking, setRevoking] = useState(false);
 
   useEffect(() => {
     if (!open || !sched?.id) {
@@ -95,6 +105,7 @@ export function PipelineDetailDrawer({
       setLastJob(null);
       setBreaker(null);
       setCampaign(undefined);
+      setAuthorization(null);
       return;
     }
     let cancelled = false;
@@ -112,11 +123,14 @@ export function PipelineDetailDrawer({
           typeof full.mapping_count === "number" ? full.mapping_count : maps.length,
         );
         setCampaign(full.fidelity_campaign);
+        const grant = full.standing_authorization;
+        setAuthorization(grant && "id" in grant ? (grant as StandingAuthorization) : null);
       })
       .catch(() => {
         if (!cancelled) {
           setMappingCount(0);
           setMappings([]);
+          setAuthorization(null);
         }
       });
     if (sched.last_job_id) {
@@ -184,6 +198,21 @@ export function PipelineDetailDrawer({
       /* parent toasts */
     } finally {
       setResettingBreaker(false);
+    }
+  };
+
+  const handleRevoke = async () => {
+    setRevoking(true);
+    try {
+      const result = await revokeScheduleAuthorization(
+        sched.id,
+        "Revoked from the pipeline drawer",
+      );
+      setAuthorization(result.authorization);
+    } catch {
+      /* the grant stays displayed; nothing was revoked */
+    } finally {
+      setRevoking(false);
     }
   };
 
@@ -454,6 +483,25 @@ export function PipelineDetailDrawer({
               {sched.primary_key && <div><dt>Primary key</dt><dd>{sched.primary_key}</dd></div>}
               {sched.cursor_column && <div><dt>Cursor</dt><dd>{sched.cursor_column}</dd></div>}
             </dl>
+            {authorization && !authorization.revoked_at && (
+              <div className="df2-approval-grant" role="group" aria-label="Delegated authority">
+                <p>
+                  <strong>{authorization.actor}</strong> authorized unattended runs of this
+                  exact plan until {formatWhen(authorization.expires_at)}
+                  {authorization.max_uses === 1 ? " (one run only)" : ""} — “{authorization.reason}”.
+                  It stops applying if the mapping, source shape, policy or contract changes.
+                </p>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  loading={revoking}
+                  onClick={() => void handleRevoke()}
+                  title="Revoke this authority; later runs need a fresh decision"
+                >
+                  Revoke authority
+                </Button>
+              </div>
+            )}
             {breakerOpen && (
               <p className="df2-drawer-empty-line">
                 Circuit breaker is open — scheduled and manual runs stay blocked until you reset it (after fixing the contract drift or quality failure that tripped it).
