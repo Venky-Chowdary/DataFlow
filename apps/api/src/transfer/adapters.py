@@ -1194,6 +1194,7 @@ def write_destination_database(
     the destination summary for ``reconcile()`` to check the delta against.
     Keyword options are forwarded verbatim to ``_write_destination_database``.
     """
+    from connectors.writer_common import active_quarantine_mappings
     from services.dest_precount import PRECOUNT_KEY, precount_destination
     from services.dialect_profiles import schema_from_cfg
     from services.row_conservation import CENSUS_KEY, prepare_keyed_upsert
@@ -1259,9 +1260,12 @@ def write_destination_database(
         )
         options["source_spool"] = spill.spool
     try:
-        rows_written, ddl_log, summary = _write_destination_database(
-            endpoint, records, columns, schema, mappings, **options
-        )
+        # The Map governs holdouts for the whole write, including the bind and
+        # salvage paths that stamp their own details.
+        with active_quarantine_mappings(mappings):
+            rows_written, ddl_log, summary = _write_destination_database(
+                endpoint, records, columns, schema, mappings, **options
+            )
         if dest_plan is not None and dest_plan.after_spec is not None:
             _run_dest_procedure_hook(endpoint, dest_plan.after_spec)
             ddl_log = list(ddl_log or [])

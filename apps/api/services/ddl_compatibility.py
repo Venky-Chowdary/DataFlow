@@ -87,6 +87,16 @@ def _parse_decimal_capacity(ddl: str) -> tuple[int, int] | None:
     return None
 
 
+def _digits_needed(value: Any) -> tuple[int, int]:
+    """(integer digits, fractional digits) this decimal occupies as written."""
+    _sign, digits, exp = value.as_tuple()
+    if not isinstance(exp, int):  # NaN / Infinity carry a string exponent
+        return 0, 0
+    scale_digits = -exp if exp < 0 else 0
+    int_digits = len(digits) - scale_digits if exp < 0 else len(digits) + exp
+    return int_digits, scale_digits
+
+
 def _decimal_overflow_issue(samples: list[str], tgt: str, tgt_type: str) -> str | None:
     capacity = _parse_decimal_capacity(tgt_type)
     if not capacity or not samples:
@@ -106,10 +116,13 @@ def _decimal_overflow_issue(samples: list[str], tgt: str, tgt_type: str) -> str 
         except (InvalidOperation, ValueError):
             # Non-numeric into DECIMAL is a type/coercion problem handled elsewhere.
             continue
-        sign, digits, exp = value.as_tuple()
-        del sign
-        scale_digits = -exp if exp < 0 else 0
-        int_digits = len(digits) - scale_digits if exp < 0 else len(digits) + max(exp, 0)
+        int_digits, scale_digits = _digits_needed(value)
+        if scale_digits > scale:
+            # Trailing zeros carry no value: '1.50000000' lands in DECIMAL(9,2) as
+            # 1.50, exactly, and the writer's own fit predicate says so. Measuring
+            # the padded scale here blocks a row Execute would have accepted —
+            # Validate must not be stricter than the write it is forecasting.
+            int_digits, scale_digits = _digits_needed(value.normalize())
         if int_digits > max_int_digits or scale_digits > scale:
             return (
                 f"Decimal capacity overflow: {tgt} ({tgt_type}) cannot hold sample value "
