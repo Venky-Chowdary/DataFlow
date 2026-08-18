@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import sys
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
@@ -733,6 +733,8 @@ def run_file_preflight(
     acknowledgment_reason: str = "",
     run_population_orphan_scan: bool = False,
     resume: bool = False,
+    population_rows: Iterable[Mapping[str, Any]] | None = None,
+    rows_are_population: bool = False,
 ) -> dict[str, Any]:
     """Run preflight gates for file/DB Studio transfers (G1–G9 + host policy)."""
 
@@ -1458,6 +1460,67 @@ def run_file_preflight(
         )
         additive_stamp_blocked = True
 
+    # Bounded destination carriers (DECIMAL(p,s) / VARCHAR(n) / sized INTEGER)
+    # are decidable before the write. Screening a preview and letting the writer
+    # discover row 431 is how a 1M-row load ends with zero rows committed and a
+    # Run-phase error for a defect Validate could name. Scan whatever rows this
+    # caller actually holds — the whole batch at Execute preflight, the preview in
+    # Studio — and report the evidence for what it is.
+    fit_gate: dict[str, Any] | None = None
+    fit_report_payload: dict[str, Any] = {}
+    fit_blocked = False
+    try:
+        from connectors.writer_common import transform_error_policy_for_validation_mode
+        from services.population_fit_scan import (
+            GATE_ID as _FIT_GATE_ID,
+            build_population_fit_gate,
+            scan_population_fit,
+        )
+
+        scan_input = population_rows if population_rows is not None else sample_rows
+        fit_report = scan_population_fit(
+            scan_input,
+            mappings,
+            dest_types=destination_column_types or {},
+            source_types=column_types or {},
+            dest_db=destination_db_type,
+            dialect_label=destination_db_type,
+            # Same policy the writer resolves from the same validation mode —
+            # Validate must not forecast a quarantine the writer will abort on.
+            job_error_policy=transform_error_policy_for_validation_mode(validation_mode),
+            rows_total=int(row_count or 0),
+            rows_are_population=bool(rows_are_population and population_rows is not None),
+        )
+        fit_report_payload = fit_report.to_dict()
+        # The gate is always stated, including when nothing needed scanning:
+        # "no bounded carrier can be exceeded" is evidence, and a silently
+        # absent gate reads as an unasked question.
+        fit_gate = build_population_fit_gate(fit_report)
+        if fit_gate.get("status") == "block":
+            fit_blocked = True
+            blockers.append(
+                {
+                    "id": _FIT_GATE_ID,
+                    "message": str(fit_gate.get("message") or ""),
+                    "details": dict(fit_gate.get("details") or {}),
+                }
+            )
+    except Exception as exc:  # noqa: BLE001 - a failed scan is unmeasured, never "fits"
+        logger.warning(
+            "population fit scan failed: %s", exc, exc_info=exc
+        )
+        fit_report_payload = {"evidence": "unmeasured", "error": str(exc)[:400]}
+        fit_gate = {
+            "id": "g3f_population_fit",
+            "status": "warn",
+            "message": (
+                "Population fit could not be measured — bounded destination "
+                "carriers stay unproven until the write-time checks run"
+            ),
+            "duration_ms": 0,
+            "details": dict(fit_report_payload),
+        }
+
     enriched_blockers = enrich_blockers(
         blockers,
         dest_kind=dest_kind,
@@ -1484,13 +1547,16 @@ def run_file_preflight(
         confidence_threshold=confidence_threshold,
     )
 
+    extra_gates: list[dict[str, Any]] = [fit_gate] if fit_gate else []
+    extra_passed = sum(1 for g in extra_gates if g.get("status") != "block")
+    total_gates = result.total_gates + len(extra_gates)
+    passed_count = result.passed_count + extra_passed
+
     out = {
-        "passed": bool(result.passed) and not additive_stamp_blocked,
-        "passed_count": result.passed_count,
-        "total_gates": result.total_gates,
-        "readiness_score": round(
-            result.passed_count / max(result.total_gates, 1) * 100, 1
-        ),
+        "passed": bool(result.passed) and not additive_stamp_blocked and not fit_blocked,
+        "passed_count": passed_count,
+        "total_gates": total_gates,
+        "readiness_score": round(passed_count / max(total_gates, 1) * 100, 1),
         "gates": [
             {
                 "id": g.gate_id.value,
@@ -1515,8 +1581,10 @@ def run_file_preflight(
             ]
             if additive_stamp_blocked
             else []
-        ),
+        )
+        + extra_gates,
         "blockers": enriched_blockers,
+        "population_fit": fit_report_payload,
         # Echo Kernel-stamped additive types so Map/Execute share Validate authority.
         "stamped_mappings": [
             {
@@ -1615,7 +1683,14 @@ def run_file_preflight(
     )
     out["source_coverage"] = src_coverage
     if isinstance(out.get("proof_bundle"), dict):
-        out["proof_bundle"] = {**out["proof_bundle"], "source_coverage": src_coverage}
+        out["proof_bundle"] = {
+            **out["proof_bundle"],
+            "source_coverage": src_coverage,
+            # Evidence travels with the proof pack, not only with the HTTP
+            # response: an exported pack must show whether the bounded carriers
+            # were decided on every row or on a preview.
+            "population_fit": fit_report_payload,
+        }
     # Hosted G13/G14/G15 replace package stubs (full dest nullability / identity).
     contract_ids = {str(g.get("id") or "") for g in contract_gates}
     out["gates"] = [

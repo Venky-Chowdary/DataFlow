@@ -79,6 +79,12 @@ export const GATE_CATALOG: GateCatalogEntry[] = [
     rule: "Existing-table shape is classified once (equal / source-superset / dest-superset / overlap). Writes are name-addressed — never source-positional. Dest-only columns stay off SET.",
   },
   {
+    id: "g3f_population_fit",
+    label: "Population fit",
+    icon: "scan",
+    rule: "Bounded destination carriers (DECIMAL(p,s) / VARCHAR(n) / sized INTEGER) are decided on the rows this run actually holds, with the write path's own fit predicates. A finding proves those values cannot be written; a clean scan is population proof only when every source row was scanned.",
+  },
+  {
     id: "constraint_fk",
     label: "Foreign key coverage",
     icon: "shield",

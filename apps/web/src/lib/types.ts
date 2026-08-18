@@ -1023,6 +1023,42 @@ export interface PreflightResult {
     reason?: string;
     note?: string;
   };
+  /**
+   * Bounded destination carriers decided before the write (g3f_population_fit).
+   * `evidence` is the strength of the walk, never the wish: `exact` only when
+   * every source row was scanned, `sampled` for a preview, `partial` when a
+   * budget stopped it, `unmeasured` when no rows were available.
+   */
+  population_fit?: {
+    evidence?: "exact" | "partial" | "sampled" | "unmeasured";
+    rows_scanned?: number;
+    rows_total?: number;
+    scanned_population?: boolean;
+    unfit_rows?: number;
+    note?: string;
+    error?: string;
+    bounded_columns?: Array<{
+      source?: string;
+      target?: string;
+      target_type?: string;
+      carrier?: string;
+      write_action?: string;
+      execution_policy?: string;
+      aborts_job?: boolean;
+    }>;
+    findings?: Array<{
+      source?: string;
+      target?: string;
+      target_type?: string;
+      unfit_rows?: number;
+      example_rows?: number[];
+      example_values?: string[];
+      aborts_job?: boolean;
+      reason?: string;
+    }>;
+    undecidable_columns?: string[];
+    safe_by_declaration?: string[];
+  };
   /** Procedure / SQL extract honesty — catalog probes skipped, CDC/SCD2/mirror refused. */
   callable_extract?: {
     mode?: string;
