@@ -154,7 +154,10 @@ export function PipelineCard({
           ) : isRunning ? (
             <span className="df2-badge df2-badge-run">Running</span>
           ) : sched.last_status ? (
-            <span className={jobStatusBadgeClass(sched.last_status)}>
+            <span
+              className={jobStatusBadgeClass(sched.last_status)}
+              title={sched.approval_finding || undefined}
+            >
               {jobStatusLabel(sched.last_status)}
             </span>
           ) : (
@@ -229,7 +232,10 @@ export function PipelineCard({
             </span>
           )}
           {sched.last_status && (
-            <span className={jobStatusBadgeClass(sched.last_status)} title={`Last run: ${jobStatusLabel(sched.last_status)}`}>
+            <span
+              className={jobStatusBadgeClass(sched.last_status)}
+              title={sched.approval_finding || `Last run: ${jobStatusLabel(sched.last_status)}`}
+            >
               {jobStatusLabel(sched.last_status)}
             </span>
           )}

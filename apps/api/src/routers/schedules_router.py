@@ -7,6 +7,8 @@ from typing import Any, Literal, Optional
 from fastapi import APIRouter, Header, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
+from services.acknowledgment_contract import MIN_ACTOR_LEN
+from services.schedule_approvals import STATUS_OPEN
 from services.schedule_store import (
     INTERVALS,
     SYNC_MODES,
@@ -163,6 +165,10 @@ class ScheduleResponse(BaseModel):
     source_schema_fingerprint: str = ""
     source_schema_observed_at: str = ""
     mapping_count: int = 0
+    # Autopilot: the finding this schedule is parked on, and the standing
+    # authority (if any) that lets later identical runs proceed unattended.
+    approval_request: dict[str, Any] = Field(default_factory=dict)
+    standing_authorization: dict[str, Any] = Field(default_factory=dict)
 
     @classmethod
     def from_schedule(cls, s: PipelineSchedule) -> ScheduleResponse:
@@ -215,12 +221,31 @@ class ScheduleSummaryResponse(BaseModel):
     running: bool = False
     created_at: str
     mapping_count: int = 0
+    # A parked schedule reads as "off" from run_count and last_status alone. The
+    # list row has to say a human owes it a decision, without the full finding.
+    needs_approval: bool = False
+    approval_id: str = ""
+    approval_code: str = ""
+    approval_finding: str = ""
+    approvable: bool = False
+    authorized: bool = False
 
     @classmethod
     def from_schedule(cls, s: PipelineSchedule) -> ScheduleSummaryResponse:
         full = ScheduleResponse.from_schedule(s)
         payload = full.model_dump()
         payload.pop("mappings", None)
+        req = dict(s.approval_request or {})
+        open_req = str(req.get("status") or "").strip().lower() == STATUS_OPEN
+        grant = dict(s.standing_authorization or {})
+        payload.update(
+            needs_approval=open_req,
+            approval_id=str(req.get("id") or "") if open_req else "",
+            approval_code=str(req.get("code") or "") if open_req else "",
+            approval_finding=str(req.get("finding") or "") if open_req else "",
+            approvable=bool(req.get("approvable")) if open_req else False,
+            authorized=bool(grant.get("id")) and not grant.get("revoked_at"),
+        )
         return cls(**{k: v for k, v in payload.items() if k in cls.model_fields})
 
 
@@ -500,3 +525,239 @@ async def run_pipeline_now(schedule_id: str):
         raise HTTPException(status_code=400, detail="Could not start pipeline — check connectors")
     updated = get_schedule(schedule_id)
     return {"success": True, "job_id": job_id, "schedule": ScheduleResponse.from_schedule(updated)}
+
+
+# --- Autopilot: the approval inbox -------------------------------------------
+#
+# A scheduled run that a gate refuses used to record one more failed run and fail
+# identically on every later beat. It now parks on a single durable finding that a
+# human can decide, and a decision can optionally mint a scoped, expiring,
+# hash-bound standing authorization so later runs of the *same plan* proceed
+# unattended. Nothing here weakens execution: preflight, the destination reread
+# and Gate-8 reconciliation still decide whether a run is green.
+
+
+class ApprovalDecision(BaseModel):
+    reason: str = Field(..., min_length=8, max_length=1000)
+    #: Attestations the operator is making. Only those the finding asked for are
+    #: honoured; a scope with nothing signed behind it is refused.
+    compliance: bool = False
+    schema_drift: bool = False
+    fk_risk: bool = False
+    #: False approves this run only. True delegates the same signature to future
+    #: runs of the identical plan, and needs ``schedule.authorize``.
+    grant_standing: bool = False
+    expires_in_days: int = Field(default=30, ge=1, le=90)
+    scopes: Optional[list[str]] = None
+
+
+class RejectDecision(BaseModel):
+    reason: str = Field(..., min_length=8, max_length=1000)
+    #: Leave the schedule paused (default) rather than let the next beat re-raise
+    #: the same refusal.
+    disable: bool = True
+
+
+class AuthorizationGrant(BaseModel):
+    reason: str = Field(..., min_length=8, max_length=1000)
+    scopes: list[str] = Field(..., min_length=1)
+    compliance: bool = False
+    schema_drift: bool = False
+    fk_risk: bool = False
+    expires_in_days: int = Field(default=30, ge=1, le=90)
+
+
+def _decider(request: Request, *, authorize: bool = False) -> str:
+    """The named human behind this decision, or 403.
+
+    The actor is taken from the session, never from the body: an audit trail the
+    client names itself is not an audit trail. When authentication is not enforced
+    (single-operator deployment) the caller must still name themselves, which the
+    ``X-Actor`` header carries.
+    """
+    from services.rbac import Permission, has_permission
+    from src.services import auth_service
+
+    if not auth_service.auth_required():
+        actor = str(request.headers.get("X-Actor") or "").strip()
+        if len(actor) < MIN_ACTOR_LEN:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "X-Actor must name the person making this decision "
+                    f"(at least {MIN_ACTOR_LEN} characters)."
+                ),
+            )
+        return actor
+    user = getattr(request.state, "user", None) or {}
+    needed = Permission.SCHEDULE_AUTHORIZE if authorize else Permission.SCHEDULE_MANAGE
+    if not has_permission(user, needed):
+        raise HTTPException(status_code=403, detail=f"Permission denied: {needed}")
+    return str(user.get("email") or user.get("name") or "").strip()
+
+
+@router.get("/approvals/open")
+async def list_open_approvals(request: Request, workspace_id: str = ""):
+    """Every schedule currently parked on a decision, newest first."""
+    import asyncio
+
+    from services.schedule_approvals import open_approvals
+
+    scope = resolve_read_workspace(request, workspace_id)
+    items = await asyncio.to_thread(open_approvals, scope or "")
+    return {"count": len(items), "approvals": items}
+
+
+@router.get("/{schedule_id}/approval")
+async def get_schedule_approval(schedule_id: str, request: Request):
+    """This schedule's open finding and its standing authorization, if any."""
+    sched = get_schedule(schedule_id)
+    if not sched:
+        raise HTTPException(status_code=404, detail="Schedule not found")
+    assert_resource_workspace(request, sched.workspace_id or "")
+    return {
+        "schedule_id": schedule_id,
+        "approval": dict(sched.approval_request or {}),
+        "authorization": dict(sched.standing_authorization or {}),
+    }
+
+
+@router.post("/{schedule_id}/approvals/{approval_id}/approve")
+async def approve_schedule_finding(
+    schedule_id: str,
+    approval_id: str,
+    payload: ApprovalDecision,
+    request: Request,
+):
+    """Approve one finding, and optionally delegate it to future identical runs."""
+    from services.schedule_approvals import (
+        AuthorizationRefused,
+        approve_request,
+    )
+
+    actor = _decider(request, authorize=bool(payload.grant_standing))
+    sched = get_schedule(schedule_id)
+    if not sched:
+        raise HTTPException(status_code=404, detail="Schedule not found")
+    assert_resource_workspace(request, sched.workspace_id or "")
+    try:
+        result = approve_request(
+            schedule_id,
+            approval_id,
+            actor=actor,
+            reason=payload.reason,
+            acknowledgments={
+                "compliance": payload.compliance,
+                "schema_drift": payload.schema_drift,
+                "fk_risk": payload.fk_risk,
+            },
+            scopes=payload.scopes,
+            grant_standing=payload.grant_standing,
+            expires_in_days=payload.expires_in_days,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except AuthorizationRefused as exc:
+        # A refused delegation writes nothing, so the schedule is never left
+        # half-approved.
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {
+        "success": True,
+        "approval": result["approval"],
+        "authorization": result["authorization"],
+        "schedule": ScheduleResponse.from_schedule(result["schedule"]),
+    }
+
+
+@router.post("/{schedule_id}/approvals/{approval_id}/reject")
+async def reject_schedule_finding(
+    schedule_id: str,
+    approval_id: str,
+    payload: RejectDecision,
+    request: Request,
+):
+    """Reject a finding; the schedule is paused rather than left to re-refuse."""
+    from services.schedule_approvals import reject_request
+
+    actor = _decider(request)
+    sched = get_schedule(schedule_id)
+    if not sched:
+        raise HTTPException(status_code=404, detail="Schedule not found")
+    assert_resource_workspace(request, sched.workspace_id or "")
+    try:
+        result = reject_request(
+            schedule_id,
+            approval_id,
+            actor=actor,
+            reason=payload.reason,
+            disable=payload.disable,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {
+        "success": True,
+        "approval": result["approval"],
+        "schedule": ScheduleResponse.from_schedule(result["schedule"]),
+    }
+
+
+@router.post("/{schedule_id}/authorization")
+async def grant_schedule_authorization(
+    schedule_id: str,
+    payload: AuthorizationGrant,
+    request: Request,
+):
+    """Grant scoped, expiring standing authority for this schedule's current plan."""
+    from services.schedule_approvals import (
+        AuthorizationRefused,
+        set_standing_authorization,
+    )
+
+    actor = _decider(request, authorize=True)
+    sched = get_schedule(schedule_id)
+    if not sched:
+        raise HTTPException(status_code=404, detail="Schedule not found")
+    assert_resource_workspace(request, sched.workspace_id or "")
+    try:
+        result = set_standing_authorization(
+            schedule_id,
+            actor=actor,
+            reason=payload.reason,
+            scopes=list(payload.scopes),
+            acknowledgments={
+                "compliance": payload.compliance,
+                "schema_drift": payload.schema_drift,
+                "fk_risk": payload.fk_risk,
+            },
+            expires_in_days=payload.expires_in_days,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except AuthorizationRefused as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {
+        "success": True,
+        "authorization": result["authorization"],
+        "schedule": ScheduleResponse.from_schedule(result["schedule"]),
+    }
+
+
+@router.delete("/{schedule_id}/authorization")
+async def revoke_schedule_authorization(
+    schedule_id: str,
+    request: Request,
+    reason: str = "",
+):
+    """Revoke standing authority. The record is kept, permanently unusable."""
+    from services.schedule_approvals import revoke_standing_authorization
+
+    actor = _decider(request, authorize=True)
+    sched = get_schedule(schedule_id)
+    if not sched:
+        raise HTTPException(status_code=404, detail="Schedule not found")
+    assert_resource_workspace(request, sched.workspace_id or "")
+    try:
+        result = revoke_standing_authorization(schedule_id, actor=actor, reason=reason)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"success": True, "authorization": result["authorization"]}

@@ -1523,6 +1523,111 @@ export async function acceptScheduleSourceSchema(
   return data as { success: boolean; message?: string; columns?: number };
 }
 
+/**
+ * Every schedule currently parked on a decision.
+ *
+ * Autopilot's inbox: a deterministic refusal is a finding a human owes an answer
+ * to, not something the next beat should replay.
+ */
+export async function fetchOpenScheduleApprovals(): Promise<
+  import("./types").ScheduleApprovalInboxItem[]
+> {
+  const res = await apiFetch(`${API_BASE}/schedules/approvals/open`);
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not load approvals"));
+  const data = (await res.json()) as {
+    approvals?: import("./types").ScheduleApprovalInboxItem[];
+  };
+  return data.approvals ?? [];
+}
+
+/** The finding and the standing authority currently recorded on one schedule. */
+export async function fetchScheduleApprovalDetail(scheduleId: string): Promise<{
+  schedule_id: string;
+  approval: import("./types").ScheduleApproval | Record<string, never>;
+  authorization: import("./types").StandingAuthorization | Record<string, never>;
+}> {
+  const res = await apiFetch(
+    `${API_BASE}/schedules/${encodeURIComponent(scheduleId)}/approval`,
+  );
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not load the approval"));
+  return res.json();
+}
+
+/**
+ * Approve one finding.
+ *
+ * `grantStanding` is the powerful half: it delegates the same signature to every
+ * later run of the *identical* plan, so it needs `schedule.authorize` and it stops
+ * applying the moment the mapping, source shape or policy moves.
+ */
+export async function approveScheduleFinding(
+  scheduleId: string,
+  approvalId: string,
+  payload: {
+    reason: string;
+    compliance?: boolean;
+    schema_drift?: boolean;
+    fk_risk?: boolean;
+    grant_standing?: boolean;
+    expires_in_days?: number;
+  },
+): Promise<{
+  approval: import("./types").ScheduleApproval;
+  authorization: import("./types").StandingAuthorization;
+  schedule: PipelineSchedule;
+}> {
+  const res = await apiFetch(
+    `${API_BASE}/schedules/${encodeURIComponent(scheduleId)}/approvals/${encodeURIComponent(
+      approvalId,
+    )}/approve`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    },
+  );
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not approve this finding"));
+  return res.json();
+}
+
+/** Reject a finding; the schedule is paused rather than left to re-refuse. */
+export async function rejectScheduleFinding(
+  scheduleId: string,
+  approvalId: string,
+  payload: { reason: string; disable?: boolean },
+): Promise<{
+  approval: import("./types").ScheduleApproval;
+  schedule: PipelineSchedule;
+}> {
+  const res = await apiFetch(
+    `${API_BASE}/schedules/${encodeURIComponent(scheduleId)}/approvals/${encodeURIComponent(
+      approvalId,
+    )}/reject`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    },
+  );
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not reject this finding"));
+  return res.json();
+}
+
+/** Revoke standing authority. The record is kept, permanently unusable. */
+export async function revokeScheduleAuthorization(
+  scheduleId: string,
+  reason = "",
+): Promise<{ authorization: import("./types").StandingAuthorization }> {
+  const res = await apiFetch(
+    `${API_BASE}/schedules/${encodeURIComponent(scheduleId)}/authorization?reason=${encodeURIComponent(
+      reason,
+    )}`,
+    { method: "DELETE" },
+  );
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not revoke the authorization"));
+  return res.json();
+}
+
 export async function createSchedule(
   payload: Partial<import("./types").ScheduleInput> & {
     name: string;

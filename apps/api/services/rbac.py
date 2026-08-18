@@ -29,6 +29,10 @@ class Permission:
     CONNECTOR_DELETE = "connector.delete"
     SCHEDULE_READ = "schedule.read"
     SCHEDULE_MANAGE = "schedule.manage"
+    # Minting standing authority for unattended runs is a separate, higher power
+    # than operating a schedule: approving one run is schedule.manage, while
+    # delegating a signature to every future run of that plan is admin-only.
+    SCHEDULE_AUTHORIZE = "schedule.authorize"
     AUDIT_READ = "audit.read"
     WORKSPACE_READ = "workspace.read"
     WORKSPACE_MANAGE = "workspace.manage"
@@ -46,6 +50,7 @@ _ALL_PERMISSIONS = {
     Permission.CONNECTOR_DELETE,
     Permission.SCHEDULE_READ,
     Permission.SCHEDULE_MANAGE,
+    Permission.SCHEDULE_AUTHORIZE,
     Permission.AUDIT_READ,
     Permission.WORKSPACE_READ,
     Permission.WORKSPACE_MANAGE,

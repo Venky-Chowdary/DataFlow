@@ -705,6 +705,192 @@
   }
 }
 
+/* ─── Autopilot approval inbox (Schedules) ───
+   Findings a scheduled run parked on. Amber, never red: nothing has failed —
+   nothing will move until a named human answers. */
+
+.df2-approval-inbox {
+  border-color: var(--df-warning-border);
+}
+
+.df2-approval-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.df2-approval-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 12px 14px;
+  border: 1px solid var(--df-warning-border);
+  border-left: 3px solid var(--df-warning);
+  border-radius: var(--df-radius-card, 8px);
+  background: var(--df-warning-bg);
+}
+
+.df2-approval-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.df2-approval-code {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-family: var(--df-font-mono);
+  font-size: var(--df-fs-xs);
+  letter-spacing: 0.02em;
+  color: var(--df-warning);
+  white-space: nowrap;
+}
+
+.df2-approval-name {
+  padding: 0;
+  border: 0;
+  background: none;
+  font-family: inherit;
+  font-size: var(--df-fs-md);
+  font-weight: 600;
+  color: var(--df-text-primary);
+  cursor: pointer;
+  text-align: left;
+}
+
+.df2-approval-name:hover,
+.df2-approval-name:focus-visible {
+  text-decoration: underline;
+}
+
+.df2-approval-route,
+.df2-approval-count {
+  font-size: var(--df-fs-sm);
+  color: var(--df-text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.df2-approval-count {
+  margin-left: auto;
+  white-space: nowrap;
+}
+
+.df2-approval-finding,
+.df2-approval-action,
+.df2-approval-nonapprovable {
+  margin: 0;
+  font-size: var(--df-fs-sm);
+  line-height: 1.5;
+  color: var(--df-text-secondary);
+}
+
+.df2-approval-nonapprovable {
+  color: var(--df-danger);
+}
+
+.df2-approval-form {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--df-warning-border);
+}
+
+.df2-approval-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: var(--df-fs-label);
+  color: var(--df-text-secondary);
+}
+
+.df2-approval-expiry {
+  max-width: 160px;
+}
+
+.df2-approval-scopes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.df2-approval-scopes li {
+  padding: 2px 8px;
+  border: 1px solid var(--df-border);
+  border-radius: 999px;
+  background: var(--df-surface);
+  font-size: var(--df-fs-xs);
+  color: var(--df-text-secondary);
+}
+
+.df2-approval-standing {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  font-size: var(--df-fs-sm);
+  color: var(--df-text-primary);
+}
+
+.df2-approval-standing span {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.df2-approval-standing em {
+  font-style: normal;
+  font-size: var(--df-fs-xs);
+  color: var(--df-text-muted);
+}
+
+.df2-approval-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+/* Delegated authority, shown in the pipeline drawer with its revocation. */
+.df2-approval-grant {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 10px 12px;
+  border: 1px solid var(--df-border);
+  border-left: 3px solid var(--df-brand, var(--df-warning));
+  border-radius: var(--df-radius-card, 8px);
+  background: var(--df-surface-muted);
+}
+
+.df2-approval-grant p {
+  margin: 0;
+  font-size: var(--df-fs-sm);
+  line-height: 1.5;
+  color: var(--df-text-secondary);
+}
+
+@media (max-width: 640px) {
+  .df2-approval-count {
+    margin-left: 0;
+  }
+  .df2-approval-route {
+    white-space: normal;
+  }
+}
+
 @media (max-width: 640px) {
   .df2-docs-architecture {
     padding: 14px;
@@ -720,4 +906,5 @@
     grid-template-columns: 1fr;
   }
 }
+
 
