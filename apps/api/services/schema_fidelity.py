@@ -72,10 +72,12 @@ _SAFE_DEFAULT_RE = re.compile(
     r"'(?:[^']|'')*'"
     r"(?:::(?:text|character varying|varchar|bpchar|char|name|cstring))?"
     r"|"
-    r"current_timestamp|current_date|current_time|"
+    # MariaDB renders clock defaults as functions (``current_timestamp()``),
+    # MySQL as bare keywords, SQLite as ``datetime('now')``.
+    r"current_timestamp(?:\(\))?|current_date(?:\(\))?|current_time(?:\(\))?|"
+    r"localtime(?:\(\))?|localtimestamp(?:\(\))?|"
     r"\(datetime\('now'\)\)|datetime\('now'\)|"
-    r"now\(\)|"
-    r"CURRENT_TIMESTAMP|CURRENT_DATE|CURRENT_TIME"
+    r"now\(\)|curdate\(\)|curtime\(\)"
     r")$",
     re.IGNORECASE,
 )
@@ -2248,11 +2250,20 @@ def _normalize_default_sql(expr: str, dest_dialect: str) -> str:
     )
     if cast_m:
         text = cast_m.group(1)
-    if text.lower() in {"current_timestamp", "now()"}:
+    lowered = text.lower()
+    if lowered in {
+        "current_timestamp",
+        "current_timestamp()",
+        "now()",
+        "localtime",
+        "localtime()",
+        "localtimestamp",
+        "localtimestamp()",
+    }:
         return "CURRENT_TIMESTAMP"
-    if text.lower() in {"current_date"}:
+    if lowered in {"current_date", "current_date()", "curdate()"}:
         return "CURRENT_DATE"
-    if text.lower() in {"current_time"}:
+    if lowered in {"current_time", "current_time()", "curtime()"}:
         return "CURRENT_TIME"
     if text.lower() in {"datetime('now')", "(datetime('now'))"}:
         if (dest_dialect or "").lower() == "sqlite":

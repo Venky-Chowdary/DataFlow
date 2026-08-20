@@ -17,6 +17,7 @@ from services.unique_key_introspect import (
     _sqlite_fetch_unique_keys,
     _sqlserver_fetch_unique_keys,
 )
+from services.catalog_defaults import normalize_catalog_default
 from services.check_constraints import probe_check_constraints
 from services.foreign_key_metadata import probe_foreign_keys
 from services.identity_carry import apply_identity_probe
@@ -1067,8 +1068,11 @@ def _introspect_mysql(**kwargs) -> dict[str, Any]:
                         "name": name,
                         "inferred_type": logical,
                         "nullable": nullable == "YES",
-                        "default": (
-                            str(default) if default is not None else None
+                        # MySQL stores a literal default as its bare value while
+                        # MariaDB stores an expression; normalize to SQL text so
+                        # the fidelity whitelist sees one spelling.
+                        "default": normalize_catalog_default(
+                            "mysql", default, data_type=str(dtype or ""), extra=extra
                         ),
                         "is_identity": "auto_increment" in extra,
                         "generation": (

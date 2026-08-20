@@ -701,9 +701,11 @@ def test_mysql_create_new_carries_pk_not_null_default_unique_live():
                 except pymysql.err.IntegrityError:
                     conn.rollback()
                 except pymysql.err.OperationalError as exc:
-                    # MariaDB CHECK: ER_CONSTRAINT_FAILED 4025 (not IntegrityError).
+                    # CHECK violations are not IntegrityError on either engine:
+                    # MariaDB raises ER_CONSTRAINT_FAILED 4025, MySQL 8 raises
+                    # ER_CHECK_CONSTRAINT_VIOLATED 3819.
                     conn.rollback()
-                    if not exc.args or exc.args[0] != 4025:
+                    if not exc.args or exc.args[0] not in (3819, 4025):
                         raise
                 cur.execute(
                     f"SELECT id, email, status, note FROM `{dst_table}` ORDER BY id"
@@ -901,9 +903,11 @@ def test_mysql_create_new_bare_varchar_inherits_width_and_unique_live():
                 except pymysql.err.IntegrityError:
                     conn.rollback()
                 except pymysql.err.OperationalError as exc:
-                    # MariaDB CHECK: ER_CONSTRAINT_FAILED 4025 (not IntegrityError).
+                    # CHECK violations are not IntegrityError on either engine:
+                    # MariaDB raises ER_CONSTRAINT_FAILED 4025, MySQL 8 raises
+                    # ER_CHECK_CONSTRAINT_VIOLATED 3819.
                     conn.rollback()
-                    if not exc.args or exc.args[0] != 4025:
+                    if not exc.args or exc.args[0] not in (3819, 4025):
                         raise
                 cur.execute(
                     f"SELECT id, email, status, note FROM `{dst_table}` ORDER BY id"
