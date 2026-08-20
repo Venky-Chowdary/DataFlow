@@ -472,6 +472,11 @@ def _columns_from_details(details: dict[str, Any] | None) -> list[str]:
     return out
 
 
+#: Separator in a ``SOURCE_TYPE → TARGET_TYPE`` label. One owner, because the
+#: label is both printed to the operator and read back to resolve the pair.
+_TYPE_PATH_ARROW = " → "
+
+
 def _collect_type_paths(
     entries: list[dict[str, Any]],
     coercion_report: dict[str, Any],
@@ -490,7 +495,7 @@ def _collect_type_paths(
         src_type = str(row.get("source_type") or "").strip()
         tgt_type = str(row.get("target_type") or "").strip()
         if col and src_type and tgt_type:
-            paths.setdefault(str(col), f"{src_type} → {tgt_type}")
+            paths.setdefault(str(col), f"{src_type}{_TYPE_PATH_ARROW}{tgt_type}")
 
     for entry in entries:
         details = (entry or {}).get("details") or {}
@@ -512,6 +517,56 @@ def _column_type_path_label(column: str, type_paths: dict[str, str]) -> str:
     """
     path = type_paths.get(column)
     return f"{column} {path}" if path else column
+
+
+def _destination_db(preflight: dict[str, Any]) -> str:
+    """The destination engine the gates ran against, or ``""`` when unstamped.
+
+    Carrier semantics are engine-specific — a bare ``date`` token is a
+    wall-clock day in SQL and an instant in BSON — so a remediation resolved
+    without the engine would be advice about a different database.
+    """
+    for key in ("destination_db_type", "dest_db_type"):
+        val = preflight.get(key)
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+    dest = preflight.get("destination")
+    if isinstance(dest, dict):
+        for key in ("db_type", "format", "type"):
+            val = dest.get(key)
+            if isinstance(val, str) and val.strip():
+                return val.strip()
+    return ""
+
+
+def _zoneless_instant_remedies(
+    columns: list[str],
+    type_paths: dict[str, str],
+    dest_db: str,
+) -> list[str]:
+    """Per-column remediation for a zoneless source landing on an instant carrier.
+
+    The generic fidelity fix ("remap to a preserving type, or sign
+    CAST_AND_CONTINUE") is a dead end for this path: a destination whose only
+    temporal carrier is an instant has nothing zoneless to remap to, and casting
+    on regardless is precisely the guessed-UTC shift the block exists to prevent.
+    The exit is the operator declaring the zone the source recorded, and the
+    wording comes from ``services.timezone_policy`` so Map, Validate and this
+    summary cannot describe the same policy differently.
+    """
+    from services.timezone_policy import POLICY_UTC_INVENT, resolve_timezone_policy
+
+    out: list[str] = []
+    for col in columns:
+        path = type_paths.get(col) or ""
+        if _TYPE_PATH_ARROW not in path:
+            continue
+        src_type, tgt_type = (p.strip() for p in path.split(_TYPE_PATH_ARROW, 1))
+        policy = resolve_timezone_policy(src_type, tgt_type, dest_db=dest_db)
+        if policy is None or policy.policy != POLICY_UTC_INVENT or not policy.remediation:
+            continue
+        out.append(f"{col} ({src_type} → {tgt_type}): {policy.remediation}")
+    return out
 
 
 def _sample_rows(preflight: dict[str, Any]) -> int | None:
@@ -610,6 +665,9 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
                 }
             )
             type_paths = _collect_type_paths(fidelity_gates + fidelity_blockers, cr)
+            zone_remedies = _zoneless_instant_remedies(
+                cols, type_paths, _destination_db(preflight)
+            )
             col_label = ", ".join(
                 _column_type_path_label(c, type_paths) for c in cols[:5]
             ) + (f" (+{len(cols) - 5} more)" if len(cols) > 5 else "")
@@ -641,11 +699,24 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
                     estimated_total_rows=est_n,
                     risk_level="high",
                     recommended_fix=(
-                        "Open Map → Remap to a fidelity-preserving type, or "
-                        "Accept · cast & continue (Migration Risk Contract with "
-                        "CAST_AND_CONTINUE) → re-run Validate."
+                        # A zone the source never recorded cannot be remapped
+                        # into existence, so that exit leads the fix when this
+                        # is the path — the generic remap advice follows it.
+                        "; ".join(r.rstrip(". ") for r in zone_remedies)
+                        + ". Otherwise: open Map → Remap to a fidelity-preserving type."
+                        if zone_remedies
+                        else (
+                            "Open Map → Remap to a fidelity-preserving type, or "
+                            "Accept · cast & continue (Migration Risk Contract with "
+                            "CAST_AND_CONTINUE) → re-run Validate."
+                        )
                     ),
                     alternative_fixes=[
+                        *(
+                            ["Declare the source zone (assume_timezone:<IANA zone>) on Map"]
+                            if zone_remedies
+                            else []
+                        ),
                         "Remap destination column to TEXT/VARCHAR/STRING",
                         "Sign QUARANTINE_ROW contract for cast failures",
                         "Widen DECIMAL/INTEGER capacity when narrowing is the only issue",

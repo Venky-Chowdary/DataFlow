@@ -9,6 +9,10 @@ import {
   applyDestTypeChange,
   applyOperatorRemapDest,
   applyStructPolicyChange,
+  applyDeclaredSourceZone,
+  assumeTimezoneAwaitingZone,
+  declaredSourceZone,
+  suggestedSourceZones,
   acknowledgeMappingRisk,
   applyTransformChange,
   approveMappingHonestly,
@@ -174,6 +178,12 @@ export function ColumnReviewPanel({
   const filterCounts = useMemo(
     () => countByFilter(mappings, confidenceThreshold),
     [mappings, confidenceThreshold],
+  );
+
+  const zoneSuggestions = useMemo(
+    () =>
+      mappings.some((m) => m.transform === "assume_timezone") ? suggestedSourceZones() : [],
+    [mappings],
   );
 
   const filtered = useMemo(
@@ -447,6 +457,13 @@ export function ColumnReviewPanel({
         isDialog ? "is-dialog" : "",
       ].filter(Boolean).join(" ")}
     >
+      {zoneSuggestions.length > 0 && (
+        <datalist id="df2-iana-zones">
+          {zoneSuggestions.map((z) => (
+            <option key={z} value={z} />
+          ))}
+        </datalist>
+      )}
       {showHead && (
         <div className="df2-column-review-head">
           <div>
@@ -1133,6 +1150,24 @@ export function ColumnReviewPanel({
                             <option key={t.id} value={t.id}>{t.label}</option>
                           ))}
                         </select>
+                        {m.transform === "assume_timezone" && !omitted && (
+                          <input
+                            className="df2-input df2-input-sm df2-column-zone"
+                            value={declaredSourceZone(m)}
+                            placeholder="IANA zone, e.g. Europe/Berlin"
+                            list="df2-iana-zones"
+                            aria-label={`Source time zone for ${m.source}`}
+                            title="The zone this zoneless column was recorded in — the destination instant is asserted from it, never guessed"
+                            onChange={(e) =>
+                              updateMapping(index, applyDeclaredSourceZone(m, e.target.value))
+                            }
+                          />
+                        )}
+                        {assumeTimezoneAwaitingZone(m) && !omitted && (
+                          <span className="df2-col-badge-warn" title="No zone named yet — Validate stays blocked">
+                            zone required
+                          </span>
+                        )}
                         {pipelineTransformChip(m.engineTransform) && !omitted && (
                           <span
                             className="df2-col-badge-pipeline"

@@ -27,6 +27,7 @@ contract that a downstream reader has to know about.
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Final
@@ -146,6 +147,30 @@ def effective_source_type(source_type: str, transform: str | None) -> str:
     if datetime_timezone_polarity(source_type) != "ntz":
         return source_type
     return "TIMESTAMPTZ"
+
+
+def declared_source_column_types(
+    column_types: Mapping[str, str],
+    mappings: Sequence[Mapping[str, object]],
+) -> dict[str, str]:
+    """Source column types as the operator's zone declarations make them true.
+
+    Map carries the declaration on the mapping's transform, while every gate
+    reasons over the introspected source types. Projecting one onto the other in
+    a single place is what keeps the declaration from being a transform that
+    changes the written value while the gate still blocks the run for the
+    zoneless problem the operator just answered.
+    """
+    out = dict(column_types)
+    for m in mappings:
+        col = m.get("source") or m.get("source_column")
+        if not isinstance(col, str) or col not in out:
+            continue
+        transform = m.get("transform")
+        out[col] = effective_source_type(
+            out[col], transform if isinstance(transform, str) else "",
+        )
+    return out
 
 
 def resolve_timezone_policy(

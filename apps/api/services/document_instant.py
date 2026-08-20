@@ -41,6 +41,18 @@ def is_document_instant_token(engine: str | None, ddl_type_token: str | None) ->
     return strip_identity_qualifier(ddl_type_token).upper().strip() == "DATE"
 
 
+def transform_narrows_to_calendar_day(transform: str | None) -> bool:
+    """True only when the mapping explicitly asked for a calendar-day narrow.
+
+    On a carrier that holds an instant, midnight-truncation is a decision, never
+    a consequence of the token's spelling. Only the ``date`` transform states it;
+    every other transform (identity, a declared zone, a parse) leaves the time of
+    day to be written, so testing for one named transform instead of listing the
+    instant-bearing ones is what keeps a new transform from silently truncating.
+    """
+    return (transform or "").strip().lower() == "date"
+
+
 def document_instant_wire_preserved(
     source_type: str,
     target_type: str,

@@ -13,6 +13,7 @@
 import { needsMappingReview } from "./columnWorkbench";
 import {
   CONTINUE_EXECUTION_POLICIES,
+  assumeTimezoneAwaitingZone,
   EXECUTION_POLICY_OPTIONS,
   classifyMappingReview,
   isExistingDestTypeOverride,
@@ -29,6 +30,7 @@ import {
 export type MapBlockerCode =
   | "no_destination"
   | "dest_schema_unloaded"
+  | "assume_timezone_zone_missing"
   | "existing_dest_type_override"
   | "existing_enum_boolean"
   | "false_friend"
@@ -92,6 +94,21 @@ export function mappingBlocker(
         + "proves it absent and the column becomes a CREATE — Datawrap will not "
         + "guess the destination type from the source.",
       clearableFromMap: false,
+    };
+  }
+
+  // The operator chose to declare the source zone but has not named one. The
+  // engine cannot pick a default: inventing UTC is the loss this control exists
+  // to prevent.
+  if (assumeTimezoneAwaitingZone(m)) {
+    return {
+      code: "assume_timezone_zone_missing",
+      source: m.source,
+      title: `${m.source} declares a source zone but none is named (${typePath(m)})`,
+      action:
+        "Type the IANA zone the source recorded these timestamps in "
+        + "(e.g. UTC, Europe/Berlin) in the transform cell.",
+      clearableFromMap: true,
     };
   }
 
@@ -219,6 +236,7 @@ const GROUP_COLUMN_LIMIT = 6;
 
 const GROUP_TITLES: Partial<Record<MapBlockerCode, string>> = {
   dest_schema_unloaded: "destination column type not read yet",
+  assume_timezone_zone_missing: "source zone declared but not named",
   no_destination: "no destination column",
   risk_ack_required: "lossy type path needs a signed Risk Contract",
   approval_required: "not approved yet",

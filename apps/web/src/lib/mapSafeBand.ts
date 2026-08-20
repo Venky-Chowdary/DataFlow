@@ -5,6 +5,7 @@
  * Classification is fail-closed: any ambiguity → attention (never invent "safe").
  */
 import {
+  assumeTimezoneAwaitingZone,
   hasCreateNewTypeRisk,
   isIntentionalOmit,
   isSafeNormalizeMapping,
@@ -29,6 +30,7 @@ export function isSafeBandMapping(m: EditableMapping): boolean {
   if (isIntentionalOmit(m)) return false;
   if (m.approved) return false;
   if (m.assignmentStrategy === "pending_dest_schema") return false;
+  if (assumeTimezoneAwaitingZone(m)) return false;
   if (mappingRequiresRiskAck(m)) return false;
   if (hasCreateNewTypeRisk(m)) return false;
   if (m.typeNarrowing) return false;

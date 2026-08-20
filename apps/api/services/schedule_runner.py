@@ -1102,11 +1102,11 @@ def _clear_stale_running_schedules() -> None:
 async def run_schedule_loop() -> None:
     """Poll for due schedules and enqueue transfers."""
     logger.info("Pipeline scheduler started (interval=%ss)", CHECK_INTERVAL_SECONDS)
-    await asyncio.get_event_loop().run_in_executor(_executor, _clear_stale_running_schedules)
+    await asyncio.get_running_loop().run_in_executor(_executor, _clear_stale_running_schedules)
     try:
         from services.schedule_store import import_file_schedules_into_mongo
 
-        imported = await asyncio.get_event_loop().run_in_executor(
+        imported = await asyncio.get_running_loop().run_in_executor(
             _executor, import_file_schedules_into_mongo
         )
         if imported:
@@ -1115,7 +1115,7 @@ async def run_schedule_loop() -> None:
         logger.exception("Schedule file→Mongo import failed")
     while True:
         try:
-            count = await asyncio.get_event_loop().run_in_executor(_executor, _run_due_schedules)
+            count = await asyncio.get_running_loop().run_in_executor(_executor, _run_due_schedules)
             if count:
                 logger.info("Scheduler started %s pipeline run(s)", count)
         except Exception:

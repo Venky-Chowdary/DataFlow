@@ -1,4 +1,5 @@
 import {
+  assumeTimezoneAwaitingZone,
   hasCreateNewTypeRisk,
   isDestSchemaPending,
   mappingRequiresRiskAck,
@@ -57,6 +58,8 @@ export function isMappingReady(m: EditableMapping, _threshold: number): boolean 
   if (m.transform === "omit" || m.engineTransform === "omit") {
     return Boolean(m.approved);
   }
+  // A zone declaration with no zone in it is not a declaration.
+  if (assumeTimezoneAwaitingZone(m)) return false;
   if (mappingRequiresRiskAck(m) && !m.riskAcknowledged) return false;
   // Approve cannot make an unread destination type known.
   if (isDestSchemaPending(m)) return false;
@@ -66,6 +69,7 @@ export function isMappingReady(m: EditableMapping, _threshold: number): boolean 
 export function needsMappingReview(m: EditableMapping, _threshold: number): boolean {
   // Destination type never read — holds Validate regardless of Approve.
   if (isDestSchemaPending(m)) return true;
+  if (assumeTimezoneAwaitingZone(m)) return true;
   // Risk / lossy / specialty — real Issues filter.
   if (mappingRequiresRiskAck(m) && !m.riskAcknowledged) return true;
   // Equivalent create-new / preserve rows need Approve, not "Issues" spam.

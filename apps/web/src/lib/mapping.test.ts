@@ -7,7 +7,11 @@ import {
   acknowledgeMappingRisk,
   applyDestTypeChange,
   applyStructPolicyChange,
+  applyDeclaredSourceZone,
   applyTransformChange,
+  assumeTimezoneAwaitingZone,
+  declaredSourceZone,
+  suggestedSourceZones,
   approveMappingHonestly,
   approveMappingsHonestly,
   buildPreflightMappings,
@@ -83,6 +87,73 @@ describe("transform SSOT round-trip", () => {
     assert.equal(next.transform, "cast_number");
     assert.equal(next.engineTransform, "decimal");
     assert.equal(next.approved, false);
+  });
+});
+
+describe("declared source zone", () => {
+  const zoneless: EditableMapping = {
+    source: "created_at",
+    target: "created_at",
+    confidence: 0.95,
+    approved: false,
+    sourceType: "TIMESTAMP",
+    targetType: "date",
+    transform: "none",
+  };
+
+  it("serializes the named zone as the engine transform", () => {
+    const declared = applyDeclaredSourceZone(zoneless, "Europe/Berlin");
+    assert.equal(declared.transform, "assume_timezone");
+    assert.equal(declared.engineTransform, "assume_timezone:Europe/Berlin");
+    assert.equal(declaredSourceZone(declared), "Europe/Berlin");
+    assert.equal(assumeTimezoneAwaitingZone(declared), false);
+    assert.equal(uiTransformToEngine("assume_timezone", "assume_timezone:Europe/Berlin"), "assume_timezone:Europe/Berlin");
+    assert.equal(buildPreflightMappings([], [declared])[0].transform, "assume_timezone:Europe/Berlin");
+  });
+
+  it("never lets an unnamed zone reach the engine", () => {
+    const chosen = applyTransformChange(zoneless, "assume_timezone");
+    assert.equal(assumeTimezoneAwaitingZone(chosen), true);
+    assert.equal(chosen.engineTransform, undefined);
+    assert.equal(uiTransformToEngine("assume_timezone", chosen.engineTransform), undefined);
+
+    const cleared = applyDeclaredSourceZone(applyDeclaredSourceZone(zoneless, "UTC"), "  ");
+    assert.equal(assumeTimezoneAwaitingZone(cleared), true);
+    assert.equal(cleared.engineTransform, undefined);
+  });
+
+  it("round-trips an engine declaration back onto the control", () => {
+    assert.equal(engineTransformToUi("assume_timezone:Asia/Kolkata"), "assume_timezone");
+    const editable = editableFromPipelineMappings(
+      [
+        {
+          source: "created_at",
+          target: "created_at",
+          confidence: 0.95,
+          transform: "assume_timezone:Asia/Kolkata",
+          source_type: "TIMESTAMP",
+          target_type: "date",
+        },
+      ],
+      [],
+      ["created_at"],
+      0.75,
+      { created_at: "date" },
+    );
+    assert.equal(editable[0].transform, "assume_timezone");
+    assert.equal(declaredSourceZone(editable[0]), "Asia/Kolkata");
+  });
+
+  it("keeps the zone when the operator reselects the control", () => {
+    const declared = applyDeclaredSourceZone(zoneless, "UTC");
+    assert.equal(declaredSourceZone(applyTransformChange(declared, "assume_timezone")), "UTC");
+  });
+
+  it("suggests UTC first and offers real zone names", () => {
+    const zones = suggestedSourceZones();
+    assert.equal(zones[0], "UTC");
+    assert.ok(zones.includes("Asia/Kolkata"));
+    assert.equal(new Set(zones).size, zones.length);
   });
 });
 

@@ -119,6 +119,64 @@ class TestTheDocumentInstantIsClassifiedAtAll:
         assert policy is None or not policy.instant_preserved
 
 
+class TestTheGatesReadTheDeclaredType:
+    """The declaration is a fact about the source, so every gate must see it.
+
+    Preflight reasons over introspected source types. Left unprojected, a
+    declared column was written with the zone attached while the run stayed
+    blocked for the zoneless problem the operator had just answered.
+    """
+
+    def test_a_declared_column_is_projected_to_an_instant_type(self):
+        from services.timezone_policy import declared_source_column_types
+
+        out = declared_source_column_types(
+            {"created_at": "TIMESTAMP", "ordered_at": "DATE"},
+            [
+                {"source": "created_at", "transform": "assume_timezone:UTC"},
+                {"source": "ordered_at", "transform": "date"},
+            ],
+        )
+        assert out == {"created_at": "TIMESTAMPTZ", "ordered_at": "DATE"}
+
+    def test_an_unnamed_zone_projects_nothing(self):
+        from services.timezone_policy import declared_source_column_types
+
+        out = declared_source_column_types(
+            {"created_at": "TIMESTAMP"},
+            [{"source": "created_at", "transform": "assume_timezone:"}],
+        )
+        assert out == {"created_at": "TIMESTAMP"}
+
+    def test_columns_the_mapping_does_not_name_are_untouched(self):
+        from services.timezone_policy import declared_source_column_types
+
+        out = declared_source_column_types(
+            {"created_at": "TIMESTAMP"},
+            [{"source": "absent_col", "transform": "assume_timezone:UTC"}],
+        )
+        assert out == {"created_at": "TIMESTAMP"}
+
+
+class TestTheDocumentCarrierOnlyNarrowsWhenAsked:
+    """BSON ``date`` holds a full instant, so midnight is a decision.
+
+    Deciding it from the token spelling truncated every declared timestamp to
+    midnight on write — loss no gate could see, because the carrier was in fact
+    wide enough to hold the value.
+    """
+
+    def test_only_the_date_transform_narrows_to_a_calendar_day(self):
+        from services.document_instant import transform_narrows_to_calendar_day
+
+        assert transform_narrows_to_calendar_day("date")
+        assert transform_narrows_to_calendar_day(" DATE ")
+        assert not transform_narrows_to_calendar_day("datetime")
+        assert not transform_narrows_to_calendar_day("assume_timezone:UTC")
+        assert not transform_narrows_to_calendar_day("")
+        assert not transform_narrows_to_calendar_day(None)
+
+
 def test_the_write_path_honours_the_declaration():
     """resolve_transform must keep it, or the value is written zoneless anyway."""
     from services.transform_resolver import resolve_transform

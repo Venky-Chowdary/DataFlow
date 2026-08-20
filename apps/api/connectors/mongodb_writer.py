@@ -30,6 +30,7 @@ from connectors.writer_common import (
 from connectors.writer_common import (
     WriteResult as _WriteResult,
 )
+from services.document_instant import transform_narrows_to_calendar_day
 
 logger = logging.getLogger(__name__)
 
@@ -619,7 +620,7 @@ def write_mapped_rows(
                         "(refuse invent via pass-through)"
                     )
                 return coerced
-            if upper == "DATE" and transform != "datetime":
+            if upper == "DATE" and transform_narrows_to_calendar_day(transform):
                 from connectors.sql_temporal import coerce_sql_temporal
                 from datetime import timezone as _tz
 

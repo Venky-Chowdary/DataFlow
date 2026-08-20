@@ -397,6 +397,21 @@ def _expected_rows() -> list[tuple]:
     ]
 
 
+# Destinations whose temporal carrier stores an *instant* only. A zoneless
+# source column has no instant, so the route stays refused until the operator
+# declares the zone the source recorded — the engine must not pick UTC for them.
+_INSTANT_ONLY_DESTINATIONS = frozenset({"mongodb"})
+
+
+def _zone_kwargs(dest_engine: str) -> dict[str, str]:
+    """The operator's zone declaration, for destinations that require one."""
+    return (
+        {"source_timezone": "UTC"}
+        if dest_engine in _INSTANT_ONLY_DESTINATIONS
+        else {}
+    )
+
+
 def _routes() -> list:
     out = []
     if _MYSQL_UP:
@@ -418,6 +433,7 @@ def test_live_cross_engine_plan_preserves_declared_types(matrix_env, dest_engine
         "source_table": matrix_env["src"],
         "dest_connector_id": matrix_env["saved"][dest_engine].id,
         "dest_table": matrix_env["dst"],
+        **_zone_kwargs(dest_engine),
     })
     assert planned.success, planned.error
     plan = planned.output
@@ -448,16 +464,28 @@ def test_live_cross_engine_plan_preserves_declared_types(matrix_env, dest_engine
 @pytest.mark.parametrize("dest_engine", _routes())
 def test_live_cross_engine_confirm_moves_every_row_intact(matrix_env, dest_engine):
     """End to end: chat stages it, Confirm runs it, the values survive."""
-    import asyncio
-
+    from conftest import spend_pilot_ack
     from src.ai.copilot.tools import DataPilotTools
-    from src.routers.copilot_router import ConfirmActionRequest, copilot_confirm
 
-    staged = DataPilotTools().execute("start_transfer", {
+    route = {
         "source_connector_id": matrix_env["saved"]["postgresql"].id,
         "source_table": matrix_env["src"],
         "dest_connector_id": matrix_env["saved"][dest_engine].id,
         "dest_table": matrix_env["dst"],
+    }
+
+    if dest_engine in _INSTANT_ONLY_DESTINATIONS:
+        # Refused first, and the refusal names the operator's exit. A guessed UTC
+        # here moves every business day for a source that was not UTC.
+        refused = DataPilotTools().execute("start_transfer", dict(route))
+        blocked = str(refused.error or "") + str(refused.output or "")
+        assert "created_at" in blocked, blocked
+        assert "assume_timezone" in blocked or "zone" in blocked.lower(), blocked
+        assert _read_back(dest_engine, matrix_env["dst"]) == []
+
+    staged = DataPilotTools().execute("start_transfer", {
+        **route,
+        **_zone_kwargs(dest_engine),
     })
     assert staged.success, staged.error
     assert staged.output["requires_confirm"] is True
@@ -465,9 +493,7 @@ def test_live_cross_engine_confirm_moves_every_row_intact(matrix_env, dest_engin
     # Nothing may exist at the destination before the operator confirms.
     assert _read_back(dest_engine, matrix_env["dst"]) == []
 
-    confirmed = asyncio.get_event_loop().run_until_complete(
-        copilot_confirm(ConfirmActionRequest(ack_id=staged.output["ack_id"], actor="wave93"))
-    )
+    confirmed = spend_pilot_ack(staged.output["ack_id"], "wave93")
     assert confirmed["ok"] is True
     job_id = confirmed["job_id"]
 

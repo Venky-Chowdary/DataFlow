@@ -27,7 +27,15 @@ export type MappingTransform =
   | "percentage"
   | "strip_controls"
   | "identity_specialty"
+  | "assume_timezone"
   | "omit";
+
+/**
+ * Engine transform prefix for an operator-declared source zone — parameterised
+ * because the zone is data the source never recorded, not a mode. Must stay
+ * aligned with ``services.transform_engine.ASSUME_TIMEZONE_PREFIX``.
+ */
+export const ASSUME_TIMEZONE_PREFIX = "assume_timezone:";
 
 export const MAPPING_TRANSFORMS: { id: MappingTransform; label: string; detail: string }[] = [
   { id: "none", label: "None", detail: "Pass through as detected" },
@@ -48,6 +56,13 @@ export const MAPPING_TRANSFORMS: { id: MappingTransform; label: string; detail: 
   { id: "email", label: "Normalize email", detail: "Normalize email addresses" },
   { id: "currency", label: "Parse currency", detail: "Strip currency symbols → decimal" },
   { id: "percentage", label: "Parse percentage", detail: "Parse percent strings → decimal" },
+  {
+    id: "assume_timezone",
+    label: "Assume source zone…",
+    detail:
+      "Declare the zone a zoneless timestamp was recorded in, so an instant destination "
+      + "(BSON date, TIMESTAMPTZ) stores an asserted instant instead of a guessed UTC one",
+  },
   {
     id: "identity_specialty",
     label: "Identity (specialty)",
@@ -394,6 +409,10 @@ export const UI_TO_ENGINE_TRANSFORM: Record<MappingTransform, string> = {
   percentage: "percentage",
   strip_controls: "strip_controls",
   identity_specialty: "none",
+  // Carries no zone on its own: the engine transform is only complete once the
+  // operator names one, and an empty value must never reach the engine as a
+  // guessed default.
+  assume_timezone: "",
   omit: "omit",
 };
 
@@ -1688,6 +1707,11 @@ export function applyTransformChange(m: EditableMapping, next: MappingTransform)
       reason: "Intentionally omitted from transfer",
     };
   }
+  if (next === "assume_timezone") {
+    // Keep a zone already declared on this row; selecting the control again is
+    // not a withdrawal.
+    return applyDeclaredSourceZone(m, declaredSourceZone(m));
+  }
   const restoring = m.transform === "omit";
   return {
     ...m,
@@ -1825,6 +1849,12 @@ export function uiTransformToEngine(t?: MappingTransform, engineTransform?: stri
     }
   }
   if (!t || t === "none" || t === "identity_specialty") return undefined;
+  // An unnamed zone is not a transform — the row stays blocked instead of
+  // sending the engine a declaration with no zone in it.
+  if (t === "assume_timezone") {
+    const engine = String(engineTransform || "");
+    return engine.toLowerCase().startsWith(ASSUME_TIMEZONE_PREFIX) ? engine : undefined;
+  }
   return UI_TO_ENGINE_TRANSFORM[t];
 }
 
@@ -1925,7 +1955,77 @@ export function buildPreflightMappings(
 
 export function engineTransformToUi(engine?: string): MappingTransform {
   if (!engine || engine === "none" || engine === "identity") return "none";
+  if (engine.toLowerCase().startsWith(ASSUME_TIMEZONE_PREFIX)) return "assume_timezone";
   return ENGINE_TO_UI_TRANSFORM[engine] ?? "none";
+}
+
+/** The zone the operator declared for a zoneless source column, if any. */
+export function declaredSourceZone(m: EditableMapping): string {
+  const engine = String(m.engineTransform || "");
+  if (!engine.toLowerCase().startsWith(ASSUME_TIMEZONE_PREFIX)) return "";
+  return engine.slice(ASSUME_TIMEZONE_PREFIX.length).trim();
+}
+
+/**
+ * Record (or withdraw) the zone for a zoneless timestamp column.
+ *
+ * An empty zone leaves the row on the control with no engine transform: the
+ * declaration is incomplete, and half of it is a guess.
+ */
+export function applyDeclaredSourceZone(m: EditableMapping, zone: string): EditableMapping {
+  const named = zone.trim();
+  return {
+    ...m,
+    transform: "assume_timezone",
+    engineTransform: named ? `${ASSUME_TIMEZONE_PREFIX}${named}` : undefined,
+    approved: false,
+    riskAcknowledged: false,
+  };
+}
+
+/** True when the operator chose to declare a zone but has not named one yet. */
+export function assumeTimezoneAwaitingZone(m: EditableMapping): boolean {
+  return m.transform === "assume_timezone" && !declaredSourceZone(m);
+}
+
+/** Zones always offered, so the list does not depend on the runtime's ICU vintage. */
+const COMMON_IANA_ZONES: readonly string[] = [
+  "UTC",
+  "America/New_York",
+  "America/Chicago",
+  "America/Denver",
+  "America/Los_Angeles",
+  "America/Sao_Paulo",
+  "Europe/London",
+  "Europe/Berlin",
+  "Europe/Paris",
+  "Europe/Moscow",
+  "Asia/Dubai",
+  "Asia/Kolkata",
+  "Asia/Shanghai",
+  "Asia/Singapore",
+  "Asia/Tokyo",
+  "Australia/Sydney",
+];
+
+/**
+ * Zone names to suggest on the declaration control, UTC first.
+ *
+ * Suggestions only — the authoritative check is the engine's own zone database,
+ * so a zone this runtime has never heard of is still accepted here and refused
+ * (by name) at Validate rather than being hidden from the operator.
+ */
+export function suggestedSourceZones(): readonly string[] {
+  const supported =
+    typeof Intl.supportedValuesOf === "function" ? Intl.supportedValuesOf("timeZone") : [];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const zone of ["UTC", ...COMMON_IANA_ZONES, ...supported]) {
+    if (seen.has(zone)) continue;
+    seen.add(zone);
+    out.push(zone);
+  }
+  return out;
 }
 
 export function editableFromPipelineMappings(

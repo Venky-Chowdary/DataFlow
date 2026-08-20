@@ -342,20 +342,17 @@ def _type_conversions(mappings: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
-def _declare_source_timezone(
-    mappings: list[dict],
+def _declare_zone_on_schema(
+    src_rows: list[dict],
     zone: str,
-    *,
-    source_types: dict,
-) -> tuple[list[dict], dict]:
-    """Stamp an operator-declared zone onto the zoneless temporal columns.
+) -> tuple[list[dict], set[str]]:
+    """Apply an operator-declared zone to the zoneless temporal source columns.
 
-    Returns the mappings and the source types as they are *after* the
-    declaration. Both matter: the transform changes the value the writer sends,
-    and the type changes what every gate downstream understands the column to
-    carry. Updating only the first leaves the transfer blocked for a problem the
-    declaration already answered — the value would be written correctly by a
-    path nothing allowed to run.
+    A declared zone is a fact about the source schema, so it has to be true
+    *before* mapping runs: the mapper, its proof, and every gate read the source
+    type, and a declaration applied afterwards would change the value the writer
+    sends while leaving the run blocked for the zoneless problem the operator
+    just answered.
 
     Only zoneless columns are touched. A column that already carries an offset
     has an instant the source was explicit about, and overriding it would move a
@@ -365,29 +362,45 @@ def _declare_source_timezone(
     from services.transform_engine import ASSUME_TIMEZONE_PREFIX
     from services.type_system import datetime_timezone_polarity
 
+    declared: set[str] = set()
     out: list[dict] = []
-    declared_types: dict = dict(source_types or {})
+    for row in src_rows:
+        entry = dict(row)
+        src_type = str(entry.get("inferred_type") or "")
+        if src_type and datetime_timezone_polarity(src_type) == "ntz":
+            entry["inferred_type"] = effective_source_type(
+                src_type, f"{ASSUME_TIMEZONE_PREFIX}{zone}"
+            )
+            declared.add(str(entry.get("name") or ""))
+        out.append(entry)
+    return out, declared
+
+
+def _stamp_zone_transform(
+    mappings: list[dict],
+    zone: str,
+    columns: set[str],
+) -> list[dict]:
+    """Carry the declaration to the writer as the transform that applies it.
+
+    The type says what the column means; the transform is what attaches the zone
+    to each value. Both are required — a declared type with no transform would
+    write the naive wall clock under an instant contract.
+    """
+    from services.transform_engine import ASSUME_TIMEZONE_PREFIX
+
+    out: list[dict] = []
     for m in mappings:
         entry = dict(m)
-        src_type = str(
-            entry.get("source_type") or source_types.get(entry.get("source") or "") or ""
-        )
         existing = str(entry.get("transform") or "").strip().lower()
         # A plain temporal transform is the mapper parsing the value, not a
         # decision about its zone — the declaration refines it. Anything else is
         # an operator choice and is left alone.
         already_typed = existing not in {"", "none", "identity", "datetime", "date", "timestamp"}
-        if (
-            src_type
-            and datetime_timezone_polarity(src_type) == "ntz"
-            and not already_typed
-        ):
+        if str(entry.get("source") or "") in columns and not already_typed:
             entry["transform"] = f"{ASSUME_TIMEZONE_PREFIX}{zone}"
-            declared = effective_source_type(src_type, entry["transform"])
-            entry["source_type"] = declared
-            declared_types[str(entry.get("source") or "")] = declared
         out.append(entry)
-    return out, declared_types
+    return out
 
 
 def plan_transfer(
@@ -567,6 +580,15 @@ def plan_transfer(
 
     samples = _column_samples(sample_rows, src_names)
     src_rows = _schema_rows(src_info["columns"], samples)
+    zone_columns: set[str] = set()
+    if source_timezone:
+        src_rows, zone_columns = _declare_zone_on_schema(src_rows, source_timezone)
+        # The declaration is a fact about the source, so it travels with the
+        # schema every gate reads — not just with the mapping.
+        src_info["schema"] = {
+            **(src_info.get("schema") or {}),
+            **{r["name"]: r["inferred_type"] for r in src_rows if r["name"] in zone_columns},
+        }
     dst_rows = _schema_rows(dst_info.get("columns") or [])
 
     from services.mapping_pipeline import run_mapping_pipeline
@@ -587,15 +609,8 @@ def plan_transfer(
         use_llm=False,
     )
     mappings = list(mapping.get("mappings") or [])
-    if source_timezone:
-        mappings, declared_source_types = _declare_source_timezone(
-            mappings,
-            source_timezone,
-            source_types=src_info.get("schema") or {},
-        )
-        # The declaration is a fact about the source, so it travels with the
-        # schema every gate reads — not just with the mapping.
-        src_info["schema"] = declared_source_types
+    if zone_columns:
+        mappings = _stamp_zone_transform(mappings, source_timezone, zone_columns)
 
     preflight = _run_preflight(
         src_conn=src_conn,
@@ -990,7 +1005,15 @@ def _run_preflight(
             for g in (result.get("gates") or [])
         ],
         "blockers": [
-            {"id": b.get("id") or b.get("gate_id"), "message": b.get("message")}
+            {
+                "id": b.get("id") or b.get("gate_id"),
+                "message": b.get("message"),
+                # Only the fix travels from the details blob: without it the chat
+                # refusal names a problem and no way out of it.
+                "details": {
+                    "recommended_fix": ((b.get("details") or {}).get("recommended_fix") or "")
+                },
+            }
             for b in (result.get("blockers") or [])
         ][:10],
         "warnings": (result.get("warnings") or [])[:10],
@@ -1246,10 +1269,22 @@ def start_transfer(
             f"{b.get('id')}: {b.get('message')}" for b in blockers[:4] if b.get("message")
         )
         if not preflight.get("passed"):
+            # A refusal without the exit is the dead end operators write in about:
+            # the engine already resolved the fix per root cause, so it travels
+            # with the refusal instead of staying in a payload nobody reads.
+            fixes = "; ".join(
+                fix
+                for fix in (
+                    str((b.get("details") or {}).get("recommended_fix") or "").strip()
+                    for b in blockers[:4]
+                )
+                if fix
+            )
             err = (
                 "Preflight blocked this transfer, so I won't start it"
                 + (f" — {listed}" if listed else "")
                 + (f" (run {preflight.get('run_id')})." if preflight.get("run_id") else ".")
+                + (f" To proceed: {fixes}" if fixes else "")
             )
         elif str(preflight.get("run_id") or "").startswith("pf_local_"):
             err = (

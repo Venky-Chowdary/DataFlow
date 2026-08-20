@@ -297,6 +297,40 @@ _RULES_PREFIX_RE = re.compile(
 )
 
 
+# "with rows where amount > 100" — the clause names its own subject again, and
+# the introducer alternation already consumed the first word, so the tail read
+# verbatim made a plain predicate unparsable and refused the transfer.
+_COND_PREAMBLE_RE = re.compile(
+    r"^(?:the\s+)?(?:rows?|records?|documents?)\s+(?:where|having|with|that\s+have)\s+",
+    re.IGNORECASE,
+)
+
+
+def _condition_text(cond: str) -> str:
+    """The comparison inside a condition clause, without a repeated subject."""
+    return _COND_PREAMBLE_RE.sub("", str(cond or "").strip(), count=1)
+
+
+def _names_sync_mode(cond: str) -> bool:
+    """Is this "with …" clause the sync mode rather than a row condition?
+
+    ``_ROWS_WHERE_RE`` accepts ``with`` as a condition introducer, so "…to
+    Snowflake with overwrite" read *overwrite* as a predicate: unparsable, so the
+    request came back as a question, and the word was cut out of the route text
+    before the route parser could read the mode. The operator asked for an
+    overwrite and got a refusal. Mode vocabulary has one owner
+    (``transfer_tools.sync_mode_from_phrase``); a clause it recognises is left in
+    the route text for the route parser and raises no question.
+    """
+    from .transfer_tools import sync_mode_from_phrase
+
+    text = _condition_text(cond).strip(".;,")
+    # A real predicate wins: a column literally named "append" still compares.
+    if not text or len(text.split()) > 4 or _parse_condition(text) is not None:
+        return False
+    return bool(sync_mode_from_phrase(text, default=""))
+
+
 def _merged(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
     """Overlapping cuts merged, ordered back to front so indexes stay valid.
 
@@ -378,8 +412,10 @@ def parse_transfer_data_rules(message: str) -> tuple[str, TransferDataRules]:
 
     where_hits = list(_ROWS_WHERE_RE.finditer(text)) or list(_BARE_WHERE_RE.finditer(text))
     for m in where_hits:
+        if _names_sync_mode(m.group("cond")):
+            continue
         negate = bool(m.groupdict().get("neg"))
-        parts, joiner = _split_conjuncts(m.group("cond"))
+        parts, joiner = _split_conjuncts(_condition_text(m.group("cond")))
         specs = [_parse_condition(part, negate=negate) for part in parts]
         if not joiner or not all(specs):
             # Read but not understood. Applying the half we parsed would move

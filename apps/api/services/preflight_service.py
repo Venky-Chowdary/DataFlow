@@ -737,6 +737,13 @@ def run_file_preflight(
     rows_are_population: bool = False,
 ) -> dict[str, Any]:
     """Run preflight gates for file/DB Studio transfers (G1–G9 + host policy)."""
+    from services.timezone_policy import declared_source_column_types
+
+    # A zone declared on Map is a fact about the source, so every gate below
+    # reads the declared type rather than the zoneless one it was introspected
+    # with. Done once here because this is the single entry every caller
+    # (Studio, Pilot, scheduled runs) goes through.
+    column_types = declared_source_column_types(column_types, mappings)
 
     # Canonical sync vocabulary — G9/DDL/policy must match writers (insert→append).
     try:
@@ -1553,6 +1560,10 @@ def run_file_preflight(
     passed_count = result.passed_count + extra_passed
 
     out = {
+        # Carrier semantics are engine-specific, so the engine the gates ran
+        # against travels with the verdict: a remediation resolved without it
+        # would describe a different database's carriers.
+        "destination_db_type": destination_db_type or "",
         "passed": bool(result.passed) and not additive_stamp_blocked and not fit_blocked,
         "passed_count": passed_count,
         "total_gates": total_gates,

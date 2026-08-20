@@ -3141,6 +3141,7 @@ textarea.df2-pilot-composer textarea {
 .df2-col-badge-struct,
 .df2-col-badge-pipeline,
 .df2-col-badge-exists,
+.df2-col-badge-warn,
 .df2-col-badge-new {
   display: inline-flex;
   align-items: center;
@@ -3184,6 +3185,18 @@ textarea.df2-pilot-composer textarea {
   background: #f1f5f9;
   color: #475569;
   border: 1px solid #e2e8f0;
+}
+
+.df2-col-badge-warn {
+  background: #fffbeb;
+  color: #92400e;
+  border: 1px solid #fde68a;
+}
+
+.df2-column-zone {
+  margin-top: 4px;
+  width: 100%;
+  min-width: 0;
 }
 
 .df2-column-destination-cell .df2-column-cell-content {

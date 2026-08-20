@@ -313,3 +313,26 @@ def pytest_collection_modifyitems(config, items):
             )
             if live_pg:
                 item.add_marker(skip_pg)
+
+
+def spend_pilot_ack(ack_id: str, actor: str) -> dict:
+    """Consume a Pilot approval the way the HTTP route does.
+
+    ``/copilot/confirm`` re-checks permission from the request object, so a test
+    calling it with the ack alone exercises a signature production does not have.
+    One helper keeps every confirm test on the real call shape.
+    """
+    import asyncio
+
+    from src.routers.copilot_router import ConfirmActionRequest, copilot_confirm
+
+    class _State:
+        pass
+
+    class _HttpRequest:
+        state = _State()
+        headers: dict[str, str] = {}
+
+    return asyncio.run(
+        copilot_confirm(ConfirmActionRequest(ack_id=ack_id, actor=actor), _HttpRequest())
+    )
