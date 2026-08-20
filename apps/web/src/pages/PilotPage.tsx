@@ -18,6 +18,7 @@ import { useActiveData } from "../lib/DataContext";
 import {
   applyPilotSafeActions,
   buildPilotDataContext,
+  isNavigableScreen,
   nextPilotResultId,
   pilotActionChipLabel,
   runPilotConfirm,
@@ -118,8 +119,11 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
 
   const ideas = AUTOMATION_IDEAS;
 
-  const applySafeActions = (actions?: CopilotAction[]) => {
-    applyPilotSafeActions(actions, onNavigate);
+  const applySafeActions = (
+    actions?: CopilotAction[],
+    toolsUsed?: { name: string; success: boolean }[],
+  ) => {
+    applyPilotSafeActions(actions, onNavigate, toolsUsed);
   };
 
   const clearPending = (msgIndex: number, actionId: string) => {
@@ -215,7 +219,7 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
       // exact bug that threw operators to Connectors/Studio and away from the
       // approval they were supposed to press for create_connector / start_transfer.
       if (!(res.pending_actions && res.pending_actions.length > 0)) {
-        applySafeActions(res.suggested_actions);
+        applySafeActions(res.suggested_actions, res.tools_used);
       }
       if (res.suggested_prompts?.length) setPrompts(res.suggested_prompts);
     } catch (error) {
@@ -495,8 +499,8 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
                   )}
                   {msg.actions?.map((a, j) => {
                     const screen = a.screen || a.route;
-                    return screen ? (
-                      <button key={j} type="button" className="df2-btn df2-btn-sm df2-mt-sm" onClick={() => onNavigate(screen as Screen)}>
+                    return isNavigableScreen(screen) ? (
+                      <button key={j} type="button" className="df2-btn df2-btn-sm df2-mt-sm" onClick={() => onNavigate(screen)}>
                         {pilotActionChipLabel(a)}
                       </button>
                     ) : null;

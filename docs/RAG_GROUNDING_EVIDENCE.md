@@ -60,13 +60,29 @@ Reading of that table:
 `carries_evidence` helper the narration gate uses, so the UI cannot show a "grounded" answer
 that has neither a citation nor a live read behind it.
 
+## An answer is only proof if the operator can read it
+
+Two defects found in the recorded browser run — the grounded answer was correct in the API
+response and still useless on screen:
+
+| Defect | Cause | Fix |
+| --- | --- | --- |
+| "What is append mode?" answered, then the screen jumped to public Help | the turn's suggested `navigate` action was auto-executed, and `help` was cast to a workspace `Screen` | `applyPilotSafeActions` navigates only when the turn actually ran the `navigate` tool, at most once, and only to a screen in the authenticated set (`landing` excluded); documented answers no longer emit a navigate action at all — their citations are the control |
+| "How many jobs do I have?" listed 5 ids while Jobs showed `All (50)` | `list_jobs` reported the size of the page it read as the count | `MongoDBService.count_jobs` counts the whole history (total + per-status, one aggregate) and `job_narration.narrate_jobs` leads with that total, labelling the bullets as the most recent excerpt |
+
+Failure questions ("which jobs failed?") now count failures over the whole history too,
+instead of over the window, so the answer cannot contradict the Jobs page either way.
+
 ## Tests
 
+`apps/api/tests/test_pilot_job_counts.py`, `apps/web/src/lib/pilotNavigationGate.test.ts`,
 `apps/api/tests/test_rag_grounded_answers.py` plus the AI/Copilot/Pilot suites:
 
 ```
-pytest -q tests -k "rag or copilot or pilot or knowledge or aggregate or ai_"
-794 passed, 2 skipped, 16658 deselected
+pytest -q tests -k "rag or copilot or pilot or job"
+920 passed, 2 skipped, 16539 deselected
+
+apps/web: npm test → 583 passed, 0 failed · npm run build clean
 ```
 
 Frontend citation rendering: `apps/web/src/lib/pilotSources.test.ts` and the Pilot page /

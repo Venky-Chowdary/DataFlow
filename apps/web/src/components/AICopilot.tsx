@@ -16,6 +16,7 @@ import { useActiveData } from "../lib/DataContext";
 import {
   applyPilotSafeActions,
   buildPilotDataContext,
+  isNavigableScreen,
   nextPilotResultId,
   pilotActionChipLabel,
   runPilotConfirm,
@@ -89,8 +90,11 @@ export function AICopilot({ onNavigate, variant = "fab", onClose }: AICopilotPro
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages, loading]);
 
-  const applyActions = (actions?: CopilotAction[]) => {
-    applyPilotSafeActions(actions, onNavigate);
+  const applyActions = (
+    actions?: CopilotAction[],
+    toolsUsed?: { name: string; success: boolean }[],
+  ) => {
+    applyPilotSafeActions(actions, onNavigate, toolsUsed);
   };
 
   const clearPending = (msgIndex: number, actionId: string) => {
@@ -164,7 +168,7 @@ export function AICopilot({ onNavigate, variant = "fab", onClose }: AICopilotPro
       ]);
       // Stay on the Confirm card — never auto-navigate away from an approval.
       if (!(res.pending_actions && res.pending_actions.length > 0)) {
-        applyActions(res.suggested_actions);
+        applyActions(res.suggested_actions, res.tools_used);
       }
       if (res.suggested_prompts?.length) {
         setPrompts(res.suggested_prompts);
@@ -244,16 +248,16 @@ export function AICopilot({ onNavigate, variant = "fab", onClose }: AICopilotPro
                 {msg.actions.map((action, j) => {
                   const screen = action.screen || action.route;
                   const label = pilotActionChipLabel(action);
-                  return (
+                  return isNavigableScreen(screen) ? (
                     <button
                       key={j}
                       type="button"
                       className="df2-btn df2-btn-sm"
-                      onClick={() => screen && onNavigate?.(screen as Screen)}
+                      onClick={() => onNavigate?.(screen)}
                     >
                       {label}
                     </button>
-                  );
+                  ) : null;
                 })}
               </div>
             )}

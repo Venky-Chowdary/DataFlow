@@ -21,6 +21,7 @@ from ..rag.evidence import keeps_draft_facts
 from .agent import CopilotResponse
 from .context_builder import get_context_builder
 from .data_analyst import get_data_analyst
+from .job_narration import narrate_jobs
 from .tool_permissions import bind_current_context, is_permission_denial
 from .tools import (
     TOOL_DEFINITIONS,
@@ -74,7 +75,9 @@ def _tool_summary(tr: ToolResult) -> str:
     if tr.name == "search_knowledge":
         return f"{o.get('count', 0)} knowledge hits"
     if tr.name == "list_jobs":
-        return f"{o.get('count', 0)} jobs"
+        total = int(o.get("total") or 0) or int(o.get("count") or 0)
+        window = int(o.get("count") or 0)
+        return f"{total} jobs (latest {window})" if window < total else f"{total} jobs"
     if tr.name == "list_schedules":
         return f"{o.get('count', 0)} schedules"
     if tr.name == "list_contracts":
@@ -2043,54 +2046,7 @@ Respond as Datawrap Pilot — grounded in tool results."""
                         )
                     parts.append("\n".join(lines))
             elif tr.name == "list_jobs" and tr.success:
-                jobs = tr.output.get("jobs", [])
-                want_failures = any(
-                    w in (message or "").lower()
-                    for w in ("fail", "failed", "failure", "error", "broken")
-                )
-                failed = [
-                    j
-                    for j in jobs
-                    if str(j.get("status") or "").lower()
-                    in {"failed", "cancelled", "error"}
-                ]
-                if jobs:
-                    if want_failures:
-                        if failed:
-                            lines = [
-                                f"**{len(failed)}** of your last **{len(jobs)}** job(s) failed:"
-                            ]
-                            show = failed[:5]
-                        else:
-                            lines = [
-                                f"None of your last **{len(jobs)}** job(s) failed "
-                                "(in this window):"
-                            ]
-                            show = jobs[:5]
-                        for j in show:
-                            lines.append(
-                                f"• `{j.get('id', '?')}` · {j.get('source', '?')} -> "
-                                f"{j.get('destination', '?')}: "
-                                f"**{j.get('status')}** ({j.get('records', 0):,} records)"
-                            )
-                        if not failed:
-                            lines.append(
-                                "Open **Jobs** for full history, or paste a job id."
-                            )
-                    else:
-                        lines = ["Here are your **recent transfer jobs**:"]
-                        for j in jobs[:5]:
-                            lines.append(
-                                f"• `{j.get('id', '?')}` · {j.get('source', '?')} -> "
-                                f"{j.get('destination', '?')}: "
-                                f"**{j.get('status')}** ({j.get('records', 0):,} records)"
-                            )
-                    parts.append("\n".join(lines))
-                else:
-                    parts.append(
-                        "No transfer jobs yet. Ask me to **plan** or **start** a transfer "
-                        "(Confirm required), or open **Transfer Studio**."
-                    )
+                parts.append(narrate_jobs(tr.output or {}, message))
             elif tr.name == "get_job" and tr.success:
                 job = tr.output or {}
                 lines = [

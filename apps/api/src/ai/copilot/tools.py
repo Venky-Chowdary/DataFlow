@@ -1126,7 +1126,19 @@ class DataPilotTools:
             }
             for j in jobs
         ]
-        return ToolResult(name="list_jobs", success=True, output={"jobs": summary, "count": len(summary)})
+        # "How many jobs?" must be answered from the whole history — the page we
+        # read here is only the window we can show.
+        counts = mongo.count_jobs()
+        return ToolResult(
+            name="list_jobs",
+            success=True,
+            output={
+                "jobs": summary,
+                "count": len(summary),
+                "total": int(counts.get("total") or 0),
+                "status_counts": counts.get("by_status") or {},
+            },
+        )
 
     def _get_job(self, job_id: str = "") -> ToolResult:
         from services.quarantine_from_preflight import merge_job_quarantine
@@ -1566,7 +1578,6 @@ class DataPilotTools:
         # operator a confident paragraph they could not trace to any page.
         doc_hits = product_doc_search(query, limit=3)
         if doc_hits:
-            top = doc_hits[0]
             documented = compose_documented_answer(doc_hits)
             return ToolResult(
                 name="explain_product",
@@ -1575,7 +1586,9 @@ class DataPilotTools:
                     "intent": curated[0] if curated else "documentation",
                     "answer": f"{curated[1]}\n\n{documented}" if curated else documented,
                     "capabilities": PRODUCT_CAPABILITIES[:6],
-                    "actions": [{"label": f"Open {top.chunk.doc_title}", "route": "help"}],
+                    # No navigate action: the citations below are the control that
+                    # opens the article, and a second one only competes with them.
+                    "actions": [],
                     "sources": [hit.as_source() for hit in doc_hits],
                     "grounded": True,
                     "source": "product_documentation",

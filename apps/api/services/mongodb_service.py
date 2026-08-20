@@ -953,6 +953,30 @@ class MongoDBService:
             result["_id"] = str(result["_id"])
         return result
 
+    @staticmethod
+    def _job_scope_query(workspace_id: str | None) -> dict[str, Any]:
+        """Job filter for a workspace scope. An empty id means global jobs only."""
+        if workspace_id is None:
+            return {}
+        allowed = ["", None] if workspace_id == "" else [workspace_id, "", None]
+        return {
+            "$or": [{"workspace_id": w} for w in allowed if w is not None]
+            + [{"workspace_id": {"$exists": False}}]
+        }
+
+    def count_jobs(self, workspace_id: str | None = None) -> dict[str, Any]:
+        """Job total and per-status breakdown over the whole history, not a page of it."""
+        db = self.get_database()
+        collection = db["transfer_jobs"]
+        query = self._job_scope_query(workspace_id)
+        by_status: dict[str, int] = {}
+        for row in collection.aggregate(
+            ([{"$match": query}] if query else [])
+            + [{"$group": {"_id": "$status", "n": {"$sum": 1}}}]
+        ):
+            by_status[str(row.get("_id") or "unknown")] = int(row.get("n") or 0)
+        return {"total": sum(by_status.values()), "by_status": by_status}
+
     def list_jobs(self, limit: int = 50, workspace_id: str | None = None) -> list[dict]:
         """List recent transfer jobs, optionally filtered to a workspace."""
         from services.job_list_view import slim_job_for_list
@@ -960,14 +984,7 @@ class MongoDBService:
         db = self.get_database()
         collection = db["transfer_jobs"]
 
-        query: dict[str, Any] = {}
-        if workspace_id is not None:
-            # An empty workspace id shows only global jobs; a non-empty id shows
-            # that workspace plus global shared jobs.
-            allowed = [workspace_id, "", None]
-            if workspace_id == "":
-                allowed = ["", None]
-            query["$or"] = [{"workspace_id": w} for w in allowed if w is not None] + [{"workspace_id": {"$exists": False}}]
+        query: dict[str, Any] = self._job_scope_query(workspace_id)
         jobs = []
         # Projection drops the heaviest arrays at the Mongo layer when possible.
         projection = {
@@ -1363,6 +1380,18 @@ class MemoryMongoDBService:
                     rec[key] = rec[key].isoformat()
             return rec
         return None
+
+    def count_jobs(self, workspace_id: str | None = None) -> dict[str, Any]:
+        """Job total and per-status breakdown over the whole history, not a page of it."""
+        by_status: dict[str, int] = {}
+        for job in self._jobs.values():
+            if workspace_id is not None:
+                allowed = {"", None} if workspace_id == "" else {workspace_id, "", None}
+                if job.get("workspace_id") not in allowed:
+                    continue
+            key = str(job.get("status") or "unknown")
+            by_status[key] = by_status.get(key, 0) + 1
+        return {"total": sum(by_status.values()), "by_status": by_status}
 
     def list_jobs(self, limit: int = 50, workspace_id: str | None = None) -> list[dict]:
         from services.job_list_view import slim_job_for_list
