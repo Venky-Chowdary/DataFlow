@@ -15,6 +15,8 @@ from services.physical_state_diff import (
     ADVISORY_ASPECTS,
     ASPECTS,
     compare_physical_state,
+    _has_catalog_supplied_value,
+    _normalize_predicate,
     read_physical_state,
     verify_physical_state,
 )
@@ -252,3 +254,63 @@ def test_trigger_body_events_do_not_shadow_the_declared_event(tmp_path: Path) ->
     state = read_physical_state(db_type="sqlite", cfg=cfg, table="src")
     assert state.triggers == frozenset({("after", "insert")})
     assert _verify(cfg, "src", "dst")["aspects"]["triggers"]["status"] == "carried"
+
+
+# --- cross-engine catalog spelling ------------------------------------------
+#
+# Two engines record the same guarantee in their own words. A comparison that
+# reads the words instead of the rule reports a phantom dropped constraint on
+# every cross-engine move, and the operator then cannot tell a real loss from
+# the destination's punctuation. Measured live: PostgreSQL stores the source
+# CHECK as ``status::text <> ''::text`` while MySQL stores the very constraint
+# it created as ``(`status` <> _utf8mb4'')``.
+
+
+def test_postgresql_cast_and_mysql_charset_introducer_are_the_same_check() -> None:
+    assert _normalize_predicate("status::text <> ''::text") == _normalize_predicate(
+        "(`status` <> _utf8mb4'')"
+    )
+
+
+def test_multi_word_type_cast_is_stripped_whole() -> None:
+    assert _normalize_predicate(
+        "ts::timestamp without time zone > '2020-01-01'"
+    ) == _normalize_predicate("[ts] > '2020-01-01'")
+    assert _normalize_predicate("qty::numeric(10,2) > 0") == _normalize_predicate(
+        "qty > 0"
+    )
+
+
+def test_a_cast_never_swallows_the_operator_that_follows_it() -> None:
+    """``x::text and y`` must keep its ``and``: a cast is not a word eater."""
+    assert _normalize_predicate("x::text and y > 0") == _normalize_predicate(
+        "x and y > 0"
+    )
+
+
+def test_literal_content_is_never_treated_as_a_cast_or_introducer() -> None:
+    """Real drift inside a literal must still be visible."""
+    assert _normalize_predicate("note <> 'a::b'") != _normalize_predicate(
+        "note <> 'a'"
+    )
+    assert _normalize_predicate("note <> '_utf8mb4'") != _normalize_predicate(
+        "note <> ''"
+    )
+
+
+def test_a_carried_generator_is_not_reported_as_a_dropped_default() -> None:
+    """MySQL exposes AUTO_INCREMENT with no column default at all.
+
+    Reflection shapes, verbatim from the two dialects: a PostgreSQL identity
+    column and the MySQL AUTO_INCREMENT column created from it must both count
+    as "the catalog fills this in", or a faithful create-new load reports its
+    carried generator as a lost default.
+    """
+    pg_identity = {"name": "id", "default": None, "identity": {"start": 1}}
+    mysql_auto = {"name": "id", "default": None, "autoincrement": True}
+    pg_serial = {"name": "id", "default": "nextval('t_id_seq'::regclass)"}
+    plain = {"name": "code", "default": None}
+    assert _has_catalog_supplied_value(pg_identity)
+    assert _has_catalog_supplied_value(mysql_auto)
+    assert _has_catalog_supplied_value(pg_serial)
+    assert not _has_catalog_supplied_value(plain)

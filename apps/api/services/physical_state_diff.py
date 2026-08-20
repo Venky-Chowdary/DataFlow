@@ -63,6 +63,18 @@ _TRIGGER_EVENTS: tuple[str, ...] = ("insert", "update", "delete")
 # Parentheses an engine wraps around a lone identifier when it stores a CHECK.
 _BARE_PARENS = re.compile(r"\(([a-z0-9_$#.]+)\)")
 
+# ``::text``, ``::character varying(16)``, ``::public.my_domain`` — PostgreSQL
+# records the cast it applied; the predicate is the same rule without it. Only
+# words that continue a *type* name may be consumed: swallowing a bare word
+# would eat the ``and`` of ``x::text and y`` and change the predicate.
+_TYPE_TAIL_WORDS = "varying|precision|without|with|time|zone|local"
+_CAST_SUFFIX = re.compile(
+    rf"::\s*[a-z0-9_$#.]+(?:\s+(?:{_TYPE_TAIL_WORDS}))*(?:\s*\([^)]*\))?"
+)
+
+# ``_utf8mb4'x'`` — MySQL records the charset it resolved for a literal.
+_CHARSET_INTRODUCER = re.compile(r"_[a-z0-9]+(?=')")
+
 # Reflection hands back the dialect's own spelling of a name (SQLAlchemy folds
 # Oracle's stored CHK_SRC to chk_src), so every catalog lookup compares folded.
 _TRIGGER_SQL: dict[str, str] = {
@@ -159,6 +171,25 @@ def _fold(name: Any) -> str:
     return str(name or "").strip().casefold()
 
 
+def _has_catalog_supplied_value(col: Any) -> bool:
+    """Does the catalog supply this column's value when the writer sends none?
+
+    Each engine records its generator in its own place: PostgreSQL as an identity
+    or a ``nextval`` column default, MySQL as AUTO_INCREMENT with *no* default at
+    all. Reading only ``default`` therefore reported a faithfully carried
+    generator as a dropped default on every PostgreSQL→MySQL move. The counter's
+    own health (next value past the migrated maximum) is proven separately by
+    ``services.identity_watermark``; this aspect answers only whether the
+    destination still fills the column in for the application.
+    """
+    return bool(
+        col.get("default") is not None
+        or col.get("computed")
+        or col.get("identity")
+        or col.get("autoincrement") is True
+    )
+
+
 def _cols(values: Any) -> tuple[str, ...]:
     if not values:
         return ()
@@ -218,7 +249,7 @@ def read_physical_state(
             continue
         if col.get("nullable") is False:
             not_null.add(col_name)
-        if col.get("default") is not None or col.get("computed") or col.get("identity"):
+        if _has_catalog_supplied_value(col):
             defaults.add(col_name)
 
     unique_sets = {
@@ -324,6 +355,19 @@ def _normalize_predicate(sqltext: Any) -> str:
             chars.append("'")
             in_str = True
             i += 1
+            continue
+        # A cast is how one engine writes the type it already knows: PostgreSQL
+        # stores ``status::text <> ''::text`` for the CHECK MySQL stores as
+        # ``status <> ''``. The rule is identical, so the cast carries no meaning
+        # here and comparing it reports a phantom dropped constraint.
+        cast = _CAST_SUFFIX.match(raw, i)
+        if cast is not None:
+            i = cast.end()
+            continue
+        # MySQL prefixes a literal with the charset it resolved (``_utf8mb4''``).
+        intro = _CHARSET_INTRODUCER.match(raw, i)
+        if intro is not None:
+            i = intro.end()
             continue
         if ch in '"`[] \t\n\r':
             i += 1

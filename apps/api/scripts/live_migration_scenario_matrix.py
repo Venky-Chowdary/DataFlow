@@ -159,6 +159,11 @@ def run_transfer(
         "success": bool(res.success),
         "rows_written": int(res.records_transferred or 0),
         "error": str(res.error or "")[:400],
+        # Post-load attestation lives on the reconciliation payload: a scenario
+        # that only reads success/rows cannot tell a row-perfect load from one
+        # that left the destination without its constraints.
+        "reconciliation": dict(res.reconciliation or {}),
+        "destination_summary": dict(res.destination_summary or {}),
     }
 
 
