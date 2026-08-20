@@ -16,7 +16,8 @@ def _mismatch_report() -> dict[str, object]:
     return {
         "checksum_match": False,
         "message": "Checksum mismatch (strict): source aaa vs target bbb.",
-        "sample_compare": {"passed": True, "compared": 500},
+        # ``compared`` is a cell count; the row count is reported separately.
+        "sample_compare": {"passed": True, "compared": 500, "rows_compared": 50},
         "source_checksum_provenance": "independent_source_reread",
     }
 
@@ -28,8 +29,9 @@ def test_clean_sample_on_a_mismatch_is_classified_and_still_fails() -> None:
     assert out["checksum_match"] is False
     assert out["mismatch_class"] == "comparison_basis_or_population_scope"
     assert out["digest_basis"]["source_digest"] == "independent_source_reread"
-    assert out["digest_basis"]["keyed_sample_rows_without_mismatch"] == 500
-    assert "500 key-aligned row(s)" in str(out["message"])
+    assert out["digest_basis"]["keyed_sample_rows_without_mismatch"] == 50
+    assert out["digest_basis"]["keyed_sample_cells_without_mismatch"] == 500
+    assert "50 row(s) / 500 cell(s)" in str(out["message"])
 
 
 def test_a_failing_sample_keeps_its_own_cell_level_evidence() -> None:

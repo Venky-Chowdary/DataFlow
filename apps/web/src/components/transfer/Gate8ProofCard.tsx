@@ -761,6 +761,50 @@ export function Gate8ProofCard({
         </div>
       )}
 
+      {report.match_summary && (
+        <div className="df2-gate8-match" aria-label="What was compared">
+          <strong>What was compared</strong>
+          <dl>
+            <div>
+              <dt>Populations</dt>
+              <dd>
+                source {(report.match_summary.source_rows ?? 0).toLocaleString()} ·
+                {" "}destination {(report.match_summary.dest_rows ?? 0).toLocaleString()}
+                {report.match_summary.dest_rows_before != null
+                  ? ` (held ${report.match_summary.dest_rows_before.toLocaleString()} before this run)`
+                  : ""}
+              </dd>
+            </div>
+            <div>
+              <dt>Cells agreeing</dt>
+              {/* Null percent is "not measured", never 0% — an unmeasured
+                  comparison must not read as total disagreement. */}
+              <dd className={report.match_summary.sample_match_percent == null
+                ? "is-warn"
+                : report.match_summary.sample_match_percent === 100 ? "is-ok" : "is-warn"}>
+                {report.match_summary.sample_match_percent == null
+                  ? "not measured"
+                  : `${report.match_summary.sample_match_percent}%`}
+              </dd>
+            </div>
+            <div>
+              <dt>Of</dt>
+              <dd>{report.match_summary.denominator}</dd>
+            </div>
+          </dl>
+          {(report.remediation?.length ?? 0) > 0 && (
+            <ol className="df2-gate8-match-fix">
+              {report.remediation!.slice(0, 4).map((r, i) => (
+                <li key={`${r.action}-${i}`}>
+                  <strong>{r.label}</strong>
+                  <span>{r.why}</span>
+                </li>
+              ))}
+            </ol>
+          )}
+        </div>
+      )}
+
       {packSummary && (
         <dl className="df2-gate8-proof-honesty" aria-label="Signed proof pack honesty">
           <div>

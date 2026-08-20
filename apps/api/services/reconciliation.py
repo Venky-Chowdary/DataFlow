@@ -668,8 +668,16 @@ def reconcile(
         extra_note = extra_rows_note(target_rows, expected_rows) if has_extra else ""
         sample_note = ""
         if sample_ok:
+            # ``compared`` is a count of cells; naming it rows over-stated the
+            # evidence by the column count of the projection.
+            sample_rows = int((sample_compare or {}).get("rows_compared") or 0)
+            scope = (
+                f"{sample_rows:,} row(s) / {compared:,} cell(s)"
+                if sample_rows
+                else f"{compared:,} cell(s)"
+            )
             sample_note = (
-                f" Key-aligned sample compared {compared} row(s) without value "
+                f" Key-aligned sample compared {scope} without value "
                 "mismatches — diagnostic only; does NOT override checksum failure."
             )
         elif sample_compare:
@@ -4429,14 +4437,21 @@ def sample_compare_rows(
 
     mismatches: list[dict[str, str]] = []
     compared = 0
+    rows_compared = 0
     keyed = bool(sort_key and target_by_key)
     # Only reachable when the caller vouched for pairing; see ``rows_are_paired``.
     target_paired = list(target_dicts) if not keyed else []
 
     def _result(*, passed: bool) -> dict[str, Any]:
+        # ``compared`` counts *cells*, and every operator-facing line rendered it
+        # as "compared N row(s)" — a 500-cell, 50-row sample read as ten times
+        # the evidence it was. Both denominators are reported so a match
+        # percentage can name the population it is a percentage of.
         return {
             "passed": passed,
             "compared": compared,
+            "cells_compared": compared,
+            "rows_compared": rows_compared,
             "mismatches": mismatches,
             "sample_seed": sample_seed,
             "alignment": "keyed" if keyed else "paired_by_caller",
@@ -4460,6 +4475,7 @@ def sample_compare_rows(
 
         # Case-insensitive target lookup — MySQL/Snowflake cursors may fold names.
         tgt_keys = {str(k).lower(): k for k in tgt.keys()}
+        rows_compared += 1
 
         for m in mappings:
             src_col = str(m.get("source") or "")

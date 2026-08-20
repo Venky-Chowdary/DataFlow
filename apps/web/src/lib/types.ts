@@ -457,7 +457,30 @@ export interface Gate8ReconciliationPayload {
       target_value?: string;
       column?: string;
     }[];
+    /** ``compared`` counts cells; these name each denominator explicitly. */
+    cells_compared?: number;
+    rows_compared?: number;
   };
+  /** Why two digests disagree when no sampled cell does. */
+  mismatch_class?: string;
+  digest_basis?: Record<string, unknown>;
+  /** What was compared, and how much of it agreed, with its denominator. */
+  match_summary?: {
+    source_rows?: number | null;
+    dest_rows?: number | null;
+    dest_rows_before?: number | null;
+    rows_moved_this_run?: number | null;
+    rejected_rows?: number | null;
+    sample_rows_compared?: number;
+    sample_cells_compared?: number;
+    sample_cells_differing?: number;
+    scope?: string;
+    /** Null when nothing comparable was drawn — never rendered as 0%. */
+    sample_match_percent?: number | null;
+    denominator?: string;
+  };
+  /** Ordered next moves for a failed reconcile; each maps to a real control. */
+  remediation?: { action?: string; label?: string; why?: string }[];
 }
 
 export interface JobProgress extends TransferJob {

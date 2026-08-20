@@ -791,6 +791,7 @@ def _localize_checksum_mismatch(
     sample_clean = bool(sample) and bool(sample.get("passed")) and compared > 0
     if not sample_clean:
         return report
+    rows = int(sample.get("rows_compared") or 0)
     basis = {
         "source_digest": str(
             report.get("source_checksum_provenance")
@@ -799,18 +800,108 @@ def _localize_checksum_mismatch(
         ),
         "source_scope": str(report.get("checksum_scope") or ""),
         "carrier_rounded_columns": list(report.get("carrier_rounded_columns") or []),
-        "keyed_sample_rows_without_mismatch": compared,
+        "keyed_sample_rows_without_mismatch": rows or compared,
+        "keyed_sample_cells_without_mismatch": compared,
     }
+    scope = f"{rows:,} row(s) / {compared:,} cell(s)" if rows else f"{compared:,} cell(s)"
     report["mismatch_class"] = "comparison_basis_or_population_scope"
     report["digest_basis"] = basis
     report["message"] = (
         f"{str(report.get('message') or '').rstrip()} No differing cell was found "
-        f"in {compared:,} key-aligned row(s), so the two digests differ in how or "
+        f"in {scope} of key-aligned data, so the two digests differ in how or "
         f"over what they were taken, not in a sampled value — source digest "
         f"{basis['source_digest'] or 'unknown'}"
         + (f", scope {basis['source_scope']}" if basis["source_scope"] else "")
         + ". Gate-8 still fails: an unexplained digest difference is not proof."
     )
+    return report
+
+
+def _attach_match_summary(
+    report: dict[str, Any],
+    dest_summary: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Say what was compared, how much of it agreed, and what to do about it.
+
+    A reconcile verdict of two hex strings is not proof an operator can use: it
+    names no population, no percentage anyone can reproduce, and no next move.
+    This stamps the denominators the run actually holds — source population,
+    destination population, the rows this pass moved, and the keyed sample's row
+    and cell counts — so a match percentage always says what it is a percentage
+    *of*, plus an ordered remediation list whose entries map to real controls.
+
+    Nothing here softens a verdict: a failed report stays failed, and a
+    percentage taken from a sample is labelled sample evidence, never population
+    proof.
+    """
+    summary = dest_summary or {}
+    sample = report.get("sample_compare") or {}
+    rows = int(sample.get("rows_compared") or 0)
+    cells = int(sample.get("cells_compared") or sample.get("compared") or 0)
+    differing = len(list(sample.get("mismatches") or []))
+    match: dict[str, Any] = {
+        "source_rows": report.get("source_rows"),
+        "dest_rows": report.get("target_rows"),
+        "dest_rows_before": summary.get(PRECOUNT_KEY),
+        "rows_moved_this_run": summary.get("rows_written"),
+        "rejected_rows": report.get("rejected_rows"),
+        "sample_rows_compared": rows,
+        "sample_cells_compared": cells,
+        "sample_cells_differing": differing,
+        "scope": str(report.get("checksum_scope") or ""),
+    }
+    if cells:
+        agreeing = max(0, cells - differing)
+        match["sample_match_percent"] = round(100.0 * agreeing / cells, 4)
+        match["denominator"] = (
+            f"{cells} cell(s) across {rows} key-aligned row(s) of the read-back "
+            "sample — sample evidence, not population proof"
+        )
+    else:
+        match["sample_match_percent"] = None
+        match["denominator"] = "no key-aligned cells were comparable in this run"
+    report["match_summary"] = match
+
+    if report.get("passed"):
+        return report
+    actions: list[dict[str, str]] = []
+    mismatches = [m for m in (sample.get("mismatches") or []) if isinstance(m, dict)]
+    if mismatches:
+        first = mismatches[0]
+        actions.append({
+            "action": "open_map",
+            "label": f"Fix the mapping for {first.get('source')} → {first.get('target')}",
+            "why": (
+                f"{len(mismatches)} sampled cell(s) differ, e.g. source "
+                f"{first.get('source_value')!r} vs destination "
+                f"{first.get('target_value')!r} — a value that changed on write is "
+                "a transform or type decision, not a digest artefact."
+            ),
+        })
+    if report.get("mismatch_class") == "comparison_basis_or_population_scope":
+        actions.append({
+            "action": "overwrite_or_keyed_resync",
+            "label": "Re-run this table with overwrite, or upsert on its key",
+            "why": (
+                "No sampled cell differs, so the digests disagree on basis or "
+                "population, not on data. A full refresh or a keyed merge gives "
+                "both sides one comparable population."
+            ),
+        })
+    if int(report.get("rejected_rows") or 0) > 0:
+        actions.append({
+            "action": "replay_quarantine",
+            "label": f"Replay {int(report['rejected_rows']):,} quarantined row(s)",
+            "why": "Those rows are absent from the destination until they are replayed.",
+        })
+    if summary.get("resumed_from") is not None:
+        actions.append({
+            "action": "resume",
+            "label": "Resume from the checkpoint",
+            "why": "The pass stopped part-way; resuming moves only the tail.",
+        })
+    if actions:
+        report["remediation"] = actions
     return report
 
 
@@ -1060,6 +1151,7 @@ def run_reconciliation(
             )
             stamped["message"] = f"{str(stamped.get('message') or '').rstrip()}{note}"
         stamped = _localize_checksum_mismatch(stamped, dest_summary)
+        stamped = _attach_match_summary(stamped, dest_summary)
         return stamped
 
     rejected_rows = int(dest_summary.get("rejected_rows", 0) or 0)
