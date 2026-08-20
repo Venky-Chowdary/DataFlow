@@ -916,6 +916,9 @@ def run_reconciliation(
     vector_stamp_ctx: dict[str, Any] = {}
     keyset_stamp_ctx: dict[str, Any] = {}
     scd2_stamp_ctx: dict[str, Any] = {}
+    # Late-bound with the resolved destination engine and physical types: which
+    # columns Gate-8 could only prove at the carrier's granularity.
+    carrier_ctx: dict[str, Any] = {}
 
     def _finalize(payload: dict[str, Any]) -> dict[str, Any]:
         if digest_provenance["source"] and "source_checksum_provenance" not in payload:
@@ -986,6 +989,27 @@ def run_reconciliation(
             )
         if physical_state:
             stamped["physical_state"] = dict(physical_state)
+        rounded = list(carrier_ctx.get("rounded_columns") or [])
+        if rounded:
+            # Both digests were taken at the destination carrier's granularity,
+            # so a match here proves every cell the destination *can* hold. The
+            # fractional seconds it cannot hold are a declared narrowing, and
+            # saying so is the difference between honest proof and a green that
+            # over-claims.
+            stamped["carrier_rounded_columns"] = rounded
+            named = ", ".join(
+                f"{c.get('column')} {c.get('source_type')} → {c.get('target_type')}"
+                for c in rounded[:3]
+            )
+            more = f" (+{len(rounded) - 3} more)" if len(rounded) > 3 else ""
+            note = (
+                f" Instants on {len(rounded)} column(s) were compared at the "
+                f"destination carrier's granularity — {named}{more} — because "
+                "that column cannot store the source's fractional seconds; "
+                "those dropped digits are a declared narrowing, not proven "
+                "cell fidelity."
+            )
+            stamped["message"] = f"{str(stamped.get('message') or '').rstrip()}{note}"
         return stamped
 
     rejected_rows = int(dest_summary.get("rejected_rows", 0) or 0)
@@ -1126,6 +1150,35 @@ def run_reconciliation(
         for k, v in physical.items():
             if v:
                 dest_types[str(k)] = str(v)
+    # The plan's target_type is Map's intent; the carrier the rows landed in is
+    # what the digests must be taken against. A pre-existing destination column
+    # contradicts the plan (declared DATETIME(6), physical datetime) and hashing
+    # the plan's precision failed correct loads with two opaque hashes.
+    if not physical and table_name and endpoint.kind == "database":
+        try:
+            from services.dest_physical_types import physical_temporal_digits
+            from services.type_system import with_temporal_fractional_digits
+
+            for k, digits in physical_temporal_digits(
+                db_type,
+                cfg,
+                table=str(table_name),
+                columns=list(dest_types.keys()),
+            ).items():
+                for declared, declared_ddl in list(dest_types.items()):
+                    if declared.lower() == k.lower() and declared_ddl:
+                        # Precision only — the declared type keeps its timezone
+                        # polarity, which the catalog spelling does not carry.
+                        dest_types[declared] = with_temporal_fractional_digits(
+                            declared_ddl, digits
+                        )
+                        break
+        except Exception as exc:
+            logging.getLogger(__name__).warning(
+                "physical destination temporal precision unavailable: %s",
+                exc,
+                exc_info=exc,
+            )
     if source_schema:
         try:
             from services.transform_resolver import attach_transforms_to_mappings
@@ -1137,6 +1190,20 @@ def run_reconciliation(
             )
         except Exception as exc:
             logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+
+    try:
+        from services.carrier_instant import carrier_rounded_columns
+
+        carrier_ctx["rounded_columns"] = carrier_rounded_columns(
+            mapping_dicts,
+            source_schema=source_schema,
+            dest_types=dest_types,
+            dest_engine=db_type,
+        )
+    except Exception as exc:
+        logging.getLogger(__name__).warning(
+            "carrier granularity disclosure skipped: %s", exc, exc_info=exc
+        )
 
     target_cols = _mapped_targets(mapping_dicts, columns)
     pk_cols = list(

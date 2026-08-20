@@ -5825,6 +5825,131 @@ def parse_temporal_fractional_precision(inferred: str | None) -> int | None:
     return int(m.group(1))
 
 
+_MSSQL_TEMPORAL_ENGINES = frozenset(
+    {"sqlserver", "mssql", "azuresql", "azure_sql", "synapse"}
+)
+# Fractional-second digits each engine keeps when the DDL declares none. From
+# the engines' own documentation: MySQL/Maria default FSP 0, SQL Server
+# datetime2 defaults to 7, Snowflake TIMESTAMP defaults to 9, and the
+# PostgreSQL/lakehouse family stores microseconds.
+_BARE_TEMPORAL_DIGITS: dict[str, int] = {
+    **{e: 0 for e in ("mysql", "mariadb", "maria", "singlestore", "tidb", "vitess")},
+    **{e: 7 for e in _MSSQL_TEMPORAL_ENGINES},
+    "snowflake": 9,
+    **{
+        e: 6
+        for e in (
+            "postgresql", "postgres", "pg", "redshift", "cockroach", "cockroachdb",
+            "alloydb", "timescaledb", "yugabytedb", "citus", "supabase", "greenplum",
+            "oracle", "databricks", "spark", "delta", "delta_lake", "iceberg",
+            "duckdb", "bigquery", "bq", "clickhouse", "athena", "trino", "presto",
+        )
+    },
+}
+
+
+def _bare_temporal_digits(dest_db: str) -> int | None:
+    """Engine default fractional digits, or ``None`` for an unnamed engine."""
+    return _BARE_TEMPORAL_DIGITS.get((dest_db or "").strip().lower())
+
+
+def destination_temporal_fractional_digits(
+    target_type: str | None,
+    *,
+    dest_db: str = "",
+) -> int | None:
+    """Fractional-second digits a destination carrier actually keeps.
+
+    Single owner of the bare-spelling defaults: a column declared ``DATETIME``
+    on MySQL keeps whole seconds, the same spelling on BigQuery keeps
+    microseconds, and ``DATETIME2`` on SQL Server keeps seven digits. Callers
+    that resolve this themselves disagree with each other — the gate then
+    declares a narrowing the checksum does not model, or the reverse.
+
+    ``None`` means the carrier is not a temporal one, or its precision is not
+    knowable from the DDL; callers must treat that as unknown rather than as
+    "keeps everything".
+    """
+    text = strip_identity_qualifier(target_type)
+    if not text:
+        return None
+    explicit = parse_temporal_fractional_precision(text)
+    if explicit is not None:
+        return explicit
+    tgt_u = text.upper().strip()
+    bare = re.sub(r"\s*\(\s*\d+\s*\)", "", tgt_u).strip()
+    # Introspection reports MySQL ``datetime`` as the logical ``TIMESTAMP_NTZ``
+    # carrier, so the underscore spellings must resolve per engine too — reading
+    # them as the Snowflake default made a MySQL whole-second column look like it
+    # kept microseconds, and Gate-8 then hashed precision the column never held.
+    bare = bare.replace("_", " ")
+    db = (dest_db or "").strip().lower()
+    if bare in {
+        "TIME WITHOUT TIME ZONE",
+        "TIMESTAMP WITHOUT TIME ZONE",
+        "TIMESTAMP NTZ",
+        "TIMESTAMPTZ",
+        "TIMESTAMP TZ",
+        "TIMESTAMP LTZ",
+        "TIMESTAMP WITH TIME ZONE",
+        "TIMESTAMP WITH LOCAL TIME ZONE",
+        "TIMETZ",
+        "TIME WITH TIME ZONE",
+    }:
+        family = _bare_temporal_digits(db)
+        # ANSI/logical spellings belong to the microsecond family when the engine
+        # is unknown; MySQL is the engine that keeps whole seconds and it is
+        # always named on the paths that fingerprint.
+        return family if family is not None else 6
+    if bare == "TIMESTAMP":
+        # Bare TIMESTAMP is FSP 0 on MySQL and unknown engines stay fail-closed:
+        # claiming microseconds here would hide a narrowing.
+        return _bare_temporal_digits(db) or 0
+    if bare in {"DATETIME2", "DATETIMEOFFSET"}:
+        # SQL Server bare DATETIME2 / DATETIMEOFFSET default precision 7.
+        return 7
+    if bare == "TIME":
+        family = _bare_temporal_digits(db)
+        return family if family is not None else 0
+    if bare == "DATETIME" or bare.startswith("DATETIME"):
+        if db in {"bigquery", "bq"}:
+            # BigQuery DATETIME is microsecond.
+            return 6
+        if db in _MSSQL_TEMPORAL_ENGINES:
+            # SQL Server legacy ``datetime`` keeps 1/300 s — three digits, whose
+            # endings are .000/.003/.007 (services.carrier_instant rounds them).
+            return 3
+        # MySQL/Maria/unknown bare DATETIME is FSP 0 — fail closed.
+        return 0
+    return None
+
+
+def with_temporal_fractional_digits(ddl: str, digits: int) -> str:
+    """Restate a temporal DDL with an explicit fractional-second precision.
+
+    Used to teach a declared type what the physical column keeps without
+    touching its timezone polarity: ``TIMESTAMPTZ`` + 0 → ``TIMESTAMPTZ(0)``,
+    ``DATETIME(6)`` + 0 → ``DATETIME(0)``. Non-temporal DDL is returned as is.
+    """
+    text = (ddl or "").strip()
+    if not text or digits < 0:
+        return ddl
+    from connectors.sql_temporal import is_temporal_ddl
+
+    if not is_temporal_ddl(text):
+        return ddl
+    base_u = re.sub(r"\s*\(\s*\d+\s*\)", "", text.upper()).strip()
+    if base_u in {"DATE", "YEAR"}:
+        # No fractional second exists to restate.
+        return ddl
+    stripped = re.sub(r"\s*\(\s*\d+\s*\)", "", text, count=1)
+    # ``TIMESTAMP(3) WITH TIME ZONE`` must keep the trailing qualifier.
+    m = re.match(r"^(\s*[A-Za-z0-9_]+)(.*)$", stripped, flags=re.DOTALL)
+    if not m:
+        return ddl
+    return f"{m.group(1)}({digits}){m.group(2)}"
+
+
 def temporal_precision_would_narrow(
     source_type: str,
     target_type: str,
@@ -5861,69 +5986,10 @@ def temporal_precision_would_narrow(
     src_u = strip_identity_qualifier(source_type).upper().strip()
     if tgt_u == "SMALLDATETIME" and src_u != "SMALLDATETIME" and src_l == LOGICAL_DATETIME:
         return True
-    tgt_p = parse_temporal_fractional_precision(target_type)
+    tgt_p = destination_temporal_fractional_digits(target_type, dest_db=dest_db)
     src_p = parse_temporal_fractional_precision(source_type)
     if tgt_p is None:
-        # MySQL bare TIME/DATETIME/TIMESTAMP default FSP 0 — TIME(6)→TIME must
-        # not silent-green. PostgreSQL bare TIMESTAMP / TIMESTAMP WITHOUT TIME
-        # ZONE defaults to precision 6 — TIMESTAMP_NTZ(6)→TIMESTAMP is preserve
-        # on create-new PG, not a fractional collapse.
-        bare = re.sub(r"\s*\(\s*\d+\s*\)", "", tgt_u).strip()
-        if bare in {
-            "TIME WITHOUT TIME ZONE",
-            "TIMESTAMP WITHOUT TIME ZONE",
-            "TIMESTAMP NTZ",
-            "TIMESTAMPTZ",
-            "TIMESTAMP WITH TIME ZONE",
-            "TIMETZ",
-            "TIME WITH TIME ZONE",
-        }:
-            # PostgreSQL / ANSI spellings default to precision 6.
-            tgt_p = 6
-        elif bare == "TIMESTAMP":
-            db = (dest_db or "").strip().lower()
-            if db in {
-                "postgresql", "postgres", "pg", "redshift", "cockroach",
-                "cockroachdb", "alloydb", "timescaledb", "yugabytedb",
-                "citus", "supabase", "greenplum",
-                # Lakehouse bare TIMESTAMP is microsecond (no typmod engines).
-                "databricks", "spark", "delta", "delta_lake", "iceberg",
-                "duckdb", "bigquery", "bq",
-            }:
-                tgt_p = 6
-            elif db in {"sqlserver", "mssql"}:
-                tgt_p = 7
-            else:
-                # MySQL/Maria/unknown: bare TIMESTAMP is FSP 0 — fail closed.
-                tgt_p = 0
-        elif bare == "DATETIME" or (
-            bare.startswith("DATETIME") and bare not in {"DATETIME2", "DATETIMEOFFSET"}
-        ):
-            db = (dest_db or "").strip().lower()
-            # BigQuery DATETIME is microsecond; MySQL/Maria bare DATETIME is FSP 0.
-            if db in {"bigquery", "bq"}:
-                tgt_p = 6
-            else:
-                tgt_p = 0
-        elif bare in {"DATETIME2", "DATETIMEOFFSET"}:
-            # SQL Server bare DATETIME2 / DATETIMEOFFSET default precision 7.
-            tgt_p = 7
-        elif bare == "TIME":
-            db = (dest_db or "").strip().lower()
-            if db in {
-                "bigquery", "bq", "postgresql", "postgres", "pg", "redshift",
-                "duckdb", "databricks", "spark", "delta", "iceberg",
-                "cockroachdb", "alloydb", "timescaledb",
-            }:
-                tgt_p = 6
-            elif db in {"sqlserver", "mssql"}:
-                tgt_p = 7
-            else:
-                tgt_p = 0
-        elif bare.startswith("DATETIME"):
-            tgt_p = 0
-        else:
-            return False
+        return False
     if src_p is None:
         # SQL Server bare DATETIME2 defaults to precision 7 — never treat as
         # unknown and soft-pass DATETIME2→DATETIME (≈3.33ms round).

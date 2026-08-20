@@ -51,6 +51,7 @@ from services.value_serializer import cell_to_string, is_missing_sentinel, json_
 # Fingerprinting runs once per cell on both the write and the read-back pass, so
 # resolving these names inside the function costs a module lookup per cell.
 from connectors.sql_bind import normalize_sql_bind_value
+from services.carrier_instant import quantize_instant_for_carrier
 
 logger = logging.getLogger(__name__)
 
@@ -3646,6 +3647,10 @@ def fingerprint_for_reconcile(
             wire = normalize_sql_bind_value(wire, ddl_type, engine=engine)
         except Exception:
             pass
+        # Fingerprint the instant at the granularity the carrier keeps, or a
+        # declared narrowing (Snowflake TIMESTAMP → MySQL DATETIME) reports as
+        # a whole-column checksum mismatch with no column named.
+        wire = quantize_instant_for_carrier(wire, ddl_type=ddl_type, engine=engine)
     return normalize_cell(wire, ddl_type=ddl_type, engine=engine)
 
 

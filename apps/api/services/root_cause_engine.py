@@ -361,6 +361,23 @@ def _is_transform_error_signal(
     return False
 
 
+def _is_destination_collision_signal(details: dict[str, Any] | None) -> bool:
+    """True for a key the destination already stores, not a duplicate in the source.
+
+    The append collision probe stamps ``sample_collisions`` with its own rule id.
+    Only the probe's own evidence counts: matching on prose would relabel a real
+    source duplicate as a destination collision and send the operator to change
+    the sync mode instead of deduplicating.
+    """
+    details = details or {}
+    rule_id = str(details.get("rule_id") or "")
+    if rule_id.startswith("g6_target_ddl.append_key_collision"):
+        return True
+    return bool(details.get("sample_collisions")) and (
+        details.get("remediation_kind") == "change_sync_mode"
+    )
+
+
 def _is_duplicate_signal(
     message: str,
     details: dict[str, Any] | None,
@@ -1106,16 +1123,81 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
             )
         )
 
+    # Keys the destination already stores are not duplicates *in the source* —
+    # the source can be perfectly unique. Naming it "duplicate identity keys on
+    # the Validate sample" and prescribing "dedupe the source" sends the operator
+    # to fix data that is already correct, so this collision owns its own root.
+    collision_findings = [
+        item
+        for item in (
+            *[g for g in gates if g.get("status") == "block"],
+            *blockers,
+        )
+        if _is_destination_collision_signal(item.get("details") or {})
+    ]
+    if collision_findings:
+        absorbed = sorted({str(i.get("id")) for i in collision_findings if i.get("id")})
+        details = collision_findings[0].get("details") or {}
+        key = str((details.get("primary_key") or {}).get("target") or "") or "the identity key"
+        stored = len(details.get("sample_collisions") or [])
+        sync_mode = str(details.get("sync_mode") or "append")
+        roots.append(
+            MigrationRootCause(
+                root_id=_root_id("destination_key_collision", [key], absorbed),
+                kind="destination_key_collision",
+                title="Destination already stores these keys",
+                summary=(
+                    f"{stored or 'Some'} key value(s) in this batch are already at rest "
+                    f"in the destination on {key}, which enforces uniqueness — "
+                    f"a {sync_mode} insert aborts on the first one"
+                ),
+                business_impact=(
+                    "The write fails outright, so no rows land. Nothing is "
+                    "duplicated and nothing at the destination is damaged."
+                ),
+                affected_columns=[key] if key != "the identity key" else [],
+                affected_rows_sample=sample_n,
+                estimated_total_rows=est_n,
+                risk_level="high",
+                recommended_fix=(
+                    f"Switch this sync to upsert/merge on {key} — that is how a row "
+                    "the destination already has is meant to land. Use overwrite "
+                    "instead if this load should replace the existing table."
+                ),
+                alternative_fixes=[
+                    "Full refresh · overwrite to replace the destination generation",
+                    "Append only the rows the destination does not have yet",
+                    "Load into a new destination table if both generations must be kept",
+                ],
+                recovery_strategy=(
+                    "Nothing was written, so no cleanup is needed — change the sync "
+                    "mode and re-run Validate."
+                ),
+                expected_runtime_impact=(
+                    "Upsert costs a key-resolved write per row; overwrite rewrites "
+                    "the whole destination table"
+                ),
+                quarantine_policy="n/a — the batch is refused before any write",
+                rollback_policy="DOCUMENT_ONLY",
+                documentation="docs/MIGRATION_ROLLBACK.md",
+                impacted_gates=absorbed,
+                absorbed_blocker_ids=absorbed,
+                severity="block",
+            )
+        )
+
     dup_gates = [
         g
         for g in gates
         if g.get("status") == "block"
+        and not _is_destination_collision_signal(g.get("details") or {})
         and _is_duplicate_signal(str(g.get("message") or ""), g.get("details") or {}, str(g.get("id") or ""))
     ]
     dup_blockers = [
         b
         for b in blockers
-        if _is_duplicate_signal(str(b.get("message") or ""), b.get("details") or {}, str(b.get("id") or ""))
+        if not _is_destination_collision_signal(b.get("details") or {})
+        and _is_duplicate_signal(str(b.get("message") or ""), b.get("details") or {}, str(b.get("id") or ""))
     ]
     if len(dup_gates) + len(dup_blockers) >= 1:
         absorbed = sorted(
