@@ -158,10 +158,16 @@ import {
 } from "../lib/types";
 import { standingAcknowledgmentReason } from "../lib/acknowledgments";
 import {
+  DEST_PROBE_FAILURE_COOLDOWN_MS,
   DEST_PROBE_TIMEOUT_MS,
   destProbeSpeedClass,
   shouldSkipAutoDestProbe,
 } from "../lib/destProbeTimeout";
+import {
+  destProbeSettled,
+  sameColumnList,
+  sameSchemaMap,
+} from "../lib/destSchemaIdentity";
 import { parseCsvTextForPreview } from "../lib/csvPreview";
 import { runLocalFileExport } from "../lib/localFileExport";
 import { isApiPreflight, runLocalPreflight } from "../lib/localPreflight";
@@ -286,6 +292,14 @@ export function TransferPage({
   const destSchemaGenRef = useRef(0);
   /** Last destination identity whose probe failed — throttles automatic re-probes. */
   const destProbeFailureRef = useRef<{ key: string; at: number } | null>(null);
+  /**
+   * Probes in flight. "Reading destination…" follows this count, not the newest
+   * generation: a superseded probe's cleanup used to be skipped, so overlapping
+   * probes could leave the control disabled after every request had settled.
+   */
+  const destProbeInflightRef = useRef(0);
+  /** Re-arms the unreachable-destination re-check timer. */
+  const [destProbeRetryTick, setDestProbeRetryTick] = useState(0);
   /** Last table key that successfully owned ``destColumns`` — blocks cross-table stickiness. */
   const destSchemaTableKeyRef = useRef("");
   const lastNewTableToastRef = useRef("");
@@ -1569,6 +1583,16 @@ export function TransferPage({
     await applyPipelineMappings(targetCols, targetSchema);
   };
 
+  /**
+   * Publish a probe result only when it differs from what Studio already holds.
+   * Map depends on these two values by identity, and Map probes the destination,
+   * so re-publishing an equal answer was a self-feeding probe loop.
+   */
+  const commitDestSchema = (columns: string[], schema: Record<string, string>) => {
+    if (!sameColumnList(destColumns, columns)) setDestColumns(columns);
+    if (!sameSchemaMap(destSchemaMap, schema)) setDestSchemaMap(schema);
+  };
+
   const loadDestinationSchema = async (opts?: { force?: boolean }): Promise<{
     columns: string[];
     schema: Record<string, string>;
@@ -1599,6 +1623,7 @@ export function TransferPage({
       };
     }
     const gen = ++destSchemaGenRef.current;
+    destProbeInflightRef.current += 1;
     setDestSchemaLoading(true);
     try {
       // Destination-only probe: stub file source so we do not re-sample Mongo/SQL
@@ -1632,14 +1657,12 @@ export function TransferPage({
 
       // No table typed yet — only refresh the picker list.
       if (!targetCollection.trim()) {
-        setDestColumns([]);
-        setDestSchemaMap({});
+        commitDestSchema([], {});
         proveDestTableExists(null);
         destSchemaTableKeyRef.current = tableKey;
         return { columns: [], schema: {}, tableExists: null, connected, message: (destination.message as string) || "" };
       }
 
-      destProbeFailureRef.current = null;
       const columns = destination.columns ?? [];
       const schema = destination.schema ?? {};
       const want = targetCollection.trim();
@@ -1690,8 +1713,14 @@ export function TransferPage({
         && (resolvedExists === true || destTableExists === true || destColumns.length > 0);
       const nextColumns = resolvedExists === false ? [] : (keepPrior ? destColumns : columns);
       const nextSchema = resolvedExists === false ? {} : (keepPrior ? destSchemaMap : schema);
-      setDestColumns(nextColumns);
-      setDestSchemaMap(nextSchema);
+      // A probe that cannot settle existence is not a reading Studio can act on,
+      // and the automatic probe must back off from it exactly as it does from a
+      // thrown error — an unreachable host answers "not connected" through the
+      // success path, which is how the re-probe loop survived the first fix.
+      destProbeFailureRef.current = destProbeSettled(connected, resolvedExists)
+        ? null
+        : { key: tableKey, at: Date.now() };
+      commitDestSchema(nextColumns, nextSchema);
       proveDestTableExists(resolvedExists);
       destSchemaTableKeyRef.current = tableKey;
       if (keepPrior && resolvedExists === true && destColumns.length === 0) {
@@ -1741,10 +1770,7 @@ export function TransferPage({
       // Re-setting an already-empty schema still hands Map a new object identity,
       // which re-ran Map, which re-probed — the loop that pinned the reload
       // control on "Reading destination…" for as long as the host stayed down.
-      if (!sameTable) {
-        if (destColumns.length) setDestColumns([]);
-        if (Object.keys(destSchemaMap).length) setDestSchemaMap({});
-      }
+      if (!sameTable) commitDestSchema([], {});
       // Do not force "table missing" — unknown is safer than a false create promise.
       proveDestTableExists(null);
       const rawMsg = e instanceof Error ? e.message : "";
@@ -1763,7 +1789,8 @@ export function TransferPage({
       });
       return { columns: keptColumns, schema: keptSchema, tableExists: null, connected: false, message: errMsg };
     } finally {
-      if (gen === destSchemaGenRef.current) setDestSchemaLoading(false);
+      destProbeInflightRef.current = Math.max(0, destProbeInflightRef.current - 1);
+      if (destProbeInflightRef.current === 0) setDestSchemaLoading(false);
     }
   };
   loadDestSchemaRef.current = loadDestinationSchema;
@@ -1789,6 +1816,22 @@ export function TransferPage({
     const t = window.setTimeout(() => { void loadDestinationSchema(); }, 350);
     return () => window.clearTimeout(t);
   }, [step, destKindMode, targetCollection, connectorId, destType, targetDb, destHost, destPort, destSchema, destWarehouse]);
+
+  // An unreachable destination is re-checked on a fixed cadence, not as fast as
+  // Map can re-render: the operator gets automatic recovery when the host comes
+  // back, and a host that stays down costs four probes a minute instead of
+  // twenty. Reload and Validate still probe on demand.
+  useEffect(() => {
+    if (destKindMode !== "database" || !connectorId) return;
+    if (step !== STEP_DESTINATION && step !== STEP_MAP) return;
+    if (destConnected !== false || destSchemaLoading) return;
+    const t = window.setTimeout(() => {
+      void loadDestinationSchema({ force: true }).finally(() => {
+        setDestProbeRetryTick((n) => n + 1);
+      });
+    }, DEST_PROBE_FAILURE_COOLDOWN_MS);
+    return () => window.clearTimeout(t);
+  }, [step, destKindMode, connectorId, destConnected, destSchemaLoading, destProbeRetryTick]);
 
   useEffect(() => {
     if (cursorCandidate && (!cursorField || !currentSourceColumns.includes(cursorField))) {

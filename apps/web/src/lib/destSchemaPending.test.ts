@@ -19,7 +19,16 @@ import {
   markMappingDestUnread,
   type EditableMapping,
 } from "./mapping";
-import { destTypeSelectOptions } from "./typeDisplay";
+import {
+  destPhysicalTypeLabel,
+  destTypeSelectOptions,
+  normalizeDestTypeValue,
+} from "./typeDisplay";
+import {
+  destProbeSettled,
+  sameColumnList,
+  sameSchemaMap,
+} from "./destSchemaIdentity";
 import {
   DEST_PROBE_FAILURE_COOLDOWN_MS,
   DEST_PROBE_TIMEOUT_MS,
@@ -249,6 +258,62 @@ describe("an unanswered destination probe returns the operator to retry", () => 
       false,
       "another table has its own existence question",
     );
+  });
+});
+
+describe("an equal probe answer does not re-run Map", () => {
+  it("compares destination columns and DDL by value, not identity", () => {
+    // The probe returns fresh arrays every 3s. Map depends on them by identity
+    // and probes the destination itself, so re-publishing an equal answer fed a
+    // probe loop — 140 requests in 222s against a host that was simply down.
+    assert.equal(sameColumnList([], []), true);
+    assert.equal(sameColumnList(["a", "b"], ["a", "b"]), true);
+    assert.equal(sameColumnList(["a", "b"], ["b", "a"]), false);
+    assert.equal(sameColumnList(["a"], ["a", "b"]), false);
+    assert.equal(sameSchemaMap({}, {}), true);
+    assert.equal(sameSchemaMap({ a: "TEXT" }, { a: "TEXT" }), true);
+    assert.equal(sameSchemaMap({ a: "TEXT" }, { a: "LONGTEXT" }), false);
+    assert.equal(sameSchemaMap({ a: "TEXT" }, { a: "TEXT", b: "TEXT" }), false);
+  });
+
+  it("treats a not-connected answer as unsettled, like a thrown probe error", () => {
+    // An unreachable MySQL answers the introspect route with connected=false and
+    // HTTP 200, so the success path used to clear the backoff the error path had
+    // just armed and the automatic probe never backed off at all.
+    assert.equal(destProbeSettled(true, false), true);
+    assert.equal(destProbeSettled(true, true), true);
+    assert.equal(destProbeSettled(true, null), false);
+    assert.equal(destProbeSettled(false, null), false);
+    assert.equal(destProbeSettled(false, true), false);
+  });
+});
+
+describe("an existing destination column is named in its own engine's DDL", () => {
+  it("prints a MySQL datetime, not the canonical instant carrier", () => {
+    // Introspection normalizes every dialect onto one lattice, so MySQL
+    // `datetime(6)` arrived as TIMESTAMP_NTZ(6) and Map offered
+    // `TIMESTAMP_NTZ(6) — current` for a column MySQL spells DATETIME(6).
+    assert.equal(destPhysicalTypeLabel("TIMESTAMP_NTZ(6)", "mysql"), "DATETIME(6)");
+    assert.equal(destPhysicalTypeLabel("TIMESTAMP_NTZ", "mysql"), "DATETIME");
+    assert.equal(destPhysicalTypeLabel("TIMESTAMPTZ(3)", "mysql"), "TIMESTAMP(3)");
+    assert.equal(destPhysicalTypeLabel("TIMESTAMP_NTZ(6)", "postgresql"), "TIMESTAMP(6)");
+    assert.equal(destPhysicalTypeLabel("TIMESTAMP_LTZ", "postgresql"), "TIMESTAMPTZ");
+    assert.equal(destPhysicalTypeLabel("TIMESTAMP_NTZ(6)", "sqlserver"), "DATETIME2(6)");
+    // Snowflake spells it that way itself, and non-temporal types are untouched.
+    assert.equal(destPhysicalTypeLabel("TIMESTAMP_NTZ(6)", "snowflake"), "TIMESTAMP_NTZ(6)");
+    assert.equal(destPhysicalTypeLabel("VARCHAR(16777216)", "mysql"), "VARCHAR(16777216)");
+    assert.equal(destPhysicalTypeLabel("DECIMAL(38,0)", "mysql"), "DECIMAL(38,0)");
+  });
+
+  it("selects the destination's own option instead of an unmatched current entry", () => {
+    const options = destTypeSelectOptions("TIMESTAMP_NTZ(6)", "mysql");
+    assert.equal(
+      options.some((o) => /TIMESTAMP_NTZ/i.test(o.label)),
+      false,
+      "MySQL has no TIMESTAMP_NTZ type to show an operator",
+    );
+    assert.equal(options.some((o) => o.value === "DATETIME(6)"), true);
+    assert.equal(normalizeDestTypeValue("TIMESTAMP_NTZ(6)", "mysql"), "DATETIME(6)");
   });
 });
 

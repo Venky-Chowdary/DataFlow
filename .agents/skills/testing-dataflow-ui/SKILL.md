@@ -163,6 +163,19 @@ Reaching Validate with a *chosen* blocker takes fixture control. What works:
   `Reading destination…` for 2.5+ minutes with zero `existence unknown` / `did not answer within`
   text. Poll the control's label+`disabled` on a timer and report the timeout as unproven rather than
   waiting indefinitely.
+- **Always count the probe requests, not just the button state.** A stuck `Reading destination…` is
+  usually a *probe storm*: hook fetch and count `POST /api/v1/transfer/introspect` while the host is
+  down (`window.__intro=[]` + push `Date.now()`), then corroborate with
+  `grep -c "transfer/introspect" <api log>`. A healthy backoff is a handful of calls per minute; a
+  loop shows a call every ~3s (observed 140 browser-side calls / 222s, 36 in the last 60s even after
+  a 15s automatic-probe cooldown shipped). Note that a *stopped* container refuses connections
+  instantly, so each probe fails fast and the 45s timeout branch may never be the one that runs —
+  to exercise the real timeout path, black-hole the port instead (e.g. DROP/REJECT-with-drop on the
+  host port, or point the connector at an unroutable host) so the TCP connect hangs.
+- **Cooldown/backoff regressions can hide behind a shipped module.** Verify the served bundle contains
+  the new code (`curl -s http://127.0.0.1:5173/src/lib/destProbeTimeout.ts | head -30`) before
+  concluding the fix isn't loaded; a present-but-ineffective fix is a different (and more useful)
+  finding than a stale bundle.
 - **Pending state may offer no approve control at all** (no `Approve eligible` button rendered). That is
   a stronger fail-closed outcome than a disabled button — assert "no control can make a pending row
   ready" by enumerating `button` text for `/approve/i` plus the footer's `n need review` count.
