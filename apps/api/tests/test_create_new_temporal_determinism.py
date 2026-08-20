@@ -62,3 +62,79 @@ def test_unknown_source_type_without_samples_does_not_invent_a_temporal_target()
     assert m["fidelity"] != "lossy_cast", m
     assert not m.get("requires_risk_contract"), m
     assert m["target_type"].upper() not in {"DATE", "DATETIME", "DATETIME(6)"}, m
+
+
+DECLARED_TEXT = [
+    {
+        "name": "HIRE_DATE",
+        "inferred_type": "VARCHAR(16777216)",
+        "native_type": "VARCHAR(16777216)",
+        "nullable": True,
+        "samples": ["2011-08-12", "2012-01-03"],
+    },
+]
+
+
+def _project_text(*, target_schemas: list[dict] | None = None, prior: list[dict] | None = None) -> dict:
+    result = run_mapping_pipeline(
+        source_columns=["HIRE_DATE"],
+        target_columns=["HIRE_DATE"] if target_schemas else [],
+        source_schemas=DECLARED_TEXT,
+        target_schemas=target_schemas,
+        source_samples={"HIRE_DATE": ["2011-08-12", "2012-01-03"]},
+        destination_db_type="mysql",
+        source_db_type="snowflake",
+        destination_table_exists=False,
+        source_types_authoritative=True,
+        prior_mappings=prior,
+    )
+    return result["mappings"][0]
+
+
+def test_declared_text_source_creates_a_text_column_not_a_signed_cast():
+    """Date-like strings are evidence of content, not of the source's type.
+
+    Narrowing eight sampled values into ``DATETIME(6)`` for a table that does not
+    exist yet, then reporting ``VARCHAR(16777216) → DATETIME(6)`` as a fidelity
+    loss, charged the operator a Risk Contract for the pipeline's own choice.
+    """
+    m = _project_text()
+    assert m["target_type"].upper() in {"TEXT", "LONGTEXT"}, m
+    assert m["fidelity"] == "preserve", m
+    assert not m.get("requires_risk_contract"), m
+    assert m["transform"] == "none", m
+
+
+def test_absent_table_target_schema_is_a_proposal_not_a_declared_type():
+    """Studio echoes the last projection back as the destination schema.
+
+    Accepting it as catalog truth let a guessed ``DATETIME(6)`` return as the
+    destination's declared type, complete with ``destination_catalog``
+    provenance for a table the probe proved absent.
+    """
+    m = _project_text(target_schemas=[{"name": "HIRE_DATE", "inferred_type": "DATETIME(6)"}])
+    assert m["target_type"].upper() in {"TEXT", "LONGTEXT"}, m
+    assert m["fidelity"] == "preserve", m
+    assert not m.get("requires_risk_contract"), m
+    assert m.get("target_type_origin") != "destination_catalog", m
+
+
+def test_operator_chosen_typed_target_survives_and_discloses_its_risk():
+    """The refusal is against silent invention, not against an operator decision."""
+    m = _project_text(
+        target_schemas=[{"name": "HIRE_DATE", "inferred_type": "DATETIME(6)"}],
+        prior=[
+            {
+                "source": "HIRE_DATE",
+                "target": "HIRE_DATE",
+                "target_type": "DATETIME(6)",
+                "user_override": True,
+                "transform": "date",
+                "confidence": 0.9,
+                "reasoning": "operator picked DATETIME(6)",
+            }
+        ],
+    )
+    assert m["target_type"].upper() == "DATETIME(6)", m
+    assert m["fidelity"] == "lossy_cast", m
+    assert m.get("requires_risk_contract"), m

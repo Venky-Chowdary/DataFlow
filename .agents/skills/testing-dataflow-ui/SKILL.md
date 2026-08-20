@@ -149,6 +149,23 @@ Reaching Validate with a *chosen* blocker takes fixture control. What works:
 - **HIRE_DATE create-new target is not stable** across runs (`DATE` in one run, `DATETIME(6)` in
   another, the latter demanding a lossy policy). Do not hard-code the expected temporal type; assert
   only that the type is MySQL-valid and contains no `16777216`.
+- **Test declared temporal mapping with a declared-DATE fixture, not an all-VARCHAR one.** Seed a
+  fakesnow table such as `PUBLIC.EMPLOYEE_DATED` (`EMPLOYEE_ID VARCHAR`, `FIRST_NAME VARCHAR`,
+  `HIRE_DATE DATE`, `DEPARTMENT VARCHAR`). With `source_kind="database"` the declared type is
+  authoritative, so a declared `DATE` should project MySQL `DATE` deterministically. `EMPLOYEE_WIDE`
+  declares every column `VARCHAR(16777216)`, so its date-like column may still project `DATETIME(6)`
+  and demand a Risk Contract — that is a *different* case, do not conflate the two.
+- **Confirm `source_kind` actually reaches the engine** by hooking fetch before entering Map:
+  `window.__maps` style capture of `/transfer/map` request bodies; assert `source_kind` and
+  `destination_table_exists` per call, and diff `target_type` across repeated Maps for determinism.
+- **A declared OLTP probe timeout (`lib/destProbeTimeout.ts`, 45s OLTP / 180s warehouse) may not be
+  observable in the UI.** With `df-mysql` stopped, the control has been seen stuck disabled as
+  `Reading destination…` for 2.5+ minutes with zero `existence unknown` / `did not answer within`
+  text. Poll the control's label+`disabled` on a timer and report the timeout as unproven rather than
+  waiting indefinitely.
+- **Pending state may offer no approve control at all** (no `Approve eligible` button rendered). That is
+  a stronger fail-closed outcome than a disabled button — assert "no control can make a pending row
+  ready" by enumerating `button` text for `/approve/i` plus the footer's `n need review` count.
 
 ### Capturing preflight request/response bodies
 

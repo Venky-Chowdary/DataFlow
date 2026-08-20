@@ -157,7 +157,11 @@ import {
   ValidationSuggestedAction,
 } from "../lib/types";
 import { standingAcknowledgmentReason } from "../lib/acknowledgments";
-import { DEST_PROBE_TIMEOUT_MS, destProbeSpeedClass } from "../lib/destProbeTimeout";
+import {
+  DEST_PROBE_TIMEOUT_MS,
+  destProbeSpeedClass,
+  shouldSkipAutoDestProbe,
+} from "../lib/destProbeTimeout";
 import { parseCsvTextForPreview } from "../lib/csvPreview";
 import { runLocalFileExport } from "../lib/localFileExport";
 import { isApiPreflight, runLocalPreflight } from "../lib/localPreflight";
@@ -280,6 +284,8 @@ export function TransferPage({
   });
   const sourceIntrospectGenRef = useRef(0);
   const destSchemaGenRef = useRef(0);
+  /** Last destination identity whose probe failed — throttles automatic re-probes. */
+  const destProbeFailureRef = useRef<{ key: string; at: number } | null>(null);
   /** Last table key that successfully owned ``destColumns`` — blocks cross-table stickiness. */
   const destSchemaTableKeyRef = useRef("");
   const lastNewTableToastRef = useRef("");
@@ -1272,7 +1278,7 @@ export function TransferPage({
    * must not close over a stale render's copy, so it is reached through a ref.
    */
   const loadDestSchemaRef = useRef<
-    (() => Promise<{
+    ((opts?: { force?: boolean }) => Promise<{
       columns: string[];
       schema: Record<string, string>;
       tableExists: boolean | null;
@@ -1563,7 +1569,7 @@ export function TransferPage({
     await applyPipelineMappings(targetCols, targetSchema);
   };
 
-  const loadDestinationSchema = async (): Promise<{
+  const loadDestinationSchema = async (opts?: { force?: boolean }): Promise<{
     columns: string[];
     schema: Record<string, string>;
     tableExists: boolean | null;
@@ -1579,8 +1585,20 @@ export function TransferPage({
         message: "",
       };
     }
-    const gen = ++destSchemaGenRef.current;
     const tableKey = `${connectorId}|${destType}|${targetDb}|${destSchema}|${targetCollection.trim()}`;
+    if (
+      !opts?.force
+      && shouldSkipAutoDestProbe(destProbeFailureRef.current, tableKey, Date.now())
+    ) {
+      return {
+        columns: destColumns,
+        schema: destSchemaMap,
+        tableExists: destTableExists,
+        connected: false,
+        message: destConnectionError,
+      };
+    }
+    const gen = ++destSchemaGenRef.current;
     setDestSchemaLoading(true);
     try {
       // Destination-only probe: stub file source so we do not re-sample Mongo/SQL
@@ -1621,6 +1639,7 @@ export function TransferPage({
         return { columns: [], schema: {}, tableExists: null, connected, message: (destination.message as string) || "" };
       }
 
+      destProbeFailureRef.current = null;
       const columns = destination.columns ?? [];
       const schema = destination.schema ?? {};
       const want = targetCollection.trim();
@@ -1715,12 +1734,16 @@ export function TransferPage({
       // A transient error on the *same* table keeps its last-known schema so the
       // panel does not blank out. A different table has no schema of its own —
       // showing the previous table's DDL for it is a false read.
+      destProbeFailureRef.current = { key: tableKey, at: Date.now() };
       const sameTable = destSchemaTableKeyRef.current === tableKey;
       const keptColumns = sameTable ? destColumns : [];
       const keptSchema = sameTable ? destSchemaMap : {};
+      // Re-setting an already-empty schema still hands Map a new object identity,
+      // which re-ran Map, which re-probed — the loop that pinned the reload
+      // control on "Reading destination…" for as long as the host stayed down.
       if (!sameTable) {
-        setDestColumns([]);
-        setDestSchemaMap({});
+        if (destColumns.length) setDestColumns([]);
+        if (Object.keys(destSchemaMap).length) setDestSchemaMap({});
       }
       // Do not force "table missing" — unknown is safer than a false create promise.
       proveDestTableExists(null);
@@ -2925,7 +2948,7 @@ export function TransferPage({
       let loadedConnected: boolean | null = null;
       if (destKindMode === "database") {
         mark("Loading destination schema…");
-        let loaded = await loadDestinationSchema();
+        let loaded = await loadDestinationSchema({ force: true });
         // One retry — SSL / metadata races often succeed on the second probe.
         if (
           loaded.columns.length === 0
@@ -5298,7 +5321,7 @@ export function TransferPage({
             // Re-probe the catalog, then re-map with the probe's own verdict —
             // a proven-absent table becomes create-new, a loaded table binds
             // real destination types. No guessing either way.
-            const res = await loadDestinationSchema();
+            const res = await loadDestinationSchema({ force: true });
             await applyPipelineMappings(
               res.columns,
               res.schema,
@@ -6511,7 +6534,7 @@ export function TransferPage({
               }
               setStep(STEP_MAP);
             }}
-            onReloadDestSchema={() => { void loadDestinationSchema(); }}
+            onReloadDestSchema={() => { void loadDestinationSchema({ force: true }); }}
             onOpenIdentitySettings={openIdentitySettings}
             uniqueKeySuggestions={uniqueKeySuggestions}
             compositeKeySuggestions={compositeKeySuggestions}

@@ -20,7 +20,12 @@ import {
   type EditableMapping,
 } from "./mapping";
 import { destTypeSelectOptions } from "./typeDisplay";
-import { DEST_PROBE_TIMEOUT_MS, destProbeSpeedClass } from "./destProbeTimeout";
+import {
+  DEST_PROBE_FAILURE_COOLDOWN_MS,
+  DEST_PROBE_TIMEOUT_MS,
+  destProbeSpeedClass,
+  shouldSkipAutoDestProbe,
+} from "./destProbeTimeout";
 import { groupMapBlockers, mapBlockerSummary, mappingBlocker } from "./mapBlockers";
 import { isMappingReady, mappingTier, needsMappingReview } from "./columnWorkbench";
 
@@ -216,6 +221,33 @@ describe("an unanswered destination probe returns the operator to retry", () => 
     assert.ok(
       DEST_PROBE_TIMEOUT_MS.oltp < DEST_PROBE_TIMEOUT_MS.warehouse,
       "an OLTP probe must give up first",
+    );
+  });
+
+  it("stops automatic probes from re-arming the disabled reload control", () => {
+    // A failed probe clears the destination columns, Map re-runs on that state
+    // change and probes again: while the host stayed down the control never left
+    // "Reading destination…". Automatic probes back off; the operator's do not.
+    const key = "conn|mysql|railway|public|Newdata";
+    const failedAt = 1_000_000;
+    assert.equal(shouldSkipAutoDestProbe(null, key, failedAt), false);
+    assert.equal(
+      shouldSkipAutoDestProbe({ key, at: failedAt }, key, failedAt + 500),
+      true,
+    );
+    assert.equal(
+      shouldSkipAutoDestProbe(
+        { key, at: failedAt },
+        key,
+        failedAt + DEST_PROBE_FAILURE_COOLDOWN_MS + 1,
+      ),
+      false,
+      "the destination must be re-probed once the backoff expires",
+    );
+    assert.equal(
+      shouldSkipAutoDestProbe({ key, at: failedAt }, "conn|mysql|railway|public|Other", failedAt + 500),
+      false,
+      "another table has its own existence question",
     );
   });
 });

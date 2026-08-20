@@ -484,10 +484,17 @@ def run_mapping_pipeline(
         str(s.get("name") or ""): str(s.get("native_type") or s.get("inferred_type") or "")
         for s in (source_schemas or [])
     }
-    declared_target_types = {
-        str(s.get("name") or ""): str(s.get("native_type") or s.get("inferred_type") or "")
-        for s in (target_schemas or [])
-    }
+    # Only a table that exists can declare a type. For a proven-absent table the
+    # request's target schema is a proposal, and treating it as declared made the
+    # verdict grade the source against a type this pipeline projected itself.
+    declared_target_types = (
+        {}
+        if destination_table_exists is False
+        else {
+            str(s.get("name") or ""): str(s.get("native_type") or s.get("inferred_type") or "")
+            for s in (target_schemas or [])
+        }
+    )
     source_schemas = _canonicalize_schema_rows(source_schemas)
     target_schemas = _canonicalize_schema_rows(target_schemas)
     enrichments = enrich_columns(source_columns, source_schemas)
@@ -500,7 +507,14 @@ def run_mapping_pipeline(
     # Carriers that actually exist in the destination. Identity targets derived
     # below for a create-new table are proposals, not live columns, and must
     # never grant bind-existing authority to the Decision Kernel.
-    introspected_target_schemas: list[dict] | None = target_schemas
+    # A table the catalog proved absent has no live carriers at all: the target
+    # schema on the request is the *proposal* Studio is holding (usually this
+    # pipeline's own earlier projection), so granting it bind-existing authority
+    # let a guessed DATETIME(6) come back as the destination's declared type and
+    # bill the operator a Risk Contract for casting into it.
+    introspected_target_schemas: list[dict] | None = (
+        None if destination_table_exists is False else target_schemas
+    )
 
     if source_samples and source_columns:
         from services.data_profiler import merge_profiler_schema, profile_dataset
@@ -649,10 +663,20 @@ def run_mapping_pipeline(
         # approved ceiling. Writers must be able to tell them apart — otherwise
         # today's narrow carrier freezes the column and every drifted row
         # quarantines under backfill instead of widening the destination.
-        catalog_stamp = bool(tgt_type) and not (
-            m.get("user_override") or m.get("userOverride")
-        )
+        # A table that does not exist has no catalog: stamping its projected type
+        # as catalog provenance let a previous Map's own guess come back as the
+        # destination's declared truth, and the fidelity gate then charged the
+        # operator for the cast into it.
         strategy = str(m.get("assignment_strategy") or "")
+        intentional_create = (
+            strategy in {"identity_passthrough", "create_compatible_new"}
+            or destination_table_exists is False
+            or bool(m.get("create_new"))
+        )
+        operator_stamp = bool(m.get("user_override") or m.get("userOverride"))
+        catalog_stamp = (
+            bool(tgt_type) and not operator_stamp and destination_table_exists is not False
+        )
         # Partial Studio: never invent dest types from source — Map/Validate must
         # stay pending until live schema loads (false-green preserve cliff).
         pending_dest = strategy == "pending_dest_schema"
@@ -666,11 +690,6 @@ def run_mapping_pipeline(
             tgt_type = ""
         elif not tgt_type:
             src_l = str(src_type).lower()
-            intentional_create = (
-                strategy in {"identity_passthrough", "create_compatible_new"}
-                or destination_table_exists is False
-                or bool(m.get("create_new"))
-            )
             if intentional_create and "unsigned" in src_l and (
                 "bigint" in src_l or normalize_logical_type(src_type) == "decimal"
             ):
@@ -761,8 +780,15 @@ def run_mapping_pipeline(
         # typed destination from a name, with no declared source type and no
         # sampled value, then reads back as a lossy VARCHAR → DATE cast that
         # demands a Risk Contract for a type this pipeline itself invented.
-        typed_stamp_has_evidence = bool(col_samples) or (
-            normalize_logical_type(src_type) not in _UNTYPED_TEXT_LOGICALS
+        declared_untyped_text = normalize_logical_type(src_type) in _UNTYPED_TEXT_LOGICALS
+        # Sampled strings are evidence of *content*, not of the source's type. When
+        # the source catalog declared text, a create-new destination mirrors text:
+        # narrowing eight sampled values into DATETIME(6) and then billing the
+        # operator a Risk Contract for the resulting VARCHAR → DATETIME cast is
+        # this pipeline charging for its own guess. The operator can still pick a
+        # typed column — then the contract covers a decision they made.
+        typed_stamp_has_evidence = not declared_untyped_text or (
+            bool(col_samples) and not (source_types_authoritative and intentional_create)
         )
         if (
             not pending_dest
@@ -791,20 +817,41 @@ def run_mapping_pipeline(
                 else:
                     tgt_type = typed_target
 
+        # Create-new on a declared-text source: a typed target can only have come
+        # from sample inference or from a previous Map's own projection echoed
+        # back as the destination schema. Re-derive from the declared type.
+        if (
+            intentional_create
+            and not pending_dest
+            and source_types_authoritative
+            and declared_untyped_text
+            and not operator_stamp
+            and tgt_type
+            and normalize_logical_type(tgt_type) not in {"string", "text", "varchar", "unknown"}
+        ):
+            tgt_type = create_new_mapping_target_type(
+                src_type, destination_db_type or "", source_db=source_db_type
+            ) or tgt_type
+        # Text in, text out: normalizing the value on the way through would
+        # rewrite the bytes the source declared without any type asking for it.
+        if (
+            declared_untyped_text
+            and tgt_type
+            and normalize_logical_type(tgt_type) in {"string", "text", "varchar", "unknown"}
+            and transform in _TYPED_TRANSFORM_TARGET_TYPE
+            and not operator_stamp
+        ):
+            transform = "none"
+
         # Create-new Map stamps from sample semantic types (BIGINT / NUMERIC(9,4))
         # must not outrank the declared source. Operator override / signed risk
         # contract still win — that is Accept-risk, not silent invent.
-        intentional_create = (
-            strategy in {"identity_passthrough", "create_compatible_new"}
-            or destination_table_exists is False
-            or bool(m.get("create_new"))
-        )
         if (
             intentional_create
             and not pending_dest
             and tgt_type
             and src_type
-            and not (m.get("user_override") or m.get("userOverride"))
+            and not operator_stamp
         ):
             try:
                 from services.migration_risk_contract import mapping_has_clearing_risk_contract

@@ -31,3 +31,22 @@ export function destProbeSpeedClass(destType: string | undefined): DestProbeSpee
   const t = (destType || "").toLowerCase();
   return WAREHOUSE_DRIVERS.some((d) => t.includes(d)) ? "warehouse" : "oltp";
 }
+
+/**
+ * How long an *automatic* probe waits after the same destination failed.
+ *
+ * A failed probe clears the destination columns, which is itself a state change
+ * that re-runs Map, which probes again — an unreachable host therefore held the
+ * reload control disabled indefinitely. Operator-initiated probes (Reload,
+ * Validate) always run immediately; only the automatic ones back off.
+ */
+export const DEST_PROBE_FAILURE_COOLDOWN_MS = 15_000;
+
+export function shouldSkipAutoDestProbe(
+  lastFailure: { key: string; at: number } | null,
+  key: string,
+  now: number,
+): boolean {
+  if (!lastFailure || lastFailure.key !== key) return false;
+  return now - lastFailure.at < DEST_PROBE_FAILURE_COOLDOWN_MS;
+}
