@@ -29,6 +29,9 @@ from services.reconcile_coverage import (
     WHOLE_TABLE_NOT_COMPARABLE,
     WRITTEN_BATCH_KEYS,
 )
+from services.destination_key_collision_probe import (
+    sync_mode_appends_without_key_resolution,
+)
 from services.reconciliation import (
     KEYED_READBACK_ENGINES,
     TargetSampleUnavailable,
@@ -1343,6 +1346,12 @@ def run_reconciliation(
         or dest_summary.get("conflict_columns")
         or []
     )
+    # Whether the *destination* stands behind this key — a declared PK/unique
+    # constraint or the conflict target of a merge — as opposed to an identity
+    # Map inferred below. The inference is good enough to align a sample; it is
+    # not good enough to scope a digest, because a keyless table can hold the
+    # same key twice.
+    key_enforced_by_destination = bool(pk_cols)
     # Quarantine replay / upsert writers may stamp written_ids without PK meta.
     # Resolve identity from Map so keyed Gate-8 can re-scope the target digest.
     if not pk_cols and mapping_dicts:
@@ -2135,7 +2144,18 @@ def run_reconciliation(
             written_ids=written_ids,
             pk_column=pk_column,
         )
-        if keyed_checksum:
+        # A key-scoped digest is only comparable when the key identifies *one*
+        # destination row. An append (no merge, no enforced constraint) can put
+        # the same key in twice: appending one batch twice left two rows per key,
+        # the keyed read-back returned 2x the batch, and its digest could never
+        # equal the source's — a correct append failed itself with two hex
+        # strings. Merge writes own their conflict target, and a declared
+        # PK/unique constraint rejects the second copy; an identity inferred from
+        # Map guarantees neither, so an append keeps the delta as its identity.
+        keys_identify_one_row = key_enforced_by_destination or not (
+            sync_mode_appends_without_key_resolution(sync_mode)
+        )
+        if keyed_checksum and keys_identify_one_row:
             target_checksum = keyed_checksum
             keyed_scope = WRITTEN_BATCH_KEYS
 
