@@ -56,6 +56,15 @@ def retains_evidence(
     return len(answer_terms & context_terms) / len(answer_terms) >= floor
 
 
+def names_identifier(text: str) -> bool:
+    """Whether the text names a workspace object by ID or backticked name.
+
+    An operator pasting `pf_...`, a job ID or a table in backticks is asking about
+    their own data, which the shipped documentation cannot vouch for by wording.
+    """
+    return bool(_IDENTIFIER_RE.search(text or ""))
+
+
 def _facts(text: str) -> list[set[str]]:
     """Each fact as the set of spellings that count as keeping it."""
     facts = [_number_forms(m.group(0)) for m in _NUMBER_RE.finditer(text)]

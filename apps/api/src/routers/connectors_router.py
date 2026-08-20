@@ -431,7 +431,11 @@ async def list_transfer_jobs(
     request: Request,
     workspace_id: str = Header(default="", alias="X-Workspace-Id"),
 ):
-    """List recent transfer jobs scoped to a workspace.
+    """List recent transfer jobs scoped to a workspace, with whole-history counts.
+
+    ``jobs`` is the most recent page; ``total`` and ``status_counts`` are counted
+    over the entire scoped history in the store. Counting the page instead made the
+    Jobs header read "All (50)" for a 90-job history and disagree with Pilot.
 
     Degrades gracefully when the job store is unavailable: returns an empty
     list flagged ``degraded`` (HTTP 200) so Job Theater still renders instead
@@ -442,11 +446,20 @@ async def list_transfer_jobs(
     try:
         mongo = get_mongodb_service()
         jobs = await asyncio.to_thread(mongo.list_jobs, workspace_id=workspace_id)
-        return {"jobs": jobs, "count": len(jobs), "degraded": False}
+        counts = await asyncio.to_thread(mongo.count_jobs, workspace_id=workspace_id)
+        return {
+            "jobs": jobs,
+            "count": len(jobs),
+            "total": int(counts.get("total") or 0),
+            "status_counts": counts.get("by_status") or {},
+            "degraded": False,
+        }
     except (PyMongoError, ConnectionError) as e:
         return {
             "jobs": [],
             "count": 0,
+            "total": 0,
+            "status_counts": {},
             "degraded": True,
             "persistence": "unavailable",
             "detail": str(e),

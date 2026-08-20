@@ -1,5 +1,6 @@
 import { API_BASE, ActiveDataContext, Connector, EnhancedAnalysis, ParsedUpload, PipelineSchedule, TransferJob, TransferPlan } from "./types";
 import { coerceLastTestOk, statusFromLastTest } from "./connectorHealth";
+import { JobHistory, jobHistoryFromResponse } from "./jobHistory";
 import { clearSession, getAuthToken, getSessionActor } from "./session";
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 15000;
@@ -943,13 +944,18 @@ export async function fetchConnectors(): Promise<Connector[]> {
   return [];
 }
 
-export async function fetchJobs(): Promise<TransferJob[]> {
-  const data = await requestJson<{ jobs?: TransferJob[] }>(
+/** Recent jobs plus the whole-history counts the operator-visible totals read. */
+export async function fetchJobs(): Promise<JobHistory> {
+  const data = await requestJson<{
+    jobs?: TransferJob[];
+    total?: number;
+    status_counts?: Record<string, number>;
+  }>(
     [`${API_BASE}/connectors/jobs`, `${API_BASE}/jobs`],
     "Failed to load jobs",
     { timeoutMs: 45_000 },
   );
-  return data.jobs || [];
+  return jobHistoryFromResponse(data);
 }
 
 export type JobProgress = import("./types").JobProgress;

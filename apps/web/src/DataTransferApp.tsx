@@ -14,6 +14,7 @@ import { StatusPopover } from "./components/StatusPopover";
 import { DataProvider } from "./lib/DataContext";
 import { StudioActionsProvider } from "./lib/StudioActionsContext";
 import { AUTH_REQUIRED_EVENT, deleteConnector, fetchConnectors, fetchJobs, fetchSchedules, fetchTransferCapabilities, noteApiSuccess, probeApiHealth, shouldMarkApiOffline } from "./lib/api";
+import { EMPTY_JOB_HISTORY, type JobHistory } from "./lib/jobHistory";
 import { clearSession, readSession, writeSession } from "./lib/session";
 import { loadSidebarNavCompact, saveSidebarNavCompact } from "./lib/pilotChatStore";
 import { loadTransferLiveCatalog, resolveCatalogIdToType } from "./lib/connectorTypes";
@@ -107,7 +108,8 @@ function AppShell({
     return initialScreen === "landing" ? "dashboard" : initialScreen;
   });
   const [connectors, setConnectors] = useState<Connector[]>([]);
-  const [jobs, setJobs] = useState<TransferJob[]>([]);
+  const [jobHistory, setJobHistory] = useState<JobHistory>(EMPTY_JOB_HISTORY);
+  const jobs = jobHistory.jobs;
   const [schedules, setSchedules] = useState<PipelineSchedule[]>([]);
   const [bootLoading, setBootLoading] = useState(true);
   /** False until the first connectors fetch settles — prevents false “no connectors” empty states. */
@@ -247,7 +249,7 @@ function AppShell({
 
   const loadJobs = useCallback(async (notifyOnError = true) => {
     try {
-      setJobs(await fetchJobs());
+      setJobHistory(await fetchJobs());
       noteApiSuccess();
       setApiOnline(true);
     } catch (err) {
@@ -495,8 +497,8 @@ function AppShell({
                 <DtIcon name={item.icon} size={18} />
               </span>
               <span>{item.label}</span>
-              {item.id === "jobs" && jobs.length > 0 && (
-                <span className="df2-nav-badge" aria-hidden="true"> {jobs.length}</span>
+              {item.id === "jobs" && jobHistory.total > 0 && (
+                <span className="df2-nav-badge" aria-hidden="true"> {jobHistory.total}</span>
               )}
             </button>
           ))}
@@ -746,6 +748,7 @@ function AppShell({
                 <PageErrorBoundary label="Job Theater">
                   <JobsPage
                     jobs={jobs}
+                    history={jobHistory}
                     onRefresh={loadJobs}
                     onStartTransfer={(intent) => {
                       if (intent && (intent.step || intent.repairProposalId || intent.jobId || intent.mappings?.length)) {

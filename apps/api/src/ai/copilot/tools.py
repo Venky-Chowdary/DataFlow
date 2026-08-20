@@ -13,12 +13,12 @@ from services.value_serializer import json_default
 from ..rag.product_docs import (
     compose_documented_answer,
     names_product_subject,
-    nearest_articles,
     product_doc_search,
 )
 from .data_analyst import get_data_analyst
 from .tool_permissions import current_caller_role, denial_message, is_tool_allowed
 from .transfer_rules import parse_transfer_data_rules
+from .unsupported_question import is_answerable_subject, unsupported_question_output
 
 
 @dataclass
@@ -1640,29 +1640,10 @@ class DataPilotTools:
             # Nothing in the documentation and no product keyword: say so. Falling
             # through to the highest-scoring template answered "how do I cook rice"
             # with a transfer blurb at full confidence.
-            leads = nearest_articles(query)
-            lines = [
-                "That is outside what the Datawrap documentation covers, so I will not "
-                "answer it from guesswork.",
-            ]
-            if leads:
-                lines.append("Closest guides: " + ", ".join(leads) + ".")
-            lines.append(
-                "Ask me about connectors, mapping, preflight gates, sync modes, quarantine, "
-                "reconcile proof, schedules, MCP or the API — or ask me to read a live table.",
-            )
             return ToolResult(
                 name="explain_product",
                 success=True,
-                output={
-                    "intent": "unsupported",
-                    "answer": "\n".join(lines),
-                    "capabilities": PRODUCT_CAPABILITIES[:6],
-                    "actions": [{"label": "Open Help", "route": "help"}],
-                    "sources": [],
-                    "grounded": False,
-                    "source": "unsupported_question",
-                },
+                output=unsupported_question_output(query),
             )
 
         intent = max(scores, key=scores.get)
@@ -1687,6 +1668,18 @@ class DataPilotTools:
     def _search_knowledge(self, query: str = "") -> ToolResult:
         if not query.strip():
             return ToolResult(name="search_knowledge", success=False, output=None, error="query required")
+
+        # Embedding search always returns its nearest neighbours, so a question about
+        # nothing this product does still came back with three confident-looking
+        # fragments ("how do I cook rice" → paste a job id, your dataset has 11
+        # columns). If the question names no documented subject, refuse before
+        # retrieval instead of narrating whatever the index happened to be closest to.
+        if not is_answerable_subject(query):
+            return ToolResult(
+                name="search_knowledge",
+                success=True,
+                output=unsupported_question_output(query),
+            )
 
         # Shipped operator documentation answers first, with citations. Embedding
         # similarity alone returned readable-looking fragments the operator could

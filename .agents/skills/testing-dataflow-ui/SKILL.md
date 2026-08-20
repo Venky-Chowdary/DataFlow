@@ -425,6 +425,37 @@ cached answer is distinguishable from a real one. A correct local run returns
 `method: pilot_local_engine` with `tools_used: [{name: "aggregate_data", summary: "count = 5"}]`, and
 the Pilot header shows an **Offline** pill when no cloud provider is available.
 
+### Pilot / RAG answer path: what to capture and the traps
+
+Capture every turn with a fetch hook on `POST /api/v1/copilot/chat` and assert the response fields
+against the rendered bubble — `method`, `grounded`, `confidence`, `sources`, `tools_used`,
+`suggested_actions` — plus `location.hash` **before and after** each turn. A correct API response with
+an empty bubble is the signature of client-side auto-navigation swallowing the answer
+(`applyPilotSafeActions`), so never judge Pilot by the DOM alone.
+
+Traps found repeatedly on this app:
+- Auto-navigation should only fire when `tools_used` contains `{name:"navigate", success:true}`.
+  Verify with an explanatory question (`What is append mode?`, hash must not change) *and* an explicit
+  one (`open jobs` / `take me to connectors`, hash must change) in the same session.
+- The Pilot page keeps **stale chat history from before an API restart**, and `New chat` can retain the
+  previously attached **Job context chip**. Reload the page (F5) and then click `New chat` before
+  asserting fresh-turn behaviour, and re-install the fetch hook after every reload.
+- Job counts: `GET /api/v1/connectors/jobs` returns at most **50 recent rows** plus whole-history
+  `total` / `status_counts`. The Jobs chips and nav badge must read those counts (via
+  `lib/jobHistory.ts`) and agree with Pilot; the row list is a window and says so
+  ("Showing the 50 most recent of N jobs"). Cross-check ground truth with `mongo.count_jobs()` in the
+  API venv before deciding which surface is wrong. Selecting `Failed (N)` can list fewer rows than N —
+  that is the stated window, not a count bug.
+- Unsupported-question refusal: `how do I cook rice` must return the `will not answer it from
+  guesswork` refusal with `sources: []`, `grounded: false`, `confidence 0.2` and no live-data tool.
+  It previously varied between that refusal and confident product prose at `confidence 0.7`
+  (`search_knowledge: 3 knowledge hits`), so assert on the *answer text* and `tools_used`, not just
+  `grounded`, and test it both on a fresh chat and after a product question in the same conversation.
+  Reproduce out of band with `curl -X POST /api/v1/copilot/chat -d '{"message":"how do I cook rice"}'`
+  to prove whether a regression is backend or UI.
+- Citations truncate `#/help/<slug>#<section>` to the article route, so section anchoring cannot be
+  proven; article-level click-through can.
+
 ### Distinguish state styling from drift
 
 Tabs legitimately render weight 600 when `.active`/`aria-selected` and 500 when inactive at the same

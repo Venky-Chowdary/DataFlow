@@ -73,16 +73,31 @@ response and still useless on screen:
 Failure questions ("which jobs failed?") now count failures over the whole history too,
 instead of over the window, so the answer cannot contradict the Jobs page either way.
 
+## Second round: the two defects the next browser run found
+
+| Defect | Cause | Fix |
+| --- | --- | --- |
+| "how do I cook rice" was answered with three product fragments (`grounded: false`, `confidence 0.7`, no sources) | the curated FAQ refused off-subject questions, but `search_knowledge` did not apply the same gate — embedding search returns its nearest neighbours for *any* input | `src/ai/copilot/unsupported_question.py` owns one refusal; `is_answerable_subject` gates `search_knowledge` **before** retrieval, so nothing is retrieved to narrate. A pasted job id / `pf_…` / backticked object still passes (`names_identifier`), because that is the operator's own data, not a documentation question |
+| Jobs header read `All (50) · Failed (10)` for a 90-job history, contradicting Pilot's 90/29 | `GET /connectors/jobs` returned only the recent page and the page counted its own rows | the endpoint returns `total` + `status_counts` counted over the whole scoped history next to the page; `apps/web/src/lib/jobHistory.ts` is the one frontend owner of those numbers, and the list says which slice it is showing ("Showing the 50 most recent of 90 jobs") |
+
+The refusal payload is `sources: []`, `grounded: false`, `source: "unsupported_question"`,
+confidence ceiling `0.2`, never handed to provider polish, and its only action is the
+authenticated `docs` route (the previous `help` route is the marketing page, which the
+workspace router cannot open).
+
 ## Tests
 
-`apps/api/tests/test_pilot_job_counts.py`, `apps/web/src/lib/pilotNavigationGate.test.ts`,
+`apps/api/tests/test_pilot_job_counts.py`, `apps/api/tests/test_jobs_history_counts.py`,
+`apps/api/tests/test_unsupported_question_refusal.py`,
+`apps/web/src/lib/pilotNavigationGate.test.ts`, `apps/web/src/lib/jobHistory.test.ts`,
 `apps/api/tests/test_rag_grounded_answers.py` plus the AI/Copilot/Pilot suites:
 
 ```
-pytest -q tests -k "rag or copilot or pilot or job"
-920 passed, 2 skipped, 16539 deselected
+pytest -q tests -k "rag or copilot or pilot or job or knowledge"
+937 passed, 2 skipped, 16541 deselected
 
-apps/web: npm test → 583 passed, 0 failed · npm run build clean
+apps/web: npm test → 588 passed, 0 failed · npm run build clean
+CI gates: ruff (configured allowlist) clean · mypy 17 files clean
 ```
 
 Frontend citation rendering: `apps/web/src/lib/pilotSources.test.ts` and the Pilot page /
@@ -94,3 +109,9 @@ rail share one `PilotSources` component, so both surfaces cite identically.
   OpenAI-compatible stub and unit doubles.
 - Retrieval quality is measured against the shipped 58-chunk corpus only. Corpus drift is
   regenerated with `npx tsx scripts/export-help-corpus.ts`.
+- Whole-history counts are proven for the Jobs page/API and Pilot. Other overview surfaces
+  (Dashboard, Connectors, workspace search) still read the bounded page and have not been
+  audited for the same contract.
+- The Jobs table still filters the loaded page, so `Failed (29)` can list fewer rows than the
+  chip counts; the list states the window instead of pretending otherwise. Server-side
+  filtering/pagination is not implemented.

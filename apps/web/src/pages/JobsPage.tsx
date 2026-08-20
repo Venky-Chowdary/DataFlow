@@ -16,6 +16,7 @@ import { PageToolbar } from "../components/ui/PageToolbar";
 import { useToast } from "../components/Toast";
 import { useActiveData } from "../lib/DataContext";
 import { fetchJob, fetchJobMappingProof, renameJob, retryJob, resumeJob, RetryRefusedError } from "../lib/api";
+import { jobFilterCounts, jobHistoryFromResponse, type JobHistory } from "../lib/jobHistory";
 import { isJobSuccess, jobStatusBadgeClass, jobStatusLabel } from "../lib/uiUtils";
 import { JobProgress, TransferJob } from "../lib/types";
 import { QuarantinePanel } from "../components/transfer/QuarantinePanel";
@@ -139,6 +140,8 @@ function formatJobDuration(startedAt?: string, completedAt?: string): string | n
 
 interface JobsPageProps {
   jobs: TransferJob[];
+  /** Whole-history counts; the table still shows the recent page in `jobs`. */
+  history?: JobHistory;
   onRefresh?: () => void;
   /** Open Transfer Studio — optional intent lands on Validate / Map with repair context. */
   onStartTransfer?: (intent?: JobsStudioIntent) => void;
@@ -221,7 +224,7 @@ function duplicateJobNameError(
   return null;
 }
 
-export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initialPanel }: JobsPageProps) {
+export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJobId, initialPanel }: JobsPageProps) {
   const { toast } = useToast();
   const { setActiveData } = useActiveData();
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -259,13 +262,12 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
     })).filter((m) => m.source);
   }, [liveJob?.transfer_request?.mappings]);
 
-  const counts = useMemo(() => ({
-    all: jobs.length,
-    running: jobs.filter((j) => j.status === "running" || j.status === "pending").length,
-    completed: jobs.filter((j) => isJobSuccess(j.status)).length,
-    quarantine: jobs.filter((j) => j.status === "completed_with_quarantine").length,
-    failed: jobs.filter((j) => j.status === "failed").length,
-  }), [jobs]);
+  // Counted over the whole history, not the page of rows below: counting the rows
+  // showed "All (50)" for a 90-job history and disagreed with Pilot.
+  const counts = useMemo(
+    () => jobFilterCounts(history || jobHistoryFromResponse({ jobs })),
+    [history, jobs],
+  );
 
   const filtered = useMemo(() => {
     let list = jobs;
@@ -827,6 +829,11 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
                       </button>
                     );
                   })
+                )}
+                {counts.all > jobs.length && (
+                  <p className="df2-jobs-v3-window-note">
+                    Showing the {jobs.length.toLocaleString()} most recent of {counts.all.toLocaleString()} jobs.
+                  </p>
                 )}
               </aside>
 
