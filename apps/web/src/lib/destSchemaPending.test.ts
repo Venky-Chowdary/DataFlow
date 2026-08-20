@@ -16,8 +16,11 @@ import {
   countApproveEligible,
   isDestSchemaPending,
   mappingRequiresRiskAck,
+  markMappingDestUnread,
   type EditableMapping,
 } from "./mapping";
+import { destTypeSelectOptions } from "./typeDisplay";
+import { DEST_PROBE_TIMEOUT_MS, destProbeSpeedClass } from "./destProbeTimeout";
 import { groupMapBlockers, mapBlockerSummary, mappingBlocker } from "./mapBlockers";
 import { isMappingReady, mappingTier, needsMappingReview } from "./columnWorkbench";
 
@@ -134,6 +137,86 @@ describe("the Map warning area stays bounded", () => {
     );
     const codes = groups.map((g) => g.code).sort();
     assert.deepEqual(codes, ["dest_schema_unloaded", "risk_ack_required"]);
+  });
+});
+
+describe("marking a row unread erases every destination claim", () => {
+  /** What the mapping engine hands back before the destination is ever read. */
+  function seededFromSourceOnly(): EditableMapping {
+    return {
+      source: "employee_id",
+      target: "employee_id",
+      confidence: 0.92,
+      inferredType: "VARCHAR(16777216)",
+      // The invented facts: source type echoed as the destination type, plus a
+      // provenance line claiming the destination connector was consulted.
+      destType: "VARCHAR(16777216)",
+      sample: "EMP0000001",
+      approved: true,
+      createNew: true,
+      existsInDestination: false,
+      assignmentStrategy: "identity_passthrough",
+      requiresReview: false,
+      reason: "Inferred from live connector schema",
+      fidelity: "preserve",
+    };
+  }
+
+  it("drops the source-derived destination type, existence and approval", () => {
+    const m = markMappingDestUnread(seededFromSourceOnly());
+    assert.equal(m.destType, "");
+    assert.equal(m.createNew, undefined);
+    assert.equal(m.existsInDestination, undefined);
+    assert.equal(m.approved, false);
+    assert.equal(m.requiresReview, true);
+    assert.equal(isDestSchemaPending(m), true);
+    assert.equal(isMappingReady({ ...m, approved: true }, THRESHOLD), false);
+  });
+
+  it("replaces provenance that claims the destination was read", () => {
+    const m = markMappingDestUnread(seededFromSourceOnly());
+    assert.doesNotMatch(m.reason ?? "", /live connector schema/i);
+    assert.doesNotMatch(m.reason ?? "", /create/i);
+    assert.match(m.reason ?? "", /not read/i);
+    assert.equal(mappingRequiresRiskAck(m), false);
+    assert.equal(mappingBlocker(m, THRESHOLD)?.code, "dest_schema_unloaded");
+  });
+
+  it("offers no destination type to pick while the catalog is unread", () => {
+    // Regression: passing the source type in as "current" put
+    // `VARCHAR(16777216) — current` in the destination dropdown of a table
+    // whose columns had never been read.
+    const m = markMappingDestUnread(seededFromSourceOnly());
+    const options = destTypeSelectOptions(
+      isDestSchemaPending(m) && !m.destType ? undefined : m.destType || m.inferredType,
+      "mysql",
+    );
+    assert.equal(
+      options.some((o) => /current/i.test(o.label)),
+      false,
+    );
+    assert.equal(
+      options.some((o) => o.value === "VARCHAR(16777216)"),
+      false,
+    );
+  });
+});
+
+describe("an unanswered destination probe returns the operator to retry", () => {
+  it("waits for a warehouse cold start but not for an OLTP engine", () => {
+    // A suspended Snowflake warehouse resumes on the first statement, so a slow
+    // first answer is legitimate; MySQL either answers a catalog query fast or
+    // is unreachable, and a 3-minute wait there left "Reading destination…"
+    // disabled with no way to reach the reload control.
+    assert.equal(destProbeSpeedClass("snowflake"), "warehouse");
+    assert.equal(destProbeSpeedClass("bigquery"), "warehouse");
+    assert.equal(destProbeSpeedClass("mysql"), "oltp");
+    assert.equal(destProbeSpeedClass("postgresql"), "oltp");
+    assert.equal(destProbeSpeedClass(undefined), "oltp");
+    assert.ok(
+      DEST_PROBE_TIMEOUT_MS.oltp < DEST_PROBE_TIMEOUT_MS.warehouse,
+      "an OLTP probe must give up first",
+    );
   });
 });
 

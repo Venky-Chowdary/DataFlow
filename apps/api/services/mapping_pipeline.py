@@ -757,9 +757,17 @@ def run_mapping_pipeline(
         # New/generic destinations: typed transforms must stamp *physical* DDL
         # for the destination (DATETIME(6)/CHAR(36)/JSONB) — never bare logical
         # tokens (DATETIME/UUID/JSON) that later false-block Validate.
+        # The transform can be inferred from the column *name* alone. Stamping a
+        # typed destination from a name, with no declared source type and no
+        # sampled value, then reads back as a lossy VARCHAR → DATE cast that
+        # demands a Risk Contract for a type this pipeline itself invented.
+        typed_stamp_has_evidence = bool(col_samples) or (
+            normalize_logical_type(src_type) not in _UNTYPED_TEXT_LOGICALS
+        )
         if (
             not pending_dest
             and tgt_type
+            and typed_stamp_has_evidence
             and normalize_logical_type(tgt_type) in {"string", "text", "varchar", "unknown"}
         ):
             typed_target = _TYPED_TRANSFORM_TARGET_TYPE.get(transform)

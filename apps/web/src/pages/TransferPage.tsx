@@ -128,9 +128,8 @@ import {
   confirmFalseFriendsBySource,
   buildPreflightMappings,
   confidenceThresholdForMode,
-  DEST_TYPE_UNREAD_REASON,
   editableFromPipelineMappings,
-  FIDELITY_DEST_TYPE_UNREAD,
+  markMappingDestUnread,
   ENGINE_TO_UI_TRANSFORM,
   engineTransformToUi,
   isEnumToBooleanConflict,
@@ -158,6 +157,7 @@ import {
   ValidationSuggestedAction,
 } from "../lib/types";
 import { standingAcknowledgmentReason } from "../lib/acknowledgments";
+import { DEST_PROBE_TIMEOUT_MS, destProbeSpeedClass } from "../lib/destProbeTimeout";
 import { parseCsvTextForPreview } from "../lib/csvPreview";
 import { runLocalFileExport } from "../lib/localFileExport";
 import { isApiPreflight, runLocalPreflight } from "../lib/localPreflight";
@@ -296,6 +296,11 @@ export function TransferPage({
   const [destType, setDestType] = useState<string>("");
   const [destKindMode, setDestKindMode] = useState<"database" | "file_export">("database");
   const destDriverType = destType ? resolveDriverType(destType) : "";
+  // Map must tell the engine where the source types came from. Without this the
+  // pipeline treated a warehouse's declared DDL as a guess and let sample
+  // profiling re-infer it, so the same Snowflake DATE column projected DATE on
+  // one Map and DATETIME(6) on the next depending on how the sample rendered.
+  const mapSourceKind = sourceKind === "cloud" ? "object_store" : sourceKind;
   const destSelected = destKindMode === "file_export" || Boolean(destType);
   const [exportFormat, setExportFormat] = useState("json");
   const [transferPlan, setTransferPlan] = useState<TransferPlan | null>(null);
@@ -1382,6 +1387,7 @@ export function TransferPage({
               source_samples: buildSourceSamples(),
               destination_db_type: destKindMode === "file_export" ? exportFormat : destType,
               sync_mode: syncMode,
+              source_kind: mapSourceKind,
               destination_table_exists:
                 destKindMode === "database" ? existsForMap : false,
             });
@@ -1400,6 +1406,7 @@ export function TransferPage({
             source_samples: buildSourceSamples(),
             destination_db_type: destKindMode === "file_export" ? exportFormat : destType,
             sync_mode: syncMode,
+            source_kind: mapSourceKind,
             destination_table_exists:
               destKindMode === "database" ? existsForMap : false,
           });
@@ -1446,18 +1453,7 @@ export function TransferPage({
         const destSchemaUnread =
           destKindMode === "database" && !(mapTargetCols?.length ?? destColumns.length);
         if (destSchemaUnread) {
-          fallback = fallback.map((m) => ({
-            ...m,
-            destType: "",
-            createNew: undefined,
-            existsInDestination: undefined,
-            assignmentStrategy: "pending_dest_schema" as const,
-            requiresReview: true,
-            approved: false,
-            fidelity: FIDELITY_DEST_TYPE_UNREAD,
-            fidelityReason: DEST_TYPE_UNREAD_REASON,
-            reason: "Destination schema was not read — mapping engine unreachable",
-          }));
+          fallback = fallback.map(markMappingDestUnread);
         }
         if (fallback.length) {
           toast({
@@ -1521,6 +1517,7 @@ export function TransferPage({
           source_samples: buildColumnSamples(sourceCols, rows ?? []),
           destination_db_type: destKindMode === "file_export" ? exportFormat : destType,
           sync_mode: syncMode,
+          source_kind: mapSourceKind,
           destination_table_exists:
             destKindMode === "database"
               ? (destTableExists ?? destTableExistsRef.current)
@@ -1588,10 +1585,16 @@ export function TransferPage({
     try {
       // Destination-only probe: stub file source so we do not re-sample Mongo/SQL
       // (that was hanging the Destination step for minutes on large collections).
-      const { destination } = await introspectTransferEndpoints({
-        source: { kind: "file", format: "csv" },
-        destination: buildDestinationEndpoint(),
-      });
+      const { destination } = await introspectTransferEndpoints(
+        {
+          source: { kind: "file", format: "csv" },
+          destination: buildDestinationEndpoint(),
+        },
+        // A warehouse can cold-start for minutes; an unreachable OLTP host must not
+        // hold "Reading destination…" for three minutes with no way back. Bound the
+        // wait so the operator reaches the unknown-destination state and can retry.
+        { timeoutMs: DEST_PROBE_TIMEOUT_MS[destProbeSpeedClass(destType)] },
+      );
       if (gen !== destSchemaGenRef.current) {
         return {
           columns: destColumns,
@@ -1721,7 +1724,13 @@ export function TransferPage({
       }
       // Do not force "table missing" — unknown is safer than a false create promise.
       proveDestTableExists(null);
-      const errMsg = e instanceof Error ? e.message : "Retry or continue — existence will be rechecked on Validate.";
+      const rawMsg = e instanceof Error ? e.message : "";
+      const timedOut = /timed out/i.test(rawMsg);
+      const errMsg = timedOut
+        ? `Destination did not answer within `
+          + `${Math.round(DEST_PROBE_TIMEOUT_MS[destProbeSpeedClass(destType)] / 1000)}s — existence unknown. `
+          + "Check the destination is reachable, then reload the destination schema."
+        : rawMsg || "Retry or continue — existence will be rechecked on Validate.";
       setDestConnected(false);
       setDestConnectionError(errMsg);
       toast({
@@ -2153,6 +2162,7 @@ export function TransferPage({
           source_samples: buildColumnSamples(data.columns, rows),
           destination_db_type: destKindMode === "file_export" ? exportFormat : destType,
           sync_mode: syncMode,
+          source_kind: mapSourceKind,
         });
         const pipelineAnalysis = analysisFromPipeline(data.columns, data.schema ?? {}, pipeline.mappings);
         setAnalysis(pipelineAnalysis);
@@ -2507,7 +2517,15 @@ export function TransferPage({
       }),
       sampleRows,
     );
-    setColumnMappings(seeded);
+    // The seed above uses the *source* logical type on both sides so the grid has
+    // something to show. That is only honest for a file export or a destination
+    // whose columns were actually read — a database destination with no read
+    // schema must stay pending until Map stamps a destination type.
+    setColumnMappings(
+      destKindMode === "database" && !destColumns.length
+        ? seeded.map(markMappingDestUnread)
+        : seeded,
+    );
     void analyzeSchemaEnhanced(columnSamples, { timeoutMs: 25_000 })
       .then((dbAnalysis) => setAnalysis(dbAnalysis))
       .catch((aiErr) => {
@@ -6198,17 +6216,7 @@ export function TransferPage({
                   // The destination side of every row described the old table.
                   // Keeping it showed "city VARCHAR(6) [exists]" for a table that
                   // had never been probed.
-                  setColumnMappings((prev) => prev.map((m) => ({
-                    ...m,
-                    destType: "",
-                    createNew: undefined,
-                    existsInDestination: undefined,
-                    assignmentStrategy: "pending_dest_schema" as const,
-                    requiresReview: true,
-                    approved: false,
-                    fidelity: FIDELITY_DEST_TYPE_UNREAD,
-                    fidelityReason: DEST_TYPE_UNREAD_REASON,
-                  })));
+                  setColumnMappings((prev) => prev.map(markMappingDestUnread));
                   setPreflight(null);
                   setValidatedContractKey(null);
                   setCellPreview(null);

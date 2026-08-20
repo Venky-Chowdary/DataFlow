@@ -118,6 +118,38 @@ Reaching Validate with a *chosen* blocker takes fixture control. What works:
 - **The footer Re-run control disappears once Validate is green.** To re-test acknowledgment
   persistence, re-enter through Back ▸ Continue to Validate.
 
+### Destination-unreadable / "create-new vs exists" Map testing
+
+- **Source types without Snowflake credentials.** A local **fakesnow** connector (account `fakesnow`,
+  catalog under `apps/api/data/fakesnow_data`) reproduces genuine `VARCHAR(16777216)` source types.
+  Only source *types* are covered — Snowflake auth/network stays untested.
+- **Induce "destination unreadable" AFTER the destination is chosen**: pick MySQL (`df-mysql`, host
+  port **3307**, db `dataflow`, root/dataflow), then `docker stop df-mysql`, then trigger the Map
+  render (Continue to Map, or retype the table name on the Destination step).
+- **Assert on the `<select>` value, not the chip.** Read
+  `[...document.querySelectorAll('select[aria-label^="Destination type"]')].map(s => s.value)`;
+  a pending row must be `""` with the option text `— destination type not loaded —`. The chip
+  (`Dest Type Not Loaded`) and the select have historically disagreed. Also check the *option list*:
+  a stale `"<source type> — current"` option may still be offered while pending.
+- **Check the Why column separately.** Pending rows have shown fallback provenance text such as
+  `Inferred from live connector schema` or `No type-compatible destination column` even when nothing
+  was read. Scan `main.innerText` for `/Inferred from live connector schema/i` as its own assertion.
+- **`Reload destination schema` may never become clickable.** While the destination is down the button
+  can stay disabled as `Reading destination…` for minutes, and the Map state often **self-heals** to
+  create-new once the container is back — so a click-driven reload assertion can be impossible to
+  prove. Capture the button's `disabled` + label over time and report the recovery trigger honestly
+  instead of assuming the click did the work.
+- **Compact blocker bar checks:** `.df2-map-blocker-bar` height should be ~46px with
+  `.df2-map-blocker-list li` length 0 collapsed; the toggle reads `Why (n)` where n = distinct
+  *causes* (not columns) and flips to `Hide detail` with exactly n `<li>`.
+- **Fixtures used for the three semantics:** absent table name (e.g. `Newdata_e2e`) ⇒ create-new;
+  `employee_wide_exist` (10 cols, `varchar(64/128/8/2)`, `date`) and `tx_tbl_0d54d1`
+  (`id int`, `region varchar(4)`, `city varchar(6)`) ⇒ existing-table real DDL comparisons; a narrow
+  existing column yields a *measured* lossy row requiring an execution policy + `Sign Risk Contract`.
+- **HIRE_DATE create-new target is not stable** across runs (`DATE` in one run, `DATETIME(6)` in
+  another, the latter demanding a lossy policy). Do not hard-code the expected temporal type; assert
+  only that the type is MySQL-valid and contains no `16777216`.
+
 ### Capturing preflight request/response bodies
 
 Install the hook **before** clicking anything on Validate, and always record the body length —

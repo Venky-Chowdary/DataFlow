@@ -928,7 +928,13 @@ export function ColumnReviewPanel({
                         {isDestSchemaPending(m) && !m.destType && (
                           <option value="">— destination type not loaded —</option>
                         )}
-                        {destTypeSelectOptions(m.destType || m.inferredType, destType).map((opt) => (
+                        {destTypeSelectOptions(
+                          // No destination type was read, so nothing is "current".
+                          // Passing the source type here labelled it as the
+                          // destination's current type.
+                          isDestSchemaPending(m) && !m.destType ? undefined : (m.destType || m.inferredType),
+                          destType,
+                        ).map((opt) => (
                           <option key={opt.value} value={opt.value}>
                             {opt.label}
                           </option>

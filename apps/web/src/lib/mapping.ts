@@ -688,6 +688,31 @@ export const DEST_TYPE_UNREAD_REASON =
   + "reload the destination schema. If the table does not exist the probe proves "
   + "it absent and the column becomes a CREATE.";
 
+/**
+ * Single way to say "this row has no destination type yet".
+ *
+ * Every caller that loses (or never had) destination metadata must go through
+ * here: leaving the previous `reason` in place printed provenance the row no
+ * longer has — "Inferred from live connector schema" on a destination nothing
+ * had read — and leaving `destType` set showed the source type as the
+ * destination's own.
+ */
+export function markMappingDestUnread(m: EditableMapping): EditableMapping {
+  return {
+    ...m,
+    destType: "",
+    createNew: undefined,
+    existsInDestination: undefined,
+    assignmentStrategy: "pending_dest_schema",
+    requiresReview: true,
+    approved: false,
+    fidelity: FIDELITY_DEST_TYPE_UNREAD,
+    fidelityReason: DEST_TYPE_UNREAD_REASON,
+    reason: "Destination schema not read — no destination type to compare against",
+    confidence: Math.min(m.confidence, 0.55),
+  };
+}
+
 /** Lossy, mutate, cast (quarantine path), specialty, create-new risk, or STRUCT expand — G4 needs risk_acknowledged. */
 export function mappingRequiresRiskAck(m: EditableMapping): boolean {
   if (isIntentionalOmit(m)) return false;
