@@ -605,6 +605,19 @@ export interface PilotTransferPreview {
   breaker_state?: string;
 }
 
+/** One retrieved citation behind a grounded answer. */
+export interface CopilotSource {
+  title?: string;
+  doc?: string;
+  section?: string;
+  href?: string;
+  text?: string;
+  source?: string;
+  url?: string;
+  snippet?: string;
+  type?: string;
+}
+
 export interface CopilotChatResponse {
   answer: string;
   intent: string;
@@ -625,7 +638,9 @@ export interface CopilotChatResponse {
   };
   tools_used?: { name: string; success: boolean; summary: string }[];
   /** RAG citations for knowledge answers. */
-  sources?: { title?: string; source?: string; url?: string; snippet?: string }[];
+  sources?: CopilotSource[];
+  /** True only when the answer rests on a citation or a live read, not authored prose. */
+  grounded?: boolean;
 }
 
 export interface PilotToolRegistry {

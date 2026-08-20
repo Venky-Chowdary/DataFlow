@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { DtIcon } from "../components/DtIcon";
 import { PilotConfirmCard } from "../components/pilot/PilotConfirmCard";
+import { PilotSources } from "../components/pilot/PilotSources";
 import {
   copilotChat,
   CopilotAction,
@@ -205,6 +206,7 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
             pending_actions: res.pending_actions,
             suggested_prompts: res.suggested_prompts,
             tools_used: res.tools_used,
+            sources: res.sources,
           },
         ],
       });
@@ -477,6 +479,7 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
               {session.messages.map((msg, i) => (
                 <div key={i} className={`df2-pilot-msg ${msg.role}`}>
                   <div dangerouslySetInnerHTML={{ __html: renderSafeMarkdown(msg.text) }} />
+                  <PilotSources sources={msg.sources} />
                   {msg.pending_actions && msg.pending_actions.length > 0 && (
                     <div className="df2-pilot-pending">
                       {msg.pending_actions.map((pa) => (

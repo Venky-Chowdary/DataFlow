@@ -463,6 +463,7 @@ class RAGQueryResponse(BaseModel):
     confidence: float
     method: str
     sources: list[dict] = []
+    grounded: bool = False
 
 
 class RAGIngestRequest(BaseModel):
@@ -541,6 +542,8 @@ async def api_rag_query(request: RAGQueryRequest):
             reasoning=result.get("reasoning", ""),
             confidence=result.get("confidence", 0.0),
             method=result.get("method", "rag"),
+            sources=result.get("sources") or [],
+            grounded=bool(result.get("grounded")),
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

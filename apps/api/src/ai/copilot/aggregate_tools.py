@@ -135,6 +135,26 @@ _METRIC_PHRASES: tuple[tuple[str, str], ...] = (
 
 _ASCENDING_HINTS = ("ascending", "lowest", "smallest", "bottom", "least", "fewest")
 
+# "mean" is also the English verb. "what does quarantine mean in Datawrap?" parsed
+# as AVG(in Datawrap) FROM Datawrap and answered a documentation question with a
+# connector error, so a definitional question is never an aggregation.
+_DEFINITIONAL_RE = re.compile(
+    r"\b(?:what|which|who|how)\b.*\b(?:mean|means|meaning)\b|"
+    r"\b(?:does|do|did)\b[^?]*\bmean\b",
+    re.I,
+)
+# "the mean", "mean of amount", "mean amount" keep their statistical reading.
+_STATISTICAL_MEAN_RE = re.compile(
+    r"\b(?:average|avg)\b|\b(?:the|a)\s+mean\b|\bmean\s+(?:of|value|amount|price)\b",
+    re.I,
+)
+
+
+def _asks_for_a_definition(text: str) -> bool:
+    """True when "mean" is the verb "to signify", not the statistical measure."""
+    return bool(_DEFINITIONAL_RE.search(text)) and not _STATISTICAL_MEAN_RE.search(text)
+
+
 # "top 5 customers by revenue" carries no metric word but is a ranking request:
 # group by the dimension, rank by the measure.
 _RANKING_RE = re.compile(
@@ -261,6 +281,9 @@ def parse_aggregation_request(message: str) -> AggregationRequest | None:
 
     # An explicit SQL statement is not a natural-language aggregation.
     if re.match(r"^\s*(?:select|with|show|describe|explain)\b", text.lower()):
+        return None
+
+    if _asks_for_a_definition(text):
         return None
 
     # "orders where amount > 10 on PilotSQLite" — table-first filtered count.

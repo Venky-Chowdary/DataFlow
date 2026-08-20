@@ -4,7 +4,12 @@
  * Secrets (passwords, connection URLs with credentials) are redacted before write.
  */
 
-import type { CopilotAction, CopilotChatMessage, CopilotPendingAction } from "./api";
+import type {
+  CopilotAction,
+  CopilotChatMessage,
+  CopilotPendingAction,
+  CopilotSource,
+} from "./api";
 
 export interface PilotMessage {
   role: "user" | "assistant";
@@ -14,6 +19,8 @@ export interface PilotMessage {
   pending_actions?: CopilotPendingAction[];
   suggested_prompts?: string[];
   tools_used?: { name: string; success: boolean; summary: string }[];
+  /** Citations the turn actually retrieved — absent means the answer is uncited. */
+  sources?: CopilotSource[];
 }
 
 export interface PilotToolLogEntry {

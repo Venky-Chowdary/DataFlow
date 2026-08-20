@@ -9,7 +9,14 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
+from .evidence import retains_evidence
+from .lexical_index import content_terms
+from .product_docs import ProductDocHit, compose_documented_answer, nearest_articles
 from .retriever import RetrievalResult
+
+# An answer nothing in the documentation covers is reported at this confidence and
+# never above it: the operator must be able to tell a documented answer from a guess.
+UNGROUNDED_CONFIDENCE = 0.1
 
 
 @dataclass
@@ -19,7 +26,8 @@ class RAGResponse:
     reasoning: str
     sources: list[dict]
     confidence: float
-    method: str  # "llm", "rag", "pattern"
+    method: str  # "product_doc", "product_doc_llm", "trained_rag", "rag", "pattern", "ungrounded"
+    grounded: bool = False
 
 
 class DataTransferRAGGenerator:
@@ -124,58 +132,125 @@ class DataTransferRAGGenerator:
         query: str,
         retrieval: RetrievalResult,
     ) -> RAGResponse:
-        """Answer a natural language data query."""
-        context = self._format_context(retrieval)
+        """Answer a product question from documentation, or state that none covers it."""
+        if retrieval.product_docs:
+            return self._answer_from_documentation(query, retrieval)
 
-        if self._llm:
-            try:
-                from ..llm.prompts import NATURAL_LANGUAGE_PROMPT
-                prompt = NATURAL_LANGUAGE_PROMPT.format(
-                    query=query,
-                    context=context,
-                )
-                llm_response = self._llm.generate(prompt, system="You are the Datawrap AI assistant.")
-                if llm_response.success:
+        for doc in retrieval.documents:
+            if doc.metadata.get("type") == "copilot_training":
+                answer = self._extract_copilot_answer(doc.text)
+                if answer:
                     return RAGResponse(
-                        answer=llm_response.content,
-                        reasoning=llm_response.reasoning or "LLM-generated response",
-                        sources=[{"text": d.text, "score": d.score} for d in retrieval.documents[:3]],
-                        confidence=min(retrieval.confidence + 0.1, 0.99),
-                        method="llm",
+                        answer=answer,
+                        reasoning="Matched trained copilot conversation",
+                        sources=[
+                            {"text": d.text[:150], "score": d.score, "type": "copilot_training"}
+                            for d in retrieval.documents[:3]
+                        ],
+                        confidence=min(retrieval.confidence + 0.15, 0.92),
+                        method="trained_rag",
+                        grounded=True,
                     )
-            except Exception as exc:
-                logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
-        # RAG-only fallback — prefer copilot training docs
-        if retrieval.documents:
-            for doc in retrieval.documents:
-                if doc.metadata.get("type") == "copilot_training":
-                    answer = self._extract_copilot_answer(doc.text)
-                    if answer:
-                        return RAGResponse(
-                            answer=answer,
-                            reasoning="Matched trained copilot conversation",
-                            sources=[{"text": d.text[:150], "score": d.score} for d in retrieval.documents[:3]],
-                            confidence=min(retrieval.confidence + 0.15, 0.92),
-                            method="trained_rag",
-                        )
-            top_docs = retrieval.documents[:3]
-            summary = "\n\n".join(d.text[:200] for d in top_docs)
-            answer = summary
-        else:
-            answer = (
-                "I can help you move data anywhere. Try asking:\n"
-                "• \"Move my CSV to MongoDB\"\n"
-                "• \"How does AI column mapping work?\"\n"
-                "• \"Check my data for PII\""
+        return self._answer_without_evidence(query)
+
+    def _answer_from_documentation(
+        self,
+        query: str,
+        retrieval: RetrievalResult,
+    ) -> RAGResponse:
+        hits = retrieval.product_docs
+        documented = compose_documented_answer(hits)
+        sources = [hit.as_source() for hit in hits]
+        confidence = min(0.5 + 0.45 * retrieval.top_grounding, 0.95)
+        cited = ", ".join(hit.chunk.citation for hit in hits[:2])
+
+        narrated = self._narrate(query, hits)
+        if narrated:
+            return RAGResponse(
+                answer=narrated,
+                reasoning=f"Answered from {cited}; narration constrained to those sections",
+                sources=sources,
+                confidence=confidence,
+                method="product_doc_llm",
+                grounded=True,
             )
 
         return RAGResponse(
-            answer=answer,
-            reasoning=f"Retrieved {len(retrieval.documents)} documents for query",
-            sources=[{"text": d.text, "score": d.score} for d in retrieval.documents],
-            confidence=retrieval.confidence,
-            method="rag",
+            answer=documented,
+            reasoning=f"Answered from {cited}",
+            sources=sources,
+            confidence=confidence,
+            method="product_doc",
+            grounded=True,
+        )
+
+    def _narrate(self, query: str, hits: list[ProductDocHit]) -> str | None:
+        """Optional LLM rewrite of the cited sections, rejected unless it kept the evidence.
+
+        A provider that answers from its own prior instead of the passages is the
+        failure mode that made a configured key look like working RAG, so the
+        rewrite must retain the question's grounded terms or it is discarded and the
+        documented text is served instead.
+        """
+        if not self._llm:
+            return None
+        context = self._format_doc_context(hits)
+        try:
+            from ..llm.prompts import NATURAL_LANGUAGE_PROMPT
+
+            prompt = NATURAL_LANGUAGE_PROMPT.format(query=query, context=context)
+            llm_response = self._llm.generate_prose(
+                prompt,
+                system=(
+                    "You are the Datawrap product assistant. Answer only from the "
+                    "documentation passages provided. Never add features, limits or "
+                    "numbers that are not in them; if they do not answer the question, "
+                    "say so plainly."
+                ),
+            )
+        except Exception as exc:
+            logging.getLogger(__name__).warning(
+                "LLM narration failed, serving documented text: %s", exc, exc_info=exc,
+            )
+            return None
+        if not llm_response.success or not (llm_response.content or "").strip():
+            return None
+        answer = llm_response.content.strip()
+        if answer.startswith(("{", "[")):
+            # A structured document is not an answer to an operator's question.
+            return None
+        return answer if self._retains_evidence(answer, hits) else None
+
+    @staticmethod
+    def _retains_evidence(answer: str, hits: list[ProductDocHit]) -> bool:
+        """Whether the narration still talks about the retrieved passages."""
+        return retains_evidence(
+            answer,
+            matched_terms={term for hit in hits for term in hit.matched_terms},
+            context_terms={t for hit in hits for t in content_terms(hit.chunk.text)},
+        )
+
+    def _answer_without_evidence(self, query: str) -> RAGResponse:
+        leads = nearest_articles(query)
+        lines = [
+            "The Datawrap documentation I can search does not cover that, so I will not "
+            "answer it from guesswork.",
+        ]
+        if leads:
+            lines.append("Closest guides: " + ", ".join(leads) + ".")
+        lines.append(
+            "I can answer questions about connectors, mapping, preflight gates, sync "
+            "modes, quarantine, reconcile proof, schedules, MCP and the API — or ask me "
+            "to read a live table.",
+        )
+        return RAGResponse(
+            answer="\n".join(lines),
+            reasoning="No documentation section covered enough of the question to answer it",
+            sources=[],
+            confidence=UNGROUNDED_CONFIDENCE,
+            method="ungrounded",
+            grounded=False,
         )
 
     def suggest_transformations(
@@ -222,6 +297,13 @@ class DataTransferRAGGenerator:
             sources=[],
             confidence=confidence,
             method="pattern",
+        )
+
+    @staticmethod
+    def _format_doc_context(hits: list[ProductDocHit]) -> str:
+        return "\n\n".join(
+            f"[{i + 1}] {hit.chunk.citation}\n{hit.chunk.text}"
+            for i, hit in enumerate(hits)
         )
 
     def _format_context(self, retrieval: RetrievalResult) -> str:

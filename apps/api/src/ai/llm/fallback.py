@@ -7,7 +7,7 @@ Graceful degradation: LLM → RAG → Pattern matching.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from services.value_serializer import json_default
 
@@ -29,6 +29,8 @@ class FallbackResult:
     reasoning: str = ""
     provider: str = ""
     confidence: float = 0.0
+    sources: list[dict] = field(default_factory=list)
+    grounded: bool = False
 
 
 class DataTransferFallbackChain:
@@ -77,6 +79,21 @@ class DataTransferFallbackChain:
                     return response
         return LLMResponse(content="", success=False, provider="none")
 
+    def generate_prose(self, prompt: str, system: str = "") -> LLMResponse:
+        """Answer a free-form prompt using only providers that can write prose.
+
+        The local knowledge provider always reports success and always returns a
+        column-analysis JSON document, so including it here turned "explain
+        quarantine" into a debug dump presented as an assistant answer.
+        """
+        for provider in self.providers:
+            if not provider.speaks_prose or not provider.is_available():
+                continue
+            response = provider.generate(prompt, system)
+            if response.success and response.content.strip():
+                return response
+        return LLMResponse(content="", success=False, provider="none")
+
     def analyze_with_fallback(
         self,
         column_name: str,
@@ -114,29 +131,22 @@ class DataTransferFallbackChain:
         )
 
     def query_with_fallback(self, question: str) -> FallbackResult:
-        """Answer natural language query with fallback."""
-        # Try LLM first
+        """Answer a natural language question, carrying the evidence the answer rests on.
 
+        This wrapper used to collapse every RAG method to "llm"/"rag" and drop the
+        citations, so the API returned a fluent paragraph with ``sources: []`` and no
+        way to tell a documented answer from an unevidenced one.
+        """
         rag_response = self.rag.query(question)
-
-        if rag_response.method == "llm":
-            return FallbackResult(
-                content=rag_response.answer,
-                success=True,
-                method="llm",
-                reasoning=rag_response.reasoning,
-                confidence=rag_response.confidence,
-                provider="llm",
-            )
-
-        # RAG fallback
         return FallbackResult(
             content=rag_response.answer,
             success=True,
-            method="rag",
+            method=rag_response.method,
             reasoning=rag_response.reasoning,
             confidence=rag_response.confidence,
-            provider="rag",
+            provider="llm" if rag_response.method.endswith("_llm") else "rag",
+            sources=list(rag_response.sources),
+            grounded=rag_response.grounded,
         )
 
     def get_status(self) -> dict:

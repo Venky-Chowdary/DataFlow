@@ -17,6 +17,7 @@ from typing import Any
 
 from services.value_serializer import json_default
 from ..knowledge.copilot_knowledge import DATA_PILOT_PERSONA, SUGGESTED_PROMPTS
+from ..rag.evidence import keeps_draft_facts
 from .agent import CopilotResponse
 from .context_builder import get_context_builder
 from .data_analyst import get_data_analyst
@@ -632,6 +633,67 @@ def _resolve_pilot_engine() -> str:
     return resolve_pilot_engine()
 
 
+_UNEVIDENCED_PRODUCT_TOOLS = frozenset({"explain_product", "describe_pilot", "search_knowledge"})
+
+
+def carries_evidence(response: CopilotResponse) -> bool:
+    """Whether an answer rests on something read: a citation or a live tool read.
+
+    Canonical for both the API's `grounded` flag and the narration gate — authored
+    prose and refusals must not be reported as grounded, and must not be handed to
+    an LLM to rewrite, because there is no evidence for it to restate.
+    """
+    if response.sources:
+        return True
+    return any(
+        tool.get("success") and str(tool.get("name") or "") not in _UNEVIDENCED_PRODUCT_TOOLS
+        for tool in response.tools_used or []
+    )
+
+
+def _sources_from_turn(turn: "PilotTurn") -> list[dict]:
+    """Citations the tools actually retrieved, de-duplicated by href."""
+    collected: list[dict] = []
+    seen: set[str] = set()
+    for tr in turn.tool_results:
+        if not tr.success or not isinstance(tr.output, dict):
+            continue
+        for src in tr.output.get("sources") or []:
+            if not isinstance(src, dict):
+                continue
+            key = str(src.get("href") or src.get("title") or "")
+            if key and key in seen:
+                continue
+            seen.add(key)
+            collected.append(src)
+    return collected
+
+
+def _evidence_ceiling(turn: "PilotTurn") -> float:
+    """Highest confidence the evidence in this turn can carry.
+
+    A product answer with no citation is authored prose or a refusal, not a
+    measured result — reporting it at 0.96 next to a live count is what made the
+    assistant sound equally sure of everything.
+    """
+    successes = [tr for tr in turn.tool_results if tr.success]
+    if not successes:
+        # Nothing was read, nothing was retrieved: this is a clarify or a refusal.
+        return 0.4
+    if any(tr.name not in _UNEVIDENCED_PRODUCT_TOOLS for tr in successes):
+        return 1.0
+    if _sources_from_turn(turn):
+        return 1.0
+    bases = {
+        str(tr.output.get("source") or "")
+        for tr in successes
+        if isinstance(tr.output, dict)
+    }
+    if bases and bases <= {"unsupported_question"}:
+        return 0.2
+    return 0.7
+
+
 @dataclass
 class PilotTurn:
     tool_results: list[ToolResult] = field(default_factory=list)
@@ -1210,6 +1272,7 @@ class DataPilotAgent:
                         needs_clarification=turn.needs_clarification,
                         suggested_prompts=self._follow_ups(message, turn),
                         data_insight=self._data_insight_from_turn(turn),
+                        sources=_sources_from_turn(turn),
                         tools_used=_tools_used(turn),
                     )
                 break
@@ -1282,6 +1345,10 @@ class DataPilotAgent:
         ok = sum(1 for t in tools if t.get("success"))
         if ok == 0 and not local.pending_actions:
             return local
+        # Refusals and uncited prose have no evidence to restate, so a rewrite can
+        # only add invention — that is how "how do I cook rice" came back narrated.
+        if not carries_evidence(local) and not local.pending_actions:
+            return local
 
         provider = None
         method = "llm_polish"
@@ -1334,16 +1401,26 @@ Draft answer:
         # Guardrail: empty or tiny polish is useless; keep local.
         if len(polished) < 20:
             return local
+        # A rewrite that dropped the draft's counts, IDs or subject is not a polish
+        # of a grounded answer — a provider ignoring the prompt must not replace it.
+        if not keeps_draft_facts(local.answer, polished):
+            logger.warning(
+                "%s narration dropped the draft's evidence — keeping the local answer",
+                method,
+            )
+            return local
         return CopilotResponse(
             answer=polished,
             intent=local.intent,
-            confidence=min(0.96, float(local.confidence or 0.9) + 0.03),
+            # Narration never adds evidence, so it never adds confidence.
+            confidence=float(local.confidence or 0.9),
             method=method,
             reasoning=f"Local tools + {method.split('_')[0].title()} narration",
             suggested_actions=local.suggested_actions,
             pending_actions=local.pending_actions,
             needs_clarification=local.needs_clarification,
             suggested_prompts=local.suggested_prompts,
+            sources=local.sources,
             data_insight=local.data_insight,
             tools_used=local.tools_used,
         )
@@ -1583,6 +1660,7 @@ Draft answer:
                         needs_clarification=turn.needs_clarification,
                         suggested_prompts=self._follow_ups(message, turn),
                         data_insight=self._data_insight_from_turn(turn),
+                        sources=_sources_from_turn(turn),
                         tools_used=_tools_used(turn),
                     )
                 break
@@ -1638,6 +1716,7 @@ Draft answer:
                 needs_clarification=turn.needs_clarification,
                 suggested_prompts=self._follow_ups(message, turn),
                 data_insight=insight,
+                sources=_sources_from_turn(turn),
                 tools_used=_tools_used(turn),
             )
 
@@ -1681,6 +1760,7 @@ Respond as Datawrap Pilot in natural language. Ground your answer in tool result
             needs_clarification=turn.needs_clarification,
             suggested_prompts=self._follow_ups(message, turn),
             data_insight=self._data_insight_from_turn(turn),
+            sources=_sources_from_turn(turn),
             tools_used=_tools_used(turn),
         )
 
@@ -1735,6 +1815,7 @@ Respond as Datawrap Pilot — grounded in tool results."""
             needs_clarification=turn.needs_clarification,
             suggested_prompts=self._follow_ups(message, turn),
             data_insight=self._data_insight_from_turn(turn),
+            sources=_sources_from_turn(turn),
             tools_used=_tools_used(turn),
         )
 
@@ -1861,12 +1942,14 @@ Respond as Datawrap Pilot — grounded in tool results."""
             if labels and "Confirm" not in answer:
                 answer = f"{answer}\n\nConfirm to proceed: {labels}.".strip()
         ok_tools = sum(1 for tr in turn.tool_results if tr.success)
+        sources = _sources_from_turn(turn)
         if ok_tools:
             confidence = 0.96
         elif turn.needs_clarification:
             confidence = 0.78
         else:
             confidence = 0.84
+        confidence = min(confidence, _evidence_ceiling(turn))
         return CopilotResponse(
             answer=answer,
             intent=intent,
@@ -1877,6 +1960,7 @@ Respond as Datawrap Pilot — grounded in tool results."""
             pending_actions=turn.pending_actions,
             needs_clarification=turn.needs_clarification,
             suggested_prompts=self._follow_ups(message, turn),
+            sources=sources,
             data_insight=self._data_insight_from_turn(turn) or (
                 {
                     "dataset": insight.dataset_name,
@@ -2503,7 +2587,11 @@ Respond as Datawrap Pilot — grounded in tool results."""
                         })
             elif tr.name == "search_knowledge" and tr.success:
                 hits = tr.output.get("hits", [])
-                if hits:
+                documented = (tr.output.get("answer") or "").strip()
+                if documented:
+                    # A cited documentation answer, not stitched-together fragments.
+                    parts.append(documented)
+                elif hits:
                     lines = ["Here's what matches your question:"]
                     for h in hits[:3]:
                         summary = (h.get("summary") or h.get("text") or "").strip()

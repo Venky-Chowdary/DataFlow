@@ -10,6 +10,12 @@ from typing import Any, Callable
 
 from services.value_serializer import json_default
 
+from ..rag.product_docs import (
+    compose_documented_answer,
+    names_product_subject,
+    nearest_articles,
+    product_doc_search,
+)
 from .data_analyst import get_data_analyst
 from .tool_permissions import current_caller_role, denial_message, is_tool_allowed
 from .transfer_rules import parse_transfer_data_rules
@@ -1549,19 +1555,47 @@ class DataPilotTools:
                 ),
             ),
         ]
-        for pattern, intent, answer in direct:
-            if pattern.search(lower):
-                return ToolResult(
-                    name="explain_product",
-                    success=True,
-                    output={
-                        "intent": intent,
-                        "answer": answer,
-                        "capabilities": PRODUCT_CAPABILITIES[:6],
-                        "actions": [],
-                        "source": "local_product_faq",
-                    },
-                )
+        curated = next(
+            ((intent, answer) for pattern, intent, answer in direct if pattern.search(lower)),
+            None,
+        )
+
+        # The shipped operator documentation, retrieved lexically with a grounding
+        # floor. Documentation leads even when a curated definition matched: the
+        # curated prose carries no citation, so answering from it alone gave the
+        # operator a confident paragraph they could not trace to any page.
+        doc_hits = product_doc_search(query, limit=3)
+        if doc_hits:
+            top = doc_hits[0]
+            documented = compose_documented_answer(doc_hits)
+            return ToolResult(
+                name="explain_product",
+                success=True,
+                output={
+                    "intent": curated[0] if curated else "documentation",
+                    "answer": f"{curated[1]}\n\n{documented}" if curated else documented,
+                    "capabilities": PRODUCT_CAPABILITIES[:6],
+                    "actions": [{"label": f"Open {top.chunk.doc_title}", "route": "help"}],
+                    "sources": [hit.as_source() for hit in doc_hits],
+                    "grounded": True,
+                    "source": "product_documentation",
+                },
+            )
+
+        if curated:
+            return ToolResult(
+                name="explain_product",
+                success=True,
+                output={
+                    "intent": curated[0],
+                    "answer": curated[1],
+                    "capabilities": PRODUCT_CAPABILITIES[:6],
+                    "actions": [],
+                    "sources": [],
+                    "grounded": False,
+                    "source": "local_product_faq",
+                },
+            )
 
         scores: dict[str, int] = {}
         for intent, keywords in INTENT_PATTERNS.items():
@@ -1589,7 +1623,36 @@ class DataPilotTools:
         if re.search(r"\b(?:count|aggregate|analy[sz]e|how many|sql)\b", lower):
             scores["analytics_help"] = scores.get("analytics_help", 0) + 2
 
-        intent = max(scores, key=scores.get) if scores else "greeting"
+        if not scores or not names_product_subject(query):
+            # Nothing in the documentation and no product keyword: say so. Falling
+            # through to the highest-scoring template answered "how do I cook rice"
+            # with a transfer blurb at full confidence.
+            leads = nearest_articles(query)
+            lines = [
+                "That is outside what the Datawrap documentation covers, so I will not "
+                "answer it from guesswork.",
+            ]
+            if leads:
+                lines.append("Closest guides: " + ", ".join(leads) + ".")
+            lines.append(
+                "Ask me about connectors, mapping, preflight gates, sync modes, quarantine, "
+                "reconcile proof, schedules, MCP or the API — or ask me to read a live table.",
+            )
+            return ToolResult(
+                name="explain_product",
+                success=True,
+                output={
+                    "intent": "unsupported",
+                    "answer": "\n".join(lines),
+                    "capabilities": PRODUCT_CAPABILITIES[:6],
+                    "actions": [{"label": "Open Help", "route": "help"}],
+                    "sources": [],
+                    "grounded": False,
+                    "source": "unsupported_question",
+                },
+            )
+
+        intent = max(scores, key=scores.get)
         matched = next((t for t in CONVERSATION_TEMPLATES if t.get("intent") == intent), None)
         if not matched:
             matched = CONVERSATION_TEMPLATES[0]
@@ -1602,6 +1665,8 @@ class DataPilotTools:
                 "answer": matched.get("assistant") or "",
                 "capabilities": PRODUCT_CAPABILITIES[:6],
                 "actions": actions,
+                "sources": [],
+                "grounded": False,
                 "source": "local_product_faq",
             },
         )
@@ -1609,6 +1674,35 @@ class DataPilotTools:
     def _search_knowledge(self, query: str = "") -> ToolResult:
         if not query.strip():
             return ToolResult(name="search_knowledge", success=False, output=None, error="query required")
+
+        # Shipped operator documentation answers first, with citations. Embedding
+        # similarity alone returned readable-looking fragments the operator could
+        # not trace back to any page, so a documented answer looked like a guess.
+        doc_hits = product_doc_search(query, limit=3)
+        if doc_hits:
+            return ToolResult(
+                name="search_knowledge",
+                success=True,
+                output={
+                    "query": query,
+                    "answer": compose_documented_answer(doc_hits),
+                    "hits": [
+                        {
+                            "text": hit.chunk.text[:600],
+                            "score": round(hit.score, 3),
+                            "type": "product_doc",
+                            "summary": hit.chunk.citation,
+                        }
+                        for hit in doc_hits
+                    ],
+                    "count": len(doc_hits),
+                    "empty": False,
+                    "sources": [hit.as_source() for hit in doc_hits],
+                    "grounded": True,
+                    "source": "product_documentation",
+                },
+            )
+
         try:
             from ..rag.pipeline import get_rag_pipeline
             rag = get_rag_pipeline()
@@ -1663,6 +1757,9 @@ class DataPilotTools:
                     "hits": hits,
                     "count": len(hits),
                     "empty": len(hits) == 0,
+                    "sources": [],
+                    "grounded": False,
+                    "source": "vector_knowledge" if hits else "unsupported_question",
                     "hint": (
                         None
                         if hits

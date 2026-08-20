@@ -59,6 +59,7 @@ class CopilotChatResponse(BaseModel):
     needs_clarification: str = ""
     suggested_prompts: list[str] = []
     sources: list[dict] = []
+    grounded: bool = False
     data_insight: Optional[dict] = None
     tools_used: list[dict] = []
 
@@ -114,6 +115,7 @@ async def copilot_chat(request: CopilotChatRequest, http_request: Request):
     """
     try:
         from ..ai.copilot import get_copilot_agent
+        from ..ai.copilot.pilot_agent import carries_evidence
         from ..ai.copilot.tool_permissions import caller_role
 
         agent = get_copilot_agent()
@@ -132,6 +134,9 @@ async def copilot_chat(request: CopilotChatRequest, http_request: Request):
             needs_clarification=getattr(result, "needs_clarification", "") or "",
             suggested_prompts=result.suggested_prompts,
             sources=result.sources,
+            # Grounded means the answer rests on a citation or a live read, never
+            # on authored prose — the operator must be able to tell them apart.
+            grounded=carries_evidence(result),
             data_insight=result.data_insight,
             tools_used=getattr(result, "tools_used", []) or [],
         )

@@ -1,0 +1,587 @@
+{
+  "version": 1,
+  "generated_from": "apps/web/src/lib/helpDocs.ts",
+  "chunk_count": 58,
+  "chunks": [
+    {
+      "id": "help-getting-started#overview",
+      "doc_id": "help-getting-started",
+      "doc_slug": "getting-started",
+      "doc_title": "How Datawrap works",
+      "category": "Getting started",
+      "section_id": "overview",
+      "section_title": "What is Datawrap?",
+      "text": "What is Datawrap?\nDatawrap is a universal data transfer platform. Transfer Studio maps schemas across systems, runs nine preflight gates before any production write, and proves every load with checksum reconciliation. Datawrap Pilot and MCP bring the same governed engine to chat and agent workflows."
+    },
+    {
+      "id": "help-getting-started#surfaces",
+      "doc_id": "help-getting-started",
+      "doc_slug": "getting-started",
+      "doc_title": "How Datawrap works",
+      "category": "Getting started",
+      "section_id": "surfaces",
+      "section_title": "Product surfaces (sidebar map)",
+      "text": "Product surfaces (sidebar map)\nThe signed-in workspace sidebar matches these guides. Start in Transfer Studio, then expand to Pipelines, Contracts, Pilot, and MCP.\nPlatform — Overview, Transfer Studio, Connectors, Contracts\nOperations — Jobs (Job Theater), Pipelines, Transforms, Query, Pilot\nSystem — Settings (SSO/Team), MCP, Help, Proofs\nGoverned path — Source → Destination → Map → Validate → Run → Jobs proof\nOverview — full Platform / Operations / System sidebar used across every guide."
+    },
+    {
+      "id": "help-getting-started#first-transfer",
+      "doc_id": "help-getting-started",
+      "doc_slug": "getting-started",
+      "doc_title": "How Datawrap works",
+      "category": "Getting started",
+      "section_id": "first-transfer",
+      "section_title": "Your first transfer (step by step)",
+      "text": "Your first transfer (step by step)\nFollow this exact path inside the signed-in workspace. Every screenshot is from the live application — not a marketing mock.\nConfirm the workspace is healthy\nOpen **Overview** and confirm connection health, recent jobs, and throughput for your tenant. If metrics fail to load, fix connectivity with your Owner before creating connectors.\n\nYou should see live **rows moved**, success rate, and connection status cards before you continue.\nWhere: Sidebar → Overview\nAdd or test a connector\nOpen **Platform → Connectors**. Click **New connection** to create a source or destination, or click **Test** on an existing row until you see **Test passed**.\n\nFor a quick offline walkthrough you can skip connectors and upload a CSV on the Transfer Studio **Source** step instead.\nWhere: Platform → Connectors → New connection\nRun Transfer Studio Source → Destination → Map → Validate → Run\nOpen **Platform → Transfer** (or **New transfer**). On **Source**, upload a sample file such as `sample-orders.csv` or pick a **Database** connector. Review **Detected structure**, then continue through **Destination**, **Map**, and **Validate**.\n\nFix every blocked gate before **Run**. Execute stays locked until Validate passes.\nWhere: Platform → Transfer  ·  or New transfer\nProve the load in Job Theater\nOpen **Operations → Jobs** and select the run. Confirm **Quarantine** is empty (or review each rejected value and reason). Wait for checksum **MATCH** and row fidelity on the reconcile stage — that is the archiveable proof of the load.\nWhere: Operations → Jobs"
+    },
+    {
+      "id": "help-getting-started#workspace",
+      "doc_id": "help-getting-started",
+      "doc_slug": "getting-started",
+      "doc_title": "How Datawrap works",
+      "category": "Getting started",
+      "section_id": "workspace",
+      "section_title": "Workspace concepts",
+      "text": "Workspace concepts\nEvery transfer runs inside a workspace with connectors, saved routes, synonym dictionaries, and audit history. Team members inherit RBAC from your IdP in enterprise tenants.\nConnectors — encrypted credentials scoped to workspace\nSaved routes — reuse mapping + write mode presets\nSynonym dictionary — accepted semantic pairs for auto-map\nJob Theater — unified run history with quarantine and proof"
+    },
+    {
+      "id": "help-installation#what-you-get",
+      "doc_id": "help-installation",
+      "doc_slug": "installation",
+      "doc_title": "Access your enterprise workspace",
+      "category": "Getting started",
+      "section_id": "what-you-get",
+      "section_title": "What your organization receives",
+      "text": "What your organization receives\nDatawrap is delivered as a **hosted enterprise workspace** at your tenant URL (for example `your-company.datawrap.io`). After sign-in you work entirely in the browser — there is nothing to install on operator laptops.\n\nThe signed-in product includes **Overview**, **Connectors**, **Transfer Studio**, **Pipelines**, **Jobs** (Job Theater), **Query**, **Pilot**, and **Settings**. Your IT team configures SSO and optional BYOK once; day-to-day operators create connections, run governed transfers, and prove loads.\nAfter SSO — Overview shows workspace health, throughput, and recent jobs for your tenant."
+    },
+    {
+      "id": "help-installation#access",
+      "doc_id": "help-installation",
+      "doc_slug": "installation",
+      "doc_title": "Access your enterprise workspace",
+      "category": "Getting started",
+      "section_id": "access",
+      "section_title": "Procedure: get access",
+      "text": "Procedure: get access\nUse this path when onboarding a new operator or confirming a newly provisioned tenant. Complete every step before you create production connectors.\nReceive your tenant URL and role\nA workspace **Owner** (or Datawrap provisioning) invites you by email with one of three roles:\n\n**Viewer** — inspect Jobs, quarantine, and MATCH proof; cannot create connectors or run transfers.\n\n**Editor** — create connectors, run **Transfer Studio** and **Pipelines**, and open **Job Theater**.\n\n**Owner** — everything Editors can do, plus **Settings → SSO**, **Enterprise**, **BYOK**, **Team**, and API keys.\n\nOpen the invite link, or go directly to your tenant URL (for example `https://your-company.datawrap.io`). Sign in with your company identity provider — **Okta**, **Azure AD / Entra ID**, **Google Workspace**, or another SAML 2.0 / OIDC IdP configured for the tenant.\nWhere: IT / Datawrap admin → invite email\nSign in with SSO\nOn the login screen choose **Continue with SSO** (or your company's branded SSO button). Authenticate with your work account. Datawrap issues a workspace session that inherits your RBAC role from the invite or from IdP group claims.\n\nA successful sign-in lands on **Overview**. Confirm the top bar shows your tenant name and that the left sidebar lists **Platform** surfaces (Connectors, Transfer, Pipelines) and **Operations → Jobs**. If you only see a blank or permission error, stop and ask an Owner to verify your role under **Settings → Team**.\nWhere: Login → Continue with SSO\nConfirm you can reach Connectors and Transfer\nIn the left sidebar open **Platform → Connectors**. You should see health cards and either an empty Connections table or existing rows. Then open **Platform → Transfer** (Transfer Studio) or click **New transfer** if shown.\n\nYou are ready for day-one work when:\n\n**1.** **New connection** is visible on Connectors (Editors and Owners).\n\n**2.** Transfer Studio opens the **Source → Destination → Map → Validate → Run** wizard.\n\n**3.** **Operations → Jobs** opens Job Theater for past and live runs.\n\nIf Connectors or Transfer is missing from the sidebar, your role is likely **Viewer** — ask an Owner to raise it to **Editor** under **Settings → Team**.\nWhere: Sidebar → Platform → Connectors  ·  Transfer\nTip: **Viewer** — inspect Jobs and proof only. **Editor** — run transfers and manage connectors. **Owner** — SSO, BYOK, Team invites, and enterprise controls under **Settings**."
+    },
+    {
+      "id": "help-installation#admin-setup",
+      "doc_id": "help-installation",
+      "doc_slug": "installation",
+      "doc_title": "Access your enterprise workspace",
+      "category": "Getting started",
+      "section_id": "admin-setup",
+      "section_title": "Admin checklist (Owners)",
+      "text": "Admin checklist (Owners)\nTenant **Owners** complete these once per workspace. Operators do not need this checklist to run day-to-day transfers — it is for IT and security readiness.\n**Settings → SSO** — choose SAML or OIDC, paste IdP metadata URL (or upload XML), map roles if your IdP sends group claims, then click **Test login** and **Save**.\n**Settings → Enterprise** — set tenant display name, data **region**, MFA policy, session timeout, and optional IP allowlist.\n**Settings → Enterprise → BYOK** — upload your customer KMS key when procurement requires customer-managed encryption for connector secrets.\n**Settings → Team** — invite Editors and Viewers with least privilege; re-check IdP group → role mapping after SSO enforce.\n**Settings → Security** — download the **Security posture report** for SOC 2 / GDPR / HIPAA questionnaires.\nTip: If your tenant URL is not live yet, email **sales@datawrap.io**. Provisioning is handled by Datawrap — operators never install or run a local API."
+    },
+    {
+      "id": "help-installation#browser",
+      "doc_id": "help-installation",
+      "doc_slug": "installation",
+      "doc_title": "Access your enterprise workspace",
+      "category": "Getting started",
+      "section_id": "browser",
+      "section_title": "Supported browsers & network",
+      "text": "Supported browsers & network\nUse a current **Chromium**, **Firefox**, or **Safari** build. Connector **Test** and transfers need outbound network access from the Datawrap worker (in your pinned region) to your sources and destinations — databases, warehouses, and object stores.\n\nCorporate proxies and firewalls must allow those destinations for the workspace region selected under **Settings → Enterprise**. If **Test** fails with a timeout while credentials are correct, open a ticket with network/security before re-running Validate gates in Transfer Studio."
+    },
+    {
+      "id": "help-transfer-studio#example",
+      "doc_id": "help-transfer-studio",
+      "doc_slug": "transfer-studio",
+      "doc_title": "Transfer Studio guide",
+      "category": "Transfer Studio",
+      "section_id": "example",
+      "section_title": "Example transfer used in this guide",
+      "text": "Example transfer used in this guide\nEvery screenshot below is from a real Transfer Studio session using the built-in demo file.\n\n**Source:** `sample-orders.csv` (5 rows · 5 columns: `order_id`, `customer_email`, `order_amt`, `order_date`, `status`)\n\n**Destination:** **File Export** → **CSV** → `exports/sample-orders.csv`\n\n**Path:** **Source → Destination → Map → Validate → Run** — the same rail Pipelines, Pilot, and MCP reuse. There is no silent shortcut around gates or checksum proof.\n\nFor production warehouse loads, swap Destination to **Database / Warehouse** and pick a saved connector (for example PostgreSQL `public.orders`). Map, Validate, and Run stay identical."
+    },
+    {
+      "id": "help-transfer-studio#procedure",
+      "doc_id": "help-transfer-studio",
+      "doc_slug": "transfer-studio",
+      "doc_title": "Transfer Studio guide",
+      "category": "Transfer Studio",
+      "section_id": "procedure",
+      "section_title": "Procedure: run the sample-orders transfer",
+      "text": "Procedure: run the sample-orders transfer\nFollow all five steps in order. Markers on each screenshot match the live product UI.\nStep 1 — Source: load sample-orders.csv\nOpen **Transfer Studio** from the sidebar (**Transfer**) or click **New transfer**. The wizard lands on **Source** with the five-step rail: **Src → Dest → Map → Validate → Run**.\n\nUnder **Where is your data?**, keep **File** selected. Click **Load sample orders CSV** (or upload your own CSV). Wait until the file chip shows **Sample-Orders.csv** with row/column counts and the right panel shows **Detected structure** with typed columns (`INTEGER`, `VARCHAR`, `DECIMAL`, `DATE`).\n\nClick **Continue to Destination →** only after Detected structure is populated — that profile feeds Map and Validate.\nWhere: Platform → Transfer  ·  or New transfer  →  Load sample orders CSV\nTip: Database and Cloud storage sources work the same way — pick a saved connector, choose table/object, wait for Detected structure, then continue.\nStep 2 — Destination: File Export CSV\nOn **Destination**, choose **Destination Mode**:\n\n**Database / Warehouse** — pick a saved connector (or **Custom connection**) and set schema/table.\n\n**File Export** — used in this example. Select format **CSV** (JSON, Parquet, Excel, and more are available). Optionally set **Output path** to `exports/sample-orders.csv`.\n\nConfirm **Sync defaults** (this example uses **Full append** · Manual approval · Strict validation). Open **Advanced** for overwrite, CDC, SCD2, mirror, cursors, and drift policy.\n\nWhen the route shows ready, click **Continue to Map**.\nWhere: Destination Mode → File Export  ·  format CSV  ·  path exports/sample-orders.csv\nTip: Enterprise warehouse path: **Database / Warehouse** → PostgreSQL (or Snowflake / BigQuery) → table such as `public.orders`. The next three steps do not change.\nStep 3 — Map: align columns and Accept risk\nMap opens **Map columns** with every source field paired to a destination name and type. For `sample-orders.csv` you should see five edges — for example `order_id` → `order_id`, `order_amt` → `order_amount`, with transforms such as **Cast integer**, **Normalize email**, **Cast decimal**, and **Date → ISO**.\n\nUse the filter tabs (**All**, **Review**, **Critical**, **PII**, **Ready**) to focus issues. False-friends stay named: **qty≠amt**, **user≠customer**, **dest collision**. **Approve eligible** will not clear those — Remap dest, or Confirm this pair on the row. When a type cast is lossy (for example DECIMAL → TEXT on a file export), click **Accept risk** on that row.\n\n**Continue to Validate →** stays locked until every blocking map issue is approved or remapped. Then continue.\nWhere: Map columns → review edges → Accept risk / Approve → Continue to Validate\nTip: Open **Proof** on Map anytime to see confidence and fidelity evidence before Validate.\nStep 4 — Validate: clear every blocking gate\nValidate runs the full gate set (source readable, destination write access, schema contract, mappings, sample dry-run, data integrity, DDL, capacity, reconcile simulation, plus sync/policy gates).\n\nIf a gate blocks — as in this example when `order_amt` (DECIMAL) collapses to TEXT — the dashboard shows **Validation blocked**, which checks failed, and **Suggested fixes** (for example **Remap order_amt → VARCHAR**). Apply the fix, click **Re-run**, and wait until the API decision is **approve**.\n\n**Execute** stays locked while any gate is blocked. That is intentional — do not skip Validate.\nWhere: Validate dashboard → fix suggested remediations → Re-run until Execute unlocks\nTip: Use **Explain & fix with AI** on Validate for plain-language why/fix, then **Re-run**. See the Preflight gates article for every gate ID.\nStep 5 — Run: Execute Transfer and prove in Job Theater\nWhen Validate approves, the **Run** step shows readiness (**Preflight approved**) and unlocks **Execute Transfer**.\n\nIf you open Run while Validate is still incomplete, you see **Confirm Validate before write** and Execute stays locked — return to Validate, clear blockers, then come back.\n\nClick **Execute Transfer**. The engine submits the governed job, locks the approved mapping, and opens live telemetry. Then open **Operations → Jobs** (Job Theater): confirm quarantine is empty (or review reasons) and wait for checksum **MATCH** / row fidelity. That MATCH artifact is the archiveable proof of the load.\nWhere: Run → Execute Transfer  ·  then Operations → Jobs\nTip: After Execute, proof lives on the job — open **Jobs → select the run → Quarantine / Reconcile**. See Job Theater guide for MATCH details."
+    },
+    {
+      "id": "help-transfer-studio#write-modes",
+      "doc_id": "help-transfer-studio",
+      "doc_slug": "transfer-studio",
+      "doc_title": "Transfer Studio guide",
+      "category": "Transfer Studio",
+      "section_id": "write-modes",
+      "section_title": "Write modes (Advanced)",
+      "text": "Write modes (Advanced)\nOpen **Advanced** on Destination (or Map footer) to set sync mode. Pipelines reuse the same modes on every schedule tick.\n**Full append** — keep existing rows; append the full snapshot (default in the example).\n**Full overwrite** — replace the target, then load.\n**Incremental append** — cursor-based new rows only.\n**Incremental deduped** — cursor + primary-key upserts.\n**CDC / SCD Type 2 / Mirror** — advanced identity modes (PK required where noted).\n**Destination write → Query** — one INSERT/MERGE/UPDATE with `:binds` mapped to source columns. Failed rows quarantine. Not CDC.\n**Destination write → Stored procedure** — one CALL/EXEC per row (Informatica connected SQL). SQLite has no dest procedures; dest query INSERT is allowed."
+    },
+    {
+      "id": "help-transfer-studio#quarantine",
+      "doc_id": "help-transfer-studio",
+      "doc_slug": "transfer-studio",
+      "doc_title": "Transfer Studio guide",
+      "category": "Transfer Studio",
+      "section_id": "quarantine",
+      "section_title": "After Run: quarantine & MATCH proof",
+      "text": "After Run: quarantine & MATCH proof\nRows that fail coerce or policy checks are isolated with **column**, **value**, and **reason** — never silently dropped. After the write, Datawrap reconciles row counts and content hashes. Only then does Job Theater flash **MATCH**.\nTip: Open **Jobs → select the run → Quarantine** before replaying failed rows. Export proof when compliance needs an archive pack.\nJob Theater — after Execute, reconcile and row fidelity prove the sample-orders load."
+    },
+    {
+      "id": "help-preflight-gates#when",
+      "doc_id": "help-preflight-gates",
+      "doc_slug": "preflight-gates",
+      "doc_title": "Preflight gates explained",
+      "category": "Transfer Studio",
+      "section_id": "when",
+      "section_title": "When Validate runs",
+      "text": "When Validate runs\nOn Transfer Studio → Validate, and again on every Pipeline tick, Datawrap runs the same gate engine. Execute stays locked until the API decision is approve. Soft or review-grade passes do not unlock write.\nTip: Pipelines cannot skip Validate. A failing gate on a schedule blocks the write the same way as a manual run."
+    },
+    {
+      "id": "help-preflight-gates#core-gates",
+      "doc_id": "help-preflight-gates",
+      "doc_slug": "preflight-gates",
+      "doc_title": "Preflight gates explained",
+      "category": "Transfer Studio",
+      "section_id": "core-gates",
+      "section_title": "Core gates (before write)",
+      "text": "Core gates (before write)\nThese checks run in Transfer Studio Validate. Open any failing card for the rule text and remediation.\nG1 Source readable — source connects and rows can be read\nG2 Destination write access — destination is reachable with write/create privilege\nG3 Schema contract — source and target schemas are compatible\nG4 Column mappings — every column maps above the confidence threshold\nG5 Sample dry-run — sample rows pass the same transforms writers use\nG9 Data integrity — encoding, required nulls, identity duplicates, precision on the sample\nG6 Target DDL — required CREATE / ALTER statements are valid\nG7 Staging capacity — destination has headroom for the volume\nG8 Sample reconciliation — pre-write sample identity and uniqueness hold (post-load checksum runs after Execute)\nValidate — core gate cards (Source readable, Destination write access, Schema contract, …) before any write."
+    },
+    {
+      "id": "help-preflight-gates#policy-gates",
+      "doc_id": "help-preflight-gates",
+      "doc_slug": "preflight-gates",
+      "doc_title": "Preflight gates explained",
+      "category": "Transfer Studio",
+      "section_id": "policy-gates",
+      "section_title": "Policy & drift gates",
+      "text": "Policy & drift gates\nDepending on sync mode and Advanced settings, Validate also enforces sync contract (cursor / primary key), schema change policy, validation posture, and live schema drift against your saved mapping.\nSync contract — cursor and primary key satisfy the chosen sync mode\nSchema change policy — detected drift is allowed by policy\nValidation posture — overall posture matches Strict / Maximum / Balanced\nSchema drift — live schemas still match the saved mapping contract"
+    },
+    {
+      "id": "help-preflight-gates#fix",
+      "doc_id": "help-preflight-gates",
+      "doc_slug": "preflight-gates",
+      "doc_title": "Preflight gates explained",
+      "category": "Transfer Studio",
+      "section_id": "fix",
+      "section_title": "Procedure: fix a blocked gate",
+      "text": "Procedure: fix a blocked gate\nUse this path whenever Validate shows a red or blocking gate.\nOpen the failing gate card\nClick **Run preflight** if gates are still PENDING. Open the failing card and read the rule plus sample evidence. Note whether the issue is mapping, credentials, capacity, encoding, or drift.\nWhere: Transfer Studio → Validate → gate card\nRemediate in Map or Advanced\nApprove or rematch columns, **Accept risk** for intentional casts, change sync mode / primary key / cursor, or use **Fix bad data** to strip or quarantine encoding issues — then return to Validate.\nWhere: Map · Destination → Advanced · Fix bad data\nRe-run until Execute unlocks\nExecute unlocks only when the API returns **approve**. Then continue to **Run**. If you are unsure, ask Pilot to explain the failing gate in plain language.\nWhere: Validate → Re-run preflight\nTip: Do not force Execute from the browser alone — governed unlock comes from the control plane."
+    },
+    {
+      "id": "help-semantic-mapping#roles",
+      "doc_id": "help-semantic-mapping",
+      "doc_slug": "semantic-mapping",
+      "doc_title": "Semantic column mapping",
+      "category": "Transfer Studio",
+      "section_id": "roles",
+      "section_title": "Semantic roles",
+      "text": "Semantic roles\nDatawrap detects roles like amount, email, identifier, timestamp, and address — not just string name matching.\nMap — roles and transforms (Cast, Normalize email, Date → ISO) with confidence and Accept risk."
+    },
+    {
+      "id": "help-semantic-mapping#synonyms",
+      "doc_id": "help-semantic-mapping",
+      "doc_slug": "semantic-mapping",
+      "doc_title": "Semantic column mapping",
+      "category": "Transfer Studio",
+      "section_id": "synonyms",
+      "section_title": "Synonym dictionary",
+      "text": "Synonym dictionary\nAccept or reject mapping suggestions. Accepted pairs enter your workspace synonym dictionary for future auto-maps.\nSource profiling types feed synonym and role inference before Map opens."
+    },
+    {
+      "id": "help-semantic-mapping#confidence",
+      "doc_id": "help-semantic-mapping",
+      "doc_slug": "semantic-mapping",
+      "doc_title": "Semantic column mapping",
+      "category": "Transfer Studio",
+      "section_id": "confidence",
+      "section_title": "Confidence scores",
+      "text": "Confidence scores\nEach Map edge shows a confidence percentage. Review anything below your threshold — use filter tabs **Review**, **Critical**, **PII**, and **Ready**. Click **Accept risk** for intentional lossy casts, or **Approve** when the edge is clean."
+    },
+    {
+      "id": "help-semantic-mapping#drift",
+      "doc_id": "help-semantic-mapping",
+      "doc_slug": "semantic-mapping",
+      "doc_title": "Semantic column mapping",
+      "category": "Transfer Studio",
+      "section_id": "drift",
+      "section_title": "Schema drift detection",
+      "text": "Schema drift detection\nDatawrap compares current source and destination schemas against your saved route. Drift warnings appear in Transfer Studio and Datawrap Pilot before the next scheduled run.\nNew columns in source — review suggested maps\nRemoved columns — confirm destination still valid\nType changes — preflight type-coercion gate validates casts"
+    },
+    {
+      "id": "help-connectors#overview",
+      "doc_id": "help-connectors",
+      "doc_slug": "connectors",
+      "doc_title": "Add & manage connectors",
+      "category": "Connectors",
+      "section_id": "overview",
+      "section_title": "What you see on Connectors",
+      "text": "What you see on Connectors\nThe **Connectors** page is the inventory of every saved source and destination in your workspace. Top **health cards** summarize **Connections**, **Healthy**, and **Needs attention**. The table below shows **Last test** and **Last used** so operators know what is safe to schedule in Pipelines.\n\nUse the **Connections** tab for saved credentials. Use **Catalog** only when browsing available driver types — Catalog does not store secrets.\nLive workspace — health cards on top, Connections table with Test passed / Test failed."
+    },
+    {
+      "id": "help-connectors#add-connector",
+      "doc_id": "help-connectors",
+      "doc_slug": "connectors",
+      "doc_title": "Add & manage connectors",
+      "category": "Connectors",
+      "section_id": "add-connector",
+      "section_title": "Procedure: add a connector",
+      "text": "Procedure: add a connector\nFollow this path whenever you onboard a new system. Numbered markers on the screenshots match the live product UI.\nOpen Connectors\nIn the signed-in workspace, open **Platform → Connectors**. Confirm the **Connections** tab is selected when you are managing saved credentials (not **Catalog**).\n\nScan the health cards. If **Needs attention** is greater than zero, open those rows and re-run **Test** before scheduling pipelines against them.\nWhere: Sidebar → Platform → Connectors\nClick New connection — Choose a connector dialog\nClick **New connection** (top-right). A modal dialog opens: **Choose a connector**.\n\nUse category chips (**Databases**, **Data Warehouses**, **Files & Formats**, …), search, and status filters (**Certified**, **Source only**, **Test only**, **Planned**). Transfer-ready cards show badges such as **Full Transfer**.\n\nPick a driver — for example **PostgreSQL**, **MySQL**, **MongoDB**, **Snowflake**, **BigQuery**, **S3**, **CSV / TSV**, or a SQLAlchemy generic. **Planned** catalog entries must not be scheduled in production Pipelines.\nWhere: Top-right → New connection\nEnter credentials and Test\nAfter you pick a driver, the credential form opens (still in the dialog flow). Fill **host**, **database**, and auth (password, key, or cloud credentials). Click **Test** before **Save**. Do not skip Test.\n\n**Test passed** (green) on the Connections table means the driver reached the system — safe to pick in Transfer Studio and Pipelines.\n\n**Test failed** (red) means fix credentials, firewall, or region network access before using the connector. Failed connections block Validate gates later.\nWhere: Wizard form → Test → Save\nTip: Credentials are encrypted at rest with workspace-scoped keys. Enterprise tenants can enable **BYOK** under **Settings → Enterprise**. Raw passwords never appear in Job Theater logs.\nUse it in Transfer Studio\nOpen **Platform → Transfer**. On **Source** (or later **Destination**), choose **Database** or **Cloud storage**. Your saved healthy connectors appear in the picker.\n\nContinue through **Map → Validate → Run**. A green **Test passed** on Connectors does **not** skip preflight — Validate still runs the full gate set before any production write.\nWhere: Transfer → Source or Destination → Database"
+    },
+    {
+      "id": "help-connectors#labels",
+      "doc_id": "help-connectors",
+      "doc_slug": "connectors",
+      "doc_title": "Add & manage connectors",
+      "category": "Connectors",
+      "section_id": "labels",
+      "section_title": "Honest transfer-ready labels",
+      "text": "Honest transfer-ready labels\nCatalog tiles are not the same as production drivers. Each connector shows one of these readiness states. Only routes with transfer-ready evidence get the production badge — everything else stays labelled honestly.\n**Live** — governed transfer path proven; safe for production schedules after Test passed.\n**Beta** — works with known limits; review before production Pipelines.\n**Planned** — catalog presence only; do not schedule yet.\n**Connect-only** — auth works; write path is not transfer-ready."
+    },
+    {
+      "id": "help-connectors#native",
+      "doc_id": "help-connectors",
+      "doc_slug": "connectors",
+      "doc_title": "Add & manage connectors",
+      "category": "Connectors",
+      "section_id": "native",
+      "section_title": "Native drivers & SQLAlchemy",
+      "text": "Native drivers & SQLAlchemy\n**PostgreSQL**, **MySQL**, **MongoDB**, **Snowflake**, **BigQuery**, **Redshift**, **S3**, **CSV**, **JSON**, and more ship with upsert and incremental where supported. Generic **SQLAlchemy** URLs extend reach with the same **Validate** preflight path used by native drivers."
+    },
+    {
+      "id": "help-pipelines#overview",
+      "doc_id": "help-pipelines",
+      "doc_slug": "pipelines",
+      "doc_title": "Create pipelines & recurring sync",
+      "category": "Connectors",
+      "section_id": "overview",
+      "section_title": "What a pipeline is",
+      "text": "What a pipeline is\nA **pipeline** is a scheduled Transfer Studio route. Every cadence tick still runs mapping confidence, **Validate** preflight gates, quarantine, and reconciliation proof — recurring does **not** mean less governance.\n\nCreate happens on an **inline form** titled **Create recurring sync** (not a side drawer). After you save, clicking a pipeline opens the **right-side detail drawer** with Overview / Schema / History / Config and actions like **Run now**, **Pause**, and **Edit**.\nTip: You need at least two saved connectors (source + destination) under **Platform → Connectors** before **Save pipeline** enables.\nOperations → Pipelines — create from empty state or New pipeline in the toolbar."
+    },
+    {
+      "id": "help-pipelines#create-pipeline",
+      "doc_id": "help-pipelines",
+      "doc_slug": "pipelines",
+      "doc_title": "Create pipelines & recurring sync",
+      "category": "Connectors",
+      "section_id": "create-pipeline",
+      "section_title": "Procedure: create a pipeline",
+      "text": "Procedure: create a pipeline\nFollow this exact path in the signed-in workspace. Screenshots are from the live **Create recurring sync** form and pipeline detail drawer — not Jobs.\nOpen Pipelines\nOpen **Operations → Pipelines**. The page title is **Pipelines** with the subtitle *Schedule recurring syncs with the same governed transfer engine.*\n\nIf none exist yet, the empty state shows **Create pipeline**. The toolbar always offers **Export YAML**, **Import YAML**, **Require signed**, and **New pipeline**.\nWhere: Sidebar → Operations → Pipelines\nOpen Create recurring sync\nClick **Create pipeline** or **New pipeline**. The page switches to the inline form **Create recurring sync** (*Schedule source → destination with your saved connectors*). A teal status chip shows **Creating your first pipeline** (or **Creating pipeline**).\n\nFill:\n\n1. **Pipeline name** (example: `Nightly orders sync`)\n2. **Source connector** + **Source table|collection**\n3. **Destination connector** + **Destination table|collection**\n\nPrefer connectors you already **Test passed** on Connectors, and a route you have proven once in Transfer Studio.\nWhere: Create pipeline  ·  or New pipeline\nTip: If Source/Destination show **No connectors available**, stop and add connectors under **Platform → Connectors** first — Save stays locked until both sides are selected.\nSet Cadence (Preset or Cron)\nIn the **Cadence** panel, choose **Preset** or **Cron**.\n\n**Preset** tiles: **Hourly**, **Daily**, **Weekly**. Presets are rolling intervals from the last run (or create) — Daily means ~24 hours later, not a fixed wall-clock time.\n\n**Cron** uses a 5-field expression plus **Timezone** (example: `10 10 * * *` daily at 10:10). Next run is computed after save.\nWhere: Cadence → Preset | Cron\nChoose Sync mode + validation policy\nIn **Sync mode**, pick how rows move. Live tiles include **Full overwrite**, **Full append**, **Incremental append**, **Incremental deduped**, **CDC**, **SCD Type 2**, and **Mirror** (availability depends on connector pair).\n\nFor incremental / CDC / SCD2 / Mirror, fill **Cursor column** and/or **Primary key** when shown.\n\nSet **Validation mode** (**Strict** / **Maximum** / **Balanced**), **Schema change policy**, and optionally **Backfill new fields on schema change**.\nWhere: Sync mode · Validation mode · Schema change policy\nBind Data contract + retries (optional)\nIn **Data contract**, optionally bind a **SIGNED** contract and enable **Require signed contract before each run (fail-closed)** so unattended ticks cannot write against an unsigned schema.\n\nIn **Retry & notifications**, set **Max retries**, **Retry backoff (seconds)**, and toggles **Notify on failure** / **Notify on success**.\nWhere: Data contract · Retry & notifications\nSave pipeline\nScroll to the form footer. Click **Save pipeline** (edit mode shows **Save changes**). On success you get a toast **Pipeline created** and return to the pipeline list/cards.\n\n**Cancel** discards the draft without saving.\nWhere: Footer → Save pipeline\nOpen the detail drawer — Run now & History\nClick the saved pipeline card/row. The **right-side detail drawer** opens with tabs **Overview**, **Schema**, **History**, and **Config**.\n\nFooter actions: **Run now** (immediate governed tick), **Last job**, **Pause** / **Activate**, **Edit** (reopens the inline form), **Export YAML**, **Delete**.\n\nUse **History** to see prior ticks before jumping to Job Theater.\nWhere: Click pipeline card → right drawer\nTip: **Edit** closes the drawer and returns you to the same **Create recurring sync** form fields for that pipeline.\nProve each tick in Job Theater\nEvery cadence tick and every **Run now** creates a job with the same phases as Transfer Studio (gates → write → reconcile). Open **Operations → Jobs**, select the run, and confirm quarantine and reconciliation proof.\n\nDo not confuse the Jobs page with Pipelines — Pipelines owns the schedule; Jobs owns the proof for each tick.\nWhere: Run now / schedule tick → Operations → Jobs\nTip: Wire **Notify on failure** (or webhooks) before promoting a pipeline to production cadence."
+    },
+    {
+      "id": "help-pipelines#incremental",
+      "doc_id": "help-pipelines",
+      "doc_slug": "pipelines",
+      "doc_title": "Create pipelines & recurring sync",
+      "category": "Connectors",
+      "section_id": "incremental",
+      "section_title": "Sync modes (exact product labels)",
+      "text": "Sync modes (exact product labels)\nPipelines reuse Transfer Studio sync modes. Pick the tile that matches your identity strategy:\n**Full overwrite** — replace the target, then load the snapshot\n**Full append** — keep existing rows; append the full snapshot\n**Incremental append** — cursor/watermark new rows only\n**Incremental deduped** — cursor + primary-key upserts\n**CDC** — log-based changes (when the source supports it)\n**SCD Type 2** — versioned history (primary key required)\n**Mirror** — soft-delete dest keys missing from source (`_deleted`; physical COUNT(*) stays; primary key required)\nTip: Failed cells quarantine without silently dropping the rest of the batch — same engine as ad-hoc Transfer Studio runs."
+    },
+    {
+      "id": "help-pipelines#gitops",
+      "doc_id": "help-pipelines",
+      "doc_slug": "pipelines",
+      "doc_title": "Create pipelines & recurring sync",
+      "category": "Connectors",
+      "section_id": "gitops",
+      "section_title": "GitOps YAML (optional)",
+      "text": "GitOps YAML (optional)\nFrom the Pipelines toolbar you can **Export YAML** / **Import YAML** and optionally **Require signed** contracts for fail-closed unattended runs. Treat exported YAML as the reviewable definition of cadence + route + sync mode for change management."
+    },
+    {
+      "id": "help-pipelines#redis-keys",
+      "doc_id": "help-pipelines",
+      "doc_slug": "pipelines",
+      "doc_title": "Create pipelines & recurring sync",
+      "category": "Connectors",
+      "section_id": "redis-keys",
+      "section_title": "Redis destination keys",
+      "text": "Redis destination keys\nRedis stores each row under `prefix:identity`. Datawrap prefers `id` / `*_id` / `uuid`, then natural keys (`code`, `iso`, `name`, `sku`). Non-unique attributes like `capital` or `city` are never chosen when a stronger key exists. Set **Primary key** on the pipeline Sync mode panel (or on Map for ad-hoc runs) when you need an explicit column."
+    },
+    {
+      "id": "help-contracts#overview",
+      "doc_id": "help-contracts",
+      "doc_slug": "contracts",
+      "doc_title": "Data contracts",
+      "category": "Connectors",
+      "section_id": "overview",
+      "section_title": "What a contract is",
+      "text": "What a contract is\nA **data contract** is a signed schema agreement for a route. Contracts live under **Platform → Contracts**. Pipelines can require a **SIGNED** contract before each tick (**Require signed contract before each run**).\nPlatform → Contracts — inventory of draft and signed schema agreements."
+    },
+    {
+      "id": "help-contracts#procedure",
+      "doc_id": "help-contracts",
+      "doc_slug": "contracts",
+      "doc_title": "Data contracts",
+      "category": "Connectors",
+      "section_id": "procedure",
+      "section_title": "Procedure: bind a contract to a pipeline",
+      "text": "Procedure: bind a contract to a pipeline\nUse contracts when unattended Pipelines must fail closed if the schema drifts or is unsigned.\nCreate or open a contract\nOpen **Contracts**. Create from a proven Transfer Studio Validate result when available, or open an existing contract card/row. Review schema fields and status (**Draft** vs **Signed**).\nWhere: Platform → Contracts\nInspect contract detail\nClick a contract card/row to open its **detail drawer** (right side). Confirm field types, version, and signature state (**Draft** vs **Signed**). Sign when Owners are ready for production schedules.\nWhere: Contract card → detail drawer\nBind on Create recurring sync\nOn **Operations → Pipelines → New pipeline**, open the **Data contract** panel. Select the **SIGNED** contract and enable **Require signed contract before each run (fail-closed)** when unattended ticks must not write without agreement.\nWhere: Pipelines → Data contract panel\nTip: Unsigned or missing contracts with require-signed enabled block the tick the same way a failed Validate gate does."
+    },
+    {
+      "id": "help-transforms#overview",
+      "doc_id": "help-transforms",
+      "doc_slug": "transforms",
+      "doc_title": "Transforms",
+      "category": "Operations",
+      "section_id": "overview",
+      "section_title": "Where Transforms live",
+      "text": "Where Transforms live\nOpen **Operations → Transforms**. This page inventories reusable transform definitions operators can apply on **Map** (cast, normalize email, date → ISO, and custom transforms your tenant enables).\nOperations → Transforms — reusable transform inventory for Map and pipelines."
+    },
+    {
+      "id": "help-transforms#with-map",
+      "doc_id": "help-transforms",
+      "doc_slug": "transforms",
+      "doc_title": "Transforms",
+      "category": "Operations",
+      "section_id": "with-map",
+      "section_title": "How Transforms relate to Map",
+      "text": "How Transforms relate to Map\nDuring Transfer Studio **Map**, each edge can show a transform (for example **Cast integer**, **Normalize email**). Accepting risk or approving the edge locks that transform into the governed route Pipelines reuse on every tick.\nTip: Changing a production transform usually means editing the route on Map (or the pipeline Config), then re-running Validate before the next schedule tick.\nMap — per-column Transform column is where operators see and approve casts."
+    },
+    {
+      "id": "help-data-pilot#use",
+      "doc_id": "help-data-pilot",
+      "doc_slug": "data-pilot",
+      "doc_title": "Datawrap Pilot",
+      "category": "Pilot & MCP",
+      "section_id": "use",
+      "section_title": "When to use Pilot",
+      "text": "When to use Pilot\nOpen **Operations → Pilot**. Ask about failed preflight gates, job status, connector readiness, or mapping suggestions. Pilot uses the same workspace context as Transfer Studio — it does not bypass Validate.\nPilot — natural-language triage on the same governed engine."
+    },
+    {
+      "id": "help-data-pilot#handoff",
+      "doc_id": "help-data-pilot",
+      "doc_slug": "data-pilot",
+      "doc_title": "Datawrap Pilot",
+      "category": "Pilot & MCP",
+      "section_id": "handoff",
+      "section_title": "Hand off to Transfer Studio",
+      "text": "Hand off to Transfer Studio\nWhen you need the full wizard, open **Transfer** from Pilot suggestions — maps and gates carry into Source → Destination → Map → Validate → Run."
+    },
+    {
+      "id": "help-data-pilot#examples",
+      "doc_id": "help-data-pilot",
+      "doc_slug": "data-pilot",
+      "doc_title": "Datawrap Pilot",
+      "category": "Pilot & MCP",
+      "section_id": "examples",
+      "section_title": "Example prompts",
+      "text": "Example prompts\nPilot understands workspace context — ask about specific jobs, connectors, or mapping decisions.\nWhy did preflight gate Data integrity fail on my last transfer?\nWhich connectors are transfer-ready for Snowflake upsert?\nWhy did order_amt map to total_amount instead of payment_amount?\nShow quarantined rows from last night's pipeline"
+    },
+    {
+      "id": "help-mcp#tools",
+      "doc_id": "help-mcp",
+      "doc_slug": "mcp",
+      "doc_title": "MCP Server for agents",
+      "category": "Pilot & MCP",
+      "section_id": "tools",
+      "section_title": "Open the MCP page",
+      "text": "Open the MCP page\nOpen **System → MCP**. The page shows MCP server status, integration snippets for **Cursor**, **Claude Desktop**, **VS Code**, and custom GPT actions, plus recent tool call logs. Agents inherit workspace RBAC — no raw destination passwords.\nSystem → MCP — status, client snippets, and tool logs for governed agent runs."
+    },
+    {
+      "id": "help-mcp#setup",
+      "doc_id": "help-mcp",
+      "doc_slug": "mcp",
+      "doc_title": "MCP Server for agents",
+      "category": "Pilot & MCP",
+      "section_id": "setup",
+      "section_title": "Procedure: connect Cursor",
+      "text": "Procedure: connect Cursor\nCopy the Cursor snippet from the MCP page (or use the JSON below) and authenticate with a workspace API key from **Settings → API Keys**.\nCopy the MCP server URL\nExpand the **Cursor** integration card. Copy the `mcpServers.dataflow.url` value shown for your tenant.\nWhere: System → MCP → Cursor\nPaste into Cursor Settings → MCP\nAdd the server entry, restart MCP if prompted, then call governed tools (connectors, preflight, jobs). Every agent-initiated transfer appears in **Job Theater** with an audit trail.\nWhere: Cursor → Settings → MCP\n{\n  \"mcpServers\": {\n    \"dataflow\": {\n      \"url\": \"https://api.datawrap.io/api/v1/mcp\"\n    }\n  }\n}"
+    },
+    {
+      "id": "help-mcp#security",
+      "doc_id": "help-mcp",
+      "doc_slug": "mcp",
+      "doc_title": "MCP Server for agents",
+      "category": "Pilot & MCP",
+      "section_id": "security",
+      "section_title": "Agent security",
+      "text": "Agent security\nMCP tools inherit workspace RBAC. Agents cannot read raw connector secrets — only trigger governed operations your role allows. Pipeline ticks and agent runs still must pass Validate before write."
+    },
+    {
+      "id": "help-query#dialects",
+      "doc_id": "help-query",
+      "doc_slug": "query-playground",
+      "doc_title": "Query Playground",
+      "category": "Pilot & MCP",
+      "section_id": "dialects",
+      "section_title": "Open Query Playground",
+      "text": "Open Query Playground\nOpen **Operations → Query**. Pick a saved connector, choose dialect (PostgreSQL, MySQL, Snowflake, BigQuery, or generic SQL), and run read-oriented checks before you map or schedule.\nQuery — connector picker, SQL editor, and results before Transfer Studio."
+    },
+    {
+      "id": "help-query#tips",
+      "doc_id": "help-query",
+      "doc_slug": "query-playground",
+      "doc_title": "Query Playground",
+      "category": "Pilot & MCP",
+      "section_id": "tips",
+      "section_title": "Tips",
+      "text": "Tips\nUse Query Playground to validate source data shape before mapping. Format JSON results, clear the editor, and use snippet chips for common patterns. Playground is **read-only** — it refuses CALL/EXEC and DML. Governed writes still go through Transfer Studio / Pipelines."
+    },
+    {
+      "id": "help-query#transfer-bridge",
+      "doc_id": "help-query",
+      "doc_slug": "query-playground",
+      "doc_title": "Query Playground",
+      "category": "Pilot & MCP",
+      "section_id": "transfer-bridge",
+      "section_title": "Bridge to Transfer Studio",
+      "text": "Bridge to Transfer Studio\nWhen the shape looks right, open **Transfer** and reuse the same connector. On **Source**, choose **Query** (read-only SELECT) or **Stored procedure** (one CALL/EXEC, spooled once). On **Destination**, choose **Query** (one INSERT/MERGE/UPDATE with binds) or **Stored procedure** (one CALL per row). Failed dest statements quarantine — they never silently drop. CDC / SCD2 / mirror refuse callable dest writes. Validated playground queries do not skip Validate."
+    },
+    {
+      "id": "help-job-theater#open",
+      "doc_id": "help-job-theater",
+      "doc_slug": "job-theater",
+      "doc_title": "Job Theater & reconciliation",
+      "category": "Operations",
+      "section_id": "open",
+      "section_title": "Open Job Theater",
+      "text": "Open Job Theater\nGo to Operations → Jobs (also linked as Theater). Filter All / Running / Completed / Failed. Select a job to open Detail, Mapping, Quarantine, and Log tabs. Theater auto-opens Quarantine when a run completed with rejected rows.\nJobs — select a run to inspect phases, quarantine, and checksum proof."
+    },
+    {
+      "id": "help-job-theater#stages",
+      "doc_id": "help-job-theater",
+      "doc_slug": "job-theater",
+      "doc_title": "Job Theater & reconciliation",
+      "category": "Operations",
+      "section_id": "stages",
+      "section_title": "Job phases",
+      "text": "Job phases\nEvery ad-hoc transfer and every pipeline tick uses the same phase rail:\nQueued — accepted by the control plane\nRead — source extract / profile\nGates — Validate decisions applied before write\nWrite — clean rows land; bad cells quarantine\nReconcile — row counts and content hashes compared\nDone — Match, Mismatch, failed, cancelled, or completed with quarantine"
+    },
+    {
+      "id": "help-job-theater#quarantine-ui",
+      "doc_id": "help-job-theater",
+      "doc_slug": "job-theater",
+      "doc_title": "Job Theater & reconciliation",
+      "category": "Operations",
+      "section_id": "quarantine-ui",
+      "section_title": "Procedure: inspect quarantine",
+      "text": "Procedure: inspect quarantine\nQuarantine means bad values were isolated with column, value, and reason — never silently dropped.\nOpen the job\nLook for Quarantine status or a non-zero rejected count in the stats strip.\nWhere: Operations → Jobs → select run\nOpen the Quarantine tab\nReview each bad cell: column, offending value, rule, and timestamp. Export for offline review if needed.\nWhere: Job detail → Quarantine\nFix and re-run\nReturn to Map or Validate to fix mappings / encoding, then Retry or Resume from checkpoint. Pipeline ticks will fail the same way until the underlying route is fixed.\nWhere: Open Studio · Retry · Resume from checkpoint\nTip: Completed with quarantine still wrote clean rows — proof may Match on the clean set while quarantine holds the rest."
+    },
+    {
+      "id": "help-job-theater#proof",
+      "doc_id": "help-job-theater",
+      "doc_slug": "job-theater",
+      "doc_title": "Job Theater & reconciliation",
+      "category": "Operations",
+      "section_id": "proof",
+      "section_title": "Checksum MATCH",
+      "text": "Checksum MATCH\nGate-8 / post-load proof compares source and destination row counts and content hashes. Theater shows Match or Mismatch with row fidelity. Finance and compliance can treat Match as the archiveable proof of the load — export from the job when required."
+    },
+    {
+      "id": "help-enterprise#where",
+      "doc_id": "help-enterprise",
+      "doc_slug": "enterprise",
+      "doc_title": "Enterprise controls",
+      "category": "Enterprise",
+      "section_id": "where",
+      "section_title": "Where enterprise settings live",
+      "text": "Where enterprise settings live\nSigned-in Owners open **System → Settings**. Tabs typically include General, Security, Enterprise, SSO, Team, Notifications, AI Models, API Keys, and Audit Logs. Day-to-day operators usually stay on Connectors, Transfer, Pipelines, and Jobs.\nSystem → Settings — Owners configure SSO, Team, Enterprise, and API keys here."
+    },
+    {
+      "id": "help-enterprise#sso",
+      "doc_id": "help-enterprise",
+      "doc_slug": "enterprise",
+      "doc_title": "Enterprise controls",
+      "category": "Enterprise",
+      "section_id": "sso",
+      "section_title": "Procedure: configure SSO",
+      "text": "Procedure: configure SSO\nUse SAML 2.0 (Okta / Azure AD / OneLogin) or OIDC (Google / Auth0 / Azure AD).\nOpen Settings → SSO\nChoose SAML or OIDC. Paste IdP metadata URL or upload metadata XML. Map roles if your IdP sends group claims.\nWhere: System → Settings → SSO\nTest, then Save\nRun Test login with a pilot user. On success you see SSO ready. Save to enforce SSO for the tenant.\nWhere: SSO → Test · Save\nTip: Keep a break-glass Owner account path documented with IT before enforcing SSO-only."
+    },
+    {
+      "id": "help-enterprise#team",
+      "doc_id": "help-enterprise",
+      "doc_slug": "enterprise",
+      "doc_title": "Enterprise controls",
+      "category": "Enterprise",
+      "section_id": "team",
+      "section_title": "Team roles",
+      "text": "Team roles\nOpen **Settings → Team** to invite members by email and assign roles.\nViewer — inspect Jobs, proof, and connectors (no execute)\nEditor — create connectors, run Transfer Studio and Pipelines\nOwner — SSO, BYOK, Enterprise tab, API keys, Team admin\nTeam — invite members and assign Viewer / Editor / Owner."
+    },
+    {
+      "id": "help-enterprise#byok-region",
+      "doc_id": "help-enterprise",
+      "doc_slug": "enterprise",
+      "doc_title": "Enterprise controls",
+      "category": "Enterprise",
+      "section_id": "byok-region",
+      "section_title": "BYOK, region, and audit",
+      "text": "BYOK, region, and audit\nSettings → Enterprise sets tenant name, custom domain, data region, MFA, session timeout, and IP allowlist. Optional BYOK wraps connector secrets with your KMS key. Settings → Audit Logs lists mapping decisions, job runs, quarantine events, and MCP calls for SOC 2 / GDPR / HIPAA review. Settings → Security downloads the Security posture report for procurement."
+    },
+    {
+      "id": "help-api#auth",
+      "doc_id": "help-api",
+      "doc_slug": "api-reference",
+      "doc_title": "API reference",
+      "category": "Enterprise",
+      "section_id": "auth",
+      "section_title": "Authentication",
+      "text": "Authentication\nBearer tokens scoped to workspace. Enterprise uses SSO-backed service accounts.\ncurl -H \"Authorization: Bearer $TOKEN\" https://api.datawrap.io/api/v1/connectors"
+    },
+    {
+      "id": "help-api#endpoints",
+      "doc_id": "help-api",
+      "doc_slug": "api-reference",
+      "doc_title": "API reference",
+      "category": "Enterprise",
+      "section_id": "endpoints",
+      "section_title": "Core endpoints",
+      "text": "Core endpoints\nCatalog, preflight, run, and job status endpoints mirror Transfer Studio behavior.\nCanonical prefix is /api/v1 — see docs/API_VERSIONING.md for deprecation policy\nGET /api/v1/connectors — list with transfer-ready status\nPOST /api/v1/preflight — run nine core gates\nPOST /api/v1/transfer/run — execute governed load\nGET /api/v1/connectors/jobs/{id} — status, quarantine, reconciliation\nAPI runs surface in Job Theater with the same stage timeline and checksum proof."
+    },
+    {
+      "id": "help-api#webhooks",
+      "doc_id": "help-api",
+      "doc_slug": "api-reference",
+      "doc_title": "API reference",
+      "category": "Enterprise",
+      "section_id": "webhooks",
+      "section_title": "Webhooks",
+      "text": "Webhooks\nSubscribe to job.completed, job.failed, and pipeline.quarantine_threshold events. Payloads include job ID, gate results, and reconciliation summary — no row payloads unless explicitly configured.\nPOST /api/v1/webhooks\n{ \"url\": \"https://your.app/hooks/dataflow\", \"events\": [\"job.completed\"] }"
+    },
+    {
+      "id": "help-faq#q1",
+      "doc_id": "help-faq",
+      "doc_slug": "faq",
+      "doc_title": "Frequently asked questions",
+      "category": "Enterprise",
+      "section_id": "q1",
+      "section_title": "What is quarantine?",
+      "text": "What is quarantine?\nRows that fail validation during load are isolated with the column, value, and reason — never silently dropped. Open Operations → Jobs → Quarantine on the run to inspect or export them.\nQuarantine and proof live on the job — open Theater to inspect failed rows."
+    },
+    {
+      "id": "help-faq#q2",
+      "doc_id": "help-faq",
+      "doc_slug": "faq",
+      "doc_title": "Frequently asked questions",
+      "category": "Enterprise",
+      "section_id": "q2",
+      "section_title": "Who can run transfers?",
+      "text": "Who can run transfers?\nEditors and Owners can create connectors and execute Transfer Studio / Pipelines. Viewers can open Jobs and review MATCH / quarantine proof. Roles are assigned under Settings → Team (and can come from IdP group claims when SSO is configured)."
+    },
+    {
+      "id": "help-faq#q3",
+      "doc_id": "help-faq",
+      "doc_slug": "faq",
+      "doc_title": "Frequently asked questions",
+      "category": "Enterprise",
+      "section_id": "q3",
+      "section_title": "Do pipelines skip preflight?",
+      "text": "Do pipelines skip preflight?\nNo. Every schedule tick reuses the same Validate gates and post-load checksum path as a manual transfer. A failing gate blocks the write; the tick appears Failed in Jobs until the route is fixed."
+    },
+    {
+      "id": "help-faq#q3b",
+      "doc_id": "help-faq",
+      "doc_slug": "faq",
+      "doc_title": "Frequently asked questions",
+      "category": "Enterprise",
+      "section_id": "q3b",
+      "section_title": "How is data protected in transit and at rest?",
+      "text": "How is data protected in transit and at rest?\nConnectors use TLS to sources and destinations. Secrets are encrypted at rest (optional customer BYOK). Quarantine replaces silent drops; post-load checksums prove what landed. Download the Security posture report from Settings → Security for procurement questionnaires."
+    },
+    {
+      "id": "help-faq#q4",
+      "doc_id": "help-faq",
+      "doc_slug": "faq",
+      "doc_title": "Frequently asked questions",
+      "category": "Enterprise",
+      "section_id": "q4",
+      "section_title": "How is Datawrap different from ETL scripts?",
+      "text": "How is Datawrap different from ETL scripts?\nSemantic mapping with confidence, fail-fast Validate gates, quarantine instead of silent coerce, and checksum MATCH after write — with SSO, RBAC, and audit built for enterprise teams."
+    }
+  ]
+}

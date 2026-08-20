@@ -120,6 +120,11 @@ class DataTransferLLMProvider(ABC):
 
     name: str = "base"
 
+    # Whether this provider can answer a free-form prose prompt. The local knowledge
+    # provider cannot: it emits a column-analysis document whatever it is asked, so a
+    # prose caller must skip it instead of publishing that JSON as an answer.
+    speaks_prose: bool = True
+
     @abstractmethod
     def is_available(self) -> bool:
         pass
@@ -428,9 +433,10 @@ class DataTransferOllamaProvider(DataTransferLLMProvider):
 
 
 class DataTransferLocalProvider(DataTransferLLMProvider):
-    """Local reasoning without external API — uses RAG + knowledge base."""
+    """Local column reasoning without external API — structured output, never prose."""
 
     name = "local"
+    speaks_prose = False
 
     def is_available(self) -> bool:
         return True

@@ -2794,6 +2794,39 @@ body {
   max-width: 95%;
 }
 
+/* Citations behind a grounded answer (Pilot page + rail share this block). */
+.df2-copilot-sources {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  padding-top: 6px;
+  border-top: 1px solid rgba(100, 116, 139, 0.2);
+  font-size: 11px;
+}
+
+.df2-copilot-sources-label {
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #64748b;
+}
+
+.df2-copilot-sources a,
+.df2-copilot-sources span:not(.df2-copilot-sources-label) {
+  padding: 2px 7px;
+  border: 1px solid #dbe3ee;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.8);
+  color: #0f766e;
+  text-decoration: none;
+}
+
+.df2-copilot-sources a:hover {
+  border-color: #0f766e;
+  text-decoration: underline;
+}
+
 .df2-copilot-evidence,
 .df2-copilot-actions {
   display: flex;
