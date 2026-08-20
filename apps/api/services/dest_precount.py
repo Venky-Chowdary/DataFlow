@@ -606,6 +606,9 @@ def destination_row_count(
         if db_type == "sftp":
             return _sftp_row_count(cfg, table_name=table)
 
+        if db_type == "redis":
+            return _redis_prefix_row_count(cfg, prefix=table)
+
         if db_type == "clickhouse":
             return _clickhouse_row_count(cfg, schema=schema, table_name=table)
 
@@ -3025,6 +3028,33 @@ def _object_store_row_count(
             return None
         total += n
     return total
+
+
+def _redis_prefix_row_count(cfg: dict[str, Any], *, prefix: str) -> int | None:
+    """Keys under ``prefix:*``, the cardinality the writer addresses.
+
+    Redis is key-addressed, so the destination row count is the number of keys
+    the writer's prefix owns — the same population Gate-8 reads back. Without
+    this number an append or a quiet incremental poll had no pre-write count to
+    subtract, and the reconcile refused to prove a correct run. An empty or
+    absent prefix is 0 (a known-empty destination is a proof); an unreachable
+    server stays ``None`` rather than substituting writer acknowledgement.
+    """
+    from connectors.redis_reader import _redis_client
+
+    client = _redis_client(cfg)
+    pattern = f"{prefix}:*" if prefix else "*"
+    # SCAN guarantees each key at least once, not exactly once (a rehash during
+    # the walk repeats slots), so the keys are de-duplicated before counting —
+    # an inflated pre-count would understate the delta of the next append.
+    seen: set[str] = set()
+    cursor = 0
+    while True:
+        cursor, batch = client.scan(cursor=cursor, match=pattern, count=500)
+        for raw in batch:
+            seen.add(raw.decode() if isinstance(raw, bytes) else str(raw))
+        if cursor == 0:
+            return len(seen)
 
 
 def _sftp_row_count(cfg: dict[str, Any], *, table_name: str) -> int | None:

@@ -17,6 +17,17 @@ WHOLE_TABLE_NOT_COMPARABLE = "whole_table_not_comparable"
 # Target digest was re-read WHERE pk IN (written keys): per-cell proof of this
 # batch, deliberately silent about rows the job never wrote.
 WRITTEN_BATCH_KEYS = "written_batch_keys"
+# A quiet incremental poll: the reader found nothing past the watermark, so no
+# batch exists to compare and the proof is that the destination count did not
+# move. Population evidence must not be turned on such a report — comparing a
+# zero-row batch against a sink that legitimately holds earlier rows fails the
+# normal outcome of every scheduled incremental sync.
+NO_OP_DEST_UNCHANGED: Final[str] = "no_op_destination_unchanged"
+
+
+def is_no_op_report(report: dict[str, Any]) -> bool:
+    """True when the report declares a no-op poll (nothing read, nothing written)."""
+    return str((report or {}).get("assurance_level") or "") == NO_OP_DEST_UNCHANGED
 
 
 def row_count_scope_stamp(out: dict[str, Any]) -> dict[str, Any] | None:

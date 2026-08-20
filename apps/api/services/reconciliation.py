@@ -30,6 +30,7 @@ from services.decision_kernel.findings import (
 from services.readback_projection import project_readback
 from services.reconcile_sftp import verify_sftp_object
 from services.reconcile_coverage import (
+    NO_OP_DEST_UNCHANGED,
     SOURCE_DIGEST_WRITE_PASS,
     WRITTEN_BATCH_KEYS,
     append_row_count_report,
@@ -197,14 +198,14 @@ def stamp_post_write_phase(report: dict[str, Any]) -> dict[str, Any]:
     out["checksum_match"] = independent_match if (src and tgt) else False
     out["population_proof"] = False
 
-    if str(out.get("assurance_level") or "") == "no_op_destination_unchanged":
+    if str(out.get("assurance_level") or "") == NO_OP_DEST_UNCHANGED:
         # Quiet incremental poll — dest-before equals dest-after. Digests from
         # a prior write-pass must not upgrade this to full_checksum.
         out["phase"] = "post_write_no_op"
         out["post_write_pending"] = False
         out["preview"] = False
-        out["coverage"] = "no_op_destination_unchanged"
-        out["assurance_level"] = "no_op_destination_unchanged"
+        out["coverage"] = NO_OP_DEST_UNCHANGED
+        out["assurance_level"] = NO_OP_DEST_UNCHANGED
         out["migration_proven"] = False
         out["population_proof"] = False
         out["checksum_match"] = False

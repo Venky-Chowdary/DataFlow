@@ -21,6 +21,7 @@ from services.dest_precount import (
     stamp_vector_census,
 )
 from services.reconcile_coverage import (
+    NO_OP_DEST_UNCHANGED,
     SOURCE_DIGEST_ENGINE_POPULATION,
     SOURCE_DIGEST_REMAPPED_ROWS,
     SOURCE_DIGEST_SOURCE_REREAD,
@@ -28,8 +29,10 @@ from services.reconcile_coverage import (
     SOURCE_DIGEST_WRITER_ACK,
     WHOLE_TABLE_NOT_COMPARABLE,
     WRITTEN_BATCH_KEYS,
+    is_no_op_report,
 )
 from services.destination_key_collision_probe import (
+    destination_enforces_key,
     sync_mode_appends_without_key_resolution,
 )
 from services.reconciliation import (
@@ -44,6 +47,7 @@ from services.reconciliation import (
 )
 
 from .adapters import records_to_matrix, resolve_connector_config
+from .adapters_introspect import _introspect_table_schema_rich
 from .models import EndpointConfig
 
 
@@ -63,6 +67,61 @@ def _finalize_reconcile(
     if isinstance(snap, dict) and snap:
         out["source_snapshot"] = dict(snap)
     return out
+
+
+_ADVISORY_KEY_TOKENS = ("not enforced", "advisory", "informational")
+
+
+def _destination_enforces_single_key(
+    db_type: str,
+    cfg: dict[str, Any],
+    *,
+    schema: str,
+    table_name: str,
+    key_column: str,
+) -> bool:
+    """True when the destination itself rejects a duplicate of ``key_column``.
+
+    Only a constraint the destination enforces makes a key-scoped digest
+    comparable to the source digest: it is what guarantees the read-back returns
+    one row per written key. A key named by the stream contract, the merge
+    request or Map's identity inference guarantees nothing on an append-only
+    write — appending the same batch twice into a keyless table left two rows per
+    key, so the keyed read-back covered 2x the batch and its digest could never
+    equal the source's. That failed a correct append with two hex strings.
+
+    Enforcement is read from the destination catalog, and a catalog that
+    declares its keys advisory (Snowflake/BigQuery-class ``NOT ENFORCED``) does
+    not enforce them. Anything unproven answers False, which keeps the append
+    delta as the proof rather than inventing comparability.
+    """
+    if not key_column or not table_name:
+        return False
+    probe_cfg = dict(cfg or {})
+    if schema:
+        probe_cfg.setdefault("schema", schema)
+    try:
+        _types, _nulls, keys = _introspect_table_schema_rich(
+            db_type, probe_cfg, table_name, [], strict_namespace=True
+        )
+    except Exception as exc:
+        logging.getLogger(__name__).debug(
+            "destination key enforcement unproven for %s.%s: %s",
+            table_name,
+            key_column,
+            exc,
+            exc_info=exc,
+        )
+        return False
+    warnings = " ".join(str(w).lower() for w in (keys.get("warnings") or []))
+    if any(token in warnings for token in _ADVISORY_KEY_TOKENS):
+        return False
+    return destination_enforces_key(
+        key_column,
+        destination_pk_columns=list(keys.get("primary_key_columns") or []),
+        destination_unique_keys=list(keys.get("unique_keys") or []),
+    )
+
 
 def _dest_types_from_mappings(mappings: list[dict]) -> dict[str, str]:
     return {
@@ -437,6 +496,12 @@ def _maybe_attach_verification_ladder(
     validation_mode: str,
 ) -> dict[str, Any]:
     """Property 5 — run L1–L5 when source+dest populations fit the row budget."""
+    if is_no_op_report(report):
+        # Nothing was read past the watermark, so there is no batch for the
+        # ladder to verify: it would compare a zero-row write against a sink
+        # that legitimately holds earlier rows, fail L1 conservation, and veto a
+        # correct quiet poll. The destination count not moving is the proof.
+        return report
     from services.verification_ladder import (
         MAX_LADDER_ROWS,
         PopulationTooLarge,
@@ -1347,11 +1412,11 @@ def run_reconciliation(
         or []
     )
     # Whether the *destination* stands behind this key — a declared PK/unique
-    # constraint or the conflict target of a merge — as opposed to an identity
-    # Map inferred below. The inference is good enough to align a sample; it is
-    # not good enough to scope a digest, because a keyless table can hold the
-    # same key twice.
-    key_enforced_by_destination = bool(pk_cols)
+    # constraint — as opposed to a key named by the stream contract or inferred
+    # by Map. Naming a key is not enforcing it: a contract primary_key on an
+    # append-only write leaves a keyless table free to hold the same key twice,
+    # so it may align a sample but must never scope a digest. Resolved from the
+    # destination catalog at the append branch below, where it is used.
     # Quarantine replay / upsert writers may stamp written_ids without PK meta.
     # Resolve identity from Map so keyed Gate-8 can re-scope the target digest.
     if not pk_cols and mapping_dicts:
@@ -2074,7 +2139,7 @@ def run_reconciliation(
                 "rejected_rows": rejected_rows,
                 "coerced_null_rows": coerced_null_rows,
                 "rows_skipped": rows_skipped,
-                "assurance_level": "no_op_destination_unchanged",
+                "assurance_level": NO_OP_DEST_UNCHANGED,
             })
 
     # Streaming append/upsert soft-pass of extra dest rows without a stashed
@@ -2152,8 +2217,14 @@ def run_reconciliation(
         # strings. Merge writes own their conflict target, and a declared
         # PK/unique constraint rejects the second copy; an identity inferred from
         # Map guarantees neither, so an append keeps the delta as its identity.
-        keys_identify_one_row = key_enforced_by_destination or not (
-            sync_mode_appends_without_key_resolution(sync_mode)
+        keys_identify_one_row = not sync_mode_appends_without_key_resolution(
+            sync_mode
+        ) or _destination_enforces_single_key(
+            db_type,
+            cfg,
+            schema=schema,
+            table_name=table_name,
+            key_column=pk_column,
         )
         if keyed_checksum and keys_identify_one_row:
             target_checksum = keyed_checksum

@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from services.reconcile_coverage import NO_OP_DEST_UNCHANGED
+
 _TERMINAL = frozenset({
     "completed",
     "completed_with_quarantine",
@@ -62,7 +64,7 @@ def has_full_checksum_proof(recon: dict[str, Any] | None) -> bool:
         "writer_ack",
         "sample",
         "write_pass_dest_readback",
-        "no_op_destination_unchanged",
+        NO_OP_DEST_UNCHANGED,
         "none",
     }:
         return False
