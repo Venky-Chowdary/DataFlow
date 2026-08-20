@@ -311,6 +311,12 @@ def _repair_unparseable_numeric_targets(
             and len(samples) >= 2
             and logical in {"integer", "decimal"}
             and not samples_fit_logical_type(samples, tgt_type or "INTEGER", field_name=src)
+            # Only values that are not numbers at all belong in a text column.
+            # Values that are numeric but exceed the declared width are a widen /
+            # fidelity decision owned by schema drift and preflight — inventing a
+            # text twin there left the destination's real numeric column NULL for
+            # every row.
+            and not samples_fit_logical_type(samples, "DECIMAL", field_name=src)
         ):
             dest_db = (destination_db_type or "").strip().lower()
             dest_native = ddl_type(dest_db, "VARCHAR") if dest_db else "VARCHAR"

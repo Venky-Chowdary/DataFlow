@@ -565,6 +565,81 @@ def infer_schema_map(
     return schema, intel
 
 
+def _samples_fit_declared_numeric(samples: list[str], logical_type: str) -> bool | None:
+    """Do the samples fit a declared exact-numeric carrier?
+
+    ``None`` when the declared type is not an exact numeric one with a known
+    width, so the caller falls back to inference. Otherwise the verdict is
+    arithmetic: every sample must parse and fit the declared precision/scale,
+    with no rounding invented (a value needing more scale than the column keeps
+    does not fit — the write path refuses to quantize silently).
+    """
+    from decimal import Decimal, InvalidOperation
+
+    from services.numeric_fit import integer_storage_bounds
+    from services.transform_engine import apply_transform
+    from services.type_system import (
+        normalize_logical_type,
+        parse_numeric_precision_scale,
+    )
+
+    logical = normalize_logical_type(logical_type)
+    if logical not in {"integer", "decimal"}:
+        return None
+    precision, scale = parse_numeric_precision_scale(logical_type)
+    bounds = integer_storage_bounds(logical_type) if logical == "integer" else None
+    if precision is None and bounds is None:
+        if logical != "decimal":
+            # Unqualified INTEGER: the physical width is engine-dependent, so
+            # only the destination-resolved carrier can answer.
+            return None
+        # Unqualified DECIMAL asks one question — are these numbers? — and
+        # arithmetic answers it. Deferring to ``infer_type`` said "no" for long
+        # digit runs, which is how a value the destination stores exactly ended
+        # up diverted into a text column.
+        precision, scale = None, None
+    for raw in samples[:200]:
+        text = str(raw).strip()
+        if not text:
+            continue
+        digits_only = text[1:] if text[:1] in "+-" else text
+        if len(digits_only) > 1 and digits_only[:1] == "0" and digits_only[1:2] != ".":
+            # A leading zero is data (zip codes, account numbers) and no numeric
+            # carrier keeps it — this is a text column, whatever it parses as.
+            return False
+        # Parse through the write path's own coercion so locale forms
+        # ("1,000.00", "2.000,50") are read exactly as the writer will read
+        # them — a second parser here would disagree with what actually lands.
+        coerced, err = apply_transform(text, "decimal")
+        if err:
+            return False
+        try:
+            value = Decimal(str(coerced))
+        except (InvalidOperation, ValueError, ArithmeticError):
+            return False
+        if not value.is_finite():
+            return False
+        if bounds is not None:
+            if value != value.to_integral_value():
+                return False
+            if not (bounds[0] <= int(value) <= bounds[1]):
+                return False
+            continue
+        if precision is None:
+            # Width unknown — the value being a finite number is the verdict.
+            continue
+        exponent = value.as_tuple().exponent
+        used_scale = -int(exponent) if isinstance(exponent, int) and exponent < 0 else 0
+        declared_scale = int(scale or 0)
+        if used_scale > declared_scale:
+            return False
+        digits = len(value.as_tuple().digits)
+        integral_digits = max(digits - used_scale, 1)
+        if integral_digits > int(precision or 0) - declared_scale:
+            return False
+    return True
+
+
 def samples_fit_logical_type(samples: list[str], logical_type: str, *, field_name: str | None = None) -> bool:
     """True when every non-empty sample coerces cleanly to ``logical_type``."""
     from services.transform_engine import apply_transform, infer_transform_for_mapping
@@ -575,6 +650,15 @@ def samples_fit_logical_type(samples: list[str], logical_type: str, *, field_nam
     lt = (logical_type or "VARCHAR").upper()
     if lt in {"VARCHAR", "TEXT", "STRING", "CHAR"}:
         return True
+    # A declared numeric carrier is answered by arithmetic, not by inference.
+    # ``infer_type`` keeps long digit runs as VARCHAR so account numbers and zip
+    # codes are not turned into integers; taking that as "does not fit
+    # DECIMAL(38,0)" made Map invent a shadow ``wide_num_text`` column beside a
+    # destination DECIMAL(38,0) that plainly holds the value — and the real
+    # column stayed NULL for every row.
+    numeric_verdict = _samples_fit_declared_numeric(non_empty, lt)
+    if numeric_verdict is not None:
+        return numeric_verdict
     # Re-infer; if engine widens away from proposed type, samples do not fit.
     inferred = infer_type(non_empty, field_name=field_name)
     if inferred in {"VARCHAR", "TEXT"} and lt not in {"VARCHAR", "TEXT", "STRING"}:

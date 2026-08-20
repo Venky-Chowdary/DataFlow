@@ -84,6 +84,42 @@ def physical_column_types(
     return out
 
 
+def apply_physical_temporal_precision(
+    dest_types: dict[str, str],
+    db_type: str,
+    cfg: dict[str, Any],
+    *,
+    table: str,
+) -> dict[str, str]:
+    """Restate declared instant types with the precision the columns keep.
+
+    Both digests — the one taken during the write pass and the destination
+    re-read — must agree on what the physical column can hold, or a correct load
+    fails its own checksum. Declared types are kept when the catalog cannot
+    answer, and only the fractional-second precision is replaced, so timezone
+    polarity stays with the contract.
+    """
+    if not dest_types or not table or not db_type:
+        return dest_types
+    from services.type_system import with_temporal_fractional_digits
+
+    digits = physical_temporal_digits(
+        db_type, cfg, table=table, columns=list(dest_types.keys())
+    )
+    if not digits:
+        return dest_types
+    out = dict(dest_types)
+    lowered = {name.lower(): name for name in out}
+    for catalog_name, kept in digits.items():
+        declared_name = lowered.get(catalog_name.lower())
+        if not declared_name:
+            continue
+        declared_ddl = out.get(declared_name) or ""
+        if declared_ddl:
+            out[declared_name] = with_temporal_fractional_digits(declared_ddl, kept)
+    return out
+
+
 def physical_temporal_digits(
     db_type: str,
     cfg: dict[str, Any],

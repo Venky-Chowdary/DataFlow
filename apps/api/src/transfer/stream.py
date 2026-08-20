@@ -1498,6 +1498,28 @@ def _stream_database_transfer_impl(
         remaining_chunks = max(remaining_chunks, 1)
     chunks = max(1, completed_chunks + (1 if chunk_idx == 0 and resume_offset == 0 else 0) + remaining_chunks)
     dest_table = resolve_dest_table(dest_type, destination, table)
+    # An existing destination column decides what an instant keeps, not the plan,
+    # and this digest must be taken at that granularity or the destination re-read
+    # disagrees with it and a correct load fails Gate-8 on two opaque hashes.
+    # Kept separate from the remap types on purpose: those drive the write-path
+    # quarantine matrix, where a declared precision means "refuse to truncate" —
+    # feeding the carrier's precision into it would hold out every row whose
+    # fractional seconds the carrier rounds, which is a narrowing to disclose,
+    # not a row to reject.
+    digest_dest_types = dict(fingerprint_dest_types)
+    try:
+        from services.dest_physical_types import apply_physical_temporal_precision
+
+        digest_dest_types = apply_physical_temporal_precision(
+            digest_dest_types, dest_type, dest_cfg, table=str(dest_table)
+        )
+    except Exception as exc:
+        logger.warning(
+            "physical destination temporal precision unavailable for the write-pass "
+            "digest: %s",
+            exc,
+            exc_info=exc,
+        )
 
     ddl_log: list[str] = [
         f"STREAM {src_type}.{table} → {dest_type}.{dest_table} "
@@ -2285,7 +2307,7 @@ def _stream_database_transfer_impl(
                     mapped_fp,
                     target_cols,
                     dest_db_type=dest_type,
-                    dest_types=fingerprint_dest_types,
+                    dest_types=digest_dest_types,
                 )
         except Exception as exc:
             logger.warning("Inline write-pass fingerprint skipped for chunk %s: %s", idx, exc)
@@ -2676,6 +2698,7 @@ def _stream_database_transfer_impl(
             use_checksum_keyset = True
         read_offset = 0
         checksum_rows_read = 0
+        reread_holdouts: list[dict[str, Any]] = []
         try:
             while True:
                 read_limit = _batch_limit(
@@ -2703,7 +2726,7 @@ def _stream_database_transfer_impl(
                 )
                 if not batch or not batch.rows:
                     break
-                mapped, _ = map_rows_for_fingerprint(
+                mapped, reread_rejected = map_rows_for_fingerprint(
                     headers=batch.headers,
                     data_rows=batch.rows,
                     mappings=mappings,
@@ -2715,13 +2738,14 @@ def _stream_database_transfer_impl(
                     dest_kind=dest_type,
                     destination_pk_columns=list(pk_target_cols or []) or None,
                 )
+                reread_holdouts.extend(reread_rejected or [])
                 if mapped:
                     fp_accumulator.add_many(
                         row_fingerprints(
                             mapped,
                             target_cols,
                             dest_db_type=dest_type,
-                            dest_types=fingerprint_dest_types,
+                            dest_types=digest_dest_types,
                         )
                     )
                 checksum_rows_read += len(batch.rows)
@@ -2736,24 +2760,44 @@ def _stream_database_transfer_impl(
         finally:
             if reread_scan is not None:
                 close_table_scan(reread_scan)
-        final_checksum = fp_accumulator.digest() if fp_accumulator.total else last_checksum
         phase_profile.add(
             PHASE_CHECKSUM, time.perf_counter() - checksum_started, rows=fp_accumulator.total
         )
-        dest_summary["checksum_mode"] = "source_reread"
-        dest_summary["source_independently_reread"] = True
         dest_summary["reread_pagination"] = reread_plan.get("mode")
-        dest_summary["checksum_note"] = (
-            "Independent source re-read after the write pass "
-            f"({reread_plan.get('mode')} pagination) — dest read-back can earn "
-            "full_checksum / migration_proven."
-        )
+        if fp_accumulator.total:
+            final_checksum = fp_accumulator.digest()
+            dest_summary["checksum_mode"] = "source_reread"
+            dest_summary["source_independently_reread"] = True
+            dest_summary["checksum_note"] = (
+                "Independent source re-read after the write pass "
+                f"({reread_plan.get('mode')} pagination) — dest read-back can earn "
+                "full_checksum / migration_proven."
+            )
+        else:
+            # The re-read fingerprinted nothing. Falling back to the writer's own
+            # digest here — while still stamping source_reread — presented a
+            # writer-basis hash as an independent source scan and produced a
+            # mismatch no operator could localize. Decline the digest instead.
+            final_checksum = ""
+            dest_summary["checksum_mode"] = "source_reread_unavailable"
+            dest_summary["source_independently_reread"] = False
+            dest_summary["checksum_note"] = (
+                "Independent source re-read produced no comparable fingerprints "
+                f"({checksum_rows_read:,} row(s) read, "
+                f"{len(reread_holdouts):,} held out by the remap) — no source "
+                "digest for this run rather than a writer-basis hash presented "
+                "as a source scan."
+            )
     else:
         final_checksum = write_pass_fp.digest() if write_pass_fp.total else last_checksum
         dest_summary["checksum_mode"] = "inline_write_pass" if write_pass_fp.total else "writer_last_batch"
         dest_summary["source_independently_reread"] = False
 
-    dest_summary["checksum"] = final_checksum or last_checksum
+    dest_summary["checksum"] = (
+        final_checksum
+        if dest_summary.get("checksum_mode") == "source_reread_unavailable"
+        else (final_checksum or last_checksum)
+    )
     # Phase F2 — operator-visible pagination honesty (OFFSET cliff vs keyset).
     dest_summary["pagination_mode"] = pagination_mode
     if pagination_warning:

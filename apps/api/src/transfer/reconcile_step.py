@@ -1156,23 +1156,13 @@ def run_reconciliation(
     # the plan's precision failed correct loads with two opaque hashes.
     if not physical and table_name and endpoint.kind == "database":
         try:
-            from services.dest_physical_types import physical_temporal_digits
-            from services.type_system import with_temporal_fractional_digits
+            from services.dest_physical_types import (
+                apply_physical_temporal_precision,
+            )
 
-            for k, digits in physical_temporal_digits(
-                db_type,
-                cfg,
-                table=str(table_name),
-                columns=list(dest_types.keys()),
-            ).items():
-                for declared, declared_ddl in list(dest_types.items()):
-                    if declared.lower() == k.lower() and declared_ddl:
-                        # Precision only — the declared type keeps its timezone
-                        # polarity, which the catalog spelling does not carry.
-                        dest_types[declared] = with_temporal_fractional_digits(
-                            declared_ddl, digits
-                        )
-                        break
+            dest_types = apply_physical_temporal_precision(
+                dest_types, db_type, cfg, table=str(table_name)
+            )
         except Exception as exc:
             logging.getLogger(__name__).warning(
                 "physical destination temporal precision unavailable: %s",
