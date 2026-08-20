@@ -765,6 +765,55 @@ def _writer_supplied_engine_digests(
     return source, target, int(rows or 0)
 
 
+def _localize_checksum_mismatch(
+    report: dict[str, Any],
+    dest_summary: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Name what the two hashes disagree about when no cell was found to differ.
+
+    A strict mismatch that survives a clean key-aligned sample on a conserved
+    population is not a corrupted cell — it is the two sides having been hashed
+    on different bases or over different populations. Reporting only the pair of
+    hashes left the operator with nothing to act on, so the classification and
+    the facts behind it are stamped for the run panel:
+
+    ``digest_basis`` — how each side was obtained (write-pass, independent
+    re-read, writer ack) and, when known, the columns whose granularity the
+    destination carrier decides.
+
+    The verdict itself does not move: a mismatch still fails Gate-8.
+    """
+    if report.get("checksum_match") is not False:
+        return report
+    summary = dest_summary or {}
+    sample = report.get("sample_compare") or {}
+    compared = int((sample or {}).get("compared") or 0)
+    sample_clean = bool(sample) and bool(sample.get("passed")) and compared > 0
+    if not sample_clean:
+        return report
+    basis = {
+        "source_digest": str(
+            report.get("source_checksum_provenance")
+            or summary.get("checksum_mode")
+            or ""
+        ),
+        "source_scope": str(report.get("checksum_scope") or ""),
+        "carrier_rounded_columns": list(report.get("carrier_rounded_columns") or []),
+        "keyed_sample_rows_without_mismatch": compared,
+    }
+    report["mismatch_class"] = "comparison_basis_or_population_scope"
+    report["digest_basis"] = basis
+    report["message"] = (
+        f"{str(report.get('message') or '').rstrip()} No differing cell was found "
+        f"in {compared:,} key-aligned row(s), so the two digests differ in how or "
+        f"over what they were taken, not in a sampled value — source digest "
+        f"{basis['source_digest'] or 'unknown'}"
+        + (f", scope {basis['source_scope']}" if basis["source_scope"] else "")
+        + ". Gate-8 still fails: an unexplained digest difference is not proof."
+    )
+    return report
+
+
 def _engine_digest_enabled() -> bool:
     """Operator gate — default **off** until two gaps are closed.
 
@@ -1010,6 +1059,7 @@ def run_reconciliation(
                 "cell fidelity."
             )
             stamped["message"] = f"{str(stamped.get('message') or '').rstrip()}{note}"
+        stamped = _localize_checksum_mismatch(stamped, dest_summary)
         return stamped
 
     rejected_rows = int(dest_summary.get("rejected_rows", 0) or 0)
