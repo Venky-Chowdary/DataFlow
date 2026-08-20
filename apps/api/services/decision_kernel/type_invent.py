@@ -362,7 +362,24 @@ def ddl_type(db_type: str, inferred: str | LogicalType | NativeType | None) -> s
             return native_uuid
         return "VARCHAR(36)"
     if uuid_exact_wire_carrier(inferred):
-        return strip_identity_qualifier(inferred).strip()
+        # Keep the 36-char contract, but spell it the way this destination
+        # spells a string: ``STRING(36)`` is BigQuery/Databricks wire and a
+        # syntax error on PostgreSQL / MySQL / Oracle CREATE.
+        exact_wire = strip_identity_qualifier(inferred).strip()
+        bounded = _string_ddl_for_dest(db, exact_wire)
+        if bounded:
+            return bounded
+        # No bounded string wire on this engine (SQLite / DuckDB / ClickHouse /
+        # Iceberg): keep the foreign token only when its base is what this
+        # engine already spells, else fall back to the native unbounded wire
+        # (wider, never narrower — width is not the UUID contract here).
+        native_string = DDL_TYPES.get(db, {}).get(LOGICAL_STRING) or DEFAULT_DDL.get(db, "")
+        exact_base = exact_wire.upper().split("(", 1)[0].strip()
+        native_base = native_string.upper().split("(", 1)[0].strip()
+        widthless_native = "(" in exact_wire and "(" not in native_string
+        if native_string and (exact_base != native_base or widthless_native):
+            return native_string
+        return exact_wire
     # MongoDB ObjectId — dialect-native wire (never invent BigQuery VARCHAR).
     if base_early in {"OBJECTID", "OBJECT_ID"} or normalize_logical_type(inferred) == LOGICAL_OBJECTID:
         types_oid = DDL_TYPES.get(db) or {}
@@ -1521,6 +1538,21 @@ _PASS_THROUGH_REJECT_ON_DEST: Final[dict[str, frozenset[str]]] = {
 
 
 
+def _dest_spells_string_as_string(db: str) -> bool:
+    """True when ``STRING`` is the destination's own create-new string wire.
+
+    ``STRING`` is a physical type on BigQuery / Databricks / Spanner / Hive-class
+    engines and a logical alias everywhere else. Passing the alias through as
+    CREATE DDL emitted ``"_df_lsn" string`` on PostgreSQL, which aborted the
+    transaction and failed the whole CDC run. Asked of the dialect table rather
+    than a hand-kept engine list so a new destination cannot regress it.
+    """
+    if not db:
+        return True
+    wire = ddl_type(db, LOGICAL_STRING) or ""
+    return wire.strip().upper().split("(", 1)[0].strip() == "STRING"
+
+
 def _is_explicit_physical_stamp(carrier: str, dest_db: str = "") -> bool:
     """True when carrier is already dest DDL (Map stamp) — do not re-ddl invent."""
     raw = strip_identity_qualifier(carrier).strip()
@@ -1600,6 +1632,8 @@ def _is_explicit_physical_stamp(carrier: str, dest_db: str = "") -> bool:
         # spell wall-clock that way) and still rematerializes to DATETIME(6).
         if bare_typmod == "TIMESTAMP" and db in {"mysql", "mariadb", "tidb"}:
             return True
+        if bare_typmod == "STRING" and not _dest_spells_string_as_string(db):
+            return False
         if bare_typmod in reject:
             return False
         return True
@@ -1629,6 +1663,8 @@ def _is_explicit_physical_stamp(carrier: str, dest_db: str = "") -> bool:
         # SQL keywords are INT32 on PG/MySQL while ddl_type invents BIGINT.
         # Unambiguous INT4/INT32 keep integer_bit_width==32 and stay physical.
         if bare in {"INTEGER", "INT", "SIGNED"} and integer_bit_width(raw) is None:
+            return False
+        if bare == "STRING" and not _dest_spells_string_as_string(db):
             return False
         return True
     # Bare FLOAT (mantissa unknown) rematerializes via ddl_type → IEEE-64.

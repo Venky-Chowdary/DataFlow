@@ -49,6 +49,7 @@ from services.row_conservation import (
     live_rows_for_digest,
     observe_keyed_batch,
     record_stream_health,
+    record_tombstone_digest_scope,
 )
 from services.resilience import (  # noqa: E402, F401
     ResilientBatcher,
@@ -2817,16 +2818,9 @@ def _stream_database_transfer_impl(
                 f"({reread_plan.get('mode')} pagination) — dest read-back can earn "
                 "full_checksum / migration_proven."
             )
-            if reread_tombstones_excluded:
-                dest_summary["checksum_tombstones_excluded"] = int(
-                    reread_tombstones_excluded
-                )
-                note += (
-                    f" Scope is the live population: {reread_tombstones_excluded:,} "
-                    "tombstoned source row(s) excluded — the keyed upsert deleted "
-                    "those keys, so the destination does not hold them."
-                )
-            dest_summary["checksum_note"] = note
+            dest_summary["checksum_note"] = record_tombstone_digest_scope(
+                dest_summary, reread_tombstones_excluded, note
+            )
         else:
             # The re-read fingerprinted nothing. Falling back to the writer's own
             # digest here — while still stamping source_reread — presented a

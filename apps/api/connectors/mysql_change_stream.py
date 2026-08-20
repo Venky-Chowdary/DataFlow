@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from services.brand_env import getenv_brand
+from services.cdc_capability import LogCaptureRefusal, classify_log_capture_failure
 from services.cdc_engine import ChangeBatch
 from services.cdc_schema_history import (
     connection_fingerprint,
@@ -51,6 +52,9 @@ def _serialize(value: Any) -> str:
 
 class MySqlChangeStreamCdc:
     """Log-based CDC for MySQL using the binlog stream."""
+
+    #: Why :meth:`is_available` said no, classified for the caller.
+    unavailable_reason: LogCaptureRefusal | None = None
 
     def __init__(
         self,
@@ -190,11 +194,18 @@ class MySqlChangeStreamCdc:
         Stream open is best-effort: missing REPLICATION privileges still return
         True when server vars are correct so CI/integration can proceed; poll()
         surfaces privilege errors clearly.
+
+        A ``False`` answer records :attr:`unavailable_reason` so the caller can
+        separate "this server does not write a ROW binlog" (degrade, declared)
+        from an attach failure that would silently stop carrying DELETEs.
         """
+        self.unavailable_reason = None
         try:
             import pymysqlreplication  # noqa: F401
-        except ImportError:
+        except ImportError as exc:
+            self.unavailable_reason = classify_log_capture_failure("mysql", f"ImportError: {exc}")
             return False
+        binlog_row_ready: bool | None = None
         try:
             conn = self._conn()
             with conn.cursor() as cur:
@@ -202,19 +213,28 @@ class MySqlChangeStreamCdc:
                 row = cur.fetchone()
                 if not row or str(row[1]).lower() not in {"on", "1", "true"}:
                     conn.close()
-                    return False
+                    binlog_row_ready = False
+                    raise RuntimeError(
+                        f"log_bin={(row[1] if row else 'unknown')} — binary logging is off"
+                    )
                 cur.execute("SHOW VARIABLES LIKE 'binlog_format'")
                 row = cur.fetchone()
                 if not row or (row[1] or "").upper() != "ROW":
                     conn.close()
-                    return False
+                    binlog_row_ready = False
+                    raise RuntimeError(
+                        f"binlog_format={(row[1] if row else 'unknown')} — ROW format required"
+                    )
                 # Debezium-class: MINIMAL/PARTIAL after-images omit unchanged cols
                 # and would NULL-wipe on SQL upsert — refuse until FULL.
                 cur.execute("SHOW VARIABLES LIKE 'binlog_row_image'")
                 row = cur.fetchone()
                 if row and (row[1] or "").upper() not in {"FULL", ""}:
                     conn.close()
-                    return False
+                    binlog_row_ready = False
+                    raise RuntimeError(
+                        f"binlog_row_image={row[1]} — FULL required so upserts do not NULL-wipe"
+                    )
             conn.close()
 
             try:
@@ -227,7 +247,15 @@ class MySqlChangeStreamCdc:
                 # Vars OK — treat as available; poll will raise with detail.
                 _logger.warning("Exception suppressed: %s", exc, exc_info=exc)
             return True
-        except Exception:
+        except Exception as exc:
+            self.unavailable_reason = classify_log_capture_failure(
+                "mysql", str(exc), server_log_enabled=binlog_row_ready
+            )
+            _logger.warning(
+                "MySQL binlog capture unavailable: %s (%s)",
+                self.unavailable_reason.detail,
+                self.unavailable_reason.cause,
+            )
             return False
 
     def _binlog_kwargs(self, blocking: bool, only_events: list[type]) -> dict[str, Any]:

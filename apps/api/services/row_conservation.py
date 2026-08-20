@@ -121,7 +121,7 @@ invents a fake job-level table.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Mapping, Sequence
+from typing import Any, Mapping, MutableMapping, Sequence
 
 from services.dest_precount import (
     ARTIFACT_COUNT_KEY,
@@ -428,6 +428,26 @@ def live_rows_for_digest(
     if not excluded:
         return row_list, 0
     return [[rec.get(h) for h in header_list] for rec in live], excluded
+
+
+def record_tombstone_digest_scope(
+    summary: MutableMapping[str, Any],
+    excluded: int,
+    note: str,
+) -> str:
+    """Disclose the digest scope when tombstones were held out of the source hash.
+
+    Same owner as :func:`live_records_for_digest` so the operator-visible scope
+    can never disagree with the population that was actually hashed.
+    """
+    if excluded <= 0:
+        return note
+    summary["checksum_tombstones_excluded"] = int(excluded)
+    return note + (
+        f" Scope is the live population: {excluded:,} tombstoned source row(s) "
+        "excluded — the keyed upsert deleted those keys, so the destination "
+        "does not hold them."
+    )
 
 
 def coerce_pk_part(value: Any) -> Any:
