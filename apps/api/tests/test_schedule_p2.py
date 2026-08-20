@@ -621,7 +621,12 @@ def test_missing_connector_records_failed_history(temp_store, monkeypatch):
     assert job_id is None
     reloaded = store.get_schedule(sched.id)
     assert reloaded.run_count == before + 1
-    assert reloaded.last_status == "failed"
+    # The beat is recorded failed, and the schedule now additionally parks on a
+    # finding: a connector that no longer resolves does not come back on its own,
+    # and every later beat only added another identical failed row.
+    assert reloaded.run_history[-1].get("status") == "failed"
+    assert reloaded.last_status == "needs_approval"
+    assert (reloaded.approval_request or {}).get("status") == "open"
     assert reloaded.running is False
     assert "connector" in (reloaded.run_history[-1].get("error") or "").lower()
     assert reloaded.next_run_at is not None

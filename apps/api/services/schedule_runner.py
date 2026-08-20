@@ -27,6 +27,10 @@ logger = logging.getLogger(__name__)
 _executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="schedule-runner")
 CHECK_INTERVAL_SECONDS = 60
 LOCK_TTL_SECONDS = int(getenv_brand("SCHEDULER_LOCK_TTL", "300"))
+# Failed beats in a row before the cadence parks on a finding whatever the
+# failure was classified as. Two is the benefit of the doubt; the third is a
+# pattern, and every beat after it only costs the operator another identical row.
+_CONSECUTIVE_FAILURE_PARK = 3
 
 
 def _scheduler_instance_id() -> str:
@@ -762,11 +766,22 @@ def _park_reason(sched: Any, decision: dict[str, Any], entry: dict[str, Any]) ->
         return "deterministic_refusal"
     if not decision.get("retry") and (decision.get("decision") or {}).get("allowed") is False:
         return "committed_rows_cannot_be_replayed"
+    history = list(getattr(sched, "run_history", None) or [])
     signature = _failure_signature(entry)
     if signature:
-        previous = [r for r in list(getattr(sched, "run_history", None) or []) if not _is_success(r.get("status"))]
+        previous = [r for r in history if not _is_success(r.get("status"))]
         if previous and _failure_signature(previous[-1]) == signature:
             return "identical_failure_repeated"
+    # A ceiling that does not depend on the wording matching. Two verdicts whose
+    # text differs — a connection error naming a different replica, a gate that
+    # names a different column each beat — used to grind on the cadence forever.
+    consecutive = 1
+    for run in reversed(history):
+        if _is_success(run.get("status")):
+            break
+        consecutive += 1
+    if consecutive >= _CONSECUTIVE_FAILURE_PARK:
+        return "consecutive_failures"
     return ""
 
 
@@ -962,7 +977,7 @@ def _dispatch_transfer(schedule_id: str, attempt: int = 0) -> str | None:
     from src.transfer.background import run_transfer_async
     from src.transfer.engine import get_transfer_engine
 
-    from services.schedule_store import get_schedule, mark_schedule_run
+    from services.schedule_store import get_schedule
 
     sched = get_schedule(schedule_id)
     if not sched or not sched.enabled:
@@ -970,24 +985,20 @@ def _dispatch_transfer(schedule_id: str, attempt: int = 0) -> str | None:
     src = _resolve_connector(sched.source_connector_id)
     dst = _resolve_connector(sched.dest_connector_id)
     if not src or not dst:
+        # A connector this schedule cannot resolve does not come back on its own:
+        # someone has to re-point the schedule or restore the connection. Every
+        # later beat produced another identical failed row — 48 of them in one
+        # customer's Jobs list — so this parks on one finding instead.
         logger.warning("Schedule %s skipped — connector missing", schedule_id)
-        now = datetime.now(timezone.utc)
-        mark_schedule_run(
+        missing = "source" if not src else "destination"
+        _park_on_decision(
             schedule_id,
-            "",
-            status="failed",
-            run_entry={
-                "job_id": "",
-                "status": "failed",
-                "attempt": attempt,
-                "started_at": now.isoformat(),
-                "finished_at": now.isoformat(),
-                "duration_seconds": 0,
-                "records_transferred": 0,
-                "rejected_rows": 0,
-                "coerced_null_rows": 0,
-                "error": "Schedule skipped — source or destination connector is missing or unavailable",
-            },
+            RuntimeError(
+                f"Schedule cannot run — its {missing} connector is missing or "
+                "unavailable. Re-select the connection on this schedule, or "
+                "restore the deleted connector, then resume."
+            ),
+            attempt=attempt,
         )
         return None
 
