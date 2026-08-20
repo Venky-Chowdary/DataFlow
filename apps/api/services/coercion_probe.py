@@ -36,7 +36,9 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from services.decision_kernel.findings import FailureClass as _FailureClass
 from services.mapping_constraints import write_mappings
+from services.shape_contract import DEST_TYPE_UNREAD_REASON
 from services.transform_engine import apply_transform
 from services.transform_resolver import resolve_transform
 from services.decision_kernel import (
@@ -334,6 +336,7 @@ def analyze_coercion(
             "checked": 0,
             "sampled_rows": 0,
             "has_blocking_failures": False,
+            "dest_schema_unloaded_columns": [],
             "columns": [],
             "by_source": {},
         }
@@ -352,6 +355,9 @@ def analyze_coercion(
         tgt_type = _target_type_for(m, dest_types, source_types, dest_db_type=dest_db_type)
         if not str(tgt_type or "").strip():
             # Match-existing without live/Map stamp — refuse source invent green.
+            # Blocking, but classified as an unread destination schema rather than
+            # a fidelity collapse: nothing was compared, so no conversion verdict
+            # exists and no Risk Contract can clear it.
             entry = {
                 "source": src,
                 "target": str(m.get("target") or src),
@@ -362,12 +368,10 @@ def analyze_coercion(
                 "nulls": 0,
                 "failed": 0,
                 "severity": "block",
-                "fidelity_collapse": True,
-                "suggested_fix": (
-                    f"Column '{src}': destination type pending Studio/Map stamp — "
-                    "refuse source_type invent. Re-run destination introspect or "
-                    "stamp Map target_type."
-                ),
+                "fidelity_collapse": False,
+                "dest_schema_unloaded": True,
+                "failure_class": _FailureClass.DEST_SCHEMA_UNLOADED.value,
+                "suggested_fix": f"Column '{src}': {DEST_TYPE_UNREAD_REASON}",
             }
             columns.append(entry)
             by_source[src] = entry
@@ -986,6 +990,11 @@ def analyze_coercion(
         "checked": len(columns),
         "sampled_rows": len(rows),
         "has_blocking_failures": any(c["severity"] == "block" for c in columns),
+        "dest_schema_unloaded_columns": [
+            str(c.get("source") or "")
+            for c in columns
+            if c.get("dest_schema_unloaded") is True
+        ],
         "columns": columns,
         "by_source": by_source,
     }

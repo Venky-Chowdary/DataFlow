@@ -8781,6 +8781,36 @@ button.df2-vd-assist-toggle:focus-visible {
   font-size: 12px;
   color: #475569;
 }
+/* One-line blocker bar: the mapping grid stays on screen no matter how many
+   columns are held. Detail is opt-in and height-bounded. */
+.df2-map-blocker-bar {
+  border: 1px solid #fcd34d;
+  background: #fffbeb;
+  border-radius: 8px;
+  padding: 8px 10px;
+  margin-bottom: 8px;
+}
+.df2-map-blocker-bar-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 13px;
+  color: #0f172a;
+  min-width: 0;
+}
+.df2-map-blocker-bar-head > strong {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.df2-map-blocker-bar .df2-map-blocker-list {
+  max-height: 156px;
+  overflow-y: auto;
+}
 .df2-map-blocker-list {
   margin: 6px 0 0 24px;
   padding: 0;

@@ -61,6 +61,22 @@ FALSE_FRIEND_KINDS = frozenset(
 
 WRITE_BY_NAME = "name"
 
+#: Fidelity verdict for a column whose destination type was never read.
+#:
+#: This is deliberately not ``cast``/``lossy_cast``: no comparison happened, so
+#: claiming a conversion verdict let Map print ``T → T loses fidelity`` and
+#: demand a Risk Contract that no signature could clear. The only exit is
+#: reloading the destination catalog (which either binds real types or proves
+#: the table absent, i.e. create-new).
+FIDELITY_DEST_TYPE_UNREAD = "dest_type_unread"
+
+DEST_TYPE_UNREAD_REASON = (
+    "Destination column type has not been read from the destination yet — "
+    "Datawrap will not use the source type as the destination type. Reload the "
+    "destination schema; if the table does not exist the probe proves it absent "
+    "and the column becomes a CREATE."
+)
+
 _INSERT_WITH_COLS = re.compile(
     r"insert\s+into\s+\S+\s*\(([^)]+)\)\s*values",
     re.IGNORECASE | re.DOTALL,

@@ -369,6 +369,20 @@ export function TransferPage({
   /** Table/collection names from the last destination introspect (picker + exists check). */
   const [destObjectNames, setDestObjectNames] = useState<string[]>([]);
   const [destTableExists, setDestTableExists] = useState<boolean | null>(null);
+  /**
+   * Last existence verdict the destination catalog actually returned.
+   *
+   * `setDestTableExists` does not flush before the plan payload is rebuilt, so a
+   * probe that just proved the table absent was still persisted as "unknown" —
+   * Map then mapped against `null`, left every `target_type` empty and printed
+   * `T → T loses fidelity` instead of a CREATE.  Written synchronously with the
+   * state so both readers see the same fact within one tick.
+   */
+  const destTableExistsRef = useRef<boolean | null>(null);
+  const proveDestTableExists = useCallback((verdict: boolean | null) => {
+    destTableExistsRef.current = verdict;
+    setDestTableExists(verdict);
+  }, []);
   const [destConnected, setDestConnected] = useState<boolean | null>(null);
   const [destConnectionError, setDestConnectionError] = useState<string>("");
   const [liveSourceTypes, setLiveSourceTypes] = useState<string[]>([]);
@@ -439,6 +453,7 @@ export function TransferPage({
   }, [sourceConnectorId, sourceKind]);
 
   const buildDestinationEndpoint = () => {
+    const provenDestTableExists = destTableExists ?? destTableExistsRef.current;
     const isMongo = destDriverType === "mongodb";
     const isDynamo = destDriverType === "dynamodb";
     const isIceberg = destDriverType === "iceberg";
@@ -481,17 +496,19 @@ export function TransferPage({
       service_account: selectedDestConnector?.service_account || undefined,
       // Dual-write: nested extra is SSOT for EndpointConfig / writers; flat root
       // keeps transfer-plan Map/preflight readers that still look at dest.table_exists.
-      ...(destTableExists === null || destTableExists === undefined
+      // `?? ref` only fills the *unknown* case, so a just-proven verdict is never
+      // downgraded to unknown by an unflushed setState.
+      ...(provenDestTableExists === null || provenDestTableExists === undefined
         ? {}
-        : { table_exists: destTableExists }),
-      ...(destTableExists === true && Object.keys(destSchemaMap).length
+        : { table_exists: provenDestTableExists }),
+      ...(provenDestTableExists === true && Object.keys(destSchemaMap).length
         ? { schema_types: destSchemaMap }
         : {}),
       extra: {
-        ...(destTableExists === null || destTableExists === undefined
+        ...(provenDestTableExists === null || provenDestTableExists === undefined
           ? {}
-          : { table_exists: destTableExists }),
-        ...(destTableExists === true && Object.keys(destSchemaMap).length
+          : { table_exists: provenDestTableExists }),
+        ...(provenDestTableExists === true && Object.keys(destSchemaMap).length
           ? { schema_types: destSchemaMap }
           : {}),
         ...(syncMode === "cdc" && allowAppendOnly ? { allow_append_only: true } : {}),
@@ -1243,6 +1260,19 @@ export function TransferPage({
   }, [parsed, transferPlan, destColumns]);
 
   const mappingGenRef = useRef(0);
+  /**
+   * Latest `loadDestinationSchema`. Map runs before that function is declared and
+   * must not close over a stale render's copy, so it is reached through a ref.
+   */
+  const loadDestSchemaRef = useRef<
+    (() => Promise<{
+      columns: string[];
+      schema: Record<string, string>;
+      tableExists: boolean | null;
+      connected: boolean | null;
+      message: string;
+    }>) | null
+  >(null);
 
   const applyPipelineMappings = useCallback(
     async (
@@ -1263,10 +1293,36 @@ export function TransferPage({
       const gen = ++mappingGenRef.current;
       const rows = parsed?.data ?? parsed?.sample_data;
       const analysisCols = analysisOverride?.columns ?? analysis?.columns;
-      const existsForMap =
+      let existsForMap =
         destinationTableExistsOverride !== undefined
           ? destinationTableExistsOverride
-          : destTableExists;
+          : (destTableExists ?? destTableExistsRef.current);
+      let mapTargetCols = targetCols;
+      let mapTargetSchema = targetSchema;
+      // Destination existence is a fact the catalog can settle, not an unknown to
+      // map against. Mapping with `null` left every target_type empty, so Map
+      // showed ten columns of "loses fidelity (T → T)" behind a Risk Contract that
+      // no signature could clear. Probe once here: the answer is either real
+      // destination types or proof of absence, i.e. a CREATE plan.
+      if (
+        existsForMap == null
+        && destKindMode === "database"
+        && Boolean(connectorId)
+        && Boolean(targetCollection.trim())
+      ) {
+        try {
+          const probed = await loadDestSchemaRef.current?.();
+          if (probed) {
+            existsForMap = probed.tableExists;
+            if (probed.tableExists === true && probed.columns.length && !targetCols?.length) {
+              mapTargetCols = probed.columns;
+              mapTargetSchema = probed.schema;
+            }
+          }
+        } catch {
+          // Probe failed — existence stays unknown and the engine stays fail-closed.
+        }
+      }
       const commitMappings = (
         next: EditableMapping[],
         llmUsed: boolean,
@@ -1295,14 +1351,14 @@ export function TransferPage({
       try {
         // Prefer direct map when fresh dest schema is in-hand — plan persistence
         // can lag React state and previously wiped create-new proposals.
-        const useDirect = Boolean(targetCols?.length) || !persistedPlanId;
+        const useDirect = Boolean(mapTargetCols?.length) || !persistedPlanId;
         let result: Awaited<ReturnType<typeof mapTransferColumns>>;
         if (!useDirect) {
           const planId = await ensurePersistedPlan(undefined, {
             source_columns: sourceCols,
             source_schema: sourceSchema,
-            target_columns: targetCols,
-            target_schema: targetSchema,
+            target_columns: mapTargetCols,
+            target_schema: mapTargetSchema,
           });
           if (planId) {
             result = await mapTransferPlan(planId, {
@@ -1314,8 +1370,8 @@ export function TransferPage({
             result = await mapTransferColumns({
               source_columns: sourceCols,
               source_schema: sourceSchema,
-              target_columns: targetCols?.length ? targetCols : undefined,
-              target_schema: targetSchema,
+              target_columns: mapTargetCols?.length ? mapTargetCols : undefined,
+              target_schema: mapTargetSchema,
               validation_mode: validationMode,
               file_format: parsed?.file_type
                 ?? (sourceKind !== "file" ? sourceConnector?.type : undefined)
@@ -1332,8 +1388,8 @@ export function TransferPage({
           result = await mapTransferColumns({
             source_columns: sourceCols,
             source_schema: sourceSchema,
-            target_columns: targetCols?.length ? targetCols : undefined,
-            target_schema: targetSchema,
+            target_columns: mapTargetCols?.length ? mapTargetCols : undefined,
+            target_schema: mapTargetSchema,
             validation_mode: validationMode,
             file_format: parsed?.file_type
               ?? (sourceKind !== "file" ? sourceConnector?.type : undefined)
@@ -1353,9 +1409,9 @@ export function TransferPage({
         const mapped = editableFromPipelineMappings(
           result.mappings ?? [],
           rows,
-          targetCols,
+          mapTargetCols,
           threshold,
-          targetSchema,
+          mapTargetSchema,
         );
         const shape = (result as { shape_contract?: typeof shapeContract }).shape_contract;
         if (shape && typeof shape === "object") {
@@ -1438,7 +1494,9 @@ export function TransferPage({
           destination_db_type: destKindMode === "file_export" ? exportFormat : destType,
           sync_mode: syncMode,
           destination_table_exists:
-            destKindMode === "database" ? destTableExists : false,
+            destKindMode === "database"
+              ? (destTableExists ?? destTableExistsRef.current)
+              : false,
         });
         return editableFromPipelineMappings(
           result.mappings,
@@ -1527,7 +1585,7 @@ export function TransferPage({
       if (!targetCollection.trim()) {
         setDestColumns([]);
         setDestSchemaMap({});
-        setDestTableExists(null);
+        proveDestTableExists(null);
         destSchemaTableKeyRef.current = tableKey;
         return { columns: [], schema: {}, tableExists: null, connected, message: (destination.message as string) || "" };
       }
@@ -1584,7 +1642,7 @@ export function TransferPage({
       const nextSchema = resolvedExists === false ? {} : (keepPrior ? destSchemaMap : schema);
       setDestColumns(nextColumns);
       setDestSchemaMap(nextSchema);
-      setDestTableExists(resolvedExists);
+      proveDestTableExists(resolvedExists);
       destSchemaTableKeyRef.current = tableKey;
       if (keepPrior && resolvedExists === true && destColumns.length === 0) {
         const metaKey = `meta:${tableKey}`;
@@ -1625,7 +1683,7 @@ export function TransferPage({
       }
       // Keep last-known schema on transient errors so the demo does not blank out.
       // Do not force "table missing" — unknown is safer than a false create promise.
-      setDestTableExists(null);
+      proveDestTableExists(null);
       const errMsg = e instanceof Error ? e.message : "Retry or continue — existence will be rechecked on Validate.";
       setDestConnected(false);
       setDestConnectionError(errMsg);
@@ -1639,6 +1697,7 @@ export function TransferPage({
       if (gen === destSchemaGenRef.current) setDestSchemaLoading(false);
     }
   };
+  loadDestSchemaRef.current = loadDestinationSchema;
 
   useEffect(() => {
     if (!analysis?.columns.length || step !== STEP_MAP || analyzing) return;
@@ -1700,7 +1759,7 @@ export function TransferPage({
     setCellPreview(null);
     setDestColumns([]);
     setDestSchemaMap({});
-    setDestTableExists(null);
+    proveDestTableExists(null);
     setDestObjectNames([]);
     destSchemaTableKeyRef.current = "";
     routeAnalyzedKeyRef.current = "";
@@ -4375,10 +4434,11 @@ export function TransferPage({
         })(),
         destExtra: (() => {
           const extra: Record<string, unknown> = {};
-          if (destTableExists !== null && destTableExists !== undefined) {
-            extra.table_exists = destTableExists;
+          const provenExists = destTableExists ?? destTableExistsRef.current;
+          if (provenExists !== null && provenExists !== undefined) {
+            extra.table_exists = provenExists;
           }
-          if (destTableExists === true && Object.keys(destSchemaMap).length) {
+          if (provenExists === true && Object.keys(destSchemaMap).length) {
             // Live DDL must ride multipart dest_extra — form fields alone omit it.
             extra.schema_types = destSchemaMap;
           }
@@ -5116,7 +5176,7 @@ export function TransferPage({
     setDestColumns([]);
     setDestSchemaMap({});
     setDestSchemaLoading(false);
-    setDestTableExists(null);
+    proveDestTableExists(null);
     setTransferLaunch(null);
     setLlmMappingUsed(false);
     setMappingProof(null);
@@ -5179,6 +5239,18 @@ export function TransferPage({
           destTableExists={destTableExists}
           extraSourceColumns={shapeContract?.extra_source_columns ?? []}
           destShapeHeadline={shapeContract?.headline ?? ""}
+          onReloadDestSchema={async () => {
+            // Re-probe the catalog, then re-map with the probe's own verdict —
+            // a proven-absent table becomes create-new, a loaded table binds
+            // real destination types. No guessing either way.
+            const res = await loadDestinationSchema();
+            await applyPipelineMappings(
+              res.columns,
+              res.schema,
+              undefined,
+              res.tableExists,
+            );
+          }}
           destConnected={destConnected}
           destConnectionError={destConnectionError}
           targetCollection={targetCollection}
@@ -6083,7 +6155,7 @@ export function TransferPage({
                 onChange={(next) => {
                   setTargetCollection(next);
                   // Do not claim existence for a name we have not probed yet.
-                  setDestTableExists(null);
+                  proveDestTableExists(null);
                   setDestColumns([]);
                   setDestSchemaMap({});
                   setPreflight(null);

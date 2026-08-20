@@ -529,6 +529,17 @@ export function engineStampedRiskChip(m: EditableMapping): {
 } | null {
   // Safe normalize (email/trim/case) is Approve-tier — do not scare with mutate/cast chips.
   if (isSafeNormalizeMapping(m)) return null;
+  // Unknown destination type outranks any cast verdict: there is nothing to cast
+  // into yet, and the row's only exit is reloading the destination schema.
+  if (isDestSchemaPending(m)) {
+    return {
+      label: "dest type not loaded",
+      detail:
+        "Destination column type has not been read from the destination yet — "
+        + "reload the destination schema.",
+      severity: "block",
+    };
+  }
   const fidelity = (m.fidelity || "").toLowerCase();
   if (fidelity === "lossy_cast" || fidelity === "mutate" || fidelity === "cast") {
     return {
@@ -657,9 +668,23 @@ export function mappingAckDoneLabel(m: EditableMapping): string {
   return "Ready";
 }
 
+/**
+ * True when the destination column type was never read from the destination.
+ *
+ * This is not a fidelity risk and no signature can clear it: until the
+ * destination catalog answers (or the table is proven absent, which is
+ * create-new), there is no destination type to compare against. Showing it as
+ * "loses fidelity (T \u2192 T)" with a Risk Contract sent operators round a loop.
+ */
+export function isDestSchemaPending(m: EditableMapping): boolean {
+  return m.assignmentStrategy === "pending_dest_schema";
+}
+
 /** Lossy, mutate, cast (quarantine path), specialty, create-new risk, or STRUCT expand — G4 needs risk_acknowledged. */
 export function mappingRequiresRiskAck(m: EditableMapping): boolean {
   if (isIntentionalOmit(m)) return false;
+  // Unknown destination type is a reload, not a risk to accept.
+  if (isDestSchemaPending(m)) return false;
   // Safe normalize (email/trim/case) is not fidelity risk — Approve is enough.
   if (isSafeNormalizeMapping(m)) return false;
   const fidelity = (m.fidelity || "").toLowerCase();
@@ -687,6 +712,7 @@ export function mappingRequiresRiskAck(m: EditableMapping): boolean {
 /** True when Approve-all must leave this row for operator review. */
 export function mappingRequiresManualApproval(m: EditableMapping): boolean {
   if (isIntentionalOmit(m)) return false;
+  if (isDestSchemaPending(m)) return true;
   if (isExistingEnumBooleanConflict(m) || isExistingDestTypeOverride(m)) return true;
   if (mappingRequiresRiskAck(m) && !m.riskAcknowledged) return true;
   // Airbyte hole: Approve-all must not clear qty≠amt / user≠customer / dest fold.
@@ -1929,7 +1955,11 @@ export function editableFromPipelineMappings(
     // destType from source_type (false-green Map before write fail-close).
     const destSchemaLoaded = Object.keys(destSchema || {}).length > 0;
     let destType = liveDestType || m.target_type || undefined;
-    if (!destType && (rowCreateNew || !destSchemaLoaded)) {
+    // Never echo the source type back as the destination type when the
+    // destination schema is pending: that produced "loses fidelity
+    // (VARCHAR(16777216) \u2192 VARCHAR(16777216))" on 10 columns whose destination
+    // type nobody had read yet. A proven create-new projection may show it.
+    if (!destType && !pendingDest && (rowCreateNew || !destSchemaLoaded)) {
       destType = m.source_type;
     }
     const destTypeGap = destSchemaLoaded && !destType && !rowCreateNew && !pendingDest;

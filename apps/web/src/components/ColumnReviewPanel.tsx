@@ -32,6 +32,7 @@ import {
   engineStampedRiskChip,
   formatColumnProfileStrip,
   hasCreateNewTypeRisk,
+  isDestSchemaPending,
   mappingAckDoneLabel,
   mappingAckLabel,
   mappingAckTier,
@@ -1160,6 +1161,21 @@ export function ColumnReviewPanel({
                             {m.riskContract.risk_id}
                           </span>
                         )}
+                      </div>
+                    ) : isDestSchemaPending(m) ? (
+                      // No row-level action exists: the destination type was never
+                      // read, so Approve would claim a comparison nobody made.
+                      <div className="df2-column-risk-actions">
+                        <span
+                          className="df2-badge df2-badge-warn df2-badge-xs"
+                          title={
+                            "Destination column type has not been read from the destination. "
+                            + "Use Reload destination schema above — if the table does not exist, "
+                            + "the probe proves it absent and this column becomes a CREATE."
+                          }
+                        >
+                          dest type not loaded
+                        </span>
                       </div>
                     ) : (
                       <div className="df2-column-risk-actions">

@@ -76,6 +76,8 @@ interface TransferMapStepProps {
   /** Dest-exists extras the operator must remap or omit — never silent drop. */
   extraSourceColumns?: string[];
   destShapeHeadline?: string;
+  /** Re-probe the destination catalog and re-map — the only exit from an unread dest schema. */
+  onReloadDestSchema?: () => void | Promise<void>;
 }
 
 
@@ -129,12 +131,16 @@ export function TransferMapStep({
   onApplyPrimaryKey,
   extraSourceColumns = [],
   destShapeHeadline = "",
+  onReloadDestSchema,
 }: TransferMapStepProps) {
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<ColumnFilter>("review");
   const [userPickedFilter, setUserPickedFilter] = useState(false);
   const [focusSource, setFocusSource] = useState<string | null>(null);
   const [mapDialogOpen, setMapDialogOpen] = useState(false);
+  // Collapsed by default: the headline plus one primary control is the whole
+  // decision. Ten expanded reasons buried the mapping grid below the fold.
+  const [blockerDetailOpen, setBlockerDetailOpen] = useState(false);
   const [proofOpenLocal, setProofOpenLocal] = useState(false);
   const proofOpen = proofOpenProp ?? proofOpenLocal;
   const setProofOpen = onProofOpenChange ?? setProofOpenLocal;
@@ -341,23 +347,40 @@ export function TransferMapStep({
 
       <div className="df2-card-body df2-map-step-body">
         {blockerSummary.blockers.length > 0 && (
-          <details className="df2-map-stream-diverge is-compact" role="status" open>
-            <summary>
+          <div className="df2-map-blocker-bar" role="status">
+            <div className="df2-map-blocker-bar-head">
               <DtIcon name="alert" size={16} />
               <strong>{blockerSummary.headline}</strong>
-            </summary>
-            <ul className="df2-map-blocker-list">
-              {blockerSummary.blockers.slice(0, 6).map((b) => (
-                <li key={`${b.code}-${b.source}`}>
-                  <strong>{b.title}</strong>
-                  <span> — {b.action}</span>
-                </li>
-              ))}
-              {blockerSummary.blockers.length > 6 && (
-                <li>+{blockerSummary.blockers.length - 6} more — use the Review filter.</li>
+              {blockerSummary.destSchemaUnloadedOnly && onReloadDestSchema && (
+                <Button
+                  size="sm"
+                  variant="primary"
+                  disabled={destSchemaLoading}
+                  onClick={() => void onReloadDestSchema()}
+                >
+                  {destSchemaLoading ? "Reading destination…" : "Reload destination schema"}
+                </Button>
               )}
-            </ul>
-          </details>
+              <button
+                type="button"
+                className="df2-btn df2-btn-sm df2-btn-ghost"
+                aria-expanded={blockerDetailOpen}
+                onClick={() => setBlockerDetailOpen((v) => !v)}
+              >
+                {blockerDetailOpen ? "Hide detail" : `Why (${blockerSummary.groups.length})`}
+              </button>
+            </div>
+            {blockerDetailOpen && (
+              <ul className="df2-map-blocker-list">
+                {blockerSummary.groups.map((g) => (
+                  <li key={g.code}>
+                    <strong>{g.title}</strong>
+                    <span> — {g.action}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
         )}
         {identityFixBanner && (
           <div className="df2-map-identity-banner is-compact" role="status">

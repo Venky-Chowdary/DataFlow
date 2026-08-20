@@ -17,6 +17,7 @@ import {
   classifyMappingReview,
   isExistingDestTypeOverride,
   isExistingEnumBooleanConflict,
+  isDestSchemaPending,
   isFalseFriendReview,
   isIntentionalOmit,
   mappingRequiresRiskAck,
@@ -27,6 +28,7 @@ import {
 
 export type MapBlockerCode =
   | "no_destination"
+  | "dest_schema_unloaded"
   | "existing_dest_type_override"
   | "existing_enum_boolean"
   | "false_friend"
@@ -50,8 +52,16 @@ const CONTINUE_POLICY_NAMES = EXECUTION_POLICY_OPTIONS
   .map((p) => p.id)
   .join(" / ");
 
+/**
+ * Source → destination types as measured.
+ *
+ * The destination side is never back-filled from the source: printing
+ * ``VARCHAR(16777216) → VARCHAR(16777216)`` for a column whose destination type
+ * was never read invents the fact the message is supposed to report.
+ */
 function typePath(m: EditableMapping): string {
-  return `${m.inferredType || "unknown"} → ${m.destType || m.inferredType || "unknown"}`;
+  const dest = String(m.destType || "").trim();
+  return `${m.inferredType || "unknown"} → ${dest || "destination type not loaded"}`;
 }
 
 /** Execution policy on the row's contract, when one is stamped. */
@@ -68,6 +78,22 @@ export function mappingBlocker(
   threshold: number,
 ): MapBlocker | null {
   if (!needsMappingReview(m, threshold)) return null;
+
+  // One root cause, before any per-column type talk: the destination schema is
+  // unknown, so no type verdict on this row is measurable and no Map action —
+  // Approve, Widen, or a signed Risk Contract — can make it measurable.
+  if (isDestSchemaPending(m)) {
+    return {
+      code: "dest_schema_unloaded",
+      source: m.source,
+      title: `${m.source} → ${m.target || m.source} has no destination type yet`,
+      action:
+        "Reload the destination schema. If the table does not exist yet, the probe "
+        + "proves it absent and the column becomes a CREATE — Datawrap will not "
+        + "guess the destination type from the source.",
+      clearableFromMap: false,
+    };
+  }
 
   if (isIntentionalOmit(m)) {
     return {
@@ -167,9 +193,66 @@ export interface MapBlockerSummary {
   headline: string;
   /** Multi-line reason + action, first blockers named. Empty when clear. */
   detail: string;
+  /**
+   * One line per distinct cause with the columns it covers, so ten columns
+   * sharing one root cause read as one line instead of ten paragraphs that
+   * push the mapping grid off screen.
+   */
+  groups: MapBlockerGroup[];
+  /** True when every blocker is the destination schema not being loaded. */
+  destSchemaUnloadedOnly: boolean;
+}
+
+export interface MapBlockerGroup {
+  code: MapBlockerCode;
+  /** Columns held by this cause, in mapping order. */
+  columns: string[];
+  /** Cause, stated once for the whole group. */
+  title: string;
+  /** The action that clears the whole group. */
+  action: string;
+  clearableFromMap: boolean;
 }
 
 const DETAIL_LIMIT = 3;
+const GROUP_COLUMN_LIMIT = 6;
+
+const GROUP_TITLES: Partial<Record<MapBlockerCode, string>> = {
+  dest_schema_unloaded: "destination column type not read yet",
+  no_destination: "no destination column",
+  risk_ack_required: "lossy type path needs a signed Risk Contract",
+  approval_required: "not approved yet",
+  existing_dest_type_override: "changes an existing destination column type",
+  existing_enum_boolean: "existing destination domain conflict",
+  false_friend: "name matches but meaning does not",
+  fail_closed_contract: "signed contract stops the write by design",
+};
+
+/** Collapse per-column blockers into one line per cause. */
+export function groupMapBlockers(blockers: MapBlocker[]): MapBlockerGroup[] {
+  const byCode = new Map<MapBlockerCode, MapBlocker[]>();
+  for (const b of blockers) {
+    const list = byCode.get(b.code);
+    if (list) list.push(b);
+    else byCode.set(b.code, [b]);
+  }
+  return [...byCode.entries()].map(([code, list]) => {
+    const columns = list.map((b) => b.source);
+    const shown = columns.slice(0, GROUP_COLUMN_LIMIT).join(", ");
+    const rest = columns.length - GROUP_COLUMN_LIMIT;
+    const cause = GROUP_TITLES[code];
+    const title = list.length === 1 || !cause
+      ? list[0].title
+      : `${list.length} column(s) — ${cause}: ${shown}${rest > 0 ? ` +${rest} more` : ""}`;
+    return {
+      code,
+      columns,
+      title,
+      action: list[0].action,
+      clearableFromMap: list.every((b) => b.clearableFromMap),
+    };
+  });
+}
 
 export function mapBlockerSummary(
   mappings: EditableMapping[],
@@ -182,18 +265,26 @@ export function mapBlockerSummary(
       clearableFromMap: 0,
       headline: "Continue to Validate",
       detail: "",
+      groups: [],
+      destSchemaUnloadedOnly: false,
     };
   }
   const clearableFromMap = blockers.filter((b) => b.clearableFromMap).length;
   const needsDdl = blockers.length - clearableFromMap;
-  const headline = needsDdl > 0
-    ? `${blockers.length} column(s) hold Validate · ${needsDdl} need a destination change`
-    : `${blockers.length} column(s) hold Validate`;
+  const groups = groupMapBlockers(blockers);
+  const destSchemaUnloadedOnly = blockers.every(
+    (b) => b.code === "dest_schema_unloaded",
+  );
+  const headline = destSchemaUnloadedOnly
+    ? `Destination schema not loaded — ${blockers.length} column(s) have no destination type yet`
+    : needsDdl > 0
+      ? `${blockers.length} column(s) hold Validate · ${needsDdl} need a destination change`
+      : `${blockers.length} column(s) hold Validate`;
   const detail = [
-    ...blockers.slice(0, DETAIL_LIMIT).map((b) => `${b.title} — ${b.action}`),
-    blockers.length > DETAIL_LIMIT
-      ? `+${blockers.length - DETAIL_LIMIT} more in the Review filter.`
+    ...groups.slice(0, DETAIL_LIMIT).map((g) => `${g.title} — ${g.action}`),
+    groups.length > DETAIL_LIMIT
+      ? `+${groups.length - DETAIL_LIMIT} more cause(s) in the Review filter.`
       : "",
   ].filter(Boolean).join("\n");
-  return { blockers, clearableFromMap, headline, detail };
+  return { blockers, clearableFromMap, headline, detail, groups, destSchemaUnloadedOnly };
 }

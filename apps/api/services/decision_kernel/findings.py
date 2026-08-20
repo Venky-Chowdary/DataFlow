@@ -34,6 +34,11 @@ class FailureClass(str, Enum):
     LENGTH_OVERFLOW = "LENGTH_OVERFLOW"
     SEMANTIC_TRANSFORM_FAILURE = "SEMANTIC_TRANSFORM_FAILURE"
     FIDELITY_COLLAPSE = "FIDELITY_COLLAPSE"
+    #: Destination column type was never read — no conversion was compared, so
+    #: this is a catalog/introspect gap, not a fidelity verdict. Its only
+    #: remediation is reloading the destination schema (which either binds real
+    #: types or proves the table absent, i.e. create-new).
+    DEST_SCHEMA_UNLOADED = "DEST_SCHEMA_UNLOADED"
     UNKNOWN = "UNKNOWN"
 
 
@@ -206,6 +211,11 @@ def rank_suggested_target_type(
     if fc is FailureClass.EMPTY_VALUE_NOT_NULLABLE:
         return ""
 
+    # Unread destination type: suggesting a target here would invent the very
+    # fact that is missing. The fix is a catalog reload, not a type.
+    if fc is FailureClass.DEST_SCHEMA_UNLOADED:
+        return ""
+
     # Fractional → integer: prefer DOUBLE/DECIMAL, never text-first.
     if fc is FailureClass.FRACTIONAL_PRECISION_LOSS or (
         src_l in {"float", "decimal", "number"}
@@ -256,6 +266,13 @@ def recommended_action_for_failure(
         )
     if fc is FailureClass.ENCODING_FAILURE:
         return "Open Fix bad data → Strip controls / Quarantine unfit cells → re-Validate."
+    if fc is FailureClass.DEST_SCHEMA_UNLOADED:
+        return (
+            f"Open Map → Reload destination schema for {col or 'the destination'}— "
+            "no widen or Risk Contract applies until the destination type is read. "
+            "If the table does not exist the probe proves it absent and the column "
+            "becomes a CREATE."
+        )
     if suggested_target_type:
         return (
             f"Open Map → widen {col} to {suggested_target_type} (or remap / ALTER) → re-Validate."

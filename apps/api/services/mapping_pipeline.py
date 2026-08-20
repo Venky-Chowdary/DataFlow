@@ -7,6 +7,10 @@ import re
 
 from services.data_profiler import UNTYPED_TEXT_LOGICALS as _UNTYPED_TEXT_LOGICALS
 from services.semantic_mapper import map_columns
+from services.shape_contract import (
+    DEST_TYPE_UNREAD_REASON,
+    FIDELITY_DEST_TYPE_UNREAD,
+)
 from services.transform_engine import infer_transform_for_mapping
 from services.decision_kernel import (
     create_new_mapping_target_type,
@@ -822,11 +826,11 @@ def run_mapping_pipeline(
                 **(
                     {
                         "requires_review": True,
-                        "fidelity": "cast",
-                        "fidelity_reason": (
-                            "Destination type pending Studio schema — refuse "
-                            "source_type invent for Map/Validate."
-                        ),
+                        # Not a cast verdict: nothing was compared. Calling this
+                        # "cast" made Map print "loses fidelity (T → T)" and demand
+                        # a Risk Contract no signature could satisfy.
+                        "fidelity": FIDELITY_DEST_TYPE_UNREAD,
+                        "fidelity_reason": DEST_TYPE_UNREAD_REASON,
                     }
                     if pending_dest or (not tgt_type and strategy != "identity_passthrough")
                     else {}
@@ -1006,10 +1010,8 @@ def run_mapping_pipeline(
             row["target_type"] = ""
             row["create_new"] = False
             row["requires_review"] = True
-            row["fidelity"] = "cast"
-            row["fidelity_reason"] = (
-                "Destination type pending Studio schema — refuse source_type invent."
-            )
+            row["fidelity"] = FIDELITY_DEST_TYPE_UNREAD
+            row["fidelity_reason"] = DEST_TYPE_UNREAD_REASON
             try:
                 row["confidence"] = min(float(row.get("confidence") or 0.55), 0.55)
             except (TypeError, ValueError):
