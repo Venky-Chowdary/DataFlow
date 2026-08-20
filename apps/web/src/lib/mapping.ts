@@ -680,6 +680,14 @@ export function isDestSchemaPending(m: EditableMapping): boolean {
   return m.assignmentStrategy === "pending_dest_schema";
 }
 
+/** Fidelity class for a destination type that was never read (mirrors the engine). */
+export const FIDELITY_DEST_TYPE_UNREAD = "dest_type_unread";
+
+export const DEST_TYPE_UNREAD_REASON =
+  "Destination column type has not been read from the destination yet — "
+  + "reload the destination schema. If the table does not exist the probe proves "
+  + "it absent and the column becomes a CREATE.";
+
 /** Lossy, mutate, cast (quarantine path), specialty, create-new risk, or STRUCT expand — G4 needs risk_acknowledged. */
 export function mappingRequiresRiskAck(m: EditableMapping): boolean {
   if (isIntentionalOmit(m)) return false;
@@ -1165,6 +1173,11 @@ export function mergeSignedRiskContracts(
  * Risk rows require {@link acknowledgeMappingRisk}, not bare Approve.
  */
 export function approveMappingHonestly(m: EditableMapping): EditableMapping {
+  // Nothing to approve while the destination type is unread — approving it once
+  // unlocked Validate for a destination the engine had never inspected.
+  if (isDestSchemaPending(m)) {
+    return { ...m, approved: false, requiresReview: true };
+  }
   if (isExistingEnumBooleanConflict(m)) {
     return flagExistingEnumBooleanConflict(m);
   }

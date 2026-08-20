@@ -12,6 +12,8 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   acknowledgeMappingRisk,
+  approveMappingsHonestly,
+  countApproveEligible,
   isDestSchemaPending,
   mappingRequiresRiskAck,
   type EditableMapping,
@@ -83,6 +85,19 @@ describe("pending destination schema is not a signable risk", () => {
     // The invented fact: source type printed as the destination type.
     assert.doesNotMatch(blocker.title, /VARCHAR\(16777216\).*VARCHAR\(16777216\)/);
     assert.match(blocker.action, /Reload the destination schema/i);
+  });
+
+  it("is never cleared by Approve all", () => {
+    // Regression: the Map fallback (mapping engine unreachable) produced rows the
+    // bulk Approve path marked ready, unlocking Validate for a destination that
+    // had never been read.
+    const columns = ["employee_id", "age"].map(pendingDestColumn);
+    assert.equal(countApproveEligible(columns), 0);
+    for (const m of approveMappingsHonestly(columns)) {
+      assert.equal(m.approved, false);
+      assert.equal(m.requiresReview, true);
+      assert.equal(isMappingReady(m, THRESHOLD), false);
+    }
   });
 });
 

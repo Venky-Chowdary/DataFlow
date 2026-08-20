@@ -128,7 +128,9 @@ import {
   confirmFalseFriendsBySource,
   buildPreflightMappings,
   confidenceThresholdForMode,
+  DEST_TYPE_UNREAD_REASON,
   editableFromPipelineMappings,
+  FIDELITY_DEST_TYPE_UNREAD,
   ENGINE_TO_UI_TRANSFORM,
   engineTransformToUi,
   isEnumToBooleanConflict,
@@ -1436,11 +1438,34 @@ export function TransferPage({
         );
       } catch (e) {
         console.error("Mapping pipeline failed:", e);
-        const fallback = buildMappingsFromSource(analysisCols, targetCols);
+        let fallback = buildMappingsFromSource(analysisCols, mapTargetCols);
+        // Without the pipeline nothing has projected a destination type. For a
+        // database destination whose columns were never read, the source type is
+        // not an answer — echoing it printed "VARCHAR(16777216) → VARCHAR(16777216)"
+        // and let the operator approve a destination that was never inspected.
+        const destSchemaUnread =
+          destKindMode === "database" && !(mapTargetCols?.length ?? destColumns.length);
+        if (destSchemaUnread) {
+          fallback = fallback.map((m) => ({
+            ...m,
+            destType: "",
+            createNew: undefined,
+            existsInDestination: undefined,
+            assignmentStrategy: "pending_dest_schema" as const,
+            requiresReview: true,
+            approved: false,
+            fidelity: FIDELITY_DEST_TYPE_UNREAD,
+            fidelityReason: DEST_TYPE_UNREAD_REASON,
+            reason: "Destination schema was not read — mapping engine unreachable",
+          }));
+        }
         if (fallback.length) {
           toast({
-            title: "Using fallback mappings",
-            message: "Semantic pipeline unavailable — showing AI-classified column pairs. Review before transfer.",
+            title: destSchemaUnread ? "Destination schema not read" : "Using fallback mappings",
+            message: destSchemaUnread
+              ? "The mapping engine could not be reached, so no destination type was projected. "
+                + "Reload the destination schema on Map before continuing."
+              : "Semantic pipeline unavailable — showing AI-classified column pairs. Review before transfer.",
             tone: "warning",
           });
         }
@@ -1465,6 +1490,9 @@ export function TransferPage({
       destType,
       syncMode,
       destTableExists,
+      destColumns,
+      connectorId,
+      targetCollection,
     ],
   );
 
@@ -1681,7 +1709,16 @@ export function TransferPage({
           message: "",
         };
       }
-      // Keep last-known schema on transient errors so the demo does not blank out.
+      // A transient error on the *same* table keeps its last-known schema so the
+      // panel does not blank out. A different table has no schema of its own —
+      // showing the previous table's DDL for it is a false read.
+      const sameTable = destSchemaTableKeyRef.current === tableKey;
+      const keptColumns = sameTable ? destColumns : [];
+      const keptSchema = sameTable ? destSchemaMap : {};
+      if (!sameTable) {
+        setDestColumns([]);
+        setDestSchemaMap({});
+      }
       // Do not force "table missing" — unknown is safer than a false create promise.
       proveDestTableExists(null);
       const errMsg = e instanceof Error ? e.message : "Retry or continue — existence will be rechecked on Validate.";
@@ -1692,7 +1729,7 @@ export function TransferPage({
         message: errMsg,
         tone: "warning",
       });
-      return { columns: destColumns, schema: destSchemaMap, tableExists: null, connected: false, message: errMsg };
+      return { columns: keptColumns, schema: keptSchema, tableExists: null, connected: false, message: errMsg };
     } finally {
       if (gen === destSchemaGenRef.current) setDestSchemaLoading(false);
     }
@@ -6158,6 +6195,20 @@ export function TransferPage({
                   proveDestTableExists(null);
                   setDestColumns([]);
                   setDestSchemaMap({});
+                  // The destination side of every row described the old table.
+                  // Keeping it showed "city VARCHAR(6) [exists]" for a table that
+                  // had never been probed.
+                  setColumnMappings((prev) => prev.map((m) => ({
+                    ...m,
+                    destType: "",
+                    createNew: undefined,
+                    existsInDestination: undefined,
+                    assignmentStrategy: "pending_dest_schema" as const,
+                    requiresReview: true,
+                    approved: false,
+                    fidelity: FIDELITY_DEST_TYPE_UNREAD,
+                    fidelityReason: DEST_TYPE_UNREAD_REASON,
+                  })));
                   setPreflight(null);
                   setValidatedContractKey(null);
                   setCellPreview(null);

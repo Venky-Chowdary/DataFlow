@@ -908,7 +908,13 @@ export function ColumnReviewPanel({
                       />
                       <select
                         className="df2-input df2-select df2-column-dest-type-select"
-                        value={normalizeDestTypeValue(m.destType || m.inferredType || "VARCHAR", destType)}
+                        value={
+                          // An unread destination type must not display the source
+                          // type as if it were the destination's.
+                          isDestSchemaPending(m) && !m.destType
+                            ? ""
+                            : normalizeDestTypeValue(m.destType || m.inferredType || "VARCHAR", destType)
+                        }
                         onChange={(e) =>
                           updateMapping(index, applyDestTypeChange(m, e.target.value))
                         }
@@ -919,6 +925,9 @@ export function ColumnReviewPanel({
                             : "Destination logical type"
                         }
                       >
+                        {isDestSchemaPending(m) && !m.destType && (
+                          <option value="">— destination type not loaded —</option>
+                        )}
                         {destTypeSelectOptions(m.destType || m.inferredType, destType).map((opt) => (
                           <option key={opt.value} value={opt.value}>
                             {opt.label}
