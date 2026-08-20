@@ -56,6 +56,47 @@ _DIALECT_WORDS = frozenset({*_TYPE_ALIASES, *_TYPE_ALIASES.values()})
 # says even less than "to postgres", so it can never resolve to an instance.
 _FAMILY_WORDS = frozenset({"sql", "database", "db", "warehouse", "lake", "lakehouse"})
 _ENGINE_WORDS = _DIALECT_WORDS | _FAMILY_WORDS
+# Environment / role qualifiers carry no instance identity: "local", "prod" and
+# "primary" appear in most connector labels, so token overlap on them alone is
+# not evidence. Requiring one distinctive token keeps "local postgres" from
+# resolving to "Local Snowflake".
+_QUALIFIER_TOKENS = frozenset(
+    {
+        "local",
+        "localhost",
+        "prod",
+        "production",
+        "dev",
+        "development",
+        "test",
+        "testing",
+        "stage",
+        "staging",
+        "qa",
+        "uat",
+        "sandbox",
+        "demo",
+        "main",
+        "primary",
+        "replica",
+        "standby",
+        "secondary",
+        "new",
+        "old",
+        "temp",
+        "my",
+        "the",
+        "connector",
+        "connection",
+        "instance",
+        "server",
+        "cluster",
+        "source",
+        "target",
+        "destination",
+        *_FAMILY_WORDS,
+    }
+)
 
 
 def _normalize_needle(needle: str) -> str:
@@ -75,6 +116,28 @@ def _is_family_word(needle: str) -> bool:
     return _normalize_needle(needle) in _FAMILY_WORDS
 
 
+def _tokens(text: str) -> set[str]:
+    return {t for t in (text or "").replace("-", " ").replace("_", " ").split() if t}
+
+
+def _named_engines(tokens: set[str]) -> set[str]:
+    """Canonical engine types a phrase's tokens name, e.g. {"postgresql"}."""
+    return {_TYPE_ALIASES.get(t, t) for t in tokens if t in _DIALECT_WORDS}
+
+
+def _engine_conflict(tokens: set[str], type_l: str) -> bool:
+    """True when the phrase names a dialect that the connector's type is not.
+
+    "orders on Local Postgres" must never resolve to a saved Snowflake
+    connector because both labels contain "Local": the phrase states the
+    engine, and a wrong engine means the answer describes another database.
+    """
+    named = _named_engines(tokens)
+    if not named or not type_l:
+        return False
+    return not any(e == type_l or e in type_l or type_l in e for e in named)
+
+
 def _match_score(needle: str, label: str, ctype: str = "") -> float:
     """Rank how well a saved connector matches a user phrase. Higher is better."""
     n = (needle or "").strip().lower()
@@ -84,6 +147,10 @@ def _match_score(needle: str, label: str, ctype: str = "") -> float:
         return 0.0
     if label_l == n:
         return 100.0
+    if _engine_conflict(_tokens(n), type_l):
+        # Only the exact-name match above may resolve a phrase whose dialect
+        # contradicts the saved connector's engine; anything weaker is a guess.
+        return 0.0
     if _is_family_word(n):
         # "sql" / "database" / "warehouse" name a family, not an instance. Matching
         # one to a saved connector is a guess, and a guess writes to the wrong
@@ -97,12 +164,13 @@ def _match_score(needle: str, label: str, ctype: str = "") -> float:
     if alias and (alias == type_l or alias in type_l or n == type_l or n in type_l):
         return 35.0
     # Token overlap: "local postgres" vs "Local Postgres Prod"
-    n_toks = {t for t in n.replace("-", " ").split() if t}
-    l_toks = {t for t in label_l.replace("-", " ").split() if t}
+    n_toks = _tokens(n)
+    l_toks = _tokens(label_l)
     if n_toks and n_toks <= l_toks:
         return 70.0 + len(n_toks) * 2.0
-    if n_toks and l_toks:
-        overlap = len(n_toks & l_toks) / len(n_toks)
+    shared = n_toks & l_toks
+    if shared and (shared - _QUALIFIER_TOKENS):
+        overlap = len(shared) / len(n_toks)
         if overlap >= 0.5:
             return 45.0 + overlap * 20.0
     return 0.0
@@ -166,6 +234,20 @@ def _no_match_message(needle: str, candidates: list[dict[str, Any]]) -> str:
         return (
             f"{head} — that names a family of databases, not one instance, so there "
             f"is nothing to point this at. {tail}"
+        )
+    named = _named_engines(_tokens(_normalize_needle(needle)))
+    saved_types = {str(d.get("type") or d.get("format") or "").strip().lower() for d in candidates}
+    absent = sorted(
+        e
+        for e in named
+        if not any(t and (e == t or e in t or t in e) for t in saved_types)
+    )
+    if absent:
+        engines = ", ".join(absent)
+        return (
+            f"{head} — no {engines} connector is saved, so there is no instance to "
+            f"point this at, and a connector of another engine is not the same "
+            f"database. {tail}"
         )
     return f"{head}, and I will not guess which database you meant. {tail}"
 
