@@ -3,6 +3,7 @@ import { Spinner } from "./LoadingState";
 import { PreflightResult } from "../lib/types";
 import { useEffect, useState } from "react";
 import { CORE_ENGINE_GATE_IDS, blockerTitle, gateLabel } from "../lib/preflightGates";
+import { EngineStageTicker } from "./EngineStageTicker";
 import { ringDasharray, validateRingPercent } from "../lib/progressRing";
 
 const CORE_GATE_ORDER = [...CORE_ENGINE_GATE_IDS];
@@ -107,7 +108,7 @@ export function PreflightTimeline({
     .find((g) => g.id === "g9_data_integrity")?.message || "";
   const sampleUniqueness = /population uniqueness not proven/i.test(g9Msg);
   const headline = running
-    ? "Engine running G1–G9…"
+    ? "Validating route — nine engine stages"
     : decision === "approve" && result.passed && sampleUniqueness
       ? "Execute-ready · uniqueness sample-only"
       : decision === "approve" && result.passed
@@ -291,7 +292,9 @@ export function PreflightTimeline({
           <div className="df2-validate-stage-core">
             <Spinner size="sm" label="" />
             <h3>Validating route</h3>
-            <p>Engine evaluating G1–G9 · {formatElapsed(elapsedMs)} elapsed</p>
+            <p>
+              <EngineStageTicker running /> · {formatElapsed(elapsedMs)} elapsed
+            </p>
             <div className="df2-preflight-progress is-indeterminate" role="status">
               <div className="df2-mapping-progress-meta">
                 <strong>{formatElapsed(elapsedMs)}</strong>

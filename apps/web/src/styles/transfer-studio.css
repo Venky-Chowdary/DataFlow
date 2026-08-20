@@ -10809,3 +10809,42 @@ button.df2-vd-assist-toggle:focus-visible {
     flex-wrap: wrap !important;
   }
 }
+
+/* Engine stage ticker — names the stage that is running instead of "G1–G9".
+   One line, monospaced counter, and a short fade as each stage takes over so a
+   long validation reads as work rather than a hung panel. */
+.df2-stage-ticker {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.df2-stage-ticker-count {
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  opacity: 0.65;
+}
+
+.df2-stage-ticker-name {
+  display: inline-block;
+  animation: df2-stage-in 260ms ease-out;
+}
+
+@keyframes df2-stage-in {
+  from {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .df2-stage-ticker-name {
+    animation: none;
+  }
+}

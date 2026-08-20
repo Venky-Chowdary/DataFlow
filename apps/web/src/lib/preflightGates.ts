@@ -104,6 +104,31 @@ export const CORE_ENGINE_GATE_IDS = [
   "g8_reconciliation",
 ] as const;
 
+/**
+ * What the engine is *doing* in each core stage, in the order it runs them.
+ *
+ * "Engine running G1–G9" told an operator nothing: a client watching a million
+ * rows migrate could not tell which internal id was inspecting their data, or
+ * that the wait was work rather than a hang. These are the same nine checks
+ * named as engineering stages, and the running ticker walks them.
+ */
+export const ENGINE_STAGES: { id: string; stage: string; running: string }[] = [
+  { id: "g1_source", stage: "Source acquisition", running: "Reading source catalog and sample" },
+  { id: "g2_destination", stage: "Destination probe", running: "Probing destination privileges" },
+  { id: "g3_schema_contract", stage: "Schema contract diff", running: "Diffing source and destination schemas" },
+  { id: "g4_mapping_confidence", stage: "Semantic mapping", running: "Assigning columns by semantic score" },
+  { id: "g5_dry_run", stage: "Transform dry-run", running: "Running writer transforms on sample rows" },
+  { id: "g9_data_integrity", stage: "Integrity scan", running: "Scanning encoding, nulls, identity and precision" },
+  { id: "g6_target_ddl", stage: "DDL compilation", running: "Compiling destination CREATE / ALTER plan" },
+  { id: "g7_capacity", stage: "Capacity estimate", running: "Estimating destination headroom and runtime" },
+  { id: "g8_reconciliation", stage: "Reconciliation contract", running: "Binding the post-load checksum contract" },
+];
+
+export function engineStageLabel(id: string): string {
+  const canonical = canonicalizeGateId(id);
+  return ENGINE_STAGES.find((s) => s.id === canonical)?.stage ?? gateLabel(id);
+}
+
 const ALIAS_TO_CANONICAL: Record<string, string> = {};
 for (const entry of GATE_CATALOG) {
   for (const alias of entry.aliases ?? []) {

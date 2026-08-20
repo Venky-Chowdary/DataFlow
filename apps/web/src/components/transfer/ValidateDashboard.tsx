@@ -21,6 +21,7 @@ import {
   gateLabel,
   isInternalGateId,
 } from "../../lib/preflightGates";
+import { EngineStageTicker } from "../EngineStageTicker";
 import {
   buildDisplayBlockers,
   buildExecutiveSummary,
@@ -1577,7 +1578,7 @@ export function ValidateDashboard({
             </span>
             <h3>
               {running
-                ? "Engine running G1–G9…"
+                ? "Validating route — nine engine stages"
                 : preflight
                   ? executiveSummary?.title ?? (
                     decision === "approve" && preflight.passed
@@ -1588,6 +1589,7 @@ export function ValidateDashboard({
                   )
                   : "Run validation to check this route"}
             </h3>
+            {running && <EngineStageTicker running />}
           </div>
 
           <div className="df2-vd-hero-counts">
