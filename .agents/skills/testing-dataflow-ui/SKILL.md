@@ -172,6 +172,19 @@ Reaching Validate with a *chosen* blocker takes fixture control. What works:
   instantly, so each probe fails fast and the 45s timeout branch may never be the one that runs —
   to exercise the real timeout path, black-hole the port instead (e.g. DROP/REJECT-with-drop on the
   host port, or point the connector at an unroutable host) so the TCP connect hangs.
+- **Toggling destination reachability instantly (best tool for probe/retry/recovery tests).** `docker
+  stop`/`start` is too slow and too coarse: startup takes ~10s during which automatic probes keep
+  firing, so a self-heal usually beats your click and recovery can never be attributed to the operator.
+  Instead keep the container running and flip a loopback firewall rule (sudo works on this box):
+  `sudo iptables -I OUTPUT 1 -p tcp -d 127.0.0.1 --dport 3307 -j REJECT --reject-with tcp-reset`
+  → instant refusal; delete the same rule with `-D` → instantly reachable again. To exercise the
+  *hanging* branch (45s OLTP timeout) instead of refusal, either `docker pause <container>` (port
+  still accepts, no MySQL greeting) or bind a python socket listener that accepts and never writes.
+  Recipe for click-attributed recovery: get Map into the pending state while refused, note the last
+  browser-side introspect timestamp, delete the rule right after an automatic probe fails, then click
+  `Reload destination schema` well inside the 15s cooldown window; a click-fired probe shows up within
+  ~1-2s of the click, so it is unambiguously distinguishable from the next automatic probe.
+  Always clean the rule up (`sudo iptables -S OUTPUT`) when finished.
 - **Cooldown/backoff regressions can hide behind a shipped module.** Verify the served bundle contains
   the new code (`curl -s http://127.0.0.1:5173/src/lib/destProbeTimeout.ts | head -30`) before
   concluding the fix isn't loaded; a present-but-ineffective fix is a different (and more useful)

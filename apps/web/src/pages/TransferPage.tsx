@@ -6373,7 +6373,7 @@ export function TransferPage({
                       {destColumns.length > 0 ? (
                         <> · {destColumns.length} columns loaded.</>
                       ) : (
-                        <> · Column metadata pending — retry schema load before Map invents create-new.</>
+                        <> · Column metadata pending — load the columns before Map invents create-new.</>
                       )}
                     </p>
                   </>
@@ -6391,9 +6391,18 @@ export function TransferPage({
                   <>
                     <DtIcon name="database" size={14} />
                     <p>
-                      <strong>Destination not confirmed yet.</strong> Retry schema load — Map will stay
-                      schema-pending until the table is found or confirmed missing (no invent create-new).
+                      <strong>Destination not confirmed yet.</strong> Map stays schema-pending until the
+                      table is found or confirmed missing (no invent create-new).
+                      {destConnectionError ? <> · {destConnectionError}</> : null}
                     </p>
+                    <Button
+                      size="sm"
+                      variant="primary"
+                      disabled={destSchemaLoading}
+                      onClick={() => void loadDestinationSchema({ force: true })}
+                    >
+                      Reload destination schema
+                    </Button>
                   </>
                 )}
               </div>
@@ -6415,8 +6424,17 @@ export function TransferPage({
                   <div className="df2-dest-schema-pending" role="status">
                     <p>
                       <strong>Existing table — column metadata pending.</strong>{" "}
-                      Retry schema load before Map invents create-new types.
+                      Load the columns before Map invents create-new types.
+                      {destConnectionError ? <> · {destConnectionError}</> : null}
                     </p>
+                    <Button
+                      size="sm"
+                      variant="primary"
+                      disabled={destSchemaLoading}
+                      onClick={() => void loadDestinationSchema({ force: true })}
+                    >
+                      Reload destination schema
+                    </Button>
                   </div>
                 )}
               </div>

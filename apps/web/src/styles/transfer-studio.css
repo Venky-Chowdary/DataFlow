@@ -3619,6 +3619,7 @@ th.df2-type-string .df2-type-badge {
 .df2-dest-target-status {
   display: flex;
   align-items: flex-start;
+  flex-wrap: wrap;
   gap: 8px;
   margin-top: 2px;
   padding: 8px 11px;
@@ -3639,6 +3640,12 @@ th.df2-type-string .df2-type-badge {
 
 .df2-dest-target-status p {
   margin: 0;
+  flex: 1 1 240px;
+}
+
+.df2-dest-target-status .df2-btn {
+  flex: 0 0 auto;
+  margin-left: auto;
 }
 
 .df2-dest-target-status.is-existing {
@@ -10804,6 +10811,10 @@ button.df2-vd-assist-toggle:focus-visible {
 }
 
 .df2-dest-schema-pending {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
   padding: 12px 14px;
   font-size: 13px;
   line-height: 1.45;
@@ -10812,6 +10823,12 @@ button.df2-vd-assist-toggle:focus-visible {
 
 .df2-dest-schema-pending p {
   margin: 0;
+  flex: 1 1 240px;
+}
+
+.df2-dest-schema-pending .df2-btn {
+  flex: 0 0 auto;
+  margin-left: auto;
 }
 
 @media (max-width: 640px) {
