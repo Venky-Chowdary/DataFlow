@@ -18,6 +18,7 @@ an instant for a source that never had a zone.
 
 from __future__ import annotations
 
+from functools import lru_cache
 from typing import Final
 
 # Engines whose bare ``date`` token stores an instant (BSON date / Elasticsearch
@@ -79,6 +80,7 @@ def document_instant_wire_preserved(
     return int(src_p) <= DOCUMENT_INSTANT_FRACTIONAL_DIGITS
 
 
+@lru_cache(maxsize=8192)
 def instant_date_carrier(engine: str | None, ddl_type_token: str | None) -> str:
     """Return the carrier to bind/fingerprint ``ddl_type_token`` against.
 

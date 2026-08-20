@@ -22,6 +22,25 @@ from connectors.sql_snapshot_scan import SNAPSHOT_SCAN_SOURCES
 #: Destinations that can independently SELECT the written population.
 WAREHOUSE_VERIFY_DESTS: Final[frozenset[str]] = SNAPSHOT_SCAN_SOURCES
 
+#: Sources the Gate-8 re-read loop knows how to page. A source outside this set
+#: keeps the write-pass digest even when ``should_reread_source`` says yes, so
+#: the write pass must not skip its inline fingerprints for those routes.
+REREAD_SCAN_SOURCES: Final[frozenset[str]] = frozenset(
+    {
+        "postgresql",
+        "redshift",
+        "mysql",
+        "snowflake",
+        "bigquery",
+        "sqlite",
+        "generic_sql",
+        "mongodb",
+        "s3",
+        "gcs",
+        "adls",
+    }
+)
+
 _PG_FAMILY: Final[frozenset[str]] = frozenset(
     {"postgresql", "postgres", "pg", "timescaledb", "alloydb", "supabase", "redshift"}
 )

@@ -41,6 +41,8 @@ from services.reconcile_coverage import (
 )
 from services.transform_engine import (
     _DATE_LIKE_RE,
+    _STRICT_BOOL_FALSE,
+    _STRICT_BOOL_TRUE,
     _parse_date,
     _parse_datetime,
     apply_transform,
@@ -70,6 +72,53 @@ _UUID_RE = re.compile(
 _NULL_SENTINEL = "\x00NULL\x00"
 
 
+@dataclass(frozen=True, slots=True)
+class _TextFoldPlan:
+    """How a destination column's text is canonicalized for a checksum.
+
+    Every decision here follows from the column's DDL type alone, so it is
+    resolved once per type instead of once per cell — a 1M-row × 10-column
+    table asked the same eleven type questions 10M times.
+    """
+
+    keep_trailing_spaces: bool
+    rstrip_blank_pad: bool
+    fold_width: bool
+    fold_kana: bool
+    fold_variation: bool
+    fold_accent: bool
+    casefold: bool
+    uuid_carrier: bool
+
+
+@lru_cache(maxsize=8192)
+def _text_fold_plan(ddl_type: str) -> _TextFoldPlan:
+    """Compile the checksum text rules for one destination DDL type."""
+    from services.type_system import (
+        is_accent_insensitive_collation,
+        is_case_insensitive_collation,
+        is_fixed_width_char_carrier,
+        is_kana_insensitive_collation,
+        is_variation_insensitive_collation,
+        is_width_insensitive_collation,
+    )
+
+    fixed_width = is_fixed_width_char_carrier(ddl_type)
+    logical = normalize_logical_type(ddl_type)
+    return _TextFoldPlan(
+        keep_trailing_spaces=not fixed_width and logical in {"string", "text"},
+        rstrip_blank_pad=fixed_width,
+        fold_width=is_width_insensitive_collation(ddl_type),
+        fold_kana=is_kana_insensitive_collation(ddl_type),
+        fold_variation=is_variation_insensitive_collation(ddl_type),
+        fold_accent=is_accent_insensitive_collation(ddl_type),
+        casefold=is_case_insensitive_collation(ddl_type),
+        uuid_carrier=logical == "uuid"
+        or bool(re.search(r"\b(?:uuid|uniqueidentifier|guid)\b", ddl_type, re.I)),
+    )
+
+
+@lru_cache(maxsize=256)
 def destination_empty_string_is_null(engine: str | None) -> bool:
     """True when the write destination collapses '' → NULL (Oracle VARCHAR2).
 
@@ -3729,57 +3778,45 @@ def normalize_cell(value: Any, *, ddl_type: str = "", engine: str = "") -> str:
     raw_text = str(value)
     if ddl_type:
         try:
-            from services.type_system import (
-                fold_diacritics,
-                fold_kana,
-                fold_variation_selectors,
-                fold_width_forms,
-                is_accent_insensitive_collation,
-                is_case_insensitive_collation,
-                is_fixed_width_char_carrier,
-                is_kana_insensitive_collation,
-                is_variation_insensitive_collation,
-                is_width_insensitive_collation,
-                normalize_logical_type,
-            )
-
-            if is_fixed_width_char_carrier(ddl_type):
+            plan = _text_fold_plan(ddl_type)
+            if plan.rstrip_blank_pad:
                 # Blank-pad only — do not strip leading spaces (rare but significant).
                 text = raw_text.rstrip(" ")
-            elif normalize_logical_type(ddl_type) in {"string", "text"}:
+            elif plan.keep_trailing_spaces:
                 # VARCHAR/TEXT: preserve trailing spaces (significant payload).
                 text = raw_text
             else:
                 text = raw_text.strip()
             # Collation equality must match the destination engine (CI/AI/WI/KI/VSS).
-            if is_width_insensitive_collation(ddl_type):
+            if plan.fold_width:
+                from services.type_system import fold_width_forms
+
                 text = fold_width_forms(text)
-            if is_kana_insensitive_collation(ddl_type):
+            if plan.fold_kana:
+                from services.type_system import fold_kana
+
                 text = fold_kana(text)
-            if is_variation_insensitive_collation(ddl_type):
+            if plan.fold_variation:
+                from services.type_system import fold_variation_selectors
+
                 text = fold_variation_selectors(text)
-            if is_accent_insensitive_collation(ddl_type):
+            if plan.fold_accent:
+                from services.type_system import fold_diacritics
+
                 text = fold_diacritics(text)
-            if is_case_insensitive_collation(ddl_type):
+            if plan.casefold:
                 text = text.casefold()
             # UUID / UNIQUEIDENTIFIER / CHAR(36) UUID carriers — canonicalize
             # braces / 32-hex / case so source wire and dest read-back match
             # (Fivetran HVR compare class: destination storage rules win).
-            try:
-                from services.type_system import normalize_logical_type
+            if plan.uuid_carrier:
+                try:
+                    from connectors.sql_bind import coerce_uuid_wire
 
-                if normalize_logical_type(ddl_type) == "uuid" or re.search(
-                    r"\b(?:uuid|uniqueidentifier|guid)\b", ddl_type, re.I
-                ):
-                    try:
-                        from connectors.sql_bind import coerce_uuid_wire
-
-                        text = coerce_uuid_wire(text) or text
-                    except ValueError:
-                        if _UUID_RE.match(text):
-                            text = text.lower()
-            except Exception:
-                pass
+                    text = coerce_uuid_wire(text) or text
+                except ValueError:
+                    if _UUID_RE.match(text):
+                        text = text.lower()
         except Exception:
             text = raw_text.strip()
     else:
@@ -3791,8 +3828,6 @@ def normalize_cell(value: Any, *, ddl_type: str = "", engine: str = "") -> str:
     # Align with transform_engine strict boolean tokens only. Status enums
     # ("active"/"enabled"/…) must NOT collide with true/false in checksums —
     # that falsely claimed 100% fidelity when status strings met bool columns.
-    from services.transform_engine import _STRICT_BOOL_FALSE, _STRICT_BOOL_TRUE
-
     if lowered in _STRICT_BOOL_TRUE:
         return "1"
     if lowered in _STRICT_BOOL_FALSE:

@@ -12,12 +12,21 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from decimal import Decimal
-from typing import Any
+from functools import lru_cache
+from typing import Any, Final
 
 from services.reconciliation import _iter_fingerprints, checksum_rows
 from services.transform_engine import apply_transform
 from services.transform_resolver import LiveDestTypes, resolve_transform
-from services.value_serializer import SQL_NULL_SENTINEL, json_loads_exact
+from services.value_serializer import (
+    DF_MISSING_SENTINEL,
+    SQL_NULL_SENTINEL,
+    Missing,
+    cell_to_string,
+    is_missing_sentinel,
+    json_loads_exact,
+    public_mapped_cell,
+)
 
 from connectors.sql_identifiers import (  # noqa: F401 — re-export canonical helpers
     quote_column_list,
@@ -93,7 +102,6 @@ def mapped_row_quarantine_values(row: Any, target_cols: list[str]) -> dict[str, 
     Accepts tuple/list bind images and SQLAlchemy/sparse ``dict`` rows — never
     ``list(dict)`` key-order invent (that poisoned generic_sql salvage replay).
     """
-    from services.value_serializer import DF_MISSING_SENTINEL
 
     out: dict[str, str] = {}
     if isinstance(row, dict):
@@ -127,7 +135,6 @@ def omit_missing_fields(
     property value. Empty strings are dropped when ``drop_empty`` (CRM upsert
     class); pass ``drop_empty=False`` when empty is a meaningful clear.
     """
-    from services.value_serializer import is_missing_sentinel
 
     out: dict[str, Any] = {}
     for item in pairs:
@@ -148,7 +155,6 @@ def mapped_row_to_json_record(
     dest_types: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """One object-store JSON record — omit ``DF_MISSING`` keys (Kafka-class)."""
-    from services.value_serializer import is_missing_sentinel
 
     dest_types = dest_types or {}
     rec: dict[str, Any] = {}
@@ -176,7 +182,6 @@ def iter_mapped_delimited_records(
 ):
     """Yield CSV/TSV records: same typed contract, source numeric text kept."""
     dest_types = dest_types or {}
-    from services.value_serializer import is_missing_sentinel
 
     for row in mapped_rows:
         rec: dict[str, Any] = {}
@@ -1578,7 +1583,6 @@ def build_mapped_rows_with_details(
     # — billions of them on a large transfer.
     # Risk Contract module is in-tree: hard-require it. Soft-import previously
     # demoted FAIL_JOB / SKIP_ROW / CAST contracts to bare job policy.
-    from services.value_serializer import DF_MISSING_SENTINEL, is_missing_sentinel
     from services.migration_risk_contract import (
         disposition_for_execution_policy,
         resolve_write_action_for_mapping,
@@ -1652,7 +1656,6 @@ def build_mapped_rows_with_details(
                     cell_policy, exec_pol, risk_id = resolve_write_action_for_mapping(
                         mapping, policy
                     )
-                from services.value_serializer import DF_MISSING_SENTINEL
 
                 values = {
                     h: (
@@ -1756,7 +1759,6 @@ def build_mapped_rows_with_details(
                     # invent SQL NULL — upsert NULL would wipe a prior good value.
                     if row_action == "ok":
                         row_action = "stop_column"
-                    from services.value_serializer import Missing
 
                     converted = Missing
                 elif cell_policy == "coerce_null":
@@ -1810,7 +1812,6 @@ def build_mapped_rows_with_details(
             continue
         # stop_column: Missing omit-from-SET; coerce_null: dense NULL cell.
         # Never emit the ``__DF_MISSING__`` wire string into public mapped tuples.
-        from services.value_serializer import Missing, public_mapped_cell
 
         mapped.append(
             tuple(
@@ -2626,7 +2627,6 @@ def fits_decimal(
 
     if value is None:
         return True
-    from services.value_serializer import is_missing_sentinel
 
     if is_missing_sentinel(value):
         return True
@@ -2716,7 +2716,6 @@ def quarantine_unfit_decimals(
     if not number_cols:
         return mapped_rows
 
-    from services.value_serializer import cell_to_string
 
     out: list[tuple] = []
     for row_idx, row in enumerate(mapped_rows):
@@ -2725,7 +2724,6 @@ def quarantine_unfit_decimals(
         for col_idx, precision, scale, declared_type in number_cols:
             if col_idx >= len(cells) or cells[col_idx] is None:
                 continue
-            from services.value_serializer import is_missing_sentinel
 
             if is_missing_sentinel(cells[col_idx]):
                 continue
@@ -2763,6 +2761,34 @@ def quarantine_unfit_decimals(
     return out
 
 
+_UNITS_CODE_POINTS: Final[str] = "code_points"
+_UNITS_UTF8_BYTES: Final[str] = "utf8_bytes"
+_UNITS_UTF16_CODE_UNITS: Final[str] = "utf16_code_units"
+_ORACLE_BYTE_TYPMOD = re.compile(r"\(\s*\d+\s*BYTE\s*\)")
+
+
+@lru_cache(maxsize=8192)
+def string_length_unit(type_str: str, dialect_label: str = "") -> str:
+    """Which length unit a bounded string column counts in.
+
+    The unit follows from the DDL type and destination dialect, never from the
+    value, so it is resolved once per column instead of once per cell.
+    """
+    upper = (type_str or "").upper()
+    dialect = (dialect_label or "").upper()
+    # Oracle BYTE semantics — multi-byte chars consume >1 unit (Informatica FAQ).
+    if _ORACLE_BYTE_TYPMOD.search(upper):
+        return _UNITS_UTF8_BYTES
+    # Redshift VARCHAR(n) is byte-length (AWS) — CJK/emoji would false-green on
+    # code-point counts then truncate/error on write.
+    if "REDSHIFT" in dialect:
+        return _UNITS_UTF8_BYTES
+    # SQL Server / Oracle national types store UTF-16 code units.
+    if "NVARCHAR" in upper or "NCHAR" in upper:
+        return _UNITS_UTF16_CODE_UNITS
+    return _UNITS_CODE_POINTS
+
+
 def string_storage_units(
     value: Any,
     type_str: str,
@@ -2776,7 +2802,6 @@ def string_storage_units(
     - SQL Server / Oracle national types → UTF-16 code units
     - Default ``VARCHAR(n)`` / ``VARCHAR2(n CHAR)`` → Unicode code points
     """
-    from services.value_serializer import cell_to_string
 
     if value is None:
         return 0
@@ -2787,19 +2812,14 @@ def string_storage_units(
             text = cell_to_string(value)
     else:
         text = value if isinstance(value, str) else cell_to_string(value)
-    upper = (type_str or "").upper()
-    dialect = (dialect_label or "").upper()
-    # Oracle BYTE semantics — multi-byte chars consume >1 unit (Informatica FAQ).
-    if re.search(r"\(\s*\d+\s*BYTE\s*\)", upper):
+    unit = string_length_unit(type_str or "", dialect_label or "")
+    if unit == _UNITS_CODE_POINTS or text.isascii():
+        # ASCII spends one byte and one UTF-16 unit per code point, so every
+        # unit rule agrees and the encode round-trip is pure overhead.
+        return len(text)
+    if unit == _UNITS_UTF8_BYTES:
         return len(text.encode("utf-8"))
-    # Redshift VARCHAR(n) is byte-length (AWS) — CJK/emoji would false-green on
-    # code-point counts then truncate/error on write.
-    if "REDSHIFT" in dialect:
-        return len(text.encode("utf-8"))
-    # SQL Server / Oracle national types store UTF-16 code units.
-    if any(token in upper for token in ("NVARCHAR", "NCHAR", "NVARCHAR2")):
-        return len(text.encode("utf-16-le")) // 2
-    return len(text)
+    return len(text.encode("utf-16-le")) // 2
 
 
 def fits_varchar(
@@ -2858,7 +2878,6 @@ def quarantine_unfit_years(
     """
 
     from services.type_system import is_year_carrier, year_value_fits
-    from services.value_serializer import cell_to_string
 
     year_cols = [i for i, typ in enumerate(target_types) if is_year_carrier(typ)]
     if not year_cols:
@@ -2873,7 +2892,6 @@ def quarantine_unfit_years(
         for col_idx in year_cols:
             if col_idx >= len(cells) or cells[col_idx] is None:
                 continue
-            from services.value_serializer import is_missing_sentinel
 
             if is_missing_sentinel(cells[col_idx]):
                 continue
@@ -2928,7 +2946,6 @@ def quarantine_unfit_booleans(
     """
 
     from services.type_system import boolean_value_fits, normalize_logical_type
-    from services.value_serializer import cell_to_string
 
     bool_cols = [
         i
@@ -2945,7 +2962,6 @@ def quarantine_unfit_booleans(
         for col_idx in bool_cols:
             if col_idx >= len(cells) or cells[col_idx] is None:
                 continue
-            from services.value_serializer import is_missing_sentinel
 
             if is_missing_sentinel(cells[col_idx]):
                 continue
@@ -3028,7 +3044,6 @@ def quarantine_unfit_temporals(
         temporal_value_exceeds_precision,
         temporal_value_has_timezone,
     )
-    from services.value_serializer import cell_to_string, is_missing_sentinel
 
     temporal_cols: list[tuple[int, str, bool, bool]] = []
     for i, typ in enumerate(target_types):
@@ -3124,7 +3139,6 @@ def quarantine_currency_markers_into_numeric(
         is_money_carrier,
         normalize_logical_type,
     )
-    from services.value_serializer import cell_to_string
 
     numeric_cols: list[int] = []
     for i, typ in enumerate(target_types):
@@ -3141,7 +3155,6 @@ def quarantine_currency_markers_into_numeric(
         for col_idx in numeric_cols:
             if col_idx >= len(cells) or cells[col_idx] is None:
                 continue
-            from services.value_serializer import is_missing_sentinel
 
             if is_missing_sentinel(cells[col_idx]):
                 continue
@@ -3235,7 +3248,6 @@ def quarantine_unfit_integers(
     if not int_cols:
         return mapped_rows
 
-    from services.value_serializer import cell_to_string
 
     out: list[tuple] = []
     for row_idx, row in enumerate(mapped_rows):
@@ -3244,7 +3256,6 @@ def quarantine_unfit_integers(
         for col_idx, typ in int_cols:
             if col_idx >= len(cells) or cells[col_idx] is None:
                 continue
-            from services.value_serializer import is_missing_sentinel
 
             if is_missing_sentinel(cells[col_idx]):
                 continue
@@ -3295,7 +3306,6 @@ def quarantine_unfit_floats(
     ``coerce_float_wire``. Empty ``\"\"`` must never invent JSON null / 0.0.
     """
     from services.type_system import normalize_logical_type
-    from services.value_serializer import cell_to_string, is_missing_sentinel
 
     float_cols: list[tuple[int, str]] = []
     for i, typ in enumerate(target_types):
@@ -3532,9 +3542,13 @@ def quarantine_unfit_strings(
             for col_idx, width, typ in width_cols:
                 if col_idx >= len(cells) or cells[col_idx] is None:
                     continue
-                from services.value_serializer import is_missing_sentinel
-
-                if is_missing_sentinel(cells[col_idx]):
+                cell = cells[col_idx]
+                # ASCII text spends one unit per character under every length
+                # rule (code points, UTF-8 bytes, UTF-16 units), so a short
+                # ASCII value fits without resolving the dialect unit.
+                if type(cell) is str and len(cell) <= width and cell.isascii():
+                    continue
+                if is_missing_sentinel(cell):
                     continue
                 if fits_varchar(
                     cells[col_idx], width, typ, dialect_label=dialect_label
@@ -3816,7 +3830,6 @@ def quarantine_unfit_arrays(
     null_strict = any(d in low for d in _ARRAY_NULL_STRICT_DIALECTS)
     nested_forbidden = any(d in low for d in _ARRAY_NESTED_FORBIDDEN_DIALECTS)
 
-    from services.value_serializer import cell_to_string, is_missing_sentinel
 
     out: list[tuple] = []
     for row_idx, row in enumerate(mapped_rows):
@@ -3943,7 +3956,6 @@ def quarantine_unfit_json_keeping_numbers(
 
     label = (dialect_label or "destination").strip() or "destination"
 
-    from services.value_serializer import cell_to_string, is_missing_sentinel
 
     out: list[tuple] = []
     kept: list[int] = []
@@ -4338,7 +4350,6 @@ def materialize_missing_as_null_for_dense_write(
     missing keys are SQL NULL, not the literal ``__DF_MISSING__`` string
     (Snowflake BOOL / Postgres BOOLEAN reject that string).
     """
-    from services.value_serializer import is_missing_sentinel
 
     if not mapped_rows or not any(row_has_missing_sentinel(r) for r in mapped_rows):
         return mapped_rows
@@ -4475,7 +4486,6 @@ def sparse_present_bindings(
     target_cols: list[str],
 ) -> dict[str, Any]:
     """Column→value for cells that are present (not DF_MISSING)."""
-    from services.value_serializer import is_missing_sentinel
 
     out: dict[str, Any] = {}
     for col, val in zip(target_cols, row):
@@ -4531,7 +4541,6 @@ def run_sparse_cdc_upsert(
     aborting the whole CDC chunk — parity with Snowflake/BigQuery sparse paths.
     """
     from services.cdc_effectively_once import should_apply_pk_row
-    from services.value_serializer import cell_to_string, is_missing_sentinel
 
     # Strict casefold resolve — never shrink a composite PK to whatever happens
     # to match case-sensitively (wrong-row MERGE / INSERT fallback).
@@ -4807,7 +4816,6 @@ def _is_nullish_conflict_key(val: Any) -> bool:
     """True when a conflict-key cell cannot identify a dense upsert row."""
     if val is None:
         return True
-    from services.value_serializer import SQL_NULL_SENTINEL, is_missing_sentinel
 
     if is_missing_sentinel(val):
         return True

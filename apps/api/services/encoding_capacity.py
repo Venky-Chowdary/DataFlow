@@ -33,6 +33,11 @@ from dataclasses import dataclass
 from typing import Any, Literal
 
 from services.dest_dialect_facts import _normalize_dest_db
+from services.value_serializer import (
+    DF_MISSING_SENTINEL,
+    cell_to_string,
+    is_missing_sentinel,
+)
 
 Status = Literal["carried", "unsupported", "skipped"]
 Form = Literal[
@@ -50,6 +55,10 @@ Form = Literal[
 
 REPLACEMENT = "\ufffd"
 BMP_MAX = 0xFFFF
+# UTF-16 surrogate code units leaked into a Python str (CESU-8 / JDBC drivers).
+# Absence is decided in one C-level scan so the recompose loop stays off the
+# per-cell write path.
+_SURROGATE_RE = re.compile("[\ud800-\udfff]")
 UNICODE_MAX = 0x10FFFF
 
 _STRING_RE = re.compile(
@@ -380,6 +389,12 @@ def compose_unicode_scalars(text: str) -> str:
 
     Unpaired surrogates raise. U+FFFD invent would hide the defect.
     """
+    # A str carrying no surrogate code unit is returned unchanged by the scan
+    # below, so the scan itself is skipped. The per-character loop ran on every
+    # cell of every row and dominated the write path; the surrogate range is
+    # decided here in one C-level scan.
+    if not _SURROGATE_RE.search(text):
+        return text
     out: list[str] = []
     i = 0
     n = len(text)
@@ -408,8 +423,6 @@ def cell_encoding(value: Any) -> CellEncoding | None:
     """Unicode scalars in a cell, or None for SQL NULL / missing."""
     if value is None:
         return None
-    from services.value_serializer import is_missing_sentinel
-
     if is_missing_sentinel(value):
         return None
     if isinstance(value, (bytes, bytearray, memoryview)):
@@ -417,10 +430,10 @@ def cell_encoding(value: Any) -> CellEncoding | None:
     elif isinstance(value, str):
         text = compose_unicode_scalars(value)
     else:
-        from services.value_serializer import cell_to_string
-
         text = compose_unicode_scalars(cell_to_string(value))
-    max_cp = max((ord(c) for c in text), default=0)
+    # ``max`` over the str compares by code point already — the generator form
+    # allocated one int per character of every cell.
+    max_cp = ord(max(text)) if text else 0
     return CellEncoding(
         text=text,
         max_code_point=max_cp,
@@ -435,10 +448,15 @@ def cell_fits_capacity(text: str, cap: EncodingCapacity) -> bool:
         return True
     if cap.form == "unknown":
         return False
+    # Every destination encoding this product models is an ASCII superset, so an
+    # ASCII cell needs no per-scalar scan (Latin-1/UTF-8/UTF-16/utf8mb3 alike).
+    ascii_only = text.isascii()
     if cap.form in {"utf8mb3"}:
-        return all(
+        return ascii_only or all(
             ord(c) <= BMP_MAX and not (0xD800 <= ord(c) <= 0xDFFF) for c in text
         )
+    if ascii_only and cap.max_code_point >= 0x7F and not cap.codec:
+        return True
     if cap.codec:
         try:
             text.encode(cap.codec)
@@ -465,8 +483,6 @@ def bind_unicode_text(
     """
     if value is None:
         return None
-    from services.value_serializer import is_missing_sentinel
-
     if is_missing_sentinel(value):
         return value
     if not isinstance(value, (str, bytes, bytearray, memoryview)):
@@ -642,7 +658,6 @@ def quarantine_unfit_encoding(
     Unlimited TEXT still cannot store supplementary characters on utf8mb3.
     """
     from connectors.writer_common import append_write_quarantine_detail
-    from services.value_serializer import cell_to_string, is_missing_sentinel
 
     caps: list[tuple[int, EncodingCapacity]] = []
     for i, typ in enumerate(target_types):
@@ -672,6 +687,17 @@ def quarantine_unfit_encoding(
         for col_idx, cap in caps:
             if col_idx >= len(cells) or cells[col_idx] is None:
                 continue
+            cell_value = cells[col_idx]
+            # ASCII text has no surrogate pair to compose and no scalar above
+            # U+007F, so every capacity above ASCII carries it unchanged. This
+            # is the common case for identifier/code columns and skips building
+            # a CellEncoding per cell.
+            if (
+                type(cell_value) is str
+                and cap.max_code_point >= 0x7F
+                and cell_value.isascii()
+            ):
+                continue
             if is_missing_sentinel(cells[col_idx]):
                 continue
             try:
@@ -696,8 +722,6 @@ def quarantine_unfit_encoding(
                     target_cols=target_cols,
                 )
                 if policy == "coerce_null":
-                    from services.value_serializer import DF_MISSING_SENTINEL
-
                     cells[col_idx] = DF_MISSING_SENTINEL
                 else:
                     hold_out = True
@@ -726,8 +750,6 @@ def quarantine_unfit_encoding(
                     target_cols=target_cols,
                 )
                 if policy == "coerce_null":
-                    from services.value_serializer import DF_MISSING_SENTINEL
-
                     cells[col_idx] = DF_MISSING_SENTINEL
                 else:
                     hold_out = True

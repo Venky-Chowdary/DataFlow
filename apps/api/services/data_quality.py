@@ -16,10 +16,10 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 try:
-    from services.pii_guard import detect_pii, is_sensitive_name
+    from services.pii_guard import is_sensitive_name, pii_findings
     from services.transform_engine import apply_transform
 except ImportError:  # pragma: no cover - compatibility for tests
-    from src.services.pii_guard import detect_pii, is_sensitive_name
+    from src.services.pii_guard import is_sensitive_name, pii_findings
     from src.services.transform_engine import apply_transform
 
 _UTC = timezone.utc
@@ -609,7 +609,7 @@ def run_integrity_audit(
         if m.get("transform") in protected_transforms
         or (m.get("target") in {m2.get("target") for m2 in (mappings or []) if m2.get("transform") in protected_transforms})
     }
-    pii_findings: dict[str, dict[str, int]] = {}
+    pii_by_column: dict[str, dict[str, int]] = {}
     for h in headers:
         idx = header_index[h]
         values = [row[idx] if idx < len(row) else "" for row in rows]
@@ -617,12 +617,10 @@ def run_integrity_audit(
         for v in values:
             if _is_null(v):
                 continue
-            res = detect_pii(v)
-            if res["has_pii"]:
-                for label, count in res["findings"].items():
-                    col_findings[label] = col_findings.get(label, 0) + count
+            for label, count in pii_findings(v).items():
+                col_findings[label] = col_findings.get(label, 0) + count
         if col_findings:
-            pii_findings[h] = col_findings
+            pii_by_column[h] = col_findings
             if h not in protected_sources:
                 _warn(
                     f"Column '{h}' contains potential PII/PHI ({col_findings}); "
@@ -631,7 +629,7 @@ def run_integrity_audit(
         elif is_sensitive_name(h) and h not in protected_sources:
             _warn(f"Column '{h}' has a sensitive name but no PII transform")
 
-    stats["pii_findings"] = pii_findings
+    stats["pii_findings"] = pii_by_column
 
     report.stats = stats
 

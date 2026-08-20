@@ -22,6 +22,15 @@ PII_PATTERNS: dict[str, re.Pattern[str]] = {
     "ip_address": re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b"),
 }
 
+# Union of every pattern above: a value matches no label iff it fails this.
+# Used as an exact one-pass gate so a clean column costs one scan, not five.
+_PII_UNION: re.Pattern[str] = re.compile(
+    "|".join(f"(?:{p.pattern})" for p in PII_PATTERNS.values())
+)
+# Every pattern needs either an ``@`` (email) or a digit (phone/ssn/card/ip),
+# so a value holding neither cannot match any label.
+_PII_REQUIRED_CHARS: frozenset[str] = frozenset("@0123456789")
+
 SENSITIVE_NAME_HINTS: set[str] = {
     "email", "phone", "mobile", "ssn", "dob", "birth", "passport", "license",
     "credit", "card", "iban", "account_number", "name", "first_name", "last_name",
@@ -68,15 +77,46 @@ def _mask_matched_token(raw: str) -> str:
     return raw[:6] + "…" + raw[-4:]
 
 
-def detect_pii(value: Any) -> dict[str, Any]:
-    """Detect PII patterns in a single value."""
+def _mask_without_pii(text: str) -> str:
+    """``mask`` for text already known to match no PII pattern.
+
+    Same output as ``mask``, minus the pattern sweep the caller just ran: no
+    pattern matched, so the email branch and the embedded-PII branch cannot fire.
+    """
+    if _looks_structured(text):
+        return _redact_text(text)
+    if len(text) <= 4:
+        return "*" * len(text)
+    if len(text) <= 12:
+        return text[:2] + "*" * (len(text) - 4) + text[-2:]
+    return text[:6] + "…" + text[-4:]
+
+
+def pii_findings(value: Any) -> dict[str, int]:
+    """Pattern label → match count for one value; empty when nothing matched.
+
+    Callers that only classify a column (audits, routing) use this instead of
+    ``detect_pii`` so they do not pay for a masked sample they discard.
+    """
     text = str(value) if value is not None else ""
+    if not _PII_REQUIRED_CHARS.intersection(text):
+        return {}
+    if _PII_UNION.search(text) is None:
+        return {}
     findings: dict[str, int] = {}
     for label, pattern in PII_PATTERNS.items():
         matches = pattern.findall(text)
         if matches:
             findings[label] = len(matches)
-    return {"has_pii": bool(findings), "findings": findings, "sample": mask(text)}
+    return findings
+
+
+def detect_pii(value: Any) -> dict[str, Any]:
+    """Detect PII patterns in a single value."""
+    text = str(value) if value is not None else ""
+    findings = pii_findings(text)
+    sample = mask(text) if findings else _mask_without_pii(text)
+    return {"has_pii": bool(findings), "findings": findings, "sample": sample}
 
 
 def mask(value: Any) -> str:

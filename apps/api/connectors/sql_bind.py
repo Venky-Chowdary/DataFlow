@@ -18,22 +18,8 @@ from typing import Any
 # times, and a function-local import pays a module lookup and a failed
 # ``__path__`` attribute hook on each one. Neither module imports connectors,
 # so there is no cycle to avoid here.
-from connectors.sql_temporal import coerce_sql_temporal, sql_base_type
-from services.type_system import (
-    LOGICAL_GEOGRAPHY,
-    LOGICAL_INTERVAL,
-    LOGICAL_MAP,
-    LOGICAL_STRING,
-    LOGICAL_STRUCT,
-    LOGICAL_TEXT,
-    is_bitstring_carrier,
-    is_varying_bitstring_carrier,
-    is_year_carrier,
-    normalize_logical_type,
-    parse_bitstring_width,
-    parse_enum_or_set_ordered_members,
-    specialty_carrier_base,
-)
+from connectors.sql_bind_route import BindRoute, bind_route
+from connectors.sql_temporal import coerce_sql_temporal
 from services.value_serializer import is_missing_sentinel
 
 # Canonical boolean wire only — SSOT with type_system / transform_engine.
@@ -2211,6 +2197,72 @@ def coerce_geography_wire(
     return str(value).strip()
 
 
+
+def _bind_sql_variant(value: Any, route: BindRoute) -> Any:
+    """SQL_VARIANT envelope — a typed envelope still reaches the driver as JSON."""
+    envelope = coerce_sql_variant_wire(value, as_json_envelope=route.json_envelope)
+    if isinstance(envelope, (dict, list)):
+        return coerce_json_wire(envelope, as_text=True)
+    return envelope
+
+
+# One entry per bind route. The route is compiled per (ddl_type, engine) in
+# ``sql_bind_route``, so a cell pays one dict lookup instead of replaying a
+# 40-branch carrier chain.
+_BIND_DISPATCH: dict[str, Any] = {
+    "enum": lambda v, r: coerce_enum_wire(v, ddl_type=r.ddl_arg),
+    "set": lambda v, r: coerce_set_wire(v, ddl_type=r.ddl_arg, as_list=r.pg_list),
+    "year": lambda v, r: coerce_year_wire(v),
+    "bitstring": lambda v, r: coerce_bitstring_wire(
+        v, width=r.bit_width, varying=r.bit_varying
+    ),
+    "boolean": lambda v, r: coerce_boolean_wire(v, as_int=r.as_int),
+    "rowversion": lambda v, r: coerce_rowversion_wire(v),
+    "sql_variant": _bind_sql_variant,
+    "rowid": lambda v, r: coerce_rowid_wire(v),
+    "hierarchyid": lambda v, r: coerce_hierarchyid_wire(v, as_ltree=r.pg_list),
+    "binary": lambda v, r: coerce_binary_wire(v),
+    "uuid": lambda v, r: coerce_uuid_wire(v, as_uuid=r.as_uuid),
+    "pg_lsn": lambda v, r: coerce_pg_lsn_wire(v),
+    "oid": lambda v, r: coerce_oid_wire(v),
+    "tid": lambda v, r: coerce_tid_wire(v),
+    "xid": lambda v, r: coerce_xid_wire(v, width64=r.as_int),
+    "cid": lambda v, r: coerce_cid_wire(v),
+    "txid_snapshot": lambda v, r: coerce_txid_snapshot_wire(v),
+    "inet": lambda v, r: coerce_inet_wire(v),
+    "cidr": lambda v, r: coerce_cidr_wire(v),
+    "macaddr": lambda v, r: coerce_macaddr_wire(v, eui64=r.eui64),
+    "xml": lambda v, r: coerce_xml_wire(v),
+    "jsonpath": lambda v, r: coerce_jsonpath_wire(v),
+    "citext": lambda v, r: coerce_citext_wire(v),
+    "ltree": lambda v, r: coerce_ltree_wire(v),
+    "tsvector": lambda v, r: coerce_tsvector_wire(v),
+    "point": lambda v, r: coerce_point_wire(v),
+    "box": lambda v, r: coerce_box_wire(v),
+    "circle": lambda v, r: coerce_circle_wire(v),
+    "lseg": lambda v, r: coerce_lseg_wire(v),
+    "line": lambda v, r: coerce_line_wire(v),
+    "path": lambda v, r: coerce_path_wire(v),
+    "polygon": lambda v, r: coerce_polygon_wire(v),
+    "hstore": lambda v, r: coerce_hstore_wire(v),
+    "range": lambda v, r: coerce_range_wire(v, multi=r.multi_range),
+    "array": lambda v, r: coerce_array_wire(v, engine=r.eng, ddl_type=r.ddl_arg),
+    "struct": lambda v, r: coerce_struct_wire(v, engine=r.eng, ddl_type=r.ddl_arg),
+    "map": lambda v, r: coerce_map_wire(v, engine=r.eng, ddl_type=r.ddl_arg),
+    # JSON text is the portable wire for every engine here. Handing psycopg2 a
+    # native dict/list raises "can't adapt type 'dict'" and aborted the whole
+    # transfer (only psycopg3 adapts dicts), while Postgres casts an
+    # unknown-typed text parameter straight into json/jsonb. Read-back is
+    # unaffected — psycopg2 still parses jsonb into native dict/list.
+    "json": lambda v, r: coerce_json_wire(v, as_text=True),
+    "integer": lambda v, r: coerce_integer_wire(v, ddl_type=r.ddl_arg, engine=r.eng),
+    "float": lambda v, r: coerce_float_wire(v, ddl_type=r.ddl_arg),
+    "decimal": lambda v, r: coerce_decimal_wire(v, ddl_type=r.ddl_arg, engine=r.eng),
+    "interval": lambda v, r: coerce_interval_wire(v, ddl_type=r.ddl_arg, engine=r.eng),
+    "geography": lambda v, r: coerce_geography_wire(v, ddl_type=r.ddl_arg, engine=r.eng),
+}
+
+
 def normalize_sql_bind_value(
     value: Any,
     ddl_type: str,
@@ -2221,258 +2273,39 @@ def normalize_sql_bind_value(
 
     Temporal coercion stays in ``sql_temporal.coerce_sql_temporal`` — callers
     should apply that first (or via writer-specific helpers).
+
+    Which coercion a column needs depends only on its DDL type and the
+    destination engine, so that decision is compiled once per column by
+    ``sql_bind_route.bind_route``. Only the two value-dependent rules stay here:
+    temporal coercion and Oracle's zero-length-string-is-NULL storage rule.
     """
     if value is None:
         return None
     # Sparse CDC sentinel must survive bind normalize — writers omit from SET.
     if is_missing_sentinel(value):
         return value
-    # ENUM/SET before sql_base_type — paren strip would drop member domain.
-    eng = (engine or "").strip().lower()
-    enum_set = parse_enum_or_set_ordered_members(ddl_type)
-    if enum_set is not None:
-        kind, _members = enum_set
-        if kind == "ENUM":
-            return coerce_enum_wire(value, ddl_type=ddl_type)
-        # PostgreSQL create-new maps SET → TEXT[]; bind as list (psycopg array).
-        pg_set_list = eng in {
-            "postgresql",
-            "postgres",
-            "pg",
-            "cockroachdb",
-            "timescaledb",
-            "alloydb",
-            "yugabytedb",
-            "citus",
-            "supabase",
-            "greenplum",
-        } or eng.startswith("postgres")
-        return coerce_set_wire(value, ddl_type=ddl_type, as_list=pg_set_list)
 
-    temporal = coerce_sql_temporal(value, ddl_type, engine=eng)
-    if temporal is not value:
-        return temporal
+    route = bind_route(ddl_type or "", engine)
+    kind = route.kind
+    # ENUM/SET bind on their member domain, ahead of any temporal read.
+    if kind == "enum":
+        return coerce_enum_wire(value, ddl_type=route.ddl_arg)
+    if kind == "set":
+        return coerce_set_wire(value, ddl_type=route.ddl_arg, as_list=route.pg_list)
 
-    upper = sql_base_type(ddl_type)
+    if route.is_temporal_candidate:
+        temporal = coerce_sql_temporal(value, ddl_type, engine=route.eng)
+        if temporal is not value:
+            return temporal
 
-    # MySQL YEAR before INTEGER collapse — string '0' → 2000 polarity.
-    if is_year_carrier(ddl_type) or upper == "YEAR":
+    # MySQL YEAR before the INTEGER collapse — string '0' → 2000 polarity.
+    if kind == "year":
         return coerce_year_wire(value)
-    # Oracle VARCHAR2/CHAR: zero-length string is stored as NULL (HVR write
-    # coercion / Oracle semantics). Collapse only for true string carriers —
-    # never silence specialty DDL (INET/CITEXT/TSVECTOR/…) that maps to
-    # LOGICAL_STRING but must raise or keep '' under the honesty bar.
-    if (
-        isinstance(value, str)
-        and value == ""
-        and (eng in {"oracle", "oracledb", "oracle_autonomous"} or eng.startswith("oracle"))
-    ):
-        if not specialty_carrier_base(ddl_type or upper) and (
-            not upper
-            or normalize_logical_type(ddl_type or upper) in {
-                LOGICAL_STRING,
-                LOGICAL_TEXT,
-            }
-        ):
-            return None
-    # BIT / VARBIT before BINARY — "BIT" must not fall through as boolean here
-    # when width > 1 (caller passes BIT(32) etc.).
-    if is_bitstring_carrier(ddl_type) or upper in {"BIT VARYING", "VARBIT"} or (
-        upper == "BIT" and parse_bitstring_width(ddl_type) not in {None, 1}
-    ):
-        return coerce_bitstring_wire(
-            value,
-            width=parse_bitstring_width(ddl_type),
-            varying=is_varying_bitstring_carrier(ddl_type) or upper in {"BIT VARYING", "VARBIT"},
-        )
-    # MySQL/SQL Server BIT(1) — boolean polarity (string '0' must stay 0, not True).
-    if upper == "BIT" and parse_bitstring_width(ddl_type) in {None, 1}:
-        return coerce_boolean_wire(value, as_int=eng in {"mysql", "mariadb", "tidb"})
-    if upper == "ROWVERSION":
-        return coerce_rowversion_wire(value)
-    if upper == "SQL_VARIANT":
-        json_env = eng in {
-            "postgresql",
-            "postgres",
-            "pg",
-            "cockroachdb",
-            "timescaledb",
-            "alloydb",
-            "yugabytedb",
-            "citus",
-            "supabase",
-            "greenplum",
-            "snowflake",
-            "databricks",
-        } or eng.startswith("postgres")
-        envelope = coerce_sql_variant_wire(value, as_json_envelope=json_env)
-        # The typed envelope is a dict; it still has to reach the driver as JSON
-        # text for the same reason JSON/JSONB does above.
-        if isinstance(envelope, (dict, list)):
-            return coerce_json_wire(envelope, as_text=True)
-        return envelope
-    if upper in {"ROWID", "UROWID"}:
-        return coerce_rowid_wire(value)
-    if upper == "HIERARCHYID":
-        pg_ltree = eng in {
-            "postgresql",
-            "postgres",
-            "pg",
-            "cockroachdb",
-            "timescaledb",
-            "alloydb",
-            "yugabytedb",
-            "citus",
-            "supabase",
-            "greenplum",
-        } or eng.startswith("postgres")
-        return coerce_hierarchyid_wire(value, as_ltree=pg_ltree)
-    if upper in {"BINARY", "BLOB", "LONGBLOB", "VARBINARY", "BYTEA"}:
-        return coerce_binary_wire(value)
-    if upper in {"UUID", "UNIQUEIDENTIFIER", "GUID"}:
-        # pyodbc UNIQUEIDENTIFIER prefers native uuid.UUID (ODBC 8169 on bad strings).
-        mssql_uuid = eng in {
-            "sqlserver",
-            "mssql",
-            "azure_sql",
-            "synapse",
-            "azure_synapse",
-        }
-        return coerce_uuid_wire(value, as_uuid=mssql_uuid)
-    if upper in {"PG_LSN", "LSN"}:
-        return coerce_pg_lsn_wire(value)
-    if upper == "OID":
-        return coerce_oid_wire(value)
-    if upper in {"TID", "CTID"}:
-        return coerce_tid_wire(value)
-    if upper == "XID8":
-        return coerce_xid_wire(value, width64=True)
-    if upper == "XID":
-        return coerce_xid_wire(value, width64=False)
-    if upper == "CID":
-        return coerce_cid_wire(value)
-    if upper in {"TXID_SNAPSHOT", "PG_SNAPSHOT"}:
-        return coerce_txid_snapshot_wire(value)
-    if upper in {"INET", "IPV4", "IPV6", "IP"}:
-        return coerce_inet_wire(value)
-    if upper in {"CIDR"}:
-        return coerce_cidr_wire(value)
-    if upper in {"MACADDR", "MACADDR8"}:
-        return coerce_macaddr_wire(value, eui64=upper == "MACADDR8")
-    if upper in {"XML", "XMLTYPE"}:
-        return coerce_xml_wire(value)
-    if upper == "JSONPATH":
-        return coerce_jsonpath_wire(value)
-    if upper == "CITEXT":
-        return coerce_citext_wire(value)
-    if upper == "LTREE":
-        return coerce_ltree_wire(value)
-    if upper in {"TSVECTOR", "TSQUERY"}:
-        return coerce_tsvector_wire(value)
-    if upper == "POINT":
-        return coerce_point_wire(value)
-    if upper == "BOX":
-        return coerce_box_wire(value)
-    if upper == "CIRCLE":
-        return coerce_circle_wire(value)
-    if upper == "LSEG":
-        return coerce_lseg_wire(value)
-    if upper == "LINE":
-        return coerce_line_wire(value)
-    if upper == "PATH":
-        return coerce_path_wire(value)
-    if upper == "POLYGON":
-        return coerce_polygon_wire(value)
-    if upper == "HSTORE":
-        return coerce_hstore_wire(value)
-    if "MULTIRANGE" in upper:
-        return coerce_range_wire(value, multi=True)
-    if upper.endswith("RANGE") and upper != "RANGE":  # int4range, daterange, …
-        return coerce_range_wire(value, multi=False)
-    if upper == "RANGE":
-        return coerce_range_wire(value, multi=False)
-    if upper == "ARRAY" or upper.endswith("[]") or (
-        (upper.startswith("ARRAY<") or upper.startswith("LIST<")) and upper.endswith(">")
-    ) or (
-        (upper.startswith("ARRAY(") or upper.startswith("LIST(") or upper.startswith("NESTED("))
-        and upper.endswith(")")
-    ):
-        return coerce_array_wire(value, engine=eng, ddl_type=ddl_type or upper)
-    if upper == "STRUCT" or upper.startswith(
-        ("STRUCT<", "RECORD<", "STRUCT(", "ROW(", "OBJECT(", "TUPLE(")
-    ):
-        return coerce_struct_wire(value, engine=eng, ddl_type=ddl_type or upper)
-    if upper == "MAP" or upper.startswith("MAP<") or upper.startswith("MAP("):
-        return coerce_map_wire(value, engine=eng, ddl_type=ddl_type or upper)
-    if upper in {"JSON", "JSONB", "VARIANT", "OBJECT", "SUPER"}:
-        # JSON text is the portable wire for every engine here. Handing psycopg2 a
-        # native dict/list raises "can't adapt type 'dict'" and aborted the whole
-        # transfer (only psycopg3 adapts dicts), while Postgres casts an
-        # unknown-typed text parameter straight into json/jsonb. Read-back is
-        # unaffected — psycopg2 still parses jsonb into native dict/list.
-        # SUPER (Redshift) shares empty→NULL refuse with VARIANT/OBJECT.
-        return coerce_json_wire(value, as_text=True)
-    if upper in {"BOOLEAN", "BOOL"}:
-        return coerce_boolean_wire(value, as_int=eng in {"mysql", "mariadb"})
-    if upper == "TINYINT" and eng in {"mysql", "mariadb", "tidb"}:
-        # MySQL TINYINT(1) convention — same as BOOLEAN wire (0/1 int).
-        return coerce_boolean_wire(value, as_int=True)
-    if upper in {
-        "TINYINT",
-        "SMALLINT",
-        "MEDIUMINT",
-        "INT",
-        "INTEGER",
-        "BIGINT",
-        "INT2",
-        "INT4",
-        "INT8",
-        "SERIAL",
-        "BIGSERIAL",
-        "SMALLSERIAL",
-    }:
-        # SQL Server TINYINT stays numeric 0–255 (pyodbc/Microsoft) — never bool.
-        return coerce_integer_wire(value, ddl_type=ddl_type or upper, engine=eng)
-    if upper in {
-        "FLOAT",
-        "FLOAT4",
-        "FLOAT8",
-        "FLOAT16",
-        "FLOAT32",
-        "FLOAT64",
-        "HALF",
-        "HALFFLOAT",
-        "REAL",
-        "DOUBLE",
-        "DOUBLE PRECISION",
-        "BINARY_FLOAT",
-        "BINARY_DOUBLE",
-    } or upper.startswith("FLOAT("):
-        return coerce_float_wire(value, ddl_type=ddl_type or upper)
-    if upper in {
-        "DECIMAL",
-        "NUMERIC",
-        "NUMBER",
-        "MONEY",
-        "SMALLMONEY",
-        "BIGNUMERIC",
-        "BIGDECIMAL",
-        "CURRENCY",
-    } or upper.startswith(("DECIMAL(", "NUMERIC(", "NUMBER(", "BIGNUMERIC(")):
-        return coerce_decimal_wire(value, ddl_type=ddl_type or upper, engine=eng)
-    logical = normalize_logical_type(ddl_type or upper)
-    if logical == LOGICAL_STRUCT:
-        return coerce_struct_wire(value, engine=eng, ddl_type=ddl_type or upper)
-    if logical == LOGICAL_MAP:
-        return coerce_map_wire(value, engine=eng, ddl_type=ddl_type or upper)
-    if logical == LOGICAL_INTERVAL or upper.startswith("INTERVAL"):
-        return coerce_interval_wire(value, ddl_type=ddl_type or upper, engine=eng)
-    if logical == LOGICAL_GEOGRAPHY or upper in {
-        "GEOGRAPHY",
-        "GEOMETRY",
-        "SDO_GEOMETRY",
-        "GEOGRAPHY(POINT)",
-        "GEOMETRY(POINT)",
-    }:
-        return coerce_geography_wire(value, ddl_type=ddl_type or upper, engine=eng)
-    return value
+    # Oracle VARCHAR2/CHAR: a zero-length string is stored as NULL.
+    if route.oracle_empty_is_null and isinstance(value, str) and value == "":
+        return None
+
+    handler = _BIND_DISPATCH.get(kind)
+    if handler is None:
+        return value
+    return handler(value, route)

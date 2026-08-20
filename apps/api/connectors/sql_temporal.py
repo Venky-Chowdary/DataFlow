@@ -240,6 +240,17 @@ def _is_mysql_engine(engine: str) -> bool:
     return _normalize_dest_db(eng) == "mysql"
 
 
+@lru_cache(maxsize=8192)
+def sql_type_is_temporal(source_type: str) -> bool:
+    """True when ``coerce_sql_temporal`` can act on this DDL type.
+
+    Every branch of the coercion is gated on ``sql_base_type`` landing in
+    ``_TEMPORAL_BASES``, so a non-temporal column can skip the call entirely
+    instead of re-deriving the base for each of its cells.
+    """
+    return sql_base_type(source_type) in _TEMPORAL_BASES
+
+
 def coerce_sql_temporal(value: Any, source_type: str, *, engine: str = "") -> Any:
     """Coerce a cell to a Python temporal for the given SQL DDL type, else return value.
 

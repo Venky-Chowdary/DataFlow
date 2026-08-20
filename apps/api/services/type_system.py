@@ -4112,12 +4112,14 @@ def is_bitstring_carrier(inferred: str | None) -> bool:
     return bool(re.search(r"\b(?:VARBIT|BIT\s+VARYING|BIT)\b", text))
 
 
+@lru_cache(maxsize=8192)
 def is_varying_bitstring_carrier(inferred: str | None) -> bool:
     """True for BIT VARYING / VARBIT (variable length up to n)."""
     text = strip_identity_qualifier(inferred).upper()
     return "VARYING" in text or "VARBIT" in text
 
 
+@lru_cache(maxsize=8192)
 def parse_bitstring_width(inferred: str | None) -> int | None:
     """Return BIT/VARBIT bit-width, or None if unbounded/unknown."""
     text = strip_identity_qualifier(inferred)
@@ -4366,6 +4368,7 @@ def parse_enum_or_set_members(inferred: str | None) -> tuple[str, frozenset[str]
     return kind, frozenset(members)
 
 
+@lru_cache(maxsize=8192)
 def parse_enum_or_set_ordered_members(
     inferred: str | None,
 ) -> tuple[str, tuple[str, ...]] | None:
@@ -4894,6 +4897,7 @@ def rowversion_would_collapse_to_temporal(
     return tgt in {LOGICAL_DATETIME, LOGICAL_DATE, LOGICAL_TIME}
 
 
+@lru_cache(maxsize=8192)
 def specialty_carrier_base(inferred: str | None) -> str | None:
     """Return uppercase specialty base (INET, PG_LSN, …) or None."""
     upper = re.sub(r"\s+", " ", (inferred or "").upper().strip())
@@ -5302,12 +5306,14 @@ def strip_collation_qualifier(inferred: str | None) -> str:
     return text.strip()
 
 
+@lru_cache(maxsize=8192)
 def parse_collation(inferred: str | None) -> str | None:
     """Return collation name from ``… COLLATE name`` carrier, else None."""
     m = re.search(r"\bCOLLATE\s+(\S+)", (inferred or ""), re.I)
     return m.group(1) if m else None
 
 
+@lru_cache(maxsize=8192)
 def is_case_insensitive_collation(inferred: str | None) -> bool:
     """True when destination collation equates ``A`` and ``a``.
 
@@ -6051,6 +6057,7 @@ def strip_identity_qualifier(inferred: str | None) -> str:
     return text.strip()
 
 
+@lru_cache(maxsize=8192)
 def is_year_carrier(inferred: str | None) -> bool:
     """True for MySQL YEAR / YEAR(4) carriers."""
     base = strip_identity_qualifier(inferred).upper()
@@ -6240,6 +6247,7 @@ from services.identity_fit import (  # noqa: E402,F401 — re-export
 )
 
 
+@lru_cache(maxsize=8192)
 def integer_bit_width(inferred: str | None) -> int | None:
     """Signed bit width; UNSIGNED adds +1 so INT UNSIGNED is wider than INT.
 

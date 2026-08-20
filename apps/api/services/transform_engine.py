@@ -13,7 +13,7 @@ from services.brand_env import getenv_brand
 import re
 import unicodedata
 import uuid as uuid_lib
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation, Overflow
 from collections.abc import Iterable
 from typing import Any
@@ -25,6 +25,11 @@ from services.semantic_types import (
     normalize_value_for_target,
 )
 from services.value_serializer import json_default, json_loads_exact
+
+#: An unadorned ASCII integer — no sign but ``-``, no separator, no exponent.
+_PLAIN_ASCII_INT_RE = re.compile(r"^-?[0-9]{1,38}$")
+#: Already-canonical ISO calendar date, which needs validation but no pattern search.
+_ISO_DATE_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
 
 _MONTH_NAME_RE = r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*"
 _DATE_LIKE_RE = re.compile(
@@ -179,9 +184,21 @@ _TYPED_TRANSFORMS = frozenset({
 _DATE_LOCALE_VAR: contextvars.ContextVar[str] = contextvars.ContextVar("date_locale", default="")
 
 
+@functools.lru_cache(maxsize=1)
+def _env_date_locale() -> str:
+    """Deployment-level date order from the environment.
+
+    The env var is process configuration, so it is read once — a per-cell read
+    cost two ``os.environ`` lookups on every date column of every row. Per-run
+    and per-request overrides travel through ``set_active_date_locale``; call
+    ``_env_date_locale.cache_clear()`` if the environment is changed in place.
+    """
+    return (getenv_brand("DATE_ORDER") or "").strip().upper()
+
+
 def _active_date_locale(explicit: str = "") -> str:
     """Return 'DMY' or 'MDY' from explicit > context > env, or '' if unset."""
-    loc = (explicit or _DATE_LOCALE_VAR.get() or getenv_brand("DATE_ORDER") or "").strip().upper()
+    loc = (explicit or _DATE_LOCALE_VAR.get() or "").strip().upper() or _env_date_locale()
     return loc if loc in {"DMY", "MDY"} else ""
 
 
@@ -432,6 +449,14 @@ def _parse_date_worker(value: str, with_time: bool, date_locale: str) -> str | N
     text = value.strip()
     if not text:
         return None
+    # ISO 8601 calendar dates are unambiguous under every locale and already in
+    # the output form, so they need one validation instead of a pattern sweep.
+    if _ISO_DATE_RE.match(text):
+        try:
+            date.fromisoformat(text)
+        except ValueError:
+            return None
+        return text
     if not _DATE_LIKE_RE.search(text):
         return None
     if text.lower() in NULL_SENTINELS:
@@ -614,7 +639,13 @@ def currency_samples_carry_markers(samples: list[str] | None) -> bool:
 
 
 def _parse_integer(value: str) -> int | None:
-    text = _normalize_numeric_text(value.strip())
+    plain = value.strip()
+    # An unadorned ASCII integer has nothing for NFKC, currency, accounting or
+    # separator resolution to change, and its digit count is inside the wire
+    # budget by construction — the common integer column skips all of it.
+    if _PLAIN_ASCII_INT_RE.match(plain):
+        return int(plain)
+    text = _normalize_numeric_text(plain)
     text = _normalize_locale_separators(text)
     if text is None or text == "":
         return None
@@ -1265,26 +1296,30 @@ def apply_transform(raw: str | None, transform: str) -> tuple[Any, str | None]:
     """
     if raw is None:
         return None, None
-    raw_s = str(raw)
-    lowered = raw_s.strip().lower()
-    # Sparse CDC / schemaless absent field — never coerce to SQL NULL or identity text.
-    if lowered == "__df_missing__" or raw_s == "__DF_MISSING__":
-        from services.value_serializer import DF_MISSING_SENTINEL
+    raw_s = raw if type(raw) is str else str(raw)
+    # Every engine sentinel is underscore-delimited, so a value without an
+    # underscore cannot be one. The check keeps the identity path — the most
+    # common transform on the widest tables — off ``strip().lower()`` of every
+    # cell it carries through unchanged.
+    if "_" in raw_s:
+        lowered = raw_s.strip().lower()
+        # Sparse CDC / schemaless absent field — never coerce to SQL NULL or identity text.
+        if lowered == "__df_missing__" or raw_s == "__DF_MISSING__":
+            from services.value_serializer import DF_MISSING_SENTINEL
 
-        return DF_MISSING_SENTINEL, None
-    # Explicit NULL sentinels must never land as literal strings in any dest.
-    if lowered in {"__df_sql_null__", "__df_ddb_null__"}:
-        return None, None
+            return DF_MISSING_SENTINEL, None
+        # Explicit NULL sentinels must never land as literal strings in any dest.
+        if lowered in {"__df_sql_null__", "__df_ddb_null__"}:
+            return None, None
 
-    text = raw_s.strip()
     transform_l = (transform or "none").strip().lower()
-    if transform_l in {"omit", "intentional_omit", "drop", "exclude"}:
-        return None, "intentional omit — mapping should not project"
-
-    # Identity aliases must preserve exact wire (incl. leading/trailing whitespace).
-    # Before empty collapse — otherwise ``"   "`` was stripped to ``""`` and mutated.
+    # Identity aliases preserve the exact wire, so they need nothing below.
     if transform_l in _IDENTITY_TRANSFORMS:
         return raw_s, None
+
+    text = raw_s.strip()
+    if transform_l in {"omit", "intentional_omit", "drop", "exclude"}:
+        return None, "intentional omit — mapping should not project"
 
     # Identity / text transforms: empty string is a real value.
     if text == "" and transform_l in _KEEP_EMPTY_TRANSFORMS:

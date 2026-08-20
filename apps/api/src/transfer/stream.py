@@ -38,6 +38,11 @@ from services.dest_precount import (
     stamp_overwrite_source_keys,
 )
 from services.dialect_profiles import schema_from_cfg
+from services.source_reread import (
+    REREAD_SCAN_SOURCES,
+    reread_pagination_plan,
+    should_reread_source,
+)
 from services.row_conservation import CENSUS_KEY, KeyCensusAccumulator, observe_keyed_batch, record_stream_health
 from services.resilience import (  # noqa: E402, F401
     ResilientBatcher,
@@ -1559,6 +1564,21 @@ def _stream_database_transfer_impl(
     last_checksum = ""
     # Phase F1 — accumulate fingerprints during the write pass (avoids double source I/O).
     write_pass_fp = FingerprintAccumulator()
+    # …but only when this route's Gate-8 will actually use them. A route that
+    # re-reads the source for an independent digest (heterogeneous warehouse
+    # full refresh) mapped and fingerprinted every cell twice and discarded the
+    # write-pass copy. ``partial_write_pass`` can only turn re-read *on*, and a
+    # source outside the re-read scan set falls back to the write-pass digest,
+    # so both stay eligible here.
+    inline_fingerprints_used = not (
+        should_reread_source(
+            src_type=src_type,
+            dest_type=dest_type,
+            incremental=incremental,
+            partial_write_pass=False,
+        )
+        and src_type in REREAD_SCAN_SOURCES
+    )
     # Restore cumulative quarantine counts on resume — Gate-8 conservation is
     # source - (rejected - coerced_null) - skipped. committed_offset already spans
     # the full population on resume, so these counters must be cumulative too or a
@@ -2289,28 +2309,31 @@ def _stream_database_transfer_impl(
         # Tombstones are already stripped: hashing deleted keys as writes would
         # fail Gate-8 after a correct hard DELETE.
         inline_fps: list[Any] = []
-        try:
-            mapped_fp, _ = map_rows_for_fingerprint(
-                headers=batch.headers,
-                data_rows=batch.rows,
-                mappings=mappings,
-                target_cols=target_cols,
-                column_types=column_types,
-                error_policy=stream_error_policy,
-                dest_types=fingerprint_dest_types,
-                preserve_case=True,
-                dest_kind=dest_type,
-                destination_pk_columns=list(pk_target_cols or []) or None,
-            )
-            if mapped_fp:
-                inline_fps = row_fingerprints(
-                    mapped_fp,
-                    target_cols,
-                    dest_db_type=dest_type,
-                    dest_types=digest_dest_types,
+        if inline_fingerprints_used:
+            try:
+                mapped_fp, _ = map_rows_for_fingerprint(
+                    headers=batch.headers,
+                    data_rows=batch.rows,
+                    mappings=mappings,
+                    target_cols=target_cols,
+                    column_types=column_types,
+                    error_policy=stream_error_policy,
+                    dest_types=fingerprint_dest_types,
+                    preserve_case=True,
+                    dest_kind=dest_type,
+                    destination_pk_columns=list(pk_target_cols or []) or None,
                 )
-        except Exception as exc:
-            logger.warning("Inline write-pass fingerprint skipped for chunk %s: %s", idx, exc)
+                if mapped_fp:
+                    inline_fps = row_fingerprints(
+                        mapped_fp,
+                        target_cols,
+                        dest_db_type=dest_type,
+                        dest_types=digest_dest_types,
+                    )
+            except Exception as exc:
+                logger.warning(
+                    "Inline write-pass fingerprint skipped for chunk %s: %s", idx, exc
+                )
 
         try:
             batch_written, last_checksum, dest_summary = with_retry(
@@ -2645,8 +2668,7 @@ def _stream_database_transfer_impl(
     # so Snowflake→Postgres can earn independent_source_reread / full_checksum.
     # Force off with =0; force on with =1. Partial write-pass (resume tail) always
     # re-reads — a session digest vs a full destination is a false mismatch.
-    from services.source_reread import reread_pagination_plan, should_reread_source
-
+    #
     # Resume: the write pass only fingerprints this session's rows while Gate-8
     # compares the full destination — force a source re-read. This holds for
     # every sync mode, not just overwrite: a resumed keyed load lands the whole
@@ -2679,7 +2701,7 @@ def _stream_database_transfer_impl(
             "default; set DATAFLOW_RECONCILE_SOURCE_REREAD=1 to force a second "
             "scan on same-engine routes (double I/O)."
         )
-    elif src_type in {"postgresql", "redshift", "mysql", "snowflake", "bigquery", "sqlite", "generic_sql", "mongodb", "s3", "gcs", "adls"}:
+    elif src_type in REREAD_SCAN_SOURCES:
         # Independent re-read — snapshot scan (no OFFSET) on warehouse sources.
         from connectors.sql_snapshot_scan import close_table_scan
 
