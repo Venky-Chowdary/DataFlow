@@ -35,6 +35,7 @@ from services.destination_key_collision_probe import (
     destination_enforces_key,
     sync_mode_appends_without_key_resolution,
 )
+from services.row_conservation import CENSUS_KEY, live_records_for_digest
 from services.reconciliation import (
     KEYED_READBACK_ENGINES,
     TargetSampleUnavailable,
@@ -646,7 +647,6 @@ def _maybe_attach_verification_ladder(
     raw_before = dest_summary.get(PRECOUNT_KEY)
     dest_before = int(raw_before) if isinstance(raw_before, int) else None
     from services.row_conservation import (
-        CENSUS_KEY,
         KIND_KEYED,
         KeyCensus,
         conservation_kind,
@@ -1118,7 +1118,7 @@ def run_reconciliation(
     # Where the source digest came from. Held in a box because the early-return
     # paths below run before it is known, and the report must never claim two
     # independent digests agreed when only the writer's was available.
-    digest_provenance: dict[str, str] = {"source": ""}
+    digest_provenance: dict[str, str] = {"source": "", "source_scope": ""}
     # Late-bound: populated once driver/schema/table are resolved. _finalize
     # is defined before those names exist; file-export returns must not stamp.
     vector_stamp_ctx: dict[str, Any] = {}
@@ -1133,6 +1133,11 @@ def run_reconciliation(
             payload = {
                 **payload,
                 "source_checksum_provenance": digest_provenance["source"],
+            }
+        if digest_provenance["source_scope"] and "source_checksum_scope" not in payload:
+            payload = {
+                **payload,
+                "source_checksum_scope": digest_provenance["source_scope"],
             }
         # Property 3 — carry source snapshot id onto the reconcile report /
         # migration certificate surface.
@@ -1595,8 +1600,23 @@ def run_reconciliation(
         source_checksum_provenance = SOURCE_DIGEST_SOURCE_REREAD
         digest_provenance["source"] = source_checksum_provenance
     else:
+        digest_records = records
+        if records and pk_cols and dest_summary.get(CENSUS_KEY):
+            # The keyed upsert hard-DELETEd tombstoned keys, so the destination
+            # holds the live population only. Hashing the tombstoned rows here
+            # compares two different scopes and fails a correct run — same owner
+            # the write path strips with.
+            digest_records, tombstones_excluded = live_records_for_digest(
+                records,
+                key_columns=[str(c) for c in pk_cols if c],
+                mappings=mapping_dicts,
+            )
+            if tombstones_excluded:
+                digest_provenance["source_scope"] = (
+                    f"live_population_excluding_{tombstones_excluded}_tombstones"
+                )
         source_checksum, source_checksum_provenance = _compute_source_checksum(
-            records,
+            digest_records,
             columns,
             mapping_dicts,
             source_schema,

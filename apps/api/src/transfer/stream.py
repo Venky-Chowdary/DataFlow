@@ -43,7 +43,13 @@ from services.source_reread import (
     reread_pagination_plan,
     should_reread_source,
 )
-from services.row_conservation import CENSUS_KEY, KeyCensusAccumulator, observe_keyed_batch, record_stream_health
+from services.row_conservation import (
+    CENSUS_KEY,
+    KeyCensusAccumulator,
+    live_rows_for_digest,
+    observe_keyed_batch,
+    record_stream_health,
+)
 from services.resilience import (  # noqa: E402, F401
     ResilientBatcher,
     adaptive_chunk_size,
@@ -2721,6 +2727,7 @@ def _stream_database_transfer_impl(
         read_offset = 0
         checksum_rows_read = 0
         reread_holdouts: list[dict[str, Any]] = []
+        reread_tombstones_excluded = 0
         try:
             while True:
                 read_limit = _batch_limit(
@@ -2748,9 +2755,24 @@ def _stream_database_transfer_impl(
                 )
                 if not batch or not batch.rows:
                     break
+                # A keyed upsert hard-DELETEs tombstoned keys, so the destination
+                # does not hold those rows: hashing them here would compare N
+                # source rows against N-deletes destination rows and fail Gate-8
+                # on a correct run. Same owner the write pass strips with.
+                # ``batch.rows`` stays intact — the keyset cursor advances on the
+                # last row actually read, not on the digest scope.
+                digest_rows = batch.rows
+                if keyed_census_acc is not None:
+                    digest_rows, _excluded_now = live_rows_for_digest(
+                        batch.headers,
+                        batch.rows,
+                        key_columns=pk_target_cols,
+                        mappings=mappings,
+                    )
+                    reread_tombstones_excluded += _excluded_now
                 mapped, reread_rejected = map_rows_for_fingerprint(
                     headers=batch.headers,
-                    data_rows=batch.rows,
+                    data_rows=digest_rows,
                     mappings=mappings,
                     target_cols=target_cols,
                     column_types=column_types,
@@ -2790,11 +2812,21 @@ def _stream_database_transfer_impl(
             final_checksum = fp_accumulator.digest()
             dest_summary["checksum_mode"] = "source_reread"
             dest_summary["source_independently_reread"] = True
-            dest_summary["checksum_note"] = (
+            note = (
                 "Independent source re-read after the write pass "
                 f"({reread_plan.get('mode')} pagination) — dest read-back can earn "
                 "full_checksum / migration_proven."
             )
+            if reread_tombstones_excluded:
+                dest_summary["checksum_tombstones_excluded"] = int(
+                    reread_tombstones_excluded
+                )
+                note += (
+                    f" Scope is the live population: {reread_tombstones_excluded:,} "
+                    "tombstoned source row(s) excluded — the keyed upsert deleted "
+                    "those keys, so the destination does not hold them."
+                )
+            dest_summary["checksum_note"] = note
         else:
             # The re-read fingerprinted nothing. Falling back to the writer's own
             # digest here — while still stamping source_reread — presented a

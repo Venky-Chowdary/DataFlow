@@ -379,6 +379,57 @@ def partition_keyed_records(
     )
 
 
+def live_records_for_digest(
+    records: Sequence[Mapping[str, Any]] | None,
+    *,
+    key_columns: Sequence[str] | None,
+    mappings: Sequence[Mapping[str, Any]] | None = None,
+) -> tuple[list[dict[str, Any]], int]:
+    """Source rows a keyed upsert leaves the destination holding, and how many it does not.
+
+    A keyed upsert applies a tombstone as a hard DELETE, so the destination
+    deliberately does not hold that row. Hashing it on the source side compares
+    a population of *N* against a destination of *N - deletes* and fails Gate-8
+    on a correct run — the destination digest is right and the source scope is
+    wrong. The write path already strips tombstones through
+    :func:`partition_keyed_records`; every source digest basis must use the same
+    owner so both sides describe the live population.
+
+    Returns ``(live_records, excluded)``. With no key columns nothing can be
+    addressed by DELETE, so the rows are returned unchanged.
+    """
+    rows = [dict(r or {}) for r in (records or [])]
+    cols = [str(c).strip() for c in (key_columns or []) if str(c).strip()]
+    if not rows or not cols:
+        return rows, 0
+    partition = partition_keyed_records(rows, cols, mappings)
+    if not partition.tombstone_keys:
+        return rows, 0
+    return partition.live_records, len(rows) - len(partition.live_records)
+
+
+def live_rows_for_digest(
+    headers: Sequence[str],
+    rows: Sequence[Sequence[Any]] | None,
+    *,
+    key_columns: Sequence[str] | None,
+    mappings: Sequence[Mapping[str, Any]] | None = None,
+) -> tuple[list[list[Any]], int]:
+    """Positional-row form of :func:`live_records_for_digest` for batch readers."""
+    header_list = [str(h) for h in (headers or [])]
+    row_list = [list(r) for r in (rows or [])]
+    if not header_list or not row_list:
+        return row_list, 0
+    live, excluded = live_records_for_digest(
+        [dict(zip(header_list, row)) for row in row_list],
+        key_columns=key_columns,
+        mappings=mappings,
+    )
+    if not excluded:
+        return row_list, 0
+    return [[rec.get(h) for h in header_list] for rec in live], excluded
+
+
 def coerce_pk_part(value: Any) -> Any:
     """Bind a PK part with integer affinity when the token is an integer.
 
