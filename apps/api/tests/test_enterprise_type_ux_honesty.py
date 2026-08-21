@@ -84,7 +84,7 @@ def test_uuid_create_new_string_sink_stamps_domain_risk():
     assert "uuid_domain" in kinds or "precision_collapse" in kinds or "lossy_coercion" in kinds
 
 
-def test_create_new_mysql_timestamptz_pipeline_stamps_visible_risks():
+def _mysql_create_new_row(inferred_type: str) -> dict:
     from services.mapping_pipeline import run_mapping_pipeline
 
     result = run_mapping_pipeline(
@@ -92,7 +92,7 @@ def test_create_new_mysql_timestamptz_pipeline_stamps_visible_risks():
         target_columns=[],
         source_schemas=[{
             "name": "created_at",
-            "inferred_type": "TIMESTAMPTZ",
+            "inferred_type": inferred_type,
             "samples": ["2024-01-01T00:00:00Z"],
         }],
         destination_db_type="mysql",
@@ -101,6 +101,19 @@ def test_create_new_mysql_timestamptz_pipeline_stamps_visible_risks():
     )
     row = result["mappings"][0]
     assert row.get("create_new") is True
+    return row
+
+
+def test_create_new_mysql_timestamptz_pipeline_stamps_visible_risks():
+    """Nanosecond source into MySQL's microsecond carrier loses precision."""
+    row = _mysql_create_new_row("TIMESTAMPTZ(9)")
     risks = row.get("create_new_risks") or []
     assert risks, row
     assert row.get("requires_review") is True
+
+
+def test_create_new_mysql_timestamptz_keeps_the_instant_unstamped():
+    """MySQL ``TIMESTAMP(6)`` is an instant carrier — nothing is lost to stamp."""
+    row = _mysql_create_new_row("TIMESTAMPTZ")
+    assert row["target_type"].upper().startswith("TIMESTAMP(6)"), row["target_type"]
+    assert (row.get("create_new_risks") or []) == []

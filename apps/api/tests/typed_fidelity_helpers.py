@@ -802,8 +802,13 @@ def assert_redis_typed_fidelity(prefix: str) -> None:
     dec = doc.get("amt_dec")
     assert Decimal(str(dec)) == Decimal("10.5000") or Decimal(str(dec)) == Decimal("10.5"), dec
     assert abs(float(doc.get("amt_float")) - 1500.0) < 1e-6
+    # Redis' only carrier is text, and the JSON wire writes RFC 3339 with the
+    # offset — so the instant must come back identical, not just the date part.
     ts = str(doc.get("ts_utc") or "")
     assert "2024-12-31" in ts, ts
+    parsed = datetime.fromisoformat(ts)
+    assert parsed.tzinfo is not None, f"redis wire dropped the offset: {ts}"
+    assert parsed == EXPECTED_PG_ROW_1["ts_utc"], ts
     assert doc.get("flag") in (True, "true", 1, "1")
 
 

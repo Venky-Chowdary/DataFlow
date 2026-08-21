@@ -1589,6 +1589,12 @@ from services.document_instant import (  # noqa: E402
     is_document_instant_token,
 )
 
+# A keyspace store's only carrier is text, and its JSON wire keeps the offset.
+from services.keyspace_instant import (  # noqa: E402
+    INSTANT_TEXT_WIRE_ENGINES as _INSTANT_TEXT_WIRE_ENGINES,
+    keyspace_instant_text_wire_preserved,
+)
+
 
 def document_domain_would_collapse(
     source_type: str,
@@ -3525,14 +3531,78 @@ def is_timezone_polarity_loss(
     return False
 
 
+def _bare_type_token(type_token: str) -> str:
+    """Upper-cased token without identity qualifier or precision parameters."""
+    raw = strip_identity_qualifier(type_token).upper().strip()
+    return re.sub(r"\s*\(\s*\d+\s*\)", "", raw).strip()
+
+
+def is_dest_instant_carrier_spelling(stamped: str, *, dest_db: str = "") -> bool:
+    """True when ``stamped`` is ``dest_db``'s own physical instant carrier.
+
+    Compares the bare token against what the dialect stamps for an aware source
+    (MySQL ``TIMESTAMP(6)``, SQL Server ``DATETIMEOFFSET``, PG ``TIMESTAMPTZ``),
+    so a *source* spelling that merely looks aware — ``TIMESTAMPTZ`` on the way
+    into SQL Server — is not mistaken for the destination's physical type.
+    """
+    db = _normalize_dest_db(dest_db) if dest_db else ""
+    if not db:
+        return False
+    bare = _bare_type_token(stamped)
+    if not bare:
+        return False
+    return any(
+        bare == _bare_type_token(ddl_type(db, logical))
+        for logical in ("TIMESTAMPTZ", "TIMESTAMP_TZ")
+    )
+
+
+def reinvent_would_drop_dest_instant_carrier(
+    stamped: str,
+    reinvented: str,
+    *,
+    dest_db: str = "",
+) -> bool:
+    """True when re-inventing the destination's own stamp drops its instant.
+
+    A stamp already spelled in the destination's dialect is a physical token, but
+    ``create_new_mapping_target_type`` reads its input as a *source* token with no
+    dialect. MySQL ``TIMESTAMP(6)`` is an instant carrier, yet fed back through
+    invent it returns ``DATETIME(6)`` — a wall-clock column — so a second pass
+    over its own stamp turns an instant-preserving route into a fidelity collapse
+    nothing in the mapping asked for.
+
+    Only the destination's own instant spelling is protected: re-inventing a
+    source token into the dialect's physical type is the stamp doing its job.
+    """
+    db = _normalize_dest_db(dest_db) if dest_db else ""
+    if not is_dest_instant_carrier_spelling(stamped, dest_db=db):
+        return False
+    before = datetime_timezone_polarity(stamped, dest_db=db)
+    if before not in {"tz", "ltz"}:
+        return False
+    return datetime_timezone_polarity(reinvented, dest_db=db) != before
+
+
 def timezone_aware_would_collapse_to_string(
-    source_type: str, target_type: str
+    source_type: str,
+    target_type: str,
+    *,
+    dest_db: str = "",
 ) -> bool:
     """True when offset-aware datetime/time collapses to open TEXT/STRING.
 
     ``TIMESTAMPTZ→TEXT`` / ``DATETIMEOFFSET→STRING`` / ``TIMETZ→STRING`` look
     like free serialization but drop the offset contract — Accept risk required.
+
+    ``dest_db`` names the destination whose wire will carry the value: a keyspace
+    store has no other carrier than text, and its JSON wire writes the offset, so
+    there the text *is* the instant.
     """
+    if keyspace_instant_text_wire_preserved(
+        source_type, target_type, dest_db=dest_db
+    ):
+        return False
     dt = datetime_timezone_polarity(source_type)
     tm = time_timezone_polarity(source_type)
     if dt not in {"tz", "ltz"} and tm != "tz":
@@ -6465,7 +6535,9 @@ def is_precision_collapse_coercion(
         return True
     if time_timezone_polarity_loss(source_type, target_type):
         return True
-    if timezone_aware_would_collapse_to_string(source_type, target_type):
+    if timezone_aware_would_collapse_to_string(
+        source_type, target_type, dest_db=dest_db
+    ):
         return True
     if long_raw_locator_would_collapse(source_type, target_type):
         return True
@@ -6920,7 +6992,9 @@ def is_lossy_coercion(
             return True
         if time_timezone_polarity_loss(source_type, target_type):
             return True
-        if timezone_aware_would_collapse_to_string(source_type, target_type):
+        if timezone_aware_would_collapse_to_string(
+            source_type, target_type, dest_db=dest_db
+        ):
             return True
         if long_raw_locator_would_collapse(source_type, target_type):
             return True
@@ -7083,7 +7157,9 @@ def is_lossy_coercion(
     # (Airbyte V2) but is still a field-DDL collapse â€” treat as lossy so G3 surfaces it.
     if is_nested_document_collapse(source_type, target_type, dest_db=dest_db):
         return True
-    if timezone_aware_would_collapse_to_string(source_type, target_type):
+    if timezone_aware_would_collapse_to_string(
+        source_type, target_type, dest_db=dest_db
+    ):
         return True
     if long_raw_locator_would_collapse(source_type, target_type):
         return True
