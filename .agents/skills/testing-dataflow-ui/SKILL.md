@@ -440,6 +440,9 @@ Traps found repeatedly on this app:
 - The Pilot page keeps **stale chat history from before an API restart**, and `New chat` can retain the
   previously attached **Job context chip**. Reload the page (F5) and then click `New chat` before
   asserting fresh-turn behaviour, and re-install the fetch hook after every reload.
+- Conversations persist in `localStorage`: the rail in `df2.pilot.rail.v1`, the Pilot page in
+  `df2.pilot.sessions.v1` / `df2.pilot.activeId.v1`. Removing the key and reloading is the only
+  reliable way to get a genuinely fresh rail chat.
 - Job counts: `GET /api/v1/connectors/jobs` returns at most **50 recent rows** plus whole-history
   `total` / `status_counts`. The Jobs chips and nav badge must read those counts (via
   `lib/jobHistory.ts`) and agree with Pilot; the row list is a window and says so

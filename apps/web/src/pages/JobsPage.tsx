@@ -16,7 +16,12 @@ import { PageToolbar } from "../components/ui/PageToolbar";
 import { useToast } from "../components/Toast";
 import { useActiveData } from "../lib/DataContext";
 import { fetchJob, fetchJobMappingProof, renameJob, retryJob, resumeJob, RetryRefusedError } from "../lib/api";
-import { jobFilterCounts, jobHistoryFromResponse, type JobHistory } from "../lib/jobHistory";
+import {
+  jobFilterCounts,
+  jobHistoryFromResponse,
+  jobWindowNote,
+  type JobHistory,
+} from "../lib/jobHistory";
 import { isJobSuccess, jobStatusBadgeClass, jobStatusLabel } from "../lib/uiUtils";
 import { JobProgress, TransferJob } from "../lib/types";
 import { QuarantinePanel } from "../components/transfer/QuarantinePanel";
@@ -294,6 +299,13 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
         .some((v) => String(v).toLowerCase().includes(q)),
     );
   }, [jobs, filter, jobSearch, nameOverrides]);
+
+  const windowNote = jobWindowNote({
+    counts,
+    filter,
+    loaded: jobs.length,
+    shown: jobSearch.trim() ? undefined : filtered.length,
+  });
 
   useEffect(() => {
     const ids = jobs.map((j) => j._id);
@@ -830,11 +842,7 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
                     );
                   })
                 )}
-                {counts.all > jobs.length && (
-                  <p className="df2-jobs-v3-window-note">
-                    Showing the {jobs.length.toLocaleString()} most recent of {counts.all.toLocaleString()} jobs.
-                  </p>
-                )}
+                {windowNote && <p className="df2-jobs-v3-window-note">{windowNote}</p>}
               </aside>
 
               <section className="df2-jobs-v3-detail" aria-label="Job detail">

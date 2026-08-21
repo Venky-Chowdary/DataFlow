@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { jobFilterCounts, jobHistoryFromResponse } from "./jobHistory";
+import { jobFilterCounts, jobHistoryFromResponse, jobWindowNote } from "./jobHistory";
 import type { TransferJob } from "./types";
 
 function job(id: string, status: string): TransferJob {
@@ -63,4 +63,40 @@ test("statuses the chips do not name still count in the total", () => {
   assert.equal(counts.all, 4);
   assert.equal(counts.completed, 1);
   assert.equal(counts.failed, 0);
+});
+
+const NINETY = jobFilterCounts(
+  jobHistoryFromResponse({
+    jobs: [],
+    total: 90,
+    status_counts: { completed: 42, running: 17, pending: 2, failed: 29 },
+  }),
+);
+
+test("a filtered window says how much of that status it holds", () => {
+  assert.equal(
+    jobWindowNote({ counts: NINETY, filter: "failed", loaded: 50, shown: 10 }),
+    "Showing 10 of 29 failed job(s) — this list holds the 50 most recent of 90 jobs.",
+  );
+});
+
+test("the unfiltered window names only the page it holds", () => {
+  assert.equal(
+    jobWindowNote({ counts: NINETY, filter: "all", loaded: 50, shown: 50 }),
+    "Showing the 50 most recent of 90 jobs.",
+  );
+});
+
+test("a search-narrowed list does not claim its rows are the status slice", () => {
+  assert.equal(
+    jobWindowNote({ counts: NINETY, filter: "failed", loaded: 50 }),
+    "This list holds the 50 most recent of 90 jobs.",
+  );
+});
+
+test("no window note when the page holds the whole history", () => {
+  const counts = jobFilterCounts(
+    jobHistoryFromResponse({ jobs: [], total: 12, status_counts: { failed: 12 } }),
+  );
+  assert.equal(jobWindowNote({ counts, filter: "failed", loaded: 12, shown: 12 }), undefined);
 });

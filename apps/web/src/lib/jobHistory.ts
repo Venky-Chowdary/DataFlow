@@ -57,6 +57,32 @@ export function statusCountsFromJobs(jobs: TransferJob[]): JobStatusCounts {
   return counts;
 }
 
+/**
+ * What the row list is showing, when the counted history is larger than the page.
+ *
+ * A chip counting 29 failures above a list of 10 rows reads as a contradiction unless
+ * the list says which slice it holds. `shown` is omitted while a search narrows the
+ * rows, because then the visible count is not the filter's slice.
+ */
+export function jobWindowNote(opts: {
+  counts: JobFilterCounts;
+  filter: keyof JobFilterCounts;
+  /** Rows the page has loaded (before filtering). */
+  loaded: number;
+  /** Rows on screen — omit when a text search is narrowing them. */
+  shown?: number;
+}): string | undefined {
+  const { counts, filter, loaded, shown } = opts;
+  if (counts.all <= loaded) return undefined;
+  const window = `the ${loaded.toLocaleString()} most recent of ${counts.all.toLocaleString()} jobs`;
+  if (filter === "all") return `Showing ${window}.`;
+  if (shown === undefined) return `This list holds ${window}.`;
+  return (
+    `Showing ${shown.toLocaleString()} of ${counts[filter].toLocaleString()} ${filter} ` +
+    `job(s) — this list holds ${window}.`
+  );
+}
+
 /** Filter-chip counts over the whole history, using the same buckets as the filters. */
 export function jobFilterCounts(history: JobHistory): JobFilterCounts {
   const counts: JobFilterCounts = { all: history.total, running: 0, completed: 0, quarantine: 0, failed: 0 };
