@@ -140,6 +140,27 @@ def test_tenant_is_amended_and_removed_by_its_workspace_admin(admin):
     assert admin.get("/api/v1/workspace/tenants").json()["tenants"] == []
 
 
+def test_tenant_removal_is_filed_at_the_level_the_warnings_view_asks_for(admin):
+    """Removing a tenant is the most destructive act here; it must not read as info.
+
+    The audit reader filters on the stored value, so ``level="warning"`` — the
+    English word rather than this system's ``warn`` — hid the deletion from the
+    Warnings view while every other warning-level event appeared there.
+    """
+    ws_id = _workspace(admin, "Zeta")
+    created = admin.post(
+        "/api/v1/workspace/tenant", json={"workspace_id": ws_id, "name": "Zeta"}
+    )
+    assert created.status_code == 200, created.text
+    assert admin.delete(f"/api/v1/workspace/tenant/{created.json()['id']}").status_code == 200
+
+    warned = admin.get("/api/v1/audit/events", params={"limit": 200, "level": "warn"})
+    assert warned.status_code == 200, warned.text
+    assert "workspace.tenant.delete" in {
+        e.get("action") for e in warned.json().get("events", [])
+    }
+
+
 def test_workspace_editor_is_refused_in_words_not_by_a_fault(admin):
     ws_id = _workspace(admin, "Gamma")
     editor = _signed_in(

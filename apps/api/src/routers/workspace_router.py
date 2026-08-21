@@ -571,7 +571,7 @@ async def delete_tenant_route(tenant_id: str, request: Request):
         action="workspace.tenant.delete",
         resource=f"/workspace/tenant/{tenant_id}",
         actor=actor,
-        level="warning",
+        level="warn",
         details={"tenant_id": tenant_id, "workspace_id": tenant.workspace_id},
     )
     return {"ok": True}

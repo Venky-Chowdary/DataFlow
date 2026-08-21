@@ -1626,7 +1626,7 @@ async def execute_job_rollback(job_id: str, body: RollbackExecuteBody, request: 
             action="migration_rollback.executed",
             resource=f"job:{job_id}",
             actor=actor,
-            level="warning",
+            level="warn",
             details={
                 "rollback_id": result.get("rollback_id"),
                 "strategy": result.get("strategy"),
