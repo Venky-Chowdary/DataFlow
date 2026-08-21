@@ -615,3 +615,71 @@ as a service-level park driven through product code, not a scheduler-observed dr
 The `min-height` control rule is gone (computed `min-height: 0px`), but the textarea is `rows=2`,
 which at 390px still hides part of a realistic two-line reason (`scrollHeight` 73 vs
 `clientHeight` 54). Measure at 390 **and** at desktop; desktop is clean (54 vs 54).
+
+## Permission / RBAC testing (PR #59 era and later)
+
+### Enable RBAC or every permission test is vacuous
+`rbac.py` passes everything through unless `DATAFLOW_REQUIRE_AUTH=1`. Start the API with
+`DATAFLOW_REQUIRE_AUTH=1` **and** `DATAFLOW_ENV=development`, and re-supply
+`DATAFLOW_ADMIN_EMAIL` / `DATAFLOW_ADMIN_PASSWORD` / `DATAFLOW_ADMIN_NAME` on every restart or you
+get `{"auth_required":false,"has_users":false}` and an unusable login form.
+
+### Setting the active workspace requires a reload
+`localStorage["df2.workspace"]` is read when `PermissionsContext` resolves identity. Setting it and
+then `page.goto("#/other")` does **not** re-resolve authority (a hash change is not a document
+load), so the account keeps its previous - often viewer - authority and every write control stays
+disabled. Always `page.reload()` after writing the key, then wait for `/auth/me` to answer.
+
+### `can()` is permissive until `/auth/me` answers
+`PermissionsContext` returns `true` for every permission while identity is unknown, so controls are
+briefly enabled for everyone. Any "the control is disabled/enabled" assertion is meaningless unless
+you first wait for the `/auth/me` response.
+
+### A header-less request is not the same as a viewer
+An account with memberships in several workspaces and **no** `X-Workspace-Id` is answered
+ambiguously and fails closed, which shows up as `GET /schedules/ 403` right after login. The same
+request returns `200` once the header is present. Do not report that first 403 as a permission
+defect - re-test with the workspace chosen before drawing any conclusion.
+
+### Read-permission and route-gate can disagree; watch for fabricated empty states
+`/auth/me` may grant `schedule.read` while `GET /api/v1/schedules/` still answers `403` for that
+role. The page then renders the "No schedules yet ... Create schedule" empty state even though
+schedules exist in that workspace. Whenever a list looks empty, confirm the underlying GET returned
+`2xx` - an empty list drawn from a failed read is a reportable defect, not a passing test.
+
+## Engine / schedule fixtures
+
+### Choose the sync mode deliberately, and probe the real button labels
+The mode buttons are `Full append`, `Full overwrite`, `CDC`, `Incremental append`,
+`Incremental deduped`, `Mirror`, `SCD Type 2` - there is no button reading "Full refresh", so a
+`/Full refresh/i` locator silently falls through to whatever matched first (often `CDC`). Dump the
+visible button labels before selecting. For a "does a repeat beat duplicate rows?" proof use
+**Full overwrite**: after N beats the destination must equal the source exactly.
+
+### CDC needs a cursor and a primary key
+A CDC schedule saved without them fails its first beat with `Sync mode contract incomplete`
+(`rejected_rows`, `records_transferred: 0`), then parks. That is a fixture mistake, not a product
+bug - do not report it as one.
+
+### `tfid_src` carries a schema-drift blocker; `ttd_orders_ok` does not
+Any schedule reading `tfid_src` parks on `SOURCE_SCHEMA_DRIFT` with the self-contradictory finding
+`ts_plain: TIMESTAMP_NTZ -> TIMESTAMP_NTZ (narrow_type)` (identical old/new type reported as
+breaking) and `approvable: false`, so it can never fire twice. Use `ttd_orders_ok` (5 rows, sum
+`1367.875000`, no temporal columns) for cadence and duplication tests, and keep it pristine.
+
+### A parked schedule freezes its own cadence
+`last_status: "needs_approval"` suppresses further beats, so "it only ran once" is expected for a
+parked schedule. Check `run_count` in Mongo before assuming the scheduler is broken.
+
+## Windows / PowerShell API access
+
+`Invoke-WebRequest` / `Invoke-RestMethod` fail here - `-SkipHttpErrorCheck` does not exist on
+PS 5.1 and an error response makes it try to prompt (`NonInteractive mode`). Use `curl.exe`:
+`curl.exe -s -o NUL -w "%{http_code}" -X DELETE -H "Authorization: Bearer $t" -H "X-Workspace-Id: $w" <url>`.
+Response shapes differ per route: `GET /api/v1/schedules/` returns a **bare array**, while
+`GET /api/v1/connectors/saved` returns `{"connectors":[...]}` - indexing the wrong one yields `0`
+and looks like successful teardown when nothing was deleted.
+
+### Connector rows are only partly workspace-scoped
+Connectors created through the current UI carry the real `workspace_id`; pre-existing rows carry
+`workspace_id: ""`. Any workspace-isolation assertion must account for those unscoped legacy rows.
