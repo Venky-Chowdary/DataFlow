@@ -244,11 +244,7 @@ export function NotificationSettings() {
           reason={manage.reason}
           what="Notification channels are read-only for you."
         />
-        {loadError && (
-          <p className="df2-settings-hint" role="alert">
-            Channels could not be read — this is not an empty list: {loadError}
-          </p>
-        )}
+
         {workspaces.length > 1 && (
           <div className="df2-settings-field df2-mb-md">
             <label>Workspace</label>
@@ -388,6 +384,15 @@ export function NotificationSettings() {
 
         {loading ? (
           <SectionLoader title="Loading channels" hint="Fetching notification channels…" />
+        ) : loadError ? (
+          // A refused or failed read has already been stated above; drawing the
+          // empty state under it would contradict it in the same breath.
+          <EmptyState
+            compact
+            icon="alert"
+            title="Channels could not be read"
+            description={`This is not an empty list — ${loadError}`}
+          />
         ) : channels.length === 0 ? (
           <EmptyState compact icon="bell" title="No channels yet" description="Add a channel to receive job alerts and quarantine notifications." />
         ) : (

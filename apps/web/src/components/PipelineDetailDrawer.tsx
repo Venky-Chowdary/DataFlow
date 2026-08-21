@@ -44,6 +44,10 @@ interface PipelineDetailDrawerProps {
   onEdit: () => void;
   onDelete: () => void;
   onToggle: () => void;
+  /** Why running is refused, when it is — the control says so before it is pressed. */
+  runRefusal?: string;
+  /** Why changing this schedule is refused, when it is. */
+  manageRefusal?: string;
   onOpenJob?: (jobId: string) => void;
   onResetBreaker?: (contractId: string) => void | Promise<void>;
   onExportYaml?: () => void;
@@ -83,6 +87,8 @@ export function PipelineDetailDrawer({
   onEdit,
   onDelete,
   onToggle,
+  runRefusal = "",
+  manageRefusal = "",
   onOpenJob,
   onResetBreaker,
   onExportYaml,
@@ -275,8 +281,8 @@ export function PipelineDetailDrawer({
             variant="primary"
             loading={running}
             loadingLabel="Running…"
-            disabled={isRunning || breakerOpen}
-            title={breakerOpen ? "Reset the contract breaker before running" : undefined}
+            disabled={isRunning || breakerOpen || Boolean(runRefusal)}
+            title={runRefusal || (breakerOpen ? "Reset the contract breaker before running" : undefined)}
             onClick={onRun}
             leadingIcon={<DtIcon name="activity" size={14} />}
           >
@@ -307,12 +313,21 @@ export function PipelineDetailDrawer({
           <Button
             size="sm"
             variant="ghost"
+            disabled={Boolean(manageRefusal)}
+            title={manageRefusal || undefined}
             onClick={onToggle}
             leadingIcon={<DtIcon name={sched.enabled ? "pause" : "check"} size={14} />}
           >
             {sched.enabled ? "Pause" : "Activate"}
           </Button>
-          <Button size="sm" variant="ghost" onClick={onEdit} leadingIcon={<DtIcon name="settings" size={14} />}>
+          <Button
+            size="sm"
+            variant="ghost"
+            disabled={Boolean(manageRefusal)}
+            title={manageRefusal || undefined}
+            onClick={onEdit}
+            leadingIcon={<DtIcon name="settings" size={14} />}
+          >
             Edit
           </Button>
           {onExportYaml && (
@@ -329,6 +344,8 @@ export function PipelineDetailDrawer({
             size="sm"
             variant="danger"
             className="df2-drawer-action-delete"
+            disabled={Boolean(manageRefusal)}
+            title={manageRefusal || undefined}
             onClick={onDelete}
             leadingIcon={<DtIcon name="trash" size={14} />}
           >

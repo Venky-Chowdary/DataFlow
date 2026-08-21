@@ -705,6 +705,8 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
         }}
         onDelete={() => selectedSchedule && void handleDelete(selectedSchedule.id)}
         onToggle={() => selectedSchedule && void toggleEnabled(selectedSchedule)}
+        runRefusal={jobRun.allowed ? "" : jobRun.reason}
+        manageRefusal={scheduleManage.allowed ? "" : scheduleManage.reason}
         onResetBreaker={handleResetBreaker}
         onExportYaml={
           selectedSchedule
