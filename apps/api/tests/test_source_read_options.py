@@ -292,7 +292,8 @@ def test_csv_declared_encoding_that_cannot_decode_refuses_rather_than_replacing(
         content, "bad.csv", read_options=ReadOptions(encoding="utf-8")
     )
     assert result.success is False
-    assert "not valid UTF-8" in (result.error or "")
+    assert "not valid utf-8 as declared" in (result.error or "")
+    assert "\ufffd" not in (result.error or "")
 
 
 def test_csv_large_and_high_precision_values_are_not_rounded_by_the_window():
@@ -355,6 +356,31 @@ def test_excel_stream_peek_reports_the_declared_population():
 
 
 # --- a window a reader cannot honour is refused, never ignored --------------
+
+
+def test_declared_encoding_lets_the_profile_read_a_non_utf8_export():
+    """The Encoding control has to work where the operator uses it: the upload
+    profile, not only the write path."""
+    content = "id,name\ncaf\u00e9,\u20ac20\n".encode("cp1252")
+    refused = FileParser.parse(content, "export.csv")
+    assert refused.success is False
+    assert "not valid UTF-8" in (refused.error or "")
+
+    result = FileParser.parse(
+        content, "export.csv", read_options=ReadOptions(encoding="cp1252")
+    )
+    assert result.success, result.error
+    assert result.columns == ["id", "name"]
+    assert result.data == [{"id": "caf\u00e9", "name": "\u20ac20"}]
+
+
+def test_sheet_index_past_the_end_names_the_positions_it_does_have():
+    book = _workbook({"Junk": [["a"], [1]], "Real": [["id"], [1]]})
+    with pytest.raises(ReadOptionsError) as exc:
+        list(iter_excel_dicts(book, ReadOptions(sheet_index=9)))
+    message = str(exc.value)
+    assert "out of range" in message
+    assert "[0] 'Junk'" in message and "[1] 'Real'" in message
 
 
 def test_sheet_selection_on_csv_is_refused():

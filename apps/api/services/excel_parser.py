@@ -70,7 +70,8 @@ def _select_sheet(wb: Any, options: ReadOptions) -> Any:
         if options.sheet_index >= len(names):
             raise ReadOptionsError(
                 f"Workbook has {len(names)} sheet(s); sheet_index "
-                f"{options.sheet_index} is out of range"
+                f"{options.sheet_index} is out of range. Available: "
+                + (", ".join(f"[{i}] '{n}'" for i, n in enumerate(names)) or "none")
             )
         return wb[names[options.sheet_index]]
     return wb.active

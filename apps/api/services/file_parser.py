@@ -1327,21 +1327,34 @@ class FileParser:
 
         file_type = cls.detect_file_type(filename, raw_bytes)
 
+        # The declared encoding decides how these bytes become text. Decoding as
+        # UTF-8 first turned a correctly declared cp1252 export into a refusal
+        # the operator could not answer: the panel offers an Encoding control,
+        # and the profile read has to obey it exactly as the write path does.
+        declared_encoding = (
+            read_options.encoding if read_options is not None else ""
+        ) or ""
         if isinstance(content, bytes):
             decoded = raw_bytes
             try:
-                content = decoded.decode("utf-8")
+                content = decoded.decode(declared_encoding or "utf-8")
             except UnicodeDecodeError as exc:
                 # Text tabular formats must not silently latin-1 mojibake.
                 if file_type in {"csv", "tsv", "json", "jsonl", "xml", "fixed_width"}:
+                    stated = (
+                        f"{declared_encoding} as declared"
+                        if declared_encoding
+                        else "UTF-8"
+                    )
                     return ParseResult(
                         success=False,
                         data=[],
                         columns=[],
                         row_count=0,
                         error=(
-                            f"File is not valid UTF-8 ({exc}); refuse silent "
-                            "latin-1 fallback — re-encode or declare the source encoding"
+                            f"File is not valid {stated} ({exc}); refuse silent "
+                            "byte replacement — re-encode the file or declare the "
+                            "encoding it really uses"
                         ),
                         file_type=file_type,
                     )
