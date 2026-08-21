@@ -153,6 +153,7 @@ import {
   EnhancedAnalysis,
   ParsedUpload,
   PreflightResult,
+  SourceReadOptions,
   TransferPlan,
   TransferResult,
   JobProgress,
@@ -170,6 +171,10 @@ import {
   sameColumnList,
   sameSchemaMap,
 } from "../lib/destSchemaIdentity";
+import {
+  SourceReadWindowPanel,
+  offersReadWindow,
+} from "../components/transfer/SourceReadWindowPanel";
 import { parseCsvTextForPreview } from "../lib/csvPreview";
 import { runLocalFileExport } from "../lib/localFileExport";
 import { isApiPreflight, runLocalPreflight } from "../lib/localPreflight";
@@ -271,6 +276,8 @@ export function TransferPage({
   const [parsed, setParsed] = useState<ParsedUpload | null>(null);
   /** Opt-in Tesseract OCR for scanned/image-only PDFs. */
   const [enableOcr, setEnableOcr] = useState(false);
+  /** Declared source read window — the same one the run reads and reconciles. */
+  const [readOptions, setReadOptions] = useState<SourceReadOptions>({});
   const [ocrStatus, setOcrStatus] = useState<{ available?: boolean; message?: string } | null>(null);
   const [sourceRowEstimate, setSourceRowEstimate] = useState<number | null>(null);
   const [analysis, setAnalysis] = useState<EnhancedAnalysis | null>(null);
@@ -2271,7 +2278,14 @@ export function TransferPage({
     }
   };
 
-  const processFile = async (selected: File) => {
+  const processFile = async (
+    selected: File,
+    opts: { readOptions?: SourceReadOptions } = {},
+  ) => {
+    // A window belongs to the file it was declared on, so a newly chosen file
+    // starts from the default (active sheet, header on row 1).
+    const window = opts.readOptions ?? {};
+    const windowDeclared = Object.keys(window).length > 0;
     const ext = fileExtension(selected.name);
     if (!ACCEPTED_UPLOAD_EXTENSIONS.has(ext)) {
       toast({
@@ -2301,10 +2315,12 @@ export function TransferPage({
     try {
       let data: ParsedUpload;
       try {
-        data = await uploadFile(selected, { enableOcr });
+        data = await uploadFile(selected, { enableOcr, readOptions: window });
       } catch (uploadErr) {
         const ext = fileExtension(selected.name);
-        if (ext === "csv" || ext === "tsv") {
+        // Browser parsing cannot honour a declared window — never profile a
+        // different population than the one that was asked for.
+        if ((ext === "csv" || ext === "tsv") && !windowDeclared) {
           const text = await selected.text();
           data = parseCsvTextForPreview(text);
           toast({
@@ -2322,6 +2338,7 @@ export function TransferPage({
         );
       }
       setParsed(data);
+      setReadOptions(data.read_options ?? window);
       if (data.ocr_status) {
         setOcrStatus(data.ocr_status);
       }
@@ -2357,10 +2374,21 @@ export function TransferPage({
       setUploadError(message);
       setFile(null);
       setParsed(null);
-      toast({ title: "Upload failed", message, tone: "error" });
+      setReadOptions({});
+      toast({
+        title: windowDeclared ? "Read window refused" : "Upload failed",
+        message,
+        tone: "error",
+      });
       console.error(e);
     }
     setUploading(false);
+  };
+
+  /** Re-profile the current file through a newly declared window. */
+  const applyReadWindow = (next: SourceReadOptions) => {
+    if (!file || uploading) return;
+    void processFile(file, { readOptions: next });
   };
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -4539,6 +4567,7 @@ export function TransferPage({
         backfillNewFields,
         writeViaStaging,
         enableOcr,
+        readOptions: sourceKind === "file" ? readOptions : undefined,
         sourceExtra: (() => {
           const extra: Record<string, unknown> = {
             ...(sourceKind === "database"
@@ -5591,6 +5620,15 @@ export function TransferPage({
                   </small>
                 </span>
               </label>
+              {file && parsed && offersReadWindow(parsed.file_type || "") && (
+                <SourceReadWindowPanel
+                  fileType={parsed.file_type || ""}
+                  sheets={parsed.sheets ?? []}
+                  applied={readOptions}
+                  busy={uploading}
+                  onApply={applyReadWindow}
+                />
+              )}
               {file && parsed ? (
                 <div className="df2-upload-result df2-upload-result-compact">
                   <div className="df2-upload-result-main">

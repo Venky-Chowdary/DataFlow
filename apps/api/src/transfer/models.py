@@ -107,6 +107,10 @@ class TransferRequest:
     write_via_staging: bool = False
     # Optional row-level source filter (column predicates, and/or composition).
     source_filter: dict = field(default_factory=dict)
+    # Tabular read window (sheet, header row, head/tail skips). See
+    # services.read_options.ReadOptions — one declaration reaches the profiler,
+    # the source COUNT and the writer, so all three read the same population.
+    read_options: dict = field(default_factory=dict)
     # Priority-first sync: sort source rows by this column before writing.
     priority_column: str = ""
     priority_direction: str = "desc"  # "asc" or "desc"
@@ -275,6 +279,7 @@ def transfer_request_to_dict(request: TransferRequest) -> dict:
         "backfill_new_fields": request.backfill_new_fields,
         "write_via_staging": request.write_via_staging,
         "source_filter": request.source_filter,
+        "read_options": request.read_options,
         "priority_column": request.priority_column,
         "priority_direction": request.priority_direction,
         "limit": request.limit,
@@ -370,6 +375,7 @@ def transfer_request_from_dict(data: dict) -> TransferRequest:
         backfill_new_fields=bool(data.get("backfill_new_fields")),
         write_via_staging=bool(data.get("write_via_staging")),
         source_filter=data.get("source_filter") or {},
+        read_options=data.get("read_options") or {},
         priority_column=(data.get("priority_column") or "").strip(),
         priority_direction=(data.get("priority_direction") or "desc").lower(),
         limit=int(data.get("limit") or 0),

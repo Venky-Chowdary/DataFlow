@@ -16,7 +16,9 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
+from services.read_options import ReadOptions
 from services.tabular_rows import is_blank_row
+from services.tabular_window import header_and_rows, row_to_record
 
 _ENCODING_PREFIX = 65536
 _DELIMITER_PREFIX = 8192
@@ -121,55 +123,72 @@ def _text_reader(content: bytes, encoding: str | None = None):
     return io.TextIOWrapper(io.BytesIO(content), encoding=enc, errors="replace", newline="")
 
 
-def parse_csv_preview(content: bytes, encoding: str | None = None, preview_rows: int = 100) -> tuple[list[str], list[list[str]], str, str]:
-    """Parse header + preview rows without loading the whole file into memory."""
-    enc = encoding or detect_encoding(content)
+def csv_header_names(row: Any) -> list[str]:
+    """Header names exactly as the file spells them, blanks and duplicates kept."""
+    return [str(c) for c in row]
+
+
+def parse_csv_preview(
+    content: bytes,
+    encoding: str | None = None,
+    preview_rows: int = 100,
+    options: ReadOptions | None = None,
+) -> tuple[list[str], list[list[str]], str, str]:
+    """Parse header + preview rows without loading the whole file into memory.
+
+    ``options`` narrows the read window and pins encoding/delimiter; it must be
+    the same window ``count_csv_rows``/``iter_csv_dicts`` receive, or the preview
+    describes rows the writer never sends.
+    """
+    opts = options or ReadOptions()
+    enc = opts.encoding or encoding or detect_encoding(content)
     sample = content[:_DELIMITER_PREFIX].decode(enc, errors="replace")
-    delim = detect_delimiter(sample)
+    delim = opts.delimiter or detect_delimiter(sample)
     with _text_reader(content, enc) as reader_file:
-        reader = csv.reader(reader_file, delimiter=delim)
-        try:
-            headers = next(reader)
-        except StopIteration:
+        # ``header_and_rows`` drops preamble, blank/``,,,,`` lines and the
+        # declared head/tail — the same rows COUNT drops.
+        headers, rows = header_and_rows(
+            csv.reader(reader_file, delimiter=delim),
+            opts,
+            header_names=csv_header_names,
+            source_label="CSV",
+        )
+        if not headers:
             return [], [], enc, delim
         preview: list[list[str]] = []
-        for row in reader:
-            # A blank line or a spreadsheet-exported ``,,,,`` line holds no
-            # field value; counting it as a record lands an all-NULL row.
-            if is_blank_row(row):
-                continue
+        for row in rows:
             if len(preview) >= preview_rows:
                 break
-            preview.append(row)
+            preview.append(list(row))
     return headers, preview, enc, delim
 
 
 def _csv_iter_dicts_from_reader(
-    reader_file: io.TextIOBase, delim: str
+    reader_file: io.TextIOBase, delim: str, options: ReadOptions | None = None
 ) -> Any:
-    reader = csv.reader(reader_file, delimiter=delim)
-    header: list[str] | None = None
-    for i, row in enumerate(reader):
-        if i == 0:
-            header = [str(c) for c in row]
-            continue
-        if header is None or is_blank_row(row):
-            continue
-        yield {
-            header[j]: (row[j] if j < len(row) else "")
-            for j in range(len(header))
-        }
+    header, rows = header_and_rows(
+        csv.reader(reader_file, delimiter=delim),
+        options or ReadOptions(),
+        header_names=csv_header_names,
+        source_label="CSV",
+    )
+    if not header:
+        return
+    for row in rows:
+        yield row_to_record(header, row, source_label="CSV row")
 
 
 def _csv_open_text(
-    content: bytes | str | Path, encoding: str | None = None
+    content: bytes | str | Path,
+    encoding: str | None = None,
+    delimiter: str | None = None,
 ) -> tuple[io.TextIOBase, str, Any]:
     """Text reader + delimiter + optional Path closer. Same sniff as COUNT."""
     if isinstance(content, (bytes, str)):
         prefix = _csv_prefix_bytes(content)
         enc = encoding or detect_encoding(prefix)
         sample = prefix[:_DELIMITER_PREFIX].decode(enc, errors="replace")
-        delim = detect_delimiter(sample)
+        delim = delimiter or detect_delimiter(sample)
         return _csv_count_open(content, enc), delim, None
     closer = None
     if isinstance(content, Path):
@@ -186,17 +205,22 @@ def _csv_open_text(
     prefix_b = bytes(prefix)
     enc = encoding or detect_encoding(prefix_b)
     sample = prefix_b[:_DELIMITER_PREFIX].decode(enc, errors="replace")
-    delim = detect_delimiter(sample)
+    delim = delimiter or detect_delimiter(sample)
     return _csv_text_from_binary(source, prefix_b, enc), delim, closer
 
 
 def iter_csv_dicts(
-    content: bytes | str | Path, encoding: str | None = None
+    content: bytes | str | Path,
+    encoding: str | None = None,
+    options: ReadOptions | None = None,
 ) -> Any:
     """Same RFC 4180 population as ``count_csv_rows``, as dicts for Gate-8."""
-    reader_file, delim, closer = _csv_open_text(content, encoding)
+    opts = options or ReadOptions()
+    reader_file, delim, closer = _csv_open_text(
+        content, opts.encoding or encoding, opts.field_delimiter
+    )
     try:
-        yield from _csv_iter_dicts_from_reader(reader_file, delim)
+        yield from _csv_iter_dicts_from_reader(reader_file, delim, opts)
     finally:
         try:
             reader_file.close()
@@ -209,7 +233,11 @@ def iter_csv_dicts(
                 pass
 
 
-def count_csv_rows(content: bytes | str | Path, encoding: str | None = None) -> int:
+def count_csv_rows(
+    content: bytes | str | Path,
+    encoding: str | None = None,
+    options: ReadOptions | None = None,
+) -> int:
     """Dest-engine record COUNT of CSV/TSV. Never ``wc -l``. Never ingest parse.
 
     Population is RFC 4180 ``csv.reader`` rows after the header.
@@ -222,8 +250,10 @@ def count_csv_rows(content: bytes | str | Path, encoding: str | None = None) -> 
     plus a COUNT open. A one-shot stream (object-store GET gzip that is
     not rewindable) is prefix-then-rest — COUNT does not ``seek(0)``.
     Gate-8 cell checksum walks the same records via ``iter_csv_dicts``.
+    ``options`` is the declared read window and must be the one the preview and
+    the writer received, or this COUNT measures a population nobody moved.
     """
-    return sum(1 for _ in iter_csv_dicts(content, encoding))
+    return sum(1 for _ in iter_csv_dicts(content, encoding, options))
 
 
 def parse_csv_full(content: bytes, encoding: str | None = None) -> tuple[list[str], list[list[str]], str, str]:

@@ -144,6 +144,21 @@ def _actor_email(request: Request) -> str:
     return getattr(request.state, "user_email", None) or "anonymous"
 
 
+def _validated_read_options(raw: dict | str | None) -> dict:
+    """Normalize the declared source read window, or 400 with the fix.
+
+    Accepts the JSON body dict and the multipart JSON string. Refusing here
+    means an unreadable sheet name is a rejected request, not a job that
+    quietly ingests the active sheet instead.
+    """
+    from services.read_options import ReadOptionsError, parse_read_options_payload
+
+    try:
+        return parse_read_options_payload(raw).to_wire()
+    except ReadOptionsError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 def _resolve_write_workspace(request: Request, x_workspace_id: str = Header(default="", alias="X-Workspace-Id")) -> str:
     workspace_id = (x_workspace_id or "").strip()
     if workspace_id and not can_write_workspace(workspace_id, _actor_email(request)):
@@ -198,6 +213,8 @@ class ExecuteTransferRequest(BaseModel):
     backfill_new_fields: bool = False
     write_via_staging: bool = False
     source_filter: dict = Field(default_factory=dict)
+    # Tabular read window for a file source: sheet, header_row, skip_rows, skip_footer.
+    read_options: dict = Field(default_factory=dict)
     priority_column: str = ""
     priority_direction: str = "desc"
     limit: int = 0
@@ -733,6 +750,7 @@ async def execute_transfer_json(
         schema_policy=body.schema_policy or "manual_review",
         validation_mode=body.validation_mode or "strict",
         source_filter=dict(body.source_filter or {}),
+        read_options=_validated_read_options(body.read_options),
         priority_column=body.priority_column or "",
         priority_direction=body.priority_direction or "desc",
         limit=int(body.limit or 0),
@@ -939,6 +957,7 @@ async def run_universal_transfer(
     schema_policy: str = Form("manual_review"),
     validation_mode: str = Form("balanced"),
     source_filter_json: str = Form(""),
+    read_options_json: str = Form(""),
     priority_column: str = Form(""),
     priority_direction: str = Form("desc"),
     limit: str = Form("0"),
@@ -1079,6 +1098,7 @@ async def run_universal_transfer(
         schema_policy=schema_policy,
         validation_mode=validation_mode,
         source_filter=source_filter,
+        read_options=_validated_read_options(read_options_json),
         priority_column=priority_column,
         priority_direction=priority_direction,
         limit=int(limit) if limit.isdigit() else 0,

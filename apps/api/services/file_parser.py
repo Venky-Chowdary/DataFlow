@@ -12,10 +12,17 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from services.csv_profiler import count_csv_rows, detect_delimiter, parse_csv_preview
+from services.csv_profiler import (
+    count_csv_rows,
+    csv_header_names,
+    detect_delimiter,
+    parse_csv_preview,
+)
 from services.platform_config import data_dir, upload_dir
+from services.read_options import ReadOptions, ReadOptionsError
 from services.schema_inference import infer_columns_from_rows
 from services.tabular_rows import is_blank_row
+from services.tabular_window import header_and_rows, row_to_record
 from services.value_serializer import cell_to_string, json_default
 
 UPLOAD_DIR = upload_dir()
@@ -124,6 +131,32 @@ def detect_format(filename: str, content: bytes) -> str:
     if b"\t" in content[:512]:
         return "tsv"
     return "unknown"
+
+
+# Which readers honour a declared window. A reader that cannot honour one must
+# refuse the request: ingesting a different population than the operator
+# declared is worse than failing the upload.
+_SHEET_WINDOW_TYPES = frozenset({"excel"})
+_DELIMITED_TYPES = frozenset({"csv", "tsv", "excel"})
+
+
+def unsupported_read_options(options: ReadOptions, file_type: str) -> str:
+    """Empty when this reader honours the whole window, else the refusal."""
+    if options.selects_sheet and file_type not in _SHEET_WINDOW_TYPES:
+        return (
+            f"A sheet selection applies to Excel workbooks; this source is {file_type}"
+        )
+    if not options.sheet_window.is_default and file_type not in _DELIMITED_TYPES:
+        return (
+            "Header row and row-skip options apply to Excel and delimited text "
+            f"sources; this source is {file_type}"
+        )
+    if (options.encoding or options.delimiter) and file_type not in ("csv", "tsv"):
+        return (
+            "Encoding and delimiter options apply to delimited text sources; "
+            f"this source is {file_type}"
+        )
+    return ""
 
 
 def parse_jsonl(content: bytes) -> tuple[list[str], list[list[str]], int]:
@@ -749,14 +782,27 @@ class FileParser:
             )
 
     @staticmethod
-    def parse_csv(content: str | bytes, delimiter: str = ",") -> ParseResult:
-        """Parse CSV/TSV file content — auto-detects delimiter and encoding."""
+    def parse_csv(
+        content: str | bytes,
+        delimiter: str = ",",
+        options: ReadOptions | None = None,
+    ) -> ParseResult:
+        """Parse CSV/TSV content through the declared read window.
+
+        Without ``options`` the encoding is UTF-8, the delimiter is sniffed and
+        row 1 is the header — the historical behaviour. A declared encoding or
+        delimiter replaces the sniff instead of competing with it, and the
+        header/skip window is the same one Excel uses, so one declaration means
+        one population everywhere.
+        """
+        opts = options or ReadOptions()
         try:
             if isinstance(content, bytes):
                 # Strict decode — errors="replace" silently corrupts bytes into
                 # U+FFFD and looks like a successful faithful ingest.
+                encoding = opts.encoding or "utf-8"
                 try:
-                    text = content.decode("utf-8").lstrip("\ufeff")
+                    text = content.decode(encoding).lstrip("\ufeff")
                 except UnicodeDecodeError as exc:
                     return ParseResult(
                         success=False,
@@ -764,7 +810,7 @@ class FileParser:
                         columns=[],
                         row_count=0,
                         error=(
-                            f"CSV is not valid UTF-8 ({exc}); refuse silent "
+                            f"CSV is not valid {encoding} ({exc}); refuse silent "
                             "byte replacement — re-encode or declare the source encoding"
                         ),
                         file_type="csv",
@@ -780,10 +826,13 @@ class FileParser:
                     error="CSV file is empty",
                     file_type="csv",
                 )
-            delim = detect_delimiter(text[:8192])
-            reader = csv.DictReader(io.StringIO(text), delimiter=delim)
-            records = [r for r in reader if not is_blank_row(dict(r).values())]
-            columns = reader.fieldnames or []
+            delim = opts.delimiter or detect_delimiter(text[:8192])
+            columns, windowed = header_and_rows(
+                csv.reader(io.StringIO(text), delimiter=delim),
+                opts,
+                header_names=csv_header_names,
+                source_label="CSV",
+            )
             if not columns:
                 return ParseResult(
                     success=False,
@@ -793,6 +842,12 @@ class FileParser:
                     error="CSV has no header row",
                     file_type="csv",
                 )
+            # ``restval=None`` / extra-cell semantics of the streaming reader, so
+            # the preview and the writer describe the same rows.
+            records = [
+                row_to_record(columns, row, source_label="CSV row", missing=None)
+                for row in windowed
+            ]
             file_type = "tsv" if delim == "\t" else "csv"
             return ParseResult(
                 success=True,
@@ -800,6 +855,17 @@ class FileParser:
                 columns=list(columns),
                 row_count=len(records),
                 file_type=file_type,
+            )
+        except ReadOptionsError as exc:
+            # A refused window already names the fix; do not bury it in a
+            # generic parse error.
+            return ParseResult(
+                success=False,
+                data=[],
+                columns=[],
+                row_count=0,
+                error=str(exc),
+                file_type="csv",
             )
         except Exception as e:
             return ParseResult(
@@ -812,8 +878,16 @@ class FileParser:
             )
 
     @staticmethod
-    def parse_excel(content: bytes, max_rows: int = 100_000) -> ParseResult:
-        """Parse Excel (.xlsx) workbook — first sheet, header row."""
+    def parse_excel(
+        content: bytes,
+        max_rows: int = 100_000,
+        options: ReadOptions | None = None,
+    ) -> ParseResult:
+        """Parse an Excel (.xlsx) workbook through the declared read window.
+
+        Without ``options`` this is the active sheet with row 1 as the header —
+        the historical behaviour.
+        """
         try:
             import sys
             from pathlib import Path
@@ -825,7 +899,7 @@ class FileParser:
 
             records: list[dict] = []
             columns: list[str] = []
-            for batch in iter_excel_batches(content, chunk_size=5000):
+            for batch in iter_excel_batches(content, chunk_size=5000, options=options):
                 if not columns and batch:
                     columns = list(batch[0].keys())
                 # Non-streaming Excel must not silently truncate — same honesty bar
@@ -1233,7 +1307,14 @@ class FileParser:
         return out
 
     @classmethod
-    def parse(cls, content: str | bytes, filename: str, *, enable_ocr: bool = False) -> ParseResult:
+    def parse(
+        cls,
+        content: str | bytes,
+        filename: str,
+        *,
+        enable_ocr: bool = False,
+        read_options: ReadOptions | None = None,
+    ) -> ParseResult:
         """Parse file based on type detection, transparently handling gzip."""
         raw_bytes = content if isinstance(content, bytes) else content.encode("utf-8", errors="replace")
 
@@ -1266,21 +1347,36 @@ class FileParser:
                     )
                 content = decoded.decode("latin-1")
 
+        # A read window this reader cannot honour must refuse, not be dropped:
+        # ingesting a different population than the operator declared is worse
+        # than failing the upload.
+        if read_options is not None and not read_options.is_default:
+            unsupported = unsupported_read_options(read_options, file_type)
+            if unsupported:
+                return ParseResult(
+                    success=False,
+                    data=[],
+                    columns=[],
+                    row_count=0,
+                    error=unsupported,
+                    file_type=file_type,
+                )
+
         if file_type == "json":
             return cls.parse_json(content)
         elif file_type == "jsonl":
             return cls.parse_jsonl(content)
         elif file_type == "csv":
-            return cls.parse_csv(content, delimiter=",")
+            return cls.parse_csv(content, delimiter=",", options=read_options)
         elif file_type == "tsv":
-            return cls.parse_csv(content, delimiter="\t")
+            return cls.parse_csv(content, delimiter="\t", options=read_options)
         elif file_type == "ndjson":
             return cls.parse_jsonl(content)
         elif file_type == "excel":
             from services.excel_parser import require_xlsx
 
             require_xlsx(filename)
-            return cls.parse_excel(raw_bytes)
+            return cls.parse_excel(raw_bytes, options=read_options)
         elif file_type == "parquet":
             return cls.parse_parquet(raw_bytes)
         elif file_type == "avro":

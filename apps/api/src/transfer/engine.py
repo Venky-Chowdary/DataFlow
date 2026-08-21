@@ -159,6 +159,7 @@ from services.batch_progress import (
     effective_backfill_new_fields,
     row_count_label,
 )
+from services.read_options import ReadOptions, ReadOptionsError
 
 try:
     from services import schema_registry
@@ -855,9 +856,39 @@ def _preflight_sample_rows(records: list[dict[str, Any]] | None) -> list[dict[st
     return rows
 
 
+def resolve_read_options(request: TransferRequest) -> ReadOptions:
+    """The declared source read window, or a refusal naming what is wrong.
+
+    Raises :class:`ReadOptionsError` for an unusable declaration and for a
+    window declared against a source that has no read window to narrow — a
+    silently ignored ``sheet`` would read a different population than the one
+    the operator approved.
+    """
+    options = ReadOptions.from_dict(request.read_options)
+    if options.is_default:
+        return options
+    if request.source.kind != "file":
+        raise ReadOptionsError(
+            "Source read options (sheet/header row/skips) apply to uploaded "
+            f"files only; this source is a {request.source.kind}. Filter a "
+            "table source with source_filter instead."
+        )
+    from services.file_parser import FileParser, unsupported_read_options
+
+    file_type = FileParser.detect_file_type(
+        request.source_filename or "upload.csv",
+        request.source_content or None,
+    )
+    refusal = unsupported_read_options(options, file_type)
+    if refusal:
+        raise ReadOptionsError(refusal)
+    return options
+
+
 def _file_population_rows(
     content: bytes | str | os.PathLike[str],
     filename: str,
+    read_options: ReadOptions | None = None,
 ) -> Iterator[dict[str, Any]]:
     """Every source row of a file, for the pre-write population fit scan.
 
@@ -870,7 +901,7 @@ def _file_population_rows(
     from .file_stream import iter_source_rows
 
     try:
-        yield from iter_source_rows(content, filename)
+        yield from iter_source_rows(content, filename, read_options=read_options)
     except Exception as exc:  # noqa: BLE001 - unreadable source is unmeasured, never "fits"
         logger.warning(
             "population fit scan could not re-read %s: %s", filename, exc
@@ -2110,6 +2141,23 @@ class UniversalTransferEngine:
             validation_mode=request.validation_mode,
             write_semantics=request.sync_mode,
         )
+        try:
+            resolve_read_options(request)
+        except ReadOptionsError as exc:
+            msg = f"Source read options refused: {exc}"
+            mongo.update_job_status(
+                job_id, "failed", error=msg, phase="failed", progress_pct=0
+            )
+            lineage.emit_run_failed(
+                run_id=job_id,
+                job_id=job_id,
+                error=msg,
+                error_details={"reason": "Invalid source read options"},
+            )
+            return TransferResult(
+                success=False, error=msg, operation=request.operation, job_id=job_id
+            )
+
         src_fmt = request.source.format or "csv"
         dst_fmt = request.destination.format or "mongodb"
         ok, msg = validate_transfer(
@@ -2174,6 +2222,7 @@ class UniversalTransferEngine:
                 request.source_path or request.source_content,
                 request.source_filename or "upload.csv",
                 request.destination,
+                resolve_read_options(request),
             )
         ):
             return self._execute_file_streaming(
@@ -4226,8 +4275,9 @@ class UniversalTransferEngine:
                 progress_pct=5,
                 message="Analyzing uploaded file…",
             )
+            read_options = resolve_read_options(request)
             columns, schema, total_rows, sample_rows = peek_file_source(
-                content, filename
+                content, filename, read_options
             )
             if total_rows == 0:
                 mongo.update_job_status(
@@ -4312,7 +4362,7 @@ class UniversalTransferEngine:
                     population_rows=(
                         None
                         if request.source_filter
-                        else _file_population_rows(content, filename)
+                        else _file_population_rows(content, filename, read_options)
                     ),
                     # A filtered run writes a subset, so the unfiltered re-read
                     # is not this job's population — fall back to preview
@@ -4648,6 +4698,7 @@ class UniversalTransferEngine:
                 source_filter=request.source_filter,
                 skip_preflight=request.skip_preflight,
                 date_locale=request.date_locale,
+                read_options=read_options,
             )
 
             with _reconcile_phase_heartbeat(
@@ -5084,6 +5135,7 @@ class UniversalTransferEngine:
                 content,
                 request.source_filename or "upload.csv",
                 enable_ocr=enable_ocr,
+                read_options=resolve_read_options(request),
             )
         if request.source.kind == "database":
             return read_source_database(request.source)

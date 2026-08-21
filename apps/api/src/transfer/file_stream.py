@@ -59,13 +59,20 @@ from services.dest_precount import (
     precount_table,
     stamp_overwrite_source_keys,
 )
-from services.excel_parser import cell_to_string, require_xlsx, sheet_headers
+from services.excel_parser import (
+    count_excel_rows,
+    iter_excel_batches,
+    parse_excel_preview,
+    require_xlsx,
+)
+from services.read_options import ReadOptions
 from services.reconciliation import FingerprintAccumulator
-from services.tabular_rows import is_blank_row
+from services.tabular_window import header_and_rows, row_to_record
 
 try:
     from services.csv_profiler import (
         count_csv_rows,
+        csv_header_names,
         detect_delimiter,
         detect_encoding,
         parse_csv_preview,
@@ -73,6 +80,7 @@ try:
 except ImportError:  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
     from src.services.csv_profiler import (
         count_csv_rows,
+        csv_header_names,
         detect_delimiter,
         detect_encoding,
         parse_csv_preview,
@@ -194,118 +202,29 @@ def _text_reader(content: bytes | str | os.PathLike, encoding: str | None = None
             binary.close()
 
 
-def _excel_preview(content: bytes | str | os.PathLike, preview_rows: int = 100) -> tuple[list[str], list[list[str]], int]:
+def _excel_preview(
+    content: bytes | str | os.PathLike,
+    preview_rows: int = 100,
+    read_options: ReadOptions | None = None,
+) -> tuple[list[str], list[list[str]], int]:
     require_xlsx(content if _is_path(content) else None)
-    try:
-        from openpyxl import load_workbook
-    except ImportError as exc:
-        raise ValueError(
-            "Excel import is not ready on this platform node. Datawrap bundles file parsers — retry shortly."
-        ) from exc
-
-    wb = load_workbook(content, read_only=True, data_only=True) if _is_path(content) else load_workbook(
-        io.BytesIO(content), read_only=True, data_only=True
-    )
-    try:
-        ws = wb.active
-        if ws is None:
-            return [], [], 0
-
-        row_iter = ws.iter_rows(values_only=True)
-        first = next(row_iter, None)
-        if not first:
-            return [], [], 0
-
-        headers = sheet_headers(first)
-        preview: list[list[str]] = []
-        total = 0
-
-        for row in row_iter:
-            if is_blank_row(row):
-                continue
-            total += 1
-            if len(preview) < preview_rows:
-                preview.append([cell_to_string(c) for c in row])
-
-        return headers, preview, total
-    finally:
-        wb.close()
+    return parse_excel_preview(content, preview_rows=preview_rows, options=read_options)
 
 
-def _excel_batches(content: bytes | str | os.PathLike, chunk_size: int):
+def _excel_batches(
+    content: bytes | str | os.PathLike,
+    chunk_size: int,
+    read_options: ReadOptions | None = None,
+):
     require_xlsx(content if _is_path(content) else None)
-    try:
-        from openpyxl import load_workbook
-    except ImportError as exc:
-        raise ValueError(
-            "Excel import is not ready on this platform node. Datawrap bundles file parsers — retry shortly."
-        ) from exc
-
-    wb = load_workbook(content, read_only=True, data_only=True) if _is_path(content) else load_workbook(
-        io.BytesIO(content), read_only=True, data_only=True
-    )
-    try:
-        ws = wb.active
-        if ws is None:
-            return
-
-        row_iter = ws.iter_rows(values_only=True)
-        first = next(row_iter, None)
-        if not first:
-            return
-
-        headers = sheet_headers(first)
-        batch: list[dict] = []
-        for row in row_iter:
-            # A formatting-only row is not a record; writing it would land an
-            # all-NULL row the source never had.
-            if is_blank_row(row):
-                continue
-            # Wider data rows than the header silently lost trailing cells —
-            # refuse rather than slice away columns (JSONL-style honesty).
-            if len(row) > len(headers):
-                raise ValueError(
-                    f"Excel row has {len(row)} cells but header has {len(headers)} "
-                    "columns; refuse silent column drop — widen the header row "
-                    "or fix the sheet"
-                )
-            record = {
-                headers[i]: cell_to_string(c)
-                for i, c in enumerate(row[: len(headers)])
-            }
-            batch.append(record)
-            if len(batch) >= chunk_size:
-                yield batch
-                batch = []
-        if batch:
-            yield batch
-    finally:
-        wb.close()
+    return iter_excel_batches(content, chunk_size, options=read_options)
 
 
-def _excel_count(content: bytes | str | os.PathLike) -> int:
+def _excel_count(
+    content: bytes | str | os.PathLike, read_options: ReadOptions | None = None
+) -> int:
     require_xlsx(content if _is_path(content) else None)
-    try:
-        from openpyxl import load_workbook
-    except ImportError as exc:
-        raise ValueError(
-            "Excel import is not ready on this platform node. Datawrap bundles file parsers — retry shortly."
-        ) from exc
-
-    wb = load_workbook(content, read_only=True, data_only=True) if _is_path(content) else load_workbook(
-        io.BytesIO(content), read_only=True, data_only=True
-    )
-    try:
-        ws = wb.active
-        if ws is None:
-            return 0
-        row_iter = ws.iter_rows(values_only=True)
-        if next(row_iter, None) is None:
-            return 0
-        # ``max_row`` is the used range, which formatting inflates.
-        return sum(1 for row in row_iter if not is_blank_row(row))
-    finally:
-        wb.close()
+    return count_excel_rows(content, options=read_options)
 
 
 def supports_file_streaming(source_kind: str, filename: str, destination: EndpointConfig) -> bool:
@@ -332,12 +251,15 @@ def _decompress_bytes_if_gzip(data: bytes) -> bytes:
 def peek_file_source(
     content: bytes | str | os.PathLike,
     filename: str,
+    read_options: ReadOptions | None = None,
 ) -> tuple[list[str], dict[str, str], int, list[dict]]:
     """Return headers, inferred schema, total row count, and a sample of <=100 rows.
 
     Accepts either an in-memory ``bytes`` payload or an on-disk path so the
     whole file never has to be loaded at once.  Gzip-compressed payloads are
-    decompressed on the fly.
+    decompressed on the fly.  ``read_options`` narrows the source window and
+    must be the same window the batch iterator uses, or the profiled schema
+    describes rows the writer never sends.
     """
     try:
         from services.file_parser import FileParser
@@ -351,10 +273,12 @@ def peek_file_source(
         # Fast path for in-memory payloads that already fit in RAM.
         if isinstance(content, bytes):
             raw = _decompress_bytes_if_gzip(content)
-            headers, rows, _enc, _delim = parse_csv_preview(raw, preview_rows=100)
+            headers, rows, _enc, _delim = parse_csv_preview(
+                raw, preview_rows=100, options=read_options
+            )
             if not headers:
                 raise ValueError("CSV file has no header row")
-            total = count_csv_rows(raw)
+            total = count_csv_rows(raw, options=read_options)
             sample = [
                 dict(zip(headers, (_csv_empty_to_none(c) for c in row)))
                 for row in rows[:100]
@@ -364,20 +288,25 @@ def peek_file_source(
 
         # Path-based streaming: read only the preview rows we need and count the
         # rest in a single pass without materializing every cell.
+        opts = read_options or ReadOptions()
         sample_bytes = _first_bytes(content)
-        delim = detect_delimiter(sample_bytes.decode(detect_encoding(sample_bytes), errors="replace"))
+        enc = opts.encoding or detect_encoding(sample_bytes)
+        delim = opts.delimiter or detect_delimiter(
+            sample_bytes.decode(enc, errors="replace")
+        )
         preview_rows: list[list[str]] = []
         total = 0
         headers: list[str] = []
-        with _text_reader(content) as reader_file:
-            reader = csv.reader(reader_file, delimiter=delim)
-            try:
-                headers = next(reader)
-            except StopIteration:
-                raise ValueError("CSV file has no header row") from None
-            for row in reader:
-                if is_blank_row(row):
-                    continue
+        with _text_reader(content, encoding=enc) as reader_file:
+            headers, rows = header_and_rows(
+                csv.reader(reader_file, delimiter=delim),
+                opts,
+                header_names=csv_header_names,
+                source_label="CSV",
+            )
+            if not headers:
+                raise ValueError("CSV file has no header row")
+            for row in rows:
                 total += 1
                 if len(preview_rows) < 100:
                     preview_rows.append([_csv_empty_to_none(c) for c in row])
@@ -415,7 +344,9 @@ def peek_file_source(
         return headers, schema, total, sample_objs[:100]
 
     if file_type == "excel":
-        headers, rows, total = _excel_preview(content, preview_rows=100)
+        headers, rows, total = _excel_preview(
+            content, preview_rows=100, read_options=read_options
+        )
         if not headers:
             raise ValueError("Excel file has no header row")
         sample = [dict(zip(headers, row)) for row in rows[:100]]
@@ -546,21 +477,32 @@ def _json_empty_to_none(value: Any) -> Any:
 def _iter_csv_batches(
     content: bytes | str | os.PathLike,
     chunk_size: int,
+    read_options: ReadOptions | None = None,
 ):
+    opts = read_options or ReadOptions()
     sample_bytes = _first_bytes(content)
-    enc = detect_encoding(sample_bytes)
+    enc = opts.encoding or detect_encoding(sample_bytes)
     sample = sample_bytes.decode(enc, errors="replace")
-    delim = detect_delimiter(sample)
+    delim = opts.delimiter or detect_delimiter(sample)
     with _text_reader(content, encoding=enc, newline="") as reader_file:
-        reader = csv.DictReader(reader_file, delimiter=delim)
+        # Header, preamble, blank-line and head/tail rules live in one place, so
+        # the rows streamed here are exactly the rows count_csv_rows counted.
+        headers, rows = header_and_rows(
+            csv.reader(reader_file, delimiter=delim),
+            opts,
+            header_names=csv_header_names,
+            source_label="CSV",
+        )
+        if not headers:
+            return
         batch: list[dict] = []
-        for row in reader:
-            values = dict(row)
-            # Must match count_csv_rows, or the source cardinality reconcile
-            # compares against is not the set of rows that was read.
-            if is_blank_row(values.values()):
-                continue
-            batch.append({k: _csv_empty_to_none(v) for k, v in values.items()})
+        for row in rows:
+            record = row_to_record(
+                headers, row, source_label="CSV row", missing=None
+            )
+            batch.append(
+                {k: _csv_empty_to_none(v) for k, v in record.items()}
+            )
             if len(batch) >= chunk_size:
                 yield batch
                 batch = []
@@ -608,6 +550,7 @@ def _batch_iterator_for_type(
     file_type: str,
     content: bytes | str | os.PathLike,
     batch_size: int,
+    read_options: ReadOptions | None = None,
 ):
     """Return a fresh batch iterator for the given file type.
 
@@ -615,13 +558,13 @@ def _batch_iterator_for_type(
     the primary streaming iterator.  Accepts either ``bytes`` or an on-disk path.
     """
     if file_type in ("csv", "tsv"):
-        return _iter_csv_batches(content, batch_size)
+        return _iter_csv_batches(content, batch_size, read_options=read_options)
     if file_type == "json":
         return _iter_json_array_batches(content, batch_size)
     if file_type == "jsonl" or file_type == "ndjson":
         return _iter_jsonl_batches(content, batch_size)
     if file_type == "excel":
-        return _excel_batches(content, batch_size)
+        return _excel_batches(content, batch_size, read_options=read_options)
     if file_type == "parquet":
         import pyarrow.parquet as pq
 
@@ -691,6 +634,7 @@ def iter_source_rows(
     content: bytes | str | os.PathLike,
     filename: str,
     batch_size: int = 50_000,
+    read_options: ReadOptions | None = None,
 ) -> Iterator[dict]:
     """Yield every source row of a streamable file as a dict.
 
@@ -706,7 +650,7 @@ def iter_source_rows(
 
     raw_bytes = content if isinstance(content, bytes) else b""
     file_type = FileParser.detect_file_type(filename, raw_bytes or None)
-    for batch in _batch_iterator_for_type(file_type, content, batch_size):
+    for batch in _batch_iterator_for_type(file_type, content, batch_size, read_options):
         for row in batch:
             if isinstance(row, dict):
                 yield row
@@ -716,6 +660,7 @@ def should_stream_file(
     content: bytes | str | os.PathLike,
     filename: str,
     destination: EndpointConfig,
+    read_options: ReadOptions | None = None,
 ) -> bool:
     if not supports_file_streaming("file", filename, destination):
         return False
@@ -726,7 +671,7 @@ def should_stream_file(
     if not content:
         return False
     try:
-        _, _, total, _ = peek_file_source(content, filename)
+        _, _, total, _ = peek_file_source(content, filename, read_options)
         return total >= STREAM_THRESHOLD
     except Exception:
         return False
@@ -751,6 +696,7 @@ def stream_file_to_database(
     source_filter: dict[str, Any] | None = None,
     skip_preflight: bool = False,
     date_locale: str = "",
+    read_options: ReadOptions | None = None,
 ) -> tuple[int, list[str], dict[str, Any], list[str]]:
     try:
         from services.file_parser import FileParser
@@ -758,7 +704,9 @@ def stream_file_to_database(
         from src.services.file_parser import FileParser
 
     file_type = FileParser.detect_file_type(filename)
-    columns, probe_schema, total_rows, sample_rows = peek_file_source(content, filename)
+    columns, probe_schema, total_rows, sample_rows = peek_file_source(
+        content, filename, read_options
+    )
     if not schema:
         schema = probe_schema
 
@@ -816,7 +764,7 @@ def stream_file_to_database(
     for col in columns:
         ddl_log.append(f"{dest_type.upper()} COLUMN {col} {ddl_type(dest_type, schema.get(col, 'string'))}")
 
-    batch_iter = _batch_iterator_for_type(file_type, content, batch_size)
+    batch_iter = _batch_iterator_for_type(file_type, content, batch_size, read_options)
 
     column_types = {c: ddl_carrier_type(schema.get(c, "string")) for c in columns}
     target_cols, logical_types = resolve_target_columns(
@@ -1363,7 +1311,7 @@ def stream_file_to_database(
     # If the job resumed, we must re-scan the whole file so the fingerprint
     # covers all source rows, not only the ones processed after the checkpoint.
     if resumed and fp_accumulator.total < total_rows:
-        full_iter = _batch_iterator_for_type(file_type, content, batch_size)
+        full_iter = _batch_iterator_for_type(file_type, content, batch_size, read_options)
         # Match the main write path (source_filter applied at read time): count and
         # fingerprint the FILTERED population, or a filtered resume overstates the
         # source count and mis-hashes the checksum against the filtered load.

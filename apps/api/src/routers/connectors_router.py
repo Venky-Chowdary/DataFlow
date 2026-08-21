@@ -1673,18 +1673,34 @@ async def delete_connector(connector_id: str):
 async def upload_file(
     file: UploadFile = File(...),
     enable_ocr: str = Form("false"),
+    read_options_json: str = Form(""),
 ):
-    """Upload and parse a file"""
+    """Upload and parse a file, through the declared read window if any."""
+    from services.read_options import ReadOptionsError, parse_read_options_payload
+
+    try:
+        read_options = parse_read_options_payload(read_options_json)
+    except ReadOptionsError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     try:
         content = await file.read()
         use_ocr = enable_ocr.lower() in ("true", "1", "yes")
-        result = FileParser.parse(content, file.filename, enable_ocr=use_ocr)
+        result = FileParser.parse(
+            content,
+            file.filename,
+            enable_ocr=use_ocr,
+            read_options=read_options,
+        )
 
         if not result.success:
             raise HTTPException(status_code=400, detail=result.error)
 
         if result.row_count == 0:
-            raise HTTPException(status_code=400, detail="File contains no records")
+            detail = "File contains no records"
+            if not read_options.is_default:
+                detail += f" through the declared read window ({read_options.describe()})"
+            raise HTTPException(status_code=400, detail=detail)
 
         if not result.columns:
             raise HTTPException(
@@ -1715,10 +1731,18 @@ async def upload_file(
 
         from services.pdf_ocr import ocr_dependency_status
 
+        sheets: list[dict] = []
+        if result.file_type == "excel":
+            from services.excel_parser import list_excel_sheets
+
+            sheets = list_excel_sheets(content)
+
         return {
             "success": True,
             "filename": file.filename,
             "file_type": result.file_type,
+            "sheets": sheets,
+            "read_options": read_options.to_wire(),
             "row_count": result.row_count,
             "columns": result.columns,
             "schema": schema,

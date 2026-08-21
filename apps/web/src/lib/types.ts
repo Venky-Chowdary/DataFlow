@@ -533,10 +533,43 @@ export interface CsvValidationReport {
   issue_count: number;
 }
 
+/** The window a tabular source is read through — one declaration for preview,
+ *  source COUNT and the write, so Validate and Execute see the same rows. */
+export interface SourceReadOptions {
+  /** Worksheet name; empty means the workbook's active sheet. */
+  sheet?: string;
+  /** 0-based worksheet position; -1 means unset. A name wins over a position. */
+  sheet_index?: number;
+  /** 1-based physical row holding the column names; 0 means no header. */
+  header_row?: number;
+  /** Value-bearing data rows dropped from the head. */
+  skip_rows?: number;
+  /** Value-bearing data rows dropped from the tail (the totals row). */
+  skip_footer?: number;
+  /** Text codec for delimited files; empty means sniff. */
+  encoding?: string;
+  /** Single-character field separator for delimited files; empty means sniff. */
+  delimiter?: string;
+}
+
+export interface WorkbookSheet {
+  name: string;
+  index: number;
+  is_active?: boolean;
+  /** Used range, inflated by formatting — never a row count. */
+  used_rows?: number;
+  used_columns?: number;
+  first_row?: string[];
+}
+
 export interface ParsedUpload {
   row_count: number;
   columns: string[];
   file_type?: string;
+  /** Sheet inventory for workbooks, so a sheet is picked from the real names. */
+  sheets?: WorkbookSheet[];
+  /** The window the server actually applied (non-default fields only). */
+  read_options?: SourceReadOptions;
   sample_data?: Record<string, unknown>[];
   data?: Record<string, unknown>[];
   schema?: Record<string, string>;

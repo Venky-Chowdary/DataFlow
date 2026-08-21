@@ -424,6 +424,35 @@
 
 .df2-dest-procedure-hooks[open] summary { margin-bottom: 10px; }
 
+/* Declared file read window — sheet, header row, skips, codec, delimiter. */
+.df2-source-read-window {
+  border: 1px solid var(--df-border, #e4e8ee);
+  border-radius: var(--df-radius-md, 8px);
+  padding: 10px 12px;
+  margin-bottom: 10px;
+  background: var(--df-surface-muted, #f8fafc);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.df2-source-read-window summary {
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--df-text-primary, #0f172a);
+  display: flex;
+  align-items: center;
+}
+
+.df2-source-read-window > p { margin: 0; }
+
+.df2-source-read-window .df2-form-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 10px 12px;
+}
+
 .df2-source-bind-params {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
