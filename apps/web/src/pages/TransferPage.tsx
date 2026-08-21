@@ -89,6 +89,7 @@ import {
   sourceExtractReady,
   type SourceReadMode,
 } from "../lib/sourceReadMode";
+import { destRouteKey, runResultDescribesRoute } from "../lib/runRouteScope";
 import { diagnoseSql } from "../lib/sqlEditorModel";
 import {
   availableSyncModes,
@@ -284,6 +285,8 @@ export function TransferPage({
   const [preflight, setPreflight] = useState<PreflightResult | null>(null);
   /** Fingerprint of Map/sync/PK that produced the current preflight result. */
   const [validatedContractKey, setValidatedContractKey] = useState<string | null>(null);
+  /** Destination route of the run on screen. */
+  const [executedRouteKey, setExecutedRouteKey] = useState<string | null>(null);
   const [cellPreview, setCellPreview] = useState<CellPreviewResult | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
   const [mappingProgress, setMappingProgress] = useState(0);
@@ -4513,6 +4516,7 @@ export function TransferPage({
     setActiveJobId(null);
     setResult(null);
     setTransferLaunch(null);
+    setExecutedRouteKey(currentDestRouteKey);
     setRunStartupProgress(stagePercent(1, RUN_LAUNCH_STAGES.length));
     setRunStartupPhase(RUN_LAUNCH_STAGES[0]);
     // Prefer Validate-echoed Kernel stamps + signed contracts over Map drafts.
@@ -4977,6 +4981,15 @@ export function TransferPage({
         : Boolean(destType && targetDb && targetCollection) && !destSchemaLoading));
 
   const needsDbPreflight = destKindMode === "database";
+  const currentDestRouteKey = destRouteKey({
+    destKindMode,
+    destType,
+    targetDb,
+    destSchema,
+    targetCollection,
+    exportFormat,
+    destOutputPath,
+  });
   /** Map/sync/PK/dest edits must invalidate a prior green Validate before Execute. */
   const buildValidateContractKey = useCallback(
     (maps: EditableMapping[]) =>
@@ -5027,6 +5040,33 @@ export function TransferPage({
       setValidatedContractKey(null);
     }
   }, [validateContractKey, validatedContractKey, preflight]);
+
+  /**
+   * A finished run reports the route it wrote. Retarget the destination and that
+   * panel stops being an answer about the route on screen, so Run offers Execute
+   * again instead of claiming a landing in a table it never wrote. The result is
+   * kept rather than destroyed: point the plan back and the proof returns.
+   * Mapping edits are deliberately not part of this — repairs are applied from
+   * the result panel itself.
+   */
+  const runResultDescribesCurrentPlan = runResultDescribesRoute(
+    executedRouteKey,
+    currentDestRouteKey,
+  );
+  /**
+   * The launch pointer belongs to the route it was launched for. Kept in state
+   * so Job Theater can still open it, but withheld from Validate and Run, whose
+   * job is the route on screen — otherwise "Open live progress" takes Execute's
+   * place for a plan that was never executed.
+   */
+  const routeScopedLaunch = runResultDescribesCurrentPlan ? transferLaunch : null;
+  /** Route the superseded run actually wrote, named so it is not mistaken for this one. */
+  const staleRunDestLabel = [
+    result?.destination?.database,
+    result?.destination?.collection,
+  ]
+    .filter(Boolean)
+    .join(".");
 
   /** API-approved preflight only — local/review-grade never unlocks Execute. */
   const isGovernedExecuteReady = Boolean(
@@ -5344,6 +5384,7 @@ export function TransferPage({
     setTransferring(false);
     setActiveJobId(null);
     setResult(null);
+    setExecutedRouteKey(null);
     setSyncMode("full_refresh_append");
     setSchemaPolicy("manual_review");
     setValidationMode("balanced");
@@ -6790,7 +6831,7 @@ export function TransferPage({
             mappingReviewCount={mappingReviewCount}
             riskAckPendingCount={riskAckPendingCount}
             rowCount={parsed?.row_count ?? sourceRowEstimate ?? undefined}
-            transferLaunch={transferLaunch}
+            transferLaunch={routeScopedLaunch}
             savingContract={savingContract}
             executeBlocked={multiStreamUnsupportedMode || Boolean(contractBlockReason)}
             executeBlockedReason={
@@ -6858,7 +6899,11 @@ export function TransferPage({
         />
       )}
 
-      {step === STEP_RUN && !activeJobId && !result && !transferring && !transferLaunch && (
+      {step === STEP_RUN
+        && !activeJobId
+        && !transferring
+        && !routeScopedLaunch
+        && (!result || !runResultDescribesCurrentPlan) && (
         <div className="df2-transfer-step-panel df2-transfer-step-viewport df2-run-step">
           <div className="df2-card-body df2-run-center">
             <div className="df2-run-readiness" aria-label="Run readiness summary">
@@ -6916,9 +6961,12 @@ export function TransferPage({
               icon="transfer"
               title={isGovernedExecuteReady ? "Execute-ready · not migration proven" : "Confirm Validate before write"}
               description={
-                isGovernedExecuteReady
+                (result && !runResultDescribesCurrentPlan
+                  ? `The plan changed since the last run${staleRunDestLabel ? ` (it wrote ${staleRunDestLabel})` : ""}; nothing has been written for the route above. `
+                  : "")
+                + (isGovernedExecuteReady
                   ? "API preflight approved on Validate. Execute starts the write; Gate-8 post-write proof is still required for migration_proven."
-                  : "Execute stays locked until API Validate returns decision approve (local/review-grade cannot unlock)."
+                  : "Execute stays locked until API Validate returns decision approve (local/review-grade cannot unlock).")
               }
             />
           </div>
@@ -7030,7 +7078,7 @@ export function TransferPage({
         </div>
       )}
 
-      {step === STEP_RUN && result && !activeJobId && (
+      {step === STEP_RUN && result && !activeJobId && runResultDescribesCurrentPlan && (
         <div className="df2-transfer-step-panel df2-transfer-step-viewport df2-run-step df2-result-host">
           <div className="df2-card-body df2-result-body">
             <TransferResultDashboard
