@@ -683,3 +683,33 @@ and looks like successful teardown when nothing was deleted.
 ### Connector rows are only partly workspace-scoped
 Connectors created through the current UI carry the real `workspace_id`; pre-existing rows carry
 `workspace_id: ""`. Any workspace-isolation assertion must account for those unscoped legacy rows.
+
+## Settings tab selectors, Team endpoints, and "fake data" false alarms (PR #59 re-verify era)
+
+Four traps that each invalidated a run:
+
+- **Settings tab buttons are NOT exact text labels.** Each renders label+subtitle concatenated, e.g. the
+  Team button''s `textContent` is `TeamMembers & roles`, Notifications is `NotificationsAlerts &
+  integrations`, Enterprise is `EnterpriseTenant, BYOK, residency`. A locator on `/^Team$/` silently
+  matches nothing, the click is a no-op, and the script keeps scraping the **General** panel while
+  reporting it as Team/Notifications/Enterprise. Use a **prefix** regex (`/^Team/`) AND assert a
+  panel-specific string ("Members & roles", "Notification channels", "Enterprise tenant") before
+  recording any result for that tab.
+- **Team membership endpoints live under a `/team` prefix** (`team_router.py`):
+  `GET|POST /api/v1/team/workspaces/{workspace_id}/members`,
+  `PATCH|DELETE /api/v1/team/workspaces/{workspace_id}/members/{email}` (email is URL-encoded).
+  The intuitive `/api/v1/workspaces/{id}/members` is a **404** - do not read that as "no members".
+- **`Create workspace` renders only for `platformAdmin`** in TeamSettings. Its absence for a viewer is by
+  design (gated by non-rendering), not a missing-control defect. For an admin it starts `disabled` purely
+  because of the `!newWorkspaceName.trim()` guard - type a name and re-read `disabled` before calling it
+  over-gated. This distinction is easy to misreport in both directions.
+- **TenantSettings placeholders look exactly like real data.** `Wells Fargo`,
+  `dataflow.wellsfargo.com`, `security@example.com` and `10.0.0.0/8 / 192.168.1.50` are `placeholder=`
+  attributes, and `us-east-1` / `8` are client-side `useState` defaults for an unfilled create-tenant
+  form. A screenshot of Enterprise after a 403 therefore *looks* like invented server data but is not.
+  Always compare the DOM `value` against the `placeholder` attribute before reporting fabricated data.
+
+**Admin membership regression (the risk when write controls get gated):** driving Team through the real UI
+should yield `POST .../members 200`, `PATCH .../members/{email} 200` on the row `<select>`, and
+`DELETE .../members/{email} 200`, with the row gone after a reload. Uncheck the "create a login" checkbox
+when adding a temp member so teardown does not leave a sign-in-capable account behind.
