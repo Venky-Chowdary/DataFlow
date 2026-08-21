@@ -147,9 +147,22 @@ _PATH_RULES: list[tuple[str, str, str]] = [
     ("*", "/api/v1/team/workspaces/", Permission.WORKSPACE_READ),
     ("GET", "/api/v1/team/workspaces", Permission.WORKSPACE_READ),
     ("*", "/api/v1/team/workspaces", Permission.WORKSPACE_MANAGE),
+    # Comparing a live source against its destination is a *run* of that pipeline,
+    # not a change to a connector. Falling through to the mutation default gave it
+    # connector.write, which refused the operator whose whole role is to run and
+    # reconcile pipelines, while the UI control stayed enabled.
+    ("POST", "/api/v1/fidelity/", Permission.JOB_RUN),
     # Proof ledger is readable by any workspace member; fidelity runs need job.run.
     ("GET", "/api/v1/workspace/proofs/", Permission.WORKSPACE_READ),
     ("POST", "/api/v1/workspace/proofs/", Permission.JOB_RUN),
+    # Reading the workspace's own name, timezone and retention is not workspace
+    # administration: refusing it left a viewer on a Settings page with nothing
+    # honest to show, which the client papered over with invented defaults.
+    # Only the secret-bearing reads (SSO certificates, provider keys, API keys,
+    # notification targets, BYOK) and the engine choice stay with workspace
+    # administration — which engine answers is read behind the same gate that
+    # changes it (tests/test_byo_provider_keys.py).
+    ("GET", "/api/v1/workspace/settings", Permission.WORKSPACE_READ),
     ("*", "/api/v1/workspace/", Permission.WORKSPACE_MANAGE),
     ("*", "/api/v1/resource-acls", Permission.WORKSPACE_MANAGE),
     ("GET", "/api/v1/audit/", Permission.AUDIT_READ),
@@ -159,6 +172,11 @@ _PATH_RULES: list[tuple[str, str, str]] = [
     ("POST", "/api/v1/transfer/run", Permission.JOB_RUN),
     ("*", "/api/v1/transfer/plans/", Permission.JOB_PLAN),
     ("GET", "/api/v1/transfer/", Permission.JOB_READ),
+    # Reading a schedule is schedule.read — the permission every role already
+    # holds. Requiring schedule.manage to *list* them refused the viewer's own
+    # Schedules page, which the client then drew as "No schedules yet" while
+    # schedules existed. Creating, changing, running and deciding stay manage.
+    ("GET", "/api/v1/schedules/", Permission.SCHEDULE_READ),
     ("*", "/api/v1/schedules/", Permission.SCHEDULE_MANAGE),
     ("GET", "/api/v1/audit/", Permission.AUDIT_READ),
     ("*", "/api/v1/ai/", Permission.AI_USE),
@@ -263,10 +281,24 @@ class RBACMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         user = getattr(request.state, "user", None)
-        if has_permission(user, permission):
+        # Imported here, not at module import: the resolver reads this module's
+        # role table, so a module-level import would be circular.
+        from services.effective_role import (
+            resolve_effective_role,
+            workspace_id_from_request_headers,
+        )
+
+        workspace_id = workspace_id_from_request_headers(request.headers)
+        effective = resolve_effective_role(user, workspace_id)
+        request.state.effective_role = effective
+        if permission in role_permissions(effective):
             return await call_next(request)
 
         return JSONResponse(
             status_code=403,
-            content={"detail": f"Permission denied: {permission}"},
+            content={
+                "detail": f"Permission denied: {permission}",
+                "required_permission": permission,
+                "effective_role": effective,
+            },
         )

@@ -21,6 +21,7 @@ from services.workspace_access import actor_email
 
 from ..services.auth_service import (
     auth_bootstrap_status,
+    auth_required,
     authenticate,
     create_token,
     lookup_user,
@@ -681,6 +682,57 @@ async def login(body: LoginRequest, request: Request):
         # An admin-issued one-time password is only temporary if the operator is
         # told to rotate it; the client prompts on this flag.
         "must_change_password": bool(account and account.get("must_change_password")),
+    }
+
+
+@router.get("/me")
+async def me(request: Request):
+    """Who the API decided you are, and what it will let you do here.
+
+    The client used to infer authority from the platform label it stashed at
+    login, which says nothing about the workspace being viewed — so it rendered
+    every write control for a viewer and let the button discover the refusal.
+    This is the single source the UI gates on: the same resolution the request
+    gate itself applies, for the workspace named by ``X-Workspace-Id``.
+    """
+    from services.effective_role import (
+        permission_summary,
+        resolved_workspace_id,
+        workspace_id_from_request_headers,
+    )
+
+    user = getattr(request.state, "user", None)
+    email = normalize_email(getattr(request.state, "user_email", "") or (user or {}).get("email", ""))
+    if not email:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    named_workspace_id = workspace_id_from_request_headers(request.headers)
+    # The workspace the request named, or the single membership that answered it,
+    # so the client can name that workspace explicitly from here on. The summary
+    # is resolved in that same workspace: a response whose permissions were
+    # decided somewhere other than the workspace it reports is not an answer.
+    workspace_id = resolved_workspace_id(user, named_workspace_id)
+    summary = permission_summary(user, workspace_id)
+    account = get_stored_user(email)
+    workspace_role = ""
+    if workspace_id:
+        try:
+            from services.team_store import get_workspace_role
+
+            workspace_role = get_workspace_role(workspace_id=workspace_id, email=email)
+        except Exception as exc:
+            logging.getLogger(__name__).warning("workspace role lookup failed: %s", exc)
+    display_name = str((user or {}).get("name") or "").strip()
+    if not display_name and account:
+        display_name = str(account.get("name") or "").strip()
+    return {
+        "email": email,
+        "name": display_name or email,
+        "platform_role": str((user or {}).get("role") or "member"),
+        "workspace_id": workspace_id,
+        "workspace_role": workspace_role,
+        "must_change_password": bool(account and account.get("must_change_password")),
+        "auth_required": auth_required(),
+        **summary,
     }
 
 

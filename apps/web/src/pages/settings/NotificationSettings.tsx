@@ -14,6 +14,8 @@ import {
   type NotificationChannel,
   type Workspace,
 } from "../../lib/api";
+import { PERMISSIONS, useWriteGate } from "../../lib/PermissionsContext";
+import { PermissionNotice } from "../../components/PermissionNotice";
 
 type ChannelKind = "slack" | "teams" | "email" | "servicenow" | "webhook";
 
@@ -28,9 +30,11 @@ const KIND_META: Record<ChannelKind, { label: string; description: string }> = {
 export function NotificationSettings() {
   const { toast } = useToast();
   const { confirm } = useConfirm();
+  const manage = useWriteGate(PERMISSIONS.workspaceManage);
   const [channels, setChannels] = useState<NotificationChannel[]>([]);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [loading, setLoading] = useState(false);
+  const [loadError, setLoadError] = useState("");
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState<string | null>(null);
   const [selectedWorkspace, setSelectedWorkspace] = useState<string>("");
@@ -74,9 +78,24 @@ export function NotificationSettings() {
   const loadChannels = () => {
     setLoading(true);
     fetchNotificationChannels(selectedWorkspace || undefined)
-      .then((data) => setChannels(data.channels))
-      .catch(() => setChannels([]))
+      .then((data) => {
+        setChannels(data.channels);
+        setLoadError("");
+      })
+      .catch((err: unknown) => {
+        // A channel list that could not be read is not "no channels configured":
+        // that reading would tell an operator alerts are unrouted when they are.
+        setChannels([]);
+        setLoadError(err instanceof Error ? err.message : "Could not read notification channels.");
+      })
       .finally(() => setLoading(false));
+  };
+
+  /** Refuse in words rather than firing a request the API will reject. */
+  const mayManage = () => {
+    if (manage.allowed) return true;
+    toast({ title: "No write permission", message: manage.reason, tone: "warning" });
+    return false;
   };
 
   const resetForm = () => {
@@ -139,6 +158,7 @@ export function NotificationSettings() {
   }, [kind, recipients, webhookUrl, endpointUrl]);
 
   const add = async () => {
+    if (!mayManage()) return;
     setSaving(true);
     try {
       await createNotificationChannel({
@@ -159,6 +179,7 @@ export function NotificationSettings() {
   };
 
   const toggle = async (channel: NotificationChannel) => {
+    if (!mayManage()) return;
     try {
       await updateNotificationChannel(channel.id, { enabled: !channel.enabled });
       setChannels((prev) => prev.map((c) => (c.id === channel.id ? { ...c, enabled: !c.enabled } : c)));
@@ -168,6 +189,7 @@ export function NotificationSettings() {
   };
 
   const remove = async (id: string) => {
+    if (!mayManage()) return;
     const ok = await confirm({
       title: "Delete this notification channel?",
       message: "Alerts will no longer be delivered through this channel.",
@@ -185,6 +207,7 @@ export function NotificationSettings() {
   };
 
   const test = async (id: string) => {
+    if (!mayManage()) return;
     setTesting(id);
     try {
       const result = await testNotificationChannel(id);
@@ -216,6 +239,12 @@ export function NotificationSettings() {
         </div>
       </div>
         <div className="df2-settings-section-body">
+        <PermissionNotice
+          allowed={manage.allowed}
+          reason={manage.reason}
+          what="Notification channels are read-only for you."
+        />
+
         {workspaces.length > 1 && (
           <div className="df2-settings-field df2-mb-md">
             <label>Workspace</label>
@@ -341,7 +370,13 @@ export function NotificationSettings() {
           )}
 
           <div className="df2-settings-channel-form-actions">
-            <button type="button" className="df2-btn df2-btn-primary" disabled={!canAdd || saving} onClick={() => void add()}>
+            <button
+              type="button"
+              className="df2-btn df2-btn-primary"
+              disabled={!canAdd || saving || !manage.allowed}
+              title={manage.reason || undefined}
+              onClick={() => void add()}
+            >
               <DtIcon name="plus" size={14} /> {saving ? "Saving…" : "Add channel"}
             </button>
           </div>
@@ -349,6 +384,15 @@ export function NotificationSettings() {
 
         {loading ? (
           <SectionLoader title="Loading channels" hint="Fetching notification channels…" />
+        ) : loadError ? (
+          // A refused or failed read has already been stated above; drawing the
+          // empty state under it would contradict it in the same breath.
+          <EmptyState
+            compact
+            icon="alert"
+            title="Channels could not be read"
+            description={`This is not an empty list — ${loadError}`}
+          />
         ) : channels.length === 0 ? (
           <EmptyState compact icon="bell" title="No channels yet" description="Add a channel to receive job alerts and quarantine notifications." />
         ) : (
@@ -376,6 +420,8 @@ export function NotificationSettings() {
                         role="switch"
                         aria-checked={c.enabled}
                         className={`df2-switch ${c.enabled ? "on" : ""}`}
+                        disabled={!manage.allowed}
+                        title={manage.reason || undefined}
                         onClick={() => void toggle(c)}
                       >
                         <span className="df2-switch-thumb" />
@@ -383,8 +429,8 @@ export function NotificationSettings() {
                     </td>
                     <td>
                       <div style={{ display: "flex", gap: 8 }}>
-                        <button type="button" className="df2-btn df2-btn-sm" disabled={testing === c.id} onClick={() => void test(c.id)}>{testing === c.id ? "Testing…" : "Test"}</button>
-                        <button type="button" className="df2-btn df2-btn-sm df2-btn-danger" onClick={() => void remove(c.id)}>Delete</button>
+                        <button type="button" className="df2-btn df2-btn-sm" disabled={testing === c.id || !manage.allowed} title={manage.reason || undefined} onClick={() => void test(c.id)}>{testing === c.id ? "Testing…" : "Test"}</button>
+                        <button type="button" className="df2-btn df2-btn-sm df2-btn-danger" disabled={!manage.allowed} title={manage.reason || undefined} onClick={() => void remove(c.id)}>Delete</button>
                       </div>
                     </td>
                   </tr>

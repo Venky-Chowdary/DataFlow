@@ -2,6 +2,10 @@ import { API_BASE, ActiveDataContext, Connector, EnhancedAnalysis, ParsedUpload,
 import { coerceLastTestOk, statusFromLastTest } from "./connectorHealth";
 import { JobHistory, jobHistoryFromResponse } from "./jobHistory";
 import { clearSession, getAuthToken, getSessionActor } from "./session";
+import { getActiveWorkspaceId } from "./workspace";
+import { permissionFromRefusal, refusalSentence } from "./permissionCopy";
+
+export { refusalSentence };
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 15000;
 const LONG_REQUEST_TIMEOUT_MS = 180000;
@@ -85,19 +89,75 @@ function notifyAuthRequired(requestUrl: string) {
   }
 }
 
-async function parseApiError(res: Response, fallback: string): Promise<string> {
-  try {
-    const data = await res.json();
-    const detail = data.detail ?? data.error ?? data.message;
-    if (typeof detail === "string") return detail;
-    if (detail && typeof detail === "object") {
-      if (typeof detail.error === "string") return detail.error;
-      if (typeof detail.message === "string") return detail.message;
-    }
-    return fallback;
-  } catch {
-    return fallback;
+/**
+ * A refusal that keeps the status that caused it.
+ *
+ * A 403 is not a transport failure and must not be rendered as one, nor —
+ * as this client used to — replaced with plausible-looking defaults. Callers
+ * check {@link ApiError.forbidden} to say "you do not have permission" and name
+ * the permission the API asked for.
+ */
+export class ApiError extends Error {
+  readonly status: number;
+  readonly requiredPermission: string;
+  readonly effectiveRole: string;
+
+  constructor(message: string, status: number, requiredPermission = "", effectiveRole = "") {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.requiredPermission = requiredPermission;
+    this.effectiveRole = effectiveRole;
   }
+
+  get forbidden(): boolean {
+    return this.status === 403;
+  }
+}
+
+export function isForbidden(err: unknown): boolean {
+  return err instanceof ApiError && err.forbidden;
+}
+
+/** The API's own reason for a non-OK response, plus the 403 metadata it carries. */
+async function readApiRefusal(
+  res: Response,
+  fallback: string,
+): Promise<{ detail: string; permission: string; role: string }> {
+  let detail = fallback;
+  let permission = "";
+  let role = "";
+  try {
+    const data = await res.clone().json();
+    permission = typeof data?.required_permission === "string" ? data.required_permission : "";
+    role = typeof data?.effective_role === "string" ? data.effective_role : "";
+    const raw = data?.detail ?? data?.error ?? data?.message;
+    if (typeof raw === "string" && raw.trim()) detail = raw;
+    else if (raw && typeof raw === "object") {
+      if (typeof raw.error === "string") detail = raw.error;
+      else if (typeof raw.message === "string") detail = raw.message;
+    }
+  } catch {
+    /* keep the fallback */
+  }
+  if (res.status === 403) {
+    // A denial the gate phrased for itself is rewritten for the person reading
+    // it, whether or not the body named the permission.
+    const named = permissionFromRefusal(detail, permission);
+    detail = refusalSentence(named, role);
+    permission = permission || named;
+  }
+  return { detail, permission, role };
+}
+
+/** Build the typed refusal for a non-OK response, preserving the API's reason. */
+export async function apiErrorFrom(res: Response, fallback: string): Promise<ApiError> {
+  const { detail, permission, role } = await readApiRefusal(res, fallback);
+  return new ApiError(detail, res.status, permission, role);
+}
+
+async function parseApiError(res: Response, fallback: string): Promise<string> {
+  return (await readApiRefusal(res, fallback)).detail;
 }
 
 async function apiFetch(input: RequestInfo | URL, init: TimedRequestInit = {}): Promise<Response> {
@@ -106,6 +166,12 @@ async function apiFetch(input: RequestInfo | URL, init: TimedRequestInit = {}): 
   const token = getAuthToken();
   if (token && !headers.has("Authorization")) {
     headers.set("Authorization", `Bearer ${token}`);
+  }
+  // Name the workspace being viewed, so the API gates on the role held *there*
+  // rather than on the platform label alone.
+  const workspaceId = getActiveWorkspaceId();
+  if (workspaceId && !headers.has("X-Workspace-Id")) {
+    headers.set("X-Workspace-Id", workspaceId);
   }
   const mergedInit = { ...requestInit, headers };
   if (timeoutMs <= 0) return fetch(input, { ...mergedInit, signal });
@@ -2707,7 +2773,10 @@ export async function fetchWorkspaceSettings(): Promise<{
 }> {
   const res = await apiFetch(`${API_BASE}/workspace/settings`);
   if (!res.ok) {
-    return { org_name: "Datawrap", timezone: "UTC", retention_days: 90 };
+    // Never invent settings. A refusal or an outage has to reach the page as
+    // itself: returning a plausible organisation name here showed a viewer a
+    // Settings screen that was pure fiction.
+    throw await apiErrorFrom(res, "Failed to load workspace settings");
   }
   return res.json();
 }
@@ -2727,9 +2796,42 @@ export async function updateWorkspaceSettings(body: {
     body: JSON.stringify(body),
   });
   if (!res.ok) {
-    throw new Error(await parseApiError(res, "Failed to save workspace settings"));
+    throw await apiErrorFrom(res, "Failed to save workspace settings");
   }
   return res.json();
+}
+
+export type EffectiveIdentity = {
+  email: string;
+  name: string;
+  platform_role: string;
+  workspace_id: string;
+  workspace_role: string;
+  effective_role: string;
+  permissions: string[];
+  can_write_connectors: boolean;
+  can_run_jobs: boolean;
+  can_manage_schedules: boolean;
+  can_manage_workspace: boolean;
+  workspace_choice_ambiguous: boolean;
+  must_change_password: boolean;
+  auth_required: boolean;
+};
+
+/** Who the API says you are, and what it will let you do in this workspace. */
+export async function fetchEffectiveIdentity(): Promise<EffectiveIdentity> {
+  const res = await apiFetch(`${API_BASE}/auth/me`);
+  if (!res.ok) throw await apiErrorFrom(res, "Failed to load your identity");
+  return res.json();
+}
+
+export async function changeOwnPassword(currentPassword: string, newPassword: string): Promise<void> {
+  const res = await apiFetch(`${API_BASE}/auth/change-password`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
+  });
+  if (!res.ok) throw await apiErrorFrom(res, "Failed to change your password");
 }
 
 export async function fetchAuditEvents(limit = 50, level?: string): Promise<Array<{

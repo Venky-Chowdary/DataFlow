@@ -12,10 +12,13 @@ import { Button } from "./components/ui/Button";
 import { WorkspaceSearch, type SearchNavigateTarget } from "./components/ui/WorkspaceSearch";
 import { StatusPopover } from "./components/StatusPopover";
 import { DataProvider } from "./lib/DataContext";
+import { ForcePasswordChange } from "./components/ForcePasswordChange";
+import { PERMISSIONS, PermissionsProvider, useWriteGate } from "./lib/PermissionsContext";
 import { StudioActionsProvider } from "./lib/StudioActionsContext";
 import { AUTH_REQUIRED_EVENT, deleteConnector, fetchConnectors, fetchJobs, fetchSchedules, fetchTransferCapabilities, noteApiSuccess, probeApiHealth, shouldMarkApiOffline } from "./lib/api";
 import { EMPTY_JOB_HISTORY, type JobHistory } from "./lib/jobHistory";
 import { clearSession, readSession, writeSession } from "./lib/session";
+import { clearActiveWorkspaceId } from "./lib/workspace";
 import { loadSidebarNavCompact, saveSidebarNavCompact } from "./lib/pilotChatStore";
 import { loadTransferLiveCatalog, resolveCatalogIdToType } from "./lib/connectorTypes";
 import { Connector, PipelineSchedule, Screen, TransferJob } from "./lib/types";
@@ -101,6 +104,7 @@ function AppShell({
   onSignOut: () => void;
 }) {
   const { toast } = useToast();
+  const connectorWrite = useWriteGate(PERMISSIONS.connectorWrite);
   const { confirm } = useConfirm();
   const [screen, setScreenState] = useState<Screen>(() => {
     const fromHash = readAppHash();
@@ -381,13 +385,26 @@ function AppShell({
     return raw.charAt(0).toUpperCase() + raw.slice(1);
   })();
 
+  /** Refuse in words: a viewer must never see a silent no-op. */
+  const refuseConnectorWrite = () => {
+    toast({ title: "No write permission", message: connectorWrite.reason, tone: "warning" });
+  };
+
   const openModal = (type?: string) => {
+    if (!connectorWrite.allowed) {
+      refuseConnectorWrite();
+      return;
+    }
     setEditingConnector(null);
     setModalType(type ? resolveCatalogIdToType(type) : "");
     setShowModal(true);
   };
 
   const openEditModal = (connector: Connector) => {
+    if (!connectorWrite.allowed) {
+      refuseConnectorWrite();
+      return;
+    }
     setEditingConnector(connector);
     setModalType(connector.type);
     setShowModal(true);
@@ -842,6 +859,10 @@ function AppShell({
   );
 
   async function handleDeleteConnector(id: string) {
+    if (!connectorWrite.allowed) {
+      refuseConnectorWrite();
+      return;
+    }
     const target = connectors.find((c) => c.id === id);
     const confirmed = await confirm({
       title: `Delete ${target?.name ?? "this connector"}?`,
@@ -958,6 +979,7 @@ function DataTransferAppInner() {
 
   const signOut = () => {
     clearSession();
+    clearActiveWorkspaceId();
     setUserEmail("");
     setEntryScreen("dashboard");
     setPublicRoute("home");
@@ -1019,7 +1041,11 @@ function DataTransferAppInner() {
       {stage === "app" && (
         <DataProvider>
           <StudioActionsProvider>
-            <AppShell initialScreen={entryScreen} userEmail={userEmail} onSignOut={signOut} />
+            <PermissionsProvider signedIn={Boolean(userEmail)}>
+              <ForcePasswordChange>
+                <AppShell initialScreen={entryScreen} userEmail={userEmail} onSignOut={signOut} />
+              </ForcePasswordChange>
+            </PermissionsProvider>
           </StudioActionsProvider>
         </DataProvider>
       )}

@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { useToast } from "../../components/Toast";
 import { ByokKey, createByokKey, createTenant, fetchByokKeys, fetchSecurityPosture, fetchTenant, fetchWorkspaces, SecurityPosture, Tenant, updateTenant } from "../../lib/api";
+import { PermissionNotice } from "../../components/PermissionNotice";
+import { PERMISSIONS, useWriteGate } from "../../lib/PermissionsContext";
 
 const REGIONS = [
   "us-east-1", "us-east-2", "us-west-1", "us-west-2",
@@ -19,7 +21,10 @@ const PROVIDER_LABELS: Record<ByokKey["provider"], string> = {
 
 export function TenantSettings() {
   const { toast } = useToast();
+  // Tenant identity, data region, security posture and BYOK are administration.
+  const manage = useWriteGate(PERMISSIONS.workspaceManage);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState("");
   const [saving, setSaving] = useState(false);
   const [tenant, setTenant] = useState<Tenant | null>(null);
   const [posture, setPosture] = useState<SecurityPosture | null>(null);
@@ -41,8 +46,27 @@ export function TenantSettings() {
 
   useEffect(() => {
     setLoading(true);
-    Promise.all([fetchTenant().catch(() => null), fetchSecurityPosture().catch(() => null), fetchByokKeys().catch(() => ({ keys: [] })), fetchWorkspaces().catch(() => ({ workspaces: [] }))])
+    // A refused read is not an unconfigured tenant: reporting "no tenant yet"
+    // after a 403 would invite a viewer to create one and fail at the button.
+    let readFailure = "";
+    const remember = (err: unknown) => {
+      if (!readFailure) readFailure = err instanceof Error ? err.message : "Could not read enterprise settings.";
+      return null;
+    };
+    Promise.all([
+      fetchTenant().catch(remember),
+      fetchSecurityPosture().catch(remember),
+      fetchByokKeys().catch((err) => {
+        remember(err);
+        return { keys: [] };
+      }),
+      fetchWorkspaces().catch((err) => {
+        remember(err);
+        return { workspaces: [] };
+      }),
+    ])
       .then(([t, p, k, wsResult]) => {
+        setLoadError(readFailure);
         const ws = wsResult.workspaces;
         setTenant(t);
         setPosture(p);
@@ -69,7 +93,14 @@ export function TenantSettings() {
     return true;
   }, [tenant, name, workspaceId]);
 
+  const allowManage = () => {
+    if (manage.allowed) return true;
+    toast({ title: "No write permission", message: manage.reason, tone: "warning" });
+    return false;
+  };
+
   const save = async () => {
+    if (!allowManage()) return;
     setSaving(true);
     try {
       const payload = {
@@ -100,6 +131,7 @@ export function TenantSettings() {
   };
 
   const addByokKey = async () => {
+    if (!allowManage()) return;
     if (!tenant) {
       toast({ title: "Create tenant first", message: "Save the tenant profile before adding BYOK keys.", tone: "warning" });
       return;
@@ -127,6 +159,8 @@ export function TenantSettings() {
 
   return (
     <div className="df2-settings-enterprise">
+      <PermissionNotice allowed={manage.allowed} reason={manage.reason} what="Enterprise tenant settings are read-only for you." />
+      {loadError && <div className="df2-team-error df2-mb-md">{loadError}</div>}
       <section className="df2-settings-section">
         <div className="df2-settings-section-head">
           <div>
@@ -196,7 +230,7 @@ export function TenantSettings() {
         </div>
 
         <div className="df2-settings-section-footer">
-          <button type="button" className="df2-btn df2-btn-primary" disabled={!canSave || saving} onClick={() => void save()}>
+          <button type="button" className="df2-btn df2-btn-primary" disabled={!canSave || saving || !manage.allowed} title={manage.reason || undefined} onClick={() => void save()}>
             {saving ? "Saving…" : tenant ? "Update tenant" : "Create tenant"}
           </button>
         </div>
@@ -257,7 +291,7 @@ export function TenantSettings() {
                 </div>
               )}
             </div>
-            <button type="button" className="df2-btn df2-btn-secondary df2-btn-sm" onClick={() => void addByokKey()} style={{ marginTop: 12 }}>
+            <button type="button" className="df2-btn df2-btn-secondary df2-btn-sm" disabled={!manage.allowed} title={manage.reason || undefined} onClick={() => void addByokKey()} style={{ marginTop: 12 }}>
               Add BYOK key
             </button>
 

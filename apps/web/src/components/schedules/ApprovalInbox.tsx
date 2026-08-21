@@ -4,6 +4,7 @@ import { Button } from "../ui/Button";
 import { PageSection } from "../ui/PageSection";
 import { useToast } from "../Toast";
 import { approveScheduleFinding, rejectScheduleFinding } from "../../lib/api";
+import { PERMISSIONS, useWriteGate } from "../../lib/PermissionsContext";
 import type { ScheduleApprovalInboxItem } from "../../lib/types";
 
 const SCOPE_ACK: Record<string, "compliance" | "schema_drift" | "fk_risk"> = {
@@ -39,6 +40,7 @@ interface ApprovalInboxProps {
  */
 export function ApprovalInbox({ items, onDecided, onOpenSchedule }: ApprovalInboxProps) {
   const { toast } = useToast();
+  const authorize = useWriteGate(PERMISSIONS.scheduleAuthorize);
   const [openId, setOpenId] = useState<string | null>(null);
   const [reason, setReason] = useState("");
   const [standing, setStanding] = useState(false);
@@ -55,6 +57,10 @@ export function ApprovalInbox({ items, onDecided, onOpenSchedule }: ApprovalInbo
   };
 
   const decide = async (item: ScheduleApprovalInboxItem, approve: boolean) => {
+    if (!authorize.allowed) {
+      toast({ title: "No write permission", message: authorize.reason, tone: "warning" });
+      return;
+    }
     const trimmed = reason.trim();
     if (trimmed.length < MIN_REASON) {
       toast({
@@ -227,9 +233,18 @@ export function ApprovalInbox({ items, onDecided, onOpenSchedule }: ApprovalInbo
                 </div>
               ) : (
                 <div className="df2-approval-actions">
-                  <Button size="sm" variant="primary" onClick={() => start(appr.id)}>
+                  <Button
+                    size="sm"
+                    variant="primary"
+                    disabled={!authorize.allowed}
+                    title={authorize.reason || undefined}
+                    onClick={() => start(appr.id)}
+                  >
                     Decide
                   </Button>
+                  {!authorize.allowed && (
+                    <span className="df2-approval-nonapprovable">{authorize.reason}</span>
+                  )}
                 </div>
               )}
             </li>

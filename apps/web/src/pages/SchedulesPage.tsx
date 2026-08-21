@@ -17,6 +17,8 @@ import {
   type PipelineTab,
 } from "../components/PipelineDetailDrawer";
 import { useToast } from "../components/Toast";
+import { PERMISSIONS, useWriteGate } from "../lib/PermissionsContext";
+import { PermissionNotice } from "../components/PermissionNotice";
 import { useConfirm } from "../components/ui/ConfirmDialog";
 import {
   applyGitopsManifest,
@@ -55,10 +57,14 @@ type ScheduleFilter = "all" | "active" | "paused";
 
 export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesChange, highlightScheduleId }: SchedulesPageProps) {
   const { toast } = useToast();
+  const scheduleManage = useWriteGate(PERMISSIONS.scheduleManage);
+  const jobRun = useWriteGate(PERMISSIONS.jobRun);
   const { confirm } = useConfirm();
   const [schedules, setSchedules] = useState<PipelineSchedule[]>([]);
   const [intervals, setIntervals] = useState<ScheduleIntervals | null>(null);
   const [loading, setLoading] = useState(true);
+  /** Why the fleet could not be read, when it could not — never drawn as empty. */
+  const [loadError, setLoadError] = useState("");
   const [showForm, setShowForm] = useState(false);
   const [editing, setEditing] = useState<PipelineSchedule | null>(null);
   const [saving, setSaving] = useState(false);
@@ -74,6 +80,16 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
   const [freshnessLag, setFreshnessLag] = useState<Record<string, { lag: number; severity: string }>>({});
   /** Schedules parked on a deterministic finding, waiting on a named decision. */
   const [approvals, setApprovals] = useState<ScheduleApprovalInboxItem[]>([]);
+
+  /**
+   * Refuse in words rather than firing a request the API will reject.
+   * Returns true when the caller may proceed.
+   */
+  const allowOrExplain = (gate: { allowed: boolean; reason: string }) => {
+    if (gate.allowed) return true;
+    toast({ title: "No write permission", message: gate.reason, tone: "warning" });
+    return false;
+  };
 
   const loadApprovals = useCallback(async () => {
     try {
@@ -135,10 +151,16 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
     try {
       const rows = await fetchSchedules();
       setSchedules(rows);
+      setLoadError("");
       void loadBreakers(rows);
       void loadFreshness();
       void loadApprovals();
     } catch (e) {
+      // A list that could not be read is not an empty fleet. Drawing "No
+      // schedules yet" over a refused or failed read told a viewer that
+      // schedules they cannot see do not exist.
+      setSchedules([]);
+      setLoadError(e instanceof Error ? e.message : "Could not read this workspace's schedules.");
       console.error(e);
     }
     setLoading(false);
@@ -201,12 +223,14 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
   }, [schedules, filter, pipelineSearch]);
 
   const openCreate = () => {
+    if (!allowOrExplain(scheduleManage)) return;
     setResumeDrawerAfterEdit(false);
     setEditing(null);
     setShowForm(true);
   };
 
   const openEdit = (sched: PipelineSchedule) => {
+    if (!allowOrExplain(scheduleManage)) return;
     setEditing(sched);
     setShowForm(true);
     window.requestAnimationFrame(() => {
@@ -226,6 +250,7 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
   };
 
   const handleSubmit = async (input: Partial<ScheduleInput>) => {
+    if (!allowOrExplain(scheduleManage)) return;
     setSaving(true);
     try {
       if (editing) {
@@ -250,6 +275,7 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
   };
 
   const toggleEnabled = async (sched: PipelineSchedule) => {
+    if (!allowOrExplain(scheduleManage)) return;
     try {
       await updateSchedule(sched.id, { enabled: !sched.enabled });
       await load();
@@ -262,6 +288,7 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
   };
 
   const handleDelete = async (id: string) => {
+    if (!allowOrExplain(scheduleManage)) return;
     const target = schedules.find((s) => s.id === id);
     const ok = await confirm({
       title: target ? `Delete schedule “${target.name}”?` : "Delete this schedule?",
@@ -287,6 +314,7 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
   };
 
   const handleRunNow = async (id: string) => {
+    if (!allowOrExplain(jobRun)) return;
     const sched = schedules.find((s) => s.id === id);
     const contractId = sched?.contract_id;
     if (contractId && breakerBlocksRuns(breakers[contractId])) {
@@ -383,6 +411,7 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
   };
 
   const handleImportFile = async (file: File) => {
+    if (!allowOrExplain(scheduleManage)) return;
     setGitopsBusy(true);
     try {
       const text = await file.text();
@@ -429,6 +458,11 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
       description="Recurring sync schedules (not ADF/Informatica DAG pipelines) — same Map→Validate→Execute engine."
     >
       <PageFrame className="df2-pipeline-page">
+      <PermissionNotice
+        allowed={scheduleManage.allowed}
+        reason={scheduleManage.reason}
+        what="Schedules are read-only for you."
+      />
       {!loading && (
         <PageToolbar
           className={showForm ? "df2-toolbar--creating" : ""}
@@ -500,16 +534,26 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
                     size="sm"
                     variant="ghost"
                     loading={gitopsBusy}
+                    disabled={!scheduleManage.allowed}
                     onClick={() => importInputRef.current?.click()}
                     title={
-                      gitopsRequireSigned
+                      // Importing a manifest creates and updates schedules, so it
+                      // is gated like every other schedule write.
+                      scheduleManage.reason ||
+                      (gitopsRequireSigned
                         ? "Plan then apply with signed-contract gate"
-                        : "Plan then apply a dataflow.yaml manifest"
+                        : "Plan then apply a dataflow.yaml manifest")
                     }
                   >
                     Import YAML
                   </Button>
-                  <Button size="sm" variant="primary" onClick={openCreate}>
+                  <Button
+                    size="sm"
+                    variant="primary"
+                    disabled={!scheduleManage.allowed}
+                    title={scheduleManage.reason || undefined}
+                    onClick={openCreate}
+                  >
                     New schedule
                   </Button>
                 </div>
@@ -560,7 +604,19 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
         <SectionLoader title="Loading schedules" hint="Fetching schedules…" />
       ) : showForm && schedules.length === 0 ? null : (
       <div className="df2-pipeline-list df2-pipeline-scroll">
-        {schedules.length === 0 ? (
+        {loadError ? (
+          <EmptyState
+            page
+            icon="alert"
+            title="Schedules could not be read"
+            description={loadError}
+            action={
+              <Button variant="secondary" onClick={() => void load()}>
+                Try again
+              </Button>
+            }
+          />
+        ) : schedules.length === 0 ? (
           <EmptyState
             page
             icon="activity"
@@ -568,7 +624,12 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
             description="Create a recurring sync to keep source and destination in step — watermark incremental, upsert, and quarantine included."
             action={
               !showForm ? (
-                <Button variant="primary" onClick={openCreate}>
+                <Button
+                  variant="primary"
+                  disabled={!scheduleManage.allowed}
+                  title={scheduleManage.reason || undefined}
+                  onClick={openCreate}
+                >
                   Create schedule
                 </Button>
               ) : undefined
@@ -644,6 +705,8 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
         }}
         onDelete={() => selectedSchedule && void handleDelete(selectedSchedule.id)}
         onToggle={() => selectedSchedule && void toggleEnabled(selectedSchedule)}
+        runRefusal={jobRun.allowed ? "" : jobRun.reason}
+        manageRefusal={scheduleManage.allowed ? "" : scheduleManage.reason}
         onResetBreaker={handleResetBreaker}
         onExportYaml={
           selectedSchedule

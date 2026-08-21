@@ -615,3 +615,160 @@ as a service-level park driven through product code, not a scheduler-observed dr
 The `min-height` control rule is gone (computed `min-height: 0px`), but the textarea is `rows=2`,
 which at 390px still hides part of a realistic two-line reason (`scrollHeight` 73 vs
 `clientHeight` 54). Measure at 390 **and** at desktop; desktop is clean (54 vs 54).
+
+## Permission / RBAC testing (PR #59 era and later)
+
+### Enable RBAC or every permission test is vacuous
+`rbac.py` passes everything through unless `DATAFLOW_REQUIRE_AUTH=1`. Start the API with
+`DATAFLOW_REQUIRE_AUTH=1` **and** `DATAFLOW_ENV=development`, and re-supply
+`DATAFLOW_ADMIN_EMAIL` / `DATAFLOW_ADMIN_PASSWORD` / `DATAFLOW_ADMIN_NAME` on every restart or you
+get `{"auth_required":false,"has_users":false}` and an unusable login form.
+
+### Setting the active workspace requires a reload
+`localStorage["df2.workspace"]` is read when `PermissionsContext` resolves identity. Setting it and
+then `page.goto("#/other")` does **not** re-resolve authority (a hash change is not a document
+load), so the account keeps its previous - often viewer - authority and every write control stays
+disabled. Always `page.reload()` after writing the key, then wait for `/auth/me` to answer.
+
+### `can()` is permissive until `/auth/me` answers
+`PermissionsContext` returns `true` for every permission while identity is unknown, so controls are
+briefly enabled for everyone. Any "the control is disabled/enabled" assertion is meaningless unless
+you first wait for the `/auth/me` response.
+
+### A header-less request is not the same as a viewer
+An account with memberships in several workspaces and **no** `X-Workspace-Id` is answered
+ambiguously and fails closed, which shows up as `GET /schedules/ 403` right after login. The same
+request returns `200` once the header is present. Do not report that first 403 as a permission
+defect - re-test with the workspace chosen before drawing any conclusion.
+
+### Read-permission and route-gate can disagree; watch for fabricated empty states
+`/auth/me` may grant `schedule.read` while `GET /api/v1/schedules/` still answers `403` for that
+role. The page then renders the "No schedules yet ... Create schedule" empty state even though
+schedules exist in that workspace. Whenever a list looks empty, confirm the underlying GET returned
+`2xx` - an empty list drawn from a failed read is a reportable defect, not a passing test.
+
+## Engine / schedule fixtures
+
+### Choose the sync mode deliberately, and probe the real button labels
+The mode buttons are `Full append`, `Full overwrite`, `CDC`, `Incremental append`,
+`Incremental deduped`, `Mirror`, `SCD Type 2` - there is no button reading "Full refresh", so a
+`/Full refresh/i` locator silently falls through to whatever matched first (often `CDC`). Dump the
+visible button labels before selecting. For a "does a repeat beat duplicate rows?" proof use
+**Full overwrite**: after N beats the destination must equal the source exactly.
+
+### CDC needs a cursor and a primary key
+A CDC schedule saved without them fails its first beat with `Sync mode contract incomplete`
+(`rejected_rows`, `records_transferred: 0`), then parks. That is a fixture mistake, not a product
+bug - do not report it as one.
+
+### `tfid_src` carries a schema-drift blocker; `ttd_orders_ok` does not
+Any schedule reading `tfid_src` parks on `SOURCE_SCHEMA_DRIFT` with the self-contradictory finding
+`ts_plain: TIMESTAMP_NTZ -> TIMESTAMP_NTZ (narrow_type)` (identical old/new type reported as
+breaking) and `approvable: false`, so it can never fire twice. Use `ttd_orders_ok` (5 rows, sum
+`1367.875000`, no temporal columns) for cadence and duplication tests, and keep it pristine.
+
+### A parked schedule freezes its own cadence
+`last_status: "needs_approval"` suppresses further beats, so "it only ran once" is expected for a
+parked schedule. Check `run_count` in Mongo before assuming the scheduler is broken.
+
+## Windows / PowerShell API access
+
+`Invoke-WebRequest` / `Invoke-RestMethod` fail here - `-SkipHttpErrorCheck` does not exist on
+PS 5.1 and an error response makes it try to prompt (`NonInteractive mode`). Use `curl.exe`:
+`curl.exe -s -o NUL -w "%{http_code}" -X DELETE -H "Authorization: Bearer $t" -H "X-Workspace-Id: $w" <url>`.
+Response shapes differ per route: `GET /api/v1/schedules/` returns a **bare array**, while
+`GET /api/v1/connectors/saved` returns `{"connectors":[...]}` - indexing the wrong one yields `0`
+and looks like successful teardown when nothing was deleted.
+
+### Connector rows are only partly workspace-scoped
+Connectors created through the current UI carry the real `workspace_id`; pre-existing rows carry
+`workspace_id: ""`. Any workspace-isolation assertion must account for those unscoped legacy rows.
+
+## Settings tab selectors, Team endpoints, and "fake data" false alarms (PR #59 re-verify era)
+
+Four traps that each invalidated a run:
+
+- **Settings tab buttons are NOT exact text labels.** Each renders label+subtitle concatenated, e.g. the
+  Team button''s `textContent` is `TeamMembers & roles`, Notifications is `NotificationsAlerts &
+  integrations`, Enterprise is `EnterpriseTenant, BYOK, residency`. A locator on `/^Team$/` silently
+  matches nothing, the click is a no-op, and the script keeps scraping the **General** panel while
+  reporting it as Team/Notifications/Enterprise. Use a **prefix** regex (`/^Team/`) AND assert a
+  panel-specific string ("Members & roles", "Notification channels", "Enterprise tenant") before
+  recording any result for that tab.
+- **Team membership endpoints live under a `/team` prefix** (`team_router.py`):
+  `GET|POST /api/v1/team/workspaces/{workspace_id}/members`,
+  `PATCH|DELETE /api/v1/team/workspaces/{workspace_id}/members/{email}` (email is URL-encoded).
+  The intuitive `/api/v1/workspaces/{id}/members` is a **404** - do not read that as "no members".
+- **`Create workspace` renders only for `platformAdmin`** in TeamSettings. Its absence for a viewer is by
+  design (gated by non-rendering), not a missing-control defect. For an admin it starts `disabled` purely
+  because of the `!newWorkspaceName.trim()` guard - type a name and re-read `disabled` before calling it
+  over-gated. This distinction is easy to misreport in both directions.
+- **TenantSettings placeholders look exactly like real data.** `Wells Fargo`,
+  `dataflow.wellsfargo.com`, `security@example.com` and `10.0.0.0/8 / 192.168.1.50` are `placeholder=`
+  attributes, and `us-east-1` / `8` are client-side `useState` defaults for an unfilled create-tenant
+  form. A screenshot of Enterprise after a 403 therefore *looks* like invented server data but is not.
+  Always compare the DOM `value` against the `placeholder` attribute before reporting fabricated data.
+
+**Admin membership regression (the risk when write controls get gated):** driving Team through the real UI
+should yield `POST .../members 200`, `PATCH .../members/{email} 200` on the row `<select>`, and
+`DELETE .../members/{email} 200`, with the row gone after a reload. Uncheck the "create a login" checkbox
+when adding a temp member so teardown does not leave a sign-in-capable account behind.
+
+## Schedule detail drawer: control selectors and refusal wiring
+
+The drawer''s action bar is `.df2-drawer-actions`; enumerate its `button`s and read `disabled` +
+`title` rather than guessing by pixel colour. Labels are **state-dependent**: `Run now` becomes
+`Running…`/`Breaker open`, and `Pause` becomes `Activate` once the schedule is paused (a `Last job`
+button also appears after a run). A `/^Pause$/` locator therefore fails on a paused schedule.
+
+`PipelineDetailDrawer` takes `runRefusal` (job.run) and `manageRefusal` (schedule.manage); for a viewer
+Run now / Pause / Edit / Delete are disabled with those sentences as titles. **`Export YAML` stays
+enabled for a viewer by design** - it is a read (`GET /schedules/{id}/export?format=yaml` 200), so do not
+report it as an un-gated write.
+
+**Known residual gap:** the drawer body''s `Run parallel-run check` is NOT covered by those refusals - as a
+viewer it renders enabled with a generic title, fires `POST /api/v1/fidelity/check` (403,
+`connector.write`), and shows **no** user-visible feedback. When checking for silent failures, sample the
+DOM repeatedly (300ms-6s) after the click: the page-level `PermissionNotice` banner also matches
+`[class*="toast"]`/`[role="alert"]`, so a single late scan can be mistaken for a refusal toast that never
+appeared. Compare against a pre-click snapshot.
+
+Restart Vite when component **props/signatures** change and prove the new module is served with
+`curl.exe http://127.0.0.1:5173/src/components/<File>.tsx | Select-String <newPropName>` before trusting a
+disabled/title assertion.
+
+**Update (commit `9578d9a6`):** that gap is closed - `Run parallel-run check` is now disabled for a viewer
+with the shared `job.run` refusal, its handler returns early, and the backend rule
+`("POST", "/api/v1/fidelity/", JOB_RUN)` replaced the fall-through to the `connector.write` mutation
+default (which also refused an *operator*, since the operator role holds `JOB_RUN` but not
+`CONNECTOR_WRITE`). Any change to that route table needs a hard uvicorn restart.
+
+## Cheap fixtures for the drawer''s conditional controls (breaker / standing authority)
+
+`Reset breaker` and `Revoke authority` only render under state that no normal test flow produces. Both can
+be injected in seconds instead of driving the contract/approval flows:
+
+- **Standing authority** (`Revoke authority`): set `standing_authorization` on the schedule document in
+  Mongo `datatransfer.pipeline_schedules`. The drawer requires an object with an `id` key; use the
+  `StandingAuthorization` shape (`id, actor, reason, granted_at, expires_at, scopes, max_uses, uses`).
+- **Open breaker** (`Reset breaker`): the drawer needs `sched.contract_id` **and** a breaker whose state is
+  `open`/`half_open` (`breakerBlocksRuns`). Insert a doc into `datatransfer.contract_breakers` with
+  `{contract_id, state:"open", failure_count, success_count, failure_threshold, recovery_timeout_seconds,
+  half_open_max, canary_pct}` and point the schedule''s `contract_id` at it.
+- **Trap:** `POST /contracts/{id}/breaker/reset` 404s ("Contract not found") unless a *real contract
+  document* exists - `GET /contracts/{id}/breaker` happily invents a default breaker, so a breaker-only
+  fixture looks fine until you press Reset. Create the contract through `POST /api/v1/contracts`
+  (body needs only `name`, `source`, `destination`) and use the returned `id` for both the breaker doc and
+  the schedule''s `contract_id`, or you will misreport a fixture artifact as a product defect.
+- With an open breaker, admin `Run now` is legitimately **disabled** with the title
+  "Reset the contract breaker before running" - that is not over-gating.
+
+## Reading the Dual Run campaign out-of-band
+
+`POST /api/v1/fidelity/check` persists the cycle on the schedule as `fidelity_campaign` (Mongo
+`pipeline_schedules`). `GET /api/v1/schedules/` does **not** expose that field, so the drawer''s PARALLEL RUN
+panel reads "Not started" even when a campaign already exists; it only populates from the check response.
+Verify a recorded cycle by matching the response `run_id` against a new `fidelity_campaign.history` entry -
+do not use `cycles_observed`, which does not advance for a UI-initiated check (the drawer sends no
+mappings/`column_types`, so the cycle lands as `assurance_level: "no_columns"`, `passed: false`). An
+overwrite `Run now` records its own `full_checksum` cycle, so capture the campaign as a baseline first.
