@@ -167,6 +167,11 @@ _PATH_RULES: list[tuple[str, str, str]] = [
     ("POST", "/api/v1/transfer/run", Permission.JOB_RUN),
     ("*", "/api/v1/transfer/plans/", Permission.JOB_PLAN),
     ("GET", "/api/v1/transfer/", Permission.JOB_READ),
+    # Reading a schedule is schedule.read — the permission every role already
+    # holds. Requiring schedule.manage to *list* them refused the viewer's own
+    # Schedules page, which the client then drew as "No schedules yet" while
+    # schedules existed. Creating, changing, running and deciding stay manage.
+    ("GET", "/api/v1/schedules/", Permission.SCHEDULE_READ),
     ("*", "/api/v1/schedules/", Permission.SCHEDULE_MANAGE),
     ("GET", "/api/v1/audit/", Permission.AUDIT_READ),
     ("*", "/api/v1/ai/", Permission.AI_USE),

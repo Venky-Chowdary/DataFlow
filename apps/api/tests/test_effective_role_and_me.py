@@ -167,6 +167,22 @@ def test_settings_read_is_not_workspace_administration():
     assert _required_permission("GET", "/api/v1/workspace/pilot-engine") == Permission.WORKSPACE_MANAGE
 
 
+def test_listing_schedules_is_a_read_but_changing_one_is_not():
+    """A viewer sees the fleet; only deciding it needs schedule.manage.
+
+    Gating the list with ``schedule.manage`` refused the viewer's own Schedules
+    page, and the client drew that refusal as "No schedules yet" — schedules
+    that exist were reported as absent.
+    """
+    from services.rbac import Permission, _required_permission, role_permissions
+
+    assert _required_permission("GET", "/api/v1/schedules/") == Permission.SCHEDULE_READ
+    assert _required_permission("POST", "/api/v1/schedules/") == Permission.SCHEDULE_MANAGE
+    assert _required_permission("DELETE", "/api/v1/schedules/abc") == Permission.SCHEDULE_MANAGE
+    assert Permission.SCHEDULE_READ in role_permissions("viewer")
+    assert Permission.SCHEDULE_MANAGE not in role_permissions("viewer")
+
+
 def test_refusal_names_the_permission_and_the_role_it_resolved():
     from fastapi import FastAPI
     from fastapi.testclient import TestClient

@@ -20,6 +20,8 @@ import {
   type WorkspaceRole,
 } from "../../lib/api";
 import { getActiveWorkspaceId, setActiveWorkspaceId } from "../../lib/workspace";
+import { PermissionNotice } from "../../components/PermissionNotice";
+import { PERMISSIONS, useWriteGate } from "../../lib/PermissionsContext";
 
 const ROLE_LABELS: Record<string, string> = {
   admin: "Admin",
@@ -37,6 +39,9 @@ const ACCOUNT_LABELS: Record<string, string> = {
 export function TeamSettings() {
   const { toast } = useToast();
   const { confirm } = useConfirm();
+  // Membership is workspace administration: a workspace admin holds it without
+  // being a platform admin, and everyone else is refused before the request.
+  const manage = useWriteGate(PERMISSIONS.workspaceManage);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [platformAdmin, setPlatformAdmin] = useState(false);
   // The workspace being administered here is also the workspace every other
@@ -110,7 +115,14 @@ export function TeamSettings() {
     void refreshMembers(selectedWorkspace);
   }, [selectedWorkspace, refreshMembers]);
 
+  /** Refuse in words rather than sending a request that will be refused. */
+  const refuse = () => {
+    toast({ title: "No write permission", message: manage.reason, tone: "warning" });
+    return false;
+  };
+
   const addWorkspace = async () => {
+    if (!manage.allowed) return void refuse();
     const name = newWorkspaceName.trim();
     if (!name) return;
     setCreatingWorkspace(true);
@@ -132,6 +144,7 @@ export function TeamSettings() {
   };
 
   const invite = async () => {
+    if (!manage.allowed) return void refuse();
     const email = inviteEmail.trim();
     if (!selectedWorkspace) {
       toast({
@@ -182,6 +195,7 @@ export function TeamSettings() {
   };
 
   const remove = async (email: string) => {
+    if (!manage.allowed) return void refuse();
     if (!selectedWorkspace) return;
     const ok = await confirm({
       title: `Remove ${email}?`,
@@ -208,6 +222,7 @@ export function TeamSettings() {
   };
 
   const changeRole = async (email: string, role: WorkspaceRole) => {
+    if (!manage.allowed) return void refuse();
     if (!selectedWorkspace) return;
     setRoleChangeEmail(email);
     try {
@@ -273,6 +288,12 @@ export function TeamSettings() {
       <div className="df2-settings-section-body">
         {loadError && <div className="df2-team-error df2-mb-md">{loadError}</div>}
 
+        <PermissionNotice
+          allowed={manage.allowed}
+          reason={manage.reason}
+          what="Membership is read-only for you."
+        />
+
         {issuedPassword && (
           <div className="df2-team-secret df2-mb-md">
             <strong>One-time password for {issuedPassword.email}</strong>
@@ -321,7 +342,8 @@ export function TeamSettings() {
               <button
                 type="button"
                 className="df2-btn"
-                disabled={creatingWorkspace || !newWorkspaceName.trim()}
+                disabled={creatingWorkspace || !newWorkspaceName.trim() || !manage.allowed}
+                title={manage.reason || undefined}
                 onClick={() => void addWorkspace()}
               >
                 <DtIcon name="plus" size={14} />
@@ -394,7 +416,8 @@ export function TeamSettings() {
               <button
                 type="button"
                 className="df2-btn df2-btn-primary"
-                disabled={inviting}
+                disabled={inviting || !manage.allowed}
+                title={manage.reason || undefined}
                 onClick={() => void invite()}
               >
                 <DtIcon name="plus" size={14} />
@@ -433,7 +456,8 @@ export function TeamSettings() {
                             className="df2-select df2-team-role-select"
                             aria-label={`Role for ${m.email}`}
                             value={m.role}
-                            disabled={roleChangeEmail === m.email}
+                            disabled={roleChangeEmail === m.email || !manage.allowed}
+                            title={manage.reason || undefined}
                             onChange={(e) => void changeRole(m.email, e.target.value as WorkspaceRole)}
                           >
                             <option value="viewer">Viewer</option>
@@ -447,7 +471,8 @@ export function TeamSettings() {
                           <button
                             type="button"
                             className="df2-btn df2-btn-sm df2-btn-danger"
-                            disabled={removingEmail === m.email}
+                            disabled={removingEmail === m.email || !manage.allowed}
+                            title={manage.reason || undefined}
                             onClick={() => void remove(m.email)}
                           >
                             {removingEmail === m.email ? "Removing…" : "Remove"}

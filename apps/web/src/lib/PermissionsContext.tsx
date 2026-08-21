@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 
 import { ApiError, fetchEffectiveIdentity, type EffectiveIdentity } from "./api";
+import { refusalSentence } from "./permissionCopy";
 import { WORKSPACE_CHANGED_EVENT, getActiveWorkspaceId, setActiveWorkspaceId } from "./workspace";
 
 /**
@@ -41,23 +42,6 @@ export interface PermissionsValue {
   /** One sentence explaining a refusal, for a tooltip or a disabled control. */
   denialReason: (permission: PermissionName) => string;
 }
-
-const ROLE_LABEL: Record<string, string> = {
-  viewer: "a viewer",
-  operator: "an operator",
-  editor: "an editor",
-  admin: "an administrator",
-};
-
-const PERMISSION_ACTION: Record<string, string> = {
-  "connector.write": "add or change connections",
-  "job.run": "run transfers",
-  "job.manage": "change transfers",
-  "job.plan": "prepare a transfer plan",
-  "schedule.manage": "create or change schedules",
-  "schedule.authorize": "approve a scheduled run",
-  "workspace.manage": "change workspace settings",
-};
 
 const PermissionsContext = createContext<PermissionsValue | null>(null);
 
@@ -117,11 +101,9 @@ export function PermissionsProvider({
       return identity.permissions.includes(permission);
     };
     const role = identity?.effective_role ?? "";
-    const denialReason = (permission: PermissionName) => {
-      const action = PERMISSION_ACTION[permission] ?? "do this";
-      const who = ROLE_LABEL[role] ?? "not permitted";
-      return `You don't have permission to ${action} — you are ${who} in this workspace. Ask a workspace admin for the editor role.`;
-    };
+    // One sentence for both halves of a refusal: the one a control shows before
+    // it is pressed, and the one the API's 403 renders as.
+    const denialReason = (permission: PermissionName) => refusalSentence(permission, role);
     return { identity, loading, error, unknown, can, role, refresh, denialReason };
   }, [error, identity, loading, refresh]);
 

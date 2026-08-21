@@ -3,6 +3,9 @@ import { coerceLastTestOk, statusFromLastTest } from "./connectorHealth";
 import { JobHistory, jobHistoryFromResponse } from "./jobHistory";
 import { clearSession, getAuthToken, getSessionActor } from "./session";
 import { getActiveWorkspaceId } from "./workspace";
+import { permissionFromRefusal, refusalSentence } from "./permissionCopy";
+
+export { refusalSentence };
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 15000;
 const LONG_REQUEST_TIMEOUT_MS = 180000;
@@ -116,8 +119,11 @@ export function isForbidden(err: unknown): boolean {
   return err instanceof ApiError && err.forbidden;
 }
 
-/** Build the typed refusal for a non-OK response, preserving the API's reason. */
-export async function apiErrorFrom(res: Response, fallback: string): Promise<ApiError> {
+/** The API's own reason for a non-OK response, plus the 403 metadata it carries. */
+async function readApiRefusal(
+  res: Response,
+  fallback: string,
+): Promise<{ detail: string; permission: string; role: string }> {
   let detail = fallback;
   let permission = "";
   let role = "";
@@ -135,26 +141,23 @@ export async function apiErrorFrom(res: Response, fallback: string): Promise<Api
     /* keep the fallback */
   }
   if (res.status === 403) {
-    detail = permission
-      ? `You don't have permission to do this (needs ${permission}${role ? `, you are ${role}` : ""}).`
-      : detail || "You don't have permission to do this.";
+    // A denial the gate phrased for itself is rewritten for the person reading
+    // it, whether or not the body named the permission.
+    const named = permissionFromRefusal(detail, permission);
+    detail = refusalSentence(named, role);
+    permission = permission || named;
   }
+  return { detail, permission, role };
+}
+
+/** Build the typed refusal for a non-OK response, preserving the API's reason. */
+export async function apiErrorFrom(res: Response, fallback: string): Promise<ApiError> {
+  const { detail, permission, role } = await readApiRefusal(res, fallback);
   return new ApiError(detail, res.status, permission, role);
 }
 
 async function parseApiError(res: Response, fallback: string): Promise<string> {
-  try {
-    const data = await res.json();
-    const detail = data.detail ?? data.error ?? data.message;
-    if (typeof detail === "string") return detail;
-    if (detail && typeof detail === "object") {
-      if (typeof detail.error === "string") return detail.error;
-      if (typeof detail.message === "string") return detail.message;
-    }
-    return fallback;
-  } catch {
-    return fallback;
-  }
+  return (await readApiRefusal(res, fallback)).detail;
 }
 
 async function apiFetch(input: RequestInfo | URL, init: TimedRequestInit = {}): Promise<Response> {

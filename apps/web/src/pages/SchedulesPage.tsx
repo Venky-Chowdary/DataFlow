@@ -63,6 +63,8 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
   const [schedules, setSchedules] = useState<PipelineSchedule[]>([]);
   const [intervals, setIntervals] = useState<ScheduleIntervals | null>(null);
   const [loading, setLoading] = useState(true);
+  /** Why the fleet could not be read, when it could not — never drawn as empty. */
+  const [loadError, setLoadError] = useState("");
   const [showForm, setShowForm] = useState(false);
   const [editing, setEditing] = useState<PipelineSchedule | null>(null);
   const [saving, setSaving] = useState(false);
@@ -149,10 +151,16 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
     try {
       const rows = await fetchSchedules();
       setSchedules(rows);
+      setLoadError("");
       void loadBreakers(rows);
       void loadFreshness();
       void loadApprovals();
     } catch (e) {
+      // A list that could not be read is not an empty fleet. Drawing "No
+      // schedules yet" over a refused or failed read told a viewer that
+      // schedules they cannot see do not exist.
+      setSchedules([]);
+      setLoadError(e instanceof Error ? e.message : "Could not read this workspace's schedules.");
       console.error(e);
     }
     setLoading(false);
@@ -526,11 +534,15 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
                     size="sm"
                     variant="ghost"
                     loading={gitopsBusy}
+                    disabled={!scheduleManage.allowed}
                     onClick={() => importInputRef.current?.click()}
                     title={
-                      gitopsRequireSigned
+                      // Importing a manifest creates and updates schedules, so it
+                      // is gated like every other schedule write.
+                      scheduleManage.reason ||
+                      (gitopsRequireSigned
                         ? "Plan then apply with signed-contract gate"
-                        : "Plan then apply a dataflow.yaml manifest"
+                        : "Plan then apply a dataflow.yaml manifest")
                     }
                   >
                     Import YAML
@@ -592,7 +604,19 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
         <SectionLoader title="Loading schedules" hint="Fetching schedules…" />
       ) : showForm && schedules.length === 0 ? null : (
       <div className="df2-pipeline-list df2-pipeline-scroll">
-        {schedules.length === 0 ? (
+        {loadError ? (
+          <EmptyState
+            page
+            icon="alert"
+            title="Schedules could not be read"
+            description={loadError}
+            action={
+              <Button variant="secondary" onClick={() => void load()}>
+                Try again
+              </Button>
+            }
+          />
+        ) : schedules.length === 0 ? (
           <EmptyState
             page
             icon="activity"
