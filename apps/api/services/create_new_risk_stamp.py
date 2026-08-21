@@ -38,7 +38,10 @@ def apply_create_new_risk_stamps(
         is_precision_collapse_coercion,
         normalize_logical_type as _nlt,
     )
-    from services.type_system import assess_create_new_type_risk
+    from services.type_system import (
+        assess_create_new_type_risk,
+        reinvent_would_drop_dest_instant_carrier,
+    )
 
     samples_by_src = source_samples or {}
     out: list[dict] = []
@@ -68,6 +71,13 @@ def apply_create_new_risk_stamps(
             physical_from_stamp = create_new_mapping_target_type(
                 stamped, db, samples=col_samples
             )
+            if reinvent_would_drop_dest_instant_carrier(
+                stamped, physical_from_stamp, dest_db=db
+            ):
+                # The stamp is already the destination's own physical carrier;
+                # re-invent read it as a dialect-less source token and dropped
+                # the instant it declares (MySQL TIMESTAMP(6) → DATETIME(6)).
+                physical_from_stamp = stamped
             stamp_l = _nlt(stamped)
             src_phys_l = _nlt(physical_from_src or src)
             if physical_from_src and stamp_l == "float" and _nlt(src) == "float":
