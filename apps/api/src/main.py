@@ -47,6 +47,7 @@ from .routers.query_router import router as query_router
 from .routers.repair_router import router as repair_router
 from .routers.saved_connectors_router import router as saved_connectors_router
 from .routers.schedules_router import router as schedules_router
+from .routers.shape_router import router as shape_router
 from .routers.training_agent_router import router as training_agent_router
 from .transfer.engine import DuplicateTransferSubmission
 from .routers.transfer_router import router as transfer_router
@@ -442,6 +443,7 @@ app.include_router(query_router, prefix="/api/v1")
 app.include_router(usage_router, prefix="/api/v1")
 app.include_router(ops_router, prefix="/api/v1")
 app.include_router(repair_router, prefix="/api/v1")
+app.include_router(shape_router, prefix="/api/v1")
 
 
 @app.get("/")
