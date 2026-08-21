@@ -713,3 +713,62 @@ Four traps that each invalidated a run:
 should yield `POST .../members 200`, `PATCH .../members/{email} 200` on the row `<select>`, and
 `DELETE .../members/{email} 200`, with the row gone after a reload. Uncheck the "create a login" checkbox
 when adding a temp member so teardown does not leave a sign-in-capable account behind.
+
+## Schedule detail drawer: control selectors and refusal wiring
+
+The drawer''s action bar is `.df2-drawer-actions`; enumerate its `button`s and read `disabled` +
+`title` rather than guessing by pixel colour. Labels are **state-dependent**: `Run now` becomes
+`Running…`/`Breaker open`, and `Pause` becomes `Activate` once the schedule is paused (a `Last job`
+button also appears after a run). A `/^Pause$/` locator therefore fails on a paused schedule.
+
+`PipelineDetailDrawer` takes `runRefusal` (job.run) and `manageRefusal` (schedule.manage); for a viewer
+Run now / Pause / Edit / Delete are disabled with those sentences as titles. **`Export YAML` stays
+enabled for a viewer by design** - it is a read (`GET /schedules/{id}/export?format=yaml` 200), so do not
+report it as an un-gated write.
+
+**Known residual gap:** the drawer body''s `Run parallel-run check` is NOT covered by those refusals - as a
+viewer it renders enabled with a generic title, fires `POST /api/v1/fidelity/check` (403,
+`connector.write`), and shows **no** user-visible feedback. When checking for silent failures, sample the
+DOM repeatedly (300ms-6s) after the click: the page-level `PermissionNotice` banner also matches
+`[class*="toast"]`/`[role="alert"]`, so a single late scan can be mistaken for a refusal toast that never
+appeared. Compare against a pre-click snapshot.
+
+Restart Vite when component **props/signatures** change and prove the new module is served with
+`curl.exe http://127.0.0.1:5173/src/components/<File>.tsx | Select-String <newPropName>` before trusting a
+disabled/title assertion.
+
+**Update (commit `9578d9a6`):** that gap is closed - `Run parallel-run check` is now disabled for a viewer
+with the shared `job.run` refusal, its handler returns early, and the backend rule
+`("POST", "/api/v1/fidelity/", JOB_RUN)` replaced the fall-through to the `connector.write` mutation
+default (which also refused an *operator*, since the operator role holds `JOB_RUN` but not
+`CONNECTOR_WRITE`). Any change to that route table needs a hard uvicorn restart.
+
+## Cheap fixtures for the drawer''s conditional controls (breaker / standing authority)
+
+`Reset breaker` and `Revoke authority` only render under state that no normal test flow produces. Both can
+be injected in seconds instead of driving the contract/approval flows:
+
+- **Standing authority** (`Revoke authority`): set `standing_authorization` on the schedule document in
+  Mongo `datatransfer.pipeline_schedules`. The drawer requires an object with an `id` key; use the
+  `StandingAuthorization` shape (`id, actor, reason, granted_at, expires_at, scopes, max_uses, uses`).
+- **Open breaker** (`Reset breaker`): the drawer needs `sched.contract_id` **and** a breaker whose state is
+  `open`/`half_open` (`breakerBlocksRuns`). Insert a doc into `datatransfer.contract_breakers` with
+  `{contract_id, state:"open", failure_count, success_count, failure_threshold, recovery_timeout_seconds,
+  half_open_max, canary_pct}` and point the schedule''s `contract_id` at it.
+- **Trap:** `POST /contracts/{id}/breaker/reset` 404s ("Contract not found") unless a *real contract
+  document* exists - `GET /contracts/{id}/breaker` happily invents a default breaker, so a breaker-only
+  fixture looks fine until you press Reset. Create the contract through `POST /api/v1/contracts`
+  (body needs only `name`, `source`, `destination`) and use the returned `id` for both the breaker doc and
+  the schedule''s `contract_id`, or you will misreport a fixture artifact as a product defect.
+- With an open breaker, admin `Run now` is legitimately **disabled** with the title
+  "Reset the contract breaker before running" - that is not over-gating.
+
+## Reading the Dual Run campaign out-of-band
+
+`POST /api/v1/fidelity/check` persists the cycle on the schedule as `fidelity_campaign` (Mongo
+`pipeline_schedules`). `GET /api/v1/schedules/` does **not** expose that field, so the drawer''s PARALLEL RUN
+panel reads "Not started" even when a campaign already exists; it only populates from the check response.
+Verify a recorded cycle by matching the response `run_id` against a new `fidelity_campaign.history` entry -
+do not use `cycles_observed`, which does not advance for a UI-initiated check (the drawer sends no
+mappings/`column_types`, so the cycle lands as `assurance_level: "no_columns"`, `passed: false`). An
+overwrite `Run now` records its own `full_checksum` cycle, so capture the campaign as a baseline first.
