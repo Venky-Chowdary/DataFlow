@@ -183,6 +183,22 @@ def test_listing_schedules_is_a_read_but_changing_one_is_not():
     assert Permission.SCHEDULE_MANAGE not in role_permissions("viewer")
 
 
+def test_a_parallel_run_check_is_a_run_not_a_connector_write():
+    """Comparing source against destination is judged as running that pipeline.
+
+    Without an explicit rule the POST fell through to the mutation default
+    (``connector.write``), so the operator whose role is to run and reconcile
+    pipelines was refused, and a viewer's drawer control stayed enabled and
+    fired a doomed request.
+    """
+    from services.rbac import Permission, _required_permission, role_permissions
+
+    assert _required_permission("POST", "/api/v1/fidelity/check") == Permission.JOB_RUN
+    assert Permission.JOB_RUN in role_permissions("operator")
+    assert Permission.JOB_RUN in role_permissions("editor")
+    assert Permission.JOB_RUN not in role_permissions("viewer")
+
+
 def test_refusal_names_the_permission_and_the_role_it_resolved():
     from fastapi import FastAPI
     from fastapi.testclient import TestClient

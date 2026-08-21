@@ -147,6 +147,11 @@ _PATH_RULES: list[tuple[str, str, str]] = [
     ("*", "/api/v1/team/workspaces/", Permission.WORKSPACE_READ),
     ("GET", "/api/v1/team/workspaces", Permission.WORKSPACE_READ),
     ("*", "/api/v1/team/workspaces", Permission.WORKSPACE_MANAGE),
+    # Comparing a live source against its destination is a *run* of that pipeline,
+    # not a change to a connector. Falling through to the mutation default gave it
+    # connector.write, which refused the operator whose whole role is to run and
+    # reconcile pipelines, while the UI control stayed enabled.
+    ("POST", "/api/v1/fidelity/", Permission.JOB_RUN),
     # Proof ledger is readable by any workspace member; fidelity runs need job.run.
     ("GET", "/api/v1/workspace/proofs/", Permission.WORKSPACE_READ),
     ("POST", "/api/v1/workspace/proofs/", Permission.JOB_RUN),

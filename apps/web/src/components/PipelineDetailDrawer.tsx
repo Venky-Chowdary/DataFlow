@@ -21,6 +21,7 @@ import {
   campaignLabel,
 } from "../lib/contractBreakerUi";
 import { computeJobTrustScore } from "../lib/jobTrustScore";
+import { PERMISSIONS, useWriteGate } from "../lib/PermissionsContext";
 import { destHeadline } from "../lib/conservationLedger";
 import { formatSyncModeLabel } from "../lib/transferConstants";
 import { Connector, PipelineSchedule, StandingAuthorization, TransferJob } from "../lib/types";
@@ -103,6 +104,9 @@ export function PipelineDetailDrawer({
   /** Standing authority currently recorded on this schedule, if any. */
   const [authorization, setAuthorization] = useState<StandingAuthorization | null>(null);
   const [revoking, setRevoking] = useState(false);
+  // Resetting a contract breaker is an editor-level write on the contract; every
+  // other write in this drawer is refused before the click, so this one is too.
+  const breakerReset = useWriteGate(PERMISSIONS.connectorWrite);
 
   useEffect(() => {
     if (!open || !sched?.id) {
@@ -223,6 +227,7 @@ export function PipelineDetailDrawer({
   };
 
   const handleParallelCheck = async () => {
+    if (runRefusal) return;
     setCheckingParallel(true);
     try {
       const result = await runScheduleParallelCheck(sched.id);
@@ -294,6 +299,8 @@ export function PipelineDetailDrawer({
               variant="ghost"
               loading={resettingBreaker}
               loadingLabel="Resetting…"
+              disabled={!breakerReset.allowed}
+              title={breakerReset.reason || undefined}
               onClick={() => void handleResetBreaker()}
               leadingIcon={<DtIcon name="shield" size={14} />}
             >
@@ -512,8 +519,9 @@ export function PipelineDetailDrawer({
                   size="sm"
                   variant="ghost"
                   loading={revoking}
+                  disabled={Boolean(manageRefusal)}
                   onClick={() => void handleRevoke()}
-                  title="Revoke this authority; later runs need a fresh decision"
+                  title={manageRefusal || "Revoke this authority; later runs need a fresh decision"}
                 >
                   Revoke authority
                 </Button>
@@ -533,9 +541,13 @@ export function PipelineDetailDrawer({
               variant="secondary"
               loading={checkingParallel}
               loadingLabel="Comparing…"
+              disabled={Boolean(runRefusal)}
               onClick={() => void handleParallelCheck()}
               leadingIcon={<DtIcon name="shield" size={14} />}
-              title="Compare live source and destination now and record a Dual Run cycle"
+              title={
+                runRefusal
+                || "Compare live source and destination now and record a Dual Run cycle"
+              }
             >
               Run parallel-run check
             </Button>
