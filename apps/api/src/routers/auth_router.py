@@ -15,6 +15,10 @@ from fastapi.responses import RedirectResponse
 from services.platform_config import is_production, web_url
 from pydantic import BaseModel, Field
 
+from services.user_store import get_user as get_stored_user
+from services.user_store import normalize_email, set_password
+from services.workspace_access import actor_email
+
 from ..services.auth_service import (
     auth_bootstrap_status,
     authenticate,
@@ -35,6 +39,11 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 class LoginRequest(BaseModel):
     email: str = Field(min_length=3, max_length=320)
     password: str = Field(min_length=8, max_length=256)
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str = Field(min_length=8, max_length=256)
+    new_password: str = Field(min_length=12, max_length=256)
 
 
 def _web_origin() -> str:
@@ -664,8 +673,42 @@ async def login(body: LoginRequest, request: Request):
         )
     except Exception as exc:
         logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+    account = get_stored_user(user["email"])
     return {
         "token": token,
         "expires_at": expires_at,
         "user": public_user(user),
+        # An admin-issued one-time password is only temporary if the operator is
+        # told to rotate it; the client prompts on this flag.
+        "must_change_password": bool(account and account.get("must_change_password")),
     }
+
+
+@router.post("/change-password")
+async def change_password(body: ChangePasswordRequest, request: Request):
+    """Rotate your own password — how an admin-issued one-time password is retired."""
+    actor = normalize_email(actor_email(request))
+    if actor in ("", "anonymous"):
+        raise HTTPException(status_code=401, detail="Sign in before changing your password")
+    if get_stored_user(actor) is None:
+        raise HTTPException(
+            status_code=400,
+            detail="This account is provisioned by the deployment environment — change it there",
+        )
+    if not authenticate(actor, body.current_password):
+        raise HTTPException(status_code=403, detail="Current password is incorrect")
+    if body.new_password == body.current_password:
+        raise HTTPException(status_code=400, detail="Choose a password you have not used")
+    set_password(email=actor, password=body.new_password)
+    try:
+        from services.audit_log import append_audit_event
+
+        append_audit_event(
+            action="auth.password_change",
+            resource="/auth/change-password",
+            actor=actor,
+            level="warn",
+        )
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+    return {"ok": True}

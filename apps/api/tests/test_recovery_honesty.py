@@ -55,7 +55,7 @@ def test_recovery_honesty_refuses_product_undo_claims() -> None:
 
 def test_workspace_security_posture_includes_recovery_honesty(client):
     """Workspace posture must publish recovery honesty — refuse invent of product undo."""
-    ws = client.post("/api/v1/workspace/workspaces", json={"name": "Recovery Audit"}).json()
+    ws = client.post("/api/v1/team/workspaces", json={"name": "Recovery Audit"}).json()["workspace"]
     ws_id = ws["id"]
     response = client.get(
         "/api/v1/workspace/security/posture",

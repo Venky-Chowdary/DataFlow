@@ -6,13 +6,15 @@ import hashlib
 import hmac
 import json
 import logging
-import re
 
 from services.brand_env import getenv_brand
 import time
 from typing import Any, Optional
 
+from services.password_hash import hash_password as _hash_password
+from services.password_hash import verify_password as _verify_password
 from services.platform_config import is_production
+from services.user_store import credentials_for_auth, record_login
 
 logger = logging.getLogger("dataflow.auth")
 
@@ -23,9 +25,6 @@ _DEV_USER = {
     "name": "Test User",
     "role": "Workspace tester",
 }
-
-# Legacy unsalted SHA-256 hashes are exactly 64 hex characters.
-_LEGACY_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 # Cache admin bcrypt hash so we do not re-salt on every login request.
 _ADMIN_USER_CACHE: dict[str, str] | None = None
@@ -173,7 +172,11 @@ def _load_users() -> list[dict[str, Any]]:
     Priority:
     1. DATAFLOW_ADMIN_EMAIL + DATAFLOW_ADMIN_PASSWORD (always included when set)
     2. DATAFLOW_AUTH_USERS JSON list (merged; admin email wins on conflict)
-    3. Dev user — **only** when DATAFLOW_ALLOW_DEV_USER=1 and not production (audit §6.9)
+    3. Accounts an admin created in the user store (merged; env entries win)
+    4. Dev user — **only** when DATAFLOW_ALLOW_DEV_USER=1 and not production (audit §6.9)
+
+    The store comes last so an operator locked out of their own deployment can
+    always recover through the environment-provisioned admin.
     """
     users: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -186,6 +189,13 @@ def _load_users() -> list[dict[str, Any]]:
     for user in _users_from_auth_users_env():
         key = user["email"].strip().lower()
         if key in seen:
+            continue
+        users.append(user)
+        seen.add(key)
+
+    for user in credentials_for_auth():
+        key = user["email"].strip().lower()
+        if key in seen or not user.get("password_hash"):
             continue
         users.append(user)
         seen.add(key)
@@ -245,10 +255,8 @@ def auth_bootstrap_status(*, include_sensitive: bool = False) -> dict[str, Any]:
 
 
 def hash_password(password: str) -> str:
-    """Hash a password with bcrypt (adaptive, salted, slow)."""
-    import bcrypt
-
-    return bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt(rounds=12)).decode("utf-8")
+    """Hash a password with bcrypt — see ``services.password_hash``."""
+    return _hash_password(password)
 
 
 def _legacy_verify(password: str, password_hash: str) -> bool:
@@ -258,23 +266,8 @@ def _legacy_verify(password: str, password_hash: str) -> bool:
 
 
 def verify_password(password: str, password_hash: str) -> bool:
-    """Verify a password against a bcrypt hash.
-
-    Legacy unsalted SHA-256 is still accepted in development for backwards
-    compatibility, but it is rejected in production because it is not suitable
-    for regulated deployments.
-    """
-    if not password_hash:
-        return False
-    if _LEGACY_SHA256_RE.match(password_hash):
-        if is_production():
-            return False
-        return _legacy_verify(password, password_hash)
-    try:
-        import bcrypt
-        return bcrypt.checkpw(password.encode("utf-8"), password_hash.encode("utf-8"))
-    except ValueError:
-        return False
+    """Verify a password against a stored hash — see ``services.password_hash``."""
+    return _verify_password(password, password_hash)
 
 
 def authenticate(email: str, password: str) -> Optional[dict[str, str]]:
@@ -287,6 +280,9 @@ def authenticate(email: str, password: str) -> Optional[dict[str, str]]:
         if user.get("email", "").strip().lower() != normalized:
             continue
         if verify_password(password, user.get("password_hash", "")):
+            # Stored accounts carry a last-seen stamp so an admin can tell a
+            # dormant login from a live one; env-provisioned users are a no-op.
+            record_login(user["email"])
             return {
                 "email": user["email"],
                 "name": user.get("name", user["email"]),

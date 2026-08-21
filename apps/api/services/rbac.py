@@ -38,6 +38,10 @@ class Permission:
     WORKSPACE_MANAGE = "workspace.manage"
     AI_USE = "ai.use"
     QUERY_USE = "query.use"
+    # Acting on your *own* credential (rotating a one-time password). Every role
+    # holds it: without it an admin-issued temporary password could never be
+    # retired by the person who received it.
+    ACCOUNT_SELF = "account.self"
 
 
 _ALL_PERMISSIONS = {
@@ -56,6 +60,7 @@ _ALL_PERMISSIONS = {
     Permission.WORKSPACE_MANAGE,
     Permission.AI_USE,
     Permission.QUERY_USE,
+    Permission.ACCOUNT_SELF,
 }
 
 
@@ -66,6 +71,7 @@ _ROLE_PERMISSIONS: dict[str, set[str]] = {
         Permission.SCHEDULE_READ,
         Permission.AUDIT_READ,
         Permission.WORKSPACE_READ,
+        Permission.ACCOUNT_SELF,
         Permission.QUERY_USE,
         # Asking the assistant is a read: Pilot gates each tool it reaches by the
         # same permission as the REST route that performs it, so ai.use lets a
@@ -83,6 +89,7 @@ _ROLE_PERMISSIONS: dict[str, set[str]] = {
         Permission.SCHEDULE_MANAGE,
         Permission.AUDIT_READ,
         Permission.WORKSPACE_READ,
+        Permission.ACCOUNT_SELF,
         Permission.AI_USE,
         Permission.QUERY_USE,
     },
@@ -94,6 +101,7 @@ _ROLE_PERMISSIONS: dict[str, set[str]] = {
         Permission.SCHEDULE_READ,
         Permission.AUDIT_READ,
         Permission.WORKSPACE_READ,
+        Permission.ACCOUNT_SELF,
         Permission.QUERY_USE,
         Permission.AI_USE,
     },
@@ -128,6 +136,17 @@ _PUBLIC_PATHS = {
 # Method "*" matches any method.
 _PATH_RULES: list[tuple[str, str, str]] = [
     ("*", "/api/v1/admin/", Permission.WORKSPACE_MANAGE),
+    # Rotating your own password is not workspace administration.
+    ("POST", "/api/v1/auth/change-password", Permission.ACCOUNT_SELF),
+    ("POST", "/auth/change-password", Permission.ACCOUNT_SELF),
+    # Accounts are deployment-level administration. Membership changes inside a
+    # workspace are authorized by the *workspace* role in ``services.team_store``
+    # (a workspace admin need not be a platform admin), so the middleware only
+    # requires membership-level read here and lets the store refuse with a reason.
+    ("*", "/api/v1/team/users", Permission.WORKSPACE_MANAGE),
+    ("*", "/api/v1/team/workspaces/", Permission.WORKSPACE_READ),
+    ("GET", "/api/v1/team/workspaces", Permission.WORKSPACE_READ),
+    ("*", "/api/v1/team/workspaces", Permission.WORKSPACE_MANAGE),
     # Proof ledger is readable by any workspace member; fidelity runs need job.run.
     ("GET", "/api/v1/workspace/proofs/", Permission.WORKSPACE_READ),
     ("POST", "/api/v1/workspace/proofs/", Permission.JOB_RUN),

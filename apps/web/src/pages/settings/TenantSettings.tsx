@@ -41,8 +41,9 @@ export function TenantSettings() {
 
   useEffect(() => {
     setLoading(true);
-    Promise.all([fetchTenant().catch(() => null), fetchSecurityPosture().catch(() => null), fetchByokKeys().catch(() => ({ keys: [] })), fetchWorkspaces().catch(() => [])])
-      .then(([t, p, k, ws]) => {
+    Promise.all([fetchTenant().catch(() => null), fetchSecurityPosture().catch(() => null), fetchByokKeys().catch(() => ({ keys: [] })), fetchWorkspaces().catch(() => ({ workspaces: [] }))])
+      .then(([t, p, k, wsResult]) => {
+        const ws = wsResult.workspaces;
         setTenant(t);
         setPosture(p);
         setKeys(k.keys ?? []);

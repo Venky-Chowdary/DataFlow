@@ -2900,58 +2900,169 @@ export async function revokeWorkspaceApiKey(keyId: string): Promise<void> {
   if (!res.ok) throw new Error(await parseApiError(res, "Failed to revoke API key"));
 }
 
+export type WorkspaceRole = "admin" | "editor" | "viewer";
+
 export type Workspace = {
   id: string;
   name: string;
   created_at: string;
   created_by: string;
+  member_count?: number;
 };
 
 export type WorkspaceMember = {
   workspace_id: string;
   email: string;
-  role: "owner" | "editor" | "viewer";
+  role: WorkspaceRole;
   added_at: string;
   added_by: string;
+  /** Whether this email can actually sign in, and how the account was provisioned. */
+  has_account?: boolean;
+  account_status?: "active" | "disabled" | "provisioned" | "no_account";
+  name?: string;
 };
 
-export async function fetchWorkspaces(): Promise<Workspace[]> {
-  const res = await apiFetch(`${API_BASE}/workspace/workspaces`);
+export type PlatformUser = {
+  email: string;
+  name: string;
+  role: "admin" | "member";
+  status: "active" | "disabled";
+  created_at: string;
+  created_by: string;
+  updated_at: string;
+  last_login_at: string | null;
+  must_change_password: boolean;
+  workspaces?: { workspace_id: string; role: WorkspaceRole }[];
+};
+
+export async function fetchWorkspaces(): Promise<{ workspaces: Workspace[]; platformAdmin: boolean; actor: string }> {
+  const res = await apiFetch(`${API_BASE}/team/workspaces`);
   if (!res.ok) throw new Error(await parseApiError(res, "Failed to load workspaces"));
   const data = await res.json();
-  return data.workspaces ?? [];
+  return { workspaces: data.workspaces ?? [], platformAdmin: !!data.platform_admin, actor: data.actor ?? "" };
 }
 
 export async function createWorkspace(name: string): Promise<Workspace> {
-  const res = await apiFetch(`${API_BASE}/workspace/workspaces`, {
+  const res = await apiFetch(`${API_BASE}/team/workspaces`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ name }),
   });
   if (!res.ok) throw new Error(await parseApiError(res, "Failed to create workspace"));
-  return res.json();
+  return (await res.json()).workspace;
+}
+
+export async function renameWorkspace(workspaceId: string, name: string): Promise<Workspace> {
+  const res = await apiFetch(`${API_BASE}/team/workspaces/${workspaceId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to rename workspace"));
+  return (await res.json()).workspace;
+}
+
+export async function deleteWorkspace(workspaceId: string): Promise<void> {
+  const res = await apiFetch(`${API_BASE}/team/workspaces/${workspaceId}`, { method: "DELETE" });
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to delete workspace"));
 }
 
 export async function fetchWorkspaceMembers(workspaceId: string): Promise<WorkspaceMember[]> {
-  const res = await apiFetch(`${API_BASE}/workspace/workspaces/${workspaceId}/members`);
+  const res = await apiFetch(`${API_BASE}/team/workspaces/${workspaceId}/members`);
   if (!res.ok) throw new Error(await parseApiError(res, "Failed to load members"));
   const data = await res.json();
   return data.members ?? [];
 }
 
-export async function addWorkspaceMember(workspaceId: string, email: string, role: string): Promise<WorkspaceMember> {
-  const res = await apiFetch(`${API_BASE}/workspace/workspaces/${workspaceId}/members`, {
+export async function addWorkspaceMember(
+  workspaceId: string,
+  email: string,
+  role: string,
+  options: { createAccount?: boolean; name?: string } = {},
+): Promise<{ membership: WorkspaceMember; hasAccount: boolean; temporaryPassword: string | null }> {
+  const res = await apiFetch(`${API_BASE}/team/workspaces/${workspaceId}/members`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ email, role }),
+    body: JSON.stringify({ email, role, create_account: !!options.createAccount, name: options.name ?? "" }),
   });
   if (!res.ok) throw new Error(await parseApiError(res, "Failed to add member"));
-  return res.json();
+  const data = await res.json();
+  return { membership: data.membership, hasAccount: !!data.has_account, temporaryPassword: data.temporary_password ?? null };
+}
+
+export async function updateWorkspaceMemberRole(
+  workspaceId: string,
+  email: string,
+  role: string,
+): Promise<WorkspaceMember> {
+  const res = await apiFetch(`${API_BASE}/team/workspaces/${workspaceId}/members/${encodeURIComponent(email)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ role }),
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to change role"));
+  const data = await res.json();
+  return data.membership as WorkspaceMember;
 }
 
 export async function removeWorkspaceMember(workspaceId: string, email: string): Promise<void> {
-  const res = await apiFetch(`${API_BASE}/workspace/workspaces/${workspaceId}/members/${encodeURIComponent(email)}`, { method: "DELETE" });
+  const res = await apiFetch(`${API_BASE}/team/workspaces/${workspaceId}/members/${encodeURIComponent(email)}`, { method: "DELETE" });
   if (!res.ok) throw new Error(await parseApiError(res, "Failed to remove member"));
+}
+
+export async function fetchPlatformUsers(): Promise<PlatformUser[]> {
+  const res = await apiFetch(`${API_BASE}/team/users`);
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to load accounts"));
+  return (await res.json()).users ?? [];
+}
+
+export async function createPlatformUser(input: {
+  email: string;
+  name?: string;
+  platformRole?: "admin" | "member";
+  password?: string;
+  workspaceId?: string;
+  workspaceRole?: WorkspaceRole;
+}): Promise<{ user: PlatformUser; temporaryPassword: string | null }> {
+  const res = await apiFetch(`${API_BASE}/team/users`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      email: input.email,
+      name: input.name ?? "",
+      platform_role: input.platformRole ?? "member",
+      password: input.password ? input.password : null,
+      workspace_id: input.workspaceId ?? "",
+      workspace_role: input.workspaceRole ?? "viewer",
+    }),
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to create account"));
+  const data = await res.json();
+  return { user: data.user, temporaryPassword: data.temporary_password ?? null };
+}
+
+export async function updatePlatformUser(
+  email: string,
+  patch: { name?: string; platformRole?: "admin" | "member"; status?: "active" | "disabled" },
+): Promise<PlatformUser> {
+  const res = await apiFetch(`${API_BASE}/team/users/${encodeURIComponent(email)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name: patch.name, platform_role: patch.platformRole, status: patch.status }),
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to update account"));
+  return (await res.json()).user;
+}
+
+export async function resetPlatformUserPassword(email: string): Promise<string | null> {
+  const res = await apiFetch(`${API_BASE}/team/users/${encodeURIComponent(email)}/reset-password`, { method: "POST" });
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to reset password"));
+  return (await res.json()).temporary_password ?? null;
+}
+
+export async function deletePlatformUser(email: string): Promise<void> {
+  const res = await apiFetch(`${API_BASE}/team/users/${encodeURIComponent(email)}`, { method: "DELETE" });
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to delete account"));
 }
 
 export async function loginWorkspace(email: string, password: string): Promise<{

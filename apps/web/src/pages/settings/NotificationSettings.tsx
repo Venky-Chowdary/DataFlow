@@ -60,7 +60,7 @@ export function NotificationSettings() {
 
   useEffect(() => {
     fetchWorkspaces()
-      .then((w) => {
+      .then(({ workspaces: w }) => {
         setWorkspaces(w);
         if (w.length && !selectedWorkspace) setSelectedWorkspace(w[0].id);
       })
