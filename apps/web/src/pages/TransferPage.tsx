@@ -320,6 +320,8 @@ export function TransferPage({
   const [contractBlockReason, setContractBlockReason] = useState("");
   const [dragOver, setDragOver] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  /** True when the last error refused a declared read window, not the file. */
+  const [readWindowRefused, setReadWindowRefused] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [connectorId, setConnectorId] = useState("");
   /** Empty until the operator picks a destination — never default to MongoDB. */
@@ -2303,9 +2305,16 @@ export function TransferPage({
       });
       return;
     }
+    // Re-profiling the same file through a new window keeps the panel mounted so
+    // the operator can see which declaration is being applied; unmounting it mid
+    // request left the controls to disappear under the cursor. Everything derived
+    // from the old profile is still dropped, and Source cannot be left while the
+    // re-read is in flight.
+    const reprofiling = opts.readOptions !== undefined && selected === file;
     setUploadError(null);
+    setReadWindowRefused(false);
     setFile(selected);
-    setParsed(null);
+    if (!reprofiling) setParsed(null);
     setAnalysis(null);
     setPreflight(null);
     setPersistedPlanId(null);
@@ -2372,9 +2381,15 @@ export function TransferPage({
     } catch (e) {
       const message = e instanceof Error ? e.message : "Check file format and try again.";
       setUploadError(message);
-      setFile(null);
-      setParsed(null);
-      setReadOptions({});
+      setReadWindowRefused(reprofiling);
+      // A refused *window* keeps the file and its last good profile: the
+      // declaration is wrong, not the upload, and forcing a re-upload to correct
+      // a sheet name discards work the operator already did.
+      if (!reprofiling) {
+        setFile(null);
+        setParsed(null);
+        setReadOptions({});
+      }
       toast({
         title: windowDeclared ? "Read window refused" : "Upload failed",
         message,
@@ -2421,6 +2436,15 @@ export function TransferPage({
   };
 
   const explainSourceGap = () => {
+    if (sourceKind === "file" && uploading) {
+      toast({
+        title: "Source still being read",
+        message: "The declared read window is being applied — the columns and row count on screen are the previous read.",
+        tone: "warning",
+      });
+      setStep(STEP_SOURCE);
+      return true;
+    }
     if (sourceKind === "file" && !parsed) {
       toast({ title: "Source file required", message: "Upload a CSV, TSV, JSON, JSONL, Excel (.xlsx), or Parquet file to continue.", tone: "warning" });
       setStep(STEP_SOURCE);
@@ -5587,8 +5611,11 @@ export function TransferPage({
                 <div className="df2-alert df2-alert-error" role="alert">
                   <DtIcon name="x" size={16} />
                   <div>
-                    <strong>Upload failed</strong>
+                    <strong>{readWindowRefused ? "Read window refused" : "Upload failed"}</strong>
                     <p>{uploadError}</p>
+                    {readWindowRefused && (
+                      <p>The file and its previous read window are unchanged — correct the declaration and apply again.</p>
+                    )}
                   </div>
                 </div>
               )}
