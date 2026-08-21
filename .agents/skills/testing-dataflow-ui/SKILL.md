@@ -446,7 +446,11 @@ Traps found repeatedly on this app:
 - Job counts: `GET /api/v1/connectors/jobs` returns at most **50 recent rows** plus whole-history
   `total` / `status_counts`. The Jobs chips and nav badge must read those counts (via
   `lib/jobHistory.ts`) and agree with Pilot; the row list is a window and says so
-  ("Showing the 50 most recent of N jobs"). Cross-check ground truth with `mongo.count_jobs()` in the
+  ("Showing X of Y failed job(s) — this list holds the 50 most recent of N jobs"). That note is a
+  `<p class="df2-jobs-v3-window-note">` at the bottom of the scrollable job-list `aside`, so scroll the
+  *list* (not the page) to photograph it, and narrow rows with the list's own
+  `input[type=search]` (placeholder "Search route, type, status, job id…") — the header search does not
+  affect it. Cross-check ground truth with `mongo.count_jobs()` in the
   API venv before deciding which surface is wrong. Selecting `Failed (N)` can list fewer rows than N —
   that is the stated window, not a count bug.
 - Unsupported-question refusal: `how do I cook rice` must return the `will not answer it from
