@@ -89,7 +89,11 @@ import {
   sourceExtractReady,
   type SourceReadMode,
 } from "../lib/sourceReadMode";
-import { destRouteKey, runResultDescribesRoute } from "../lib/runRouteScope";
+import {
+  describeDestRoute,
+  destRouteKey,
+  runResultDescribesRoute,
+} from "../lib/runRouteScope";
 import { diagnoseSql } from "../lib/sqlEditorModel";
 import {
   availableSyncModes,
@@ -5060,13 +5064,14 @@ export function TransferPage({
    * place for a plan that was never executed.
    */
   const routeScopedLaunch = runResultDescribesCurrentPlan ? transferLaunch : null;
-  /** Route the superseded run actually wrote, named so it is not mistaken for this one. */
-  const staleRunDestLabel = [
-    result?.destination?.database,
-    result?.destination?.collection,
-  ]
-    .filter(Boolean)
-    .join(".");
+  /**
+   * Route the superseded run actually wrote, named from the route it recorded so
+   * the sentence matches the label the result dashboard uses for the same run.
+   */
+  const staleRunDestLabel = describeDestRoute(executedRouteKey)
+    || [result?.destination?.database, result?.destination?.collection]
+      .filter(Boolean)
+      .join(".");
 
   /** API-approved preflight only — local/review-grade never unlocks Execute. */
   const isGovernedExecuteReady = Boolean(

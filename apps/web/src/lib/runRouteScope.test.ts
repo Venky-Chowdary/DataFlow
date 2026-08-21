@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { destRouteKey, runResultDescribesRoute, type DestRoute } from "./runRouteScope";
+import {
+  describeDestRoute,
+  destRouteKey,
+  runResultDescribesRoute,
+  type DestRoute,
+} from "./runRouteScope";
 
 const DB_ROUTE: DestRoute = {
   destKindMode: "database",
@@ -68,4 +73,29 @@ test("a run is stale exactly when its route no longer matches", () => {
 
 test("a run that was never executed here is not called stale", () => {
   assert.equal(runResultDescribesRoute(null, destRouteKey(DB_ROUTE)), true);
+});
+
+test("a recorded table route is named the way the result dashboard names it", () => {
+  assert.equal(describeDestRoute(destRouteKey(DB_ROUTE)), "public.orders");
+  assert.equal(
+    describeDestRoute(destRouteKey({ ...DB_ROUTE, destSchema: "" })),
+    "dataflow.orders",
+  );
+});
+
+test("a recorded export route is named by format and path", () => {
+  assert.equal(
+    describeDestRoute(destRouteKey({
+      ...DB_ROUTE,
+      destKindMode: "file_export",
+      exportFormat: "csv",
+      destOutputPath: "C:/out/orders.csv",
+    })),
+    "CSV export · C:/out/orders.csv",
+  );
+});
+
+test("an absent or unreadable route is named nothing rather than guessed", () => {
+  assert.equal(describeDestRoute(null), "");
+  assert.equal(describeDestRoute("not json"), "");
 });

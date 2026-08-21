@@ -29,6 +29,30 @@ export function destRouteKey(route: DestRoute): string {
 }
 
 /**
+ * Names a recorded route the way the rest of the wizard names it — schema
+ * qualified for a table, format and path for an export — so one run is not
+ * described two different ways on the same page.
+ */
+export function describeDestRoute(routeKey: string | null): string {
+  if (!routeKey) return "";
+  let route: Partial<DestRoute>;
+  try {
+    route = JSON.parse(routeKey) as Partial<DestRoute>;
+  } catch {
+    return "";
+  }
+  if (route.destKindMode === "file_export") {
+    const format = (route.exportFormat || "").toUpperCase();
+    const path = route.destOutputPath || "";
+    return [format && `${format} export`, path].filter(Boolean).join(" · ");
+  }
+  const table = route.targetCollection || "";
+  const qualifier = route.destSchema || route.targetDb || "";
+  if (!table) return qualifier;
+  return qualifier ? `${qualifier}.${table}` : table;
+}
+
+/**
  * True when the run on screen wrote the route the wizard now describes. A run
  * seeded from elsewhere (no executed route) is not claimed to be stale.
  */
