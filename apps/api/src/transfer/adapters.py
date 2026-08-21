@@ -41,6 +41,7 @@ except (
     from src.services.value_serializer import cell_to_string, json_default
 
 from connectors.sql_dsn import is_masked_secret, sync_credentials_into_connection_string
+from services.read_options import ReadOptions
 
 from .connector_registry import run_probe
 from .models import EndpointConfig
@@ -216,8 +217,11 @@ def parse_file_content(
     filename: str,
     *,
     enable_ocr: bool = False,
+    read_options: ReadOptions | None = None,
 ) -> tuple[list[dict], list[str], dict[str, str]]:
-    result = FileParser.parse(content, filename, enable_ocr=enable_ocr)
+    result = FileParser.parse(
+        content, filename, enable_ocr=enable_ocr, read_options=read_options
+    )
     if not result.success:
         raise ValueError(result.error or "File parse failed")
     schema = FileParser.infer_schema(result.data)

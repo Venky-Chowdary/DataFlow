@@ -18,6 +18,12 @@ interface ValidateActionsRailProps {
   /** Extra execute block (e.g. non-CDC multi-stream). */
   executeBlocked?: boolean;
   executeBlockedReason?: string;
+  /**
+   * Route a previous completed run wrote, when the plan has since been
+   * retargeted. Stated here because Validate is where the operator stands when
+   * the retarget happens — the run they remember answers for another table.
+   */
+  supersededRunLabel?: string;
   /** CDC retention Check control (SQL Server / Oracle) — shown above footer when present. */
   cdcRetentionSlot?: ReactNode;
   /** Bind a signed data contract before Execute (plans + schedules persist this). */
@@ -53,6 +59,7 @@ export function ValidateActionsRail({
   savingContract,
   executeBlocked = false,
   executeBlockedReason,
+  supersededRunLabel,
   cdcRetentionSlot,
   contractSlot,
   onPrimaryFix,
@@ -133,6 +140,11 @@ export function ValidateActionsRail({
           )}
           {executeBlocked && executeBlockedReason && (
             <span className="is-warn" role="alert">{executeBlockedReason}</span>
+          )}
+          {supersededRunLabel && !transferLaunch && (
+            <span className="is-warn">
+              Last run wrote {supersededRunLabel} — nothing written for this route yet
+            </span>
           )}
         </div>
 

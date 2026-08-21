@@ -1,9 +1,10 @@
-import { API_BASE, ActiveDataContext, Connector, EnhancedAnalysis, ParsedUpload, PipelineSchedule, TransferJob, TransferPlan } from "./types";
+import { API_BASE, ActiveDataContext, Connector, EnhancedAnalysis, ParsedUpload, PipelineSchedule, SourceReadOptions, TransferJob, TransferPlan } from "./types";
 import { coerceLastTestOk, statusFromLastTest } from "./connectorHealth";
 import { JobHistory, jobHistoryFromResponse } from "./jobHistory";
 import { clearSession, getAuthToken, getSessionActor } from "./session";
 import { getActiveWorkspaceId } from "./workspace";
 import { permissionFromRefusal, refusalSentence } from "./permissionCopy";
+import { readOptionsPayload } from "./readOptions";
 
 export { refusalSentence };
 
@@ -1953,11 +1954,13 @@ export async function updateConnector(
 
 export async function uploadFile(
   file: File,
-  options?: { enableOcr?: boolean },
+  options?: { enableOcr?: boolean; readOptions?: SourceReadOptions },
 ): Promise<ParsedUpload> {
   const formData = new FormData();
   formData.append("file", file);
   formData.append("enable_ocr", options?.enableOcr === true ? "true" : "false");
+  const readOptions = readOptionsPayload(options?.readOptions);
+  if (readOptions) formData.append("read_options_json", readOptions);
   const res = await apiFetch(`${API_BASE}/connectors/upload`, { method: "POST", body: formData, timeoutMs: LONG_REQUEST_TIMEOUT_MS });
   if (!res.ok) throw new Error(await parseApiError(res, "Upload failed"));
   return res.json();
@@ -2462,6 +2465,8 @@ export async function runUniversalTransfer(options: {
   /** Bound data contract — same fail-closed SIGNED gate as scheduled runs. */
   contractId?: string;
   requireSignedContract?: boolean;
+  /** Declared source read window (sheet, header row, skips, encoding, delimiter). */
+  readOptions?: SourceReadOptions;
 }) {
   const formData = new FormData();
   if (options.file) formData.append("file", options.file);
@@ -2482,6 +2487,10 @@ export async function runUniversalTransfer(options: {
   formData.append("backfill_new_fields", options.backfillNewFields === true ? "true" : "false");
   formData.append("write_via_staging", options.writeViaStaging === true ? "true" : "false");
   formData.append("enable_ocr", options.enableOcr === true ? "true" : "false");
+  // The same window the preview was profiled through — a run that omits it
+  // would read the active sheet and reconcile against rows nobody approved.
+  const runReadOptions = readOptionsPayload(options.readOptions);
+  if (runReadOptions) formData.append("read_options_json", runReadOptions);
   if (options.destExtra && Object.keys(options.destExtra).length) {
     formData.append("dest_extra_json", JSON.stringify(options.destExtra));
   }

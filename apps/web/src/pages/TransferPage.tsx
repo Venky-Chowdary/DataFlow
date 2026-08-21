@@ -89,6 +89,11 @@ import {
   sourceExtractReady,
   type SourceReadMode,
 } from "../lib/sourceReadMode";
+import {
+  describeDestRoute,
+  destRouteKey,
+  runResultDescribesRoute,
+} from "../lib/runRouteScope";
 import { diagnoseSql } from "../lib/sqlEditorModel";
 import {
   availableSyncModes,
@@ -153,6 +158,7 @@ import {
   EnhancedAnalysis,
   ParsedUpload,
   PreflightResult,
+  SourceReadOptions,
   TransferPlan,
   TransferResult,
   JobProgress,
@@ -170,6 +176,10 @@ import {
   sameColumnList,
   sameSchemaMap,
 } from "../lib/destSchemaIdentity";
+import {
+  SourceReadWindowPanel,
+  offersReadWindow,
+} from "../components/transfer/SourceReadWindowPanel";
 import { parseCsvTextForPreview } from "../lib/csvPreview";
 import { runLocalFileExport } from "../lib/localFileExport";
 import { isApiPreflight, runLocalPreflight } from "../lib/localPreflight";
@@ -271,12 +281,16 @@ export function TransferPage({
   const [parsed, setParsed] = useState<ParsedUpload | null>(null);
   /** Opt-in Tesseract OCR for scanned/image-only PDFs. */
   const [enableOcr, setEnableOcr] = useState(false);
+  /** Declared source read window — the same one the run reads and reconciles. */
+  const [readOptions, setReadOptions] = useState<SourceReadOptions>({});
   const [ocrStatus, setOcrStatus] = useState<{ available?: boolean; message?: string } | null>(null);
   const [sourceRowEstimate, setSourceRowEstimate] = useState<number | null>(null);
   const [analysis, setAnalysis] = useState<EnhancedAnalysis | null>(null);
   const [preflight, setPreflight] = useState<PreflightResult | null>(null);
   /** Fingerprint of Map/sync/PK that produced the current preflight result. */
   const [validatedContractKey, setValidatedContractKey] = useState<string | null>(null);
+  /** Destination route of the run on screen. */
+  const [executedRouteKey, setExecutedRouteKey] = useState<string | null>(null);
   const [cellPreview, setCellPreview] = useState<CellPreviewResult | null>(null);
   const [analyzing, setAnalyzing] = useState(false);
   const [mappingProgress, setMappingProgress] = useState(0);
@@ -313,6 +327,8 @@ export function TransferPage({
   const [contractBlockReason, setContractBlockReason] = useState("");
   const [dragOver, setDragOver] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  /** True when the last error refused a declared read window, not the file. */
+  const [readWindowRefused, setReadWindowRefused] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [connectorId, setConnectorId] = useState("");
   /** Empty until the operator picks a destination — never default to MongoDB. */
@@ -2271,7 +2287,14 @@ export function TransferPage({
     }
   };
 
-  const processFile = async (selected: File) => {
+  const processFile = async (
+    selected: File,
+    opts: { readOptions?: SourceReadOptions } = {},
+  ) => {
+    // A window belongs to the file it was declared on, so a newly chosen file
+    // starts from the default (active sheet, header on row 1).
+    const window = opts.readOptions ?? {};
+    const windowDeclared = Object.keys(window).length > 0;
     const ext = fileExtension(selected.name);
     if (!ACCEPTED_UPLOAD_EXTENSIONS.has(ext)) {
       toast({
@@ -2289,9 +2312,16 @@ export function TransferPage({
       });
       return;
     }
+    // Re-profiling the same file through a new window keeps the panel mounted so
+    // the operator can see which declaration is being applied; unmounting it mid
+    // request left the controls to disappear under the cursor. Everything derived
+    // from the old profile is still dropped, and Source cannot be left while the
+    // re-read is in flight.
+    const reprofiling = opts.readOptions !== undefined && selected === file;
     setUploadError(null);
+    setReadWindowRefused(false);
     setFile(selected);
-    setParsed(null);
+    if (!reprofiling) setParsed(null);
     setAnalysis(null);
     setPreflight(null);
     setPersistedPlanId(null);
@@ -2301,10 +2331,12 @@ export function TransferPage({
     try {
       let data: ParsedUpload;
       try {
-        data = await uploadFile(selected, { enableOcr });
+        data = await uploadFile(selected, { enableOcr, readOptions: window });
       } catch (uploadErr) {
         const ext = fileExtension(selected.name);
-        if (ext === "csv" || ext === "tsv") {
+        // Browser parsing cannot honour a declared window — never profile a
+        // different population than the one that was asked for.
+        if ((ext === "csv" || ext === "tsv") && !windowDeclared) {
           const text = await selected.text();
           data = parseCsvTextForPreview(text);
           toast({
@@ -2322,6 +2354,7 @@ export function TransferPage({
         );
       }
       setParsed(data);
+      setReadOptions(data.read_options ?? window);
       if (data.ocr_status) {
         setOcrStatus(data.ocr_status);
       }
@@ -2355,12 +2388,29 @@ export function TransferPage({
     } catch (e) {
       const message = e instanceof Error ? e.message : "Check file format and try again.";
       setUploadError(message);
-      setFile(null);
-      setParsed(null);
-      toast({ title: "Upload failed", message, tone: "error" });
+      setReadWindowRefused(reprofiling);
+      // A refused *window* keeps the file and its last good profile: the
+      // declaration is wrong, not the upload, and forcing a re-upload to correct
+      // a sheet name discards work the operator already did.
+      if (!reprofiling) {
+        setFile(null);
+        setParsed(null);
+        setReadOptions({});
+      }
+      toast({
+        title: windowDeclared ? "Read window refused" : "Upload failed",
+        message,
+        tone: "error",
+      });
       console.error(e);
     }
     setUploading(false);
+  };
+
+  /** Re-profile the current file through a newly declared window. */
+  const applyReadWindow = (next: SourceReadOptions) => {
+    if (!file || uploading) return;
+    void processFile(file, { readOptions: next });
   };
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -2393,6 +2443,15 @@ export function TransferPage({
   };
 
   const explainSourceGap = () => {
+    if (sourceKind === "file" && uploading) {
+      toast({
+        title: "Source still being read",
+        message: "The declared read window is being applied — the columns and row count on screen are the previous read.",
+        tone: "warning",
+      });
+      setStep(STEP_SOURCE);
+      return true;
+    }
     if (sourceKind === "file" && !parsed) {
       toast({ title: "Source file required", message: "Upload a CSV, TSV, JSON, JSONL, Excel (.xlsx), or Parquet file to continue.", tone: "warning" });
       setStep(STEP_SOURCE);
@@ -4461,6 +4520,7 @@ export function TransferPage({
     setActiveJobId(null);
     setResult(null);
     setTransferLaunch(null);
+    setExecutedRouteKey(currentDestRouteKey);
     setRunStartupProgress(stagePercent(1, RUN_LAUNCH_STAGES.length));
     setRunStartupPhase(RUN_LAUNCH_STAGES[0]);
     // Prefer Validate-echoed Kernel stamps + signed contracts over Map drafts.
@@ -4539,6 +4599,7 @@ export function TransferPage({
         backfillNewFields,
         writeViaStaging,
         enableOcr,
+        readOptions: sourceKind === "file" ? readOptions : undefined,
         sourceExtra: (() => {
           const extra: Record<string, unknown> = {
             ...(sourceKind === "database"
@@ -4924,6 +4985,15 @@ export function TransferPage({
         : Boolean(destType && targetDb && targetCollection) && !destSchemaLoading));
 
   const needsDbPreflight = destKindMode === "database";
+  const currentDestRouteKey = destRouteKey({
+    destKindMode,
+    destType,
+    targetDb,
+    destSchema,
+    targetCollection,
+    exportFormat,
+    destOutputPath,
+  });
   /** Map/sync/PK/dest edits must invalidate a prior green Validate before Execute. */
   const buildValidateContractKey = useCallback(
     (maps: EditableMapping[]) =>
@@ -4974,6 +5044,34 @@ export function TransferPage({
       setValidatedContractKey(null);
     }
   }, [validateContractKey, validatedContractKey, preflight]);
+
+  /**
+   * A finished run reports the route it wrote. Retarget the destination and that
+   * panel stops being an answer about the route on screen, so Run offers Execute
+   * again instead of claiming a landing in a table it never wrote. The result is
+   * kept rather than destroyed: point the plan back and the proof returns.
+   * Mapping edits are deliberately not part of this — repairs are applied from
+   * the result panel itself.
+   */
+  const runResultDescribesCurrentPlan = runResultDescribesRoute(
+    executedRouteKey,
+    currentDestRouteKey,
+  );
+  /**
+   * The launch pointer belongs to the route it was launched for. Kept in state
+   * so Job Theater can still open it, but withheld from Validate and Run, whose
+   * job is the route on screen — otherwise "Open live progress" takes Execute's
+   * place for a plan that was never executed.
+   */
+  const routeScopedLaunch = runResultDescribesCurrentPlan ? transferLaunch : null;
+  /**
+   * Route the superseded run actually wrote, named from the route it recorded so
+   * the sentence matches the label the result dashboard uses for the same run.
+   */
+  const staleRunDestLabel = describeDestRoute(executedRouteKey)
+    || [result?.destination?.database, result?.destination?.collection]
+      .filter(Boolean)
+      .join(".");
 
   /** API-approved preflight only — local/review-grade never unlocks Execute. */
   const isGovernedExecuteReady = Boolean(
@@ -5291,6 +5389,7 @@ export function TransferPage({
     setTransferring(false);
     setActiveJobId(null);
     setResult(null);
+    setExecutedRouteKey(null);
     setSyncMode("full_refresh_append");
     setSchemaPolicy("manual_review");
     setValidationMode("balanced");
@@ -5558,8 +5657,11 @@ export function TransferPage({
                 <div className="df2-alert df2-alert-error" role="alert">
                   <DtIcon name="x" size={16} />
                   <div>
-                    <strong>Upload failed</strong>
+                    <strong>{readWindowRefused ? "Read window refused" : "Upload failed"}</strong>
                     <p>{uploadError}</p>
+                    {readWindowRefused && (
+                      <p>The file and its previous read window are unchanged — correct the declaration and apply again.</p>
+                    )}
                   </div>
                 </div>
               )}
@@ -5591,6 +5693,15 @@ export function TransferPage({
                   </small>
                 </span>
               </label>
+              {file && parsed && offersReadWindow(parsed.file_type || "") && (
+                <SourceReadWindowPanel
+                  fileType={parsed.file_type || ""}
+                  sheets={parsed.sheets ?? []}
+                  applied={readOptions}
+                  busy={uploading}
+                  onApply={applyReadWindow}
+                />
+              )}
               {file && parsed ? (
                 <div className="df2-upload-result df2-upload-result-compact">
                   <div className="df2-upload-result-main">
@@ -6725,7 +6836,12 @@ export function TransferPage({
             mappingReviewCount={mappingReviewCount}
             riskAckPendingCount={riskAckPendingCount}
             rowCount={parsed?.row_count ?? sourceRowEstimate ?? undefined}
-            transferLaunch={transferLaunch}
+            transferLaunch={routeScopedLaunch}
+            supersededRunLabel={
+              result && !runResultDescribesCurrentPlan
+                ? (staleRunDestLabel || "another destination")
+                : undefined
+            }
             savingContract={savingContract}
             executeBlocked={multiStreamUnsupportedMode || Boolean(contractBlockReason)}
             executeBlockedReason={
@@ -6793,7 +6909,11 @@ export function TransferPage({
         />
       )}
 
-      {step === STEP_RUN && !activeJobId && !result && !transferring && !transferLaunch && (
+      {step === STEP_RUN
+        && !activeJobId
+        && !transferring
+        && !routeScopedLaunch
+        && (!result || !runResultDescribesCurrentPlan) && (
         <div className="df2-transfer-step-panel df2-transfer-step-viewport df2-run-step">
           <div className="df2-card-body df2-run-center">
             <div className="df2-run-readiness" aria-label="Run readiness summary">
@@ -6851,9 +6971,12 @@ export function TransferPage({
               icon="transfer"
               title={isGovernedExecuteReady ? "Execute-ready · not migration proven" : "Confirm Validate before write"}
               description={
-                isGovernedExecuteReady
+                (result && !runResultDescribesCurrentPlan
+                  ? `The plan changed since the last run${staleRunDestLabel ? ` (it wrote ${staleRunDestLabel})` : ""}; nothing has been written for the route above. `
+                  : "")
+                + (isGovernedExecuteReady
                   ? "API preflight approved on Validate. Execute starts the write; Gate-8 post-write proof is still required for migration_proven."
-                  : "Execute stays locked until API Validate returns decision approve (local/review-grade cannot unlock)."
+                  : "Execute stays locked until API Validate returns decision approve (local/review-grade cannot unlock).")
               }
             />
           </div>
@@ -6965,7 +7088,7 @@ export function TransferPage({
         </div>
       )}
 
-      {step === STEP_RUN && result && !activeJobId && (
+      {step === STEP_RUN && result && !activeJobId && runResultDescribesCurrentPlan && (
         <div className="df2-transfer-step-panel df2-transfer-step-viewport df2-run-step df2-result-host">
           <div className="df2-card-body df2-result-body">
             <TransferResultDashboard

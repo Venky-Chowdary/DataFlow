@@ -145,7 +145,7 @@ def test_excel_over_max_rows_fail_closed(monkeypatch):
     from services.file_parser import FileParser
     import services.excel_parser as ep
 
-    def fake_batches(content, chunk_size):
+    def fake_batches(content, chunk_size, options=None):
         yield [{"id": "1", "name": "a"}, {"id": "2", "name": "b"}, {"id": "3", "name": "c"}]
 
     monkeypatch.setattr(ep, "iter_excel_batches", fake_batches)
