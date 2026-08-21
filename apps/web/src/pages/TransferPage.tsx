@@ -6832,6 +6832,11 @@ export function TransferPage({
             riskAckPendingCount={riskAckPendingCount}
             rowCount={parsed?.row_count ?? sourceRowEstimate ?? undefined}
             transferLaunch={routeScopedLaunch}
+            supersededRunLabel={
+              result && !runResultDescribesCurrentPlan
+                ? (staleRunDestLabel || "another destination")
+                : undefined
+            }
             savingContract={savingContract}
             executeBlocked={multiStreamUnsupportedMode || Boolean(contractBlockReason)}
             executeBlockedReason={
