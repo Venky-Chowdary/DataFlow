@@ -19,6 +19,7 @@ import {
   type WorkspaceMember,
   type WorkspaceRole,
 } from "../../lib/api";
+import { getActiveWorkspaceId, setActiveWorkspaceId } from "../../lib/workspace";
 
 const ROLE_LABELS: Record<string, string> = {
   admin: "Admin",
@@ -38,7 +39,10 @@ export function TeamSettings() {
   const { confirm } = useConfirm();
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [platformAdmin, setPlatformAdmin] = useState(false);
-  const [selectedWorkspace, setSelectedWorkspace] = useState<string>("");
+  // The workspace being administered here is also the workspace every other
+  // request is decided in: authority is per workspace, so a page that showed one
+  // workspace's members while the API answered for another would gate wrongly.
+  const [selectedWorkspace, setSelectedWorkspace] = useState<string>(() => getActiveWorkspaceId());
   const [members, setMembers] = useState<WorkspaceMember[]>([]);
   const [users, setUsers] = useState<PlatformUser[]>([]);
   const [loading, setLoading] = useState(true);
@@ -89,10 +93,20 @@ export function TeamSettings() {
       setMembers([]);
       return;
     }
-    setMembers(await fetchWorkspaceMembers(workspaceId).catch(() => []));
+    try {
+      setMembers(await fetchWorkspaceMembers(workspaceId));
+      setLoadError("");
+    } catch (err) {
+      // An unreadable member list is not an empty workspace.
+      setMembers([]);
+      setLoadError(err instanceof Error ? err.message : "Could not read this workspace's members.");
+    }
   }, []);
 
   useEffect(() => {
+    // Administering a workspace here also chooses it for the rest of the client,
+    // so every later request is decided by this workspace's membership role.
+    setActiveWorkspaceId(selectedWorkspace);
     void refreshMembers(selectedWorkspace);
   }, [selectedWorkspace, refreshMembers]);
 

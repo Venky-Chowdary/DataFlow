@@ -577,13 +577,18 @@ def _decider(request: Request, *, authorize: bool = False) -> str:
     a single-operator deployment with enforcement off — may the caller name
     themselves through the ``X-Actor`` header.
     """
-    from services.rbac import Permission, has_permission
+    from services.effective_role import (
+        effective_permissions,
+        workspace_id_from_request_headers,
+    )
+    from services.rbac import Permission
     from src.services import auth_service
 
     user = getattr(request.state, "user", None) or {}
     needed = Permission.SCHEDULE_AUTHORIZE if authorize else Permission.SCHEDULE_MANAGE
     if user:
-        if not has_permission(user, needed):
+        granted = effective_permissions(user, workspace_id_from_request_headers(request.headers))
+        if needed not in granted:
             raise HTTPException(status_code=403, detail=f"Permission denied: {needed}")
         actor = str(user.get("email") or user.get("name") or "").strip()
         if len(actor) >= MIN_ACTOR_LEN:

@@ -21,11 +21,21 @@ def _caller(request: Request) -> tuple[str, str]:
     single-operator deployment has no identity to gate on, and Pilot has to keep
     working there. The actor comes from the session rather than the request body
     — an audit trail the client names itself is not an audit trail.
+
+    The role is the one the request gate itself resolved for the addressed
+    workspace, so a workspace editor asking Pilot to do an editor's work is not
+    refused by a platform label that says only ``member``.
     """
+    from services.effective_role import (
+        resolve_effective_role,
+        workspace_id_from_request_headers,
+    )
+
     if not auth_service.auth_required():
         return "", ""
     user = getattr(request.state, "user", None) or {}
-    return str(user.get("role") or "viewer"), str(user.get("email") or "")
+    role = resolve_effective_role(user, workspace_id_from_request_headers(request.headers))
+    return role, str(user.get("email") or "")
 
 
 class ChatMessage(BaseModel):

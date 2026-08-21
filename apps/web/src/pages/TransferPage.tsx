@@ -12,6 +12,8 @@ import { PageShell } from "../components/ui/PageShell";
 import { WizardSteps } from "../components/ui/WizardSteps";
 import { ButtonLoader, LoadingBlock, Spinner } from "../components/LoadingState";
 import { useToast } from "../components/Toast";
+import { PERMISSIONS, useWriteGate } from "../lib/PermissionsContext";
+import { PermissionNotice } from "../components/PermissionNotice";
 import { TransferMapStep } from "./transfer/TransferMapStep";
 import { DestinationPicker } from "../components/transfer/DestinationPicker";
 import { DestProcedurePanel, type DestWriteMode } from "../components/transfer/DestProcedurePanel";
@@ -229,6 +231,7 @@ export function TransferPage({
   seedStudioIntent = null,
 }: TransferPageProps) {
   const { toast } = useToast();
+  const jobRun = useWriteGate(PERMISSIONS.jobRun);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const autoSelectedConnector = useRef(false);
   const autoSelectedSourceConnector = useRef(false);
@@ -4362,6 +4365,10 @@ export function TransferPage({
   }, [duplicateKeyRoot, openIdentitySettings, preflight, syncMode, toast]);
 
   const executeTransfer = async () => {
+    if (!jobRun.allowed) {
+      toast({ title: "No write permission", message: jobRun.reason, tone: "warning" });
+      return;
+    }
     if (multiStreamUnsupportedMode) {
       toast({
         title: "Multi-stream not supported for this mode",
@@ -5318,6 +5325,11 @@ export function TransferPage({
       description="Governed path: source → destination → map → preflight → run → proof"
     >
       <PageFrame className={`df2-transfer-studio-shell is-transfer-studio-active${step === STEP_MAP ? " is-map-step-active" : ""}`} showHonesty>
+      <PermissionNotice
+        allowed={jobRun.allowed}
+        reason={jobRun.reason}
+        what="You can plan a transfer but not run one."
+      />
       <header className="df2-transfer-studio-chrome">
         <div className="df2-transfer-studio-chrome-row">
         <WizardSteps

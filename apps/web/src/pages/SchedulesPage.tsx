@@ -17,6 +17,8 @@ import {
   type PipelineTab,
 } from "../components/PipelineDetailDrawer";
 import { useToast } from "../components/Toast";
+import { PERMISSIONS, useWriteGate } from "../lib/PermissionsContext";
+import { PermissionNotice } from "../components/PermissionNotice";
 import { useConfirm } from "../components/ui/ConfirmDialog";
 import {
   applyGitopsManifest,
@@ -55,6 +57,8 @@ type ScheduleFilter = "all" | "active" | "paused";
 
 export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesChange, highlightScheduleId }: SchedulesPageProps) {
   const { toast } = useToast();
+  const scheduleManage = useWriteGate(PERMISSIONS.scheduleManage);
+  const jobRun = useWriteGate(PERMISSIONS.jobRun);
   const { confirm } = useConfirm();
   const [schedules, setSchedules] = useState<PipelineSchedule[]>([]);
   const [intervals, setIntervals] = useState<ScheduleIntervals | null>(null);
@@ -74,6 +78,16 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
   const [freshnessLag, setFreshnessLag] = useState<Record<string, { lag: number; severity: string }>>({});
   /** Schedules parked on a deterministic finding, waiting on a named decision. */
   const [approvals, setApprovals] = useState<ScheduleApprovalInboxItem[]>([]);
+
+  /**
+   * Refuse in words rather than firing a request the API will reject.
+   * Returns true when the caller may proceed.
+   */
+  const allowOrExplain = (gate: { allowed: boolean; reason: string }) => {
+    if (gate.allowed) return true;
+    toast({ title: "No write permission", message: gate.reason, tone: "warning" });
+    return false;
+  };
 
   const loadApprovals = useCallback(async () => {
     try {
@@ -201,12 +215,14 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
   }, [schedules, filter, pipelineSearch]);
 
   const openCreate = () => {
+    if (!allowOrExplain(scheduleManage)) return;
     setResumeDrawerAfterEdit(false);
     setEditing(null);
     setShowForm(true);
   };
 
   const openEdit = (sched: PipelineSchedule) => {
+    if (!allowOrExplain(scheduleManage)) return;
     setEditing(sched);
     setShowForm(true);
     window.requestAnimationFrame(() => {
@@ -226,6 +242,7 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
   };
 
   const handleSubmit = async (input: Partial<ScheduleInput>) => {
+    if (!allowOrExplain(scheduleManage)) return;
     setSaving(true);
     try {
       if (editing) {
@@ -250,6 +267,7 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
   };
 
   const toggleEnabled = async (sched: PipelineSchedule) => {
+    if (!allowOrExplain(scheduleManage)) return;
     try {
       await updateSchedule(sched.id, { enabled: !sched.enabled });
       await load();
@@ -262,6 +280,7 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
   };
 
   const handleDelete = async (id: string) => {
+    if (!allowOrExplain(scheduleManage)) return;
     const target = schedules.find((s) => s.id === id);
     const ok = await confirm({
       title: target ? `Delete schedule “${target.name}”?` : "Delete this schedule?",
@@ -287,6 +306,7 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
   };
 
   const handleRunNow = async (id: string) => {
+    if (!allowOrExplain(jobRun)) return;
     const sched = schedules.find((s) => s.id === id);
     const contractId = sched?.contract_id;
     if (contractId && breakerBlocksRuns(breakers[contractId])) {
@@ -383,6 +403,7 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
   };
 
   const handleImportFile = async (file: File) => {
+    if (!allowOrExplain(scheduleManage)) return;
     setGitopsBusy(true);
     try {
       const text = await file.text();
@@ -429,6 +450,11 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
       description="Recurring sync schedules (not ADF/Informatica DAG pipelines) — same Map→Validate→Execute engine."
     >
       <PageFrame className="df2-pipeline-page">
+      <PermissionNotice
+        allowed={scheduleManage.allowed}
+        reason={scheduleManage.reason}
+        what="Schedules are read-only for you."
+      />
       {!loading && (
         <PageToolbar
           className={showForm ? "df2-toolbar--creating" : ""}
@@ -509,7 +535,13 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
                   >
                     Import YAML
                   </Button>
-                  <Button size="sm" variant="primary" onClick={openCreate}>
+                  <Button
+                    size="sm"
+                    variant="primary"
+                    disabled={!scheduleManage.allowed}
+                    title={scheduleManage.reason || undefined}
+                    onClick={openCreate}
+                  >
                     New schedule
                   </Button>
                 </div>
@@ -568,7 +600,12 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
             description="Create a recurring sync to keep source and destination in step — watermark incremental, upsert, and quarantine included."
             action={
               !showForm ? (
-                <Button variant="primary" onClick={openCreate}>
+                <Button
+                  variant="primary"
+                  disabled={!scheduleManage.allowed}
+                  title={scheduleManage.reason || undefined}
+                  onClick={openCreate}
+                >
                   Create schedule
                 </Button>
               ) : undefined
