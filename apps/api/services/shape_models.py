@@ -260,6 +260,27 @@ class ShapeStep:
         target = self.column or str(self.options.get("to") or "")
         return f"{self.op}({target})" if target else self.op
 
+    @property
+    def writes(self) -> tuple[str, ...]:
+        """Columns whose values this step can change or create.
+
+        Used to decide which columns' declared types must be re-inferred after
+        shaping: a column no step writes keeps the type the source declared, so
+        shaping cannot re-open a carrier decision it never touched.
+        """
+        options = self.options
+        if self.op in ("drop_column", "keep_columns", "filter_rows", "divert_rows"):
+            return ()
+        if self.op == "rename_column":
+            target = str(options.get("to") or "")
+            return (target,) if target else ()
+        if self.op in ("constant_column", "derive_column", "concat_columns"):
+            target = str(options.get("to") or "")
+            return (target,) if target else ()
+        if self.op == "split_column":
+            return tuple(str(name) for name in options.get("into", []))
+        return (self.column,) if self.column else ()
+
     def canonical(self) -> dict[str, Any]:
         """Identity of this step: shape, not spelling."""
         options = dict(self.options)
@@ -327,6 +348,15 @@ class ShapeRecipe:
             default=str,
         )
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
+
+    @property
+    def touched_columns(self) -> frozenset[str]:
+        """Every column an enabled step writes, plus every column it introduced."""
+        written: set[str] = set()
+        for step in self.enabled_steps:
+            written.update(step.writes)
+        written.update(set(self.output_columns) - set(self.input_columns))
+        return frozenset(name for name in written if name)
 
     def to_wire(self) -> dict[str, Any]:
         return {"steps": [s.to_wire() for s in self.steps]}

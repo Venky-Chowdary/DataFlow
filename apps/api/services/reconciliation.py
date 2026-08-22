@@ -616,6 +616,8 @@ def reconcile(
     sample_compare: dict[str, Any] | None = None,
     coerced_null_rows: int = 0,
     rows_skipped: int = 0,
+    rows_shaped_out: int = 0,
+    rows_source_filtered: int = 0,
     target_rows_before: int | None = None,
     checksum_scope: str = "",
 ) -> ReconciliationReport:
@@ -635,6 +637,8 @@ def reconcile(
     """
     coerced_null_rows = max(int(coerced_null_rows or 0), 0)
     rows_skipped = max(int(rows_skipped or 0), 0)
+    rows_shaped_out = max(int(rows_shaped_out or 0), 0)
+    rows_source_filtered = max(int(rows_source_filtered or 0), 0)
     # Coerced rows are KEPT in the destination (a cell became NULL), so they do
     # not lower the expected row count — only genuinely DROPPED / held-out rows do.
     # Under quarantine, bad rows are held out of the primary write (rejected >
@@ -642,8 +646,22 @@ def reconcile(
     # Under fail, coerced == 0 so dropped == rejected.
     # Skipped rows are neither dropped nor written (e.g. stale CDC LSN
     # redelivery) and must be excluded from the expected destination count.
+    # Rows an approved shaping recipe removed on the read (filtered or diverted)
+    # were read and are deliberately absent from the destination. They are a
+    # declared effect of the recipe, not a loss and not a quarantine finding, so
+    # they lower the expected count exactly like a hold-out does.
+    # A declared source row filter removes rows on the read for the same reason:
+    # they were counted in the source population and were never candidates for
+    # the destination.
     dropped_rows = max(max(rejected_rows, 0) - coerced_null_rows, 0)
-    expected_rows = max(source_rows - dropped_rows - rows_skipped, 0)
+    expected_rows = max(
+        source_rows
+        - dropped_rows
+        - rows_skipped
+        - rows_shaped_out
+        - rows_source_filtered,
+        0,
+    )
     if (
         not source_checksum
         and expected_rows == 0
@@ -673,7 +691,9 @@ def reconcile(
             target_checksum=target_checksum,
             message=(
                 f"Row count mismatch: source {source_rows}, rejected {rejected_rows}, "
-                f"skipped {rows_skipped}, expected target {expected_rows} vs target {target_rows}{extra_note}"
+                f"skipped {rows_skipped}, shaped out {rows_shaped_out}, "
+                f"filtered out {rows_source_filtered}, "
+                f"expected target {expected_rows} vs target {target_rows}{extra_note}"
             ),
             rejected_rows=rejected_rows,
             coerced_null_rows=coerced_null_rows,

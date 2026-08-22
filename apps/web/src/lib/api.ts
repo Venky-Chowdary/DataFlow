@@ -5,6 +5,12 @@ import { clearSession, getAuthToken, getSessionActor } from "./session";
 import { getActiveWorkspaceId } from "./workspace";
 import { permissionFromRefusal, refusalSentence } from "./permissionCopy";
 import { readOptionsPayload } from "./readOptions";
+import type {
+  ShapeCatalog,
+  ShapePreviewResponse,
+  ShapeProfileResponse,
+  ShapeRecipeWire,
+} from "./shape";
 
 export { refusalSentence };
 
@@ -480,6 +486,65 @@ export async function previewQuarantineCells(payload: {
     body: JSON.stringify(payload),
   });
   if (!res.ok) throw new Error(await parseApiError(res, "Cell preview failed"));
+  return res.json();
+}
+
+/**
+ * Shape (pre-write shaping) design-time calls.
+ *
+ * All four are pure design aids: they take the sampled rows the studio already
+ * holds and never touch a source or a destination, so the editor stays
+ * responsive and the answers are reproducible — the property Validate≡Execute
+ * later depends on.
+ */
+export async function fetchShapeCatalog(): Promise<ShapeCatalog> {
+  const res = await apiFetch(`${API_BASE}/shape/catalog`);
+  if (!res.ok) throw await apiErrorFrom(res, "Shape catalog unavailable");
+  return res.json();
+}
+
+export async function checkShapeExpression(payload: {
+  expression: string;
+  source_columns?: string[];
+}): Promise<{ valid: boolean; columns?: string[]; error?: string }> {
+  const res = await apiFetch(`${API_BASE}/shape/expression`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw await apiErrorFrom(res, "Expression check failed");
+  return res.json();
+}
+
+export async function profileShapeSource(payload: {
+  sample_rows: Record<string, unknown>[];
+  source_columns?: string[];
+  target_schema?: Record<string, string>;
+}): Promise<ShapeProfileResponse> {
+  const res = await apiFetch(`${API_BASE}/shape/profile`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+    timeoutMs: LONG_REQUEST_TIMEOUT_MS,
+  });
+  if (!res.ok) throw await apiErrorFrom(res, "Profile failed");
+  return res.json();
+}
+
+export async function previewShapeRecipe(payload: {
+  recipe: ShapeRecipeWire;
+  sample_rows: Record<string, unknown>[];
+  source_columns?: string[];
+  target_schema?: Record<string, string>;
+  include_profile?: boolean;
+}): Promise<ShapePreviewResponse> {
+  const res = await apiFetch(`${API_BASE}/shape/preview`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+    timeoutMs: LONG_REQUEST_TIMEOUT_MS,
+  });
+  if (!res.ok) throw await apiErrorFrom(res, "Shape preview failed");
   return res.json();
 }
 
@@ -2467,6 +2532,10 @@ export async function runUniversalTransfer(options: {
   requireSignedContract?: boolean;
   /** Declared source read window (sheet, header row, skips, encoding, delimiter). */
   readOptions?: SourceReadOptions;
+  /** Ordered row-local shaping applied on the read, before mapping. */
+  shapeRecipe?: ShapeRecipeWire;
+  /** Recipe identity Validate approved — a changed recipe is refused, not run. */
+  approvedShapeRecipeHash?: string;
 }) {
   const formData = new FormData();
   if (options.file) formData.append("file", options.file);
@@ -2491,6 +2560,14 @@ export async function runUniversalTransfer(options: {
   // would read the active sheet and reconcile against rows nobody approved.
   const runReadOptions = readOptionsPayload(options.readOptions);
   if (runReadOptions) formData.append("read_options_json", runReadOptions);
+  // The recipe the operator approved, and its identity. Execute re-applies this
+  // recipe and refuses if the hash no longer matches what Validate scanned.
+  if (options.shapeRecipe?.steps?.length) {
+    formData.append("shape_recipe_json", JSON.stringify(options.shapeRecipe));
+  }
+  if (options.approvedShapeRecipeHash) {
+    formData.append("approved_shape_recipe_hash", options.approvedShapeRecipeHash);
+  }
   if (options.destExtra && Object.keys(options.destExtra).length) {
     formData.append("dest_extra_json", JSON.stringify(options.destExtra));
   }

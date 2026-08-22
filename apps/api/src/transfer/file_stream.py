@@ -697,6 +697,7 @@ def stream_file_to_database(
     skip_preflight: bool = False,
     date_locale: str = "",
     read_options: ReadOptions | None = None,
+    shape_runner: Any = None,
 ) -> tuple[int, list[str], dict[str, Any], list[str]]:
     try:
         from services.file_parser import FileParser
@@ -709,6 +710,19 @@ def stream_file_to_database(
     )
     if not schema:
         schema = probe_schema
+    if shape_runner is not None:
+        # The recipe can add, drop and rename columns, so everything downstream —
+        # mapping fallbacks, fingerprints, DDL, the sample used for chunk sizing —
+        # must describe the shaped rows the writer will actually receive, not the
+        # ones the file holds. The caller's runner is stateful and carries this
+        # job's population counts; the sample is shaped by a throwaway one so a
+        # peeked row is never counted as a written row.
+        from services.shape_apply import ShapeRunner, shaped_schema
+
+        probe = ShapeRunner(shape_runner.recipe)
+        sample_rows = probe.records(sample_rows)
+        columns = list(probe.output_columns or columns)
+        schema = shaped_schema(probe, sample_rows, schema)
 
     # Resolve ambiguous day/month date order from the sample before any transform.
     if not date_locale and sample_rows and columns:
@@ -892,6 +906,25 @@ def stream_file_to_database(
 
     if source_filter:
         batch_iter = (apply_row_filter(batch, source_filter) for batch in batch_iter)
+
+    # Rows the file handed over before the recipe removed any of them. Gate-8
+    # counts the read population, so a filtered row has to be counted here and
+    # declared as a shaping effect — counting only the survivors would make the
+    # recipe's own arithmetic disappear from conservation.
+    shape_raw_rows_read = 0
+
+    if shape_runner is not None:
+        # One runner for the whole file, applied on the read: every batch is
+        # shaped before it is mapped, fingerprinted, counted or written, so a
+        # chunk boundary cannot change what a row becomes and the effect counts
+        # cover the population rather than one batch.
+        def _count_rows_read(batches):
+            nonlocal shape_raw_rows_read
+            for raw in batches:
+                shape_raw_rows_read += len(raw or [])
+                yield raw
+
+        batch_iter = shape_runner.batches(_count_rows_read(batch_iter))
 
     fp_accumulator = FingerprintAccumulator()
     # Independent reader cardinality for Gate-8 — never invent from written+held_out.
@@ -1317,6 +1350,15 @@ def stream_file_to_database(
         # source count and mis-hashes the checksum against the filtered load.
         if source_filter:
             full_iter = (apply_row_filter(batch, source_filter) for batch in full_iter)
+        if shape_runner is not None:
+            # The re-scan must fingerprint the same shaped rows the writer wrote,
+            # or a resumed run compares a shaped destination against a raw source
+            # checksum. Its own runner: this pass re-reads rows the main runner
+            # already accounted for, and counting them twice would unbalance the
+            # recipe's own arithmetic.
+            from services.shape_apply import ShapeRunner as _ShapeRunner
+
+            full_iter = _ShapeRunner(shape_runner.recipe).batches(full_iter)
         full_accumulator = FingerprintAccumulator()
         full_source_rows = 0
         for batch in full_iter:
@@ -1390,6 +1432,12 @@ def stream_file_to_database(
     if resumed and full_source_rows > 0:
         dest_summary["source_row_count"] = int(full_source_rows)
         dest_summary["source_row_count_source"] = "full_rescan_rows"
+    elif shape_runner is not None and shape_raw_rows_read > 0:
+        # The batches were counted after shaping, so they exclude the rows the
+        # recipe removed. Those rows were read, and the ledger states them as
+        # ``rows_shaped_out`` — the read population must include them.
+        dest_summary["source_row_count"] = int(shape_raw_rows_read)
+        dest_summary["source_row_count_source"] = "shape_read_rows"
     elif source_rows_seen > 0:
         dest_summary["source_row_count"] = int(source_rows_seen)
         dest_summary["source_row_count_source"] = "batch_rows"

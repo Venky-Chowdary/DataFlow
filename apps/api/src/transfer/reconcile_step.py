@@ -366,6 +366,38 @@ def _ladder_declined(report: dict[str, Any], rows: int, budget: int) -> dict[str
     return out
 
 
+def _ladder_declined_for_shape(
+    report: dict[str, Any], recipe_hash: str
+) -> dict[str, Any]:
+    """Decline source/destination cell equality for a shaped run, and say so.
+
+    The rows left in the source are the pre-shape values; the destination holds
+    the post-shape ones. Comparing them would report the operator's own declared
+    change as corruption, so the ladder names the recipe instead of asserting an
+    equality shaping made false. Gate-8 row balance and the destination re-read
+    are unaffected.
+    """
+    out = dict(report or {})
+    out["verification_ladder"] = {
+        "layers": {},
+        "passed": bool(out.get("passed")),
+        "assurance_level": str(out.get("assurance_level") or ""),
+        "population_proof": False,
+        "population_checksum_proof": bool(out.get("checksum_match")),
+        "skipped": True,
+        "shape_recipe_hash": recipe_hash,
+        "reason": (
+            f"Shaping recipe {recipe_hash} rewrote source-side values on the read, "
+            "so the source table no longer holds what this run wrote; "
+            "source→destination cell equality is declined rather than reported "
+            "false. Gate-8 row balance and the destination re-read still apply."
+        ),
+        "localization": {},
+        "localization_summary": "",
+    }
+    return out
+
+
 def _maybe_engine_profile_ladder(
     report: dict[str, Any],
     *,
@@ -389,6 +421,11 @@ def _maybe_engine_profile_ladder(
     profile, leaving the existing decline in charge.
     """
     if source_endpoint is None or getattr(source_endpoint, "kind", "") != "database":
+        return None
+    if dest_summary.get("shape_recipe_hash"):
+        # Column aggregates over the unshaped source describe values this run
+        # deliberately changed, so a rounded or filtered column would be reported
+        # as drift. The shaped decline in the caller states the reason instead.
         return None
     from services.procedure_source import is_callable_source
 
@@ -594,6 +631,15 @@ def _maybe_attach_verification_ladder(
         logging.getLogger(__name__).debug("ladder dest load failed: %s", exc)
         return report
 
+    # A shaping recipe rewrote source-side values on the read, so the rows still
+    # in the source table are no longer what this run wrote. Re-reading them here
+    # would compare pre-shape values against post-shape values and report every
+    # shaped cell as a mismatch, so the cell ladder declines and says why — the
+    # proof for a shaped run is the pinned recipe hash plus the destination
+    # re-read, not a source/destination cell equality that shaping made false.
+    shaped_run = bool(dest_summary.get("shape_recipe_hash"))
+    if source_endpoint is not None and not source_rows and shaped_run:
+        return _ladder_declined_for_shape(report, str(dest_summary["shape_recipe_hash"]))
     if source_endpoint is not None and not source_rows:
         from services.procedure_source import is_callable_source
 
@@ -1230,6 +1276,25 @@ def run_reconciliation(
     rejected_rows = int(dest_summary.get("rejected_rows", 0) or 0)
     coerced_null_rows = int(dest_summary.get("coerced_null_rows", 0) or 0)
     rows_skipped = int(dest_summary.get("rows_skipped", 0) or 0)
+    # Rows an approved shaping recipe removed on the read. They were read — so
+    # they belong to the source population this run counted — and they are
+    # deliberately not at the destination, so conservation has to name them
+    # instead of reading their absence as short delivery.
+    rows_shaped_out = int(dest_summary.get("rows_shaped_out", 0) or 0)
+    # Rows a declared source filter removed on the read. The source population
+    # this run counted includes them (the source paged and counted them), so the
+    # filter has to be stated here for the same reason a recipe does.
+    rows_source_filtered = int(dest_summary.get("rows_source_filtered", 0) or 0)
+    # The streaming reader counts every row it removed on the read — a declared
+    # filter's and a recipe's — for committed pages only, and cumulatively across
+    # resumes. When it reports that, it is the authoritative removal total: the
+    # recipe's own tally covers this pass alone.
+    rows_removed_on_read = int(dest_summary.get("rows_removed_on_read", 0) or 0)
+    if (
+        "rows_source_filtered" not in dest_summary
+        and rows_removed_on_read > rows_shaped_out + rows_source_filtered
+    ):
+        rows_source_filtered = rows_removed_on_read - rows_shaped_out
     # A resumed pass reads and writes only the tail of the population, while the
     # destination read-back is always full-table. Comparing the two directly
     # reports a mismatch on data that is correct, so the resumed slice must be
@@ -1276,7 +1341,14 @@ def run_reconciliation(
         source_rows = resume_full_source_rows
     elif resumed_from:
         source_rows += resumed_from
-    expected_written = max(source_rows - dropped_rows - rows_skipped, 0)
+    expected_written = max(
+        source_rows
+        - dropped_rows
+        - rows_skipped
+        - rows_shaped_out
+        - rows_source_filtered,
+        0,
+    )
     # Destinations with no read-back are accounted from writer counts, so rows a
     # previous pass already committed have to be added back or a correct resume
     # reads as short delivery.
@@ -1658,6 +1730,8 @@ def run_reconciliation(
             sample_compare=None,
             coerced_null_rows=coerced_null_rows,
             rows_skipped=rows_skipped,
+            rows_shaped_out=rows_shaped_out,
+            rows_source_filtered=rows_source_filtered,
         )
         return _finalize(report.to_dict())
 
@@ -2086,6 +2160,8 @@ def run_reconciliation(
             strict_checksum=False,
             coerced_null_rows=coerced_null_rows,
             rows_skipped=rows_skipped,
+            rows_shaped_out=rows_shaped_out,
+            rows_source_filtered=rows_source_filtered,
             sample_compare=sample_compare,
         )
         return _finalize(report.to_dict())
@@ -2102,6 +2178,8 @@ def run_reconciliation(
             sample_compare=sample_compare,
             coerced_null_rows=coerced_null_rows,
             rows_skipped=rows_skipped,
+            rows_shaped_out=rows_shaped_out,
+            rows_source_filtered=rows_source_filtered,
         )
         return _finalize(report.to_dict())
 
@@ -2261,6 +2339,8 @@ def run_reconciliation(
         sample_compare=sample_compare,
         coerced_null_rows=coerced_null_rows,
         rows_skipped=rows_skipped,
+        rows_shaped_out=rows_shaped_out,
+        rows_source_filtered=rows_source_filtered,
         target_rows_before=rows_before,
         checksum_scope=keyed_scope,
     )

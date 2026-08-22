@@ -97,6 +97,14 @@ class Checkpoint:
     #: Pre-write destination COUNT from the first batch. Resume must restore
     #: this — a mid-run COUNT is not a "before" and would invent a false delta.
     target_rows_before: int | None = None
+    #: Cumulative count of rows removed on the read by a declared source filter
+    #: or an approved shaping recipe. They belong to the source population the
+    #: run counted and are deliberately absent from the destination, so resume
+    #: must restore them or a correct filtered/shaped load fails conservation.
+    rows_removed_on_read: int = 0
+    #: The declared source filter's share of ``rows_removed_on_read``. Proof
+    #: names the two removals apart, so resume has to restore the split too.
+    rows_source_filtered: int = 0
 
     def add_rejected_details(self, details: list[dict[str, Any]] | None) -> None:
         """Append rejection evidence, keeping the checkpoint document bounded.
@@ -155,6 +163,8 @@ class Checkpoint:
             "updated_at": self.updated_at,
             "rejected_rows": self.rejected_rows,
             "coerced_null_rows": self.coerced_null_rows,
+            "rows_removed_on_read": self.rows_removed_on_read,
+            "rows_source_filtered": self.rows_source_filtered,
             "rejected_details": self.rejected_details,
             "rejected_details_truncated": self.rejected_details_truncated,
             "target_rows_before": self.target_rows_before,

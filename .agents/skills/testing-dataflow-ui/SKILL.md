@@ -718,7 +718,7 @@ when adding a temp member so teardown does not leave a sign-in-capable account b
 
 The drawer''s action bar is `.df2-drawer-actions`; enumerate its `button`s and read `disabled` +
 `title` rather than guessing by pixel colour. Labels are **state-dependent**: `Run now` becomes
-`Running…`/`Breaker open`, and `Pause` becomes `Activate` once the schedule is paused (a `Last job`
+`Running...`/`Breaker open`, and `Pause` becomes `Activate` once the schedule is paused (a `Last job`
 button also appears after a run). A `/^Pause$/` locator therefore fails on a paused schedule.
 
 `PipelineDetailDrawer` takes `runRefusal` (job.run) and `manageRefusal` (schedule.manage); for a viewer
@@ -772,3 +772,28 @@ Verify a recorded cycle by matching the response `run_id` against a new `fidelit
 do not use `cycles_observed`, which does not advance for a UI-initiated check (the drawer sends no
 mappings/`column_types`, so the cycle lands as `assurance_level: "no_columns"`, `passed: false`). An
 overwrite `Run now` records its own `full_checksum` cycle, so capture the campaign as a baseline first.
+
+## Tenant administration (Settings -> Enterprise)
+
+`GET /api/v1/workspace/tenant` resolves the tenant from the **workspace header** (`df2.workspace` in
+localStorage, sent as `X-Workspace-Id`). Until a workspace is selected on the **Team** tab, every
+tenant call 404s and the Enterprise tab looks broken - set the workspace first, or you will report a
+fixture gap as a product defect.
+
+Coverage limits worth knowing before planning a round: `deleteTenant` and `rotateByokKey` do **not**
+exist anywhere in `apps/web/src`. The page only offers Create/Update tenant and `Add BYOK key`, so
+tenant delete and BYOK rotate have to be exercised over HTTP with the authenticated session.
+
+Authority is resolved from the workspace named in the request **body** (platform role + membership
+row, via `resolve_effective_role`), not from the header - a workspace admin cannot create a tenant in
+another workspace by sending its own `X-Workspace-Id`. A viewer/editor must see the read-only notice
+*and* get `403 Workspace admin required to create a tenant` for its own token.
+
+## Audit level vocabulary trap
+
+Audit readers (`GET /api/v1/audit/events?level=...` and the Settings audit table) match the stored
+string **exactly** against `info|success|warn|error`. A synonym such as `warning` or `critical` used
+to render as `info` and vanish from the Warnings filter even though Mongo held the intended value;
+`append_audit_event` now canonicalizes it. When verifying that an event was recorded at a severity,
+cross-check **all three** layers - Mongo `datatransfer.audit_events`, the audit API response, and the
+DOM Level cell - because agreement between the first two proves nothing about what an operator sees.

@@ -26,8 +26,8 @@ from decimal import Decimal, DecimalException, InvalidOperation
 from typing import Any, Iterable, Mapping, Sequence
 
 from services.shape_expr import (
-    EvalError,
     FUNCTIONS,
+    EvalError,
     is_blank,
 )
 from services.shape_models import ShapeRecipe, ShapeStep
@@ -359,12 +359,21 @@ class ShapeEngine:
             return work()
         except (EvalError, ValueError, ArithmeticError, TypeError) as exc:
             tally.errors += 1
+            column = step.column or str(step.options.get("to") or "")
+            # A refusal surfaces to the operator as the run's failure message, so
+            # it has to say where to look: step 3 of the recipe, row 431, column
+            # arr_time — not just "not a number" for a million-row file.
+            located = f"shaping step {index + 1} ({step.op})"
+            if column:
+                located += f" on column '{column}'"
+            # One-based, like every other row citation the operator sees.
+            located += f", source row {self._row_index + 1}: {exc}"
             failure = ShapeRowError(
-                str(exc),
+                located,
                 step=step,
                 step_index=index,
                 row_index=self._row_index,
-                column=step.column or str(step.options.get("to") or ""),
+                column=column,
             )
             if len(tally.error_samples) < self.sample_limit:
                 tally.error_samples.append(failure.as_dict())
