@@ -103,6 +103,27 @@ def _actor(request: Request) -> str:
     return getattr(request.state, "user_email", None) or "anonymous"
 
 
+def _can_admin_workspace(request: Request, workspace_id: str) -> bool:
+    """Whether this caller may administer the workspace the call names.
+
+    Resolved through the same two authorities the API gate uses — the platform
+    role and the membership row — so a platform administrator administers every
+    workspace and a workspace admin need not be a platform admin. Reading the
+    membership row alone refused the platform admin who created the workspace
+    and never joined it.
+    """
+    from src.services import auth_service
+
+    if not auth_service.auth_required():
+        return True
+    from services.effective_role import resolve_effective_role
+
+    user = getattr(request.state, "user", None)
+    if not isinstance(user, dict):
+        user = {"email": _actor(request), "role": "viewer"}
+    return resolve_effective_role(user, workspace_id) == "admin"
+
+
 @router.get("/settings")
 async def get_settings():
     from services.workspace_store import get_workspace_settings
@@ -471,8 +492,10 @@ async def get_all_tenants():
 
 @router.post("/tenant")
 async def post_tenant(body: TenantCreateBody, request: Request):
+    from services.audit_log import append_audit_event
+
     actor = _actor(request)
-    if body.workspace_id and not can_admin_workspace(body.workspace_id, actor):
+    if body.workspace_id and not _can_admin_workspace(request, body.workspace_id):
         raise HTTPException(status_code=403, detail="Workspace admin required to create a tenant")
     try:
         tenant = create_tenant(
@@ -488,36 +511,69 @@ async def post_tenant(body: TenantCreateBody, request: Request):
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    append_audit_event(
+        action="workspace.tenant.create",
+        resource=f"/workspace/tenant/{tenant.id}",
+        actor=actor,
+        level="info",
+        details={
+            "tenant_id": tenant.id,
+            "workspace_id": tenant.workspace_id,
+            "custom_domain": tenant.custom_domain,
+            "data_region": tenant.data_region,
+        },
+    )
     return tenant.to_dict()
 
 
 @router.patch("/tenant/{tenant_id}")
 async def patch_tenant(tenant_id: str, body: TenantUpdateBody, request: Request):
+    from services.audit_log import append_audit_event
+
     tenant = get_tenant(tenant_id)
     if not tenant:
         raise HTTPException(status_code=404, detail="Tenant not found")
     actor = _actor(request)
-    if tenant.workspace_id and not can_admin_workspace(tenant.workspace_id, actor):
+    if tenant.workspace_id and not _can_admin_workspace(request, tenant.workspace_id):
         raise HTTPException(status_code=403, detail="Workspace admin required")
     try:
         updated = update_tenant(tenant_id, **body.model_dump(exclude_none=True))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not updated:
-        raise HTTPException(status_code=500, detail="Update failed")
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    append_audit_event(
+        action="workspace.tenant.update",
+        resource=f"/workspace/tenant/{tenant_id}",
+        actor=actor,
+        level="info",
+        details={
+            "tenant_id": tenant_id,
+            "fields": sorted(body.model_dump(exclude_none=True).keys()),
+        },
+    )
     return updated.to_dict()
 
 
 @router.delete("/tenant/{tenant_id}")
 async def delete_tenant_route(tenant_id: str, request: Request):
+    from services.audit_log import append_audit_event
+
     tenant = get_tenant(tenant_id)
     if not tenant:
         raise HTTPException(status_code=404, detail="Tenant not found")
     actor = _actor(request)
-    if tenant.workspace_id and not can_admin_workspace(tenant.workspace_id, actor):
+    if tenant.workspace_id and not _can_admin_workspace(request, tenant.workspace_id):
         raise HTTPException(status_code=403, detail="Workspace admin required")
     if not delete_tenant(tenant_id):
-        raise HTTPException(status_code=500, detail="Delete failed")
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    append_audit_event(
+        action="workspace.tenant.delete",
+        resource=f"/workspace/tenant/{tenant_id}",
+        actor=actor,
+        level="warn",
+        details={"tenant_id": tenant_id, "workspace_id": tenant.workspace_id},
+    )
     return {"ok": True}
 
 
@@ -534,8 +590,7 @@ async def post_tenant_byok_key(request: Request, body: BYOKKeyCreateBody):
     tenant = _resolve_request_tenant(request)
     if not tenant:
         raise HTTPException(status_code=404, detail="No tenant configured")
-    actor = _actor(request)
-    if tenant.workspace_id and not can_admin_workspace(tenant.workspace_id, actor):
+    if tenant.workspace_id and not _can_admin_workspace(request, tenant.workspace_id):
         raise HTTPException(status_code=403, detail="Workspace admin required")
     try:
         key = create_key(
@@ -557,8 +612,7 @@ async def rotate_tenant_byok_key(key_id: str, request: Request):
     tenant = _resolve_request_tenant(request)
     if not tenant:
         raise HTTPException(status_code=404, detail="No tenant configured")
-    actor = _actor(request)
-    if tenant.workspace_id and not can_admin_workspace(tenant.workspace_id, actor):
+    if tenant.workspace_id and not _can_admin_workspace(request, tenant.workspace_id):
         raise HTTPException(status_code=403, detail="Workspace admin required")
     key = get_key(key_id)
     if not key or key.tenant_id != tenant.id:

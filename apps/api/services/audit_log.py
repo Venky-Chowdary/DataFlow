@@ -27,6 +27,41 @@ _SENSITIVE_KEYS = frozenset({
 })
 
 
+AUDIT_LEVELS = frozenset({"info", "success", "warn", "error"})
+
+_LEVEL_SYNONYMS = {
+    "warning": "warn",
+    "critical": "error",
+    "fatal": "error",
+    "err": "error",
+    "debug": "info",
+    "ok": "success",
+}
+
+
+def canonical_level(level: str) -> str:
+    """The level string the readers actually filter on.
+
+    Readers (the audit API's ``level`` filter and the Settings audit table) match
+    the stored value exactly against ``info|success|warn|error``, so a caller that
+    writes the English synonym ``"warning"`` files a destructive action as
+    informational and it disappears from the Warnings view. Fold the synonym here
+    rather than trusting every call site to remember the vocabulary.
+    """
+    raw = str(level or "").strip().lower()
+    if raw in AUDIT_LEVELS:
+        return raw
+    mapped = _LEVEL_SYNONYMS.get(raw)
+    if mapped:
+        return mapped
+    logging.getLogger(__name__).warning(
+        "Audit level %r is not one of %s; recording as info",
+        level,
+        sorted(AUDIT_LEVELS),
+    )
+    return "info"
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -126,7 +161,7 @@ def append_audit_event(
             "actor": actor,
             "action": action,
             "resource": resource,
-            "level": level,
+            "level": canonical_level(level),
             "correlation_id": correlation_id,
             "details": _redact(details or {}),
             "prev_hash": prev,
