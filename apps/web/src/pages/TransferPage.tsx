@@ -4173,6 +4173,10 @@ export function TransferPage({
             && Object.keys(destSchemaMap).length
               ? destSchemaMap
               : undefined,
+          // Validate must score the rows the write will carry: the run shapes on
+          // the read, so a gate judging the raw source refuses values the
+          // transform already removed.
+          shape_recipe: recipePayload(shapeSteps),
           sample_rows: sampleRows,
           estimated_bytes: estimatedBytes,
           sync_mode: syncMode,

@@ -423,6 +423,12 @@ export async function runPreflight(payload: {
   dest_extra?: Record<string, unknown>;
   source_kind?: string;
   source_type?: string;
+  /**
+   * Approved pre-load transform recipe. Execute shapes rows on the read, so the
+   * gates have to judge the transformed rows or they refuse values the write
+   * never carries.
+   */
+  shape_recipe?: ShapeRecipeWire;
 }): Promise<import("./types").PreflightResult> {
   const res = await apiFetch(`${API_BASE}/preflight/run`, {
     method: "POST",

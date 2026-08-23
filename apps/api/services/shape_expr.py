@@ -929,7 +929,14 @@ class _Parser:
                 f"{token.text!r} cannot start an expression (position {token.pos + 1})"
             )
         if token.kind == "end":
-            raise ExpressionError("expression is empty")
+            # Only genuinely empty at position 0. Reaching the end mid-parse means
+            # an operator is missing its right-hand value ("[status] <>"), and
+            # calling that "empty" sends the operator looking for the wrong fault.
+            if token.pos == 0:
+                raise ExpressionError("expression is empty")
+            raise ExpressionError(
+                f"expression ends after position {token.pos}: a value is missing"
+            )
 
         # A name: either a function call or a column reference.
         if self.current.kind == "punct" and self.current.text == "(":

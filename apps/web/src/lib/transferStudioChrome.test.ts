@@ -77,6 +77,22 @@ describe("Transfer Studio chrome contracts", () => {
     assert.doesNotMatch(page, /Continue to Shape/);
   });
 
+  it("Validate is asked about the transformed rows, not the raw source", () => {
+    // The run shapes on the read, so a Validate that scores the source refuses
+    // values the write never carries (a stripped control character, a rounded
+    // decimal). Both calls must carry the same recipe.
+    const page = readFileSync(join(webRoot, "pages/TransferPage.tsx"), "utf8");
+    const api = readFileSync(join(webRoot, "lib/api.ts"), "utf8");
+
+    const preflightCall = page.slice(page.indexOf("pf = await runPreflight("));
+    assert.match(
+      preflightCall.slice(0, preflightCall.indexOf("});")),
+      /shape_recipe: recipePayload\(shapeSteps\)/,
+      "runPreflight must send the approved recipe",
+    );
+    assert.match(api, /shape_recipe\?: ShapeRecipeWire/);
+  });
+
   it("the Transform step ships the stylesheet its own namespace needs", () => {
     const entry = readFileSync(join(webRoot, "styles/app-styles.css"), "utf8");
     const css = readFileSync(join(webRoot, "styles/transform-prep.css"), "utf8");
