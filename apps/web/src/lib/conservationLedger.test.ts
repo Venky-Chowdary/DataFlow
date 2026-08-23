@@ -631,18 +631,18 @@ describe("shaped rows are named, never drawn as silent loss", () => {
     const cells = ledgerIdentityCells(ledger);
     const labels = cells.map((c) => c.label);
     assert.ok(labels.includes("Filtered on read"));
-    assert.ok(labels.includes("Shaped out"));
-    assert.equal(cells.find((c) => c.label === "Shaped out")?.value, "2");
-    assert.equal(cells.find((c) => c.label === "Recipe")?.value, "abc123def4567890");
+    assert.ok(labels.includes("Removed by transform"));
+    assert.equal(cells.find((c) => c.label === "Removed by transform")?.value, "2");
+    assert.equal(cells.find((c) => c.label === "Transform recipe")?.value, "abc123def4567890");
   });
 
-  it("draws no shaping row when nothing was removed", () => {
+  it("draws no transform row when nothing was removed", () => {
     const ledger = readConservationLedger({ row_accounting: overwriteLedger });
     assert.ok(ledger);
     const labels = ledgerIdentityCells(ledger).map((c) => c.label);
-    assert.ok(!labels.includes("Shaped out"));
+    assert.ok(!labels.includes("Removed by transform"));
     assert.ok(!labels.includes("Filtered on read"));
-    assert.ok(!labels.includes("Recipe"));
+    assert.ok(!labels.includes("Transform recipe"));
   });
 
   it("keeps a shaped run measured and balanced", () => {

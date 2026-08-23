@@ -1,5 +1,5 @@
 /**
- * What a shaping recipe is on the client, and the pure decisions about it.
+ * What a pre-load transform recipe is on the client, and the pure decisions about it.
  *
  * The server owns the meaning of a recipe (which operations exist, what each
  * one does to a value, what its identity is). This module owns only what the
@@ -320,7 +320,7 @@ export function linesToList(raw: string): string[] {
 export function summarizeEffect(effect: ShapeEffect | null): string {
   if (!effect) return "";
   const parts = [`${effect.rows_in.toLocaleString()} row(s) in`, `${effect.rows_out.toLocaleString()} out`];
-  if (effect.rows_shaped_out) parts.push(`${effect.rows_shaped_out.toLocaleString()} shaped out`);
+  if (effect.rows_shaped_out) parts.push(`${effect.rows_shaped_out.toLocaleString()} removed`);
   if (effect.rows_diverted) parts.push(`${effect.rows_diverted.toLocaleString()} diverted`);
   if (effect.cells_changed) parts.push(`${effect.cells_changed.toLocaleString()} cell(s) changed`);
   if (effect.nulls_introduced) parts.push(`${effect.nulls_introduced.toLocaleString()} null(s) introduced`);

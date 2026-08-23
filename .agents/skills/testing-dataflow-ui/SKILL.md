@@ -840,3 +840,64 @@ Traps that cost real time here:
 - Destination claims: always reread Postgres directly (`127.0.0.1:5433`, db `dataflow`, connector
   `Local PG 5433`). Exact-row equality plus `COUNT`/`SUM`; a shaped write must show trimmed/uppercased
   text, rounded numerics and the filtered ids absent.
+
+## Transform (pre-load) step — the renamed Shape step (PR #71 era and later)
+
+The wizard step 3 is now **Transform (pre-load)** (`TransferTransformStep.tsx`,
+`TransformGuidePanel/TransformColumnChart/TransformStepBuilder`, `lib/transformProfile.ts`,
+`styles/transform-prep.css`). Backend wire names are still `shape*` (`/api/v1/shape/{catalog,profile,
+preview}`, `approvedShapeRecipeHash`), so finding `shape` in a **payload** is not a naming defect —
+only operator-visible text counts. Check these surfaces individually, because a partial rename is the
+likeliest failure: Destination CTA ("Continue to Transform"), stepper step 3 ("Transform", narrow
+"Xform"), inspector title, page heading/eyebrow, and the Proof/result dashboard.
+
+### Shape-family wording that may still leak into operator-visible text
+`conservationLedger.ts` emits a ledger cell labelled **"Shaped out"** and the Proof screen renders it,
+`summarizeEffect` composes `... N shaped out ...` on the step itself, and the refusal alert can say
+"shaping step N". `api.ts` still surfaces "Shape catalog unavailable" / "Shape preview failed" on the
+error path. These are outside the renamed files, so a rename PR can pass its own diff and still show
+Shape wording — grep operator-facing strings first, then confirm **on screen**.
+
+### Viewer role: the profile fetch is skipped client-side, not merely 403'd
+The step's effect begins `if (!plan.allowed || !sampleRows.length) return;`, so a viewer never issues
+`/shape/profile` at all. Consequence: "What the sample holds" renders as an **empty card**, "Columns
+with findings" reads **0** even for a demonstrably messy fixture, and the operation vocabulary is
+absent — while the lock alert still claims "The operations below are the real vocabulary this engine
+accepts. You can read them". Treat that contradiction as a finding rather than a pass; the correct
+assertions are that the lock states the `job.plan` reason, that `Add a step` is `disabled`, and that
+clicking it adds no step (steps count unchanged, builder never opens).
+
+### A viewer can only reach step 3 by typing the destination table by hand
+On Destination the viewer's schema read fails with a toast ("Could not read destination schema … needs
+`connector.write`") and the table dropdown stays empty, so `Continue to Transform` is disabled. Type
+the table name into the free-text `Pick table or type new name` field; if Continue flips back to
+disabled after a re-analysis, click **Analyze Route**, wait, then click Continue. Do not conclude the
+Transform step is unreachable for viewers.
+
+### Charts and guide assertions worth pre-computing
+Build the fixture so finding counts are known in advance — a messy text column should yield **one bar
+per finding, not a stacked share bar** (`Blank`, `Leading/trailing space`, `Repeated inner space`,
+`Control character`, `Un-normalised Unicode`, and one bar per distinct placeholder token `NULL`/`N/A`/
+`n/a`), each with a `count/rows` label, a proportional non-zero fill width, and a `title` tooltip. A
+wrong *number* then localises a profiler bug that a missing-element check would miss.
+`changedCellIndex` deliberately excludes `kind === "removed"`, so removed rows are not highlighted —
+not a bug.
+
+### Transform is not applied before the Validate control-character gate
+A recipe containing `strip_characters` can still make Validate block on the **raw** source value
+(e.g. `name` row 6, U+0001), i.e. preflight scans pre-transform data. The UI offers a "Strip controls
+& re-run" workaround that adds remediation mappings. Verify whether the approved recipe reaches
+preflight before treating a shaped transfer as clean, and expect this may still be open.
+
+### Responsive evidence: screenshot through Playwright, not the generic tool
+The generic screenshot tool may render at a fixed viewport and silently ignore CDP
+`Emulation.setDeviceMetricsOverride`, producing "proof" at the wrong width. Drive the width over CDP,
+assert geometry numerically (`getBoundingClientRect().left` equal for all grid children = one column;
+`document.documentElement.scrollWidth <= window.innerWidth` = no page overflow;
+`.df2-xform-scroll` `scrollWidth > clientWidth` = table scrolls inside its card), and capture the
+image via Playwright directly. Cards are two-column at 1440 and collapse to one below 1180.
+
+### Fixture caution
+Do not put literal `NaN`/`Infinity` in a source column: `/api/v1/shape/{profile,preview}` returns
+HTTP 500 (`shape_suggest.py:181`, `as_tuple().exponent` is `'n'`/`'F'` for non-finite Decimals),
+Continue is disabled, and the whole step becomes unreachable — masking everything under test.

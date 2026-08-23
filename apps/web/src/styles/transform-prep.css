@@ -539,6 +539,36 @@
 
 .df2-xform-field-op { grid-column: 1 / -1; }
 
+/* Read-only vocabulary shown to a role that may inspect but not apply. */
+.df2-xform-vocab {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 320px;
+  overflow: auto;
+}
+
+.df2-xform-vocab li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 2px;
+  border: 1px solid var(--df-border, #e4e8ee);
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: var(--df-surface-2, #f8fafc);
+}
+
+.df2-xform-vocab code {
+  font-size: 11px;
+  color: var(--df-text-2, #64748b);
+}
+
+.df2-xform-vocab span { font-size: 13px; color: var(--df-text, #0f172a); }
+.df2-xform-vocab small { font-size: 11px; color: var(--df-text-2, #64748b); }
+
 .df2-xform-builder .df2-field {
   display: flex;
   flex-direction: column;

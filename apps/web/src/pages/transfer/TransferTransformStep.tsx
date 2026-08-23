@@ -126,11 +126,11 @@ export function TransferTransformStep({
     return () => { cancelled = true; };
   }, []);
 
-  // Profiling and previewing are plan-time work. A viewer may read the operation
-  // vocabulary — it is real, and refusing it would render an empty screen — but
-  // the API refuses the design calls, so they are not attempted.
+  // Profiling only describes rows the caller already holds, so it is a read: a
+  // viewer sees the same findings an operator would act on. Previewing composes a
+  // recipe identity, which is plan work, so that call stays behind the gate.
   useEffect(() => {
-    if (!plan.allowed || !sampleRows.length) return;
+    if (!sampleRows.length) return;
     let cancelled = false;
     profileShapeSource({
       sample_rows: sampleRows.slice(0, 200),
@@ -141,7 +141,7 @@ export function TransferTransformStep({
       .catch((err) => { if (!cancelled) setProfileError(err instanceof Error ? err.message : String(err)); });
     return () => { cancelled = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [plan.allowed, rowsKey, schemaKey, sourceColumns.join("|")]);
+  }, [rowsKey, schemaKey, sourceColumns.join("|")]);
 
   const timer = useRef<number | null>(null);
   useEffect(() => {
@@ -285,8 +285,8 @@ export function TransferTransformStep({
           <div>
             <p>{plan.reason}</p>
             <p className="df2-label-hint">
-              The operations below are the real vocabulary this engine accepts. You can read them;
-              applying one is plan work.
+              The profile, the charts and “Read the operations” are yours to inspect — they are the
+              real findings and the real vocabulary. Applying one is plan work.
             </p>
           </div>
         </div>
@@ -398,16 +398,19 @@ export function TransferTransformStep({
             <h3 id="xform-recipe-title">
               <span className="df2-xform-card-num">2</span> Steps to apply, in order
             </h3>
+            {/* A viewer opens the same panel read-only: the operations are what the
+                refusal text says are readable, and nothing in it can be applied. */}
             <button
               type="button"
               className="df2-btn df2-btn-sm"
-              disabled={!plan.allowed}
               aria-expanded={showBuilder}
-              title={plan.reason || "Compose a step by hand"}
+              title={plan.allowed ? "Compose a step by hand" : "Read the operations this engine accepts"}
               onClick={() => setShowBuilder((open) => !open)}
             >
               <DtIcon name={showBuilder ? "minus" : "plus"} size={14} />
-              {showBuilder ? " Close builder" : " Add a step"}
+              {showBuilder
+                ? " Close"
+                : plan.allowed ? " Add a step" : " Read the operations"}
             </button>
           </header>
 

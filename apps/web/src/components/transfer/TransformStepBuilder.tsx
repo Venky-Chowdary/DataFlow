@@ -93,6 +93,30 @@ export function TransformStepBuilder({
     reset();
   }, [column, expressionError, label, onAdd, operation, options, policy, reset]);
 
+  // A viewer is told it may read the vocabulary, so it is rendered as a list.
+  // The same operations inside disabled selects are unreadable — a disabled
+  // select cannot be opened — which would make the refusal text a false promise.
+  if (!canPlan) {
+    return (
+      <div className="df2-xform-builder">
+        <p className="df2-label-hint">{disabledReason}</p>
+        <ul className="df2-xform-vocab">
+          {(catalog?.operations ?? []).map((entry) => (
+            <li key={entry.op}>
+              <code>{entry.op}</code>
+              <span>{entry.summary}</span>
+              <small>
+                {entry.active
+                  ? "changes the row count, so it moves the ledger"
+                  : "value-only, the row count is unchanged"}
+              </small>
+            </li>
+          ))}
+        </ul>
+      </div>
+    );
+  }
+
   return (
     <div className="df2-xform-builder">
       <div className="df2-xform-builder-row">
