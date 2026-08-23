@@ -37,8 +37,8 @@ const STEP_GUIDES: Record<number, { title: string; body: string }> = {
     body: "Pick connector, database, and table. Existing destination schema is fetched before mapping.",
   },
   [STEP_SHAPE]: {
-    title: "Shape",
-    body: "Optional. Clean the source on the read — trim, parse, round, filter — before Map decides carriers. The source itself is never modified, and the recipe is re-applied identically at Execute.",
+    title: "Transform (pre-load)",
+    body: "Optional. Repair the source on the read — trim, parse, round, filter — before Map decides carriers. The source itself is never modified, and the recipe is re-applied identically at Execute under the identity approved here.",
   },
   [STEP_MAP]: {
     title: "Map",

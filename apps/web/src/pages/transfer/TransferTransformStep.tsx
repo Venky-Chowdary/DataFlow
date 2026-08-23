@@ -1,33 +1,28 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { DtIcon } from "../../components/DtIcon";
-import {
-  checkShapeExpression,
-  fetchShapeCatalog,
-  previewShapeRecipe,
-  profileShapeSource,
-} from "../../lib/api";
+import { TransformColumnChart } from "../../components/transfer/TransformColumnChart";
+import { TransformGuidePanel } from "../../components/transfer/TransformGuidePanel";
+import { TransformStepBuilder } from "../../components/transfer/TransformStepBuilder";
+import { fetchShapeCatalog, previewShapeRecipe, profileShapeSource } from "../../lib/api";
 import { PERMISSIONS, useWriteGate } from "../../lib/PermissionsContext";
 import {
   changedCellIndex,
   describeStep,
-  fieldsFor,
-  linesToList,
-  missingRequired,
   moveStep,
   removeStep,
   sortSuggestions,
   summarizeEffect,
   toggleStep,
   type ShapeCatalog,
-  type ShapeColumnProfile,
   type ShapeOperation,
   type ShapePreviewResponse,
   type ShapeProfileResponse,
   type ShapeStepWire,
   type ShapeSuggestion,
 } from "../../lib/shape";
+import { columnsNeedingAttention } from "../../lib/transformProfile";
 
-interface TransferShapeStepProps {
+interface TransferTransformStepProps {
   /** Sampled source rows already held by the studio — no connector round-trip. */
   sampleRows: Record<string, unknown>[];
   sourceColumns: string[];
@@ -47,6 +42,7 @@ interface TransferShapeStepProps {
 
 const PREVIEW_ROWS = 12;
 const PREVIEW_DEBOUNCE_MS = 250;
+const GUIDE_KEY = "df.transform.guide.dismissed";
 
 /** Severity → the badge class the rest of the studio already uses. */
 function severityClass(severity: string): string {
@@ -62,38 +58,19 @@ function cellText(value: unknown): string {
   return String(value);
 }
 
-/** What the profile found worth saying about one column, in one line. */
-function profileNotes(profile: ShapeColumnProfile): string {
-  const notes: string[] = [];
-  if (profile.blanks) notes.push(`${profile.blanks} blank`);
-  if (profile.untrimmed) notes.push(`${profile.untrimmed} padded`);
-  if (profile.inner_whitespace) notes.push(`${profile.inner_whitespace} inner space`);
-  const sentinels = Object.entries(profile.sentinels);
-  if (sentinels.length) {
-    notes.push(sentinels.map(([token, count]) => `${count}× ${token}`).join(", "));
-  }
-  if (profile.non_printable) notes.push(`${profile.non_printable} control char`);
-  if (profile.unnormalized_unicode) notes.push(`${profile.unnormalized_unicode} un-normalised`);
-  if (profile.max_scale) notes.push(`scale ${profile.max_scale}`);
-  if (profile.ambiguous_date_order) notes.push("ambiguous date order");
-  return notes.join(" · ");
-}
-
 /**
- * Shape — prepare the raw source before Map decides carriers and Validate scans.
+ * Transform (pre-load) — repair the source on the read, before Map and the write.
  *
- * The panel is an Applied Steps list over a live before/after preview, the shape
- * Power Query and Alteryx taught operators to expect, with three things they do
- * not have: every step states what it did to the sample (cells changed, nulls
- * introduced, rows shaped out), the recipe carries an identity that Execute is
- * held to, and an operation that cannot be honoured on a stream is refused by
- * name here instead of failing at row 431.
+ * Three panels in the order the decision is made: what the sample holds (charted
+ * per column, with profile-driven suggestions), the ordered steps to apply, and
+ * the before/after the recipe produces. Nothing here mutates the source; the
+ * recipe travels with the plan under an identity Execute is held to, and every
+ * step states what it did — cells changed, nulls introduced, rows removed.
  *
- * Nothing in this panel mutates the source. The recipe travels with the plan and
- * is re-applied deterministically at Execute; this screen is where the operator
- * decides what it should say.
+ * The step is named for the operator, not for the engine: post-load SQL
+ * transforms are a different plane, and this one is explicitly *pre-load*.
  */
-export function TransferShapeStep({
+export function TransferTransformStep({
   sampleRows,
   sourceColumns,
   targetSchema,
@@ -105,7 +82,7 @@ export function TransferShapeStep({
   onIdentity,
   onBack,
   onContinue,
-}: TransferShapeStepProps) {
+}: TransferTransformStepProps) {
   const plan = useWriteGate(PERMISSIONS.jobPlan);
   const [catalog, setCatalog] = useState<ShapeCatalog | null>(null);
   const [catalogError, setCatalogError] = useState("");
@@ -114,23 +91,32 @@ export function TransferShapeStep({
   const [preview, setPreview] = useState<ShapePreviewResponse | null>(null);
   const [previewError, setPreviewError] = useState("");
   const [busy, setBusy] = useState(false);
-  const [showProfile, setShowProfile] = useState(false);
-  const [showFunctions, setShowFunctions] = useState(false);
-
-  // The step being composed. Kept out of the recipe until it is complete, so a
-  // half-typed expression never becomes part of an identity.
-  const [draftOp, setDraftOp] = useState("");
-  const [draftColumn, setDraftColumn] = useState("");
-  const [draftOptions, setDraftOptions] = useState<Record<string, unknown>>({});
-  const [draftLabel, setDraftLabel] = useState("");
-  const [draftPolicy, setDraftPolicy] = useState("refuse");
-  const [draftError, setDraftError] = useState("");
-  const [expressionError, setExpressionError] = useState("");
+  const [showGuide, setShowGuide] = useState(() => {
+    try {
+      return window.localStorage.getItem(GUIDE_KEY) !== "1";
+    } catch {
+      return true;
+    }
+  });
+  const [showAllColumns, setShowAllColumns] = useState(false);
+  const [showBuilder, setShowBuilder] = useState(false);
 
   const rowsKey = useMemo(() => JSON.stringify(sampleRows.slice(0, 200)), [sampleRows]);
   const stepsKey = useMemo(() => JSON.stringify(steps), [steps]);
   const schemaKey = useMemo(() => JSON.stringify(targetSchema), [targetSchema]);
   const shapedColumns = preview?.recipe.output_columns ?? sourceColumns;
+
+  const toggleGuide = useCallback(() => {
+    setShowGuide((open) => {
+      const next = !open;
+      try {
+        window.localStorage.setItem(GUIDE_KEY, next ? "0" : "1");
+      } catch {
+        /* a private-mode browser simply shows the guide every visit */
+      }
+      return next;
+    });
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -192,68 +178,19 @@ export function TransferShapeStep({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [plan.allowed, rowsKey, stepsKey, schemaKey, sourceColumns.join("|")]);
 
-  const operation: ShapeOperation | undefined = useMemo(
-    () => catalog?.operations.find((op) => op.op === draftOp),
-    [catalog, draftOp],
-  );
   const operationsByName = useMemo(() => {
     const index = new Map<string, ShapeOperation>();
     for (const op of catalog?.operations ?? []) index.set(op.op, op);
     return index;
   }, [catalog]);
 
-  const resetDraft = useCallback(() => {
-    setDraftOp("");
-    setDraftColumn("");
-    setDraftOptions({});
-    setDraftLabel("");
-    setDraftPolicy("refuse");
-    setDraftError("");
-    setExpressionError("");
-  }, []);
-
-  const addStep = useCallback(() => {
-    if (!operation) {
-      setDraftError("Pick an operation.");
-      return;
-    }
-    const missing = missingRequired(operation, draftColumn, draftOptions);
-    if (missing) {
-      setDraftError(missing);
-      return;
-    }
-    if (expressionError) {
-      setDraftError(expressionError);
-      return;
-    }
-    const step: ShapeStepWire = { op: operation.op, options: draftOptions };
-    if (operation.needs_column) step.column = draftColumn;
-    if (draftLabel.trim()) step.label = draftLabel.trim();
-    if (draftPolicy !== "refuse") step.on_error = draftPolicy;
+  const addStep = useCallback((step: ShapeStepWire) => {
     onChangeSteps([...steps, step]);
-    resetDraft();
-  }, [draftColumn, draftLabel, draftOptions, draftPolicy, expressionError, onChangeSteps, operation, resetDraft, steps]);
+  }, [onChangeSteps, steps]);
 
   const applySuggestion = useCallback((suggestion: ShapeSuggestion) => {
     onChangeSteps([...steps, suggestion.step]);
   }, [onChangeSteps, steps]);
-
-  const validateExpression = useCallback(async (name: string, text: string) => {
-    if (!text.trim()) {
-      setExpressionError("");
-      return;
-    }
-    try {
-      const answer = await checkShapeExpression({
-        expression: text,
-        source_columns: shapedColumns,
-      });
-      setExpressionError(answer.valid ? "" : (answer.error ?? "Expression is not valid."));
-    } catch (err) {
-      setExpressionError(err instanceof Error ? err.message : String(err));
-    }
-    void name;
-  }, [shapedColumns]);
 
   const suggestions = useMemo(
     () => sortSuggestions(preview?.suggestions?.length ? preview.suggestions : (profile?.suggestions ?? [])),
@@ -272,29 +209,75 @@ export function TransferShapeStep({
   const columnsBefore = sourceColumns.length ? sourceColumns : Object.keys(beforeRows[0] ?? {});
   const columnsAfter = shapedColumns.length ? shapedColumns : columnsBefore;
 
+  const profiledColumns = profile?.columns ?? [];
+  const attention = columnsNeedingAttention(profiledColumns);
+  const chartedColumns = showAllColumns
+    ? profiledColumns
+    : profiledColumns.filter((column) => column.blanks || column.untrimmed || column.inner_whitespace
+      || column.non_printable || column.unnormalized_unicode || Object.keys(column.sentinels).length);
+
   return (
-    <div className="df2-shape-step">
-      <header className="df2-shape-head">
-        <div>
-          <h2 className="df2-step-title">Shape the source before it is mapped</h2>
-          <p className="df2-label-hint">
-            {sourceLabel} → {destRouteLabel}. Steps run on the read, in order, row by row — the source
-            file or table is never modified. Map, Validate and the writer all see the shaped columns.
+    <section className="df2-xform" aria-labelledby="xform-title">
+      <header className="df2-xform-head">
+        <div className="df2-xform-head-copy">
+          <p className="df2-xform-eyebrow">Before the load · the source is never modified</p>
+          <h2 className="df2-xform-title" id="xform-title">Transform (pre-load)</h2>
+          <p className="df2-xform-route">
+            <span>{sourceLabel}</span>
+            <DtIcon name="transfer" size={14} />
+            <span>{destRouteLabel}</span>
           </p>
         </div>
-        <div className="df2-shape-identity">
+        <div className="df2-xform-head-side">
           {preview ? (
-            <>
-              <span className="df2-badge df2-badge-live" title="Pinned at approval and re-checked before Execute">
-                recipe {preview.recipe.recipe_hash}
-              </span>
-              <span className="df2-label-hint">{preview.recipe.summary}</span>
-            </>
+            <span className="df2-xform-identity" title="Pinned at approval and re-checked before Execute">
+              <DtIcon name="shield" size={14} />
+              recipe {preview.recipe.recipe_hash}
+            </span>
           ) : (
-            <span className="df2-label-hint">{busy ? "Previewing…" : "No shaping declared"}</span>
+            <span className="df2-xform-identity is-empty">
+              {busy ? "Previewing…" : "No transform declared"}
+            </span>
           )}
+          <button
+            type="button"
+            className="df2-btn df2-btn-ghost df2-btn-sm"
+            aria-expanded={showGuide}
+            onClick={toggleGuide}
+          >
+            <DtIcon name="book" size={14} /> {showGuide ? "Hide how this works" : "How this works"}
+          </button>
         </div>
       </header>
+
+      {showGuide && (
+        <TransformGuidePanel postLoadOnly={catalog?.post_load_only.operations ?? []} />
+      )}
+
+      <dl className="df2-xform-stats">
+        <div>
+          <dt>Sampled rows</dt>
+          <dd>
+            {(profile?.sampled_rows ?? sampleRows.length).toLocaleString()}
+            {rowCount ? <small> of {rowCount.toLocaleString()}</small> : null}
+          </dd>
+        </div>
+        <div>
+          <dt>Columns</dt>
+          <dd>{(profiledColumns.length || sourceColumns.length).toLocaleString()}</dd>
+        </div>
+        <div className={attention ? "is-attention" : ""}>
+          <dt>Columns with findings</dt>
+          <dd>{attention.toLocaleString()}</dd>
+        </div>
+        <div>
+          <dt>Steps applied</dt>
+          <dd>
+            {steps.length.toLocaleString()}
+            {catalog ? <small> of {catalog.max_steps} allowed</small> : null}
+          </dd>
+        </div>
+      </dl>
 
       {!plan.allowed && (
         <div className="df2-alert df2-alert-info" role="status">
@@ -302,13 +285,12 @@ export function TransferShapeStep({
           <div>
             <p>{plan.reason}</p>
             <p className="df2-label-hint">
-              The operations below are the real vocabulary this engine accepts. You can read them; applying
-              one is plan work.
+              The operations below are the real vocabulary this engine accepts. You can read them;
+              applying one is plan work.
             </p>
           </div>
         </div>
       )}
-
       {catalogError && (
         <div className="df2-alert df2-alert-error" role="alert">
           <DtIcon name="x" size={16} />
@@ -326,7 +308,9 @@ export function TransferShapeStep({
           <DtIcon name="x" size={16} />
           <div>
             <p>{previewError}</p>
-            <p className="df2-label-hint">The recipe is refused, so it has no identity to approve. Fix or remove the step.</p>
+            <p className="df2-label-hint">
+              The recipe is refused, so it has no identity to approve. Fix or remove the step.
+            </p>
           </div>
         </div>
       )}
@@ -339,118 +323,128 @@ export function TransferShapeStep({
               {preview.refusal.column ? ` on ${preview.refusal.column}` : ""}: {preview.refusal.message}
             </p>
             <p className="df2-label-hint">
-              This row stops the run. Change the step's error policy to divert or null if that is the decision
-              you want, or fix the value at source.
+              This row stops the run. Change the step's error policy to divert or null if that is the
+              decision you want, or repair the value at source.
             </p>
           </div>
         </div>
       )}
 
-      <div className="df2-shape-body">
-        <section className="df2-shape-pane">
-          <h3 className="df2-pane-title">
-            What the sample shows
-            {profile ? (
-              <span className="df2-label-hint">
-                {profile.sampled_rows.toLocaleString()} sampled row(s)
-                {rowCount ? ` of ${rowCount.toLocaleString()}` : ""}
-              </span>
-            ) : null}
-          </h3>
-          {profile?.sample_notice && <p className="df2-label-hint">{profile.sample_notice}</p>}
+      <div className="df2-xform-grid">
+        <section className="df2-xform-card" aria-labelledby="xform-profile-title">
+          <header className="df2-xform-card-head">
+            <h3 id="xform-profile-title">
+              <span className="df2-xform-card-num">1</span> What the sample holds
+            </h3>
+            {profiledColumns.length > 0 && (
+              <button
+                type="button"
+                className="df2-btn df2-btn-ghost df2-btn-sm"
+                onClick={() => setShowAllColumns((all) => !all)}
+              >
+                {showAllColumns ? "Only columns with findings" : `All ${profiledColumns.length} columns`}
+              </button>
+            )}
+          </header>
 
-          {openSuggestions.length === 0 && profile && (
-            <p className="df2-label-hint">
-              Nothing in the sample needs shaping. Validate still re-checks the whole population.
+          {profile?.sample_notice && <p className="df2-xform-note">{profile.sample_notice}</p>}
+
+          {openSuggestions.length > 0 ? (
+            <ul className="df2-xform-suggestions">
+              {openSuggestions.map((suggestion) => (
+                <li key={suggestion.id}>
+                  <div className="df2-xform-suggestion-head">
+                    <span className={severityClass(suggestion.severity)}>{suggestion.severity}</span>
+                    <strong>{suggestion.title}</strong>
+                  </div>
+                  <p>{suggestion.reason}</p>
+                  <div className="df2-xform-suggestion-foot">
+                    <span>{suggestion.rows_affected.toLocaleString()} sampled row(s) affected</span>
+                    <button
+                      type="button"
+                      className="df2-btn df2-btn-sm"
+                      disabled={!plan.allowed}
+                      title={plan.reason || "Add this step to the recipe"}
+                      onClick={() => applySuggestion(suggestion)}
+                    >
+                      <DtIcon name="plus" size={14} /> Add step
+                    </button>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          ) : profile ? (
+            <p className="df2-xform-empty">
+              <DtIcon name="check" size={16} />
+              Nothing in the sample needs a transform. Validate still re-checks the whole population.
             </p>
-          )}
-          <ul className="df2-shape-suggestions">
-            {openSuggestions.map((suggestion) => (
-              <li key={suggestion.id}>
-                <div className="df2-shape-suggestion-head">
-                  <span className={severityClass(suggestion.severity)}>{suggestion.severity}</span>
-                  <strong>{suggestion.title}</strong>
-                </div>
-                <p className="df2-label-hint">{suggestion.reason}</p>
-                <div className="df2-shape-suggestion-foot">
-                  <span className="df2-label-hint">
-                    {suggestion.rows_affected.toLocaleString()} sampled row(s) affected
-                  </span>
-                  <button
-                    type="button"
-                    className="df2-btn df2-btn-sm"
-                    disabled={!plan.allowed}
-                    title={plan.reason || "Add this step to the recipe"}
-                    onClick={() => applySuggestion(suggestion)}
-                  >
-                    Add step
-                  </button>
-                </div>
-              </li>
-            ))}
-          </ul>
+          ) : null}
 
-          {profile && (
-            <details className="df2-shape-profile" open={showProfile} onToggle={(e) => setShowProfile((e.target as HTMLDetailsElement).open)}>
-              <summary>Column profile ({profile.columns.length})</summary>
-              <table className="df2-table df2-table-compact">
-                <thead>
-                  <tr><th>Column</th><th>Reads as</th><th>Distinct</th><th>Findings</th></tr>
-                </thead>
-                <tbody>
-                  {profile.columns.map((column) => (
-                    <tr key={column.name}>
-                      <td>{column.name}</td>
-                      <td>{column.logical_type}</td>
-                      <td>{column.distinct.toLocaleString()}{column.distinct_capped ? "+" : ""}</td>
-                      <td className="df2-label-hint">{profileNotes(column) || "—"}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </details>
+          {chartedColumns.length > 0 && (
+            <ul className="df2-xform-cols">
+              {chartedColumns.map((column) => (
+                <TransformColumnChart
+                  key={column.name}
+                  profile={column}
+                  targetType={targetSchema[column.name]}
+                />
+              ))}
+            </ul>
           )}
         </section>
 
-        <section className="df2-shape-pane df2-shape-pane-wide">
-          <h3 className="df2-pane-title">
-            Applied steps
-            <span className="df2-label-hint">
-              {steps.length}
-              {catalog ? ` of ${catalog.max_steps} allowed` : ""}
-            </span>
-          </h3>
+        <section className="df2-xform-card" aria-labelledby="xform-recipe-title">
+          <header className="df2-xform-card-head">
+            <h3 id="xform-recipe-title">
+              <span className="df2-xform-card-num">2</span> Steps to apply, in order
+            </h3>
+            <button
+              type="button"
+              className="df2-btn df2-btn-sm"
+              disabled={!plan.allowed}
+              aria-expanded={showBuilder}
+              title={plan.reason || "Compose a step by hand"}
+              onClick={() => setShowBuilder((open) => !open)}
+            >
+              <DtIcon name={showBuilder ? "minus" : "plus"} size={14} />
+              {showBuilder ? " Close builder" : " Add a step"}
+            </button>
+          </header>
 
           {steps.length === 0 ? (
-            <p className="df2-label-hint">
-              No steps yet. The source passes through unchanged, which is exactly today's behaviour.
+            <p className="df2-xform-empty">
+              <DtIcon name="check" size={16} />
+              No steps. The source passes through unchanged — exactly today's behaviour.
             </p>
           ) : (
-            <ol className="df2-shape-steps">
+            <ol className="df2-xform-steps">
               {steps.map((step, index) => {
                 const stepEffect = effect?.steps?.[index];
                 const disabled = step.enabled === false;
                 return (
                   <li key={`${step.op}:${index}`} className={disabled ? "is-disabled" : ""}>
-                    <div className="df2-shape-step-head">
-                      <span className="df2-shape-step-index">{index + 1}</span>
+                    <div className="df2-xform-step-head">
+                      <span className="df2-xform-step-index">{index + 1}</span>
                       <strong>{describeStep(step, operationsByName.get(step.op))}</strong>
                       {step.on_error && step.on_error !== "refuse" && (
                         <span className="df2-badge">on error: {step.on_error}</span>
                       )}
                       {operationsByName.get(step.op)?.active && (
-                        <span className="df2-badge df2-badge-warn" title="Changes the row count, so it moves the conservation ledger">
+                        <span
+                          className="df2-badge df2-badge-warn"
+                          title="Changes the row count, so it moves the conservation ledger"
+                        >
                           moves the ledger
                         </span>
                       )}
                     </div>
-                    <p className="df2-label-hint">
+                    <p className="df2-xform-step-effect">
                       {stepEffect
                         ? [
                             `${stepEffect.rows_in.toLocaleString()} in`,
                             `${stepEffect.rows_out.toLocaleString()} out`,
                             stepEffect.cells_changed ? `${stepEffect.cells_changed.toLocaleString()} cell(s) changed` : "",
-                            stepEffect.rows_removed ? `${stepEffect.rows_removed.toLocaleString()} shaped out` : "",
+                            stepEffect.rows_removed ? `${stepEffect.rows_removed.toLocaleString()} removed` : "",
                             stepEffect.rows_diverted ? `${stepEffect.rows_diverted.toLocaleString()} diverted` : "",
                             stepEffect.nulls_introduced ? `${stepEffect.nulls_introduced.toLocaleString()} null(s) introduced` : "",
                           ].filter(Boolean).join(" · ")
@@ -458,16 +452,18 @@ export function TransferShapeStep({
                           ? "Disabled — excluded from the recipe and its identity."
                           : "Not yet measured."}
                     </p>
-                    <div className="df2-shape-step-controls">
+                    <div className="df2-xform-step-controls">
                       <button type="button" className="df2-btn df2-btn-sm df2-btn-ghost" disabled={!plan.allowed || index === 0}
-                        title="Move earlier" onClick={() => onChangeSteps(moveStep(steps, index, -1))}>↑</button>
+                        title="Move earlier" aria-label={`Move step ${index + 1} earlier`}
+                        onClick={() => onChangeSteps(moveStep(steps, index, -1))}>↑</button>
                       <button type="button" className="df2-btn df2-btn-sm df2-btn-ghost" disabled={!plan.allowed || index === steps.length - 1}
-                        title="Move later" onClick={() => onChangeSteps(moveStep(steps, index, 1))}>↓</button>
+                        title="Move later" aria-label={`Move step ${index + 1} later`}
+                        onClick={() => onChangeSteps(moveStep(steps, index, 1))}>↓</button>
                       <button type="button" className="df2-btn df2-btn-sm df2-btn-ghost" disabled={!plan.allowed}
                         onClick={() => onChangeSteps(toggleStep(steps, index))}>
                         {disabled ? "Enable" : "Disable"}
                       </button>
-                      <button type="button" className="df2-btn df2-btn-sm df2-btn-ghost" disabled={!plan.allowed}
+                      <button type="button" className="df2-btn df2-btn-sm df2-btn-ghost is-danger" disabled={!plan.allowed}
                         onClick={() => onChangeSteps(removeStep(steps, index))}>Remove</button>
                     </div>
                   </li>
@@ -477,7 +473,8 @@ export function TransferShapeStep({
           )}
 
           {effect && (
-            <p className={`df2-shape-ledger${effect.balanced ? "" : " is-unbalanced"}`}>
+            <p className={`df2-xform-ledger${effect.balanced ? "" : " is-unbalanced"}`}>
+              <DtIcon name={effect.balanced ? "check" : "alert"} size={14} />
               {summarizeEffect(effect)}
               {effect.balanced
                 ? " · every sampled row is accounted for"
@@ -485,303 +482,95 @@ export function TransferShapeStep({
             </p>
           )}
 
-          <div className="df2-shape-add">
-            <div className="df2-form-row">
-              <div className="df2-field">
-                <label className="df2-label" htmlFor="shape-op">Operation</label>
-                <select
-                  id="shape-op"
-                  className="df2-input df2-select"
-                  value={draftOp}
-                  disabled={!plan.allowed || !catalog}
-                  onChange={(e) => { setDraftOp(e.target.value); setDraftOptions({}); setDraftError(""); setExpressionError(""); }}
-                >
-                  <option value="">Pick an operation…</option>
-                  {(catalog?.operations ?? []).map((op) => (
-                    <option key={op.op} value={op.op}>{op.op} — {op.summary}</option>
-                  ))}
-                </select>
-              </div>
-              {operation?.needs_column && (
-                <div className="df2-field">
-                  <label className="df2-label" htmlFor="shape-column">Column</label>
-                  <select
-                    id="shape-column"
-                    className="df2-input df2-select"
-                    value={draftColumn}
-                    disabled={!plan.allowed}
-                    onChange={(e) => { setDraftColumn(e.target.value); setDraftError(""); }}
-                  >
-                    <option value="">Pick a column…</option>
-                    {columnsAfter.map((column) => (
-                      <option key={column} value={column}>{column}</option>
-                    ))}
-                  </select>
-                </div>
-              )}
-              {operation && (
-                <div className="df2-field">
-                  <label className="df2-label" htmlFor="shape-policy">If a value cannot be computed</label>
-                  <select
-                    id="shape-policy"
-                    className="df2-input df2-select"
-                    value={draftPolicy}
-                    disabled={!plan.allowed}
-                    onChange={(e) => setDraftPolicy(e.target.value)}
-                  >
-                    {(catalog?.error_policies ?? []).map((policy) => (
-                      <option key={policy.value} value={policy.value}>{policy.label}</option>
-                    ))}
-                  </select>
-                  <span className="df2-label-hint">
-                    {catalog?.error_policies.find((p) => p.value === draftPolicy)?.detail ?? ""}
-                  </span>
-                </div>
-              )}
-            </div>
-
-            {operation && (
-              <div className="df2-form-row">
-                {fieldsFor(operation).map((field) => {
-                  const id = `shape-opt-${field.name}`;
-                  const value = draftOptions[field.name];
-                  if (field.kind === "boolean") {
-                    return (
-                      <label key={field.name} className="df2-policy-toggle">
-                        <input
-                          type="checkbox"
-                          checked={value === true}
-                          disabled={!plan.allowed}
-                          onChange={(e) => setDraftOptions({ ...draftOptions, [field.name]: e.target.checked })}
-                        />
-                        <span><strong>{field.label}</strong><small>{field.hint}</small></span>
-                      </label>
-                    );
-                  }
-                  return (
-                    <div className="df2-field" key={field.name}>
-                      <label className="df2-label" htmlFor={id}>
-                        {field.label}{field.required ? " *" : ""}
-                      </label>
-                      {field.kind === "choice" ? (
-                        <select
-                          id={id}
-                          className="df2-input df2-select"
-                          value={typeof value === "string" ? value : ""}
-                          disabled={!plan.allowed}
-                          onChange={(e) => setDraftOptions({ ...draftOptions, [field.name]: e.target.value })}
-                        >
-                          <option value="">Pick…</option>
-                          {(field.choices ?? []).map((choice) => (
-                            <option key={choice} value={choice}>{choice}</option>
-                          ))}
-                        </select>
-                      ) : field.kind === "columns" ? (
-                        <select
-                          id={id}
-                          multiple
-                          className="df2-input df2-select"
-                          value={Array.isArray(value) ? (value as string[]) : []}
-                          disabled={!plan.allowed}
-                          onChange={(e) => setDraftOptions({
-                            ...draftOptions,
-                            [field.name]: Array.from(e.target.selectedOptions, (o) => o.value),
-                          })}
-                        >
-                          {columnsAfter.map((column) => (
-                            <option key={column} value={column}>{column}</option>
-                          ))}
-                        </select>
-                      ) : field.kind === "list" ? (
-                        <textarea
-                          id={id}
-                          className="df2-input"
-                          rows={3}
-                          value={Array.isArray(value) ? (value as string[]).join("\n") : ""}
-                          disabled={!plan.allowed}
-                          onChange={(e) => setDraftOptions({ ...draftOptions, [field.name]: linesToList(e.target.value) })}
-                        />
-                      ) : field.kind === "expression" ? (
-                        <textarea
-                          id={id}
-                          className={`df2-input df2-code-input${expressionError ? " is-invalid" : ""}`}
-                          rows={2}
-                          placeholder="[status] <> 'void'"
-                          value={typeof value === "string" ? value : ""}
-                          disabled={!plan.allowed}
-                          onChange={(e) => {
-                            const text = e.target.value;
-                            setDraftOptions({ ...draftOptions, [field.name]: text });
-                            void validateExpression(field.name, text);
-                          }}
-                        />
-                      ) : (
-                        <input
-                          id={id}
-                          className="df2-input"
-                          inputMode={field.kind === "number" ? "numeric" : undefined}
-                          value={value === undefined || value === null ? "" : String(value)}
-                          disabled={!plan.allowed}
-                          onChange={(e) => {
-                            const raw = e.target.value;
-                            const next = field.kind === "number"
-                              ? (raw.trim() === "" ? "" : Number(raw))
-                              : raw;
-                            setDraftOptions({ ...draftOptions, [field.name]: next });
-                          }}
-                        />
-                      )}
-                      {field.hint && (
-                        <span className="df2-label-hint">{field.hint}</span>
-                      )}
-                    </div>
-                  );
-                })}
-                <div className="df2-field">
-                  <label className="df2-label" htmlFor="shape-label">Step name (optional)</label>
-                  <input
-                    id="shape-label"
-                    className="df2-input"
-                    value={draftLabel}
-                    disabled={!plan.allowed}
-                    placeholder="Tidy customer names"
-                    onChange={(e) => setDraftLabel(e.target.value)}
-                  />
-                </div>
-              </div>
-            )}
-
-            {expressionError && (
-              <div className="df2-alert df2-alert-error" role="alert">
-                <DtIcon name="x" size={16} />
-                <div><p>{expressionError}</p></div>
-              </div>
-            )}
-            {draftError && (
-              <div className="df2-alert df2-alert-warn" role="alert">
-                <DtIcon name="alert" size={16} />
-                <div><p>{draftError}</p></div>
-              </div>
-            )}
-
-            <div className="df2-upload-sample-row">
-              <button
-                type="button"
-                className="df2-btn df2-btn-sm df2-btn-primary"
-                disabled={!plan.allowed || !operation || Boolean(expressionError)}
-                title={plan.reason || "Append this step to the recipe"}
-                onClick={addStep}
-              >
-                Add step
-              </button>
-              {draftOp && (
-                <button type="button" className="df2-btn df2-btn-sm df2-btn-ghost" onClick={resetDraft}>
-                  Clear
-                </button>
-              )}
-              {catalog && (
-                <button
-                  type="button"
-                  className="df2-btn df2-btn-sm df2-btn-ghost"
-                  onClick={() => setShowFunctions((open) => !open)}
-                >
-                  {showFunctions ? "Hide expression help" : "Expression help"}
-                </button>
-              )}
-            </div>
-
-            {showFunctions && catalog && (
-              <div className="df2-shape-functions">
-                <p className="df2-label-hint">
-                  Columns are written <code>[column name]</code>. Arithmetic is decimal, never binary float.
-                  There is no clock, no randomness and no SQL — the same row always yields the same answer,
-                  which is what lets Execute be held to this recipe's identity.
-                </p>
-                <ul>
-                  {catalog.functions.map((fn) => (
-                    <li key={fn.name}>
-                      <code>{fn.name}</code> <span className="df2-label-hint">{fn.summary}</span>
-                    </li>
-                  ))}
-                </ul>
-                <p className="df2-label-hint">
-                  Not available in flight: {catalog.post_load_only.operations.join(", ")}. {catalog.post_load_only.reason}
-                </p>
-              </div>
-            )}
-          </div>
+          {showBuilder && (
+            <TransformStepBuilder
+              catalog={catalog}
+              columns={columnsAfter}
+              canPlan={plan.allowed}
+              disabledReason={plan.reason}
+              onAdd={addStep}
+            />
+          )}
         </section>
       </div>
 
-      <section className="df2-shape-preview">
-        <h3 className="df2-pane-title">
-          Before and after
-          <span className="df2-label-hint">
-            {busy ? "Previewing…" : `first ${Math.min(PREVIEW_ROWS, beforeRows.length)} sampled row(s)`}
+      <section className="df2-xform-card df2-xform-preview" aria-labelledby="xform-preview-title">
+        <header className="df2-xform-card-head">
+          <h3 id="xform-preview-title">
+            <span className="df2-xform-card-num">3</span> Before and after
+          </h3>
+          <span className="df2-xform-note">
+            {busy
+              ? "Previewing…"
+              : `first ${Math.min(PREVIEW_ROWS, beforeRows.length)} sampled row(s) · changed cells are highlighted`}
           </span>
-        </h3>
-        <div className="df2-shape-grids">
-          <div className="df2-shape-grid">
-            <h4>Source (unchanged)</h4>
-            <table className="df2-table df2-table-compact">
-              <thead>
-                <tr>{columnsBefore.map((column) => <th key={column}>{column}</th>)}</tr>
-              </thead>
-              <tbody>
-                {beforeRows.map((row, index) => (
-                  <tr key={index}>
-                    {columnsBefore.map((column) => <td key={column}>{cellText(row[column])}</td>)}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          <div className="df2-shape-grid">
-            <h4>Shaped (what Map will see)</h4>
-            {afterRows.length === 0 ? (
-              <p className="df2-label-hint">
-                {steps.length ? "No rows survive the recipe on this sample." : "Nothing shaped yet."}
-              </p>
-            ) : (
+        </header>
+        <div className="df2-xform-grids">
+          <div className="df2-xform-gridpane">
+            <h4>Source, unchanged</h4>
+            <div className="df2-xform-scroll">
               <table className="df2-table df2-table-compact">
                 <thead>
-                  <tr>{columnsAfter.map((column) => <th key={column}>{column}</th>)}</tr>
+                  <tr>{columnsBefore.map((column) => <th key={column}>{column}</th>)}</tr>
                 </thead>
                 <tbody>
-                  {afterRows.map((row, index) => (
+                  {beforeRows.map((row, index) => (
                     <tr key={index}>
-                      {columnsAfter.map((column) => (
-                        <td
-                          key={column}
-                          className={changed.has(`${index}:${column}`) ? "is-shape-changed" : ""}
-                          title={changed.has(`${index}:${column}`) ? "Changed by the recipe" : undefined}
-                        >
-                          {cellText(row[column])}
-                        </td>
-                      ))}
+                      {columnsBefore.map((column) => <td key={column}>{cellText(row[column])}</td>)}
                     </tr>
                   ))}
                 </tbody>
               </table>
+            </div>
+          </div>
+          <div className="df2-xform-gridpane">
+            <h4>Transformed — what Map and the writer will see</h4>
+            {afterRows.length === 0 ? (
+              <p className="df2-xform-empty">
+                {steps.length ? "No rows survive the recipe on this sample." : "Nothing transformed yet."}
+              </p>
+            ) : (
+              <div className="df2-xform-scroll">
+                <table className="df2-table df2-table-compact">
+                  <thead>
+                    <tr>{columnsAfter.map((column) => <th key={column}>{column}</th>)}</tr>
+                  </thead>
+                  <tbody>
+                    {afterRows.map((row, index) => (
+                      <tr key={index}>
+                        {columnsAfter.map((column) => (
+                          <td
+                            key={column}
+                            className={changed.has(`${index}:${column}`) ? "is-xform-changed" : ""}
+                            title={changed.has(`${index}:${column}`) ? "Changed by the recipe" : undefined}
+                          >
+                            {cellText(row[column])}
+                          </td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             )}
           </div>
         </div>
       </section>
 
-      <div className="df2-step-actions">
-        <button type="button" className="df2-btn df2-btn-ghost" onClick={onBack}>Back</button>
+      <footer className="df2-xform-actions">
+        <button type="button" className="df2-btn df2-btn-ghost" onClick={onBack}>
+          Back to Destination
+        </button>
         <button
           type="button"
           className="df2-btn df2-btn-primary"
           disabled={Boolean(previewError) || Boolean(preview?.refusal)}
-          title={
-            previewError || (preview?.refusal ? "A refused row must be decided before Map." : "Continue to Map")
-          }
+          title={previewError || (preview?.refusal ? "A refused row must be decided before Map." : "Continue to Map")}
           onClick={onContinue}
         >
-          {steps.length ? "Continue with this recipe" : "Continue without shaping"}
+          {steps.length ? "Continue with this transform" : "Continue without transforming"}
         </button>
-      </div>
-    </div>
+      </footer>
+    </section>
   );
 }

@@ -1,0 +1,665 @@
+/**
+ * Transform (pre-load) step — layout authority for the `.df2-xform` namespace.
+ *
+ * The step previously shipped with no stylesheet at all: every class it used was
+ * undefined, so the browser laid the whole panel out in default flow — tables at
+ * full bleed, no cards, no column rhythm. Everything here is scoped under
+ * `.df2-xform` so it cannot reach any other studio step, and every colour comes
+ * from the `--df-*` token SSOT.
+ */
+
+.df2-xform {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 16px;
+  border: 1px solid var(--df-border, #e4e8ee);
+  border-radius: var(--df-radius-lg, 12px);
+  background: var(--df-surface, #ffffff);
+}
+
+/* ── Header ─────────────────────────────────────────────────────────────── */
+
+.df2-xform-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--df-border, #e4e8ee);
+}
+
+.df2-xform-head-copy { min-width: 0; }
+
+.df2-xform-eyebrow {
+  margin: 0 0 2px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--df-brand, #0f766e);
+}
+
+.df2-xform-title {
+  margin: 0;
+  font-size: 20px;
+  line-height: 1.2;
+  font-weight: 700;
+  color: var(--df-text-primary, #0f172a);
+}
+
+.df2-xform-route {
+  margin: 6px 0 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--df-text-secondary, #475569);
+}
+
+.df2-xform-route svg { color: var(--df-brand, #0f766e); flex-shrink: 0; }
+
+.df2-xform-head-side {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.df2-xform-identity {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: 1px solid var(--df-success-border, #a7f3d0);
+  background: var(--df-success-bg, #ecfdf5);
+  color: var(--df-success, #047857);
+  font-family: var(--df-font-mono, "JetBrains Mono", monospace);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.df2-xform-identity.is-empty {
+  border-color: var(--df-border, #e4e8ee);
+  background: var(--df-surface-muted, #f8fafc);
+  color: var(--df-text-secondary, #475569);
+  font-family: inherit;
+}
+
+/* ── How this works ─────────────────────────────────────────────────────── */
+
+.df2-xform-guide {
+  border: 1px solid var(--df-border, #e4e8ee);
+  border-left: 3px solid var(--df-brand, #0f766e);
+  border-radius: var(--df-radius-md, 8px);
+  background: var(--df-surface-muted, #f8fafc);
+  padding: 14px 16px;
+}
+
+.df2-xform-guide-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 12px 20px;
+}
+
+.df2-xform-guide-list > li {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+}
+
+.df2-xform-guide-num {
+  flex: 0 0 auto;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  background: var(--df-brand, #0f766e);
+  color: #ffffff;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.df2-xform-guide-list strong {
+  display: block;
+  font-size: 13px;
+  color: var(--df-text-primary, #0f172a);
+}
+
+.df2-xform-guide-list p {
+  margin: 2px 0 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--df-text-secondary, #475569);
+}
+
+.df2-xform-guide-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 12px 0 0;
+  padding-top: 10px;
+  border-top: 1px dashed var(--df-border, #e4e8ee);
+  font-size: 12px;
+  color: var(--df-text-secondary, #475569);
+}
+
+.df2-xform-guide-foot svg { color: var(--df-warning, #b45309); flex-shrink: 0; }
+.df2-xform code { font-family: var(--df-font-mono, "JetBrains Mono", monospace); font-size: 11.5px; }
+
+/* ── Stat strip ─────────────────────────────────────────────────────────── */
+
+.df2-xform-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 10px;
+  margin: 0;
+}
+
+.df2-xform-stats > div {
+  border: 1px solid var(--df-border, #e4e8ee);
+  border-radius: var(--df-radius-md, 8px);
+  background: var(--df-surface-muted, #f8fafc);
+  padding: 10px 12px;
+}
+
+.df2-xform-stats > div.is-attention {
+  border-color: var(--df-warning-border, #fcd34d);
+  background: var(--df-warning-bg, #fffbeb);
+}
+
+.df2-xform-stats dt {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  color: var(--df-text-secondary, #475569);
+}
+
+.df2-xform-stats dd {
+  margin: 4px 0 0;
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--df-text-primary, #0f172a);
+}
+
+.df2-xform-stats dd small {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--df-text-secondary, #475569);
+}
+
+/* ── Cards and the two-column body ─────────────────────────────────────── */
+
+.df2-xform-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 5fr) minmax(0, 6fr);
+  gap: 14px;
+  align-items: start;
+}
+
+@media (max-width: 1180px) {
+  .df2-xform-grid { grid-template-columns: minmax(0, 1fr); }
+}
+
+.df2-xform-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  border: 1px solid var(--df-border, #e4e8ee);
+  border-radius: var(--df-radius-md, 8px);
+  background: var(--df-surface, #ffffff);
+  padding: 12px 14px;
+  min-width: 0;
+}
+
+.df2-xform-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.df2-xform-card-head h3 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--df-text-primary, #0f172a);
+}
+
+.df2-xform-card-num {
+  width: 20px;
+  height: 20px;
+  border-radius: 6px;
+  display: grid;
+  place-items: center;
+  background: var(--df-brand-soft, #ccfbf1);
+  color: var(--df-brand, #0f766e);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.df2-xform-note {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--df-text-secondary, #475569);
+}
+
+.df2-xform-empty {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: var(--df-radius-md, 8px);
+  background: var(--df-surface-muted, #f8fafc);
+  font-size: 12px;
+  color: var(--df-text-secondary, #475569);
+}
+
+.df2-xform-empty svg { color: var(--df-success, #047857); flex-shrink: 0; }
+
+/* ── Suggestions ────────────────────────────────────────────────────────── */
+
+.df2-xform-suggestions {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.df2-xform-suggestions > li {
+  border: 1px solid var(--df-border, #e4e8ee);
+  border-radius: var(--df-radius-md, 8px);
+  padding: 10px 12px;
+  background: var(--df-surface, #ffffff);
+}
+
+.df2-xform-suggestion-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 13px;
+  color: var(--df-text-primary, #0f172a);
+}
+
+.df2-xform-suggestions p {
+  margin: 4px 0 8px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--df-text-secondary, #475569);
+}
+
+.df2-xform-suggestion-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 11.5px;
+  color: var(--df-text-secondary, #475569);
+}
+
+/* ── Column charts ──────────────────────────────────────────────────────── */
+
+.df2-xform-cols {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 460px;
+  overflow-y: auto;
+}
+
+.df2-xform-col {
+  border: 1px solid var(--df-border, #e4e8ee);
+  border-radius: var(--df-radius-md, 8px);
+  padding: 8px 10px;
+  background: var(--df-surface-muted, #f8fafc);
+}
+
+.df2-xform-col.has-findings { border-left: 3px solid var(--df-warning, #b45309); }
+
+.df2-xform-col-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.df2-xform-col-name {
+  font-family: var(--df-font-mono, "JetBrains Mono", monospace);
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--df-text-primary, #0f172a);
+  overflow-wrap: anywhere;
+}
+
+.df2-xform-col-type,
+.df2-xform-col-target {
+  font-size: 11px;
+  color: var(--df-text-secondary, #475569);
+}
+
+.df2-xform-col-target {
+  font-family: var(--df-font-mono, "JetBrains Mono", monospace);
+  color: var(--df-brand, #0f766e);
+}
+
+.df2-xform-col-meta {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 3px;
+  font-size: 11px;
+  color: var(--df-text-secondary, #475569);
+}
+
+.df2-xform-col-flag {
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--df-warning-border, #fcd34d);
+  background: var(--df-warning-bg, #fffbeb);
+  color: var(--df-warning, #b45309);
+  font-weight: 600;
+}
+
+.df2-xform-col-sample {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+  font-family: var(--df-font-mono, "JetBrains Mono", monospace);
+}
+
+.df2-xform-col-clean {
+  margin: 6px 0 0;
+  font-size: 11px;
+  color: var(--df-text-secondary, #475569);
+}
+
+.df2-xform-bars {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.df2-xform-bars > li {
+  display: grid;
+  grid-template-columns: minmax(90px, 30%) minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--df-text-secondary, #475569);
+}
+
+.df2-xform-bar-track {
+  height: 8px;
+  border-radius: 999px;
+  background: var(--df-surface, #ffffff);
+  border: 1px solid var(--df-border, #e4e8ee);
+  overflow: hidden;
+}
+
+.df2-xform-bar-fill {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--df-brand, #0f766e);
+  transition: width 0.25s ease;
+}
+
+.df2-xform-bar-fill.kind-blank { background: #94a3b8; }
+.df2-xform-bar-fill.kind-padded { background: #0d9488; }
+.df2-xform-bar-fill.kind-inner-space { background: #14b8a6; }
+.df2-xform-bar-fill.kind-control { background: #b91c1c; }
+.df2-xform-bar-fill.kind-unicode { background: #7c3aed; }
+.df2-xform-bar-fill.kind-sentinel { background: #d97706; }
+
+.df2-xform-bar-count {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  color: var(--df-text-primary, #0f172a);
+}
+
+.df2-xform-bar-count small { font-weight: 400; color: var(--df-text-secondary, #475569); }
+
+/* ── Applied steps ──────────────────────────────────────────────────────── */
+
+.df2-xform-steps {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.df2-xform-steps > li {
+  border: 1px solid var(--df-border, #e4e8ee);
+  border-radius: var(--df-radius-md, 8px);
+  padding: 10px 12px;
+  background: var(--df-surface, #ffffff);
+}
+
+.df2-xform-steps > li.is-disabled { opacity: 0.6; }
+
+.df2-xform-step-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 13px;
+  color: var(--df-text-primary, #0f172a);
+}
+
+.df2-xform-step-index {
+  width: 20px;
+  height: 20px;
+  border-radius: 6px;
+  display: grid;
+  place-items: center;
+  background: var(--df-surface-muted, #f8fafc);
+  border: 1px solid var(--df-border, #e4e8ee);
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--df-text-secondary, #475569);
+}
+
+.df2-xform-step-effect {
+  margin: 6px 0 8px;
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--df-text-secondary, #475569);
+}
+
+.df2-xform-step-controls {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.df2-xform-step-controls .is-danger { color: var(--df-danger, #b91c1c); }
+
+.df2-xform-ledger {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  padding: 8px 10px;
+  border-radius: var(--df-radius-md, 8px);
+  border: 1px solid var(--df-success-border, #a7f3d0);
+  background: var(--df-success-bg, #ecfdf5);
+  color: var(--df-success, #047857);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.df2-xform-ledger.is-unbalanced {
+  border-color: var(--df-danger-border, #fecaca);
+  background: var(--df-danger-bg, #fef2f2);
+  color: var(--df-danger, #b91c1c);
+  font-weight: 600;
+}
+
+/* ── Step builder ───────────────────────────────────────────────────────── */
+
+.df2-xform-builder {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  border-top: 1px dashed var(--df-border, #e4e8ee);
+  padding-top: 12px;
+}
+
+.df2-xform-builder-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 10px 12px;
+  align-items: start;
+}
+
+.df2-xform-field-op { grid-column: 1 / -1; }
+
+.df2-xform-builder .df2-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.df2-xform-builder .df2-label {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--df-text-primary, #0f172a);
+}
+
+.df2-xform-builder .df2-label-hint {
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--df-text-secondary, #475569);
+}
+
+.df2-xform-code {
+  font-family: var(--df-font-mono, "JetBrains Mono", monospace);
+  font-size: 12px;
+}
+
+.df2-xform-code.is-invalid { border-color: var(--df-danger, #b91c1c); }
+.df2-xform-multi { min-height: 84px; }
+.df2-xform-toggle { align-self: end; }
+
+.df2-xform-builder-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.df2-xform-functions {
+  border: 1px solid var(--df-border, #e4e8ee);
+  border-radius: var(--df-radius-md, 8px);
+  background: var(--df-surface-muted, #f8fafc);
+  padding: 10px 12px;
+  font-size: 11.5px;
+  color: var(--df-text-secondary, #475569);
+}
+
+.df2-xform-functions p { margin: 0 0 8px; line-height: 1.5; }
+
+.df2-xform-functions ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 4px 12px;
+}
+
+.df2-xform-functions li { display: flex; gap: 6px; align-items: baseline; }
+.df2-xform-functions code { color: var(--df-brand, #0f766e); font-weight: 600; }
+
+/* ── Before / after ─────────────────────────────────────────────────────── */
+
+.df2-xform-grids {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 12px;
+}
+
+.df2-xform-gridpane { min-width: 0; }
+
+.df2-xform-gridpane h4 {
+  margin: 0 0 6px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: var(--df-text-secondary, #475569);
+}
+
+.df2-xform-scroll {
+  border: 1px solid var(--df-border, #e4e8ee);
+  border-radius: var(--df-radius-md, 8px);
+  overflow: auto;
+  max-height: 320px;
+}
+
+.df2-xform-scroll table { width: 100%; border-collapse: collapse; }
+
+.df2-xform-scroll th,
+.df2-xform-scroll td {
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--df-border, #e4e8ee);
+  font-size: 11.5px;
+  text-align: left;
+  white-space: nowrap;
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.df2-xform-scroll th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--df-surface-muted, #f8fafc);
+  font-family: var(--df-font-mono, "JetBrains Mono", monospace);
+  font-weight: 600;
+  color: var(--df-text-primary, #0f172a);
+}
+
+.df2-xform-scroll td { color: var(--df-text-secondary, #475569); }
+
+.df2-xform-scroll td.is-xform-changed {
+  background: var(--df-success-bg, #ecfdf5);
+  color: var(--df-success, #047857);
+  font-weight: 600;
+}
+
+/* ── Footer ─────────────────────────────────────────────────────────────── */
+
+.df2-xform-actions {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding-top: 12px;
+  border-top: 1px solid var(--df-border, #e4e8ee);
+}

@@ -65,6 +65,47 @@ describe("Transfer Studio chrome contracts", () => {
     assert.match(css, /\.df2-app \.df2-main \{[\s\S]*margin-left:\s*0\s*!important/);
   });
 
+  it("the pre-load step is named for the operator, never 'Shape'", () => {
+    const constants = readFileSync(join(webRoot, "pages/transfer/studioConstants.ts"), "utf8");
+    const inspector = readFileSync(join(webRoot, "components/transfer/TransferStudioInspector.tsx"), "utf8");
+    const page = readFileSync(join(webRoot, "pages/TransferPage.tsx"), "utf8");
+
+    assert.match(constants, /label: "Transform", shortLabel: "Xform"/);
+    assert.doesNotMatch(constants, /label: "Shape"/);
+    assert.match(inspector, /title: "Transform \(pre-load\)"/);
+    assert.match(page, /Continue to Transform/);
+    assert.doesNotMatch(page, /Continue to Shape/);
+  });
+
+  it("the Transform step ships the stylesheet its own namespace needs", () => {
+    const entry = readFileSync(join(webRoot, "styles/app-styles.css"), "utf8");
+    const css = readFileSync(join(webRoot, "styles/transform-prep.css"), "utf8");
+
+    // Every class the step used was previously undefined, so the panel laid out
+    // in default flow. The stylesheet must be reachable from the one entrypoint.
+    assert.match(entry, /@import "\.\/transform-prep\.css";/);
+    for (const rule of [".df2-xform-grid", ".df2-xform-card", ".df2-xform-bars", ".df2-xform-scroll"]) {
+      assert.ok(css.includes(rule), `${rule} has no rule`);
+    }
+    assert.match(css, /grid-template-columns: minmax\(0, 5fr\) minmax\(0, 6fr\)/);
+    assert.match(css, /@media \(max-width: 1180px\)/);
+  });
+
+  it("the Transform step states its own rules on screen", () => {
+    const guide = readFileSync(join(webRoot, "components/transfer/TransformGuidePanel.tsx"), "utf8");
+    const step = readFileSync(join(webRoot, "pages/transfer/TransferTransformStep.tsx"), "utf8");
+
+    assert.match(guide, /runs on the read, before anything is written/);
+    assert.match(guide, /never modified/);
+    assert.match(guide, /not as loss/);
+    assert.match(guide, /post-load transform/);
+    assert.match(guide, /re-checks every row of the[\s\S]{0,40}population/);
+    // Identity is what Execute is held to, so it is stated where it is approved.
+    assert.match(step, /recipe \{preview\.recipe\.recipe_hash\}/);
+    // A refused recipe has no identity — Map must not be reachable behind it.
+    assert.match(step, /disabled=\{Boolean\(previewError\) \|\| Boolean\(preview\?\.refusal\)\}/);
+  });
+
   it("transfer-studio stacks chrome via container query + 1280 fallback", () => {
     const css = readFileSync(join(webRoot, "styles/transfer-studio.css"), "utf8");
     assert.match(css, /container-type:\s*inline-size/);

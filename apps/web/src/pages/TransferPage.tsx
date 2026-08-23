@@ -219,7 +219,7 @@ import {
   STEPS,
   UPLOAD_FORMATS,
 } from "./transfer/studioConstants";
-import { TransferShapeStep } from "./transfer/TransferShapeStep";
+import { TransferTransformStep } from "./transfer/TransferTransformStep";
 import { recipePayload, type ShapeStepWire } from "../lib/shape";
 import {
   analysisFromPipeline,
@@ -277,13 +277,13 @@ export function TransferPage({
     unaccounted_sources?: string[];
   } | null>(null);
   /**
-   * The shaping recipe composed on the Shape step, and the identity the engine
+   * The recipe composed on the Transform (pre-load) step, and the identity the engine
    * gave it. The hash is what Execute is held to: if the recipe changes after
    * Validate, the run is refused rather than quietly running a different one.
    */
   const [shapeSteps, setShapeSteps] = useState<ShapeStepWire[]>([]);
   const [shapeIdentity, setShapeIdentity] = useState<{ hash: string; columns: string[] } | null>(null);
-  /** Sample rows from the last connector introspect, for Shape profile/preview. */
+  /** Sample rows from the last connector introspect, for Transform profile/preview. */
   const [connectorSampleRows, setConnectorSampleRows] = useState<Record<string, unknown>[]>([]);
   const [cloudPath, setCloudPath] = useState("");
   const [advancedOpen, setAdvancedOpen] = useState(false);
@@ -873,7 +873,7 @@ export function TransferPage({
     return {};
   })();
   const samplePreviewRows = parsed?.sample_data ?? parsed?.data ?? [];
-  /** Rows Shape profiles and previews against — file preview or connector sample. */
+  /** Rows Transform profiles and previews against — file preview or connector sample. */
   const shapeSampleRows = (
     sourceKind === "file" ? samplePreviewRows : connectorSampleRows
   ) as Record<string, unknown>[];
@@ -2596,7 +2596,7 @@ export function TransferPage({
       setSourceRowEstimate(intro.row_estimate);
     }
     const sampleRows = intro.data ?? intro.sample_data ?? [];
-    // Kept so Shape can profile and preview a connector source without a second
+    // Kept so Transform can profile and preview a connector source without a second
     // round-trip — the same rows Map was seeded from.
     setConnectorSampleRows(sampleRows);
     const columnSamples = Object.fromEntries(
@@ -6707,7 +6707,7 @@ export function TransferPage({
             onClick={() => setStep(STEP_SHAPE)}
             disabled={!canRunPreflight || analyzing}
           >
-            {analyzing ? <ButtonLoader label="Preparing mappings…" /> : <><DtIcon name="layers" size={18} /> Continue to Shape</>}
+            {analyzing ? <ButtonLoader label="Preparing mappings…" /> : <><DtIcon name="layers" size={18} /> Continue to Transform</>}
           </button>
           </div>
         </div>
@@ -6715,7 +6715,7 @@ export function TransferPage({
       )}
 
       {step === STEP_SHAPE && (
-        <TransferShapeStep
+        <TransferTransformStep
           sampleRows={shapeSampleRows}
           sourceColumns={currentSourceColumns}
           targetSchema={destSchemaMap}
