@@ -8188,3 +8188,311 @@ def test_oracle_live_scd2_current_when_reachable():
     except Exception:
         pass
 
+
+def test_removed_on_read_names_both_authorities_and_ignores_negatives():
+    from services.row_conservation import removed_on_read
+
+    assert removed_on_read(2, 1) == 3
+    assert removed_on_read(0, 0) == 0
+    assert removed_on_read(-5, 4) == 4
+
+
+def test_rows_removed_by_filter_and_recipe_close_the_population():
+    """A shaped run is short at the destination by instruction, not by loss."""
+    ledger = account_population(
+        rows_read=5,
+        dest_count=2,
+        dest_count_source=DEST_READBACK,
+        dest_count_before=0,
+        rejected_rows=0,
+        coerced_null_rows=0,
+        rows_skipped=0,
+        writer_ack=2,
+        sync_mode="overwrite",
+        rows_shaped_out=2,
+        rows_source_filtered=1,
+    )
+    assert ledger.conservation_kind == KIND_OVERWRITE
+    assert ledger.rows_read == 5
+    assert ledger.rows_written == 2
+    assert ledger.rows_shaped_out == 2
+    assert ledger.rows_source_filtered == 1
+    assert ledger.unaccounted == 0
+    assert ledger.balanced is True
+    assert "declared source filter" in ledger.note
+    assert "approved shaping recipe" in ledger.note
+    assert "Removal is not quarantine" in ledger.note
+
+
+def test_removed_rows_do_not_excuse_a_real_shortfall():
+    ledger = account_population(
+        rows_read=10,
+        dest_count=5,
+        dest_count_source=DEST_READBACK,
+        dest_count_before=0,
+        rejected_rows=0,
+        coerced_null_rows=0,
+        rows_skipped=0,
+        writer_ack=5,
+        sync_mode="overwrite",
+        rows_shaped_out=2,
+        rows_source_filtered=0,
+    )
+    assert ledger.unaccounted == 3
+    assert ledger.balanced is False
+
+
+def test_a_shaped_run_that_removed_nothing_reads_exactly_as_before():
+    plain = account_population(
+        rows_read=4,
+        dest_count=4,
+        dest_count_source=DEST_READBACK,
+        dest_count_before=0,
+        rejected_rows=0,
+        coerced_null_rows=0,
+        rows_skipped=0,
+        writer_ack=4,
+        sync_mode="overwrite",
+    )
+    shaped = account_population(
+        rows_read=4,
+        dest_count=4,
+        dest_count_source=DEST_READBACK,
+        dest_count_before=0,
+        rejected_rows=0,
+        coerced_null_rows=0,
+        rows_skipped=0,
+        writer_ack=4,
+        sync_mode="overwrite",
+        rows_shaped_out=0,
+        rows_source_filtered=0,
+    )
+    assert shaped.note == plain.note
+    assert shaped.balanced is plain.balanced is True
+    assert shaped.rows_shaped_out == 0
+    assert shaped.shape_recipe_hash == ""
+
+
+def test_quarantine_and_removal_are_separate_terms_in_one_close():
+    ledger = account_population(
+        rows_read=10,
+        dest_count=6,
+        dest_count_source=DEST_READBACK,
+        dest_count_before=0,
+        rejected_rows=2,
+        coerced_null_rows=0,
+        rows_skipped=1,
+        writer_ack=6,
+        sync_mode="overwrite",
+        rows_shaped_out=1,
+        rows_source_filtered=0,
+    )
+    assert ledger.rows_quarantined == 2
+    assert ledger.rows_skipped == 1
+    assert ledger.rows_shaped_out == 1
+    assert ledger.unaccounted == 0
+    assert ledger.balanced is True
+
+
+def test_mirror_close_counts_rows_the_recipe_removed():
+    ledger = account_population(
+        rows_read=5,
+        dest_count=8,
+        dest_count_source=DEST_ACTIVE_READBACK,
+        dest_count_before=0,
+        rejected_rows=0,
+        coerced_null_rows=0,
+        rows_skipped=0,
+        writer_ack=3,
+        sync_mode="mirror",
+        mirror={"active_rows": 3, "physical_rows": 8},
+        rows_shaped_out=2,
+        rows_source_filtered=0,
+    )
+    assert ledger.conservation_kind == KIND_MIRROR
+    assert ledger.unaccounted == 0
+    assert ledger.balanced is True
+    assert ledger.rows_shaped_out == 2
+
+
+def test_scd2_close_counts_rows_the_recipe_removed():
+    ledger = account_population(
+        rows_read=4,
+        dest_count=3,
+        dest_count_source=DEST_CURRENT_READBACK,
+        dest_count_before=0,
+        rejected_rows=0,
+        coerced_null_rows=0,
+        rows_skipped=0,
+        writer_ack=3,
+        sync_mode="scd2",
+        scd2={"current_rows": 3, "history_rows": 5},
+        rows_shaped_out=1,
+        rows_source_filtered=0,
+    )
+    assert ledger.conservation_kind == KIND_SCD2
+    assert ledger.unaccounted == 0
+    assert ledger.balanced is True
+
+
+def test_vector_close_counts_rows_the_filter_removed():
+    ledger = account_population(
+        rows_read=3,
+        dest_count=2,
+        dest_count_source=DEST_IDENTITY_READBACK,
+        dest_count_before=0,
+        rejected_rows=0,
+        coerced_null_rows=0,
+        rows_skipped=0,
+        writer_ack=2,
+        sync_mode="full_refresh_overwrite",
+        vector={"identity_rows": 2, "vector_rows": 9},
+        rows_shaped_out=0,
+        rows_source_filtered=1,
+    )
+    assert ledger.conservation_kind == KIND_VECTOR
+    assert ledger.unaccounted == 0
+    assert ledger.balanced is True
+
+
+def test_account_job_reads_shape_terms_and_recipe_identity_from_the_run():
+    job = {
+        "status": "completed",
+        "records_processed": 2,
+        "sync_mode": "overwrite",
+        "destination_summary": {
+            "rows": 2,
+            "rows_shaped_out": 2,
+            "rows_source_filtered": 1,
+            "rows_removed_on_read": 3,
+            "shape_recipe_hash": "abc123def4567890",
+        },
+        "reconciliation": {
+            "phase": "post_write_verified",
+            "source_rows": 5,
+            "target_rows": 2,
+            "target_checksum": "deadbeef",
+            "source_checksum": "deadbeef",
+            "rejected_rows": 0,
+            "coerced_null_rows": 0,
+            "rows_skipped": 0,
+        },
+    }
+    ledger = account_job(job)
+    assert ledger.rows_read == 5
+    assert ledger.rows_written == 2
+    assert ledger.rows_shaped_out == 2
+    assert ledger.rows_source_filtered == 1
+    assert ledger.shape_recipe_hash == "abc123def4567890"
+    assert ledger.unaccounted == 0
+    assert ledger.balanced is True
+    assert ledger.to_dict()["rows_shaped_out"] == 2
+    assert ledger.to_dict()["shape_recipe_hash"] == "abc123def4567890"
+
+
+def test_account_job_attributes_an_unsplit_removal_total_to_the_filter():
+    """A streaming pass may report only the cumulative removal total."""
+    job = {
+        "status": "completed",
+        "records_processed": 3,
+        "sync_mode": "overwrite",
+        "destination_summary": {
+            "rows": 3,
+            "rows_shaped_out": 1,
+            "rows_removed_on_read": 4,
+        },
+        "reconciliation": {
+            "phase": "post_write_verified",
+            "source_rows": 7,
+            "target_rows": 3,
+            "target_checksum": "deadbeef",
+            "source_checksum": "deadbeef",
+            "rejected_rows": 0,
+            "coerced_null_rows": 0,
+            "rows_skipped": 0,
+        },
+    }
+    ledger = account_job(job)
+    assert ledger.rows_shaped_out == 1
+    assert ledger.rows_source_filtered == 3
+    assert ledger.unaccounted == 0
+    assert ledger.balanced is True
+
+
+def test_job_rollup_sums_each_stream_removals_and_keeps_one_recipe_identity():
+    streams = {
+        "orders": {
+            "records_processed": 2,
+            "row_accounting": {
+                "conservation_kind": KIND_OVERWRITE,
+                "rows_written_source": DEST_READBACK,
+                "rows_read": 5,
+                "rows_written": 2,
+                "dest_count": 2,
+                "rows_quarantined": 0,
+                "rows_skipped": 0,
+                "rows_shaped_out": 2,
+                "rows_source_filtered": 1,
+                "shape_recipe_hash": "abc123def4567890",
+                "writer_ack": 2,
+                "unaccounted": 0,
+                "balanced": True,
+            },
+        },
+        "lines": {
+            "records_processed": 4,
+            "row_accounting": {
+                "conservation_kind": KIND_OVERWRITE,
+                "rows_written_source": DEST_READBACK,
+                "rows_read": 6,
+                "rows_written": 4,
+                "dest_count": 4,
+                "rows_quarantined": 0,
+                "rows_skipped": 0,
+                "rows_shaped_out": 2,
+                "rows_source_filtered": 0,
+                "shape_recipe_hash": "abc123def4567890",
+                "writer_ack": 4,
+                "unaccounted": 0,
+                "balanced": True,
+            },
+        },
+    }
+    ledger = account_job_streams(streams)
+    assert ledger is not None
+    assert ledger.rows_read == 11
+    assert ledger.rows_written == 6
+    assert ledger.rows_shaped_out == 4
+    assert ledger.rows_source_filtered == 1
+    assert ledger.shape_recipe_hash == "abc123def4567890"
+    assert ledger.unaccounted == 0
+    assert ledger.balanced is True
+    assert "approved shaping recipe" in ledger.note
+
+
+def test_job_rollup_does_not_name_one_recipe_when_the_streams_ran_two():
+    def stream(hash_: str) -> dict:
+        return {
+            "records_processed": 2,
+            "row_accounting": {
+                "conservation_kind": KIND_OVERWRITE,
+                "rows_written_source": DEST_READBACK,
+                "rows_read": 3,
+                "rows_written": 2,
+                "dest_count": 2,
+                "rows_quarantined": 0,
+                "rows_skipped": 0,
+                "rows_shaped_out": 1,
+                "rows_source_filtered": 0,
+                "shape_recipe_hash": hash_,
+                "writer_ack": 2,
+                "unaccounted": 0,
+                "balanced": True,
+            },
+        }
+
+    ledger = account_job_streams({"a": stream("1111111111111111"), "b": stream("2222222222222222")})
+    assert ledger is not None
+    assert ledger.rows_shaped_out == 2
+    assert ledger.shape_recipe_hash == ""
+    assert ledger.balanced is True

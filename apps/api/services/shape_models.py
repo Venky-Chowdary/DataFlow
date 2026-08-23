@@ -337,11 +337,28 @@ class ShapeRecipe:
 
         Disabled steps are excluded: they do not touch a single row, so toggling
         one off must not invalidate an approval, and toggling one *on* must.
+
+        A recipe with no enabled step has no identity, because there is no
+        program to identify. Hashing the empty case would name the pass-through
+        path — and an approval carrying that name, sent with no recipe (there is
+        none to send), reads as "the approved recipe went missing" and refuses a
+        run that is asking for exactly today's behaviour.
+
+        The identity is the program alone. The source column set is not part of
+        it, because every surface that computes this hash is holding its own
+        rendering of that set — design-time introspection, a preview called with
+        the sample's keys, the live read's headers — and folding it in made one
+        recipe carry several identities, which reads to an operator as "this is
+        not the recipe you approved" for a recipe nobody touched. Agreement with
+        the source is a separate, better-worded check: ``parse`` refuses a step
+        that reads a column the source does not have, and the read refuses a
+        column the approved recipe never saw.
         """
+        if not self.enabled_steps:
+            return ""
         payload = json.dumps(
             {
                 "steps": [s.canonical() for s in self.enabled_steps],
-                "input_columns": list(self.input_columns),
             },
             sort_keys=True,
             separators=(",", ":"),

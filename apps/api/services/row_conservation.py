@@ -983,11 +983,19 @@ class ConservationLedger:
     summable: bool | None = None
     per_stream: tuple[dict[str, Any], ...] | None = None
     # Rows a declared shaping recipe removed on the read (filter/divert). The
-    # reader cardinality is already net of them, so this term does not enter the
-    # balance — it exists so a smaller destination population can be read as "the
-    # recipe removed 27 rows" instead of "27 rows went missing", which is a
-    # different sentence from "the writer rejected them".
+    # reader counts them — they were read, paged and offset — so they are inside
+    # the population this run is asked to conserve, and the balance has to name
+    # them or a correct shaped run reads as "3 row(s) are neither at the
+    # destination, quarantined, nor skipped. Treat as potential silent loss",
+    # which is a different sentence from "the recipe removed them".
     rows_shaped_out: int = 0
+    # The declared source filter's share of the rows removed on the read, kept
+    # apart from the recipe's share so proof names the right authority: a filter
+    # the operator wrote and a recipe the operator approved are two decisions.
+    rows_source_filtered: int = 0
+    # Identity of the recipe that removed them, so "which program did this" is
+    # answerable from the ledger the run shipped rather than from a re-derivation.
+    shape_recipe_hash: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -996,6 +1004,8 @@ class ConservationLedger:
             "rows_quarantined": self.rows_quarantined,
             "rows_skipped": self.rows_skipped,
             "rows_shaped_out": self.rows_shaped_out,
+            "rows_source_filtered": self.rows_source_filtered,
+            "shape_recipe_hash": self.shape_recipe_hash,
             "rows_coerced_null": self.rows_coerced_null,
             "writer_ack": self.writer_ack,
             "dest_count": self.dest_count,
@@ -1078,8 +1088,15 @@ def _account_keyed(
     coerced: int,
     ack: int | None,
     census: KeyCensus | None,
+    removed: int = 0,
+    removal_note: str = "",
 ) -> ConservationLedger:
-    """Close dest COUNT(*) delta against dest-engine new keys, not writer ack."""
+    """Close dest COUNT(*) delta against dest-engine new keys, not writer ack.
+
+    Rows removed on the read never reached the key census, so they do not move
+    the expected delta; they are still stated, because an operator reading a
+    keyed close has to know the batch was narrowed before it got here.
+    """
     base = dict(
         rows_read=read,
         rows_quarantined=quarantined,
@@ -1177,6 +1194,7 @@ def _account_keyed(
             f"{abs(unaccounted)} more dest row(s) appeared than the key census "
             "predicted (duplicate dest keys, or inserts the census missed)."
         )
+    note += removal_note
     if ack_delta:
         sign = "more" if ack_delta > 0 else "fewer"
         note += (
@@ -1212,6 +1230,8 @@ def _account_mirror(
     coerced: int,
     ack: int | None,
     mirror: Mapping[str, Any] | None,
+    removed: int = 0,
+    removal_note: str = "",
 ) -> ConservationLedger:
     """Close active dest population, not physical COUNT(*) (which does not drop)."""
     payload = dict(mirror or {})
@@ -1262,7 +1282,7 @@ def _account_mirror(
             writer_ack_delta=None,
         )
 
-    unaccounted = read - (int(active) + quarantined + skipped)
+    unaccounted = read - (int(active) + quarantined + skipped + removed)
     ack_delta = (int(active) - ack) if ack is not None else None
     leftover = None
     if physical is not None:
@@ -1291,6 +1311,7 @@ def _account_mirror(
             "Reactivated keys or a dest-engine active census that includes "
             "rows this snapshot did not send."
         )
+    note += removal_note
     if ack_delta:
         sign = "more" if ack_delta > 0 else "fewer"
         note += (
@@ -1362,6 +1383,8 @@ def _account_vector(
     coerced: int,
     ack: int | None,
     vector: Mapping[str, Any] | None,
+    removed: int = 0,
+    removal_note: str = "",
 ) -> ConservationLedger:
     """Close COUNT(DISTINCT source_id), not physical embedding COUNT(*).
 
@@ -1439,7 +1462,7 @@ def _account_vector(
             writer_ack_delta=(int(identity) - ack) if ack is not None else None,
         )
 
-    unaccounted = read - (int(identity) + quarantined + skipped)
+    unaccounted = read - (int(identity) + quarantined + skipped + removed)
     ack_delta = (int(identity) - ack) if ack is not None else None
     if unaccounted == 0:
         note = (
@@ -1463,6 +1486,7 @@ def _account_vector(
             "Pre-existing source_id values on an empty-dest proof, or "
             "duplicate identity accounting."
         )
+    note += removal_note
     if ack_delta:
         sign = "more" if ack_delta > 0 else "fewer"
         note += (
@@ -1516,6 +1540,8 @@ def _account_scd2(
     coerced: int,
     ack: int | None,
     scd2: Mapping[str, Any] | None,
+    removed: int = 0,
+    removal_note: str = "",
 ) -> ConservationLedger:
     """Close COUNT(*) WHERE is_current, not physical history COUNT(*).
 
@@ -1570,7 +1596,7 @@ def _account_scd2(
         else " Physical history COUNT(*) is diagnostic."
     )
     ack_delta = (int(current) - ack) if ack is not None else None
-    accounted = int(current) + quarantined + skipped
+    accounted = int(current) + quarantined + skipped + removed
     unaccounted = read - accounted
 
     if dest_count_before is None:
@@ -1615,6 +1641,7 @@ def _account_scd2(
                 "proof, or duplicate current accounting."
                 + history_note
             )
+        note += removal_note
         if ack_delta:
             sign = "more" if ack_delta > 0 else "fewer"
             note += (
@@ -1645,6 +1672,7 @@ def _account_scd2(
             + history_note
             + " Writer version ack is diagnostic."
         )
+        note += removal_note
         if ack_delta:
             sign = "more" if ack_delta > 0 else "fewer"
             note += (
@@ -1680,6 +1708,34 @@ def _account_scd2(
     )
 
 
+def removed_on_read(rows_shaped_out: int, rows_source_filtered: int) -> int:
+    """Rows the read counted and deliberately did not offer the writer.
+
+    A declared source filter's rows and an approved recipe's rows are absent
+    from the destination *by instruction*. They are inside the population the
+    reader counted, so conservation closes only when it names them.
+    """
+    return max(int(rows_shaped_out or 0), 0) + max(int(rows_source_filtered or 0), 0)
+
+
+def _removal_phrase(rows_shaped_out: int, rows_source_filtered: int) -> str:
+    """How the removed rows are named in an operator-facing note."""
+    shaped = max(int(rows_shaped_out or 0), 0)
+    filtered = max(int(rows_source_filtered or 0), 0)
+    parts: list[str] = []
+    if filtered:
+        parts.append(f"{filtered:,} by the declared source filter")
+    if shaped:
+        parts.append(f"{shaped:,} by the approved shaping recipe")
+    if not parts:
+        return ""
+    return (
+        f" {' and '.join(parts)} were removed on the read: the reader counted "
+        "them, and they are absent from the destination by instruction, not by "
+        "loss. Removal is not quarantine — no cell was found unfit."
+    )
+
+
 def account_population(
     *,
     rows_read: int | None,
@@ -1696,8 +1752,65 @@ def account_population(
     vector: Mapping[str, Any] | None = None,
     keyset: Mapping[str, Any] | None = None,
     scd2: Mapping[str, Any] | None = None,
+    rows_shaped_out: int = 0,
+    rows_source_filtered: int = 0,
 ) -> ConservationLedger:
-    """Close ``reader == dest_population + hold_outs + skipped`` or say why not."""
+    """Close ``reader == dest_population + hold_outs + skipped + removed``, or say why not.
+
+    Rows a declared source filter or an approved recipe removed on the read are
+    counted by the reader and absent from the destination by instruction, so
+    they are stated on the accounted side. Every ledger carries them, including
+    the ones that refuse to balance, because "which program removed rows" is
+    part of reading why a run does not close.
+    """
+    shaped_out = max(int(rows_shaped_out or 0), 0)
+    source_filtered = max(int(rows_source_filtered or 0), 0)
+    ledger = _close_population(
+        rows_read=rows_read,
+        dest_count=dest_count,
+        dest_count_source=dest_count_source,
+        dest_count_before=dest_count_before,
+        rejected_rows=rejected_rows,
+        coerced_null_rows=coerced_null_rows,
+        rows_skipped=rows_skipped,
+        writer_ack=writer_ack,
+        sync_mode=sync_mode,
+        census=census,
+        mirror=mirror,
+        vector=vector,
+        keyset=keyset,
+        scd2=scd2,
+        removed=removed_on_read(shaped_out, source_filtered),
+        removal_note=_removal_phrase(shaped_out, source_filtered),
+    )
+    if not (shaped_out or source_filtered):
+        return ledger
+    return replace(
+        ledger,
+        rows_shaped_out=shaped_out,
+        rows_source_filtered=source_filtered,
+    )
+
+
+def _close_population(
+    *,
+    rows_read: int | None,
+    dest_count: int | None,
+    dest_count_source: str,
+    dest_count_before: int | None,
+    rejected_rows: int,
+    coerced_null_rows: int,
+    rows_skipped: int,
+    writer_ack: int | None,
+    sync_mode: str | None,
+    census: KeyCensus | None,
+    mirror: Mapping[str, Any] | None,
+    vector: Mapping[str, Any] | None,
+    keyset: Mapping[str, Any] | None,
+    scd2: Mapping[str, Any] | None,
+    removed: int,
+    removal_note: str,
+) -> ConservationLedger:
     quarantined = hold_outs(rejected_rows, coerced_null_rows)
     skipped = int(rows_skipped or 0)
     coerced = int(coerced_null_rows or 0)
@@ -1755,6 +1868,8 @@ def account_population(
             coerced=coerced,
             ack=ack,
             mirror=mirror,
+            removed=removed,
+            removal_note=removal_note,
         )
 
     if kind == KIND_VECTOR:
@@ -1770,6 +1885,8 @@ def account_population(
             coerced=coerced,
             ack=ack,
             vector=vector,
+            removed=removed,
+            removal_note=removal_note,
         )
 
     if kind == KIND_SCD2:
@@ -1785,12 +1902,15 @@ def account_population(
             coerced=coerced,
             ack=ack,
             scd2=scd2,
+            removed=removed,
+            removal_note=removal_note,
         )
 
     if (
         read == 0
         and quarantined == 0
         and skipped == 0
+        and removed == 0
         and int(ack or 0) == 0
     ):
         return _empty_pass_ledger(
@@ -1813,6 +1933,8 @@ def account_population(
             coerced=coerced,
             ack=ack,
             census=census,
+            removed=removed,
+            removal_note=removal_note,
         )
 
     written: int | None
@@ -1903,7 +2025,7 @@ def account_population(
     if kind == KIND_APPEND_DELTA:
         dest_short = "dest Δ"
 
-    unaccounted = read - (written + quarantined + skipped)
+    unaccounted = read - (written + quarantined + skipped + removed)
     ack_delta = (written - ack) if ack is not None else None
     append_delta = written if kind == KIND_APPEND_DELTA else None
 
@@ -1945,8 +2067,12 @@ def account_population(
         )
     else:
         note = (
-            f"Every source row is in the {dest_phrase}, quarantined, or skipped."
+            f"Every source row is in the {dest_phrase}, quarantined, skipped, "
+            "or removed on the read."
+            if removed
+            else f"Every source row is in the {dest_phrase}, quarantined, or skipped."
         )
+    note += removal_note
     if ack_delta:
         sign = "more" if ack_delta > 0 else "fewer"
         note += (
@@ -2038,15 +2164,37 @@ def account_job(job: Mapping[str, Any]) -> ConservationLedger:
     scd2 = extract_scd2_payload(dest)
     if not scd2:
         scd2 = extract_scd2_payload(recon)
-    # Rows the declared recipe removed on the read. The reader cardinality every
-    # path reports is already net of them (the same way it is net of a source
-    # filter), so this term is evidence, not arithmetic: adding it to skipped
-    # would open a ledger that is closed.
+    # Rows the declared recipe and the declared source filter removed on the
+    # read. The reader counted them — the source paged and offset them — so the
+    # population Gate-8 conserves includes them and the balance has to state
+    # them. Leaving them out reads a correct shaped run as silent loss.
     shaped_out = _first_present_int(
         recon.get("rows_shaped_out"),
         dest.get("rows_shaped_out"),
     )
+    source_filtered = _first_present_int(
+        recon.get("rows_source_filtered"),
+        dest.get("rows_source_filtered"),
+    )
+    # A streaming pass reports the cumulative removal total for committed pages
+    # only. When it did not split that total, whatever the recipe did not remove
+    # was the filter's — the same attribution Gate-8 makes.
+    removed_total = _first_present_int(
+        recon.get("rows_removed_on_read"),
+        dest.get("rows_removed_on_read"),
+    )
+    if (
+        "rows_source_filtered" not in recon
+        and "rows_source_filtered" not in dest
+        and removed_total > shaped_out + source_filtered
+    ):
+        source_filtered = removed_total - shaped_out
+    recipe_hash = str(
+        recon.get("shape_recipe_hash") or dest.get("shape_recipe_hash") or ""
+    )
     ledger = account_population(
+        rows_shaped_out=shaped_out,
+        rows_source_filtered=source_filtered,
         rows_read=_as_optional_int(recon.get("source_rows")),
         dest_count=dest_count,
         dest_count_source=dest_source,
@@ -2072,7 +2220,9 @@ def account_job(job: Mapping[str, Any]) -> ConservationLedger:
         keyset=keyset or None,
         scd2=scd2 or None,
     )
-    return replace(ledger, rows_shaped_out=shaped_out) if shaped_out else ledger
+    if not recipe_hash:
+        return ledger
+    return replace(ledger, shape_recipe_hash=recipe_hash)
 
 
 def attach_conservation_to_updates(
@@ -2179,6 +2329,9 @@ def _compact_stream_ledger(
             "rows_written": None,
             "rows_quarantined": 0,
             "rows_skipped": 0,
+            "rows_shaped_out": 0,
+            "rows_source_filtered": 0,
+            "shape_recipe_hash": "",
             "writer_ack": _as_optional_int(health.get("records_processed")),
         }
     measured = stream_dest_measured(raw)
@@ -2193,6 +2346,9 @@ def _compact_stream_ledger(
         "rows_written": _as_optional_int(raw.get("rows_written")),
         "rows_quarantined": _first_present_int(raw.get("rows_quarantined")),
         "rows_skipped": _first_present_int(raw.get("rows_skipped")),
+        "rows_shaped_out": _first_present_int(raw.get("rows_shaped_out")),
+        "rows_source_filtered": _first_present_int(raw.get("rows_source_filtered")),
+        "shape_recipe_hash": str(raw.get("shape_recipe_hash") or ""),
         "writer_ack": _as_optional_int(raw.get("writer_ack")),
         "unaccounted": _as_optional_int(raw.get("unaccounted")),
     }
@@ -2214,6 +2370,14 @@ def account_job_streams(streams: Any) -> ConservationLedger | None:
     kinds = {str(item["conservation_kind"]) for item in per if item.get("conservation_kind")}
     only = next(iter(kinds)) if len(kinds) == 1 else None
     summable = bool(all_measured and only in _SUMMABLE_KINDS)
+    # Every stream removed its own rows on the read, so the job's population
+    # includes each stream's removals; summing them is the only way the rolled
+    # up balance closes on the same rows the stream ledgers closed on.
+    shaped_out_total = sum(int(item["rows_shaped_out"] or 0) for item in per)
+    source_filtered_total = sum(int(item["rows_source_filtered"] or 0) for item in per)
+    removed_total = removed_on_read(shaped_out_total, source_filtered_total)
+    hashes = {str(item["shape_recipe_hash"] or "") for item in per} - {""}
+    job_recipe_hash = next(iter(hashes)) if len(hashes) == 1 else ""
 
     dest_count: int | None = None
     active_count: int | None = None
@@ -2230,7 +2394,7 @@ def account_job_streams(streams: Any) -> ConservationLedger | None:
         quarantined = sum(int(item["rows_quarantined"] or 0) for item in per)
         skipped = sum(int(item["rows_skipped"] or 0) for item in per)
         written_source = DEST_READBACK
-        unaccounted = rows_read - (rows_written + quarantined + skipped)
+        unaccounted = rows_read - (rows_written + quarantined + skipped + removed_total)
     elif summable and only == KIND_MIRROR:
         active_count = sum(int(item["active_count"] or 0) for item in per)
         dest_count = (
@@ -2243,7 +2407,7 @@ def account_job_streams(streams: Any) -> ConservationLedger | None:
         quarantined = sum(int(item["rows_quarantined"] or 0) for item in per)
         skipped = sum(int(item["rows_skipped"] or 0) for item in per)
         written_source = DEST_ACTIVE_READBACK
-        unaccounted = rows_read - (rows_written + quarantined + skipped)
+        unaccounted = rows_read - (rows_written + quarantined + skipped + removed_total)
     elif summable and only == KIND_VECTOR:
         dest_count = sum(int(item["dest_count"] or 0) for item in per)
         rows_written = dest_count
@@ -2251,7 +2415,7 @@ def account_job_streams(streams: Any) -> ConservationLedger | None:
         quarantined = sum(int(item["rows_quarantined"] or 0) for item in per)
         skipped = sum(int(item["rows_skipped"] or 0) for item in per)
         written_source = DEST_IDENTITY_READBACK
-        unaccounted = rows_read - (rows_written + quarantined + skipped)
+        unaccounted = rows_read - (rows_written + quarantined + skipped + removed_total)
     elif summable and only == KIND_SCD2:
         dest_count = sum(int(item["dest_count"] or 0) for item in per)
         rows_written = dest_count
@@ -2259,7 +2423,7 @@ def account_job_streams(streams: Any) -> ConservationLedger | None:
         quarantined = sum(int(item["rows_quarantined"] or 0) for item in per)
         skipped = sum(int(item["rows_skipped"] or 0) for item in per)
         written_source = DEST_CURRENT_READBACK
-        unaccounted = rows_read - (rows_written + quarantined + skipped)
+        unaccounted = rows_read - (rows_written + quarantined + skipped + removed_total)
     elif summable and only == KIND_EMPTY_PASS:
         dest_count = 0
         rows_written = 0
@@ -2293,7 +2457,7 @@ def account_job_streams(streams: Any) -> ConservationLedger | None:
             f"Job conservation closed across {len(per)} {only} stream(s). Dest "
             "population is the sum of dest-engine counts of the same kind. "
             "Writer ack is diagnostic."
-        )
+        ) + _removal_phrase(shaped_out_total, source_filtered_total)
     else:
         note = (
             f"Every stream ledger is closed ({', '.join(sorted(kinds))}). Dest "
@@ -2328,6 +2492,9 @@ def account_job_streams(streams: Any) -> ConservationLedger | None:
         measured_streams=measured_n,
         summable=summable,
         per_stream=per,
+        rows_shaped_out=shaped_out_total,
+        rows_source_filtered=source_filtered_total,
+        shape_recipe_hash=job_recipe_hash,
     )
 
 

@@ -14,6 +14,7 @@ import {
   ledgerIdentityCells,
   conservationCompleteCopy,
   readConservationLedger,
+  removedOnRead,
   writerAckDisagrees,
   writerHeadline,
 } from "./conservationLedger.js";
@@ -579,5 +580,74 @@ describe("append dest headline is dest Δ, not dest after", () => {
     assert.equal(writerAckDisagrees({ row_accounting: noDeltaField }), false);
     const h = destHeadline({ status: "completed", row_accounting: noDeltaField });
     assert.equal(h.value, "200");
+  });
+});
+
+describe("shaped rows are named, never drawn as silent loss", () => {
+  const shapedLedger = {
+    ...overwriteLedger,
+    rows_read: 5,
+    rows_written: 2,
+    dest_count: 2,
+    unaccounted: 0,
+    balanced: true,
+    writer_ack: 2,
+    writer_ack_delta: 0,
+    rows_shaped_out: 2,
+    rows_source_filtered: 1,
+    shape_recipe_hash: "abc123def4567890",
+  };
+
+  it("parses the engine shape terms without inventing them", () => {
+    const ledger = readConservationLedger({ row_accounting: shapedLedger });
+    assert.ok(ledger);
+    assert.equal(ledger.rows_shaped_out, 2);
+    assert.equal(ledger.rows_source_filtered, 1);
+    assert.equal(ledger.shape_recipe_hash, "abc123def4567890");
+    const plain = readConservationLedger({ row_accounting: overwriteLedger });
+    assert.ok(plain);
+    assert.equal(plain.rows_shaped_out, 0);
+    assert.equal(plain.rows_source_filtered, 0);
+    assert.equal(plain.shape_recipe_hash, "");
+  });
+
+  it("states the removed rows inside the identity", () => {
+    const ledger = readConservationLedger({ row_accounting: shapedLedger });
+    assert.ok(ledger);
+    assert.equal(removedOnRead(ledger), 3);
+    assert.match(ledgerEquation(ledger), /removed on read 3/);
+  });
+
+  it("leaves a plain transfer identity untouched", () => {
+    const ledger = readConservationLedger({ row_accounting: overwriteLedger });
+    assert.ok(ledger);
+    assert.equal(removedOnRead(ledger), 0);
+    assert.doesNotMatch(ledgerEquation(ledger), /removed on read/);
+  });
+
+  it("names each removal authority and the recipe that ran", () => {
+    const ledger = readConservationLedger({ row_accounting: shapedLedger });
+    assert.ok(ledger);
+    const cells = ledgerIdentityCells(ledger);
+    const labels = cells.map((c) => c.label);
+    assert.ok(labels.includes("Filtered on read"));
+    assert.ok(labels.includes("Shaped out"));
+    assert.equal(cells.find((c) => c.label === "Shaped out")?.value, "2");
+    assert.equal(cells.find((c) => c.label === "Recipe")?.value, "abc123def4567890");
+  });
+
+  it("draws no shaping row when nothing was removed", () => {
+    const ledger = readConservationLedger({ row_accounting: overwriteLedger });
+    assert.ok(ledger);
+    const labels = ledgerIdentityCells(ledger).map((c) => c.label);
+    assert.ok(!labels.includes("Shaped out"));
+    assert.ok(!labels.includes("Filtered on read"));
+    assert.ok(!labels.includes("Recipe"));
+  });
+
+  it("keeps a shaped run measured and balanced", () => {
+    const metric = destHeadline({ status: "completed", row_accounting: shapedLedger });
+    assert.equal(metric.measured, true);
+    assert.equal(metric.value, "2");
   });
 });

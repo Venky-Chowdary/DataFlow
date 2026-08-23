@@ -7,6 +7,7 @@ from decimal import Decimal
 
 import pytest
 
+from services.shape_apply import build_shape_runner
 from services.shape_engine import ShapeEngine, ShapeRowError, shape_records
 from services.shape_models import MAX_STEPS, ShapeError, ShapeRecipe
 
@@ -102,6 +103,35 @@ def test_a_disabled_step_is_not_part_of_the_identity_but_enabling_it_is():
     on = recipe({"op": "trim", "column": "name"})
     assert off.recipe_hash == ShapeRecipe.parse({}, source_columns=COLUMNS).recipe_hash
     assert on.recipe_hash != off.recipe_hash
+
+
+def test_a_recipe_with_nothing_enabled_has_no_identity_to_approve():
+    """The pass-through path is not a program, so Validate must not name one.
+
+    An identity here is what broke "Continue without shaping": Validate handed
+    back a hash for the empty recipe, Execute received that hash with no recipe
+    to go with it, and refused a run that asked for exactly today's behaviour.
+    """
+    assert ShapeRecipe.parse({}, source_columns=COLUMNS).recipe_hash == ""
+    assert ShapeRecipe.parse(None, source_columns=COLUMNS).recipe_hash == ""
+    assert recipe({"op": "trim", "column": "name", "enabled": False}).recipe_hash == ""
+
+
+def test_no_recipe_reaches_execute_even_when_an_approval_is_echoed_back():
+    """Validate's empty identity, sent back with no recipe, still runs unshaped."""
+    approved = ShapeRecipe.parse({}, source_columns=COLUMNS).recipe_hash
+    assert build_shape_runner({}, source_columns=COLUMNS, approved_hash=approved) is None
+    assert build_shape_runner(None, source_columns=COLUMNS, approved_hash=approved) is None
+
+
+def test_one_recipe_has_one_identity_on_every_surface_that_hashes_it():
+    """Validate, preview and the live read hold different renderings of the
+    source column set; the recipe they are all talking about is the same one."""
+    step = {"op": "trim", "column": "name"}
+    designed = recipe(step)
+    previewed = recipe(step, columns=["name", "amount", "id", "when", "code"])
+    live = recipe(step, columns=[*COLUMNS, "loaded_at"])
+    assert designed.recipe_hash == previewed.recipe_hash == live.recipe_hash
 
 
 def test_step_order_is_part_of_the_identity():

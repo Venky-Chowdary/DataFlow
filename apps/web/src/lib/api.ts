@@ -2562,11 +2562,14 @@ export async function runUniversalTransfer(options: {
   if (runReadOptions) formData.append("read_options_json", runReadOptions);
   // The recipe the operator approved, and its identity. Execute re-applies this
   // recipe and refuses if the hash no longer matches what Validate scanned.
+  // An approval names a recipe, so it travels only with the recipe it names: a
+  // hash sent beside no recipe reads as "the approved recipe went missing" and
+  // is refused — which would block the pass-through run this is.
   if (options.shapeRecipe?.steps?.length) {
     formData.append("shape_recipe_json", JSON.stringify(options.shapeRecipe));
-  }
-  if (options.approvedShapeRecipeHash) {
-    formData.append("approved_shape_recipe_hash", options.approvedShapeRecipeHash);
+    if (options.approvedShapeRecipeHash) {
+      formData.append("approved_shape_recipe_hash", options.approvedShapeRecipeHash);
+    }
   }
   if (options.destExtra && Object.keys(options.destExtra).length) {
     formData.append("dest_extra_json", JSON.stringify(options.destExtra));

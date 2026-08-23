@@ -491,6 +491,21 @@ def render_certificate_markdown(cert: dict[str, Any]) -> str:
     def _n(value: Any) -> str:
         return f"{value:,}" if isinstance(value, int) else "unmeasured"
 
+    shaped_out = ledger.get("rows_shaped_out")
+    source_filtered = ledger.get("rows_source_filtered")
+    removal_rows = [
+        row
+        for row in (
+            f"| Removed by the declared source filter | {_n(source_filtered)} |"
+            if isinstance(source_filtered, int) and source_filtered > 0
+            else "",
+            f"| Removed by the approved shaping recipe | {_n(shaped_out)} |"
+            if isinstance(shaped_out, int) and shaped_out > 0
+            else "",
+        )
+        if row
+    ]
+
     lines = [
         "# Migration Certificate",
         "",
@@ -509,8 +524,16 @@ def render_certificate_markdown(cert: dict[str, Any]) -> str:
         f"| On destination (COUNT(*)) | {_n(ledger.get('rows_written'))} |",
         f"| Quarantined (did not land) | {_n(ledger.get('rows_quarantined'))} |",
         f"| Skipped (stale / duplicate) | {_n(ledger.get('rows_skipped'))} |",
+        *removal_rows,
         f"| Unaccounted | {_n(ledger.get('unaccounted'))} |",
         "",
+        (
+            f"Shaping recipe `{ledger.get('shape_recipe_hash')}` ran on the read — "
+            "removed rows were counted by the reader and are absent from the "
+            "destination by instruction, not by loss or quarantine."
+            if ledger.get("shape_recipe_hash")
+            else ""
+        ),
         f"Written figure is `{ledger.get('rows_written_source') or 'unmeasured'}`"
         f" ({ledger.get('conservation_kind') or 'n/a'})."
         + (
