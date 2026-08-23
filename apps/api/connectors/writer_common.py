@@ -28,6 +28,13 @@ from services.value_serializer import (
     public_mapped_cell,
 )
 
+from connectors.array_wire import (  # noqa: F401 — re-export canonical helpers
+    _is_numeric_wire,
+    _is_temporal_wire,
+    _parse_pg_array_literal,
+    _pg_array_element,
+    parse_array_wire_elements,
+)
 from connectors.sql_identifiers import (  # noqa: F401 — re-export canonical helpers
     quote_column_list,
     quote_sql_identifier,
@@ -3632,119 +3639,6 @@ _ARRAY_NULL_STRICT_DIALECTS = ("bigquery", "big query", "bq", "clickhouse")
 # BigQuery does not support arrays of arrays — an ARRAY of STRUCT is required.
 _ARRAY_NESTED_FORBIDDEN_DIALECTS = ("bigquery", "big query", "bq")
 
-
-def parse_array_wire_elements(value: Any) -> tuple[list[Any] | None, str | None]:
-    """Parse array wire into elements for element-level fidelity checks.
-
-    Returns ``(elements, error)``. ``(None, None)`` means *ambiguous* — a bare
-    scalar that may legitimately be a SET joiner payload or engine-native
-    literal. Ambiguity is never quarantined; only unambiguous breakage is,
-    so this gate cannot produce false holdouts.
-    """
-    if value is None:
-        return None, None
-    if isinstance(value, (list, tuple)):
-        return list(value), None
-    if isinstance(value, dict):
-        return None, "object/dict payload cannot populate an ARRAY column"
-    if isinstance(value, (bytes, bytearray, memoryview)):
-        return None, "binary payload cannot populate an ARRAY column"
-    if not isinstance(value, str):
-        return None, None
-
-    text = value.strip()
-    if not text:
-        return None, None
-    if text.startswith("[") and text.endswith("]"):
-        try:
-            parsed = json.loads(text)
-        except Exception:
-            return None, "malformed JSON array payload"
-        if not isinstance(parsed, list):
-            return None, "JSON payload is not an array"
-        return parsed, None
-    if text.startswith("{") and text.endswith("}"):
-        # Postgres array literal ``{a,b,NULL}`` (unquoted NULL is a real NULL;
-        # quoted "NULL" is the literal string) — PG docs 8.15.
-        try:
-            parsed_obj = json.loads(text)
-        except Exception:
-            return _parse_pg_array_literal(text), None
-        if isinstance(parsed_obj, dict):
-            return None, "JSON object payload cannot populate an ARRAY column"
-        return _parse_pg_array_literal(text), None
-    return None, None
-
-
-def _parse_pg_array_literal(text: str) -> list[Any]:
-    """Split a Postgres ``{a,b,"c,d",NULL}`` literal into elements."""
-    body = text[1:-1]
-    if not body.strip():
-        return []
-    elements: list[Any] = []
-    buf: list[str] = []
-    in_quotes = False
-    escaped = False
-    for ch in body:
-        if escaped:
-            buf.append(ch)
-            escaped = False
-            continue
-        if ch == "\\":
-            escaped = True
-            continue
-        if ch == '"':
-            in_quotes = not in_quotes
-            buf.append(ch)
-            continue
-        if ch == "," and not in_quotes:
-            elements.append(_pg_array_element(("".join(buf)).strip()))
-            buf = []
-            continue
-        buf.append(ch)
-    elements.append(_pg_array_element(("".join(buf)).strip()))
-    return elements
-
-
-def _pg_array_element(raw: str) -> Any:
-    if raw.upper() == "NULL":
-        return None
-    if len(raw) >= 2 and raw.startswith('"') and raw.endswith('"'):
-        return raw[1:-1]
-    return raw
-
-
-def _is_numeric_wire(value: Any) -> bool:
-    """True when a cell parses as a finite number (never invent 0 from text)."""
-    from decimal import Decimal, InvalidOperation
-
-    if isinstance(value, bool) or isinstance(value, (int, float)):
-        return True
-    try:
-        return Decimal(str(value).strip()).is_finite()
-    except (InvalidOperation, ValueError, TypeError, ArithmeticError):
-        return False
-
-
-def _is_temporal_wire(value: Any) -> bool:
-    """True when a cell parses as an ISO-8601 date / time / timestamp."""
-    from datetime import date, datetime, time
-
-    if isinstance(value, (datetime, date, time)):
-        return True
-    text = str(value).strip()
-    if not text:
-        return True
-    # ``fromisoformat`` gained ``Z`` support in 3.11; normalize for older runtimes.
-    normalized = text[:-1] + "+00:00" if text.endswith(("Z", "z")) else text
-    normalized = normalized.replace(" ", "T", 1) if " " in normalized else normalized
-    for parser in (datetime.fromisoformat, date.fromisoformat, time.fromisoformat):
-        try:
-            parser(normalized)
-            return True
-        except (ValueError, TypeError):
-            continue
-    return False
 
 
 def array_element_unfit_reason(

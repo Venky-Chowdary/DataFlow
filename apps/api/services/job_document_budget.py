@@ -84,6 +84,10 @@ def slim_rejected_detail(detail: Any, *, cell_chars: int = JOB_REJECTED_CELL_CHA
         "row",
         "row_number",
         "index",
+        # The offending value is the finding: without it Inspect shows a reason
+        # for a cell it cannot name, and the export has an empty column.
+        "value",
+        "original_value",
         "reason",
         "message",
         "error",

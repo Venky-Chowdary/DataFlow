@@ -2029,11 +2029,15 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
             rejectedRows={liveJob.rejected_rows}
             coercedNullRows={liveJob.coerced_null_rows}
             initialDetails={Array.isArray(liveJob.rejected_details) ? liveJob.rejected_details : undefined}
-            truncatedDetails={
-              liveJob.rejected_details_truncated
-              ?? (liveJob.destination_summary as { rejected_details_truncated?: number } | undefined)
-                ?.rejected_details_truncated
-            }
+            truncatedDetails={Math.max(
+              0,
+              Number(
+                liveJob.rejected_details_total
+                  ?? (liveJob.destination_summary as { rejected_details_total?: number } | undefined)
+                    ?.rejected_details_total
+                  ?? 0,
+              ) - (Array.isArray(liveJob.rejected_details) ? liveJob.rejected_details.length : 0),
+            )}
             autoLoad
             initiallyOpen
             repairMappings={jobRepairMappings}

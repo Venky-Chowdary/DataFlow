@@ -241,6 +241,70 @@ rebuilt from Source.
 Confirm no rows landed with a destination count, e.g.
 `docker exec df-pg psql -U postgres -d dataflow -tAc "SELECT count(*) FROM <table>;"`.
 
+## Quarantine / refused-write-unit / integer-fit testing
+
+Verifying quarantine accounting (`rejected_rows` vs `rows_rolled_back` vs `rows_refused_unit`,
+`rows_unaccounted`, `dest_dlq_durable`) needs a **refused atomic write unit**, which is surprisingly
+hard to reach on purpose. What works:
+
+- **Fractional → INT can no longer reach the writer.** Once `fits_integer` refuses non-integral
+  decimals *and* Execute hands the fit scan the full population, a strict fractional→INT run blocks at
+  **Execute preflight**, so the writer-abort path is unreachable with fractional data. `skip_preflight=true`
+  does not help — engine-side fidelity/type-drift gates still fire. Do not burn time here; pick a defect
+  class the fit gate passes but the writer refuses.
+- **Find the gate-blind classes by probing the two rules directly** rather than guessing. Import
+  `scan_population_fit` + `build_population_fit_gate` (`services/population_fit_scan.py`) and
+  `apply_transform` (`services/transform_engine.py`), feed 750 good + 250 bad rows, and flag
+  `gate != "block" and writer_error`. Observed gate-blind (gate passes, writer refuses):
+  **text→INT (`'ABC-1'`), bad date→DATE (`'2024-02-31'`), bad bool→BOOL (`'maybe'`),
+  bad UUID→CHAR(36)**. Gate correctly blocks fractional / overflow / long-string / decimal-scale.
+  `fits_integer('ABC-1','INT')` returning `True` is itself worth reporting — same bug family as the
+  fractional one, still open for non-numeric text.
+- **`'ABC-1'` → INT is the cheapest refused-unit fixture** and needs **no preflight bypass at all**
+  (`validation_mode=strict`, `skip_preflight=false`), so the run is fully UI-drivable. Put the bad rows
+  **past the preview window** (e.g. rows 501-750 of 1000) so CSV inference still reads the column as
+  integer and the strict source-side CSV gate does not bounce the wizard back to Source.
+- **Fixture size decides whether you see the real detail or a slimmed copy.**
+  `JOB_REJECTED_PREVIEW_MAX = 40` (`services/job_document_budget.py`), and `slim_rejected_detail`'s
+  whitelist **omits `value`**. So:
+  - `> 40` findings ⇒ endpoint hydrates from the DLQ (`"source": "dlq"`) and `value` is populated;
+  - `<= 40` findings ⇒ endpoint serves the slimmed job-document copy (`"source": "write"`) and `value`
+    is empty in the UI table *and* the CSV export.
+  Always test **both** sizes — a single large fixture makes the `value` bug look fixed, and a single
+  small one makes hydration look broken. Check `endpoint["source"]` to know which path you measured.
+- **Destination DLQ auto-provisioning is broken on MySQL**: the generated DDL emits `VARCHAR` with no
+  length, so the DLQ create fails with error **1064** and `dest_dlq_durable` is `false` on every MySQL
+  run, regardless of whether a `<table>_df_quarantine` table pre-exists. Don't attribute that to your
+  own malformed fixture — confirm with a destination that has *no* DLQ table.
+- **`row_accounting` is `unmeasured` for file sources**, so a refused-unit job shows
+  `balanced: false` and a red **"Ledger unbalanced"** panel even when the quarantine split is fully
+  accounted. The new `rows_rolled_back` / `rows_refused_unit` are not fed into the Gate-8 ledger.
+- **Valid `schema_policy` values** (`services/preflight_service.py`) are exactly
+  `manual_review`, `propagate_columns`, `propagate_all`, `pause_on_change`, `type_locked`. Anything
+  else (e.g. `auto_add_columns`) fails the run with `Unknown schema policy '...'` surfaced as a
+  1-row *quarantine finding* — which reads exactly like a product regression. Use
+  `propagate_columns` when the destination table must be created.
+- **Inspect surface**: Jobs ▸ select job ▸ **Quarantine** tab ▸ **Inspect quarantine details** opens the
+  drawer rendering `QuarantinePanel`. A replay control (`Replay quarantined rows`) is offered for
+  `completed_with_quarantine` jobs but **not** for a fully-failed refused-unit job, even when findings
+  are durable on the control plane.
+- **UI export lands in the browser download dir**, e.g.
+  `%TEMP%\chisel_browser_downloads\quarantine-<job_id>.csv`. It is UTF-8 **without BOM**: PowerShell
+  `Get-Content` decodes the em-dash as mojibake, so read it with
+  `[System.Text.Encoding]::UTF8.GetString([IO.File]::ReadAllBytes($f))` before reporting an
+  "encoding bug".
+
+### Fixture locations that are easy to get wrong
+
+- Postgres `df-pg` on host port **5433**: the 11-table fixture baseline (`ttd_orders_ok` = 5 rows /
+  `SUM(amount) 1367.875000`, `eos_t_*`, `ttd_pii`, `tfid_src`) lives in database **`dataflow`**, not
+  `postgres`. Querying `postgres` shows a single `_dataflow_write_ledger` table and looks exactly like
+  someone dropped the baseline. Port **5432** exists but rejects `postgres/postgres`.
+- MySQL `df-mysql` on host port **3306**, `dataflow/dataflow`, db `dataflow` (an older note in this file
+  says 3307 — verify with `docker port df-mysql` before trusting either).
+- Mongo jobs: database `datatransfer`, collection **`transfer_jobs`**, `_id` is an **ObjectId** — use
+  `find_one({"_id": jid}) or find_one({"_id": ObjectId(jid)})`.
+
 ## Devin Secrets Needed
 
 None — local credentials come from the running API process environment.

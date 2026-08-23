@@ -24,6 +24,8 @@ from services.quarantine_from_preflight import merge_job_quarantine  # noqa: E40
 from src.transfer.adapters import (  # noqa: E402
     WriteBatchBlocked,
     raise_writer_failure,
+)
+from src.transfer.job_quarantine import (  # noqa: E402
     rows_with_findings,
     split_refused_unit,
 )
@@ -151,3 +153,53 @@ def test_a_raw_mongo_job_hydrates_its_durable_findings(monkeypatch) -> None:
     }
     merged = merge_job_quarantine(job)
     assert len(merged) == 2500
+
+
+def test_a_small_run_keeps_the_offending_value_on_the_job() -> None:
+    """Under the hydration threshold the job copy *is* the evidence.
+
+    ``slim_rejected_detail`` whitelisted row/column/reason but not ``value``, so
+    a run with a handful of findings showed a reason for a cell it could not
+    name, and Export CSV had an empty value column.
+    """
+    from services.job_document_budget import trim_job_update_payload
+
+    trimmed = trim_job_update_payload(
+        {"rejected_details": _details(5), "rejected_rows": 5}
+    )
+    kept = trimmed["rejected_details"]
+    assert len(kept) == 5
+    assert [d.get("value") for d in kept] == ["22.433332"] * 5
+
+
+@pytest.mark.parametrize(
+    "dest_type",
+    ["mysql", "postgresql", "oracle", "mssql", "sqlite", "redshift"],
+)
+def test_the_dlq_table_declares_a_carrier_the_dialect_accepts(dest_type: str) -> None:
+    """A bare ``VARCHAR`` is a MySQL 1064 — the DLQ table could never be created."""
+    from services.type_system import materialize_dest_ddl
+
+    carrier = materialize_dest_ddl(dest_type, "string").strip()
+    assert carrier
+    assert carrier.upper() != "VARCHAR"
+
+
+def test_an_unmeasured_read_is_not_an_unbalanced_ledger() -> None:
+    """No source count means no equation to fail, so no loss may be implied."""
+    from services.row_conservation import account_population
+
+    ledger = account_population(
+        rows_read=None,
+        dest_count=0,
+        dest_count_source="unmeasured",
+        dest_count_before=None,
+        rejected_rows=250,
+        coerced_null_rows=0,
+        rows_skipped=0,
+        writer_ack=0,
+        sync_mode="insert",
+    )
+    assert ledger.conservation_kind == "unmeasured"
+    assert ledger.rows_read is None
+    assert ledger.unaccounted is None
