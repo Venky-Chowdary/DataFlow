@@ -388,6 +388,100 @@ def test_integer_overflow_is_found() -> None:
     assert report.findings[0].example_rows == (2, 3)
 
 
+@pytest.mark.parametrize(
+    "dest_db,int_type",
+    [
+        ("mysql", "INT"),
+        ("postgresql", "INTEGER"),
+        ("snowflake", "NUMBER(38,0)"),
+        ("sqlserver", "INT"),
+        ("oracle", "NUMBER(10,0)"),
+    ],
+)
+def test_a_decimal_population_into_an_integer_carrier_blocks_before_the_write(
+    dest_db: str, int_type: str
+) -> None:
+    """The 1M-row MySQL abort, decided at Validate for every connector family.
+
+    ``ARR_TIME`` holds fractional hours; the destination column is an integer.
+    The write refuses every fractional cell ("Invalid integer: '22.433332'"),
+    so this must never reach Execute — and the finding must say *fractional*,
+    not "overflow", because widening the carrier is the fix, not a bigger int.
+    """
+    rows = [
+        {"arr_time": "1000"},
+        {"arr_time": "22.433332"},
+        {"arr_time": "22.05"},
+        {"arr_time": "21.833334"},
+        {"arr_time": "1130"},
+    ]
+    report = scan_population_fit(
+        rows,
+        [{"source": "arr_time", "target": "ARR_TIME", "target_type": int_type}],
+        source_types={"arr_time": "DECIMAL(13,8)"},
+        dest_db=dest_db,
+        dialect_label=dest_db,
+        job_error_policy="fail",
+        rows_total=len(rows),
+        rows_are_population=True,
+    )
+    assert [f.unfit_rows for f in report.findings] == [3], dest_db
+    assert report.findings[0].example_rows == (2, 3, 4), dest_db
+    assert "fractional" in report.findings[0].unfit_reason, dest_db
+
+    gate = build_population_fit_gate(report)
+    assert gate["status"] == "block", dest_db
+    assert "3 value(s)" in gate["message"], dest_db
+
+
+def test_an_integral_population_still_lands_in_an_integer_carrier() -> None:
+    """Integral decimals and scientific notation are what the writer accepts."""
+    report = scan_population_fit(
+        [{"c": "1000"}, {"c": "22.0"}, {"c": "1e3"}, {"c": 2200}],
+        [{"source": "c", "target": "c", "target_type": "INT"}],
+        source_types={"c": "DECIMAL(13,8)"},
+        dest_db="mysql",
+        job_error_policy="fail",
+        rows_total=4,
+        rows_are_population=True,
+    )
+    assert report.findings == ()
+    assert build_population_fit_gate(report)["status"] == "pass"
+
+
+def test_a_signed_continue_contract_forecasts_the_held_out_fractional_rows() -> None:
+    """An approved lossy policy holds the rows out — it never truncates them."""
+    contract = _signed_contract("QUARANTINE_ROW")
+    contract["column"] = "arr_time"
+    contract["target"] = "arr_time"
+    contract["source_type"] = "DECIMAL(13,8)"
+    contract["destination_type"] = "INT"
+    from services.migration_risk_contract import sign_risk_contract
+
+    contract.pop("signature", None)
+    contract["signature"] = sign_risk_contract(contract)
+
+    report = scan_population_fit(
+        [{"arr_time": "1000"}, {"arr_time": "22.433332"}],
+        [
+            {
+                "source": "arr_time",
+                "target": "arr_time",
+                "target_type": "INT",
+                "risk_contract": contract,
+            }
+        ],
+        source_types={"arr_time": "DECIMAL(13,8)"},
+        dest_db="mysql",
+        job_error_policy="quarantine",
+        rows_total=2,
+        rows_are_population=True,
+    )
+    gate = build_population_fit_gate(report)
+    assert gate["status"] == "warn"
+    assert "1 row(s) will be held out" in gate["message"]
+
+
 def test_intentionally_omitted_column_is_not_scanned() -> None:
     targets, _, _ = bounded_targets(
         [

@@ -29,6 +29,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from decimal import Decimal, InvalidOperation
 from typing import Any, Iterable, Mapping
 
 #: Every source row was scanned — a clean column is clean for the population.
@@ -100,6 +101,9 @@ class ColumnFitFinding:
     unfit_rows: int
     example_rows: tuple[int, ...] = ()
     example_values: tuple[str, ...] = ()
+    #: Writer's own words for the first unfit value — a fractional value and an
+    #: out-of-range value are different defects with different remediations.
+    unfit_reason: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -107,6 +111,7 @@ class ColumnFitFinding:
             "unfit_rows": self.unfit_rows,
             "example_rows": list(self.example_rows),
             "example_values": list(self.example_values),
+            "unfit_reason": self.unfit_reason,
             "reason": self.reason(),
         }
 
@@ -114,9 +119,10 @@ class ColumnFitFinding:
         t = self.target
         rows = ", ".join(str(r) for r in self.example_rows[:3])
         where = f" (first at row {rows})" if rows else ""
+        why = f" — {self.unfit_reason}" if self.unfit_reason else ""
         return (
             f"{self.unfit_rows} value(s) in '{t.source}' do not fit "
-            f"{t.target}{' ' if t.target_type else ''}{t.target_type}{where}"
+            f"{t.target}{' ' if t.target_type else ''}{t.target_type}{where}{why}"
         )
 
 
@@ -310,21 +316,33 @@ def bounded_targets(
     )
 
 
+def _is_fractional(value: Any) -> bool:
+    """True when the value carries a fraction a zero-scale carrier cannot hold."""
+    if isinstance(value, bool):
+        return False
+    try:
+        dec = Decimal(str(value).strip())
+    except (InvalidOperation, ValueError, TypeError):
+        return False
+    return bool(dec.is_finite() and dec != dec.to_integral_value())
+
+
 def _fit_predicate(
     target: BoundedTarget,
     *,
     dest_db: str,
     dialect_label: str,
-) -> Callable[[Any], bool]:
+) -> Callable[[Any], str | None]:
     """Bind one column's writer predicate once, then reuse it per value.
 
     A million-row scan must not re-parse ``NUMBER(11,8)`` a million times; the
     predicate itself is still the write path's, never a second numeric rule set.
+    Returns the writer's reason for an unfit value, or ``None`` when it fits.
     """
     from connectors.writer_common import (
         fits_decimal,
-        fits_integer,
         fits_varchar,
+        integer_fit_failure,
         parse_decimal_precision_scale,
     )
     from services.ddl_compatibility import parse_varchar_width
@@ -332,24 +350,40 @@ def _fit_predicate(
     if target.carrier == CARRIER_DECIMAL:
         parsed = parse_decimal_precision_scale(target.target_type, dest_db=dest_db)
         if not parsed:
-            return lambda _value: True
+            return lambda _value: None
         precision, scale = parsed
-        return lambda value: bool(
-            fits_decimal(value, precision, scale, dest_db=dest_db)
-        )
+        decimal_type = target.target_type
+
+        def _decimal_reason(value: Any) -> str | None:
+            if fits_decimal(value, precision, scale, dest_db=dest_db):
+                return None
+            if scale == 0 and _is_fractional(value):
+                # NUMBER(38,0) / NUMBER(10,0) are integer carriers wearing a
+                # decimal spelling — name the defect the same way MySQL's INT
+                # does, so one remediation covers every dialect.
+                return (
+                    f"fractional value {str(value).strip()} is not an integer for "
+                    f"{decimal_type} — widen the destination to a scaled "
+                    "DECIMAL/DOUBLE, or round it explicitly before the write"
+                )
+            return f"value exceeds {decimal_type}"
+
+        return _decimal_reason
     if target.carrier == CARRIER_STRING:
         width = parse_varchar_width(target.target_type)
         if width is None:
-            return lambda _value: True
+            return lambda _value: None
         type_str = target.target_type
         label = dialect_label or dest_db
-        return lambda value: bool(
-            fits_varchar(value, width, type_str, dialect_label=label)
+        return lambda value: (
+            None
+            if fits_varchar(value, width, type_str, dialect_label=label)
+            else f"value is longer than {type_str}"
         )
     if target.carrier == CARRIER_INTEGER:
         type_str = target.target_type
-        return lambda value: bool(fits_integer(value, type_str, dest_db=dest_db))
-    return lambda _value: True
+        return lambda value: integer_fit_failure(value, type_str, dest_db=dest_db)
+    return lambda _value: None
 
 
 def _skip_value(value: Any, is_missing_sentinel: Callable[[Any], bool]) -> bool:
@@ -397,6 +431,7 @@ def scan_rows(
     counts: dict[int, int] = {}
     example_rows: dict[int, list[int]] = {}
     example_values: dict[int, list[str]] = {}
+    reasons: dict[int, str] = {}
     scanned = 0
     truncated = False
 
@@ -415,15 +450,17 @@ def scan_rows(
         scanned += 1
         if not isinstance(row, Mapping):
             continue
-        for idx, source, fits in probes:
+        for idx, source, fit_reason in probes:
             if source not in row:
                 continue
             value = row.get(source)
             if _skip_value(value, is_missing_sentinel):
                 continue
-            if fits(value):
+            why = fit_reason(value)
+            if why is None:
                 continue
             counts[idx] = counts.get(idx, 0) + 1
+            reasons.setdefault(idx, why)
             if len(example_rows.setdefault(idx, [])) < max_examples:
                 example_rows[idx].append(scanned)
                 example_values.setdefault(idx, []).append(cell_to_string(value)[:120])
@@ -443,6 +480,7 @@ def scan_rows(
             unfit_rows=counts[idx],
             example_rows=tuple(example_rows.get(idx, ())),
             example_values=tuple(example_values.get(idx, ())),
+            unfit_reason=reasons.get(idx, ""),
         )
         for idx in sorted(counts)
     )

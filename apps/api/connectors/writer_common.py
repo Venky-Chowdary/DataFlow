@@ -3190,34 +3190,57 @@ def quarantine_currency_markers_into_numeric(
     return out
 
 
-def fits_integer(value: Any, type_str: str, *, dest_db: str = "") -> bool:
-    """True if value fits the signed/unsigned integer destination carrier."""
+def integer_fit_failure(
+    value: Any, type_str: str, *, dest_db: str = ""
+) -> str | None:
+    """Why ``value`` cannot land in the integer carrier, or ``None`` if it can.
+
+    One rule for Validate and for the write. ``22.433332`` is not an integer
+    value: the write path's ``_parse_integer`` refuses any non-integral decimal
+    ("Invalid integer"), so a fit check that truncated to ``22`` and called it
+    in range promised a write that the writer would then reject at row 1.
+    Rounding a fractional value into an integer column is a declared
+    transformation, never a side effect of a bounds test.
+    """
     from decimal import Decimal, InvalidOperation
     from services.type_system import integer_storage_bounds
 
     bounds = integer_storage_bounds(type_str, dest_db=dest_db)
-    if bounds is None:
-        return True
-    if value is None:
-        return True
+    if bounds is None or value is None:
+        return None
     if isinstance(value, bool):
         # bool is a subclass of int — treat as 0/1.
-        n = int(value)
+        dec = Decimal(int(value))
     elif isinstance(value, int):
-        n = value
+        dec = Decimal(value)
     else:
+        text = str(value).strip()
+        if not text:
+            # Empty ≠ natural NULL on INTEGER — bind must not invent NULL;
+            # quarantine_unfit_integers / bind quarantine hold the row out.
+            return f"empty value is not an integer for {type_str}"
         try:
-            text = str(value).strip()
-            if not text:
-                # Empty ≠ natural NULL on INTEGER — bind must not invent NULL;
-                # quarantine_unfit_integers / bind quarantine hold the row out.
-                return False
-            n = int(Decimal(text))
+            dec = Decimal(text)
         except (InvalidOperation, ValueError, TypeError, OverflowError):
             # Non-numeric — leave for type coercion / other quarantine paths.
-            return True
+            return None
+        if not dec.is_finite():
+            return None
+    if dec != dec.to_integral_value():
+        return (
+            f"fractional value {dec} is not an integer for {type_str} "
+            "— widen the destination to DECIMAL/DOUBLE, or round it explicitly "
+            "before the write"
+        )
     lo, hi = bounds
-    return lo <= n <= hi
+    if not (lo <= int(dec) <= hi):
+        return f"{dec} is out of range for {type_str} ({lo}..{hi})"
+    return None
+
+
+def fits_integer(value: Any, type_str: str, *, dest_db: str = "") -> bool:
+    """True if value fits the signed/unsigned integer destination carrier."""
+    return integer_fit_failure(value, type_str, dest_db=dest_db) is None
 
 
 def quarantine_unfit_integers(
@@ -3259,7 +3282,8 @@ def quarantine_unfit_integers(
 
             if is_missing_sentinel(cells[col_idx]):
                 continue
-            if fits_integer(cells[col_idx], typ, dest_db=dest_db):
+            unfit = integer_fit_failure(cells[col_idx], typ, dest_db=dest_db)
+            if unfit is None:
                 continue
             sample = cell_to_string(cells[col_idx])[:120]
             append_write_quarantine_detail(
@@ -3270,8 +3294,8 @@ def quarantine_unfit_integers(
                     "target": target_cols[col_idx],
                     "value": sample,
                     "reason": (
-                    f"integer does not fit {dialect_label}({typ}) "
-                    "— quarantined (would overflow/wrap on write)"
+                        f"value does not fit {dialect_label}({typ}) "
+                        f"— quarantined: {unfit}"
                     ),
                     "policy": "write_quarantine",
                     "chars": [],
