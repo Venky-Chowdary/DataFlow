@@ -103,7 +103,9 @@ def run_non_cdc_multi_stream_sequential(
     )
 
     # Imported here: the single-stream engine lives in ``stream``, which imports
-    # this module for its historical export surface.
+    # this module for its historical export surface. The drop is resolved through
+    # that module too, so it stays the one name a caller can substitute.
+    from . import stream as stream_module
     from .stream import stream_database_transfer
 
     selected_list = list(selected or resolve_selected_sync_contracts(stream_contracts))
@@ -213,7 +215,7 @@ def run_non_cdc_multi_stream_sequential(
                 request_sync_mode=sync_mode,
                 contract_sync_mode=single_contracts[0].get("sync_mode"),
             ):
-                _drop_destination_endpoint(destination)
+                stream_module._drop_destination_endpoint(destination)
 
             status = "completed"
             error: str | None = None
