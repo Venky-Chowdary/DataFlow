@@ -1001,6 +1001,20 @@ export interface PreflightResult {
     note?: string;
     fk_risk_acknowledged?: boolean;
   };
+  /**
+   * The transformed image the gates judged, when an approved Transform
+   * (pre-load) recipe ran before them. Sample-scoped: counts describe the
+   * rows Validate held, never the population.
+   */
+  transform_image?: {
+    recipe_hash?: string;
+    columns?: string[];
+    sample_rows_in?: number;
+    sample_rows_out?: number;
+    sample_rows_removed?: number;
+    sample_rows_diverted?: number;
+    retyped_columns?: Record<string, string>;
+  };
   /** Sample-scoped orphan probe report (never population proof). */
   sample_orphan_probe?: {
     ran?: boolean;

@@ -499,7 +499,7 @@ def render_certificate_markdown(cert: dict[str, Any]) -> str:
             f"| Removed by the declared source filter | {_n(source_filtered)} |"
             if isinstance(source_filtered, int) and source_filtered > 0
             else "",
-            f"| Removed by the approved shaping recipe | {_n(shaped_out)} |"
+            f"| Removed by the approved transform recipe | {_n(shaped_out)} |"
             if isinstance(shaped_out, int) and shaped_out > 0
             else "",
         )
@@ -528,7 +528,7 @@ def render_certificate_markdown(cert: dict[str, Any]) -> str:
         f"| Unaccounted | {_n(ledger.get('unaccounted'))} |",
         "",
         (
-            f"Shaping recipe `{ledger.get('shape_recipe_hash')}` ran on the read — "
+            f"Transform recipe `{ledger.get('shape_recipe_hash')}` ran on the read — "
             "removed rows were counted by the reader and are absent from the "
             "destination by instruction, not by loss or quarantine."
             if ledger.get("shape_recipe_hash")

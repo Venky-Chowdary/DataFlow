@@ -387,7 +387,7 @@ def _ladder_declined_for_shape(
         "skipped": True,
         "shape_recipe_hash": recipe_hash,
         "reason": (
-            f"Shaping recipe {recipe_hash} rewrote source-side values on the read, "
+            f"Transform recipe {recipe_hash} rewrote source-side values on the read, "
             "so the source table no longer holds what this run wrote; "
             "source→destination cell equality is declined rather than reported "
             "false. Gate-8 row balance and the destination re-read still apply."

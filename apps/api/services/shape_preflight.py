@@ -102,7 +102,7 @@ def shaped_preflight_image(
         ) from exc
 
     out_columns = list(recipe.output_columns) or _columns_of(shaped) or declared
-    out_types, retyped = _shaped_column_types(
+    out_types, retyped = shaped_column_types(
         out_columns,
         declared_types=declared_types,
         touched=recipe.touched_columns,
@@ -132,7 +132,7 @@ def _columns_of(rows: Sequence[Mapping[str, Any]]) -> list[str]:
     return seen
 
 
-def _shaped_column_types(
+def shaped_column_types(
     columns: Sequence[str],
     *,
     declared_types: Mapping[str, str],

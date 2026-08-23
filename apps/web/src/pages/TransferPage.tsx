@@ -220,7 +220,7 @@ import {
   UPLOAD_FORMATS,
 } from "./transfer/studioConstants";
 import { TransferTransformStep } from "./transfer/TransferTransformStep";
-import { recipePayload, type ShapeStepWire } from "../lib/shape";
+import { recipePayload, type ShapeStepWire, type TransformImage } from "../lib/shape";
 import {
   analysisFromPipeline,
   fileExtension,
@@ -282,7 +282,14 @@ export function TransferPage({
    * Validate, the run is refused rather than quietly running a different one.
    */
   const [shapeSteps, setShapeSteps] = useState<ShapeStepWire[]>([]);
-  const [shapeIdentity, setShapeIdentity] = useState<{ hash: string; columns: string[] } | null>(null);
+  const [shapeIdentity, setShapeIdentity] = useState<TransformImage | null>(null);
+  /**
+   * Read inside `applyPipelineMappings` without making the transformed image a
+   * dependency of it: Map must ask about the transformed image, but re-running
+   * every mapping on each preview keystroke is not what the operator asked for.
+   */
+  const shapeIdentityRef = useRef<TransformImage | null>(null);
+  shapeIdentityRef.current = shapeIdentity;
   /** Sample rows from the last connector introspect, for Transform profile/preview. */
   const [connectorSampleRows, setConnectorSampleRows] = useState<Record<string, unknown>[]>([]);
   const [cloudPath, setCloudPath] = useState("");
@@ -475,6 +482,21 @@ export function TransferPage({
   );
 
   const buildSourceSamples = useCallback((): Record<string, string[]> => {
+    // Sampled values are evidence for the mapping engine, so once a Transform
+    // (pre-load) recipe is declared they must be the transformed values: sending
+    // the raw ones would let the engine re-infer the carrier the transform just
+    // replaced.
+    const image = shapeIdentityRef.current;
+    if (image && image.columns.length && image.sampleRows.length) {
+      const shaped: Record<string, string[]> = {};
+      for (const col of image.columns) {
+        shaped[col] = image.sampleRows
+          .slice(0, 8)
+          .map((r) => String(r[col] ?? ""))
+          .filter((v) => v.length > 0);
+      }
+      return shaped;
+    }
     const rows = (parsed?.data ?? parsed?.sample_data ?? []) as Record<string, unknown>[];
     const cols =
       parsed?.columns ??
@@ -1351,7 +1373,24 @@ export function TransferPage({
         ?? [];
       if (!sourceCols.length) return [];
       const threshold = confidenceThresholdForMode(validationMode);
-      const sourceSchema = parsed?.schema ?? transferPlan?.source_schema ?? {};
+      const declaredSchema = parsed?.schema ?? transferPlan?.source_schema ?? {};
+      // Transform (pre-load) runs on the read, before Map. So the columns and
+      // carriers Map decides fidelity from are the ones the recipe produces, not
+      // the raw source they replaced — otherwise a column rounded to whole
+      // numbers is still explained as a lossy decimal the writer would refuse.
+      // The plan keeps declared source truth: the recipe is applied once, by the
+      // engine, on the read.
+      const image = shapeIdentityRef.current;
+      const transformed = Boolean(image && image.columns.length);
+      const mapSourceCols = transformed && image ? image.columns : sourceCols;
+      const mapSourceSchema = transformed && image
+        ? Object.fromEntries(
+            mapSourceCols.map((column) => [
+              column,
+              image.columnTypes[column] ?? declaredSchema[column] ?? "VARCHAR",
+            ]),
+          )
+        : declaredSchema;
       const gen = ++mappingGenRef.current;
       const rows = parsed?.data ?? parsed?.sample_data;
       const analysisCols = analysisOverride?.columns ?? analysis?.columns;
@@ -1413,12 +1452,18 @@ export function TransferPage({
       try {
         // Prefer direct map when fresh dest schema is in-hand — plan persistence
         // can lag React state and previously wiped create-new proposals.
-        const useDirect = Boolean(mapTargetCols?.length) || !persistedPlanId;
+        // A declared transform is also a reason to map directly: the persisted
+        // plan holds declared source truth, not the transformed image, so only
+        // the direct call can be asked about the columns the writer will see.
+        const useDirect = Boolean(mapTargetCols?.length) || !persistedPlanId || transformed;
         let result: Awaited<ReturnType<typeof mapTransferColumns>>;
         if (!useDirect) {
+          // The plan records declared source truth — the engine applies the
+          // recipe on the read, so persisting the transformed image here would
+          // apply it twice.
           const planId = await ensurePersistedPlan(undefined, {
             source_columns: sourceCols,
-            source_schema: sourceSchema,
+            source_schema: declaredSchema,
             target_columns: mapTargetCols,
             target_schema: mapTargetSchema,
           });
@@ -1430,8 +1475,8 @@ export function TransferPage({
             });
           } else {
             result = await mapTransferColumns({
-              source_columns: sourceCols,
-              source_schema: sourceSchema,
+              source_columns: mapSourceCols,
+              source_schema: mapSourceSchema,
               target_columns: mapTargetCols?.length ? mapTargetCols : undefined,
               target_schema: mapTargetSchema,
               validation_mode: validationMode,
@@ -1449,8 +1494,8 @@ export function TransferPage({
           }
         } else {
           result = await mapTransferColumns({
-            source_columns: sourceCols,
-            source_schema: sourceSchema,
+            source_columns: mapSourceCols,
+            source_schema: mapSourceSchema,
             target_columns: mapTargetCols?.length ? mapTargetCols : undefined,
             target_schema: mapTargetSchema,
             validation_mode: validationMode,
@@ -6726,6 +6771,7 @@ export function TransferPage({
         <TransferTransformStep
           sampleRows={shapeSampleRows}
           sourceColumns={currentSourceColumns}
+          sourceSchema={currentSourceSchema}
           targetSchema={destSchemaMap}
           sourceLabel={sourceLabel}
           destRouteLabel={mapDestRouteLabel}

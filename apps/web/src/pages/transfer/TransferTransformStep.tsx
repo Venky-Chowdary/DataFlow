@@ -19,6 +19,7 @@ import {
   type ShapeProfileResponse,
   type ShapeStepWire,
   type ShapeSuggestion,
+  type TransformImage,
 } from "../../lib/shape";
 import { columnsNeedingAttention } from "../../lib/transformProfile";
 
@@ -26,6 +27,8 @@ interface TransferTransformStepProps {
   /** Sampled source rows already held by the studio — no connector round-trip. */
   sampleRows: Record<string, unknown>[];
   sourceColumns: string[];
+  /** Declared source carriers from the catalog — the types the recipe starts from. */
+  sourceSchema: Record<string, string>;
   /** Declared destination carriers, so a narrowing decimal is caught here. */
   targetSchema: Record<string, string>;
   sourceLabel: string;
@@ -34,8 +37,12 @@ interface TransferTransformStepProps {
   rowCount?: number;
   steps: ShapeStepWire[];
   onChangeSteps: (steps: ShapeStepWire[]) => void;
-  /** Recipe identity and shaped column set, for Map and the run request. */
-  onIdentity: (identity: { hash: string; columns: string[] } | null) => void;
+  /**
+   * The transformed image Map, Validate and the run request are held to: the
+   * recipe identity, the columns it produces, and the carriers those columns
+   * now hold. Null when no recipe can run, so nothing downstream claims one.
+   */
+  onIdentity: (identity: TransformImage | null) => void;
   onBack: () => void;
   onContinue: () => void;
 }
@@ -73,6 +80,7 @@ function cellText(value: unknown): string {
 export function TransferTransformStep({
   sampleRows,
   sourceColumns,
+  sourceSchema,
   targetSchema,
   sourceLabel,
   destRouteLabel,
@@ -104,7 +112,12 @@ export function TransferTransformStep({
   const rowsKey = useMemo(() => JSON.stringify(sampleRows.slice(0, 200)), [sampleRows]);
   const stepsKey = useMemo(() => JSON.stringify(steps), [steps]);
   const schemaKey = useMemo(() => JSON.stringify(targetSchema), [targetSchema]);
+  const sourceSchemaKey = useMemo(() => JSON.stringify(sourceSchema), [sourceSchema]);
   const shapedColumns = preview?.recipe.output_columns ?? sourceColumns;
+  const retyped = useMemo(
+    () => Object.entries(preview?.retyped_columns ?? {}).sort(([a], [b]) => a.localeCompare(b)),
+    [preview],
+  );
 
   const toggleGuide = useCallback(() => {
     setShowGuide((open) => {
@@ -154,13 +167,20 @@ export function TransferTransformStep({
         recipe: { steps },
         sample_rows: sampleRows.slice(0, 200),
         source_columns: sourceColumns,
+        column_types: sourceSchema,
         target_schema: targetSchema,
       })
         .then((next) => {
           if (cancelled) return;
           setPreview(next);
           setPreviewError("");
-          onIdentity({ hash: next.recipe.recipe_hash, columns: next.recipe.output_columns });
+          onIdentity({
+            hash: next.recipe.recipe_hash,
+            columns: next.recipe.output_columns,
+            columnTypes: next.column_types ?? {},
+            retypedColumns: next.retyped_columns ?? {},
+            sampleRows: next.after,
+          });
         })
         .catch((err) => {
           if (cancelled) return;
@@ -176,7 +196,7 @@ export function TransferTransformStep({
       if (timer.current !== null) window.clearTimeout(timer.current);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [plan.allowed, rowsKey, stepsKey, schemaKey, sourceColumns.join("|")]);
+  }, [plan.allowed, rowsKey, stepsKey, schemaKey, sourceSchemaKey, sourceColumns.join("|")]);
 
   const operationsByName = useMemo(() => {
     const index = new Map<string, ShapeOperation>();
@@ -558,6 +578,15 @@ export function TransferTransformStep({
             )}
           </div>
         </div>
+        {retyped.length > 0 && (
+          <p className="df2-xform-note df2-xform-retyped">
+            <DtIcon name="info" size={14} />
+            {" "}Map and Validate now read {retyped.length === 1 ? "this column" : "these columns"} as
+            the transform leaves {retyped.length === 1 ? "it" : "them"}:{" "}
+            {retyped.map(([column, carrier]) => `${column} → ${carrier}`).join(", ")}. Columns no step
+            wrote keep their declared source type.
+          </p>
+        )}
       </section>
 
       <footer className="df2-xform-actions">

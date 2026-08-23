@@ -541,6 +541,8 @@ export async function previewShapeRecipe(payload: {
   recipe: ShapeRecipeWire;
   sample_rows: Record<string, unknown>[];
   source_columns?: string[];
+  /** Declared source carriers — untouched columns keep them, touched ones are re-read. */
+  column_types?: Record<string, string>;
   target_schema?: Record<string, string>;
   include_profile?: boolean;
 }): Promise<ShapePreviewResponse> {

@@ -127,14 +127,14 @@ def build_shape_runner(
     if not recipe.enabled_steps:
         if approved_hash:
             raise ShapeError(
-                "this run was approved with a shaping recipe "
+                "this run was approved with a transform recipe "
                 f"({approved_hash}), but no recipe was supplied — "
                 "re-validate before running"
             )
         return None
     if approved_hash and recipe.recipe_hash != approved_hash:
         raise ShapeError(
-            f"shaping recipe {recipe.recipe_hash} is not the one approved at Validate "
+            f"transform recipe {recipe.recipe_hash} is not the one approved at Validate "
             f"({approved_hash}) — re-validate the changed recipe before running"
         )
     return ShapeRunner(recipe, sample_limit=sample_limit)

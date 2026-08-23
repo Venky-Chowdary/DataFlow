@@ -313,7 +313,7 @@ class ShapeEngine:
             if matched:
                 raise _Drop(
                     diverted=True,
-                    reason=str(options.get("reason") or "diverted by a shaping rule"),
+                    reason=str(options.get("reason") or "diverted by a transform rule"),
                     step_index=index,
                     op=op,
                 )

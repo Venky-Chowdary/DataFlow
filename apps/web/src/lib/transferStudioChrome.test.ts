@@ -93,6 +93,52 @@ describe("Transfer Studio chrome contracts", () => {
     assert.match(api, /shape_recipe\?: ShapeRecipeWire/);
   });
 
+  it("Validate renders the transformed image it was judged on", () => {
+    // The backend already returned `transform_image`; an operator who cannot see
+    // it has no way to know which rows the verdict covers, or that the rows the
+    // recipe removed are absent by instruction rather than lost.
+    const dash = readFileSync(join(webRoot, "components/transfer/ValidateDashboard.tsx"), "utf8");
+    const types = readFileSync(join(webRoot, "lib/types.ts"), "utf8");
+    const css = readFileSync(join(webRoot, "styles/transfer-studio.css"), "utf8");
+
+    assert.match(types, /transform_image\?: \{/);
+    assert.match(dash, /preflight\?\.transform_image \?\? null/);
+    assert.match(dash, /Gates judged the transformed rows, not the raw source/);
+    assert.match(dash, /recipe \{transformImage\.recipe_hash/);
+    assert.match(dash, /removed by\s*\n?\s*transform/);
+    assert.match(dash, /diverted by\s*\n?\s*transform/);
+    assert.match(dash, /Re-read carrier\(s\) after transform/);
+    // Sample counts are not population proof, and the panel must say so.
+    assert.match(dash, /never the whole\s*\n?\s*population/);
+    assert.ok(css.includes(".df2-vd-xform {"), ".df2-vd-xform has no rule");
+  });
+
+  it("Map decides carriers from the transformed image, and the plan keeps source truth", () => {
+    // Transform runs before Map by design: a column rounded to whole numbers is
+    // no longer a lossy decimal, so mapping it against the raw carrier explains
+    // a narrowing the write will never perform. The persisted plan must stay raw
+    // — the engine applies the recipe once, on the read.
+    const page = readFileSync(join(webRoot, "pages/TransferPage.tsx"), "utf8");
+    const step = readFileSync(join(webRoot, "pages/transfer/TransferTransformStep.tsx"), "utf8");
+    const router = readFileSync(
+      join(webRoot, "../../api/src/routers/shape_router.py"),
+      "utf8",
+    );
+
+    const mapCalls = page.slice(page.indexOf("const useDirect ="));
+    const mapBody = mapCalls.slice(0, mapCalls.indexOf("// Do NOT create an empty draft plan"));
+    assert.match(mapBody, /source_columns: mapSourceCols/);
+    assert.match(mapBody, /source_schema: mapSourceSchema/);
+    // The plan override keeps declared truth so the recipe is not applied twice.
+    assert.match(mapBody, /source_schema: declaredSchema/);
+    assert.doesNotMatch(mapBody, /source_schema: mapSourceSchema,\s*\n\s*target_columns: mapTargetCols,/);
+    // Sampled values shown to the mapping engine follow the transform too.
+    assert.match(page, /image\.sampleRows\s*\n?\s*\.slice\(0, 8\)/);
+    // The carrier of a transformed column is re-read from the transformed rows.
+    assert.match(step, /column_types: sourceSchema/);
+    assert.match(router, /out_types, retyped = shaped_column_types\(/);
+  });
+
   it("the Transform step ships the stylesheet its own namespace needs", () => {
     const entry = readFileSync(join(webRoot, "styles/app-styles.css"), "utf8");
     const css = readFileSync(join(webRoot, "styles/transform-prep.css"), "utf8");
