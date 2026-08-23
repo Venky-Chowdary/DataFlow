@@ -3401,6 +3401,16 @@ export interface QuarantineInfo {
   job_id: string;
   rejected_rows: number;
   issue_count?: number;
+  /** Distinct source rows carrying a finding of their own. */
+  finding_rows?: number;
+  /** Rows the refused (atomic) write unit rolled back without a finding. */
+  rows_rolled_back?: number;
+  /** Rows the refused write unit counted, findings plus rollbacks. */
+  rows_refused_unit?: number;
+  /** Reject total that no retrievable finding or named rollback explains. */
+  rows_unaccounted?: number;
+  /** Destination DLQ table durability — independent of the control plane. */
+  dest_dlq_durable?: boolean | null;
   open_count?: number;
   /** write = load-time rejects; preflight = Validate/Run integrity findings */
   source?: "write" | "preflight" | "none" | string;

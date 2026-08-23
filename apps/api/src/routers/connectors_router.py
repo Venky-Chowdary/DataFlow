@@ -901,11 +901,12 @@ async def get_job_quarantine(job_id: str, request: Request):
         }
     open_n = int(closure.get("open_count") or 0)
     row_ids = {d.get("row") for d in details if isinstance(d, dict) and d.get("row") is not None}
+    finding_rows = len(row_ids) if row_ids else len(details)
     rejected_rows = int(
         job.get("rejected_details_total")
         or job.get("rejected_rows")
         or 0
-    ) or (len(row_ids) if row_ids else len(details))
+    ) or finding_rows
     has_write = bool(
         job.get("rejected_details")
         or (job.get("destination_summary") or {}).get("rejected_details")
@@ -936,6 +937,18 @@ async def get_job_quarantine(job_id: str, request: Request):
         # Older jobs wrote rejects without the flag — treat as unknown, not lost.
         quarantine_durable = None
     quarantine_dlq_error = ds.get("quarantine_dlq_error")
+    # A refused write unit rolls back rows that carry no finding of their own.
+    # Those rows are not reviewable quarantine scraps, so they are named here
+    # instead of inflating a total Inspect cannot show a single row for.
+    rows_rolled_back = int(ds.get("rows_rolled_back") or 0)
+    rows_refused_unit = int(ds.get("rows_refused_unit") or 0)
+    rows_unaccounted = max(0, rejected_rows - finding_rows - rows_rolled_back)
+    # `quarantine_durable` speaks for the control plane only. A destination DLQ
+    # table write can fail in the same run, so the two stores are reported
+    # separately instead of one flag reading `true` beside a failed write.
+    dest_dlq_durable: bool | None = None
+    if dest_dlq.get("table") or dest_dlq.get("error") or dest_dlq.get("ok") is not None:
+        dest_dlq_durable = bool(dest_dlq.get("ok")) and not dest_dlq.get("error")
     # Live open-row count when we have a saved transfer request + SQL dest.
     payload = job.get("transfer_request")
     if payload and dest_dlq.get("table"):
@@ -955,11 +968,16 @@ async def get_job_quarantine(job_id: str, request: Request):
         "job_id": job_id,
         "rejected_rows": rejected_rows,
         "issue_count": len(details),
+        "finding_rows": finding_rows,
+        "rows_rolled_back": rows_rolled_back,
+        "rows_refused_unit": rows_refused_unit,
+        "rows_unaccounted": rows_unaccounted,
         "open_count": open_n,
         "source": source,
         "quarantine": details,
         "dest_dlq": dest_dlq,
         "quarantine_durable": quarantine_durable,
+        "dest_dlq_durable": dest_dlq_durable,
         "quarantine_dlq_error": quarantine_dlq_error,
         "quarantine_closure": {
             "verdict": closure.get("verdict"),

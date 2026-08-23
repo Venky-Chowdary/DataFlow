@@ -149,6 +149,9 @@ export function QuarantinePanel({
   const [issueCount, setIssueCount] = useState(initialDetails?.length ?? 0);
   const [rowCount, setRowCount] = useState(rejectedRows ?? initialDetails?.length ?? 0);
   const [source, setSource] = useState<string>(initialDetails?.length ? "job" : "none");
+  const [rowsRolledBack, setRowsRolledBack] = useState(0);
+  const [destDlqDurable, setDestDlqDurable] = useState<boolean | null | undefined>(undefined);
+  const [rowsUnaccounted, setRowsUnaccounted] = useState(0);
   const [editIndex, setEditIndex] = useState<number | null>(null);
   const [editValue, setEditValue] = useState("");
   const [applySuggested, setApplySuggested] = useState(true);
@@ -183,6 +186,9 @@ export function QuarantinePanel({
       setRows(next);
       setIssueCount(data.issue_count ?? next.length);
       setRowCount(data.rejected_rows ?? rejectedRows ?? next.length);
+      setRowsRolledBack(data.rows_rolled_back ?? 0);
+      setDestDlqDurable(data.dest_dlq_durable);
+      setRowsUnaccounted(data.rows_unaccounted ?? 0);
       setSource(apiRows.length ? (data.source || "write") : (initialDetails?.length ? "job" : data.source || "none"));
       setDestDlq(data.dest_dlq);
       setQuarantineDurable(data.quarantine_durable);
@@ -369,6 +375,23 @@ export function QuarantinePanel({
             <span className="df2-quarantine-explainer-count">
               <strong>{displayFindings.toLocaleString()}</strong> finding{displayFindings === 1 ? "" : "s"}
             </span>
+            {loaded && rowsRolledBack > 0 && (
+              <span
+                className="df2-quarantine-explainer-count"
+                title="A strict write unit is atomic: rows without a finding of their own were rolled back with the batch. They are not quarantine scraps and are not replayable — re-run them after the mapping is fixed."
+              >
+                <strong>{rowsRolledBack.toLocaleString()}</strong> row{rowsRolledBack === 1 ? "" : "s"} rolled back with the refused batch
+              </span>
+            )}
+            {loaded && rowsUnaccounted > 0 && (
+              <span
+                className="df2-quarantine-explainer-count"
+                role="alert"
+                title="The job's reject total exceeds the findings this build can retrieve, and the difference is not named as a rollback. Export the CSV and treat the total as unproven."
+              >
+                <strong>{rowsUnaccounted.toLocaleString()}</strong> row{rowsUnaccounted === 1 ? "" : "s"} counted with no retrievable finding
+              </span>
+            )}
             {coercedNullRows != null && coercedNullRows > 0 && (
               <span className="df2-quarantine-explainer-count">
                 <strong>{coercedNullRows.toLocaleString()}</strong> coerced to NULL
@@ -420,6 +443,15 @@ export function QuarantinePanel({
       <div className="df2-quarantine-next" role="region" aria-label="Next remediation step">
         <div className="df2-quarantine-next-copy">
           <strong>Next step</strong>
+          {destDlqDurable === false ? (
+            <p className="df2-quarantine-durable-warn" role="alert">
+              These findings are durable on the <strong>control plane only</strong> — the
+              destination DLQ table write failed
+              {destDlq?.error ? <> ({String(destDlq.error)})</> : null}, so the destination holds
+              no copy to query in SQL. Export the CSV for an off-platform record, and fix the DLQ
+              table before relying on destination-side quarantine evidence.
+            </p>
+          ) : null}
           {isPreflight ? (
             <p>
               Caught in Validate before write. Open Validate → <em>Fix bad data…</em> or fix

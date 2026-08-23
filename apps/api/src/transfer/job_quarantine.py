@@ -63,6 +63,34 @@ def _persist_checkpoint_quarantine_delta(
         ) from exc
 
 
+def checkpoint_quarantine_summary(
+    checkpoint: dict[str, Any],
+    details: list[dict[str, Any]],
+    preview: list[dict[str, Any]],
+    total: int,
+    truncated: bool,
+) -> dict[str, Any]:
+    """Destination summary for a running checkpoint, findings named separately.
+
+    A writer counts ``source - kept`` per unit, so a refused batch reports every
+    uncommitted row as rejected. Written straight onto the job that becomes
+    "5,000 quarantined / 0 findings" on Inspect: the rows without a finding of
+    their own were rolled back with the batch, and no finding exists to show.
+    """
+    from .adapters import split_refused_unit
+
+    summary: dict[str, Any] = {
+        "checksum": checkpoint.get("checksum", ""),
+        "rejected_details": preview,
+        "rejected_details_total": total,
+        "rejected_details_truncated": truncated,
+        "quarantine_checkpoint_durable": True,
+    }
+    rejected = int(checkpoint.get("rejected_rows") or total or 0)
+    summary["rejected_rows"] = split_refused_unit(details, rejected, summary)
+    return summary
+
+
 def _persist_job_quarantine(
     job_id: str,
     dest_summary: dict[str, Any],
