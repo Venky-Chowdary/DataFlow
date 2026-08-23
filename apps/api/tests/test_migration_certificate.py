@@ -374,3 +374,44 @@ def test_fully_carried_foreign_keys_do_not_block() -> None:
     }
     verdict = build_migration_certificate(job)["verdict"]
     assert not any("foreign key" in b.lower() for b in verdict["blockers"])
+
+
+def _shaped_job() -> dict[str, Any]:
+    """A run where a source filter and an approved recipe removed rows."""
+    job = _job(records_processed=2)
+    job["reconciliation"].update(
+        {
+            "source_rows": 5,
+            "target_rows": 2,
+            "rejected_rows": 0,
+            "rows_shaped_out": 2,
+            "rows_source_filtered": 1,
+            "shape_recipe_hash": "abc123def4567890",
+        }
+    )
+    return job
+
+
+def test_rows_a_recipe_removed_close_the_certificate_ledger() -> None:
+    ledger = row_accounting(_shaped_job())
+    assert ledger["rows_read"] == 5
+    assert ledger["rows_written"] == 2
+    assert ledger["rows_shaped_out"] == 2
+    assert ledger["rows_source_filtered"] == 1
+    assert ledger["shape_recipe_hash"] == "abc123def4567890"
+    assert ledger["unaccounted"] == 0
+    assert ledger["balanced"] is True
+
+
+def test_certificate_page_names_each_removal_authority_and_the_recipe() -> None:
+    md = render_certificate_markdown(build_migration_certificate(_shaped_job()))
+    assert "| Removed by the declared source filter | 1 |" in md
+    assert "| Removed by the approved shaping recipe | 2 |" in md
+    assert "abc123def4567890" in md
+    assert "by instruction, not by loss or quarantine" in md
+
+
+def test_certificate_page_of_a_plain_run_states_no_removals() -> None:
+    md = render_certificate_markdown(build_migration_certificate(_job()))
+    assert "Removed by" not in md
+    assert "shaping recipe" not in md

@@ -797,3 +797,46 @@ to render as `info` and vanish from the Warnings filter even though Mongo held t
 `append_audit_event` now canonicalizes it. When verifying that an event was recorded at a severity,
 cross-check **all three** layers - Mongo `datatransfer.audit_events`, the audit API response, and the
 DOM Level cell - because agreement between the first two proves nothing about what an operator sees.
+
+## Shape step (Transfer Studio, pre-write recipe) - runtime testing notes
+
+Wizard order is Source -> Destination -> **Shape** -> Map -> Validate -> Run -> Proof.
+API: `GET /api/v1/shape/catalog`, `POST /api/v1/shape/{validate,expression,profile,preview}`.
+
+Traps that cost real time here:
+
+- **uvicorn runs without `--reload`.** A Shape branch checked out while the old API process is
+  still up gives `/shape/catalog` -> 404 *with a valid admin token*, and the whole feature looks
+  missing. Confirm the feature is live first: `GET /openapi.json` and grep for `/shape` paths.
+  Recover the running process env (`DATAFLOW_ADMIN_*`, `DATAFLOW_AUTH_USERS`, `DATAFLOW_ENV`,
+  `DATAFLOW_REQUIRE_AUTH`, `PYTHONPATH`) before restarting, or RBAC and logins silently change.
+- **Uploading the fixture:** the dropzone is not the input. `select_file` only works on an element
+  the browser tool itself annotated - a hand-set `devinid` attribute is rejected. Make the hidden
+  `input[type=file]` visible via the console (position/opacity/z-index), re-`view` so the tool
+  assigns it a real `devinid`, then `select_file` on that id.
+- **Recipe identity:** the header badge renders the hash uppercased by CSS, so a
+  `/recipe [0-9a-f]{16}/` regex on `innerText` will not match. Match case-insensitively.
+- **The hash is not one thing.** `/shape/validate` can return a different hash than the UI/engine
+  identity for the same recipe. Always compare the *engine's* hash (execute payload / proof) with
+  the badge, and state which surface produced which value.
+- **Stale-approval guard is not reachable through ordinary UI navigation:** the page sends
+  `shape_recipe` and `approved_shape_recipe_hash` from the same live shape identity, so a
+  post-Validate edit updates both and self-agrees. Exercise the guard over authenticated HTTP with
+  an edited recipe plus the older hash, and verify the destination table was never created.
+- **Empty-recipe regression is its own scenario.** "Continue without shaping" still submits an
+  approved hash for the empty recipe; if the engine also receives no `shape_recipe`, Execute can be
+  refused with "approved with a shaping recipe ... but no recipe was supplied". Always run the
+  no-recipe path end to end and reread Postgres - do not assume "no recipe" is a no-op.
+- **Viewer role:** `/shape/profile` requires `job.plan`, so a viewer gets HTTP 403 and the profile
+  panel renders with no facts and no suggestions while the lock notice is still shown. Decide
+  whether that is intended before calling the read-only state a pass.
+- **Editor role:** provision by resetting the login in Settings -> Team (one-time password is shown
+  once in a `<code>` element). Stash it in `localStorage` and fill the login form from there so the
+  value never lands in a screenshot or a log; delete any screenshot that captured it. First sign-in
+  forces a password change - the change screen can appear a beat *after* the app shell renders.
+- **Schedules cannot carry a recipe.** `ScheduleCreate` has no shape field and the New schedule form
+  never mentions shaping, so "does the recipe replay on each beat" is unanswerable through schedules
+  in this build - report it as untested with that evidence rather than simulating it.
+- Destination claims: always reread Postgres directly (`127.0.0.1:5433`, db `dataflow`, connector
+  `Local PG 5433`). Exact-row equality plus `COUNT`/`SUM`; a shaped write must show trimmed/uppercased
+  text, rounded numerics and the filtered ids absent.

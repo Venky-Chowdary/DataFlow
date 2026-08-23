@@ -14,7 +14,7 @@ import type { RepairMapping } from "../../lib/api";
 import { Gate8ProofCard, classifyGate8Status, gate8AppendIdentity, isGate8AppendDelta, isGate8KeyedBatch, type Gate8Reconciliation } from "./Gate8ProofCard";
 import { JobTrustScoreCard } from "./JobTrustScoreCard";
 import { ConservationLedgerCard } from "./ConservationLedgerCard";
-import { conservationCompleteCopy, destHeadline, writerAckDisagrees, writerHeadline } from "../../lib/conservationLedger";
+import { conservationCompleteCopy, destHeadline, readConservationLedger, writerAckDisagrees, writerHeadline } from "../../lib/conservationLedger";
 import { CdcCursorGapPanel } from "./CdcCursorGapPanel";
 import { CdcRetentionPanel } from "./CdcRetentionPanel";
 import { isCdcGapErrorCode } from "../../lib/jobTrustScore";
@@ -227,6 +227,28 @@ export function TransferResultDashboard({
   }
   if (result.operation) {
     metaChips.push({ label: "Mode", value: result.operation });
+  }
+  const ledger = readConservationLedger({ row_accounting: result.row_accounting });
+  if (ledger && ledger.rows_source_filtered > 0) {
+    metaChips.push({
+      label: "Filtered on read",
+      value: ledger.rows_source_filtered.toLocaleString(),
+      title: "Rows the declared source filter removed on the read — counted, and absent from the destination by instruction, not quarantined.",
+    });
+  }
+  if (ledger && ledger.rows_shaped_out > 0) {
+    metaChips.push({
+      label: "Shaped out",
+      value: ledger.rows_shaped_out.toLocaleString(),
+      title: "Rows the approved shaping recipe removed on the read. Removal is not quarantine — no cell was found unfit.",
+    });
+  }
+  if (ledger && ledger.shape_recipe_hash) {
+    metaChips.push({
+      label: "Recipe",
+      value: ledger.shape_recipe_hash,
+      title: "Identity of the shaping recipe this run executed — the same recipe Validate approved.",
+    });
   }
   if (ds?.error_policy) {
     metaChips.push({ label: "Policy", value: ds.error_policy });
