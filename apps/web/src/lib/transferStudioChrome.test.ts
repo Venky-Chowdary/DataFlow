@@ -139,6 +139,62 @@ describe("Transfer Studio chrome contracts", () => {
     assert.match(router, /out_types, retyped = shaped_column_types\(/);
   });
 
+  it("the cell-level preview scans the transformed values, not the raw cell", () => {
+    // `/preflight/run` carried the recipe while `/preflight/preview-cells` did
+    // not, so the quarantine table cited `Invalid integer: '22.43'` on a column
+    // the approved recipe rounds to 22 — a finding no writer would ever raise.
+    const page = readFileSync(join(webRoot, "pages/TransferPage.tsx"), "utf8");
+    const api = readFileSync(join(webRoot, "lib/api.ts"), "utf8");
+    const router = readFileSync(
+      join(webRoot, "../../api/src/routers/preflight_router.py"),
+      "utf8",
+    );
+
+    const cellCall = page.slice(page.indexOf("previewQuarantineCells({"));
+    const cellBody = cellCall.slice(0, cellCall.indexOf("});"));
+    assert.match(cellBody, /shape_recipe: recipePayload\(shapeSteps\)/);
+    // A changed recipe is different evidence, so the effect must re-run on it.
+    const deps = cellCall.slice(cellCall.indexOf("}, ["), cellCall.indexOf("]);") + 3);
+    assert.match(deps, /shapeSteps/);
+    assert.match(api, /shape_recipe\?: ShapeRecipeWire \| null;/);
+    // The backend applies the same pre-load image before it scans a cell.
+    assert.match(router, /shape_recipe: dict\[str, Any\] \| None = None/);
+    assert.match(router, /image = shaped_preflight_image\(/);
+    assert.match(router, /if image\.applied:/);
+  });
+
+  it("a refused row is not reported as an accounting defect", () => {
+    const step = readFileSync(
+      join(webRoot, "pages/transfer/TransferTransformStep.tsx"),
+      "utf8",
+    );
+    const ledger = step.slice(step.indexOf("df2-xform-ledger"));
+    const block = ledger.slice(0, ledger.indexOf("</p>"));
+    assert.match(block, /preview\?\.refusal/);
+    assert.match(block, /the preview stopped at the refused row above/);
+    // The defect wording survives, but only for an imbalance with no refusal.
+    assert.match(block, /: " · ledger does not balance/);
+  });
+
+  it("a required Transform option says so before Add is clicked", () => {
+    const builder = readFileSync(
+      join(webRoot, "components/transfer/TransformStepBuilder.tsx"),
+      "utf8",
+    );
+    const css = readFileSync(join(webRoot, "styles/transform-prep.css"), "utf8");
+
+    assert.match(builder, /const blankRequired = useMemo\(/);
+    assert.match(builder, /is-invalid/);
+    assert.match(builder, /role="alert"/);
+    // Add cannot append a step the engine would refuse, and says why.
+    assert.match(builder, /disabled=\{!canPlan \|\| !operation \|\| Boolean\(missing\)/);
+    assert.ok(css.includes(".df2-xform-required {"), ".df2-xform-required has no rule");
+    assert.ok(
+      css.includes(".df2-field.is-invalid > .df2-input"),
+      "invalid required inputs are not marked",
+    );
+  });
+
   it("the Transform step ships the stylesheet its own namespace needs", () => {
     const entry = readFileSync(join(webRoot, "styles/app-styles.css"), "utf8");
     const css = readFileSync(join(webRoot, "styles/transform-prep.css"), "utf8");

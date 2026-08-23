@@ -160,6 +160,32 @@ def _passthrough_identity_transform(
     return "none" if same_family else transform
 
 
+def _reported_source_carrier(declared: str, invent_carrier: str) -> str:
+    """The source's own carrier, not the create-new invent widened from it.
+
+    ``ddl_carrier_type`` answers the CREATE question — "which carrier is never
+    narrower than this one?" — so an ambiguous ``INTEGER`` / ``INT`` widens to
+    ``BIGINT``. That is the right invent and the wrong *report*: Map recomputes
+    carrier fidelity client-side from ``source_type``, so an INTEGER source
+    landing in an existing ``INT4`` column read back as a ``BIGINT → INT4``
+    narrowing and demanded a Risk Contract for a path this same engine graded
+    ``preserve``. Only the ambiguous-width integer widening is undone; every
+    other carrier (DECIMAL(p,s), specialty, temporal) keeps its canonical form.
+    """
+    from services.type_system import integer_bit_width, strip_identity_qualifier
+
+    if not declared or not invent_carrier:
+        return invent_carrier
+    if normalize_logical_type(declared) != normalize_logical_type(invent_carrier):
+        return invent_carrier
+    if normalize_logical_type(declared) != "integer":
+        return invent_carrier
+    if integer_bit_width(declared) is not None:
+        # The source named its own width (INT4 / SMALLINT / BIGINT) — canonical.
+        return invent_carrier
+    return strip_identity_qualifier(declared).strip() or invent_carrier
+
+
 def classify_format(source_columns: list[str], file_format: str | None = None) -> dict:
     from services.domain_profiles import detect_data_domain
     from services.semantic_analyzer import analyze_column
@@ -655,8 +681,14 @@ def run_mapping_pipeline(
         reasoning = m["reasoning"]
         if enrichment and enrichment not in reasoning.lower():
             reasoning = f"{reasoning} · enriched: {enrichment}"
-        src_type = schema_by_name.get(m["source"], {}).get("inferred_type", "VARCHAR")
-        src_type = ddl_carrier_type(str(src_type))
+        # What the source *declared*, captured before canonicalization widened
+        # ambiguous spellings for the CREATE question. Only the report reads it;
+        # every invent below still uses the never-narrower carrier.
+        declared_src_type = str(
+            declared_source_types.get(m["source"])
+            or schema_by_name.get(m["source"], {}).get("inferred_type", "VARCHAR")
+        )
+        src_type = ddl_carrier_type(declared_src_type)
         tgt_type = target_by_name.get(m["target"], {}).get("inferred_type")
         # Provenance, not just a value: a stamp read out of the destination
         # catalog records what exists today, while an operator stamp records an
@@ -868,7 +900,7 @@ def run_mapping_pipeline(
             {
                 **m,
                 "transform": transform,
-                "source_type": src_type,
+                "source_type": _reported_source_carrier(declared_src_type, src_type),
                 "target_type": tgt_type or "",
                 **(
                     {"target_type_origin": "destination_catalog"}

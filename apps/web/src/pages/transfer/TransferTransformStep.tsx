@@ -496,12 +496,18 @@ export function TransferTransformStep({
           )}
 
           {effect && (
-            <p className={`df2-xform-ledger${effect.balanced ? "" : " is-unbalanced"}`}>
+            /* A refused row is the operator's own Refuse policy fail-closing, so
+               the sample legitimately stops short of a balance — calling that a
+               defect blamed the engine for the step's configured behaviour. Only
+               an unbalanced sample with no refusal is an accounting defect. */
+            <p className={`df2-xform-ledger${effect.balanced || preview?.refusal ? "" : " is-unbalanced"}`}>
               <DtIcon name={effect.balanced ? "check" : "alert"} size={14} />
               {summarizeEffect(effect)}
               {effect.balanced
                 ? " · every sampled row is accounted for"
-                : " · ledger does not balance — this is a defect, do not approve"}
+                : preview?.refusal
+                  ? " · the preview stopped at the refused row above, so the remaining sampled rows were not transformed"
+                  : " · ledger does not balance — this is a defect, do not approve"}
             </p>
           )}
 

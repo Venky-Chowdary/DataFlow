@@ -48,6 +48,30 @@ export function TransformStepBuilder({
     [catalog, op],
   );
 
+  /**
+   * Which required option is still blank, named before the click rather than
+   * after it. A step that silently fails to append is worse than a refusal:
+   * the operator reads the unchanged preview as "the transform did nothing".
+   */
+  const missing = useMemo(
+    () => (operation ? missingRequired(operation, column, options) : ""),
+    [column, operation, options],
+  );
+  const blankRequired = useMemo(() => {
+    if (!operation) return new Set<string>();
+    return new Set(
+      operation.required.filter((name) => {
+        const value = options[name];
+        return (
+          value === undefined
+          || value === null
+          || value === ""
+          || (Array.isArray(value) && value.length === 0)
+        );
+      }),
+    );
+  }, [operation, options]);
+
   const reset = useCallback(() => {
     setOp("");
     setColumn("");
@@ -195,8 +219,12 @@ export function TransformStepBuilder({
                 </label>
               );
             }
+            const invalid = field.required && blankRequired.has(field.name);
             return (
-              <div className="df2-field" key={field.name}>
+              <div
+                className={`df2-field${invalid ? " is-invalid" : ""}`}
+                key={field.name}
+              >
                 <label className="df2-label" htmlFor={id}>
                   {field.label}{field.required ? " *" : ""}
                 </label>
@@ -269,6 +297,11 @@ export function TransformStepBuilder({
                   />
                 )}
                 {field.hint && <span className="df2-label-hint">{field.hint}</span>}
+                {invalid && (
+                  <span className="df2-xform-required" role="alert">
+                    {field.label} is required for {operation.op}.
+                  </span>
+                )}
               </div>
             );
           })}
@@ -303,8 +336,8 @@ export function TransformStepBuilder({
         <button
           type="button"
           className="df2-btn df2-btn-primary df2-btn-sm"
-          disabled={!canPlan || !operation || Boolean(expressionError)}
-          title={disabledReason || "Append this step to the recipe"}
+          disabled={!canPlan || !operation || Boolean(missing) || Boolean(expressionError)}
+          title={disabledReason || missing || expressionError || "Append this step to the recipe"}
           onClick={add}
         >
           <DtIcon name="plus" size={14} /> Add step
@@ -313,6 +346,9 @@ export function TransformStepBuilder({
           <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" onClick={reset}>
             Clear
           </button>
+        )}
+        {missing && !expressionError && (
+          <span className="df2-xform-required df2-xform-builder-why">{missing}</span>
         )}
         {catalog && (
           <button

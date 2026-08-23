@@ -476,6 +476,13 @@ export type CellPreviewResult = {
     message?: string;
     transform?: string;
   }>;
+  transform_image?: {
+    recipe_hash?: string;
+    sample_rows_in?: number;
+    sample_rows_out?: number;
+    sample_rows_removed?: number;
+    retyped_columns?: Record<string, string>;
+  };
 };
 
 /** Cell-level will-quarantine / will-coerce preview before run. */
@@ -485,6 +492,11 @@ export async function previewQuarantineCells(payload: {
   mappings: Array<{ source: string; target: string; transform?: string | null; target_type?: string | null }>;
   column_types?: Record<string, string>;
   sample_size?: number;
+  /**
+   * The approved pre-load recipe. Execute transforms on the read, so a cell
+   * preview scanned on raw values reports findings the writer never sees.
+   */
+  shape_recipe?: ShapeRecipeWire | null;
 }): Promise<CellPreviewResult> {
   const res = await apiFetch(`${API_BASE}/preflight/preview-cells`, {
     method: "POST",

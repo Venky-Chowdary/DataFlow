@@ -716,6 +716,8 @@ def run_file_preflight(
     backfill_new_fields: bool = False,
     stored_source_fp: str = "",
     stored_target_fp: str = "",
+    declared_source_columns: list[str] | None = None,
+    declared_source_schema: dict[str, str] | None = None,
     previous_source_columns: list[str] | None = None,
     previous_source_schema: dict[str, str] | None = None,
     contract_primary_key: str | None = None,
@@ -1083,9 +1085,18 @@ def run_file_preflight(
         contract_primary_key=contract_primary_key,
     )
 
+    # Two questions, two truths, and an approved pre-load transform separates
+    # them. "Did the source change under the stored revision?" is answered by the
+    # declared source the revision fingerprinted — otherwise the operator's own
+    # recipe reads as source drift. "Do these values fit the destination
+    # carrier?" is answered by the transformed image the writer will bind, or a
+    # column rounded to whole numbers is graded a DECIMAL→INT4 precision
+    # collapse for values that are now integers.
     drift = detect_schema_drift(
-        source_columns=columns,
-        source_schema=column_types,
+        source_columns=list(columns),
+        source_schema=dict(column_types),
+        declared_source_columns=list(declared_source_columns or columns),
+        declared_source_schema=dict(declared_source_schema or column_types),
         target_columns=target_cols or [m["target"] for m in write_maps if m.get("target")],
         target_schema=drift_dest_types,
         mappings=mappings,

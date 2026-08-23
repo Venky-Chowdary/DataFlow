@@ -345,6 +345,10 @@ def run_plan_preflight(
         destination_table=dest_table,
         schema_policy=policies.get("schema_policy", "manual_review"),
         backfill_new_fields=bool(policies.get("backfill_new_fields")),
+        # Drift compares against the revision's declared-source fingerprint, so
+        # it must see the declared source — an approved transform is not drift.
+        declared_source_columns=list(plan.source_columns),
+        declared_source_schema=dict(plan.source_schema or {}),
         stored_source_fp=rev.source_schema_hash or "",
         stored_target_fp=rev.target_schema_hash or "",
         previous_source_columns=prev_cols or None,

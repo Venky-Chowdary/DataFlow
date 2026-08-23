@@ -557,11 +557,18 @@ class CellPreviewRequest(BaseModel):
     column_types: dict[str, str] = Field(default_factory=dict)
     sample_size: int = Field(25, ge=1, le=200)
     date_locale: str = ""
+    shape_recipe: dict[str, Any] | None = None
 
 
 @router.post("/preview-cells")
 async def preview_quarantine_cells(body: CellPreviewRequest):
-    """Cell-level quarantine/coerce preview before transfer run."""
+    """Cell-level quarantine/coerce preview before transfer run.
+
+    The recipe travels with the request for the same reason it travels with
+    ``/preflight/run``: Execute transforms on the read, so a cell preview that
+    scans raw values reports findings on values no writer will ever bind —
+    ``Invalid integer: '22.43'`` on a column the approved recipe rounds to 22.
+    """
     from services.transform_engine import preview_quarantine_cells as _preview
 
     try:
@@ -573,14 +580,43 @@ async def preview_quarantine_cells(body: CellPreviewRequest):
         locale_token = set_active_date_locale(body.date_locale)
         try:
             rows = [[("" if c is None else str(c)) for c in row] for row in body.sample_rows]
-            return _preview(
-                headers=body.headers,
+            headers = list(body.headers)
+            column_types = dict(body.column_types)
+            try:
+                image = shaped_preflight_image(
+                    body.shape_recipe,
+                    columns=headers,
+                    column_types=column_types,
+                    sample_rows=[dict(zip(headers, row)) for row in rows],
+                )
+            except ShapePreflightRefused as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            if image.applied:
+                headers = image.columns
+                column_types = image.column_types
+                rows = [
+                    [("" if row.get(h) is None else str(row.get(h))) for h in headers]
+                    for row in (image.sample_rows or [])
+                ]
+            result = _preview(
+                headers=headers,
                 sample_rows=rows,
                 mappings=body.mappings,
-                column_types=body.column_types,
+                column_types=column_types,
                 sample_size=body.sample_size,
             )
+            if image.applied:
+                result["transform_image"] = {
+                    "recipe_hash": image.recipe_hash,
+                    "sample_rows_in": image.rows_in,
+                    "sample_rows_out": image.rows_out,
+                    "sample_rows_removed": image.rows_removed,
+                    "retyped_columns": image.retyped_columns,
+                }
+            return result
         finally:
             reset_active_date_locale(locale_token)
+    except HTTPException:
+        raise
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=str(e))

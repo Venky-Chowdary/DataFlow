@@ -594,6 +594,24 @@
 }
 
 .df2-xform-code.is-invalid { border-color: var(--df-danger, #b91c1c); }
+
+/* A required option left blank says so beside itself, before Add is clicked. */
+.df2-xform-required {
+  display: block;
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--df-danger, #b91c1c);
+}
+
+.df2-xform-builder-why {
+  align-self: center;
+  margin-top: 0;
+}
+
+.df2-field.is-invalid > .df2-input {
+  border-color: var(--df-danger, #b91c1c);
+  background: #fff7f7;
+}
 .df2-xform-multi { min-height: 84px; }
 .df2-xform-toggle { align-self: end; }
 

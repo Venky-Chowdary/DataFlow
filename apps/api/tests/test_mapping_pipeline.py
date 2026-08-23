@@ -48,6 +48,41 @@ def test_pipeline_uses_source_inferred_types_for_transforms():
     )
 
 
+def test_an_ambiguous_integer_source_is_reported_as_itself():
+    """Map reports the source's carrier, not the create-new invent widened from it.
+
+    ``ddl_carrier_type("INTEGER")`` answers the CREATE question and returns
+    ``BIGINT`` (never-narrower invent). Reporting that as ``source_type`` made an
+    INTEGER column landing in an existing ``int4`` read back as a ``BIGINT →
+    INT4`` narrowing, so the UI demanded a Risk Contract for a path this same
+    engine graded ``preserve`` — the exact false blocker a rounded transform hit.
+    """
+    r = run_mapping_pipeline(
+        ["arr_time"],
+        ["arr_time"],
+        source_schemas=[
+            {"name": "arr_time", "inferred_type": "INTEGER", "samples": ["22", "21"]}
+        ],
+        target_schemas=[{"name": "arr_time", "inferred_type": "int4", "samples": []}],
+        confidence_threshold=0.5,
+    )
+    m = r["mappings"][0]
+    assert m["source_type"] == "INTEGER"
+    assert m.get("fidelity") in {"preserve", None}
+    assert not m.get("narrowing")
+
+
+def test_a_source_that_named_its_own_width_keeps_the_canonical_spelling():
+    r = run_mapping_pipeline(
+        ["n"],
+        ["n"],
+        source_schemas=[{"name": "n", "inferred_type": "BIGINT", "samples": ["1"]}],
+        target_schemas=[{"name": "n", "inferred_type": "int8", "samples": []}],
+        confidence_threshold=0.5,
+    )
+    assert r["mappings"][0]["source_type"] == "BIGINT"
+
+
 def test_pipeline_entailment_prune_drops_phantom_targets():
     from services.mapping_pipeline import entailment_prune
 

@@ -925,6 +925,9 @@ export function TransferPage({
       })),
       column_types: (currentSourceSchema || {}) as Record<string, string>,
       sample_size: 25,
+      // Same image as the gates: the recipe runs on the read, so scanning the
+      // raw cell reports a finding on a value the writer never binds.
+      shape_recipe: recipePayload(shapeSteps),
     })
       .then((res) => {
         if (!cancelled) setCellPreview(res);
@@ -935,7 +938,7 @@ export function TransferPage({
     return () => {
       cancelled = true;
     };
-  }, [step, currentSourceColumnsKey, columnMappings, samplePreviewRows, currentSourceSchema, currentSourceColumns]);
+  }, [step, currentSourceColumnsKey, columnMappings, samplePreviewRows, currentSourceSchema, currentSourceColumns, shapeSteps]);
 
   // A name-matched column is a starting point for the operator, never a claim
   // about the column's behaviour — the declaration beside it carries that.

@@ -156,6 +156,29 @@ def test_a_recipe_that_cannot_run_refuses_instead_of_passing() -> None:
         )
 
 
+def test_the_drift_contract_still_reads_the_declared_source() -> None:
+    """An approved recipe is not source drift.
+
+    The mapping revision fingerprints the *declared* source. Handing the
+    transformed image to the drift detector made the operator's own retyped
+    column read as "source schema changed since last mapping revision", which
+    blocked Validate on the very transform it had just approved.
+    """
+    captured, _ = _run(
+        _make_plan(),
+        shape_recipe={
+            "steps": [
+                {"op": "round_number", "column": "arr_time", "options": {"places": 0}}
+            ]
+        },
+    )
+    # Gates judge the transformed image…
+    assert captured["column_types"]["arr_time"] != "DECIMAL(12,9)"
+    # …while drift compares the declared source the revision was signed on.
+    assert captured["declared_source_columns"] == ["name", "arr_time"]
+    assert captured["declared_source_schema"]["arr_time"] == "DECIMAL(12,9)"
+
+
 def test_an_empty_recipe_is_not_an_identity() -> None:
     """A step-less Transform must leave Validate exactly as it was."""
     captured, result = _run(_make_plan(), shape_recipe={"steps": []})
