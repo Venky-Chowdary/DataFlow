@@ -1528,6 +1528,7 @@ from .job_quarantine import (  # noqa: E402,F401 — re-export
     _attach_job_rollback_plan,
     _persist_checkpoint_quarantine_delta,
     _persist_job_quarantine,
+    checkpoint_quarantine_summary,
 )
 
 
@@ -2907,16 +2908,9 @@ class UniversalTransferEngine:
                     # Never embed the full writer checkpoint (unbounded quarantine)
                     # into transfer_jobs — that is the DocumentTooLarge failure mode.
                     update["checkpoint"] = slim_checkpoint_for_job_store(checkpoint)
-                    update["destination_summary"] = {
-                        "checksum": checkpoint.get("checksum", ""),
-                        "rejected_rows": int(
-                            checkpoint.get("rejected_rows") or total or 0
-                        ),
-                        "rejected_details": preview,
-                        "rejected_details_total": total,
-                        "rejected_details_truncated": truncated,
-                        "quarantine_checkpoint_durable": True,
-                    }
+                    update["destination_summary"] = checkpoint_quarantine_summary(
+                        checkpoint, details, preview, total, truncated
+                    )
                     _promote_cdc_job_fields(checkpoint, update)
                 mongo.update_job_status(job_id, "running", **update)
 
@@ -4133,16 +4127,9 @@ class UniversalTransferEngine:
                     # Never embed the full writer checkpoint (unbounded quarantine)
                     # into transfer_jobs — that is the DocumentTooLarge failure mode.
                     update["checkpoint"] = slim_checkpoint_for_job_store(checkpoint)
-                    update["destination_summary"] = {
-                        "checksum": checkpoint.get("checksum", ""),
-                        "rejected_rows": int(
-                            checkpoint.get("rejected_rows") or total or 0
-                        ),
-                        "rejected_details": preview,
-                        "rejected_details_total": total,
-                        "rejected_details_truncated": truncated,
-                        "quarantine_checkpoint_durable": True,
-                    }
+                    update["destination_summary"] = checkpoint_quarantine_summary(
+                        checkpoint, details, preview, total, truncated
+                    )
                     _promote_cdc_job_fields(checkpoint, update)
                 mongo.update_job_status(job_id, "running", **update)
 
@@ -4928,16 +4915,9 @@ class UniversalTransferEngine:
                     # Never embed the full writer checkpoint (unbounded quarantine)
                     # into transfer_jobs — that is the DocumentTooLarge failure mode.
                     update["checkpoint"] = slim_checkpoint_for_job_store(checkpoint)
-                    update["destination_summary"] = {
-                        "checksum": checkpoint.get("checksum", ""),
-                        "rejected_rows": int(
-                            checkpoint.get("rejected_rows") or total or 0
-                        ),
-                        "rejected_details": preview,
-                        "rejected_details_total": total,
-                        "rejected_details_truncated": truncated,
-                        "quarantine_checkpoint_durable": True,
-                    }
+                    update["destination_summary"] = checkpoint_quarantine_summary(
+                        checkpoint, details, preview, total, truncated
+                    )
                     _promote_cdc_job_fields(checkpoint, update)
                 mongo.update_job_status(job_id, "running", **update)
 

@@ -684,6 +684,28 @@ def _parse_integer(value: str) -> int | None:
         return None
 
 
+def integer_parse_failure_reason(value: str) -> str:
+    """Why the integer transform refused ``value``, in remediation terms.
+
+    ``Invalid integer: '22.433332'`` names the value but not the fix, so an
+    operator reviewing quarantine cannot tell a fractional value (widen the
+    carrier, or round explicitly) from unparseable text (repair the source).
+    The refusal keeps its prefix so existing reason grouping still holds.
+    """
+    stem = f"Invalid integer: {value!r}"
+    try:
+        dec = Decimal(value.strip())
+    except (InvalidOperation, Overflow, ValueError, TypeError):
+        return stem
+    if dec.is_finite() and dec != dec.to_integral_value():
+        return (
+            f"{stem} — fractional value is not an integer; widen the "
+            "destination to DECIMAL/DOUBLE, or round it explicitly before "
+            "the write"
+        )
+    return stem
+
+
 # Canonical boolean wire only (SSOT with type_system.boolean_value_fits).
 # Informal "yes"/"on"/"y" invents truth (Airbyte-class); refuse — operator
 # must remap or transform. Schema inference keeps a wider informal set for
@@ -1360,7 +1382,7 @@ def apply_transform(raw: str | None, transform: str) -> tuple[Any, str | None]:
             return bool_as_number, None
         parsed_int = _parse_integer(text)
         if parsed_int is None:
-            return None, f"Invalid integer: {text!r}"
+            return None, integer_parse_failure_reason(text)
         return parsed_int, None
 
     if transform == "boolean":

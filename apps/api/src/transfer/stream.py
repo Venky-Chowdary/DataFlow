@@ -62,6 +62,7 @@ from .adapters import (
     _introspect_table_schema_rich,
     resolve_connector_config,
     resolve_dest_table,
+    split_refused_unit,
 )
 from .connector_capabilities import resolve_driver_type
 from .stream_row_accounting import (
@@ -275,6 +276,7 @@ def _raise_write_failure(result: Any, label: str) -> None:
     details = list(getattr(result, "rejected_details", []) or [])
     rejected_rows = int(getattr(result, "rejected_rows", 0) or 0) or len(details)
     summary = _writer_diagnostics(result)
+    rejected_rows = split_refused_unit(details, rejected_rows, summary)
     try:
         from connectors.write_resilience import is_connection_lost
     except ImportError:
