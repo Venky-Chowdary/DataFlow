@@ -2394,6 +2394,10 @@ export type PreflightAcknowledgments = {
 export async function preflightTransferPlan(
   planId: string,
   acknowledgments: PreflightAcknowledgments = {},
+  // The run shapes rows on the read, so the plan-scoped Validate — the call the
+  // wizard actually makes — has to carry the approved recipe too, or the gates
+  // score a source image the writer never sees.
+  shapeRecipe?: ShapeRecipeWire,
 ) {
   const res = await apiFetch(`${API_BASE}/transfer/plans/${planId}/preflight`, {
     method: "POST",
@@ -2404,6 +2408,7 @@ export async function preflightTransferPlan(
       fk_risk_acknowledged: acknowledgments.fk_risk_acknowledged ?? false,
       acknowledgment_actor: acknowledgments.acknowledgment_actor ?? "",
       acknowledgment_reason: acknowledgments.acknowledgment_reason ?? "",
+      shape_recipe: shapeRecipe ?? null,
     }),
     timeoutMs: LONG_REQUEST_TIMEOUT_MS,
   });

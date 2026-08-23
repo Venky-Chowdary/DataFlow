@@ -222,9 +222,10 @@ def test_route_forwards_acknowledgment_body():
 
     seen: dict = {}
 
-    def fake_run_plan_preflight(plan_id, *, acknowledgments=None):
+    def fake_run_plan_preflight(plan_id, *, acknowledgments=None, shape_recipe=None):
         seen["plan_id"] = plan_id
         seen["ack"] = acknowledgments
+        seen["shape_recipe"] = shape_recipe
         return {"passed": True}
 
     from fastapi import FastAPI
@@ -243,11 +244,17 @@ def test_route_forwards_acknowledgment_body():
                 "compliance_acknowledged": True,
                 "acknowledgment_actor": "operator@dataflow.test",
                 "acknowledgment_reason": "Governance approved for this window",
+                "shape_recipe": {"steps": [{"op": "trim_whitespace", "column": "email"}]},
             },
         )
     assert res.status_code == 200, res.text
     assert seen["ack"].compliance is True
     assert seen["ack"].actor == "operator@dataflow.test"
+    # The wizard validates through this route, so the approved recipe has to
+    # ride along or the gates score rows the write never carries.
+    assert seen["shape_recipe"] == {
+        "steps": [{"op": "trim_whitespace", "column": "email"}]
+    }
 
     # A claimed acknowledgment without an actor is refused before preflight runs.
     with patch(

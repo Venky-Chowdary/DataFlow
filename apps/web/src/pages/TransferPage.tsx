@@ -4059,13 +4059,17 @@ export function TransferPage({
           await syncTransferPlanMappings(planId, mappings);
           // The plan transport must carry the attestation — a body-less call
           // cannot clear a PII/drift/FK gate, and Execute would stay locked.
-          const pf = await preflightTransferPlan(planId, {
-            compliance_acknowledged: ackCompliance,
-            schema_drift_acknowledged: ackSchemaDrift,
-            fk_risk_acknowledged: ackFkRisk,
-            acknowledgment_actor: ackActor,
-            acknowledgment_reason: ackReason,
-          });
+          const pf = await preflightTransferPlan(
+            planId,
+            {
+              compliance_acknowledged: ackCompliance,
+              schema_drift_acknowledged: ackSchemaDrift,
+              fk_risk_acknowledged: ackFkRisk,
+              acknowledgment_actor: ackActor,
+              acknowledgment_reason: ackReason,
+            },
+            recipePayload(shapeSteps),
+          );
           // Never stamp plan approved on review-grade / soft-pass — Execute
           // unlock requires decision===approve (same bar as Validate rail).
           const decision = pf.proof_bundle?.transfer_decision?.decision;
