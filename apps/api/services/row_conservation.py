@@ -120,7 +120,7 @@ invents a fake job-level table.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Mapping, MutableMapping, Sequence
 
 from services.dest_precount import (
@@ -982,6 +982,12 @@ class ConservationLedger:
     measured_streams: int | None = None
     summable: bool | None = None
     per_stream: tuple[dict[str, Any], ...] | None = None
+    # Rows a declared shaping recipe removed on the read (filter/divert). The
+    # reader cardinality is already net of them, so this term does not enter the
+    # balance — it exists so a smaller destination population can be read as "the
+    # recipe removed 27 rows" instead of "27 rows went missing", which is a
+    # different sentence from "the writer rejected them".
+    rows_shaped_out: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -989,6 +995,7 @@ class ConservationLedger:
             "rows_written": self.rows_written,
             "rows_quarantined": self.rows_quarantined,
             "rows_skipped": self.rows_skipped,
+            "rows_shaped_out": self.rows_shaped_out,
             "rows_coerced_null": self.rows_coerced_null,
             "writer_ack": self.writer_ack,
             "dest_count": self.dest_count,
@@ -2031,7 +2038,15 @@ def account_job(job: Mapping[str, Any]) -> ConservationLedger:
     scd2 = extract_scd2_payload(dest)
     if not scd2:
         scd2 = extract_scd2_payload(recon)
-    return account_population(
+    # Rows the declared recipe removed on the read. The reader cardinality every
+    # path reports is already net of them (the same way it is net of a source
+    # filter), so this term is evidence, not arithmetic: adding it to skipped
+    # would open a ledger that is closed.
+    shaped_out = _first_present_int(
+        recon.get("rows_shaped_out"),
+        dest.get("rows_shaped_out"),
+    )
+    ledger = account_population(
         rows_read=_as_optional_int(recon.get("source_rows")),
         dest_count=dest_count,
         dest_count_source=dest_source,
@@ -2057,6 +2072,7 @@ def account_job(job: Mapping[str, Any]) -> ConservationLedger:
         keyset=keyset or None,
         scd2=scd2 or None,
     )
+    return replace(ledger, rows_shaped_out=shaped_out) if shaped_out else ledger
 
 
 def attach_conservation_to_updates(

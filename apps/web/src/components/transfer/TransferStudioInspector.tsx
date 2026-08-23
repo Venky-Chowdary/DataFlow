@@ -3,6 +3,14 @@ import { detectTypeRisks, type TypeRisk } from "../../lib/schemaIntelligence";
 import type { EditableMapping } from "../../lib/mapping";
 import type { EnhancedAnalysis, PreflightResult, TransferResult } from "../../lib/types";
 import { conservationCompleteCopy } from "../../lib/conservationLedger";
+import {
+  STEP_DESTINATION,
+  STEP_MAP,
+  STEP_RUN,
+  STEP_SHAPE,
+  STEP_SOURCE,
+  STEP_VALIDATE,
+} from "../../pages/transfer/studioConstants";
 
 interface TransferStudioInspectorProps {
   step: number;
@@ -20,24 +28,28 @@ function resultDestLabel(result: TransferResult): string {
 }
 
 const STEP_GUIDES: Record<number, { title: string; body: string }> = {
-  1: {
+  [STEP_SOURCE]: {
     title: "Source",
     body: "Upload a file or connect a database. Schema preview appears on the right as soon as data is profiled.",
   },
-  2: {
+  [STEP_DESTINATION]: {
     title: "Destination",
     body: "Pick connector, database, and table. Existing destination schema is fetched before mapping.",
   },
-  3: {
+  [STEP_SHAPE]: {
+    title: "Shape",
+    body: "Optional. Clean the source on the read — trim, parse, round, filter — before Map decides carriers. The source itself is never modified, and the recipe is re-applied identically at Execute.",
+  },
+  [STEP_MAP]: {
     title: "Map",
     body: "Intelligent mapping aligns source columns to destination fields. Review critical and PII fields.",
   },
-  4: {
+  [STEP_VALIDATE]: {
     title: "Validate",
     body: "Preflight runs core G1–G9 only (not “eleven gates”). Studio may add host policy checks and soft constraint hints — those are extras, not marketed GateIds.",
 
   },
-  5: {
+  [STEP_RUN]: {
     title: "Run",
     body: "Live batch progress with phase tracking. Data appends to existing tables by default.",
   },
@@ -65,10 +77,10 @@ export function TransferStudioInspector({
   const blockers = typeRisks.filter((r) => r.severity === "block");
   const warnings = typeRisks.filter((r) => r.severity === "warn");
 
-  const showRisks = step >= 3 && step <= 4 && typeRisks.length > 0;
-  const showPreflight = step >= 4 && preflight;
-  const showResult = step === 5 && result?.success;
-  const guide = STEP_GUIDES[step] ?? STEP_GUIDES[1];
+  const showRisks = step >= STEP_MAP && step <= STEP_VALIDATE && typeRisks.length > 0;
+  const showPreflight = step >= STEP_VALIDATE && preflight;
+  const showResult = step === STEP_RUN && result?.success;
+  const guide = STEP_GUIDES[step] ?? STEP_GUIDES[STEP_SOURCE];
 
   return (
     <aside className="df2-studio-inspector" aria-label="Step context">
@@ -96,7 +108,7 @@ export function TransferStudioInspector({
               </li>
             ))}
           </ul>
-          {blockers.length > 0 && onGoToMapping && step !== 2 && (
+          {blockers.length > 0 && onGoToMapping && step !== STEP_DESTINATION && (
             <button type="button" className="df2-btn df2-btn-sm df2-inspector-action" onClick={onGoToMapping}>
               Review mappings
             </button>

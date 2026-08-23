@@ -17,12 +17,12 @@ caller supplies a ``process(idx, item)`` function.
 from __future__ import annotations
 
 import concurrent.futures
-import os
-from services.brand_env import getenv_brand
 import queue
 import threading
 from collections.abc import Callable, Iterable, Iterator
 from typing import TypeVar
+
+from services.brand_env import getenv_brand
 
 T = TypeVar("T")
 R = TypeVar("R")
@@ -225,10 +225,19 @@ class OrderedChunkRunner(ChunkDispatcher):
         if self._executor is None:
             raise RuntimeError("Use OrderedChunkRunner as a context manager (with ...)")
 
+        # A reader that dies mid-stream must not look like a stream that ended.
+        # Without this the exception stays on the reader thread, the sentinel is
+        # posted, and the caller sees a short but *successful* run — a corrupt row
+        # halfway through a file, or a shaping recipe refusing one, would silently
+        # truncate the load and still report the rows it managed to write.
+        reader_error: list[BaseException] = []
+
         def _reader() -> None:
             try:
                 for idx, item in iterable:
                     self._prefetch.put((idx, item))
+            except BaseException as exc:  # noqa: BLE001 - re-raised on the consumer
+                reader_error.append(exc)
             finally:
                 # Sentinel tells the dispatcher the input stream is done.
                 self._prefetch.put(None)
@@ -287,6 +296,11 @@ class OrderedChunkRunner(ChunkDispatcher):
                         f"Parallel chunk ordering broken: expecting {self._next_yield}, "
                         f"buffer has {sorted(self._buffer.keys())[:5]}"
                     )
+            # Every chunk the reader managed to hand over has now been yielded, so
+            # the caller's accounting is intact; the read itself still failed, and
+            # it is raised here rather than reported as a completed stream.
+            if reader_error:
+                raise reader_error[0]
         finally:
             # Drain any stragglers and clean up.
             while self._pending or self._buffer:

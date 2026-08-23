@@ -10,7 +10,7 @@ import threading
 import time
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
-from typing import Any, Iterator, Optional
+from typing import Any, Iterator, Optional, Sequence
 
 try:
     import resource  # Unix-only; unavailable on Windows
@@ -50,6 +50,14 @@ try:
     )
     from services.row_filter import apply_row_filter
     from services.scd2_engine import apply_scd2
+    from services.shape_apply import (
+        ShapeError,
+        ShapeRowError,
+        ShapeRunner,
+        build_shape_runner,
+        shape_ledger_terms,
+        shaped_schema,
+    )
     from services.sync_cursor import (
         destination_exists_for_typing,
         is_overwrite_sync,
@@ -87,6 +95,14 @@ except (
     )
     from src.services.row_filter import apply_row_filter
     from src.services.scd2_engine import apply_scd2
+    from src.services.shape_apply import (
+        ShapeError,
+        ShapeRowError,
+        ShapeRunner,
+        build_shape_runner,
+        shape_ledger_terms,
+        shaped_schema,
+    )
     from src.services.sync_cursor import (
         destination_exists_for_typing,
         is_overwrite_sync,
@@ -679,6 +695,187 @@ def _authoritative_source_schema(
         return schema
 
 
+def _open_shape_runner(
+    request: TransferRequest,
+    columns: list[str] | None,
+) -> "ShapeRunner | None":
+    """The declared shaping recipe, refused unless it is the approved one.
+
+    Shaping runs before mapping on purpose: Map decides carriers, narrowing risk
+    contracts and the DDL identity from the columns and values it is shown, so a
+    recipe that changes source-side truth has to run first or those decisions
+    describe data that never reaches the writer.
+    """
+    return build_shape_runner(
+        getattr(request, "shape_recipe", None),
+        source_columns=list(columns or []),
+        approved_hash=str(getattr(request, "approved_shape_recipe_hash", "") or ""),
+    )
+
+
+def _stamp_shape_evidence(
+    dest_summary: dict[str, Any],
+    runner: "ShapeRunner | None",
+) -> None:
+    """Record what the recipe did to this run, on the run's own summary.
+
+    Without this the ledger would compare a source COUNT(*) against a
+    destination population short by the removed rows and report an unbalanced
+    load, and the proof pack would not say which recipe produced the values it
+    is proving.
+    """
+    if runner is None:
+        return
+    terms = shape_ledger_terms(runner)
+    # A resumed streaming pass carries the removals of every committed page,
+    # earlier passes included, while this runner only shaped the tail. Taking
+    # the runner's smaller tally would drop the earlier passes' removed rows
+    # out of conservation and read a correct load as short delivery.
+    for key in ("rows_shaped_out", "rows_shaped_in", "rows_shape_filtered"):
+        prior = dest_summary.get(key)
+        if isinstance(prior, int) and prior > int(terms.get(key, 0) or 0):
+            terms[key] = prior
+    dest_summary.update(terms)
+    dest_summary["shape_proof"] = runner.report()
+    # The rows the recipe read are this run's source population, whether or not
+    # they reached the writer. A materialized read hands reconciliation only the
+    # surviving records, so the removed rows would be missing from both sides of
+    # conservation and the recipe's effect would balance by disappearing.
+    if not isinstance(dest_summary.get("source_row_count"), int):
+        dest_summary["source_row_count"] = int(runner.effect.rows_in)
+        dest_summary["source_row_count_source"] = "shape_read"
+
+
+def _shaped_population_rows(
+    runner: "ShapeRunner | None",
+    rows: Iterator[dict[str, Any]],
+) -> Iterator[dict[str, Any]]:
+    """The population the writer will see, for the pre-write fit scan.
+
+    The scan asks whether every row survives the destination carrier, so it has
+    to be asked of the shaped values: a ``round to 8`` step makes 27 otherwise
+    unfittable decimals fit, and scanning the raw file would block a run that is
+    correct. Its own runner, because the scan's counts are not the load's.
+    """
+    if runner is None:
+        return rows
+    probe = ShapeRunner(runner.recipe)
+
+    def _iter() -> Iterator[dict[str, Any]]:
+        for row in rows:
+            shaped = probe.records([row])
+            if shaped:
+                yield shaped[0]
+
+    return _iter()
+
+
+def _shape_stream_refusal(
+    runner: "ShapeRunner | None",
+    *,
+    effective_sync: str,
+    multi_stream: bool,
+    cursor_field: str,
+    key_columns: Sequence[str],
+) -> str:
+    """Why this streaming route cannot honour the recipe, or ``""``.
+
+    Silently ignoring a recipe on a route that cannot run it is the worst
+    outcome: the operator approved shaped values and the destination would
+    receive raw ones. So each route that cannot re-apply the recipe row by row
+    says so before anything is written.
+
+    History and change-data routes compare a row against the row already stored,
+    which was written by a possibly different recipe — that comparison is not
+    ours to guess at. An incremental or upsert route resolves rows and watermarks
+    by cursor and key, so a recipe that rewrites, renames or drops one of those
+    columns would move the watermark or the identity itself.
+    """
+    if runner is None:
+        return ""
+    sync = (effective_sync or "").lower()
+    if sync in ("cdc", "scd2", "full_refresh_mirror", "mirror"):
+        return (
+            f"Shaping is not applied on the {sync} route: it merges each row "
+            "against history already stored on the destination, which was not "
+            "written by this recipe. Remove the Shape recipe for this sync mode, "
+            "or use full refresh / incremental append and shape on the read."
+        )
+    if multi_stream:
+        return (
+            "Shaping a multi-stream selection is refused: one recipe names "
+            "columns of one stream, so applying it to every selected stream "
+            "would either miss columns or rewrite unrelated ones. Run one "
+            "stream per transfer to shape it."
+        )
+    touched = set(runner.recipe.touched_columns)
+    outputs = set(runner.output_columns)
+    guarded = [c for c in ([cursor_field] if cursor_field else []) + list(key_columns) if c]
+    hit = [c for c in guarded if c in touched or c not in outputs]
+    if hit:
+        return (
+            "Shaping refuses to rewrite the columns this sync mode resolves rows "
+            f"by ({', '.join(sorted(set(hit)))}): the cursor and key decide which "
+            "rows are read and which stored row is replaced, so a shaped value "
+            "there would move the watermark or change row identity. Shape other "
+            "columns, or switch to a full refresh."
+        )
+    return ""
+
+
+def _shape_materialized_read(
+    runner: "ShapeRunner",
+    records: list[dict[str, Any]],
+    columns: list[str],
+    schema: dict[str, str],
+) -> tuple[list[dict[str, Any]], list[str], dict[str, str]]:
+    """Apply the recipe to a fully-read source and re-declare what it produced."""
+    shaped = runner.records(records)
+    out_columns = list(runner.output_columns or columns)
+    return shaped, out_columns, shaped_schema(runner, shaped, schema)
+
+
+def _widen_design_sample(
+    source: "EndpointConfig",
+    columns: list[str],
+    source_filter: dict[str, Any] | None,
+    runner: "ShapeRunner | None",
+    *,
+    wanted: int,
+    scan_budget: int = 50_000,
+) -> list[dict[str, Any]]:
+    """Read further into the source until ``wanted`` rows survive the read rewrites.
+
+    A declared source filter and an approved recipe both remove rows *before*
+    Map, the type inference and the gates ever see them, so a selective one can
+    empty the first page and leave preflight with no rows to judge — which reads
+    as "no sample" and blocks a run that is in fact correct. Reading on is the
+    only honest answer: the rows exist, they are just deeper than one page.
+
+    Bounded on purpose. A filter that keeps one row in a million must not turn
+    design time into a full table scan, so the walk stops at ``scan_budget`` raw
+    rows and returns what survived — the caller then judges a thinner sample,
+    which is what it would have done for a small table anyway.
+    """
+    from services.row_filter import apply_row_filter
+
+    from .source_peek import iter_stream_source_column_rows
+
+    survivors: list[dict[str, Any]] = []
+    scanned = 0
+    for row in iter_stream_source_column_rows(source, columns):
+        scanned += 1
+        kept = [row]
+        if source_filter:
+            kept = apply_row_filter(kept, source_filter)
+        if kept and runner is not None:
+            kept = runner.records(kept)
+        survivors.extend(kept)
+        if len(survivors) >= wanted or scanned >= scan_budget:
+            break
+    return survivors[:wanted]
+
+
 def _rekey_to_read_columns(
     schema: dict[str, str], columns: list[str] | None
 ) -> dict[str, str]:
@@ -915,6 +1112,7 @@ def _table_population_rows(
     column_types: dict[str, str],
     dest_types: dict[str, str],
     dest_db: str,
+    shape_runner: "ShapeRunner | None" = None,
 ) -> Iterator[dict[str, Any]]:
     """Every source row of a table, projected to the bounded columns only.
 
@@ -939,11 +1137,19 @@ def _table_population_rows(
         wanted = sorted({t.source for t in targets if t.source})
         if not wanted:
             return
-        yield from iter_stream_source_column_rows(
+        rows = iter_stream_source_column_rows(
             request.source,
-            wanted,
+            # A bounded column name is a *shaped* name, which the table may not hold
+            # at all (derived, renamed). So a shaped run projects the recipe's own
+            # inputs and shapes the rows before the scan judges them.
+            sorted({str(c) for c in shape_runner.recipe.input_columns})
+            if shape_runner is not None
+            else wanted,
             limit=int(request.limit or 0),
         )
+        if shape_runner is not None:
+            rows = _shaped_population_rows(shape_runner, rows)
+        yield from rows
     except Exception as exc:  # noqa: BLE001 - unreadable source is unmeasured, never "fits"
         logger.warning("population fit scan could not re-read source table: %s", exc)
 
@@ -2254,6 +2460,11 @@ class UniversalTransferEngine:
             schema = _authoritative_source_schema(request.source, schema, columns)
             if request.source_filter:
                 records = apply_row_filter(records, request.source_filter)
+            shape_runner = _open_shape_runner(request, columns)
+            if shape_runner is not None:
+                records, columns, schema = _shape_materialized_read(
+                    shape_runner, records, columns, schema
+                )
             records = _apply_priority_and_limit(
                 records,
                 request.priority_column,
@@ -3195,6 +3406,10 @@ class UniversalTransferEngine:
                         dest_summary.setdefault(
                             "primary_key_columns", list(conflict_columns)
                         )
+                    # Stamped before reconciliation so the recipe identity is on
+                    # the summary the ladder and the ledger read, not only on the
+                    # record written afterwards.
+                    _stamp_shape_evidence(dest_summary, shape_runner)
                 from connectors.engine_record_spill import ENGINE_SPILL_SUMMARY_KEY
 
                 spill_holder = (
@@ -3507,8 +3722,85 @@ class UniversalTransferEngine:
                     job_id=job_id,
                 )
 
+            read_columns = list(columns)
+            raw_sample_size = len(sample_rows)
             if request.source_filter:
                 sample_rows = apply_row_filter(sample_rows, request.source_filter)
+
+            # The recipe runs on the read, so Map, the narrowing scan and the DDL
+            # identity are decided from the shaped columns and values the writer
+            # will receive. A separate throwaway runner shapes the design-time
+            # sample: those effects are not the population's.
+            shape_runner = _open_shape_runner(request, columns)
+            declared_contract = resolve_sync_contract(request.stream_contracts)
+            shape_refusal = _shape_stream_refusal(
+                shape_runner,
+                effective_sync=resolve_effective_sync_mode(
+                    request.sync_mode,
+                    declared_contract.sync_mode if declared_contract else None,
+                ),
+                multi_stream=len(
+                    resolve_selected_sync_contracts(request.stream_contracts)
+                ) > 1,
+                cursor_field=(
+                    declared_contract.cursor_field if declared_contract else ""
+                ),
+                key_columns=(
+                    declared_contract.primary_key_columns()
+                    if declared_contract and declared_contract.primary_key
+                    else []
+                ),
+            )
+            if shape_refusal:
+                mongo.update_job_status(
+                    job_id,
+                    "failed",
+                    error=shape_refusal,
+                    phase="failed",
+                    progress_pct=0,
+                )
+                return TransferResult(
+                    success=False,
+                    error=shape_refusal,
+                    error_details={
+                        "reason": "shape_route_unsupported",
+                        "remediation": (
+                            "Remove the Shape recipe for this sync mode, or shape "
+                            "on a full-refresh / incremental-append route."
+                        ),
+                    },
+                    operation=request.operation,
+                    job_id=job_id,
+                )
+            sample_probe = (
+                ShapeRunner(shape_runner.recipe) if shape_runner is not None else None
+            )
+            if sample_probe is not None:
+                sample_rows = sample_probe.records(sample_rows)
+            if (
+                not sample_rows
+                and raw_sample_size
+                and (request.source_filter or sample_probe is not None)
+            ):
+                # The rewrites emptied the first page, not the table. Read on
+                # rather than let the gates judge a run on no rows at all.
+                widened_probe = (
+                    ShapeRunner(shape_runner.recipe)
+                    if shape_runner is not None
+                    else None
+                )
+                sample_rows = _widen_design_sample(
+                    request.source,
+                    read_columns,
+                    request.source_filter,
+                    widened_probe,
+                    wanted=raw_sample_size,
+                )
+                if widened_probe is not None:
+                    sample_probe = widened_probe
+            if sample_probe is not None:
+                columns = list(sample_probe.output_columns or columns)
+                schema = shaped_schema(sample_probe, sample_rows, schema)
 
             mongo.update_job_status(
                 job_id, "running", total_rows=total_rows, records_processed=0
@@ -3578,6 +3870,7 @@ class UniversalTransferEngine:
                             column_types=schema,
                             dest_types=dest_schema_types,
                             dest_db=dst_fmt.lower(),
+                            shape_runner=shape_runner,
                         )
                     ),
                     rows_are_population=not request.source_filter,
@@ -4022,6 +4315,7 @@ class UniversalTransferEngine:
                     source_filter=request.source_filter,
                     limit=request.limit,
                     skip_preflight=request.skip_preflight,
+                    shape_runner=shape_runner,
                 )
 
             with _reconcile_phase_heartbeat(
@@ -4033,6 +4327,11 @@ class UniversalTransferEngine:
                 if isinstance(dest_summary, dict):
                     dest_summary.setdefault("sync_mode", effective_sync)
                     dest_summary.setdefault("streaming", True)
+                    # Stamped before reconciliation: the ladder and the ledger
+                    # read the recipe identity and the rows it removed off this
+                    # summary, so a shaped run balances instead of reporting a
+                    # destination population short by the filtered rows.
+                    _stamp_shape_evidence(dest_summary, shape_runner)
                 recon = run_reconciliation(
                     endpoint=request.destination,
                     records=[],
@@ -4293,6 +4592,19 @@ class UniversalTransferEngine:
             if request.source_filter:
                 sample_rows = apply_row_filter(sample_rows, request.source_filter)
 
+            # The recipe runs before Map on the sample as well as on the stream:
+            # Map, the narrowing scan and the DDL identity are all decided from
+            # the columns and values shown here, so an unshaped sample would
+            # approve carriers for data the writer never receives. Two runners —
+            # the sample's effects are design-time and must not be added to the
+            # population accounting the ledger publishes.
+            shape_runner = _open_shape_runner(request, columns)
+            if shape_runner is not None:
+                sample_probe = ShapeRunner(shape_runner.recipe)
+                sample_rows = sample_probe.records(sample_rows)
+                columns = list(sample_probe.output_columns or columns)
+                schema = shaped_schema(sample_probe, sample_rows, schema)
+
             # Resolve ambiguous day/month date order from the sample before mapping.
             if not request.date_locale and sample_rows and columns:
                 inferred_locale = infer_date_locale(sample_rows, columns)
@@ -4362,7 +4674,10 @@ class UniversalTransferEngine:
                     population_rows=(
                         None
                         if request.source_filter
-                        else _file_population_rows(content, filename, read_options)
+                        else _shaped_population_rows(
+                            shape_runner,
+                            _file_population_rows(content, filename, read_options),
+                        )
                     ),
                     # A filtered run writes a subset, so the unfiltered re-read
                     # is not this job's population — fall back to preview
@@ -4699,6 +5014,7 @@ class UniversalTransferEngine:
                 skip_preflight=request.skip_preflight,
                 date_locale=request.date_locale,
                 read_options=read_options,
+                shape_runner=shape_runner,
             )
 
             with _reconcile_phase_heartbeat(
@@ -4720,6 +5036,9 @@ class UniversalTransferEngine:
                     if file_pk:
                         dest_summary.setdefault("conflict_columns", list(file_pk))
                         dest_summary.setdefault("primary_key_columns", list(file_pk))
+                    # Before reconciliation, not after: the cell ladder decides
+                    # whether a source re-read is still comparable from this stamp.
+                    _stamp_shape_evidence(dest_summary, shape_runner)
                 recon = run_reconciliation(
                     endpoint=request.destination,
                     records=[],

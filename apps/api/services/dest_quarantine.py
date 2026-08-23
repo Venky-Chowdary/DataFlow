@@ -17,6 +17,7 @@ import json
 import logging
 import re
 import uuid
+from contextlib import closing
 from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any
@@ -265,7 +266,7 @@ def mark_dlq_promoted(
                 if job_id:
                     sql += ' AND "_df_job_id" = ?'
                     params.append(job_id)
-            with sqlite3.connect(path, timeout=8) as conn:
+            with closing(sqlite3.connect(path, timeout=8)) as conn:
                 cur = conn.execute(sql, params)
                 updated = int(cur.rowcount or 0)
                 conn.commit()
@@ -414,7 +415,7 @@ def count_open_dlq_rows(destination: Any, *, job_id: str = "") -> dict[str, Any]
             if job_id:
                 sql += ' AND "_df_job_id" = ?'
                 params.append(job_id)
-            with sqlite3.connect(path, timeout=8) as conn:
+            with closing(sqlite3.connect(path, timeout=8)) as conn:
                 row = conn.execute(sql, params).fetchone()
                 n = int(row[0] or 0) if row else 0
             return {"supported": True, "open_rows": n, "table": table}

@@ -172,7 +172,7 @@ import io
 import logging
 import tempfile
 from collections.abc import Iterator, Mapping, Sequence
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -512,7 +512,7 @@ def destination_row_count(
             database = str(cfg.get("database") or "")
             if not database:
                 return None
-            with sqlite3.connect(database) as conn:
+            with closing(sqlite3.connect(database)) as conn:
                 exists = conn.execute(
                     "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
                     (table,),
@@ -1551,7 +1551,7 @@ def _key_list_sql(
         database = str(cfg.get("database") or "")
         if not database:
             return None
-        with sqlite3.connect(database) as conn:
+        with closing(sqlite3.connect(database)) as conn:
             return _fetch_key_rows(conn, sql, len(cols))
     if dialect in {"postgresql", "redshift"}:
         from connectors.postgresql_conn import get_connection
@@ -1631,7 +1631,7 @@ def _key_hits_sql(
         database = str(cfg.get("database") or "")
         if not database:
             return None
-        with sqlite3.connect(database) as conn:
+        with closing(sqlite3.connect(database)) as conn:
             total = _sum_distinct_hits(conn, table_ref, col_sql, cols, keys, ph)
         return total
     if dialect in {"postgresql", "redshift"}:
@@ -4132,7 +4132,7 @@ def _sqlite_scd2_populations(
     database = str(cfg.get("database") or "")
     if not database:
         return None
-    with sqlite3.connect(database) as conn:
+    with closing(sqlite3.connect(database)) as conn:
         exists = conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
             (table_name,),

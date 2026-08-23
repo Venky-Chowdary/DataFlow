@@ -100,6 +100,7 @@ try:
     from services.replay_safety import classify_replay_safety
     from services.resilience import adaptive_chunk_size
     from services.row_filter import apply_row_filter_to_matrix
+    from services.shape_apply import ShapeRunner
 except ImportError:  # pragma: no cover - tests with api root on path
     from src.services.checkpoint_service import Checkpoint, CheckpointService
     from src.services.data_quality import run_integrity_audit
@@ -109,6 +110,7 @@ except ImportError:  # pragma: no cover - tests with api root on path
     from src.services.replay_safety import classify_replay_safety
     from src.services.resilience import adaptive_chunk_size
     from src.services.row_filter import apply_row_filter_to_matrix
+    from src.services.shape_apply import ShapeRunner
 
 
 def _writer_diagnostics(result: Any) -> dict[str, Any]:
@@ -188,6 +190,78 @@ def _unwrap_read(result):
     if isinstance(result, tuple) and len(result) == 2 and hasattr(result[0], "headers"):
         return result
     return result, None
+
+
+def _raw_page_marked(batch: Any) -> bool:
+    """True when this page already recorded how the source handed it over.
+
+    Rewriting a page (source filter, shaping recipe) is not idempotent, and the
+    first page is prepared twice — its DDL is committed before any worker starts.
+    The mark is what proves a page is rewritten exactly once.
+    """
+    if batch is None:
+        return False
+    try:
+        return batch.raw_page_rows is not None
+    except AttributeError:
+        return False
+
+
+def _mark_raw_page(batch: Any, rows: int, cursor: str, keyset: str) -> bool:
+    """Record the page as the source handed it over; False if it cannot hold it."""
+    try:
+        batch.raw_page_rows = int(rows)
+        batch.raw_page_cursor = str(cursor or "")
+        batch.raw_page_keyset = str(keyset or "")
+    except AttributeError:
+        return False
+    return True
+
+
+def _raw_page_rows(batch: Any) -> int:
+    """How many rows the source handed over for this page.
+
+    Unmarked pages were never rewritten, so their surviving rows *are* the page.
+    """
+    if batch is None:
+        return 0
+    try:
+        marked = batch.raw_page_rows
+    except AttributeError:
+        marked = None
+    if marked is None:
+        return len(batch.rows or [])
+    return int(marked)
+
+
+def _raw_page_filtered(batch: Any) -> int:
+    """Rows the declared source filter removed from this page (0 if none)."""
+    if batch is None:
+        return 0
+    try:
+        return int(batch.raw_page_filtered or 0)
+    except AttributeError:
+        return 0
+
+
+def _raw_page_cursor(batch: Any) -> str:
+    """The page's highest cursor value before it was rewritten ("" if unmarked)."""
+    if batch is None:
+        return ""
+    try:
+        return str(batch.raw_page_cursor or "")
+    except AttributeError:
+        return ""
+
+
+def _raw_page_keyset(batch: Any) -> str:
+    """The page's keyset bookmark before it was rewritten ("" if unmarked)."""
+    if batch is None:
+        return ""
+    try:
+        return str(batch.raw_page_keyset or "")
+    except AttributeError:
+        return ""
 
 
 def _raise_write_failure(result: Any, label: str) -> None:
@@ -804,10 +878,15 @@ def stream_database_transfer(
     source_filter: dict[str, Any] | None = None,
     limit: int = 0,
     skip_preflight: bool = False,
+    shape_runner: ShapeRunner | None = None,
 ) -> tuple[int, list[str], dict[str, Any], list[str]]:
     """
     Extract source table in CHUNK_SIZE batches and load to destination.
     Returns (rows_written, ddl_log, dest_summary, columns).
+
+    ``shape_runner`` is the recipe Validate approved, applied to every page as it
+    is read — so the writer, the DDL, the digest and the destination all describe
+    the shaped rows, and the recipe's effects are counted once for the whole run.
 
     Property 3: full-refresh PostgreSQL/SQLite reads bind one snapshot session
     for the whole pagination lifetime (see ``services.source_snapshot``).
@@ -831,6 +910,7 @@ def stream_database_transfer(
             source_filter=source_filter,
             limit=limit,
             skip_preflight=skip_preflight,
+            shape_runner=shape_runner,
         )
         ok = True
         return result
@@ -871,6 +951,7 @@ def _stream_database_transfer_impl(
     source_filter: dict[str, Any] | None = None,
     limit: int = 0,
     skip_preflight: bool = False,
+    shape_runner: ShapeRunner | None = None,
 ) -> tuple[int, list[str], dict[str, Any], list[str]]:
     """
     Extract source table in CHUNK_SIZE batches and load to destination.
@@ -936,7 +1017,10 @@ def _stream_database_transfer_impl(
             "refuse silent insert fallback (set primary_key on the stream contract)"
         )
 
-    fast = _try_copy_fast_path(
+    # A server-side COPY never materializes a row in this process, so a recipe
+    # could not be applied to one. A shaped run takes the paged route instead of
+    # silently copying the raw rows the operator asked to change.
+    fast = None if shape_runner is not None else _try_copy_fast_path(
         source=source,
         destination=destination,
         mappings=mappings,
@@ -1454,9 +1538,13 @@ def _stream_database_transfer_impl(
                 if not schema:
                     schema = {c: "string" for c in columns}
 
-    column_types = {c: ddl_carrier_type(schema.get(c, "string")) for c in columns}
+    # ``columns`` stays the source's own column list: it is what every read
+    # projects on. Under a recipe the writer sees different columns, so the
+    # carriers, the mappings and the DDL are decided from the recipe's output.
+    write_columns = list(shape_runner.output_columns or columns) if shape_runner else columns
+    column_types = {c: ddl_carrier_type(schema.get(c, "string")) for c in write_columns}
     if not mappings:
-        mappings = [{"source": c, "target": c, "confidence": 0.95} for c in columns]
+        mappings = [{"source": c, "target": c, "confidence": 0.95} for c in write_columns]
     from services.shape_contract import write_ready_mappings
 
     # Pending extras and intentional omits stay off INSERT/MERGE (name-addressed).
@@ -1540,8 +1628,13 @@ def _stream_database_transfer_impl(
     ]
     if incremental and watermark:
         ddl_log.append(f"INCREMENTAL cursor {cursor_source_col} > {watermark}")
-    for col in columns:
+    for col in write_columns:
         ddl_log.append(f"{dest_type.upper()} COLUMN {col} {ddl_type(dest_type, schema.get(col, 'string'))}")
+    if shape_runner is not None:
+        ddl_log.append(
+            f"SHAPE recipe {shape_runner.recipe_hash} applied on the read: "
+            f"{shape_runner.recipe.describe()}"
+        )
 
     written = checkpoint.rows_processed or 0
     offset = checkpoint.offset or 0
@@ -1593,6 +1686,17 @@ def _stream_database_transfer_impl(
     rejected_total = int(getattr(checkpoint, "rejected_rows", 0) or 0) if resumed_pass else 0
     coerced_null_total = (
         int(getattr(checkpoint, "coerced_null_rows", 0) or 0) if resumed_pass else 0
+    )
+    # Rows a declared source filter or an approved recipe removed on the read,
+    # counted only for pages that actually committed and cumulative across
+    # resumes for the same reason the quarantine counters are.
+    removed_on_read_total = (
+        int(checkpoint.rows_removed_on_read or 0) if resumed_pass else 0
+    )
+    # The filter's share of that total, kept apart so proof can say which
+    # authority removed a row: the operator's declared scope, or the recipe.
+    filtered_on_read_total = (
+        int(checkpoint.rows_source_filtered or 0) if resumed_pass else 0
     )
     # Strict/maximum FAIL-FAST on coercion errors; balanced quarantines them.
     # Threaded to every writer so the streaming path matches the buffered path.
@@ -1857,13 +1961,15 @@ def _stream_database_transfer_impl(
         # buffered (DuckDB returns one vector), and a catalog count that still
         # exceeds the rows read says more remain — stopping there drops rows
         # while every count and checksum agrees on the truncated set.
-        page_may_be_partial = bool(last_batch is not None and last_batch.rows) and (
+        page_may_be_partial = bool(
+            last_batch is not None and _raw_page_rows(last_batch)
+        ) and (
             bool(src_scan.get("started"))
             or (total_rows is not None and fetch_offset < total_rows)
         )
         if (
             last_batch is not None
-            and len(last_batch.rows) < chunk_size
+            and _raw_page_rows(last_batch) < chunk_size
             and not page_may_be_partial
         ):
             if (
@@ -1955,22 +2061,26 @@ def _stream_database_transfer_impl(
             )
             return batch
         elif use_keyset:
-            if last_batch is not None and last_batch.rows:
+            if last_batch is not None and _raw_page_rows(last_batch):
                 # Advance on the max of the page across the full composite key
-                # (Phase F2) — max_keyset_bookmark does not assume page sort.
-                order_cols = keyset_order_cols or (
-                    [keyset_col] + ([keyset_tiebreak] if keyset_tiebreak else [])
-                )
-                advanced = max_keyset_bookmark(
-                    last_batch.rows, last_batch.headers, order_cols
-                )
-                if advanced is None and keyset_col in (last_batch.headers or []):
-                    advanced = max_cursor_value(
-                        last_batch.rows,
-                        last_batch.headers,
-                        keyset_col,
-                        keyset_tiebreak or None,
+                # (Phase F2) — max_keyset_bookmark does not assume page sort. A
+                # shaped page carries the bookmark of the rows it was read as,
+                # taken before the recipe could drop the highest one.
+                advanced = _raw_page_keyset(last_batch)
+                if not advanced:
+                    order_cols = keyset_order_cols or (
+                        [keyset_col] + ([keyset_tiebreak] if keyset_tiebreak else [])
                     )
+                    advanced = max_keyset_bookmark(
+                        last_batch.rows, last_batch.headers, order_cols
+                    )
+                    if advanced is None and keyset_col in (last_batch.headers or []):
+                        advanced = max_cursor_value(
+                            last_batch.rows,
+                            last_batch.headers,
+                            keyset_col,
+                            keyset_tiebreak or None,
+                        )
                 keyset_after = advanced or keyset_after
             _key_cols = keyset_order_cols or (
                 [keyset_col] + ([keyset_tiebreak] if keyset_tiebreak else [])
@@ -2057,10 +2167,103 @@ def _stream_database_transfer_impl(
                 redis_scan_state = extra
             return batch
 
+    shape_inputs = (
+        frozenset(shape_runner.recipe.input_columns) if shape_runner is not None else frozenset()
+    )
+
     def _filter_batch(batch):
-        if source_filter and batch and batch.rows:
-            batch.rows = apply_row_filter_to_matrix(batch.headers, batch.rows, source_filter)
+        """Source filter, then the approved recipe — once per page.
+
+        The page carries its own pre-filter, pre-shape row count: the source
+        OFFSET must advance by the rows the source handed over, not by the rows
+        that survived a filter or a recipe, or every dropped row shifts the next
+        page and the tail of the table is never read.
+
+        That mark is also what makes this idempotent, and why both rewrites are
+        recorded by one mark: they happen together, in this call, so the mark
+        means "this page has already been rewritten". The first page passes
+        through here twice (its DDL is committed before any worker starts), and a
+        page already shaped is returned untouched: shaping it again would round a
+        rounded value and count the page's effects into the run's ledger twice.
+        """
+        if not batch:
+            return batch
+        if _raw_page_marked(batch):
+            return batch
+        raw_rows = len(batch.rows or [])
+        if raw_rows and (source_filter or shape_runner is not None):
+            # Pagination bookmarks belong to the rows the source handed over. A
+            # recipe that drops the page's highest key would otherwise bookmark a
+            # lower one and the next read would hand those rows over again.
+            order_cols = keyset_order_cols or (
+                [keyset_col] + ([keyset_tiebreak] if keyset_tiebreak else [])
+            )
+            keyset_mark = max_keyset_bookmark(batch.rows, batch.headers, order_cols)
+            if keyset_mark is None and keyset_col in (batch.headers or []):
+                keyset_mark = max_cursor_value(
+                    batch.rows, batch.headers, keyset_col, keyset_tiebreak or None
+                )
+            cursor_mark = ""
+            if incremental and cursor_source_col:
+                cursor_mark = (
+                    max_cursor_value(
+                        batch.rows,
+                        batch.headers,
+                        cursor_source_col,
+                        cursor_pk_source or None,
+                    )
+                    or ""
+                )
+            if not _mark_raw_page(batch, raw_rows, cursor_mark, keyset_mark or ""):
+                raise ValueError(
+                    "this source's read page cannot record the page as it was read, "
+                    "so a filter or a shaping recipe cannot be proven to be applied "
+                    "to it exactly once, nor the next page proven to resume where "
+                    "this one ended — refusing rather than risk skipping source rows"
+                )
+        if source_filter and batch.rows:
+            before = len(batch.rows)
+            batch.rows = apply_row_filter_to_matrix(
+                batch.headers, batch.rows, source_filter
+            )
+            removed = before - len(batch.rows)
+            try:
+                batch.raw_page_filtered = removed
+            except AttributeError as exc:
+                # Without this the removal would be charged to the recipe, and
+                # proof would name the wrong authority for a missing row.
+                raise ValueError(
+                    "this source's read page cannot record how many rows the "
+                    "declared source filter removed, so proof cannot say whether "
+                    "the filter or the shaping recipe removed a row — refusing "
+                    "rather than attributing it to the wrong authority"
+                ) from exc
+        if shape_runner is not None and batch.rows is not None:
+            headers = list(batch.headers or [])
+            unknown = [h for h in headers if h and h not in shape_inputs]
+            if unknown:
+                # A column the recipe was never validated against cannot be
+                # shaped, and writing it raw beside shaped columns would put two
+                # different rules in one row. Fail closed, naming it.
+                raise ValueError(
+                    f"source column(s) {', '.join(sorted(unknown))} appeared on the read "
+                    f"but the approved shaping recipe ({shape_runner.recipe_hash}) was "
+                    "validated against a different column set — re-validate the recipe "
+                    "against the source as it is now"
+                )
+            batch.headers, batch.rows = shape_runner.matrix(headers, batch.rows)
         return batch
+
+    def _page_cursor_max(batch) -> str:
+        """The page's highest cursor value, as the source handed it over.
+
+        A row the recipe removed was still read, so the watermark must move past
+        it — otherwise the next incremental run reads it again to remove it again,
+        for ever.
+        """
+        return _raw_page_cursor(batch) or max_cursor_value(
+            batch.rows, batch.headers, cursor_source_col, cursor_pk_source or None
+        )
 
     batch = _filter_batch(_fetch_next_batch(None) if (offset > 0 or chunk_idx > 0) else probe)
     batch_quality_enabled = validation_mode in ("strict", "maximum")
@@ -2185,6 +2388,12 @@ def _stream_database_transfer_impl(
         pg_conn_state["conn"] = conn
         return conn
 
+    # The destination DDL rides on the first page that reaches the writer, which
+    # is not necessarily the first page read: a source filter or a recipe can
+    # empty page one entirely. Only the synchronous prologue below reads this as
+    # False, so no worker thread can race another into a CREATE TABLE.
+    ddl_state = {"created": False}
+
     def _process_db_chunk(idx: int, batch: Any) -> dict[str, Any]:
         """Timed wrapper around the transform + destination write for one chunk.
 
@@ -2202,6 +2411,9 @@ def _stream_database_transfer_impl(
 
     def _process_db_chunk_inner(idx: int, batch: Any) -> dict[str, Any]:
         if not batch or not getattr(batch, "rows", None):
+            # A page a filter or a recipe emptied still consumed source rows, so
+            # the offset, the watermark and the keyset bookmark advance past it.
+            # Reporting zero here would re-read that page on resume for ever.
             return {
                 "batch_written": 0,
                 "last_checksum": "",
@@ -2209,9 +2421,13 @@ def _stream_database_transfer_impl(
                 "rejected": 0,
                 "coerced_null": 0,
                 "warnings": [],
-                "batch_max": None,
-                "batch_keyset": None,
-                "batch_rows": 0,
+                "batch_max": _raw_page_cursor(batch) or None,
+                "batch_keyset": _raw_page_keyset(batch) or None,
+                "batch_rows": _raw_page_rows(batch),
+                "filter_page_removed": _raw_page_filtered(batch),
+                "shape_page_removed": max(
+                    0, _raw_page_rows(batch) - _raw_page_filtered(batch)
+                ),
                 "reconcile_sample_rows": [],
                 "fingerprints": [],
             }
@@ -2249,14 +2465,17 @@ def _stream_database_transfer_impl(
             if not audit.passed:
                 raise ValueError(f"Batch {idx} failed data-quality audit: {'; '.join(audit.issues[:5])}")
 
+        # Both bookmarks describe the page as the source handed it over: a recipe
+        # may have dropped the row carrying the page's highest key, and
+        # committing a lower bookmark would hand those rows over again.
         batch_max = None
         if incremental and cursor_source_col:
-            batch_max = max_cursor_value(
+            batch_max = _raw_page_cursor(batch) or max_cursor_value(
                 batch.rows, batch.headers, cursor_source_col, cursor_pk_source or None
             )
         batch_keyset = None
         if use_keyset:
-            batch_keyset = max_keyset_bookmark(
+            batch_keyset = _raw_page_keyset(batch) or max_keyset_bookmark(
                 batch.rows,
                 batch.headers,
                 keyset_order_cols
@@ -2284,7 +2503,7 @@ def _stream_database_transfer_impl(
             batch.rows,
             mappings,
             column_types,
-            create_table=(idx == chunk_idx + 1),
+            create_table=not ddl_state["created"],
             on_checkpoint=None,
             chunk_idx=idx,
             total_chunks=chunks,
@@ -2383,7 +2602,14 @@ def _stream_database_transfer_impl(
             "warnings": (dest_summary.get("warnings") or [])[:10] + local_warnings,
             "batch_max": batch_max,
             "batch_keyset": batch_keyset,
-            "batch_rows": len(batch.rows),
+            # Source rows this page consumed — the offset and the run's read
+            # population count them, including the ones a recipe removed.
+            "batch_rows": _raw_page_rows(batch),
+            "filter_page_removed": _raw_page_filtered(batch),
+            "shape_page_removed": max(
+                0,
+                _raw_page_rows(batch) - _raw_page_filtered(batch) - len(batch.rows),
+            ),
             "reconcile_sample_rows": sample_rows,
             "fingerprints": inline_fps,
             "overwrite_keys": (
@@ -2396,7 +2622,7 @@ def _stream_database_transfer_impl(
         }
 
     def _apply_result(idx: int, result: dict[str, Any]) -> None:
-        nonlocal written, rejected_total, coerced_null_total, last_checksum, running_cursor, committed_offset, committed_keyset, dest_summary, batches_completed, kafka_cursor, reconcile_sample
+        nonlocal written, rejected_total, coerced_null_total, removed_on_read_total, filtered_on_read_total, last_checksum, running_cursor, committed_offset, committed_keyset, dest_summary, batches_completed, kafka_cursor, reconcile_sample
         if overwrite_keys_acc is not None:
             if "overwrite_keys" in result:
                 overwrite_keys_acc.observe_tuples(result.get("overwrite_keys"))
@@ -2405,6 +2631,11 @@ def _stream_database_transfer_impl(
         written += result["batch_written"]
         rejected_total += result["rejected"]
         coerced_null_total += result.get("coerced_null", 0)
+        filter_removed = int(result.get("filter_page_removed") or 0)
+        filtered_on_read_total += filter_removed
+        removed_on_read_total += filter_removed + int(
+            result.get("shape_page_removed") or 0
+        )
         last_checksum = result["last_checksum"] or last_checksum
         fps = result.get("fingerprints") or []
         if fps:
@@ -2445,6 +2676,12 @@ def _stream_database_transfer_impl(
                     detail["batch_row"] = local_row
                     detail["batch_offset"] = batch_start
                     detail["row"] = batch_start + local_row  # 1-based absolute across the transfer
+                    if int(result.get("shape_page_removed") or 0):
+                        # The recipe removed rows earlier in this page, so this
+                        # number counts the rows that reached the writer, not the
+                        # source's own numbering. Say so rather than name a source
+                        # line the operator would not find.
+                        detail["row_basis"] = "shaped_read"
                 new_details.append(detail)
             # GA: keep full rejected_details across batches — never drop for a
             # UI sample cap (sample is stamped separately at finalize).
@@ -2503,6 +2740,8 @@ def _stream_database_transfer_impl(
         # Gate-8 conservation balances across passes.
         checkpoint.rejected_rows = rejected_total
         checkpoint.coerced_null_rows = coerced_null_total
+        checkpoint.rows_removed_on_read = removed_on_read_total
+        checkpoint.rows_source_filtered = filtered_on_read_total
         checkpoint.cursor_value = running_cursor or committed_keyset or ""
         checkpoint.cursor_column = cursor_source_col if incremental else keyset_col
         checkpoint.es_search_after = es_search_after
@@ -2550,28 +2789,32 @@ def _stream_database_transfer_impl(
     def _prepare_and_submit(dispatcher: ChunkDispatcher, idx: int, batch: Any) -> None:
         nonlocal fetch_cursor, fetch_offset
         batch = _filter_batch(batch)
-        if incremental and cursor_source_col and batch.rows:
-            batch_max = max_cursor_value(
-                batch.rows, batch.headers, cursor_source_col, cursor_pk_source or None
-            )
+        if incremental and cursor_source_col and _raw_page_rows(batch):
+            batch_max = _page_cursor_max(batch)
             if batch_max and (fetch_cursor is None or compare_cursor_values(batch_max, fetch_cursor) > 0):
                 fetch_cursor = batch_max
         dispatcher.submit(idx, batch, _process_db_chunk)
-        fetch_offset += len(batch.rows)
+        fetch_offset += _raw_page_rows(batch)
 
     try:
         # Process the first batch synchronously so DDL (table/index creation) is
         # committed before any parallel workers try to insert into the new table.
-        if batch:
+        while batch:
             batch = _filter_batch(batch)
-            if incremental and cursor_source_col and batch.rows:
-                batch_max = max_cursor_value(
-                batch.rows, batch.headers, cursor_source_col, cursor_pk_source or None
-            )
+            if incremental and cursor_source_col and _raw_page_rows(batch):
+                batch_max = _page_cursor_max(batch)
                 if batch_max and (fetch_cursor is None or compare_cursor_values(batch_max, fetch_cursor) > 0):
                     fetch_cursor = batch_max
             _apply_result(first_idx, _process_db_chunk(first_idx, batch))
-            fetch_offset += len(batch.rows)
+            fetch_offset += _raw_page_rows(batch)
+            if batch.rows:
+                ddl_state["created"] = True
+                break
+            # Every row on this page was removed on the read, so it never
+            # reached the writer and the table does not exist yet. Keep reading
+            # here rather than hand the DDL to the worker pool.
+            batch = _fetch_next_batch(batch)
+            first_idx += 1
 
         idx = first_idx + 1
         with ChunkDispatcher(max_workers=max_workers) as dispatcher:
@@ -2681,7 +2924,14 @@ def _stream_database_transfer_impl(
     # every sync mode, not just overwrite: a resumed keyed load lands the whole
     # population too, so a session-only digest reads as a checksum mismatch on a
     # destination that is in fact complete.
-    _expected_population = int(total_rows or 0) or int(written or 0)
+    # A recipe that removed rows makes the write pass smaller than the source
+    # population by design. Counting that as a partial pass would force a second
+    # source scan and then compare unshaped source values against shaped
+    # destination values, so the removed rows come off the expectation.
+    _shaped_removed = int(removed_on_read_total)
+    _expected_population = max(
+        (int(total_rows or 0) or int(written or 0)) - _shaped_removed, 0
+    )
     _partial_write_pass = bool(
         write_pass_fp.total > 0
         and _expected_population > 0
@@ -2727,6 +2977,12 @@ def _stream_database_transfer_impl(
             use_checksum_keyset = True
         read_offset = 0
         checksum_rows_read = 0
+        # The digest has to describe the rows this run wrote, so the second scan
+        # replays the same approved recipe. Its own runner: the run's shaping
+        # effects were counted on the write pass and must not be counted twice.
+        reread_shaper = (
+            ShapeRunner(shape_runner.recipe) if shape_runner is not None else None
+        )
         reread_holdouts: list[dict[str, Any]] = []
         reread_tombstones_excluded = 0
         try:
@@ -2771,8 +3027,22 @@ def _stream_database_transfer_impl(
                         mappings=mappings,
                     )
                     reread_tombstones_excluded += _excluded_now
+                digest_headers = batch.headers
+                if source_filter and digest_rows:
+                    # The write pass only wrote the rows the filter kept, so the
+                    # digest has to cover the same population — hashing the rows
+                    # it removed would fail Gate-8 on a correct run.
+                    digest_rows = apply_row_filter_to_matrix(
+                        batch.headers, digest_rows, source_filter
+                    )
+                if reread_shaper is not None:
+                    # Shaped for the digest only: pagination and the keyset
+                    # cursor still advance on the page the source handed over.
+                    digest_headers, digest_rows = reread_shaper.matrix(
+                        list(batch.headers or []), digest_rows
+                    )
                 mapped, reread_rejected = map_rows_for_fingerprint(
-                    headers=batch.headers,
+                    headers=digest_headers,
                     data_rows=digest_rows,
                     mappings=mappings,
                     target_cols=target_cols,
@@ -2964,6 +3234,20 @@ def _stream_database_transfer_impl(
     stamp_source_row_count(
         dest_summary, reader_count=int(committed_offset or 0), rows_written=int(written or 0)
     )
+    if removed_on_read_total:
+        # committed_offset counts the rows the source handed over, so the rows a
+        # declared filter or an approved recipe removed are inside that population
+        # and have to be named for Gate-8 — otherwise a filtered or shaped run
+        # reads as short delivery against the table's own count.
+        dest_summary["rows_removed_on_read"] = int(removed_on_read_total)
+        # Named apart: the operator's declared scope removed these before the
+        # recipe was offered them, so they are not the recipe's effect.
+        dest_summary["rows_source_filtered"] = int(filtered_on_read_total)
+        shaped_removed = max(0, removed_on_read_total - filtered_on_read_total)
+        if shaped_removed:
+            # Every committed page's recipe removals, this pass and the passes
+            # before it — the live runner only shaped the pages of this pass.
+            dest_summary["rows_shaped_out"] = shaped_removed
     if reconcile_sample:
         dest_summary["reconcile_sample"] = reconcile_sample[:_RECONCILE_SAMPLE_CAP]
     if load_methods_seen:

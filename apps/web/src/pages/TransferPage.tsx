@@ -213,11 +213,14 @@ import {
   STEP_DESTINATION,
   STEP_MAP,
   STEP_RUN,
+  STEP_SHAPE,
   STEP_SOURCE,
   STEP_VALIDATE,
   STEPS,
   UPLOAD_FORMATS,
 } from "./transfer/studioConstants";
+import { TransferShapeStep } from "./transfer/TransferShapeStep";
+import { recipePayload, type ShapeStepWire } from "../lib/shape";
 import {
   analysisFromPipeline,
   fileExtension,
@@ -273,6 +276,15 @@ export function TransferPage({
     primary_action?: string;
     unaccounted_sources?: string[];
   } | null>(null);
+  /**
+   * The shaping recipe composed on the Shape step, and the identity the engine
+   * gave it. The hash is what Execute is held to: if the recipe changes after
+   * Validate, the run is refused rather than quietly running a different one.
+   */
+  const [shapeSteps, setShapeSteps] = useState<ShapeStepWire[]>([]);
+  const [shapeIdentity, setShapeIdentity] = useState<{ hash: string; columns: string[] } | null>(null);
+  /** Sample rows from the last connector introspect, for Shape profile/preview. */
+  const [connectorSampleRows, setConnectorSampleRows] = useState<Record<string, unknown>[]>([]);
   const [cloudPath, setCloudPath] = useState("");
   const [advancedOpen, setAdvancedOpen] = useState(false);
   /** Shared Fix-bad-data drawer open state (Validate dashboard + rail Fix CTA). */
@@ -861,6 +873,10 @@ export function TransferPage({
     return {};
   })();
   const samplePreviewRows = parsed?.sample_data ?? parsed?.data ?? [];
+  /** Rows Shape profiles and previews against — file preview or connector sample. */
+  const shapeSampleRows = (
+    sourceKind === "file" ? samplePreviewRows : connectorSampleRows
+  ) as Record<string, unknown>[];
   const currentSourceColumnsKey = currentSourceColumns.join("|");
 
   useEffect(() => {
@@ -2580,6 +2596,9 @@ export function TransferPage({
       setSourceRowEstimate(intro.row_estimate);
     }
     const sampleRows = intro.data ?? intro.sample_data ?? [];
+    // Kept so Shape can profile and preview a connector source without a second
+    // round-trip — the same rows Map was seeded from.
+    setConnectorSampleRows(sampleRows);
     const columnSamples = Object.fromEntries(
       intro.columns.map((col) => [
         col,
@@ -4600,6 +4619,8 @@ export function TransferPage({
         writeViaStaging,
         enableOcr,
         readOptions: sourceKind === "file" ? readOptions : undefined,
+        shapeRecipe: recipePayload(shapeSteps),
+        approvedShapeRecipeHash: shapeIdentity?.hash || undefined,
         sourceExtra: (() => {
           const extra: Record<string, unknown> = {
             ...(sourceKind === "database"
@@ -5348,6 +5369,9 @@ export function TransferPage({
     setAdvancedOpen(false);
     setFile(null);
     setParsed(null);
+    setShapeSteps([]);
+    setShapeIdentity(null);
+    setConnectorSampleRows([]);
     setSourceRowEstimate(null);
     setAnalysis(null);
     setPreflight(null);
@@ -5440,6 +5464,7 @@ export function TransferPage({
             n < step ||
             n === STEP_SOURCE ||
             (n === STEP_DESTINATION && (sourceKind === "file" ? !!parsed : Boolean(currentSourceColumns.length || analysis?.columns.length))) ||
+            (n === STEP_SHAPE && canRunPreflight) ||
             (n === STEP_MAP && canRunPreflight) ||
             (n === STEP_VALIDATE && canRunPreflight && columnMappings.length > 0) ||
             (n === STEP_RUN && canExecute)
@@ -6679,14 +6704,30 @@ export function TransferPage({
           <button
             type="button"
             className="df2-btn df2-btn-primary"
-            onClick={() => void goToMapping()}
+            onClick={() => setStep(STEP_SHAPE)}
             disabled={!canRunPreflight || analyzing}
           >
-            {analyzing ? <ButtonLoader label="Preparing mappings…" /> : <><DtIcon name="sparkle" size={18} /> Continue to Map</>}
+            {analyzing ? <ButtonLoader label="Preparing mappings…" /> : <><DtIcon name="layers" size={18} /> Continue to Shape</>}
           </button>
           </div>
         </div>
       </div>
+      )}
+
+      {step === STEP_SHAPE && (
+        <TransferShapeStep
+          sampleRows={shapeSampleRows}
+          sourceColumns={currentSourceColumns}
+          targetSchema={destSchemaMap}
+          sourceLabel={sourceLabel}
+          destRouteLabel={mapDestRouteLabel}
+          rowCount={parsed?.row_count ?? sourceRowEstimate ?? undefined}
+          steps={shapeSteps}
+          onChangeSteps={setShapeSteps}
+          onIdentity={setShapeIdentity}
+          onBack={() => setStep(STEP_DESTINATION)}
+          onContinue={() => void goToMapping()}
+        />
       )}
 
       {step === STEP_VALIDATE && (

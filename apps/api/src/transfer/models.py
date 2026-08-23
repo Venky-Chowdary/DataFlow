@@ -111,6 +111,14 @@ class TransferRequest:
     # services.read_options.ReadOptions — one declaration reaches the profiler,
     # the source COUNT and the writer, so all three read the same population.
     read_options: dict = field(default_factory=dict)
+    # Pre-write shaping recipe (services.shape_models.ShapeRecipe payload). Applied
+    # to every read row before mapping, so Map, the narrowing checks, the DDL
+    # identity and the writer all see the same shaped truth. Row-local and
+    # deterministic by construction — see services.shape_engine.
+    shape_recipe: dict = field(default_factory=dict)
+    # Recipe identity approved at Validate. Execute refuses when the recipe it was
+    # handed hashes to anything else (Validate≡Execute).
+    approved_shape_recipe_hash: str = ""
     # Priority-first sync: sort source rows by this column before writing.
     priority_column: str = ""
     priority_direction: str = "desc"  # "asc" or "desc"
@@ -280,6 +288,8 @@ def transfer_request_to_dict(request: TransferRequest) -> dict:
         "write_via_staging": request.write_via_staging,
         "source_filter": request.source_filter,
         "read_options": request.read_options,
+        "shape_recipe": dict(request.shape_recipe or {}),
+        "approved_shape_recipe_hash": request.approved_shape_recipe_hash or "",
         "priority_column": request.priority_column,
         "priority_direction": request.priority_direction,
         "limit": request.limit,
@@ -376,6 +386,10 @@ def transfer_request_from_dict(data: dict) -> TransferRequest:
         write_via_staging=bool(data.get("write_via_staging")),
         source_filter=data.get("source_filter") or {},
         read_options=data.get("read_options") or {},
+        shape_recipe=data.get("shape_recipe") or {},
+        approved_shape_recipe_hash=str(
+            data.get("approved_shape_recipe_hash") or ""
+        ).strip(),
         priority_column=(data.get("priority_column") or "").strip(),
         priority_direction=(data.get("priority_direction") or "desc").lower(),
         limit=int(data.get("limit") or 0),

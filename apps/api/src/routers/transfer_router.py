@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 from services.brand_env import getenv_brand
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import (
     APIRouter,
@@ -159,6 +160,33 @@ def _validated_read_options(raw: dict | str | None) -> dict:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+def _validated_shape_recipe(raw: dict | str | None) -> dict:
+    """Normalize the declared shaping recipe, or 400 with the operation at fault.
+
+    A recipe the engine cannot run must be refused at the door: accepting it here
+    would only surface as a failed run after the source has been read.
+    """
+    from services.shape_models import ShapeError, ShapeRecipe
+
+    payload: Any = raw
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            return {}
+        try:
+            payload = json.loads(text)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=400, detail=f"shape_recipe is not valid JSON: {exc}"
+            ) from exc
+    if not payload:
+        return {}
+    try:
+        return ShapeRecipe.parse(payload).to_wire()
+    except ShapeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 def _resolve_write_workspace(request: Request, x_workspace_id: str = Header(default="", alias="X-Workspace-Id")) -> str:
     workspace_id = (x_workspace_id or "").strip()
     if workspace_id and not can_write_workspace(workspace_id, _actor_email(request)):
@@ -240,6 +268,10 @@ class ExecuteTransferRequest(BaseModel):
     # Map→DDL fingerprint the operator saw pass at Validate. Without it Execute
     # can only re-check its own derived stamps against themselves.
     approved_ddl_identity_hash: str = ""
+    # Ordered row-local shaping applied on the read, before mapping.
+    shape_recipe: dict = Field(default_factory=dict)
+    # The recipe identity Validate approved; a different recipe is refused.
+    approved_shape_recipe_hash: str = ""
 
 
 class MapColumnsRequest(BaseModel):
@@ -776,6 +808,10 @@ async def execute_transfer_json(
         ).strip(),
         approved_ddl_identity_hash=str(body.approved_ddl_identity_hash or "").strip(),
         decision_artifact=dict(body.decision_artifact or {}),
+        shape_recipe=_validated_shape_recipe(body.shape_recipe),
+        approved_shape_recipe_hash=str(
+            body.approved_shape_recipe_hash or ""
+        ).strip(),
     )
     from services.batch_progress import effective_backfill_new_fields
 
@@ -958,6 +994,8 @@ async def run_universal_transfer(
     validation_mode: str = Form("balanced"),
     source_filter_json: str = Form(""),
     read_options_json: str = Form(""),
+    shape_recipe_json: str = Form(""),
+    approved_shape_recipe_hash: str = Form(""),
     priority_column: str = Form(""),
     priority_direction: str = Form("desc"),
     limit: str = Form("0"),
@@ -1099,6 +1137,8 @@ async def run_universal_transfer(
         validation_mode=validation_mode,
         source_filter=source_filter,
         read_options=_validated_read_options(read_options_json),
+        shape_recipe=_validated_shape_recipe(shape_recipe_json),
+        approved_shape_recipe_hash=(approved_shape_recipe_hash or "").strip(),
         priority_column=priority_column,
         priority_direction=priority_direction,
         limit=int(limit) if limit.isdigit() else 0,
