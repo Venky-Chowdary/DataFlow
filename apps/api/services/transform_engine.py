@@ -684,6 +684,24 @@ def _parse_integer(value: str) -> int | None:
         return None
 
 
+def integer_wire_value(value: str) -> int | None:
+    """The integer the write path would bind for ``value``, or ``None``.
+
+    The one parser a fit check must consult. ``Decimal(text)`` answers a
+    different question in both directions: it refuses ``$1,000`` and ``true``,
+    which this write coerces, and accepts ``NaN``/``Infinity``, which it does
+    not. A fit check that asked ``Decimal`` alone therefore called values
+    writable that the writer refuses at row 1.
+    """
+    text = str(value).strip()
+    if not text:
+        return None
+    as_number = canonical_boolean_as_number(text)
+    if as_number is not None:
+        return as_number
+    return _parse_integer(text)
+
+
 def integer_parse_failure_reason(value: str) -> str:
     """Why the integer transform refused ``value``, in remediation terms.
 

@@ -3201,8 +3201,13 @@ def integer_fit_failure(
     in range promised a write that the writer would then reject at row 1.
     Rounding a fractional value into an integer column is a declared
     transformation, never a side effect of a bounds test.
+
+    Unparseable text is named here too, on the same parser the write binds
+    through: leaving ``'ABC-1'`` for "type coercion" meant Validate reported an
+    INT column as fitting and the write refused every such row afterwards.
     """
     from decimal import Decimal, InvalidOperation
+    from services.transform_engine import integer_wire_value
     from services.type_system import integer_storage_bounds
 
     bounds = integer_storage_bounds(type_str, dest_db=dest_db)
@@ -3213,19 +3218,34 @@ def integer_fit_failure(
         dec = Decimal(int(value))
     elif isinstance(value, int):
         dec = Decimal(value)
+    elif is_missing_sentinel(value):
+        # Absence, not a value — sparse CDC decides it, not a bounds test.
+        return None
     else:
         text = str(value).strip()
         if not text:
             # Empty ≠ natural NULL on INTEGER — bind must not invent NULL;
             # quarantine_unfit_integers / bind quarantine hold the row out.
             return f"empty value is not an integer for {type_str}"
-        try:
-            dec = Decimal(text)
-        except (InvalidOperation, ValueError, TypeError, OverflowError):
-            # Non-numeric — leave for type coercion / other quarantine paths.
-            return None
-        if not dec.is_finite():
-            return None
+        parsed = integer_wire_value(text)
+        if parsed is None:
+            try:
+                unwritable = Decimal(text)
+            except (InvalidOperation, ValueError, TypeError, OverflowError):
+                unwritable = None
+            if unwritable is not None and unwritable.is_finite():
+                if unwritable != unwritable.to_integral_value():
+                    return (
+                        f"fractional value {unwritable} is not an integer for "
+                        f"{type_str} — widen the destination to DECIMAL/DOUBLE, "
+                        "or round it explicitly before the write"
+                    )
+                return f"{text} exceeds the integer wire budget for {type_str}"
+            return (
+                f"{text!r} is not an integer for {type_str} — repair the source "
+                "value, or map the column to a text or decimal carrier"
+            )
+        dec = Decimal(parsed)
     if dec != dec.to_integral_value():
         return (
             f"fractional value {dec} is not an integer for {type_str} "
