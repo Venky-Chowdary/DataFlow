@@ -8,7 +8,12 @@ import { Drawer } from "./ui/Drawer";
 import { Dialog } from "./ui/Dialog";
 import { DtIcon } from "./DtIcon";
 import type { EditableMapping } from "../lib/mapping";
-import { engineStampedRiskChip, hasCreateNewTypeRisk } from "../lib/mapping";
+import {
+  engineStampedRiskChip,
+  hasCreateNewTypeRisk,
+  mappingReviewKindMeta,
+  type MappingReviewKind,
+} from "../lib/mapping";
 import { typeBadgeClass } from "../lib/typeDisplay";
 import { readSession } from "../lib/session";
 
@@ -56,6 +61,7 @@ export interface MappingProofRow {
   confidence: number;
   reasoning?: string;
   requires_review?: boolean;
+  review_kind?: string;
   evidence?: MappingProofEvidence;
   risks?: MappingProofRisk[];
   pii?: string[];
@@ -233,6 +239,7 @@ export function buildClientMappingProof(
       confidence: conf,
       reasoning: m.reason,
       requires_review: m.requiresReview,
+      review_kind: m.reviewKind,
       evidence: {
         strategy: destMode === "create_new" ? "identity_passthrough" : "operator_or_pipeline",
         name_match: nameMatch,
@@ -352,6 +359,7 @@ export function mergeMappingProof(
       confidence,
       reasoning: live.reason || row.reasoning,
       requires_review: live.requiresReview || schemaPending,
+      review_kind: live.reviewKind || row.review_kind,
       risks: withoutTransformRisks,
       sample_preview_clear: live.sample
         ? [live.sample]
@@ -512,7 +520,18 @@ function PairCard({ r, revealPii }: { r: MappingProofRow; revealPii: boolean }) 
           <span key={p} className="df2-badge df2-badge-run df2-badge-xs">{p}</span>
         ))}
         {r.requires_review && (
-          <span className="df2-badge df2-badge-warn df2-badge-xs">review</span>
+          <span
+            className="df2-badge df2-badge-warn df2-badge-xs"
+            title={
+              r.review_kind
+                ? mappingReviewKindMeta(r.review_kind as MappingReviewKind).detail
+                : "Engine held this pair for review"
+            }
+          >
+            {r.review_kind
+              ? mappingReviewKindMeta(r.review_kind as MappingReviewKind).chip
+              : "review"}
+          </span>
         )}
       </div>
 

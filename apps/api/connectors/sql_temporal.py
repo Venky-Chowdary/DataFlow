@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 from datetime import date, datetime, time, timedelta, timezone
+from functools import lru_cache
 from typing import Any
 
 
@@ -28,6 +29,7 @@ def round_to_smalldatetime(value: datetime) -> datetime:
     return base
 
 
+@lru_cache(maxsize=8192)
 def sql_base_type(source_type: str) -> str:
     """Strip length/precision suffixes while preserving TZ polarity.
 
@@ -37,10 +39,21 @@ def sql_base_type(source_type: str) -> str:
     - ``TIMESTAMP WITHOUT TIME ZONE`` → ``TIMESTAMP``
     - ``DATETIME(6)`` → ``DATETIME``
     - ``DECIMAL(10,2)`` → ``DECIMAL``
+
+    ClickHouse / Databricks class:
+    - ``Nullable(Int64)`` / ``LowCardinality(Nullable(DateTime64(3)))`` unwrap
+      then canonicalize ``Int64``→``BIGINT``, ``DateTime64``→``DATETIME64``.
     """
     upper = re.sub(r"\s+", " ", (source_type or "").upper().strip())
     if not upper:
         return upper
+    # Unwrap ClickHouse wrappers before TZ / precision decisions so
+    # ``Nullable(DateTime64(3))`` is not mis-read as base ``NULLABLE``.
+    while True:
+        wrap = re.match(r"^(NULLABLE|LOWCARDINALITY)\((.+)\)$", upper)
+        if not wrap:
+            break
+        upper = re.sub(r"\s+", " ", wrap.group(2).strip())
     # TZ polarity MUST be decided before splitting on '(' — otherwise
     # ``TIMESTAMP(6) WITH TIME ZONE`` collapses to ``TIMESTAMP`` and writers
     # silently strip offsets (enterprise fidelity failure).
@@ -66,7 +79,24 @@ def sql_base_type(source_type: str) -> str:
         return "TIMESTAMP"
     if "(" in upper:
         upper = upper.split("(", 1)[0].strip()
-    return upper
+    # ClickHouse / Arrow / Spark integer & temporal aliases → canonical bases
+    # so overlay_physical_bind_types and coerce_sql_temporal share one map.
+    aliases = {
+        "INT64": "BIGINT",
+        "INT32": "INTEGER",
+        "INT16": "SMALLINT",
+        "INT8": "TINYINT",
+        "UINT64": "BIGINT",
+        "UINT32": "INTEGER",
+        "UINT16": "SMALLINT",
+        "UINT8": "TINYINT",
+        "FLOAT32": "FLOAT",
+        "FLOAT64": "DOUBLE",
+        "DATE32": "DATE",
+        "DATETIME64": "DATETIME64",
+        "BOOL": "BOOLEAN",
+    }
+    return aliases.get(upper, upper)
 
 
 def input_has_timezone(value: Any) -> bool:
@@ -200,9 +230,52 @@ def parse_sql_date(value: Any) -> date | None:
     return None
 
 
-def coerce_sql_temporal(value: Any, source_type: str) -> Any:
-    """Coerce a cell to a Python temporal for the given SQL DDL type, else return value."""
+def _is_mysql_engine(engine: str) -> bool:
+    """True for the MySQL family (mariadb/tidb/aurora-mysql all normalize here)."""
+    eng = (engine or "").strip().lower()
+    if not eng:
+        return False
+    from services.type_system import _normalize_dest_db
+
+    return _normalize_dest_db(eng) == "mysql"
+
+
+def coerce_sql_temporal(value: Any, source_type: str, *, engine: str = "") -> Any:
+    """Coerce a cell to a Python temporal for the given SQL DDL type, else return value.
+
+    ``engine`` disambiguates the bare ``TIMESTAMP`` token. On MySQL it is an
+    instant carrier (stored UTC, converted with the session ``time_zone``, which
+    writers pin to ``+00:00``), so an offset-bearing wire is converted to UTC
+    rather than having its offset stripped off the civil digits. Everywhere else
+    bare ``TIMESTAMP`` stays wall-clock.
+    """
     base = sql_base_type(source_type)
+    # Empty → SQL NULL / MySQL zero-date on upsert wipe. Quarantine owns the cell.
+    if base in _TEMPORAL_BASES and isinstance(value, str) and not value.strip():
+        raise ValueError(
+            f"empty string cannot coerce to {base} — "
+            "refuse silent NULL invent (quarantine or remap upstream)"
+        )
+    if base == "TIMESTAMP" and _is_mysql_engine(engine):
+        from services.timezone_policy import (
+            MYSQL_TIMESTAMP_MAX,
+            MYSQL_TIMESTAMP_MIN,
+            mysql_timestamp_out_of_range,
+        )
+
+        if mysql_timestamp_out_of_range(value):
+            raise ValueError(
+                "value is outside the MySQL TIMESTAMP epoch range "
+                f"({MYSQL_TIMESTAMP_MIN.date()} .. {MYSQL_TIMESTAMP_MAX.date()}) "
+                "— quarantined; map to DATETIME(6) with a UTC-normalize contract "
+                "to carry instants beyond 2038"
+            )
+        # Session time_zone is pinned to UTC, so a naive UTC bind stores the
+        # same instant the aware wire carried.
+        parsed = parse_sql_datetime(value, aware_utc=True)
+        if parsed is None:
+            return value
+        return parsed.astimezone(timezone.utc).replace(tzinfo=None)
     if base in {
         "TIMESTAMPTZ",
         "TIMESTAMP_TZ",
@@ -218,15 +291,35 @@ def coerce_sql_temporal(value: Any, source_type: str) -> Any:
                 "Provide an offset/Z, or map to TIMESTAMP_NTZ / DATETIME."
             )
         parsed = parse_sql_datetime(value, aware_utc=True)
-        return parsed if parsed is not None else value
+        if parsed is None:
+            return value
+        from services.offset_label import restore_offset_after_utc
+
+        return restore_offset_after_utc(
+            value, parsed, engine=engine, dest_type=source_type
+        )
     if base in {
         "DATETIME",
+        "DATETIME64",
         "TIMESTAMP",
         "TIMESTAMP_NTZ",
         "DATETIME2",
         "SMALLDATETIME",
         "TIMESTAMP WITHOUT TIME ZONE",
     }:
+        # ClickHouse DateTime64(p, 'UTC') / named TZ → aware UTC polarity;
+        # bare DateTime64(p) stays wall-clock (no silent offset strip invent).
+        raw_u = re.sub(r"\s+", " ", (source_type or "").upper())
+        if base == "DATETIME64" and (
+            "'" in raw_u or "UTC" in raw_u or "TIME ZONE" in raw_u
+        ):
+            if not input_has_timezone(value):
+                raise ValueError(
+                    f"{source_type} refuses naive wall-clock (would invent UTC). "
+                    "Provide an offset/Z, or map to DateTime64 without timezone."
+                )
+            parsed = parse_sql_datetime(value, aware_utc=True)
+            return parsed if parsed is not None else value
         parsed = parse_sql_datetime(value, wall_clock=True)
         if parsed is None:
             return value
@@ -284,12 +377,14 @@ def coerce_sql_temporal(value: Any, source_type: str) -> Any:
 
 _TEMPORAL_BASES = frozenset({
     "DATETIME",
+    "DATETIME64",
     "TIMESTAMP",
     "TIMESTAMP_TZ",
     "TIMESTAMPTZ",
     "TIMESTAMP_LTZ",
     "TIMESTAMP_NTZ",
     "TIMESTAMP WITH TIME ZONE",
+    "TIMESTAMP WITH LOCAL TIME ZONE",
     "TIMESTAMP WITHOUT TIME ZONE",
     "DATE",
     "TIME",
@@ -351,14 +446,17 @@ def logical_to_temporal_ddl(logical: str) -> str | None:
         return "DATE"
     if t in {"time"}:
         return "TIME"
-    # Preserve TZ polarity: aware carriers keep UTC tzinfo on bind.
+    # Offset-storing carriers keep the originating label; instant-only
+    # TIMESTAMPTZ stays UTC. Folding DATETIMEOFFSET into TIMESTAMPTZ here
+    # is how a SQL Server dest received +00:00.
+    if t in {"datetimeoffset"}:
+        return "DATETIMEOFFSET"
     if t in {
         "timestamptz",
         "timestamp_tz",
         "timestamp_ltz",
         "timestamp with time zone",
         "timestamp with local time zone",
-        "datetimeoffset",
     }:
         return "TIMESTAMPTZ"
     if t in {
@@ -375,9 +473,9 @@ def logical_to_temporal_ddl(logical: str) -> str | None:
     return None
 
 
-def format_wire_value(value: Any, source_type: str) -> str | None:
+def format_wire_value(value: Any, source_type: str, *, engine: str = "") -> str | None:
     """Human-readable form that would bind to MySQL/PG after coerce."""
-    coerced = coerce_sql_temporal(value, source_type)
+    coerced = coerce_sql_temporal(value, source_type, engine=engine)
     base = sql_base_type(source_type)
     if isinstance(coerced, datetime):
         if base == "DATE":
@@ -392,8 +490,12 @@ def format_wire_value(value: Any, source_type: str) -> str | None:
     return None
 
 
-def wire_check_temporal(value: Any, ddl_type: str) -> dict[str, Any]:
+def wire_check_temporal(value: Any, ddl_type: str, *, engine: str = "") -> dict[str, Any]:
     """Simulate destination bind for temporal DDL (same helpers writers use).
+
+    ``engine`` must be the destination engine so Validate simulates the *same*
+    bind Execute will run — MySQL ``TIMESTAMP`` is an instant carrier with epoch
+    bounds, and a range violation has to surface here, not at write time.
 
     Returns ``{ok, wire_value, reason, needs_normalize}``.
     ``needs_normalize`` is True when the engine would emit ISO-Z text that
@@ -406,11 +508,19 @@ def wire_check_temporal(value: Any, ddl_type: str) -> dict[str, Any]:
     if value is None:
         return {"ok": True, "wire_value": None, "reason": "", "needs_normalize": False}
     if isinstance(value, str) and not value.strip():
-        return {"ok": True, "wire_value": None, "reason": "", "needs_normalize": False}
+        return {
+            "ok": False,
+            "wire_value": None,
+            "reason": (
+                f"empty string cannot coerce to {base} — "
+                "refuse silent NULL invent (quarantine or remap upstream)"
+            ),
+            "needs_normalize": False,
+        }
 
     try:
-        coerced = coerce_sql_temporal(value, ddl_type)
-        wire = format_wire_value(value, ddl_type)
+        coerced = coerce_sql_temporal(value, ddl_type, engine=engine)
+        wire = format_wire_value(value, ddl_type, engine=engine)
     except ValueError as exc:
         return {
             "ok": False,
@@ -473,25 +583,80 @@ def extract_column_from_sql_error(exc: BaseException | str) -> str | None:
     return None
 
 
+# Row-level contract violations: the *value* is unfit for the destination
+# column, so the row belongs in quarantine and the rest of the chunk must
+# still land. Duplicate/unique-key errors are deliberately absent — those are
+# an identity/replay concern, not a row-value defect, and quarantining them
+# would let a non-idempotent replay report success.
+_ROW_CONTRACT_ERROR_SIGNATURES = (
+    # temporal / numeric / cast (MySQL, PostgreSQL, SQL Server)
+    "incorrect datetime",
+    "incorrect date",
+    "incorrect time",
+    "truncated incorrect",
+    "data truncation",
+    "out of range value",
+    "invalid input syntax",
+    "invalid datetime",
+    "date/time field value out of range",
+    "cannot cast",
+    "invalid value",
+    "numeric value out of range",
+    "value too long for type",
+    "string or binary data would be truncated",
+    # NOT NULL
+    "violates not-null constraint",
+    "null value in column",
+    "cannot be null",
+    "cannot insert the value null",
+    "does not allow nulls",
+    # CHECK / FK
+    "violates check constraint",
+    "violates foreign key constraint",
+    "check constraint",
+    "foreign key constraint",
+    # Oracle: 01400 NULL insert, 01438/12899 too large, 02290 check, 02291 FK
+    "ora-01400",
+    "ora-01438",
+    "ora-12899",
+    "ora-02290",
+    "ora-02291",
+)
+
+# Unique/PK collisions must keep aborting the chunk (see above).
+_IDENTITY_COLLISION_SIGNATURES = (
+    "violates unique constraint",
+    "duplicate key value",
+    "duplicate entry",
+    "unique constraint",
+    "ora-00001",
+    "cannot insert duplicate key",
+)
+
+
+def is_identity_collision_error(exc: BaseException | str) -> bool:
+    """True for unique/primary-key collisions (replay identity, not row value)."""
+    return any(sig in str(exc).lower() for sig in _IDENTITY_COLLISION_SIGNATURES)
+
+
 def is_sql_data_error(exc: BaseException | str) -> bool:
-    """True for value/type contract errors that must not be retried as connection drops."""
+    """True for row-level value/contract errors.
+
+    Such an error must never be retried as a connection drop, and under a
+    quarantine policy it must be resolved row by row so the fit rows still
+    land and the unfit ones are counted — a whole-chunk abort leaves rows
+    neither written nor quarantined, which breaks the conservation ledger.
+
+    Driver classification is read from the exception's MRO, not from the
+    concrete class name: psycopg2 raises ``NotNullViolation``, pymysql raises
+    ``IntegrityError``, and only the base classes are DB-API contract.
+    """
     text = str(exc).lower()
-    name = type(exc).__name__.lower() if isinstance(exc, BaseException) else ""
-    if "dataerror" in name or "integrityerror" in name:
-        return True
-    return any(
-        sig in text
-        for sig in (
-            "incorrect datetime",
-            "incorrect date",
-            "incorrect time",
-            "truncated incorrect",
-            "data truncation",
-            "out of range value",
-            "invalid input syntax",
-            "invalid datetime",
-            "date/time field value out of range",
-            "cannot cast",
-            "invalid value",
-        )
-    )
+    if is_identity_collision_error(text):
+        return False
+    if isinstance(exc, BaseException):
+        for klass in type(exc).__mro__:
+            klass_name = klass.__name__.lower()
+            if "dataerror" in klass_name or "integrityerror" in klass_name:
+                return True
+    return any(sig in text for sig in _ROW_CONTRACT_ERROR_SIGNATURES)

@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "policy": "soft_then_hard",
+  "description": "Phase F9 — max gzip-unaware byte sizes for Vite dist JS chunks (raw file size).",
+  "max_entry_js_bytes": 900000,
+  "max_any_js_chunk_bytes": 1600000,
+  "max_css_bytes": 1400000,
+  "require_named_chunks": ["react-vendor", "transfer-studio"]
+}

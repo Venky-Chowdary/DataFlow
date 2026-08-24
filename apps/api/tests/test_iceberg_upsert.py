@@ -1,4 +1,4 @@
-"""Iceberg CoW upsert with _df_lsn guard."""
+"""Iceberg MoR upsert with _df_lsn guard."""
 
 from __future__ import annotations
 
@@ -43,6 +43,20 @@ def test_iceberg_parquet_preserves_decimal_arrow_type(tmp_path: Path) -> None:
     assert pa.types.is_decimal(table.schema.field("amt").type)
     vals = [str(x) for x in table.column("amt").to_pylist()]
     assert "10.5000" in vals[0] or vals[0].startswith("10.5")
+
+
+def test_windows_local_path_infers_filesystem_catalog() -> None:
+    """Drive-letter warehouses must not invent a SQL catalog (Windows CI)."""
+    from connectors.iceberg_catalog import _infer_catalog_type
+
+    assert (
+        _infer_catalog_type(r"C:\tmp\iceberg_wh", "", "", {}) == "filesystem"
+    )
+    assert _infer_catalog_type("/var/lib/iceberg", "", "", {}) == "filesystem"
+    assert (
+        _infer_catalog_type("sqlite:///C:/tmp/catalog.db", "", r"C:\wh", {})
+        == "sql"
+    )
 
 
 def test_iceberg_upsert_requires_explicit_pk(tmp_path: Path) -> None:
@@ -93,7 +107,7 @@ def test_iceberg_upsert_write_roundtrip(tmp_path: Path) -> None:
         conflict_columns=["id"],
     )
     assert r2.ok
-    assert r2.rows_written == 2  # CoW full rewrite: id1 updated + id2 kept
+    assert r2.rows_written == 1  # MoR: only the updated key is rewritten
 
     from connectors.iceberg_writer import _load_existing_rows, _load_metadata
 
@@ -104,6 +118,103 @@ def test_iceberg_upsert_write_roundtrip(tmp_path: Path) -> None:
     by_id = {str(r["id"]): r for r in rows}
     assert by_id["1"]["v"] == "a2"
     assert by_id["2"]["v"] == "b"
+    deletes = list(meta.get("delete-files") or [])
+    assert deletes and deletes[-1].get("content") == 2
+    assert len(meta.get("data-files") or []) >= 2
+    assert (meta.get("properties") or {}).get("dataflow.write_strategy") == (
+        "merge-on-read"
+    )
+    from services.dest_precount import destination_row_count
+
+    assert destination_row_count(
+        "iceberg",
+        {"connection_string": warehouse, "database": warehouse, "host": "", "schema": ""},
+        schema="",
+        table_name="orders",
+    ) == 2
+
+
+def test_iceberg_mor_upsert_stale_lsn_is_noop(tmp_path: Path) -> None:
+    warehouse = str(tmp_path / "wh")
+    mappings = [
+        {"source": "id", "target": "id", "transform": "direct"},
+        {"source": "v", "target": "v", "transform": "direct"},
+        {"source": "_df_lsn", "target": "_df_lsn", "transform": "direct"},
+    ]
+    assert write_mapped_rows(
+        connection_string=warehouse,
+        table_name="orders",
+        headers=["id", "v", "_df_lsn"],
+        data_rows=[["1", "keep", "0/200"]],
+        mappings=mappings,
+        write_mode="upsert",
+        conflict_columns=["id"],
+    ).ok
+    stale = write_mapped_rows(
+        connection_string=warehouse,
+        table_name="orders",
+        headers=["id", "v", "_df_lsn"],
+        data_rows=[["1", "stale", "0/100"]],
+        mappings=mappings,
+        write_mode="upsert",
+        conflict_columns=["id"],
+    )
+    assert stale.ok, stale.error
+    assert stale.rows_written == 0
+    from connectors.iceberg_writer import _load_existing_rows, _load_metadata
+    from services.dest_precount import destination_row_count
+
+    table_dir = Path(warehouse) / "orders"
+    versions = sorted((table_dir / "metadata").glob("v*.metadata.json"))
+    meta = _load_metadata(versions[-1])
+    rows = _load_existing_rows(table_dir, ["id", "v", "_df_lsn"], meta)
+    assert str(rows[0]["v"]) == "keep"
+    assert destination_row_count(
+        "iceberg",
+        {"connection_string": warehouse, "database": warehouse, "host": "", "schema": ""},
+        schema="",
+        table_name="orders",
+    ) == 1
+
+
+def test_iceberg_mor_upsert_preserves_dest_only_column(tmp_path: Path) -> None:
+    warehouse = str(tmp_path / "wh")
+    first = write_mapped_rows(
+        connection_string=warehouse,
+        table_name="orders",
+        headers=["id", "note", "extra"],
+        data_rows=[["1", "a", "keep-me"]],
+        mappings=[
+            {"source": "id", "target": "id", "transform": "direct"},
+            {"source": "note", "target": "note", "transform": "direct"},
+            {"source": "extra", "target": "extra", "transform": "direct"},
+        ],
+        write_mode="upsert",
+        conflict_columns=["id"],
+    )
+    assert first.ok, first.error
+    second = write_mapped_rows(
+        connection_string=warehouse,
+        table_name="orders",
+        headers=["id", "note"],
+        data_rows=[["1", "b"]],
+        mappings=[
+            {"source": "id", "target": "id", "transform": "direct"},
+            {"source": "note", "target": "note", "transform": "direct"},
+        ],
+        write_mode="upsert",
+        conflict_columns=["id"],
+    )
+    assert second.ok, second.error
+    from connectors.iceberg_writer import _load_existing_rows, _load_metadata
+
+    table_dir = Path(warehouse) / "orders"
+    versions = sorted((table_dir / "metadata").glob("v*.metadata.json"))
+    meta = _load_metadata(versions[-1])
+    rows = _load_existing_rows(table_dir, ["id", "note", "extra"], meta)
+    assert len(rows) == 1
+    assert str(rows[0]["note"]) == "b"
+    assert str(rows[0]["extra"]) == "keep-me"
 
 
 def _make_sql_catalog(tmp_path: Path) -> tuple[str, str, str]:
@@ -295,7 +406,10 @@ def test_iceberg_sql_catalog_schema_evolution(tmp_path: Path) -> None:
     headers = batch.headers
     assert "w" in headers
     rows = {row[headers.index("id")]: row for row in batch.rows}
-    assert rows["1"][headers.index("w")] == ""
+    # Row 1 predates column w, so its value is SQL NULL — not an empty string.
+    from services.value_serializer import SQL_NULL_SENTINEL
+
+    assert rows["1"][headers.index("w")] == SQL_NULL_SENTINEL
     assert rows["2"][headers.index("w")] == "x"
 
 

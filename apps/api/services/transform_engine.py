@@ -24,7 +24,7 @@ from services.semantic_types import (
     detect_semantic_type,
     normalize_value_for_target,
 )
-from services.value_serializer import json_default
+from services.value_serializer import json_default, json_loads_exact
 
 _MONTH_NAME_RE = r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*"
 _DATE_LIKE_RE = re.compile(
@@ -165,9 +165,11 @@ _KEEP_EMPTY_TRANSFORMS = frozenset({
 _NONFINITE_TOKENS = frozenset({"nan", "infinity", "+infinity", "-infinity"})
 
 #: Transforms that parse into a concrete type, so null sentinels mean null.
+#: Includes currency/percentage — empty must not silent-NULL into numeric sinks.
 _TYPED_TRANSFORMS = frozenset({
     "decimal", "integer", "boolean", "date", "datetime", "time",
     "json", "uuid", "binary", "vector",
+    "currency", "percentage",
 })
 
 # Per-request date locale for ambiguous MDY/DMY parsing.  The engine and
@@ -238,13 +240,20 @@ def _format_datetime(dt: datetime) -> str:
     never had, and the MySQL ``DATETIME`` writer then quarantined every row for
     being timezone-aware. Postgres→MySQL moved zero rows as a result. A value
     with no zone carries no zone downstream; only a real offset survives.
+
+    Sub-second precision survives too. Every branch here used to render seconds
+    and nothing finer, and the mapper stamps this transform on *every* timestamp
+    column by default, so a PostgreSQL ``timestamp(6)`` copied to an identical
+    ``timestamp(6)`` arrived with its microseconds gone — on every route, for
+    every row, with no finding raised. ``isoformat`` omits the fractional part
+    when it is zero, so whole-second values render exactly as they did.
     """
     if dt.tzinfo is None:
-        return dt.strftime("%Y-%m-%dT%H:%M:%S")
+        return dt.isoformat()
     offset = dt.utcoffset()
     if offset is not None and offset.total_seconds() == 0:
-        return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    return dt.isoformat(timespec="seconds")
+        return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+    return dt.isoformat()
 
 
 def _to_utc_z(dt: datetime) -> str:
@@ -409,7 +418,9 @@ def _parse_datetime_worker(value: str, date_locale: str) -> str | None:
         except ValueError:
             continue
     parsed = _parse_date(text, date_locale=date_locale)
-    return f"{parsed}T00:00:00Z" if parsed else None
+    # Date-only → datetime: attach midnight without inventing a timezone.
+    # Stamping Z implied UTC and silently shifted warehouse TIMESTAMP_NTZ binds.
+    return f"{parsed}T00:00:00" if parsed else None
 
 
 def _parse_datetime(value: str, date_locale: str = "") -> str | None:
@@ -619,6 +630,12 @@ def _parse_integer(value: str) -> int | None:
 _STRICT_BOOL_TRUE = frozenset({"true", "t", "1"})
 _STRICT_BOOL_FALSE = frozenset({"false", "f", "0"})
 
+#: Every token the write path can actually coerce to a boolean. A column typed
+#: BOOLEAN off ``Y``/``N`` samples is rejected here on every row ("Invalid
+#: boolean: 'Y'"), so any caller routing values through the boolean transform
+#: must first check the destination can hold the outcome.
+CANONICAL_BOOLEAN_TOKENS: frozenset[str] = _STRICT_BOOL_TRUE | _STRICT_BOOL_FALSE
+
 
 def _parse_boolean(value: str) -> bool | None:
     text = value.strip().lower()
@@ -628,6 +645,44 @@ def _parse_boolean(value: str) -> bool | None:
         return True
     if text in _STRICT_BOOL_FALSE:
         return False
+    return None
+
+
+def canonical_boolean_as_number(value: str) -> int | None:
+    """Canonical boolean wire → 1/0 for a numeric target, else ``None``.
+
+    Boolean-carrying sources (SQL Server ``BIT``, PostgreSQL ``BOOLEAN``, MySQL
+    ``TINYINT(1)``) serialize to ``"true"``/``"false"``, and engines without a
+    boolean type (Oracle before 23ai, DB2, most warehouses) receive them as
+    ``NUMBER(1)``/``SMALLINT``. That mapping is total and lossless, so refusing
+    it as ``Invalid integer`` blocked every boolean column on those routes. Only
+    the strict canonical wire converts — informal ``yes``/``on`` still refuses.
+    """
+    text = value.strip().lower()
+    if text in {"true", "t"}:
+        return 1
+    if text in {"false", "f"}:
+        return 0
+    return None
+
+
+def boolean_carrier_numeric_value(
+    value: object, precision: int | None, scale: int | None
+) -> int | None:
+    """1/0 when a boolean lands on an engine's boolean carrier, else ``None``.
+
+    Engines without a native boolean (Oracle, DB2) carry one as ``NUMBER(1)``,
+    so a ``BIT``/``BOOLEAN`` source arriving as ``"true"`` is in range there —
+    quarantining it as "decimal does not fit DECIMAL(1,0)" held out every
+    boolean column on those routes. Anything wider than a single integer digit
+    is a real numeric column and keeps refusing boolean wire.
+    """
+    if precision is None or int(precision) > 1 or int(scale or 0) != 0:
+        return None
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, str):
+        return canonical_boolean_as_number(value)
     return None
 
 
@@ -653,7 +708,12 @@ def _parse_json(value: Any) -> str | None:
         try:
             # JSONDecodeError subclasses ValueError — catch it first so bare
             # scalars wrap as JSON string literals (Mongo mixed fields → VARIANT).
-            parsed = json.loads(value, parse_constant=_json_reject_nonfinite)
+            # Numbers parse exactly: the stdlib routes every non-integer through
+            # binary64, which silently dropped digits off a DECIMAL landing in a
+            # JSON / JSONB / VARIANT / SUPER column. Values binary64 holds exactly
+            # still serialize as JSON numbers; the rest keep every digit as exact
+            # text, per this codebase's Decimal-to-JSON policy.
+            parsed = json_loads_exact(value, parse_constant=_json_reject_nonfinite)
         except json.JSONDecodeError:
             parsed = value  # wrap the raw scalar as a JSON string literal
         except ValueError:
@@ -881,6 +941,39 @@ def _samples_look_temporal(source_samples: list[str] | None) -> bool:
     return checked >= 2 and (hits / checked) >= 0.8
 
 
+_YEAR_COLUMN_NAMES = frozenset({"year", "fiscalyear", "calendaryear", "yr"})
+
+
+def _is_calendar_year_number(
+    source_col: str, src_logical: str, source_samples: list[str] | None
+) -> bool:
+    """True for a column that *holds a year number*, not merely one named "Year".
+
+    The name alone is not evidence. Spreadsheet exports routinely put a real
+    instant (``2019-01-01T00:00:00``) in a column called ``Year``; forcing the
+    integer transform there makes every row fail ``Invalid integer`` at Validate
+    with no remap that can clear it, because the declared pair is already
+    TIMESTAMP → TIMESTAMP. A temporal source type or temporal-looking samples
+    therefore veto the heuristic.
+    """
+    if re.sub(r"[^a-z0-9]", "", (source_col or "").lower()) not in _YEAR_COLUMN_NAMES:
+        return False
+    if src_logical in {"datetime", "date", "timestamp", "time"}:
+        return False
+    return not _samples_look_temporal(source_samples)
+
+
+def _samples_need_numeric_parse(source_samples: list[str] | None) -> bool:
+    """True when declared-numeric samples still look like text that must parse."""
+    if not source_samples:
+        return False
+    for raw in source_samples[:12]:
+        text = str(raw).strip()
+        if any(mark in text for mark in ("$", "€", "£", "¥", "%", ",")):
+            return True
+    return False
+
+
 def infer_transform_for_mapping(
     source_col: str,
     target_col: str,
@@ -907,12 +1000,16 @@ def infer_transform_for_mapping(
     samples_temporal = _samples_look_temporal(source_samples)
     src_temporal = src in {"datetime", "date", "timestamp", "time"}
 
-    # Zero-scale DECIMAL/NUMBER targets (e.g. Snowflake NUMBER(38,0)) are integer
-    # carriers, so an integer source should be coerced with the integer transform.
+    # Native numeric wire already is a number — do not invent a string parse.
+    # Parse integer/decimal is reserved for text/unknown sources, or dirty
+    # CSV/Excel cells that still carry currency / grouping marks.
+    _native_numeric = src in {"integer", "decimal", "float"} and not _samples_need_numeric_parse(
+        source_samples
+    )
     if tgt == "decimal" and target_type:
         _p, _s = parse_numeric_precision_scale(target_type)
         if _s == 0 and src == "integer":
-            return "integer"
+            return "none" if _native_numeric else "integer"
 
     # Explicit, non-generic target type wins; if the source is already numeric
     # use a direct numeric transform, otherwise apply semantic transforms.
@@ -923,16 +1020,16 @@ def infer_transform_for_mapping(
             # do not invent active_text / null out the existing flag column.
             if src == "boolean" or _samples_prefer_boolean_over_integer(source_samples):
                 return "boolean"
-            return "integer"
+            return "none" if _native_numeric else "integer"
         if tgt == "decimal":
             if src in {"string", "text", "unknown"} and semantic == "currency":
                 return "currency"
             if src in {"string", "text", "unknown"} and semantic == "percentage":
                 return "percentage"
-            return "decimal"
+            return "none" if _native_numeric else "decimal"
         if tgt == "float":
-            # Wire as decimal transform — IEEE float DDL is chosen by type_system.
-            return "decimal"
+            # Native float/decimal/int already numeric — IEEE DDL is type_system.
+            return "none" if _native_numeric else "decimal"
         if tgt == "boolean":
             return "boolean"
         if tgt in {"json", "array"}:
@@ -940,12 +1037,18 @@ def infer_transform_for_mapping(
         if tgt == "binary":
             return "binary"
         if tgt == "datetime":
+            # Calendar year number columns must stay integer (FSI "Year"), not
+            # invent datetime coerce that then FAIL_JOBs on blank Excel cells.
+            if _is_calendar_year_number(source_col, src, source_samples):
+                return "integer"
             # Never force a date cast on non-temporal VARCHAR (status → posted_date).
             # Let G3/G5 declare the type mismatch instead of lucky-parse corruption.
             if src_temporal or samples_temporal:
                 return "datetime"
             return "none"
         if tgt == "date":
+            if _is_calendar_year_number(source_col, src, source_samples):
+                return "integer"
             # Narrowing a datetime into a date-only column drops the time of day.
             # Only do it when the destination genuinely cannot hold a time;
             # document stores map both logical types onto one instant carrier.
@@ -967,12 +1070,13 @@ def infer_transform_for_mapping(
             return "none"
 
     # Source type is the pivot when the target is generic (e.g., VARCHAR).
+    # Native numerics stay identity; string sources still need a parse guard.
     if src == "integer":
-        return "integer"
+        return "none"
     if src == "decimal":
-        return "decimal"
+        return "none"
     if src == "float":
-        return "decimal"
+        return "none"
     if src == "boolean":
         return "boolean"
     if src in {"json", "array"}:
@@ -981,7 +1085,7 @@ def infer_transform_for_mapping(
         # Binary→text sinks must not force base64 rewrite as identity.
         # Keep bytes as identity payload; Map/G3 treat domain polarity via
         # Accept risk (hex/base64 mutate is not "preserve").
-        if tgt in {"string", "text", "json", "unknown"} or not destination_type:
+        if tgt in {"string", "text", "json", "unknown"} or not target_type:
             return "none"
         return "binary"
     if src == "datetime":
@@ -998,29 +1102,56 @@ def infer_transform_for_mapping(
         return "none"
 
     # Semantic column names drive the transform for generic string targets.
-    # For string/unknown targets, preserve currency/percentage as text to avoid
-    # data loss (e.g. '$100' should not be silently stripped to 100).
-    if semantic in {"currency", "percentage"}:
+    # For string/unknown targets, preserve currency/percentage/email/url/phone
+    # as text to avoid data loss / false quarantine (e.g. empty image→url on
+    # TEXT, '$100' stripped to 100). Typed sinks still get semantic casts below.
+    if semantic in {
+        "currency",
+        "percentage",
+        "phone",
+        "email",
+        "url",
+        "iban",
+        "postal",
+        "base64",
+    }:
+        if tgt in {"string", "text", "unknown"} or not tgt:
+            return "none"
+        if semantic == "phone":
+            return "phone"
+        if semantic == "email":
+            return "email"
+        if semantic == "url":
+            return "url"
+        if semantic == "iban":
+            return "iban"
+        if semantic == "postal":
+            return "postal"
+        if semantic == "base64":
+            return "base64"
+        # currency / percentage on numeric tgt already handled above when tgt set
         return "none"
-    if semantic == "phone":
-        return "phone"
-    if semantic == "email":
-        return "email"
-    if semantic == "url":
-        return "url"
-    if semantic == "iban":
-        return "iban"
-    if semantic == "postal":
-        return "postal"
-    if semantic == "base64":
-        return "base64"
     if semantic == "timestamp":
         return "datetime"
 
     src_col = source_col.upper()
-    if "amount" in tgt_name or "total" in tgt_name or "weight" in tgt_name or src_col in {
-        "AMT", "PAY_AMT", "PAYMENT_AMT", "VALUE",
-    }:
+    # Calendar year number (FSI "Year", fiscal_year) is INTEGER — never invent
+    # datetime coerce for a 4-digit year field (empty cells then FAIL_JOB).
+    if _is_calendar_year_number(source_col, src, source_samples):
+        if tgt in {"datetime", "timestamp", "timestamptz", "date"}:
+            return "integer"
+        if not tgt or tgt in {"string", "text", "unknown", "integer", "bigint"}:
+            return "integer"
+    # Name-heuristic decimal only when the destination is numeric — never invent
+    # a cast that strips currency markers into a VARCHAR/TEXT sink.
+    if tgt not in {"string", "text", "unknown", None} and (
+        "amount" in tgt_name
+        or "total" in tgt_name
+        or "weight" in tgt_name
+        or src_col in {
+            "AMT", "PAY_AMT", "PAYMENT_AMT", "VALUE",
+        }
+    ):
         return "decimal"
     src_lower = source_col.lower()
     # Only apply date transforms when the SOURCE looks temporal — never because
@@ -1050,6 +1181,47 @@ def infer_transform_for_mapping(
     return "none"
 
 
+#: A zoneless source column carries wall-clock digits and no zone, so writing it
+#: to an instant carrier has to pick one. Guessing UTC is what silently shifts a
+#: business day; this transform is the operator supplying the fact the source
+#: never recorded, so the instant is asserted rather than invented.
+ASSUME_TIMEZONE_PREFIX = "assume_timezone:"
+
+
+def _apply_assume_timezone(text: str, transform: str) -> tuple[Any, str | None]:
+    """Attach a declared zone to a zoneless datetime.
+
+    A value that already carries an offset is left alone: it has an instant, and
+    overriding it with a declared zone would move a timestamp the source was
+    explicit about.
+    """
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+    zone_name = transform[len(ASSUME_TIMEZONE_PREFIX):].strip()
+    if not zone_name:
+        return None, "assume_timezone needs a zone, e.g. assume_timezone:UTC"
+    try:
+        zone = ZoneInfo(zone_name)
+    except (ZoneInfoNotFoundError, ValueError, KeyError):
+        return None, f"Unknown timezone: {zone_name!r}"
+
+    parsed = _parse_datetime(text)
+    if parsed is None:
+        return None, f"Invalid datetime: {text!r}"
+    try:
+        moment = datetime.fromisoformat(str(parsed).replace("Z", "+00:00"))
+    except ValueError:
+        return None, f"Invalid datetime: {text!r}"
+    # An offset the source stated is an instant already; a declared zone must not
+    # move it.
+    if moment.tzinfo is not None:
+        return _format_datetime(moment), None
+    try:
+        return _format_datetime(moment.replace(tzinfo=zone)), None
+    except (ValueError, OverflowError) as exc:
+        return None, f"Could not apply zone {zone_name!r}: {exc}"
+
+
 def apply_transform(raw: str | None, transform: str) -> tuple[Any, str | None]:
     """Returns (value, error).
 
@@ -1075,19 +1247,25 @@ def apply_transform(raw: str | None, transform: str) -> tuple[Any, str | None]:
     if transform_l in {"omit", "intentional_omit", "drop", "exclude"}:
         return None, "intentional omit — mapping should not project"
 
-    # Identity / text transforms: empty string is a real value.
-    if text == "" and transform_l in _KEEP_EMPTY_TRANSFORMS:
-        return "", None
-    if text == "":
-        return None, None
-
     # Identity aliases must preserve exact wire (incl. leading/trailing whitespace).
-    # Silent strip previously false-failed Gate-8 ("identity transform altered value")
-    # on Mongo/long-text samples and silently mutated VARCHAR payloads at write.
+    # Before empty collapse — otherwise ``"   "`` was stripped to ``""`` and mutated.
     if transform_l in _IDENTITY_TRANSFORMS:
         return raw_s, None
 
-    # Null/missing sentinels for typed transforms are treated as None.
+    # Identity / text transforms: empty string is a real value.
+    if text == "" and transform_l in _KEEP_EMPTY_TRANSFORMS:
+        return "", None
+    # Typed + semantic transforms: empty/whitespace must not silently become SQL NULL.
+    # That bypassed Risk Contracts (no err → no CAST/QUARANTINE path) and looked
+    # like a successful write. Empty → error; continue policies may quarantine or
+    # coerce_null only when the contract/job policy says so.
+    if text == "" and transform_l in _TYPED_TRANSFORMS:
+        return None, f"Empty value cannot coerce to {transform_l}"
+    if text == "":
+        return None, f"Empty value cannot coerce to {transform_l or 'transform'}"
+
+    # Null/missing sentinels for typed transforms must surface as coerce errors
+    # (Risk Contract / quarantine path) — never silent NULL invent.
     # Exception: NaN / ±Infinity are NOT SQL null for JSON/vector — reject as
     # non-finite (never invent JSON null / empty embedding).
     if transform_l in _TYPED_TRANSFORMS:
@@ -1096,15 +1274,21 @@ def apply_transform(raw: str | None, transform: str) -> tuple[Any, str | None]:
             if transform_l in {"json", "vector"} and low in _NONFINITE_TOKENS:
                 pass  # fall through to typed parsers that reject non-finite
             else:
-                return None, None
+                return None, f"Null sentinel {text!r} cannot coerce to {transform_l}"
 
     if transform == "decimal":
+        bool_as_number = canonical_boolean_as_number(text)
+        if bool_as_number is not None:
+            return Decimal(bool_as_number), None
         parsed = _parse_decimal(text)
         if parsed is None:
             return None, f"Invalid decimal: {text!r}"
         return parsed, None
 
     if transform == "integer":
+        bool_as_number = canonical_boolean_as_number(text)
+        if bool_as_number is not None:
+            return bool_as_number, None
         parsed_int = _parse_integer(text)
         if parsed_int is None:
             return None, f"Invalid integer: {text!r}"
@@ -1127,6 +1311,9 @@ def apply_transform(raw: str | None, transform: str) -> tuple[Any, str | None]:
         if parsed is None:
             return None, f"Invalid datetime: {text!r}"
         return parsed, None
+
+    if transform.startswith(ASSUME_TIMEZONE_PREFIX):
+        return _apply_assume_timezone(text, transform)
 
     if transform == "time":
         parsed = _parse_time(text)
@@ -1209,8 +1396,54 @@ def apply_transform(raw: str | None, transform: str) -> tuple[Any, str | None]:
         target_string = st not in {SemanticType.CURRENCY, SemanticType.PERCENTAGE}
         converted = normalize_value_for_target(text, st, "decimal" if not target_string else "string")
         if not target_string and not isinstance(converted, Decimal):
-            return text, f"Invalid {transform}: {text!r}"
-        return str(converted) if not target_string and isinstance(converted, Decimal) else converted, None
+            # Fail-closed: never invent the raw text as a "usable" currency/percentage.
+            return None, f"Invalid {transform}: {text!r}"
+        if target_string:
+            out = str(converted)
+            # Explicit semantic transforms must fail-closed on garbage — never
+            # silently "normalize" invalid email/url/iban/phone into the primary table.
+            from services.semantic_types import (
+                _EMAIL_RE,
+                _IBAN_RE,
+                _URL_RE,
+                _digits_only,
+            )
+
+            if transform == "email" and not _EMAIL_RE.match(out):
+                return None, f"Invalid email: {text!r}"
+            if transform == "url" and not _URL_RE.match(out):
+                return None, f"Invalid url: {text!r}"
+            if transform == "iban":
+                compact = out.upper().replace(" ", "")
+                if not _IBAN_RE.match(compact):
+                    return None, f"Invalid iban: {text!r}"
+                return compact, None
+            if transform == "phone":
+                digits = _digits_only(out)
+                # E.164-ish: at least 7 digits; refuse embedded letters.
+                if len(digits.replace("+", "")) < 7:
+                    return None, f"Invalid phone: {text!r}"
+                if re.search(r"[A-Za-z]", out):
+                    return None, f"Invalid phone: {text!r}"
+                # Preserve operator-visible formatting on string targets (Map Ready).
+                return out, None
+            if transform == "postal":
+                compact = out.upper().replace(" ", "")
+                # Accept national formats (US ZIP, CA, UK outward+inward) — refuse
+                # empty / punctuation-only garbage that normalize would soft-pass.
+                if not re.match(r"^[A-Z0-9]{3,12}$", compact):
+                    return None, f"Invalid postal: {text!r}"
+                return compact, None
+            if transform == "base64":
+                try:
+                    import base64 as _b64
+
+                    _b64.b64decode(out, validate=True)
+                except Exception:
+                    return None, f"Invalid base64: {text!r}"
+                return out, None
+            return out, None
+        return str(converted) if isinstance(converted, Decimal) else converted, None
 
     if transform not in KNOWN_TRANSFORMS:
         return None, f"Unknown transform: {transform!r}"
@@ -1238,7 +1471,13 @@ def dry_run_sample(
     errors: list[str] = []
     source_idx = {h: i for i, h in enumerate(headers)}
 
+    from services.mapping_constraints import write_mappings
     from services.transform_resolver import resolve_transform
+
+    # A declared omission has no destination carrier, so there is no write-path
+    # transform to dry-run. Probing it reported the omission itself as a cast
+    # failure — the honest operator action was punished with a data error.
+    mappings = write_mappings(mappings)
 
     dest_types = {
         str(m.get("target")): str(m.get("target_type"))
@@ -1296,7 +1535,11 @@ def preview_quarantine_cells(
     coerce_count = 0
     ok_count = 0
 
+    from services.mapping_constraints import write_mappings
     from services.transform_resolver import resolve_transform
+
+    # Omitted columns are never written, so they have no cell to quarantine.
+    mappings = write_mappings(mappings)
 
     for m in mappings:
         src = m.get("source") or ""

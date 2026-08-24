@@ -17,11 +17,11 @@ from connectors.saas_common import (
     token,
 )
 from connectors.writer_common import (
+    reject_on_strict_policy,
     WriteResult,
     apply_write_quarantine_matrix,
     build_mapped_rows_with_details,
     gate8_writer_meta,
-    resolve_mapping_dest_types,
     resolve_target_columns,
     transform_error_policy,
 )
@@ -86,21 +86,31 @@ def coerce_hubspot_datetime_wire(value: Any) -> str | None:
         return str(n)
     text = str(value).strip()
     if not text:
-        return None
+        # Omit empty CRM datetime — never invent JSON/API null wipe on upsert.
+        # Callers must not write None into property payload; raise so quarantine/
+        # omit path owns the cell (parity with Notion empty url).
+        raise ValueError(
+            "empty HubSpot datetime — refuse silent NULL invent "
+            "(quarantine or omit property upstream)"
+        )
     if text.isdigit():
         return coerce_hubspot_datetime_wire(int(text))
     from connectors.sql_temporal import coerce_sql_temporal
 
-    coerced = coerce_sql_temporal(value, "TIMESTAMPTZ")
-    from datetime import datetime
+    from datetime import datetime, timezone as _tz
 
+    # HubSpot CRM Properties API documents datetime as UTC epoch millis.
+    # Prefer offset/Z; when the wire is a naive ISO civil clock, treat it as UTC
+    # (SaaS contract — not a silent SQL TIMESTAMPTZ invent across engines).
+    try:
+        coerced = coerce_sql_temporal(value, "TIMESTAMPTZ")
+    except ValueError:
+        coerced = coerce_sql_temporal(value, "DATETIME")
     if not isinstance(coerced, datetime):
         raise ValueError(
             f"HubSpot datetime cannot parse {text[:64]!r} — refuse invent"
         )
     if coerced.tzinfo is None:
-        from datetime import timezone as _tz
-
         coerced = coerced.replace(tzinfo=_tz.utc)
     return str(int(coerced.timestamp() * 1000))
 
@@ -113,6 +123,11 @@ def coerce_hubspot_date_wire(value: Any) -> str | None:
 
     if is_missing_sentinel(value):
         return value
+    if isinstance(value, str) and not value.strip():
+        raise ValueError(
+            "empty HubSpot date — refuse silent NULL invent "
+            "(quarantine or omit property upstream)"
+        )
     from connectors.sql_temporal import coerce_sql_temporal
     from datetime import date, datetime
 
@@ -196,9 +211,17 @@ def hubspot_property_to_carrier(prop: dict[str, Any]) -> str:
         if length_n:
             return f"VARCHAR({length_n})"
         return f"VARCHAR({_HUBSPOT_STRING_CHARS})"
-    if length_n:
-        return f"VARCHAR({length_n})"
-    return f"VARCHAR({_HUBSPOT_STRING_CHARS})"
+    if ptype == "json":
+        # HubSpot internal JSON property polarity — never invent open VARCHAR.
+        return "JSON"
+    if ptype == "object_coordinates":
+        # Internal object-reference text — bounded string, not unbounded invent.
+        if length_n:
+            return f"VARCHAR({length_n})"
+        return f"VARCHAR({_HUBSPOT_STRING_CHARS})"
+    # Unknown / new Properties API type tokens — refuse soft VARCHAR invent;
+    # merge_saas_live_types fails closed unless Studio types the column.
+    return ""
 
 
 def resolve_hubspot_dest_types(
@@ -208,8 +231,16 @@ def resolve_hubspot_dest_types(
     *,
     logical_types: list[str] | None = None,
     describe_props: list[dict[str, Any]] | None = None,
+    studio_types: dict[str, Any] | None = None,
 ) -> dict[str, str]:
-    """Prefer live Properties Describe; else Map/source carriers."""
+    """Prefer live Properties Describe; else Map/source carriers.
+
+    When Describe props are supplied (including empty list after a successful
+    probe) or Studio typed carriers, never soft-fill missing/unknown Meta types
+    with Map ``VARCHAR`` — parity with ``merge_saas_live_types`` on the write path.
+    """
+    from connectors.saas_common import resolve_saas_live_or_map_dest_types
+
     live: dict[str, str] = {}
     for p in describe_props or []:
         if not isinstance(p, dict):
@@ -217,13 +248,16 @@ def resolve_hubspot_dest_types(
         name = str(p.get("name") or "").strip()
         if name:
             live[name] = hubspot_property_to_carrier(p)
-    return resolve_mapping_dest_types(
+    live = {k: v for k, v in live.items() if str(v or "").strip()}
+    return resolve_saas_live_or_map_dest_types(
         target_cols,
         mappings,
         column_types,
+        live_carriers=live,
+        live_schema_present=describe_props is not None,
+        studio_types=studio_types,
         logical_types=logical_types,
-        live_types=live,
-        default="VARCHAR",
+        product="HubSpot",
     )
 
 
@@ -346,8 +380,13 @@ def write_mapped_rows(
     # Live Properties Describe when scopes allow — VARCHAR(65536)/DECIMAL(38,10)
     # before batch upsert invents bad CRM cells (Salesforce Describe class).
     describe_props: list[dict[str, Any]] | None = None
+    live_dest = _kwargs.get("destination_column_types")
+    studio_live = isinstance(live_dest, dict) and all(
+        str(live_dest.get(c) or "").strip() for c in target_cols if c
+    )
     try:
         from connectors.hubspot import describe_properties
+        from connectors.saas_common import is_auth_error
 
         describe_props = describe_properties(
             {
@@ -361,15 +400,106 @@ def write_mapped_rows(
             },
             obj,
         )
-    except Exception:
+    except Exception as exc:
+        if is_auth_error(exc):
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=obj,
+                target_schema="",
+                checksum="",
+                chunks_completed=0,
+                error=(
+                    f"HubSpot Properties Describe auth failed: {exc} — "
+                    "refuse Map VARCHAR bind (empty→null invent risk)."
+                ),
+                driver="hubspot",
+            )
+        if not studio_live:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=obj,
+                target_schema="",
+                checksum="",
+                chunks_completed=0,
+                error=(
+                    f"HubSpot Properties Describe unavailable ({exc}) and Studio "
+                    "did not type all mapped fields — refuse Map VARCHAR bind "
+                    "(empty→null invent risk). Re-run destination schema introspect "
+                    "or refresh CRM property scopes."
+                ),
+                driver="hubspot",
+            )
         describe_props = None
-    dest_types = resolve_hubspot_dest_types(
-        target_cols,
-        mappings,
-        column_types,
-        logical_types=logical_types,
-        describe_props=describe_props,
-    )
+
+    if describe_props is not None and len(describe_props) == 0:
+        if not studio_live:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=obj,
+                target_schema="",
+                checksum="",
+                chunks_completed=0,
+                error=(
+                    f"HubSpot Properties Describe returned no properties for {obj!r} — "
+                    "refuse Map VARCHAR bind (empty→null invent risk). Confirm object "
+                    "type and CRM scopes."
+                ),
+                driver="hubspot",
+            )
+        describe_props = None
+
+    if describe_props:
+        live: dict[str, str] = {}
+        for p in describe_props:
+            if not isinstance(p, dict):
+                continue
+            name = str(p.get("name") or "").strip()
+            if name:
+                live[name] = hubspot_property_to_carrier(p)
+        live = {k: v for k, v in live.items() if str(v or "").strip()}
+        from connectors.saas_common import merge_saas_live_types
+
+        dest_types, cov_err = merge_saas_live_types(
+            live,
+            target_cols,
+            studio_types=live_dest if isinstance(live_dest, dict) else None,
+            product="HubSpot",
+        )
+        if cov_err:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=obj,
+                target_schema="",
+                checksum="",
+                chunks_completed=0,
+                error=cov_err,
+                driver="hubspot",
+            )
+    else:
+        # Studio-typed fallback only after Describe failed non-auth / empty.
+        from connectors.saas_common import merge_saas_live_types
+
+        dest_types, cov_err = merge_saas_live_types(
+            {},
+            target_cols,
+            studio_types=live_dest if isinstance(live_dest, dict) else None,
+            product="HubSpot",
+        )
+        if cov_err:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=obj,
+                target_schema="",
+                checksum="",
+                chunks_completed=0,
+                error=cov_err,
+                driver="hubspot",
+            )
     mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
         headers=headers,
         data_rows=data_rows,
@@ -379,8 +509,11 @@ def write_mapped_rows(
         error_policy=policy,
         dest_types=dest_types,
         preserve_case=True,
+        dest_kind="hubspot",
+        destination_pk_columns=list(conflict_columns or []) or None,
+        destination_column_nullability=_kwargs.get("destination_column_nullability"),
     )
-    tgt_types = [str(dest_types.get(c, "VARCHAR") or "VARCHAR") for c in target_cols]
+    tgt_types = [str(dest_types.get(c) or "").strip() for c in target_cols]
     mapped_rows = apply_write_quarantine_matrix(
         mapped_rows,
         target_cols,
@@ -397,7 +530,8 @@ def write_mapped_rows(
         rejected_details,
         policy,
     )
-    if transform_errors and policy == "fail":
+    _map_abort = reject_on_strict_policy(policy, rejected_details, 'HubSpot', transform_errors)
+    if _map_abort:
         return WriteResult(
             ok=False,
             rows_written=0,
@@ -405,16 +539,50 @@ def write_mapped_rows(
             target_schema="",
             checksum="",
             chunks_completed=0,
-            error=f"Transform errors: {'; '.join(transform_errors[:3])}",
+            error=_map_abort or f"Transform errors: {'; '.join(transform_errors[:3])}",
             rejected_details=rejected_details,
             driver="hubspot",
         )
 
-    id_property = "email"
+    id_property = ""
+    mode_l = (write_mode or "upsert").lower()
+    upsert_modes = {"upsert", "merge", "update", "overwrite", "replace"}
     if conflict_columns:
-        id_property = str(conflict_columns[0]).strip() or "email"
-    elif "hs_object_id" in target_cols or "id" in target_cols:
-        id_property = "hs_object_id" if "hs_object_id" in target_cols else "id"
+        id_property = str(conflict_columns[0]).strip()
+        if not id_property and mode_l in upsert_modes:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=obj,
+                target_schema="",
+                checksum="",
+                chunks_completed=0,
+                error=(
+                    "HubSpot upsert requires conflict_columns/primary_key — "
+                    "refuse inventing default 'email'"
+                ),
+                rejected_details=rejected_details,
+                driver="hubspot",
+            )
+    elif "hs_object_id" in target_cols:
+        id_property = "hs_object_id"
+    elif "id" in target_cols:
+        id_property = "id"
+    elif mode_l in upsert_modes:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=obj,
+            target_schema="",
+            checksum="",
+            chunks_completed=0,
+            error=(
+                "HubSpot upsert requires conflict_columns/primary_key — "
+                "refuse inventing default 'email' (wrong-object upsert)"
+            ),
+            rejected_details=rejected_details,
+            driver="hubspot",
+        )
 
     url = f"{base_url(host, DEFAULT_HOST)}/crm/v3/objects/{obj}/batch/upsert"
     written = 0
@@ -422,32 +590,63 @@ def write_mapped_rows(
     digest = hashlib.sha256()
     written_ids: list[str] = []
 
+    from services.value_serializer import is_missing_sentinel
+
     try:
         for i in range(0, len(mapped_rows), chunk):
             batch = mapped_rows[i : i + chunk]
             inputs = []
+            # Parallel original mapped rows — CRM props omit DF_MISSING/None.
+            input_mapped_rows: list[Any] = []
             for row in batch:
                 if isinstance(row, dict):
                     pairs = row.items()
+                    mapped_src = tuple((row or {}).get(c) for c in target_cols)
                 else:
                     pairs = zip(target_cols, row)
-                props = {k: str(v) for k, v in pairs if v is not None and str(v) != ""}
-                id_val = props.pop(id_property, None) or props.get("email") or props.get("id")
+                    mapped_src = row if isinstance(row, (tuple, list)) else tuple(
+                        row[j] if j < len(row) else None for j in range(len(target_cols))
+                    )
+                props = {
+                    k: str(v)
+                    for k, v in pairs
+                    if v is not None
+                    and not is_missing_sentinel(v)
+                    and str(v) != ""
+                }
+                id_val = props.pop(id_property, None)
+                # Never invent identity from a different property while idProperty
+                # stays configured (wrong-object upsert / create).
                 if not id_val:
-                    detail = {
-                        "row_index": i + len(inputs),
-                        "reason": f"Missing idProperty '{id_property}' for HubSpot upsert",
-                        "values": props,
-                    }
-                    rejected_details.append(detail)
+                    from connectors.writer_common import append_write_quarantine_detail
+
+                    append_write_quarantine_detail(
+                        rejected_details,
+                        {
+                            "row": i + len(inputs) + 1,
+                            "column": id_property,
+                            "target": id_property,
+                            "value": None,
+                            "reason": (
+                                f"Missing idProperty '{id_property}' for HubSpot upsert"
+                            ),
+                            "policy": "write_fail" if policy == "fail" else "write_quarantine",
+                            "values": props,
+                        },
+                        mapped_row=mapped_src,
+                        target_cols=target_cols,
+                    )
                     if policy == "fail":
-                        raise RuntimeError(detail["reason"])
+                        raise RuntimeError(
+                            f"Missing idProperty '{id_property}' for HubSpot upsert"
+                        )
                     continue
                 inputs.append({
                     "idProperty": id_property,
                     "id": str(id_val),
                     "properties": props,
                 })
+                input_mapped_rows.append(mapped_src)
             if not inputs:
                 continue
 
@@ -477,12 +676,45 @@ def write_mapped_rows(
                 digest.update(rid.encode())
                 if rid:
                     written_ids.append(rid)
-            for err in errors:
-                rejected_details.append({
-                    "row_index": i,
-                    "reason": str(err.get("message") or err),
-                    "values": err.get("context") or {},
-                })
+            for err_i, err in enumerate(errors):
+                from connectors.writer_common import append_write_quarantine_detail
+
+                ctx = err.get("context") if isinstance(err.get("context"), dict) else {}
+                # Prefer the submitted input row — HubSpot context is metadata, not props.
+                src_props: dict[str, Any] = {}
+                matched_idx: int | None = None
+                err_ids = {
+                    str(x) for x in (ctx.get("ids") or []) if x is not None
+                }
+                if err_ids:
+                    for inp_i, inp in enumerate(inputs):
+                        if str(inp.get("id") or "") in err_ids:
+                            matched_idx = inp_i
+                            break
+                if matched_idx is None and err_i < len(inputs):
+                    matched_idx = err_i
+                matched_inp = inputs[matched_idx] if matched_idx is not None else None
+                if matched_inp is not None:
+                    src_props = dict(matched_inp.get("properties") or {})
+                    src_props[id_property] = matched_inp.get("id")
+                # Original mapped batch row — preserves DF_MISSING / NULL polarity.
+                mapped_src: Any = tuple()
+                if matched_idx is not None and matched_idx < len(input_mapped_rows):
+                    mapped_src = input_mapped_rows[matched_idx]
+                append_write_quarantine_detail(
+                    rejected_details,
+                    {
+                        "row": i + err_i + 1,
+                        "column": "",
+                        "target": obj,
+                        "value": "",
+                        "reason": str(err.get("message") or err),
+                        "policy": "write_fail" if policy == "fail" else "write_quarantine",
+                        "values": src_props,
+                    },
+                    mapped_row=mapped_src,
+                    target_cols=target_cols,
+                )
             if errors and policy == "fail":
                 raise RuntimeError(
                     f"HubSpot rejected {len(errors)} record(s); "
@@ -504,18 +736,16 @@ def write_mapped_rows(
             driver="hubspot",
         )
 
-    if rejected_details and policy == "fail":
+    _final_abort = reject_on_strict_policy(policy, rejected_details, "HubSpot")
+    if _final_abort:
         return WriteResult(
             ok=False,
-            rows_written=0,
+            rows_written=written,
             table_name=obj,
             target_schema="",
-            checksum="",
-            chunks_completed=0,
-            error=(
-                f"HubSpot rejected {len(rejected_details)} record(s); "
-                "strict error policy blocks partial activation"
-            ),
+            checksum=digest.hexdigest()[:16] if written else "",
+            chunks_completed=chunks,
+            error=_final_abort,
             rejected_details=rejected_details,
             rejected_rows=len(rejected_details),
             driver="hubspot",

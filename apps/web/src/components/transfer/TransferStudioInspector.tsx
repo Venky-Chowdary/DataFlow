@@ -2,6 +2,7 @@ import { DtIcon } from "../DtIcon";
 import { detectTypeRisks, type TypeRisk } from "../../lib/schemaIntelligence";
 import type { EditableMapping } from "../../lib/mapping";
 import type { EnhancedAnalysis, PreflightResult, TransferResult } from "../../lib/types";
+import { conservationCompleteCopy } from "../../lib/conservationLedger";
 
 interface TransferStudioInspectorProps {
   step: number;
@@ -12,6 +13,10 @@ interface TransferStudioInspectorProps {
   /** Destination connector id — enables SaaS width/scale fidelity chips. */
   destType?: string;
   onGoToMapping?: () => void;
+}
+
+function resultDestLabel(result: TransferResult): string {
+  return conservationCompleteCopy(result);
 }
 
 const STEP_GUIDES: Record<number, { title: string; body: string }> = {
@@ -113,7 +118,7 @@ export function TransferStudioInspector({
         <div className="df2-inspector-panel df2-inspector-success">
           <DtIcon name="check" size={16} />
           <div>
-            <strong>{result.records_transferred?.toLocaleString()} rows transferred</strong>
+            <strong>{resultDestLabel(result)}</strong>
             {result.reconciliation?.message && <span>{result.reconciliation.message}</span>}
           </div>
         </div>

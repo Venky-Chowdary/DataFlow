@@ -112,6 +112,97 @@ def snowflake_endpoint(table: str) -> EndpointConfig:
     )
 
 
+def seed_snowflake_typed_sink(table: str) -> None:
+    """Create the Snowflake destination with declared types, ready to append.
+
+    ``fakesnow`` is DuckDB underneath and has no ``GRANTS`` catalog, so G2
+    cannot read the privileges a *create-new* destination needs and fails
+    closed — which is the engine being right, and is proven separately against
+    the privilege probe. Typed fidelity is a different property, and it is
+    provable here on the existing-table path, where connectivity carries write
+    and no CREATE privilege is required.
+    """
+    import pytest
+
+    pytest.importorskip("fakesnow")
+    from connectors.snowflake_conn import get_connection
+
+    conn = get_connection(
+        account="localhost",
+        username="test",
+        password="test",
+        database="dataflow",
+        schema="public",
+        warehouse="",
+        connection_string="",
+    )
+    try:
+        cur = conn.cursor()
+        cur.execute(f'DROP TABLE IF EXISTS "{table}"')
+        cur.execute(
+            f'''
+            CREATE TABLE "{table}" (
+              "id" INT,
+              "amt_dec" NUMBER(12,4),
+              "amt_float" FLOAT,
+              "note_null" VARCHAR,
+              "note_empty" VARCHAR,
+              "ts_utc" TIMESTAMP_TZ,
+              "flag" BOOLEAN
+            )
+            '''
+        )
+    finally:
+        conn.close()
+
+
+def read_snowflake_row(table: str, row_id: int = 1) -> dict[str, Any]:
+    """Read one row back out of the emulated warehouse."""
+    from connectors.snowflake_conn import get_connection
+
+    conn = get_connection(
+        account="localhost",
+        username="test",
+        password="test",
+        database="dataflow",
+        schema="public",
+        warehouse="",
+        connection_string="",
+    )
+    try:
+        cur = conn.cursor()
+        cols = ", ".join(f'"{c}"' for c in FIDELITY_COLUMNS)
+        cur.execute(f'SELECT {cols} FROM "{table}" WHERE "id" = {int(row_id)}')
+        row = cur.fetchone()
+        assert row is not None, f"no row id={row_id} in {table}"
+        return dict(zip(FIDELITY_COLUMNS, row))
+    finally:
+        conn.close()
+
+
+def drop_snowflake_table(table: str) -> None:
+    try:
+        from connectors.snowflake_conn import get_connection
+
+        conn = get_connection(
+            account="localhost",
+            username="test",
+            password="test",
+            database="dataflow",
+            schema="public",
+            warehouse="",
+            connection_string="",
+        )
+    except Exception:
+        return
+    try:
+        conn.cursor().execute(f'DROP TABLE IF EXISTS "{table}"')
+    except Exception:
+        pass
+    finally:
+        conn.close()
+
+
 def dynamo_endpoint(table: str) -> EndpointConfig:
     return EndpointConfig(
         kind="database",
@@ -227,14 +318,18 @@ def require_oracle_env() -> None:
 def seed_postgresql_typed(table: str) -> None:
     """Native PG types: NUMERIC vs DOUBLE PRECISION, NULL vs '', timestamptz, bool."""
     import psycopg2
+    import pytest
 
-    conn = psycopg2.connect(
-        host="localhost",
-        port=5432,
-        database="dataflow",
-        user="dataflow",
-        password="dataflow",
-    )
+    try:
+        conn = psycopg2.connect(
+            host="localhost",
+            port=5432,
+            database="dataflow",
+            user="dataflow",
+            password="dataflow",
+        )
+    except psycopg2.OperationalError as exc:
+        pytest.skip(f"PostgreSQL typed e2e unavailable: {exc}")
     conn.autocommit = True
     with conn.cursor() as cur:
         cur.execute(f'DROP TABLE IF EXISTS public."{table}"')

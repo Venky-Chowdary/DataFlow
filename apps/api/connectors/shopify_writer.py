@@ -18,13 +18,15 @@ from connectors.saas_common import (
     request,
     token,
 )
-from connectors.saas_write_carriers import shopify_live_types_for_columns
+from connectors.saas_write_carriers import (
+    merge_shopify_catalog_types,
+)
 from connectors.writer_common import (
+    reject_on_strict_policy,
     WriteResult,
     apply_write_quarantine_matrix,
     build_mapped_rows_with_details,
     gate8_writer_meta,
-    resolve_mapping_dest_types,
     resolve_target_columns,
     transform_error_policy,
 )
@@ -41,21 +43,27 @@ def resolve_shopify_dest_types(
     logical_types: list[str] | None = None,
     object_type: str = "customers",
     metafield_defs: list[dict] | None = None,
+    live_types: dict[str, str] | None = None,
+    studio_types: dict[str, Any] | None = None,
 ) -> dict[str, str]:
-    """Prefer Admin core + live metafield definitions; else Map/source carriers."""
-    live = shopify_live_types_for_columns(
+    """Prefer Admin core + live metafield definitions; never bare Map invent.
+
+    When catalog/metafields/Studio are in play, return covered carriers only —
+    never soft-fill gaps with Map ``VARCHAR`` (HubSpot/CRM resolve parity).
+    """
+    if live_types is not None:
+        return {
+            str(k): str(v)
+            for k, v in live_types.items()
+            if k and str(v or "").strip()
+        }
+    live, _err = merge_shopify_catalog_types(
         object_type,
         target_cols,
         metafield_defs=metafield_defs,
+        studio_types=studio_types,
     )
-    return resolve_mapping_dest_types(
-        target_cols,
-        mappings,
-        column_types,
-        logical_types=logical_types,
-        live_types=live,
-        default="VARCHAR",
-    )
+    return {str(k): str(v) for k, v in live.items() if k and str(v or "").strip()}
 
 
 def _singular(table: str) -> str:
@@ -166,8 +174,43 @@ def write_mapped_rows(
             },
             obj,
         )
-    except Exception:
+    except Exception as exc:
+        low = str(exc).lower()
+        if is_auth_error(exc) or "auth/scope failed" in low:
+            return WriteResult(
+                ok=False,
+                rows_written=0,
+                table_name=obj,
+                target_schema=shop_host,
+                checksum="",
+                chunks_completed=0,
+                error=(
+                    f"Shopify metafield Describe auth failed: {exc} — "
+                    "refuse Map VARCHAR bind (empty→null invent risk)."
+                ),
+                driver="shopify",
+            )
+        # Non-auth probe miss: core Admin carriers still resolve from
+        # shopify_live_types_for_columns — metafields stay Map/Studio only.
         metafield_defs = None
+    live_dest = _kwargs.get("destination_column_types")
+    catalog_live, catalog_err = merge_shopify_catalog_types(
+        obj,
+        target_cols,
+        metafield_defs=metafield_defs,
+        studio_types=live_dest if isinstance(live_dest, dict) else None,
+    )
+    if catalog_err:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=obj,
+            target_schema=shop_host,
+            checksum="",
+            chunks_completed=0,
+            error=catalog_err,
+            driver="shopify",
+        )
     dest_types = resolve_shopify_dest_types(
         target_cols,
         mappings,
@@ -175,6 +218,7 @@ def write_mapped_rows(
         logical_types=logical_types,
         object_type=obj,
         metafield_defs=metafield_defs,
+        live_types=catalog_live,
     )
     mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
         headers=headers,
@@ -185,8 +229,11 @@ def write_mapped_rows(
         error_policy=policy,
         dest_types=dest_types,
         preserve_case=True,
+        dest_kind="shopify",
+        destination_pk_columns=list(conflict_columns or []) or None,
+        destination_column_nullability=_kwargs.get("destination_column_nullability"),
     )
-    tgt_types = [str(dest_types.get(c, "VARCHAR") or "VARCHAR") for c in target_cols]
+    tgt_types = [str(dest_types.get(c) or "").strip() for c in target_cols]
     mapped_rows = apply_write_quarantine_matrix(
         mapped_rows,
         target_cols,
@@ -196,7 +243,8 @@ def write_mapped_rows(
         dialect_label="Shopify",
         mappings=mappings,
     )
-    if transform_errors and policy == "fail":
+    _map_abort = reject_on_strict_policy(policy, rejected_details, 'Shopify', transform_errors)
+    if _map_abort:
         return WriteResult(
             ok=False,
             rows_written=0,
@@ -204,7 +252,7 @@ def write_mapped_rows(
             target_schema=shop_host,
             checksum="",
             chunks_completed=0,
-            error=f"Transform errors: {'; '.join(transform_errors[:3])}",
+            error=_map_abort or f"Transform errors: {'; '.join(transform_errors[:3])}",
             rejected_details=rejected_details,
             driver="shopify",
         )
@@ -228,22 +276,144 @@ def write_mapped_rows(
 
         record_id = None
         if mode in upsert_modes:
-            candidates = list(conflict_columns or ["id"])
-            for c in candidates:
+            from services.value_serializer import is_missing_sentinel
+
+            candidates = [c for c in (conflict_columns or []) if c]
+            if not candidates:
+                from connectors.writer_common import append_write_quarantine_detail
+
+                detail = {
+                    "row": i + 1,
+                    "column": "",
+                    "target": obj,
+                    "value": "",
+                    "reason": (
+                        "Shopify upsert requires conflict_columns/primary_key — "
+                        "refuse inventing default 'id'"
+                    ),
+                    "policy": "write_fail" if policy == "fail" else "write_quarantine",
+                    "values": row_dict,
+                }
+                append_write_quarantine_detail(
+                    all_rejected,
+                    detail,
+                    mapped_row=tuple(row_dict.get(c) for c in target_cols),
+                    target_cols=target_cols,
+                )
+                warnings.append(detail["reason"])
+                if policy == "fail":
+                    return WriteResult(
+                        ok=False,
+                        rows_written=written,
+                        table_name=obj,
+                        target_schema=shop_host,
+                        checksum=digest.hexdigest()[:32] if written else "",
+                        chunks_completed=chunks,
+                        error=detail["reason"],
+                        rejected_details=all_rejected,
+                        rejected_rows=len(all_rejected),
+                        warnings=warnings,
+                        driver="shopify",
+                    )
+                continue
+            # Shopify Admin REST only updates by resource ``id`` — never take a
+            # secondary conflict column (sku/handle/tenant) as the URL identity
+            # when ``id`` is empty (would PUT against the wrong resource).
+            id_cols = [c for c in candidates if (c or "").lower() == "id"]
+            if not id_cols:
+                from connectors.writer_common import append_write_quarantine_detail
+
+                detail = {
+                    "row": i + 1,
+                    "column": str(candidates[0]),
+                    "target": obj,
+                    "value": "",
+                    "reason": (
+                        "Shopify upsert requires conflict column 'id' — "
+                        "refuse create invent from non-id keys "
+                        "(would duplicate under at-least-once retry)"
+                    ),
+                    "policy": "write_fail" if policy == "fail" else "write_quarantine",
+                    "values": row_dict,
+                }
+                append_write_quarantine_detail(
+                    all_rejected,
+                    detail,
+                    mapped_row=tuple(row_dict.get(c) for c in target_cols),
+                    target_cols=target_cols,
+                )
+                warnings.append(detail["reason"])
+                if policy == "fail":
+                    return WriteResult(
+                        ok=False,
+                        rows_written=written,
+                        table_name=obj,
+                        target_schema=shop_host,
+                        checksum=digest.hexdigest()[:32] if written else "",
+                        chunks_completed=chunks,
+                        error=detail["reason"],
+                        rejected_details=all_rejected,
+                        rejected_rows=len(all_rejected),
+                        warnings=warnings,
+                        driver="shopify",
+                    )
+                continue
+            for c in id_cols:
                 val = row_dict.get(c)
+                if val is None or is_missing_sentinel(val):
+                    continue
                 if val:
                     record_id = str(val).strip() or None
                     break
-            # If conflict column is not 'id', Shopify Admin REST does not support
-            # upsert by arbitrary fields; fall back to create and surface a warning.
-            if record_id and not (candidates[0] or "").lower() in ("id",):
-                warnings.append(
-                    f"row {i}: Shopify update by non-id field not supported; creating instead."
+            if not record_id:
+                from connectors.writer_common import append_write_quarantine_detail
+
+                detail = {
+                    "row": i + 1,
+                    "column": str(id_cols[0]),
+                    "target": obj,
+                    "value": "",
+                    "reason": (
+                        "Shopify upsert missing id value — refuse create invent "
+                        "(would duplicate under at-least-once retry)"
+                    ),
+                    "policy": "write_fail" if policy == "fail" else "write_quarantine",
+                    "values": row_dict,
+                }
+                append_write_quarantine_detail(
+                    all_rejected,
+                    detail,
+                    mapped_row=tuple(row_dict.get(c) for c in target_cols),
+                    target_cols=target_cols,
                 )
-                record_id = None
+                warnings.append(detail["reason"])
+                if policy == "fail":
+                    return WriteResult(
+                        ok=False,
+                        rows_written=written,
+                        table_name=obj,
+                        target_schema=shop_host,
+                        checksum=digest.hexdigest()[:32] if written else "",
+                        chunks_completed=chunks,
+                        error=detail["reason"],
+                        rejected_details=all_rejected,
+                        rejected_rows=len(all_rejected),
+                        warnings=warnings,
+                        driver="shopify",
+                    )
+                continue
 
         update = mode in upsert_modes and bool(record_id)
-        payload = {singular: {k: v for k, v in row_dict.items() if k.lower() != "id"}}
+        from connectors.writer_common import omit_missing_fields
+
+        # STOP_COLUMN / coerce_null → DF_MISSING must omit, never leak the
+        # sentinel string into Shopify Admin REST payloads. Empty strings omit
+        # too — never invent CRM field clears on upsert (HubSpot class).
+        body = omit_missing_fields(
+            ((k, v) for k, v in row_dict.items() if k.lower() != "id"),
+            drop_empty=True,
+        )
+        payload = {singular: body}
         url = _make_url(shop_host, obj, record_id if update else None)
         method = "PUT" if update else "POST"
 
@@ -288,12 +458,19 @@ def write_mapped_rows(
                 "row": i,
                 "column": "",
                 "target": obj,
-                "value": str(record_id or row_dict),
+                "value": record_id,
                 "reason": humanize_http_error(exc, "shopify"),
                 "policy": policy,
                 "values": payload,
             }
-            all_rejected.append(detail)
+            from connectors.writer_common import append_write_quarantine_detail
+
+            append_write_quarantine_detail(
+                all_rejected,
+                detail,
+                mapped_row=tuple(row_dict.get(c) for c in target_cols),
+                target_cols=target_cols,
+            )
             if policy == "fail":
                 return WriteResult(
                     ok=False,
@@ -316,6 +493,22 @@ def write_mapped_rows(
 
     if on_checkpoint:
         on_checkpoint(len(mapped_rows), written, 1)
+
+    _final_abort = reject_on_strict_policy(policy, all_rejected, "Shopify")
+    if _final_abort:
+        return WriteResult(
+            ok=False,
+            rows_written=written,
+            table_name=obj,
+            target_schema=shop_host,
+            checksum=digest.hexdigest()[:32],
+            chunks_completed=chunks or 1,
+            error=_final_abort,
+            rejected_details=all_rejected,
+            rejected_rows=len(all_rejected),
+            warnings=warnings[:20],
+            driver="shopify",
+        )
 
     return WriteResult(
         ok=True,

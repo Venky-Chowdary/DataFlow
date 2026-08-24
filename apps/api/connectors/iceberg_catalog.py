@@ -75,10 +75,27 @@ def _infer_catalog_type(
     if wh.startswith(("s3://", "gs://", "gcs://")) or region or wh.startswith("arn:"):
         return "glue"
 
+    def _is_local_fs_path(raw: str) -> bool:
+        """True for POSIX/Windows paths — never host:port without a scheme.
+
+        Windows drive letters (``C:\\warehouse``) contain ``:`` and must not be
+        misclassified as SQL catalogs (that path previously required pyiceberg
+        and failed closed with 'connector not ready' on every local CoW write).
+        """
+        s = (raw or "").strip()
+        if not s or "://" in s:
+            return False
+        if s.startswith(("\\\\", "/")):
+            return True
+        # Drive letter: C:\... or C:/...
+        if len(s) >= 2 and s[1] == ":" and s[0].isalpha():
+            return True
+        # Relative / POSIX path without scheme or host:port.
+        return ":" not in s
+
     # A bare local path without catalog URI is the legacy filesystem CoW writer.
     if cs and not cs.startswith("file://") and not cs.startswith("iceberg://"):
-        # If it contains no URL-like delimiter, treat as path.
-        if "://" not in cs and ":" not in cs:
+        if _is_local_fs_path(cs):
             return "filesystem"
 
     if cs.startswith("file://"):
@@ -87,7 +104,7 @@ def _infer_catalog_type(
     # A bare local warehouse path (no URL scheme) defaults to the legacy
     # filesystem CoW writer unless the user explicitly asked for a SQL catalog.
     if wh and not wh.startswith(("s3://", "gs://", "gcs://", "arn:", "http://", "https://", "file://")):
-        if "://" not in wh and ":" not in wh:
+        if _is_local_fs_path(wh):
             return "filesystem"
 
     # If no connection string or warehouse was provided, default to filesystem

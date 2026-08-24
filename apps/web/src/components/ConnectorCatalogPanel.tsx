@@ -5,6 +5,7 @@ import { Skeleton } from "./LoadingState";
 import { FilterTabs } from "./ui/FilterTabs";
 import { FilterBar } from "./ui/FilterBar";
 import { fetchCatalogConnectors, type CatalogConnector } from "../lib/api";
+import { collapseHostedAliasTiles } from "../lib/catalogAliases";
 import { resolveCatalogIdToType } from "../lib/connectorTypes";
 
 const CATEGORY_LABELS: Record<string, string> = {
@@ -72,6 +73,8 @@ interface ConnectorCatalogPanelProps {
   /** When true, only live transfer connectors are clickable */
   requireAvailable?: boolean;
   initialStatus?: string;
+  /** Hide cloud/edition twins (Snowflake on AWS, Standard, …) — same login. */
+  collapseAliases?: boolean;
 }
 
 export function ConnectorCatalogPanel({
@@ -82,6 +85,7 @@ export function ConnectorCatalogPanel({
   transferOnly = false,
   requireAvailable = false,
   initialStatus = "",
+  collapseAliases = false,
 }: ConnectorCatalogPanelProps) {
   const [query, setQuery] = useState("");
   const [debouncedQ, setDebouncedQ] = useState("");
@@ -118,7 +122,13 @@ export function ConnectorCatalogPanel({
       setCategories(data.categories || []);
       setFiltered(data.filtered ?? data.connectors?.length ?? 0);
       setTotal(data.total ?? 0);
-      setTransferLive(data.certified ?? data.transfer_live ?? 0);
+      // Per-side count when a role is chosen: "usable in a transfer" counts
+      // write-only stores among the sources, so it cannot label a source list.
+      setTransferLive(
+        role === "all"
+          ? (data.certified ?? data.transfer_live ?? 0)
+          : (data.role_live ?? data.certified ?? data.transfer_live ?? 0),
+      );
       setSourceOnlyCount(data.source_only ?? 0);
       setPlannedCount(data.planned_count ?? data.roadmap ?? 0);
     } catch {
@@ -140,6 +150,11 @@ export function ConnectorCatalogPanel({
     }
     return items;
   }, [categories]);
+
+  const visibleConnectors = useMemo(
+    () => (collapseAliases ? collapseHostedAliasTiles(connectors) : connectors),
+    [collapseAliases, connectors],
+  );
 
   const showSidebar = !compact;
 
@@ -202,13 +217,25 @@ export function ConnectorCatalogPanel({
           <p className="df2-catalog-meta">
             {filtered.toLocaleString()} shown
             {total > 0 && ` · ${total.toLocaleString()} in catalog`}
-            {transferLive > 0 && ` · ${transferLive.toLocaleString()} transfer-live drivers`}
+            {transferLive > 0 && (
+              role === "all"
+                ? ` · ${transferLive.toLocaleString()} transfer-live drivers`
+                : ` · ${transferLive.toLocaleString()} usable as ${role}`
+            )}
             {sourceOnlyCount > 0 && ` · ${sourceOnlyCount.toLocaleString()} source-only`}
             {plannedCount > 0 && ` · ${plannedCount.toLocaleString()} planned`}
+            {collapseAliases && connectors.length > visibleConnectors.length && (
+              <>
+                {" · "}
+                {connectors.length - visibleConnectors.length} cloud/edition tiles use the same login
+              </>
+            )}
             {role !== "all" && (
               <>
                 {" · "}
-                Filter is catalog browsing only — saved databases stay usable as source and destination
+                {role === "source"
+                  ? "Write-only stores (vector databases) are not listed — they cannot be read"
+                  : "Read-only feeds are not listed — they cannot be written to"}
               </>
             )}
           </p>
@@ -227,11 +254,11 @@ export function ConnectorCatalogPanel({
               <Skeleton key={i} className="df2-skeleton-tile" />
             ))}
           </div>
-        ) : connectors.length === 0 ? (
+        ) : visibleConnectors.length === 0 ? (
           <p className="df2-catalog-empty">No connectors match. Try &quot;Transfer ready&quot; or a different search.</p>
         ) : (
           <div className="df2-connector-grid">
-            {connectors.map((item) => {
+            {visibleConnectors.map((item) => {
               const badge = statusBadge(item);
               const tier = item.certification_tier || "";
               const selectable =

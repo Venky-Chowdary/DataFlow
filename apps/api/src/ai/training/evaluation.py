@@ -208,7 +208,8 @@ class DataTransferEvaluator:
             {"name1": "fname", "name2": "first_name", "expected": True},
             {"name1": "ssn", "name2": "social_security", "expected": True},
             {"name1": "zip", "name2": "postal_code", "expected": True},
-            {"name1": "sku", "name2": "product_id", "expected": True},
+            {"name1": "sku", "name2": "product_sku", "expected": True},
+            {"name1": "sku", "name2": "product_id", "expected": False},
         ]
 
     def _default_pii_cases(self) -> list[dict]:

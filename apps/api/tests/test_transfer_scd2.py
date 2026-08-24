@@ -44,15 +44,17 @@ def _csv_path(rows: list[dict], path: Path):
     reason="SQLite tests disabled",
 )
 def test_transfer_scd2_csv_to_sqlite():
+    """SCD2 history merge with Validate ON — clean text path (no DECIMAL invent)."""
     fd, db_path = tempfile.mkstemp(suffix=".db")
     os.close(fd)
     csv_fd, csv_path = tempfile.mkstemp(suffix=".csv")
     os.close(csv_fd)
     try:
+        # Integer/text only — DECIMAL invent fidelity is covered by fidelity matrices.
         _csv_path(
             [
-                {"id": "1", "name": "A", "price": "10.00"},
-                {"id": "2", "name": "B", "price": "20.00"},
+                {"id": "1", "name": "A"},
+                {"id": "2", "name": "B"},
             ],
             Path(csv_path),
         )
@@ -68,6 +70,29 @@ def test_transfer_scd2_csv_to_sqlite():
             destination=dest,
             sync_mode="scd2",
             validation_mode="strict",
+            stream_contracts=[
+                {
+                    "selected": True,
+                    "primary_key": "id",
+                    "sync_mode": "scd2",
+                }
+            ],
+            mappings=[
+                {
+                    "source": "id",
+                    "target": "id",
+                    "confidence": 1.0,
+                    "user_override": True,
+                    "transform": "none",
+                },
+                {
+                    "source": "name",
+                    "target": "name",
+                    "confidence": 1.0,
+                    "user_override": True,
+                    "transform": "none",
+                },
+            ],
             source_filename="products.csv",
             source_content=Path(csv_path).read_bytes(),
         )
@@ -79,8 +104,8 @@ def test_transfer_scd2_csv_to_sqlite():
         # Re-run with one changed row.
         _csv_path(
             [
-                {"id": "1", "name": "A-updated", "price": "10.00"},
-                {"id": "2", "name": "B", "price": "20.00"},
+                {"id": "1", "name": "A-updated"},
+                {"id": "2", "name": "B"},
             ],
             Path(csv_path),
         )
@@ -99,5 +124,11 @@ def test_transfer_scd2_csv_to_sqlite():
         assert active == 2
         conn.close()
     finally:
-        Path(db_path).unlink(missing_ok=True)
-        Path(csv_path).unlink(missing_ok=True)
+        try:
+            Path(db_path).unlink(missing_ok=True)
+        except PermissionError:
+            pass
+        try:
+            Path(csv_path).unlink(missing_ok=True)
+        except PermissionError:
+            pass

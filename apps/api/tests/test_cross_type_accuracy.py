@@ -56,6 +56,11 @@ def test_every_db_driver_has_probe_read_write(driver: str):
         # live PRODUCTION_SKU matrix.
         assert not transfer_ready(declared), driver
         pytest.skip(f"{driver} is Planned (certified=False) — not transfer-ready yet")
+    if declared.get("preflight") is False:
+        # Drivers without a Validate-class preflight (SFTP, email) cannot gate a
+        # transfer, so they stay Planned no matter how complete read/write is.
+        assert not transfer_ready(declared), driver
+        pytest.skip(f"{driver} has no Validate-class preflight — not transfer-ready yet")
     if declared.get("source_only"):
         assert declared.get("read"), driver
     else:
@@ -152,7 +157,7 @@ def test_mapping_pipeline_passes_source_types():
         confidence_threshold=0.5,
     )
     by_source = {m["source"]: m for m in result["mappings"]}
-    assert by_source["payment_amount"]["transform"] == "decimal"
+    assert by_source["payment_amount"]["transform"] == "none"
     assert by_source["txn_date"]["transform"] == "date"
     assert by_source["payment_amount"]["source_type"] == "DECIMAL"
 
@@ -251,7 +256,9 @@ CSV_SNOWFLAKE_DDL_EXPECTED = {
     "order_id": "VARCHAR",
     "customer_email": "VARCHAR",
     "order_total": "NUMBER(38,10)",
-    "quantity": "INTEGER",
+    # Snowflake INTEGER is a synonym of NUMBER(38,0); emit the explicit form so
+    # the DDL states the width it actually gets.
+    "quantity": "NUMBER(38,0)",
     "is_gift": "BOOLEAN",
     "order_date": "DATE",
     # Bare TIMESTAMP = wall-clock NTZ (offset samples need explicit TIMESTAMPTZ).
@@ -283,8 +290,8 @@ def test_csv_to_snowflake_mapping_pipeline_transforms():
         confidence_threshold=0.5,
     )
     by_source = {m["source"]: m for m in result["mappings"]}
-    assert by_source["order_total"]["transform"] == "decimal"
-    assert by_source["quantity"]["transform"] == "integer"
+    assert by_source["order_total"]["transform"] == "none"
+    assert by_source["quantity"]["transform"] == "none"
     assert by_source["is_gift"]["transform"] == "boolean"
     assert by_source["order_date"]["transform"] == "date"
     assert by_source["shipped_at"]["transform"] == "datetime"
@@ -313,6 +320,9 @@ def test_csv_rows_map_to_snowflake_typed_values():
             "transform": infer_transform_for_mapping(
                 c["name"], c["name"].upper(), c["inferred_type"],
                 ddl_type("snowflake", c["inferred_type"]),
+                source_samples=list(c.get("samples") or []) + (
+                    ["$2,499.00"] if c["name"] == "order_total" else []
+                ),
             ),
         }
         for c in CSV_SNOWFLAKE_COLUMNS
@@ -331,7 +341,8 @@ def test_csv_rows_map_to_snowflake_typed_values():
     assert not errors, errors
     assert mapped[0][0] == "ORD-9001"
     assert mapped[0][2] == "2499.00"
-    assert mapped[0][3] == 5
+    # Native INTEGER wire is identity — digit text is not Parse integer.
+    assert mapped[0][3] in {5, "5"}
     assert mapped[0][4] is True
     assert mapped[0][5] == "2024-11-20"
     assert mapped[0][7] == '{"promo":true}'
@@ -371,10 +382,10 @@ def test_csv_to_snowflake_lossy_coercions_flagged():
         ("not-json", "json", '"not-json"', False),
         # uuids
         ("550e8400-e29b-41d4-a716-446655440000", "uuid", "550e8400-e29b-41d4-a716-446655440000", False),
-        # null sentinels collapse to None for typed transforms
-        ("NULL", "integer", None, False),
-        ("N/A", "decimal", None, False),
-        ("", "boolean", None, False),
+        # null sentinels refuse invent into typed sinks (quarantine owns the cell)
+        ("NULL", "integer", None, True),
+        ("N/A", "decimal", None, True),
+        ("", "boolean", None, True),
         # time values
         ("12:30:45", "time", "12:30:45", False),
         ("14:30", "time", "14:30:00", False),

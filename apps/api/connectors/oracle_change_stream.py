@@ -14,7 +14,9 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Iterator
 
+from connectors.sql_identifiers import quote_sql_identifier
 from services.cdc_engine import ChangeBatch
+from services.value_serializer import SQL_NULL_SENTINEL, cell_to_string
 
 logger = logging.getLogger(__name__)
 
@@ -25,17 +27,18 @@ def encode_oracle_resume_token(
     table: str,
     phase: str = "streaming",
     offset: int = 0,
+    last_pk: str = "",
 ) -> str:
-    return json.dumps(
-        {
-            "kind": "oracle-scn",
-            "table": table,
-            "scn": int(scn),
-            "phase": phase,
-            "offset": int(offset),
-        },
-        separators=(",", ":"),
-    )
+    payload: dict[str, Any] = {
+        "kind": "oracle-scn",
+        "table": table,
+        "scn": int(scn),
+        "phase": phase,
+        "offset": int(offset),
+    }
+    if last_pk and phase == "snapshot":
+        payload["last_pk"] = str(last_pk)
+    return json.dumps(payload, separators=(",", ":"))
 
 
 def decode_oracle_resume_token(token: str | None) -> dict[str, Any]:
@@ -56,6 +59,7 @@ def decode_oracle_resume_token(token: str | None) -> dict[str, Any]:
                 "phase": str(data.get("phase") or "streaming"),
                 "offset": int(data.get("offset") or 0),
                 "table": str(data.get("table") or ""),
+                "last_pk": str(data.get("last_pk") or ""),
             }
     except Exception as exc:
         logger.warning("Exception suppressed: %s", exc, exc_info=exc)
@@ -83,13 +87,16 @@ class OracleFlashbackCdc:
         self.cfg = cfg
         self.table = table
         self.schema = (schema or cfg.get("schema") or cfg.get("username") or "").upper()
-        self.primary_key = (primary_key or "ID").upper()
+        from services.cdc_identity import require_cdc_primary_key
+
+        self.primary_key = require_cdc_primary_key(primary_key, table=table).upper()
         self.batch_size = max(1, int(batch_size or 500))
         self.columns = columns
         state = decode_oracle_resume_token(resume_token)
         self.scn = int(state.get("scn") or 0)
         self.phase = str(state.get("phase") or "initial")
         self.snapshot_offset = int(state.get("offset") or 0)
+        self.snapshot_last_pk = str(state.get("last_pk") or "")
         self._last_event_at: datetime | None = None
         self.cursor_key = (
             cursor_key or f"oracle-flashback:{self.schema}.{self.table.upper()}"
@@ -138,9 +145,10 @@ class OracleFlashbackCdc:
         )
 
     def _qualified(self) -> str:
+        tbl = quote_sql_identifier(self.table.upper())
         if self.schema:
-            return f'"{self.schema}"."{self.table.upper()}"'
-        return f'"{self.table.upper()}"'
+            return f"{quote_sql_identifier(self.schema)}.{tbl}"
+        return tbl
 
     def is_available(self) -> bool:
         try:
@@ -162,34 +170,74 @@ class OracleFlashbackCdc:
             return False
 
     def _row_to_record(self, cols: list[str], row: tuple) -> dict[str, str]:
-        return {str(cols[i]).upper(): "" if row[i] is None else str(row[i]) for i in range(len(cols))}
+        return {
+            str(cols[i]).upper(): (
+                SQL_NULL_SENTINEL
+                if row[i] is None
+                else cell_to_string(row[i], preserve_sql_null=True)
+            )
+            for i in range(len(cols))
+        }
 
     def snapshot(self) -> Iterator[ChangeBatch]:
         """Full table dump at current SCN, then hand off to flashback versions."""
         self._acquire_cdc_lease()
+        from connectors.sql_snapshot_scan import fetch_scan_page
+        from services.cdc_snapshot_resume import (
+            classify_snapshot_resume,
+            last_pk_from_records,
+            quoted_pk_columns,
+            snapshot_keyset_sql,
+        )
+        from services.cdc_snapshot_window import _pk_columns
+
         qualified = self._qualified()
-        pk = self.primary_key
+        pk_cols = _pk_columns(self.primary_key)
+        quoted = quoted_pk_columns(pk_cols, '"')
+        order_sql = ", ".join(quoted)
         offset = self.snapshot_offset if self.phase == "snapshot" else 0
-        handoff_scn = 0
+        last_pk = self.snapshot_last_pk if self.phase == "snapshot" else ""
+        mode = classify_snapshot_resume(last_pk=last_pk, offset=offset)
+        # Mid-dump resume keeps the original SCN (not a new tip).
+        handoff_scn = self.scn if (self.phase == "snapshot" and self.scn) else 0
         try:
             with self._conn() as conn:
                 with conn.cursor() as cur:
-                    cur.execute("SELECT current_scn FROM v$database")
-                    head = cur.fetchone()
-                    handoff_scn = int(head[0] or 0) if head else 0
-                    while True:
+                    if not handoff_scn:
+                        cur.execute("SELECT current_scn FROM v$database")
+                        head = cur.fetchone()
+                        handoff_scn = int(head[0] or 0) if head else 0
+                    if mode == "scan":
                         cur.execute(
-                            f"""
-                            SELECT * FROM (
-                              SELECT t.*, ROW_NUMBER() OVER (ORDER BY t."{pk}") AS df_rn
-                              FROM {qualified} t
-                            )
-                            WHERE df_rn > :off AND df_rn <= :lim
-                            """,  # nosec B608
-                            {"off": offset, "lim": offset + self.batch_size},
+                            f"SELECT * FROM {qualified} ORDER BY {order_sql}"  # nosec B608
                         )
+                    while True:
+                        if mode == "scan":
+                            rows = fetch_scan_page(cur, self.batch_size)
+                        elif mode == "keyset":
+                            sql, params = snapshot_keyset_sql(
+                                table_ref=qualified,
+                                quoted_pk_columns=quoted,
+                                last_pk=last_pk,
+                                limit=self.batch_size,
+                                dialect="oracle",
+                            )
+                            cur.execute(sql, params)
+                            rows = cur.fetchall() or []
+                        else:
+                            pk = quote_sql_identifier(self.primary_key)
+                            cur.execute(
+                                f"""
+                                SELECT * FROM (
+                                  SELECT t.*, ROW_NUMBER() OVER (ORDER BY t.{pk}) AS df_rn
+                                  FROM {qualified} t
+                                )
+                                WHERE df_rn > :off AND df_rn <= :lim
+                                """,  # nosec B608
+                                {"off": offset, "lim": offset + self.batch_size},
+                            )
+                            rows = cur.fetchall() or []
                         cols = [d[0] for d in (cur.description or [])]
-                        rows = cur.fetchall() or []
                         if not rows:
                             break
                         # Drop synthetic rn column
@@ -206,6 +254,7 @@ class OracleFlashbackCdc:
                                 values = list(row)
                             records.append(self._row_to_record(clean_cols, tuple(values)))
                         offset += len(rows)
+                        last_pk = last_pk_from_records(records, pk_cols) or last_pk
                         self._last_event_at = datetime.now(timezone.utc)
                         yield ChangeBatch(
                             inserts=records,
@@ -214,6 +263,7 @@ class OracleFlashbackCdc:
                                 table=self.table,
                                 phase="snapshot",
                                 offset=offset,
+                                last_pk=last_pk,
                             ),
                         )
                         if len(rows) < self.batch_size:
@@ -225,6 +275,7 @@ class OracleFlashbackCdc:
         self.scn = handoff_scn
         self.phase = "streaming"
         self.snapshot_offset = 0
+        self.snapshot_last_pk = ""
         yield ChangeBatch(
             resume_token=encode_oracle_resume_token(
                 self.scn, table=self.table, phase="streaming", offset=0
@@ -276,10 +327,19 @@ class OracleFlashbackCdc:
                         scn_val = rec.pop("DF_SCN", None) or rec.pop("df_scn", None) or head_scn
                         next_scn = max(next_scn, int(scn_val or 0))
                         self._last_event_at = datetime.now(timezone.utc)
-                        clean = {str(k).upper(): "" if v is None else str(v) for k, v in rec.items()}
+                        clean = {
+                            str(k).upper(): (
+                                SQL_NULL_SENTINEL
+                                if v is None
+                                else cell_to_string(v, preserve_sql_null=True)
+                            )
+                            for k, v in rec.items()
+                        }
                         key = clean.get(pk, "")
                         if str(op).upper() == "D":
-                            if key:
+                            from services.cdc_identity import is_present_cdc_row_key
+
+                            if is_present_cdc_row_key(key):
                                 deletes.append(key)
                         elif str(op).upper() == "I":
                             inserts.append(clean)

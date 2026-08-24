@@ -36,15 +36,19 @@ def test_unlisted_but_introspectable_table_is_not_create_new():
         "src.transfer.endpoint_intelligence.resolve_connector_config",
         return_value={"type": "postgresql", "database": "railway", "schema": "public", "ssl": False},
     ), patch(
-        "src.transfer.endpoint_intelligence._introspect_table_schema",
-        return_value={
-            "city": "TEXT",
-            "code": "TEXT",
-            "country": "TEXT",
-            "lat": "NUMERIC",
-            "lon": "NUMERIC",
-            "name": "TEXT",
-        },
+        "src.transfer.endpoint_intelligence._introspect_table_schema_rich",
+        return_value=(
+            {
+                "city": "TEXT",
+                "code": "TEXT",
+                "country": "TEXT",
+                "lat": "NUMERIC",
+                "lon": "NUMERIC",
+                "name": "TEXT",
+            },
+            {},
+            {},
+        ),
     ), patch(
         "src.transfer.endpoint_intelligence._attach_sql_sample_rows",
     ):
@@ -107,8 +111,10 @@ def test_streaming_append_passes_with_reconcile_sample():
             validation_mode="strict",
         )
 
-    assert report["passed"] is True, report
-    assert "sample" in report["message"].lower()
+    # Audit §1.2 / proof contract: sample success must NEVER override a
+    # whole-table checksum mismatch. Gate-8 stays fail-closed here.
+    assert report["passed"] is False, report
+    assert report.get("checksum_match") is False
     assert read_sample.called
     kwargs = read_sample.call_args.kwargs
     assert kwargs.get("sort_key") == "code"
@@ -143,4 +149,7 @@ def test_streaming_append_still_fails_without_sample_proof():
             validation_mode="strict",
         )
     assert report["passed"] is False
-    assert "sample" in report["message"].lower()
+    # Dest-before is unknown, so extra dest rows are an unverified append
+    # delta — not a whole-table checksum mismatch and not a sample pass.
+    assert "unverified" in report["message"].lower()
+    assert "checksum mismatch" not in report["message"].lower()

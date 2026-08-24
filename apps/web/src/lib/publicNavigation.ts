@@ -93,7 +93,7 @@ export const PUBLIC_PAGE_META: Record<PublicRoute, PublicPageMeta> = {
   home: {
     title: "Universal Data Transfer Platform",
     description:
-      "Move any data anywhere with AI semantic mapping, 8 preflight gates, quarantine, and checksum proof. Databases, files, warehouses, and APIs.",
+      "Move any data anywhere with AI semantic mapping, 9 preflight gates, quarantine, and checksum proof. Databases, files, warehouses, and APIs.",
     keywords:
       "Datawrap, data transfer platform, database migration, ETL, semantic mapping, preflight gates, PostgreSQL Snowflake",
     canonicalPath: "#/",
@@ -112,8 +112,8 @@ export const PUBLIC_PAGE_META: Record<PublicRoute, PublicPageMeta> = {
   },
   customers: {
     title: "Customers",
-    description: "How data teams use Datawrap for migrations, sync, and warehouse loads without silent data loss.",
-    keywords: "Datawrap customers, data migration case studies, warehouse loading success",
+    description: "Load Snowflake, BigQuery, and your lake with mapping, preflight, quarantine, and a checksum finance can archive.",
+    keywords: "Datawrap customers, data migration proof, warehouse loading, schema drift testing",
     canonicalPath: "#/customers",
   },
   contact: {
@@ -124,13 +124,13 @@ export const PUBLIC_PAGE_META: Record<PublicRoute, PublicPageMeta> = {
   },
   privacy: {
     title: "Privacy",
-    description: "How Datawrap handles workspace data, credentials, and audit logs.",
+    description: "How Datawrap handles workspace data, encrypted credentials, retention, subprocessors, and your rights.",
     keywords: "Datawrap privacy policy, data processor, credential encryption",
     canonicalPath: "#/privacy",
   },
   terms: {
     title: "Terms of service",
-    description: "Terms governing use of the Datawrap platform.",
+    description: "Terms of service for the Datawrap platform — accounts, customer data, acceptable use, and enterprise agreements.",
     keywords: "Datawrap terms of service, acceptable use",
     canonicalPath: "#/terms",
   },
@@ -184,7 +184,7 @@ export const PUBLIC_PAGE_META: Record<PublicRoute, PublicPageMeta> = {
   },
   integrations: {
     title: "Connectors",
-    description: "Native drivers and SQLAlchemy generics with honest transfer-ready labels.",
+    description: "Snowflake, BigQuery, S3, ADLS, GCS, PostgreSQL, and the rest of your stack — one catalog.",
     keywords: "Datawrap connectors, PostgreSQL MySQL MongoDB Snowflake BigQuery S3 Iceberg",
     canonicalPath: "#/integrations",
   },

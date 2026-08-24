@@ -214,17 +214,13 @@ async function main() {
     "x-profile-400.png": 400,
     "youtube-profile-800.png": 800,
   };
-  let mark1024 = null;
   for (const [name, size] of Object.entries(markSizes)) {
     const buf = await renderMark(browser, svg, size);
     await writeFile(path.join(OUT, name), buf);
-    if (size === 1024) mark1024 = buf;
     console.log(`  ${name}  (${size * 2}px @2x → sharp)`);
   }
-  await writeFile(path.join(OUT, "logo-1024-transparent.png"), mark1024);
-  await writeFile(path.join(WEB, "public", "datawrap-mark.png"), mark1024);
-  await writeFile(path.join(WEB, "public", "brand", "datawrap-mark.png"), mark1024);
-  console.log("  synced app mark PNGs");
+  // App icons and the OG card belong to export-brand-icons.mjs — two scripts
+  // writing the same file is how the shipped favicon drifted off-brand.
 
   console.log("HD lockups (single mark + word)…");
   const lockupLight = await renderLockup(browser, svg, { mark: 512, pad: 96, dark: false, scale: 2 });

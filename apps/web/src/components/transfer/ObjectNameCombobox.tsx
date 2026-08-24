@@ -1,4 +1,5 @@
-import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { DtIcon } from "../DtIcon";
 
 interface ObjectNameComboboxProps {
@@ -15,7 +16,8 @@ interface ObjectNameComboboxProps {
 
 /**
  * Type-or-pick control for destination table/collection names.
- * Shows a real dropdown of introspected objects (not a native datalist).
+ * Menu is portaled + fixed so Transfer Studio overflow panels cannot clip
+ * the list (no-scroll / missing dropdown under Destination right rail).
  */
 export function ObjectNameCombobox({
   id,
@@ -30,9 +32,17 @@ export function ObjectNameCombobox({
 }: ObjectNameComboboxProps) {
   const listId = useId();
   const rootRef = useRef<HTMLDivElement>(null);
+  const controlRef = useRef<HTMLDivElement>(null);
+  const menuRef = useRef<HTMLUListElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
   const [open, setOpen] = useState(false);
   const [activeIndex, setActiveIndex] = useState(0);
+  const [menuBox, setMenuBox] = useState<{
+    top: number;
+    left: number;
+    width: number;
+    maxHeight: number;
+  } | null>(null);
 
   const filtered = useMemo(() => {
     const q = value.trim().toLowerCase();
@@ -54,10 +64,62 @@ export function ObjectNameCombobox({
     return options.some((n) => n.toLowerCase() === q);
   }, [options, value]);
 
+  const computeMenuBox = () => {
+    const control = controlRef.current;
+    if (!control) return null;
+    const rect = control.getBoundingClientRect();
+    const gap = 4;
+    const spaceBelow = window.innerHeight - rect.bottom - gap - 8;
+    const spaceAbove = rect.top - 8;
+    const preferBelow = spaceBelow >= 140 || spaceBelow >= spaceAbove;
+    const maxHeight = Math.min(280, Math.max(120, preferBelow ? spaceBelow : spaceAbove));
+    const top = preferBelow
+      ? rect.bottom + gap
+      : Math.max(8, rect.top - gap - maxHeight);
+    return {
+      top,
+      left: rect.left,
+      width: Math.max(rect.width, 180),
+      maxHeight,
+    };
+  };
+
+  const placeMenu = () => {
+    const box = computeMenuBox();
+    if (box) setMenuBox(box);
+  };
+
+  const openMenu = () => {
+    // Place immediately so the first paint is not a blank frame (menuBox null).
+    const box = computeMenuBox();
+    if (box) setMenuBox(box);
+    setOpen(true);
+  };
+
+  const closeMenu = () => {
+    setOpen(false);
+    setMenuBox(null);
+  };
+
+  useLayoutEffect(() => {
+    if (!open) return;
+    placeMenu();
+    const onReposition = () => placeMenu();
+    window.addEventListener("resize", onReposition);
+    // Capture scroll from Transfer Studio overflow panels.
+    window.addEventListener("scroll", onReposition, true);
+    return () => {
+      window.removeEventListener("resize", onReposition);
+      window.removeEventListener("scroll", onReposition, true);
+    };
+  }, [open, filtered.length, value]);
+
   useEffect(() => {
     if (!open) return;
     const onDoc = (e: MouseEvent) => {
-      if (!rootRef.current?.contains(e.target as Node)) setOpen(false);
+      const t = e.target as Node;
+      if (rootRef.current?.contains(t) || menuRef.current?.contains(t)) return;
+      closeMenu();
     };
     document.addEventListener("mousedown", onDoc);
     return () => document.removeEventListener("mousedown", onDoc);
@@ -69,21 +131,95 @@ export function ObjectNameCombobox({
 
   const pick = (name: string) => {
     onChange(name);
-    setOpen(false);
+    closeMenu();
     inputRef.current?.focus();
   };
 
   const showCreateRow =
-    value.trim().length > 0 && !exactMatch && options.length > 0;
+    value.trim().length > 0 && !exactMatch;
 
-  const canOpen = options.length > 0 || loading;
+  // Always allow open — empty discovery must still show the create/empty hint
+  // (previously options.length===0 hid the dropdown entirely → "sometimes not showing").
+  const canOpen = true;
+  const optionCount = filtered.length + (showCreateRow ? 1 : 0);
+
+  const menu =
+    open && canOpen && menuBox
+      ? createPortal(
+          <ul
+            ref={menuRef}
+            id={listId}
+            className="df2-object-combobox-menu is-portaled"
+            role="listbox"
+            aria-label={`Existing ${objectNoun}s`}
+            style={{
+              top: menuBox.top,
+              left: menuBox.left,
+              width: menuBox.width,
+              maxHeight: menuBox.maxHeight,
+            }}
+          >
+            {loading && options.length === 0 ? (
+              <li className="df2-object-combobox-empty" role="presentation">
+                Loading {objectNoun}s…
+              </li>
+            ) : filtered.length === 0 && !showCreateRow ? (
+              <li className="df2-object-combobox-empty" role="presentation">
+                {options.length === 0
+                  ? emptyHint || `No ${objectNoun}s discovered yet — type a name to create.`
+                  : `No ${objectNoun}s match “${value.trim()}”.`}
+              </li>
+            ) : (
+              <>
+                {filtered.map((name, i) => (
+                  <li key={name} role="option" aria-selected={i === activeIndex}>
+                    <button
+                      type="button"
+                      className={`df2-object-combobox-option${i === activeIndex ? " is-active" : ""}`}
+                      onMouseEnter={() => setActiveIndex(i)}
+                      onClick={() => pick(name)}
+                    >
+                      <span className="df2-object-combobox-option-name">{name}</span>
+                      <span className="df2-object-combobox-option-meta">existing</span>
+                    </button>
+                  </li>
+                ))}
+                {showCreateRow && (
+                  <li role="option" aria-selected={activeIndex === filtered.length}>
+                    <button
+                      type="button"
+                      className={`df2-object-combobox-option is-create${
+                        activeIndex === filtered.length ? " is-active" : ""
+                      }`}
+                      onMouseEnter={() => setActiveIndex(filtered.length)}
+                    onClick={() => {
+                      closeMenu();
+                      inputRef.current?.focus();
+                    }}
+                  >
+                    <span className="df2-object-combobox-option-name">
+                      Create “{value.trim()}”
+                    </span>
+                      <span className="df2-object-combobox-option-meta">new</span>
+                    </button>
+                  </li>
+                )}
+              </>
+            )}
+          </ul>,
+          document.body,
+        )
+      : null;
 
   return (
-    <div className="df2-field df2-object-combobox" ref={rootRef}>
+    <div className={`df2-field df2-object-combobox${open ? " is-open" : ""}`} ref={rootRef}>
       <label className="df2-label" htmlFor={id}>
         {label}
       </label>
-      <div className={`df2-object-combobox-control${open ? " is-open" : ""}`}>
+      <div
+        ref={controlRef}
+        className={`df2-object-combobox-control${open ? " is-open" : ""}`}
+      >
         <input
           ref={inputRef}
           id={id}
@@ -99,20 +235,20 @@ export function ObjectNameCombobox({
           placeholder={placeholder}
           onChange={(e) => {
             onChange(e.target.value);
-            if (canOpen) setOpen(true);
+            openMenu();
           }}
           onFocus={() => {
-            if (canOpen) setOpen(true);
+            openMenu();
           }}
           onKeyDown={(e) => {
             if (e.key === "Escape") {
-              setOpen(false);
+              closeMenu();
               return;
             }
             if (e.key === "ArrowDown") {
               e.preventDefault();
-              if (!open && canOpen) setOpen(true);
-              else setActiveIndex((i) => Math.min(i + 1, filtered.length - 1 + (showCreateRow ? 1 : 0)));
+              if (!open) openMenu();
+              else setActiveIndex((i) => Math.min(i + 1, Math.max(optionCount - 1, 0)));
               return;
             }
             if (e.key === "ArrowUp") {
@@ -124,7 +260,7 @@ export function ObjectNameCombobox({
               const createIdx = showCreateRow ? filtered.length : -1;
               if (activeIndex === createIdx && showCreateRow) {
                 e.preventDefault();
-                setOpen(false);
+                closeMenu();
                 return;
               }
               if (filtered[activeIndex]) {
@@ -139,10 +275,9 @@ export function ObjectNameCombobox({
           className="df2-object-combobox-toggle"
           tabIndex={-1}
           aria-label={open ? `Hide ${objectNoun} list` : `Show ${objectNoun} list`}
-          disabled={!canOpen}
           onClick={() => {
-            if (!canOpen) return;
-            setOpen((v) => !v);
+            if (open) closeMenu();
+            else openMenu();
             inputRef.current?.focus();
           }}
         >
@@ -153,63 +288,7 @@ export function ObjectNameCombobox({
           )}
         </button>
       </div>
-
-      {open && canOpen && (
-        <ul
-          id={listId}
-          className="df2-object-combobox-menu"
-          role="listbox"
-          aria-label={`Existing ${objectNoun}s`}
-        >
-          {loading && options.length === 0 ? (
-            <li className="df2-object-combobox-empty" role="presentation">
-              Loading {objectNoun}s…
-            </li>
-          ) : filtered.length === 0 && !showCreateRow ? (
-            <li className="df2-object-combobox-empty" role="presentation">
-              {options.length === 0
-                ? emptyHint || `No ${objectNoun}s discovered yet — type a name to create.`
-                : `No ${objectNoun}s match “${value.trim()}”.`}
-            </li>
-          ) : (
-            <>
-              {filtered.map((name, i) => (
-                <li key={name} role="option" aria-selected={i === activeIndex}>
-                  <button
-                    type="button"
-                    className={`df2-object-combobox-option${i === activeIndex ? " is-active" : ""}`}
-                    onMouseEnter={() => setActiveIndex(i)}
-                    onClick={() => pick(name)}
-                  >
-                    <span className="df2-object-combobox-option-name">{name}</span>
-                    <span className="df2-object-combobox-option-meta">existing</span>
-                  </button>
-                </li>
-              ))}
-              {showCreateRow && (
-                <li role="option" aria-selected={activeIndex === filtered.length}>
-                  <button
-                    type="button"
-                    className={`df2-object-combobox-option is-create${
-                      activeIndex === filtered.length ? " is-active" : ""
-                    }`}
-                    onMouseEnter={() => setActiveIndex(filtered.length)}
-                    onClick={() => {
-                      setOpen(false);
-                      inputRef.current?.focus();
-                    }}
-                  >
-                    <span className="df2-object-combobox-option-name">
-                      Create “{value.trim()}”
-                    </span>
-                    <span className="df2-object-combobox-option-meta">new</span>
-                  </button>
-                </li>
-              )}
-            </>
-          )}
-        </ul>
-      )}
+      {menu}
     </div>
   );
 }

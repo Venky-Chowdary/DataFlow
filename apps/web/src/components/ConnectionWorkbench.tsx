@@ -6,6 +6,7 @@ import { Button } from "./ui/Button";
 import { Connector } from "../lib/types";
 import { ConnectionWorkbenchContext, formatRelativeTime } from "../lib/connectionWorkbench";
 import { connectorHealthLabel, jobStatusBadgeClass, jobStatusLabel } from "../lib/uiUtils";
+import { formatJobRowMetric } from "../lib/conservationLedger";
 import { introspectTransferEndpoints, type EndpointIntrospection } from "../lib/api";
 import {
   formatConnectorRoleLabel,
@@ -322,17 +323,23 @@ export function ConnectionWorkbench({
                     </tr>
                   </thead>
                   <tbody>
-                    {workbench.relatedJobs.slice(0, 12).map((job) => (
+                    {workbench.relatedJobs.slice(0, 12).map((job) => {
+                      const rows = formatJobRowMetric(job);
+                      return (
                       <tr key={job._id}>
                         <td>
                           <div className="df2-cell-title">{job.source_name}</div>
                           <div className="df2-cell-meta">{job.source_type} → {job.destination_type}</div>
                         </td>
                         <td><span className={jobStatusBadgeClass(job.status)}>{jobStatusLabel(job.status)}</span></td>
-                        <td>{job.records_processed?.toLocaleString() ?? "—"}</td>
+                        <td title={rows.title}>
+                          {rows.value}
+                          <div className="df2-cell-meta">{rows.label}</div>
+                        </td>
                         <td className="df2-cell-meta">{formatRelativeTime(job.created_at)}</td>
                       </tr>
-                    ))}
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>

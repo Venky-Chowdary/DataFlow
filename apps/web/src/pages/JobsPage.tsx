@@ -1,3 +1,4 @@
+import { loadMethodDescription, loadMethodLabel } from "../lib/loadMethod";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ConnectorIcon } from "../app/brand-icons";
 import { DtIcon } from "../components/DtIcon";
@@ -14,7 +15,7 @@ import { FilterTabs } from "../components/ui/FilterTabs";
 import { PageToolbar } from "../components/ui/PageToolbar";
 import { useToast } from "../components/Toast";
 import { useActiveData } from "../lib/DataContext";
-import { cancelJob, fetchJob, fetchJobMappingProof, renameJob, retryJob, resumeJob } from "../lib/api";
+import { fetchJob, fetchJobMappingProof, renameJob, retryJob, resumeJob, RetryRefusedError } from "../lib/api";
 import { isJobSuccess, jobStatusBadgeClass, jobStatusLabel } from "../lib/uiUtils";
 import { JobProgress, TransferJob } from "../lib/types";
 import { QuarantinePanel } from "../components/transfer/QuarantinePanel";
@@ -24,6 +25,17 @@ import { CdcCursorGapPanel } from "../components/transfer/CdcCursorGapPanel";
 import { CdcRetentionPanel } from "../components/transfer/CdcRetentionPanel";
 import { CdcIncrementalSnapshotPanel } from "../components/transfer/CdcIncrementalSnapshotPanel";
 import { JobTrustScoreCard } from "../components/transfer/JobTrustScoreCard";
+import { ConservationLedgerCard } from "../components/transfer/ConservationLedgerCard";
+import { destHeadline, formatJobRowMetric, destMetricCompact, destMetricToneClass } from "../lib/conservationLedger";
+import {
+  formatSchemaPolicyLabel,
+  formatSyncModeLabel,
+  formatValidationModeLabel,
+} from "../lib/transferConstants";
+import { jobStudioDataRules } from "../lib/studioDataRules";
+import { jobStudioDeliveryGuarantee } from "../lib/cdcExactlyOnce";
+import { clampPercent } from "../lib/progressRing";
+import { nextListSelection, shouldApplyInitialJobFocus } from "../lib/jobSelection";
 import { LoadHistoryPanel } from "../components/transfer/LoadHistoryPanel";
 import { ConnectionReuseCard } from "../components/transfer/ConnectionReuseCard";
 import { PhaseProfileCard } from "../components/transfer/PhaseProfileCard";
@@ -57,6 +69,8 @@ export type JobsStudioIntent = {
   /** Job-captured preflight so Studio Validate shows real gates, not Pending. */
   preflight?: import("../lib/types").PreflightResult;
   validationMode?: string;
+  schemaPolicy?: string;
+  deliveryGuarantee?: string;
 };
 
 function asMappingProof(raw: unknown): MappingProof | null {
@@ -96,6 +110,7 @@ interface JobDetailRecord extends JobProgress {
     sync_mode?: string;
     validation_mode?: string;
     schema_policy?: string;
+    delivery_guarantee?: string;
   };
   phases?: { name: string; status: "pending" | "active" | "done" | "failed" | "skipped"; message?: string }[];
   ddl_log?: string[];
@@ -119,11 +134,6 @@ function formatJobDuration(startedAt?: string, completedAt?: string): string | n
   if (m < 60) return `${m}m ${s % 60}s`;
   const h = Math.floor(m / 60);
   return `${h}h ${m % 60}m`;
-}
-
-function formatSyncModeLabel(mode?: string): string {
-  if (!mode) return "—";
-  return mode.replace(/_/g, " ");
 }
 
 interface JobsPageProps {
@@ -200,7 +210,6 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
   const [detailLoading, setDetailLoading] = useState(false);
   const [retrying, setRetrying] = useState(false);
   const [resuming, setResuming] = useState(false);
-  const [cancelling, setCancelling] = useState(false);
   const [filter, setFilter] = useState<JobFilter>("all");
   const [jobSearch, setJobSearch] = useState("");
   const [detailTab, setDetailTab] = useState<JobDetailTab>("detail");
@@ -212,6 +221,9 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
   const [mappingProofOpen, setMappingProofOpen] = useState(false);
   const [mappingProof, setMappingProof] = useState<MappingProof | null>(null);
   const [evidenceDrawer, setEvidenceDrawer] = useState<JobEvidenceDrawer>(null);
+  const appliedFocusRef = useRef<string | null>(null);
+  const jobsRef = useRef(jobs);
+  jobsRef.current = jobs;
 
   const openStudio = useCallback((intent?: JobsStudioIntent) => {
     onStartTransfer?.(intent);
@@ -263,11 +275,12 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
   }, [jobs, filter, jobSearch, nameOverrides]);
 
   useEffect(() => {
-    if (!initialJobId) return;
-    if (!jobs.some((j) => j._id === initialJobId)) return;
+    const ids = jobs.map((j) => j._id);
+    if (!shouldApplyInitialJobFocus(initialJobId, appliedFocusRef.current, ids)) return;
+    appliedFocusRef.current = initialJobId!;
     setFilter("all");
     setJobSearch("");
-    setSelectedId(initialJobId);
+    setSelectedId(initialJobId!);
     if (initialPanel === "mapping-proof") {
       setDetailTab("mapping");
       setEvidenceDrawer("mapping-proof");
@@ -306,13 +319,9 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
   }, [selectedId, liveJob]);
 
   useEffect(() => {
-    if (filter === "failed" && counts.failed > 0 && !selectedId) {
-      const first = jobs.find((j) => j.status === "failed");
-      if (first) setSelectedId(first._id);
-    } else if (filtered.length > 0 && !filtered.some((j) => j._id === selectedId)) {
-      setSelectedId(filtered[0]._id);
-    }
-  }, [filter, filtered, jobs, counts.failed, selectedId]);
+    const next = nextListSelection(selectedId, filtered.map((j) => j._id));
+    if (next && next !== selectedId) setSelectedId(next);
+  }, [filter, filtered, selectedId]);
 
   // Feed the selected job into Datawrap Pilot so NL triage uses the real job ID.
   useEffect(() => {
@@ -342,18 +351,20 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
       return;
     }
     let cancelled = false;
-    setDetailLoading(true);
-    const listed = jobs.find((j) => j._id === selectedId);
+    const listed = jobsRef.current.find((j) => j._id === selectedId);
     // Optimistic hydrate from list so the detail pane never goes blank on slow/404 get.
     if (listed) {
-      setLiveJob({
+      setLiveJob((prev) => ({
+        ...(prev && prev._id === selectedId ? prev : {}),
         ...(listed as unknown as JobDetailRecord),
         _id: listed._id,
         status: listed.status,
         progress_pct: listed.progress_pct ?? 0,
         records_processed: listed.records_processed ?? 0,
         message: listed.message || listed.error || "",
-      });
+      }));
+    } else {
+      setDetailLoading(true);
     }
     fetchJob(selectedId)
       .then((job) => {
@@ -372,7 +383,23 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
     return () => {
       cancelled = true;
     };
-  }, [selectedId, jobs]);
+  }, [selectedId]);
+
+  useEffect(() => {
+    if (!selectedId) return;
+    const listed = jobs.find((j) => j._id === selectedId);
+    if (!listed) return;
+    setLiveJob((prev) => {
+      if (!prev || prev._id !== selectedId) return prev;
+      return {
+        ...prev,
+        status: listed.status,
+        progress_pct: listed.progress_pct ?? prev.progress_pct,
+        records_processed: listed.records_processed ?? prev.records_processed,
+        message: listed.message || listed.error || prev.message,
+      };
+    });
+  }, [jobs, selectedId]);
 
   const selected = jobs.find((j) => j._id === selectedId);
   const isLive = selected?.status === "running" || selected?.status === "pending";
@@ -396,6 +423,17 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
       setSelectedId(result.job_id);
       onRefresh?.();
     } catch (e) {
+      if (e instanceof RetryRefusedError) {
+        // Retry re-reads the source from zero; the rows this attempt already
+        // committed would land a second time. Resume is the safe action.
+        toast({
+          title: "Retry refused \u2014 it would duplicate committed rows",
+          message: `${e.message} Use Resume from checkpoint instead.`,
+          tone: "warning",
+        });
+        setRetrying(false);
+        return;
+      }
       const msg = e instanceof Error ? e.message : "Retry failed";
       if (msg.includes("File uploads") || msg.includes("Transfer Studio")) {
         toast({ title: "Re-upload required", message: msg, tone: "warning" });
@@ -409,11 +447,25 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
   }, [selectedId, onRefresh, onStartTransfer, toast]);
 
   const handleResume = useCallback(async () => {
-    if (!selectedId || !liveJob?.checkpoint) return;
+    if (!selectedId) return;
+    const gapRecovery = Boolean(liveJob?.cdc_cursor_gap);
+    if (!liveJob?.checkpoint && !gapRecovery) return;
     setResuming(true);
     try {
-      await resumeJob(selectedId);
-      toast({ title: "Resume started", message: `Resuming from batch ${liveJob.checkpoint.chunk_index ?? 0} (${(liveJob.checkpoint.rows_processed ?? 0).toLocaleString()} rows already committed).`, tone: "success" });
+      const res = await resumeJob(selectedId);
+      // Full refresh restarts rather than continuing; promising a batch offset
+      // it will not use is the kind of detail that erodes trust in the report.
+      toast({
+        title: res.restarted ? "Transfer restarted" : "Resume started",
+        message:
+          res.message
+          || (res.restarted
+            ? (gapRecovery
+              ? "CDC cursor-gap recovery restarted — not a checkpoint continuation. Purged-window events are gone."
+              : "Full refresh re-run from the beginning — it replaces the destination.")
+            : `Resuming from batch ${liveJob?.checkpoint?.chunk_index ?? 0} (${(liveJob?.checkpoint?.rows_processed ?? 0).toLocaleString()} rows already committed).`),
+        tone: "success",
+      });
       onRefresh?.();
     } catch (e) {
       const msg = e instanceof Error ? e.message : "Resume failed";
@@ -426,21 +478,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
     } finally {
       setResuming(false);
     }
-  }, [selectedId, liveJob?.checkpoint, onRefresh, onStartTransfer, toast]);
-
-  const handleCancel = useCallback(async () => {
-    if (!selectedId) return;
-    setCancelling(true);
-    try {
-      await cancelJob(selectedId);
-      toast({ title: "Cancellation requested", message: "The job will stop at the next checkpoint.", tone: "info" });
-      onRefresh?.();
-    } catch (e) {
-      toast({ title: "Could not cancel job", message: e instanceof Error ? e.message : "Cancel failed", tone: "error" });
-    } finally {
-      setCancelling(false);
-    }
-  }, [selectedId, onRefresh, toast]);
+  }, [selectedId, liveJob?.checkpoint, liveJob?.cdc_cursor_gap, onRefresh, onStartTransfer, toast]);
 
   const beginRename = useCallback((job: TransferJob) => {
     setRenamingId(job._id);
@@ -527,6 +565,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
   const rejectedCount = liveJob?.rejected_rows ?? 0;
   const recon = liveJob?.reconciliation;
   const gate8 = classifyGate8Status(recon);
+  const destMetric = destHeadline(liveJob);
   const jobDuration = formatJobDuration(liveJob?.started_at, liveJob?.completed_at);
   const triggeredBy = liveJob?.triggered_by || liveJob?.created_by || "";
   const syncModeLabel = formatSyncModeLabel(
@@ -534,22 +573,28 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
   );
   const jobPreflight = liveJob?.preflight;
   const openValidateInStudio = useCallback((extra?: Partial<JobsStudioIntent>) => {
+    const rules = jobStudioDataRules(liveJob);
     openStudio({
       step: "validate",
       jobId: selectedId || liveJob?._id || undefined,
       mappings: jobRepairMappings,
       preflight: liveJob?.preflight,
-      validationMode: liveJob?.transfer_request?.validation_mode,
+      validationMode: rules.validationMode || undefined,
+      schemaPolicy: rules.schemaPolicy || undefined,
+      deliveryGuarantee: jobStudioDeliveryGuarantee(liveJob) || undefined,
       ...extra,
     });
   }, [openStudio, selectedId, liveJob, jobRepairMappings]);
   const openMapInStudio = useCallback((extra?: Partial<JobsStudioIntent>) => {
+    const rules = jobStudioDataRules(liveJob);
     openStudio({
       step: "map",
       jobId: selectedId || liveJob?._id || undefined,
       mappings: jobRepairMappings,
       preflight: liveJob?.preflight,
-      validationMode: liveJob?.transfer_request?.validation_mode,
+      validationMode: rules.validationMode || undefined,
+      schemaPolicy: rules.schemaPolicy || undefined,
+      deliveryGuarantee: jobStudioDeliveryGuarantee(liveJob) || undefined,
       ...extra,
     });
   }, [openStudio, selectedId, liveJob, jobRepairMappings]);
@@ -648,9 +693,13 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
             description="Run a transfer from Transfer Studio — live batch progress, phases, and proof reports appear here."
             action={
               onStartTransfer ? (
-                <button type="button" className="df2-btn df2-btn-primary" onClick={() => openStudio()}>
-                  <DtIcon name="transfer" size={14} /> Open Transfer Studio
-                </button>
+                <Button
+                  variant="primary"
+                  onClick={() => openStudio()}
+                  leadingIcon={<DtIcon name="transfer" size={14} />}
+                >
+                  Open Transfer Studio
+                </Button>
               ) : undefined
             }
           />
@@ -714,6 +763,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
                           job.status === "failed" ? "is-failed" : "",
                           isLiveRow ? "is-live" : "",
                         ].filter(Boolean).join(" ")}
+                        aria-current={selectedId === job._id ? "true" : undefined}
                         onClick={() => setSelectedId(job._id)}
                       >
                         <span className={`df2-job-row-status is-${job.status}`} aria-hidden>
@@ -728,7 +778,17 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
                           </div>
                           <div className="df2-job-row-meta">
                             <span className="df2-job-row-route-meta" title={route}>{route}</span>
-                            <span>{(job.records_processed ?? 0).toLocaleString()} rows</span>
+                            {(() => {
+                              const rows = formatJobRowMetric(job);
+                              return (
+                                <span
+                                  className={`df2-job-row-rows ${destMetricToneClass(rows)}`}
+                                  title={rows.title}
+                                >
+                                  {destMetricCompact(rows)}
+                                </span>
+                              );
+                            })()}
                             <span>
                               {new Date(job.created_at).toLocaleString(undefined, {
                                 month: "short",
@@ -741,7 +801,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
                           </div>
                           {isLiveRow && job.progress_pct != null && (
                             <div className="df2-job-row-bar" aria-hidden>
-                              <i style={{ width: `${job.progress_pct}%` }} />
+                              <i style={{ width: `${clampPercent(job.progress_pct)}%` }} />
                             </div>
                           )}
                         </div>
@@ -752,7 +812,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
               </aside>
 
               <section className="df2-jobs-v3-detail" aria-label="Job detail">
-                {detailLoading ? (
+                {detailLoading && !selected && !liveJob ? (
                   <LoadingBlock title="Loading job details" size="md" variant="glass" />
                 ) : isLive && selected ? (
                   <div className="df2-jobs-v3-live">
@@ -771,19 +831,6 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
                         onSave={() => void commitRename(selected._id)}
                         onCancel={cancelRename}
                       />
-                      <div className="df2-jobs-v3-live-actions">
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          onClick={() => void handleCancel()}
-                          disabled={cancelling}
-                          loading={cancelling}
-                          loadingLabel="Cancelling…"
-                          leadingIcon={<DtIcon name="x" size={14} />}
-                        >
-                          Cancel job
-                        </Button>
-                      </div>
                     </div>
                     <JobTheater
                       jobId={selectedId!}
@@ -831,110 +878,15 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
                       </div>
                       <div className="df2-jobs-v3-summary-ids">
                         <span className={jobStatusBadgeClass(liveJob.status)}>{jobStatusLabel(liveJob.status)}</span>
+                        <span
+                          className={`df2-jobs-v3-summary-dest ${destMetricToneClass(destMetric)}`}
+                          title={destMetric.title}
+                        >
+                          {destMetricCompact(destMetric)}
+                        </span>
                         <CopyIdChip id={selected._id} label="Job" />
                       </div>
                     </header>
-
-                    <div className="df2-jobs-v3-summary-metrics" role="group" aria-label="Job metrics">
-                      <article className="is-metric-rows">
-                        <strong>{(liveJob.records_processed ?? 0).toLocaleString()}</strong>
-                        <span>Rows</span>
-                      </article>
-                      <article className="is-metric-progress">
-                        <strong>{liveJob.progress_pct ?? 100}%</strong>
-                        <span>Progress</span>
-                      </article>
-                      <article className="is-metric-columns">
-                        <strong>{mappingCount || "—"}</strong>
-                        <span>Columns</span>
-                      </article>
-                      <article
-                        className="is-metric-mode"
-                        title={liveJob.operation || liveJob.transfer_request?.sync_mode || "transfer"}
-                      >
-                        <strong>
-                          {(() => {
-                            const mode = String(liveJob.operation || liveJob.transfer_request?.sync_mode || "transfer");
-                            const short: Record<string, string> = {
-                              full_refresh_overwrite: "overwrite",
-                              full_refresh_append: "append",
-                              incremental_append: "incr append",
-                              incremental_upsert: "upsert",
-                              cdc: "CDC",
-                              migration: "migration",
-                            };
-                            return short[mode.toLowerCase()] || (mode.length > 12 ? `${mode.slice(0, 10)}…` : mode);
-                          })()}
-                        </strong>
-                        <span>Mode</span>
-                      </article>
-                      <article className={`is-metric-quarantine${rejectedCount > 0 ? " is-warn" : ""}`}>
-                        <strong>{rejectedCount.toLocaleString()}</strong>
-                        <span>Quarantined</span>
-                      </article>
-                      <article className={`is-metric-coerced${Number(liveJob.coerced_null_rows ?? 0) > 0 ? " is-warn" : ""}`}>
-                        <strong>{Number(liveJob.coerced_null_rows ?? 0).toLocaleString()}</strong>
-                        <span>Coerced</span>
-                      </article>
-                      <article
-                        className={`is-metric-reconcile${
-                          gate8.tone === "ok"
-                            ? " is-ok"
-                            : gate8.tone === "danger" || selected.status === "failed"
-                              ? " is-bad"
-                              : gate8.tone === "warn"
-                                ? " is-warn"
-                                : ""
-                        }`}
-                      >
-                        <strong>
-                          {gate8.label !== "Pending"
-                            ? gate8.label
-                            : isJobSuccess(liveJob.status)
-                              ? "Pending"
-                              : selected.status === "failed"
-                                ? "Failed"
-                                : "—"}
-                        </strong>
-                        <span>Reconcile</span>
-                      </article>
-                      {jobDuration && (
-                        <article className="is-metric-duration">
-                          <strong>{jobDuration}</strong>
-                          <span>Duration</span>
-                        </article>
-                      )}
-                      {triggeredBy && (
-                        <article className="is-metric-actor">
-                          <strong title={triggeredBy}>
-                            {triggeredBy.includes("@") ? triggeredBy.split("@")[0] : triggeredBy}
-                          </strong>
-                          <span>Run by</span>
-                        </article>
-                      )}
-                      {syncModeLabel !== "—" && (
-                        <article className="is-metric-mode">
-                          <strong title={syncModeLabel}>{syncModeLabel}</strong>
-                          <span>Sync mode</span>
-                        </article>
-                      )}
-                      {liveJob.cdc_lag_seconds != null && Number.isFinite(Number(liveJob.cdc_lag_seconds)) && (
-                        <article className="is-metric-cdc">
-                          <strong>{`${Number(liveJob.cdc_lag_seconds).toFixed(1)}s`}</strong>
-                          <span>CDC lag</span>
-                        </article>
-                      )}
-                      {liveJob.replication_lag_bytes != null && Number.isFinite(Number(liveJob.replication_lag_bytes)) && (
-                        <article className="is-metric-wal">
-                          <strong>
-                            {Number(liveJob.replication_lag_bytes) >= 1_048_576
-                              ? `${(Number(liveJob.replication_lag_bytes) / 1_048_576).toFixed(1)} MB`
-                              : `${Number(liveJob.replication_lag_bytes).toLocaleString()} B`}
-                          </strong>
-                          <span>WAL</span>
-                        </article>
-                      )}
-                    </div>
 
                     <div className="df2-jobs-detail-card">
                       <div className="df2-jobs-detail-tabs" role="tablist" aria-label="Job detail sections">
@@ -977,6 +929,10 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
                               Overview of this run. Open evidence panels from the right for Gate-8,
                               run metadata, timeline, and logs — keep this pane scannable.
                             </JobOverviewNote>
+                            <ConservationLedgerCard
+                              job={liveJob}
+                              onOpenValidate={() => openValidateInStudio()}
+                            />
                             <JobTrustScoreCard
                               job={liveJob}
                               onOpenQuarantine={
@@ -996,7 +952,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
                                 {
                                   id: "gate8",
                                   title: "Gate-8 reconcile",
-                                  description: "Source vs destination row counts and checksums",
+                                  description: "Dest-before delta, row counts, and checksums",
                                   icon: "shield",
                                   meta: recon
                                     ? gate8.label
@@ -1196,11 +1152,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
 
                             <CdcCursorGapPanel
                               job={liveJob}
-                              onResume={
-                                liveJob.checkpoint || liveJob.chunk_current != null
-                                  ? () => void handleResume()
-                                  : undefined
-                              }
+                              onResume={() => void handleResume()}
                             />
                             <CdcRetentionPanel
                               status={liveJob.cdc_retention_status}
@@ -1214,6 +1166,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
                                   ? () => void handleResume()
                                   : undefined
                               }
+                              hideGap={Boolean(liveJob.cdc_cursor_gap)}
                             />
                             {(liveJob.cdc_plugin || liveJob.watermark || liveJob.cdc_delivery || liveJob.sync_mode === "cdc") && (
                               <CdcIncrementalSnapshotPanel jobId={selected._id} enabled />
@@ -1383,8 +1336,8 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
                                 },
                                 {
                                   id: "streams",
-                                  title: "CDC streams",
-                                  description: "Per-stream lag and watermark",
+                                  title: "Streams",
+                                  description: "Per-stream dest COUNT(*) and watermarks",
                                   icon: "zap",
                                   meta: Array.isArray(liveJob.streams) && liveJob.streams.length
                                     ? `${liveJob.streams.length}`
@@ -1656,7 +1609,12 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
               </div>
             )}
             {typeof destSummary.load_method === "string" && destSummary.load_method && (
-              <div><dt>Load method</dt><dd>{String(destSummary.load_method)}</dd></div>
+              <div>
+                <dt>Load method</dt>
+                <dd title={loadMethodDescription(String(destSummary.load_method))}>
+                  {loadMethodLabel(String(destSummary.load_method))}
+                </dd>
+              </div>
             )}
             {typeof destSummary.chunk_policy === "object" && destSummary.chunk_policy !== null ? (
               <div>
@@ -1760,13 +1718,13 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
             {(liveJob.schema_policy || liveJob.transfer_request?.schema_policy) && (
               <div>
                 <dt>Schema policy</dt>
-                <dd>{formatSyncModeLabel(liveJob.schema_policy || liveJob.transfer_request?.schema_policy)}</dd>
+                <dd>{formatSchemaPolicyLabel(liveJob.schema_policy || liveJob.transfer_request?.schema_policy)}</dd>
               </div>
             )}
             {(liveJob.validation_mode || liveJob.transfer_request?.validation_mode) && (
               <div>
                 <dt>Validation</dt>
-                <dd>{formatSyncModeLabel(liveJob.validation_mode || liveJob.transfer_request?.validation_mode)}</dd>
+                <dd>{formatValidationModeLabel(liveJob.validation_mode || liveJob.transfer_request?.validation_mode)}</dd>
               </div>
             )}
             {liveJob.watermark && (
@@ -1802,7 +1760,13 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
               <div><dt>CDC topology</dt><dd>Shared log reader (one slot / server_id)</dd></div>
             )}
             {liveJob.snapshot_mode && (
-              <div><dt>Snapshot mode</dt><dd>{liveJob.snapshot_mode}</dd></div>
+              <div>
+                <dt>Snapshot mode</dt>
+                <dd>
+                  {liveJob.snapshot_mode}
+                  {liveJob.snapshot_plan?.lost_window ? " · lost window (not continuous CDC)" : ""}
+                </dd>
+              </div>
             )}
             {(liveJob.cdc_lease_holder || liveJob.cdc_lease_conflict) && (
               <div>
@@ -1965,7 +1929,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
         <Drawer
           open
           onClose={() => setEvidenceDrawer(null)}
-          title="CDC stream health"
+          title="Stream conservation"
           subtitle={`${liveJob.streams.length} stream(s)`}
           icon={<DtIcon name="zap" size={18} />}
           size="lg"
@@ -1975,7 +1939,8 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
               <tr>
                 <th>Stream</th>
                 <th>Status</th>
-                <th>Records</th>
+                <th>Conserved</th>
+                <th>Events written</th>
                 <th>Lag</th>
                 <th>Watermark</th>
               </tr>
@@ -1985,6 +1950,15 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
                 <tr key={s.name}>
                   <td>{s.name}</td>
                   <td>{s.status || "—"}</td>
+                  <td>
+                    {destMetricCompact(
+                      destHeadline({
+                        status: s.status,
+                        records_processed: s.records_processed,
+                        row_accounting: s.row_accounting,
+                      }),
+                    )}
+                  </td>
                   <td>{Number(s.records_processed ?? 0).toLocaleString()}</td>
                   <td>
                     {s.cdc_lag_seconds != null && Number.isFinite(Number(s.cdc_lag_seconds))

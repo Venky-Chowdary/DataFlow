@@ -90,6 +90,8 @@ def rejected_details_to_dlq_records(
     job_id: str,
 ) -> list[dict[str, str]]:
     """Map writer ``rejected_details`` into DLQ table rows (string cells)."""
+    from connectors.writer_common import quarantine_cell_wire
+
     rows: list[dict[str, str]] = []
     created = _now()
     for detail in details or []:
@@ -104,11 +106,11 @@ def rejected_details_to_dlq_records(
             "_df_row": str(detail.get("row") if detail.get("row") is not None else ""),
             "_df_column": str(detail.get("column") or ""),
             "_df_target": str(detail.get("target") or ""),
-            "_df_value": "" if detail.get("value") is None else str(detail.get("value")),
+            "_df_value": quarantine_cell_wire(detail.get("value")),
             "_df_reason": str(detail.get("reason") or ""),
             "_df_policy": str(detail.get("policy") or ""),
             "_df_payload": json.dumps(
-                {str(k): "" if v is None else str(v) for k, v in payload.items()},
+                {str(k): quarantine_cell_wire(v) for k, v in payload.items()},
                 ensure_ascii=False,
             ),
             "_df_created_at": created,

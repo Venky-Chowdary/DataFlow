@@ -41,6 +41,11 @@ REQUIRED_QUARANTINE_FIELDS = (
 RETRY_STATUSES = frozenset(
     {"open", "pending_replay", "promoted", "replay_failed", "abandoned"}
 )
+#: Still in the operator replay set — Kafka/Uber DLQ "not yet merged".
+RETRY_OPEN_STATUSES = frozenset({"open", "pending_replay", "replay_failed"})
+#: Left the replay set. ``promoted`` is Gate-8 child proof, not parent
+#: migration_proven. ``abandoned`` is an explicit operator drop of a poison pill.
+RETRY_CLOSED_STATUSES = frozenset({"promoted", "abandoned"})
 
 
 class QuarantineRowContractError(ValueError):

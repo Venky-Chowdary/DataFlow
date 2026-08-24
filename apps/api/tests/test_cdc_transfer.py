@@ -127,6 +127,7 @@ def test_run_cdc_database_transfer_performs_initial_snapshot():
     assert mock_write.call_args[1]["write_mode"] == "upsert"
 
 
+@pytest.mark.fake_mongo
 def test_run_cdc_database_transfer_uses_mongodb_change_stream():
     """Exercise the MongoDB change-stream branch of the CDC runner."""
     from services.cdc_engine import ChangeBatch

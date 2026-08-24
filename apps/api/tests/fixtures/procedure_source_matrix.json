@@ -1,0 +1,60 @@
+{
+  "metric": "procedure_source_extract",
+  "honesty": "Named fixture. Not a claim we beat Informatica CDI (which already has SP-as-source via SQL Override) or Airbyte/Fivetran on catalog breadth. CDC remains at-least-once upsert. Live warehouse matrix is not invented here.",
+  "competitor_facts": [
+    "Airbyte incremental-append-deduped: at-least-once via inclusive cursors; no first-class paste-SP source (airbyte#7010)",
+    "Fivetran: upsert + checkpoint; custom extract via Connector SDK, not Studio CALL",
+    "Informatica CDI: SP source via dummy SELECT + SQL Override call a();",
+    "AWS DMS: tables/views; views full-load only; source SPs are not the extract"
+  ],
+  "parse_accept": [
+    {"id": "call_literals", "dialect": "mysql", "mode": "procedure", "text": "CALL get_orders('2024-01-01')"},
+    {"id": "call_bound", "dialect": "mysql", "mode": "procedure", "text": "CALL get_orders(:since)", "params": {"since": "2024-01-01"}},
+    {"id": "pg_func", "dialect": "postgresql", "mode": "procedure", "text": "SELECT * FROM public.get_orders(:since)", "params": {"since": "2024-01-01"}},
+    {"id": "exec_named", "dialect": "sqlserver", "mode": "procedure", "text": "EXEC dbo.GetOrders @since = :since", "params": {"since": "2024-01-01"}},
+    {"id": "bare_pg", "dialect": "postgresql", "mode": "procedure", "text": "public.get_orders"},
+    {"id": "bare_mssql", "dialect": "sqlserver", "mode": "procedure", "text": "dbo.GetOrders"},
+    {"id": "query_select", "dialect": "postgresql", "mode": "query", "text": "SELECT id, email FROM customers"}
+  ],
+  "parse_reject": [
+    {"id": "stacked", "dialect": "mysql", "mode": "procedure", "text": "CALL get_orders(); DROP TABLE t"},
+    {"id": "insert", "dialect": "mysql", "mode": "procedure", "text": "INSERT INTO t SELECT * FROM s"},
+    {"id": "xp", "dialect": "sqlserver", "mode": "procedure", "text": "EXEC xp_cmdshell 'dir'"},
+    {"id": "sp_exec", "dialect": "sqlserver", "mode": "procedure", "text": "EXEC sp_executesql N'select 1'"},
+    {"id": "sqlite_proc", "dialect": "sqlite", "mode": "procedure", "text": "CALL get_orders()"},
+    {"id": "unbound", "dialect": "mysql", "mode": "procedure", "text": "CALL get_orders(:since)", "params": {}},
+    {"id": "query_exec", "dialect": "postgresql", "mode": "query", "text": "EXEC dbo.GetOrders"}
+  ],
+  "map_cases": [
+    {
+      "id": "sp_result_dest_exists_extra",
+      "note": "SP returns loyalty_tier the dest table does not have — Map must surface it, never drop.",
+      "source": ["order_id", "customer_id", "order_amt", "loyalty_tier"],
+      "dest": ["order_id", "customer_id", "order_amt"],
+      "source_types": {"order_id": "INTEGER", "customer_id": "INTEGER", "order_amt": "DECIMAL", "loyalty_tier": "VARCHAR"},
+      "dest_types": {"order_id": "INTEGER", "customer_id": "INTEGER", "order_amt": "DECIMAL"},
+      "expect_shape": "source_superset",
+      "expect_bound": ["order_id", "customer_id", "order_amt"],
+      "expect_extra_min": 1
+    },
+    {
+      "id": "sp_result_qty_vs_amt",
+      "note": "SP order_qty must not auto-pin dest order_amt — false-friend review.",
+      "source": ["order_id", "order_qty"],
+      "dest": ["order_id", "order_amt"],
+      "source_types": {"order_id": "INTEGER", "order_qty": "INTEGER"},
+      "dest_types": {"order_id": "INTEGER", "order_amt": "DECIMAL"},
+      "expect_review_kinds": ["measure_kind"]
+    },
+    {
+      "id": "sp_result_equal",
+      "note": "Same columns — bind only, high-confidence identity.",
+      "source": ["id", "email", "created_at"],
+      "dest": ["id", "email", "created_at"],
+      "source_types": {"id": "INTEGER", "email": "VARCHAR", "created_at": "TIMESTAMP"},
+      "dest_types": {"id": "INTEGER", "email": "VARCHAR", "created_at": "TIMESTAMP"},
+      "expect_shape": "equal",
+      "expect_extra_min": 0
+    }
+  ]
+}

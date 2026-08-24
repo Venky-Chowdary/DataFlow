@@ -3,6 +3,7 @@ import { createPortal } from "react-dom";
 import { ConnectorIcon } from "../../app/brand-icons";
 import { DtIcon } from "../DtIcon";
 import { Connector, PipelineSchedule, Screen, TransferJob } from "../../lib/types";
+import { formatJobRowMetric, destMetricCompact } from "../../lib/conservationLedger";
 
 export interface SearchNavigateTarget {
   screen: Screen;
@@ -174,11 +175,12 @@ export function WorkspaceSearch({
         || matchesQuery(j.destination_database, q)
         || matchesQuery(j.error, q)
       ) {
+        const rows = formatJobRowMetric(j);
         out.push({
           id: `job-${j._id}`,
           kind: "job",
           label: `${srcName || j.source_type || "Source"} → ${j.destination_collection || j.destination_database || "dest"}`,
-          meta: `${j.status} · ${(j.records_processed ?? 0).toLocaleString()} rows`,
+          meta: `${j.status} · ${destMetricCompact(rows)}`,
           screen: "jobs",
           jobId: j._id,
         });

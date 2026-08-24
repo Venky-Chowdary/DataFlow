@@ -2,6 +2,11 @@
 
 import type { CSSProperties } from "react";
 
+import { PROVEN_EVIDENCE } from "../../lib/provenEvidence";
+
+/** Live matrix cases actually recorded — read from the evidence table, never typed in. */
+const LIVE_MATRIX_CASES = PROVEN_EVIDENCE.reduce((n, row) => n + row.cases, 0);
+
 type IllustrationKind =
   | "security"
   | "enterprise"
@@ -37,7 +42,7 @@ export function MarketingIllustration({ kind, className = "" }: { kind: Illustra
         <text x="240" y="142" textAnchor="middle" fontSize="12" fill="#0f172a" fontWeight="650">Governed transfer engine</text>
         <text x="240" y="162" textAnchor="middle" fontSize="10" fill="#64748b">Preflight · Quarantine · Reconcile</text>
         <rect x="48" y="208" width="384" height="44" rx="10" fill="#0f766e" opacity="0.08" />
-        <text x="240" y="235" textAnchor="middle" fontSize="11" fill="#0f766e" fontWeight="600">SOC 2 · GDPR · HIPAA-ready posture</text>
+        <text x="240" y="235" textAnchor="middle" fontSize="11" fill="#0f766e" fontWeight="600">Encryption · SSO · BYOK · GDPR — security pack on request</text>
       </svg>
     );
   }
@@ -61,7 +66,7 @@ export function MarketingIllustration({ kind, className = "" }: { kind: Illustra
         <text x="48" y="172" fontSize="11" fill="#94a3b8">RBAC · Pipelines · Quarantine</text>
         <rect x="48" y="196" width="160" height="10" rx="5" fill="#1e293b" />
         <rect x="48" y="196" width="118" height="10" rx="5" fill="#0d9488" />
-        <text x="48" y="232" fontSize="11" fill="#99f6e4">Preflight 8/8 · checksum match</text>
+        <text x="48" y="232" fontSize="11" fill="#99f6e4">Preflight 9/9 · checksum match</text>
         <rect x="252" y="92" width="200" height="168" rx="14" fill="#111827" stroke="#334155" />
         <text x="272" y="122" fontSize="11" fill="#94a3b8" fontWeight="700">WORKSPACE B</text>
         <text x="272" y="148" fontSize="13" fill="#f8fafc" fontWeight="650">Regulated loads</text>
@@ -139,25 +144,25 @@ export function MarketingIllustration({ kind, className = "" }: { kind: Illustra
         <rect width="480" height="300" rx="18" fill="url(#lp-cust-bg)" stroke="#99f6e4" />
         <g className="lp-cust-tile" style={{ "--i": 0 } as CSSProperties}>
           <rect x="24" y="24" width="200" height="120" rx="14" fill="#fff" stroke="#ccece7" />
-          <text x="40" y="54" fontSize="11" fill="#0f766e" fontWeight="700">RETAIL</text>
-          <text x="40" y="88" fontSize="22" fill="#0f172a" fontWeight="700">12k+</text>
-          <text x="40" y="112" fontSize="12" fill="#64748b">migrations governed</text>
+          <text x="40" y="54" fontSize="11" fill="#0f766e" fontWeight="700">LIVE MATRIX</text>
+          <text x="40" y="88" fontSize="22" fill="#0f172a" fontWeight="700">{LIVE_MATRIX_CASES}</text>
+          <text x="40" y="112" fontSize="12" fill="#64748b">cases run on real engines</text>
         </g>
         <g className="lp-cust-tile" style={{ "--i": 1 } as CSSProperties}>
           <rect x="240" y="24" width="216" height="120" rx="14" fill="#0f766e" />
-          <text x="256" y="54" fontSize="11" fill="#99f6e4" fontWeight="700">HEALTHCARE</text>
-          <text x="256" y="88" fontSize="22" fill="#fff" fontWeight="700">G1–G8</text>
+          <text x="256" y="54" fontSize="11" fill="#99f6e4" fontWeight="700">PREFLIGHT</text>
+          <text x="256" y="88" fontSize="22" fill="#fff" fontWeight="700">G1–G9</text>
           <text x="256" y="112" fontSize="12" fill="#ccfbf1">gates before every write</text>
         </g>
         <g className="lp-cust-tile" style={{ "--i": 2 } as CSSProperties}>
           <rect x="24" y="160" width="140" height="116" rx="14" fill="#fff" stroke="#ccece7" />
-          <text x="40" y="196" fontSize="11" fill="#0f766e" fontWeight="700">SAAS</text>
+          <text x="40" y="196" fontSize="11" fill="#0f766e" fontWeight="700">AGENTS</text>
           <text x="40" y="228" fontSize="18" fill="#0f172a" fontWeight="700">MCP</text>
           <text x="40" y="250" fontSize="11" fill="#64748b">agent-native ops</text>
         </g>
         <g className="lp-cust-tile" style={{ "--i": 3 } as CSSProperties}>
           <rect x="180" y="160" width="140" height="116" rx="14" fill="#fff" stroke="#ccece7" />
-          <text x="196" y="196" fontSize="11" fill="#0f766e" fontWeight="700">FINANCE</text>
+          <text x="196" y="196" fontSize="11" fill="#0f766e" fontWeight="700">LEDGER</text>
           <text x="196" y="228" fontSize="18" fill="#0f172a" fontWeight="700">0</text>
           <text x="196" y="250" fontSize="11" fill="#64748b">silent data loss</text>
         </g>
@@ -212,8 +217,9 @@ export function MarketingIllustration({ kind, className = "" }: { kind: Illustra
   }
 
   if (kind === "mapping") {
-    const src = ["order_amt", "cust_email", "order_id", "ts"];
-    const dst = ["payment_amount", "email", "order_key", "created_at"];
+    const src = ["order_amt", "pay_amt", "tax_amt", "cust_id"];
+    const dst = ["total_amount", "payment_amount", "tax_amount", "customer_key"];
+    const scores = ["0.92", "0.99", "0.99", "rev"];
     return (
       <svg className={cls} viewBox="0 0 480 280" role="img" aria-label="Semantic column mapping">
         <rect width="480" height="280" rx="16" fill="#f8fafc" stroke="#e2e8f0" />
@@ -229,7 +235,7 @@ export function MarketingIllustration({ kind, className = "" }: { kind: Illustra
               <text x="384" y={y + 23} textAnchor="middle" fontSize="12" fill="#0f766e" fontFamily="ui-monospace, monospace">{dst[i]}</text>
               <path d={`M168 ${y + 18}C220 ${y + 18} 260 ${y + 18} 312 ${y + 18}`} stroke="#0d9488" strokeWidth="2" fill="none" strokeDasharray="5 4" />
               <circle cx="240" cy={y + 18} r="11" fill="#ecfdf5" stroke="#0d9488" />
-              <text x="240" y={y + 22} textAnchor="middle" fontSize="9" fill="#0f766e" fontWeight="700">{96 - i * 3}</text>
+              <text x="240" y={y + 22} textAnchor="middle" fontSize="9" fill="#0f766e" fontWeight="700">{scores[i]}</text>
             </g>
           );
         })}

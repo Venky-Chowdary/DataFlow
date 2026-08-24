@@ -16,10 +16,15 @@ export interface ConnectionWorkbenchContext {
 }
 
 function matchesConnector(job: TransferJob, connector: Connector): boolean {
+  const id = (connector.id || "").trim();
+  if (id) {
+    if ((job.source_connector_id || "").trim() === id) return true;
+    if ((job.dest_connector_id || "").trim() === id) return true;
+  }
   const name = connector.name.toLowerCase();
-  const id = connector.id.toLowerCase();
+  const idLower = id.toLowerCase();
   const src = (job.source_name ?? "").toLowerCase();
-  if (src && (src === name || src === id)) return true;
+  if (src && (src === name || src === idLower)) return true;
   if (job.source_type === connector.type && src && src === name) return true;
   if (job.destination_type === connector.type) {
     const dest = (job.destination_collection || job.destination_database || "").toLowerCase();
@@ -31,14 +36,29 @@ function matchesConnector(job: TransferJob, connector: Connector): boolean {
   return false;
 }
 
+function jobTimestamp(job: TransferJob): string | null {
+  return job.created_at || job.started_at || job.updated_at || null;
+}
+
 export function jobsForConnector(connector: Connector, jobs: TransferJob[]): TransferJob[] {
-  return jobs.filter((j) => matchesConnector(j, connector));
+  return jobs
+    .filter((j) => matchesConnector(j, connector))
+    .sort((a, b) => {
+      const ta = new Date(jobTimestamp(a) || 0).getTime();
+      const tb = new Date(jobTimestamp(b) || 0).getTime();
+      return tb - ta;
+    });
 }
 
 /** Most recent transfer touching this connector — drives the "last used" signal in status-first lists. */
 export function lastUsedAtForConnector(connector: Connector, jobs: TransferJob[]): string | null {
   const related = jobsForConnector(connector, jobs);
-  return related[0]?.created_at ?? null;
+  const fromJobs = related[0] ? jobTimestamp(related[0]) : null;
+  const stamped = connector.last_used_at || null;
+  if (fromJobs && stamped) {
+    return new Date(fromJobs).getTime() >= new Date(stamped).getTime() ? fromJobs : stamped;
+  }
+  return fromJobs || stamped;
 }
 
 export function schedulesForConnector(connectorId: string, schedules: PipelineSchedule[]): PipelineSchedule[] {

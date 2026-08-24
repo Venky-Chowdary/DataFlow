@@ -485,6 +485,46 @@ def test_case_insensitive_source_mapping_not_unmapped():
     assert report["schema_evolution"]["action"] == "continue"
 
 
+def test_pg_bare_decimal_is_widen_not_narrow_type_drift():
+    """MySQL DECIMAL(38,15) → Postgres bare DECIMAL/NUMERIC is unconstrained.
+
+    Must not invent narrow_type / schema_drift block (airports lat/lon class).
+    MySQL bare DECIMAL still invents (10,0) and stays hard-breaking.
+    """
+    mappings = [
+        {"source": "lat", "target": "lat", "target_type": "DECIMAL", "confidence": 0.98},
+        {"source": "lon", "target": "lon", "target_type": "DECIMAL", "confidence": 0.98},
+    ]
+    pg = detect_schema_drift(
+        source_columns=["lat", "lon"],
+        source_schema={"lat": "DECIMAL(38,15)", "lon": "DECIMAL(38,15)"},
+        target_columns=["lat", "lon"],
+        target_schema={"lat": "DECIMAL", "lon": "NUMERIC"},
+        mappings=mappings,
+        destination_db_type="postgresql",
+        table_exists=True,
+        schema_policy="manual_review",
+        sample_rows=[{"lat": "40.1", "lon": "-73.9"}] * 5,
+    )
+    assert pg["type_mismatches"] == []
+    assert pg["schema_evolution"]["hard_breaking"] == []
+    assert pg["schema_evolution"]["action"] == "continue"
+    assert not pg["drift_detected"]
+
+    mysql = detect_schema_drift(
+        source_columns=["lat"],
+        source_schema={"lat": "DECIMAL(38,15)"},
+        target_columns=["lat"],
+        target_schema={"lat": "DECIMAL"},
+        mappings=[mappings[0]],
+        destination_db_type="mysql",
+        table_exists=True,
+        schema_policy="manual_review",
+    )
+    assert mysql["type_mismatches"]
+    assert any(b.get("kind") == "narrow_type" for b in mysql["schema_evolution"]["hard_breaking"])
+
+
 def test_propagate_policy_synonym_target_fp_does_not_require_ack():
     from services.preflight_service import run_file_preflight
     from services.schema_fingerprint import fingerprint_schema_legacy
@@ -678,3 +718,55 @@ def test_classify_flat_schema_dicts():
     )
     assert report["severity"] == "additive"
     assert any(c["kind"] == "widen_type" for c in report["additive"])
+
+
+def test_compatibility_lattice_matches_confluent_roles_for_sql():
+    from services.schema_drift import (
+        COMPAT_BACKWARD,
+        COMPAT_FORWARD,
+        COMPAT_FULL,
+        COMPAT_IDENTICAL,
+        COMPAT_NONE,
+        classify_schema_evolution_report,
+        compatibility_of,
+        resolve_schema_evolution,
+    )
+
+    identical = classify_schema_change({"id": "INTEGER"}, {"id": "INT"})
+    assert identical["severity"] == "none"
+    assert compatibility_of(identical) == COMPAT_IDENTICAL
+
+    widened = classify_schema_change(
+        {"id": "INT", "name": "VARCHAR(50)"},
+        {"id": "INT", "name": "VARCHAR(200)"},
+    )
+    assert compatibility_of(widened) == COMPAT_FORWARD
+
+    dropped = classify_schema_change({"id": "INT", "legacy": "VARCHAR"}, {"id": "INT"})
+    assert compatibility_of(dropped) == COMPAT_BACKWARD
+
+    both = classify_schema_change(
+        {"id": "INT", "legacy": "VARCHAR"},
+        {"id": "INT", "region": "VARCHAR"},
+    )
+    # rename heuristic may pair legacy→region; either backward (rename) or full (drop+add)
+    assert compatibility_of(both) in {COMPAT_FULL, COMPAT_BACKWARD}
+
+    narrowed = classify_schema_change(
+        {"amount": "DECIMAL(12,2)"},
+        {"amount": "DECIMAL(6,2)"},
+    )
+    assert compatibility_of(narrowed) == COMPAT_NONE
+
+    evo = resolve_schema_evolution(narrowed, schema_policy="propagate_columns")
+    assert evo["should_pause"] is True
+    assert evo["compatibility"] == COMPAT_NONE
+
+    report = classify_schema_evolution_report(
+        {"id": "INTEGER", "name": "VARCHAR"},
+        {"id": "INTEGER", "name": "VARCHAR", "region": "VARCHAR"},
+        schema_policy="propagate_columns",
+    )
+    assert report["compatibility"] == COMPAT_FORWARD
+    assert report["schema_evolution"]["should_propagate"] is True
+    assert report["summary"]

@@ -64,7 +64,9 @@ def test_attach_db_sample_miss_still_probes_before_create_new():
     with patch.object(ei, "resolve_connector_config", return_value=cfg):
         with patch.object(ei, "_mark_table_listed_if_present", return_value=None):
             with patch.object(ei, "_object_name_match", return_value=None):
-                with patch.object(ei, "_introspect_table_schema", return_value={}) as introspect:
+                with patch.object(
+                    ei, "_introspect_table_schema_rich", return_value=({}, {}, {})
+                ) as introspect:
                     ei._attach_db_sample(out, endpoint)
                     assert introspect.called
     assert out["table_exists"] is False

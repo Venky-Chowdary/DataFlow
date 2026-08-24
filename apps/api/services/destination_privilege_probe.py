@@ -13,11 +13,14 @@ Implemented engines
 * SQL Server — ``HAS_PERMS_BY_NAME``
 * Oracle — ``SESSION_PRIVS`` / ``ALL_TAB_PRIVS``
 * SQLite — filesystem ``os.access`` + ``sqlite_master``
+* DuckDB — filesystem ``os.access`` + ``information_schema`` (embedded: no GRANTs)
 * MongoDB — ``connectionStatus.showPrivileges`` (never insert)
 * Redis — ``ACL WHOAMI`` / ``ACL GETUSER`` (never SET/DEL)
 * Kafka — AdminClient ``describe_acls`` (never produce)
 * Elasticsearch — ``security.has_privileges`` (never index a probe doc)
 * S3 — ``GetBucketAcl`` grant parse (never PutObject)
+* GCS — bucket IAM bindings (never upload)
+* ADLS — container metadata + role/account-key posture (never PutBlob)
 
 Contract
 --------
@@ -33,7 +36,7 @@ from __future__ import annotations
 import logging
 import os
 import re
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 
 logger = logging.getLogger(__name__)
@@ -51,6 +54,7 @@ _SUPPORTED = frozenset({
     "mssql",
     "oracle",
     "sqlite",
+    "duckdb",
     "mongodb",
     "redis",
     "kafka",
@@ -58,6 +62,9 @@ _SUPPORTED = frozenset({
     "opensearch",
     "s3",
     "minio",
+    "gcs",
+    "adls",
+    "sftp",
 })
 
 _MONGO_WRITE_ACTIONS = frozenset({
@@ -75,6 +82,36 @@ _KAFKA_CREATE_OPS = frozenset({"CREATE", "ALL", "ANY"})
 _ES_WRITE_PRIVS = frozenset({"index", "write", "create", "create_doc"})
 _ES_CREATE_PRIVS = frozenset({"create_index", "manage"})
 _S3_WRITE_PERMS = frozenset({"FULL_CONTROL", "WRITE", "WRITE_ACP"})
+_GCS_WRITE_ROLES = frozenset({
+    "roles/storage.admin",
+    "roles/storage.objectAdmin",
+    "roles/storage.objectCreator",
+    "roles/storage.objectUser",
+    "roles/storage.legacyBucketOwner",
+    "roles/storage.legacyBucketWriter",
+})
+_GCS_CREATE_ROLES = frozenset({
+    "roles/storage.admin",
+    "roles/storage.legacyBucketOwner",
+})
+_GCS_WRITE_PERMS = frozenset({
+    "storage.objects.create",
+    "storage.objects.update",
+    "storage.objects.delete",
+})
+_ADLS_WRITE_ROLES = frozenset({
+    "storage blob data contributor",
+    "storage blob data owner",
+    "storage blob data writer",
+    "contributor",
+    "owner",
+})
+_ADLS_CREATE_ROLES = frozenset({
+    "storage blob data owner",
+    "contributor",
+    "owner",
+})
+_ADLS_WRITE_ACL = frozenset({"w", "c", "a"})
 
 _BQ_WRITE_ROLES = frozenset({
     "OWNER",
@@ -102,6 +139,10 @@ class PrivilegeProbeResult:
     detail: str
     engine: str = ""
     method: str = ""
+    # Independently measured capabilities behind the two verdicts. Each entry
+    # is True / False / None, where None means *not measured* — an unmeasured
+    # capability is never reported as absent.
+    signals: dict[str, bool | None] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -133,6 +174,10 @@ def _normalize_engine(db_type: str) -> str:
         return "elasticsearch"
     if engine in {"minio", "wasabi", "backblaze_b2", "digitalocean_spaces", "cloudflare_r2", "amazon_s3"}:
         return "s3"
+    if engine in {"gcs", "google_cloud_storage", "google_gcs"}:
+        return "gcs"
+    if engine in {"adls", "adls_gen2", "azure_data_lake", "azure_blob", "azure_blob_storage"}:
+        return "adls"
     return engine
 
 
@@ -148,8 +193,10 @@ def _finalize(
     method: str,
     write_action: str = "INSERT",
     create_action: str = "CREATE",
+    signals: dict[str, bool | None] | None = None,
 ) -> PrivilegeProbeResult:
     """Map measured flags into ok/denied with operator-facing detail."""
+    signals = dict(signals or {})
     target = f"{schema}.{table}" if schema and table else (table or schema or "destination")
     if table_exists is True and table and not can_write:
         update_suffix = "/UPDATE" if need_update and write_action == "INSERT" else ""
@@ -160,6 +207,7 @@ def _finalize(
             detail=f"User can connect but lacks {write_action}{update_suffix} on {target}",
             engine=engine,
             method=method,
+            signals=signals,
         )
     if table_exists is False and not can_create:
         return PrivilegeProbeResult(
@@ -169,6 +217,7 @@ def _finalize(
             detail=f"User can connect but lacks {create_action} on '{schema or target}'",
             engine=engine,
             method=method,
+            signals=signals,
         )
     return PrivilegeProbeResult(
         can_write=can_write,
@@ -180,6 +229,7 @@ def _finalize(
         ),
         engine=engine,
         method=method,
+        signals=signals,
     )
 
 
@@ -206,6 +256,12 @@ def probe_destination_privileges(
     location: str = "",
     auth_source: str = "",
     api_key: str = "",
+    private_key: str = "",
+    # SFTP host-key trust must reach the probe: a probe that connected under
+    # looser trust than the transfer would prove the wrong server's directory.
+    host_key: str = "",
+    known_hosts: str = "",
+    host_key_policy: str = "",
 ) -> PrivilegeProbeResult:
     """Probe write/create privileges for a destination without mutating data."""
     engine = _normalize_engine(db_type)
@@ -305,6 +361,14 @@ def probe_destination_privileges(
                 table_exists=table_exists,
                 need_update=need_update,
             )
+        if engine == "duckdb":
+            return _probe_duckdb(
+                database=database,
+                connection_string=connection_string,
+                host=host,
+                table=tbl,
+                table_exists=bool(table_exists),
+            )
         if engine == "sqlite":
             return _probe_sqlite(
                 database=database,
@@ -375,6 +439,47 @@ def probe_destination_privileges(
                 key_prefix=tbl or sch,
                 table_exists=table_exists,
             )
+        if engine == "gcs":
+            return _probe_gcs(
+                host=host,
+                port=port,
+                bucket=database or tbl,
+                username=username,
+                password=password,
+                connection_string=connection_string,
+                service_account=service_account or password,
+                key_prefix=tbl or sch,
+                table_exists=table_exists,
+            )
+        if engine == "adls":
+            return _probe_adls(
+                host=host,
+                port=port,
+                container=database or sch or tbl,
+                username=username,
+                password=password,
+                connection_string=connection_string,
+                service_account=service_account,
+                key_prefix=tbl or sch,
+                table_exists=table_exists,
+            )
+        if engine == "sftp":
+            return _probe_sftp(
+                host=host,
+                port=port or 22,
+                directory=sch or database,
+                filename=tbl,
+                username=username,
+                password=password,
+                connection_string=connection_string,
+                private_key=private_key,
+                service_account=service_account,
+                api_key=api_key,
+                host_key=host_key,
+                known_hosts=known_hosts,
+                host_key_policy=host_key_policy,
+                table_exists=table_exists,
+            )
     except Exception as exc:  # noqa: BLE001 — never flake Validate on probe errors
         logger.info("privilege probe unavailable for %s: %s", engine, exc)
         return PrivilegeProbeResult(
@@ -407,7 +512,7 @@ def _probe_postgres_family(
     username: str,
     password: str,
     connection_string: str,
-    table_exists: bool,
+    table_exists: bool | None,
     need_update: bool,
 ) -> PrivilegeProbeResult:
     from connectors.postgresql_conn import get_connection
@@ -421,38 +526,113 @@ def _probe_postgres_family(
         connection_string=connection_string,
         ssl=True,
     )
+    # Each capability is measured on its own. ``None`` stays None when a
+    # capability could not be measured, so an unmeasured one is never reported
+    # as absent — in particular a table this role cannot see in the catalog is
+    # not evidence that the table does not exist.
+    signals: dict[str, bool | None] = {
+        "schema_usage": None,
+        "schema_create": None,
+        "table_visible_in_catalog": None,
+        "table_insert_grant": None,
+        "table_update_grant": None,
+        "table_owner": None,
+    }
     try:
         with conn.cursor() as cur:
+            if table_exists is None and table:
+                # The caller could not say — drivers that declare no introspect
+                # (pgvector is PostgreSQL underneath) never learn it. Reporting
+                # "existence unknown" from here would refuse a route this very
+                # connection can answer authoritatively in one statement.
+                try:
+                    cur.execute(
+                        "SELECT to_regclass(format('%%I.%%I', %s::text, %s::text)) IS NOT NULL",
+                        (schema, table),
+                    )
+                    table_exists = bool(cur.fetchone()[0])
+                except Exception as exc:
+                    # Leave it unknown rather than claim absence: a blocked
+                    # catalog lookup is not evidence the table is missing.
+                    logger.debug("Catalog existence lookup unavailable: %s", exc)
+            # ``has_*_privilege`` parses its name argument as an SQL identifier,
+            # so an unquoted "s.MixedCase" is folded to lower case and raises
+            # undefined_table. format('%I.%I') quotes what the operator named.
             cur.execute(
-                "SELECT has_schema_privilege(current_user, %s, 'CREATE')",
-                (schema,),
+                "SELECT has_schema_privilege(current_user, format('%%I', %s::text), 'USAGE'),"
+                "       has_schema_privilege(current_user, format('%%I', %s::text), 'CREATE')",
+                (schema, schema),
             )
-            can_create = bool(cur.fetchone()[0])
+            usage_row = cur.fetchone()
+            signals["schema_usage"] = bool(usage_row[0])
+            can_create = bool(usage_row[1])
+            signals["schema_create"] = can_create
 
             can_insert = False
-            can_update = False
+            can_update = True
             if table_exists and table:
-                cur.execute(
-                    "SELECT has_table_privilege(current_user, %s, 'INSERT')",
-                    (f"{schema}.{table}",),
-                )
-                can_insert = bool(cur.fetchone()[0])
-                if need_update:
+                try:
                     cur.execute(
-                        "SELECT has_table_privilege(current_user, %s, 'UPDATE')",
-                        (f"{schema}.{table}",),
+                        "SELECT to_regclass(format('%%I.%%I', %s::text, %s::text)) IS NOT NULL",
+                        (schema, table),
                     )
-                    can_update = bool(cur.fetchone()[0])
-                else:
-                    can_update = True
-            elif not table_exists:
-                can_insert = can_create
-                can_update = True
+                    visible = bool(cur.fetchone()[0])
+                except Exception as exc:
+                    # e.g. "permission denied for schema": the catalog lookup
+                    # itself is blocked, so visibility is unmeasured — not False.
+                    logger.debug("Catalog visibility lookup blocked: %s", exc)
+                    return PrivilegeProbeResult(
+                        can_write=None,
+                        can_create_table=can_create,
+                        status="unavailable",
+                        detail=(
+                            f"Catalog lookup for {schema}.{table} was refused for "
+                            f"'{username or 'current_user'}' ({str(exc).strip()}). "
+                            "Object existence and write access are both unmeasured; "
+                            "this is not proof the object is absent."
+                        ),
+                        engine=engine,
+                        method="to_regclass/has_schema_privilege",
+                        signals=signals,
+                    )
+                signals["table_visible_in_catalog"] = visible
+                if not visible:
+                    # Not resolvable *for this role*: could be absent, could be
+                    # invisible without USAGE. Refuse to guess either way.
+                    return PrivilegeProbeResult(
+                        can_write=None,
+                        can_create_table=can_create,
+                        status="unavailable",
+                        detail=(
+                            f"{schema}.{table} is not resolvable in the catalog as "
+                            f"'{username or 'current_user'}'. This is not proof the "
+                            "object is absent — schema USAGE is "
+                            f"{'granted' if signals['schema_usage'] else 'missing'}. "
+                            "Grant catalog visibility before trusting a write verdict."
+                        ),
+                        engine=engine,
+                        method="to_regclass/has_schema_privilege",
+                        signals=signals,
+                    )
+                cur.execute(
+                    "SELECT has_table_privilege(current_user, format('%%I.%%I', %s::text, %s::text), 'INSERT'),"
+                    "       has_table_privilege(current_user, format('%%I.%%I', %s::text, %s::text), 'UPDATE'),"
+                    "       pg_get_userbyid(c.relowner) = current_user"
+                    "  FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace"
+                    " WHERE n.nspname = %s AND c.relname = %s",
+                    (schema, table, schema, table, schema, table),
+                )
+                row = cur.fetchone() or (False, False, None)
+                can_insert = bool(row[0])
+                signals["table_insert_grant"] = can_insert
+                signals["table_update_grant"] = bool(row[1])
+                signals["table_owner"] = None if row[2] is None else bool(row[2])
+                can_update = bool(row[1]) if need_update else True
             else:
+                # Create-new: the schema's CREATE privilege is the write gate.
                 can_insert = can_create
-                can_update = True
 
-        can_write = bool(can_insert and (can_update if need_update else True))
+        can_write = bool(can_insert and can_update)
         return _finalize(
             engine=engine,
             can_write=can_write,
@@ -461,7 +641,8 @@ def _probe_postgres_family(
             table=table,
             schema=schema,
             need_update=need_update,
-            method="has_table_privilege/has_schema_privilege",
+            method="has_table_privilege/has_schema_privilege/pg_class owner",
+            signals=signals,
         )
     finally:
         try:
@@ -908,9 +1089,21 @@ def _probe_sqlserver(
             else:
                 update_perm = True
 
+        # CREATE TABLE is a *database*-scoped permission in SQL Server:
+        # HAS_PERMS_BY_NAME(schema, 'SCHEMA', 'CREATE TABLE') returns NULL for
+        # every principal, including sysadmin, so probing it at schema scope
+        # denies writes to accounts that can plainly create tables. Creating a
+        # table needs CREATE TABLE on the database *and* ALTER on the schema
+        # that will own it.
         create_perm = bool(
             conn.execute(
-                sa.text("SELECT HAS_PERMS_BY_NAME(:sch, 'SCHEMA', 'CREATE TABLE')"),
+                sa.text(
+                    "SELECT CASE WHEN IS_SRVROLEMEMBER('sysadmin') = 1 "
+                    "OR IS_MEMBER('db_owner') = 1 THEN 1 "
+                    "WHEN HAS_PERMS_BY_NAME(DB_NAME(), 'DATABASE', 'CREATE TABLE') = 1 "
+                    "AND HAS_PERMS_BY_NAME(:sch, 'SCHEMA', 'ALTER') = 1 THEN 1 "
+                    "ELSE 0 END"
+                ),
                 {"sch": schema},
             ).scalar()
         )
@@ -1012,11 +1205,18 @@ def _probe_oracle(
                     ).fetchall()
                 }
 
+        # ALL_TAB_PRIVS lists *granted* privileges only — an owner never appears
+        # there, so a schema owner writing to its own table read as "denied".
+        session_user = str(
+            conn.execute(sa.text("SELECT USER FROM dual")).scalar() or ""
+        ).upper()
+
         can_write, can_create = evaluate_oracle_privileges(
             session_privs=session_privs,
             tab_privs=tab_privs,
             table_exists=bool(exists),
             need_update=need_update,
+            is_owner=bool(session_user) and session_user == owner,
         )
         return _finalize(
             engine="oracle",
@@ -1036,19 +1236,27 @@ def evaluate_oracle_privileges(
     tab_privs: set[str],
     table_exists: bool,
     need_update: bool = False,
+    is_owner: bool = False,
 ) -> tuple[bool, bool]:
-    """Evaluate Oracle privilege sets → (can_write, can_create). Public for tests."""
+    """Evaluate Oracle privilege sets → (can_write, can_create). Public for tests.
+
+    ``is_owner`` is the session user owning the target schema: Oracle grants an
+    owner implicit full DML on its own objects and never records it in
+    ALL_TAB_PRIVS, so it must be treated as INSERT/UPDATE.
+    """
     sp = {p.upper() for p in session_privs}
     tp = {p.upper() for p in tab_privs}
 
     can_create = bool(sp & {"CREATE TABLE", "CREATE ANY TABLE"} or "DBA" in sp)
     can_insert = bool(
-        tp & {"INSERT", "ALL"}
+        is_owner
+        or tp & {"INSERT", "ALL"}
         or sp & {"INSERT ANY TABLE"}
         or "DBA" in sp
     )
     can_update = bool(
-        tp & {"UPDATE", "ALL"}
+        is_owner
+        or tp & {"UPDATE", "ALL"}
         or sp & {"UPDATE ANY TABLE"}
         or "DBA" in sp
     )
@@ -1139,6 +1347,105 @@ def _probe_sqlite(
     )
 
 
+# ── DuckDB ───────────────────────────────────────────────────────────────────
+
+def _probe_duckdb(
+    *,
+    database: str,
+    connection_string: str,
+    host: str,
+    table: str,
+    table_exists: bool,
+) -> PrivilegeProbeResult:
+    """Filesystem probe — DuckDB is embedded and has no GRANT catalog.
+
+    Asking an embedded engine for grants and reporting ``unavailable`` when it
+    has none blocked create-new on a destination the process can plainly write.
+    Whoever can write the file holds every privilege there is, so the file is
+    the authority. MotherDuck is a hosted service reached through the same
+    driver, and no local path can speak for it, so it stays unavailable.
+    """
+    raw = (connection_string or database or host or "").strip()
+    lowered = raw.lower()
+    for prefix in ("duckdb:///", "duckdb://", "duckdb:"):
+        if lowered.startswith(prefix):
+            raw = raw[len(prefix) :]
+            lowered = raw.lower()
+            break
+    raw = raw.lstrip("/") if lowered.startswith("//") else raw
+
+    if lowered.startswith("md:") or lowered.startswith("motherduck:"):
+        return PrivilegeProbeResult(
+            can_write=None,
+            can_create_table=None,
+            status="unavailable",
+            detail=(
+                "MotherDuck is a hosted catalog — a local filesystem check "
+                "cannot prove its grants"
+            ),
+            engine="duckdb",
+        )
+
+    if not raw or raw == ":memory:":
+        return PrivilegeProbeResult(
+            can_write=True,
+            can_create_table=True,
+            status="ok",
+            detail="DuckDB in-memory database is always writable in-process",
+            engine="duckdb",
+            method="in_memory",
+        )
+
+    path = raw
+    exists = bool(table_exists)
+    if os.path.exists(path):
+        can_write_fs = os.access(path, os.W_OK)
+        parent = os.path.dirname(path) or "."
+        parent_ok = os.access(parent, os.W_OK)
+        if table:
+            try:
+                import duckdb
+
+                con = duckdb.connect(path, read_only=True)
+                try:
+                    row = con.execute(
+                        "SELECT count(*) FROM information_schema.tables "
+                        "WHERE table_name = ?",
+                        [table],
+                    ).fetchone()
+                    exists = bool(row and row[0])
+                finally:
+                    con.close()
+            except Exception as exc:  # noqa: BLE001 — existence stays as given
+                logging.getLogger(__name__).info(
+                    "duckdb table existence probe unavailable: %s", exc
+                )
+        can_create = can_write_fs and parent_ok
+        return _finalize(
+            engine="duckdb",
+            can_write=can_write_fs if exists else can_create,
+            can_create=can_create,
+            table_exists=exists,
+            table=table,
+            schema="main",
+            need_update=False,
+            method="os.access+information_schema",
+        )
+
+    parent = os.path.dirname(path) or "."
+    parent_ok = os.path.isdir(parent) and os.access(parent, os.W_OK)
+    return _finalize(
+        engine="duckdb",
+        can_write=parent_ok,
+        can_create=parent_ok,
+        table_exists=False,
+        table=table,
+        schema="main",
+        need_update=False,
+        method="os.access",
+    )
+
+
 # ── MongoDB ──────────────────────────────────────────────────────────────────
 
 def _probe_mongodb(
@@ -1199,16 +1506,32 @@ def _probe_mongodb(
     auth_info = (status or {}).get("authInfo") or {}
     privileges = list(auth_info.get("authenticatedUserPrivileges") or [])
     roles = list(auth_info.get("authenticatedUserRoles") or [])
+    auth_users = list(auth_info.get("authenticatedUsers") or [])
 
-    # Unauthenticated local / empty privilege list: cannot assert deny.
+    # Empty privilege catalog: distinguish unauthenticated mongod (full local
+    # access, CREATE/WRITE assumed from connectivity) from an authenticated
+    # session that returned no grant rows (restricted — cannot prove CREATE).
     if not privileges and not roles:
+        if not auth_users:
+            return PrivilegeProbeResult(
+                can_write=True,
+                can_create_table=True,
+                status="ok",
+                detail=(
+                    "MongoDB session is unauthenticated — privilege catalog empty; "
+                    "CREATE/WRITE assumed from connectivity (enable auth for "
+                    "catalog-verified grants)"
+                ),
+                engine="mongodb",
+                method="connectionStatus.unauthenticated",
+            )
         return PrivilegeProbeResult(
             can_write=None,
             can_create_table=None,
             status="unavailable",
             detail=(
-                "MongoDB returned no privilege catalog (unauthenticated or restricted); "
-                "G2 falls back to connectivity"
+                "MongoDB returned no privilege catalog for an authenticated user "
+                "(restricted); G2 falls back to connectivity"
             ),
             engine="mongodb",
             method="connectionStatus.showPrivileges",
@@ -1964,6 +2287,302 @@ def evaluate_s3_acl_grants(
     return can_write, can_create
 
 
+def evaluate_gcs_iam_bindings(
+    bindings: list[Any],
+    *,
+    table_exists: bool = True,
+) -> tuple[bool, bool]:
+    """Parse GCS IAM bindings → (can_write, can_create). Public for tests."""
+    can_write = False
+    can_create = False
+    for binding in bindings or []:
+        role = ""
+        perms: list[str] = []
+        if isinstance(binding, dict):
+            role = str(binding.get("role") or binding.get("Role") or "")
+            raw_perms = binding.get("permissions") or binding.get("Permissions") or []
+            if isinstance(raw_perms, (list, tuple, set)):
+                perms = [str(p) for p in raw_perms]
+        else:
+            role = str(getattr(binding, "role", "") or "")
+            raw_perms = getattr(binding, "permissions", None) or []
+            if isinstance(raw_perms, (list, tuple, set)):
+                perms = [str(p) for p in raw_perms]
+        role_l = role.strip()
+        if role_l in _GCS_WRITE_ROLES:
+            can_write = True
+        if role_l in _GCS_CREATE_ROLES:
+            can_create = True
+        if any(p in _GCS_WRITE_PERMS for p in perms):
+            can_write = True
+        if "storage.buckets.create" in perms:
+            can_create = True
+    if not table_exists:
+        can_write = can_write or can_create
+    return can_write, can_create
+
+
+def evaluate_adls_access(
+    *,
+    has_account_key: bool,
+    roles: list[str] | None = None,
+    acl_permissions: str = "",
+    container_exists: bool = True,
+) -> tuple[bool, bool]:
+    """Parse ADLS/Blob access posture → (can_write, can_create). Public for tests.
+
+    An account key is the Azure equivalent of full-control — never probe PutBlob.
+    Role names and container ACL letters are evaluated when a service principal
+    is used instead of a key.
+    """
+    if has_account_key:
+        return True, True
+    can_write = False
+    can_create = False
+    for raw in roles or []:
+        role = str(raw or "").strip().lower()
+        if role in _ADLS_WRITE_ROLES:
+            can_write = True
+        if role in _ADLS_CREATE_ROLES:
+            can_create = True
+    perms = {ch.lower() for ch in (acl_permissions or "") if ch.isalpha()}
+    if perms & _ADLS_WRITE_ACL:
+        can_write = True
+    if "c" in perms:
+        can_create = True
+    if not container_exists:
+        can_write = can_write or can_create
+    return can_write, can_create
+
+
+def _probe_gcs(
+    *,
+    host: str,
+    port: int,
+    bucket: str,
+    username: str,
+    password: str,
+    connection_string: str,
+    service_account: str,
+    key_prefix: str,
+    table_exists: bool,
+) -> PrivilegeProbeResult:
+    from connectors.gcs_common import gcs_client
+
+    bucket_name = (bucket or "").strip()
+    if not bucket_name:
+        return PrivilegeProbeResult(
+            can_write=None,
+            can_create_table=None,
+            status="unavailable",
+            detail="GCS bucket name required for privilege probe",
+            engine="gcs",
+        )
+
+    cfg = {
+        "host": host,
+        "port": port,
+        "database": bucket_name,
+        "username": username,
+        "password": password,
+        "connection_string": connection_string,
+        "service_account": service_account,
+    }
+    client = gcs_client(cfg)
+    exists = bool(table_exists)
+    try:
+        bucket_obj = client.get_bucket(bucket_name)
+        exists = True
+    except Exception as exc:
+        code = str(getattr(exc, "code", "") or getattr(exc, "status_code", "") or "")
+        name = str(getattr(exc, "message", "") or exc)
+        if "404" in f"{code} {name}" or "NotFound" in type(exc).__name__:
+            exists = False
+            return PrivilegeProbeResult(
+                can_write=None,
+                can_create_table=None,
+                status="unavailable",
+                detail=f"GCS bucket `{bucket_name}` not found — IAM cannot be read until it exists",
+                engine="gcs",
+                method="get_bucket",
+            )
+        if "403" in f"{code} {name}" or "Forbidden" in type(exc).__name__:
+            return PrivilegeProbeResult(
+                can_write=False,
+                can_create_table=False,
+                status="denied",
+                detail=f"GCS AccessDenied on get_bucket for `{bucket_name}` — check IAM",
+                engine="gcs",
+                method="get_bucket",
+            )
+        return PrivilegeProbeResult(
+            can_write=None,
+            can_create_table=None,
+            status="unavailable",
+            detail=f"GCS get_bucket failed: {exc}",
+            engine="gcs",
+            method="get_bucket",
+        )
+
+    try:
+        policy = bucket_obj.get_iam_policy(requested_policy_version=3)
+    except Exception as exc:
+        return PrivilegeProbeResult(
+            can_write=None,
+            can_create_table=None,
+            status="unavailable",
+            detail=(
+                f"GCS get_iam_policy unavailable ({exc}); "
+                "G2 falls back to connectivity (never upload probe)"
+            ),
+            engine="gcs",
+            method="get_iam_policy",
+        )
+
+    bindings = getattr(policy, "bindings", None)
+    if bindings is None and isinstance(policy, dict):
+        bindings = policy.get("bindings")
+    bindings = list(bindings or [])
+    can_write, can_create = evaluate_gcs_iam_bindings(
+        bindings,
+        table_exists=bool(exists),
+    )
+    return _finalize(
+        engine="gcs",
+        can_write=can_write,
+        can_create=can_create,
+        table_exists=bool(exists),
+        table=key_prefix or bucket_name,
+        schema=bucket_name,
+        need_update=False,
+        method="get_iam_policy",
+        write_action="storage.objects.create",
+        create_action="storage.buckets.create",
+    )
+
+
+def _probe_adls(
+    *,
+    host: str,
+    port: int,
+    container: str,
+    username: str,
+    password: str,
+    connection_string: str,
+    service_account: str,
+    key_prefix: str,
+    table_exists: bool,
+) -> PrivilegeProbeResult:
+    from connectors.adls_common import blob_service_client
+
+    container_name = (container or "").strip()
+    if not container_name:
+        return PrivilegeProbeResult(
+            can_write=None,
+            can_create_table=None,
+            status="unavailable",
+            detail="ADLS container name required for privilege probe",
+            engine="adls",
+        )
+
+    cfg = {
+        "host": host,
+        "port": port,
+        "database": container_name,
+        "username": username,
+        "password": password,
+        "connection_string": connection_string,
+        "service_account": service_account,
+        "account_key": password,
+        "account_name": username,
+    }
+    has_account_key = bool(
+        (password or "").strip()
+        or "AccountKey=" in (connection_string or "")
+    )
+    client = blob_service_client(cfg)
+    exists = bool(table_exists)
+    container_client = None
+    try:
+        container_client = client.get_container_client(container_name)
+        container_client.get_container_properties()
+        exists = True
+    except Exception as exc:
+        code = str(getattr(exc, "status_code", "") or getattr(exc, "status", "") or "")
+        name = type(exc).__name__
+        if "404" in f"{code}" or "ResourceNotFound" in name or "ContainerNotFound" in name:
+            exists = False
+        elif "403" in f"{code}" or "ClientAuthenticationError" in name or "HttpResponseError" in name:
+            # Distinguish auth deny from other HTTP errors when status is present.
+            if "403" in f"{code}" or "401" in f"{code}":
+                return PrivilegeProbeResult(
+                    can_write=False,
+                    can_create_table=False,
+                    status="denied",
+                    detail=f"ADLS AccessDenied on get_container_properties for `{container_name}`",
+                    engine="adls",
+                    method="get_container_properties",
+                )
+            return PrivilegeProbeResult(
+                can_write=None,
+                can_create_table=None,
+                status="unavailable",
+                detail=f"ADLS get_container_properties failed: {exc}",
+                engine="adls",
+                method="get_container_properties",
+            )
+        else:
+            return PrivilegeProbeResult(
+                can_write=None,
+                can_create_table=None,
+                status="unavailable",
+                detail=f"ADLS get_container_properties failed: {exc}",
+                engine="adls",
+                method="get_container_properties",
+            )
+
+    roles: list[str] = []
+    acl_permissions = ""
+    try:
+        if container_client is None:
+            raise RuntimeError("container client unavailable")
+        policy = container_client.get_container_access_policy()
+        signed = (policy or {}).get("signed_identifiers") or (policy or {}).get("signedIdentifiers") or []
+        if isinstance(signed, dict):
+            signed = list(signed.values())
+        for ident in signed or []:
+            access = getattr(ident, "permission", None) or getattr(ident, "access_policy", None)
+            perm = getattr(access, "permission", None) if access is not None else None
+            if perm is None and isinstance(ident, dict):
+                perm = (ident.get("access_policy") or ident).get("permission") if isinstance(ident.get("access_policy") or ident, dict) else ident.get("permission")
+            if perm:
+                acl_permissions += str(perm)
+    except Exception:
+        # Access policy is optional — account-key / role evaluation still applies.
+        pass
+
+    can_write, can_create = evaluate_adls_access(
+        has_account_key=has_account_key,
+        roles=roles,
+        acl_permissions=acl_permissions,
+        container_exists=bool(exists),
+    )
+    if not exists and has_account_key:
+        can_write, can_create = True, True
+    return _finalize(
+        engine="adls",
+        can_write=can_write,
+        can_create=can_create,
+        table_exists=bool(exists),
+        table=key_prefix or container_name,
+        schema=container_name,
+        need_update=False,
+        method="get_container_properties",
+        write_action="Microsoft.Storage/storageAccounts/blobServices/containers/blobs/write",
+        create_action="Microsoft.Storage/storageAccounts/blobServices/containers/write",
+    )
+
+
 def resolve_write_flags(
     connected: bool,
     probe: PrivilegeProbeResult | None,
@@ -1990,3 +2609,130 @@ def resolve_write_flags(
     can_create = bool(probe.can_create_table)
     meta["privilege_verified"] = True
     return can_write, can_create, meta
+
+
+def _probe_sftp(
+    *,
+    host: str,
+    port: int,
+    directory: str,
+    filename: str,
+    username: str,
+    password: str,
+    connection_string: str,
+    private_key: str,
+    service_account: str,
+    api_key: str,
+    host_key: str,
+    known_hosts: str,
+    host_key_policy: str,
+    table_exists: bool | None,
+) -> PrivilegeProbeResult:
+    """Measure whether the landing directory accepts a new file.
+
+    SFTP has no privilege catalog to read, and leaving it unmeasured made every
+    create-new SFTP route fail G2 for want of proof — the connector could write
+    perfectly and still never pass Validate.
+
+    POSIX mode bits cannot answer this over SFTP: the protocol reports the
+    remote uid/gid but not which of them the authenticated session maps to, so
+    ``0o755`` says nothing about *this* user. The only honest measurement is the
+    operation itself, so a uniquely named hidden file is created and removed.
+    That is not operator data: it is a new dotfile no reader is watching, and it
+    is deleted on every exit path including failure. ``.`` keeps it out of the
+    directory listings that drop-zone automation polls.
+    """
+    import uuid
+
+    from connectors.sftp_common import connect_sftp, parse_sftp_config
+
+    target_dir = (directory or "").strip() or "/"
+    cfg = parse_sftp_config(
+        connection_string=connection_string,
+        host=host,
+        port=port,
+        username=username,
+        password=password,
+        database=target_dir,
+        private_key=private_key,
+        service_account=service_account,
+        api_key=api_key,
+        host_key=host_key,
+        known_hosts=known_hosts,
+        host_key_policy=host_key_policy,
+    )
+    if not cfg.host:
+        return PrivilegeProbeResult(
+            can_write=None,
+            can_create_table=None,
+            status="unavailable",
+            detail="SFTP host required for privilege probe",
+            engine="sftp",
+        )
+
+    transport, sftp = connect_sftp(cfg)
+    probe_name = f"{target_dir.rstrip('/')}/.dataflow-preflight-{uuid.uuid4().hex}.tmp"
+    signals: dict[str, bool | None] = {}
+    try:
+        try:
+            sftp.stat(target_dir)
+            signals["directory_exists"] = True
+        except OSError as exc:
+            return PrivilegeProbeResult(
+                can_write=False,
+                can_create_table=False,
+                status="denied",
+                detail=(
+                    f"SFTP directory `{target_dir}` is not reachable for "
+                    f"'{cfg.username}': {exc}"
+                ),
+                engine="sftp",
+                method="stat",
+                signals={"directory_exists": False},
+            )
+
+        try:
+            with sftp.file(probe_name, "wb") as handle:
+                handle.write(b"")
+            signals["directory_write"] = True
+        except OSError as exc:
+            return PrivilegeProbeResult(
+                can_write=False,
+                can_create_table=False,
+                status="denied",
+                detail=(
+                    f"SFTP user '{cfg.username}' cannot create files in "
+                    f"`{target_dir}`: {exc}"
+                ),
+                engine="sftp",
+                method="create probe file",
+                signals={"directory_exists": True, "directory_write": False},
+            )
+        finally:
+            try:
+                sftp.remove(probe_name)
+            except OSError as exc:
+                # A probe file we cannot remove is litter in an operator's
+                # landing directory — name it rather than leave it silent.
+                logger.warning(
+                    "SFTP preflight probe file left behind at %s: %s", probe_name, exc
+                )
+
+        return _finalize(
+            engine="sftp",
+            can_write=True,
+            can_create=True,
+            table_exists=table_exists,
+            table=filename,
+            schema=target_dir,
+            need_update=False,
+            method="create/remove probe file",
+            signals=signals,
+            write_action="WRITE",
+            create_action="CREATE FILE",
+        )
+    finally:
+        try:
+            sftp.close()
+        finally:
+            transport.close()

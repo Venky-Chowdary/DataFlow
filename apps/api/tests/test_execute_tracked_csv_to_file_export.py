@@ -39,6 +39,15 @@ def _run_export(dest_format: str, expected_ext: str, expected_mime_prefix: str) 
     assert result.destination_summary.get("filename", "").endswith(f".{expected_ext}")
     mime = result.destination_summary.get("mime", "")
     assert mime.startswith(expected_mime_prefix), mime
+    recon = result.reconciliation or {}
+    assert recon.get("skipped_readback") is True
+    assert recon.get("migration_proven") is False
+    assert recon.get("artifact_row_count") == 2
+    assert recon.get("dest_count_source") == "artifact_readback"
+    ledger = result.row_accounting or {}
+    assert ledger.get("dest_count") == 2
+    assert ledger.get("rows_written_source") == "artifact_readback"
+    assert ledger.get("balanced") is True
 
 
 def test_csv_to_parquet_export():

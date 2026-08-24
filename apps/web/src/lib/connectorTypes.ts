@@ -154,7 +154,7 @@ const BASE_DEFAULTS: Record<string, { host: string; port: number }> = {
   postgresql: { host: "localhost", port: 5432 },
   mysql: { host: "localhost", port: 3306 },
   mongodb: { host: "localhost", port: 27017 },
-  snowflake: { host: "account.snowflakecomputing.com", port: 443 },
+  snowflake: { host: "", port: 443 },
   bigquery: { host: "bigquery.googleapis.com", port: 443 },
   redshift: { host: "localhost", port: 5439 },
   dynamodb: { host: "us-east-1", port: 443 },
@@ -173,7 +173,7 @@ const BASE_DEFAULTS: Record<string, { host: string; port: number }> = {
   milvus: { host: "localhost", port: 19530 },
   iceberg: { host: "", port: 0 },
   // Instance URL only — login.salesforce.com cannot serve REST data APIs.
-  salesforce: { host: "https://yourorg.my.salesforce.com", port: 443 },
+  salesforce: { host: "", port: 443 },
   hubspot: { host: "api.hubapi.com", port: 443 },
   stripe: { host: "api.stripe.com", port: 443 },
   csv: { host: "", port: 0 },

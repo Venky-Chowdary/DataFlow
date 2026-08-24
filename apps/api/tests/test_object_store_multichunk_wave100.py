@@ -126,16 +126,19 @@ def test_s3_writer_two_chunks_use_distinct_keys(monkeypatch):
         **common, data_rows=[["2"]], file_batch_idx=2
     )
     assert r1.ok and r2.ok
-    assert len(puts) == 2
-    assert puts[0] != puts[1]
-    assert "part-00001" in puts[0]
-    assert "part-00002" in puts[1]
+    # Each chunk: staging put + live put (purge-after-commit honesty).
+    live_puts = [k for k in puts if not k.endswith(".__df_staging__")]
+    assert len(live_puts) == 2
+    assert live_puts[0] != live_puts[1]
+    assert "part-00001" in live_puts[0]
+    assert "part-00002" in live_puts[1]
+    assert any(k.endswith(".__df_staging__") for k in puts)
 
 
 # --- Wave 102: append runs must not interleave with a previous run's parts ---
 
 
-def test_overwrite_layout_shares_one_part_set_and_purges_first_chunk():
+def test_overwrite_layout_shares_one_part_set_and_purges_last_chunk():
     first = resolve_object_write_layout(
         table_name="orders/export.json",
         sync_mode="full_refresh_overwrite",
@@ -150,13 +153,53 @@ def test_overwrite_layout_shares_one_part_set_and_purges_first_chunk():
         total_chunks=3,
         job_id="job-a",
     )
-    # Overwrite reuses a stable part set (no run token) and clears once.
+    last = resolve_object_write_layout(
+        table_name="orders/export.json",
+        sync_mode="full_refresh_overwrite",
+        file_batch_idx=3,
+        total_chunks=3,
+        job_id="job-a",
+    )
+    # Overwrite reuses a stable part set (no run token) and clears once *after*
+    # the last successful promote — never before the first upload.
     assert first.write_key == "orders/export/part-00001.json"
     assert second.write_key == "orders/export/part-00002.json"
-    assert first.should_purge is True
+    assert first.should_purge is False
     assert second.should_purge is False
+    assert last.should_purge is True
+    assert last.keep_part_count == 3
     assert first.purge_prefix == "orders/export/"
     assert first.purge_legacy_key == "orders/export.json"
+
+
+def test_purge_keeps_current_run_parts_after_overwrite():
+    from connectors.object_store_common import purge_object_store_parts
+
+    store = {
+        "orders/export/part-00001.json": b"new1",
+        "orders/export/part-00002.json": b"new2",
+        "orders/export/part-00003.json": b"stale",
+        "orders/export.json": b"legacy",
+    }
+
+    def list_keys(prefix: str) -> list[str]:
+        return [k for k in store if k.startswith(prefix)]
+
+    def delete_key(key: str) -> None:
+        store.pop(key, None)
+
+    removed = purge_object_store_parts(
+        list_keys=list_keys,
+        delete_key=delete_key,
+        parts_prefix="orders/export/",
+        legacy_base_key="orders/export.json",
+        keep_part_count=2,
+        keep_keys=["orders/export/part-00001.json", "orders/export/part-00002.json"],
+    )
+    assert "orders/export/part-00003.json" in removed
+    assert "orders/export.json" in removed
+    assert "orders/export/part-00001.json" in store
+    assert "orders/export/part-00002.json" in store
 
 
 def test_append_reruns_never_collide_on_part_keys():

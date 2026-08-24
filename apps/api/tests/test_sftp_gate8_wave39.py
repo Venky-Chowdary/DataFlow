@@ -30,16 +30,13 @@ def test_verify_target_routes_sftp():
 
 
 def test_verify_sftp_object_parses_jsonl():
+    import io
+
     from services.reconciliation import verify_sftp_object
 
     body = b'{"id":"1","n":1}\n{"id":"2","n":2}\n'
-    file_obj = MagicMock()
-    file_obj.__enter__ = lambda s: s
-    file_obj.__exit__ = MagicMock(return_value=False)
-    file_obj.read.return_value = body
-
     sftp = MagicMock()
-    sftp.file.return_value = file_obj
+    sftp.file.return_value = io.BytesIO(body)
     transport = MagicMock()
 
     cfg = MagicMock()
@@ -64,15 +61,13 @@ def test_verify_sftp_object_parses_jsonl():
 
 
 def test_read_target_sample_routes_sftp():
+    import io
+
     from services.reconciliation import read_target_sample
 
     body = b'{"id":"a","email":"a@x.com"}\n'
-    file_obj = MagicMock()
-    file_obj.__enter__ = lambda s: s
-    file_obj.__exit__ = MagicMock(return_value=False)
-    file_obj.read.return_value = body
     sftp = MagicMock()
-    sftp.file.return_value = file_obj
+    sftp.file.return_value = io.BytesIO(body)
     cfg = MagicMock()
     cfg.host = "ftp.example"
     cfg.path = "/exports/contacts.jsonl"

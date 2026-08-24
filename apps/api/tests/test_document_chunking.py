@@ -6,6 +6,8 @@ import io
 import sys
 from pathlib import Path
 
+import pytest
+
 _API_ROOT = Path(__file__).resolve().parents[1]
 if str(_API_ROOT) not in sys.path:
     sys.path.insert(0, str(_API_ROOT))
@@ -51,6 +53,7 @@ def _make_pdf_bytes(text: str) -> bytes:
 
 
 def _make_docx_bytes(paragraphs: list[str], heading: str = "") -> bytes:
+    pytest.importorskip("docx")
     from docx import Document
 
     doc = Document()

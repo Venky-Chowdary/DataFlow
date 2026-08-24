@@ -563,15 +563,17 @@ body {
 
 .df2-card-title {
   margin: 0;
-  font-size: 15px;
+  font-family: var(--df-font-sans);
+  font-size: var(--df-fs-title, 15px);
   font-weight: 600;
-  color: #0f172a;
+  color: var(--df-text-primary, #0f172a);
 }
 
 .df2-card-sub {
   margin: 4px 0 0;
-  font-size: 13px;
-  color: #64748b;
+  font-family: var(--df-font-sans);
+  font-size: var(--df-fs-sm, 12.5px);
+  color: var(--df-text-secondary, #64748b);
 }
 
 .df2-card-body { padding: 20px; }
@@ -863,7 +865,7 @@ body {
   padding: 2px 8px;
   font-size: 11px;
   font-weight: 600;
-  border-radius: 999px;
+  border-radius: var(--df-radius-sm, 6px);
   text-transform: capitalize;
 }
 
@@ -1012,6 +1014,8 @@ body {
   text-align: left;
   transition: border-color 0.15s, box-shadow 0.15s;
   min-height: 130px;
+  min-width: 0;
+  overflow: hidden;
 }
 
 .df2-connector-tile:hover {
@@ -1034,6 +1038,13 @@ body {
   font-weight: 600;
   color: #0f172a;
   line-height: 1.25;
+  overflow-wrap: anywhere;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  min-width: 0;
+  width: 100%;
 }
 
 .df2-connector-tile-desc {
@@ -3822,6 +3833,10 @@ body {
 .df2-preflight-score svg { width: 100%; height: 100%; }
 .df2-score-track { fill: none; stroke: #e2e8f0; stroke-width: 6; }
 .df2-score-fill { fill: none; stroke: #0f766e; stroke-width: 6; stroke-linecap: round; }
+.df2-preflight-score.is-complete .df2-score-fill { stroke-linecap: butt; }
+.df2-preflight-score.is-indeterminate svg {
+  animation: df2-progress-ring-spin 1.1s linear infinite;
+}
 
 .df2-preflight-score-val {
   position: absolute;
@@ -6215,7 +6230,7 @@ html,
   gap: 12px;
   padding: 12px 14px 14px;
   border: 1px solid var(--df-border);
-  border-radius: var(--df-radius-panel, 12px);
+  border-radius: var(--df-radius-card, 8px);
   background: color-mix(in srgb, var(--df-surface) 96%, transparent);
   box-shadow: var(--df-shadow-md);
   backdrop-filter: blur(12px);
@@ -6276,7 +6291,8 @@ html,
 
 .dt-toast-title {
   color: var(--df-text-primary);
-  font-size: 13.5px;
+  font-family: var(--df-font-sans);
+  font-size: var(--df-fs-md, 13.5px);
   font-weight: 700;
   line-height: 1.3;
   letter-spacing: -0.01em;
@@ -6284,7 +6300,8 @@ html,
 
 .dt-toast-message {
   color: var(--df-text-secondary);
-  font-size: 12.5px;
+  font-family: var(--df-font-sans);
+  font-size: var(--df-fs-sm, 12.5px);
   line-height: 1.45;
   overflow-wrap: anywhere;
   white-space: pre-wrap;

@@ -16,15 +16,16 @@ from connectors.base import ReadBatch
 
 
 def _stringify(value: Any) -> str:
+    from services.value_serializer import SQL_NULL_SENTINEL, cell_to_string
+
     if value is None:
-        return ""
+        return SQL_NULL_SENTINEL
     if isinstance(value, (dict, list)):
         return json.dumps(value, default=str)
     if isinstance(value, (datetime, date, time, Decimal)):
         return str(value)
-    if isinstance(value, bytes):
-        return value.decode("utf-8", errors="replace")
-    return str(value)
+    # Bytes → base64 via cell_to_string SSOT — never UTF-8 errors="replace" (U+FFFD invent).
+    return cell_to_string(value, preserve_sql_null=True)
 
 
 def _endpoint_from_cfg_or_kwargs(

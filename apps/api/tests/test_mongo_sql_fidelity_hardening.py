@@ -13,7 +13,8 @@ def test_mysql_bool_and_json_wire_from_mongo_strings():
     assert _to_mysql_value("false", "BOOLEAN") == 0
     assert _to_mysql_value("true", "TINYINT") == 1
     assert _to_mysql_value({"email": True}, "JSON") == '{"email":true}'
-    assert _to_mysql_value("", "JSON") is None
+    with pytest.raises(ValueError, match="refuse silent NULL invent"):
+        _to_mysql_value("", "JSON")
 
 
 def test_struct_flatten_uses_json_default_not_repr():
@@ -178,3 +179,57 @@ def test_mark_dlq_promoted_mongodb_branch():
     assert out.get("updated") == 2
     assert out.get("driver") == "mongodb"
     coll.update_many.assert_called_once()
+
+
+def test_resume_treats_unreadable_committed_count_as_unknown_not_zero():
+    """Unknown committed rows must not be read as 'nothing was written'.
+
+    A confirmed-zero job can restart from zero (it cannot duplicate). A job
+    whose control-plane document is missing or unreadable is *unknown*, and an
+    append restarted from zero there duplicates the rows already committed.
+    """
+    from services.execution_engine_contract import (
+        ExecutionContractError,
+        ResumeKind,
+        assert_resume_allowed,
+        decide_resume,
+    )
+
+    confirmed_zero = assert_resume_allowed(
+        resume_requested=True,
+        checkpoint_has_progress=False,
+        sync_mode="full_refresh_append",
+        rows_committed=0,
+        rows_committed_known=True,
+    )
+    assert confirmed_zero["kind"] == ResumeKind.FROM_ZERO_NO_WRITES.value
+
+    unknown = decide_resume(
+        resume_requested=True,
+        checkpoint_has_progress=False,
+        sync_mode="full_refresh_append",
+        rows_committed=0,
+        rows_committed_known=False,
+    )
+    assert unknown["allowed"] is False
+    assert unknown["kind"] == ResumeKind.REFUSED.value
+    assert "Unknown is not zero" in unknown["reason"]
+
+    # A convergent sync mode still restarts: re-writing the same keys converges.
+    upsert = assert_resume_allowed(
+        resume_requested=True,
+        checkpoint_has_progress=False,
+        sync_mode="upsert",
+        rows_committed=0,
+        rows_committed_known=False,
+    )
+    assert upsert["kind"] == ResumeKind.FROM_ZERO_IDEMPOTENT.value
+
+    with pytest.raises(ExecutionContractError):
+        assert_resume_allowed(
+            resume_requested=True,
+            checkpoint_has_progress=False,
+            sync_mode="full_refresh_append",
+            rows_committed=0,
+            rows_committed_known=False,
+        )

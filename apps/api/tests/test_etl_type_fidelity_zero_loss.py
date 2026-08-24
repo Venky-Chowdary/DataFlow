@@ -42,8 +42,9 @@ def test_pg_array_preserves_element_carrier():
 
 
 def test_mysql_unsigned_widths_preserved():
-    assert _mysql_to_logical("int unsigned") == "INT UNSIGNED"
-    assert _mysql_to_logical("int(11) unsigned") == "INT UNSIGNED"
+    # Unambiguous INT4 UNSIGNED — bare INT UNSIGNED invents 64-bit (Property 1).
+    assert _mysql_to_logical("int unsigned") == "INT4 UNSIGNED"
+    assert _mysql_to_logical("int(11) unsigned") == "INT4 UNSIGNED"
     assert _mysql_to_logical("mediumint unsigned") == "MEDIUMINT UNSIGNED"
     assert _mysql_to_logical("smallint unsigned") == "SMALLINT UNSIGNED"
     assert _mysql_to_logical("bigint unsigned") == "BIGINT UNSIGNED"
@@ -89,4 +90,9 @@ def test_tz_polarity_lakehouse_and_mysql():
     assert "NTZ" in ddl_type("databricks", "TIMESTAMP_NTZ").upper() or "TIMESTAMP_NTZ" in ddl_type(
         "databricks", "TIMESTAMP_NTZ"
     ).upper()
-    assert ddl_type("mysql", "TIMESTAMPTZ").upper().startswith("DATETIME")
+    # MySQL has no offset-label carrier, so the only question an aware source
+    # raises is which carrier keeps the instant. TIMESTAMP(6) is UTC on disk
+    # and self-describing; DATETIME(6) holds the same digits with no polarity
+    # marker and needs a UTC-normalize contract to mean anything.
+    assert ddl_type("mysql", "TIMESTAMPTZ").upper().startswith("TIMESTAMP")
+    assert ddl_type("mysql", "TIMESTAMP").upper().startswith("DATETIME")

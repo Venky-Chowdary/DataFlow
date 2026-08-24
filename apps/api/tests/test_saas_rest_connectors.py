@@ -105,7 +105,8 @@ def test_airtable_cursor_pagination():
             cfg={"api_key": "pat_xxx", "table": "appXXX/tblYYY"},
             limit=2,
         )
-    assert batch.headers == ["id", "fields.Name"]
+    # Typed Airtable flatten promotes fields.* to top-level Map columns.
+    assert batch.headers == ["id", "Name"]
     assert batch.rows == [["r1", "A"], ["r2", "B"]]
     second_params = calls[1][1].get("params")
     assert second_params["offset"] == "off2"

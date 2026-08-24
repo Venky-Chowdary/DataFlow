@@ -12,11 +12,28 @@ describe("computeJobTrustScore", () => {
       records_processed: 1000,
       rejected_rows: 0,
       coerced_null_rows: 0,
-      reconciliation: { passed: true },
+      reconciliation: {
+        passed: true,
+        assurance_level: "full_checksum",
+        source_checksum: "aaa",
+        target_checksum: "aaa",
+        phase: "post_write_verified",
+      },
     });
     assert.ok(t.score >= 90);
     assert.equal(t.grade, "A");
     assert.equal(t.next_action.code, "ok");
+  });
+
+  it("does not grade-A on passed without full_checksum assurance", () => {
+    const t = computeJobTrustScore({
+      status: "completed",
+      records_processed: 1000,
+      rejected_rows: 0,
+      reconciliation: { passed: true },
+    });
+    assert.ok(t.score <= 89);
+    assert.notEqual(t.grade, "A");
   });
 
   it("drops score on quarantine and points next action", () => {
@@ -51,6 +68,46 @@ describe("computeJobTrustScore", () => {
     assert.ok(t.score <= 28);
     assert.equal(t.cursor_gap, true);
     assert.equal(t.next_action.code, "cursor_gap");
+    assert.match(t.next_action.label, /Reset/);
+  });
+
+  it("when_needed cursor gap tells the operator Resume will snapshot", () => {
+    const t = computeJobTrustScore({
+      status: "failed",
+      records_processed: 10,
+      cdc_cursor_gap: true,
+      snapshot_mode: "when_needed",
+      reconciliation: { passed: false },
+    });
+    assert.equal(t.next_action.code, "cursor_gap");
+    assert.match(t.next_action.label, /Resume/);
+    assert.match(t.next_action.detail, /migration_proven/);
+  });
+
+  it("treats cdc_ct_gap error_code as a cursor gap", () => {
+    const t = computeJobTrustScore({
+      status: "failed",
+      records_processed: 10,
+      error_code: "cdc_ct_gap",
+      snapshot_mode: "when_needed",
+      reconciliation: { passed: false },
+    });
+    assert.equal(t.cursor_gap, true);
+    assert.equal(t.next_action.code, "cursor_gap");
+    assert.match(t.next_action.label, /Resume/);
+  });
+
+  it("treats cdc_oplog_gap error_code as a cursor gap", () => {
+    const t = computeJobTrustScore({
+      status: "failed",
+      records_processed: 10,
+      error_code: "cdc_oplog_gap",
+      snapshot_mode: "when_needed",
+      reconciliation: { passed: false },
+    });
+    assert.equal(t.cursor_gap, true);
+    assert.equal(t.next_action.code, "cursor_gap");
+    assert.match(t.next_action.label, /Resume/);
   });
 
   it("caps completeness when Gate-8 reconcile is missing", () => {
@@ -58,7 +115,12 @@ describe("computeJobTrustScore", () => {
       status: "completed",
       records_processed: 1000,
       rejected_rows: 0,
-      reconciliation: { passed: true },
+      reconciliation: {
+        passed: true,
+        assurance_level: "full_checksum",
+        source_checksum: "a",
+        target_checksum: "a",
+      },
     });
     const without = computeJobTrustScore({
       status: "completed",
@@ -66,6 +128,7 @@ describe("computeJobTrustScore", () => {
       rejected_rows: 0,
     });
     assert.ok(without.score < withRecon.score);
+    assert.ok(without.score <= 84);
     const completeness = without.factors.find((f) => f.id === "completeness");
     assert.ok(completeness && (completeness.score as number) <= 82);
   });
@@ -75,7 +138,13 @@ describe("computeJobTrustScore", () => {
       status: "completed",
       records_processed: 1000,
       rejected_rows: 0,
-      reconciliation: { passed: true, phase: "post_write", source_checksum: "a", target_checksum: "a" },
+      reconciliation: {
+        passed: true,
+        phase: "post_write_verified",
+        assurance_level: "full_checksum",
+        source_checksum: "a",
+        target_checksum: "a",
+      },
     });
     const ack = computeJobTrustScore({
       status: "completed",
@@ -84,13 +153,90 @@ describe("computeJobTrustScore", () => {
       reconciliation: {
         passed: true,
         phase: "post_write_writer_ack",
+        assurance_level: "writer_ack",
         message: "Transfer verified by writer: 10 rows written (read-back verifier not available)",
         source_checksum: "abc",
       },
     });
     assert.ok(ack.score < full.score);
+    assert.notEqual(ack.grade, "A");
     const factor = ack.factors.find((f) => f.id === "reconcile");
     assert.ok(factor?.note.toLowerCase().includes("writer"));
     assert.ok((factor?.score as number) <= 58);
+  });
+
+  it("caps sample and file-export unproven below grade A", () => {
+    const sample = computeJobTrustScore({
+      status: "completed",
+      records_processed: 1000,
+      rejected_rows: 0,
+      reconciliation: {
+        passed: true,
+        assurance_level: "sample",
+        phase: "post_write_sample_verified",
+      },
+    });
+    assert.ok(sample.score <= 89);
+    assert.notEqual(sample.grade, "A");
+    const exportJob = computeJobTrustScore({
+      status: "completed",
+      records_processed: 10,
+      rejected_rows: 0,
+      reconciliation: {
+        passed: true,
+        unproven: true,
+        skipped_readback: true,
+        phase: "post_write_skipped",
+        assurance_level: "none",
+        message: "File/object export wrote successfully — Gate-8 cell fidelity unproven",
+      },
+    });
+    const factor = exportJob.factors.find((f) => f.id === "reconcile");
+    assert.ok((factor?.score as number) <= 45);
+    assert.ok(factor?.note.toLowerCase().includes("unproven"));
+  });
+
+  it("does not treat append dest-before delta as full checksum Verified", () => {
+    const append = computeJobTrustScore({
+      status: "completed",
+      records_processed: 200,
+      rejected_rows: 0,
+      reconciliation: {
+        passed: true,
+        phase: "post_write_row_count",
+        assurance_level: "row_count",
+        coverage: "row_count",
+        checksum_scope: "whole_table_not_comparable",
+        source_checksum: "aaa",
+        target_checksum: "bbb",
+        checksum_match: false,
+        migration_proven: false,
+        message: "Append delta verified (200 row(s) appended: 100 → 300).",
+      },
+    });
+    const factor = append.factors.find((f) => f.id === "reconcile");
+    assert.ok(factor?.note.toLowerCase().includes("append delta"));
+    assert.notEqual(append.grade, "A");
+    assert.ok(append.score <= 89);
+    assert.equal(append.next_action.code, "append_delta");
+    assert.doesNotMatch(append.next_action.label, /investigate/i);
+  });
+
+  it("closed quarantine ledger does not keep Review quarantine as next action", () => {
+    const t = computeJobTrustScore({
+      status: "completed_with_quarantine",
+      records_processed: 100,
+      rejected_rows: 40,
+      quarantine_closure: { verdict: "closed", open_count: 0, promoted_count: 40 },
+      reconciliation: {
+        passed: true,
+        assurance_level: "full_checksum",
+        source_checksum: "a",
+        target_checksum: "a",
+      },
+    });
+    const q = t.factors.find((f) => f.id === "quarantine");
+    assert.equal(q?.score, 100);
+    assert.equal(t.next_action.code, "quarantine_closed");
   });
 });

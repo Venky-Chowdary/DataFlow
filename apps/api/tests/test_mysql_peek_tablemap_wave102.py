@@ -6,6 +6,9 @@ from unittest.mock import MagicMock, patch
 
 
 def test_peek_binlog_kwargs_include_table_map_and_rotate():
+    import pytest
+
+    pytest.importorskip("pymysqlreplication")
     from pymysqlreplication.event import GtidEvent, RotateEvent
     from pymysqlreplication.row_event import (
         DeleteRowsEvent,

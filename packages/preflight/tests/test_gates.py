@@ -1,5 +1,15 @@
 from __future__ import annotations
 
+import sys
+from pathlib import Path
+
+_PREFLIGHT_ROOT = Path(__file__).resolve().parents[1] / "src"
+_API_ROOT = Path(__file__).resolve().parents[3] / "apps" / "api"
+if str(_PREFLIGHT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PREFLIGHT_ROOT))
+if str(_API_ROOT) not in sys.path:
+    sys.path.insert(0, str(_API_ROOT))
+
 from preflight import (
     ColumnMapping,
     ColumnSchema,
@@ -84,6 +94,215 @@ def test_g8_blocks_without_sample_rows():
     result = PreflightEngine().run(PreflightContext(plan=_happy_plan()))
     assert not result.passed
     assert any(b.gate_id.value == "g8_reconciliation" for b in result.blockers)
+
+
+def test_g8_blocks_url_empty_without_risk_contract():
+    """Empty cells under url transform hard-block G8 until Map remaps or contracts."""
+    from preflight.gates import gate_g8_reconciliation
+
+    plan = _happy_plan()
+    plan.mappings = [
+        ColumnMapping(source="image", target="image", confidence=0.9, transform="url"),
+    ]
+    plan.required_targets = ["image"]
+    plan.source.columns = [ColumnSchema(name="image", inferred_type="TEXT", samples=[""])]
+    plan.destination.target_columns = [
+        ColumnSchema(name="image", inferred_type="TEXT"),
+    ]
+    result = gate_g8_reconciliation(
+        PreflightContext(plan=plan, sample_rows=[{"image": ""}, {"image": ""}])
+    )
+    assert result.status == GateStatus.BLOCK
+    assert "transform errors" in (result.message or "").lower()
+
+
+def test_g8_pass_url_empty_with_cast_and_continue_contract():
+    """Signed CAST_AND_CONTINUE: empty url cells hold out — G8 must not re-block Validate."""
+    from preflight.gates import gate_g8_reconciliation
+
+    plan = _happy_plan()
+    plan.mappings = [
+        ColumnMapping(
+            source="image",
+            target="image",
+            confidence=0.9,
+            transform="url",
+            fidelity="mutate",
+            risk_acknowledged=True,
+            risk_contract=make_clearing_risk_contract(
+                column="image",
+                source_type="TEXT",
+                destination_type="TEXT",
+                execution_policy="CAST_AND_CONTINUE",
+                reason="quarantine empty urls",
+            ),
+        ),
+    ]
+    plan.required_targets = ["image"]
+    plan.source.columns = [ColumnSchema(name="image", inferred_type="TEXT", samples=[""])]
+    plan.destination.target_columns = [
+        ColumnSchema(name="image", inferred_type="TEXT"),
+    ]
+    result = gate_g8_reconciliation(
+        PreflightContext(plan=plan, sample_rows=[{"image": ""}, {"image": ""}])
+    )
+    assert result.status == GateStatus.PASS, result.message
+    details = result.details or {}
+    assert int(details.get("contracted_holdout_count") or 0) >= 1
+    assert details.get("contracted_holdouts")
+    # Held-out rows must not invent NULL cells into the primary dry-run set.
+    assert int(details.get("target_rows") or 0) == 0
+    assert int(details.get("source_rows") or 0) == 2
+
+
+def test_g5_block_url_empty_without_contract():
+    """Empty url cells hard-block G5 until Map remaps or signs a continue policy."""
+    from preflight.gates import gate_g5_dry_run
+
+    plan = _happy_plan()
+    plan.mappings = [
+        ColumnMapping(source="image", target="image", confidence=0.9, transform="url"),
+    ]
+    plan.source.columns = [ColumnSchema(name="image", inferred_type="TEXT", samples=[""])]
+    plan.destination.target_columns = [
+        ColumnSchema(name="image", inferred_type="TEXT"),
+    ]
+
+    class _Ctx(PreflightContext):
+        def run_dry_run(self, sample_size: int = 1000):
+            from services.transform_engine import dry_run_sample
+
+            headers = ["image"]
+            rows = [[""], [""]]
+            return dry_run_sample(
+                headers=headers,
+                sample_rows=rows,
+                mappings=[
+                    {
+                        "source": "image",
+                        "target": "image",
+                        "transform": "url",
+                    }
+                ],
+                column_types={"image": "TEXT"},
+            )
+
+    result = gate_g5_dry_run(_Ctx(plan=plan, sample_rows=[{"image": ""}, {"image": ""}]))
+    assert result.status == GateStatus.BLOCK
+    assert "cannot coerce" in (result.message or "").lower() or "dry-run failed" in (
+        result.message or ""
+    ).lower()
+
+
+def test_g5_pass_url_empty_with_cast_and_continue_contract():
+    """Parity with G8: signed CAST_AND_CONTINUE demotes empty-url off G5 hard block."""
+    from preflight.gates import gate_g5_dry_run
+
+    contract = make_clearing_risk_contract(
+        column="image",
+        source_type="TEXT",
+        destination_type="TEXT",
+        execution_policy="CAST_AND_CONTINUE",
+        reason="quarantine empty urls",
+    )
+    plan = _happy_plan()
+    plan.mappings = [
+        ColumnMapping(
+            source="image",
+            target="image",
+            confidence=0.9,
+            transform="url",
+            fidelity="mutate",
+            risk_acknowledged=True,
+            risk_contract=contract,
+        ),
+    ]
+    plan.source.columns = [ColumnSchema(name="image", inferred_type="TEXT", samples=[""])]
+    plan.destination.target_columns = [
+        ColumnSchema(name="image", inferred_type="TEXT"),
+    ]
+
+    class _Ctx(PreflightContext):
+        def run_dry_run(self, sample_size: int = 1000):
+            from services.transform_engine import dry_run_sample
+
+            return dry_run_sample(
+                headers=["image"],
+                sample_rows=[[""], [""]],
+                mappings=[
+                    {
+                        "source": "image",
+                        "target": "image",
+                        "transform": "url",
+                        "risk_contract": contract,
+                    }
+                ],
+                column_types={"image": "TEXT"},
+            )
+
+    result = gate_g5_dry_run(_Ctx(plan=plan, sample_rows=[{"image": ""}, {"image": ""}]))
+    assert result.status == GateStatus.PASS, result.message
+    details = result.details or {}
+    assert int(details.get("contracted_holdout_count") or 0) >= 1
+    assert details.get("contracted_holdouts")
+
+
+def test_g8_partial_holdout_with_identity_does_not_500():
+    """Production: Risk Contract holdouts + identity mappings must not IndexError on fingerprint.
+
+    Reproduces Railway 500: mapped_rows shorter than sample_rows after quarantine holdout,
+    then ``mapped_rows[row_idx - 1]`` crashed Validate preflight.
+    """
+    from preflight.gates import gate_g8_reconciliation
+
+    plan = _happy_plan()
+    plan.destination.db_type = "postgres"
+    plan.mappings = [
+        ColumnMapping(source="id", target="id", confidence=0.99, transform="identity"),
+        ColumnMapping(source="name", target="name", confidence=0.99, transform="identity"),
+        ColumnMapping(
+            source="image",
+            target="image",
+            confidence=0.9,
+            transform="url",
+            fidelity="mutate",
+            risk_acknowledged=True,
+            risk_contract=make_clearing_risk_contract(
+                column="image",
+                source_type="TEXT",
+                destination_type="TEXT",
+                execution_policy="CAST_AND_CONTINUE",
+                reason="quarantine empty urls",
+            ),
+        ),
+    ]
+    plan.required_targets = ["id", "name", "image"]
+    plan.source.columns = [
+        ColumnSchema(name="id", inferred_type="TEXT", samples=["1", "2", "3"]),
+        ColumnSchema(name="name", inferred_type="TEXT", samples=["a", "b", "c"]),
+        ColumnSchema(name="image", inferred_type="TEXT", samples=["https://ok", "", "https://ok2"]),
+    ]
+    plan.destination.target_columns = [
+        ColumnSchema(name="id", inferred_type="TEXT"),
+        ColumnSchema(name="name", inferred_type="TEXT"),
+        ColumnSchema(name="image", inferred_type="TEXT"),
+    ]
+    # Row 2 holds out (empty url); rows 1 and 3 stay — fingerprint must align kept set.
+    result = gate_g8_reconciliation(
+        PreflightContext(
+            plan=plan,
+            sample_rows=[
+                {"id": "1", "name": "a", "image": "https://example.com/a.png"},
+                {"id": "2", "name": "b", "image": ""},
+                {"id": "3", "name": "c", "image": "https://example.com/c.png"},
+            ],
+        )
+    )
+    assert result.status == GateStatus.PASS, result.message
+    details = result.details or {}
+    assert int(details.get("source_rows") or 0) == 3
+    assert int(details.get("target_rows") or 0) == 2
+    assert int(details.get("contracted_holdout_count") or 0) >= 1
 
 
 def test_g1_blocks_unparseable_file():
@@ -187,11 +406,19 @@ def test_g4_allows_safe_normalize_mutate_without_risk_contract():
 
 
 def test_g4_allows_phone_safe_normalize_without_risk_contract():
+    """phone stays SAFE_NORMALIZE for G4 — Risk Contract not required."""
     plan = _happy_plan()
     plan.mappings[0].fidelity = "mutate"
     plan.mappings[0].transform = "phone"
     plan.mappings[0].user_override = True
-    result = PreflightEngine().run(_happy_ctx(plan))
+    ctx = _happy_ctx(plan)
+    # Phone-shaped samples so G8 fail-closed phone does not mask the G4 check.
+    ctx.sample_rows = [
+        {"AMT": "+1-555-0100", "PAY_DT": "20250101"},
+        {"AMT": "+1-555-0199", "PAY_DT": "20250102"},
+    ]
+    result = PreflightEngine().run(ctx)
+    assert not any(b.gate_id.value == "g4_mapping_confidence" for b in result.blockers)
     assert result.passed, [b.message for b in result.blockers]
 
 
@@ -263,6 +490,19 @@ def test_g2_blocks_create_denied_for_missing_table():
     assert "create" in g2.message.lower()
 
 
+def test_g2_blocks_create_unknown_even_when_write_true():
+    """INSERT-true + CREATE-false + missing table must not Validate-approve."""
+    plan = _happy_plan()
+    plan.destination.can_write = True
+    plan.destination.can_create_table = False
+    plan.destination.table_exists = False
+    result = PreflightEngine().run(PreflightContext(plan=plan))
+    assert not result.passed
+    g2 = next(g for g in result.gates if g.gate_id.value == "g2_destination")
+    assert g2.status == GateStatus.BLOCK
+    assert "create" in g2.message.lower()
+
+
 def test_g2_blocks_unavailable_probe_on_create_new():
     """Connectivity-only fallback must not green-light create-new."""
     plan = _happy_plan()
@@ -294,6 +534,40 @@ def test_g2_passes_unavailable_probe_when_table_exists():
     g2 = next(g for g in result.gates if g.gate_id.value == "g2_destination")
     assert g2.status == GateStatus.PASS
     assert "unavailable" in g2.message.lower()
+
+
+def test_g2_blocks_redshift_staging_denied():
+    plan = _happy_plan()
+    plan.destination.db_type = "redshift"
+    plan.destination.table_exists = True
+    plan.destination.can_write = True
+    plan.destination.redshift_staging_probe = {
+        "status": "denied",
+        "method": "GetBucketAcl",
+        "detail": "Staging bucket `dw-stage` ACL does not grant write for COPY FROM S3",
+        "bucket": "dw-stage",
+    }
+    result = PreflightEngine().run(PreflightContext(plan=plan))
+    assert not result.passed
+    g2 = next(g for g in result.gates if g.gate_id.value == "g2_destination")
+    assert g2.status == GateStatus.BLOCK
+    assert "staging" in g2.message.lower()
+    assert g2.details["redshift_staging_probe"]["status"] == "denied"
+
+
+def test_g2_passes_redshift_staging_not_configured():
+    plan = _happy_plan()
+    plan.destination.db_type = "redshift"
+    plan.destination.table_exists = True
+    plan.destination.can_write = True
+    plan.destination.redshift_staging_probe = {
+        "status": "not_configured",
+        "detail": "PostgreSQL-wire insert remains valid.",
+    }
+    result = PreflightEngine().run(PreflightContext(plan=plan))
+    g2 = next(g for g in result.gates if g.gate_id.value == "g2_destination")
+    assert g2.status == GateStatus.PASS
+    assert "not configured" in g2.message.lower()
 
 
 def test_g3_schemaless_is_skip_not_pass():

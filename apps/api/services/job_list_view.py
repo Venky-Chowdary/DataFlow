@@ -38,6 +38,7 @@ _LIST_KEEP_KEYS = frozenset({
     "completed_at",
     "workspace_id",
     "sync_mode",
+    "source_read_mode",
     "records_per_second",
     "chunk_current",
     "chunk_total",
@@ -47,7 +48,36 @@ _LIST_KEEP_KEYS = frozenset({
     "created_by",
     "retry_of",
     "cdc_lag_seconds",
+    # Independent dest COUNT(*) ledger — small dict, required so Overview /
+    # Jobs list never fall dest population back to records_processed.
+    "row_accounting",
+    "trust_score",
+    # Join keys for Connectors "last used" — never the full transfer_request.
+    "source_connector_id",
+    "dest_connector_id",
 })
+
+
+def connector_ids_from_job(job: dict[str, Any] | None) -> tuple[str | None, str | None]:
+    """Return source/dest saved-connector ids, recovering them from old job docs.
+
+    Historic jobs stored the table name in ``source_name`` and stripped
+    ``transfer_request`` from list payloads, so the Connectors page could not
+    join 50 jobs to 11 profiles and showed every tile as Not used.
+    """
+    if not job:
+        return None, None
+    src = str(job.get("source_connector_id") or "").strip() or None
+    dst = str(job.get("dest_connector_id") or "").strip() or None
+    if src and dst:
+        return src, dst
+    req = job.get("transfer_request")
+    if isinstance(req, dict):
+        src_ep = req.get("source") if isinstance(req.get("source"), dict) else {}
+        dst_ep = req.get("destination") if isinstance(req.get("destination"), dict) else {}
+        src = src or str(src_ep.get("connector_id") or "").strip() or None
+        dst = dst or str(dst_ep.get("connector_id") or "").strip() or None
+    return src, dst
 
 
 def slim_job_for_list(job: dict[str, Any] | None) -> dict[str, Any]:
@@ -58,6 +88,11 @@ def slim_job_for_list(job: dict[str, Any] | None) -> dict[str, Any]:
     for key, value in job.items():
         if key in _LIST_KEEP_KEYS:
             out[key] = value
+    src_id, dst_id = connector_ids_from_job(job)
+    if src_id:
+        out["source_connector_id"] = src_id
+    if dst_id:
+        out["dest_connector_id"] = dst_id
     # Preserve reject count if only nested under destination_summary.
     if "rejected_rows" not in out and isinstance(job.get("destination_summary"), dict):
         ds = job["destination_summary"]

@@ -63,7 +63,10 @@ def describe_fields(cfg: dict[str, Any], object_type: str = "") -> list[dict[str
     host = str(cfg.get("host") or cfg.get("subdomain") or "")
     scheme, access = _auth_from_cfg(cfg)
     if not access or not host:
-        return []
+        # Never soft-empty — Map introspect would invent seed VARCHAR carriers.
+        raise RuntimeError(
+            "Zendesk schema Describe unauthorized: host or credentials missing"
+        )
     url = f"{base_url(host, DEFAULT_HOST)}/api/v2/{path}.json"
     fields: list[dict[str, Any]] = []
     next_url: str | None = url

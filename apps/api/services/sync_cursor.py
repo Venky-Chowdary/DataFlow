@@ -15,6 +15,11 @@ from datetime import datetime, timezone
 from typing import Any
 
 from services.atomic_file import write_json_atomic
+from services.keyset_pagination import (
+    KEYSET_SEP,
+    encode_keyset_bookmark,
+    split_cursor_bookmark,
+)
 from services.platform_config import data_dir
 from services.value_serializer import json_default
 
@@ -140,6 +145,50 @@ def is_append_sync(mode: str | None) -> bool:
     return normalized in APPEND_SYNC_MODES or normalized == "full_refresh_append"
 
 
+#: Destinations that have no column catalog to bind types to — ever. A Redis
+#: keyspace and a Kafka topic are not tables: they report no column types on
+#: every run, so waiting for a live shape waits forever.
+SCHEMALESS_DESTINATIONS = frozenset({"redis", "kafka"})
+
+
+def destination_exists_for_typing(
+    mode: str | None,
+    exists: bool | None,
+    *,
+    has_live_column_types: bool = True,
+    dest_format: str = "",
+) -> bool | None:
+    """Is there a live column shape for the write to bind its types to?
+
+    Two situations answer no, and both used to be mistaken for "wait for a
+    Studio stamp", which leaves every target type pending and makes the
+    schema-contract gate refuse a transfer it had approved minutes earlier.
+
+    *Overwrite drops and recreates.* Whatever is there now is not what the rows
+    land in, so for typing the destination is create-new every run, not just the
+    first. Run one created the table and invented types from the source; run two
+    found the table present but carrying no usable column types — correctly,
+    since typing against a shape about to be dropped would be wrong — and
+    failed. Any schedule on overwrite failed from its second tick onward.
+
+    *A destination with no column catalog has nothing to bind to.* Redis is a
+    keyspace, not a table: it reports no column types on any run, so append,
+    incremental and upsert all left their targets unstamped while Validate had
+    invented ``string``, and Execute refused on the divergence.
+
+    Existence that is *unknown* stays unknown. A probe that could not read the
+    destination is not evidence that it has no columns, and inventing create-new
+    there would type against a shape nobody looked at.
+    """
+    if is_overwrite_sync(mode):
+        return False
+    if (dest_format or "").strip().lower() in SCHEMALESS_DESTINATIONS:
+        return False
+    if exists is True and not has_live_column_types:
+        return False
+    return exists
+
+
 def resolve_effective_sync_mode(
     request_mode: str | None,
     contract_mode: str | None = None,
@@ -178,6 +227,11 @@ class SyncContract:
     primary_key: str = ""  # single column or comma-separated composite
     schema_policy: str = "manual_review"
     validation_mode: str = "strict"
+    #: What the cursor column means in the source, declared by the operator.
+    #: A column's name and type cannot establish this: ``created_at`` exists on
+    #: a table whose rows are updated in place, and a business date is set from
+    #: a calendar, not a clock. See :data:`CURSOR_SEMANTICS`.
+    cursor_semantics: str = ""
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> SyncContract:
@@ -195,6 +249,7 @@ class SyncContract:
             primary_key=primary_key,
             schema_policy=str(data.get("schema_policy") or "manual_review"),
             validation_mode=str(data.get("validation_mode") or "strict"),
+            cursor_semantics=str(data.get("cursor_semantics") or "").strip().lower(),
         )
 
     def primary_key_columns(self) -> list[str]:
@@ -233,6 +288,78 @@ def build_cursor_key(
     return (
         f"{source_type}:{source_database}:{source_object}"
         f"→{dest_type}:{dest_database}:{dest_object}:{stream_name}"
+    )
+
+
+@dataclass(frozen=True)
+class IncrementalReadScope:
+    """Which source rows the next run of this route will actually read.
+
+    An incremental run reads past its stored watermark, so every pre-write check
+    that reasons about "the rows about to be written" has to reason about that
+    subset. Checks that used the whole-table sample instead condemned the second
+    run of every incremental append: the keys already at rest are, of course,
+    still in the source.
+    """
+
+    cursor_column: str = ""
+    primary_key: str = ""
+    watermark: str | None = None
+    cursor_key: str = ""
+
+    @property
+    def bounded(self) -> bool:
+        """True when a stored watermark narrows the read to a delta."""
+        return bool(self.cursor_column and self.watermark)
+
+
+def resolve_incremental_read_scope(
+    *,
+    sync_mode: str,
+    stream_contracts: list[dict[str, Any]] | None,
+    source_type: str,
+    source_database: str,
+    source_object: str,
+    dest_type: str,
+    dest_database: str,
+    dest_object: str,
+    source: Any = None,
+) -> IncrementalReadScope:
+    """Resolve the cursor state of a route — the read side's own view of it.
+
+    Callers must not rebuild the cursor key themselves: the transfer writes the
+    watermark under this key, so a checker that derives a different key sees no
+    watermark and silently reverts to whole-table reasoning.
+    """
+    if not requires_incremental(normalize_sync_mode(sync_mode)):
+        return IncrementalReadScope()
+    contract = resolve_sync_contract(stream_contracts)
+    cursor_column = (contract.cursor_field if contract else "").strip()
+    if not cursor_column:
+        return IncrementalReadScope()
+    object_name = source_object
+    if source is not None:
+        from services.procedure_source import source_object_for_cursor
+
+        token = source_object_for_cursor(source, fallback="")
+        if token:
+            object_name = token
+    cursor_key = build_cursor_key(
+        source_type=source_type,
+        source_database=source_database,
+        source_object=object_name,
+        dest_type=dest_type,
+        dest_database=dest_database,
+        dest_object=dest_object,
+        stream_name=contract.name if contract else "stream",
+    )
+    pk_cols = contract.primary_key_columns() if contract else []
+    tiebreak = next((c for c in pk_cols if c and c != cursor_column), "")
+    return IncrementalReadScope(
+        cursor_column=cursor_column,
+        primary_key=tiebreak,
+        watermark=get_watermark(cursor_key),
+        cursor_key=cursor_key,
     )
 
 
@@ -365,6 +492,17 @@ def clear_watermark(cursor_key: str) -> dict[str, Any]:
     }
 
 
+def _is_composite(watermark: str) -> bool:
+    """A watermark carrying a tie-break part alongside the cursor value.
+
+    The canonical separator is unambiguous. Watermarks persisted before it
+    existed used a pipe, which a text cursor value can also contain — they keep
+    comparing as composite so a stored watermark does not change meaning, while
+    every watermark written from now on is unambiguous.
+    """
+    return KEYSET_SEP in watermark or "|" in watermark
+
+
 def max_cursor_value(
     rows: list[list[str]],
     headers: list[str],
@@ -373,8 +511,11 @@ def max_cursor_value(
 ) -> str | None:
     """Find maximum cursor value using typed watermark comparator.
 
-    When ``cursor_primary_key`` is set, returns a composite ``cursor|pk`` watermark
-    so peer rows sharing a timestamp are not skipped on the next incremental poll.
+    When ``cursor_primary_key`` is set, returns a composite watermark so peer
+    rows sharing a timestamp are not skipped on the next incremental poll. The
+    composite is encoded by :func:`encode_keyset_bookmark`, whose separator is
+    not a value a source column can hold — a pipe is, so a text cursor value
+    containing one used to be indistinguishable from a composite.
     """
     if not cursor_column or not rows:
         return None
@@ -405,7 +546,7 @@ def max_cursor_value(
         if idx >= len(row) or not row[idx]:
             continue
         pk_val = row[pk_idx] if pk_idx < len(row) else ""
-        cand = f"{row[idx]}|{pk_val}"
+        cand = encode_keyset_bookmark([row[idx], pk_val])
         if best is None or compare_cursor_values(cand, best) > 0:
             best = cand
     return best
@@ -415,7 +556,8 @@ def compare_cursor_values(a: str | None, b: str | None) -> int:
     """Compare two cursor values using the same typed watermark logic.
 
     Returns -1 if a < b, 0 if equal, 1 if a > b.  None is treated as less
-    than any value. Composite ``cursor|pk`` watermarks compare lexicographically.
+    than any value. Composite watermarks compare lexicographically, and a
+    watermark written before the canonical separator existed still compares.
     """
     if a is None and b is None:
         return 0
@@ -424,9 +566,9 @@ def compare_cursor_values(a: str | None, b: str | None) -> int:
     if b is None:
         return 1
     sa, sb = str(a), str(b)
-    if "|" in sa and "|" in sb:
-        a_cur, a_pk = sa.split("|", 1)
-        b_cur, b_pk = sb.split("|", 1)
+    if _is_composite(sa) and _is_composite(sb):
+        a_cur, a_pk = split_cursor_bookmark(sa, has_tiebreak=True)
+        b_cur, b_pk = split_cursor_bookmark(sb, has_tiebreak=True)
         base = compare_cursor_values(a_cur, b_cur)
         if base != 0:
             return base

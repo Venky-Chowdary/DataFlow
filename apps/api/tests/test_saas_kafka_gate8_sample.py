@@ -62,7 +62,10 @@ def test_run_reconciliation_sample_verified_when_no_full_verifier():
         )
     assert report["passed"] is True, report
     assert report["phase"] == "post_write_sample_verified"
-    assert "sample-verified" in report["message"].lower()
+    # The sample phase must say what it is: screening, never population proof.
+    message = report["message"].lower()
+    assert "sample" in message
+    assert "not population proof" in message
 
 
 def test_verify_target_routes_hubspot_and_kafka():

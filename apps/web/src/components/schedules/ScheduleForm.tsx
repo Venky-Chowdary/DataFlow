@@ -2,13 +2,15 @@ import { FormEvent, useEffect, useMemo, useState } from "react";
 import { DtIcon } from "../DtIcon";
 import { Button } from "../ui/Button";
 import { ConnectorSelect } from "../ui/ConnectorSelect";
+import { SqlEditor } from "../ui/SqlEditor";
 import { CadenceTiles } from "../ui/CadenceTiles";
-import { fetchContracts, type DataContractSummary } from "../../lib/api";
+import { ContractBindField } from "../contracts/ContractBindField";
 import {
   DEFAULT_SYNC_MODE_IDS,
   SCHEMA_POLICIES,
   SYNC_MODE_META,
   VALIDATION_MODES,
+  availableSyncModes,
 } from "../../lib/transferConstants";
 import type {
   Connector,
@@ -16,6 +18,13 @@ import type {
   ScheduleInput,
   ScheduleIntervals,
 } from "../../lib/types";
+import {
+  CDC_DELIVERY_AT_LEAST_ONCE,
+  exactlyOnceWiredDest,
+  namedCdcDeliveryGuarantee,
+  studioDeliveryGuarantee,
+  type CdcDeliveryGuarantee,
+} from "../../lib/cdcExactlyOnce";
 
 interface ScheduleFormProps {
   connectors: Connector[];
@@ -78,9 +87,16 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
   const [syncMode, setSyncMode] = useState(initial?.sync_mode ?? "full_refresh_overwrite");
   const [cursorColumn, setCursorColumn] = useState(initial?.cursor_column ?? "");
   const [primaryKey, setPrimaryKey] = useState(initial?.primary_key ?? "");
+  const [sourceReadMode, setSourceReadMode] = useState(initial?.source_read_mode || "table");
+  const [procedureText, setProcedureText] = useState(
+    initial?.procedure_call || initial?.source_query || "",
+  );
   const [validationMode, setValidationMode] = useState(initial?.validation_mode ?? "balanced");
   const [schemaPolicy, setSchemaPolicy] = useState(initial?.schema_policy ?? "manual_review");
   const [backfill, setBackfill] = useState(initial?.backfill_new_fields ?? false);
+  const [deliveryGuarantee, setDeliveryGuarantee] = useState<CdcDeliveryGuarantee>(
+    namedCdcDeliveryGuarantee(initial?.delivery_guarantee),
+  );
 
   // Retry & notifications
   const [maxRetries, setMaxRetries] = useState(initial?.max_retries ?? 2);
@@ -89,14 +105,30 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
   const [notifySuccess, setNotifySuccess] = useState(initial?.notify_on_success ?? false);
 
   // Data contract (governance)
-  const [contracts, setContracts] = useState<DataContractSummary[]>([]);
-  const [contractsLoading, setContractsLoading] = useState(false);
   const [contractId, setContractId] = useState(initial?.contract_id ?? "");
   const [requireSigned, setRequireSigned] = useState(
     initial?.require_signed_contract ?? Boolean(initial?.contract_id),
   );
 
-  const syncModes = intervals?.sync_modes?.length ? intervals.sync_modes : DEFAULT_SYNC_MODE_IDS;
+  const sourceConnector = connectors.find((c) => c.id === sourceId);
+  const destConnector = connectors.find((c) => c.id === destId);
+  const callable = sourceReadMode === "procedure" || sourceReadMode === "query";
+  const syncModes = useMemo(() => {
+    const offered = availableSyncModes({
+      destDriver: destConnector?.type || "",
+      sourceDriver: sourceConnector?.type || "",
+      sourceKind: "database",
+      isMultiStream: false,
+      sourceReadMode,
+    });
+    const offeredIds = new Set<string>(offered.map((m) => m.id));
+    return (intervals?.sync_modes?.length ? intervals.sync_modes : DEFAULT_SYNC_MODE_IDS).filter((mode) => {
+      if (mode === "incremental") {
+        return offeredIds.has("incremental_append") || offeredIds.has("incremental_deduped");
+      }
+      return offeredIds.has(mode);
+    });
+  }, [destConnector?.type, intervals?.sync_modes, sourceConnector?.type, sourceReadMode]);
   const showCursor =
     syncMode === "incremental_append" ||
     syncMode === "incremental_deduped" ||
@@ -109,40 +141,16 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
     syncMode === "mirror";
 
   useEffect(() => {
-    let cancelled = false;
-    setContractsLoading(true);
-    void fetchContracts()
-      .then((list) => {
-        if (!cancelled) setContracts(list);
-      })
-      .catch(() => {
-        if (!cancelled) setContracts([]);
-      })
-      .finally(() => {
-        if (!cancelled) setContractsLoading(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+    if (!syncModes.includes(syncMode as typeof syncModes[number])) {
+      setSyncMode("full_refresh_overwrite");
+    }
+  }, [syncMode, syncModes]);
 
-  const signedContracts = useMemo(
-    () => contracts.filter((c) => String(c.status || "").toUpperCase() === "SIGNED"),
-    [contracts],
-  );
-  const selectedContract = useMemo(
-    () => contracts.find((c) => c.id === contractId) || null,
-    [contracts, contractId],
-  );
-  const contractUnsigned =
-    Boolean(contractId)
-    && selectedContract
-    && String(selectedContract.status || "").toUpperCase() !== "SIGNED"
-    && requireSigned;
+  const [contractBlock, setContractBlock] = useState("");
 
-  const sourceConnector = connectors.find((c) => c.id === sourceId);
-  const destConnector = connectors.find((c) => c.id === destId);
-  const sourceStreamLabel = sourceConnector?.type === "mongodb" ? "collection" : "table";
+  const sourceStreamLabel = callable
+    ? (sourceReadMode === "procedure" ? "procedure stream" : "query stream")
+    : sourceConnector?.type === "mongodb" ? "collection" : "table";
   const destStreamLabel = destConnector?.type === "mongodb" ? "collection" : "table";
 
   const timezoneOptions = useMemo(() => {
@@ -164,9 +172,9 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
     && destId
     && sourceTable.trim()
     && destTable.trim()
+    && (!callable || procedureText.trim())
     && (cadenceMode === "preset" || cron.trim())
-    && !contractUnsigned
-    && !(requireSigned && !contractId.trim()),
+    && !contractBlock,
   );
 
   const submit = (e: FormEvent) => {
@@ -185,8 +193,17 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
       validation_mode: validationMode,
       schema_policy: schemaPolicy,
       backfill_new_fields: backfill,
+      delivery_guarantee: studioDeliveryGuarantee({
+        syncMode,
+        deliveryGuarantee,
+        callableSource: callable,
+      }),
       cursor_column: showCursor ? cursorColumn.trim() : "",
       primary_key: showPrimaryKey ? primaryKey.trim() : "",
+      source_read_mode: sourceReadMode,
+      procedure_call: sourceReadMode === "procedure" ? procedureText.trim() : "",
+      source_query: sourceReadMode === "query" ? procedureText.trim() : "",
+      procedure_params: initial?.procedure_params || {},
       max_retries: maxRetries,
       retry_backoff_seconds: retryBackoff,
       notify_on_failure: notifyFailure,
@@ -217,6 +234,20 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
         <div className="df2-field">
           <label className="df2-label" htmlFor="sched-src-table">Source {sourceStreamLabel}</label>
           <input id="sched-src-table" className="df2-input" value={sourceTable} onChange={(e) => setSourceTable(e.target.value)} placeholder="orders" required />
+          <div className="df2-sched-seg" role="radiogroup" aria-label="Source read mode">
+            {(["table", "query", "procedure"] as const).map((mode) => (
+              <button
+                key={mode}
+                type="button"
+                role="radio"
+                aria-checked={sourceReadMode === mode}
+                className={sourceReadMode === mode ? "active" : ""}
+                onClick={() => setSourceReadMode(mode)}
+              >
+                {mode === "table" ? "Table" : mode === "query" ? "SQL query" : "Procedure"}
+              </button>
+            ))}
+          </div>
         </div>
         <ConnectorSelect
           id="sched-dst"
@@ -233,6 +264,21 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
           <input id="sched-dst-table" className="df2-input" value={destTable} onChange={(e) => setDestTable(e.target.value)} placeholder="orders_warehouse" required />
         </div>
       </div>
+
+      {callable && (
+        <SqlEditor
+          id="sched-callable-sql"
+          label={sourceReadMode === "procedure" ? "CALL / EXEC" : "Read-only SELECT"}
+          value={procedureText}
+          onChange={setProcedureText}
+          mode={sourceReadMode === "procedure" ? "procedure" : "query"}
+          dialect={sourceConnector?.type}
+          placeholder={sourceReadMode === "procedure" ? "CALL get_orders(:since)" : "SELECT id, updated_at FROM orders"}
+          hint="Result-set snapshot — one CALL/SELECT, then page the spool. CDC, SCD2, and mirror are refused. Incremental filters cursor > watermark (at-least-once)."
+          rows={6}
+          required
+        />
+      )}
 
       {/* Panel: Cadence */}
       <section className="df2-sched-panel">
@@ -340,11 +386,37 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
                   {syncMode === "scd2"
                     ? "Required for SCD2 versioning — identifies which business key to expire and reopen."
                     : syncMode === "mirror"
-                      ? "Required for mirror sync — identifies rows to soft-delete when missing from source."
+                      ? "Required for mirror sync — dest keys missing from the source are flagged _deleted. Physical COUNT(*) stays; active population is COUNT(*) WHERE NOT _deleted."
                       : "Enables dedupe / upsert into the destination."}
                 </span>
               </div>
             )}
+          </div>
+        )}
+
+        {syncMode === "cdc" && (
+          <div className="df2-field">
+            <label className="df2-label" htmlFor="sched-delivery">CDC delivery guarantee</label>
+            <select
+              id="sched-delivery"
+              className="df2-input"
+              value={deliveryGuarantee}
+              onChange={(e) => setDeliveryGuarantee(
+                e.target.value === "exactly_once" ? "exactly_once" : CDC_DELIVERY_AT_LEAST_ONCE,
+              )}
+            >
+              <option value="at_least_once">at_least_once — default PK upsert</option>
+              <option value="exactly_once" disabled={callable}>
+                exactly_once — dest-owned watermark transaction
+              </option>
+            </select>
+            <span className="df2-field-hint">
+              {callable
+                ? "Procedure/query sources stay at-least-once — CALL is not a dest-owned watermark log."
+                : exactlyOnceWiredDest(destConnector?.type)
+                  ? "Default stays at-least-once. Exactly-once commits apply and a dest watermark in one transaction."
+                  : "Default stays at-least-once. Exactly-once fails closed on this destination."}
+            </span>
           </div>
         )}
 
@@ -388,65 +460,14 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
             <span>Bind a signed schema agreement so unattended runs stay fail-closed.</span>
           </div>
         </div>
-        <div className="df2-field">
-          <label className="df2-label" htmlFor="sched-contract">Contract</label>
-          <select
-            id="sched-contract"
-            className="df2-input"
-            value={contractId}
-            onChange={(e) => {
-              const next = e.target.value;
-              setContractId(next);
-              if (next) setRequireSigned(true);
-            }}
-            disabled={contractsLoading}
-          >
-            <option value="">None — no contract enforcement</option>
-            {signedContracts.map((c) => (
-              <option key={c.id} value={c.id}>
-                {c.name} · v{c.version} · SIGNED
-              </option>
-            ))}
-            {/* Keep a previously selected non-signed contract visible so the operator can clear or fix it */}
-            {selectedContract
-              && String(selectedContract.status || "").toUpperCase() !== "SIGNED"
-              && (
-                <option value={selectedContract.id}>
-                  {selectedContract.name} · v{selectedContract.version} · {selectedContract.status} (sign required)
-                </option>
-              )}
-            {!selectedContract && contractId && (
-              <option value={contractId}>{contractId} (not in catalog)</option>
-            )}
-          </select>
-          <span className="df2-field-hint">
-            {contractsLoading
-              ? "Loading contracts…"
-              : signedContracts.length === 0
-                ? "No signed contracts yet — save + sign one from Transfer Validate → Contracts."
-                : "Only SIGNED contracts appear here. Drafts must be signed on the Contracts page first."}
-          </span>
-        </div>
-        {contractId && (
-          <label className="df2-sched-check">
-            <input
-              type="checkbox"
-              checked={requireSigned}
-              onChange={(e) => setRequireSigned(e.target.checked)}
-            />
-            Require signed contract before each run (fail-closed)
-          </label>
-        )}
-        {contractUnsigned && (
-          <p className="df2-label-hint df2-dest-sync-warning" role="alert">
-            Contract is not SIGNED. Open <strong>Contracts</strong>, sign it, then return — or clear the selection.
-          </p>
-        )}
-        {requireSigned && !contractId.trim() && (
-          <p className="df2-label-hint df2-dest-sync-warning" role="alert">
-            Require signed is on but no contract is selected.
-          </p>
-        )}
+        <ContractBindField
+          idPrefix="sched"
+          contractId={contractId}
+          requireSigned={requireSigned}
+          onContractIdChange={setContractId}
+          onRequireSignedChange={setRequireSigned}
+          onBlockReasonChange={setContractBlock}
+        />
       </section>
 
       {/* Panel: Retry & notifications */}

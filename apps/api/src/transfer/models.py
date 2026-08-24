@@ -94,8 +94,11 @@ class TransferRequest:
     source_filename: str = ""
     source_content: bytes = b""
     # Optional on-disk path for the source file.  Used for billion-row streaming
-    # when loading the whole file into memory would exhaust RAM.
+    # when loading the whole file into memory would exhaust RAM, and for
+    # claim-queue workers that reconstruct TransferRequest without in-memory bytes.
     source_path: str = ""
+    # Optional s3:// URI from object_store.stage_bytes (multi-replica hydrate).
+    source_object_uri: str = ""
     sync_mode: str = "full_refresh_append"
     schema_policy: str = "manual_review"
     validation_mode: str = "strict"
@@ -126,9 +129,22 @@ class TransferRequest:
     # fingerprint, letting a caller make its own HTTP retries safe. When empty,
     # the fingerprint still guards against accidental double submission.
     idempotency_key: str = ""
-    # CDC / stream delivery honesty — selectable set is enforced by
-    # ``assert_delivery_guarantee_allowed`` (exactly_once / at_most_once refused).
+    # CDC / stream delivery. Default at_least_once. exactly_once is opt-in
+    # dest-owned watermark EOS and fail-closed on ineligible routes.
     delivery_guarantee: str = "at_least_once"
+    # Operator acks from Validate — Execute must carry the same trail (Validate≡Execute).
+    compliance_acknowledged: bool = False
+    schema_drift_acknowledged: bool = False
+    fk_risk_acknowledged: bool = False
+    acknowledgment_actor: str = ""
+    acknowledgment_reason: str = ""
+    # Map→DDL fingerprint from Validate (or ledger proof). Required when
+    # skip_preflight + mappings so Execute still fail-closes on stamp drift.
+    approved_ddl_identity_hash: str = ""
+    # Phase C11 — Decision Artifact content_hash from Validate / ledger.
+    # Programmatic skip_preflight stamps inline when empty.
+    approved_decision_artifact_hash: str = ""
+    decision_artifact: dict = field(default_factory=dict)
 
     @property
     def operation(self) -> str:
@@ -272,8 +288,30 @@ def transfer_request_to_dict(request: TransferRequest) -> dict:
         "date_locale": request.date_locale,
         "idempotency_key": request.idempotency_key,
         "delivery_guarantee": request.delivery_guarantee or "at_least_once",
-        "requires_file_reupload": request.source.kind == "file" and bool(request.source_content),
+        "compliance_acknowledged": bool(request.compliance_acknowledged),
+        "schema_drift_acknowledged": bool(request.schema_drift_acknowledged),
+        "fk_risk_acknowledged": bool(request.fk_risk_acknowledged),
+        "acknowledgment_actor": request.acknowledgment_actor or "",
+        "acknowledgment_reason": request.acknowledgment_reason or "",
+        "approved_ddl_identity_hash": request.approved_ddl_identity_hash or "",
+        "approved_decision_artifact_hash": request.approved_decision_artifact_hash or "",
+        "decision_artifact": dict(request.decision_artifact or {}),
+        # Path/URI are durable; never embed source_content bytes in Mongo.
+        "source_path": request.source_path or "",
+        "source_object_uri": request.source_object_uri or "",
+        "requires_file_reupload": _requires_file_reupload_flag(request),
     }
+
+
+def _requires_file_reupload_flag(request: TransferRequest) -> bool:
+    """True when claim/restart cannot recover file bytes from path or object URI.
+
+    In-memory ``source_content`` alone is not durable across claim-queue workers —
+    callers must :func:`persist_file_source` before serializing.
+    """
+    from services.transfer_file_staging import requires_file_reupload
+
+    return requires_file_reupload(request)
 
 
 def _mask_endpoint_secrets(ep: dict | None) -> dict:
@@ -324,6 +362,8 @@ def transfer_request_from_dict(data: dict) -> TransferRequest:
         skip_preflight=bool(data.get("skip_preflight")),
         source_filename=data.get("source_filename") or "",
         source_content=b"",
+        source_path=str(data.get("source_path") or "").strip(),
+        source_object_uri=str(data.get("source_object_uri") or "").strip(),
         sync_mode=data.get("sync_mode") or "full_refresh_append",
         schema_policy=data.get("schema_policy") or "manual_review",
         validation_mode=data.get("validation_mode") or "strict",
@@ -343,6 +383,18 @@ def transfer_request_from_dict(data: dict) -> TransferRequest:
         date_locale=(data.get("date_locale") or "").strip().upper(),
         idempotency_key=(data.get("idempotency_key") or "").strip(),
         delivery_guarantee=(data.get("delivery_guarantee") or "at_least_once").strip().lower(),
+        compliance_acknowledged=bool(data.get("compliance_acknowledged")),
+        schema_drift_acknowledged=bool(data.get("schema_drift_acknowledged")),
+        fk_risk_acknowledged=bool(data.get("fk_risk_acknowledged")),
+        acknowledgment_actor=str(data.get("acknowledgment_actor") or "").strip(),
+        acknowledgment_reason=str(data.get("acknowledgment_reason") or "").strip(),
+        approved_ddl_identity_hash=str(
+            data.get("approved_ddl_identity_hash") or ""
+        ).strip(),
+        approved_decision_artifact_hash=str(
+            data.get("approved_decision_artifact_hash") or ""
+        ).strip(),
+        decision_artifact=dict(data.get("decision_artifact") or {}),
     )
 
 
@@ -367,6 +419,8 @@ class TransferResult:
     elapsed_seconds: float = 0.0
     records_per_second: float = 0.0
     peak_memory_bytes: int = 0
+    # Independent dest COUNT(*) ledger — never closed by writer ack.
+    row_accounting: dict = field(default_factory=dict)
 
 
 @dataclass

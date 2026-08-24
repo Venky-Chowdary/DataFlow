@@ -52,6 +52,17 @@ def test_checkpoint_round_trip():
     assert loaded.cursor_value == "2025-01-01"
 
 
+def test_checkpoint_persists_target_rows_before():
+    mongo = _FakeMongo()
+    cp = Checkpoint(job_id="job-precount", offset=500, target_rows_before=42)
+    service = CheckpointService(mongo)
+    assert service.save(cp)
+    loaded = service.load("job-precount")
+    assert loaded is not None
+    assert loaded.target_rows_before == 42
+    assert loaded.to_dict()["target_rows_before"] == 42
+
+
 def test_resume_or_create_initializes_when_missing():
     service = CheckpointService(_FakeMongo())
     cp = resume_or_create_checkpoint("job-cp-2", service)

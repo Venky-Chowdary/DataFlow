@@ -1,8 +1,9 @@
 import { API_BASE, ActiveDataContext, Connector, EnhancedAnalysis, ParsedUpload, PipelineSchedule, TransferJob, TransferPlan } from "./types";
+import { coerceLastTestOk, statusFromLastTest } from "./connectorHealth";
 import { clearSession, getAuthToken } from "./session";
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 15000;
-const LONG_REQUEST_TIMEOUT_MS = 120000;
+const LONG_REQUEST_TIMEOUT_MS = 180000;
 
 /** Unauthenticated liveness probe — used so a 401 on connectors is not "API offline". */
 let _healthFailStreak = 0;
@@ -275,6 +276,8 @@ export async function runPreflight(payload: {
     requires_review?: boolean;
     score_gap?: number;
     user_override?: boolean;
+    review_kind?: string;
+    false_friend_confirmed?: boolean;
     create_new?: boolean;
     assignment_strategy?: string;
     semantic_role?: string;
@@ -287,9 +290,19 @@ export async function runPreflight(payload: {
     struct_policy?: string;
     struct_derived?: boolean;
     struct_parent?: string;
+    structural_class?: string;
+    child_table_spec?: {
+      child_table: string;
+      parent_key_columns: string[];
+      ordinal_column?: string;
+      columns: Array<{ name: string; type: string }>;
+      keep_parent_json?: boolean;
+    };
   }[];
   connector_id?: string;
   source_connector_id?: string;
+  /** Ad-hoc / inline source endpoint when no saved connector — uniqueness + orphan probes. */
+  source_config?: Record<string, unknown>;
   source_table?: string;
   source_collection?: string;
   dest_type?: string;
@@ -311,6 +324,8 @@ export async function runPreflight(payload: {
   sample_rows?: Record<string, unknown>[];
   estimated_bytes?: number;
   sync_mode?: string;
+  /** CDC delivery — default at_least_once; exactly_once is opt-in. */
+  delivery_guarantee?: "at_least_once" | "exactly_once";
   schema_policy?: string;
   validation_mode?: string;
   backfill_new_fields?: boolean;
@@ -330,6 +345,8 @@ export async function runPreflight(payload: {
   acknowledgment_reason?: string;
   /** Pre-ingestion staging (SQL destinations only). */
   write_via_staging?: boolean;
+  /** Connector-specific dest settings (Redshift staging_bucket / iam_role). */
+  dest_extra?: Record<string, unknown>;
   source_kind?: string;
   source_type?: string;
 }): Promise<import("./types").PreflightResult> {
@@ -580,6 +597,12 @@ export interface PilotTransferPreview {
   destination_table_exists?: boolean;
   preflight_run_id?: string;
   readiness_score?: number;
+  validation_mode?: string;
+  schema_policy?: string;
+  contract_id?: string;
+  require_signed_contract?: boolean;
+  enforce_contract?: boolean;
+  breaker_state?: string;
 }
 
 export interface CopilotChatResponse {
@@ -795,6 +818,8 @@ export interface CatalogConnector {
   capability_label?: string;
   /** Honest tier: certified | source_only | connect_only | planned */
   certification_tier?: string;
+  is_hosted_alias?: boolean;
+  alias_of?: string | null;
   capabilities?: {
     test?: boolean;
     read?: boolean;
@@ -845,6 +870,8 @@ export async function fetchConnectors(): Promise<Connector[]> {
   const normalize = (c: Record<string, unknown>): Connector | null => {
     const id = String(c.id ?? c._id ?? "");
     if (!id) return null;
+    // Probe result is authoritative — never keep a sticky status=error after a pass.
+    const lastTestOk = coerceLastTestOk(c.last_test_ok);
     return {
       id,
       name: String(c.name ?? ""),
@@ -852,7 +879,7 @@ export async function fetchConnectors(): Promise<Connector[]> {
       host: String(c.host ?? ""),
       port: Number(c.port ?? 0),
       database: String(c.database ?? ""),
-      status: c.last_test_ok === false ? "error" : String(c.status ?? "configured"),
+      status: statusFromLastTest(lastTestOk),
       role: c.role ? String(c.role) : undefined,
       username: c.username ? String(c.username) : undefined,
       password: c.password ? String(c.password) : undefined,
@@ -866,9 +893,8 @@ export async function fetchConnectors(): Promise<Connector[]> {
       service_account: c.service_account ? String(c.service_account) : undefined,
       created_at: String(c.created_at ?? new Date().toISOString()),
       // Preserve tri-state: true / false / undefined (never tested).
-      // Coercing null→false made brand-new saves look like "Test failed".
-      last_test_ok:
-        c.last_test_ok === true ? true : c.last_test_ok === false ? false : undefined,
+      last_test_ok: lastTestOk,
+      last_used_at: c.last_used_at ? String(c.last_used_at) : null,
     };
   };
 
@@ -951,6 +977,34 @@ export async function verifySignedProofPack(
   return res.json();
 }
 
+/** Client-facing Migration Certificate (Markdown) for a completed run. */
+export async function fetchMigrationCertificateMarkdown(jobId: string): Promise<string> {
+  const res = await apiFetch(
+    `${API_BASE}/transfer/${encodeURIComponent(jobId)}/certificate?format=markdown`,
+  );
+  if (!res.ok) throw new Error(await parseApiError(res, "Migration certificate not available"));
+  return res.text();
+}
+
+/** Audit deliverable: the same signed certificate, paginated and hash-stamped. */
+export async function fetchMigrationCertificatePdf(jobId: string): Promise<Blob> {
+  const res = await apiFetch(
+    `${API_BASE}/transfer/${encodeURIComponent(jobId)}/certificate?format=pdf`,
+  );
+  if (!res.ok) throw new Error(await parseApiError(res, "Migration certificate not available"));
+  return res.blob();
+}
+
+/** Signed JSON form of the certificate — the artifact /certificate/verify checks. */
+export async function fetchMigrationCertificate(
+  jobId: string,
+): Promise<Record<string, unknown>> {
+  return requestJson(
+    [`${API_BASE}/transfer/${encodeURIComponent(jobId)}/certificate`],
+    "Migration certificate not available",
+  );
+}
+
 /** Execute signed rollback plan — DISCARD_STAGING only (never population undo). */
 export async function executeJobRollback(
   jobId: string,
@@ -1000,28 +1054,71 @@ export async function renameJob(jobId: string, name: string): Promise<JobProgres
   throw lastError instanceof Error ? lastError : new Error("Rename failed");
 }
 
-export async function retryJob(jobId: string): Promise<{ job_id: string; retry_of: string }> {
+/** Retry from start was refused because it would duplicate committed rows. */
+export class RetryRefusedError extends Error {
+  readonly rowsCommitted: number | null;
+  readonly rowsCommittedKnown: boolean;
+
+  constructor(reason: string, rowsCommitted: number | null, rowsCommittedKnown: boolean) {
+    super(reason);
+    this.name = "RetryRefusedError";
+    this.rowsCommitted = rowsCommitted;
+    this.rowsCommittedKnown = rowsCommittedKnown;
+  }
+}
+
+export async function retryJob(
+  jobId: string,
+  options: { force?: boolean } = {},
+): Promise<{ job_id: string; retry_of: string; duplicate_risk_acknowledged?: boolean }> {
+  const query = options.force ? "?force=true" : "";
   const urls = [
-    `${API_BASE}/connectors/jobs/${jobId}/retry`,
-    `${API_BASE}/jobs/${jobId}/retry`,
+    `${API_BASE}/connectors/jobs/${jobId}/retry${query}`,
+    `${API_BASE}/jobs/${jobId}/retry${query}`,
   ];
   let lastError: unknown;
   for (const url of urls) {
     try {
       const res = await apiFetch(url, { method: "POST" });
       const data = await res.json();
+      if (res.status === 409 && data?.detail && typeof data.detail === "object") {
+        // A refusal is the server's answer, not a route miss: surface it rather
+        // than falling through to the legacy URL and reporting its 404 instead.
+        const detail = data.detail as {
+          reason?: string;
+          rows_committed?: number | null;
+          rows_committed_known?: boolean;
+        };
+        throw new RetryRefusedError(
+          detail.reason || "Retry from start would duplicate committed rows.",
+          detail.rows_committed ?? null,
+          detail.rows_committed_known !== false,
+        );
+      }
       if (!res.ok) {
         throw new Error(typeof data.detail === "string" ? data.detail : "Retry failed");
       }
-      return data as { job_id: string; retry_of: string };
+      return data as { job_id: string; retry_of: string; duplicate_risk_acknowledged?: boolean };
     } catch (error) {
+      if (error instanceof RetryRefusedError) throw error;
       lastError = error;
     }
   }
   throw lastError instanceof Error ? lastError : new Error("Retry failed");
 }
 
-export async function resumeJob(jobId: string): Promise<{ job_id: string; status: string }> {
+/**
+ * Resume a job. A full refresh has nothing to resume *into* — it replaces the
+ * destination — so the server re-runs it from the beginning and says so with
+ * `restarted`. Dropping that made the UI promise a checkpoint continuation it
+ * had not performed.
+ */
+export async function resumeJob(jobId: string): Promise<{
+  job_id: string;
+  status: string;
+  restarted?: boolean;
+  message?: string;
+}> {
   const urls = [
     `${API_BASE}/connectors/jobs/${jobId}/resume`,
     `${API_BASE}/jobs/${jobId}/resume`,
@@ -1034,7 +1131,12 @@ export async function resumeJob(jobId: string): Promise<{ job_id: string; status
       if (!res.ok) {
         throw new Error(typeof data.detail === "string" ? data.detail : "Resume failed");
       }
-      return data as { job_id: string; status: string };
+      return data as {
+        job_id: string;
+        status: string;
+        restarted?: boolean;
+        message?: string;
+      };
     } catch (error) {
       lastError = error;
     }
@@ -1159,7 +1261,39 @@ export function streamJobProgress(
           ? rpsFromDs
           : undefined,
       cdc_lag_seconds: raw.cdc_lag_seconds != null ? Number(raw.cdc_lag_seconds) : null,
+      cdc_lag_basis: raw.cdc_lag_basis != null ? String(raw.cdc_lag_basis) : null,
+      cdc_heartbeat_age_sec:
+        raw.cdc_heartbeat_age_sec != null ? Number(raw.cdc_heartbeat_age_sec) : null,
       replication_lag_bytes: raw.replication_lag_bytes != null ? Number(raw.replication_lag_bytes) : null,
+      cdc_confirmed_flush_lsn: raw.cdc_confirmed_flush_lsn
+        ? String(raw.cdc_confirmed_flush_lsn)
+        : null,
+      cdc_restart_lsn: raw.cdc_restart_lsn ? String(raw.cdc_restart_lsn) : null,
+      cdc_min_lsn: raw.cdc_min_lsn ? String(raw.cdc_min_lsn) : null,
+      cdc_max_lsn: raw.cdc_max_lsn ? String(raw.cdc_max_lsn) : null,
+      cdc_max_lsn_time: raw.cdc_max_lsn_time ? String(raw.cdc_max_lsn_time) : null,
+      cdc_capture_instance: raw.cdc_capture_instance
+        ? String(raw.cdc_capture_instance)
+        : null,
+      cdc_capture_stall: raw.cdc_capture_stall == null ? null : Boolean(raw.cdc_capture_stall),
+      cdc_capture_stall_reason: raw.cdc_capture_stall_reason
+        ? String(raw.cdc_capture_stall_reason)
+        : null,
+      cdc_capture_stall_unknown:
+        raw.cdc_capture_stall_unknown == null ? null : Boolean(raw.cdc_capture_stall_unknown),
+      cdc_capture_latency_seconds:
+        raw.cdc_capture_latency_seconds != null
+          ? Number(raw.cdc_capture_latency_seconds)
+          : null,
+      cdc_slot_active: raw.cdc_slot_active == null ? null : Boolean(raw.cdc_slot_active),
+      cdc_slot_exists: raw.cdc_slot_exists == null ? null : Boolean(raw.cdc_slot_exists),
+      cdc_wal_status: raw.cdc_wal_status ? String(raw.cdc_wal_status) : null,
+      cdc_freshness_severity: raw.cdc_freshness_severity
+        ? String(raw.cdc_freshness_severity)
+        : null,
+      cdc_lag_unknown_reason: raw.cdc_lag_unknown_reason
+        ? String(raw.cdc_lag_unknown_reason)
+        : null,
       cdc_heartbeat_at: raw.cdc_heartbeat_at ? String(raw.cdc_heartbeat_at) : null,
       cdc_last_ddl_at: raw.cdc_last_ddl_at ? String(raw.cdc_last_ddl_at) : null,
       mapping_review_required: raw.mapping_review_required == null ? null : Boolean(raw.mapping_review_required),
@@ -1173,6 +1307,10 @@ export function streamJobProgress(
       watermark: raw.watermark != null ? String(raw.watermark) : null,
       cdc_shared_reader: raw.cdc_shared_reader == null ? null : Boolean(raw.cdc_shared_reader),
       snapshot_mode: raw.snapshot_mode ? String(raw.snapshot_mode) : null,
+      snapshot_plan:
+        raw.snapshot_plan && typeof raw.snapshot_plan === "object"
+          ? (raw.snapshot_plan as import("./types").TransferJob["snapshot_plan"])
+          : null,
       cdc_lease_holder: raw.cdc_lease_holder ? String(raw.cdc_lease_holder) : null,
       cdc_lease_resource: raw.cdc_lease_resource ? String(raw.cdc_lease_resource) : null,
       cdc_lease_stale: raw.cdc_lease_stale == null ? null : Boolean(raw.cdc_lease_stale),
@@ -1202,6 +1340,9 @@ export function streamJobProgress(
       cdc_append_only_sink: raw.cdc_append_only_sink == null ? null : Boolean(raw.cdc_append_only_sink),
       trust_score: raw.trust_score != null ? Number(raw.trust_score) : null,
       trust: raw.trust && typeof raw.trust === "object" ? raw.trust as JobProgress["trust"] : null,
+      row_accounting: raw.row_accounting && typeof raw.row_accounting === "object"
+        ? raw.row_accounting as JobProgress["row_accounting"]
+        : undefined,
       streams: Array.isArray(raw.streams) ? raw.streams as JobProgress["streams"] : undefined,
       notifications: Array.isArray(raw.notifications)
         ? raw.notifications as JobProgress["notifications"]
@@ -1306,15 +1447,24 @@ export async function deleteConnector(id: string): Promise<void> {
   throw new Error(await parseApiError(res, "Failed to delete connector"));
 }
 
-export async function testSavedConnector(id: string): Promise<{ success: boolean; message: string }> {
+export async function testSavedConnector(id: string): Promise<{
+  success: boolean;
+  message: string;
+  last_test_ok: boolean;
+}> {
   const res = await apiFetch(`${API_BASE}/connectors/saved/${id}/test`, { method: "POST" });
   if (!res.ok) {
     throw new Error(await parseApiError(res, "Connection test failed"));
   }
   const data = await res.json();
+  const success = Boolean(data?.success);
+  // Prefer explicit last_test_ok from API; fall back to success so UI never
+  // sticks on a stale failed badge after a green probe.
+  const lastTestOk = coerceLastTestOk(data?.last_test_ok);
   return {
-    success: Boolean(data?.success),
-    message: String(data?.message || (data?.success ? "Connected" : "Connection failed")),
+    success,
+    message: String(data?.message || (success ? "Connected" : "Connection failed")),
+    last_test_ok: lastTestOk === undefined ? success : lastTestOk,
   };
 }
 
@@ -1345,6 +1495,28 @@ export async function fetchScheduleHistory(
   const res = await apiFetch(`${API_BASE}/schedules/${id}/history?limit=${limit}`);
   if (!res.ok) throw new Error("Failed to fetch schedule history");
   return res.json();
+}
+
+/**
+ * Record the source's current shape as this schedule's baseline.
+ *
+ * The operator asserting that a drift finding has been reviewed and the mapping
+ * still holds. Deliberately a separate action rather than something a retry
+ * does implicitly.
+ */
+export async function acceptScheduleSourceSchema(
+  id: string,
+): Promise<{ success: boolean; message?: string; columns?: number }> {
+  const res = await apiFetch(`${API_BASE}/schedules/${id}/accept-source-schema`, {
+    method: "POST",
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    throw new Error(
+      typeof data?.detail === "string" ? data.detail : "Could not update the baseline",
+    );
+  }
+  return data as { success: boolean; message?: string; columns?: number };
 }
 
 export async function createSchedule(
@@ -1597,6 +1769,8 @@ export interface EndpointIntrospection {
   >;
   objects?: { name: string; type: string }[];
   row_estimate?: number;
+  row_estimate_uncertain?: boolean;
+  sample_row_count?: number;
   table_exists?: boolean;
   data?: Record<string, unknown>[];
   sample_data?: Record<string, unknown>[];
@@ -1676,13 +1850,16 @@ export async function fetchOpsFreshness(warnSeconds = 60): Promise<{
     schedule_id?: string | null;
     job_id?: string | null;
     stream?: string | null;
-    lag_seconds?: number;
+    lag_seconds?: number | null;
+    lag_bytes?: number | null;
   }>;
   pipelines: Array<{
     schedule_id: string;
     stream: string;
     job_id: string;
-    lag_seconds: number;
+    lag_seconds: number | null;
+    lag_bytes?: number | null;
+    lag_basis?: string | null;
     polls_total: number;
     heartbeat_at?: number;
     heartbeat_age_seconds?: number | null;
@@ -2023,6 +2200,8 @@ export async function runUniversalTransfer(options: {
   syncMode?: string;
   schemaPolicy?: string;
   validationMode?: string;
+  /** CDC dest-owned watermark EOS. Default at_least_once. */
+  deliveryGuarantee?: "at_least_once" | "exactly_once";
   backfillNewFields?: boolean;
   writeViaStaging?: boolean;
   /** Opt-in Tesseract OCR for scanned/image-only PDF sources. */
@@ -2039,6 +2218,21 @@ export async function runUniversalTransfer(options: {
   dateLocale?: string;
   /** Client-supplied key; when omitted a fresh UUID is sent so HTTP retries converge. */
   idempotencyKey?: string;
+  /** Validate→Execute ack trail — must match Studio Validate acknowledgments. */
+  complianceAcknowledged?: boolean;
+  schemaDriftAcknowledged?: boolean;
+  fkRiskAcknowledged?: boolean;
+  acknowledgmentActor?: string;
+  acknowledgmentReason?: string;
+  /** Phase C11 — 64-hex Decision Artifact content_hash from last green Validate. */
+  approvedDecisionArtifactHash?: string;
+  /** Map→DDL fingerprint stamped by the same Validate run. */
+  approvedDdlIdentityHash?: string;
+  /** Optional full artifact payload (content_hash must match approved hash). */
+  decisionArtifact?: Record<string, unknown>;
+  /** Bound data contract — same fail-closed SIGNED gate as scheduled runs. */
+  contractId?: string;
+  requireSignedContract?: boolean;
 }) {
   const formData = new FormData();
   if (options.file) formData.append("file", options.file);
@@ -2052,8 +2246,10 @@ export async function runUniversalTransfer(options: {
   formData.append("sync_mode", options.syncMode || "full_refresh_append");
   formData.append("schema_policy", options.schemaPolicy || "manual_review");
   formData.append("validation_mode", options.validationMode || "strict");
-  // Runtime SSOT: only at_least_once is selectable — never invent exactly-once.
-  formData.append("delivery_guarantee", "at_least_once");
+  formData.append(
+    "delivery_guarantee",
+    options.deliveryGuarantee === "exactly_once" ? "exactly_once" : "at_least_once",
+  );
   formData.append("backfill_new_fields", options.backfillNewFields === true ? "true" : "false");
   formData.append("write_via_staging", options.writeViaStaging === true ? "true" : "false");
   formData.append("enable_ocr", options.enableOcr === true ? "true" : "false");
@@ -2096,7 +2292,41 @@ export async function runUniversalTransfer(options: {
     formData.append("stream_contracts_json", JSON.stringify(options.streamContracts));
   }
   if (options.planId) formData.append("plan_id", options.planId);
+  if (options.contractId) formData.append("contract_id", options.contractId);
+  formData.append(
+    "require_signed_contract",
+    options.requireSignedContract === true ? "true" : "false",
+  );
   formData.append("date_locale", options.dateLocale || "");
+  formData.append(
+    "compliance_acknowledged",
+    options.complianceAcknowledged === true ? "true" : "false",
+  );
+  formData.append(
+    "schema_drift_acknowledged",
+    options.schemaDriftAcknowledged === true ? "true" : "false",
+  );
+  formData.append(
+    "fk_risk_acknowledged",
+    options.fkRiskAcknowledged === true ? "true" : "false",
+  );
+  if (options.acknowledgmentActor) {
+    formData.append("acknowledgment_actor", options.acknowledgmentActor);
+  }
+  if (options.acknowledgmentReason) {
+    formData.append("acknowledgment_reason", options.acknowledgmentReason);
+  }
+  const approvedHash = (options.approvedDecisionArtifactHash || "").trim();
+  if (approvedHash) {
+    formData.append("approved_decision_artifact_hash", approvedHash);
+  }
+  const approvedDdlHash = (options.approvedDdlIdentityHash || "").trim();
+  if (approvedDdlHash) {
+    formData.append("approved_ddl_identity_hash", approvedDdlHash);
+  }
+  if (options.decisionArtifact && Object.keys(options.decisionArtifact).length) {
+    formData.append("decision_artifact_json", JSON.stringify(options.decisionArtifact));
+  }
   // A fresh key per click still lets the server fingerprint catch a double-submit
   // of the same intent; the header itself makes HTTP-level retries of this call
   // converge on one job instead of starting a second writer.
@@ -2166,10 +2396,19 @@ export async function executeTransferJson(payload: {
   syncMode?: string;
   validationMode?: string;
   schemaPolicy?: string;
+  deliveryGuarantee?: "at_least_once" | "exactly_once";
   skipPreflight?: boolean;
   asyncMode?: boolean;
   planId?: string;
   idempotencyKey?: string;
+  complianceAcknowledged?: boolean;
+  schemaDriftAcknowledged?: boolean;
+  fkRiskAcknowledged?: boolean;
+  acknowledgmentActor?: string;
+  acknowledgmentReason?: string;
+  approvedDecisionArtifactHash?: string;
+  approvedDdlIdentityHash?: string;
+  decisionArtifact?: Record<string, unknown>;
 }) {
   const idempotencyKey =
     payload.idempotencyKey?.trim() ||
@@ -2189,10 +2428,21 @@ export async function executeTransferJson(payload: {
       sync_mode: payload.syncMode || "full_refresh_append",
       validation_mode: payload.validationMode || "strict",
       schema_policy: payload.schemaPolicy || "manual_review",
-      delivery_guarantee: "at_least_once",
+      delivery_guarantee:
+        payload.deliveryGuarantee === "exactly_once" ? "exactly_once" : "at_least_once",
       skip_preflight: payload.skipPreflight === true,
       async_mode: payload.asyncMode !== false,
       plan_id: payload.planId || undefined,
+      compliance_acknowledged: payload.complianceAcknowledged === true,
+      schema_drift_acknowledged: payload.schemaDriftAcknowledged === true,
+      fk_risk_acknowledged: payload.fkRiskAcknowledged === true,
+      acknowledgment_actor: payload.acknowledgmentActor || undefined,
+      acknowledgment_reason: payload.acknowledgmentReason || undefined,
+      approved_decision_artifact_hash:
+        (payload.approvedDecisionArtifactHash || "").trim() || undefined,
+      approved_ddl_identity_hash:
+        (payload.approvedDdlIdentityHash || "").trim() || undefined,
+      decision_artifact: payload.decisionArtifact || undefined,
     }),
     timeoutMs: LONG_REQUEST_TIMEOUT_MS,
   });
@@ -2526,6 +2776,40 @@ export interface QueryResult {
   column_schema: Record<string, string>;
   row_count: number;
   truncated: boolean;
+  /** Server-measured execution time. Absent on older API builds. */
+  duration_ms?: number;
+  /**
+   * Provenance of `column_schema`. Result-set types are inferred from the
+   * returned values, never read from source DDL — the console must not
+   * present the first as the second.
+   */
+  column_type_source?: string;
+}
+
+export interface QuerySchemaColumnInfo {
+  name: string;
+  type: string;
+  /** null/undefined = the catalog did not say; never assume nullable. */
+  nullable?: boolean | null;
+  primary_key?: boolean;
+}
+
+export interface QuerySchemaObjectInfo {
+  name: string;
+  type: string;
+  schema_name?: string;
+  columns: QuerySchemaColumnInfo[];
+  row_estimate?: number;
+}
+
+export interface QuerySchemaResult {
+  connected: boolean;
+  connector_type?: string;
+  database?: string;
+  objects: QuerySchemaObjectInfo[];
+  message?: string;
+  warnings?: string[];
+  type_source?: string;
 }
 
 export interface QueryExportResult {
@@ -2544,6 +2828,11 @@ export async function executeQuery(payload: {
   database?: string;
   collection?: string;
   limit?: number;
+  /**
+   * Named bind parameters for `:name` placeholders. These stay bound values
+   * on the server — they are never interpolated into the SQL text.
+   */
+  params?: Record<string, unknown>;
 }): Promise<QueryResult> {
   const res = await apiFetch(`${API_BASE}/query/execute`, {
     method: "POST",
@@ -2583,10 +2872,34 @@ export async function exportQuery(payload: {
   return res.json();
 }
 
+/**
+ * List queryable objects for a connector, and columns for one named object.
+ *
+ * Two-phase by design: omit `object_name` to list objects, then pass it to
+ * expand that object's columns. Fetching every table's columns up front is
+ * what makes schema browsers unusable on large estates.
+ */
+export async function fetchQuerySchema(payload: {
+  connector_id: string;
+  database?: string;
+  schema_name?: string;
+  object_name?: string;
+}): Promise<QuerySchemaResult> {
+  const res = await apiFetch(`${API_BASE}/query/schema`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+    timeoutMs: LONG_REQUEST_TIMEOUT_MS,
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Schema introspection failed"));
+  return res.json();
+}
+
 export interface QuarantineInfo {
   job_id: string;
   rejected_rows: number;
   issue_count?: number;
+  open_count?: number;
   /** write = load-time rejects; preflight = Validate/Run integrity findings */
   source?: "write" | "preflight" | "none" | string;
   quarantine: {
@@ -2600,6 +2913,7 @@ export interface QuarantineInfo {
     chars?: string[];
     suggested_transform?: string;
     _df_qid?: string;
+    retry_status?: string;
   }[];
   /** Destination-side DLQ table (`{table}_df_quarantine`) when written. */
   dest_dlq?: {
@@ -2619,6 +2933,17 @@ export interface QuarantineInfo {
    */
   quarantine_durable?: boolean | null;
   quarantine_dlq_error?: string | null;
+  /** Dual Run sibling: remediations until open_count hits zero. closed ≠ migration_proven. */
+  quarantine_closure?: {
+    verdict?: string;
+    open_count?: number;
+    promoted_count?: number;
+    failed_count?: number;
+    durable_count?: number;
+    next_action?: string;
+    note?: string;
+    migration_proven?: boolean;
+  };
 }
 
 export async function fetchJobQuarantine(jobId: string): Promise<QuarantineInfo> {
@@ -2741,6 +3066,7 @@ export interface QuarantineReplayResult {
     source_rows?: number;
     target_rows?: number;
   };
+  quarantine_closure?: QuarantineInfo["quarantine_closure"];
 }
 
 export async function replayJobQuarantine(
@@ -2959,10 +3285,10 @@ export type ProofLedger = {
     checks?: string[];
     elapsed_ms?: number;
   }[];
-  vs_airbyte: {
+  integrity_comparison: {
     dimension: string;
     dataflow: string;
-    airbyte: string;
+    industry_elt: string;
     proof: string;
   }[];
   how_to_verify: string[];
@@ -2981,7 +3307,7 @@ export type FidelityProofResult = {
   spot?: Record<string, unknown>;
   proof_id?: string;
   proof_file?: string;
-  vs_airbyte?: string;
+  integrity_note?: string;
 };
 
 export async function fetchProofLedger(): Promise<ProofLedger> {
@@ -2996,6 +3322,19 @@ export async function runFidelityProof(): Promise<FidelityProofResult> {
     timeoutMs: 120_000,
   });
   if (!res.ok) throw new Error(await parseApiError(res, "Fidelity proof failed"));
+  return res.json();
+}
+
+export async function runScheduleParallelCheck(
+  scheduleId: string,
+): Promise<{ passed?: boolean; message?: string; campaign?: PipelineSchedule["fidelity_campaign"] }> {
+  const res = await apiFetch(`${API_BASE}/fidelity/check`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ schedule_id: scheduleId }),
+    timeoutMs: 120_000,
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Parallel-run check failed"));
   return res.json();
 }
 
@@ -3161,9 +3500,21 @@ export async function fetchUsageSummary(days = 30): Promise<{
 
 export interface SchemaDriftReport {
   severity: string;
-  additive: { kind: string; column?: string; to_type?: string }[];
-  breaking: { kind: string; column?: string; to?: string; to_type?: string }[];
+  additive: { kind: string; column?: string; to_type?: string; new_type?: string }[];
+  breaking: { kind: string; column?: string; to?: string; to_type?: string; new_type?: string }[];
   summary?: string;
+  compatibility?: string;
+  compatibility_note?: string;
+  hard_breaking?: { kind: string; column?: string; to?: string }[];
+  soft_net_additive?: { kind: string; column?: string; to?: string }[];
+  schema_evolution?: {
+    action?: string;
+    should_pause?: boolean;
+    compatibility?: string;
+    compatibility_note?: string;
+    hard_breaking?: { kind: string; column?: string }[];
+    soft_net_additive?: { kind: string; column?: string }[];
+  };
 }
 
 export async function classifySchemaDrift(
@@ -3420,6 +3771,8 @@ export interface TransformCompiledModel {
   sources: string[];
   statements: string[];
   error?: string;
+  /** How the executed SQL differs from this preview, when it does. */
+  note?: string;
   tests: { test_type: string; column: string; severity: string; sql: string }[];
 }
 

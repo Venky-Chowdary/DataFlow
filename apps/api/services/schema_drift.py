@@ -1,19 +1,24 @@
-"""Schema drift detection + auto-propagate — Airbyte/Fivetran-class evolution.
+"""Schema drift detection + auto-propagate — one evolution kernel.
 
-Algorithms (primary sources: Airbyte schema-change docs, Fivetran net-additive /
-schema_change_handling):
+Algorithms (primary sources: Confluent Schema Registry compatibility lattice,
+Apache Iceberg schema evolution, Fivetran net-additive ``schema_change_handling``,
+Airbyte propagate vs pause):
 
 * Additive (nullable add, widen) → auto-apply under ``propagate_columns`` /
   ``propagate_all`` (Validate≡Execute share ``apply_propagate_mappings``).
 * Net-additive drops/renames under propagate → keep dest history; map the new
-  name; never silent DROP COLUMN (Fivetran-safe).
+  name; never silent DROP COLUMN (Fivetran / Iceberg metadata-only drop).
 * Hard breaking (PK change, type narrow, NOT NULL add) → **always pause**,
-  even when propagate is on (Airbyte rule).
+  even when propagate is on (Airbyte rule + Confluent ``NONE``).
 * ``pause_on_change`` → pause on any detected change.
 * ``manual_review`` → continue with existing mappings only (ignore new cols
   until approved); still pause on hard breaking.
 * ``type_locked`` → pause on any type change; additive columns still require
   propagate or explicit backfill.
+
+Compatibility is policy-independent. Policy only chooses the action. Validate,
+Execute, schedules, and signed contracts must call :func:`resolve_schema_evolution`
+— never a parallel pause/continue table.
 """
 
 from __future__ import annotations
@@ -23,7 +28,7 @@ from typing import Any
 
 from services.db_type_utils import SCHEMALESS_DESTS, ci_get, normalize_dest_kind
 from services.schema_fingerprint import fingerprint_schema, schemas_match
-from services.type_system import is_lossy_coercion, normalize_logical_type
+from services.decision_kernel import is_lossy_coercion, normalize_logical_type
 
 # Policies that auto-apply additive field evolution (Airbyte propagate_*).
 PROPAGATE_POLICIES = frozenset({"propagate_columns", "propagate_all"})
@@ -41,6 +46,36 @@ HARD_BREAKING_KINDS = frozenset({
 
 # Soft under propagate (Fivetran net-additive): dest keeps old column / new name.
 SOFT_NET_ADDITIVE_KINDS = frozenset({"drop", "rename"})
+
+# Confluent-class lattice specialized for SQL transfer. Dest is the consumer of
+# new source rows; dest history is never DROP COLUMN (Iceberg / Fivetran).
+COMPAT_IDENTICAL = "identical"
+COMPAT_FORWARD = "forward"      # source grew (add / widen)
+COMPAT_BACKWARD = "backward"    # source dropped / renamed; dest keeps history
+COMPAT_FULL = "full"            # optional add AND remove, no type/PK change
+COMPAT_NONE = "none"            # hard-breaking — not auto-applicable
+
+COMPATIBILITY_NOTES: dict[str, str] = {
+    COMPAT_IDENTICAL: "No material schema change.",
+    COMPAT_FORWARD: (
+        "Source grew (nullable add or type widen). Destination can accept new "
+        "rows after ADD/WIDEN, or by leaving new columns unmapped — never DROP "
+        "destination columns."
+    ),
+    COMPAT_BACKWARD: (
+        "Source dropped or renamed fields. Destination keeps history "
+        "(net-additive). Mapped drops pause unattended runs unless propagate "
+        "is on."
+    ),
+    COMPAT_FULL: (
+        "Optional add and remove without type or primary-key change "
+        "(Avro FULL-class)."
+    ),
+    COMPAT_NONE: (
+        "Hard-breaking (narrow, type change, primary key, NOT NULL, cursor). "
+        "Always pause — never auto-apply, never acknowledge-away."
+    ),
+}
 
 
 def _norm_type(value: str | None) -> str:
@@ -92,8 +127,15 @@ def _is_type_widen(old_type: str, new_type: str, *, dest_db: str = "") -> bool:
 
 
 def _is_type_narrow(old_type: str, new_type: str, *, dest_db: str = "") -> bool:
+    """True when new_type can lose values of old_type (precision/range/domain).
+
+    Same-logical pairs must still consult ``is_lossy_coercion`` — first ``(p``
+    digit alone misses DECIMAL(10,4)→DECIMAL(10,2) and BIGINT→TINYINT.
+    """
     old_logical = normalize_logical_type(old_type)
     new_logical = normalize_logical_type(new_type)
+    if is_lossy_coercion(old_type, new_type, dest_db=dest_db):
+        return True
     if old_logical == new_logical:
         old_len = _type_length(old_type)
         new_len = _type_length(new_type)
@@ -102,20 +144,122 @@ def _is_type_narrow(old_type: str, new_type: str, *, dest_db: str = "") -> bool:
             and new_len is not None
             and new_len < old_len
         )
-    return is_lossy_coercion(old_type, new_type, dest_db=dest_db)
+    return False
+
+
+def _semantic_rename_pairs(
+    dropped: list[str],
+    added: list[str],
+    old_cols: dict[str, str],
+    new_cols: dict[str, str],
+    *,
+    dest_db: str = "",
+) -> tuple[list[str], list[str], list[tuple[str, str]]]:
+    """Pair dropped↔added columns that are the same field under a new name.
+
+    Type compatibility is necessary but not sufficient. ``AMT`` → ``quantity``
+    is a drop+add, not a rename — Fivetran treats it as a new column and
+    leaves the old one stale. We require the shared mapper to pin the pair
+    without a measure/identity/entity false-friend.
+    """
+    from services.semantic_mapper import (
+        _entity_conflict_requires_review,
+        _identity_leaf_mismatch,
+        _measure_kind_mismatch,
+        map_columns,
+    )
+
+    remaining_dropped = list(dropped)
+    remaining_added = list(added)
+    if not remaining_dropped or not remaining_added:
+        return remaining_dropped, remaining_added, []
+
+    mapped = map_columns(remaining_dropped, remaining_added)
+    by_source = {str(m.get("source")): m for m in mapped}
+    used_added: set[str] = set()
+    pairs: list[tuple[str, str]] = []
+    for d in list(remaining_dropped):
+        row = by_source.get(d) or {}
+        a = str(row.get("target") or "")
+        if not a or a not in remaining_added or a in used_added:
+            continue
+        if row.get("create_new"):
+            continue
+        if _is_type_narrow(old_cols[d], new_cols[a], dest_db=dest_db):
+            continue
+        if (
+            _measure_kind_mismatch(d, a)
+            or _identity_leaf_mismatch(d, a)
+            or _entity_conflict_requires_review(d, a)
+        ):
+            continue
+        if float(row.get("confidence") or 0) < 0.72:
+            continue
+        pairs.append((d, a))
+        used_added.add(a)
+    remaining_dropped = [c for c in remaining_dropped if c not in {p[0] for p in pairs}]
+    remaining_added = [c for c in remaining_added if c not in used_added]
+    return remaining_dropped, remaining_added, pairs
+
+
+def compatibility_of(classification: dict[str, Any] | None) -> str:
+    """Confluent BACKWARD/FORWARD/FULL/NONE for physical SQL transfer.
+
+    Policy does not belong here. Dest-as-consumer:
+
+    * ``identical`` — no additive or breaking diffs.
+    * ``forward`` — old dest can still be written if we ADD/WIDEN or ignore new
+      columns (nullable add, type widen / Iceberg promote).
+    * ``backward`` — new source dropped or renamed fields; dest keeps columns
+      (Fivetran net-additive / Iceberg metadata-only drop).
+    * ``full`` — both optional add and remove, no hard type/PK change.
+    * ``none`` — narrow, type change, PK, NOT NULL, cursor — not auto-applicable.
+
+    Type widen is ``forward`` rather than ``none`` because writers can ALTER
+    promote; ``type_locked`` still pauses it at the policy layer.
+    """
+    classification = classification or {}
+    additive = list(classification.get("additive") or [])
+    breaking = list(classification.get("breaking") or [])
+    hard_or_unknown: list[dict[str, Any]] = []
+    soft: list[dict[str, Any]] = []
+    known = HARD_BREAKING_KINDS | SOFT_NET_ADDITIVE_KINDS
+    for item in breaking:
+        kind = str(item.get("kind") or "")
+        if kind in SOFT_NET_ADDITIVE_KINDS:
+            soft.append(item)
+        elif kind in HARD_BREAKING_KINDS or kind not in known:
+            hard_or_unknown.append(item)
+    if hard_or_unknown:
+        return COMPAT_NONE
+    has_add = bool(additive)
+    has_soft = bool(soft)
+    if not has_add and not has_soft:
+        return COMPAT_IDENTICAL
+    if has_add and has_soft:
+        return COMPAT_FULL
+    if has_add:
+        return COMPAT_FORWARD
+    return COMPAT_BACKWARD
 
 
 def classify_schema_change(
     old_schema: dict[str, Any] | None,
     new_schema: dict[str, Any] | None,
+    *,
+    dest_db: str = "",
 ) -> dict[str, Any]:
     """Classify a schema evolution as additive vs breaking.
 
     Additive: new nullable columns, widen types.
     Breaking: drop/rename/type-narrow/pk change / new NOT NULL columns.
+
+    ``dest_db`` threads dialect rules into widen/narrow (ARRAY→MySQL JSON is
+    representation, not false ``narrow_type``).
     """
     old_cols, old_null, old_pk = _unpack_schema(old_schema)
     new_cols, new_null, new_pk = _unpack_schema(new_schema)
+    dest_db = (dest_db or "").strip()
 
     additive: list[dict[str, Any]] = []
     breaking: list[dict[str, Any]] = []
@@ -125,41 +269,23 @@ def classify_schema_change(
     added = sorted(new_names - old_names)
     dropped = sorted(old_names - new_names)
 
-    # Heuristic rename: match dropped↔added by compatible (non-narrowing) types.
-    # Single-pair keeps the classic path; multi-column uses greedy type matching
-    # so N renames are not misclassified as N drops + N adds (false breaking).
+    # Semantic rename: pair dropped↔added by mapper score, not type-only.
+    # Type-only pairing is the Fivetran hole (AMT drop + quantity add looks
+    # like a rename because both are DECIMAL). Require a real name match and
+    # refuse measure/identity/entity false-friends.
     renamed_pairs: list[tuple[str, str]] = []
     if dropped and added:
-        remaining_dropped = list(dropped)
-        remaining_added = list(added)
-        # Prefer exact logical-type matches, then any non-narrow pair.
-        for prefer_exact in (True, False):
-            for d in list(remaining_dropped):
-                best: str | None = None
-                for a in remaining_added:
-                    if _is_type_narrow(old_cols[d], new_cols[a]):
-                        continue
-                    same = normalize_logical_type(old_cols[d]) == normalize_logical_type(
-                        new_cols[a]
-                    )
-                    if prefer_exact and not same:
-                        continue
-                    if not prefer_exact and same:
-                        continue
-                    best = a
-                    break
-                if best is None:
-                    continue
-                renamed_pairs.append((d, best))
-                breaking.append({
-                    "kind": "rename",
-                    "column": d,
-                    "to": best,
-                    "old_type": old_cols[d],
-                    "new_type": new_cols[best],
-                })
-                remaining_dropped.remove(d)
-                remaining_added.remove(best)
+        remaining_dropped, remaining_added, renamed_pairs = _semantic_rename_pairs(
+            dropped, added, old_cols, new_cols, dest_db=dest_db
+        )
+        for d, a in renamed_pairs:
+            breaking.append({
+                "kind": "rename",
+                "column": d,
+                "to": a,
+                "old_type": old_cols[d],
+                "new_type": new_cols[a],
+            })
         dropped = remaining_dropped
         added = remaining_added
 
@@ -183,7 +309,9 @@ def classify_schema_change(
         old_t, new_t = old_cols[col], new_cols[col]
         same_logical = normalize_logical_type(old_t) == normalize_logical_type(new_t)
         same_length = _type_length(old_t) == _type_length(new_t)
-        if same_logical and same_length:
+        # Never short-circuit on same logical + same first-number length alone —
+        # DECIMAL(10,4)→DECIMAL(10,2) and BIGINT→TINYINT share that trap.
+        if same_logical and same_length and not _is_type_narrow(old_t, new_t, dest_db=dest_db):
             # Same declared type; nullability tighten is breaking.
             if col in old_null and col in new_null and old_null[col] and not new_null[col]:
                 breaking.append({
@@ -193,14 +321,14 @@ def classify_schema_change(
                     "new_type": new_t,
                 })
             continue
-        if _is_type_widen(old_t, new_t):
+        if _is_type_widen(old_t, new_t, dest_db=dest_db):
             additive.append({
                 "kind": "widen_type",
                 "column": col,
                 "old_type": old_t,
                 "new_type": new_t,
             })
-        elif _is_type_narrow(old_t, new_t):
+        elif _is_type_narrow(old_t, new_t, dest_db=dest_db):
             breaking.append({
                 "kind": "narrow_type",
                 "column": col,
@@ -263,6 +391,7 @@ def classify_from_column_maps(
     old_pk: list[str] | None = None,
     new_pk: list[str] | None = None,
     cursor_fields: list[str] | None = None,
+    dest_db: str = "",
 ) -> dict[str, Any]:
     """Classify evolution from flat column maps (plan revisions / live introspect)."""
     old_columns = list(old_columns or [])
@@ -272,6 +401,7 @@ def classify_from_column_maps(
     report = classify_schema_change(
         _schema_dict_from_flat(old_columns, old_types, primary_key=old_pk),
         _schema_dict_from_flat(new_columns, new_types, primary_key=new_pk),
+        dest_db=dest_db,
     )
     # Airbyte hard-break: cursor removed from source.
     cursors = [str(c).strip() for c in (cursor_fields or []) if str(c).strip()]
@@ -372,6 +502,10 @@ def resolve_schema_evolution(
     elif action == "review":
         severity = "warning"
 
+    compat = compatibility_of({
+        "additive": additive,
+        "breaking": breaking,
+    })
     return {
         "action": action,
         "severity": severity,
@@ -383,6 +517,8 @@ def resolve_schema_evolution(
         "unmapped_sources": unmapped,
         "should_pause": action == "pause",
         "should_propagate": action == "propagate",
+        "compatibility": compat,
+        "compatibility_note": COMPATIBILITY_NOTES[compat],
         "backfill_recommended": bool(
             action == "propagate"
             and any(
@@ -391,6 +527,47 @@ def resolve_schema_evolution(
             )
         ),
     }
+
+
+def classify_schema_evolution_report(
+    old_schema: dict[str, Any] | None,
+    new_schema: dict[str, Any] | None,
+    *,
+    dest_db: str = "",
+    schema_policy: str = "manual_review",
+) -> dict[str, Any]:
+    """Classify + decide — the payload Validate, Contracts, and /schema-drift share."""
+    classification = classify_schema_change(
+        old_schema, new_schema, dest_db=dest_db
+    )
+    evolution = resolve_schema_evolution(
+        classification, schema_policy=schema_policy
+    )
+    return {
+        **classification,
+        "schema_evolution": evolution,
+        "compatibility": evolution["compatibility"],
+        "compatibility_note": evolution["compatibility_note"],
+        "hard_breaking": evolution["hard_breaking"],
+        "soft_net_additive": evolution["soft_net_additive"],
+        "summary": _evolution_summary(evolution),
+    }
+
+
+def _evolution_summary(evolution: dict[str, Any]) -> str:
+    action = str(evolution.get("action") or "continue")
+    compat = str(evolution.get("compatibility") or COMPAT_IDENTICAL)
+    hard = evolution.get("hard_breaking") or []
+    if action == "pause" and hard:
+        kind = str(hard[0].get("kind") or "breaking")
+        column = str(hard[0].get("column") or hard[0].get("to") or "")
+        named = f"{kind} on {column}" if column else kind
+        return f"Hard-breaking {named} — paused (compatibility={compat})."
+    if action == "propagate":
+        return f"Safe to auto-propagate (compatibility={compat})."
+    if action == "review":
+        return f"Review required before Execute (compatibility={compat})."
+    return COMPATIBILITY_NOTES.get(compat, "")
 
 
 def apply_propagate_mappings(
@@ -569,18 +746,25 @@ def detect_schema_drift(
                 or "VARCHAR"
             )
             # Prefer mapping stamp over invented VARCHAR when live schema lacks column.
-            from services.type_system import (
-                is_precision_collapse_coercion,
-                resolve_mapping_target_type,
-            )
+            from services.decision_kernel import is_precision_collapse_coercion
+            from services.type_system import resolve_mapping_target_type
 
+            dest_db = str(destination_db_type or dest_kind or "")
             tgt_type = resolve_mapping_target_type(
                 m,
                 target_types=target_schema,
                 source_type=str(src_type),
-                dest_db_type=str(destination_db_type or dest_kind or ""),
-            ) or ci_get(target_schema, tgt) or "VARCHAR"
-            dest_db = str(destination_db_type or dest_kind or "")
+                dest_db_type=dest_db,
+            ) or ci_get(target_schema, tgt) or ""
+            if not tgt_type:
+                type_mismatches.append({
+                    "source": src,
+                    "target": tgt,
+                    "source_type": str(src_type).upper(),
+                    "target_type": "",
+                    "reason": "pending_dest_type",
+                })
+                continue
             if not is_lossy_coercion(src_type, tgt_type, dest_db=dest_db):
                 continue
 
@@ -620,6 +804,7 @@ def detect_schema_drift(
             old_pk=previous_primary_key,
             new_pk=live_primary_key,
             cursor_fields=cursor_fields,
+            dest_db=str(destination_db_type or dest_kind or ""),
         )
     elif source_changed and mapped_sources:
         still_present = [c for c in source_columns if c.lower() in mapped_sources]

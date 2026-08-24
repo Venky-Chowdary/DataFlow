@@ -368,4 +368,11 @@ def test_saved_connector(
         update_connector(connector_id, {"auth_source": cfg.get("auth_source", "")}, workspace_id=workspace_id)
 
     mark_tested(connector_id, ok)
-    return {"success": ok, "message": message, "auth_source": cfg.get("auth_source", "")}
+    # Echo last_test_ok so the UI can patch the list immediately — never leave a
+    # sticky "Test failed" badge after a green probe (Test-all vs individual drift).
+    return {
+        "success": ok,
+        "message": message,
+        "last_test_ok": ok,
+        "auth_source": cfg.get("auth_source", ""),
+    }

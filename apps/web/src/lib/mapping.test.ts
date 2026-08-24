@@ -17,6 +17,7 @@ import {
   editableFromPipelineMappings,
   engineStampedRiskChip,
   engineTransformToUi,
+  formatColumnProfileStrip,
   inferLogicalFromSample,
   isSafeNormalizeMapping,
   mappingAckLabel,
@@ -25,6 +26,7 @@ import {
   mappingRequiresRiskAck,
   mappingsFromAnalysis,
   mergeSignedRiskContracts,
+  mergeStampedTargetTypes,
   uiTransformToEngine,
   widenMappingToVarchar,
   type EditableMapping,
@@ -233,6 +235,73 @@ describe("fail-closed Map approve", () => {
     assert.equal(next.riskAcknowledged, true);
     assert.equal(next.approved, false);
     assert.equal(next.requiresReview, true);
+  });
+
+  it("mergeStampedTargetTypes hydrates Kernel destType from Validate", () => {
+    const merged = mergeStampedTargetTypes(
+      [{
+        source: "Change_from_Previous_Year",
+        target: "Change_from_Previous_Year",
+        confidence: 0.9,
+        approved: true,
+        createNew: true,
+        destType: "",
+        assignmentStrategy: "create_compatible_new",
+      }],
+      [{
+        source: "Change_from_Previous_Year",
+        target: "Change_from_Previous_Year",
+        target_type: "DOUBLE PRECISION",
+        create_new: true,
+        assignment_strategy: "create_compatible_new",
+      }],
+    );
+    assert.equal(merged[0].destType, "DOUBLE PRECISION");
+    assert.equal(merged[0].createNew, true);
+    assert.equal(merged[0].existsInDestination, false);
+  });
+
+  it("mergeStampedTargetTypes refuses ambiguous source-only hydrate", () => {
+    const merged = mergeStampedTargetTypes(
+      [
+        { source: "a", target: "a1", confidence: 0.9, approved: true, destType: "TEXT" },
+        { source: "a", target: "a2", confidence: 0.9, approved: true, destType: "TEXT" },
+      ],
+      [
+        { source: "a", target: "a1", target_type: "INTEGER" },
+        { source: "a", target: "a2", target_type: "BIGINT" },
+      ],
+    );
+    assert.equal(merged[0].destType, "INTEGER");
+    assert.equal(merged[1].destType, "BIGINT");
+  });
+
+  it("mergeStampedTargetTypes clears stale createNew on bind_existing", () => {
+    const merged = mergeStampedTargetTypes(
+      [{
+        source: "id",
+        target: "id",
+        confidence: 0.99,
+        approved: true,
+        createNew: true,
+        existsInDestination: false,
+        destType: "VARCHAR",
+        assignmentStrategy: "create_compatible_new",
+      }],
+      [{
+        source: "id",
+        target: "id",
+        target_type: "INTEGER",
+        create_new: false,
+        assignment_strategy: "bind_existing",
+      }],
+    );
+    assert.equal(merged[0].destType, "INTEGER");
+    assert.equal(merged[0].createNew, false);
+    assert.equal(merged[0].existsInDestination, true);
+    assert.equal(merged[0].assignmentStrategy, "bind_existing");
+    const wire = buildPreflightMappings([], merged);
+    assert.equal(wire[0].create_new, false);
   });
 
   it("mergeSignedRiskContracts echoes risk_id and signature", () => {
@@ -584,6 +653,36 @@ describe("destination schema honesty", () => {
     assert.ok(editable[0].confidence <= 0.93);
   });
 
+  it("does not flatten create-new confidence to a 95% wall", () => {
+    const rows = editableFromPipelineMappings([
+      {
+        source: "c_custkey",
+        target: "c_custkey",
+        confidence: 0.88,
+        transform: "none",
+        create_new: true,
+        assignment_strategy: "identity_passthrough",
+        source_type: "BIGINT",
+        target_type: "NUMBER(38,0)",
+        fidelity: "preserve",
+      },
+      {
+        source: "c_acctbal",
+        target: "c_acctbal",
+        confidence: 0.91,
+        transform: "none",
+        create_new: true,
+        assignment_strategy: "identity_passthrough",
+        source_type: "DECIMAL(11,6)",
+        target_type: "NUMBER(11,6)",
+        fidelity: "preserve",
+      },
+    ]);
+    assert.equal(rows[0].confidence, 0.88);
+    assert.equal(rows[1].confidence, 0.91);
+    assert.notEqual(rows[0].confidence, rows[1].confidence);
+  });
+
   it("caps create-new confidence in buildPreflightMappings before preflight", () => {
     const fromEditable = buildPreflightMappings([], [
       {
@@ -661,6 +760,20 @@ describe("destination schema honesty", () => {
     assert.ok(existing[0].confidence >= 0.95);
     // Bootstrap must not invent Approve — fidelity pipeline stamps first.
     assert.equal(existing[0].approved, false);
+  });
+
+  it("create-new destType uses catalog inferred_type, not sample semantic_type", () => {
+    const cols = [{
+      column_name: "C_CUSTKEY",
+      confidence: 0.99,
+      inferred_type: "DECIMAL(38,0)",
+      semantic_type: "BIGINT",
+      is_pii: false,
+      compliance: [],
+    }];
+    const create = mappingsFromAnalysis(cols, undefined, ["other_col"]);
+    assert.equal(create[0].createNew, true);
+    assert.equal(create[0].destType, "DECIMAL(38,0)");
   });
 
   it("intentional omit is first-class Map policy", () => {
@@ -798,5 +911,85 @@ describe("destination schema honesty", () => {
     assert.equal(clearedHealth.weak, false);
     assert.equal(clearedHealth.ready, 1);
     assert.match(clearedHealth.headline, /ready/i);
+  });
+
+  it("does not invent destType from source when Studio schema is partial", () => {
+    const editable = editableFromPipelineMappings(
+      [
+        {
+          source: "id",
+          target: "id",
+          confidence: 0.95,
+          transform: "none",
+          source_type: "INTEGER",
+          target_type: "INTEGER",
+        },
+        {
+          source: "note",
+          target: "note",
+          confidence: 0.9,
+          transform: "none",
+          source_type: "VARCHAR",
+          // no Map stamp — Studio also missing note
+        },
+      ],
+      [],
+      ["id", "note"],
+      0.75,
+      { id: "INTEGER" }, // partial Studio
+    );
+    assert.equal(editable[0].destType, "INTEGER");
+    assert.equal(editable[1].destType, undefined);
+    assert.equal(editable[1].requiresReview, true);
+
+    // Preflight must not re-invent VARCHAR stamp after Approve path.
+    const withExists = editable.map((m) => ({
+      ...m,
+      existsInDestination: true,
+      approved: true,
+    }));
+    const pf = buildPreflightMappings([], withExists);
+    assert.equal(pf[0].target_type, "INTEGER");
+    assert.equal(pf[1].target_type, undefined);
+  });
+});
+
+describe("column profile Map strip", () => {
+  it("threads engine column_profile into EditableMapping", () => {
+    const editable = editableFromPipelineMappings(
+      [
+        {
+          source: "score",
+          target: "score",
+          confidence: 0.9,
+          source_type: "DECIMAL",
+          target_type: "NUMERIC(8,2)",
+          column_profile: {
+            null_rate: 0.1,
+            min: 66.75,
+            max: 100,
+            observed_precision: 5,
+            observed_scale: 2,
+            numeric_kind: "fixed_decimal",
+          },
+        },
+      ],
+      [],
+      [],
+      0.75,
+      {},
+    );
+    assert.equal(editable[0].columnProfile?.null_rate, 0.1);
+    assert.equal(editable[0].columnProfile?.observed_scale, 2);
+    const strip = formatColumnProfileStrip(editable[0].columnProfile);
+    assert.ok(strip);
+    assert.match(strip!, /null 10%/);
+    assert.match(strip!, /p5,s2/);
+    assert.match(strip!, /fixed/);
+  });
+
+  it("formatColumnProfileStrip returns null when empty", () => {
+    assert.equal(formatColumnProfileStrip(undefined), null);
+    assert.equal(formatColumnProfileStrip({}), null);
   });
 });

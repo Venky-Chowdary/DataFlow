@@ -39,9 +39,9 @@ export const MAPPING_TRANSFORMS: { id: MappingTransform; label: string; detail: 
   { id: "date_iso", label: "Date → ISO", detail: "Parse dates/timestamps to ISO-8601" },
   { id: "time_iso", label: "Time → ISO", detail: "Parse time-of-day values" },
   { id: "hash_pii", label: "Hash PII", detail: "One-way hash for sensitive fields" },
-  { id: "cast_integer", label: "Cast integer", detail: "Coerce to whole number (no fractional scale)" },
-  { id: "cast_number", label: "Cast decimal", detail: "Coerce to precise numeric / DECIMAL" },
-  { id: "cast_boolean", label: "Cast boolean", detail: "Coerce to true/false" },
+  { id: "cast_integer", label: "Parse integer", detail: "Integer write guard — unparseable cells quarantine (not precision invent)" },
+  { id: "cast_number", label: "Parse decimal", detail: "Numeric write guard — unparseable cells quarantine (not precision invent)" },
+  { id: "cast_boolean", label: "Parse boolean", detail: "Boolean write guard — unparseable cells quarantine" },
   { id: "parse_json", label: "Parse JSON", detail: "Normalize JSON / ARRAY / STRUCT payloads" },
   { id: "binary", label: "Binary / base64", detail: "Preserve bytes as base64-safe wire form" },
   { id: "phone", label: "Normalize phone", detail: "Normalize phone numbers for text destinations" },
@@ -60,6 +60,17 @@ export interface CreateNewTypeRisk {
   severity?: "info" | "warn" | "block" | string;
   message: string;
 }
+
+/** Engine-stamped Map review kinds — keep aligned with ``semantic_mapper``. */
+export type MappingReviewKind =
+  | "measure_kind"
+  | "entity_identity"
+  | "dest_collision"
+  | "identity_leaf"
+  | "temporal_polarity"
+  | "lossy"
+  | "create_new"
+  | "generic";
 
 export interface EditableMapping {
   source: string;
@@ -94,6 +105,14 @@ export interface EditableMapping {
   structDerived?: boolean;
   /** Parent source column when structDerived. */
   structParent?: string;
+  /** Sample-aware array class from Map pipeline (array_of_object, …). */
+  structuralClass?: string;
+  /** Ranked strategy recommendations from the engine. */
+  arrayStrategies?: ArrayStrategyOption[];
+  /** Operator-approved child table contract for normalize/hybrid. */
+  childTableSpec?: ChildTableSpec;
+  /** Proposed child spec while policy is still JSON (one-click apply). */
+  proposedChildTableSpec?: ChildTableSpec;
   /**
    * Engine fidelity verdict from `mapping_fidelity` — preserve | cast | mutate | lossy_cast.
    * Prefer this over client-side type heuristics when present.
@@ -122,6 +141,72 @@ export interface EditableMapping {
   riskContract?: MigrationRiskContractDraft;
   /** Underscore-path collisions from STRUCT flatten — fail-closed, operator-visible. */
   flattenCollisions?: { flat: string; paths: string[][] }[];
+  /**
+   * Sample-aware column profile from Map pipeline (null%, min/max, observed p/s).
+   * Engine-stamped — never invent client-side invent from sample string alone.
+   */
+  columnProfile?: ColumnProfile;
+  /**
+   * Engine Map review kind from ``semantic_mapper.classify_review_kind``.
+   * False-friends stay off Approve eligible until Confirm this pair / Remap.
+   */
+  reviewKind?: MappingReviewKind;
+  /** Operator explicitly confirmed a false-friend pair (not Approve eligible). */
+  falseFriendConfirmed?: boolean;
+}
+
+/** Compact profiler strip from ``mapping_quality.column_profile_for_map``. */
+export interface ColumnProfile {
+  null_rate?: number;
+  unique_ratio?: number;
+  min?: number;
+  max?: number;
+  observed_precision?: number;
+  observed_scale?: number;
+  numeric_kind?: string;
+  suggested_carrier?: string;
+  ieee_signals?: string[];
+  likely_identifier?: boolean;
+  likely_email?: boolean;
+  likely_uuid?: boolean;
+  likely_date?: boolean;
+  likely_boolean?: boolean;
+  semantic_pattern_score?: number;
+}
+
+/** Operator-facing one-line Map strip from engine column_profile. */
+export function formatColumnProfileStrip(profile?: ColumnProfile | null): string | null {
+  if (!profile || typeof profile !== "object") return null;
+  const parts: string[] = [];
+  if (typeof profile.null_rate === "number" && Number.isFinite(profile.null_rate)) {
+    parts.push(`null ${(profile.null_rate * 100).toFixed(0)}%`);
+  }
+  if (
+    typeof profile.min === "number"
+    && typeof profile.max === "number"
+    && Number.isFinite(profile.min)
+    && Number.isFinite(profile.max)
+  ) {
+    const fmt = (n: number) =>
+      Math.abs(n) >= 1000 ? n.toLocaleString(undefined, { maximumFractionDigits: 2 }) : String(n);
+    parts.push(`${fmt(profile.min)}–${fmt(profile.max)}`);
+  }
+  if (
+    typeof profile.observed_precision === "number"
+    && typeof profile.observed_scale === "number"
+  ) {
+    parts.push(`p${profile.observed_precision},s${profile.observed_scale}`);
+  } else if (profile.suggested_carrier) {
+    parts.push(String(profile.suggested_carrier));
+  }
+  if (profile.numeric_kind === "ieee_float") {
+    parts.push("IEEE float");
+  } else if (profile.numeric_kind === "fixed_decimal") {
+    parts.push("fixed");
+  } else if (profile.numeric_kind === "integer") {
+    parts.push("int");
+  }
+  return parts.length ? parts.join(" · ") : null;
 }
 
 /** Draft / signed Migration Risk Contract — mirrors apps/api migration_risk_contract. */
@@ -157,8 +242,16 @@ export const EXECUTION_POLICY_OPTIONS: Array<{
   { id: "RETRY", label: "RETRY — one re-attempt then abort", continueUnlock: false },
   { id: "STOP_COLUMN", label: "STOP_COLUMN — omit bad column; write other columns", continueUnlock: true },
   { id: "QUARANTINE_ROW", label: "QUARANTINE_ROW — holdout row to DLQ for replay", continueUnlock: true },
-  { id: "SKIP_ROW", label: "SKIP_ROW — drop row (audit skip, not DLQ replay)", continueUnlock: true },
-  { id: "CAST_AND_CONTINUE", label: "CAST_AND_CONTINUE — cast fail → quarantine", continueUnlock: true },
+  {
+    id: "SKIP_ROW",
+    label: "SKIP_ROW — drop from primary (audit only; not DLQ / not replayable)",
+    continueUnlock: true,
+  },
+  {
+    id: "CAST_AND_CONTINUE",
+    label: "CAST_FAIL_QUARANTINE — cast fail → holdout (value not written)",
+    continueUnlock: true,
+  },
   { id: "TRANSFORM_AND_CONTINUE", label: "TRANSFORM_AND_CONTINUE — transform fail → quarantine", continueUnlock: true },
 ];
 
@@ -208,7 +301,26 @@ export type StructPolicy =
   | "store_as_json"
   | "flatten_top_level_keys"
   | "flatten_deep"
-  | "explode_rows";
+  | "explode_rows"
+  | "normalize_child_table"
+  | "hybrid_json_and_child";
+
+export type ChildTableSpec = {
+  child_table: string;
+  parent_key_columns: string[];
+  ordinal_column?: string;
+  columns: Array<{ name: string; type: string }>;
+  keep_parent_json?: boolean;
+};
+
+export type ArrayStrategyOption = {
+  id: StructPolicy;
+  label: string;
+  fidelity?: string;
+  recommended?: boolean;
+  detail?: string;
+  child_table_spec?: ChildTableSpec;
+};
 
 export const STRUCT_POLICIES: { id: StructPolicy; label: string; detail: string }[] = [
   {
@@ -231,8 +343,18 @@ export const STRUCT_POLICIES: { id: StructPolicy; label: string; detail: string 
 export const ARRAY_POLICIES: { id: StructPolicy; label: string; detail: string }[] = [
   {
     id: "store_as_json",
-    label: "Serialize JSON",
-    detail: "Keep ARRAY as one JSON/list column — no row explosion",
+    label: "JSON column",
+    detail: "Keep ARRAY as one JSON/list column — lossless document wire (default)",
+  },
+  {
+    id: "hybrid_json_and_child",
+    label: "Hybrid (JSON + child)",
+    detail: "Parent JSON for fidelity + normalized child table for SQL analytics",
+  },
+  {
+    id: "normalize_child_table",
+    label: "Normalize child table",
+    detail: "Relational child table (parent JSON kept fail-closed unless cleared)",
   },
   {
     id: "explode_rows",
@@ -551,7 +673,216 @@ export function mappingRequiresManualApproval(m: EditableMapping): boolean {
   if (isIntentionalOmit(m)) return false;
   if (isExistingEnumBooleanConflict(m) || isExistingDestTypeOverride(m)) return true;
   if (mappingRequiresRiskAck(m) && !m.riskAcknowledged) return true;
+  // Airbyte hole: Approve-all must not clear qty≠amt / user≠customer / dest fold.
+  if (isFalseFriendReview(m) && !m.falseFriendConfirmed) return true;
   return false;
+}
+
+export const FALSE_FRIEND_REVIEW_KINDS: ReadonlySet<MappingReviewKind> = new Set([
+  "measure_kind",
+  "entity_identity",
+  "dest_collision",
+  "identity_leaf",
+  "temporal_polarity",
+]);
+
+const REVIEW_KIND_SET: ReadonlySet<string> = new Set([
+  "measure_kind",
+  "entity_identity",
+  "dest_collision",
+  "identity_leaf",
+  "temporal_polarity",
+  "lossy",
+  "create_new",
+  "generic",
+]);
+
+const FALSE_FRIEND_KIND_ORDER: MappingReviewKind[] = [
+  "dest_collision",
+  "measure_kind",
+  "identity_leaf",
+  "temporal_polarity",
+  "entity_identity",
+];
+
+export interface MappingReviewKindMeta {
+  kind: MappingReviewKind;
+  chip: string;
+  noun: string;
+  detail: string;
+  primaryLabel: string;
+  confirmLabel: string;
+}
+
+const REVIEW_KIND_META: Record<MappingReviewKind, Omit<MappingReviewKindMeta, "kind">> = {
+  measure_kind: {
+    chip: "qty≠amt",
+    noun: "quantity≠amount pair(s)",
+    detail: "Count is not money. Remap the destination column — do not write quantity into amount.",
+    primaryLabel: "Remap dest",
+    confirmLabel: "Confirm this pair",
+  },
+  entity_identity: {
+    chip: "user≠customer",
+    noun: "user≠customer pair(s)",
+    detail: "Different entities share an id leaf. Remap to the intended destination — user is not customer.",
+    primaryLabel: "Remap dest",
+    confirmLabel: "Confirm this pair",
+  },
+  dest_collision: {
+    chip: "dest collision",
+    noun: "destination identifier collision(s)",
+    detail: "Two destination names fold to the same identifier (UserID vs userid). Remap to the intended column.",
+    primaryLabel: "Remap dest",
+    confirmLabel: "Confirm this pair",
+  },
+  identity_leaf: {
+    chip: "sku≠id",
+    noun: "sku≠product_id pair(s)",
+    detail: "Identity kinds differ (sku vs id/key). Remap to the matching destination column.",
+    primaryLabel: "Remap dest",
+    confirmLabel: "Confirm this pair",
+  },
+  temporal_polarity: {
+    chip: "created≠updated",
+    noun: "created≠updated pair(s)",
+    detail: "Created and updated are opposite time polarity. Remap — do not write one into the other.",
+    primaryLabel: "Remap dest",
+    confirmLabel: "Confirm this pair",
+  },
+  lossy: {
+    chip: "lossy",
+    noun: "lossy type pair(s)",
+    detail: "Type path narrows or mutates. Sign a Risk Contract — Approve eligible will not clear this.",
+    primaryLabel: "Sign Risk Contract",
+    confirmLabel: "Approve",
+  },
+  create_new: {
+    chip: "create-new",
+    noun: "create-new column(s)",
+    detail: "This source will ADD a destination column. Confirm the name and type before Validate.",
+    primaryLabel: "Review dest name",
+    confirmLabel: "Approve",
+  },
+  generic: {
+    chip: "review",
+    noun: "mapping(s)",
+    detail: "Engine held this pair below the auto-approve floor. Remap or confirm the pair.",
+    primaryLabel: "Remap dest",
+    confirmLabel: "Approve",
+  },
+};
+
+export function mappingReviewKindMeta(kind: MappingReviewKind): MappingReviewKindMeta {
+  return { kind, ...(REVIEW_KIND_META[kind] || REVIEW_KIND_META.generic) };
+}
+
+function parseReviewKindFromReason(reason?: string): MappingReviewKind | null {
+  const text = (reason || "").toLowerCase();
+  if (!text) return null;
+  if (text.includes("destination identifier collision")) return "dest_collision";
+  if (text.includes("measure-kind mismatch")) return "measure_kind";
+  if (text.includes("identity leaf mismatch")) return "identity_leaf";
+  if (text.includes("temporal polarity")) return "temporal_polarity";
+  if (text.includes("entity qualifier conflict") || text.includes("conflicting entity qualifiers")) {
+    return "entity_identity";
+  }
+  return null;
+}
+
+export function classifyMappingReview(m: EditableMapping): MappingReviewKind | null {
+  if (isIntentionalOmit(m) || m.approved || m.falseFriendConfirmed) return null;
+  if (m.reviewKind && REVIEW_KIND_SET.has(m.reviewKind)) return m.reviewKind;
+  const fromReason = parseReviewKindFromReason(m.reason);
+  if (fromReason) return fromReason;
+  if (!m.requiresReview) return null;
+  if (mappingRequiresRiskAck(m)) return "lossy";
+  if (m.createNew) return "create_new";
+  return "generic";
+}
+
+export function isFalseFriendReview(m: EditableMapping): boolean {
+  const kind = classifyMappingReview(m);
+  return kind != null && FALSE_FRIEND_REVIEW_KINDS.has(kind);
+}
+
+/** Per-row confirm of a false-friend. Approve eligible must not call this. */
+export function confirmFalseFriendMapping(m: EditableMapping): EditableMapping {
+  if (mappingRequiresRiskAck(m) && !m.riskAcknowledged) {
+    return { ...m, approved: false, requiresReview: true };
+  }
+  if (isExistingEnumBooleanConflict(m) || isExistingDestTypeOverride(m)) {
+    return { ...m, approved: false, requiresReview: true };
+  }
+  return {
+    ...m,
+    approved: true,
+    requiresReview: false,
+    falseFriendConfirmed: true,
+    reason: [m.reason, "Operator confirmed proposed pair"].filter(Boolean).join(" · "),
+  };
+}
+
+/**
+ * Validate-step confirm for G15. Named sources win; empty list confirms every
+ * unconfirmed false-friend. Approve-all must not call this.
+ */
+export function confirmFalseFriendsBySource(
+  mappings: EditableMapping[],
+  sources?: string[] | null,
+): {
+  mappings: EditableMapping[];
+  confirmed: string[];
+  blocked: string[];
+  unmatched: string[];
+} {
+  const named = (sources || []).map((s) => String(s || "").trim()).filter(Boolean);
+  const want = new Set(named.map((s) => s.toLowerCase()));
+  const confirmed: string[] = [];
+  const blocked: string[] = [];
+  const seen = new Set<string>();
+
+  const next = mappings.map((m) => {
+    const src = String(m.source || "").trim();
+    if (!src) return m;
+    const key = src.toLowerCase();
+    const targeted = want.size === 0
+      ? isFalseFriendReview(m) && !m.falseFriendConfirmed
+      : want.has(key);
+    if (!targeted) return m;
+    if (!isFalseFriendReview(m) || m.falseFriendConfirmed) return m;
+    seen.add(key);
+    const stamped = confirmFalseFriendMapping(m);
+    if (stamped.falseFriendConfirmed) {
+      confirmed.push(src);
+      return stamped;
+    }
+    blocked.push(src);
+    return stamped;
+  });
+
+  const unmatched = named.filter((s) => !seen.has(s.toLowerCase()));
+  return { mappings: next, confirmed, blocked, unmatched };
+}
+
+/** Operator changed the dest name — drop stale false-friend kind until rematch. */
+export function applyOperatorRemapDest(m: EditableMapping, target: string): EditableMapping {
+  const next = String(target || "").trim();
+  const baseReason = (m.reason || "")
+    .replace(/(?: · )?Operator remapped dest to .+$/u, "")
+    .replace(/(?: · )?Operator cleared dest$/u, "")
+    .trim();
+  return {
+    ...m,
+    target: next,
+    approved: false,
+    requiresReview: true,
+    reviewKind: "generic",
+    falseFriendConfirmed: false,
+    reason: [baseReason, next ? `Operator remapped dest to ${next}` : "Operator cleared dest"]
+      .filter(Boolean)
+      .join(" · "),
+  };
 }
 
 /**
@@ -623,10 +954,17 @@ export function acknowledgeMappingRisk(
     expected_truncation: Boolean(m.typeNarrowing),
     expected_nulls: fidelity === "cast" || policy === "QUARANTINE_ROW",
     execution_policy: policy,
+    // CAST/TRANSFORM continue = quarantine holdout (not silent NULL). Stamp the
+    // quarantine policy explicitly so Validate/Execute never look like "signed
+    // contract = write anyway" when cells still go to DLQ.
     quarantine_policy:
       policy === "QUARANTINE_ROW"
+        || policy === "CAST_AND_CONTINUE"
+        || policy === "TRANSFORM_AND_CONTINUE"
         ? "QUARANTINE_ROW_on_failure"
-        : "holdout_rejected_rows",
+        : policy === "STOP_COLUMN"
+          ? "omit_column_on_failure"
+          : "holdout_rejected_rows",
     retry_policy: "none",
     rollback_strategy: "DOCUMENT_ONLY",
     approved_by: actor,
@@ -653,6 +991,76 @@ export function acknowledgeMappingRisk(
         : m.transform,
     reason: [m.reason, createNewRiskDetail(m) || m.fidelityReason, ackNote, `policy=${policy}`].filter(Boolean).join(" · "),
   };
+}
+
+/**
+ * Merge Validate-echoed Kernel target_type stamps onto Map rows.
+ * Additive / create-new columns must show the same stamp Execute will refuse without.
+ */
+export function mergeStampedTargetTypes(
+  mappings: EditableMapping[],
+  stamped: Array<{
+    source?: string;
+    target?: string;
+    target_type?: string;
+    create_new?: boolean;
+    assignment_strategy?: string;
+  }> | null | undefined,
+): EditableMapping[] {
+  if (!stamped?.length) return mappings;
+  const bySourceTarget = new Map<string, (typeof stamped)[number]>();
+  // Source-only fallback only when that source maps to exactly one stamp —
+  // never first-wins across fan-out (source→many targets).
+  const bySource = new Map<string, (typeof stamped)[number] | "ambiguous">();
+  for (const row of stamped) {
+    const src = String(row.source || "").trim();
+    const tgt = String(row.target || "").trim();
+    const tt = String(row.target_type || "").trim();
+    if (!src || !tt) continue;
+    bySourceTarget.set(`${src}\0${tgt}`, row);
+    const prev = bySource.get(src);
+    if (prev === undefined) bySource.set(src, row);
+    else if (prev !== "ambiguous" && prev !== row) bySource.set(src, "ambiguous");
+  }
+  return mappings.map((m) => {
+    const srcHit = bySource.get(m.source);
+    const hit =
+      bySourceTarget.get(`${m.source}\0${m.target || m.source}`)
+      || (srcHit && srcHit !== "ambiguous" ? srcHit : undefined);
+    if (!hit?.target_type) return m;
+    const stampedType = String(hit.target_type).trim();
+    if (!stampedType) return m;
+    const nextStrategy = String(hit.assignment_strategy || "").trim();
+    const stampedCreateNew =
+      typeof hit.create_new === "boolean" ? hit.create_new : undefined;
+    // Bind-existing must clear stale createNew + mark dest present — otherwise
+    // buildPreflightMappings re-emits create_new via existsInDestination===false.
+    let createNew = m.createNew;
+    let existsInDestination = m.existsInDestination;
+    if (stampedCreateNew === true || nextStrategy === "create_compatible_new") {
+      createNew = true;
+      existsInDestination = false;
+    } else if (
+      stampedCreateNew === false
+      || nextStrategy === "bind_existing"
+    ) {
+      createNew = false;
+      existsInDestination = true;
+    }
+    return {
+      ...m,
+      destType: stampedType,
+      createNew,
+      existsInDestination,
+      assignmentStrategy: nextStrategy || m.assignmentStrategy,
+      reason: [
+        m.reason,
+        m.destType && m.destType !== stampedType
+          ? `Validate stamped ${stampedType}`
+          : "",
+      ].filter(Boolean).join(" · "),
+    };
+  });
 }
 
 /** Merge Validate-echoed signed risk contracts onto Map rows (risk_id + signature). */
@@ -704,6 +1112,9 @@ export function approveMappingHonestly(m: EditableMapping): EditableMapping {
     return flagExistingEnumBooleanConflict(m);
   }
   if (isExistingDestTypeOverride(m)) {
+    return { ...m, approved: false, requiresReview: true };
+  }
+  if (isFalseFriendReview(m) && !m.falseFriendConfirmed) {
     return { ...m, approved: false, requiresReview: true };
   }
   if (isEnumToBooleanConflict(m) && canWidenMapping(m)) {
@@ -838,6 +1249,7 @@ function childSampleFromParent(sample: string | undefined, key: string): string 
 /**
  * Apply STRUCT/ARRAY Map policy. Flatten synthesizes ``parent_key`` child mappings;
  * explode_rows synthesizes ``parent_elem``; store_as_json removes prior derived children.
+ * Normalize/hybrid attach ``childTableSpec`` from engine proposals (operator-approved).
  * Parent blob is always kept.
  */
 export function applyStructPolicyChange(
@@ -855,26 +1267,39 @@ export function applyStructPolicyChange(
 
   const flattenish = FLATTEN_POLICIES.has(policy);
   const exploding = policy === "explode_rows";
+  const normalizing =
+    policy === "normalize_child_table" || policy === "hybrid_json_and_child";
+  const fromStrategy = parent.arrayStrategies?.find((s) => s.id === policy);
+  const childSpec = normalizing
+    ? (fromStrategy?.child_table_spec
+      || parent.childTableSpec
+      || parent.proposedChildTableSpec)
+    : undefined;
   const nextParent: EditableMapping = {
     ...withoutDerived[parentIdx],
     structPolicy: policy,
     approved: false,
+    childTableSpec: childSpec,
     // Leaving flatten clears collision metadata so the Map table does not stick.
     flattenCollisions: flattenish ? withoutDerived[parentIdx].flattenCollisions : undefined,
-    requiresReview: flattenish || exploding
+    requiresReview: flattenish || exploding || normalizing
       ? true
       : withoutDerived[parentIdx].flattenCollisions?.length
         ? false
         : withoutDerived[parentIdx].requiresReview,
     reason: exploding
       ? "ARRAY explode — one output row per element (capped); parent array kept"
-      : policy === "flatten_deep"
-        ? "STRUCT deep flatten — nested keys promoted (depth≤2); parent JSON kept"
-        : policy === "flatten_top_level_keys"
-          ? "STRUCT flatten — top-level keys promoted; nested objects stay on parent JSON"
-          : isArrayLogicalType(parent.inferredType) || isArrayLogicalType(parent.destType)
-            ? "ARRAY serialized as JSON/list"
-            : "STRUCT stored as JSON/VARIANT blob",
+      : policy === "hybrid_json_and_child"
+        ? "ARRAY hybrid — parent JSON + normalized child table"
+        : policy === "normalize_child_table"
+          ? "ARRAY normalize — child table from profiled keys; parent JSON kept fail-closed"
+          : policy === "flatten_deep"
+            ? "STRUCT deep flatten — nested keys promoted (depth≤2); parent JSON kept"
+            : policy === "flatten_top_level_keys"
+              ? "STRUCT flatten — top-level keys promoted; nested objects stay on parent JSON"
+              : isArrayLogicalType(parent.inferredType) || isArrayLogicalType(parent.destType)
+                ? "ARRAY serialized as JSON/list"
+                : "STRUCT stored as JSON/VARIANT blob",
     transform:
       withoutDerived[parentIdx].transform === "none" || !withoutDerived[parentIdx].transform
         ? "parse_json"
@@ -1172,19 +1597,9 @@ function boostIdentityConfidence(
   let next = confidence;
   if (exact) {
     if (createNew) {
-      // Vary create-new identity by fidelity — avoid a flat 93% wall.
-      if (fid === "lossy_cast") next = Math.min(Math.max(confidence, 0.62), 0.74);
-      else if (fid === "mutate" && !SAFE_NORMALIZE_TRANSFORMS.has(tf)) {
-        next = Math.min(Math.max(confidence, 0.78), 0.88);
-      } else if (fid === "mutate") {
-        next = Math.min(Math.max(confidence, 0.88), 0.94);
-      } else if (fid === "cast") {
-        next = Math.min(Math.max(confidence, 0.8), 0.9);
-      } else if (fid === "preserve" || !fid) {
-        next = Math.min(Math.max(confidence, 0.9), 0.96);
-      } else {
-        next = Math.min(Math.max(confidence, 0.86), 0.93);
-      }
+      // Trust the API evidence band — do not flatten every create-new row to 95%.
+      if (fid === "lossy_cast") next = Math.min(confidence, 0.74);
+      else next = Math.min(confidence, 0.93);
     } else {
       next = Math.max(confidence, fid === "lossy_cast" ? 0.7 : 0.95);
     }
@@ -1257,6 +1672,10 @@ export function mappingsFromAnalysis(
       structPolicy: structish || arrayish ? "store_as_json" : undefined,
       existsInDestination,
       createNew: createNew || undefined,
+      // Create-new / ADD must carry a destType stamp — Execute refuse Map VARCHAR
+      // invent under partial Studio when target_type is blank (Excel→PG cliff).
+      // Catalog DDL wins over sample semantic_type (BIGINT invented from 1,2,150000).
+      destType: createNew && !pendingDest ? (col.inferred_type || inferred) : undefined,
       assignmentStrategy: pendingDest
         ? "pending_dest_schema"
         : createNew
@@ -1316,13 +1735,21 @@ export function buildPreflightMappings(
         user_override: Boolean(safe.riskAcknowledged) || (safe.approved && !enumBool && !mappingRequiresRiskAck(safe)),
         transform: omitted ? "omit" : uiTransformToEngine(safe.transform, safe.engineTransform),
         intentional_omit: omitted || undefined,
+        // Existing dest: never invent target_type from inferredType when Map
+        // left destType blank (partial Studio honesty — write path fail-closes).
+        // Create-new may still preview from inferredType / destType stamp.
         target_type: omitted
           ? undefined
-          : m.existsInDestination
-          ? (m.destType || safe.destType || safe.inferredType)
-          : (safe.destType || safe.inferredType),
+          : isCreateNew
+            ? (safe.destType || safe.inferredType)
+            : (m.destType || safe.destType || undefined),
         source_type: safe.inferredType,
-        requires_review: omitted ? false : Boolean((safe.requiresReview || enumBool) && !safe.approved),
+        requires_review: omitted
+          ? false
+          : Boolean(
+              (safe.requiresReview || enumBool || (!isCreateNew && !(m.destType || safe.destType)))
+              && !safe.approved,
+            ),
         score_gap: safe.scoreGap ?? 1,
         semantic_role: safe.semanticRole,
         create_new: isCreateNew,
@@ -1334,10 +1761,15 @@ export function buildPreflightMappings(
         struct_policy: omitted ? undefined : safe.structPolicy,
         struct_derived: safe.structDerived || undefined,
         struct_parent: safe.structParent,
+        structural_class: omitted ? undefined : safe.structuralClass,
+        child_table_spec: omitted ? undefined : safe.childTableSpec,
         fidelity: omitted ? undefined : safe.fidelity,
         type_narrowing: omitted ? undefined : Boolean(safe.typeNarrowing) || undefined,
         risk_acknowledged: omitted ? undefined : Boolean(safe.riskAcknowledged) || undefined,
         risk_contract: omitted ? undefined : (safe.riskContract || undefined),
+        review_kind: omitted ? undefined : (safe.reviewKind || classifyMappingReview(safe) || undefined),
+        // Engine G15 only clears false-friend on this flag — not Approve / user_override.
+        false_friend_confirmed: omitted ? undefined : Boolean(safe.falseFriendConfirmed) || undefined,
       };
     });
   }
@@ -1383,10 +1815,17 @@ export function editableFromPipelineMappings(
     struct_policy?: string;
     struct_derived?: boolean;
     struct_parent?: string;
+    structural_class?: string;
+    array_strategies?: ArrayStrategyOption[];
+    child_table_spec?: ChildTableSpec;
+    proposed_child_table_spec?: ChildTableSpec;
     fidelity?: string;
     fidelity_reason?: string;
     type_narrowing?: boolean;
     create_new_risks?: Array<{ kind?: string; severity?: string; message?: string }>;
+    column_profile?: ColumnProfile | Record<string, unknown> | null;
+    review_kind?: string;
+    false_friend_confirmed?: boolean;
   }>,
   sampleRows?: Record<string, unknown>[],
   destColumns?: string[],
@@ -1418,9 +1857,16 @@ export function editableFromPipelineMappings(
       (m.fidelity || "").trim().toLowerCase() || undefined,
       (m.transform || "").trim().toLowerCase() || undefined,
     );
-    const requiresReview = Boolean(m.requires_review) || pendingDest;
     const sourceType = m.source_type;
-    const destType = liveDestType || m.target_type || m.source_type;
+    // Partial Studio: destSchema loaded but this target missing → never invent
+    // destType from source_type (false-green Map before write fail-close).
+    const destSchemaLoaded = Object.keys(destSchema || {}).length > 0;
+    let destType = liveDestType || m.target_type || undefined;
+    if (!destType && (rowCreateNew || !destSchemaLoaded)) {
+      destType = m.source_type;
+    }
+    const destTypeGap = destSchemaLoaded && !destType && !rowCreateNew && !pendingDest;
+    const requiresReview = Boolean(m.requires_review) || pendingDest || destTypeGap;
     const specialty = isSpecialtyLogicalType(sourceType) || isSpecialtyLogicalType(destType);
     const structish = isStructLogicalType(sourceType) || isStructLogicalType(destType);
     const arrayish = isArrayLogicalType(sourceType) || isArrayLogicalType(destType);
@@ -1434,6 +1880,8 @@ export function editableFromPipelineMappings(
       m.struct_policy === "flatten_top_level_keys" ||
       m.struct_policy === "flatten_deep" ||
       m.struct_policy === "explode_rows" ||
+      m.struct_policy === "normalize_child_table" ||
+      m.struct_policy === "hybrid_json_and_child" ||
       m.struct_policy === "store_as_json"
         ? m.struct_policy
         : structish
@@ -1452,6 +1900,43 @@ export function editableFromPipelineMappings(
             message: String(r.message || ""),
           }))
       : undefined;
+    const rawProfile = m.column_profile && typeof m.column_profile === "object"
+      ? m.column_profile as Record<string, unknown>
+      : null;
+    const columnProfile: ColumnProfile | undefined = rawProfile
+      ? {
+          null_rate: typeof rawProfile.null_rate === "number" ? rawProfile.null_rate : undefined,
+          unique_ratio: typeof rawProfile.unique_ratio === "number" ? rawProfile.unique_ratio : undefined,
+          min: typeof rawProfile.min === "number" ? rawProfile.min : undefined,
+          max: typeof rawProfile.max === "number" ? rawProfile.max : undefined,
+          observed_precision:
+            typeof rawProfile.observed_precision === "number"
+              ? rawProfile.observed_precision
+              : undefined,
+          observed_scale:
+            typeof rawProfile.observed_scale === "number"
+              ? rawProfile.observed_scale
+              : undefined,
+          numeric_kind: rawProfile.numeric_kind != null
+            ? String(rawProfile.numeric_kind)
+            : undefined,
+          suggested_carrier: rawProfile.suggested_carrier != null
+            ? String(rawProfile.suggested_carrier)
+            : undefined,
+          ieee_signals: Array.isArray(rawProfile.ieee_signals)
+            ? rawProfile.ieee_signals.map(String)
+            : undefined,
+          likely_identifier: Boolean(rawProfile.likely_identifier) || undefined,
+          likely_email: Boolean(rawProfile.likely_email) || undefined,
+          likely_uuid: Boolean(rawProfile.likely_uuid) || undefined,
+          likely_date: Boolean(rawProfile.likely_date) || undefined,
+          likely_boolean: Boolean(rawProfile.likely_boolean) || undefined,
+          semantic_pattern_score:
+            typeof rawProfile.semantic_pattern_score === "number"
+              ? rawProfile.semantic_pattern_score
+              : undefined,
+        }
+      : undefined;
     const lossyFidelity =
       engineFidelity === "lossy_cast"
       || engineFidelity === "mutate"
@@ -1461,6 +1946,7 @@ export function editableFromPipelineMappings(
     // Fail-closed: never invent Approve from confidence. Operator must Approve
     // (or Approve-all for eligible rows). Ready ≡ approved only.
     const autoApproved = false;
+    const friendConfirmed = Boolean(m.false_friend_confirmed);
     const base: EditableMapping = {
       source: m.source,
       target: m.target,
@@ -1468,17 +1954,20 @@ export function editableFromPipelineMappings(
       inferredType: sourceType,
       destType,
       sample: sampleVal != null ? String(sampleVal) : undefined,
-      approved: autoApproved,
+      approved: friendConfirmed || autoApproved,
+      falseFriendConfirmed: friendConfirmed || undefined,
       isPii: m.is_pii,
       reason: specialty && !(m.reasoning || "").toLowerCase().includes("identity")
         ? [m.reasoning, `${sourceType || destType} — identity payload (dim/SRID not rewritten)`].filter(Boolean).join(" · ")
         : structish && !m.reasoning
           ? "STRUCT/JSON — choose JSON blob, flatten keys, or deep flatten"
           : arrayish && !m.reasoning
-            ? "ARRAY — serialize as JSON/list or explode rows (Map policy)"
+            ? "ARRAY — JSON default; optional normalize/hybrid/explode (Map policy)"
             : m.reasoning,
       existsInDestination: existsInDest,
-      requiresReview: requiresReview || specialty || structish || arrayish || lossyFidelity || conf < threshold,
+      requiresReview: friendConfirmed
+        ? false
+        : requiresReview || specialty || structish || arrayish || lossyFidelity || conf < threshold,
       scoreGap: m.score_gap,
       transform: uiTf === "none" && (structish || arrayish) ? "parse_json" : uiTf,
       engineTransform: engineTf || (structish || arrayish ? "json" : undefined),
@@ -1486,12 +1975,20 @@ export function editableFromPipelineMappings(
       createNew: rowCreateNew,
       assignmentStrategy: m.assignment_strategy,
       structPolicy: structPolicy ?? (arrayish ? "store_as_json" : undefined),
+      structuralClass: m.structural_class,
+      arrayStrategies: Array.isArray(m.array_strategies) ? m.array_strategies : undefined,
+      childTableSpec: m.child_table_spec,
+      proposedChildTableSpec: m.proposed_child_table_spec,
       fidelity: engineFidelity || undefined,
       fidelityReason: m.fidelity_reason || undefined,
       typeNarrowing: Boolean(m.type_narrowing),
       createNewRisks,
       structDerived: Boolean(m.struct_derived),
       structParent: m.struct_parent,
+      columnProfile,
+      reviewKind: m.review_kind && REVIEW_KIND_SET.has(m.review_kind)
+        ? (m.review_kind as MappingReviewKind)
+        : parseReviewKindFromReason(m.reasoning) || undefined,
     };
     if (isEnumToBooleanConflict(base)) {
       if (base.existsInDestination) {
@@ -1524,6 +2021,8 @@ export interface MappingHealthSummary {
   intentionalOmit: number;
   specialtyIdentity: number;
   existingTypeConflict: number;
+  falseFriendCount: number;
+  falseFriendKinds: Partial<Record<MappingReviewKind, number>>;
   weak: boolean;
   headline: string;
   detail: string;
@@ -1551,6 +2050,14 @@ export function mappingHealthSummary(
   const existingTypeConflict = active.filter(
     (m) => isExistingEnumBooleanConflict(m) || isExistingDestTypeOverride(m),
   ).length;
+  const falseFriendKinds: Partial<Record<MappingReviewKind, number>> = {};
+  for (const m of active) {
+    const kind = classifyMappingReview(m);
+    if (kind && FALSE_FRIEND_REVIEW_KINDS.has(kind)) {
+      falseFriendKinds[kind] = (falseFriendKinds[kind] || 0) + 1;
+    }
+  }
+  const falseFriendCount = Object.values(falseFriendKinds).reduce((s, n) => s + (n || 0), 0);
   // Ready ≡ operator-approved (and Accept risk when required) — never confidence alone.
   const ready = mappings.filter((m) => {
     if (mappingRequiresRiskAck(m) && !m.riskAcknowledged) return false;
@@ -1563,7 +2070,8 @@ export function mappingHealthSummary(
     || needsReview > 0
     || lowConfidence > 0
     || existingTypeConflict > 0
-    || specialtyIdentity > 0;
+    || specialtyIdentity > 0
+    || falseFriendCount > 0;
 
   let headline = "Map looks ready";
   let detail = `${ready}/${total} mappings approved for Validate.`;
@@ -1579,6 +2087,12 @@ export function mappingHealthSummary(
   } else if (existingTypeConflict > 0) {
     headline = `${existingTypeConflict} existing-column type conflict(s)`;
     detail = "Remap to a compatible column or ALTER the destination — Map Widen cannot change DDL.";
+  } else if (falseFriendCount > 0) {
+    const parts = FALSE_FRIEND_KIND_ORDER
+      .filter((k) => (falseFriendKinds[k] || 0) > 0)
+      .map((k) => `${falseFriendKinds[k]} ${mappingReviewKindMeta(k).noun}`);
+    headline = `${parts.join(" · ")} need confirm`;
+    detail = "Approve eligible will not clear these. Remap the destination column, or Confirm this pair on the row.";
   } else if (needsReview > 0 || lowConfidence > 0) {
     // One row can be both requiresReview and low-confidence — count unique mappings.
     const reviewCount = active.filter(
@@ -1603,6 +2117,8 @@ export function mappingHealthSummary(
     intentionalOmit,
     specialtyIdentity,
     existingTypeConflict,
+    falseFriendCount,
+    falseFriendKinds,
     weak,
     headline,
     detail,

@@ -81,17 +81,19 @@ def test_verify_target_routes_databricks():
 
 
 def test_verify_adls_blob_parses_json(monkeypatch):
+    """Gate-8 ADLS JSON is the GET stream walk, not download_blob().readall()."""
+    import io
+
     from services.reconciliation import verify_adls_blob
 
     body = b'[{"id": 1, "n": "a"}, {"id": 2, "n": "b"}]'
-    blob = MagicMock()
-    blob.download_blob.return_value.readall.return_value = body
-    client = MagicMock()
-    client.get_blob_client.return_value = blob
-
     monkeypatch.setattr(
-        "connectors.adls_common.blob_service_client",
-        lambda _cfg: client,
+        "services.dest_precount._object_store_list_keys",
+        lambda *_a, **_k: ["data.json"],
+    )
+    monkeypatch.setattr(
+        "services.object_streaming.open_object_store_binary",
+        lambda *_a, **_k: (io.BytesIO(body), None),
     )
     count, chk = verify_adls_blob(
         container="lake",

@@ -30,7 +30,7 @@ class DecideBody(BaseModel):
 class SnapshotBody(BaseModel):
     source_key: str
     table: str
-    primary_key: str = "id"
+    primary_key: str  # required — refuse inventing default "id"
     chunk_size: int = 1000
 
 

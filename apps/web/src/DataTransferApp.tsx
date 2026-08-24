@@ -2,7 +2,7 @@
  * Datawrap — Universal Data Platform
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { Suspense, useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { DtIcon } from "./components/DtIcon";
 import { BrandWordmark } from "./components/BrandWordmark";
 import { PageErrorBoundary } from "./components/PageErrorBoundary";
@@ -20,21 +20,9 @@ import { loadTransferLiveCatalog, resolveCatalogIdToType } from "./lib/connector
 import { Connector, PipelineSchedule, Screen, TransferJob } from "./lib/types";
 import { LoginPage } from "./pages/LoginPage";
 import { MarketingSite } from "./pages/marketing/MarketingSite";
-import { DashboardPage } from "./pages/DashboardPage";
-import { PilotPage } from "./pages/PilotPage";
-import { TransferPage } from "./pages/TransferPage";
-import { ConnectorsPage } from "./pages/ConnectorsPage";
-import { SchedulesPage } from "./pages/SchedulesPage";
-import { TransformsPage } from "./pages/TransformsPage";
-import { JobsPage, type JobsStudioIntent } from "./pages/JobsPage";
-import { ContractsPage } from "./pages/ContractsPage";
-import { McpPage } from "./pages/McpPage";
-import { QueryPage } from "./pages/QueryPage";
-import { SettingsPage } from "./pages/SettingsPage";
-import { DocsPage } from "./pages/DocsPage";
-import { BenchmarksPage } from "./pages/BenchmarksPage";
 import { AICopilot } from "./components/AICopilot";
 import { ConnectorModal } from "./components/ConnectorModal";
+import { LoadingBlock } from "./components/LoadingState";
 import { focusFromHash, readAppHash, writeAppHash } from "./lib/appNavigation";
 import {
   PUBLIC_PAGE_META,
@@ -45,6 +33,38 @@ import {
 import { apiOfflineMessage } from "./lib/runtimeEnv";
 import { usePageMeta } from "./lib/usePageMeta";
 import { metaForLogin, metaForScreen } from "./lib/seo";
+import type { JobsStudioIntent } from "./pages/JobsPage";
+import { DashboardPage } from "./pages/DashboardPage";
+import { lazyNamed } from "./lib/lazyPage";
+
+/** Overview is the signed-in home screen — never a separate hashed chunk.
+ * Other routes stay lazy; stale Vite hashes reload once (see lazyPage). */
+const PilotPage = lazyNamed(() => import("./pages/PilotPage"), "PilotPage");
+const TransferPage = lazyNamed(() => import("./pages/TransferPage"), "TransferPage");
+const ConnectorsPage = lazyNamed(() => import("./pages/ConnectorsPage"), "ConnectorsPage");
+const SchedulesPage = lazyNamed(() => import("./pages/SchedulesPage"), "SchedulesPage");
+const TransformsPage = lazyNamed(() => import("./pages/TransformsPage"), "TransformsPage");
+const JobsPage = lazyNamed(() => import("./pages/JobsPage"), "JobsPage");
+const ContractsPage = lazyNamed(() => import("./pages/ContractsPage"), "ContractsPage");
+const McpPage = lazyNamed(() => import("./pages/McpPage"), "McpPage");
+const QueryPage = lazyNamed(() => import("./pages/QueryPage"), "QueryPage");
+const SettingsPage = lazyNamed(() => import("./pages/SettingsPage"), "SettingsPage");
+const DocsPage = lazyNamed(() => import("./pages/DocsPage"), "DocsPage");
+const BenchmarksPage = lazyNamed(() => import("./pages/BenchmarksPage"), "BenchmarksPage");
+
+function LazyScreen({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <Suspense
+      fallback={
+        <div className="df2-page" role="status" aria-live="polite">
+          <LoadingBlock title={`Loading ${label}…`} />
+        </div>
+      }
+    >
+      {children}
+    </Suspense>
+  );
+}
 
 const NAV: { id: Screen; label: string; icon: string; desc: string; group: "platform" | "ops" | "system" }[] = [
   { id: "dashboard", label: "Overview", icon: "dashboard", desc: "Health, throughput, and recent jobs", group: "platform" },
@@ -173,6 +193,12 @@ function AppShell({
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
+
+  const patchConnector = useCallback((id: string, patch: Partial<Connector>) => {
+    setConnectors((prev) =>
+      prev.map((c) => (c.id === id ? { ...c, ...patch } : c)),
+    );
   }, []);
 
   const loadConnectors = useCallback(async (notifyOnError = true) => {
@@ -399,7 +425,7 @@ function AppShell({
   const offlineCopy = apiOfflineMessage();
   const runningJobsCount = jobs.filter((j) => j.status === "running" || j.status === "pending").length;
   const failedJobsCount = jobs.filter((j) => j.status === "failed").length;
-  const unhealthyConnectorsCount = connectors.filter((c) => c.status === "error" || c.last_test_ok === false).length;
+  const unhealthyConnectorsCount = connectors.filter((c) => c.last_test_ok === false).length;
   return (
     <div className={`df2-app ${showCopilotRail ? "df2-app-with-rail" : ""} ${sidebarNavCompact ? "df2-sidebar-nav-compact" : ""}`}>
       {mobileNavOpen && (
@@ -425,8 +451,9 @@ function AppShell({
             }}
             aria-label={sidebarNavCompact ? "Expand navigation" : "Collapse navigation"}
             title={sidebarNavCompact ? "Expand navigation" : "Collapse navigation"}
+            aria-pressed={!sidebarNavCompact}
           >
-            <DtIcon name={sidebarNavCompact ? "chevron-right" : "chevron-left"} size={16} />
+            <DtIcon name="panel-left" size={16} />
           </button>
         </div>
 
@@ -605,6 +632,7 @@ function AppShell({
           className={`df2-content-inner ${contentInnerClass} ${bootLoading ? "is-booting" : ""} ${firstScreenPaint ? "is-first-screen" : ""}`}
         >
           <div className="df2-screen-panel">
+            <LazyScreen label={NAV.find((n) => n.id === screen)?.label || "workspace"}>
             {mountedScreens.has("dashboard") && (
                 <div className={`df2-screen-keep ${showScreen("dashboard")}`} hidden={screen !== "dashboard"} aria-hidden={screen !== "dashboard"}>
                 <PageErrorBoundary label="Overview">
@@ -669,6 +697,7 @@ function AppShell({
                     onEdit={openEditModal}
                     onDelete={handleDeleteConnector}
                     onRefresh={loadConnectors}
+                    onConnectorPatch={patchConnector}
                     connectorEditorOpen={showModal && Boolean(editingConnector)}
                     onOpenTransfer={(connectorId) => {
                       if (connectorId) {
@@ -758,10 +787,11 @@ function AppShell({
               {mountedScreens.has("settings") && (
                 <div className={`df2-screen-keep ${showScreen("settings")}`} hidden={screen !== "settings"} aria-hidden={screen !== "settings"}>
                 <PageErrorBoundary label="Settings">
-                  <SettingsPage />
+                  <SettingsPage onOpenConnectors={() => setScreen("connectors")} />
                 </PageErrorBoundary>
                 </div>
               )}
+            </LazyScreen>
           </div>
         </div>
         </div>
@@ -968,6 +998,11 @@ function DataTransferAppInner() {
           onBack={() => {
             setPublicRoute("home");
             writePublicHash("home", true);
+            setStage("landing");
+          }}
+          onLegal={(route) => {
+            setPublicRoute(route);
+            writePublicHash(route);
             setStage("landing");
           }}
         />

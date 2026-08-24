@@ -82,9 +82,14 @@ class DataTransferRAGGenerator:
     ) -> RAGResponse:
         """Generate mapping suggestion between columns."""
         confidence = mapping_info.get("mapping_confidence", 0.5)
+        requires_review = bool(mapping_info.get("requires_review"))
+        authority_reason = str(mapping_info.get("authority_reasoning") or "")
         is_synonym = mapping_info.get("are_synonyms", False)
 
-        if is_synonym:
+        if authority_reason:
+            reason = authority_reason
+            method = "map_columns_ssot"
+        elif is_synonym:
             reason = f"'{source_col}' and '{target_col}' are synonyms"
             method = "synonym"
         elif mapping_info.get("same_canonical"):
@@ -100,9 +105,10 @@ class DataTransferRAGGenerator:
                 reason = "Partial match based on retrieved context"
                 method = "rag"
 
+        review_note = " Review required before auto-approve." if requires_review else ""
         answer = (
             f"Map '{source_col}' → '{target_col}'. "
-            f"Reason: {reason}. Confidence: {confidence:.1%}."
+            f"Reason: {reason}. Confidence: {confidence:.1%}.{review_note}"
         )
 
         return RAGResponse(

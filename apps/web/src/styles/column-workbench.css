@@ -39,7 +39,7 @@
   overflow: hidden;
   display: flex;
   flex-direction: column;
-  padding-bottom: 8px;
+  padding-bottom: 0;
 }
 
 .df2-transfer-studio-shell:has(.is-map-step),
@@ -49,7 +49,7 @@
   overflow: hidden;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 4px;
 }
 
 .df2-transfer-studio-shell:has(.is-map-step) .df2-page-insight,
@@ -116,8 +116,8 @@
   display: flex;
   flex-direction: column;
   gap: 0 !important;
-  padding-top: 10px !important;
-  padding-bottom: 10px !important;
+  padding-top: 4px !important;
+  padding-bottom: 0 !important;
 }
 
 .df2-map-step-panel .df2-wizard-footer {
@@ -576,7 +576,8 @@
   gap: 10px;
   flex: 1 1 0;
   min-height: 0;
-  height: 100%;
+  height: auto;
+  max-height: 100%;
   overflow: hidden;
 }
 
@@ -628,7 +629,7 @@
   overflow: hidden;
   display: flex;
   flex-direction: column;
-  padding: 0 10px 10px;
+  padding: 0;
 }
 
 .df2-map-editor-scroll-host .df2-column-review {
@@ -651,6 +652,10 @@
   flex-shrink: 0;
   padding: 8px 12px;
   border-bottom: 1px solid #f1f5f9;
+}
+
+.df2-column-review.is-compact .df2-column-review-chrome {
+  padding: 6px 8px;
 }
 
 .df2-column-review-editor {
@@ -793,8 +798,21 @@
 .df2-column-review-footer {
   flex-shrink: 0;
   margin-top: 0;
-  padding: 8px 12px;
+  padding: 6px 10px;
   border-top: 1px solid #f1f5f9;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  min-width: 0;
+  overflow: visible;
+}
+
+.df2-column-review-pager {
+  flex: 0 0 auto;
+  min-width: max-content;
+  overflow: visible;
 }
 
 /* Intelligence panel */
@@ -1115,9 +1133,10 @@
 }
 
 @media (max-width: 900px) {
-  .df2-map-step-workspace {
-    grid-template-columns: 1fr;
-    grid-template-rows: minmax(0, 1fr) minmax(0, min(42vh, 380px));
+  .df2-map-step-workspace,
+  .df2-map-step-workspace.is-full-editor {
+    grid-template-columns: minmax(0, 1fr) !important;
+    grid-template-rows: minmax(0, 1fr) !important;
   }
 
   .df2-transfer-studio-body.is-map-step .df2-transfer-step-panel,
@@ -1129,13 +1148,14 @@
 
 @media (max-width: 900px) {
   .df2-content-inner.is-map-step-view {
-    height: calc(var(--df-viewport-h, 100dvh) - var(--df-header-height, 60px) - 40px);
-    max-height: calc(var(--df-viewport-h, 100dvh) - var(--df-header-height, 60px) - 40px);
+    height: calc(var(--df-viewport-h, 100dvh) - var(--df-header-height, 60px));
+    max-height: calc(var(--df-viewport-h, 100dvh) - var(--df-header-height, 60px));
   }
 
-  .df2-map-step-workspace {
-    grid-template-columns: 1fr;
-    grid-template-rows: minmax(0, 1fr) minmax(0, min(36vh, 260px));
+  .df2-map-step-workspace,
+  .df2-map-step-workspace.is-full-editor {
+    grid-template-columns: minmax(0, 1fr) !important;
+    grid-template-rows: minmax(0, 1fr) !important;
   }
 
   .df2-map-step-head .df2-card-sub {
@@ -1338,6 +1358,15 @@
   padding: 0;
   border-top: none;
   margin-top: 0;
+}
+
+.df2-column-review-footer.df2-column-workbench-pagination {
+  justify-content: space-between;
+}
+
+.df2-column-review-pager {
+  margin-left: auto;
+  flex-shrink: 0;
 }
 
 .df2-column-workbench-page-label {

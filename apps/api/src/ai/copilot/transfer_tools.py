@@ -34,7 +34,9 @@ Two safety rules are deliberate and load-bearing:
 
 from __future__ import annotations
 
+import json
 import logging
+import re
 from typing import Any
 
 from .query_tools import _tool_result
@@ -90,6 +92,13 @@ def sync_mode_from_phrase(spoken: str, *, default: str = "full_refresh_append") 
         return default
     if text in SYNC_MODES:
         return text
+    # Engine-only tokens Pilot used to drop to append. Keep them so callable
+    # refusal and policy gates see SCD2 / mirror instead of a silent rewrite.
+    raw = text.replace("-", "_").replace(" ", "_")
+    if raw in {"scd2", "scd_2", "slowly_changing_dimension"}:
+        return "scd2"
+    if raw in {"mirror", "full_refresh_mirror"}:
+        return "mirror"
     # Exact phrase first, then token-boundary contains for multi-word phrases.
     for phrase in _OVERWRITE_PHRASES:
         if text == phrase or f" {phrase} " in f" {text} ":
@@ -128,6 +137,70 @@ def normalize_sync_mode(spoken: str, *, default: str = "full_refresh_append") ->
         )
         return default
     return candidate
+
+
+_CALLABLE_TABLE_RE = re.compile(r"^\s*(CALL|EXEC(?:UTE)?|SELECT)\b", re.IGNORECASE)
+
+
+def resolve_callable_plan_source(
+    *,
+    source_table: str = "",
+    source_read_mode: str = "",
+    procedure_call: str = "",
+    source_query: str = "",
+    procedure_params: Any = None,
+    dialect: str = "",
+) -> dict[str, Any] | None:
+    """Detect a CALL/SELECT extract in Pilot args. None means a table plan.
+
+    A bare stream label (``get_orders``) is not enough — that is how a colliding
+    table gets introspected. The operator must paste the statement, or put
+    CALL/SELECT in the table slot.
+    """
+    from services.procedure_source import (
+        CALLABLE_MODES,
+        ProcedureSourceError,
+        parse_callable_source,
+        stream_name_for_callable,
+    )
+
+    mode = (source_read_mode or "").strip().lower()
+    text = str(procedure_call or source_query or "").strip()
+    table = (source_table or "").strip()
+    if not text and _CALLABLE_TABLE_RE.match(table):
+        text = table
+        if mode not in CALLABLE_MODES:
+            mode = "query" if table.lstrip().upper().startswith("SELECT") else "procedure"
+    elif mode not in CALLABLE_MODES:
+        if text:
+            # LLM often sends CALL/SELECT without setting source_read_mode.
+            mode = (
+                "query"
+                if (source_query or text).lstrip().upper().startswith("SELECT")
+                else "procedure"
+            )
+        else:
+            return None
+    if not text:
+        raise ProcedureSourceError(
+            "Callable plan needs the CALL/SELECT text, not just a stream name."
+        )
+    params = procedure_params
+    if isinstance(params, str):
+        try:
+            params = json.loads(params)
+        except Exception:
+            params = {}
+    if not isinstance(params, dict):
+        params = {}
+    spec = parse_callable_source(text, dialect=dialect, mode=mode, params=params)
+    return {
+        "mode": spec.mode,
+        "text": text,
+        "params": dict(spec.params),
+        "stream_name": stream_name_for_callable(spec),
+        "sql": spec.sql,
+    }
 
 
 def _column_samples(rows: list[dict[str, Any]], columns: list[str]) -> dict[str, list[str]]:
@@ -212,6 +285,11 @@ def _dest_table_exists_tri_state(dst_info: dict[str, Any]) -> bool | None:
     """
     if dst_info.get("columns"):
         return True
+    measured = dst_info.get("table_exists")
+    if isinstance(measured, bool):
+        # The catalog was asked directly. Prefer that over the error-text guess
+        # below, which no engine promises to phrase any particular way.
+        return measured
     if dst_info.get("ok"):
         # Connected but zero columns — incomplete metadata, not create-new.
         return None
@@ -264,6 +342,54 @@ def _type_conversions(mappings: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
+def _declare_source_timezone(
+    mappings: list[dict],
+    zone: str,
+    *,
+    source_types: dict,
+) -> tuple[list[dict], dict]:
+    """Stamp an operator-declared zone onto the zoneless temporal columns.
+
+    Returns the mappings and the source types as they are *after* the
+    declaration. Both matter: the transform changes the value the writer sends,
+    and the type changes what every gate downstream understands the column to
+    carry. Updating only the first leaves the transfer blocked for a problem the
+    declaration already answered — the value would be written correctly by a
+    path nothing allowed to run.
+
+    Only zoneless columns are touched. A column that already carries an offset
+    has an instant the source was explicit about, and overriding it would move a
+    timestamp on the operator's behalf.
+    """
+    from services.timezone_policy import effective_source_type
+    from services.transform_engine import ASSUME_TIMEZONE_PREFIX
+    from services.type_system import datetime_timezone_polarity
+
+    out: list[dict] = []
+    declared_types: dict = dict(source_types or {})
+    for m in mappings:
+        entry = dict(m)
+        src_type = str(
+            entry.get("source_type") or source_types.get(entry.get("source") or "") or ""
+        )
+        existing = str(entry.get("transform") or "").strip().lower()
+        # A plain temporal transform is the mapper parsing the value, not a
+        # decision about its zone — the declaration refines it. Anything else is
+        # an operator choice and is left alone.
+        already_typed = existing not in {"", "none", "identity", "datetime", "date", "timestamp"}
+        if (
+            src_type
+            and datetime_timezone_polarity(src_type) == "ntz"
+            and not already_typed
+        ):
+            entry["transform"] = f"{ASSUME_TIMEZONE_PREFIX}{zone}"
+            declared = effective_source_type(src_type, entry["transform"])
+            entry["source_type"] = declared
+            declared_types[str(entry.get("source") or "")] = declared
+        out.append(entry)
+    return out, declared_types
+
+
 def plan_transfer(
     source_connector_id: str = "",
     source_connector_name: str = "",
@@ -274,11 +400,38 @@ def plan_transfer(
     sync_mode: str = "",
     schema_policy: str = "manual_review",
     validation_mode: str = "balanced",
+    write_via_staging: bool = False,
+    source_timezone: str = "",
+    source_read_mode: str = "",
+    procedure_call: str = "",
+    source_query: str = "",
+    procedure_params: Any = None,
+    contract_id: str = "",
+    require_signed_contract: Any = None,
 ):
-    """Plan a real transfer: live schemas, real mapping, real preflight gates."""
+    """Plan a real transfer: live schemas, real mapping, real preflight gates.
+
+    ``source_timezone`` answers the one question the tool cannot answer itself:
+    a zoneless source column has no instant, so landing it on a carrier that
+    stores instants has to pick a zone. Guessing UTC is how a business day moves
+    for anyone whose data was not UTC, so the plan is blocked until the operator
+    says which zone the source meant.
+    """
     tool = "plan_transfer"
     src_table = (source_table or "").strip()
-    if not src_table:
+    from services.procedure_source import ProcedureSourceError
+
+    try:
+        callable_plan = resolve_callable_plan_source(
+            source_table=src_table,
+            source_read_mode=source_read_mode,
+            procedure_call=procedure_call,
+            source_query=source_query,
+            procedure_params=procedure_params,
+        )
+    except ProcedureSourceError as exc:
+        return _tool_result(tool, success=False, error=str(exc))
+    if not src_table and not callable_plan:
         from .example_phrases import example_connector_name, example_dest_connector_name
 
         src_ex = example_connector_name()
@@ -291,7 +444,28 @@ def plan_transfer(
                 f'"plan a transfer of orders from {src_ex} to {dst_ex}".'
             ),
         )
-    dst_table = (dest_table or src_table).strip()
+    dst_table = (dest_table or (callable_plan["stream_name"] if callable_plan else src_table)).strip()
+
+    mode = normalize_sync_mode(sync_mode)
+    if callable_plan:
+        from services.procedure_source import assert_callable_sync_allowed
+
+        try:
+            assert_callable_sync_allowed(
+                mode,
+                {
+                    "source_read_mode": callable_plan["mode"],
+                    "procedure_call": callable_plan["text"]
+                    if callable_plan["mode"] == "procedure"
+                    else "",
+                    "source_query": callable_plan["text"]
+                    if callable_plan["mode"] == "query"
+                    else "",
+                },
+            )
+        except ProcedureSourceError as exc:
+            return _tool_result(tool, success=False, error=str(exc))
+        src_table = callable_plan["stream_name"]
 
     try:
         src_conn, err = _safe_connector(source_connector_id, source_connector_name, tool)
@@ -303,27 +477,15 @@ def plan_transfer(
     except AmbiguousConnectorError as exc:
         return _tool_result(tool, success=False, error=exc.message)
 
-    if str(src_conn.get("id")) == str(dst_conn.get("id")) and src_table == dst_table:
+    if (
+        not callable_plan
+        and str(src_conn.get("id")) == str(dst_conn.get("id"))
+        and src_table == dst_table
+    ):
         return _tool_result(
             tool,
             success=False,
             error="Source and destination are the same table — nothing to move.",
-        )
-
-    try:
-        src_info = _introspect(src_conn, src_table, purpose="source")
-    except Exception as exc:
-        _LOG.warning("plan_transfer source introspect failed: %s", exc, exc_info=True)
-        return _tool_result(tool, success=False, error=f"Could not read the source: {exc}")
-    if not src_info["ok"] or not src_info["columns"]:
-        return _tool_result(
-            tool,
-            success=False,
-            error=(
-                f"Could not read `{src_table}` on {src_conn.get('name')}"
-                + (f": {src_info['error']}" if src_info["error"] else "")
-                + '. Ask me to "list tables on that connector".'
-            ),
         )
 
     try:
@@ -333,10 +495,36 @@ def plan_transfer(
         dst_info = {"ok": False, "error": str(exc), "columns": [], "db_type": "", "cfg": {}}
 
     dest_exists = _dest_table_exists_tri_state(dst_info)
-    mode = normalize_sync_mode(sync_mode)
 
-    # Sample once: the same real rows drive mapping confidence and the gates.
-    sample_rows = _sample_rows(src_conn, src_table)
+    if callable_plan:
+        try:
+            src_info = _peek_callable_source(src_conn, callable_plan)
+        except Exception as exc:
+            _LOG.warning("plan_transfer callable peek failed: %s", exc, exc_info=True)
+            return _tool_result(
+                tool,
+                success=False,
+                error=f"Could not execute the procedure extract: {exc}",
+            )
+        sample_rows = list(src_info.get("sample_rows") or [])
+    else:
+        try:
+            src_info = _introspect(src_conn, src_table, purpose="source")
+        except Exception as exc:
+            _LOG.warning("plan_transfer source introspect failed: %s", exc, exc_info=True)
+            return _tool_result(tool, success=False, error=f"Could not read the source: {exc}")
+        if not src_info["ok"] or not src_info["columns"]:
+            return _tool_result(
+                tool,
+                success=False,
+                error=(
+                    f"Could not read `{src_table}` on {src_conn.get('name')}"
+                    + (f": {src_info['error']}" if src_info["error"] else "")
+                    + '. Ask me to "list tables on that connector".'
+                ),
+            )
+        sample_rows = _sample_rows(src_conn, src_table)
+
     src_names = [str(c.get("name")) for c in src_info["columns"] if c.get("name")]
     samples = _column_samples(sample_rows, src_names)
     src_rows = _schema_rows(src_info["columns"], samples)
@@ -356,10 +544,19 @@ def plan_transfer(
         sync_mode=mode,
         destination_table_exists=dest_exists,
         # Both ends were introspected, so their DDL is fact, not a guess.
-        source_types_authoritative=True,
+        source_types_authoritative=not bool(callable_plan),
         use_llm=False,
     )
     mappings = list(mapping.get("mappings") or [])
+    if source_timezone:
+        mappings, declared_source_types = _declare_source_timezone(
+            mappings,
+            source_timezone,
+            source_types=src_info.get("schema") or {},
+        )
+        # The declaration is a fact about the source, so it travels with the
+        # schema every gate reads — not just with the mapping.
+        src_info["schema"] = declared_source_types
 
     preflight = _run_preflight(
         src_conn=src_conn,
@@ -373,9 +570,15 @@ def plan_transfer(
         schema_policy=schema_policy,
         validation_mode=validation_mode,
         src_db_type=str(src_info.get("db_type") or ""),
-        source_config=_endpoint_dict(src_info.get("endpoint")),
+        source_config=_stamp_callable_source_config(
+            _endpoint_dict(src_info.get("endpoint")),
+            callable_plan,
+        ),
         dest_db_type=str(dst_info.get("db_type") or ""),
         dest_exists=dest_exists,
+        source_primary_key=_source_primary_key(src_info),
+        write_via_staging=bool(write_via_staging),
+        source_read_mode=str((callable_plan or {}).get("mode") or ""),
     )
 
     conversions = _type_conversions(mappings)
@@ -399,6 +602,18 @@ def plan_transfer(
                 "schema": str(src_conn.get("schema") or ""),
                 "table": src_table,
                 "column_count": len(src_rows),
+                "source_read_mode": str((callable_plan or {}).get("mode") or "table"),
+                "procedure_call": (
+                    callable_plan["text"]
+                    if callable_plan and callable_plan["mode"] == "procedure"
+                    else ""
+                ),
+                "source_query": (
+                    callable_plan["text"]
+                    if callable_plan and callable_plan["mode"] == "query"
+                    else ""
+                ),
+                "procedure_params": (callable_plan or {}).get("params") or {},
             },
             "destination": {
                 "connector_id": str(dst_conn.get("id") or ""),
@@ -439,8 +654,21 @@ def plan_transfer(
             "preflight": preflight,
             # Align with Execute unlock — passed alone must not invent safe_to_start.
             "safe_to_start": _is_execute_cleared(preflight),
+            **_preview_bound_contract(contract_id, require_signed_contract),
         },
     )
+
+
+def _source_primary_key(src_info: dict[str, Any]) -> str:
+    """The source's declared identity, as a comma-joined composite key.
+
+    Studio collects this on the Map screen; a chat request has no such screen,
+    so the catalog is the only place the Pilot can learn it — and it is the
+    better source anyway, since the source already declared it.
+    """
+    raw = src_info.get("raw") if isinstance(src_info.get("raw"), dict) else {}
+    cols = [str(c).strip() for c in (raw.get("primary_key_columns") or []) if str(c).strip()]
+    return ",".join(cols)
 
 
 def _run_preflight(
@@ -459,6 +687,9 @@ def _run_preflight(
     source_config: dict[str, Any],
     dest_db_type: str,
     dest_exists: bool | None,
+    source_primary_key: str = "",
+    write_via_staging: bool = False,
+    source_read_mode: str = "",
 ) -> dict[str, Any]:
     """Run the real 9 gates and persist the run so the operator can cite it."""
     from services.preflight_run_store import save_preflight_run
@@ -486,9 +717,13 @@ def _run_preflight(
     column_types = {r["name"]: r["inferred_type"] for r in src_rows}
     # G7 capacity sizes batches from the real volume, so send the exact count
     # rather than the sample size, which would understate a large table.
-    row_count = _exact_row_count(src_conn, src_table)
-    if row_count is None:
+    if (source_read_mode or "").strip().lower() in {"procedure", "query"}:
+        # COUNT(*) against a procedure stream name would hit a colliding table.
         row_count = len(sample_rows)
+    else:
+        row_count = _exact_row_count(src_conn, src_table)
+        if row_count is None:
+            row_count = len(sample_rows)
 
     try:
         policy_gates = run_transfer_policy_gates(
@@ -498,11 +733,19 @@ def _run_preflight(
             stream_contracts=[],
             backfill_new_fields=False,
             source_columns=columns,
+            dest_type=dest_db_type,
+            source_type=src_db_type,
+            source_kind="database",
+            # G12 must match Studio / Execute — Pilot cannot soft-skip staging policy.
+            write_via_staging=bool(write_via_staging),
+            source_read_mode=source_read_mode,
         )
         # These must mirror ``UniversalTransferEngine`` exactly. The source
         # config and table are what enable the live coercion probe; without
         # them the pilot would promise "safe to start" and the engine would
         # then block the run, which is worse than refusing up front.
+        # Never invent can_create=True when privilege probe omitted the flag.
+        can_create = dest_probe.get("can_create_table")
         result = run_file_preflight(
             columns=columns,
             column_types=column_types,
@@ -516,8 +759,11 @@ def _run_preflight(
             validation_mode=validation_mode,
             destination_column_types=dest_probe.get("column_types") or {},
             destination_column_nullability=dest_probe.get("column_nullability") or {},
+            destination_column_defaults=dest_probe.get("column_defaults") or {},
+            destination_identity_columns=dest_probe.get("identity_columns") or [],
+            destination_generated_columns=dest_probe.get("generated_columns") or [],
             destination_table_exists=dest_exists,
-            destination_can_create=bool(dest_probe.get("can_create_table", True)),
+            destination_can_create=can_create if isinstance(can_create, bool) else None,
             destination_db_type=dest_db_type,
             destination_table=dst_table,
             source_kind="database",
@@ -526,6 +772,12 @@ def _run_preflight(
             source_connector_id=str(src_conn.get("id") or ""),
             source_config=source_config,
             confidence_threshold=confidence_threshold_for_mode(validation_mode),
+            # Key-addressed destinations (Mongo, Redis, vector stores) refuse a
+            # write they cannot address. Studio carries the key on a stream
+            # contract; the Pilot has no Map screen to fill one in, so without
+            # this the gate asked the operator to set a key the source catalog
+            # had already declared.
+            contract_primary_key=source_primary_key or None,
         )
         result = apply_policy_gates(
             result,
@@ -550,6 +802,18 @@ def _run_preflight(
             "blockers": [{"id": "preflight", "message": f"Preflight could not run: {exc}"}],
         }
 
+    # Confirm is gated on the proof bundle's transfer_decision, so the slim
+    # projection has to carry it. Dropping it did not make Confirm stricter, it
+    # made the decision unreadable: _transfer_decision saw nothing and every run
+    # fell back to "review", so no Pilot transfer could ever be confirmed however
+    # clean it was. Only the decision travels; the rest of the bundle stays out
+    # of the chat payload.
+    proof_bundle = result.get("proof_bundle")
+    decision = (
+        (proof_bundle or {}).get("transfer_decision")
+        if isinstance(proof_bundle, dict)
+        else None
+    )
     return {
         "run_id": result.get("run_id"),
         "passed": bool(result.get("passed")),
@@ -565,6 +829,83 @@ def _run_preflight(
             for b in (result.get("blockers") or [])
         ][:10],
         "warnings": (result.get("warnings") or [])[:10],
+        "proof_bundle": {"transfer_decision": decision} if isinstance(decision, dict) else {},
+    }
+
+
+def _stamp_callable_source_config(
+    source_config: dict[str, Any],
+    callable_plan: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Put CALL/SELECT fields on the preflight/execute source cfg."""
+    cfg = dict(source_config or {})
+    if not callable_plan:
+        return cfg
+    extra = dict(cfg.get("extra") or {}) if isinstance(cfg.get("extra"), dict) else {}
+    extra["source_read_mode"] = callable_plan["mode"]
+    if callable_plan["mode"] == "procedure":
+        extra["procedure_call"] = callable_plan["text"]
+        cfg["procedure_call"] = callable_plan["text"]
+    else:
+        extra["source_query"] = callable_plan["text"]
+        cfg["source_query"] = callable_plan["text"]
+    extra["procedure_params"] = callable_plan.get("params") or {}
+    cfg["source_read_mode"] = callable_plan["mode"]
+    cfg["procedure_params"] = extra["procedure_params"]
+    cfg["extra"] = extra
+    return cfg
+
+
+def _peek_callable_source(conn: dict[str, Any], plan: dict[str, Any]) -> dict[str, Any]:
+    """Execute CALL/SELECT once for schema — never introspect a colliding table."""
+    from services.procedure_source import close_callable_spool, read_callable_batch
+    from src.transfer.models import endpoint_to_dict
+
+    from .schema_tools import _endpoint_from_connector
+
+    endpoint = _endpoint_from_connector(conn, table=str(plan.get("stream_name") or ""))
+    cfg = _stamp_callable_source_config(endpoint_to_dict(endpoint), plan)
+    try:
+        batch = read_callable_batch(cfg, offset=0, limit=50, peek=True)
+    finally:
+        close_callable_spool()
+    headers = list(batch.headers or [])
+    if not headers:
+        raise ValueError("Procedure extract returned no columns")
+    sample_rows: list[dict[str, Any]] = []
+    for row in batch.rows or []:
+        if isinstance(row, dict):
+            sample_rows.append(dict(row))
+        else:
+            sample_rows.append(
+                {
+                    headers[i]: (row[i] if i < len(row) else "")
+                    for i in range(len(headers))
+                }
+            )
+    schema = {}
+    meta = getattr(batch, "meta", None) or {}
+    native = meta.get("native_types") if isinstance(meta, dict) else {}
+    if isinstance(native, dict):
+        schema = {str(k): str(v) for k, v in native.items()}
+    columns = [
+        {
+            "name": h,
+            "inferred_type": schema.get(h, "VARCHAR"),
+            "nullable": True,
+        }
+        for h in headers
+    ]
+    return {
+        "ok": True,
+        "columns": columns,
+        "schema": schema,
+        "db_type": str(conn.get("type") or conn.get("format") or ""),
+        "cfg": cfg,
+        "endpoint": endpoint,
+        "sample_rows": sample_rows,
+        "error": "",
+        "raw": {},
     }
 
 
@@ -622,6 +963,61 @@ def _sample_rows(conn: dict[str, Any], table: str, limit: int = 50) -> list[dict
         return []
 
 
+def _require_signed_flag(contract_id: str, require_signed_contract: Any) -> bool:
+    """Selecting a contract defaults require-signed the same way Studio does."""
+    cid = str(contract_id or "").strip()
+    if require_signed_contract is None:
+        return bool(cid)
+    if isinstance(require_signed_contract, str):
+        return require_signed_contract.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(require_signed_contract)
+
+
+def _preview_bound_contract(
+    contract_id: str = "",
+    require_signed_contract: Any = None,
+) -> dict[str, Any]:
+    """Read-only bind for plan_transfer. Never invents. Never raises.
+
+    OPEN / unsigned / missing still appear so the operator can see why Confirm
+    would refuse. Staging uses ``_stage_bound_contract`` instead.
+    """
+    cid = str(contract_id or "").strip()
+    require = _require_signed_flag(cid, require_signed_contract)
+    from services.contract_store import bound_contract_preview, get_contract_store
+
+    preview = bound_contract_preview(cid, require_signed=require)
+    if not cid:
+        return preview
+    contract = get_contract_store().get_contract(cid)
+    preview["contract_status"] = (
+        str(getattr(contract.status, "value", contract.status)).upper()
+        if contract is not None
+        else "not_found"
+    )
+    return preview
+
+
+def _stage_bound_contract(
+    contract_id: str = "",
+    require_signed_contract: Any = None,
+) -> dict[str, Any]:
+    """Fail-closed SIGNED bind at Pilot staging. Empty id leaves enforce unset.
+
+    Selecting a contract defaults ``require_signed`` the same way Studio and
+    ScheduleForm do. Confirm is not offered for an unsigned bind.
+    """
+    cid = str(contract_id or "").strip()
+    require = _require_signed_flag(cid, require_signed_contract)
+    from services.contract_store import assert_contract_breaker_allows, bound_contract_preview
+    from services.schedule_store import assert_signed_contract
+
+    assert_signed_contract(cid, require_signed=require)
+    if cid:
+        assert_contract_breaker_allows(cid)
+    return bound_contract_preview(cid, require_signed=require)
+
+
 def start_transfer(
     source_connector_id: str = "",
     source_connector_name: str = "",
@@ -633,6 +1029,13 @@ def start_transfer(
     schema_policy: str = "manual_review",
     validation_mode: str = "balanced",
     limit: int = 0,
+    source_timezone: str = "",
+    source_read_mode: str = "",
+    procedure_call: str = "",
+    source_query: str = "",
+    procedure_params: Any = None,
+    contract_id: str = "",
+    require_signed_contract: Any = None,
 ):
     """Stage a transfer for explicit Confirm. This never moves data by itself."""
     tool = "start_transfer"
@@ -646,6 +1049,11 @@ def start_transfer(
         sync_mode=sync_mode,
         schema_policy=schema_policy,
         validation_mode=validation_mode,
+        source_timezone=source_timezone,
+        source_read_mode=source_read_mode,
+        procedure_call=procedure_call,
+        source_query=source_query,
+        procedure_params=procedure_params,
     )
     if not planned.success:
         return _tool_result(tool, success=False, error=planned.error)
@@ -700,6 +1108,10 @@ def start_transfer(
             "connector_id": source["connector_id"],
             "schema": source.get("schema") or "",
             "table": source["table"],
+            "source_read_mode": source.get("source_read_mode") or "table",
+            "procedure_call": source.get("procedure_call") or "",
+            "source_query": source.get("source_query") or "",
+            "procedure_params": source.get("procedure_params") or {},
         },
         "destination": {
             "kind": "database",
@@ -718,19 +1130,35 @@ def start_transfer(
         "skip_preflight": False,
         "preflight_run_id": preflight.get("run_id"),
     }
+    try:
+        bound = _stage_bound_contract(contract_id, require_signed_contract)
+    except ValueError as exc:
+        return _tool_result(tool, success=False, error=str(exc))
+    payload.update(bound)
     # Belt-and-suspenders: ignore any injected/mutated skip even if schema drifts.
     payload["skip_preflight"] = False  # hard deny - Pilot never bypasses Validate
     preview = {
         "source": f"{source['connector_name']}.{source['table']}",
         "destination": f"{destination['connector_name']}.{destination['table']}",
         "sync_mode": plan.get("sync_mode"),
+        "source_read_mode": source.get("source_read_mode") or "table",
+        "procedure_call": source.get("procedure_call") or "",
+        "source_query": source.get("source_query") or "",
         "mapped_columns": plan.get("mapped_count"),
         "unmapped_source_columns": plan.get("unmapped_source_columns"),
         "lossy_conversions": len(plan.get("lossy_conversions") or []),
         "destination_table_exists": destination.get("table_exists"),
         "preflight_run_id": preflight.get("run_id"),
         "readiness_score": preflight.get("readiness_score"),
+        "validation_mode": plan.get("validation_mode"),
+        "schema_policy": plan.get("schema_policy"),
     }
+    if bound.get("contract_id"):
+        preview["contract_id"] = bound["contract_id"]
+        preview["require_signed_contract"] = bound["require_signed_contract"]
+        preview["enforce_contract"] = True
+        if bound.get("breaker_state"):
+            preview["breaker_state"] = bound["breaker_state"]
 
     from .ack_ledger import get_ack_ledger
 

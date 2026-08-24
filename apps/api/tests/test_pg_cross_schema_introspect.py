@@ -10,16 +10,21 @@ from services.schema_introspect import _introspect_postgresql
 def test_pg_introspect_finds_table_in_alternate_schema():
     """UI schema may be blank/wrong; jobs often lives in public while form says railway."""
     cur = MagicMock()
-    # 1) tables in requested schema (empty / wrong)
-    # 2) columns in requested schema (miss)
-    # 3) cross-schema lookup
-    # 4) columns in found schema
-    cur.fetchall.side_effect = [
+    # _pg_fetch_columns unpacks ≥5 fields (name, dtype, nullable, identity, default, …).
+    _col = lambda name, dtype: (name, dtype, "YES", "", None, "", True, "", 0, "")
+    responses = [
         [],  # list tables in schema "railway"
         [],  # _pg_fetch_columns in "railway"/"jobs"
         [("public", "jobs")],  # cross-schema hit
-        [("id", "text", "YES"), ("title", "text", "YES")],  # columns
+        [_col("id", "text"), _col("title", "text")],  # columns
     ]
+
+    def _fetchall():
+        if responses:
+            return responses.pop(0)
+        return []  # unique / FK / enum follow-ups
+
+    cur.fetchall.side_effect = _fetchall
     conn = MagicMock()
     conn.cursor.return_value.__enter__.return_value = cur
     conn.cursor.return_value.__exit__.return_value = False

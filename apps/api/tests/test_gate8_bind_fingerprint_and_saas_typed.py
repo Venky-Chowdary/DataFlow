@@ -202,10 +202,15 @@ def test_canonical_checksum_bind_parity_bool_wire():
 def test_snowflake_bind_rows_covers_boolean_before_copy():
     from connectors.snowflake_writer import _bind_rows_for_snowflake
 
+    rejected: list[dict] = []
     bound = _bind_rows_for_snowflake(
         [("1", "true"), ("2", "false")],
+        ["id", "active"],
         ["VARCHAR", "BOOLEAN"],
+        rejected,
+        "quarantine",
     )
+    assert not rejected, rejected
     assert bound[0][1] is True or bound[0][1] == 1 or bound[0][1] == "true"
     # After bind, false-ish wire must not remain the string "false" if coerce works.
     assert bound[1][1] is False or bound[1][1] == 0 or bound[1][1] == "false"

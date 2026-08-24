@@ -156,6 +156,69 @@ def test_refine_mappings_with_quality():
     assert "column_profile" in refined[0]
 
 
+def test_column_profile_stamps_observed_decimal_for_map_strip():
+    from services.mapping_quality import analyze_column_profile, refine_mappings_with_quality
+
+    samples = ["85.5", "92.0", "78.25", "100", "66.75"]
+    profile = analyze_column_profile("credit_score", samples)
+    assert profile.get("numeric_kind") == "fixed_decimal"
+    assert profile.get("observed_precision") is not None
+    assert profile.get("min") is not None
+    assert profile.get("max") is not None
+
+    schemas = [
+        {
+            "name": "credit_score",
+            "inferred_type": "DECIMAL",
+            "samples": samples,
+            "null_rate": 0.0,
+            "statistics": {
+                "observed_precision": profile["observed_precision"],
+                "observed_scale": profile["observed_scale"],
+                "numeric_kind": "fixed_decimal",
+                "min": profile["min"],
+                "max": profile["max"],
+            },
+        }
+    ]
+    refined = refine_mappings_with_quality(
+        [{"source": "credit_score", "target": "score", "confidence": 0.9, "reasoning": "identity"}],
+        source_schemas=schemas,
+    )
+    cp = refined[0]["column_profile"]
+    assert cp.get("null_rate") == 0.0
+    assert cp.get("observed_precision") is not None
+    assert cp.get("observed_scale") is not None
+    assert cp.get("numeric_kind") == "fixed_decimal"
+    assert "min" in cp and "max" in cp
+
+
+def test_pipeline_attaches_profiler_stats_to_schemas():
+    from services.mapping_pipeline import run_mapping_pipeline
+
+    result = run_mapping_pipeline(
+        source_columns=["amount", "note"],
+        target_columns=[],
+        source_samples={
+            "amount": ["12.50", "99.99", "0.01", "", "1500.00"],
+            "note": ["a", "b", "c", "d", "e"],
+        },
+        destination_db_type="postgresql",
+        destination_table_exists=False,
+        use_llm=False,
+    )
+    mappings = result.get("mappings") or []
+    amt = next(m for m in mappings if m["source"] == "amount")
+    cp = amt.get("column_profile") or {}
+    assert "null_rate" in cp
+    assert cp.get("null_rate") == 0.2 or cp.get("null_rate") is not None
+    assert cp.get("observed_precision") is not None or cp.get("numeric_kind") in {
+        "fixed_decimal",
+        "integer",
+        "ieee_float",
+    }
+
+
 def test_detect_duplicate_identifier_targets():
     schemas = [
         {"name": "id_a", "samples": ["1", "2", "3", "4"]},

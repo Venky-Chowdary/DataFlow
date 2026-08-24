@@ -33,7 +33,8 @@ def _ensure_executor() -> concurrent.futures.ThreadPoolExecutor:
     if _shutdown:
         raise RuntimeError("Transfer scheduler has been shut down")
     if _executor is None or _executor._shutdown:
-        max_workers = max(1, int(getenv_brand("TRANSFER_WORKERS", "4")))
+        # Phase F6 — default concurrent jobs raised 4 → 8 (still process-local pool).
+        max_workers = max(1, int(getenv_brand("TRANSFER_WORKERS", "8")))
         _executor = concurrent.futures.ThreadPoolExecutor(
             max_workers=max_workers,
             thread_name_prefix="df-transfer-",

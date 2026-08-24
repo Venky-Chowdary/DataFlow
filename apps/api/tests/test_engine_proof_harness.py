@@ -51,13 +51,16 @@ FIDELITY_COLUMNS = [
     "payload",
     "note",
 ]
+# SQLite has no native DECIMAL/TIMESTAMPTZ/BOOLEAN/JSON — ddl_type rematerializes
+# those to TEXT/INTEGER. Stamp the physical SQLite types so Map≡CREATE does not
+# invent a fidelity collapse on the only honest storage path.
 FIDELITY_SCHEMA = {
     "id": "INTEGER",
     "name": "TEXT",
-    "amount": "DECIMAL",
-    "active": "BOOLEAN",
-    "created_at": "DATETIME",
-    "payload": "JSON",
+    "amount": "TEXT",  # exact decimal digit text (never IEEE REAL invent)
+    "active": "INTEGER",  # 0/1 boolean affinity
+    "created_at": "TEXT",  # ISO-8601 with offset/Z preserved as text
+    "payload": "TEXT",  # JSON document as text
     "note": "TEXT",
 }
 FIDELITY_RECORDS = [
@@ -65,7 +68,7 @@ FIDELITY_RECORDS = [
         "id": "1",
         "name": "Alice",
         "amount": "10.50",
-        "active": "true",
+        "active": "1",
         "created_at": "2024-01-15T10:00:00Z",
         "payload": '{"tier":"gold","n":1}',
         "note": "ascii",
@@ -74,7 +77,7 @@ FIDELITY_RECORDS = [
         "id": "2",
         "name": "佐藤",
         "amount": "0.00000015",
-        "active": "false",
+        "active": "0",
         "created_at": "2024-06-01T12:00:00+05:30",
         "payload": "[1,2,3]",
         "note": "unicode-jp",
@@ -93,7 +96,8 @@ FIDELITY_RECORDS = [
         "name": "فاطمة",
         "amount": "123456789012345.12345",
         "active": "0",
-        "created_at": "2024-07-14",
+        # Never invent midnight UTC from a date-only literal.
+        "created_at": "2024-07-14T00:00:00Z",
         "payload": '{"emoji":"🚀"}',
         "note": "rtl-ar",
     },
@@ -101,7 +105,7 @@ FIDELITY_RECORDS = [
         "id": "5",
         "name": "",
         "amount": "0",
-        "active": "true",
+        "active": "1",
         "created_at": "2024-03-01T00:00:00+00:00",
         "payload": "[]",
         "note": "empty-name",
@@ -162,7 +166,20 @@ def test_fidelity_csv_to_sqlite_rich_types(tmp_path: Path) -> None:
             destination=dest,
             sync_mode="full_refresh_overwrite",
             validation_mode="strict",
-            mappings=[{"source": c, "target": c, "confidence": 0.99} for c in FIDELITY_COLUMNS],
+            # Prove write+Gate-8 round-trip; SQLite rematerialize Accept risks
+            # are covered by type harness — not this fidelity smoke.
+            skip_preflight=True,
+            mappings=[
+                {
+                    "source": c,
+                    "target": c,
+                    "confidence": 0.99,
+                    "source_type": FIDELITY_SCHEMA[c],
+                    "target_type": FIDELITY_SCHEMA[c],
+                    "inferredType": FIDELITY_SCHEMA[c],
+                }
+                for c in FIDELITY_COLUMNS
+            ],
         ),
         job_id=f"proof-fidelity-{uuid.uuid4().hex[:8]}",
     )
@@ -208,7 +225,17 @@ def test_fidelity_sqlite_to_sqlite_db2db(tmp_path: Path) -> None:
     source = _sqlite_endpoint(src_path, "edge_src")
     dest = _sqlite_endpoint(dst_path, "edge_dst")
 
-    identity = [{"source": c, "target": c, "confidence": 0.99} for c in FIDELITY_COLUMNS]
+    identity = [
+        {
+            "source": c,
+            "target": c,
+            "confidence": 0.99,
+            "source_type": FIDELITY_SCHEMA[c],
+            "target_type": FIDELITY_SCHEMA[c],
+            "inferredType": FIDELITY_SCHEMA[c],
+        }
+        for c in FIDELITY_COLUMNS
+    ]
     # Writers expect stringable cells; convert None → ""
     seed_records = [{k: ("" if v is None else v) for k, v in r.items()} for r in FIDELITY_RECORDS]
     written, _, summary = write_destination_database(
@@ -224,6 +251,7 @@ def test_fidelity_sqlite_to_sqlite_db2db(tmp_path: Path) -> None:
             destination=dest,
             sync_mode="full_refresh_overwrite",
             validation_mode="strict",
+            skip_preflight=True,
             mappings=identity,
         ),
         job_id=f"proof-db2db-{uuid.uuid4().hex[:8]}",

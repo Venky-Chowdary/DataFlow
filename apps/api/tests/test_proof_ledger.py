@@ -20,8 +20,9 @@ def test_build_proof_ledger_has_honest_metrics():
     assert metrics["unique_transfer_drivers"] >= 1
     assert metrics["production_sku_routes"] >= 1
     assert len(ledger["production_sku"]) == metrics["production_sku_routes"]
-    assert len(ledger["vs_airbyte"]) >= 4
-    assert any("Silent data loss" in row["dimension"] for row in ledger["vs_airbyte"])
+    assert len(ledger["integrity_comparison"]) >= 4
+    assert any("Silent data loss" in row["dimension"] for row in ledger["integrity_comparison"])
+    assert all("industry_elt" in row for row in ledger["integrity_comparison"])
     assert ledger["how_to_verify"]
 
 
@@ -51,4 +52,4 @@ def test_proof_ledger_endpoints(monkeypatch):
         assert resp.status_code == 200, resp.text
         data = resp.json()
         assert "metrics" in data
-        assert "vs_airbyte" in data
+        assert "integrity_comparison" in data

@@ -37,21 +37,27 @@ def test_pg_preserves_decimal_precision_scale():
 def test_pg_mysql_bq_sf_preserve_ieee_float():
     from services.schema_introspect import _bq_to_logical, _sample_logical_type
 
-    assert _pg_to_logical("double precision") == "FLOAT"
-    assert _pg_to_logical("real") == "FLOAT"
-    assert _pg_to_logical("float8") == "FLOAT"
+    # Width-preserving IEEE carriers (never collapse DOUBLE→bare FLOAT).
+    assert _pg_to_logical("double precision") == "DOUBLE PRECISION"
+    assert _pg_to_logical("real") == "REAL"
+    assert _pg_to_logical("float8") == "DOUBLE PRECISION"
     assert _pg_to_logical("numeric") == "DECIMAL"
-    assert _mysql_to_logical("double") == "FLOAT"
-    assert _mysql_to_logical("float") == "FLOAT"
+    assert _mysql_to_logical("double") == "DOUBLE"
+    # MySQL FLOAT is IEEE-32; the bare FLOAT keyword means IEEE-64 on
+    # PostgreSQL/SQL Server/Snowflake, so the width is named explicitly.
+    assert _mysql_to_logical("float") == "FLOAT32"
     assert _mysql_to_logical("decimal(10,2)") == "DECIMAL(10,2)"
-    assert _bq_to_logical("FLOAT64") == "FLOAT"
+    assert _bq_to_logical("FLOAT64") == "FLOAT64"
     # BIGNUMERIC stays distinct from NUMERIC/DECIMAL (76,38 vs 38,9 contract).
     assert _bq_to_logical("BIGNUMERIC") == "BIGNUMERIC"
-    assert _sf_to_logical("FLOAT") == "FLOAT"
-    assert _sf_to_logical("FLOAT8") == "FLOAT"
+    # Snowflake FLOAT / FLOAT8 / DOUBLE are one IEEE-64 type — naming the width
+    # keeps a 32-bit destination from being invented from the spelling.
+    assert _sf_to_logical("FLOAT") == "DOUBLE"
+    assert _sf_to_logical("FLOAT8") == "DOUBLE"
     assert _sf_to_logical("NUMBER(38,10)") == "DECIMAL(38,10)"
-    assert _sample_logical_type(1.5) == "FLOAT"
+    assert _sample_logical_type(1.5) == "DOUBLE"
     assert _sample_logical_type(3) == "INTEGER"
+    assert _sample_logical_type(5_000_000_000) == "BIGINT"
 
 
 def test_pg_does_not_classify_interval_as_text():
@@ -80,9 +86,10 @@ def test_oracle_preserves_number_scale_and_ieee_float():
 
     assert _oracle_to_logical("NUMBER(12,4)") == "DECIMAL(12,4)"
     assert _oracle_to_logical("NUMBER(38,0)") == "DECIMAL(38,0)"
-    assert _oracle_to_logical("NUMBER(10,0)") == "INTEGER"
-    assert _oracle_to_logical("BINARY_DOUBLE") == "FLOAT"
-    assert _oracle_to_logical("BINARY_FLOAT") == "FLOAT"
+    # Zero-scale ≤18 digits → BIGINT carrier (never INT32 invent).
+    assert _oracle_to_logical("NUMBER(10,0)") == "BIGINT"
+    assert _oracle_to_logical("BINARY_DOUBLE") == "BINARY_DOUBLE"
+    assert _oracle_to_logical("BINARY_FLOAT") == "BINARY_FLOAT"
     assert _oracle_to_logical("FLOAT") == "FLOAT"
     assert _oracle_to_logical("DATE") == "TIMESTAMP"  # Oracle DATE is datetime
     assert _oracle_to_logical("INTERVAL DAY TO SECOND") == "INTERVAL DAY TO SECOND"
@@ -95,9 +102,10 @@ def test_sqlserver_preserves_decimal_and_float():
     from services.schema_introspect import _sqlserver_to_logical
 
     assert _sqlserver_to_logical("decimal(18,4)") == "DECIMAL(18,4)"
-    assert _sqlserver_to_logical("numeric(10,0)") == "INTEGER"
-    assert _sqlserver_to_logical("float") == "FLOAT"
-    assert _sqlserver_to_logical("real") == "FLOAT"
+    assert _sqlserver_to_logical("numeric(10,0)") == "BIGINT"
+    # SQL Server FLOAT is IEEE-64 — stamp DOUBLE polarity (never pretend FLOAT32).
+    assert _sqlserver_to_logical("float") == "DOUBLE"
+    assert _sqlserver_to_logical("real") == "REAL"
     assert _sqlserver_to_logical("money") == "MONEY"
     assert _sqlserver_to_logical("smallmoney") == "SMALLMONEY"
     assert _sqlserver_to_logical("bit") == "BOOLEAN"
@@ -179,7 +187,10 @@ def test_tz_polarity_introspect_and_ddl():
     assert ddl_type("snowflake", "TIMESTAMPTZ") == "TIMESTAMP_LTZ"
     assert ddl_type("snowflake", "TIMESTAMP_TZ") == "TIMESTAMP_TZ"
     assert ddl_type("snowflake", "TIMESTAMP_NTZ") == "TIMESTAMP_NTZ"
-    assert ddl_type("mysql", "TIMESTAMPTZ").upper().startswith("DATETIME")
+    # MySQL introspect reads its own ``timestamp`` as aware (above), so the
+    # aware carrier must round-trip to TIMESTAMP(6) — landing DATETIME(6) lost
+    # the polarity on a MySQL→MySQL copy of the column it just read.
+    assert ddl_type("mysql", "TIMESTAMPTZ").upper().startswith("TIMESTAMP")
     assert ddl_type("mysql", "TIMESTAMP_NTZ").upper().startswith("DATETIME")
     assert ddl_type("redshift", "TIMESTAMPTZ") == "TIMESTAMPTZ"
     assert ddl_type("redshift", "TIMESTAMP_NTZ") == "TIMESTAMP"

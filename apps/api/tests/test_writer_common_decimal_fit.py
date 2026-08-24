@@ -23,7 +23,10 @@ def test_parse_decimal_precision_scale_variants():
     assert parse_decimal_precision_scale("decimal(8)") == (8, 0)
     assert parse_decimal_precision_scale("BIGNUMERIC(20,6)") == (20, 6)
     assert parse_decimal_precision_scale("decimal(12,2)") == (12, 2)  # Iceberg DDL
-    assert parse_decimal_precision_scale("NUMERIC") == (38, 9)  # BigQuery default
+    assert parse_decimal_precision_scale("NUMERIC") == (38, 9)  # BigQuery default (unset dialect)
+    assert parse_decimal_precision_scale("NUMERIC", dest_db="bigquery") == (38, 9)
+    assert parse_decimal_precision_scale("NUMERIC", dest_db="postgresql") is None  # unbounded
+    assert parse_decimal_precision_scale("DECIMAL", dest_db="postgresql") is None
     assert parse_decimal_precision_scale("BIGNUMERIC") == (76, 38)
     assert parse_decimal_precision_scale("DECIMAL") is None  # ambiguous bare
     assert parse_decimal_precision_scale("VARCHAR(10)") is None
@@ -33,8 +36,16 @@ def test_parse_decimal_precision_scale_variants():
 def test_fits_decimal_integer_and_scale_overflow():
     assert fits_decimal("1.50", 10, 2) is True
     assert fits_decimal("99999999999999999999", 10, 2) is False  # int digits
-    assert fits_decimal("1.234", 10, 2) is False  # scale overflow — no silent round
+    assert fits_decimal("1.234", 10, 2) is False  # MySQL/SF fail-closed on scale
     assert fits_decimal(None, 10, 2) is True
+    # Trailing wire zeros are not scale overflow (MySQL→PG airports lat cliff).
+    assert fits_decimal("52.310500000000000", 38, 9) is True
+    assert fits_decimal("-33.939900000000000", 38, 9) is True
+    assert fits_decimal("1.2345000001", 10, 2) is False  # non-zero beyond scale
+    # PostgreSQL rounds fractional excess — match destination engine, don't invent block.
+    assert fits_decimal("1.234", 10, 2, dest_db="postgresql") is True
+    assert fits_decimal("1.2345000001", 10, 2, dest_db="postgresql") is True
+    assert fits_decimal("99999999999999999999", 10, 2, dest_db="postgresql") is False
 
 
 def test_quarantine_holds_out_unfit_row():
@@ -53,7 +64,43 @@ def test_quarantine_holds_out_unfit_row():
     assert all("does not fit MySQL DECIMAL(10,2)" in d["reason"] for d in details)
 
 
-def test_coerce_null_nulls_cell_keeps_row():
+def test_quarantine_allows_airport_lat_trailing_zeros_on_pg_numeric():
+    """Client MySQL→Postgres airports: lat wire pads zeros past scale 9."""
+    rows = [("52.310500000000000",), ("33.640700000000000",), ("1.23456789012",)]
+    details: list[dict] = []
+    out = quarantine_unfit_decimals(
+        rows,
+        ["lat"],
+        ["NUMERIC(38,9)"],
+        details,
+        policy="quarantine",
+        dialect_label="PostgreSQL NUMERIC",
+        dest_db="postgresql",
+    )
+    # PG rounds fractional excess — all three fit NUMERIC(38,9).
+    assert out == rows
+    assert details == []
+
+
+def test_quarantine_still_blocks_pg_integer_overflow():
+    details: list[dict] = []
+    out = quarantine_unfit_decimals(
+        [("99999999999999999999999999999999999999",)],  # > 29 int digits for (38,9)
+        ["amount"],
+        ["NUMERIC(38,9)"],
+        details,
+        policy="quarantine",
+        dialect_label="PostgreSQL NUMERIC",
+        dest_db="postgresql",
+    )
+    assert out == []
+    assert details
+
+
+def test_coerce_null_omits_cell_keeps_row():
+    """coerce_null uses DF_MISSING (omit-from-SET) — never dense NULL wipe on upsert."""
+    from services.value_serializer import DF_MISSING_SENTINEL
+
     rows = [("1.234", "keep")]
     details: list[dict] = []
     out = quarantine_unfit_decimals(
@@ -64,11 +111,15 @@ def test_coerce_null_nulls_cell_keeps_row():
         policy="coerce_null",
         dialect_label="PostgreSQL NUMERIC",
     )
-    assert out == [(None, "keep")]
+    assert out == [(DF_MISSING_SENTINEL, "keep")]
     assert details and "PostgreSQL NUMERIC(10,2)" in details[0]["reason"]
 
 
-def test_fail_policy_leaves_rows_unchanged():
+def test_fail_policy_stamps_and_holds_out_unfit_decimals():
+    """Strict/fail must stamp unfit cells so reject_on_strict_policy can abort.
+
+    Leaving rows unchanged used to rely on soft SQL drivers — silent truncate.
+    """
     rows = [("99999999999999999999", "ok")]
     details: list[dict] = []
     out = quarantine_unfit_decimals(
@@ -78,5 +129,7 @@ def test_fail_policy_leaves_rows_unchanged():
         details,
         policy="fail",
     )
-    assert out is rows
-    assert details == []
+    assert out == []
+    assert details
+    assert "would truncate/overflow" in details[0]["reason"]
+    assert details[0]["policy"] == "write_quarantine"

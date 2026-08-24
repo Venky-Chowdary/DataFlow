@@ -3,6 +3,7 @@ import { Spinner } from "./LoadingState";
 import { PreflightResult } from "../lib/types";
 import { useEffect, useState } from "react";
 import { CORE_ENGINE_GATE_IDS, gateLabel } from "../lib/preflightGates";
+import { ringDasharray, validateRingPercent } from "../lib/progressRing";
 
 const CORE_GATE_ORDER = [...CORE_ENGINE_GATE_IDS];
 
@@ -40,7 +41,6 @@ export function PreflightTimeline({
   onUseBalanced,
 }: PreflightTimelineProps) {
   const [elapsedMs, setElapsedMs] = useState(0);
-  const [revealCount, setRevealCount] = useState(0);
 
   useEffect(() => {
     if (!running) {
@@ -52,25 +52,6 @@ export function PreflightTimeline({
     return () => window.clearInterval(timer);
   }, [running]);
 
-  useEffect(() => {
-    if (running || !result.gates?.length) {
-      setRevealCount(0);
-      return;
-    }
-    setRevealCount(0);
-    let i = 0;
-    let timer = 0;
-    const advance = () => {
-      i += 1;
-      setRevealCount(i);
-      if (i >= result.gates.length) return;
-      const pace = Math.min(900, Math.max(140, Number(result.gates[i - 1]?.duration_ms) || 180));
-      timer = window.setTimeout(advance, pace);
-    };
-    timer = window.setTimeout(advance, 60);
-    return () => window.clearTimeout(timer);
-  }, [running, result.run_id, result.gates]);
-
   const gates = running
     ? CORE_GATE_ORDER.map((id) => ({
         id,
@@ -79,15 +60,7 @@ export function PreflightTimeline({
         duration_ms: 0,
       }))
     : result.gates.length > 0
-      ? result.gates.map((g, i) =>
-          i < revealCount
-            ? g
-            : {
-                ...g,
-                status: "pending" as const,
-                message: "Result ready — revealing…",
-              },
-        )
+      ? result.gates
       : [];
 
   const passCount = (result.gates || []).filter((g) => g.status === "pass").length;
@@ -97,6 +70,14 @@ export function PreflightTimeline({
   const proof = result.proof_bundle;
   // Missing decision must never invent approve from passed (review-grade greenwash).
   const decision = proof?.transfer_decision?.decision ?? "review";
+  const heroRing = validateRingPercent({
+    running: Boolean(running),
+    passed: result.passed,
+    decision,
+    passedCount: passCount,
+    blockedCount: blockCount,
+    readinessScore: result.readiness_score,
+  });
   const decisionLabel = decision.toUpperCase();
   const decisionTone = decision === "block" ? "#dc2626" : decision === "review" ? "#f59e0b" : "#16a34a";
   const stateClass = result.passed ? "passed" : result.blockers.length ? "blocked" : "";
@@ -122,10 +103,15 @@ export function PreflightTimeline({
     return typeof firstIssue === "string" ? firstIssue : null;
   };
 
+  const g9Msg = (result.gates || [])
+    .find((g) => g.id === "g9_data_integrity")?.message || "";
+  const sampleUniqueness = /population uniqueness not proven/i.test(g9Msg);
   const headline = running
-    ? "Engine running G1–G8…"
-    : decision === "approve" && result.passed
-      ? "Ready to transfer"
+    ? "Engine running G1–G9…"
+    : decision === "approve" && result.passed && sampleUniqueness
+      ? "Execute-ready · uniqueness sample-only"
+      : decision === "approve" && result.passed
+        ? "Execute-ready · not migration proven"
       : decision === "review"
         ? "Review required — not production-approved"
         : result.passed
@@ -133,8 +119,10 @@ export function PreflightTimeline({
           : "Validation — action needed";
   const subExtra = running
     ? ""
-    : decision === "approve" && result.passed
-      ? " · you can execute the transfer"
+    : decision === "approve" && result.passed && sampleUniqueness
+      ? " · population uniqueness not proven — Execute may re-probe"
+      : decision === "approve" && result.passed
+        ? " · Execute unlocked; Gate-8 proof after write"
       : decision === "review"
         ? " · local or incomplete evidence — treat as review"
         : !result.passed
@@ -145,7 +133,7 @@ export function PreflightTimeline({
     <div className={`df2-preflight ${stateClass}${compact ? " is-compact" : ""}${running ? " is-validating" : ""}`}>
       {!compact && (
       <div className="df2-preflight-head">
-        <div className="df2-preflight-score">
+        <div className={`df2-preflight-score${heroRing.indeterminate ? " is-indeterminate" : ""}${!heroRing.indeterminate && heroRing.pct >= 100 ? " is-complete" : ""}`}>
           <svg viewBox="0 0 80 80" aria-hidden>
             <circle cx="40" cy="40" r="34" className="df2-score-track" />
             <circle
@@ -153,18 +141,17 @@ export function PreflightTimeline({
               cy="40"
               r="34"
               className="df2-score-fill"
-              strokeDasharray={`${((running ? Math.min(92, 18 + elapsedMs / 80) : result.readiness_score) / 100) * 213.6} 213.6`}
+              pathLength={100}
+              strokeDasharray={ringDasharray(heroRing.pct, { indeterminate: heroRing.indeterminate })}
               transform="rotate(-90 40 40)"
             />
           </svg>
           <div className="df2-preflight-score-val">
             {running ? (
-              <>
-                <span style={{ fontSize: 14 }}>{formatElapsed(elapsedMs)}</span>
-              </>
+              <span style={{ fontSize: 14 }}>{formatElapsed(elapsedMs)}</span>
             ) : (
               <>
-                <span>{result.readiness_score}</span>
+                <span>{heroRing.pct}</span>
                 <small>%</small>
               </>
             )}
@@ -304,14 +291,14 @@ export function PreflightTimeline({
           <div className="df2-validate-stage-core">
             <Spinner size="sm" label="" />
             <h3>Validating route</h3>
-            <p>Engine evaluating G1–G8 · {formatElapsed(elapsedMs)} elapsed</p>
+            <p>Engine evaluating G1–G9 · {formatElapsed(elapsedMs)} elapsed</p>
             <div className="df2-preflight-progress is-indeterminate" role="status">
               <div className="df2-mapping-progress-meta">
                 <strong>{formatElapsed(elapsedMs)}</strong>
-                <span>Wall clock · not fake %</span>
+                <span>Wall clock · not a guessed percent</span>
               </div>
-              <div className="df2-mapping-progress-track">
-                <span className="df2-mapping-progress-fill is-animating" style={{ width: "42%" }} />
+              <div className="df2-mapping-progress-track is-indeterminate">
+                <span className="df2-mapping-progress-fill is-animating" />
               </div>
             </div>
           </div>

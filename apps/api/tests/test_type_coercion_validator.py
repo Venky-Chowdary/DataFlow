@@ -38,8 +38,8 @@ def test_lossy_coercion_blocks_when_high_confidence():
     assert coerce_blocks_transfer(issues) is True
 
 
-def test_lossy_coercion_warns_under_balanced():
-    """Balanced Map-time declared lossy pairs warn — mirrors G3; value probe still fail-fast on Validate."""
+def test_lossy_coercion_blocks_under_balanced_without_risk_contract():
+    """Balanced must not soft-green VARCHAR→NUMBER — Risk Contract required (data-rule matrix)."""
     issues = validate_mapping_coercions(
         [{"source": "note", "target": "amount", "confidence": 0.95}],
         source_types={"note": "VARCHAR"},
@@ -47,8 +47,8 @@ def test_lossy_coercion_warns_under_balanced():
         validation_mode="balanced",
     )
     assert issues
-    assert issues[0]["severity"] == "warn"
-    assert coerce_blocks_transfer(issues) is False
+    assert issues[0]["severity"] == "block"
+    assert coerce_blocks_transfer(issues) is True
 
 
 def test_strict_boolean_ack_alone_still_blocks_lossy():

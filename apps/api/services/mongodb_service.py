@@ -15,6 +15,8 @@ from typing import Any, Optional
 
 from pymongo import MongoClient
 
+from services.runtime_estimate import append_throughput_mark
+
 #: Statuses a job never leaves on its own. Progress writes that arrive after a
 #: job reaches one of these are stale by definition and must be dropped, not
 #: applied — otherwise a late write resurrects a cancelled or failed job.
@@ -132,6 +134,29 @@ def _as_object_id(job_id: str):
         return ObjectId(job_id)
     except (errors.InvalidId, TypeError, ValueError):
         return None
+
+
+def job_key_filter(job_id: str) -> dict | None:
+    """Mongo filter matching a job by ObjectId **or** by its string id.
+
+    ``create_transfer_job`` honours a caller-supplied ``_id`` of any shape
+    (fleet claim, scheduler, CLI, ``execute_tracked(job_id=...)``), while the
+    write paths used to accept ObjectId-shaped ids only. A job created with an
+    external id was therefore readable but permanently un-updatable: its very
+    first checkpoint save returned False and the transfer aborted mid-write,
+    leaving committed rows at the destination with no resume token. One
+    resolver now serves every read and write so an id that is accepted at
+    creation stays addressable for the life of the job.
+    """
+    if not job_id:
+        return None
+    oid = _as_object_id(job_id)
+    clauses: list[dict] = []
+    if oid is not None:
+        clauses.append({"_id": oid})
+    clauses.append({"_id": job_id})
+    clauses.append({"job_id": job_id})
+    return clauses[0] if len(clauses) == 1 else {"$or": clauses}
 
 
 def _fresh_object_id_hex() -> str:
@@ -388,6 +413,12 @@ class MongoDBService:
 
         collection = db["transfer_jobs"]
 
+        # Honor caller-supplied job id (execute_tracked / resume / fleet claim).
+        explicit = job_data.get("_id") or job_data.get("job_id")
+        if explicit and "_id" not in job_data:
+            job_data = dict(job_data)
+            job_data["_id"] = str(explicit)
+
         job_data["status"] = "pending"
         job_data["created_at"] = datetime.now(timezone.utc)
         job_data["started_at"] = None
@@ -417,8 +448,8 @@ class MongoDBService:
             return False
         collection = db["transfer_jobs"]
 
-        oid = _as_object_id(job_id)
-        if not oid:
+        key = job_key_filter(job_id)
+        if not key:
             return False
 
         updates = {"status": status, "updated_at": datetime.now(timezone.utc)}
@@ -427,7 +458,7 @@ class MongoDBService:
         prev_doc = None
         try:
             prev_doc = collection.find_one(
-                {"_id": oid},
+                key,
                 {
                     "status": 1,
                     "phases": 1,
@@ -438,10 +469,12 @@ class MongoDBService:
                     "cdc_lag_seconds": 1,
                     "cdc_lease_conflict": 1,
                     "destination_summary": 1,
+                    "quarantine_closure": 1,
                     "reconcile": 1,
                     "event_log": 1,
                     "message": 1,
                     "phase": 1,
+                    "throughput_marks": 1,
                 },
             )
         except Exception:
@@ -475,10 +508,27 @@ class MongoDBService:
         except Exception as exc:
             logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
+        try:
+            from services.row_conservation import attach_conservation_to_updates
+
+            attach_conservation_to_updates(status, updates, previous=prev_doc)
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+
         if status == "running":
             updates.setdefault("started_at", datetime.now(timezone.utc))
         elif status in ("completed", "completed_with_quarantine", "failed", "cancelled"):
             updates["completed_at"] = datetime.now(timezone.utc)
+
+        # Throughput evidence for the cutover-window estimate. Bounded to the
+        # trailing window the estimator reads, so the job doc cannot grow.
+        if "records_processed" in kwargs and "throughput_marks" not in updates:
+            marks = append_throughput_mark(
+                (prev_doc or {}).get("throughput_marks"),
+                kwargs.get("records_processed"),
+            )
+            if marks is not None:
+                updates["throughput_marks"] = marks
 
         phase_label = kwargs.get("phase")
         message = kwargs.get("message", "")
@@ -543,20 +593,47 @@ class MongoDBService:
                 fence = active_fence(job_id)
             except Exception:
                 fence = None
-        filt: dict = {"_id": oid}
+        filt: dict = dict(key)
         if fence is not None:
             updates["lease_fence"] = fence
-            # Allow first write (no fence yet) or matching fence only.
+            # Allow first write (no fence yet) or matching fence only. The key
+            # itself may already be an `$or`, so both go under `$and` rather
+            # than one silently replacing the other.
             filt = {
-                "_id": oid,
-                "$or": [
-                    {"lease_fence": {"$exists": False}},
-                    {"lease_fence": None},
-                    {"lease_fence": fence},
-                ],
+                "$and": [
+                    key,
+                    {
+                        "$or": [
+                            {"lease_fence": {"$exists": False}},
+                            {"lease_fence": None},
+                            {"lease_fence": fence},
+                        ]
+                    },
+                ]
             }
 
-        result = collection.update_one(filt, {"$set": updates})
+        # Control-plane BSON budget — never let quarantine/checkpoint previews
+        # blow MongoDB's 16 MiB update command (Excel→SQL high-reject cliff).
+        try:
+            from services.job_document_budget import apply_job_update_with_budget
+
+            result = apply_job_update_with_budget(collection, filt, updates)
+        except Exception as budget_exc:
+            logging.getLogger(__name__).error(
+                "transfer_jobs update failed for %s: %s",
+                job_id,
+                budget_exc,
+                exc_info=budget_exc,
+            )
+            # Last ditch: status/error only so Theater still shows failure.
+            try:
+                from services.job_document_budget import emergency_strip_job_update
+
+                result = collection.update_one(
+                    filt, {"$set": emergency_strip_job_update(updates)}
+                )
+            except Exception:
+                return False
         ok = result.modified_count > 0 or result.matched_count > 0
         if ok:
             try:
@@ -592,11 +669,11 @@ class MongoDBService:
             db = self.get_database()
         except ConnectionError:
             return False
-        oid = _as_object_id(job_id)
-        if not oid:
+        key = job_key_filter(job_id)
+        if not key:
             return False
         result = db["transfer_jobs"].update_one(
-            {"_id": oid},
+            key,
             {
                 "$set": {
                     "cancel_requested": True,
@@ -613,11 +690,11 @@ class MongoDBService:
             db = self.get_database()
         except ConnectionError:
             return False
-        oid = _as_object_id(job_id)
-        if not oid:
+        key = job_key_filter(job_id)
+        if not key:
             return False
         result = db["transfer_jobs"].update_one(
-            {"_id": oid},
+            key,
             {
                 "$unset": {"cancel_requested": "", "cancel_requested_at": ""},
                 "$set": {"updated_at": datetime.now(timezone.utc)},
@@ -635,11 +712,11 @@ class MongoDBService:
             db = self.get_database()
         except ConnectionError:
             return False
-        oid = _as_object_id(job_id)
-        if not oid:
+        key = job_key_filter(job_id)
+        if not key:
             return False
         doc = db["transfer_jobs"].find_one(
-            {"_id": oid}, {"cancel_requested": 1, "status": 1}
+            key, {"cancel_requested": 1, "status": 1}
         )
         if not doc:
             return False
@@ -790,13 +867,11 @@ class MongoDBService:
 
     def _job_status(self, job_id: str) -> str:
         """Current status of a job, or '' when it cannot be read."""
-        oid = _as_object_id(job_id)
-        if not oid:
+        key = job_key_filter(job_id)
+        if not key:
             return ""
         try:
-            doc = self.get_database()["transfer_jobs"].find_one(
-                {"_id": oid}, {"status": 1}
-            )
+            doc = self.get_database()["transfer_jobs"].find_one(key, {"status": 1})
         except Exception:
             return ""
         return str((doc or {}).get("status") or "")
@@ -810,11 +885,11 @@ class MongoDBService:
         except ConnectionError:
             return False
         collection = db["transfer_jobs"]
-        oid = _as_object_id(job_id)
-        if not oid:
+        key = job_key_filter(job_id)
+        if not key:
             return False
         updates = {**fields, "updated_at": datetime.now(timezone.utc)}
-        result = collection.update_one({"_id": oid}, {"$set": updates})
+        result = collection.update_one(key, {"$set": updates})
         return result.matched_count > 0
 
     def is_job_name_taken(
@@ -872,15 +947,8 @@ class MongoDBService:
             return None
         collection = db["transfer_jobs"]
 
-        result = None
-        oid = _as_object_id(job_id)
-        if oid is not None:
-            result = collection.find_one({"_id": oid})
-        # Fallback: some stores persist string ids / job_id field (memory→mongo, retries).
-        if result is None and job_id:
-            result = collection.find_one({"_id": job_id})
-        if result is None and job_id:
-            result = collection.find_one({"job_id": job_id})
+        key = job_key_filter(job_id)
+        result = collection.find_one(key) if key else None
         if result:
             result["_id"] = str(result["_id"])
         return result
@@ -1103,8 +1171,8 @@ class MemoryMongoDBService:
         return {"success": True, "document_count": 0, "sample_documents": []}
 
     def create_transfer_job(self, job_data: dict) -> str:
-        oid = self._new_id()
         job = dict(job_data)
+        oid = str(job.get("_id") or job.get("job_id") or self._new_id())
         job["_id"] = oid
         job.setdefault("status", "pending")
         job.setdefault("created_at", datetime.now(timezone.utc))
@@ -1121,7 +1189,12 @@ class MemoryMongoDBService:
     def update_job_status(self, job_id: str, status: str, **kwargs) -> bool:
         rec = self._jobs.get(job_id)
         if not rec:
-            return False
+            # Fail-closed resume requires a job shell — mint one for programmatic
+            # execute_tracked(job_id=…) callers (memory store / tests / CLI).
+            self.create_transfer_job({"_id": job_id, "status": status or "pending"})
+            rec = self._jobs.get(job_id)
+            if not rec:
+                return False
         previous_status = rec.get("status")
         fence = kwargs.pop("lease_fence", None)
         if fence is None:
@@ -1144,14 +1217,27 @@ class MemoryMongoDBService:
         except Exception as exc:
             logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
+        try:
+            from services.row_conservation import attach_conservation_to_updates
+
+            attach_conservation_to_updates(status, kwargs, previous=rec)
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+
         prev_phase = rec.get("phase")
         prev_message = str(rec.get("message") or "").strip()
         prev_rows = int(rec.get("records_processed") or 0)
         prev_log = list(rec.get("event_log") or [])
 
+        prev_marks = rec.get("throughput_marks")
+
         rec.update(kwargs)
         rec["status"] = status
         rec["updated_at"] = datetime.now(timezone.utc)
+        if "records_processed" in kwargs and "throughput_marks" not in kwargs:
+            marks = append_throughput_mark(prev_marks, kwargs.get("records_processed"))
+            if marks is not None:
+                rec["throughput_marks"] = marks
         if status == "running":
             rec.setdefault("started_at", datetime.now(timezone.utc))
         elif status in ("completed", "completed_with_quarantine", "failed", "cancelled"):

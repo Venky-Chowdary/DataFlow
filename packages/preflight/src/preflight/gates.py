@@ -25,6 +25,21 @@ def _risk_cleared(m: Any) -> bool:
 
 # Offline fallback when apps.api type_system cannot be imported (package-only).
 # Hosted Validate must use is_lossy_coercion / is_precision_collapse_coercion.
+
+def _effective_source_type(source_type: str, transform: str | None) -> str:
+    """The source type an operator-declared zone makes true.
+
+    Falls back to the declared type when the hosted type system is unavailable —
+    this package runs standalone, and guessing here would be worse than leaving
+    the stricter verdict in place.
+    """
+    try:
+        from services.timezone_policy import effective_source_type
+    except ImportError:  # pragma: no cover — standalone package
+        return source_type
+    return effective_source_type(source_type, transform)
+
+
 LOSSY_COERCIONS = {
     ("VARCHAR", "INTEGER"),
     ("VARCHAR", "TIMESTAMP"),
@@ -131,6 +146,11 @@ def gate_g2_destination(ctx: PreflightContext) -> GateResult:
     start = time.perf_counter()
     dest = ctx.plan.destination
     probe = dict(dest.privilege_probe or {}) if isinstance(getattr(dest, "privilege_probe", None), dict) else {}
+    staging = (
+        dict(dest.redshift_staging_probe or {})
+        if isinstance(getattr(dest, "redshift_staging_probe", None), dict)
+        else {}
+    )
     details: dict = {
         "table_exists": dest.table_exists,
         "can_create_table": dest.can_create_table,
@@ -138,6 +158,8 @@ def gate_g2_destination(ctx: PreflightContext) -> GateResult:
     }
     if probe:
         details["privilege_probe"] = probe
+    if staging:
+        details["redshift_staging_probe"] = staging
 
     if dest.error:
         return _block(
@@ -211,6 +233,27 @@ def gate_g2_destination(ctx: PreflightContext) -> GateResult:
             _with_scope(details, evidence_scope(kind="destination_connectivity", coverage="n/a")),
         )
 
+    # INSERT grant alone must not green-light create-new. Unknown/false create with
+    # a missing table is a hard block — otherwise Validate APPROVE invents DDL.
+    if dest.table_exists is False and not dest.can_create_table:
+        return _block(
+            GateId.G2_DESTINATION,
+            "Destination table is missing and CREATE is not proven "
+            "(INSERT may be allowed on other objects, but create-new DDL is denied/unknown)",
+            start,
+            _with_scope(details, evidence_scope(kind="destination_connectivity", coverage="n/a")),
+        )
+
+    staging_status = str(staging.get("status") or "").strip()
+    if staging_status == "denied":
+        detail = str(staging.get("detail") or "Redshift COPY staging bucket denied").strip()
+        return _block(
+            GateId.G2_DESTINATION,
+            detail,
+            start,
+            _with_scope(details, evidence_scope(kind="destination_connectivity", coverage="n/a")),
+        )
+
     create_note = ""
     if dest.table_exists is False and dest.can_create_table:
         create_note = "; CREATE table allowed"
@@ -219,17 +262,25 @@ def gate_g2_destination(ctx: PreflightContext) -> GateResult:
     elif dest.table_exists is None:
         create_note = "; table existence unknown"
 
+    staging_note = ""
+    if staging_status == "ok":
+        staging_note = "; COPY staging bucket writable"
+    elif staging_status == "not_configured":
+        staging_note = "; COPY FROM S3 not configured (PostgreSQL-wire insert remains valid)"
+    elif staging_status == "unavailable" and staging.get("detail"):
+        staging_note = f"; COPY staging probe unavailable — {staging['detail']}"
+
     method = str(probe.get("method") or "").strip()
     if status == "unavailable" and probe.get("detail"):
         msg = (
-            f"Destination reachable with write access{create_note} "
+            f"Destination reachable with write access{create_note}{staging_note} "
             f"(privilege catalog unavailable — {probe['detail']}; "
             "append/upsert to existing table only)"
         )
     elif method:
-        msg = f"Destination writable via {method}{create_note}"
+        msg = f"Destination writable via {method}{create_note}{staging_note}"
     else:
-        msg = f"Destination reachable with write access{create_note}"
+        msg = f"Destination reachable with write access{create_note}{staging_note}"
     return _pass(
         GateId.G2_DESTINATION,
         msg,
@@ -243,6 +294,46 @@ def gate_g2_destination(ctx: PreflightContext) -> GateResult:
             ),
         ),
     )
+
+
+def _document_instant_reason(
+    source_type: str, target_type: str, dest_db: str
+) -> str:
+    """Why a temporal column will not survive a document store's ``date``.
+
+    That token is an instant, not a calendar day, so the generic
+    "datetime→date, time-of-day truncation" wording is wrong here — the clock
+    survives. Only two things do not, and an operator cannot act on the finding
+    without being told which.
+    """
+    try:
+        from services.type_system import (
+            DOCUMENT_INSTANT_FRACTIONAL_DIGITS,
+            is_document_instant_token,
+            parse_temporal_fractional_precision,
+        )
+        from services.type_system import (
+            datetime_timezone_polarity as _polarity,
+        )
+    except Exception:
+        return ""
+    if not is_document_instant_token(dest_db, target_type):
+        return ""
+    if _polarity(source_type) == "ntz":
+        return (
+            "zoneless source into a UTC instant carrier — this store has no "
+            "wall-clock type, so the instant is stamped rather than carried. "
+            "Declare the source zone, or sign a Migration Risk Contract to "
+            "accept UTC"
+        )
+    src_p = parse_temporal_fractional_precision(source_type)
+    if src_p is not None and int(src_p) > DOCUMENT_INSTANT_FRACTIONAL_DIGITS:
+        return (
+            f"sub-millisecond truncation — the carrier counts milliseconds "
+            f"({DOCUMENT_INSTANT_FRACTIONAL_DIGITS} fractional digits) and the "
+            f"source declares {int(src_p)}"
+        )
+    return ""
 
 
 def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
@@ -420,14 +511,24 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
                 continue
             target = ColumnSchema(name=m.target, inferred_type=stamped)
         examined += 1
-        pair = (source_col.inferred_type.upper(), target.inferred_type.upper())
+        # A declared source zone is the operator supplying the fact the source
+        # never recorded, so from here the column really does carry an instant.
+        # Judging the type path on the undeclared type would leave the transfer
+        # blocked for a problem the declaration already answered.
+        source_type_declared = _effective_source_type(
+            source_col.inferred_type, getattr(m, "transform", "")
+        )
+        pair = (source_type_declared.upper(), target.inferred_type.upper())
         # Prefer type_system SSOT when available; LOSSY_COERCIONS is offline fallback only.
         if is_lossy_coercion:
             lossy = bool(
                 is_lossy_coercion(
-                    source_col.inferred_type,
+                    source_type_declared,
                     target.inferred_type,
                     dest_db=dest_kind,
+                    dest_table_exists=getattr(
+                        ctx.plan.destination, "table_exists", None
+                    ),
                 )
             )
         else:
@@ -481,18 +582,20 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
             pair = (source_col.inferred_type.upper(), f"{target.inferred_type.upper()} [vector dim unknown]")
         # Both sides may normalize to the same logical family (datetime) while
         # still collapsing TZ polarity / IEEE precision — treat as lossy.
+        _dest_exists = getattr(ctx.plan.destination, "table_exists", None)
         if (
             not lossy
             and is_precision_collapse_coercion
             and is_precision_collapse_coercion(
-                source_col.inferred_type,
+                source_type_declared,
                 target.inferred_type,
                 dest_db=str(
                     getattr(getattr(ctx.plan, "destination", None), "db_type", "")
                     or getattr(getattr(ctx.plan, "destination", None), "kind", "")
                     or ""
                 ),
-                    )
+                dest_table_exists=_dest_exists,
+            )
         ):
             lossy = True
         # Nested STRUCT/MAP field contract or nested→document collapse.
@@ -505,6 +608,19 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
             )
         )
         if not lossy and nested_collapse:
+            lossy = True
+        # ObjectId → unbounded TEXT keeps the hex value but the destination no
+        # longer enforces the ObjectId domain — Accept risk, never silent green.
+        objectid_text_domain = False
+        try:
+            from services.specialty_fit import objectid_text_domain_polarity
+
+            objectid_text_domain = objectid_text_domain_polarity(
+                source_col.inferred_type, target.inferred_type
+            )
+        except ImportError:
+            objectid_text_domain = False
+        if objectid_text_domain:
             lossy = True
         # Coercion probe may block wire values even when declared types look
         # safe (naive DATETIME→TIMESTAMPTZ). Never skip those columns.
@@ -532,17 +648,19 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
 
         # IEEE→fixed, datetime→date, timestamptz→NTZ, DECIMAL(p,s) narrow,
         # platform DECIMAL caps: never sample soft-pass.
+        _dest_db = str(
+            getattr(getattr(ctx.plan, "destination", None), "db_type", "")
+            or getattr(getattr(ctx.plan, "destination", None), "kind", "")
+            or ""
+        )
         fidelity_collapse = bool(
             (
                 is_precision_collapse_coercion
                 and is_precision_collapse_coercion(
-                    source_col.inferred_type,
+                    source_type_declared,
                     target.inferred_type,
-                    dest_db=str(
-                        getattr(getattr(ctx.plan, 'destination', None), 'db_type', '')
-                        or getattr(getattr(ctx.plan, 'destination', None), 'kind', '')
-                        or ''
-                    ),
+                    dest_db=_dest_db,
+                    dest_table_exists=_dest_exists,
                 )
             )
             or platform_decimal_trunc
@@ -558,6 +676,15 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
                 label = (
                     f"{label} — decimal→float (IEEE magnitude/scale loss; "
                     "not soft-passed by samples)"
+                )
+            elif _document_instant_reason(
+                source_col.inferred_type, target.inferred_type, _dest_db
+            ):
+                label = (
+                    f"{label} — "
+                    + _document_instant_reason(
+                        source_col.inferred_type, target.inferred_type, _dest_db
+                    )
                 )
             elif normalize_logical_type and normalize_logical_type(
                 target.inferred_type
@@ -633,7 +760,13 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
         document_collapse = bool(
             is_nested_document_collapse
             and is_nested_document_collapse(
-                source_col.inferred_type, target.inferred_type
+                source_col.inferred_type,
+                target.inferred_type,
+                # Without the dialect the helper fails closed, so ARRAY/MAP into
+                # the destination's own document wire (Snowflake VARIANT, MySQL
+                # JSON, PG JSONB) was reported as field-DDL loss and blocked
+                # every schemaless source that had no struct_policy set.
+                dest_db=dest_kind,
             )
         )
         field_shape_loss = bool(nested_collapse and not document_collapse)
@@ -700,18 +833,24 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
         # ObjectId→bare TEXT/VARCHAR: hex wire is value-lossless; domain polarity
         # still needs Accept risk (not a silent hard-block on existing PG TEXT).
         objectid_text_polarity = False
-        if fidelity_collapse and not field_shape_loss:
+        if not field_shape_loss:
             try:
                 from services.type_system import (
                     specialty_carrier_base,
                     specialty_carrier_would_collapse,
                 )
 
-                objectid_text_polarity = bool(
-                    specialty_carrier_would_collapse(
-                        source_col.inferred_type, target.inferred_type
+                objectid_source = (
+                    specialty_carrier_base(source_col.inferred_type) == "OBJECTID"
+                )
+                objectid_text_polarity = objectid_source and (
+                    (
+                        fidelity_collapse
+                        and specialty_carrier_would_collapse(
+                            source_col.inferred_type, target.inferred_type
+                        )
                     )
-                    and specialty_carrier_base(source_col.inferred_type) == "OBJECTID"
+                    or objectid_text_domain
                 )
             except ImportError:
                 objectid_text_polarity = False
@@ -792,12 +931,20 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
                     oid_label + " — sign Migration Risk Contract or remap to VARCHAR(24)"
                 )
         elif fidelity_collapse or field_shape_loss:
-            # Nested field mismatch always hard-blocks. Declared fidelity collapses
-            # honor verified continue-policy Risk Contract only.
+            # Declared fidelity + nested shape collapses honor verified continue-
+            # policy Risk Contract (same SSOT as G8 holdouts / write quarantine).
+            # Without a contract, nested shape and declared collapses hard-block.
             risk_ack = _risk_cleared(m)
-            collapse_warn = bool(fidelity_collapse and risk_ack and not field_shape_loss)
+            collapse_warn = bool(risk_ack)
             if collapse_warn:
-                warnings.append(label + " (risk contract)")
+                warnings.append(
+                    label
+                    + (
+                        " (risk contract — nested shape accepted; remap preferred)"
+                        if field_shape_loss
+                        else " (risk contract)"
+                    )
+                )
             else:
                 issues.append(
                     label
@@ -814,6 +961,8 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
                 "fidelity_collapse": fidelity_collapse,
                 "nested_shape_collapse": field_shape_loss,
                 "risk_acknowledged": risk_ack,
+                # Holdout only when samples/transforms fail — clean lossy casts still write.
+                "contracted_holdout": False,
                 "reason": label,
                 "message": label,
                 "sampled": 0,
@@ -822,7 +971,7 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
                 "sample_failures": [],
                 "suggested_fix": (
                     "Accept risk on Map, or remap to a fidelity-preserving type."
-                    if fidelity_collapse and not field_shape_loss
+                    if fidelity_collapse or field_shape_loss
                     else ""
                 ),
                 "suggested_target_type": None,
@@ -862,27 +1011,52 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
                     pass
             issues_detail.append(detail)
         elif document_collapse and not intentional_json:
-            # Nested→document always blocks without explicit Map struct_policy —
-            # balanced/review must not soft-pass (enterprise fail-closed).
-            issues.append(
-                label + " — set Map struct_policy to store_as_json (or flatten) to proceed"
-            )
-            if probe is not None:
-                issues_detail.append({
-                    "source": m.source,
-                    "target": m.target,
-                    "source_type": source_col.inferred_type,
-                    "target_type": target.inferred_type,
-                    "severity": "block",
-                    "nested_document_collapse": True,
-                    "sampled": probe.get("sampled", 0),
-                    "failed": probe.get("failed", 0),
-                    "sentinel_nulls": probe.get("sentinel_nulls", 0),
-                    "sample_failures": probe.get("sample_failures", []),
-                    "suggested_fix": "Set struct_policy=store_as_json or map to native STRUCT/OBJECT",
-                    "suggested_target_type": probe.get("suggested_target_type"),
-                    "suggested_transform": probe.get("suggested_transform"),
-                })
+            # Nested→document: struct_policy OR signed continue-policy Risk Contract.
+            risk_ack = _risk_cleared(m)
+            if risk_ack:
+                warnings.append(
+                    label + " (risk contract — nested document accepted; prefer struct_policy)"
+                )
+                if probe is not None:
+                    issues_detail.append({
+                        "source": m.source,
+                        "target": m.target,
+                        "source_type": source_col.inferred_type,
+                        "target_type": target.inferred_type,
+                        "severity": "warn",
+                        "nested_document_collapse": True,
+                        "risk_acknowledged": True,
+                        "contracted_holdout": int(probe.get("failed") or 0) > 0,
+                        "sampled": probe.get("sampled", 0),
+                        "failed": probe.get("failed", 0),
+                        "sentinel_nulls": probe.get("sentinel_nulls", 0),
+                        "sample_failures": probe.get("sample_failures", []),
+                        "suggested_fix": (
+                            "Set struct_policy=store_as_json or map to native STRUCT/OBJECT"
+                        ),
+                        "suggested_target_type": probe.get("suggested_target_type"),
+                        "suggested_transform": probe.get("suggested_transform"),
+                    })
+            else:
+                issues.append(
+                    label + " — set Map struct_policy to store_as_json (or flatten) to proceed"
+                )
+                if probe is not None:
+                    issues_detail.append({
+                        "source": m.source,
+                        "target": m.target,
+                        "source_type": source_col.inferred_type,
+                        "target_type": target.inferred_type,
+                        "severity": "block",
+                        "nested_document_collapse": True,
+                        "sampled": probe.get("sampled", 0),
+                        "failed": probe.get("failed", 0),
+                        "sentinel_nulls": probe.get("sentinel_nulls", 0),
+                        "sample_failures": probe.get("sample_failures", []),
+                        "suggested_fix": "Set struct_policy=store_as_json or map to native STRUCT/OBJECT",
+                        "suggested_target_type": probe.get("suggested_target_type"),
+                        "suggested_transform": probe.get("suggested_transform"),
+                    })
         elif document_collapse and intentional_json:
             warnings.append(label + f" — acknowledged via struct_policy={policy}")
         elif probe is not None:
@@ -891,13 +1065,9 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
             # Head-sample "ok" must never soft-pass declared lossy without a
             # verified continue-policy Migration Risk Contract.
             force_block = bool(declared_lossy and not risk_ack)
-            sample_clean = int(probe.get("failed") or 0) == 0
-            if (
-                risk_ack
-                and declared_lossy
-                and severity == "block"
-                and sample_clean
-            ):
+            # Signed continue policy matches write/G8: sample cast failures hold
+            # out (warn) — do not re-lock Validate after the operator signed.
+            if risk_ack and severity == "block":
                 severity = "warn"
             json_wraps = int(probe.get("json_scalar_wraps") or 0)
             detail = {
@@ -925,6 +1095,9 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
                 "suggested_target_type": probe.get("suggested_target_type"),
                 "suggested_transform": probe.get("suggested_transform"),
                 "risk_acknowledged": risk_ack,
+                "contracted_holdout": bool(
+                    risk_ack and int(probe.get("failed") or 0) > 0
+                ),
                 "declared_lossy": True,
             }
             issues_detail.append(detail)
@@ -1003,11 +1176,37 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
     # typed columns that refuse NULL must not receive nullable sources / empty samples.
     sample_rows = list(getattr(ctx, "sample_rows", None) or [])
     for m in ctx.plan.mappings:
-        target = dest_by_name.get(m.target.lower())
+        if _is_intentional_omit_mapping(m) or not m.target:
+            continue
+        target = dest_by_name.get(str(m.target).lower())
         if not target or target.nullable:
             continue
         source_col = next((c for c in ctx.plan.source.columns if c.name == m.source), None)
         src_nullable = True if source_col is None else bool(source_col.nullable)
+        # STOP_COLUMN / CAST+COERCE invent NULL into the primary table — refuse on
+        # NOT NULL destinations even when samples look clean (Validate≠write gap).
+        if _risk_cleared(m) and _continue_policy_disposition(m) == "null_cell":
+            label = (
+                f"NOT NULL contract: {m.source} → {m.target} "
+                f"({target.inferred_type}) rejects NULL invent — "
+                "STOP_COLUMN / coerce continue-policy cannot bind NULL into a "
+                "required column; remap, use QUARANTINE_ROW, or widen nullability"
+            )
+            issues.append(label)
+            issues_detail.append({
+                "source": m.source,
+                "target": m.target,
+                "source_type": source_col.inferred_type if source_col else "",
+                "target_type": target.inferred_type,
+                "severity": "block",
+                "not_null_contract": True,
+                "null_invent_policy_blocked": True,
+                "suggested_fix": (
+                    "Use QUARANTINE_ROW / SKIP_ROW, or remap so the destination "
+                    "column is nullable / has a DEFAULT"
+                ),
+            })
+            continue
         null_samples = 0
         for row in sample_rows[:200]:
             if not isinstance(row, dict):
@@ -1298,10 +1497,24 @@ def _block_message(prefix: str, issues: list[Any]) -> str:
 def gate_g5_dry_run(ctx: PreflightContext) -> GateResult:
     start = time.perf_counter()
     passed, errors = ctx.run_dry_run()
-    details: dict[str, Any] = {"errors": list(errors[:20])}
+    # Parity with G8: continue-policy Risk Contracts hold out cast failures —
+    # they must not keep Sample dry-run blocked after Accept · cast & continue.
+    from preflight.risk_contract import partition_transform_dry_run_errors
+
+    hard_errors, contracted = partition_transform_dry_run_errors(
+        list(errors or []),
+        list(ctx.plan.mappings or []),
+    )
+    details: dict[str, Any] = {
+        "errors": list(hard_errors[:20]),
+        "contracted_holdouts": list(contracted[:20]),
+        "contracted_holdout_count": len(contracted),
+    }
+    if hard_errors:
+        details["kind"] = "transform_errors"
     dry_meta = getattr(ctx, "_last_dry_run_meta", None)
     if isinstance(dry_meta, dict):
-        details.update(dry_meta)
+        details.update({k: v for k, v in dry_meta.items() if k not in details})
 
     scanned = int(details.get("sample_rows_scanned") or 0)
     available = int(details.get("sample_rows_available") or scanned or 0)
@@ -1315,11 +1528,43 @@ def gate_g5_dry_run(ctx: PreflightContext) -> GateResult:
     )
     details = _with_scope(details, g5_scope)
 
-    if not passed:
-        details["issue_texts"] = [_issue_text(i) for i in errors[:20]]
+    if hard_errors:
+        details["issue_texts"] = [_issue_text(i) for i in hard_errors[:20]]
         return _block(
             GateId.G5_DRY_RUN,
-            _block_message("Dry-run failed", errors),
+            _block_message("Dry-run failed", hard_errors),
+            start,
+            details,
+        )
+    # Contracted-only failures: gate does not hard-block Execute, but must not
+    # claim a clean "passed" — auditors reject "dry-run passed" beside holdouts.
+    if contracted:
+        details["note"] = (
+            "Continue-policy Risk Contract holdouts on sample — hard transforms "
+            "cleared; cast failures quarantine/hold out at write (not silent invent). "
+            "This is not a clean transform pass."
+        )
+        details["transform_status"] = "completed_with_contracted_holdouts"
+    elif not passed and not errors:
+        # run_dry_run returned False with empty errors (rare adapter failure).
+        return _block(
+            GateId.G5_DRY_RUN,
+            "Dry-run failed — no sample transform proof",
+            start,
+            details,
+        )
+    if contracted and not hard_errors:
+        rows_bit = (
+            f" ({int(details.get('sample_rows_scanned', 0))} preview rows)"
+            if details.get("sample_rows_scanned")
+            else ""
+        )
+        return _pass(
+            GateId.G5_DRY_RUN,
+            (
+                f"Sample transform completed with {len(contracted)} contracted "
+                f"holdout(s){rows_bit} — not a clean pass; holdouts quarantine at write"
+            ),
             start,
             details,
         )
@@ -1427,7 +1672,7 @@ def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
             )
         except Exception:
             for m in ctx.plan.mappings:
-                if m.target.lower() == "_id":
+                if m.target and str(m.target).lower() == "_id":
                     pk_src, pk_tgt = m.source, m.target
                     break
         if pk_tgt:
@@ -1471,9 +1716,9 @@ def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
         else:
             # Key-addressed / upsert destinations must resolve an identity key.
             try:
-                from services.primary_key import sync_requires_unique_identity
+                from services.primary_key import missing_identity_blocks
 
-                if sync_requires_unique_identity(
+                if missing_identity_blocks(
                     getattr(ctx.plan, "sync_mode", "") or "",
                     dest_kind=dest_kind,
                 ):
@@ -1541,6 +1786,78 @@ def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
             ),
         )
 
+    # Append into a table that already enforces this key: the write aborts on the
+    # first stored key, so the verdict belongs here, not in a duplicate-key error
+    # after Execute has started.
+    collision = getattr(ctx, "destination_collision", None)
+    if collision is not None and getattr(collision, "findings", None):
+        found = list(collision.findings)
+        key = getattr(collision, "key_column", "") or "identity key"
+        if getattr(collision, "idempotent_apply", False):
+            # Resume: the overlap is the interrupted batch being re-delivered and
+            # the writer resolves it on the enforced key. Blocking here leaves a
+            # half-loaded destination with no forward path.
+            return _pass(
+                GateId.G6_TARGET_DDL,
+                (
+                    f"Resume re-delivery overlaps {len(found)} existing destination "
+                    f"key(s) on {key} — applied idempotently on the enforced key "
+                    "(at-least-once read, key-resolved write)."
+                ),
+                start,
+                _scope(
+                    {
+                        "sample_collisions": found[:5],
+                        "primary_key": {"target": key},
+                        "sync_mode": getattr(ctx.plan, "sync_mode", ""),
+                        "rule_id": "g6_target_ddl.append_key_collision_resume",
+                        "probe_status": getattr(collision, "status", ""),
+                        "values_probed": getattr(collision, "values_probed", 0),
+                        "delivery": "at_least_once_idempotent_apply",
+                        "delta_scope": getattr(collision, "delta_scope", {}) or {},
+                    },
+                    coverage="sample",
+                    note="Destination key collision probe on resumed append batch",
+                ),
+            )
+        delta_scope = getattr(collision, "delta_scope", {}) or {}
+        if delta_scope:
+            # The collision is inside the delta this cursor will re-read, so the
+            # operator needs to know the key returns with a newer cursor value —
+            # an append cannot store it twice.
+            cause = (
+                f"The rows after watermark {delta_scope.get('watermark')} on "
+                f"{delta_scope.get('cursor_column')} carry {len(found)} key(s) the "
+                f"destination already stores on {key}, so an append aborts. "
+                "Switch this sync to upsert/merge (key-resolved), which is how an "
+                "updated row is meant to land."
+            )
+        else:
+            cause = (
+                f"Append would duplicate {len(found)} existing destination key(s) on "
+                f"{key} — the destination enforces uniqueness, so the insert aborts. "
+                "Switch this sync to upsert/merge (key-resolved) or overwrite."
+            )
+        return _block(
+            GateId.G6_TARGET_DDL,
+            cause,
+            start,
+            _scope(
+                {
+                    "sample_collisions": found[:5],
+                    "primary_key": {"target": key},
+                    "sync_mode": getattr(ctx.plan, "sync_mode", ""),
+                    "rule_id": "g6_target_ddl.append_key_collision",
+                    "remediation_kind": "change_sync_mode",
+                    "probe_status": getattr(collision, "status", ""),
+                    "values_probed": getattr(collision, "values_probed", 0),
+                    "delta_scope": delta_scope,
+                },
+                coverage="sample",
+                note="Destination key collision probe on append batch",
+            ),
+        )
+
     # Canonical identity key uniqueness probe for SQL destinations.
     # Append/overwrite: skip unless the destination introspected a real PK
     # (INSERT would then fail — fail closed with a clear gate).
@@ -1571,7 +1888,7 @@ def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
     except Exception:
         pk_src, pk_tgt = None, None
         for m in ctx.plan.mappings:
-            if m.target.lower() in {"id", "_id"}:
+            if m.target and str(m.target).lower() in {"id", "_id"}:
                 pk_src, pk_tgt = m.source, m.target
                 break
 
@@ -1708,15 +2025,45 @@ def _dry_run_transform(value: str, transform: str | None) -> str | None:
             logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
         return value
     # Non-deterministic / one-way transforms break reconciliation previews.
-    if t in {"uuid", "guid", "hash", "md5", "sha256", "mask", "redact", "pii_mask", "anonymize", "encrypt"}:
+    if t in {"hash", "md5", "sha256", "mask", "redact", "pii_mask", "anonymize", "encrypt"}:
         return None
     # For other deterministic string-preserving transforms, keep the value as-is.
     return value
 
 
 _NON_DETERMINISTIC = {
-    "uuid", "guid", "hash", "md5", "sha256", "mask", "redact", "pii_mask", "anonymize", "encrypt",
+    # Deterministic UUID *parse* stays comparable — only generators/one-way.
+    "hash", "md5", "sha256", "mask", "redact", "pii_mask", "anonymize", "encrypt",
 }
+
+
+def _continue_policy_disposition(mapping: Any) -> str:
+    """Map signed continue-policy to G8 dry-run behavior.
+
+    ``holdout`` — omit row (QUARANTINE_ROW / SKIP_ROW / default CAST quarantine).
+    ``null_cell`` — keep row with NULL cell (STOP_COLUMN / CAST+COERCE).
+    """
+    raw = None
+    if isinstance(mapping, dict):
+        raw = mapping.get("risk_contract") or mapping.get("riskContract")
+    else:
+        raw = getattr(mapping, "risk_contract", None)
+    if not isinstance(raw, dict):
+        return "holdout"
+    pol = str(raw.get("execution_policy") or "").strip().upper()
+    qp = str(
+        raw.get("quarantine_policy") or raw.get("quarantinePolicy") or ""
+    ).strip().upper()
+    if pol == "STOP_COLUMN":
+        return "null_cell"
+    if pol in {"CAST_AND_CONTINUE", "TRANSFORM_AND_CONTINUE"} and qp in {
+        "NULL",
+        "COERCE",
+        "COERCE_NULL",
+        "NULL_CELL",
+    }:
+        return "null_cell"
+    return "holdout"
 
 
 def _apply_write_path_transform(value: str, transform: str | None) -> tuple[str | None, str | None]:
@@ -1781,6 +2128,11 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
         for m in ctx.plan.mappings
         if m.transform and str(m.transform).lower().strip() in _NON_DETERMINISTIC
     ]
+    dest_by_name = {
+        str(c.name or "").lower(): c
+        for c in (getattr(ctx.plan.destination, "target_columns", None) or [])
+        if getattr(c, "name", None)
+    }
 
     def _serialize_for_write(value: Any) -> str | None:
         # Match readers/writers: lists/dicts become compact JSON, not Python repr.
@@ -1796,9 +2148,16 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
             return str(value)
 
     transform_errors: list[str] = []
+    contracted_holdouts: list[str] = []
+    contracted_null_cells: list[str] = []
     mapped_rows: list[dict[str, Any]] = []
+    # Parallel to mapped_rows: source rows that survive quarantine holdouts.
+    # Fingerprint MUST use this list — never sample_rows[i] vs mapped_rows[i]
+    # after holdouts shrink the write set (production IndexError / Validate 500).
+    kept_sample_rows: list[tuple[int, dict[str, Any]]] = []
     for row_idx, row in enumerate(sample_rows, start=1):
         mapped: dict[str, Any] = {}
+        row_holdout = False
         for m in ctx.plan.mappings:
             if _is_intentional_omit_mapping(m) or not m.target:
                 continue
@@ -1809,11 +2168,37 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
                 continue
             transformed, err = _apply_write_path_transform(raw_s, m.transform)
             if err:
-                transform_errors.append(f"row {row_idx} {m.source}→{m.target}: {err}")
-                mapped[m.target] = None
+                line = f"row {row_idx} {m.source}→{m.target}: {err}"
+                # Continue-policy Risk Contract matches write disposition:
+                # quarantine/skip → omit row; STOP_COLUMN/coerce → NULL cell
+                # (blocked when destination is NOT NULL — same as G3).
+                if _risk_cleared(m):
+                    disposition = _continue_policy_disposition(m)
+                    dest_col = dest_by_name.get(str(m.target or "").lower()) if dest_by_name else None
+                    if (
+                        disposition == "null_cell"
+                        and dest_col is not None
+                        and not bool(getattr(dest_col, "nullable", True))
+                    ):
+                        transform_errors.append(
+                            line
+                            + " — NOT NULL destination refuses STOP_COLUMN/coerce NULL invent"
+                        )
+                        mapped[m.target] = None
+                    elif disposition == "null_cell":
+                        contracted_null_cells.append(line)
+                        mapped[m.target] = None
+                    else:
+                        contracted_holdouts.append(line)
+                        row_holdout = True
+                else:
+                    transform_errors.append(line)
+                    mapped[m.target] = None
             else:
                 mapped[m.target] = transformed
-        mapped_rows.append(mapped)
+        if not row_holdout:
+            mapped_rows.append(mapped)
+            kept_sample_rows.append((row_idx, row))
 
     if transform_errors:
         return _block(
@@ -1822,9 +2207,15 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
             start,
             {
                 "errors": transform_errors[:20],
+                "contracted_holdouts": contracted_holdouts[:20],
                 "source_rows": source_count,
                 "preview_only": True,
-                "note": "Write-path transform failed on sample — fix mapping before Run",
+                "note": (
+                    "Write-path transform failed on sample without a continue-policy "
+                    "Risk Contract — remap, clean cells, or Accept · cast & continue / "
+                    "quarantine on Map"
+                ),
+                "kind": "transform_errors",
             },
         )
 
@@ -1855,7 +2246,7 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
             )
         except Exception:
             for m in ctx.plan.mappings:
-                if m.target.lower() in {"id", "_id"}:
+                if m.target and str(m.target).lower() in {"id", "_id"}:
                     pk_target = m.target
                     break
 
@@ -1996,8 +2387,26 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
 
         mismatches: list[str] = []
         dest_eng = dest_kind
-        for row_idx, row in enumerate(sample_rows, start=1):
+        # Zip kept sources with mapped_rows — quarantine holdouts must not re-index
+        # into a shorter write set (IndexError → API 500 on Validate preflight).
+        if len(kept_sample_rows) != len(mapped_rows):
+            return _block(
+                GateId.G8_RECONCILIATION,
+                "Dry-run reconciliation invariant failed — holdout/write-set length mismatch",
+                start,
+                {
+                    "source_rows": source_count,
+                    "kept_rows": len(kept_sample_rows),
+                    "target_rows": len(mapped_rows),
+                    "preview_only": True,
+                    "rule_id": "g8_reconciliation.holdout_alignment",
+                    "remediation_kind": "retry_validate",
+                },
+            )
+        for (row_idx, row), mapped in zip(kept_sample_rows, mapped_rows):
             for m in ctx.plan.mappings:
+                if _is_intentional_omit_mapping(m) or not m.target:
+                    continue
                 tname = str(m.transform or "").lower().strip()
                 # Identity / rename-only: serialized source wire must equal mapped
                 # cell after destination bind. Use cell_to_string for arrays/objects
@@ -2005,7 +2414,7 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
                 # not strip whitespace (that false-failed Mongo long-text samples).
                 if tname in {"", "none", "identity", "passthrough", "string", "varchar", "text"}:
                     raw = row.get(m.source, "")
-                    got = mapped_rows[row_idx - 1].get(m.target)
+                    got = mapped.get(m.target)
                     ddl = ""
                     try:
                         tgt_col = next(
@@ -2064,7 +2473,25 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
                     "source_rows": source_count,
                     "target_rows": len(mapped_rows),
                     "preview_only": True,
-                    "note": "Pre-write write-path sample check — live Gate-8 checksum runs after load",
+                    "contracted_holdouts": contracted_holdouts[:20],
+                    "contracted_holdout_count": len(contracted_holdouts),
+                    "contracted_null_cells": contracted_null_cells[:20],
+                    "contracted_null_cell_count": len(contracted_null_cells),
+                    "note": (
+                        "Pre-write write-path sample check — live Gate-8 checksum runs after load"
+                        + (
+                            f"; {len(contracted_holdouts)} row(s) held out under "
+                            "quarantine/skip continue-policy"
+                            if contracted_holdouts
+                            else ""
+                        )
+                        + (
+                            f"; {len(contracted_null_cells)} cell(s) NULL-invent under "
+                            "STOP_COLUMN/coerce continue-policy"
+                            if contracted_null_cells
+                            else ""
+                        )
+                    ),
                 },
                 evidence_scope(
                     kind="pre_write_reconciliation",
@@ -2159,7 +2586,18 @@ def gate_g9_data_integrity(ctx: PreflightContext) -> GateResult:
             ),
         )
     probe = report.get("source_uniqueness_probe") or {}
-    probe_ran = bool(probe.get("ran")) or bool(getattr(ctx, "source_duplicate_probe_ran", False))
+    probe_status = str(
+        probe.get("status")
+        or getattr(ctx, "source_duplicate_probe_status", "")
+        or ""
+    ).strip().lower()
+    # Never invent full_selected from a skip/error — only explicit ran.
+    probe_ran = bool(probe.get("ran")) and probe_status in ("", "ran")
+    if not probe_ran:
+        probe_ran = bool(getattr(ctx, "source_duplicate_probe_ran", False)) and probe_status in (
+            "",
+            "ran",
+        )
     coverage = "full_selected" if probe_ran else "sample"
     if probe_ran:
         pk_label = (
@@ -2171,6 +2609,17 @@ def gate_g9_data_integrity(ctx: PreflightContext) -> GateResult:
             f"Source uniqueness probe on identity key {pk_label} "
             f"(GROUP BY / aggregate over selected transfer) · "
             f"other integrity checks use Validate sample — not a full population proof"
+        )
+    elif probe_status in (
+        "error",
+        "skipped_unsupported",
+        "skipped_no_source",
+        "skipped_callable",
+    ):
+        detail = str(probe.get("message") or probe_status)
+        g9_note = (
+            f"Source uniqueness probe unavailable ({detail}) — "
+            "population uniqueness not proven; uniqueness-required syncs fail closed"
         )
     else:
         g9_note = (
@@ -2191,20 +2640,39 @@ def gate_g9_data_integrity(ctx: PreflightContext) -> GateResult:
     encoding_issues = (encoding or {}).get("issues") or []
     if report.get("blocks_transfer"):
         issues = report.get("issues", [])[:15]
+        checks = list(report.get("checks") or [])
+        transform_fail = next(
+            (
+                c
+                for c in checks
+                if c.get("check") == "transform_dry_run" and not c.get("passed")
+            ),
+            None,
+        )
+        g9_details: dict[str, Any] = {
+            "issues": issues,
+            "issue_texts": [_issue_text(i) for i in issues],
+            "checks_failed": report.get("checks_failed", 0),
+            "encoding_issues": encoding_issues[:12],
+            "source_uniqueness_probe": probe,
+        }
+        # Stamp transform_errors so root-cause does not invent "fidelity collapse"
+        # for empty-url / cast holdouts (parity with G5/G8).
+        if transform_fail is not None and not any(
+            c.get("fidelity_collapse") for c in checks if isinstance(c, dict)
+        ):
+            g9_details["kind"] = str(transform_fail.get("kind") or "transform_errors")
+            if transform_fail.get("note"):
+                g9_details["note"] = transform_fail.get("note")
+            if transform_fail.get("contracted_holdouts"):
+                g9_details["contracted_holdouts"] = transform_fail.get(
+                    "contracted_holdouts"
+                )
         return _block(
             GateId.G9_DATA_INTEGRITY,
             _block_message("Data integrity failed", issues),
             start,
-            _with_scope(
-                {
-                    "issues": issues,
-                    "issue_texts": [_issue_text(i) for i in issues],
-                    "checks_failed": report.get("checks_failed", 0),
-                    "encoding_issues": encoding_issues[:12],
-                    "source_uniqueness_probe": probe,
-                },
-                g9_scope,
-            ),
+            _with_scope(g9_details, g9_scope),
         )
     warnings = list(report.get("warnings") or [])
     if encoding_issues and not warnings:
@@ -2240,6 +2708,168 @@ def gate_g9_data_integrity(ctx: PreflightContext) -> GateResult:
     )
 
 
+def _host_gate_to_result(gate_id: GateId, payload: dict[str, Any], start: float) -> GateResult:
+    """Translate hosted gate dicts (pass/block/skip/warn) onto package GateResult."""
+    raw = str(payload.get("status") or "skip").strip().lower()
+    status = {
+        "pass": GateStatus.PASS,
+        "block": GateStatus.BLOCK,
+        "skip": GateStatus.SKIP,
+        "warn": GateStatus.WARN,
+    }.get(raw, GateStatus.SKIP)
+    return GateResult(
+        gate_id=gate_id,
+        status=status,
+        message=str(payload.get("message") or ""),
+        details=dict(payload.get("details") or {}),
+        duration_ms=(time.perf_counter() - start) * 1000,
+    )
+
+
+def _plan_mapping_dicts(ctx: PreflightContext) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for m in ctx.plan.mappings or []:
+        if isinstance(m, dict):
+            rows.append(dict(m))
+            continue
+        rows.append(
+            {
+                "source": getattr(m, "source", ""),
+                "target": getattr(m, "target", ""),
+                "confidence": getattr(m, "confidence", 0),
+                "create_new": bool(getattr(m, "create_new", False)),
+                "intentional_omit": bool(getattr(m, "intentional_omit", False)),
+                "assignment_strategy": str(getattr(m, "assignment_strategy", "") or ""),
+                "review_kind": str(getattr(m, "review_kind", "") or ""),
+            }
+        )
+    return rows
+
+
+def gate_g9_sync_contract(ctx: PreflightContext) -> GateResult:
+    """CDC / SCD2 / mirror + callable extract is refuse-closed. Hosted policy gate may replace this."""
+    start = time.perf_counter()
+    mode = str(getattr(ctx.plan.source, "source_read_mode", "") or "").strip().lower()
+    sync = str(ctx.plan.sync_mode or "").strip().lower()
+    try:
+        from services.preflight_cursor_gate import build_sync_contract_gate
+
+        payload = build_sync_contract_gate(
+            [],
+            sync=sync,
+            validation=str(ctx.plan.validation_mode or "strict"),
+            dest=str(ctx.plan.destination.db_type or ""),
+            src=str(ctx.plan.source.db_type or ""),
+            kind=str(ctx.plan.source.kind or "file"),
+            source_columns=[c.name for c in (ctx.plan.source.columns or [])],
+            pass_status="pass",
+            block_status="block",
+            source_read_mode=mode,
+        )
+        return _host_gate_to_result(GateId.G9_SYNC_CONTRACT, payload, start)
+    except ImportError:
+        if mode in {"procedure", "query"} and sync in {
+            "cdc",
+            "scd2",
+            "mirror",
+            "full_refresh_mirror",
+        }:
+            return _block(
+                GateId.G9_SYNC_CONTRACT,
+                "Stored-procedure / custom-SQL extract is a result-set snapshot — "
+                "CDC, SCD2, and mirror are not available on this source",
+                start,
+                {"source_read_mode": mode, "sync_mode": sync},
+            )
+        return GateResult(
+            gate_id=GateId.G9_SYNC_CONTRACT,
+            status=GateStatus.SKIP,
+            message="Sync contract skipped — hosted cursor gate unavailable",
+            details={"source_read_mode": mode, "sync_mode": sync},
+            duration_ms=(time.perf_counter() - start) * 1000,
+        )
+
+
+def gate_g13_source_coverage(ctx: PreflightContext) -> GateResult:
+    start = time.perf_counter()
+    try:
+        from services.source_coverage_gate import build_source_coverage_gate
+    except ImportError:
+        return GateResult(
+            gate_id=GateId.G13_SOURCE_COVERAGE,
+            status=GateStatus.SKIP,
+            message="Source coverage skipped — hosted G13 unavailable",
+            details={},
+            duration_ms=(time.perf_counter() - start) * 1000,
+        )
+    _coverage, gate = build_source_coverage_gate(
+        source_columns=[c.name for c in (ctx.plan.source.columns or [])],
+        mappings=_plan_mapping_dicts(ctx),
+    )
+    return _host_gate_to_result(GateId.G13_SOURCE_COVERAGE, gate, start)
+
+
+def gate_g14_destination_requirements(ctx: PreflightContext) -> GateResult:
+    start = time.perf_counter()
+    dest = ctx.plan.destination
+    try:
+        from services.destination_requirements_gate import build_destination_requirements_gate
+    except ImportError:
+        return GateResult(
+            gate_id=GateId.G14_DESTINATION_REQUIREMENTS,
+            status=GateStatus.SKIP,
+            message="Destination requirements skipped — hosted G14 unavailable",
+            details={},
+            duration_ms=(time.perf_counter() - start) * 1000,
+        )
+    gate = build_destination_requirements_gate(
+        destination_table_exists=dest.table_exists,
+        column_nullability=getattr(dest, "column_nullability", None) or {},
+        column_defaults=getattr(dest, "column_defaults", None) or {},
+        identity_columns=getattr(dest, "identity_columns", None) or [],
+        generated_columns=getattr(dest, "generated_columns", None) or [],
+        mappings=_plan_mapping_dicts(ctx),
+    )
+    if not gate:
+        return GateResult(
+            gate_id=GateId.G14_DESTINATION_REQUIREMENTS,
+            status=GateStatus.SKIP,
+            message="Destination requirements not applicable",
+            details={},
+            duration_ms=(time.perf_counter() - start) * 1000,
+        )
+    return _host_gate_to_result(GateId.G14_DESTINATION_REQUIREMENTS, gate, start)
+
+
+def gate_g15_dest_exists_shape(ctx: PreflightContext) -> GateResult:
+    start = time.perf_counter()
+    dest = ctx.plan.destination
+    try:
+        from services.shape_contract import build_shape_gate, classify_dest_exists_shape
+    except ImportError:
+        return GateResult(
+            gate_id=GateId.G15_DEST_EXISTS_SHAPE,
+            status=GateStatus.SKIP,
+            message="Dest-exists shape skipped — hosted G15 unavailable",
+            details={},
+            duration_ms=(time.perf_counter() - start) * 1000,
+        )
+    dest_cols = [c.name for c in (dest.target_columns or [])]
+    contract = classify_dest_exists_shape(
+        destination_table_exists=dest.table_exists,
+        source_columns=[c.name for c in (ctx.plan.source.columns or [])],
+        dest_columns=dest_cols,
+        mappings=_plan_mapping_dicts(ctx),
+        column_nullability=getattr(dest, "column_nullability", None) or {},
+        column_defaults=getattr(dest, "column_defaults", None) or {},
+        identity_columns=getattr(dest, "identity_columns", None) or [],
+        generated_columns=getattr(dest, "generated_columns", None) or [],
+    )
+    return _host_gate_to_result(
+        GateId.G15_DEST_EXISTS_SHAPE, build_shape_gate(contract), start
+    )
+
+
 PREFLIGHT_GATES: list[tuple[GateId, GateFn]] = [
     (GateId.G1_SOURCE, gate_g1_source),
     (GateId.G2_DESTINATION, gate_g2_destination),
@@ -2250,6 +2880,10 @@ PREFLIGHT_GATES: list[tuple[GateId, GateFn]] = [
     (GateId.G7_CAPACITY, gate_g7_capacity),
     (GateId.G8_RECONCILIATION, gate_g8_reconciliation),
     (GateId.G9_DATA_INTEGRITY, gate_g9_data_integrity),
+    (GateId.G9_SYNC_CONTRACT, gate_g9_sync_contract),
+    (GateId.G13_SOURCE_COVERAGE, gate_g13_source_coverage),
+    (GateId.G14_DESTINATION_REQUIREMENTS, gate_g14_destination_requirements),
+    (GateId.G15_DEST_EXISTS_SHAPE, gate_g15_dest_exists_shape),
 ]
 
 

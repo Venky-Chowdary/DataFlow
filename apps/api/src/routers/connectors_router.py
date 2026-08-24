@@ -22,6 +22,7 @@ from fastapi import (
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field
 from pymongo.errors import PyMongoError
+from services.runtime_estimate import estimate_for_job_doc
 from services.team_store import can_read_workspace, can_write_workspace
 from services.value_serializer import json_default
 
@@ -79,6 +80,7 @@ class ConnectorConfig(BaseModel):
     path_style: bool = Field(default=False, description="Force S3 path-style addressing")
     options: dict = Field(default_factory=dict, description="Additional options")
     auth_source: Optional[str] = None
+    private_key: Optional[str] = Field(default=None, description="PEM private key (Snowflake key-pair / SFTP)")
     role: Optional[str] = Field(default="both", description="Connector role: source | destination | both")
 
 
@@ -117,6 +119,7 @@ class TestConnectionRequest(BaseModel):
     endpoint_url: Optional[str] = None
     path_style: Optional[bool] = False
     auth_source: Optional[str] = None
+    private_key: Optional[str] = None
 
 
 class TransferRequest(BaseModel):
@@ -135,81 +138,56 @@ class TransferRequest(BaseModel):
 @router.post("/test")
 async def test_connection(request: TestConnectionRequest):
     """Test a connector configuration before saving"""
-    from ..transfer.connector_registry import humanize_connection_error
+    from ..transfer.connector_capabilities import file_source_types
+    from ..transfer.connector_registry import humanize_connection_error, probe_file_source
 
     try:
-        if request.type in ("csv", "tsv", "json", "jsonl", "ndjson", "excel", "parquet"):
-            path = (request.connection_string or request.host or "").strip()
-            if path:
-                if "://" in path:
-                    return {
-                        "success": True,
-                        "message": f"{request.type.upper()} file source configured — data will be read from the provided URL or object-store URI.",
-                        "details": {"format": request.type, "mode": "file_source", "path": path},
-                    }
-                if not os.path.exists(path):
-                    return {
-                        "success": False,
-                        "message": f"Path not found: {path}. Create the directory or mount the volume before running.",
-                        "details": {"format": request.type, "mode": "file_source", "path": path},
-                    }
+        driver = resolve_driver_type(request.type)
+        # Resolve catalog twins (excel_workbook → excel) before the file-source
+        # check. Checking the raw tile id skipped probe_file_source and claimed
+        # "No connectivity probe" for Excel/CSV upload aliases.
+        if (request.type or "").lower() in file_source_types() or driver in file_source_types():
+            path = (request.connection_string or request.host or request.database or "").strip()
+            kind = driver if driver in file_source_types() else (request.type or "")
+            ok, msg = probe_file_source(kind, path)
             return {
-                "success": True,
-                "message": f"{request.type.upper()} file format supported — upload a sample file or provide a file path to validate parsing",
-                "details": {"format": request.type, "mode": "file_source"},
+                "success": ok,
+                "message": msg,
+                "details": {"format": kind, "mode": "file_source", "path": path},
             }
 
-        driver = resolve_driver_type(request.type)
+        from services.connector_auth import engine_login_role, infer_auth_mode, validate_probe_auth
 
-        # Enforce required fields per authentication mode so the UI and API behave
-        # consistently and do not pass empty values to a driver that will fail
-        # with a cryptic low-level error.
-        auth_mode = (request.auth_mode or "").strip().lower()
-        if not auth_mode:
-            if request.connection_string:
-                auth_mode = "connection_string"
-            elif request.service_account:
-                auth_mode = "service_account"
-            elif request.api_key:
-                auth_mode = "api_key"
-            elif request.username or request.password:
-                auth_mode = "user_pass"
-            else:
-                auth_mode = "user_pass"
-
-        if auth_mode in ("connection_string", "file_path"):
-            if not (request.connection_string or "").strip():
-                return {"success": False, "message": "Connection string is required.", "driver": driver, "auth_source": request.auth_source or ""}
-        elif auth_mode == "service_account":
-            if not (request.service_account or "").strip():
-                return {"success": False, "message": "Service account JSON or file path is required.", "driver": driver, "auth_source": request.auth_source or ""}
-            if not (request.database or "").strip():
-                return {"success": False, "message": "Project / bucket / database is required for service account authentication.", "driver": driver, "auth_source": request.auth_source or ""}
-        elif auth_mode == "api_key":
-            if not (request.api_key or "").strip():
-                return {"success": False, "message": "API key is required.", "driver": driver, "auth_source": request.auth_source or ""}
-            if not (request.host or "").strip():
-                return {"success": False, "message": "Host is required for API key authentication.", "driver": driver, "auth_source": request.auth_source or ""}
-        elif auth_mode == "aws_keys":
-            if not (request.host or "").strip() and not (request.database or "").strip():
-                return {"success": False, "message": "Region / endpoint and bucket / table are required for AWS authentication.", "driver": driver, "auth_source": request.auth_source or ""}
-            if not (request.username or "").strip() or not (request.password or "").strip():
-                return {"success": False, "message": "Access key ID and secret access key are required for AWS authentication.", "driver": driver, "auth_source": request.auth_source or ""}
-        elif auth_mode == "user_pass":
-            # Path-based engines (SQLite/DuckDB) use host as a file path; others
-            # need a real host and port.
-            path_based = driver in ("sqlite", "duckdb")
-            has_path = (request.host or "").strip() or (request.database or "").strip()
-            if not has_path and path_based:
-                return {"success": False, "message": "File path or database name is required for SQLite/DuckDB.", "driver": driver, "auth_source": request.auth_source or ""}
-            if not (request.host or "").strip() and not path_based:
-                return {"success": False, "message": "Host is required for username & password authentication.", "driver": driver, "auth_source": request.auth_source or ""}
-            if not path_based and driver not in ("bigquery", "snowflake", "s3", "dynamodb", "gcs", "adls", "elasticsearch"):
-                if not (request.port or 0):
-                    return {"success": False, "message": "Port is required for username & password authentication.", "driver": driver, "auth_source": request.auth_source or ""}
-            if driver not in ("sqlite", "duckdb", "bigquery", "s3", "dynamodb", "gcs", "adls"):
-                if not (request.username or "").strip() or not (request.password or "").strip():
-                    return {"success": False, "message": "Username and password are required.", "driver": driver, "auth_source": request.auth_source or ""}
+        auth_mode = infer_auth_mode(
+            auth_mode=request.auth_mode or "",
+            connection_string=request.connection_string or "",
+            service_account=request.service_account or "",
+            api_key=request.api_key or "",
+            username=request.username or "",
+            password=request.password or "",
+            private_key=getattr(request, "private_key", None) or "",
+            driver=driver,
+        )
+        auth_error = validate_probe_auth(
+            driver=driver,
+            auth_mode=auth_mode,
+            host=request.host or "",
+            port=int(request.port or 0),
+            database=request.database or "",
+            username=request.username or "",
+            password=request.password or "",
+            connection_string=request.connection_string or "",
+            service_account=request.service_account or "",
+            api_key=request.api_key or "",
+            private_key=getattr(request, "private_key", None) or "",
+        )
+        if auth_error:
+            return {
+                "success": False,
+                "message": auth_error,
+                "driver": driver,
+                "auth_source": request.auth_source or "",
+            }
 
         cfg = {
             "host": request.host or "",
@@ -222,11 +200,12 @@ async def test_connection(request: TestConnectionRequest):
             "ssl": bool(request.ssl) if request.ssl is not None else False,
             "warehouse": request.warehouse or "",
             "type": request.type,
-            "auth_mode": request.auth_mode or "",
-            "auth_role": request.auth_role or "",
-            "role": getattr(request, "role", None) or "both",
+            "auth_mode": auth_mode,
+            "auth_role": engine_login_role(request.auth_role),
+            "role": engine_login_role(request.auth_role),
             "api_key": request.api_key or "",
             "service_account": request.service_account or "",
+            "private_key": getattr(request, "private_key", None) or "",
             "endpoint_url": request.endpoint_url or "",
             "path_style": bool(request.path_style),
             "auth_source": request.auth_source or "",
@@ -290,6 +269,7 @@ async def create_connector(
         "role": config.role or "both",
         "api_key": config.api_key,
         "service_account": config.service_account,
+        "private_key": config.private_key,
         "endpoint_url": config.endpoint_url,
         "path_style": config.path_style,
         "options": config.options,
@@ -490,7 +470,9 @@ async def get_transfer_job(job_id: str, request: Request):
         for key in ("created_at", "updated_at", "started_at", "completed_at"):
             if job.get(key) and hasattr(job[key], "isoformat"):
                 job[key] = job[key].isoformat()
-        return sanitize_job_for_api(job)
+        safe = sanitize_job_for_api(job)
+        safe["runtime_estimate"] = estimate_for_job_doc(job)
+        return safe
     except HTTPException:
         raise
     except Exception as e:
@@ -546,10 +528,20 @@ async def patch_transfer_job(job_id: str, request: Request):
 
 
 @router.post("/jobs/{job_id}/retry")
-async def retry_transfer_job(job_id: str, background_tasks: BackgroundTasks, request: Request):
+async def retry_transfer_job(
+    job_id: str,
+    background_tasks: BackgroundTasks,
+    request: Request,
+    force: bool = False,
+):
     """Re-run a failed transfer from the beginning as a new job (no checkpoint).
 
     Use ``/resume`` to continue the *same* job from its last committed batch.
+    A from-zero retry re-reads the whole source, so it is refused when the
+    failed attempt already committed rows under a sync mode that has no key to
+    collapse a second copy. ``force=true`` is the operator's explicit
+    acknowledgement that the duplicates are acceptable and is recorded on the
+    new job.
     """
     try:
         from ..transfer.background import run_transfer_async
@@ -569,22 +561,64 @@ async def retry_transfer_job(job_id: str, background_tasks: BackgroundTasks, req
                 status_code=400,
                 detail="This job has no saved configuration — re-run from Transfer Studio.",
             )
-        if payload.get("requires_file_reupload"):
+        xfer_req = transfer_request_from_dict(payload)
+        from services.transfer_file_staging import (
+            file_source_bytes_available,
+            hydrate_file_source,
+        )
+
+        hydrate_file_source(xfer_req)
+        if xfer_req.source.kind == "file" and not file_source_bytes_available(xfer_req):
             raise HTTPException(
                 status_code=400,
                 detail="File uploads must be re-submitted from Transfer Studio.",
             )
 
-        xfer_req = transfer_request_from_dict(payload)
+        from services.execution_engine_contract import (
+            committed_rows_of,
+            decide_retry_from_start,
+        )
+
+        rows_committed, rows_known = committed_rows_of(job)
+        retry_decision = decide_retry_from_start(
+            status=job.get("status"),
+            sync_mode=getattr(xfer_req, "sync_mode", ""),
+            rows_committed=rows_committed,
+            rows_committed_known=rows_known,
+        )
+        if not retry_decision["allowed"] and not force:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "Retry from start refused — it would duplicate committed rows",
+                    "reason": retry_decision["reason"],
+                    "rows_committed": rows_committed if rows_known else None,
+                    "rows_committed_known": rows_known,
+                    "primary_action": "resume",
+                    "resume_url": f"/api/v1/connectors/jobs/{job_id}/resume",
+                    "override": "Re-send with force=true to accept the duplicates.",
+                },
+            )
         # Retries from start also re-run preflight — never inherit skip_preflight.
         xfer_req.skip_preflight = False
         engine = get_transfer_engine()
         new_job_id = engine._create_pending_job(xfer_req)
+        forced = bool(force and not retry_decision["allowed"])
         mongo.update_job_status(
             new_job_id,
             "pending",
             retry_of=job_id,
-            message=f"Retry from start of job {job_id} (no checkpoint)",
+            message=(
+                f"Retry from start of job {job_id} (no checkpoint)"
+                + (
+                    " — operator accepted duplicate rows: "
+                    f"{retry_decision['reason']}"
+                    if forced
+                    else ""
+                )
+            ),
+            duplicate_risk_acknowledged=forced,
+            retry_decision=retry_decision,
         )
 
         # From-zero: do not copy parent checkpoint / resume_from_job_id.
@@ -596,7 +630,12 @@ async def retry_transfer_job(job_id: str, background_tasks: BackgroundTasks, req
             "retry_of": job_id,
             "status": "running",
             "resume": False,
-            "message": "Retry from start — new job, source re-read from the beginning (at-least-once upsert).",
+            "duplicate_risk_acknowledged": forced,
+            "retry_decision": retry_decision,
+            "message": (
+                "Retry from start — new job, source re-read from the beginning "
+                "(at-least-once)."
+            ),
         }
     except HTTPException:
         raise
@@ -605,6 +644,32 @@ async def retry_transfer_job(job_id: str, background_tasks: BackgroundTasks, req
 
 
 @router.post("/jobs/{job_id}/resume")
+def _resume_restarts_from_scratch(xfer_req: Any) -> bool:
+    """True when Resume should re-run the transfer rather than continue it.
+
+    A full refresh replaces the destination instead of adding to it, so there is
+    no partial state to resume into and re-running is idempotent by definition.
+    Continuing mid-stream is the case that needs an identity key, to make the
+    interrupted batch's replay idempotent — and a keyless source such as an
+    ordinary CSV export can never supply one, which left Resume as an action
+    that could only ever refuse itself.
+    """
+    from services.sync_cursor import is_overwrite_sync
+
+    contracts = getattr(xfer_req, "stream_contracts", None) or []
+    for contract in contracts:
+        if isinstance(contract, dict) and contract.get("sync_mode"):
+            if not is_overwrite_sync(str(contract.get("sync_mode"))):
+                return False
+    return is_overwrite_sync(str(getattr(xfer_req, "sync_mode", "") or "")) or bool(
+        contracts
+        and all(
+            isinstance(c, dict) and is_overwrite_sync(str(c.get("sync_mode") or ""))
+            for c in contracts
+        )
+    )
+
+
 async def resume_transfer_job(job_id: str, background_tasks: BackgroundTasks, request: Request):
     """Resume a failed or paused transfer from its last durable checkpoint."""
     try:
@@ -624,7 +689,16 @@ async def resume_transfer_job(job_id: str, background_tasks: BackgroundTasks, re
                 status_code=400,
                 detail="This job has no saved configuration — re-run from Transfer Studio.",
             )
-        if payload.get("requires_file_reupload"):
+        xfer_req_probe = transfer_request_from_dict(payload)
+        from services.transfer_file_staging import (
+            file_source_bytes_available,
+            hydrate_file_source,
+        )
+
+        hydrate_file_source(xfer_req_probe)
+        if xfer_req_probe.source.kind == "file" and not file_source_bytes_available(
+            xfer_req_probe
+        ):
             raise HTTPException(
                 status_code=400,
                 detail="File uploads must be re-submitted from Transfer Studio.",
@@ -649,9 +723,22 @@ async def resume_transfer_job(job_id: str, background_tasks: BackgroundTasks, re
                 },
             )
 
-        xfer_req = transfer_request_from_dict(payload)
+        xfer_req = xfer_req_probe
         # Resume must never inherit a stale skip_preflight flag — gates re-run.
         xfer_req.skip_preflight = False
+        # A full refresh has nothing to resume *into*: it replaces the
+        # destination rather than adding to it, so the safe continuation is to
+        # run it again from the top. Continuing mid-file needs an identity key to
+        # make the replay idempotent, and a keyless source — an ordinary CSV
+        # export — can never supply one. Operators hit exactly that wall: Resume
+        # was the only action offered on a failed 1M-row overwrite, and it
+        # answered by demanding a key the sync mode never needed.
+        # A CDC cursor gap is the same class: the durable cursor is the problem,
+        # so Resume restarts (when_needed snapshots current keys) rather than
+        # polling the purged LSN from the last checkpoint.
+        restart_full_refresh = _resume_restarts_from_scratch(xfer_req) or bool(
+            safety.get("gap_restart")
+        )
         # Resume is the one sanctioned exit from a terminal status, and it must
         # also drop any stale cancel request or the resumed run would abort at
         # its first checkpoint.
@@ -662,14 +749,26 @@ async def resume_transfer_job(job_id: str, background_tasks: BackgroundTasks, re
             message=f"Resume requested for job {job_id}",
             allow_terminal_exit=True,
         )
-        background_tasks.add_task(run_transfer_async, job_id, xfer_req, resume=True)
+        background_tasks.add_task(
+            run_transfer_async, job_id, xfer_req, resume=not restart_full_refresh
+        )
         return {
             "success": True,
             "async": True,
             "job_id": job_id,
             "status": "running",
-            "resume": True,
-            "message": "Resume started from last committed checkpoint (at-least-once upsert).",
+            "resume": not restart_full_refresh,
+            "restarted": restart_full_refresh,
+            "message": (
+                "CDC cursor-gap recovery restarted. Purged-window events are gone. "
+                "when_needed snapshots current source keys, then streams from the new tip. "
+                "At-least-once upsert — not continuous CDC, not migration_proven."
+                if safety.get("gap_restart")
+                else "Full refresh restarted from the beginning — it replaces the "
+                "destination, so there is nothing to resume into."
+                if restart_full_refresh
+                else "Resume started from last committed checkpoint (at-least-once upsert)."
+            ),
             "checkpoint_age_hours": safety.get("age_hours"),
             "warnings": safety.get("warnings") or [],
             "honesty": safety.get("honesty"),
@@ -738,6 +837,7 @@ async def stream_transfer_job(job_id: str, request: Request):
                 if job.get(key) and hasattr(job[key], "isoformat"):
                     job[key] = job[key].isoformat()
             safe = sanitize_job_for_api(job)
+            safe["runtime_estimate"] = estimate_for_job_doc(job)
             yield f"data: {json.dumps(safe, default=json_default)}\n\n"
             if safe.get("status") in ("completed", "completed_with_quarantine", "failed", "cancelled"):
                 break
@@ -767,11 +867,44 @@ async def get_job_quarantine(job_id: str, request: Request):
         raise HTTPException(status_code=403, detail="Workspace access denied")
 
     details = merge_job_quarantine(job)
-    row_ids = {d.get("row") for d in details if isinstance(d, dict) and d.get("row") is not None}
-    rejected_rows = int(job.get("rejected_rows") or 0) or (len(row_ids) if row_ids else len(details))
-    source = "write" if (job.get("rejected_details") or (job.get("destination_summary") or {}).get("rejected_details")) else (
-        "preflight" if details else "none"
+    from services.quarantine_dlq import (
+        evaluate_replay_closure,
+        job_quarantine_closure,
     )
+
+    stored_closure = job_quarantine_closure(job)
+    closure = evaluate_replay_closure(details, last_replay=(stored_closure or {}).get("last_replay"))
+    if stored_closure:
+        closure = {
+            **stored_closure,
+            "open_count": closure["open_count"],
+            "promoted_count": closure["promoted_count"],
+            "failed_count": closure["failed_count"],
+            "durable_count": closure["durable_count"],
+            "verdict": closure["verdict"],
+            "next_action": closure["next_action"],
+            "note": closure["note"],
+            "migration_proven": False,
+        }
+    open_n = int(closure.get("open_count") or 0)
+    row_ids = {d.get("row") for d in details if isinstance(d, dict) and d.get("row") is not None}
+    rejected_rows = int(
+        job.get("rejected_details_total")
+        or job.get("rejected_rows")
+        or 0
+    ) or (len(row_ids) if row_ids else len(details))
+    has_write = bool(
+        job.get("rejected_details")
+        or (job.get("destination_summary") or {}).get("rejected_details")
+    )
+    source = "write" if has_write else ("preflight" if details else "none")
+    # DLQ hydrate when job sample was truncated / incomplete.
+    if details and (
+        job.get("rejected_details_truncated")
+        or int(job.get("rejected_details_total") or 0) > len(job.get("rejected_details") or [])
+        or len(details) > len(job.get("rejected_details") or [])
+    ):
+        source = "dlq" if has_write or source == "none" else source
     ds = job.get("destination_summary") if isinstance(job.get("destination_summary"), dict) else {}
     dest_q = ds.get("dest_quarantine") if isinstance(ds.get("dest_quarantine"), dict) else {}
     dest_dlq: dict[str, Any] = {
@@ -809,11 +942,22 @@ async def get_job_quarantine(job_id: str, request: Request):
         "job_id": job_id,
         "rejected_rows": rejected_rows,
         "issue_count": len(details),
+        "open_count": open_n,
         "source": source,
         "quarantine": details,
         "dest_dlq": dest_dlq,
         "quarantine_durable": quarantine_durable,
         "quarantine_dlq_error": quarantine_dlq_error,
+        "quarantine_closure": {
+            "verdict": closure.get("verdict"),
+            "open_count": open_n,
+            "promoted_count": int(closure.get("promoted_count") or 0),
+            "failed_count": int(closure.get("failed_count") or 0),
+            "durable_count": int(closure.get("durable_count") or 0),
+            "next_action": closure.get("next_action") or "",
+            "note": closure.get("note") or "",
+            "migration_proven": False,
+        },
     }
 
 
@@ -905,11 +1049,15 @@ def _quarantine_details_to_records(details: list[dict], transform_overrides: Opt
         if not base:
             base = detail.get("values") if isinstance(detail.get("values"), dict) else {}
         if base:
+            from connectors.writer_common import quarantine_cell_wire
+
             for k, v in base.items():
-                by_row[row_num].setdefault(str(k), "" if v is None else str(v))
+                by_row[row_num].setdefault(str(k), quarantine_cell_wire(v))
         col = str(detail.get("column") or "").strip()
         if col:
-            by_row[row_num][col] = "" if detail.get("value") is None else str(detail.get("value"))
+            from connectors.writer_common import quarantine_cell_wire
+
+            by_row[row_num][col] = quarantine_cell_wire(detail.get("value"))
     records = [by_row[n] for n in order if by_row[n]]
     columns: list[str] = []
     seen: set[str] = set()
@@ -950,19 +1098,21 @@ def _canonicalize_quarantine_records_to_source(
 
     out: list[dict] = []
     for rec in records:
+        from connectors.writer_common import quarantine_cell_wire
+
         shaped: dict[str, str] = {}
         for src, tgt in pairs:
             if src in rec:
-                shaped[src] = "" if rec[src] is None else str(rec[src])
+                shaped[src] = quarantine_cell_wire(rec[src])
             elif tgt in rec:
-                shaped[src] = "" if rec[tgt] is None else str(rec[tgt])
+                shaped[src] = quarantine_cell_wire(rec[tgt])
             else:
                 # Keep absence visible to refuse-incomplete (key missing).
                 continue
         # Preserve unmapped extras (operator edits) under their original keys.
         for k, v in rec.items():
             if k not in shaped and all(k != t for _, t in pairs):
-                shaped[str(k)] = "" if v is None else str(v)
+                shaped[str(k)] = quarantine_cell_wire(v)
         out.append(shaped)
     columns: list[str] = []
     seen_c: set[str] = set()
@@ -1043,19 +1193,46 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
         )
 
     stored_details = job.get("rejected_details") or job.get("destination_summary", {}).get("rejected_details") or []
-    details = body.rows if body.rows else list(stored_details)
+    from services.quarantine_from_preflight import merge_job_quarantine
+    from services.quarantine_dlq import (
+        compact_replay_closure,
+        job_quarantine_closure,
+        open_quarantine_details,
+        quarantine_sample_incomplete,
+        record_replay,
+        replay_row_identity,
+        VERDICT_CLOSED,
+    )
+
+    hydrated = merge_job_quarantine(job)
+    durable = hydrated or list(stored_details)
+    incomplete = quarantine_sample_incomplete(job, durable)
+    if incomplete:
+        raise HTTPException(status_code=400, detail=incomplete)
+
+    promoted_ids = {
+        replay_row_identity(d)
+        for d in durable
+        if str(d.get("retry_status") or "").lower() == "promoted"
+    }
+    if body.rows:
+        details = [
+            d for d in body.rows
+            if isinstance(d, dict) and replay_row_identity(d) not in promoted_ids
+        ]
+    else:
+        details = open_quarantine_details(durable)
     if not details:
-        raise HTTPException(status_code=400, detail="No quarantine rows to replay")
-    rejected_rows = int(job.get("rejected_rows") or job.get("destination_summary", {}).get("rejected_rows") or 0)
-    if rejected_rows > 0 and len(details) < rejected_rows:
         raise HTTPException(
             status_code=400,
             detail=(
-                f"Quarantine sample is incomplete ({len(details)} of {rejected_rows} rejects). "
-                "Export the destination DLQ / full findings, or re-run so all rejects are persisted — "
-                "partial replay would leave remaining rejects behind."
+                "Quarantine ledger is closed — remediations already Gate-8 promoted. "
+                "Replay would only re-upsert already-landed keys."
+                if promoted_ids or str((job_quarantine_closure(job) or {}).get("verdict") or "") == VERDICT_CLOSED
+                else "No quarantine rows to replay"
             ),
         )
+    prior_closure = job_quarantine_closure(job) or {}
 
     records, columns = _quarantine_details_to_records(details, body.transform_overrides)
     if not records:
@@ -1072,6 +1249,19 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
         mappings = [{"source": c, "target": c, "confidence": 0.95} for c in columns]
 
     _refuse_incomplete_quarantine_replay(records, mappings)
+    from services.cdc_exactly_once import (
+        ExactlyOnceRouteError,
+        assert_cdc_eos_quarantine_replay,
+        dest_view_from_job_summary,
+    )
+
+    try:
+        assert_cdc_eos_quarantine_replay(
+            details=list(details),
+            dest=dest_view_from_job_summary(job),
+        )
+    except ExactlyOnceRouteError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     records, columns = _canonicalize_quarantine_records_to_source(records, mappings)
 
     schema = dict(transfer_req.column_types or {})
@@ -1136,6 +1326,26 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
     child_payload["sync_mode"] = "incremental_deduped"
     child_payload["skip_preflight"] = True
     child_req = transfer_request_from_dict(child_payload)
+    from src.transfer.contract_engine import enforce_bound_contract, stamp_request_contract
+
+    try:
+        from services.data_contract import ContractViolation
+    except ImportError:  # pragma: no cover
+        from src.services.data_contract import ContractViolation
+
+    try:
+        stamp_request_contract(
+            child_req,
+            explicit_id=str(getattr(transfer_req, "contract_id", "") or ""),
+            explicit_require=bool(getattr(transfer_req, "require_signed_contract", False)),
+        )
+        enforce_bound_contract(
+            child_req,
+            schema=schema,
+            mappings=mappings,
+        )
+    except (ValueError, ContractViolation) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     child_job_id = engine._create_pending_job(child_req)
     mongo.update_job_status(
         child_job_id,
@@ -1201,20 +1411,46 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
             status = "failed"
         else:
             status = "completed"
+
+        recorded = record_replay(
+            durable,
+            attempted=details,
+            child_rejected=list(dest_summary.get("rejected_details") or []),
+            gate8_passed=bool(recon.get("passed")),
+            child_job_id=child_job_id,
+            rows_written=int(rows_written or 0),
+            rejected=rejected,
+            prior=prior_closure,
+        )
+        compact = compact_replay_closure(recorded)
+        stamped_findings = list(recorded.get("findings") or [])
+        landed_ids = set(recorded.get("promoted_identities") or [])
+
         promote_meta: dict[str, Any] = {}
-        if rejected == 0 and recon.get("passed", True):
+        if recon.get("passed") and landed_ids:
             try:
                 from services.dest_quarantine import mark_dlq_promoted
 
                 qids = [
                     str(d.get("_df_qid") or "")
                     for d in details
-                    if isinstance(d, dict) and d.get("_df_qid")
+                    if isinstance(d, dict)
+                    and d.get("_df_qid")
+                    and replay_row_identity(d) in landed_ids
                 ]
-                # Prefer qids; when absent, stamp all open DLQ rows for this parent job.
-                promote_meta = mark_dlq_promoted(
-                    dest, qids=qids, job_id=job_id
-                )
+                # Full close without qids: stamp every open dest DLQ row for this job.
+                # Partial close without qids: refuse dest stamp rather than mark poison pills.
+                failed_ids = set(recorded.get("failed_identities") or [])
+                if qids:
+                    promote_meta = mark_dlq_promoted(dest, qids=qids, job_id=job_id)
+                elif not failed_ids:
+                    promote_meta = mark_dlq_promoted(dest, qids=[], job_id=job_id)
+                else:
+                    promote_meta = {
+                        "updated": 0,
+                        "skipped": True,
+                        "reason": "partial promote needs _df_qid on each finding",
+                    }
             except Exception as exc:
                 promote_meta = {"error": str(exc)[:300]}
         phase = "completed" if status != "failed" else "failed"
@@ -1236,6 +1472,19 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
             ddl_log=ddl_log,
             error=recon.get("message") if status == "failed" else None,
         )
+        parent_ds = dict(job.get("destination_summary") or {})
+        parent_ds["quarantine_closure"] = compact
+        parent_status = str(job.get("status") or "completed_with_quarantine")
+        try:
+            mongo.update_job_status(
+                job_id,
+                parent_status,
+                quarantine_closure=compact,
+                rejected_details=stamped_findings[:2000],
+                destination_summary=parent_ds,
+            )
+        except Exception as exc:
+            logger.warning("parent quarantine_closure persist failed: %s", exc, exc_info=exc)
         try:
             from services.audit_log import append_audit_event
             from services.quarantine_dlq import append_dlq_event
@@ -1250,6 +1499,25 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
                     "rejected": rejected,
                     "status": status,
                     "gate8_passed": bool(recon.get("passed")),
+                    "verdict": compact.get("verdict"),
+                    "open_count": compact.get("open_count"),
+                },
+            )
+            append_dlq_event(
+                job_id=job_id,
+                action="replay_closure",
+                rows=int(compact.get("promoted_count") or 0),
+                child_job_id=child_job_id,
+                workspace_id=str(job.get("workspace_id") or ""),
+                details={
+                    "verdict": compact.get("verdict"),
+                    "open_count": compact.get("open_count"),
+                    "promoted_count": compact.get("promoted_count"),
+                    "failed_count": compact.get("failed_count"),
+                    "gate8_passed": bool(recon.get("passed")),
+                    "promoted_identities": list(recorded.get("promoted_identities") or []),
+                    "failed_identities": list(recorded.get("failed_identities") or []),
+                    "migration_proven": False,
                 },
             )
             actor = getattr(getattr(request, "state", None), "user", None)
@@ -1267,6 +1535,8 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
                     "status": status,
                     "gate8_passed": bool(recon.get("passed")),
                     "gate8_phase": recon.get("phase"),
+                    "verdict": compact.get("verdict"),
+                    "open_count": compact.get("open_count"),
                 },
             )
         except Exception as exc:
@@ -1282,6 +1552,16 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
             "destination_summary": dest_summary,
             "dest_dlq_promoted": promote_meta,
             "reconciliation": recon,
+            "quarantine_closure": {
+                "verdict": compact.get("verdict"),
+                "open_count": compact.get("open_count"),
+                "promoted_count": compact.get("promoted_count"),
+                "failed_count": compact.get("failed_count"),
+                "durable_count": compact.get("durable_count"),
+                "next_action": compact.get("next_action") or "",
+                "note": compact.get("note") or "",
+                "migration_proven": False,
+            },
         }
     except HTTPException:
         mongo.update_job_status(child_job_id, "failed", phase="failed", message="Quarantine replay failed")

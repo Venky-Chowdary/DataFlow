@@ -53,12 +53,18 @@ def _parse_type_mismatch_columns(text: str) -> list[tuple[str, str]]:
 
 
 def _parse_type_mismatch_pairs(text: str) -> list[tuple[str, str, str, str]]:
-    """Extract (source, source_type, target, target_type) from mismatch messages."""
+    """Extract (source, source_type, target, target_type) from mismatch messages.
+
+    Type tokens may nest parentheses (``NUMBER(38,0)``, ``DECIMAL(10,2)``) — a
+    naive ``[^)]+`` truncates at the first ``)`` and corrupts Remap CTAs.
+    """
     import re
 
     out: list[tuple[str, str, str, str]] = []
+    # One level of nesting covers dialect carriers used in dry-run / G3 messages.
+    type_tok = r"((?:[^()]|\([^()]*\))+)"
     for m in re.finditer(
-        r"([A-Za-z_][\w]*)\s*\(([^)]+)\)\s*→\s*([A-Za-z_][\w]*)\s*\(([^)]+)\)",
+        rf"([A-Za-z_][\w]*)\s*\({type_tok}\)\s*→\s*([A-Za-z_][\w]*)\s*\({type_tok}\)",
         text or "",
     ):
         out.append(

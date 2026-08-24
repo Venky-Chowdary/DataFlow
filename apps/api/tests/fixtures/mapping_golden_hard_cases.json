@@ -1,0 +1,126 @@
+{
+  "version": 1,
+  "description": "Enterprise hard cases competitors get wrong. 100% means measured on this fixture, not all schemas.",
+  "honesty": "Pin cases must auto-map. Review cases must propose the dest column below G4 (0.85) and never invent create-new. Dest-exists empty metadata must stay schema-pending.",
+  "pin": [
+    {
+      "id": "abbrev_customer_id",
+      "sources": ["cust_id"],
+      "targets": ["customer_id", "customer_uuid"],
+      "expect": {"cust_id": "customer_id"},
+      "max_review": false
+    },
+    {
+      "id": "amount_not_quantity_when_both_exist",
+      "sources": ["AMT", "qty"],
+      "targets": ["amount", "quantity"],
+      "expect": {"AMT": "amount", "qty": "quantity"},
+      "max_review": false
+    },
+    {
+      "id": "created_not_updated",
+      "sources": ["created_at"],
+      "targets": ["updated_at", "created_timestamp"],
+      "expect": {"created_at": "created_timestamp"},
+      "max_review": false
+    },
+    {
+      "id": "sku_to_product_sku_not_product_id",
+      "sources": ["sku"],
+      "targets": ["product_sku", "product_id"],
+      "expect": {"sku": "product_sku"},
+      "max_review": false
+    },
+    {
+      "id": "tax_to_tax_not_total",
+      "sources": ["tax_amt"],
+      "targets": ["tax_amount", "total_amount"],
+      "expect": {"tax_amt": "tax_amount"},
+      "max_review": false
+    }
+  ],
+  "review": [
+    {
+      "id": "qty_must_not_auto_pin_amount",
+      "sources": ["order_qty"],
+      "targets": ["order_amt"],
+      "expect_target": "order_amt",
+      "create_new": false,
+      "requires_review": true,
+      "max_confidence": 0.84
+    },
+    {
+      "id": "cust_id_must_not_auto_pin_uuid",
+      "sources": ["cust_id"],
+      "targets": ["customer_uuid"],
+      "expect_target": "customer_uuid",
+      "create_new": false,
+      "requires_review": true,
+      "max_confidence": 0.84
+    },
+    {
+      "id": "user_id_is_not_customer_id",
+      "sources": ["user_id"],
+      "targets": ["customer_id"],
+      "expect_target": "customer_id",
+      "create_new": false,
+      "requires_review": true,
+      "max_confidence": 0.84
+    },
+    {
+      "id": "client_id_is_not_customer_id",
+      "sources": ["client_id"],
+      "targets": ["customer_id"],
+      "expect_target": "customer_id",
+      "create_new": false,
+      "requires_review": true,
+      "max_confidence": 0.84
+    },
+    {
+      "id": "sku_is_not_product_id",
+      "sources": ["sku"],
+      "targets": ["product_id"],
+      "expect_target": "product_id",
+      "create_new": false,
+      "requires_review": true,
+      "max_confidence": 0.84
+    },
+    {
+      "id": "dest_userid_userid_collision",
+      "sources": ["user_id"],
+      "targets": ["UserID", "userid"],
+      "expect_target_in": ["UserID", "userid"],
+      "create_new": false,
+      "requires_review": true,
+      "max_confidence": 0.84
+    },
+    {
+      "id": "order_amt_only_payment_amount",
+      "sources": ["order_amt"],
+      "targets": ["payment_amount"],
+      "expect_target": "payment_amount",
+      "create_new": false,
+      "requires_review": true,
+      "max_confidence": 0.84
+    }
+  ],
+  "dest_honesty": [
+    {
+      "id": "existing_table_empty_schema_is_pending",
+      "sources": ["cust_id"],
+      "targets": [],
+      "destination_table_exists": true,
+      "create_new": false,
+      "requires_review": true,
+      "assignment_strategy": "pending_dest_schema"
+    },
+    {
+      "id": "confirmed_missing_table_is_create_new",
+      "sources": ["cust_id"],
+      "targets": [],
+      "destination_table_exists": false,
+      "create_new": true,
+      "requires_review": true
+    }
+  ]
+}

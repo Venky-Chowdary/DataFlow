@@ -87,6 +87,10 @@ def test_quality_not_profiled_when_no_sample_rows() -> None:
     assert bundle["quality_score"] is None
     assert bundle["quality_grade"] == "not_profiled"
     assert "not profiled" in (bundle.get("evidence_summary") or "").lower()
+    # Not profiled must never be Execute-ready approve.
+    assert bundle["transfer_decision"]["decision"] == "review"
+    assert bundle["passed"] is False
+    assert any("not profiled" in b.lower() for b in bundle["transfer_decision"]["blockers"])
 
 
 def test_build_preflight_proof_bundle_blocks_on_pii_risk_and_missing_keys() -> None:

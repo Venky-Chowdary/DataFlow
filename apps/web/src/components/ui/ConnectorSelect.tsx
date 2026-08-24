@@ -48,7 +48,7 @@ export function ConnectorSelect({
           <option value="">{connectors.length === 0 ? "No connectors available" : placeholder}</option>
           {connectors.map((c) => (
             <option key={c.id} value={c.id}>
-              {c.name} — {c.type}{c.last_test_ok === false ? " (untested)" : ""}
+              {c.name} — {c.type}{c.last_test_ok === false ? " (test failed)" : c.last_test_ok == null ? " (not tested)" : ""}
             </option>
           ))}
         </select>

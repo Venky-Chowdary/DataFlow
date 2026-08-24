@@ -2,18 +2,15 @@
 
 from __future__ import annotations
 
-import re
 from typing import Any
-from urllib.parse import unquote, urlparse
-
-_MYSQL_SCHEMES = frozenset({"mysql", "mysql+pymysql", "mariadb"})
-_PG_SCHEMES = frozenset({"postgresql", "postgres", "postgresql+psycopg2", "pgsql"})
-
-# user:pass@host:port/db  (scheme omitted — common Railway paste mistake)
-_USERINFO_AT_HOST = re.compile(
-    r"^(?P<user>[^:/@\s]+):(?P<password>[^@\s]+)@(?P<host>[^:/?\s]+)(?::(?P<port>\d+))?(?:/(?P<db>[^?\s]*))?",
-    re.IGNORECASE,
+from connectors.url_authority import (
+    looks_like_userinfo_host,
+    parse_url_authority,
+    rebuild_url,
 )
+
+_MYSQL_SCHEMES = frozenset({"mysql", "mysql+pymysql", "mariadb", "mariadb+pymysql"})
+_PG_SCHEMES = frozenset({"postgresql", "postgres", "postgresql+psycopg2", "pgsql", "redshift"})
 
 
 def normalize_sql_dsn(url: str, *, family: str) -> str:
@@ -30,7 +27,7 @@ def normalize_sql_dsn(url: str, *, family: str) -> str:
     if "://" in raw:
         # postgres:// is fine for psycopg2; keep as-is
         return raw
-    if _USERINFO_AT_HOST.match(raw):
+    if looks_like_userinfo_host(raw):
         scheme = "mysql://" if family == "mysql" else "postgresql://"
         return scheme + raw
     return raw
@@ -43,17 +40,17 @@ def parse_sql_url(url: str, *, family: str) -> dict[str, Any]:
         return {}
     if "://" not in raw:
         return {}
-    parsed = urlparse(raw)
+    parsed = parse_url_authority(raw)
     scheme = (parsed.scheme or "").lower()
     allowed = _MYSQL_SCHEMES if family == "mysql" else _PG_SCHEMES
     if scheme not in allowed:
         return {}
-    database = unquote((parsed.path or "").lstrip("/").split("/")[0] or "")
+    database = (parsed.path or "").lstrip("/").split("/")[0] or ""
     return {
-        "host": parsed.hostname or "",
-        "port": int(parsed.port) if parsed.port else 0,
-        "username": unquote(parsed.username or ""),
-        "password": unquote(parsed.password or ""),
+        "host": parsed.host or "",
+        "port": int(parsed.port or 0),
+        "username": parsed.user or "",
+        "password": parsed.password or "",
         "database": database,
     }
 
@@ -68,8 +65,8 @@ def looks_like_sql_url(value: str, *, family: str) -> bool:
             return True
     elif lower.startswith(("postgresql://", "postgres://", "postgresql+psycopg2://", "pgsql://")):
         return True
-    # Scheme-less user:pass@host…
-    return bool(_USERINFO_AT_HOST.match(raw))
+    # Scheme-less user:pass@host… (password may contain @)
+    return looks_like_userinfo_host(raw)
 
 
 def resolve_sql_endpoint(
@@ -197,3 +194,63 @@ def private_cloud_host_hint(host: str = "", connection_string: str = "") -> str:
             "Use the provider's public proxy host and port unless Datawrap is running on that same private network."
         )
     return ""
+
+
+def is_masked_secret(value: Any) -> bool:
+    """True when a credential value is empty, placeholder, or redacted."""
+    if value is None:
+        return True
+    if isinstance(value, str):
+        v = value.strip()
+        if not v or v == "****":
+            return True
+        if "****" in v or "<redacted>" in v.lower():
+            return True
+    return False
+
+
+def sync_credentials_into_connection_string(cfg: dict[str, Any]) -> None:
+    """Rewrite a SQL URL so its embedded user/password match explicit fields.
+
+    Generic SQLAlchemy paths (introspection, duplicate-key probes, schema drift)
+    build the engine from the ``connection_string`` and do not merge an explicit
+    ``password`` field. If a saved connector has a stale URL password but a fresh
+    ``password`` field, the connector Test can pass while Validate/Run fail.
+    Synchronizing the URL keeps every code path consistent.
+    """
+    cstr = (cfg.get("connection_string") or "").strip()
+    password = cfg.get("password") or ""
+    username = cfg.get("username") or ""
+    if not cstr or is_masked_secret(cstr) or is_masked_secret(password):
+        return
+
+    lower = cstr.lower()
+    skip = (
+        "mongodb://",
+        "mongodb+srv://",
+        "redis://",
+        "rediss://",
+        "sftp://",
+        "smtp://",
+        "smtps://",
+        "snowflake://",
+        "s3://",
+        "gs://",
+        "http://",
+        "https://",
+    )
+    if lower.startswith(skip):
+        return
+
+    parsed = parse_url_authority(cstr)
+    if not parsed.host:
+        return
+    old_user = parsed.user
+    old_pass = parsed.password
+    new_user = username or old_user
+    new_pass = password or old_pass
+    if str(new_user) == old_user and str(new_pass) == old_pass:
+        return
+    if not new_pass:
+        return
+    cfg["connection_string"] = rebuild_url(parsed, user=str(new_user), password=str(new_pass))

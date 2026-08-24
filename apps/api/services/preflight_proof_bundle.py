@@ -209,6 +209,13 @@ def build_preflight_proof_bundle(
     if quality_score is None:
         quality_grade = "not_profiled"
         quality_display = "not profiled"
+        # No sample profile ⇒ never Execute-ready approve. Operators must re-sample
+        # before claiming quality; G3/G9 still own hard gates separately.
+        if decision == "approve":
+            decision = "review"
+            blockers = list(blockers) + [
+                "Sample quality not profiled — re-run Validate with sample rows before Execute-approve"
+            ]
     else:
         quality_grade = "excellent" if quality_score >= 0.9 else "good" if quality_score >= 0.7 else "review"
         quality_display = f"{quality_score:.2f}"

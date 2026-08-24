@@ -34,7 +34,17 @@ def test_redis(
 
     try:
         if connection_string.strip():
-            client = redis.from_url(connection_string.strip(), socket_timeout=8)
+            from connectors.url_authority import parse_url_authority, rebuild_url
+
+            raw = connection_string.strip()
+            parsed = parse_url_authority(raw)
+            if parsed.host and (username or password):
+                raw = rebuild_url(
+                    parsed,
+                    user=username or parsed.user,
+                    password=password or parsed.password,
+                )
+            client = redis.from_url(raw, socket_timeout=8)
         else:
             client = redis.Redis(
                 host=host or "localhost",

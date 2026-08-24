@@ -34,13 +34,19 @@ def _normalize_signal_primary_key(raw: Any) -> str | list[str]:
     if isinstance(raw, (list, tuple)):
         cols = [str(c).strip() for c in raw if str(c).strip()]
         if not cols:
-            return "id"
+            raise ValueError(
+                "CDC signal primary_key empty — refuse inventing default 'id'"
+            )
         return cols if len(cols) > 1 else cols[0]
-    text = str(raw or "id").strip() or "id"
+    text = str(raw or "").strip()
+    if not text:
+        raise ValueError(
+            "CDC signal primary_key empty — refuse inventing default 'id'"
+        )
     return text
 
 
-def signal_pk_columns(signal_pk: Any, fallback: Any = "id") -> list[str]:
+def signal_pk_columns(signal_pk: Any, fallback: Any = None) -> list[str]:
     """Normalise a signal primary key into an ordered column list.
 
     Shared by every incremental-snapshot chunk reader so single- and
@@ -48,6 +54,8 @@ def signal_pk_columns(signal_pk: Any, fallback: Any = "id") -> list[str]:
     reader passed the raw value straight into an identifier quoter, so a
     composite-key signal raised inside ``fetch_chunk``, the runner marked the
     signal ``failed``, and the backfill silently never ran.
+
+    Empty identity is refused — never invent default ``\"id\"``.
     """
     raw = signal_pk if signal_pk not in (None, "", [], ()) else fallback
     if isinstance(raw, (list, tuple)):
@@ -55,7 +63,12 @@ def signal_pk_columns(signal_pk: Any, fallback: Any = "id") -> list[str]:
     else:
         # Accept a comma-joined spelling for configs that flatten lists.
         cols = [part.strip() for part in str(raw or "").split(",") if part.strip()]
-    return cols or ["id"]
+    if not cols:
+        raise ValueError(
+            "CDC signal primary_key empty — refuse inventing default 'id' "
+            "(wrong-row chunk / upsert under at-least-once)"
+        )
+    return cols
 
 
 def snapshot_records_from_rows(
@@ -90,7 +103,7 @@ class SnapshotSignal:
     source_key: str
     table: str
     status: str = "pending"  # pending | running | completed | failed | cancelled
-    primary_key: str | list[str] = "id"
+    primary_key: str | list[str] = ""  # required via request path — refuse inventing "id"
     chunk_size: int = 1000
     last_pk: str = ""
     rows_snapshotted: int = 0
@@ -116,7 +129,7 @@ class SnapshotSignal:
             source_key=str(d.get("source_key") or ""),
             table=str(d.get("table") or ""),
             status=str(d.get("status") or "pending"),
-            primary_key=_normalize_signal_primary_key(d.get("primary_key") or "id"),
+            primary_key=_normalize_signal_primary_key(d.get("primary_key")),
             chunk_size=int(d.get("chunk_size") or 1000),
             last_pk=str(d.get("last_pk") or ""),
             rows_snapshotted=int(d.get("rows_snapshotted") or 0),
@@ -235,11 +248,49 @@ def _signal_store_lock() -> Iterator[None]:
             logging.getLogger(__name__).debug("Exception suppressed: %s", exc, exc_info=exc)
 
 
+def enqueue_gap_recovery_snapshots(
+    source_key: str,
+    tables: list[tuple[str, str | list[str]]],
+    *,
+    chunk_size: int = 1000,
+) -> list[SnapshotSignal]:
+    """Enqueue DDD-3 incremental snapshots after a retention gap.
+
+    Skips a table that already has a pending/running signal so a retry
+    does not double-scan. Empty PK is refused. Does not start a blocking
+    snapshot — the caller must have selected ``incremental_snapshot``.
+    """
+    key = str(source_key or "").strip()
+    if not key:
+        raise ValueError(
+            "CDC incremental gap recovery requires source_key so poll can "
+            "interleave DDD-3 chunks"
+        )
+    existing = {
+        str(getattr(sig, "table", "") or "")
+        for sig in list_signals(key)
+        if str(getattr(sig, "status", "") or "") in {"pending", "running", "in_progress"}
+    }
+    out: list[SnapshotSignal] = []
+    for table, primary_key in tables:
+        name = str(table or "").strip()
+        if not name:
+            continue
+        if name in existing:
+            continue
+        out.append(
+            request_incremental_snapshot(
+                key, name, primary_key=primary_key, chunk_size=chunk_size
+            )
+        )
+    return out
+
+
 def request_incremental_snapshot(
     source_key: str,
     table: str,
     *,
-    primary_key: str | list[str] = "id",
+    primary_key: str | list[str] | None = None,
     chunk_size: int = 1000,
 ) -> SnapshotSignal:
     """Enqueue an incremental snapshot for ``table`` on ``source_key``."""

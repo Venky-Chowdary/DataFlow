@@ -61,7 +61,9 @@ def test_coerce_null_nulls_overflow_cell():
         details,
         policy="coerce_null",
     )
-    assert out == [(None, "keep")]
+    from services.value_serializer import DF_MISSING_SENTINEL
+
+    assert out == [(DF_MISSING_SENTINEL, "keep")]
     assert details
 
 

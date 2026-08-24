@@ -11,6 +11,74 @@ from __future__ import annotations
 from typing import Any
 
 # ---------------------------------------------------------------------------
+# Shared nested address leaves (Stripe Customer.address / Shopify
+# default_address / billing_address / shipping_address).
+# Only documented Admin/API leaves — never soft-VARCHAR invent for unknowns.
+# ---------------------------------------------------------------------------
+
+_ADDRESS_LEAF_CARRIERS: dict[str, str] = {
+    # Shopify Admin address shape
+    "address1": "VARCHAR(255)",
+    "address2": "VARCHAR(255)",
+    # Stripe Customer.address / PaymentMethod.billing_details.address
+    "line1": "VARCHAR(255)",
+    "line2": "VARCHAR(255)",
+    "city": "VARCHAR(255)",
+    "province": "VARCHAR(255)",
+    "province_code": "VARCHAR(16)",
+    "state": "VARCHAR(255)",
+    "state_code": "VARCHAR(16)",
+    "country": "VARCHAR(2)",
+    "country_code": "VARCHAR(2)",
+    "country_name": "VARCHAR(255)",
+    "zip": "VARCHAR(20)",
+    "postal_code": "VARCHAR(20)",
+    "phone": "VARCHAR(50)",
+    "company": "VARCHAR(255)",
+    "name": "VARCHAR(255)",
+    "first_name": "VARCHAR(255)",
+    "last_name": "VARCHAR(255)",
+    "latitude": "DECIMAL(10,7)",
+    "longitude": "DECIMAL(10,7)",
+}
+
+_ADDRESS_NEST_PREFIXES: tuple[str, ...] = (
+    "billing_details.address.",
+    "billing_details_address_",
+    "shipping_details.address.",
+    "shipping_details_address_",
+    "default_address.",
+    "default_address_",
+    "billing_address.",
+    "billing_address_",
+    "shipping_address.",
+    "shipping_address_",
+    "address.",
+    "address_",
+)
+
+
+def address_leaf_carrier(column: str) -> str | None:
+    """Return typed carrier for a flattened address leaf, or ``None`` if unknown.
+
+    Unknown leaves must NOT soft-bind VARCHAR — callers refuse Map invent unless
+    Studio provides ``destination_column_types``.
+    """
+    low = str(column or "").strip().lower()
+    if not low:
+        return None
+    leaf: str | None = None
+    # Longer prefixes first (default_address_ before address_).
+    for prefix in _ADDRESS_NEST_PREFIXES:
+        if low.startswith(prefix):
+            leaf = low[len(prefix) :]
+            break
+    if leaf is None:
+        return None
+    return _ADDRESS_LEAF_CARRIERS.get(leaf)
+
+
+# ---------------------------------------------------------------------------
 # Stripe — OpenAPI / API reference maximum lengths (customers, products, …)
 # ---------------------------------------------------------------------------
 
@@ -204,16 +272,55 @@ def stripe_live_types_for_columns(
         if low.startswith("metadata.") or low.startswith("metadata_"):
             live[col] = "VARCHAR(500)"
             continue
-        # Nested address leaves commonly flattened in Map.
-        if low.startswith("address.") or low.startswith("address_"):
-            leaf = low.split(".", 1)[-1].split("_", 1)[-1] if "." in low else low.replace("address_", "", 1)
-            if leaf == "country":
-                live[col] = "VARCHAR(2)"
-            elif leaf in {"postal_code", "zip"}:
-                live[col] = "VARCHAR(20)"
-            else:
-                live[col] = "VARCHAR(500)"
+        # Nested address leaves — typed documented leaves only (no soft invent).
+        addr = address_leaf_carrier(col)
+        if addr:
+            live[col] = addr
     return live
+
+
+def merge_stripe_catalog_types(
+    object_type: str,
+    target_cols: list[str],
+    *,
+    studio_types: dict[str, Any] | None = None,
+) -> tuple[dict[str, str], str | None]:
+    """Catalog∩Studio coverage gate for Stripe Map bind (no live Describe API).
+
+    Returns ``(live_types, None)`` when every mapped column has a documented
+    OpenAPI carrier or a Studio-typed destination carrier. Uncatalogued Map
+    columns without Studio types return an error — never soft-bind VARCHAR
+    (empty→null / overflow invent risk on create).
+    """
+    live = stripe_live_types_for_columns(object_type, target_cols)
+    studio = studio_types if isinstance(studio_types, dict) else {}
+    studio_l = {
+        str(k).lower(): str(v).strip()
+        for k, v in studio.items()
+        if k and str(v or "").strip()
+    }
+    merged = dict(live)
+    missing: list[str] = []
+    for col in target_cols:
+        if not col:
+            continue
+        if col in live:
+            continue
+        st = studio_l.get(str(col).lower())
+        if st:
+            merged[col] = st
+            continue
+        missing.append(col)
+    if missing:
+        sample = ", ".join(repr(c) for c in missing[:12])
+        more = f" (+{len(missing) - 12} more)" if len(missing) > 12 else ""
+        return merged, (
+            f"Stripe OpenAPI catalog has no carrier for mapped field(s) "
+            f"{sample}{more} — refuse Map VARCHAR invent (empty→null / "
+            "overflow risk). Map documented Stripe fields or provide Studio "
+            "destination_column_types for custom/metadata leaves."
+        )
+    return merged, None
 
 
 # ---------------------------------------------------------------------------
@@ -395,12 +502,25 @@ def _normalize_shopify_object(object_type: str) -> str:
     return aliases.get(obj, obj)
 
 
+# Admin REST identity + common leaves present on every resource payload.
+_SHOPIFY_COMMON: dict[str, str] = {
+    "id": "VARCHAR(64)",
+    "admin_graphql_api_id": "VARCHAR(255)",
+    "created_at": "TIMESTAMPTZ",
+    "updated_at": "TIMESTAMPTZ",
+}
+
+
 def shopify_core_field_carriers(object_type: str = "customers") -> dict[str, str]:
     """Return documented Shopify Admin core-field carriers for a resource."""
     key = _normalize_shopify_object(object_type)
-    out = dict(_SHOPIFY_BY_OBJECT.get(key) or {})
-    if not out and key.endswith("s"):
-        out = dict(_SHOPIFY_BY_OBJECT.get(key[:-1]) or {})
+    out = dict(_SHOPIFY_COMMON)
+    out.update(_SHOPIFY_BY_OBJECT.get(key) or {})
+    if len(out) == len(_SHOPIFY_COMMON) and key.endswith("s"):
+        out.update(_SHOPIFY_BY_OBJECT.get(key[:-1]) or {})
+    # Product Map often flattens variant sku onto the product object.
+    if key == "products":
+        out.setdefault("sku", f"VARCHAR({_SHOPIFY_SINGLE_LINE})")
     return out
 
 
@@ -422,6 +542,9 @@ def shopify_metafield_type_to_carrier(
         inner = shopify_metafield_type_to_carrier(
             t[5:], max_validation=max_validation
         )
+        # Unknown element type — refuse soft ARRAY<TEXT> invent (Studio gate).
+        if not str(inner or "").strip():
+            return ""
         # List payloads are JSON arrays of the element type.
         if inner == "BOOLEAN":
             return "ARRAY<BOOLEAN>"
@@ -431,7 +554,7 @@ def shopify_metafield_type_to_carrier(
             return f"ARRAY<{inner}>"
         if inner == "JSON":
             return "ARRAY<JSON>"
-        if inner.startswith("VARCHAR"):
+        if inner.startswith("VARCHAR") or inner == "ARRAY<TEXT>":
             return "ARRAY<TEXT>"
         return "ARRAY<TEXT>"
     if t in {"boolean"}:
@@ -479,8 +602,9 @@ def shopify_metafield_type_to_carrier(
         if max_validation and max_validation > 0:
             return f"VARCHAR({min(max_validation, 65535)})"
         return f"VARCHAR({_SHOPIFY_SINGLE_LINE})"
-    # Unknown / new Shopify types — bounded text, never invent unbounded CLOB.
-    return "VARCHAR(2048)"
+    # Unknown / new Shopify Admin types — refuse soft VARCHAR invent; Studio or
+    # a documented carrier must cover the column (merge_shopify_catalog_types).
+    return ""
 
 
 def shopify_live_types_for_columns(
@@ -496,6 +620,11 @@ def shopify_live_types_for_columns(
         low = str(col).lower()
         if low in catalog:
             live[col] = catalog[low]
+            continue
+        # Flattened default_address / billing_address / shipping_address leaves.
+        addr = address_leaf_carrier(col)
+        if addr:
+            live[col] = addr
 
     for d in metafield_defs or []:
         if not isinstance(d, dict):
@@ -512,7 +641,13 @@ def shopify_live_types_for_columns(
                     max_v = int(float(str(v.get("value"))))
                 except (TypeError, ValueError):
                     max_v = None
+        if not typ.strip():
+            # Empty metafield type from Describe — do not invent VARCHAR(2048).
+            continue
         carrier = shopify_metafield_type_to_carrier(typ, max_validation=max_v)
+        if not str(carrier or "").strip():
+            # Unknown Admin type token — leave uncatalogued for Studio gate.
+            continue
         names = []
         if ns and key:
             names.extend([f"{ns}.{key}", f"{ns}_{key}", key])
@@ -521,3 +656,49 @@ def shopify_live_types_for_columns(
         for name in names:
             live[name] = carrier
     return live
+
+
+def merge_shopify_catalog_types(
+    object_type: str,
+    target_cols: list[str],
+    *,
+    metafield_defs: list[dict[str, Any]] | None = None,
+    studio_types: dict[str, Any] | None = None,
+) -> tuple[dict[str, str], str | None]:
+    """Admin catalog∩metafield∩Studio gate (Stripe-class Map invent refuse).
+
+    Every mapped column must hit Admin core, a live metafield definition, or
+    Studio ``destination_column_types`` — never soft-bind Map VARCHAR.
+    """
+    live = shopify_live_types_for_columns(
+        object_type, target_cols, metafield_defs=metafield_defs
+    )
+    live_l = {str(k).lower(): str(v) for k, v in live.items() if k and v}
+    studio = studio_types if isinstance(studio_types, dict) else {}
+    studio_l = {
+        str(k).lower(): str(v).strip()
+        for k, v in studio.items()
+        if k and str(v or "").strip()
+    }
+    merged = dict(live)
+    missing: list[str] = []
+    for col in target_cols:
+        if not col:
+            continue
+        if live_l.get(str(col).lower()):
+            continue
+        st = studio_l.get(str(col).lower())
+        if st:
+            merged[col] = st
+            continue
+        missing.append(col)
+    if missing:
+        sample = ", ".join(repr(c) for c in missing[:12])
+        more = f" (+{len(missing) - 12} more)" if len(missing) > 12 else ""
+        return merged, (
+            f"Shopify Admin catalog has no carrier for mapped field(s) "
+            f"{sample}{more} — refuse Map VARCHAR invent (empty→null / "
+            "overflow risk). Map documented Admin fields, refresh metafield "
+            "Describe, or provide Studio destination_column_types."
+        )
+    return merged, None

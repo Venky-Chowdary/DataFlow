@@ -131,6 +131,9 @@ NON_RETRIABLE_PATTERNS: set[str] = {
     "serialization",
     "schema",
     "partial write",
+    "blocks partial write",
+    "migration risk contract",
+    "writebatchblocked",
     "refuse concurrent consumer",
     "cdc lease",
     "cdc_lease_conflict",
@@ -196,11 +199,25 @@ _OPERATOR_FAILURE_RULES: tuple[tuple[tuple[str, ...], dict[str, str]], ...] = (
         (
             "cdc_lsn_gap",
             "cdc_scn_gap",
+            "cdc_binlog_gap",
+            "cdc_slot_gap",
+            "cdc_ct_gap",
+            "cdc_oplog_gap",
             "cdc_cursor_gap",
             "before capture retention",
             "before available redo",
             "min_lsn",
+            "min_valid_version",
+            "last_sync_version",
+            "change tracking",
             "oldest_available",
+            "gtid_purged",
+            "binary log",
+            "binlog",
+            "wal_status",
+            "replication slot",
+            "changestreamhistorylost",
+            "resume point may no longer be in the oplog",
             "ora-01291",
             "ora-01292",
         ),
@@ -210,8 +227,10 @@ _OPERATOR_FAILURE_RULES: tuple[tuple[tuple[str, ...], dict[str, str]], ...] = (
             "confidence": "high",
             "title": "CDC cursor gap (retention / failover)",
             "fix": (
-                "Reset the CDC watermark, set snapshot to when_needed or initial, then re-run. "
-                "Continuous CDC across the gap is not possible."
+                "If snapshot_mode=when_needed, Resume — the engine snapshots current "
+                "source keys then streams from the new tip. initial/never stay fail-closed "
+                "until you change mode or reset the watermark. Purged-window events are gone. "
+                "Not continuous CDC, not migration_proven."
             ),
         },
     ),
@@ -530,6 +549,37 @@ def format_exception_message(error: Exception | str) -> str:
     return msg
 
 
+def _cursor_gap_fix(error: Any) -> str:
+    """Operator next step from the snapshot plan, not a generic reset slogan."""
+    plan = getattr(error, "snapshot_plan", None) or {}
+    action = str(plan.get("next_action") or "")
+    mode = str(plan.get("snapshot_mode") or "")
+    if action == "set_when_needed" or mode == "never":
+        return (
+            "Set snapshot_mode=when_needed, then Resume. The engine will snapshot "
+            "current source keys and stream from the new tip. snapshot_mode=never "
+            "forbids a recovery snapshot. Purged-window events are gone — not "
+            "continuous CDC, not migration_proven."
+        )
+    if mode in {"when_needed", "always", "initial_only"}:
+        return (
+            "Resume — engine will snapshot current source keys, then stream from "
+            "the new tip. Purged-window events are gone. At-least-once upsert, not "
+            "continuous CDC, not migration_proven."
+        )
+    if mode == "initial" or action == "set_when_needed":
+        return (
+            "snapshot_mode=initial will not snapshot again. Reset the CDC watermark "
+            "or set when_needed, then Resume. Purged-window events are gone."
+        )
+    return (
+        "If snapshot_mode=when_needed, Resume — the engine snapshots current source "
+        "keys then streams from the new tip. Otherwise reset the watermark or set "
+        "when_needed. Purged-window events are gone. Not continuous CDC, not "
+        "migration_proven."
+    )
+
+
 def humanize_transfer_failure(error: Exception | str) -> dict[str, Any]:
     """Turn a raw driver exception into an operator-facing failure summary.
 
@@ -603,6 +653,26 @@ def humanize_transfer_failure(error: Exception | str) -> dict[str, Any]:
             ),
         }
 
+    if (
+        "no durable checkpoint to resume" in text
+        or "restart-from-zero would duplicate" in text
+    ):
+        return {
+            "code": "resume_without_checkpoint",
+            "category": "execution",
+            "title": "Resume needs a committed checkpoint",
+            "message": raw,
+            "fix": (
+                "This job has no durable progress (typically 0 rows written). "
+                "Re-run from Validate or start a new transfer — do not Resume. "
+                "After a deploy/restart, workers restart zero-progress jobs from "
+                "the beginning instead of false-failing Resume on append/Excel."
+            ),
+            "raw": raw,
+            "retriable": False,
+            "confidence": "high",
+        }
+
     try:
         from services.cdc_lease import CdcLeaseConflict
 
@@ -645,11 +715,7 @@ def humanize_transfer_failure(error: Exception | str) -> dict[str, Any]:
                     f"(resume={error.resume or '?'}, retained={error.retained or '?'}). "
                     "Continuous CDC across the gap is not possible."
                 ),
-                "fix": (
-                    "Reset the CDC watermark in Job Theater, set snapshot mode to "
-                    "when_needed or initial, then re-run. Do not claim continuous CDC "
-                    "across an AG / Data Guard / archive-purge gap."
-                ),
+                "fix": _cursor_gap_fix(error),
                 "raw": raw,
                 "retriable": False,
                 "confidence": "high",
@@ -726,6 +792,24 @@ def humanize_transfer_failure(error: Exception | str) -> dict[str, Any]:
             "retriable": False,
             "confidence": confidence,
         }
+    if "circuit_breaker_open" in text or (
+        "circuit breaker" in text and "is open" in text
+    ):
+        return {
+            "code": "circuit_breaker_open",
+            "category": "contract",
+            "title": "Contract circuit breaker is OPEN",
+            "message": raw,
+            "fix": (
+                "Reset the breaker after you fix the contract violation "
+                "(Contracts or Validate bind), then re-run. "
+                "Do not enqueue while the breaker is OPEN."
+            ),
+            "raw": raw,
+            "retriable": False,
+            "confidence": "high",
+        }
+
     # Unknown — never invent a specific root cause or fake remediation path.
     return {
         "code": "transfer_failed",
@@ -765,6 +849,54 @@ class RetryBudget:
 
     def has_budget(self) -> bool:
         return self.attempts_made < self.max_attempts
+
+
+# Server-directed backoff cap. Salesforce/HubSpot/Graph can ask for minutes;
+# honour that, but never let one header park a worker indefinitely.
+_RETRY_AFTER_CAP_SECONDS = float(getenv_brand("RETRY_AFTER_MAX_SECONDS", "300.0"))
+
+
+def retry_after_seconds(error: Exception) -> float | None:
+    """Server-directed wait from a throttled HTTP response, in seconds.
+
+    Salesforce (REQUEST_LIMIT_EXCEEDED), HubSpot, and Microsoft Graph all answer
+    429/503 with ``Retry-After``. Ignoring it and using our own exponential
+    backoff re-sends inside the penalty window, which is what turns a throttle
+    into a multi-hour stall on large SaaS migrations. Supports both the
+    delta-seconds and HTTP-date forms of RFC 9110 ``Retry-After``.
+    """
+    headers = getattr(getattr(error, "response", None), "headers", None)
+    if not headers:
+        return None
+    try:
+        raw = headers.get("Retry-After") or headers.get("retry-after")
+    except Exception:  # noqa: BLE001 - header mapping may be exotic
+        return None
+    if raw is None:
+        return None
+    text = str(raw).strip()
+    if not text:
+        return None
+    try:
+        return max(0.0, min(float(text), _RETRY_AFTER_CAP_SECONDS))
+    except ValueError:
+        pass
+    try:
+        from email.utils import parsedate_to_datetime
+
+        when = parsedate_to_datetime(text)
+    except Exception:  # noqa: BLE001 - malformed header is not fatal
+        return None
+    if when is None:
+        return None
+    from datetime import datetime, timezone
+
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    delta = (when - datetime.now(timezone.utc)).total_seconds()
+    if delta <= 0:
+        return 0.0
+    return min(delta, _RETRY_AFTER_CAP_SECONDS)
 
 
 @dataclass
@@ -916,6 +1048,9 @@ def with_retry(
                         )
                 raise AmbiguousWriteOutcome(exc, replay_safety) from exc
             delay = budget.next_delay()
+            server_hint = retry_after_seconds(exc)
+            if server_hint is not None:
+                delay = max(delay, server_hint)
             if on_transient:
                 on_transient(exc, delay)
             time.sleep(delay)

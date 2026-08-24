@@ -207,28 +207,41 @@ class EnhancedSmartMapper:
         target_columns: list[str],
         source_samples: dict[str, list[str]] | None = None,
     ) -> list[EnhancedMappingSuggestion]:
-        """Generate mappings using chain-of-thought + RAG."""
-        result = self.analyzer.fallback.map_with_fallback(
-            source_columns, target_columns, source_samples,
+        """Generate mappings using the Map SSOT; RAG only explains."""
+        from services.semantic_mapper import authority_mappings
+
+        source_schemas = None
+        if source_samples:
+            source_schemas = [
+                {
+                    "name": col,
+                    "inferred_type": "VARCHAR",
+                    "samples": list(source_samples.get(col) or [])[:8],
+                }
+                for col in source_columns
+            ]
+        rows = authority_mappings(
+            source_columns,
+            target_columns,
+            source_schemas=source_schemas,
         )
-        answer = json.loads(result.content) if result.success else {}
-        mappings_data = answer.get("mappings", [])
-
         enhanced = []
-        for m in mappings_data:
+        for m in rows:
+            tgt = str(m.get("target") or "<unmapped>")
+            if m.get("create_new"):
+                tgt = "<unmapped>"
             enhanced.append(EnhancedMappingSuggestion(
-                source_column=m["source_column"],
-                target_column=m["target_column"],
-                confidence=m["confidence"],
-                reason=m["reason"],
-                transformation_needed=m.get("transformation_needed", False),
-                suggested_transformation=m.get("suggested_transformation"),
-                canonical_source=resolve_canonical(m["source_column"]),
-                canonical_target=resolve_canonical(m["target_column"]),
-                reasoning=result.reasoning,
-                method=result.method,
+                source_column=str(m.get("source") or ""),
+                target_column=tgt,
+                confidence=float(m.get("confidence") or 0),
+                reason=str(m.get("reasoning") or "map_columns SSOT"),
+                transformation_needed=False,
+                suggested_transformation=None,
+                canonical_source=resolve_canonical(str(m.get("source") or "")),
+                canonical_target=resolve_canonical(tgt) if tgt != "<unmapped>" else "",
+                reasoning=str(m.get("reasoning") or ""),
+                method="map_columns_ssot",
             ))
-
         return enhanced
 
 

@@ -155,18 +155,19 @@ export function LandingDataPlane3D() {
 
         <aside className="lp-d3-hud lp-d3-hud--map">
           <header><span className="lp-d3-led" /> Semantic map</header>
-          <p><code>order_amt</code> → <b>payment_amount</b></p>
-          <p><code>cust_id</code> → <b>customer_key</b></p>
+          <p><code>order_amt</code> → <b>total_amount</b></p>
+          <p><code>pay_amt</code> → <b>payment_amount</b></p>
+          <p><code>cust_id</code> → <b>customer_key</b> review</p>
           <div className="lp-d3-bar"><span /></div>
-          <footer>96% confidence</footer>
+          <footer>id ≠ warehouse key</footer>
         </aside>
 
         <aside className="lp-d3-hud lp-d3-hud--proof">
           <header><span className="lp-d3-led is-ok" /> Job Theater</header>
           <ul>
-            <li><span>Preflight</span><em>8 / 8</em></li>
-            <li><span>Write</span><em>12,480</em></li>
-            <li><span>Reconcile</span><em>match</em></li>
+            <li><span>Preflight</span><em>G4 hold</em></li>
+            <li><span>Map</span><em>1 review</em></li>
+            <li><span>Reconcile</span><em>after write</em></li>
           </ul>
         </aside>
 

@@ -112,8 +112,8 @@ def describe_properties(cfg: dict[str, Any], object_type: str = "") -> list[dict
         r.raise_for_status()
         payload = r.json() if hasattr(r, "json") else {}
         for p in payload.get("results") or []:
-            # Preserve validation / length metadata when HubSpot returns it so
-            # reverse-ETL quarantine can emit VARCHAR(n) tighter than 65_536.
+            # Preserve validation / length / enumeration options so reverse-ETL
+            # quarantine emits ENUM/SET domains (not open VARCHAR invent).
             row = {
                 "name": p.get("name") or "",
                 "type": p.get("type") or "string",
@@ -122,7 +122,11 @@ def describe_properties(cfg: dict[str, Any], object_type: str = "") -> list[dict
                 "hasUniqueValue": bool(p.get("hasUniqueValue")),
                 "numberDisplayHint": str(
                     p.get("numberDisplayHint")
-                    or (p.get("options") or {}).get("numberDisplayHint")
+                    or (
+                        (p.get("options") or {}).get("numberDisplayHint")
+                        if isinstance(p.get("options"), dict)
+                        else ""
+                    )
                     or ""
                 ),
             }
@@ -130,6 +134,18 @@ def describe_properties(cfg: dict[str, Any], object_type: str = "") -> list[dict
                 row["maxLength"] = p.get("maxLength")
             if p.get("validationRules"):
                 row["validationRules"] = p.get("validationRules")
+            opts = p.get("options")
+            if isinstance(opts, list) and opts:
+                # Keep active option dicts (value/label/hidden) for ENUM/SET carriers.
+                row["options"] = [
+                    {
+                        "value": o.get("value"),
+                        "label": o.get("label"),
+                        "hidden": o.get("hidden"),
+                    }
+                    for o in opts
+                    if isinstance(o, dict)
+                ]
             props.append(row)
         after = ((payload.get("paging") or {}).get("next") or {}).get("after")
         if not after:

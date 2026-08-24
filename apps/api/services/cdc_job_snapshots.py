@@ -23,10 +23,10 @@ def _stream_defaults(job: dict[str, Any]) -> tuple[str, str]:
     src = _endpoint_dict(job)
     table = str(src.get("table") or src.get("collection") or "").strip()
     contracts = req.get("stream_contracts") or []
-    primary_key = "id"
+    primary_key = ""
     if isinstance(contracts, list) and contracts:
         first = contracts[0] if isinstance(contracts[0], dict) else {}
-        primary_key = str(first.get("primary_key") or primary_key)
+        primary_key = str(first.get("primary_key") or "").strip()
         if not table:
             table = str(first.get("name") or first.get("table") or "").strip()
     if not table:
@@ -133,7 +133,12 @@ def request_snapshot_for_job(
     tbl = (table or ctx["table"] or "").strip()
     if not tbl:
         raise ValueError("table is required (job has no source table/collection)")
-    pk = (primary_key or ctx["primary_key"] or "id").strip() or "id"
+    pk = (primary_key or ctx["primary_key"] or "").strip()
+    if not pk:
+        raise ValueError(
+            "primary_key is required for CDC incremental snapshot — refuse "
+            "inventing default 'id'"
+        )
     sig = request_incremental_snapshot(
         ctx["source_key"],
         tbl,

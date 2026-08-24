@@ -12,6 +12,24 @@ def test_reconcile_pass():
     assert d["post_write_pending"] is False
 
 
+def test_canonicalize_ieee_float_matches_decimal_sink():
+    """Excel IEEE residue must not false-fail Gate-8 vs DECIMAL 106.6."""
+    from services.reconciliation import normalize_cell, sample_compare_rows
+
+    assert normalize_cell(106.60000000000001) == "106.6"
+    assert normalize_cell("106.60000000000001") == "106.6"
+    assert normalize_cell("106.6") == "106.6"
+
+    cmp = sample_compare_rows(
+        [{"id": "1", "Total": 106.60000000000001}],
+        [{"id": "1", "total": "106.6"}],
+        [{"source": "Total", "target": "total"}],
+        sort_key="id",
+    )
+    assert cmp["passed"] is True
+    assert cmp["compared"] >= 1
+
+
 def test_stamp_writer_ack_phase():
     from services.reconciliation import stamp_post_write_phase
 
@@ -25,6 +43,30 @@ def test_stamp_writer_ack_phase():
     })
     assert stamped["phase"] == "post_write_writer_ack"
     assert stamped["post_write_pending"] is False
+    assert stamped["assurance_level"] == "writer_ack"
+
+
+def test_stamp_file_object_export_unproven_not_writer_ack():
+    """File/object export message must not false-green as writer_ack / verified."""
+    from services.reconciliation import stamp_post_write_phase
+
+    stamped = stamp_post_write_phase({
+        "passed": True,
+        "unproven": True,
+        "skipped_readback": True,
+        "message": (
+            "File/object export wrote successfully — Gate-8 cell fidelity "
+            "unproven (no destination read-back). Writer checksum present (abc123…) — count/bytes only."
+        ),
+        "source_rows": 1,
+        "target_rows": 1,
+        "checksum": "abc123checksum",
+    })
+    assert stamped["phase"] == "post_write_skipped"
+    assert stamped["assurance_level"] == "none"
+    assert stamped["coverage"] == "none"
+    assert stamped["unproven"] is True
+    assert stamped["migration_proven"] is False
 
 
 def test_reconcile_row_mismatch():
@@ -167,6 +209,7 @@ def test_sample_compare_rows_detects_mismatch():
         [{"id": "1", "name": "Alice"}],
         [{"id": "2", "name": "Alice"}],
         [{"source": "id", "target": "id"}, {"source": "name", "target": "name"}],
+        rows_are_paired=True,
     )
     assert not result["passed"]
     assert result["mismatches"]
@@ -320,7 +363,11 @@ def test_normalize_cell_utc_wall_clock_equates_aware_and_ntz():
 
 
 def test_reconcile_extra_rows_checksum_mismatch_always_fails():
-    """GA: allow_extra_rows + sample proof still cannot override checksum mismatch."""
+    """Incomparable append is dest-before delta, not a checksum. Sample never upgrades it.
+
+    Without dest-before the delta is unverified (fail). Overwrite-shaped
+    checksum mismatch (equal row counts) still fails even with a sample.
+    """
     r = reconcile(
         source_rows=10,
         target_rows=15,
@@ -330,7 +377,8 @@ def test_reconcile_extra_rows_checksum_mismatch_always_fails():
         strict_checksum=True,
     )
     assert not r.passed
-    assert "checksum mismatch" in r.message.lower()
+    assert "unverified" in r.message.lower()
+    assert "checksum mismatch" not in r.message.lower()
 
     r2 = reconcile(
         source_rows=10,
@@ -348,10 +396,28 @@ def test_reconcile_extra_rows_checksum_mismatch_always_fails():
         source_checksum="abc",
         target_checksum="xyz",
         allow_extra_rows=True,
+        target_rows_before=5,
         sample_compare={"passed": True, "compared": 10, "mismatches": []},
     )
-    assert not r3.passed
-    assert "cannot override" in r3.message.lower() or "diagnostic" in r3.message.lower()
+    assert r3.passed is True
+    stamped = r3.to_dict()
+    assert stamped["passed"] is True
+    assert stamped["assurance_level"] == "row_count"
+    assert stamped["migration_proven"] is False
+    assert stamped["checksum_match"] is False
+    assert stamped.get("target_rows_before") == 5
+
+    overwrite = reconcile(
+        source_rows=10,
+        target_rows=10,
+        source_checksum="abc",
+        target_checksum="xyz",
+        allow_extra_rows=False,
+        sample_compare={"passed": True, "compared": 10, "mismatches": []},
+    )
+    assert not overwrite.passed
+    assert "checksum mismatch" in overwrite.message.lower()
+    assert "cannot override" in overwrite.message.lower() or "diagnostic" in overwrite.message.lower()
 
 
 def test_sample_compare_aligns_renamed_primary_key():
@@ -404,6 +470,7 @@ def test_sample_compare_skips_columns_absent_from_readback():
 
 
 def test_mysql_boolean_false_binds_as_zero():
+    import pytest
     from connectors.mysql_writer import _to_mysql_value
 
     assert _to_mysql_value(False, "BOOLEAN") == 0
@@ -412,6 +479,7 @@ def test_mysql_boolean_false_binds_as_zero():
     assert _to_mysql_value("false", "BOOLEAN") == 0
     assert _to_mysql_value("true", "TINYINT") == 1
     assert _to_mysql_value("0", "BOOLEAN") == 0
-    assert _to_mysql_value("", "JSON") is None
+    with pytest.raises(ValueError, match="refuse silent NULL invent"):
+        _to_mysql_value("", "JSON")
     assert _to_mysql_value({"a": 1}, "JSON") == '{"a":1}'
     assert _to_mysql_value("not-json", "JSON") == '"not-json"'

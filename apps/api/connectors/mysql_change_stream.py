@@ -27,8 +27,9 @@ from services.cdc_schema_history import (
 )
 
 from connectors.mysql_conn import get_connection
-from connectors.mysql_reader import _cell, read_table_batch
+from connectors.mysql_reader import read_table_batch, read_table_scan_batch
 from connectors.sql_identifiers import quote_table_ref
+from services.cdc_cursor_gap import CdcBinlogGapError
 
 _DDL_RE = re.compile(
     r"\b(ALTER|CREATE|DROP|RENAME)\s+TABLE\b",
@@ -39,11 +40,13 @@ _logger = logging.getLogger(__name__)
 
 
 def _serialize(value: Any) -> str:
+    from services.value_serializer import SQL_NULL_SENTINEL, cell_to_string
+
     if value is None:
-        return ""
+        return SQL_NULL_SENTINEL
     if isinstance(value, datetime):
         return value.isoformat()
-    return _cell(value)
+    return cell_to_string(value, preserve_sql_null=True)
 
 
 class MySqlChangeStreamCdc:
@@ -69,10 +72,11 @@ class MySqlChangeStreamCdc:
         if not self.tables:
             raise ValueError("MySQL CDC requires at least one table")
         self.table = self.tables[0]
-        self.primary_keys = {
-            t: str((primary_keys or {}).get(t) or primary_key or "id")
-            for t in self.tables
-        }
+        from services.cdc_identity import require_cdc_primary_keys_map
+
+        self.primary_keys = require_cdc_primary_keys_map(
+            self.tables, primary_key=primary_key, primary_keys=primary_keys
+        )
         self.primary_key = self.primary_keys[self.table]
         self.columns = columns
         self.batch_size = batch_size
@@ -93,7 +97,9 @@ class MySqlChangeStreamCdc:
         self.decode_schema: dict[str, Any] = {}
         self.last_ddl_at: str | None = None
         self._last_event_at: datetime | None = None
+        self._last_event_commit_at: datetime | None = None
         self._last_heartbeat_at: datetime | None = None
+        self._lag_observation: dict | None = None
         self._schema_ready = False
         self._processed_signal_ids: set[str] = set()
         self.signal_table = str(cfg.get("signal_table") or "dataflow_signal")
@@ -131,6 +137,8 @@ class MySqlChangeStreamCdc:
                 "shared_reader": len(self.tables) > 1,
             },
         )
+        self._binlog_catalog_cache: dict[str, Any] | None = None
+        self._binlog_catalog_cache_at: float = 0.0
 
     @property
     def lease_holder_id(self) -> str:
@@ -341,19 +349,39 @@ class MySqlChangeStreamCdc:
             locked = False
             lock_conn = None
 
-        if not start_pos.get("file"):
+        from services.cdc_snapshot_resume import streaming_handoff_fields
+
+        resume_handoff = {}
+        if (
+            isinstance(self.resume_token, dict)
+            and self.resume_token.get("phase") == "snapshot"
+        ):
+            resume_handoff = streaming_handoff_fields(self.resume_token)
+        if resume_handoff.get("file"):
+            # Mid-dump resume must keep the original binlog tip. Recapturing
+            # SHOW MASTER STATUS here would skip writes between the first lock
+            # and this restart (silent CDC loss).
+            start_pos = {
+                **start_pos,
+                **resume_handoff,
+                "table": self.table,
+                "tables": list(self.tables),
+            }
+        elif not start_pos.get("file"):
             # Fallback when binlog position cannot be captured while locked.
             start_pos = self._current_binlog_position() or start_pos
 
-        # Resume mid-snapshot from the recorded table/offset.
+        # Resume mid-snapshot from last_pk (Debezium-class) or legacy offset.
         offset = 0
         resume_table = self.table
+        resume_last_pk = ""
         if (
             isinstance(self.resume_token, dict)
             and self.resume_token.get("phase") == "snapshot"
         ):
             offset = int(self.resume_token.get("offset") or 0)
             resume_table = self.resume_token.get("table") or self.table
+            resume_last_pk = str(self.resume_token.get("last_pk") or "")
 
         if resume_table in self.tables:
             tables_to_snapshot = self.tables[self.tables.index(resume_table) :]
@@ -363,45 +391,26 @@ class MySqlChangeStreamCdc:
         try:
             for table in tables_to_snapshot:
                 table_offset = offset if table == resume_table else 0
-                while True:
-                    batch = read_table_batch(
-                        host=self.cfg.get("host") or "localhost",
-                        port=self.cfg.get("port") or 3306,
-                        database=self.database,
-                        username=self.cfg.get("username") or "",
-                        password=self.cfg.get("password") or "",
-                        schema="",
-                        connection_string=self.cfg.get("connection_string") or "",
-                        ssl=bool(self.cfg.get("ssl")),
-                        table=table,
-                        columns=self.columns,
-                        offset=table_offset,
-                        limit=self.batch_size,
-                        conn=lock_conn if locked else None,
-                    )
-                    if not batch.rows:
-                        break
-                    records = [dict(zip(batch.headers, row)) for row in batch.rows]
-                    table_offset += len(batch.rows)
-                    yield ChangeBatch(
-                        inserts=records,
-                        resume_token={
-                            **start_pos,
-                            "phase": "snapshot",
-                            "offset": table_offset,
-                            "table": table,
-                        },
-                    )
-                    if len(batch.rows) < self.batch_size:
-                        break
-            yield ChangeBatch(
-                resume_token={
-                    **start_pos,
-                    "phase": "streaming",
-                    "offset": 0,
-                    "table": self.table,
-                }
-            )
+                table_last_pk = resume_last_pk if table == resume_table else ""
+                yield from self._snapshot_table_pages(
+                    table,
+                    start_pos=start_pos,
+                    table_offset=table_offset,
+                    table_last_pk=table_last_pk,
+                    lock_conn=lock_conn if locked else None,
+                )
+            handoff = {
+                **start_pos,
+                "phase": "streaming",
+                "offset": 0,
+                "table": self.table,
+            }
+            handoff.pop("last_pk", None)
+            yield ChangeBatch(resume_token=handoff)
+            # Adopt the captured consistent point as the live resume. Poll after
+            # a when_needed gap recovery must stream from this tip, not the
+            # purged file:pos the adapter was constructed with.
+            self.resume_token = dict(handoff)
         finally:
             if lock_conn:
                 if locked:
@@ -414,6 +423,120 @@ class MySqlChangeStreamCdc:
                     lock_conn.close()
                 except Exception as exc:
                     _logger.debug("Error closing MySQL lock connection: %s", exc)
+
+    def _snapshot_table_pages(
+        self,
+        table: str,
+        *,
+        start_pos: dict[str, Any],
+        table_offset: int,
+        table_last_pk: str,
+        lock_conn: Any | None,
+    ) -> Iterator[ChangeBatch]:
+        """Page one table: held scan, PK-seek resume, or legacy OFFSET."""
+        from connectors.sql_snapshot_scan import close_table_scan
+        from services.cdc_snapshot_resume import (
+            classify_snapshot_resume,
+            last_pk_from_records,
+        )
+        from services.cdc_snapshot_window import _pk_columns
+
+        pk_cols = _pk_columns(self.primary_keys.get(table, self.primary_key))
+        mode = classify_snapshot_resume(last_pk=table_last_pk, offset=table_offset)
+        scan_state: dict = {}
+        try:
+            while True:
+                if mode == "keyset":
+                    records = self._mysql_keyset_page(
+                        table, pk_cols, table_last_pk, lock_conn
+                    )
+                    if not records:
+                        break
+                else:
+                    _read_kw = dict(
+                        host=self.cfg.get("host") or "localhost",
+                        port=self.cfg.get("port") or 3306,
+                        database=self.database,
+                        username=self.cfg.get("username") or "",
+                        password=self.cfg.get("password") or "",
+                        schema="",
+                        connection_string=self.cfg.get("connection_string") or "",
+                        ssl=bool(self.cfg.get("ssl")),
+                        table=table,
+                        columns=self.columns,
+                        offset=table_offset,
+                        limit=self.batch_size,
+                        conn=lock_conn,
+                    )
+                    if mode == "scan":
+                        batch = read_table_scan_batch(
+                            **_read_kw, scan_state=scan_state
+                        )
+                    else:
+                        batch = read_table_batch(**_read_kw)
+                    if not batch.rows:
+                        break
+                    records = [dict(zip(batch.headers, row)) for row in batch.rows]
+                table_offset += len(records)
+                table_last_pk = last_pk_from_records(records, pk_cols) or table_last_pk
+                token = {
+                    **start_pos,
+                    "phase": "snapshot",
+                    "offset": table_offset,
+                    "table": table,
+                }
+                if table_last_pk:
+                    token["last_pk"] = table_last_pk
+                yield ChangeBatch(inserts=records, resume_token=token)
+                if len(records) < self.batch_size:
+                    break
+        finally:
+            close_table_scan(scan_state)
+
+    def _mysql_keyset_page(
+        self,
+        table: str,
+        pk_cols: list[str],
+        last_pk: str,
+        conn: Any | None,
+    ) -> list[dict[str, Any]]:
+        """PK-seek one snapshot page on the locked session when we hold it."""
+        from connectors.sql_identifiers import quote_column_list, quote_table_ref
+        from services.cdc_snapshot_resume import quoted_pk_columns, snapshot_keyset_sql
+
+        table_ref = quote_table_ref(table, dialect="mysql")
+        quoted = quoted_pk_columns(pk_cols, "`")
+        sql, params = snapshot_keyset_sql(
+            table_ref=table_ref,
+            quoted_pk_columns=quoted,
+            last_pk=last_pk,
+            limit=self.batch_size,
+            dialect="mysql",
+            select_list=quote_column_list(self.columns, quote_char="`"),
+        )
+        close = conn is None
+        if conn is None:
+            conn = get_connection(
+                host=self.cfg.get("host") or "localhost",
+                port=self.cfg.get("port") or 3306,
+                database=self.database,
+                username=self.cfg.get("username") or "",
+                password=self.cfg.get("password") or "",
+                connection_string=self.cfg.get("connection_string") or "",
+                ssl=bool(self.cfg.get("ssl")),
+            )
+        try:
+            with conn.cursor() as cur:
+                cur.execute(sql, params)
+                rows = cur.fetchall() or []
+                headers = [d[0] for d in (cur.description or [])]
+            return [dict(zip(headers, row)) for row in rows]
+        finally:
+            if close:
+                try:
+                    conn.close()
+                except Exception as exc:
+                    _logger.debug("Error closing MySQL keyset connection: %s", exc)
 
     def _binlog_file_pos_on(self, cur) -> str | None:
         """Return ``file:pos`` from the open cursor for snapshot row stamps.
@@ -496,14 +619,253 @@ class MySqlChangeStreamCdc:
             return None
 
     def replication_lag_seconds(self) -> float | None:
-        """Seconds since the last binlog event / heartbeat, when known."""
-        anchor = self._last_event_at or self._last_heartbeat_at
-        if anchor is None:
-            return None
-        return max(0.0, (datetime.now(timezone.utc) - anchor).total_seconds())
+        """Proven CDC lag seconds — never heartbeat age (Debezium-class honesty)."""
+        from services.cdc_lag_honesty import observe_cdc_lag
+
+        obs = observe_cdc_lag(
+            last_event_commit_at=self._last_event_commit_at,
+            last_heartbeat_at=self._last_heartbeat_at,
+            replication_lag_bytes=self.replication_lag_bytes(),
+        )
+        self._lag_observation = obs
+        return obs.get("cdc_lag_seconds")
 
     def heartbeat(self) -> None:
         self._last_heartbeat_at = datetime.now(timezone.utc)
+
+    def _binlog_catalog_status(self, *, max_age_sec: float = 2.0) -> dict[str, Any]:
+        """Live binlog catalog proof for Theater / Freshness (PG slot parity).
+
+        Returns ``slot_exists`` (log_bin), ``active`` (lease), ``restart_lsn``
+        (oldest retained file:pos), ``confirmed_flush_lsn`` (resume file:pos),
+        ``wal_status`` ∈ {reserved, unreserved, lost}, expire vars, gtid_purged.
+        """
+        import time as _time
+
+        now = _time.monotonic()
+        if (
+            self._binlog_catalog_cache is not None
+            and (now - float(self._binlog_catalog_cache_at or 0.0)) < max(0.25, float(max_age_sec))
+        ):
+            return dict(self._binlog_catalog_cache)
+
+        out: dict[str, Any] = {
+            "plugin": "mysql-binlog",
+            "slot_exists": False,
+            "active": bool(getattr(self._lease, "acquired", False)),
+            "restart_lsn": None,
+            "confirmed_flush_lsn": None,
+            "wal_status": None,
+            "binary_logs": [],
+            "oldest_file": None,
+            "current_file": None,
+            "current_pos": None,
+            "gtid_purged": "",
+            "gtid_executed": "",
+            "binlog_expire_logs_seconds": None,
+            "expire_logs_days": None,
+            "server_id": self._mysql_server_id(),
+            "log_bin": False,
+            "binlog_format": None,
+            "binlog_row_image": None,
+        }
+        token = self.resume_token if isinstance(self.resume_token, dict) else {}
+        resume_file = str(token.get("file") or "").strip()
+        resume_pos = token.get("pos")
+        resume_gtid = str(token.get("gtid") or "").strip()
+        if resume_file:
+            out["confirmed_flush_lsn"] = (
+                f"{resume_file}:{resume_pos}" if resume_pos is not None else resume_file
+            )
+        elif resume_gtid:
+            out["confirmed_flush_lsn"] = resume_gtid[:120]
+
+        try:
+            conn = self._conn()
+            try:
+                with conn.cursor() as cur:
+                    def _var(name: str) -> str | None:
+                        try:
+                            cur.execute(f"SHOW VARIABLES LIKE '{name}'")
+                            row = cur.fetchone()
+                            if row and len(row) > 1 and row[1] is not None:
+                                return str(row[1])
+                        except Exception:
+                            return None
+                        return None
+
+                    log_bin = (_var("log_bin") or "").lower()
+                    out["log_bin"] = log_bin in {"on", "1", "true"}
+                    out["slot_exists"] = bool(out["log_bin"])
+                    out["binlog_format"] = _var("binlog_format")
+                    out["binlog_row_image"] = _var("binlog_row_image")
+                    expire_sec = _var("binlog_expire_logs_seconds")
+                    if expire_sec is not None:
+                        try:
+                            out["binlog_expire_logs_seconds"] = int(expire_sec)
+                        except (TypeError, ValueError):
+                            out["binlog_expire_logs_seconds"] = expire_sec
+                    expire_days = _var("expire_logs_days")
+                    if expire_days is not None:
+                        try:
+                            out["expire_logs_days"] = int(float(expire_days))
+                        except (TypeError, ValueError):
+                            out["expire_logs_days"] = expire_days
+
+                    logs: list[str] = []
+                    try:
+                        cur.execute("SHOW BINARY LOGS")
+                        for row in cur.fetchall() or []:
+                            if row and row[0]:
+                                logs.append(str(row[0]))
+                    except Exception as exc:
+                        out["probe_error"] = f"SHOW BINARY LOGS: {exc}"[:200]
+                    out["binary_logs"] = logs
+                    if logs:
+                        out["oldest_file"] = logs[0]
+                        out["restart_lsn"] = f"{logs[0]}:4"
+
+                    for sql in ("SHOW MASTER STATUS", "SHOW BINARY LOG STATUS"):
+                        try:
+                            cur.execute(sql)
+                            row = cur.fetchone()
+                            if row:
+                                out["current_file"] = str(row[0]) if row[0] else None
+                                try:
+                                    out["current_pos"] = int(row[1])
+                                except (TypeError, ValueError, IndexError):
+                                    out["current_pos"] = row[1] if len(row) > 1 else None
+                                break
+                        except Exception:
+                            continue
+
+                    try:
+                        cur.execute("SELECT @@GLOBAL.gtid_purged")
+                        row = cur.fetchone()
+                        if row and row[0]:
+                            out["gtid_purged"] = str(row[0])
+                    except Exception:
+                        pass
+                    try:
+                        cur.execute("SELECT @@GLOBAL.gtid_executed")
+                        row = cur.fetchone()
+                        if row and row[0]:
+                            out["gtid_executed"] = str(row[0])
+                    except Exception:
+                        pass
+
+                    gtid_in_purged: bool | None = None
+                    if resume_gtid and out.get("gtid_purged"):
+                        try:
+                            cur.execute(
+                                "SELECT GTID_SUBSET(%s, @@GLOBAL.gtid_purged)",
+                                (resume_gtid,),
+                            )
+                            row = cur.fetchone()
+                            if row is not None and row[0] is not None:
+                                gtid_in_purged = bool(int(row[0]))
+                        except Exception:
+                            gtid_in_purged = None
+                    out["gtid_in_purged"] = gtid_in_purged
+
+                from services.cdc_retention_probe import classify_binlog_retention
+
+                retention = classify_binlog_retention(
+                    resume_file,
+                    resume_pos,
+                    logs,
+                    resume_gtid=resume_gtid,
+                    gtid_purged=str(out.get("gtid_purged") or ""),
+                    gtid_in_purged=gtid_in_purged,
+                    cursor_key=self.cursor_key,
+                )
+                out["retention_status"] = retention.status
+                if retention.status == "gap":
+                    out["wal_status"] = "lost"
+                elif retention.status == "at_risk":
+                    out["wal_status"] = "unreserved"
+                elif retention.status == "ok":
+                    out["wal_status"] = "reserved"
+                elif out["slot_exists"]:
+                    out["wal_status"] = "reserved"
+            finally:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+        except Exception as exc:
+            _logger.debug("binlog catalog probe failed: %s", exc)
+            out["probe_error"] = str(exc)[:200]
+
+        out["active"] = bool(getattr(self._lease, "acquired", False))
+        self._binlog_catalog_cache = dict(out)
+        self._binlog_catalog_cache_at = now
+        return out
+
+    def cdc_metadata(self) -> dict[str, Any]:
+        """Operator-visible MySQL CDC status for Job Theater / Validate."""
+        lag_sec = self.replication_lag_seconds()
+        obs = dict(self._lag_observation or {})
+        catalog = self._binlog_catalog_status()
+        lease_fields: dict[str, Any] = {}
+        try:
+            lease_fields = dict(self._lease.theater_fields() or {})
+        except Exception:
+            lease_fields = {}
+        phase = "snapshot"
+        if isinstance(self.resume_token, dict) and self.resume_token.get("phase") == "snapshot":
+            phase = "snapshot"
+        elif self.resume_token:
+            phase = "streaming"
+        return {
+            "plugin": "mysql-binlog",
+            "slot_name": f"server_id:{catalog.get('server_id') or self._mysql_server_id()}",
+            "phase": phase,
+            "replication_lag_bytes": obs.get(
+                "replication_lag_bytes", self.replication_lag_bytes()
+            ),
+            "replication_lag_seconds": lag_sec,
+            "cdc_lag_basis": obs.get("cdc_lag_basis"),
+            "cdc_heartbeat_age_sec": obs.get("cdc_heartbeat_age_sec"),
+            "freshness_severity": obs.get("freshness_severity"),
+            "active": catalog.get("active"),
+            "slot_exists": catalog.get("slot_exists"),
+            "restart_lsn": catalog.get("restart_lsn"),
+            "confirmed_flush_lsn": catalog.get("confirmed_flush_lsn"),
+            "wal_status": catalog.get("wal_status"),
+            "binlog_expire_logs_seconds": catalog.get("binlog_expire_logs_seconds"),
+            "gtid_purged": catalog.get("gtid_purged"),
+            "retention_status": catalog.get("retention_status"),
+            "delivery": "at-least-once",
+            **lease_fields,
+        }
+
+    def _assert_resume_within_retention(self) -> None:
+        """Fail-closed when resume file/GTID is before retained binary logs."""
+        if isinstance(self.resume_token, dict) and self.resume_token.get("phase") == "snapshot":
+            return
+        token = self.resume_token if isinstance(self.resume_token, dict) else {}
+        resume_file = str(token.get("file") or "").strip()
+        resume_gtid = str(token.get("gtid") or "").strip()
+        if not resume_file and not resume_gtid:
+            return
+        catalog = self._binlog_catalog_status(max_age_sec=0)
+        if catalog.get("retention_status") != "gap" and catalog.get("wal_status") != "lost":
+            return
+        raise CdcBinlogGapError(
+            (
+                f"MySQL CDC resume is before retained binary logs "
+                f"(resume={catalog.get('confirmed_flush_lsn') or resume_file or resume_gtid}, "
+                f"oldest={catalog.get('oldest_file') or catalog.get('gtid_purged') or '?'}). "
+                "Reset watermark and re-snapshot — continuous CDC across the gap is not claimed."
+            ),
+            resume_file=resume_file,
+            resume_pos=token.get("pos") if resume_file else "",
+            oldest_file=str(catalog.get("oldest_file") or ""),
+            resume_gtid=resume_gtid,
+            gtid_purged=str(catalog.get("gtid_purged") or ""),
+            cursor_key=self.cursor_key,
+        )
 
     def _poll_signal_table(self) -> None:
         """Debezium-compatible signal table → incremental snapshot enqueue."""
@@ -975,6 +1337,8 @@ class MySqlChangeStreamCdc:
 
         self._acquire_cdc_lease()
         self._poll_signal_table()
+        # Fail-closed before opening the stream — purged binlog/GTID is silent loss.
+        self._assert_resume_within_retention()
 
         # Signal-driven incremental snapshot (DDD-3 window via shared runner).
         from services.cdc_incremental_runner import interleave_incremental_snapshot
@@ -985,6 +1349,7 @@ class MySqlChangeStreamCdc:
             fetch_chunk=self._fetch_incremental_chunk,
             stream_events_during_chunk=self._peek_stream_events_during_chunk,
             max_chunks_per_poll=1,
+            dest_resume=self.resume_token,
         )
 
         from pymysqlreplication import BinLogStreamReader
@@ -1112,7 +1477,9 @@ class MySqlChangeStreamCdc:
 
                 event_ts = getattr(binlog_event, "timestamp", None)
                 if isinstance(event_ts, (int, float)) and event_ts > 0:
-                    self._last_event_at = datetime.fromtimestamp(event_ts, tz=timezone.utc)
+                    commit_at = datetime.fromtimestamp(event_ts, tz=timezone.utc)
+                    self._last_event_commit_at = commit_at
+                    self._last_event_at = commit_at
                 else:
                     self._last_event_at = datetime.now(timezone.utc)
 

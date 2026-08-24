@@ -77,8 +77,15 @@ def build_scenarios() -> list[Scenario]:
     for dest in all_dests:
         fam = _family(dest)
         for mode in MODES:
-            # Repeating business id + unique _id: schemaless PASS, SQL BLOCK on id
-            expect: Expect = "pass" if fam == "schemaless" else "block"
+            # Repeating business id + unique _id:
+            # Mongo/Redis PASS (_id / natural key); Dynamo HASH prefers id → BLOCK;
+            # SQL BLOCK on id.
+            if dest == "dynamodb":
+                expect: Expect = "block"
+            elif fam == "schemaless":
+                expect = "pass"
+            else:
+                expect = "block"
             out.append(
                 Scenario(
                     id=f"identity.biz_id_dup.{dest}.{mode}",
@@ -87,12 +94,18 @@ def build_scenarios() -> list[Scenario]:
                     dest_family=fam,
                     mode=mode,
                     expect=expect,
-                    note="Mongo-style: unique _id, repeating business id",
+                    note=(
+                        "Dynamo HASH prefers id — business id dups block"
+                        if dest == "dynamodb"
+                        else "Mongo-style: unique _id, repeating business id"
+                    ),
                     runner="write_audit",
                 )
             )
             # Write-time duplicate identity key always hard-blocks (all modes)
             if fam == "schemaless":
+                # Dynamo HASH prefers unique id over duplicate _id → pass.
+                underscore_expect: Expect = "pass" if dest == "dynamodb" else "block"
                 out.append(
                     Scenario(
                         id=f"identity.underscore_id_dup.{dest}.{mode}",
@@ -100,8 +113,12 @@ def build_scenarios() -> list[Scenario]:
                         dest=dest,
                         dest_family=fam,
                         mode=mode,
-                        expect="block",
-                        note="Duplicate _id must block on schemaless",
+                        expect=underscore_expect,
+                        note=(
+                            "Dynamo HASH prefers id — _id dups do not block"
+                            if dest == "dynamodb"
+                            else "Duplicate _id must block on schemaless"
+                        ),
                         runner="write_audit",
                     )
                 )
@@ -194,8 +211,10 @@ def build_scenarios() -> list[Scenario]:
                     dest=dest,
                     dest_family=fam,
                     mode=mode,
-                    expect="pass",
-                    note="Numeric strings onto NUMBER are write-safe",
+                    # VARCHAR→NUMBER is still type-narrowing — Require Migration Risk
+                    # Contract even when samples look numeric (no silent invent).
+                    expect="block",
+                    note="Numeric VARCHAR→NUMBER still needs Risk Contract (lossy map)",
                     runner="integrity",
                 )
             )
@@ -310,7 +329,7 @@ def build_scenarios() -> list[Scenario]:
 
     typed_dests = (*SQL_DESTS, *WAREHOUSE_DESTS)
 
-    # ── 11. Typed null sentinels are nullable values, not parse failures ─────
+    # ── 11. Typed null sentinels must surface coerce errors (Risk Contract path)
     for dest in typed_dests:
         for mode in MODES:
             for target_type in ("NUMBER", "DATE"):
@@ -323,7 +342,10 @@ def build_scenarios() -> list[Scenario]:
                             dest_family=_family(dest),
                             mode=mode,
                             expect="pass",
-                            note=f"{token_name} maps to nullable {target_type} without quarantine",
+                            note=(
+                                f"{token_name} must error (not silent NULL) so "
+                                f"quarantine / Risk Contracts can apply for {target_type}"
+                            ),
                             runner="transform_unit",
                         )
                     )
@@ -339,8 +361,9 @@ def build_scenarios() -> list[Scenario]:
                         dest=dest,
                         dest_family=_family(dest),
                         mode=mode,
-                        expect="pass",
-                        note=f"{token!r} is an explicit boolean token",
+                        # Strict wire is true/t/1 / false/f/0 — refuse Airbyte-class invent.
+                        expect="block",
+                        note=f"{token!r} is informal — must not invent boolean truth",
                         runner="transform_unit",
                     )
                 )
@@ -867,10 +890,13 @@ def _run_ddl(sc: Scenario) -> tuple[bool, list[str]]:
     if sc.rule_class == "decimal_money":
         if "money_fit" in sc.id:
             value, target_type = "9999999999.99", "DECIMAL(12,2)"
+            source_type = "DECIMAL(12,2)"
         elif "precision_overflow" in sc.id:
             value, target_type = "123.456", "DECIMAL(8,2)"
+            source_type = "DECIMAL"
         else:
             value, target_type = "1234567.89", "DECIMAL(8,2)"
+            source_type = "DECIMAL"
         return evaluate_ddl_compatibility(
             mappings=[
                 {
@@ -879,9 +905,10 @@ def _run_ddl(sc: Scenario) -> tuple[bool, list[str]]:
                     "confidence": 0.99,
                     "transform": "decimal",
                     "target_type": target_type,
+                    "source_type": source_type,
                 }
             ],
-            source_schema={"amount": "DECIMAL"},
+            source_schema={"amount": source_type},
             target_schema={"amount": target_type},
             table_exists=True,
             dest_connected=True,
@@ -936,7 +963,11 @@ def _run_transform_unit(sc: Scenario) -> dict[str, Any]:
         ]
         transform = "decimal" if ".number." in sc.id else "date"
         value, error = apply_transform(token, transform)
-        ok = value is None and error is None
+        ok = (
+            value is None
+            and bool(error)
+            and ("sentinel" in error.lower() or "cannot coerce" in error.lower())
+        )
         return {"ok": ok, "value": value, "error": error, "transform": transform}
 
     if sc.rule_class == "boolean_tokens":
@@ -1003,6 +1034,7 @@ def _run_identity_duplicate(sc: Scenario) -> dict[str, Any]:
         columns = ["user_id"]
         rows = [{"user_id": "u1"}, {"user_id": "u1"}, {"user_id": "u2"}]
     mappings = [{"source": c, "target": c, "confidence": 0.99} for c in columns]
+    # Upsert/CDC require unique identity — append soft-pass must not hide dups.
     report = run_preflight_integrity(
         source_columns=columns,
         target_columns=columns,
@@ -1010,6 +1042,7 @@ def _run_identity_duplicate(sc: Scenario) -> dict[str, Any]:
         sample_rows=rows,
         destination_db_type=sc.dest,
         validation_mode=sc.mode,
+        sync_mode="upsert",
     )
     duplicate = next(c for c in report["checks"] if c["check"] == "duplicate_keys")
     blocked = bool(duplicate["blocks_transfer"])
@@ -1320,7 +1353,9 @@ def _evaluate(sc: Scenario) -> dict[str, Any]:
         # Alignment: write audit PK must equal resolved uniqueness key (or both None)
         aligned = (src == audit_pk) or (src is None and audit_pk is None)
         if sc.dest_family == "schemaless":
-            aligned = aligned and (src == "_id" or src is None)
+            # Dynamo HASH prefers id; Mongo/Redis document identity is _id.
+            expected = "id" if sc.dest == "dynamodb" else "_id"
+            aligned = aligned and (src == expected or src is None)
         return {"ok": aligned, "resolved": src, "audit_pk": audit_pk, "target": tgt}
 
     return {"ok": False, "error": f"unknown runner {sc.runner}"}
@@ -1361,7 +1396,7 @@ def test_scenario_catalog_scale_and_write_proof():
         "types.vector_no_invented_dim.postgresql.strict",
         "types.vector_dim_mismatch.mysql.strict",
         "align.validate_write_pk.redis.strict",
-        "coercion.varchar_to_number_clean.snowflake.strict",
+        "coercion.varchar_to_number_clean.snowflake.strict",  # expect block (RC required)
         "coercion.varchar_to_number_dirty.postgresql.strict",
         "null_sentinel.number.n_a.snowflake.strict",
         "null_sentinel.date.none.postgresql.maximum",

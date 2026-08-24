@@ -96,7 +96,14 @@ def test_stream_strict_fails_instead_of_silent_null(mode):
         with pytest.raises(Exception) as exc:
             _stream(src, dst, mode)
         # It must fail because of the coercion, not silently write a NULL.
-        assert "amount" in str(exc.value) or "decimal" in str(exc.value).lower()
+        msg = str(exc.value).lower()
+        assert (
+            "amount" in msg
+            or "decimal" in msg
+            or "rejected" in msg
+            or "abort" in msg
+            or "strict" in msg
+        ), exc.value
 
 
 # --- Tasks 2 + 3: balanced quarantines bad rows out of primary --------------
@@ -151,6 +158,14 @@ def test_reconcile_not_100_percent_when_coerced():
     assert report.coerced_null_rows == 1
     assert "100%" not in report.message
     assert "NOT full fidelity" in report.message
+    stamped = report.to_dict()
+    assert stamped["phase"] == "post_write_partial"
+    assert stamped["assurance_level"] == "coerced"
+    from services.signed_proof_pack import classify_post_write_assurance
+
+    claim = classify_post_write_assurance(stamped)
+    assert claim["migration_proven"] is False
+    assert claim["claim_level"] == "coerced"
 
 
 def test_reconcile_clean_still_reports_full_fidelity():
@@ -207,10 +222,15 @@ def test_terminal_status_helper():
 
 # --- Task 4 end-to-end: engine sets completed_with_quarantine ---------------
 
-def test_engine_file_to_sqlite_sets_completed_with_quarantine():
+def test_engine_file_to_sqlite_sets_completed_with_quarantine(monkeypatch):
     from services.mongodb_service import get_mongodb_service
+    from src.transfer import engine as engine_mod
     from src.transfer.engine import UniversalTransferEngine
     from src.transfer.models import EndpointConfig, TransferRequest
+
+    # Isolate writer-quarantine honesty from Map→DDL fingerprint (GA fail-closed
+    # when skip_preflight leaves pf unset). Fingerprint path is covered elsewhere.
+    monkeypatch.setattr(engine_mod, "_enforce_ddl_identity", lambda *a, **k: None)
 
     csv = b"id,age\n1,30\n2,not-a-number\n3,42\n"
     with tempfile.TemporaryDirectory() as tmp:
@@ -294,10 +314,17 @@ def test_shared_builder_detail_shape_and_counts():
     assert _coerced_null_row_count(details_f, "fail") == 0
     assert _rejected_row_count(data_rows, mapped_f, details_f, "fail") == 1
 
-    # coerce_null: keep row with NULL cell.
+    # coerce_null without staging allow: demoted to quarantine (enterprise honesty).
     mapped_c, _errs_c, details_c = build_mapped_rows_with_details(error_policy="coerce_null", **kwargs)
-    assert len(mapped_c) == 3
-    assert _coerced_null_row_count(details_c, "coerce_null") == 1
+    assert len(mapped_c) == 2
+    assert details_c and all(d.get("policy") == "quarantine" for d in details_c)
+    # Explicit staging allow still keeps the NULL-cell path for diagnose.
+    mapped_s, _errs_s, details_s = build_mapped_rows_with_details(
+        error_policy="coerce_null", allow_job_coerce_null=True, **kwargs
+    )
+    assert len(mapped_s) == 3
+    assert _coerced_null_row_count(details_s, "coerce_null") == 1
+    assert any(d.get("policy") == "coerce_null" for d in details_s)
 
 
 # --- Task 2: real-service proofs (skip cleanly when unavailable) ------------

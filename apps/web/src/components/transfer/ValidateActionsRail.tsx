@@ -20,6 +20,8 @@ interface ValidateActionsRailProps {
   executeBlockedReason?: string;
   /** CDC retention Check control (SQL Server / Oracle) — shown above footer when present. */
   cdcRetentionSlot?: ReactNode;
+  /** Bind a signed data contract before Execute (plans + schedules persist this). */
+  contractSlot?: ReactNode;
   /** Primary remediation for the top blocker (e.g. open identity settings). */
   onPrimaryFix?: () => void;
   primaryFixLabel?: string;
@@ -28,6 +30,9 @@ interface ValidateActionsRailProps {
   onApproveMappings: () => void;
   /** Open Map filtered to Accept-risk rows. */
   onOpenMapForRisk?: () => void;
+  /** Sign holdout Risk Contracts here and re-validate — no trip back to Map. */
+  onHoldOutRows?: () => void;
+  holdingOutRows?: boolean;
   onExecute: () => void;
   onOpenJobTheater: () => void;
   onSaveAsContract?: () => void;
@@ -49,12 +54,15 @@ export function ValidateActionsRail({
   executeBlocked = false,
   executeBlockedReason,
   cdcRetentionSlot,
+  contractSlot,
   onPrimaryFix,
   primaryFixLabel,
   onBack,
   onRunPreflight,
   onApproveMappings,
   onOpenMapForRisk,
+  onHoldOutRows,
+  holdingOutRows,
   onExecute,
   onOpenJobTheater,
   onSaveAsContract,
@@ -100,6 +108,11 @@ export function ValidateActionsRail({
       {cdcRetentionSlot ? (
         <div className="df2-validate-footer-cdc" aria-label="CDC retention">
           {cdcRetentionSlot}
+        </div>
+      ) : null}
+      {contractSlot ? (
+        <div className="df2-validate-footer-contract" aria-label="Data contract">
+          {contractSlot}
         </div>
       ) : null}
 
@@ -168,14 +181,28 @@ export function ValidateActionsRail({
               )}
 
               {blocked && riskAckPendingCount > 0 && !onPrimaryFix && (
-                <Button
-                  variant="primary"
-                  onClick={onOpenMapForRisk || onBack}
-                  leadingIcon={<DtIcon name="shield" size={16} />}
-                  title="Accept risk on Map — Approve-all cannot clear lossy/specialty rows"
-                >
-                  Accept risk on Map
-                </Button>
+                <>
+                  {onHoldOutRows && (
+                    <Button
+                      variant="primary"
+                      onClick={onHoldOutRows}
+                      loading={holdingOutRows}
+                      loadingLabel="Signing…"
+                      leadingIcon={<DtIcon name="shield" size={16} />}
+                      title={`Sign a quarantine Risk Contract for ${riskAckPendingCount} column(s) and re-validate here. Failing rows go to quarantine for replay — nothing is written lossily.`}
+                    >
+                      Run with rows held out
+                    </Button>
+                  )}
+                  <Button
+                    variant={onHoldOutRows ? "ghost" : "primary"}
+                    onClick={onOpenMapForRisk || onBack}
+                    leadingIcon={<DtIcon name="layers" size={16} />}
+                    title="Choose a per-column execution policy on Map — approvals are preserved"
+                  >
+                    Choose policy on Map
+                  </Button>
+                </>
               )}
 
               {blocked

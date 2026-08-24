@@ -63,8 +63,8 @@ def test_finalize_notifies_on_breaker_open():
         DataContract(
             id=cid,
             name="t",
-            status=ContractStatus.ACTIVE,
-            workspace_id="ws-notify",
+            status=ContractStatus.SIGNED,
+            metadata={"workspace_id": "ws-notify"},
         )
     )
     # Ensure closed breaker with threshold 1

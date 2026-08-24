@@ -92,12 +92,58 @@ def test_cast_and_continue_quarantines_cast_failure_under_strict_job():
     # Cast failure → quarantine holdout (not silent NULL), good rows still mapped
     assert bad.get("policy") == "quarantine"
     assert len(mapped) == 2
-    # Must NOT abort the whole batch solely due to this contracted cast failure
-    blocked = reject_on_strict_policy("fail", details, "sqlite")
-    # Job is fail, but CAST_AND_CONTINUE failures are quarantined — abort only if
-    # remaining details still demand fail. Contracted cast failures are stamped
-    # so reject_on_strict ignores them when all failures are continue-policy.
-    assert blocked is None or "CAST_AND_CONTINUE" not in (blocked or "")
+    # Must NOT abort the whole batch solely due to this contracted cast failure —
+    # including when transform_errors still list the held-out cells (PG/MySQL bug).
+    blocked = reject_on_strict_policy("fail", details, "sqlite", errors)
+    assert blocked is None, blocked
+
+
+def test_empty_url_cast_continue_does_not_abort_with_transform_errors_list():
+    """Reproduce MySQL→Postgres image empty→url: quarantine holdouts + strict job.
+
+    Writers used to abort on ``transform_errors and policy==fail`` even after
+    CAST_AND_CONTINUE stamped every rejected_detail — 0 rows written while
+    quarantine already held 130 image cells.
+    """
+    c = create_migration_risk_contract(
+        column="image",
+        source_type="VARCHAR",
+        destination_type="TEXT",
+        approved_by="tester@datawrap.io",
+        reason="Quarantine empty image urls",
+        execution_policy="CAST_AND_CONTINUE",
+        quarantine_policy="holdout_rejected_rows",
+        transform="url",
+    )
+    mapped, errors, details = build_mapped_rows_with_details(
+        headers=["image", "email"],
+        data_rows=[
+            ["", "a@x.com"],
+            ["https://ok.example/a.png", "b@x.com"],
+            ["", "c@x.com"],
+        ],
+        mappings=[
+            {
+                "source": "image",
+                "target": "image",
+                "transform": "url",
+                "target_type": "TEXT",
+                "risk_contract": c.to_dict(),
+            },
+            {"source": "email", "target": "email", "transform": "none", "target_type": "TEXT"},
+        ],
+        target_cols=["image", "email"],
+        column_types={"image": "VARCHAR", "email": "VARCHAR"},
+        dest_types={"image": "TEXT", "email": "TEXT"},
+        error_policy="fail",
+    )
+    assert errors
+    assert details
+    assert all(d.get("execution_policy") == "CAST_AND_CONTINUE" for d in details)
+    # Good row kept; empty-url rows held out
+    assert len(mapped) == 1
+    blocked = reject_on_strict_policy("fail", details, "PostgreSQL", errors)
+    assert blocked is None, blocked
 
 
 def test_quarantine_row_contract_holdout_under_fail_job_mode():

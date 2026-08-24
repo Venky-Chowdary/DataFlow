@@ -153,6 +153,14 @@ def _render_transfer(tool: str, o: dict[str, Any]) -> str:
         f"**{dst.get('connector_name')}**.`{dst.get('table')}`"
     )
     lines = [f"{route} — sync `{plan.get('sync_mode')}`"]
+    read_mode = str(src.get("source_read_mode") or "table").strip().lower()
+    if read_mode in {"procedure", "query"}:
+        sql = str(src.get("procedure_call") or src.get("source_query") or "").strip()
+        lines.append(
+            f"• Source is a **{read_mode}** result-set snapshot"
+            + (f" (`{sql}`)" if sql else "")
+            + f", not table `{src.get('table')}`. CDC/SCD2/mirror stay refused."
+        )
 
     dest_exists = dst.get("table_exists")
     if dest_exists is True:
@@ -210,6 +218,35 @@ def _render_transfer(tool: str, o: dict[str, Any]) -> str:
     if pf.get("run_id"):
         lines.append(f"• Preflight run `{pf.get('run_id')}`")
 
+    preview = o.get("preview") if isinstance(o.get("preview"), dict) else {}
+    bound_id = str(
+        (preview or {}).get("contract_id") or plan.get("contract_id") or ""
+    ).strip()
+    if bound_id:
+        status = str(
+            (preview or {}).get("contract_status") or plan.get("contract_status") or ""
+        ).strip()
+        lines.append(
+            f"• Bound contract `{bound_id}`"
+            + (f" ({status})" if status else "")
+            + " — Confirm fails closed unless it is SIGNED."
+        )
+        if status.lower() == "not_found":
+            lines.append("  – Contract not found — Confirm will refuse.")
+        elif status and status.upper() != "SIGNED":
+            lines.append(f"  – Contract is {status} — Confirm will refuse until SIGNED.")
+        breaker = str(
+            (preview or {}).get("breaker_state") or plan.get("breaker_state") or ""
+        ).strip()
+        if breaker:
+            lines.append(f"• Circuit breaker is **{breaker}**.")
+            if breaker.lower() in {"open", "half_open"}:
+                lines.append("  – Confirm will refuse while the breaker is OPEN.")
+
+    rules = _render_live_data_rules(preview, plan)
+    if rules:
+        lines.append(rules)
+
     if tool == "start_transfer" and o.get("requires_confirm"):
         if o.get("destructive"):
             lines.append(
@@ -218,6 +255,135 @@ def _render_transfer(tool: str, o: dict[str, Any]) -> str:
             )
         else:
             lines.append("\nConfirm below to run it — nothing moves until you do.")
+    return "\n".join(lines)
+
+
+def _data_rules_bits(o: dict[str, Any] | None) -> list[str]:
+    """Named validation / schema posture only. Never invents skip_preflight."""
+    rec = o or {}
+    bits: list[str] = []
+    mode = str(rec.get("validation_mode") or "").strip()
+    if mode:
+        bits.append(f"{mode} validation")
+    policy = str(rec.get("schema_policy") or "").strip()
+    if policy:
+        bits.append(f"schema `{policy}`")
+    return bits
+
+
+def _render_live_data_rules(*records: dict[str, Any] | None) -> str:
+    """Operator-visible data / migration rules on a live plan or Confirm."""
+    merged: dict[str, Any] = {}
+    for rec in records:
+        if not rec:
+            continue
+        if rec.get("validation_mode"):
+            merged["validation_mode"] = rec.get("validation_mode")
+        if rec.get("schema_policy"):
+            merged["schema_policy"] = rec.get("schema_policy")
+    bits = _data_rules_bits(merged)
+    if not bits:
+        return ""
+    return f"• Data / migration rules: {', '.join(bits)}."
+
+
+def _render_requested_data_rules(o: dict[str, Any]) -> str:
+    """Name spoken bind / data rules on a generic route sketch.
+
+    This is not a live plan. Confirm still fail-closes on SIGNED / OPEN.
+    """
+    bits: list[str] = []
+    cid = str(o.get("contract_id") or "").strip()
+    if cid:
+        bits.append(f"contract `{cid}`")
+    bits.extend(_data_rules_bits(o))
+    if not bits:
+        return ""
+    return (
+        f"\nRequested data / migration rules: {', '.join(bits)} — "
+        "previewed on a real plan; Confirm stays fail-closed. "
+        "This sketch is not a plan for your data."
+    )
+
+
+def _schedule_bind_phrase(row: dict[str, Any] | None) -> str:
+    """One-line bind for list/get. Empty when the schedule is unbound."""
+    s = row or {}
+    cid = str(s.get("contract_id") or "").strip()
+    require = bool(s.get("require_signed_contract"))
+    breaker = str(s.get("breaker_state") or "").strip()
+    if not cid and not require:
+        return ""
+    if not cid:
+        return "require signed on, no contract"
+    bits = [f"contract `{cid}`"]
+    if require:
+        bits.append("SIGNED required")
+    if breaker:
+        bits.append(f"breaker {breaker}")
+    return " · ".join(bits)
+
+
+def _render_schedule_detail(s: dict[str, Any]) -> str:
+    """Answer “what’s on this pipeline?” — route, sync, bind, cadence."""
+    name = s.get("name") or "pipeline"
+    sid = str(s.get("id") or "").strip()
+    src = s.get("source_table") or "?"
+    dst = s.get("dest_table") or "?"
+    sync = str(s.get("sync_mode") or "").strip()
+    lines = [
+        f"Pipeline **{name}**"
+        + (f" (`{sid}`)" if sid else "")
+        + f" · {s.get('interval') or '—'}"
+        + f" · enabled={s.get('enabled')}."
+    ]
+    route = f"• Route `{src}` → `{dst}`"
+    if sync:
+        route += f" · sync `{sync}`"
+    lines.append(route)
+    bind = _schedule_bind_phrase(s)
+    if bind:
+        lines.append(f"• Bound {bind}.")
+    else:
+        lines.append("• No data contract bound — enforce stays unset.")
+    rules = _render_live_data_rules(s)
+    if rules:
+        lines.append(rules)
+    lines.append(
+        f"• next `{s.get('next_run_at') or '—'}` · last **{s.get('last_status') or 'never'}**"
+        f" ({s.get('run_count', 0)} runs)."
+    )
+    return "\n".join(lines)
+
+
+def _render_schedule_run(o: dict[str, Any]) -> str:
+    """Show the pipeline an operator has to sign off on: route, bind, breaker."""
+    preview = o.get("preview") if isinstance(o.get("preview"), dict) else {}
+    name = o.get("name") or preview.get("name") or "pipeline"
+    src = preview.get("source_table") or "?"
+    dst = preview.get("dest_table") or "?"
+    sync = preview.get("sync_mode") or ""
+    lines = [
+        f"Ready to run pipeline **{name}** — `{src}` → `{dst}`"
+        + (f" · sync `{sync}`" if sync else "")
+        + "."
+    ]
+    bound_id = str(preview.get("contract_id") or "").strip()
+    if bound_id:
+        lines.append(
+            f"• Bound contract `{bound_id}` — Confirm fails closed unless it is SIGNED."
+        )
+        breaker = str(preview.get("breaker_state") or "").strip()
+        if breaker:
+            lines.append(f"• Circuit breaker is **{breaker}**.")
+    rules = _render_live_data_rules(preview, o)
+    if rules:
+        lines.append(rules)
+    if o.get("destructive") or sync == "full_refresh_overwrite":
+        lines.append("• **This overwrites the destination table.**")
+    lines.append(
+        "Confirm below to start an immediate run (does not change the regular cadence)."
+    )
     return "\n".join(lines)
 
 
@@ -943,6 +1109,7 @@ class DataPilotAgent:
                 "type": "run_schedule",
                 "label": out.get("label") or "Run pipeline now",
                 "risk": "mutate",
+                "destructive": bool(out.get("destructive")),
                 "payload": {
                     "ack_id": out.get("ack_id"),
                     "schedule_id": out.get("schedule_id"),
@@ -1740,27 +1907,21 @@ Respond as Datawrap Pilot — grounded in tool results."""
                 if rows:
                     lines = [f"You have **{len(rows)} pipeline schedule(s)**:"]
                     for s in rows[:8]:
+                        bind = _schedule_bind_phrase(s)
                         lines.append(
                             f"• **{s.get('name')}** · {s.get('interval')}"
                             f"{' · cron ' + s['cron'] if s.get('cron') else ''}"
-                            f" · next `{s.get('next_run_at') or '—'}`"
-                            f" · last **{s.get('last_status') or 'never'}** ({s.get('run_count', 0)} runs)"
+                            + (f" · {bind}" if bind else "")
+                            + f" · next `{s.get('next_run_at') or '—'}`"
+                            + f" · last **{s.get('last_status') or 'never'}** ({s.get('run_count', 0)} runs)"
                         )
                     parts.append("\n".join(lines))
                 else:
                     parts.append("No pipeline schedules yet. Create one from **Pipelines** or after a transfer.")
             elif tr.name == "get_schedule" and tr.success:
-                s = tr.output or {}
-                parts.append(
-                    f"Pipeline **{s.get('name')}** (`{s.get('id')}`) · {s.get('interval')} · "
-                    f"enabled={s.get('enabled')} · next `{s.get('next_run_at') or '—'}` · "
-                    f"last **{s.get('last_status') or 'never'}**."
-                )
+                parts.append(_render_schedule_detail(tr.output or {}))
             elif tr.name == "run_schedule_now" and tr.success:
-                parts.append(
-                    f"Ready to run pipeline **{tr.output.get('name')}**. "
-                    "Confirm below to start an immediate run (does not change the regular cadence)."
-                )
+                parts.append(_render_schedule_run(tr.output or {}))
             elif tr.name == "list_contracts" and tr.success:
                 rows = tr.output.get("contracts", [])
                 if rows:
@@ -1918,9 +2079,12 @@ Respond as Datawrap Pilot — grounded in tool results."""
                 if not o.get("generic"):
                     parts.append(_render_transfer("plan_transfer", o))
                 else:
+                    posture = _render_requested_data_rules(o)
                     parts.append(
                         f"**Standard gate sequence**: {', '.join(o.get('required_gates') or [])}\n"
-                        f"{o.get('note') or ''}\n{o.get('next') or ''}"
+                        f"{o.get('note') or ''}"
+                        f"{posture}"
+                        f"\n{o.get('next') or ''}"
                     )
             elif tr.name == "explain_mapping_assurance" and tr.success:
                 o = tr.output or {}

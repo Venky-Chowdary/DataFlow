@@ -146,7 +146,7 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
       {
         id: "overview",
         title: "What is Datawrap?",
-        body: "Datawrap is a universal data transfer platform. Transfer Studio maps schemas across systems, runs eight preflight gates before any production write, and proves every load with checksum reconciliation. Datawrap Pilot and MCP bring the same governed engine to chat and agent workflows.",
+        body: "Datawrap is a universal data transfer platform. Transfer Studio maps schemas across systems, runs nine preflight gates before any production write, and proves every load with checksum reconciliation. Datawrap Pilot and MCP bring the same governed engine to chat and agent workflows.",
       },
       {
         id: "surfaces",
@@ -383,7 +383,7 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
           {
             title: "Step 3 — Map: align columns and Accept risk",
             pin: "Map columns → review edges → Accept risk / Approve → Continue to Validate",
-            body: "Map opens **Map columns** with every source field paired to a destination name and type. For `sample-orders.csv` you should see five edges — for example `order_id` → `order_id`, `order_amt` → `order_amount`, with transforms such as **Cast integer**, **Normalize email**, **Cast decimal**, and **Date → ISO**.\n\nUse the filter tabs (**All**, **Review**, **Critical**, **PII**, **Ready**) to focus issues. When a type cast is lossy (for example DECIMAL → TEXT on a file export), click **Accept risk** on that row (or **Approve eligible** when shown).\n\n**Continue to Validate →** stays locked until every blocking map issue is approved or remapped. Then continue.",
+            body: "Map opens **Map columns** with every source field paired to a destination name and type. For `sample-orders.csv` you should see five edges — for example `order_id` → `order_id`, `order_amt` → `order_amount`, with transforms such as **Cast integer**, **Normalize email**, **Cast decimal**, and **Date → ISO**.\n\nUse the filter tabs (**All**, **Review**, **Critical**, **PII**, **Ready**) to focus issues. False-friends stay named: **qty≠amt**, **user≠customer**, **dest collision**. **Approve eligible** will not clear those — Remap dest, or Confirm this pair on the row. When a type cast is lossy (for example DECIMAL → TEXT on a file export), click **Accept risk** on that row.\n\n**Continue to Validate →** stays locked until every blocking map issue is approved or remapped. Then continue.",
             figure: {
               src: "/docs/screenshots/app-transfer-map.png",
               alt: "Transfer Studio Map columns with sample-orders field mappings",
@@ -443,6 +443,8 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
           "**Incremental append** — cursor-based new rows only.",
           "**Incremental deduped** — cursor + primary-key upserts.",
           "**CDC / SCD Type 2 / Mirror** — advanced identity modes (PK required where noted).",
+          "**Destination write → Query** — one INSERT/MERGE/UPDATE with `:binds` mapped to source columns. Failed rows quarantine. Not CDC.",
+          "**Destination write → Stored procedure** — one CALL/EXEC per row (Informatica connected SQL). SQLite has no dest procedures; dest query INSERT is allowed.",
         ],
       },
       {
@@ -873,7 +875,7 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
           "**Incremental deduped** — cursor + primary-key upserts",
           "**CDC** — log-based changes (when the source supports it)",
           "**SCD Type 2** — versioned history (primary key required)",
-          "**Mirror** — soft-delete rows missing from source (primary key required)",
+          "**Mirror** — soft-delete dest keys missing from source (`_deleted`; physical COUNT(*) stays; primary key required)",
         ],
         tip: "Failed cells quarantine without silently dropping the rest of the batch — same engine as ad-hoc Transfer Studio runs.",
       },
@@ -1024,7 +1026,7 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
         steps: [
           "Why did preflight gate Data integrity fail on my last transfer?",
           "Which connectors are transfer-ready for Snowflake upsert?",
-          "Suggest a map for order_amt → payment_amount",
+          "Why did order_amt map to total_amount instead of payment_amount?",
           "Show quarantined rows from last night's pipeline",
         ],
       },
@@ -1105,12 +1107,12 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
       {
         id: "tips",
         title: "Tips",
-        body: "Use Query Playground to validate source data shape before mapping. Format JSON results, clear the editor, and use snippet chips for common patterns. Prefer read-only statements — governed writes still go through Transfer Studio / Pipelines.",
+        body: "Use Query Playground to validate source data shape before mapping. Format JSON results, clear the editor, and use snippet chips for common patterns. Playground is **read-only** — it refuses CALL/EXEC and DML. Governed writes still go through Transfer Studio / Pipelines.",
       },
       {
         id: "transfer-bridge",
         title: "Bridge to Transfer Studio",
-        body: "When the shape looks right, open **Transfer** and reuse the same connector on Source or Destination. Validated queries inform filters and preflight sample expectations; they do not skip Validate.",
+        body: "When the shape looks right, open **Transfer** and reuse the same connector. On **Source**, choose **Query** (read-only SELECT) or **Stored procedure** (one CALL/EXEC, spooled once). On **Destination**, choose **Query** (one INSERT/MERGE/UPDATE with binds) or **Stored procedure** (one CALL per row). Failed dest statements quarantine — they never silently drop. CDC / SCD2 / mirror refuse callable dest writes. Validated playground queries do not skip Validate.",
       },
     ],
   },

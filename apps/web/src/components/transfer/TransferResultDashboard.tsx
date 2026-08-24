@@ -1,3 +1,4 @@
+import { loadMethodLabel } from "../../lib/loadMethod";
 import { useEffect, useMemo, useState } from "react";
 import { DtIcon } from "../DtIcon";
 import { ConnectorIcon } from "../../app/brand-icons";
@@ -10,16 +11,20 @@ import { LoadHistoryPanel } from "./LoadHistoryPanel";
 import { NotificationDeliveryStrip } from "./NotificationDeliveryStrip";
 import { QuarantinePanel } from "./QuarantinePanel";
 import type { RepairMapping } from "../../lib/api";
-import { Gate8ProofCard, classifyGate8Status, type Gate8Reconciliation } from "./Gate8ProofCard";
+import { Gate8ProofCard, classifyGate8Status, gate8AppendIdentity, isGate8AppendDelta, isGate8KeyedBatch, type Gate8Reconciliation } from "./Gate8ProofCard";
 import { JobTrustScoreCard } from "./JobTrustScoreCard";
+import { ConservationLedgerCard } from "./ConservationLedgerCard";
+import { conservationCompleteCopy, destHeadline, writerAckDisagrees, writerHeadline } from "../../lib/conservationLedger";
 import { CdcCursorGapPanel } from "./CdcCursorGapPanel";
 import { CdcRetentionPanel } from "./CdcRetentionPanel";
+import { isCdcGapErrorCode } from "../../lib/jobTrustScore";
 import { MappingProofDrawer, type MappingProof } from "../MappingProofDrawer";
 import { ConnectionReuseCard } from "./ConnectionReuseCard";
 import { PhaseProfileCard } from "./PhaseProfileCard";
 import { ReplaySafetyCard } from "./ReplaySafetyCard";
 import { TransformationsCard } from "./TransformationsCard";
 import { hashForScreen } from "../../lib/appNavigation";
+import { cdcDeliveryResultCopy } from "../../lib/cdcExactlyOnce";
 
 function asMappingProof(raw: unknown): MappingProof | null {
   if (!raw || typeof raw !== "object") return null;
@@ -114,8 +119,20 @@ export function TransferResultDashboard({
   const droppedRows = Math.max(rejected - coercedNull, 0);
   const hasIntegrityLoss = result.success && (rejected > 0 || coercedNull > 0);
   const showQuarantine = Boolean(result.job_id) && (!result.success || hasIntegrityLoss || rejected > 0 || issueFindings > 0);
-  const sourceRows = result.reconciliation?.source_rows ?? rec;
-  const targetRows = result.reconciliation?.target_rows ?? rec;
+  const sourceRows = result.reconciliation?.source_rows;
+  const destMetric = destHeadline({
+    status: result.success ? "completed" : "failed",
+    records_processed: rec,
+    records_transferred: rec,
+    row_accounting: result.row_accounting,
+  });
+  const writerMetric = writerHeadline({
+    status: result.success ? "completed" : "failed",
+    records_processed: rec,
+    records_transferred: rec,
+    row_accounting: result.row_accounting,
+  });
+  const ackDisagrees = writerAckDisagrees(result);
   // Never infer Gate-8 Passed from job success alone — and never call writer-ack “Passed”.
   const gate8 = classifyGate8Status(result.reconciliation as Gate8Reconciliation | undefined);
   const reconcileLabel = gate8.label;
@@ -158,7 +175,7 @@ export function TransferResultDashboard({
     result.destination?.database || result.destination?.collection || "Destination";
 
   const destinationPath =
-    ds?.table ? `${ds.type || destType} · ${ds.database}${ds.schema ? ` · ${ds.schema}` : ""}` :
+    ds?.table ? [ds.type || destType, ds.database, ds.schema].filter((p) => fmt(p as string | undefined)).join(" · ") :
     ds?.collection ? `${ds.type || destType} · ${[ds.database, ds.collection].filter(Boolean).join(".")}` :
     ds?.filename ? `${result.destination?.format || destType} · ${ds.filename}` :
     result.destination?.path ? `${result.destination?.format || destType} · ${result.destination.path}` :
@@ -180,19 +197,20 @@ export function TransferResultDashboard({
     : hasIntegrityLoss
       ? "Data transferred — not full fidelity"
       : "Data transferred";
+  const destPhrase = conservationCompleteCopy(result, { quarantine: hasIntegrityLoss });
   const subtitle = !result.success
     ? "Review failure details and bad-data findings below, then fix on Validate or Map."
     : hasIntegrityLoss
-      ? `${rec.toLocaleString()} records landed; some rows were held out in quarantine or values coerced to NULL`
-      : gate8.fullPass
-        ? `${rec.toLocaleString()} records moved and reconciled`
-        : gate8.label === "Writer ack"
-          ? `${rec.toLocaleString()} records written — writer acknowledged; independent Gate-8 read-back still pending`
-          : `${rec.toLocaleString()} records moved — Gate-8 ${gate8.label.toLowerCase()}`;
+      ? destPhrase
+      : destMetric.measured && gate8.fullPass
+        ? `${destPhrase} and reconciled`
+        : destMetric.measured
+          ? `${destPhrase} — Gate-8 ${gate8.label.toLowerCase()}`
+          : `${writerMetric.value} writer-acked — independent dest COUNT(*) still pending`;
 
   const metaChips: Array<{ label: string; value: string; tone?: "warn" | "ok"; title?: string }> = [];
   if (ds?.load_method) {
-    metaChips.push({ label: "Load", value: ds.load_method });
+    metaChips.push({ label: "Load", value: loadMethodLabel(String(ds.load_method)) });
   }
   if (ds?.type === "pgvector" || ds?.type === "qdrant" || ds?.type === "weaviate" || ds?.type === "pinecone" || ds?.type === "milvus") {
     metaChips.push({
@@ -204,7 +222,7 @@ export function TransferResultDashboard({
   if (ds?.chunk_size != null && Number(ds.chunk_size) > 0) {
     metaChips.push({ label: "Batch", value: Number(ds.chunk_size).toLocaleString() });
   }
-  if (sourceRows !== rec && sourceRows > 0) {
+  if (sourceRows != null && sourceRows > 0 && sourceRows !== rec) {
     metaChips.push({ label: "Source rows", value: sourceRows.toLocaleString() });
   }
   if (result.operation) {
@@ -231,8 +249,24 @@ export function TransferResultDashboard({
       });
     }
   }
-  if (checksum) {
+  if (isGate8AppendDelta(result.reconciliation as Gate8Reconciliation | undefined)) {
+    const id = gate8AppendIdentity(result.reconciliation as Gate8Reconciliation);
+    const before = id.destBefore != null ? id.destBefore.toLocaleString() : "—";
+    const after = id.destAfter.toLocaleString();
+    metaChips.push({
+      label: "Dest Δ",
+      value: `${before} → ${after}`,
+      tone: "warn",
+      title: "Append dest COUNT(*) growth this run. Whole-table checksums are not comparable.",
+    });
+  } else if (checksum && !isGate8KeyedBatch(result.reconciliation as Gate8Reconciliation | undefined)) {
     metaChips.push({ label: "Checksum", value: checksum.slice(0, 12), title: checksum });
+  } else if (isGate8KeyedBatch(result.reconciliation as Gate8Reconciliation | undefined) && checksum) {
+    metaChips.push({
+      label: "Batch checksum",
+      value: checksum.slice(0, 12),
+      title: "Written-key digest — extra dest rows outside this batch are not in the proof.",
+    });
   }
   if (issueFindings > 0) {
     metaChips.push({
@@ -298,8 +332,18 @@ export function TransferResultDashboard({
       </header>
 
       <section className="df2-result-metrics" aria-label="Transfer metrics">
-        <MetricCell value={rec.toLocaleString()} label="Transferred" />
-        <MetricCell value={targetRows.toLocaleString()} label="At destination" />
+        <MetricCell
+          value={destMetric.value}
+          label={destMetric.label}
+          tone={destMetric.tone === "ok" || destMetric.tone === "warn" || destMetric.tone === "danger" ? destMetric.tone : undefined}
+          title={destMetric.title}
+        />
+        <MetricCell
+          value={writerMetric.value}
+          label={writerMetric.label}
+          tone={ackDisagrees ? "warn" : undefined}
+          title={writerMetric.title}
+        />
         <MetricCell
           value={droppedRows.toLocaleString()}
           label="Held out"
@@ -343,6 +387,18 @@ export function TransferResultDashboard({
         notifications={result.notifications}
         className="df2-result-notify"
         compact
+      />
+
+      <ConservationLedgerCard
+        job={{
+          status: result.success
+            ? (rejected > 0 || coercedNull > 0 ? "completed_with_quarantine" : "completed")
+            : "failed",
+          records_processed: rec,
+          records_transferred: rec,
+          row_accounting: result.row_accounting,
+        }}
+        onOpenValidate={onOpenValidate}
       />
 
       <JobTrustScoreCard
@@ -467,14 +523,31 @@ export function TransferResultDashboard({
           <header>
             <DtIcon name="activity" size={14} />
             <strong>CDC</strong>
-            <span>{result.cdc_delivery || "at-least-once"} · not platform exactly-once</span>
+            <span>{cdcDeliveryResultCopy({
+              cdcDelivery: result.cdc_delivery,
+              exactlyOnceActive: Boolean(
+                (result as { exactly_once_active?: boolean }).exactly_once_active
+                || result.cdc_delivery === "exactly_once",
+              ),
+              destLsn: (result as { eos_committed_lsn?: string }).eos_committed_lsn,
+              fenceEpoch: (result as { eos_fence_epoch?: number }).eos_fence_epoch,
+              protocol: (result as { exactly_once_protocol?: string }).exactly_once_protocol,
+            })}</span>
           </header>
           <dl>
             {result.cdc_plugin && <div><dt>Plugin</dt><dd>{result.cdc_plugin}</dd></div>}
             {result.cdc_row_filter && (
               <div><dt>Row filter</dt><dd className="df2-mono">{result.cdc_row_filter}</dd></div>
             )}
-            {result.snapshot_mode && <div><dt>Snapshot</dt><dd>{result.snapshot_mode}</dd></div>}
+            {result.snapshot_mode && (
+              <div>
+                <dt>Snapshot</dt>
+                <dd>
+                  {result.snapshot_mode}
+                  {result.snapshot_plan?.lost_window ? " · lost window (not continuous CDC)" : ""}
+                </dd>
+              </div>
+            )}
             {result.cdc_shared_reader && <div><dt>Topology</dt><dd>Shared log reader</dd></div>}
             {result.source_ha_role && (
               <div>
@@ -507,7 +580,7 @@ export function TransferResultDashboard({
         </section>
       )}
 
-      {!result.success && (result.cdc_cursor_gap || result.error_code === "cdc_lsn_gap" || result.error_code === "cdc_scn_gap" || result.error_code === "cdc_cursor_gap") && (
+      {!result.success && (result.cdc_cursor_gap || isCdcGapErrorCode(result.error_code)) && (
         <CdcCursorGapPanel
           job={{
             _id: result.job_id,
@@ -518,6 +591,8 @@ export function TransferResultDashboard({
             cdc_cursor_gap_resume: result.cdc_cursor_gap_resume,
             cdc_cursor_gap_retained: result.cdc_cursor_gap_retained,
             cdc_lease_cursor_key: result.cdc_lease_cursor_key,
+            snapshot_mode: result.snapshot_mode,
+            snapshot_plan: result.snapshot_plan,
             error_code: result.error_code,
             error: result.error,
             watermark: result.watermark,
@@ -532,6 +607,7 @@ export function TransferResultDashboard({
           message={result.cdc_retention_message}
           dialect={result.cdc_retention_dialect}
           cursorKey={result.cdc_lease_cursor_key}
+          hideGap={Boolean(result.cdc_cursor_gap)}
         />
       )}
 
@@ -614,7 +690,7 @@ export function TransferResultDashboard({
               {ds?.load_method && (
                 <div>
                   <dt>Load method</dt>
-                  <dd>{ds.load_method}{ds.chunk_size ? ` · batch ${Number(ds.chunk_size).toLocaleString()}` : ""}</dd>
+                  <dd>{loadMethodLabel(String(ds.load_method))}{ds.chunk_size ? ` · batch ${Number(ds.chunk_size).toLocaleString()}` : ""}</dd>
                 </div>
               )}
               <div>
@@ -628,7 +704,13 @@ export function TransferResultDashboard({
                         ? "Writer acknowledged rows — independent source/destination checksum compare not available"
                         : gate8.label === "Failed"
                           ? result.reconciliation?.message || "Reconciliation failed"
-                          : result.reconciliation?.message || `Gate-8 ${gate8.label.toLowerCase()} for this job`}
+                          : gate8.label === "Append delta"
+                            ? result.reconciliation?.message
+                              || "Append delta verified — whole-table checksums are not comparable"
+                            : gate8.label === "Batch verified"
+                              ? result.reconciliation?.message
+                                || "This run’s keys verified — extra destination rows are outside this proof"
+                              : result.reconciliation?.message || `Gate-8 ${gate8.label.toLowerCase()} for this job`}
                 </dd>
               </div>
               {droppedRows > 0 && (
@@ -652,8 +734,8 @@ export function TransferResultDashboard({
             <summary>Checksums, warnings &amp; DDL</summary>
             <div className="df2-result-more-body">
               <p className="df2-result-explain-body">
-                Checksums are computed over source and destination rows and compared.
-                If reconciliation passed, the transfer is complete and unchanged.
+                If reconciliation is <strong>Verified</strong>, source and destination fingerprints match.
+                Append delta and batch-verified runs landed rows but whole-table checksums are not comparable.
               </p>
               {(result.reconciliation?.source_checksum || result.reconciliation?.target_checksum) && (
                 <dl className="df2-result-checksum-pair">
@@ -668,7 +750,11 @@ export function TransferResultDashboard({
                   <div>
                     <dt>Match</dt>
                     <dd>
-                      {gate8.fullPass
+                      {isGate8AppendDelta(result.reconciliation as Gate8Reconciliation | undefined)
+                        ? "Not comparable — dest-before delta, not whole-table fingerprints"
+                        : isGate8KeyedBatch(result.reconciliation as Gate8Reconciliation | undefined)
+                          ? "Batch keys only — extra dest rows outside proof"
+                        : gate8.fullPass
                         && result.reconciliation?.source_checksum
                         && result.reconciliation?.target_checksum
                         && result.reconciliation.source_checksum === result.reconciliation.target_checksum
@@ -763,7 +849,7 @@ export function TransferResultDashboard({
         </div>
       )}
 
-      <section className="df2-job-log-panel is-result is-open" aria-label="Job event log">
+      <section className="df2-job-log-panel is-result" aria-label="Job event log">
         <LiveEventLog
           lines={eventLog}
           variant="result"

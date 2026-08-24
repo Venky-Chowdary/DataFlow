@@ -2,7 +2,8 @@ import { ReactNode } from "react";
 import { ConnectorIcon } from "../../app/brand-icons";
 import { DtIcon } from "../DtIcon";
 import { Connector, PipelineSchedule } from "../../lib/types";
-import { breakerBadgeClass, breakerWarnLabel } from "../../lib/contractBreakerUi";
+import { breakerBadgeClass, breakerWarnLabel, campaignBadgeClass, campaignWarnLabel } from "../../lib/contractBreakerUi";
+import { formatSyncModeLabel } from "../../lib/transferConstants";
 import { jobStatusBadgeClass, jobStatusLabel } from "../../lib/uiUtils";
 import { Button } from "./Button";
 import { CopyIdChip } from "./CopyIdChip";
@@ -46,13 +47,6 @@ const INTERVAL_LABEL: Record<string, string> = {
   weekly: "Weekly",
 };
 
-const SYNC_MODE_LABEL: Record<string, string> = {
-  full_refresh_overwrite: "Full overwrite",
-  full_refresh_append: "Full append",
-  incremental: "Incremental",
-  cdc: "CDC",
-};
-
 function cadenceLabel(sched: PipelineSchedule): string {
   if (sched.cron) return `Cron ${sched.cron}`;
   return INTERVAL_LABEL[sched.interval] ?? sched.interval;
@@ -79,10 +73,11 @@ export function PipelineCard({
   children,
 }: PipelineCardProps) {
   const isRunning = running || sched.running;
-  const syncLabel = SYNC_MODE_LABEL[sched.sync_mode] ?? sched.sync_mode;
+  const syncLabel = formatSyncModeLabel(sched.sync_mode);
   const routeLabel = `${source?.name ?? "Source"} → ${dest?.name ?? "Destination"}`;
   const tableLabel = `${sched.source_table} → ${sched.dest_table}`;
   const breakerText = breakerWarnLabel(breakerState);
+  const campaignText = campaignWarnLabel(sched.fidelity_campaign?.verdict);
   const freshnessText =
     freshnessLagSeconds != null && Number.isFinite(freshnessLagSeconds)
       ? `Lag ${freshnessLagSeconds.toFixed(0)}s`
@@ -141,6 +136,13 @@ export function PipelineCard({
           {breakerText ? (
             <span className={`df2-badge ${breakerBadgeClass(breakerState)}`} title="Data contract circuit breaker">
               {breakerText}
+            </span>
+          ) : campaignText ? (
+            <span
+              className={`df2-badge ${campaignBadgeClass(sched.fidelity_campaign?.verdict)}`}
+              title={sched.fidelity_campaign?.next_action || "Parallel-run campaign"}
+            >
+              {campaignText}
             </span>
           ) : freshnessText ? (
             <span
@@ -216,6 +218,14 @@ export function PipelineCard({
           {breakerText && (
             <span className={`df2-badge ${breakerBadgeClass(breakerState)}`} title="Data contract circuit breaker">
               {breakerText}
+            </span>
+          )}
+          {!breakerText && campaignText && (
+            <span
+              className={`df2-badge ${campaignBadgeClass(sched.fidelity_campaign?.verdict)}`}
+              title={sched.fidelity_campaign?.next_action || "Parallel-run campaign"}
+            >
+              {campaignText}
             </span>
           )}
           {sched.last_status && (

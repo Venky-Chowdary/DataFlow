@@ -23,6 +23,7 @@ import logging
 from datetime import datetime, timezone
 from typing import Any, Iterator
 
+from connectors.sql_identifiers import quote_sql_identifier, quote_table_ref
 from services.cdc_cursor_gap import CdcLsnGapError
 from services.cdc_engine import ChangeBatch
 
@@ -30,6 +31,15 @@ from services.cdc_engine import ChangeBatch
 __all_gap__ = ("CdcLsnGapError",)
 
 logger = logging.getLogger(__name__)
+
+
+def _qualified_ref(schema: str, table: str) -> str:
+    """``[schema].[table]`` with ``]`` escaped.
+
+    ``sanitize=False`` keeps the operator's real object names verbatim — the
+    bracket escaping, not rewriting, is what makes a hostile name safe.
+    """
+    return quote_table_ref(table, schema, dialect="sqlserver", sanitize=False)
 
 
 def encode_mssql_cdc_token(
@@ -40,6 +50,7 @@ def encode_mssql_cdc_token(
     offset: int = 0,
     seqval: bytes | str | None = None,
     capture_instance: str = "",
+    last_pk: str = "",
 ) -> str:
     if isinstance(lsn, (bytes, bytearray)):
         lsn_hex = bytes(lsn).hex()
@@ -61,6 +72,8 @@ def encode_mssql_cdc_token(
         payload["seqval"] = seq_hex
     if capture_instance:
         payload["capture_instance"] = capture_instance
+    if last_pk:
+        payload["last_pk"] = str(last_pk)
     return json.dumps(payload, separators=(",", ":"))
 
 
@@ -73,6 +86,7 @@ def decode_mssql_cdc_token(token: str | None) -> dict[str, Any]:
             "offset": 0,
             "seqval": "",
             "capture_instance": "",
+            "last_pk": "",
         }
     try:
         data = json.loads(str(token))
@@ -84,6 +98,7 @@ def decode_mssql_cdc_token(token: str | None) -> dict[str, Any]:
                 "offset": int(data.get("offset") or 0),
                 "seqval": str(data.get("seqval") or ""),
                 "capture_instance": str(data.get("capture_instance") or ""),
+                "last_pk": str(data.get("last_pk") or ""),
             }
     except Exception as exc:
         logger.warning("Exception suppressed: %s", exc, exc_info=exc)
@@ -94,6 +109,7 @@ def decode_mssql_cdc_token(token: str | None) -> dict[str, Any]:
         "offset": 0,
         "seqval": "",
         "capture_instance": "",
+        "last_pk": "",
     }
 
 
@@ -248,7 +264,7 @@ class SqlServerNativeCdc:
         cfg: dict[str, Any],
         *,
         table: str | list[str],
-        primary_key: str = "id",
+        primary_key: str = "",
         primary_keys: dict[str, str] | None = None,
         schema: str = "dbo",
         batch_size: int = 500,
@@ -265,10 +281,11 @@ class SqlServerNativeCdc:
             raise ValueError("SQL Server CDC requires at least one table")
         self.table = self.tables[0]
         self.schema = schema or "dbo"
-        self.primary_keys: dict[str, str] = {
-            t: str((primary_keys or {}).get(t) or primary_key or "id")
-            for t in self.tables
-        }
+        from services.cdc_identity import require_cdc_primary_keys_map
+
+        self.primary_keys = require_cdc_primary_keys_map(
+            self.tables, primary_key=primary_key, primary_keys=primary_keys
+        )
         self.primary_key = self.primary_keys[self.table]
         self.batch_size = max(1, int(batch_size or 500))
         self._shared = len(self.tables) > 1
@@ -299,6 +316,9 @@ class SqlServerNativeCdc:
         self._resume_inclusive = not (state.get("seqval") or "")
         self.phase = state.get("phase") or "initial"
         self.snapshot_offset = int(state.get("offset") or 0)
+        self.snapshot_last_pk = str(state.get("last_pk") or "")
+        self.snapshot_table = str(state.get("table") or "")
+        self.resume_token = resume_token
         self._last_event_at: datetime | None = None
         self._last_schema_fingerprint: str = ""
         from services.cdc_schema_history import connection_fingerprint
@@ -339,6 +359,10 @@ class SqlServerNativeCdc:
                 "shared_reader": self._shared,
             },
         )
+        self._capture_catalog_cache: dict[str, Any] | None = None
+        self._capture_catalog_cache_at: float = 0.0
+        self._stall_max_lsn: str | None = None
+        self._stall_max_lsn_at: float = 0.0
 
     def _acquire_cdc_lease(self) -> None:
         self._lease.ensure()
@@ -346,16 +370,230 @@ class SqlServerNativeCdc:
     def close(self) -> None:
         self._lease.release()
 
+    def _probe_log_scan_session(self, cur) -> dict[str, Any]:
+        """Read current CDC log scan session (session_id=0). Fail-open on privilege."""
+        out: dict[str, Any] = {
+            "dmv_available": False,
+            "latency": None,
+            "error_count": None,
+            "failed_sessions_count": None,
+            "empty_scan_count": None,
+            "last_commit_lsn": None,
+        }
+        try:
+            cur.execute(
+                """
+                SELECT latency, empty_scan_count, error_count,
+                       failed_sessions_count, last_commit_lsn
+                FROM sys.dm_cdc_log_scan_sessions
+                WHERE session_id = 0
+                """
+            )
+            row = cur.fetchone()
+            if not row:
+                out["dmv_available"] = True  # DMV readable, no current session row
+                return out
+            out["dmv_available"] = True
+            try:
+                out["latency"] = float(row[0]) if row[0] is not None else None
+            except (TypeError, ValueError):
+                out["latency"] = None
+            try:
+                out["empty_scan_count"] = int(row[1]) if row[1] is not None else None
+            except (TypeError, ValueError):
+                out["empty_scan_count"] = None
+            try:
+                out["error_count"] = int(row[2]) if row[2] is not None else None
+            except (TypeError, ValueError):
+                out["error_count"] = None
+            try:
+                out["failed_sessions_count"] = int(row[3]) if row[3] is not None else None
+            except (TypeError, ValueError):
+                out["failed_sessions_count"] = None
+            if len(row) > 4 and row[4] is not None:
+                out["last_commit_lsn"] = _lsn_to_hex(row[4])
+        except Exception as exc:
+            logger.debug("dm_cdc_log_scan_sessions probe failed: %s", exc)
+            out["probe_error"] = str(exc)[:200]
+        return out
+
+    def _map_lsn_to_time(self, cur, lsn_hex: str) -> str | None:
+        if not lsn_hex:
+            return None
+        try:
+            cur.execute(
+                "SELECT sys.fn_cdc_map_lsn_to_time(%s)",
+                (_hex_to_lsn(lsn_hex),),
+            )
+            row = cur.fetchone()
+            if not row or row[0] is None:
+                return None
+            val = row[0]
+            if isinstance(val, datetime):
+                if val.tzinfo is None:
+                    val = val.replace(tzinfo=timezone.utc)
+                return val.astimezone(timezone.utc).isoformat()
+            return str(val)
+        except Exception as exc:
+            logger.debug("fn_cdc_map_lsn_to_time failed: %s", exc)
+            return None
+
+    def _capture_catalog_status(self, *, max_age_sec: float = 2.0) -> dict[str, Any]:
+        """Live capture min_lsn / max_lsn / scan-stall proof for Theater.
+
+        Returns ``min_lsn``, ``max_lsn``, ``capture_instance``, ``capture_exists``,
+        ``restart_lsn`` (=min), ``confirmed_flush_lsn`` (=resume), ``wal_status``
+        ∈ {reserved, unreserved, lost}, plus capture-stall fields from
+        ``dm_cdc_log_scan_sessions`` (reader-at-tip ≠ capture healthy).
+        """
+        import time as _time
+
+        now = _time.monotonic()
+        if (
+            self._capture_catalog_cache is not None
+            and (now - float(self._capture_catalog_cache_at or 0.0))
+            < max(0.25, float(max_age_sec))
+        ):
+            return dict(self._capture_catalog_cache)
+
+        out: dict[str, Any] = {
+            "plugin": "sqlserver_native_cdc",
+            "slot_exists": False,
+            "capture_exists": False,
+            "active": bool(getattr(self._lease, "acquired", False)),
+            "capture_instance": self.capture_instance,
+            "min_lsn": None,
+            "max_lsn": None,
+            "max_lsn_time": None,
+            "restart_lsn": None,
+            "confirmed_flush_lsn": None,
+            "wal_status": None,
+            "retention_status": None,
+            "capture_stall": False,
+            "capture_stall_severity": None,
+            "capture_stall_reason": None,
+            "capture_latency_seconds": None,
+            "captures": dict(self._captures),
+        }
+        resume = _lsn_to_hex(self.start_lsn) if self.start_lsn else ""
+        if resume:
+            out["confirmed_flush_lsn"] = resume
+
+        try:
+            with self._conn() as conn:
+                with conn.cursor() as cur:
+                    try:
+                        self._resolve_all_captures(cur)
+                    except Exception as exc:
+                        logger.debug("capture resolve during catalog probe: %s", exc)
+                    capture = self.capture_instance or self._captures.get(self.table) or ""
+                    out["capture_instance"] = capture
+                    out["captures"] = dict(self._captures)
+                    min_lsn = self._min_lsn_for(cur, capture) if capture else ""
+                    max_lsn = self._max_lsn(cur)
+                    out["min_lsn"] = min_lsn or None
+                    out["max_lsn"] = max_lsn or None
+                    out["restart_lsn"] = min_lsn or None
+                    out["capture_exists"] = bool(min_lsn)
+                    out["slot_exists"] = bool(min_lsn)
+                    if self._shared and self._captures:
+                        per: dict[str, str] = {}
+                        for tbl, cap in self._captures.items():
+                            try:
+                                per[tbl] = self._min_lsn_for(cur, cap) or ""
+                            except Exception:
+                                per[tbl] = ""
+                        out["min_lsn_by_table"] = per
+
+                    from services.cdc_retention_probe import classify_lsn_retention
+
+                    retention = classify_lsn_retention(
+                        resume, min_lsn, cursor_key=self.cursor_key
+                    )
+                    out["retention_status"] = retention.status
+                    if retention.status == "gap":
+                        out["wal_status"] = "lost"
+                    elif retention.status == "at_risk":
+                        out["wal_status"] = "unreserved"
+                    elif retention.status == "ok":
+                        out["wal_status"] = "reserved"
+                    elif out["slot_exists"]:
+                        out["wal_status"] = "reserved"
+                    try:
+                        self._cdc_retention = retention
+                    except Exception:
+                        pass
+
+                    # Capture-stall: max_lsn tip can freeze while source still commits.
+                    scan = self._probe_log_scan_session(cur)
+                    out["max_lsn_time"] = self._map_lsn_to_time(cur, max_lsn) if max_lsn else None
+                    prev_max = getattr(self, "_stall_max_lsn", None)
+                    if max_lsn and max_lsn == (prev_max or ""):
+                        frozen_for = now - float(getattr(self, "_stall_max_lsn_at", None) or now)
+                    else:
+                        self._stall_max_lsn = max_lsn or None
+                        self._stall_max_lsn_at = now
+                        frozen_for = 0.0
+                    from services.cdc_capture_stall import classify_mssql_capture_stall
+
+                    stall = classify_mssql_capture_stall(
+                        max_lsn=max_lsn or "",
+                        frozen_for_sec=frozen_for,
+                        scan_latency_sec=scan.get("latency"),
+                        error_count=scan.get("error_count"),
+                        failed_sessions_count=scan.get("failed_sessions_count"),
+                        dmv_available=bool(scan.get("dmv_available")),
+                    )
+                    out["capture_stall"] = bool(stall.get("capture_stall"))
+                    out["capture_stall_severity"] = stall.get("capture_stall_severity")
+                    out["capture_stall_reason"] = stall.get("capture_stall_reason")
+                    out["capture_latency_seconds"] = stall.get("capture_latency_seconds")
+                    out["scan_empty_count"] = scan.get("empty_scan_count")
+                    out["frozen_for_sec"] = frozen_for
+                    if stall.get("capture_stall_severity") == "unknown":
+                        out["capture_stall_unknown"] = True
+        except Exception as exc:
+            logger.debug("SQL Server capture catalog probe failed: %s", exc)
+            out["probe_error"] = str(exc)[:200]
+
+        out["active"] = bool(getattr(self._lease, "acquired", False))
+        self._capture_catalog_cache = dict(out)
+        self._capture_catalog_cache_at = now
+        return out
+
     def cdc_metadata(self) -> dict[str, Any]:
+        catalog = self._capture_catalog_status()
+        freshness = None
+        if catalog.get("capture_stall"):
+            freshness = catalog.get("capture_stall_severity") or "warn"
+        elif catalog.get("wal_status") == "lost":
+            freshness = "critical"
         return {
             "plugin": "sqlserver_native_cdc",
             "phase": self.phase,
             "delivery": "at-least-once",
-            "capture_instance": self.capture_instance,
-            "captures": dict(self._captures),
+            "capture_instance": catalog.get("capture_instance") or self.capture_instance,
+            "captures": dict(catalog.get("captures") or self._captures),
             "tables": list(self.tables),
             "cdc_row_filter": self.row_filter,
             "shared_reader": self._shared,
+            "slot_name": catalog.get("capture_instance") or self.capture_instance,
+            "active": catalog.get("active"),
+            "slot_exists": catalog.get("slot_exists"),
+            "capture_exists": catalog.get("capture_exists"),
+            "min_lsn": catalog.get("min_lsn"),
+            "max_lsn": catalog.get("max_lsn"),
+            "max_lsn_time": catalog.get("max_lsn_time"),
+            "restart_lsn": catalog.get("restart_lsn"),
+            "confirmed_flush_lsn": catalog.get("confirmed_flush_lsn"),
+            "wal_status": catalog.get("wal_status"),
+            "retention_status": catalog.get("retention_status"),
+            "capture_stall": catalog.get("capture_stall"),
+            "capture_stall_severity": catalog.get("capture_stall_severity"),
+            "capture_stall_reason": catalog.get("capture_stall_reason"),
+            "capture_latency_seconds": catalog.get("capture_latency_seconds"),
+            "capture_stall_unknown": catalog.get("capture_stall_unknown"),
+            "freshness_severity": freshness,
             **self._lease.theater_fields(),
         }
 
@@ -552,6 +790,7 @@ class SqlServerNativeCdc:
         seqval: str = "",
         table: str | None = None,
         capture_instance: str | None = None,
+        last_pk: str = "",
     ) -> str:
         return encode_mssql_cdc_token(
             lsn,
@@ -562,6 +801,7 @@ class SqlServerNativeCdc:
             capture_instance=capture_instance
             if capture_instance is not None
             else ("" if self._shared else self.capture_instance),
+            last_pk=last_pk if phase == "snapshot" else "",
         )
 
     def snapshot(self) -> Iterator[ChangeBatch]:
@@ -570,70 +810,60 @@ class SqlServerNativeCdc:
         if self._shared:
             yield from self._snapshot_shared()
             return
-        qualified = f"[{self.schema}].[{self.table}]"
-        pk = self.primary_key
         offset = int(self.snapshot_offset or 0)
-        handoff = ""
+        last_pk = self.snapshot_last_pk if self.phase == "snapshot" else ""
+        # Keep the original consistent-point LSN on mid-dump resume.
+        handoff = self.start_lsn if (self.phase == "snapshot" and self.start_lsn) else ""
         with self._conn() as conn:
             with conn.cursor() as cur:
                 self._resolve_capture_instance(cur)
-                handoff = self._max_lsn(cur) or self._min_lsn(cur)
+                if not handoff:
+                    handoff = self._max_lsn(cur) or self._min_lsn(cur)
                 self._maybe_record_capture_schema(cur, offset=handoff)
-                while True:
-                    cur.execute(
-                        f"""
-                        SELECT *
-                        FROM {qualified}
-                        ORDER BY [{pk}]
-                        OFFSET %s ROWS FETCH NEXT %s ROWS ONLY
-                        """,  # nosec B608
-                        (offset, self.batch_size),
-                    )
-                    cols = [d[0] for d in (cur.description or [])]
-                    rows = cur.fetchall() or []
-                    if not rows:
-                        break
-                    records = [
-                        {
-                            cols[i]: "" if row[i] is None else str(row[i])
-                            for i in range(len(cols))
-                        }
-                        for row in rows
-                    ]
-                    offset += len(rows)
-                    self.snapshot_offset = offset
-                    self._last_event_at = datetime.now(timezone.utc)
-                    yield ChangeBatch(
-                        inserts=records,
-                        resume_token=self._token(
-                            lsn=handoff, phase="snapshot", offset=offset
-                        ),
-                        table=self.table,
-                    )
-                    if len(rows) < self.batch_size:
-                        break
+                yield from self._iter_snapshot_table(
+                    cur,
+                    self.table,
+                    handoff=handoff,
+                    offset=offset,
+                    last_pk=last_pk,
+                    ack_barrier=False,
+                )
         self.start_lsn = handoff
         self.start_seqval = ""
         # Nothing at the handoff LSN has been streamed yet.
         self._resume_inclusive = True
         self.phase = "streaming"
         self.snapshot_offset = 0
+        self.snapshot_last_pk = ""
+        self.resume_token = self._token(lsn=self.start_lsn, phase="streaming")
         yield ChangeBatch(
-            resume_token=self._token(lsn=self.start_lsn, phase="streaming"),
+            resume_token=self.resume_token,
             table=self.table,
         )
 
     def _snapshot_shared(self) -> Iterator[ChangeBatch]:
         """Multi-table initial dump under one LSN handoff (at-least-once)."""
-        handoff = ""
+        resume_table = self.snapshot_table if self.phase == "snapshot" else ""
+        resume_last_pk = self.snapshot_last_pk if self.phase == "snapshot" else ""
+        resume_offset = self.snapshot_offset if self.phase == "snapshot" else 0
+        # Shared streaming tokens label table as a comma list — not a resume key.
+        if resume_table and "," in resume_table:
+            resume_table = ""
+            resume_last_pk = ""
+            resume_offset = 0
+        tables = list(self.tables)
+        if resume_table in tables:
+            tables = tables[tables.index(resume_table) :]
+        handoff = self.start_lsn if (self.phase == "snapshot" and self.start_lsn) else ""
         with self._conn() as conn:
             with conn.cursor() as cur:
                 self._resolve_all_captures(cur)
-                handoff = self._max_lsn(cur)
+                if not handoff:
+                    handoff = self._max_lsn(cur)
                 if not handoff:
                     for t in self.tables:
                         handoff = self._min_lsn_for(cur, self._captures.get(t, "")) or handoff
-                for table_name in self.tables:
+                for table_name in tables:
                     cap = self._captures.get(table_name, "")
                     if cap:
                         prev_cap = self.capture_instance
@@ -642,80 +872,147 @@ class SqlServerNativeCdc:
                             self._maybe_record_capture_schema(cur, offset=handoff)
                         finally:
                             self.capture_instance = prev_cap
-                    pk = self.primary_keys.get(table_name, self.primary_key)
-                    qualified = f"[{self.schema}].[{table_name}]"
-                    offset = 0
-                    while True:
-                        cur.execute(
-                            f"""
-                            SELECT *
-                            FROM {qualified}
-                            ORDER BY [{pk}]
-                            OFFSET %s ROWS FETCH NEXT %s ROWS ONLY
-                            """,  # nosec B608
-                            (offset, self.batch_size),
-                        )
-                        cols = [d[0] for d in (cur.description or [])]
-                        rows = cur.fetchall() or []
-                        if not rows:
-                            break
-                        records = [
-                            {
-                                cols[i]: "" if row[i] is None else str(row[i])
-                                for i in range(len(cols))
-                            }
-                            for row in rows
-                        ]
-                        offset += len(rows)
-                        self._last_event_at = datetime.now(timezone.utc)
-                        yield ChangeBatch(
-                            inserts=records,
-                            resume_token=self._token(
-                                lsn=handoff, phase="snapshot", offset=offset, table=table_name
-                            ),
-                            table=table_name,
-                            ack_barrier=False,
-                        )
-                        if len(rows) < self.batch_size:
-                            break
+                    table_last_pk = resume_last_pk if table_name == resume_table else ""
+                    table_offset = resume_offset if table_name == resume_table else 0
+                    yield from self._iter_snapshot_table(
+                        cur,
+                        table_name,
+                        handoff=handoff,
+                        offset=table_offset,
+                        last_pk=table_last_pk,
+                        ack_barrier=False,
+                    )
         self.start_lsn = handoff
         self.start_seqval = ""
         # Nothing at the handoff LSN has been streamed yet.
         self._resume_inclusive = True
         self.phase = "streaming"
         self.snapshot_offset = 0
+        self.snapshot_last_pk = ""
+        self.resume_token = self._token(lsn=self.start_lsn, phase="streaming")
         yield ChangeBatch(
-            resume_token=self._token(lsn=self.start_lsn, phase="streaming"),
+            resume_token=self.resume_token,
             ack_barrier=True,
         )
+
+    def _iter_snapshot_table(
+        self,
+        cur: Any,
+        table_name: str,
+        *,
+        handoff: str,
+        offset: int,
+        last_pk: str,
+        ack_barrier: bool,
+    ) -> Iterator[ChangeBatch]:
+        """Page one capture table: held scan, PK-seek, or legacy OFFSET."""
+        from connectors.sql_snapshot_scan import fetch_scan_page
+        from services.cdc_snapshot_resume import (
+            classify_snapshot_resume,
+            last_pk_from_records,
+            quoted_pk_columns,
+            snapshot_keyset_sql,
+        )
+        from services.cdc_snapshot_window import _pk_columns
+
+        pk_cols = _pk_columns(self.primary_keys.get(table_name, self.primary_key))
+        quoted = quoted_pk_columns(pk_cols, "[")
+        qualified = _qualified_ref(self.schema, table_name)
+        mode = classify_snapshot_resume(last_pk=last_pk, offset=offset)
+        order_sql = ", ".join(quoted)
+        if mode == "scan":
+            cur.execute(
+                f"SELECT * FROM {qualified} ORDER BY {order_sql}"  # nosec B608
+            )
+        while True:
+            if mode == "scan":
+                rows = fetch_scan_page(cur, self.batch_size)
+            elif mode == "keyset":
+                sql, params = snapshot_keyset_sql(
+                    table_ref=qualified,
+                    quoted_pk_columns=quoted,
+                    last_pk=last_pk,
+                    limit=self.batch_size,
+                    dialect="sqlserver",
+                )
+                cur.execute(sql, params)
+                rows = cur.fetchall() or []
+            else:
+                cur.execute(
+                    f"""
+                    SELECT *
+                    FROM {qualified}
+                    ORDER BY {order_sql}
+                    OFFSET %s ROWS FETCH NEXT %s ROWS ONLY
+                    """,  # nosec B608
+                    (offset, self.batch_size),
+                )
+                rows = cur.fetchall() or []
+            cols = [d[0] for d in (cur.description or [])]
+            if not rows:
+                break
+            records = [
+                {
+                    cols[i]: "" if row[i] is None else str(row[i])
+                    for i in range(len(cols))
+                }
+                for row in rows
+            ]
+            offset += len(rows)
+            last_pk = last_pk_from_records(records, pk_cols) or last_pk
+            self.snapshot_offset = offset
+            self.snapshot_last_pk = last_pk
+            self._last_event_at = datetime.now(timezone.utc)
+            yield ChangeBatch(
+                inserts=records,
+                resume_token=self._token(
+                    lsn=handoff,
+                    phase="snapshot",
+                    offset=offset,
+                    table=table_name,
+                    last_pk=last_pk,
+                ),
+                table=table_name,
+                ack_barrier=ack_barrier,
+            )
+            if len(rows) < self.batch_size:
+                break
 
     def _fetch_incremental_chunk(self, sig: Any) -> tuple[list[dict[str, Any]], str | None, bool]:
         """PK-ordered chunk for signal-driven incremental snapshots."""
         from connectors.sql_identifiers import require_safe_identifier
 
+        from services.cdc_snapshot_resume import (
+            last_pk_from_records,
+            quoted_pk_columns,
+            snapshot_keyset_sql,
+        )
+        from services.cdc_snapshot_window import _pk_columns
+
         pk_name = require_safe_identifier(sig.primary_key or self.primary_key, preserve_case=True)
-        pk = f"[{pk_name.replace(']', ']]')}]"
-        qualified = f"[{self.schema}].[{self.table}]"
+        pk_cols = _pk_columns(sig.primary_key or self.primary_key or pk_name)
+        quoted = quoted_pk_columns(pk_cols, "[")
+        qualified = _qualified_ref(self.schema, self.table)
         limit = int(sig.chunk_size or self.batch_size)
         last_pk = sig.last_pk or ""
         with self._conn() as conn:
             with conn.cursor() as cur:
                 if last_pk:
-                    cur.execute(
-                        f"""
-                        SELECT TOP ({limit}) *
-                        FROM {qualified}
-                        WHERE {pk} > %s
-                        ORDER BY {pk}
-                        """,  # nosec B608
-                        (last_pk,),
+                    sql, params = snapshot_keyset_sql(
+                        table_ref=qualified,
+                        quoted_pk_columns=quoted,
+                        last_pk=last_pk,
+                        limit=limit,
+                        dialect="sqlserver",
                     )
+                    cur.execute(sql, params)
                 else:
+                    order_sql = ", ".join(quoted)
                     cur.execute(
                         f"""
                         SELECT TOP ({limit}) *
                         FROM {qualified}
-                        ORDER BY {pk}
+                        ORDER BY {order_sql}
                         """  # nosec B608
                     )
                 cols = [d[0] for d in (cur.description or [])]
@@ -724,7 +1021,7 @@ class SqlServerNativeCdc:
             {cols[i]: "" if row[i] is None else str(row[i]) for i in range(len(cols))}
             for row in rows
         ]
-        new_last = records[-1].get(pk_name) if records else last_pk
+        new_last = last_pk_from_records(records, pk_cols) or last_pk
         done = len(records) < limit
         return records, str(new_last) if new_last is not None else last_pk, done
 
@@ -900,6 +1197,7 @@ class SqlServerNativeCdc:
             fetch_chunk=self._fetch_incremental_chunk,
             stream_events_during_chunk=self._peek_stream_events_during_chunk,
             max_chunks_per_poll=1,
+            dest_resume=self.resume_token,
         )
 
         fn = self._changes_tvf()

@@ -107,27 +107,43 @@ class TestKeysetBookmarkTieBreak:
     """A strict `>` on a non-unique bookmark drops every tied row at a page edge."""
 
     def test_composite_watermark_carries_the_primary_key(self):
+        """Encoded with the canonical separator, which no column value can hold.
+
+        A pipe can appear inside a text cursor value, so a watermark joined with
+        one was indistinguishable from a bare value carrying a pipe.
+        """
+        from services.keyset_pagination import KEYSET_SEP
+
         rows = [["2024-01-01", "a"], ["2024-01-01", "b"], ["2024-01-01", "c"]]
         headers = ["updated_at", "id"]
-        assert max_cursor_value(rows, headers, "updated_at", "id") == "2024-01-01|c"
+        assert (
+            max_cursor_value(rows, headers, "updated_at", "id")
+            == f"2024-01-01{KEYSET_SEP}c"
+        )
 
     def test_without_a_tiebreak_the_watermark_cannot_distinguish_peers(self):
         """This is the shape of the bug: the bookmark alone loses b and c."""
         rows = [["2024-01-01", "a"], ["2024-01-01", "b"], ["2024-01-01", "c"]]
         headers = ["updated_at", "id"]
+        from services.keyset_pagination import KEYSET_SEP
+
         bare = max_cursor_value(rows, headers, "updated_at")
         assert bare == "2024-01-01"
         # Seeking `updated_at > '2024-01-01'` skips the untransferred peers.
-        assert "|" not in bare
+        assert KEYSET_SEP not in bare
 
     def test_stream_requires_unique_evidence_before_using_keyset(self):
-        """No PK evidence must fall back to OFFSET rather than risk silent loss."""
+        """No PK evidence must fall back to OFFSET rather than risk silent loss.
+
+        Phase F2: full composite ``keyset_order_cols`` (or incremental cursor)
+        gates seek reads; OFFSET when the PK list is empty.
+        """
         source = Path("src/transfer/stream.py").read_text(encoding="utf-8")
-        assert "keyset_unique or bool(keyset_tiebreak)" in source, (
-            "keyset pagination must require a unique bookmark or a PK tie-break"
-        )
-        assert "cursor_primary_key=keyset_tiebreak or None" in source, (
-            "the keyset read must pass its tie-break through to the reader"
+        assert "keyset_order_cols" in source
+        assert "KEYSET_CAPABLE_SOURCES" in source
+        assert 'pagination_mode = "keyset" if use_keyset else "offset"' in source
+        assert "cursor_key_columns" in source, (
+            "composite keyset must pass ordered key columns to the reader"
         )
 
 

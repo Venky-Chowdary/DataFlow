@@ -213,8 +213,10 @@ class CdcRetentionProbeBody(BaseModel):
 async def post_cdc_retention_probe(body: CdcRetentionProbeBody) -> dict[str, Any]:
     """Probe watermark vs live CDC retention (SQL Server min_lsn / Oracle oldest SCN).
 
-    Honesty: ``gap`` means reset watermark + re-snapshot. Continuous CDC across
-    the retention window is not claimed.
+    Honesty: ``gap`` means reset watermark + re-snapshot (or ``when_needed``).
+    PostgreSQL ``wal_status=lost`` / dropped slot is the same class — recreating
+    the slot at current WAL skips the lost window. Continuous CDC across the
+    retention window is not claimed.
     """
     from services.cdc_retention_probe import probe_cdc_retention
 

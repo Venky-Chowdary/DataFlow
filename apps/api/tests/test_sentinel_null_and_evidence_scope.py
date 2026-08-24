@@ -37,10 +37,13 @@ def test_strict_sentinel_nulls_block() -> None:
 
 
 def test_balanced_sentinel_nulls_warn() -> None:
+    # Same-family INTEGER→INTEGER: sentinel NULL loss warns under balanced.
+    # VARCHAR→INTEGER also fidelity-collapses and blocks without a Risk Contract
+    # — that path is covered by strict + collapse tests, not this warn contract.
     report = analyze_coercion(
         sample_rows=[{"amt": "N/A"}, {"amt": "12"}],
         mappings=[{"source": "amt", "target": "amt"}],
-        source_types={"amt": "VARCHAR"},
+        source_types={"amt": "INTEGER"},
         dest_types={"amt": "INTEGER"},
         dest_db_type="postgresql",
         validation_mode="balanced",

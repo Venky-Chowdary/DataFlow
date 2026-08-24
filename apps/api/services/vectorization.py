@@ -312,6 +312,60 @@ def embed(
     return out
 
 
+CONTENT_STORE_LIMIT = 4000
+
+
+def _is_store_compatible_vector_id(value: str) -> bool:
+    """True when source PK can be used as vector-store document id."""
+    text = (value or "").strip()
+    if not text or len(text) > 128:
+        return False
+    # UUID / hex / alphanumeric / safe punct — refuse whitespace and control chars.
+    if any(ch.isspace() for ch in text):
+        return False
+    return all(ch.isalnum() or ch in "-_.:@" for ch in text)
+
+
+def _stable_vector_row_id(
+    source_id: str,
+    chunk_index: int,
+    content: str,
+    *,
+    multi_chunk: bool,
+) -> str:
+    """Prefer source PK for upsert identity; hash only when PK missing/incompatible.
+
+    Content must not be part of the id when a source PK exists — otherwise an
+    edit creates a new vector id and leaves the old entity orphaned.
+    """
+    from services.vector_embedding import coerce_chunk_index
+
+    sid = (source_id or "").strip()
+    chunk = coerce_chunk_index(chunk_index)
+    if sid:
+        if not multi_chunk and chunk == 0 and _is_store_compatible_vector_id(sid):
+            return sid
+        return hashlib.sha256(f"{sid}:{chunk}".encode("utf-8")).hexdigest()[:32]
+    return hashlib.sha256(
+        f":{chunk}:{content}".encode("utf-8")
+    ).hexdigest()[:32]
+
+
+def _bounded_vector_content(
+    content: str,
+    metadata: dict[str, Any],
+) -> tuple[str, dict[str, Any]]:
+    """Cap stored content; stamp metadata when truncated (never silent shrink)."""
+    text = content or ""
+    if len(text) <= CONTENT_STORE_LIMIT:
+        return text, metadata
+    meta = dict(metadata or {})
+    meta["_df_content_truncated"] = True
+    meta["_df_content_original_len"] = len(text)
+    meta["_df_content_store_limit"] = CONTENT_STORE_LIMIT
+    return text[:CONTENT_STORE_LIMIT], meta
+
+
 def vectorize_records(
     records: list[dict[str, Any]],
     *,
@@ -373,25 +427,71 @@ def vectorize_records(
                 # Universal fallback: embed a concise JSON representation of the
                 # record so vector destinations never fail on short/numeric rows.
                 safe_rec = {k: v for k, v in rec.items() if k not in exclude and k != PRECHUNKED_FLAG}
-                content = json.dumps(
+                raw_json = json.dumps(
                     {k: sanitize_json_value(v) for k, v in safe_rec.items()},
                     ensure_ascii=False,
                     separators=(",", ":"),
                     sort_keys=True,
                     default=sanitize_json_value,
                     allow_nan=False,
-                )[:4000]
+                )
+                content = raw_json
 
         embedding = None
+        embed_column_parse_failed = False
+        embed_column_parse_reason = ""
         if embedding_column and embedding_column in rec:
             raw = rec[embedding_column]
             if isinstance(raw, list):
-                embedding = [float(x) for x in raw]
+                if len(raw) == 0:
+                    embed_column_parse_failed = True
+                    embed_column_parse_reason = (
+                        f"embedding_column '{embedding_column}' is empty — "
+                        "refuse silent re-embed"
+                    )
+                else:
+                    try:
+                        embedding = [float(x) for x in raw]
+                    except (TypeError, ValueError) as exc:
+                        embed_column_parse_failed = True
+                        embed_column_parse_reason = (
+                            f"embedding_column '{embedding_column}' has non-numeric "
+                            f"values — refuse silent re-embed ({exc})"
+                        )
             elif isinstance(raw, str):
-                try:
-                    embedding = [float(x) for x in json.loads(raw)]
-                except Exception as exc:
-                    logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+                text = raw.strip()
+                if not text or text.lower() in {"null", "none", "[]"}:
+                    embed_column_parse_failed = True
+                    embed_column_parse_reason = (
+                        f"embedding_column '{embedding_column}' is empty — "
+                        "refuse silent re-embed"
+                    )
+                else:
+                    try:
+                        parsed = json.loads(text)
+                        if not isinstance(parsed, list):
+                            raise ValueError("JSON value is not an array")
+                        if len(parsed) == 0:
+                            raise ValueError("empty array")
+                        embedding = [float(x) for x in parsed]
+                    except Exception as exc:
+                        embed_column_parse_failed = True
+                        embed_column_parse_reason = (
+                            f"embedding_column '{embedding_column}' is not a numeric "
+                            f"JSON array — refuse silent re-embed ({exc})"
+                        )
+            elif raw is None:
+                embed_column_parse_failed = True
+                embed_column_parse_reason = (
+                    f"embedding_column '{embedding_column}' is null — "
+                    "refuse silent re-embed"
+                )
+            else:
+                embed_column_parse_failed = True
+                embed_column_parse_reason = (
+                    f"embedding_column '{embedding_column}' must be a list or "
+                    f"JSON array, got {type(raw).__name__} — refuse silent re-embed"
+                )
 
         source_id = str(rec.get("id", rec.get("_id", rec.get("source_id", ""))))
         metadata = rec.copy()
@@ -407,28 +507,67 @@ def vectorize_records(
             metadata = {k: v for k, v in metadata.items() if k in allowed}
 
         existing_chunk_index = 0
+        chunk_index_error = ""
         try:
-            existing_chunk_index = int(rec.get("chunk_index") or 0)
-        except (TypeError, ValueError):
+            from services.vector_embedding import coerce_chunk_index
+
+            existing_chunk_index = coerce_chunk_index(rec.get("chunk_index"))
+        except ValueError as exc:
+            # Never invent chunk 0 from garbage — stamp for writer quarantine.
+            chunk_index_error = str(exc)
             existing_chunk_index = 0
 
-        if embedding:
+        if chunk_index_error:
+            bounded, meta = _bounded_vector_content(content, metadata)
             rows.append({
-                "id": hashlib.sha256(f"{source_id}:{existing_chunk_index}:{content}".encode()).hexdigest()[:32],
-                "content": content[:4000],
+                "id": _stable_vector_row_id(
+                    source_id, existing_chunk_index, bounded, multi_chunk=False
+                ),
+                "content": bounded,
+                "embedding": None,
+                "metadata": meta,
+                "source_id": source_id,
+                "chunk_index": rec.get("chunk_index"),
+                "_df_embed_error": chunk_index_error,
+            })
+        elif embed_column_parse_failed:
+            # Operator mapped an embedding column — never invent a content embedding
+            # when that column is present but unparseable (silent fidelity invent).
+            bounded, meta = _bounded_vector_content(content, metadata)
+            rows.append({
+                "id": _stable_vector_row_id(
+                    source_id, existing_chunk_index, bounded, multi_chunk=False
+                ),
+                "content": bounded,
+                "embedding": None,
+                "metadata": meta,
+                "source_id": source_id,
+                "chunk_index": existing_chunk_index,
+                "_df_embed_error": embed_column_parse_reason,
+            })
+        elif embedding:
+            bounded, meta = _bounded_vector_content(content, metadata)
+            rows.append({
+                "id": _stable_vector_row_id(
+                    source_id, existing_chunk_index, bounded, multi_chunk=False
+                ),
+                "content": bounded,
                 "embedding": embedding,
-                "metadata": metadata,
+                "metadata": meta,
                 "source_id": source_id,
                 "chunk_index": existing_chunk_index,
             })
         elif content and prechunked:
             vectors = embed([content], model=model, durable=durable_embedding_cache)
             vector = vectors[0] if vectors else None
+            bounded, meta = _bounded_vector_content(content, metadata)
             rows.append({
-                "id": hashlib.sha256(f"{source_id}:{existing_chunk_index}:{content}".encode()).hexdigest()[:32],
-                "content": content[:4000],
+                "id": _stable_vector_row_id(
+                    source_id, existing_chunk_index, bounded, multi_chunk=False
+                ),
+                "content": bounded,
                 "embedding": vector,
-                "metadata": metadata,
+                "metadata": meta,
                 "source_id": source_id,
                 "chunk_index": existing_chunk_index,
             })
@@ -436,20 +575,35 @@ def vectorize_records(
             chunks = chunk_text(content, chunk_size=chunk_size, chunk_overlap=chunk_overlap)
             if not chunks:
                 chunks = [content]
+            multi = len(chunks) > 1
             embeddings = embed(chunks, model=model, durable=durable_embedding_cache)
             for idx, (chunk, vector) in enumerate(zip(chunks, embeddings)):
+                bounded, meta = _bounded_vector_content(chunk, metadata)
                 rows.append({
-                    "id": hashlib.sha256(f"{source_id}:{idx}:{chunk}".encode()).hexdigest()[:32],
-                    "content": chunk[:4000],
+                    "id": _stable_vector_row_id(
+                        source_id, idx, bounded, multi_chunk=multi
+                    ),
+                    "content": bounded,
                     "embedding": vector,
-                    "metadata": metadata,
+                    "metadata": meta,
                     "source_id": source_id,
                     "chunk_index": idx,
                 })
         else:
             # No content and no embedding: still index metadata as a sparse row.
+            # Fingerprint metadata — a fixed "metadata" token collided every row
+            # when source PK was missing (silent upsert overwrite).
+            meta_fp = json.dumps(
+                metadata or {},
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+                default=str,
+            )
             rows.append({
-                "id": hashlib.sha256(f"{source_id}:0:metadata".encode()).hexdigest()[:32],
+                "id": _stable_vector_row_id(
+                    source_id, 0, meta_fp or "{}", multi_chunk=False
+                ),
                 "content": "",
                 "embedding": None,
                 "metadata": metadata,

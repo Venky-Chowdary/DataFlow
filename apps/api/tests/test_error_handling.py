@@ -71,6 +71,18 @@ def test_humanize_mysql_table_full_guides_operator():
     assert "1114" in human["raw"] or "full" in human["raw"].lower()
 
 
+def test_humanize_circuit_breaker_open_guides_reset():
+    from services.error_handling import humanize_transfer_failure
+
+    human = humanize_transfer_failure(
+        ValueError("Circuit breaker for contract dfc-1 is OPEN; transfer blocked until recovery")
+    )
+    assert human["code"] == "circuit_breaker_open"
+    assert human["confidence"] == "high"
+    assert "reset" in human["fix"].lower()
+    assert "No mapped remediation" not in human["fix"]
+
+
 def test_humanize_unknown_error_does_not_invent_root_cause():
     from services.error_handling import humanize_transfer_failure
 

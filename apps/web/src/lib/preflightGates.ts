@@ -61,6 +61,24 @@ export const GATE_CATALOG: GateCatalogEntry[] = [
   { id: "g11_validation_posture", label: "Validation posture", icon: "lock", rule: "Overall posture meets the selected validation mode." },
   { id: "schema_drift", label: "Schema drift", icon: "alert", rule: "Live source/destination schema no longer matches the saved mapping contract." },
   {
+    id: "g13_source_coverage",
+    label: "Source column coverage",
+    icon: "layers",
+    rule: "Every source column is mapped to a destination column or declared an intentional omission — unaccounted columns block instead of being dropped.",
+  },
+  {
+    id: "g14_destination_requirements",
+    label: "Destination required columns",
+    icon: "layers",
+    rule: "Every NOT NULL destination column is filled by a mapping, a DEFAULT, or an identity/generated value — otherwise the write is refused before it starts.",
+  },
+  {
+    id: "g15_dest_exists_shape",
+    label: "Dest-exists shape",
+    icon: "layers",
+    rule: "Existing-table shape is classified once (equal / source-superset / dest-superset / overlap). Writes are name-addressed — never source-positional. Dest-only columns stay off SET.",
+  },
+  {
     id: "constraint_fk",
     label: "Foreign key coverage",
     icon: "shield",

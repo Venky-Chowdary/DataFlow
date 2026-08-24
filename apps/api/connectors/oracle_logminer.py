@@ -13,6 +13,7 @@ import re
 from datetime import datetime, timezone
 from typing import Any, Iterator
 
+from connectors.sql_identifiers import quote_sql_identifier
 from services.cdc_cursor_gap import CdcScnGapError
 from services.cdc_engine import ChangeBatch
 
@@ -33,12 +34,17 @@ def encode_logminer_token(
     phase: str = "streaming",
     rs_id: str = "",
     ssn: int = 0,
+    offset: int = 0,
+    last_pk: str = "",
 ) -> str:
     """Encode a LogMiner resume token.
 
     Debezium's Oracle connector commits ``(scn, rsId, ssn)`` — SCN alone is not
     unique per change. Carrying ``rs_id``/``ssn`` lets a truncated batch resume
     mid-SCN instead of replaying (or, worse, skipping) sibling rows.
+
+    Snapshot progress is ``last_pk`` (PK-seek) plus legacy ``offset``. Those
+    fields are snapshot-only — streaming handoff must not carry them.
     """
     payload: dict[str, Any] = {
         "kind": "oracle-logminer",
@@ -49,12 +55,26 @@ def encode_logminer_token(
     if rs_id:
         payload["rs_id"] = str(rs_id)
         payload["ssn"] = int(ssn or 0)
+    if phase == "snapshot":
+        if offset:
+            payload["offset"] = int(offset)
+        if last_pk:
+            payload["last_pk"] = str(last_pk)
     return json.dumps(payload, separators=(",", ":"))
 
 
 def decode_logminer_token(token: str | None) -> dict[str, Any]:
+    empty = {
+        "scn": 0,
+        "phase": "initial",
+        "table": "",
+        "rs_id": "",
+        "ssn": 0,
+        "offset": 0,
+        "last_pk": "",
+    }
     if not token:
-        return {"scn": 0, "phase": "initial", "table": "", "rs_id": "", "ssn": 0}
+        return empty
     try:
         data = json.loads(str(token))
         if isinstance(data, dict) and data.get("kind") == "oracle-logminer":
@@ -64,10 +84,12 @@ def decode_logminer_token(token: str | None) -> dict[str, Any]:
                 "table": str(data.get("table") or ""),
                 "rs_id": str(data.get("rs_id") or ""),
                 "ssn": int(data.get("ssn") or 0),
+                "offset": int(data.get("offset") or 0),
+                "last_pk": str(data.get("last_pk") or ""),
             }
     except Exception as exc:
         logger.warning("Exception suppressed: %s", exc, exc_info=exc)
-    return {"scn": 0, "phase": "initial", "table": "", "rs_id": "", "ssn": 0}
+    return dict(empty)
 
 
 def _logminer_options_sql() -> str:
@@ -422,7 +444,7 @@ class OracleLogMinerCdc:
         cfg: dict[str, Any],
         *,
         table: str | list[str],
-        primary_key: str = "ID",
+        primary_key: str = "",
         primary_keys: dict[str, str] | None = None,
         schema: str = "",
         batch_size: int = 500,
@@ -430,6 +452,7 @@ class OracleLogMinerCdc:
         cursor_key: str = "",
     ) -> None:
         from services.cdc_multi_table import normalize_table_list, tables_digest
+        from services.cdc_identity import require_cdc_primary_keys_map
 
         self.cfg = cfg
         raw_tables = normalize_table_list(table)
@@ -438,16 +461,19 @@ class OracleLogMinerCdc:
         self.tables = [t.upper() for t in raw_tables]
         self.table = self.tables[0]
         self.schema = (schema or cfg.get("schema") or cfg.get("username") or "").upper()
-        self.primary_keys: dict[str, str] = {
-            t: str((primary_keys or {}).get(t) or (primary_keys or {}).get(t.lower()) or primary_key or "ID").upper()
-            for t in self.tables
-        }
-        # Also accept original-case keys from callers.
+        # Normalize caller keys to upper for Oracle identifiers.
+        normalized_pks: dict[str, Any] | None = None
         if primary_keys:
-            for k, v in primary_keys.items():
-                if k and v:
-                    self.primary_keys[str(k).upper()] = str(v).upper()
-        self.primary_key = self.primary_keys.get(self.table, (primary_key or "ID").upper())
+            normalized_pks = {
+                str(k).upper(): str(v).upper() for k, v in primary_keys.items() if k and v
+            }
+        mapped = require_cdc_primary_keys_map(
+            self.tables,
+            primary_key=(primary_key or "").upper() or None,
+            primary_keys=normalized_pks,
+        )
+        self.primary_keys = {t: str(v).upper() for t, v in mapped.items()}
+        self.primary_key = self.primary_keys[self.table]
         self.batch_size = max(1, int(batch_size or 500))
         self._shared = len(self.tables) > 1
         state = decode_logminer_token(resume_token)
@@ -456,6 +482,10 @@ class OracleLogMinerCdc:
         self.rs_id = str(state.get("rs_id") or "")
         self.ssn = int(state.get("ssn") or 0)
         self.phase = str(state.get("phase") or "initial")
+        self.snapshot_offset = int(state.get("offset") or 0)
+        self.snapshot_last_pk = str(state.get("last_pk") or "")
+        self.snapshot_table = str(state.get("table") or "")
+        self.resume_token = resume_token
         self._last_event_at: datetime | None = None
         from services.cdc_schema_history import connection_fingerprint
 
@@ -529,10 +559,10 @@ class OracleLogMinerCdc:
         )
 
     def _qualified(self, table: str | None = None) -> str:
-        tbl = (table or self.table).upper()
+        tbl = quote_sql_identifier((table or self.table).upper())
         if self.schema:
-            return f'"{self.schema}"."{tbl}"'
-        return f'"{tbl}"'
+            return f"{quote_sql_identifier(self.schema)}.{tbl}"
+        return tbl
 
     def _token_table_label(self) -> str:
         if self._shared:
@@ -564,167 +594,224 @@ class OracleLogMinerCdc:
             logger.debug("Oracle LogMiner unavailable: %s", exc)
             return False
 
-    def snapshot(self) -> Iterator[ChangeBatch]:
-        self._acquire_cdc_lease()
-        if self._shared:
-            yield from self._snapshot_shared()
-            return
-        offset = 0
-        handoff = 0
-        pk = self.primary_key
-        with self._conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT current_scn FROM v$database")
-                row = cur.fetchone()
-                handoff = int(row[0] or 0) if row else 0
-                while True:
-                    cur.execute(
-                        f"""
-                        SELECT * FROM (
-                          SELECT t.*, ROW_NUMBER() OVER (ORDER BY t."{pk}") AS df_rn
-                          FROM {self._qualified()} t
-                        ) WHERE df_rn > :off AND df_rn <= :lim
-                        """,  # nosec B608
-                        {"off": offset, "lim": offset + self.batch_size},
-                    )
-                    cols = [d[0] for d in (cur.description or [])]
-                    rows = cur.fetchall() or []
-                    if not rows:
-                        break
-                    clean_cols = [c for c in cols if str(c).upper() != "DF_RN"]
-                    rn_idx = next((i for i, c in enumerate(cols) if str(c).upper() == "DF_RN"), None)
-                    records = []
-                    for row in rows:
-                        values = [row[i] for i in range(len(cols)) if i != rn_idx]
-                        records.append(
-                            {
-                                str(clean_cols[i]).upper(): "" if values[i] is None else str(values[i])
-                                for i in range(len(clean_cols))
-                            }
-                        )
-                    offset += len(rows)
-                    yield ChangeBatch(
-                        inserts=records,
-                        resume_token=encode_logminer_token(
-                            handoff, table=self.table, phase="snapshot"
-                        ),
-                        table=self.table,
-                    )
-                    if len(rows) < self.batch_size:
-                        break
-        self.scn = handoff
-        self.phase = "streaming"
-        yield ChangeBatch(
-            resume_token=encode_logminer_token(
-                self.scn, table=self._token_table_label(), phase="streaming"
-            ),
-            table=self.table,
-        )
-
-    def _snapshot_shared(self) -> Iterator[ChangeBatch]:
-        """Multi-table initial dump under one SCN handoff (at-least-once)."""
-        handoff = 0
-        with self._conn() as conn:
-            with conn.cursor() as cur:
-                cur.execute("SELECT current_scn FROM v$database")
-                row = cur.fetchone()
-                handoff = int(row[0] or 0) if row else 0
-                for table_name in self.tables:
-                    pk = self.primary_keys.get(table_name, self.primary_key)
-                    offset = 0
-                    while True:
-                        cur.execute(
-                            f"""
-                            SELECT * FROM (
-                              SELECT t.*, ROW_NUMBER() OVER (ORDER BY t."{pk}") AS df_rn
-                              FROM {self._qualified(table_name)} t
-                            ) WHERE df_rn > :off AND df_rn <= :lim
-                            """,  # nosec B608
-                            {"off": offset, "lim": offset + self.batch_size},
-                        )
-                        cols = [d[0] for d in (cur.description or [])]
-                        rows = cur.fetchall() or []
-                        if not rows:
-                            break
-                        clean_cols = [c for c in cols if str(c).upper() != "DF_RN"]
-                        rn_idx = next(
-                            (i for i, c in enumerate(cols) if str(c).upper() == "DF_RN"),
-                            None,
-                        )
-                        records = []
-                        for row in rows:
-                            values = [row[i] for i in range(len(cols)) if i != rn_idx]
-                            records.append(
-                                {
-                                    str(clean_cols[i]).upper(): (
-                                        "" if values[i] is None else str(values[i])
-                                    )
-                                    for i in range(len(clean_cols))
-                                }
-                            )
-                        offset += len(rows)
-                        self._last_event_at = datetime.now(timezone.utc)
-                        yield ChangeBatch(
-                            inserts=records,
-                            resume_token=encode_logminer_token(
-                                handoff, table=table_name, phase="snapshot"
-                            ),
-                            table=table_name,
-                            ack_barrier=False,
-                        )
-                        if len(rows) < self.batch_size:
-                            break
-        self.scn = handoff
-        self.phase = "streaming"
-        yield ChangeBatch(
-            resume_token=encode_logminer_token(
-                self.scn, table=self._token_table_label(), phase="streaming"
-            ),
-            ack_barrier=True,
-        )
-
-    def _fetch_incremental_chunk(self, sig: Any) -> tuple[list[dict[str, Any]], str | None, bool]:
-        """PK-ordered chunk for signal-driven incremental snapshots."""
-        pk = (sig.primary_key or self.primary_key or "ID").upper()
-        limit = int(sig.chunk_size or self.batch_size)
-        last_pk = sig.last_pk or ""
-        with self._conn() as conn:
-            with conn.cursor() as cur:
-                if last_pk:
-                    cur.execute(
-                        f"""
-                        SELECT * FROM (
-                          SELECT t.*, ROW_NUMBER() OVER (ORDER BY t."{pk}") AS df_rn
-                          FROM {self._qualified()} t
-                          WHERE t."{pk}" > :last_pk
-                        ) WHERE df_rn <= :lim
-                        """,  # nosec B608
-                        {"last_pk": last_pk, "lim": limit},
-                    )
-                else:
-                    cur.execute(
-                        f"""
-                        SELECT * FROM (
-                          SELECT t.*, ROW_NUMBER() OVER (ORDER BY t."{pk}") AS df_rn
-                          FROM {self._qualified()} t
-                        ) WHERE df_rn <= :lim
-                        """,  # nosec B608
-                        {"lim": limit},
-                    )
-                cols = [d[0] for d in (cur.description or [])]
-                rows = cur.fetchall() or []
+    def _rows_to_records(self, cols: list[Any], rows: list[Any]) -> list[dict[str, str]]:
         clean_cols = [c for c in cols if str(c).upper() != "DF_RN"]
-        rn_idx = next((i for i, c in enumerate(cols) if str(c).upper() == "DF_RN"), None)
-        records = []
+        rn_idx = next(
+            (i for i, c in enumerate(cols) if str(c).upper() == "DF_RN"),
+            None,
+        )
+        records: list[dict[str, str]] = []
         for row in rows:
-            values = [row[i] for i in range(len(cols)) if i != rn_idx]
+            if rn_idx is not None:
+                values = [row[i] for i in range(len(cols)) if i != rn_idx]
+            else:
+                values = list(row)
             records.append(
                 {
                     str(clean_cols[i]).upper(): "" if values[i] is None else str(values[i])
                     for i in range(len(clean_cols))
                 }
             )
-        new_last = records[-1].get(pk) if records else last_pk
+        return records
+
+    def snapshot(self) -> Iterator[ChangeBatch]:
+        self._acquire_cdc_lease()
+        if self._shared:
+            yield from self._snapshot_shared()
+            return
+        offset = self.snapshot_offset if self.phase == "snapshot" else 0
+        last_pk = self.snapshot_last_pk if self.phase == "snapshot" else ""
+        # Mid-dump resume keeps the original SCN (not a new tip).
+        handoff = self.scn if (self.phase == "snapshot" and self.scn) else 0
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                if not handoff:
+                    cur.execute("SELECT current_scn FROM v$database")
+                    row = cur.fetchone()
+                    handoff = int(row[0] or 0) if row else 0
+                yield from self._iter_snapshot_table(
+                    cur,
+                    self.table,
+                    handoff=handoff,
+                    offset=offset,
+                    last_pk=last_pk,
+                    ack_barrier=False,
+                )
+        self.scn = handoff
+        self.phase = "streaming"
+        self.snapshot_offset = 0
+        self.snapshot_last_pk = ""
+        self.resume_token = encode_logminer_token(
+            self.scn, table=self._token_table_label(), phase="streaming"
+        )
+        yield ChangeBatch(
+            resume_token=self.resume_token,
+            table=self.table,
+        )
+
+    def _snapshot_shared(self) -> Iterator[ChangeBatch]:
+        """Multi-table initial dump under one SCN handoff (at-least-once)."""
+        resume_table = (self.snapshot_table or "").upper() if self.phase == "snapshot" else ""
+        resume_last_pk = self.snapshot_last_pk if self.phase == "snapshot" else ""
+        resume_offset = self.snapshot_offset if self.phase == "snapshot" else 0
+        if resume_table and "," in resume_table:
+            resume_table = ""
+            resume_last_pk = ""
+            resume_offset = 0
+        tables = list(self.tables)
+        if resume_table in tables:
+            tables = tables[tables.index(resume_table) :]
+        handoff = self.scn if (self.phase == "snapshot" and self.scn) else 0
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                if not handoff:
+                    cur.execute("SELECT current_scn FROM v$database")
+                    row = cur.fetchone()
+                    handoff = int(row[0] or 0) if row else 0
+                for table_name in tables:
+                    table_last_pk = resume_last_pk if table_name == resume_table else ""
+                    table_offset = resume_offset if table_name == resume_table else 0
+                    yield from self._iter_snapshot_table(
+                        cur,
+                        table_name,
+                        handoff=handoff,
+                        offset=table_offset,
+                        last_pk=table_last_pk,
+                        ack_barrier=False,
+                    )
+        self.scn = handoff
+        self.phase = "streaming"
+        self.snapshot_offset = 0
+        self.snapshot_last_pk = ""
+        self.resume_token = encode_logminer_token(
+            self.scn, table=self._token_table_label(), phase="streaming"
+        )
+        yield ChangeBatch(
+            resume_token=self.resume_token,
+            ack_barrier=True,
+        )
+
+    def _iter_snapshot_table(
+        self,
+        cur: Any,
+        table_name: str,
+        *,
+        handoff: int,
+        offset: int,
+        last_pk: str,
+        ack_barrier: bool,
+    ) -> Iterator[ChangeBatch]:
+        """Page one table: held scan, PK-seek, or legacy ROW_NUMBER."""
+        from connectors.sql_snapshot_scan import fetch_scan_page
+        from services.cdc_snapshot_resume import (
+            classify_snapshot_resume,
+            last_pk_from_records,
+            quoted_pk_columns,
+            snapshot_keyset_sql,
+        )
+        from services.cdc_snapshot_window import _pk_columns
+
+        pk_cols = [c.upper() for c in _pk_columns(self.primary_keys.get(table_name, self.primary_key))]
+        quoted = quoted_pk_columns(pk_cols, '"')
+        order_sql = ", ".join(quoted)
+        qualified = self._qualified(table_name)
+        mode = classify_snapshot_resume(last_pk=last_pk, offset=offset)
+        if mode == "scan":
+            cur.execute(
+                f"SELECT * FROM {qualified} ORDER BY {order_sql}"  # nosec B608
+            )
+        while True:
+            if mode == "scan":
+                rows = fetch_scan_page(cur, self.batch_size)
+            elif mode == "keyset":
+                sql, params = snapshot_keyset_sql(
+                    table_ref=qualified,
+                    quoted_pk_columns=quoted,
+                    last_pk=last_pk,
+                    limit=self.batch_size,
+                    dialect="oracle",
+                )
+                cur.execute(sql, params)
+                rows = cur.fetchall() or []
+            else:
+                pk = quote_sql_identifier(self.primary_keys.get(table_name, self.primary_key))
+                cur.execute(
+                    f"""
+                    SELECT * FROM (
+                      SELECT t.*, ROW_NUMBER() OVER (ORDER BY t.{pk}) AS df_rn
+                      FROM {qualified} t
+                    ) WHERE df_rn > :off AND df_rn <= :lim
+                    """,  # nosec B608
+                    {"off": offset, "lim": offset + self.batch_size},
+                )
+                rows = cur.fetchall() or []
+            cols = [d[0] for d in (cur.description or [])]
+            if not rows:
+                break
+            records = self._rows_to_records(cols, rows)
+            offset += len(rows)
+            last_pk = last_pk_from_records(records, pk_cols) or last_pk
+            self.snapshot_offset = offset
+            self.snapshot_last_pk = last_pk
+            self._last_event_at = datetime.now(timezone.utc)
+            yield ChangeBatch(
+                inserts=records,
+                resume_token=encode_logminer_token(
+                    handoff,
+                    table=table_name,
+                    phase="snapshot",
+                    offset=offset,
+                    last_pk=last_pk,
+                ),
+                table=table_name,
+                ack_barrier=ack_barrier,
+            )
+            if len(rows) < self.batch_size:
+                break
+
+    def _fetch_incremental_chunk(self, sig: Any) -> tuple[list[dict[str, Any]], str | None, bool]:
+        """PK-ordered chunk for signal-driven incremental snapshots."""
+        from services.cdc_snapshot_resume import (
+            last_pk_from_records,
+            quoted_pk_columns,
+            snapshot_keyset_sql,
+        )
+        from services.cdc_snapshot_window import _pk_columns
+
+        pk_name = (sig.primary_key or self.primary_key or "").upper()
+        if not pk_name:
+            raise ValueError(
+                "Oracle LogMiner incremental snapshot requires primary_key — "
+                "refuse inventing default 'ID'"
+            )
+        pk_cols = [c.upper() for c in _pk_columns(sig.primary_key or self.primary_key)]
+        quoted = quoted_pk_columns(pk_cols, '"')
+        limit = int(sig.chunk_size or self.batch_size)
+        last_pk = sig.last_pk or ""
+        qualified = self._qualified()
+        with self._conn() as conn:
+            with conn.cursor() as cur:
+                if last_pk:
+                    sql, params = snapshot_keyset_sql(
+                        table_ref=qualified,
+                        quoted_pk_columns=quoted,
+                        last_pk=last_pk,
+                        limit=limit,
+                        dialect="oracle",
+                    )
+                    cur.execute(sql, params)
+                else:
+                    order_sql = ", ".join(quoted)
+                    cur.execute(
+                        f"SELECT * FROM ("  # nosec B608
+                        f"SELECT * FROM {qualified} ORDER BY {order_sql}"
+                        f") WHERE ROWNUM <= :lim",
+                        {"lim": limit},
+                    )
+                cols = [d[0] for d in (cur.description or [])]
+                rows = cur.fetchall() or []
+        records = self._rows_to_records(cols, rows)
+        new_last = last_pk_from_records(records, pk_cols) or last_pk
         done = len(records) < limit
         return records, str(new_last) if new_last is not None else last_pk, done
 
@@ -852,6 +939,7 @@ class OracleLogMinerCdc:
             fetch_chunk=self._fetch_incremental_chunk,
             stream_events_during_chunk=self._peek_stream_events_during_chunk,
             max_chunks_per_poll=1,
+            dest_resume=self.resume_token,
         )
 
         inserts: list[dict[str, Any]] = []

@@ -24,7 +24,7 @@ def test_sql_base_type_preserves_timestamptz_with_precision():
     assert sql_base_type("TIMESTAMP(6) WITHOUT TIME ZONE") == "TIMESTAMP"
     assert sql_base_type("DATETIME(6)") == "DATETIME"
     assert sql_base_type("DECIMAL(10,2)") == "DECIMAL"
-    assert sql_base_type("TIME(6) WITH TIME ZONE") == "TIME WITH TIME ZONE"
+    assert sql_base_type("TIME(6) WITH TIME ZONE") == "TIMETZ"
     assert sql_base_type("DATETIMEOFFSET(7)") == "TIMESTAMPTZ"
 
 
@@ -61,14 +61,16 @@ def test_normalize_sql_bind_timestamptz_precision_ddl():
 
 
 def test_generic_sql_to_sa_value_uses_ddl_tz_polarity():
-    from connectors.generic_sql import _to_sa_value
+    from connectors.generic_sql import _sa_type_for_logical, _to_sa_value
 
-    # logical collapsed to datetime must still honor ddl_type WITH TIME ZONE.
+    # Logical collapsed to datetime must still honor SA timezone=True from DDL.
+    sa_t = _sa_type_for_logical("TIMESTAMP WITH TIME ZONE", "postgresql", "postgresql")
+    assert getattr(sa_t, "timezone", False) is True
     got = _to_sa_value(
         "2024-08-09T01:58:42Z",
         "datetime",
-        None,
-        "TIMESTAMP WITH TIME ZONE",
+        sa_t,
+        "postgresql",
         "postgresql",
     )
     assert isinstance(got, datetime)

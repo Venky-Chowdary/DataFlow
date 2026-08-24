@@ -225,21 +225,37 @@ def schema_map_from_registry_doc(schema_doc: dict[str, Any]) -> dict[str, str]:
         if isinstance(props, dict) and props:
             out: dict[str, str] = {}
             for name, prop in props.items():
-                if isinstance(prop, dict):
-                    jtype = str(prop.get("type") or "string").lower()
-                    out[str(name)] = {
-                        "string": "TEXT",
-                        "integer": "INTEGER",
-                        "number": "DECIMAL",
-                        "boolean": "BOOLEAN",
-                        "array": "ARRAY",
-                        "object": "JSON",
-                        "null": "TEXT",
-                    }.get(jtype, "TEXT")
-                else:
-                    out[str(name)] = "TEXT"
+                out[str(name)] = _logical_from_json_schema_prop(prop)
             return out
     return {}
+
+
+def _logical_from_json_schema_prop(prop: Any) -> str:
+    """Map a JSON Schema property object to a Datawrap logical carrier."""
+    if not isinstance(prop, dict):
+        return "TEXT"
+    if str(prop.get("contentMediaType") or "").lower() in {
+        "application/x-decimal",
+        "text/x-decimal",
+    }:
+        return "DECIMAL"
+    if str(prop.get("contentEncoding") or "").lower() == "base64":
+        return "BINARY"
+    raw_type = prop.get("type")
+    if isinstance(raw_type, list):
+        types = [str(t).lower() for t in raw_type if str(t).lower() != "null"]
+        jtype = types[0] if types else "string"
+    else:
+        jtype = str(raw_type or "string").lower()
+    return {
+        "string": "TEXT",
+        "integer": "INTEGER",
+        "number": "FLOAT",
+        "boolean": "BOOLEAN",
+        "array": "ARRAY",
+        "object": "JSON",
+        "null": "TEXT",
+    }.get(jtype, "TEXT")
 
 
 def decode_kafka_value(

@@ -24,9 +24,11 @@ from __future__ import annotations
 import json
 import re
 from collections import Counter
+from contextlib import contextmanager
 from datetime import datetime
 from typing import Any
 
+from services.decimal_observe import observe_numeric_samples
 from services.transform_engine import (
     NULL_SENTINELS,
     _active_date_locale,
@@ -34,6 +36,7 @@ from services.transform_engine import (
     _parse_datetime,
     _parse_decimal,
 )
+from services.value_serializer import evidence_samples, is_null_evidence
 
 # Logical types emitted to mapping / preflight / DDL layers
 LOGICAL_TYPES = frozenset({
@@ -505,6 +508,39 @@ def _classify_value(value: str, *, field_name: str | None = None) -> str:
     return "VARCHAR"
 
 
+@contextmanager
+def _column_date_locale(samples: list[str]):
+    """Resolve one date ordering for the whole column before classifying cells.
+
+    ``12/31/2024`` is unambiguously MDY, but ``5/8/1967`` beside it is not, and a
+    cell judged on its own becomes VARCHAR. One such cell made the column mixed,
+    so a date column landed as text even though the write path went on to parse
+    every value as MDY correctly — the type and the values disagreed.
+
+    Reading the ordering from the column and classifying under it is what a
+    reader does with a CSV: the unambiguous rows settle the ambiguous ones. An
+    explicit transfer locale still wins, and a column with no unambiguous member
+    resolves to nothing and stays text rather than guessing an ordering.
+    """
+    from services.transform_engine import (
+        _active_date_locale,
+        infer_date_locale,
+        reset_active_date_locale,
+        set_active_date_locale,
+    )
+
+    token = None
+    if not _active_date_locale():
+        resolved = infer_date_locale(samples)
+        if resolved:
+            token = set_active_date_locale(resolved)
+    try:
+        yield
+    finally:
+        if token is not None:
+            reset_active_date_locale(token)
+
+
 def infer_type(
     samples: list[str], *, threshold: float = 0.85, field_name: str | None = None
 ) -> str:
@@ -533,7 +569,7 @@ def samples_fit_logical_type(samples: list[str], logical_type: str, *, field_nam
     """True when every non-empty sample coerces cleanly to ``logical_type``."""
     from services.transform_engine import apply_transform, infer_transform_for_mapping
 
-    non_empty = [str(s).strip() for s in samples if s is not None and str(s).strip()]
+    non_empty = evidence_samples(samples)
     if not non_empty:
         return True
     lt = (logical_type or "VARCHAR").upper()
@@ -684,7 +720,7 @@ def infer_column(
 
     Returns keys: logical_type, semantic_role, confidence, notes, samples.
     """
-    non_empty = [s.strip() for s in samples if s and str(s).strip()]
+    non_empty = evidence_samples(samples)
     notes: list[str] = []
     if not non_empty:
         return {
@@ -723,12 +759,28 @@ def infer_column(
                 "samples": non_empty[:8],
             }
 
-    counts: Counter[str] = Counter(_classify_value(s, field_name=field_name) for s in non_empty)
+    with _column_date_locale(non_empty):
+        counts: Counter[str] = Counter(
+            _classify_value(s, field_name=field_name) for s in non_empty
+        )
     types = set(counts.keys())
 
     if types <= {"INTEGER", "DECIMAL"}:
-        inferred = "DECIMAL" if "DECIMAL" in types else "INTEGER"
+        # Sample-aware DECIMAL(p,s) / FLOAT invent — never bare DECIMAL → (38,15).
+        obs = observe_numeric_samples(non_empty)
+        inferred = str(obs.get("carrier") or ("DECIMAL" if "DECIMAL" in types else "INTEGER"))
         role = "numeric"
+        if obs.get("kind") == "ieee_float":
+            notes.append(
+                "IEEE/Excel float residue — invent FLOAT (not fake money DECIMAL)"
+            )
+        elif obs.get("kind") == "fixed_decimal":
+            notes.append(
+                f"observed DECIMAL({obs.get('precision')},{obs.get('scale')}) "
+                f"from samples (max_int={obs.get('max_int_digits')})"
+            )
+        elif obs.get("kind") == "integer":
+            notes.append("all integral samples")
     elif types <= {"DATE", "TIMESTAMP", "TIMESTAMPTZ", "TIME"}:
         tz_count = counts.get("TIMESTAMPTZ", 0)
         # Promote to TIMESTAMPTZ only when the column is unanimously TZ-aware,
@@ -838,18 +890,30 @@ def infer_column(
             inferred = "BINARY"
             role = "binary"
 
+    # Bare epoch-shaped digits (10 or 13 chars) classify as TIMESTAMP per value.
+    # Two ways that misreads an ordinary integer column:
+    #   unanimous — every sample epoch-shaped, so the column reads as TIMESTAMP;
+    #   mixed     — ordinary short integers alongside 10-digit ones give
+    #               {INTEGER, TIMESTAMP}, which no widening rule covers, so the
+    #               column fell through to VARCHAR and an integer key landed as
+    #               text on Mongo/CSV → SQL routes.
+    # The unanimous case needs a name to judge (a nameless all-epoch column is
+    # more likely a real timestamp); the mixed case is already self-evidently
+    # not a timestamp column, so it recovers even unnamed.
+    epoch_mixed = inferred == "VARCHAR" and types == {"INTEGER", "TIMESTAMP"}
     if (
-        inferred == "TIMESTAMP"
-        and field_name
-        and not _is_timestamp_field_name(field_name)
-    ):
+        (inferred == "TIMESTAMP" and field_name) or epoch_mixed
+    ) and not _is_timestamp_field_name(field_name or ""):
         if all(re.match(r"^[+\-]?\d+$", v) for v in non_empty):
             try:
                 for v in non_empty:
                     int(v)
-                inferred = "INTEGER"
+                # Re-observe so a value beyond int64 still widens to DECIMAL
+                # rather than being forced into INTEGER.
+                obs = observe_numeric_samples(non_empty)
+                inferred = str(obs.get("carrier") or "INTEGER")
                 role = "numeric"
-                notes.append("long digits without temporal name — INTEGER not TIMESTAMP")
+                notes.append("long digits without temporal name — numeric not TIMESTAMP")
             except ValueError:
                 inferred = "VARCHAR"
                 role = "text"
@@ -888,8 +952,8 @@ def infer_columns_from_rows(headers: list[str], rows: list[list[Any]], *, max_sa
                 "semantic_role": intel["semantic_role"],
                 "confidence": intel["confidence"],
                 "notes": intel["notes"],
-                "nullable": any(not str(s).strip() for s in samples),
-                "samples": [s for s in samples[:5] if str(s).strip()],
+                "nullable": any(is_null_evidence(s) for s in samples),
+                "samples": evidence_samples(samples[:5]),
             }
         )
     return columns

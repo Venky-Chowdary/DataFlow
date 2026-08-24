@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "source_dataset": "synthetic_v1.jsonl",
+  "targets": [
+    "account_number",
+    "beneficiary_account",
+    "currency_code",
+    "customer_id",
+    "description",
+    "order_date",
+    "order_total",
+    "payment_amount",
+    "payment_date",
+    "reference_number",
+    "sku",
+    "status",
+    "transaction_id"
+  ]
+}

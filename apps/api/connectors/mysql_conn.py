@@ -105,5 +105,28 @@ def get_connection(
 
     from connectors.write_resilience import apply_mysql_session_guards
 
-    apply_mysql_session_guards(conn, lock_wait_seconds=lock_wait_s)
+    # Fail-closed STRICT only on write/DDL purposes. Read/introspect/probe soft-log
+    # when managed MySQL forbids sql_mode changes (still prefer STRICT when allowed).
+    require_strict = purpose_l in {"write", "bulk", "ddl", "setup", "drop"}
+    apply_mysql_session_guards(
+        conn,
+        lock_wait_seconds=lock_wait_s,
+        require_strict_sql_mode=require_strict,
+    )
     return conn
+
+
+def enable_autocommit(conn: Any) -> None:
+    """Enable autocommit on a PyMySQL connection without shadowing the method.
+
+    ``conn.autocommit`` is a *method*. Assignment ``conn.autocommit = True``
+    replaces it with a bool; ``get_autocommit()`` stays False, so ``close()``
+    rolls back DELETE. CDC tombstones then report rowcount 1 while dest
+    ``COUNT(*)`` does not drop — leftover rows after a source delete.
+    psycopg2's ``autocommit`` *is* a property; this helper is MySQL-only.
+    """
+    setter = getattr(conn, "autocommit", None)
+    if callable(setter):
+        setter(True)
+        return
+    conn.autocommit = True

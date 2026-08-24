@@ -68,7 +68,48 @@ def format_snowflake_bind(value: Any, sf_type: str) -> Any:
             return coerced.date().isoformat()
         return value
     if ddl in {"TIMESTAMP_LTZ", "TIMESTAMP_TZ", "TIMESTAMPTZ"}:
+        # Refuse offset-less wires before aware_utc parse attaches UTC invent.
+        def _wire_has_tz(raw: Any) -> bool:
+            if isinstance(raw, datetime):
+                return raw.tzinfo is not None
+            if isinstance(raw, bool):
+                return False
+            if isinstance(raw, (int, float)):
+                return True  # epoch seconds are UTC instants
+            if not isinstance(raw, str):
+                return False
+            text = raw.strip()
+            if not text:
+                return False
+            if text.endswith(("Z", "z")) or text.upper().endswith(" UTC"):
+                return True
+            # ISO offset suffix +HH:MM / -HH:MM or +HHMM
+            if len(text) >= 6 and text[-6] in "+-" and text[-3] == ":":
+                return text[-5:-3].isdigit() and text[-2:].isdigit()
+            if len(text) >= 5 and text[-5] in "+-" and text[-4:].isdigit():
+                return True
+            return False
+
+        if not _wire_has_tz(value):
+            raise ValueError(
+                f"Snowflake {ddl} refused naive datetime — provide offset/Z "
+                "(refuse silent session-TZ / UTC invent)"
+            )
         coerced = parse_sql_datetime(value, aware_utc=True)
+        if isinstance(coerced, datetime):
+            from datetime import timezone as _tz
+
+            utc = (
+                coerced.astimezone(_tz.utc)
+                if coerced.tzinfo is not None
+                else coerced.replace(tzinfo=_tz.utc)
+            )
+            if utc.microsecond:
+                body = utc.strftime("%Y-%m-%d %H:%M:%S.%f").rstrip("0").rstrip(".")
+            else:
+                body = utc.strftime("%Y-%m-%d %H:%M:%S")
+            return f"{body} +00:00"
+        return value
     else:
         # TIMESTAMP_NTZ / bare TIMESTAMP / DATETIME / TIME: keep civil digits.
         # Do NOT astimezone(UTC) then strip — that invents a different local time
@@ -205,7 +246,11 @@ def coerce_mapped_rows_snowflake(
             if i >= len(cells) or cells[i] is None:
                 continue
             if snowflake_temporal_ddl(typ):
-                cells[i] = format_snowflake_bind(cells[i], typ)
+                try:
+                    cells[i] = format_snowflake_bind(cells[i], typ)
+                except ValueError:
+                    # Leave raw for bind quarantine — refuse batch-abort invent.
+                    pass
         out.append(tuple(cells))
     return out
 
@@ -228,7 +273,15 @@ def bigquery_json_cell(value: Any) -> Any:
     """
     from services.value_serializer import sanitize_json_value
 
-    if value is None or isinstance(value, (bool, str, float)):
+    if value is None or isinstance(value, (bool, str)):
+        return value
+    if isinstance(value, float):
+        import math
+
+        if not math.isfinite(value):
+            raise ValueError(
+                f"non-finite float refused for BigQuery JSON wire: {value!r}"
+            )
         return value
     if isinstance(value, int):
         return str(value) if abs(value) > _BQ_EXACT_JSON_INT_MAX else value
@@ -286,15 +339,30 @@ def records_for_bigquery(
             if is_missing_sentinel(val):
                 continue
             element_type = bigquery_repeated_element(typ)
-            if val is not None and element_type is not None:
-                rec[col] = bigquery_repeated_cell(val, element_type)
-            elif val is not None and bigquery_temporal_ddl(typ):
-                rec[col] = format_bigquery_bind(val, typ)
-            elif val is not None:
-                rec[col] = bigquery_json_cell(
-                    normalize_sql_bind_value(val, typ, engine="bigquery")
-                )
-            else:
+            try:
+                if val is not None and element_type is not None:
+                    rec[col] = bigquery_repeated_cell(val, element_type)
+                elif val is not None and bigquery_temporal_ddl(typ):
+                    rec[col] = format_bigquery_bind(val, typ)
+                elif val is not None:
+                    rec[col] = bigquery_json_cell(
+                        normalize_sql_bind_value(val, typ, engine="bigquery")
+                    )
+                else:
+                    rec[col] = val
+            except ValueError as exc:
+                # Never leave datetime/Decimal/bytes on the JSON wire — that
+                # aborts the whole batch with TypeError at ``json.dumps`` and
+                # bypasses quarantine. Propagate so the writer holds the row out.
+                from datetime import date as _date
+                from datetime import datetime as _dt
+                from decimal import Decimal as _Decimal
+                from uuid import UUID as _UUID
+
+                if isinstance(
+                    val, (_dt, _date, _Decimal, bytes, bytearray, memoryview, _UUID)
+                ):
+                    raise ValueError(f"BigQuery JSON wire refused {col}: {exc}") from exc
                 rec[col] = val
         records.append(rec)
     return records

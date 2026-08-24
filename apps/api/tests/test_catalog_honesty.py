@@ -90,6 +90,57 @@ def test_postgresql_is_certified_transfer_ready() -> None:
     assert row["effective_status"] == "live"
     assert row["certification_tier"] == "certified"
     assert certification_tier("postgresql", "postgresql", row["capabilities"], transfer_ready_flag=True) == "certified"
+    assert row.get("is_hosted_alias") is False
+    assert row.get("alias_of") is None
+
+
+def test_snowflake_cloud_and_edition_tiles_are_aliases() -> None:
+    """AWS / Azure / GCP / Standard / Enterprise are the same Snowflake login."""
+    for catalog_id in (
+        "snowflake_aws",
+        "snowflake_azure",
+        "snowflake_gcp",
+        "snowflake_standard",
+        "snowflake_enterprise",
+    ):
+        row = enrich_catalog_entry(
+            {
+                "id": catalog_id,
+                "name": catalog_id,
+                "category": "warehouse",
+                "status": "live",
+                "description": "",
+            }
+        )
+        assert row["driver_type"] == "snowflake", catalog_id
+        assert row["is_hosted_alias"] is True, catalog_id
+        assert row["alias_of"] == "snowflake", catalog_id
+
+
+def test_e1_hosted_twin_is_alias_not_extra_engine() -> None:
+    """Phase E1 — postgresql_rds shares the postgresql driver; not a second engine."""
+    row = enrich_catalog_entry(
+        {
+            "id": "postgresql_rds",
+            "name": "PostgreSQL (RDS)",
+            "category": "database",
+            "status": "live",
+            "description": "",
+        }
+    )
+    assert row["driver_type"] == "postgresql"
+    assert row["is_hosted_alias"] is True
+    assert row["alias_of"] == "postgresql"
+
+
+def test_e1_catalog_summary_prefers_unique_drivers() -> None:
+    from services.catalog_service import catalog_summary
+
+    summary = catalog_summary()
+    assert summary["unique_drivers"] == summary["transfer_live"] == summary["certified"]
+    assert summary["unique_drivers"] <= summary.get("catalog_tile_total", summary["total"])
+    assert "alias_tiles" in summary
+    assert "honesty_note" in summary
 
 
 def test_redshift_is_planned_until_production_sku() -> None:
