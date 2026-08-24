@@ -92,3 +92,49 @@ def test_workspace_notification_api(tmp_path, monkeypatch):
 
     del_resp = client.delete(f"/api/v1/workspace/notifications/{data['id']}")
     assert del_resp.status_code == 200
+
+
+def test_only_slack_and_teams_acknowledgements_count_as_delivered(monkeypatch):
+    """A 200 from something that is not Slack/Teams is not a delivered alert.
+
+    "Test message sent" was rendered for any HTTP 2xx, so a webhook aimed at the
+    wrong host read as a working alert route until an incident went unnoticed.
+    """
+    from services import notification_service
+    from services.notification_store import NotificationChannel
+
+    answers: dict[str, object] = {}
+    monkeypatch.setattr(notification_service, "_http_post", lambda *a, **k: answers)
+
+    slack = NotificationChannel(
+        id="c1", workspace_id="ws", kind="slack", label="Ops",
+        config={"webhook_url": "https://hooks.slack.com/services/x"},
+    )
+    teams = NotificationChannel(
+        id="c2", workspace_id="ws", kind="teams", label="Ops",
+        config={"webhook_url": "https://example.webhook.office.com/x"},
+    )
+
+    # An intranet page answering 200 is not an acknowledgement.
+    answers = {"ok": True, "status": 200, "body": "<html>hello</html>"}
+    refused = notification_service._send_slack(slack, {"text": "hi"})
+    assert refused["ok"] is False
+    assert "did not acknowledge as Slack" in refused["error"]
+    refused_teams = notification_service._send_teams(teams, {"text": "hi"})
+    assert refused_teams["ok"] is False
+    assert "Microsoft Teams" in refused_teams["error"]
+
+    # What each provider actually answers.
+    answers = {"ok": True, "status": 200, "body": "ok"}
+    assert notification_service._send_slack(slack, {"text": "hi"})["ok"] is True
+    answers = {"ok": True, "status": 200, "body": '{"ok": true}'}
+    assert notification_service._send_slack(slack, {"text": "hi"})["ok"] is True
+    answers = {"ok": True, "status": 200, "body": "1"}
+    assert notification_service._send_teams(teams, {"text": "hi"})["ok"] is True
+    # Teams Workflows accepts without a body.
+    answers = {"ok": True, "status": 202, "body": ""}
+    assert notification_service._send_teams(teams, {"text": "hi"})["ok"] is True
+
+    # A transport failure keeps its own reason.
+    answers = {"ok": False, "error": "HTTP Error 404: Not Found"}
+    assert notification_service._send_slack(slack, {"text": "hi"})["error"] == "HTTP Error 404: Not Found"

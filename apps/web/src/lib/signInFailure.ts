@@ -7,9 +7,12 @@ import { ApiError } from "./api";
  * "Control plane unreachable" and sent the operator to check infrastructure that
  * was answering normally.
  *
- * - `api`    — no answer arrived at all (fetch never completed).
+ * - `api`    — nothing that can answer a sign-in was reached: the fetch never
+ *   completed, or a proxy in front of the API reported the upstream as dead.
+ *   Behind the dev/reverse proxy a stopped API answers 500 with an empty body,
+ *   which is not the API refusing a credential.
  * - `config` — the API answered 503: it has no identities configured yet.
- * - `auth`   — the API answered; the credentials were refused.
+ * - `auth`   — the API answered about the credentials; they were refused.
  */
 export type SignInFailure = "api" | "config" | "auth";
 
@@ -19,5 +22,11 @@ export function classifySignInFailure(err: unknown): SignInFailure {
   if (status === 0 && /Failed to fetch|NetworkError|timed out|fetch/i.test(message)) {
     return "api";
   }
-  return status === 503 ? "config" : "auth";
+  if (status === 503) return "config";
+  // No 5xx is ever a statement about the credentials: a stopped API behind the
+  // dev proxy answers 500 with an empty body, and a gateway answers 502/504.
+  // Blaming the password there sends the operator to reset something that was
+  // never wrong.
+  if (status >= 500) return "api";
+  return "auth";
 }

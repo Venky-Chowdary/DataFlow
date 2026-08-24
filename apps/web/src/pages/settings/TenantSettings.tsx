@@ -41,6 +41,8 @@ export function TenantSettings() {
   const [ipAllowlist, setIpAllowlist] = useState("");
   const [workspaceId, setWorkspaceId] = useState("");
 
+  const [switching, setSwitching] = useState(false);
+
   const [newKeyLabel, setNewKeyLabel] = useState("");
   const [newKeyProvider, setNewKeyProvider] = useState<ByokKey["provider"]>("local");
   const [newKeyMaterial, setNewKeyMaterial] = useState("");
@@ -94,6 +96,34 @@ export function TenantSettings() {
       })
       .finally(() => setLoading(false));
   }, []);
+
+  /** Read the named workspace's tenant instead of assuming it has none.
+   *
+   * Pointing the selector at another workspace used to change only which
+   * workspace a *new* tenant would be written to, so a workspace that already
+   * had one still read "No tenant configured" — and saving raised a conflict
+   * the operator could not see the cause of.
+   */
+  const selectWorkspace = async (id: string) => {
+    setWorkspaceId(id);
+    if (!id) return;
+    setSwitching(true);
+    try {
+      const t = await fetchTenant(id).catch(() => null);
+      setTenant(t);
+      if (t) {
+        setName(t.name);
+        setCustomDomain(t.custom_domain);
+        setDataRegion(t.data_region || "us-east-1");
+        setSecurityContact(t.security_contact_email);
+        setMfaRequired(t.mfa_required);
+        setSessionTimeout(t.session_timeout_hours);
+        setIpAllowlist((t.ip_allowlist || []).join("\n"));
+      }
+    } finally {
+      setSwitching(false);
+    }
+  };
 
   const canSave = useMemo(() => {
     if (!tenant) return name.trim() && workspaceId;
@@ -184,7 +214,7 @@ export function TenantSettings() {
             {!tenant && (
               <div className="df2-settings-field">
                 <label htmlFor="tenant-workspace">Workspace</label>
-                <select id="tenant-workspace" className="df2-select" value={workspaceId} onChange={(e) => setWorkspaceId(e.target.value)}>
+                <select id="tenant-workspace" className="df2-select" value={workspaceId} disabled={switching} onChange={(e) => void selectWorkspace(e.target.value)}>
                   {workspaces.map((w) => <option key={w.id} value={w.id}>{w.name}</option>)}
                 </select>
               </div>

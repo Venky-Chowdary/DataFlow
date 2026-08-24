@@ -18,6 +18,13 @@ test("only a request that never got an answer is an unreachable control plane", 
   assert.equal(classifySignInFailure(new Error("request timed out")), "api");
 });
 
+test("a stopped API behind a proxy is unreachable, not a bad password", () => {
+  // The Vite dev proxy answers 500 with an empty body when uvicorn is down.
+  assert.equal(classifySignInFailure(new ApiError("Sign-in failed", 500)), "api");
+  assert.equal(classifySignInFailure(new ApiError("Bad gateway", 502)), "api");
+  assert.equal(classifySignInFailure(new ApiError("Gateway timeout", 504)), "api");
+});
+
 test("503 is a deployment that has no identities yet", () => {
   assert.equal(classifySignInFailure(new ApiError("No users configured", 503)), "config");
 });

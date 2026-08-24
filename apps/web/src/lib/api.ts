@@ -3747,8 +3747,17 @@ export type SecurityPosture = {
   attestations: Array<{ name: string; last_completed?: string | null; next_due?: string | null; status?: string }>;
 };
 
-export async function fetchTenant(): Promise<Tenant | null> {
-  const res = await apiFetch(`${API_BASE}/workspace/tenant`);
+/** The tenant of a named workspace, or of the workspace being viewed.
+ *
+ * The named form exists because the Enterprise tab lets an admin point at a
+ * workspace other than the active one: resolving that read against the session's
+ * workspace reported a saved tenant as "No tenant configured".
+ */
+export async function fetchTenant(workspaceId?: string): Promise<Tenant | null> {
+  const res = await apiFetch(
+    `${API_BASE}/workspace/tenant`,
+    workspaceId ? { headers: { "X-Workspace-Id": workspaceId } } : {},
+  );
   if (!res.ok) return null;
   return res.json();
 }
@@ -3756,7 +3765,10 @@ export async function fetchTenant(): Promise<Tenant | null> {
 export async function createTenant(body: Omit<Tenant, "id" | "created_at" | "updated_at">): Promise<Tenant> {
   const res = await apiFetch(`${API_BASE}/workspace/tenant`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    // The scope in the body is the scope of the request: without this the
+    // session's workspace header disagrees with the workspace named on the
+    // form, and the API refuses the write as a cross-workspace borrow.
+    headers: { "Content-Type": "application/json", ...(body.workspace_id ? { "X-Workspace-Id": body.workspace_id } : {}) },
     body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error(await parseApiError(res, "Could not create tenant"));

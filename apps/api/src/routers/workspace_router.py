@@ -768,8 +768,10 @@ async def get_security_report(request: Request):
         "# Datawrap Security & Compliance Report",
         f"Generated: {datetime.now(timezone.utc).isoformat()}Z",
         f"Environment: {posture['environment']}",
-        f"Tenant ID: {posture['tenant_id'] or 'default'}",
-        f"Workspace ID: {posture['workspace_id'] or 'default'}",
+        # "default" read as a configured tenant named default; a report handed to
+        # an auditor has to say when no tenant profile backs these controls.
+        f"Tenant ID: {posture['tenant_id'] or 'none — no tenant profile configured for this workspace'}",
+        f"Workspace ID: {posture['workspace_id'] or 'none — request carried no workspace scope'}",
         f"Custom domain: {posture['custom_domain'] or 'not configured'}",
         f"Primary data region: {posture['data_region']}",
         "",

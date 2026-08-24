@@ -147,12 +147,58 @@ def _smpt_send(recipients: list[str], subject: str, body: str, smtp_cfg: dict[st
         return {"ok": False, "error": str(exc)}
 
 
+def _slack_acknowledged(result: dict[str, Any]) -> dict[str, Any]:
+    """Slack's own acknowledgement, not merely "the host answered 200".
+
+    Any endpoint that returns 2xx used to be reported as *Test message sent*, so
+    a webhook pointed at the wrong host — or at an intranet page — read as a
+    working alert route until the day an incident went unnoticed. An incoming
+    webhook answers ``200`` with the body ``ok``; the Web API answers JSON with
+    ``"ok": true``. Anything else is a delivery we cannot claim.
+    """
+    if not result.get("ok"):
+        return result
+    body = str(result.get("body", "")).strip()
+    if body.lower() == "ok":
+        return result
+    try:
+        if json.loads(body).get("ok") is True:
+            return result
+    except (ValueError, AttributeError):
+        pass
+    return {
+        "ok": False,
+        "status": result.get("status"),
+        "error": (
+            f"Endpoint answered HTTP {result.get('status')} but did not acknowledge as Slack "
+            f"(expected body 'ok', got {body[:120]!r}) — check the webhook URL"
+        ),
+    }
+
+
+def _teams_acknowledged(result: dict[str, Any]) -> dict[str, Any]:
+    """Teams' own acknowledgement: ``1`` from a connector, ``202`` from a workflow."""
+    if not result.get("ok"):
+        return result
+    body = str(result.get("body", "")).strip()
+    if body == "1" or (result.get("status") == 202 and not body):
+        return result
+    return {
+        "ok": False,
+        "status": result.get("status"),
+        "error": (
+            f"Endpoint answered HTTP {result.get('status')} but did not acknowledge as Microsoft "
+            f"Teams (expected '1' or 202 Accepted, got {body[:120]!r}) — check the webhook URL"
+        ),
+    }
+
+
 def _send_slack(channel: NotificationChannel, payload: dict[str, Any]) -> dict[str, Any]:
     url = channel.config.get("webhook_url") or channel.config.get("url", "")
     if not url:
         return {"ok": False, "error": "Slack webhook URL missing"}
     text = payload.get("text") or _payload_text(payload)
-    return _http_post(url, {"text": text})
+    return _slack_acknowledged(_http_post(url, {"text": text}))
 
 
 def _send_teams(channel: NotificationChannel, payload: dict[str, Any]) -> dict[str, Any]:
@@ -160,7 +206,7 @@ def _send_teams(channel: NotificationChannel, payload: dict[str, Any]) -> dict[s
     if not url:
         return {"ok": False, "error": "Teams webhook URL missing"}
     text = payload.get("text") or _payload_text(payload)
-    return _http_post(
+    return _teams_acknowledged(_http_post(
         url,
         {
             "@type": "MessageCard",
@@ -169,7 +215,7 @@ def _send_teams(channel: NotificationChannel, payload: dict[str, Any]) -> dict[s
             "summary": payload.get("title", "Datawrap alert"),
             "sections": [{"activityTitle": payload.get("title", ""), "text": text}],
         },
-    )
+    ))
 
 
 def _send_email(channel: NotificationChannel, payload: dict[str, Any]) -> dict[str, Any]:
