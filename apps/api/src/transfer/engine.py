@@ -114,6 +114,8 @@ try:
 except ImportError:  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
     from src.services import pii_guard
 
+from services.file_export_append import land_export_bytes
+
 from .adapters import (
     FileExportMapBlocked,
     WriteBatchBlocked,
@@ -124,6 +126,7 @@ from .adapters import (
     write_destination_file,
 )
 from .cdc_transfer import run_cdc_database_transfer
+from .incremental_no_op import incremental_no_op_result
 from .file_stream import (
     peek_file_source,
     prepare_stream_content,
@@ -997,10 +1000,12 @@ def _execute_policy_gates_for_request(
     Studio Validate passes dest_type / source_type / source_kind / write_via_staging.
     Execute must match or CDC/SCD2/staging falsely block (or skip) after Approve.
     """
+    from services.preflight_cursor_gate import read_scope_for_transfer_request
     from services.preflight_service import run_transfer_policy_gates
 
     dest = getattr(request, "destination", None)
     src = getattr(request, "source", None)
+    src_extra = getattr(src, "extra", None) or {}
     return run_transfer_policy_gates(
         sync_mode=str(getattr(request, "sync_mode", "") or ""),
         schema_policy=str(getattr(request, "schema_policy", "") or "manual_review"),
@@ -1012,7 +1017,10 @@ def _execute_policy_gates_for_request(
         source_type=str(getattr(src, "format", None) or getattr(src, "kind", None) or ""),
         source_kind=str(getattr(src, "kind", None) or "file"),
         write_via_staging=bool(getattr(request, "write_via_staging", False)),
-        source_read_mode=str((getattr(src, "extra", None) or {}).get("source_read_mode") or ""),
+        source_read_mode=str(src_extra.get("source_read_mode") or ""),
+        # Best-effort here; the read side refuses authoritatively with the exact
+        # cursor key. Both refuse a watermark measured on another column.
+        read_scope=read_scope_for_transfer_request(request),
     )
 
 
@@ -2156,6 +2164,29 @@ class UniversalTransferEngine:
             schema = _authoritative_source_schema(request.source, schema, columns)
             if request.source_filter:
                 records = apply_row_filter(records, request.source_filter)
+            # The batch path reads the source whole, so an incremental mode has
+            # to be bounded here or it re-delivers rows already at rest.
+            try:
+                from services.batch_incremental import bind_transfer_request
+
+                incremental_bound = bind_transfer_request(request, src_fmt)
+                records = incremental_bound.bound(records)
+            except ValueError as cursor_refusal:
+                mongo.update_job_status(
+                    job_id, "failed", error=str(cursor_refusal), phase="failed"
+                )
+                return TransferResult(
+                    success=False,
+                    error=str(cursor_refusal),
+                    operation=request.operation,
+                    job_id=job_id,
+                )
+            if incremental_bound.active and not records:
+                # The cursor bound left nothing: every source row is already at
+                # rest. That is a correct no-op run, not an empty source.
+                return incremental_no_op_result(
+                    request, job_id, incremental_bound.scope.watermark
+                )
             shape_runner = _open_shape_runner(request, columns)
             if shape_runner is not None:
                 records, columns, schema = _shape_materialized_read(
@@ -3010,57 +3041,25 @@ class UniversalTransferEngine:
                     )
                 # Honesty: count exported mapped rows, not source batch size.
                 rows_written = int(dest_summary.get("rows") or 0)
-                ext = os.path.splitext(export_name)[1].lstrip(".") or (
-                    request.destination.format or "json"
-                )
-                unique_name = f"export_{job_id}.{ext}"
-
-                output_path = (
-                    request.destination.output_path.strip()
-                    if request.destination.output_path
-                    else ""
-                )
-                workspace_root = os.path.abspath(
-                    os.path.join(os.path.dirname(__file__), "..", "..")
-                )
-                if output_path:
-                    export_path = (
-                        os.path.abspath(output_path)
-                        if os.path.isabs(output_path)
-                        else os.path.abspath(os.path.join(workspace_root, output_path))
-                    )
-                    if not export_path.startswith(workspace_root):
-                        mongo.update_job_status(
-                            job_id,
-                            "failed",
-                            error="File export path must be inside the application workspace",
-                            phase="failed",
-                        )
-                        return TransferResult(
-                            success=False,
-                            error="File export path must be inside the application workspace",
+                try:
+                    dest_summary.update(
+                        land_export_bytes(
+                            request.destination,
+                            export_bytes,
                             job_id=job_id,
+                            sync_mode=request.sync_mode,
+                            export_name=export_name,
                         )
-                    os.makedirs(os.path.dirname(export_path) or ".", exist_ok=True)
-                    with open(export_path, "wb") as f:
-                        f.write(export_bytes)
-                    dest_summary["filename"] = os.path.basename(export_path)
-                    dest_summary["path"] = export_path
-                    dest_summary["download_url"] = (
-                        f"/api/v1/transfer/download/{os.path.basename(export_path)}"
                     )
-                else:
-                    export_dir = os.path.join(
-                        os.path.dirname(__file__), "..", "..", "exports"
+                except ValueError as refusal:
+                    mongo.update_job_status(
+                        job_id, "failed", error=str(refusal), phase="failed"
                     )
-                    os.makedirs(export_dir, exist_ok=True)
-                    export_path = os.path.join(export_dir, unique_name)
-                    with open(export_path, "wb") as f:
-                        f.write(export_bytes)
-                    dest_summary["filename"] = unique_name
-                    dest_summary["path"] = export_path
-                    dest_summary["download_url"] = (
-                        f"/api/v1/transfer/download/{unique_name}"
+                    return TransferResult(
+                        success=False,
+                        error=str(refusal),
+                        job_id=job_id,
+                        operation=request.operation,
                     )
                 ddl_log.append(
                     f"Exported {rows_written} rows to {dest_summary['filename']}"
@@ -3161,6 +3160,10 @@ class UniversalTransferEngine:
                     destination_summary=dest_summary,
                     reconciliation=recon,
                 )
+
+            # Reconciliation passed: the delta is at rest, so the watermark may
+            # move. Persisting it earlier would skip these rows after a failed run.
+            incremental_bound.commit()
 
             explanation = _build_explanation(
                 request,

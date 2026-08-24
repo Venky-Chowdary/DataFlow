@@ -225,19 +225,22 @@ def test_mongodb_to_snowflake_messy_docs_with_preflight_and_roundtrip():
             if "sample-transform" in str(b.get("id") or "")
         ]
         assert transform_blockers == [], transform_blockers
-        # Two honest, actionable blocks remain, each needing an operator decision:
+        # Three honest, actionable blocks remain, each needing an operator decision:
         #   tags   — one document carries a bare scalar where the column is ARRAY,
         #            so writing it wraps a scalar as JSON (domain change).
         #   balance — BSON Decimal128 declares a domain no Snowflake NUMBER can
         #            hold, so the max carrier NUMBER(38,10) can still overflow.
+        #   created — BSON's date carrier is an instant, and one document stores a
+        #            zoneless string there, so landing it stamps a zone the source
+        #            never proved.
         # Mongo's ARRAY → VARIANT itself is the destination's native document
         # wire and must not be blocked as field-DDL loss.
         blocked_cols = {
             str(d.get("source"))
             for b in (pf.get("blockers") or [])
             for d in (b.get("evidence", {}).get("issues_detail") or [])
-        } or {"tags", "balance"}
-        assert blocked_cols <= {"tags", "balance"}, blocked_cols
+        } or {"tags", "balance", "created"}
+        assert blocked_cols <= {"tags", "balance", "created"}, blocked_cols
 
         acknowledged = [
             {
@@ -249,7 +252,10 @@ def test_mongodb_to_snowflake_messy_docs_with_preflight_and_roundtrip():
                 "risk_contract": {
                     "column": m["source"],
                     "source_type": schema.get(m["source"], ""),
-                    "destination_type": "VARIANT" if m["source"] == "tags" else "NUMBER(38,10)",
+                    "destination_type": {
+                        "tags": "VARIANT",
+                        "created": "TIMESTAMP_LTZ",
+                    }.get(m["source"], "NUMBER(38,10)"),
                     "execution_policy": "CAST_AND_CONTINUE",
                     "approved_by": "admin@dataflow.app",
                     "reason": "Operator accepted schemaless domain change",
@@ -259,7 +265,7 @@ def test_mongodb_to_snowflake_messy_docs_with_preflight_and_roundtrip():
                     "rollback_strategy": "DOCUMENT_ONLY",
                 },
             }
-            if m["source"] in {"tags", "balance"}
+            if m["source"] in {"tags", "balance", "created"}
             else m
             for m in mappings
         ]

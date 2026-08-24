@@ -3066,10 +3066,13 @@ def _sample_logical_type(value: Any, key: str = "") -> str:
     except Exception:
         pass
     if isinstance(value, datetime.datetime):
-        # Mongo UTCDateTime is always timezone-aware in pymongo (UTC).
-        if value.tzinfo is not None:
-            return "TIMESTAMPTZ"
-        return "TIMESTAMP_NTZ"
+        # BSON stores milliseconds since the epoch — an instant, always UTC.
+        # Whether the driver hands it back aware is a client setting
+        # (``tz_aware``), not a property of the stored value, so a naive render
+        # must not be stamped zoneless: that made the timezone policy see
+        # naive→naive, ask for no contract, and let Validate clear a batch the
+        # writer then refused row by row.
+        return "TIMESTAMPTZ"
     if isinstance(value, datetime.date):
         return "DATE"
     if _BSON_DECIMAL and isinstance(value, _BSON_DECIMAL):

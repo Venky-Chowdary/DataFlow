@@ -72,6 +72,112 @@ def _cast_cursor_value(value: str, cursor_type: str | None = None) -> Any:
     return value
 
 
+# BSON compares across types by type order, never by value: a `$gt` on a
+# datetime can never match a field whose cells hold ISO strings. A watermark
+# cast from the *declared* logical type therefore matches nothing and the sync
+# reports "no new rows" forever. The cursor value is aligned to the type the
+# collection actually stores instead.
+_BSON_KIND_OF_TYPE = {
+    "string": "string",
+    "date": "date",
+    "timestamp": "date",
+    "int": "number",
+    "long": "number",
+    "double": "number",
+    "decimal": "number",
+    "bool": "bool",
+    "objectId": "objectid",
+}
+
+
+def stored_cursor_bson_kind(
+    coll: Any, field: str, *, sample_limit: int = 5000
+) -> str:
+    """The BSON type family the collection actually stores in ``field``.
+
+    Returns ``""`` when nothing is stored (empty collection / absent field), and
+    raises when the field mixes families — a mixed cursor field cannot bound an
+    incremental read, and guessing one family would silently skip the others.
+    """
+    if not field:
+        return ""
+    pipeline = [
+        {"$match": {field: {"$exists": True, "$ne": None}}},
+        {"$limit": int(sample_limit)},
+        {"$group": {"_id": {"$type": f"${field}"}}},
+    ]
+    try:
+        types = {str(d.get("_id") or "") for d in coll.aggregate(pipeline)}
+    except Exception:
+        return ""
+    kinds = {_BSON_KIND_OF_TYPE.get(t, "") for t in types if t}
+    kinds.discard("")
+    if not kinds:
+        return ""
+    if len(kinds) > 1:
+        raise ValueError(
+            f"Cursor field '{field}' stores more than one BSON type "
+            f"({', '.join(sorted(types))}) in this collection. MongoDB orders "
+            "values by type before value, so no single watermark can bound an "
+            "incremental read across them — normalise the field to one type at "
+            "the source, or run this sync as full refresh."
+        )
+    return kinds.pop()
+
+
+def _align_cursor_to_stored_kind(raw: str, casted: Any, kind: str) -> Any:
+    """Re-cast a watermark into the BSON family the collection stores."""
+    import datetime as _dt
+    from decimal import Decimal, InvalidOperation
+
+    from bson.decimal128 import Decimal128
+    from bson.objectid import ObjectId
+
+    if not kind:
+        return casted
+    if kind == "string":
+        return raw if isinstance(casted, (_dt.datetime, _dt.date, bool, int, float)) else casted
+    if kind == "date":
+        if isinstance(casted, _dt.datetime):
+            return casted
+        parsed = _cast_cursor_value(raw, "TIMESTAMP")
+        if isinstance(parsed, _dt.datetime):
+            return parsed
+        raise ValueError(
+            f"Watermark '{raw}' is not a timestamp, but this collection stores "
+            "BSON dates in the cursor field — the incremental bound cannot be "
+            "compared. Reset the cursor for this stream."
+        )
+    if kind == "number":
+        if isinstance(casted, (int, float, Decimal128)) and not isinstance(casted, bool):
+            return casted
+        try:
+            text = str(raw).replace(",", "")
+            return int(text) if text.lstrip("+-").isdigit() else Decimal128(
+                str(Decimal(text))
+            )
+        except (InvalidOperation, ValueError, TypeError) as exc:
+            raise ValueError(
+                f"Watermark '{raw}' is not numeric, but this collection stores "
+                "numbers in the cursor field. Reset the cursor for this stream."
+            ) from exc
+    if kind == "bool":
+        return bool(casted) if isinstance(casted, bool) else str(raw).strip().lower() in {
+            "true", "t", "yes", "y", "1",
+        }
+    if kind == "objectid":
+        if isinstance(casted, ObjectId):
+            return casted
+        text = str(raw).strip()
+        if ObjectId.is_valid(text):
+            return ObjectId(text)
+        raise ValueError(
+            f"Watermark '{raw}' is not an ObjectId, but this collection stores "
+            "ObjectIds in the cursor field. Reset the cursor for this stream."
+        )
+    return casted
+
+
 def _connection_string(cfg: dict[str, Any]) -> str:
     from connectors.mongodb_common import normalize_mongodb_connection_string
 
@@ -188,6 +294,9 @@ def read_collection_cursor_batch(
     sort_spec: list[tuple[str, int]] = [(cursor_column, 1)]
     pk = (cursor_primary_key or "").strip()
     use_composite = bool(pk and pk != cursor_column)
+    # The stored family, not the declared one, decides the comparison.
+    cursor_kind = stored_cursor_bson_kind(coll, cursor_column)
+    pk_kind = stored_cursor_bson_kind(coll, pk) if use_composite else ""
 
     def _as_mongo_cursor(raw: str, *, as_id: bool = False) -> Any:
         casted = _cast_cursor_value(raw, cursor_type if not as_id else "STRING")
@@ -206,7 +315,9 @@ def read_collection_cursor_batch(
             and ObjectId.is_valid(casted)
         ):
             return ObjectId(casted)
-        return casted
+        return _align_cursor_to_stored_kind(
+            raw, casted, pk_kind if as_id else cursor_kind
+        )
 
     if cursor_after is not None and cursor_after != "":
         cur_raw, pk_raw = split_cursor_bookmark(

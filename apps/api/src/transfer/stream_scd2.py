@@ -24,13 +24,20 @@ from .type_mapper import ddl_carrier_type
 logger = logging.getLogger(__name__)
 
 
-def _qualified(table: str, schema: str | None) -> str:
-    """Return a SQL quoted qualified table name."""
-    from connectors.writer_common import quote_sql_identifier
+def _qualified(table: str, schema: str | None, dialect: str = "") -> str:
+    """Return a SQL quoted qualified table name for this destination engine.
 
-    table_q = quote_sql_identifier(table)
+    Quoting is per dialect: MySQL backticks, SQL Server brackets, ANSI double
+    quotes elsewhere. Emitting ANSI quotes everywhere made every SCD2 / mirror
+    statement a syntax error on MySQL.
+    """
+    from connectors.writer_common import quote_sql_identifier
+    from services.dialect_profiles import quote_char_for
+
+    q = quote_char_for(dialect) or '"'
+    table_q = quote_sql_identifier(table, q)
     if schema:
-        return f"{quote_sql_identifier(schema)}.{table_q}"
+        return f"{quote_sql_identifier(schema, q)}.{table_q}"
     return table_q
 
 
@@ -112,8 +119,9 @@ def stream_scd2_mirror_transfer(
     column_types = {c: ddl_carrier_type(schema.get(c, "string")) for c in schema}
 
     staging = _staging_endpoint(destination, job_id or "")
-    staging_qualified = _qualified(staging.table, schema_name)
-    target_qualified = _qualified(destination.table or staging.table, schema_name)
+    staging_qualified = _qualified(staging.table, schema_name, dest_type)
+    target_qualified = _qualified(destination.table or staging.table, schema_name,
+                                  dest_type)
 
     # 1. Drop any leftover staging table and stream source into staging.
     drop_table(dest_cfg, staging.table, schema_name or None)
@@ -369,10 +377,14 @@ def _read_staging_batches(
     from services.reconciliation_api import iter_select_row_dicts
 
     engine = get_sqlalchemy_engine(cfg)
-    qualified = _qualified(endpoint.table, schema_name)
+    from services.dialect_profiles import quote_char_for
+
+    dialect = str(getattr(getattr(engine, "dialect", None), "name", "") or "")
+    qchar = quote_char_for(dialect) or '"'
+    qualified = _qualified(endpoint.table, schema_name, dialect)
     try:
         with engine.connect() as conn:
-            cols = ",".join(quote_sql_identifier(c) for c in columns)
+            cols = ",".join(quote_sql_identifier(c, qchar) for c in columns)
             sql = f"SELECT {cols} FROM {qualified}"  # nosec B608
             yield from iter_select_row_dicts(
                 conn, sa.text(sql), columns, itersize=batch_size

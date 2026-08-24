@@ -14,7 +14,13 @@ from preflight.models import (
     GateStatus,
     PreflightContext,
 )
-from preflight.risk_contract import is_safe_normalize_mapping, mapping_risk_cleared
+from preflight.risk_contract import (
+    is_safe_normalize_mapping,
+    mapping_is_lossy,
+    mapping_is_structural_review,
+    mapping_requires_risk_contract,
+    mapping_risk_cleared,
+)
 
 GateFn = Callable[[PreflightContext], GateResult]
 
@@ -1337,35 +1343,17 @@ def _is_intentional_omit_mapping(m: Any) -> bool:
 
 
 def _is_lossy_mapping(m: Any) -> bool:
-    fidelity = str(getattr(m, "fidelity", None) or "").strip().lower()
-    if fidelity == "lossy_cast":
-        return True
-    return bool(getattr(m, "type_narrowing", False))
+    return mapping_is_lossy(m)
 
 
 def _requires_risk_ack(m: Any) -> bool:
-    """Lossy casts, type narrowing, and value-mutating transforms need a contract.
-
-    Safe normalize (trim / trim_id / email / phone / case) is Map-Ready — not a
-    Migration Risk Contract path. Must stay aligned with Map ``isSafeNormalizeMapping``.
-    """
-    if is_safe_normalize_mapping(m):
-        return False
-    if _is_lossy_mapping(m):
-        return True
-    fidelity = str(getattr(m, "fidelity", None) or "").strip().lower()
-    return fidelity == "mutate"
+    """Lossy casts, type narrowing, and value-mutating transforms need a contract."""
+    return mapping_requires_risk_contract(m)
 
 
 def _is_structural_review_mapping(m: Any) -> bool:
     """STRUCT flatten / specialty identity cannot clear via bare user_override."""
-    if getattr(m, "struct_derived", False):
-        return True
-    policy = str(getattr(m, "struct_policy", None) or "").strip().lower()
-    if policy in {"flatten_top_level_keys", "flatten_deep", "explode_rows"}:
-        return True
-    xf = str(getattr(m, "transform", None) or "").strip().lower()
-    return xf in {"identity_specialty", "specialty"}
+    return mapping_is_structural_review(m)
 
 
 def gate_g4_mapping_confidence(ctx: PreflightContext) -> GateResult:

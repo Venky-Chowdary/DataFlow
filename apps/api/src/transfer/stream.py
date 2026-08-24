@@ -1064,6 +1064,11 @@ def _stream_database_transfer_impl(
         )
         cursor_key = scope.cursor_key
         watermark = scope.watermark
+        from services.preflight_cursor_gate import refuse_unusable_cursor_state
+
+        refuse_unusable_cursor_state(
+            scope, dest_type, dest_cfg, resolve_dest_table(dest_type, destination, table)
+        )
 
     src_db = source.database or src_cfg.get("database") or ("test" if src_type == "mongodb" else "")
 
@@ -1386,6 +1391,12 @@ def _stream_database_transfer_impl(
             logging.getLogger(__name__).warning(
                 "DynamoDB empty-probe KeySchema seed failed for %s: %s", table, exc
             )
+    if not columns and incremental and schema:
+        # A schemaless source names its columns from the documents it returns, so
+        # an incremental page with nothing past the watermark comes back with no
+        # headers. That is a zero-row run at the current mark, not an empty
+        # source: the declared shape carries the run to the no-op close.
+        columns = list(schema.keys())
     if not columns:
         raise ValueError(f"Source table `{table}` has no columns or is empty")
 
@@ -2848,7 +2859,17 @@ def _stream_database_transfer_impl(
         raise ValueError("Source table is empty")
 
     if incremental and running_cursor and cursor_key and running_cursor != watermark:
-        set_watermark(cursor_key, running_cursor, metadata={"job_id": job_id, "sync_mode": effective_sync})
+        set_watermark(
+            cursor_key,
+            running_cursor,
+            metadata={
+                "job_id": job_id,
+                "sync_mode": effective_sync,
+                # A watermark is a value of one column; record which one so a
+                # later run on a different cursor cannot inherit it.
+                "cursor_column": cursor_source_col,
+            },
+        )
 
     # Phase F1 — write-pass fingerprints hash the same remapped rows just written.
     # Heterogeneous warehouse routes auto-re-read (DATAFLOW_RECONCILE_SOURCE_REREAD=auto)

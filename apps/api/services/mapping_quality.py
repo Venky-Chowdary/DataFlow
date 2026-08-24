@@ -38,16 +38,18 @@ CONFIDENCE_CLASS_LABELS: dict[str, str] = {
     "weak_or_conflicted": "Weak or conflicted evidence",
 }
 
+# Pairs are in the *logical* vocabulary ``_logical_type`` returns
+# (``normalize_logical_type``): BIGINT/SMALLINT collapse to ``integer``,
+# DOUBLE/REAL to ``float``, NUMBER to ``decimal``, and TIMESTAMP/DATETIME to
+# ``datetime``. Physical spellings here are unreachable — ``("date",
+# "timestamp")`` never matched, so every DATE → TIMESTAMP widening (the shape
+# of a re-run against a destination DataFlow itself created) was classed
+# "weak or conflicted" and held for review.
 _SAFE_PROMOTIONS = frozenset({
-    ("integer", "bigint"),
     ("integer", "decimal"),
     ("integer", "float"),
-    ("integer", "double"),
-    ("integer", "number"),
-    ("float", "double"),
     # float→decimal is IEEE→fixed-point invent — not a safe promotion (lossy).
-    ("float", "number"),
-    ("date", "timestamp"),
+    ("date", "datetime"),
     ("boolean", "integer"),
     ("string", "text"),
     ("text", "string"),
@@ -303,7 +305,8 @@ def _logical_type(type_str: str) -> str:
         if any(x in t for x in ("JSON", "JSONB", "VARIANT", "ARRAY")):
             return "json"
         if any(x in t for x in ("DATE", "TIME", "TIMESTAMP")):
-            return "timestamp" if "TIME" in t else "date"
+            # Same vocabulary as ``normalize_logical_type`` above.
+            return "datetime" if "TIME" in t else "date"
         if "BOOL" in t:
             return "boolean"
         return "string"

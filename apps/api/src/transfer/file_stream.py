@@ -790,19 +790,29 @@ def stream_file_to_database(
 
     try:
         from services.sync_cursor import (
-            is_overwrite_sync,
+            compare_cursor_values,
             map_source_to_target,
+            max_cursor_value,
+            records_after_watermark,
+            requires_incremental,
             requires_upsert,
             resolve_effective_sync_mode,
+            resolve_incremental_read_scope,
             resolve_sync_contract,
+            set_watermark,
         )
     except ImportError:
-        from src.services.sync_cursor import (
-            is_overwrite_sync,
+        from src.services.sync_cursor import (  # type: ignore[no-redef]
+            compare_cursor_values,
             map_source_to_target,
+            max_cursor_value,
+            records_after_watermark,
+            requires_incremental,
             requires_upsert,
             resolve_effective_sync_mode,
+            resolve_incremental_read_scope,
             resolve_sync_contract,
+            set_watermark,
         )
     contract = resolve_sync_contract(stream_contracts)
     effective_sync = resolve_effective_sync_mode(
@@ -900,12 +910,102 @@ def stream_file_to_database(
     warning_samples: list[str] = []
     rejected_details: list[dict] = []
 
-    # Resume: skip chunks that were already committed
-    if chunk_idx > 0:
-        batch_iter = itertools.islice(batch_iter, chunk_idx, None)
-
     if source_filter:
         batch_iter = (apply_row_filter(batch, source_filter) for batch in batch_iter)
+
+    # An incremental sync of a file source is bounded after the parse — the file
+    # arrives whole, so without this the mode appends every row it still holds
+    # and the second run duplicates the first. Same resolver, same watermark key
+    # and same refusals as the database reader, so Validate judges the delta this
+    # run will actually write.
+    incremental = requires_incremental(effective_sync)
+    cursor_source_col = (contract.cursor_field if contract else "").strip()
+    cursor_key = ""
+    watermark: str | None = None
+    cursor_pk_source = ""
+    running_cursor: str | None = None
+    if incremental and cursor_source_col:
+        scope = resolve_incremental_read_scope(
+            sync_mode=effective_sync,
+            stream_contracts=stream_contracts,
+            source_type="file",
+            source_database="",
+            source_object=filename,
+            dest_type=dest_type,
+            dest_database=destination.database or dest_cfg.get("database", ""),
+            dest_object=dest_table,
+        )
+        cursor_key = scope.cursor_key
+        watermark = scope.watermark
+        cursor_pk_source = next(
+            (
+                c
+                for c in (contract.primary_key_columns() if contract else [])
+                if c and c != cursor_source_col
+            ),
+            "",
+        )
+        if scope.cursor_column_changed:
+            from services.preflight_cursor_gate import cursor_identity_issue
+
+            raise ValueError(cursor_identity_issue(scope))
+        if scope.bounded:
+            from services.preflight_cursor_gate import cursor_destination_reset_issue
+
+            reset_issue = cursor_destination_reset_issue(
+                scope, precount_table(dest_type, dest_cfg, dest_table)
+            )
+            if reset_issue:
+                raise ValueError(reset_issue)
+
+        def _bounded_batches(batches):
+            nonlocal running_cursor
+            for raw in batches:
+                delta, unbounded = records_after_watermark(
+                    list(raw or []),
+                    cursor_source_col,
+                    watermark,
+                    primary_key=cursor_pk_source,
+                )
+                if unbounded:
+                    # A row with no cursor value cannot be proven new or already
+                    # at rest. Skipping it loses data and sending it duplicates
+                    # data, so the run refuses instead of choosing silently.
+                    raise ValueError(
+                        f"{unbounded} row(s) carry no value for cursor "
+                        f"'{cursor_source_col}' — an incremental read cannot "
+                        "prove whether they already landed. Fill the cursor "
+                        "column at the source, or run this sync as full "
+                        "refresh."
+                    )
+                if not delta:
+                    continue
+                cursor_headers = [
+                    c for c in (cursor_source_col, cursor_pk_source) if c
+                ]
+                batch_mark = max_cursor_value(
+                    [
+                        [str(r.get(c, "")) for c in cursor_headers]
+                        for r in delta
+                    ],
+                    cursor_headers,
+                    cursor_source_col,
+                    cursor_pk_source or None,
+                )
+                if batch_mark and (
+                    running_cursor is None
+                    or compare_cursor_values(batch_mark, running_cursor) > 0
+                ):
+                    running_cursor = batch_mark
+                yield delta
+
+        batch_iter = _bounded_batches(batch_iter)
+
+    # Resume: skip chunks that were already committed. The cursor bound is
+    # applied first and is deterministic for a given watermark (which only moves
+    # on success), so a chunk index means the same batch on the retry.
+    if chunk_idx > 0:
+        batch_iter = itertools.islice(batch_iter, chunk_idx, None)
 
     # Rows the file handed over before the recipe removed any of them. Gate-8
     # counts the read population, so a filtered row has to be counted here and
@@ -1311,6 +1411,16 @@ def stream_file_to_database(
     try:
         first_idx, first_batch = next(batch_enum)
     except StopIteration:
+        if incremental and cursor_key:
+            # An incremental sync whose cursor bound left nothing is a correct
+            # no-op, not an empty file: the rows are already at rest and the
+            # watermark stays where it is.
+            dest_summary["sync_mode"] = effective_sync
+            dest_summary["source_row_count"] = 0
+            dest_summary["source_row_count_source"] = "incremental_no_new_rows"
+            dest_summary["rejected_rows"] = 0
+            dest_summary["incremental_watermark"] = watermark or ""
+            return 0, ddl_log, dest_summary, columns
         raise ValueError("No records found in file")
 
     try:
@@ -1350,6 +1460,18 @@ def stream_file_to_database(
         # source count and mis-hashes the checksum against the filtered load.
         if source_filter:
             full_iter = (apply_row_filter(batch, source_filter) for batch in full_iter)
+        if incremental and cursor_key:
+            # The re-scan must fingerprint the same bounded delta the writer
+            # wrote; the whole file would hash rows this run never carried.
+            full_iter = (
+                records_after_watermark(
+                    list(batch or []),
+                    cursor_source_col,
+                    watermark,
+                    primary_key=cursor_pk_source,
+                )[0]
+                for batch in full_iter
+            )
         if shape_runner is not None:
             # The re-scan must fingerprint the same shaped rows the writer wrote,
             # or a resumed run compares a shaped destination against a raw source
@@ -1391,6 +1513,25 @@ def stream_file_to_database(
         full_source_rows = 0
         final_checksum = fp_accumulator.digest() if fp_accumulator.total else last_checksum
 
+    if (
+        incremental
+        and cursor_key
+        and running_cursor
+        and running_cursor != watermark
+    ):
+        set_watermark(
+            cursor_key,
+            running_cursor,
+            metadata={
+                "job_id": job_id,
+                "sync_mode": effective_sync,
+                # A watermark is a value of one column; record which one so a
+                # later run on a different cursor cannot inherit it.
+                "cursor_column": cursor_source_col,
+            },
+        )
+        dest_summary["incremental_watermark"] = running_cursor
+
     dest_summary["checksum"] = final_checksum or last_checksum
     dest_summary["rejected_rows"] = rejected_total
     dest_summary["coerced_null_rows"] = coerced_null_total
@@ -1409,6 +1550,17 @@ def stream_file_to_database(
         filtered_sample = sample_rows
         if source_filter:
             filtered_sample = apply_row_filter(sample_rows, source_filter)
+        if incremental and cursor_key:
+            # Reconcile against the delta this run carried. The rest of the file
+            # is at rest from an earlier run: read-back on those keys proves
+            # nothing about this write and drops Gate-8 to a whole-table digest,
+            # which is not comparable for a write into a non-empty destination.
+            filtered_sample = records_after_watermark(
+                list(filtered_sample or []),
+                cursor_source_col,
+                watermark,
+                primary_key=cursor_pk_source,
+            )[0]
         dest_summary["reconcile_sample"] = (filtered_sample or [])[:50]
         # Batch PK ids for keyed Gate-8 (full-table digests are not comparable
         # for upsert/append into a non-empty sink).

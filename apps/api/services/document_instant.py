@@ -33,12 +33,25 @@ DOCUMENT_INSTANT_FRACTIONAL_DIGITS: Final[int] = 3
 
 
 def is_document_instant_token(engine: str | None, ddl_type_token: str | None) -> bool:
-    """True for a document store's ``date`` token — an instant, not a calendar day."""
-    from services.type_system import strip_identity_qualifier
+    """True for a document store's temporal token — an instant, not a calendar day.
+
+    The store has one temporal carrier, so ``date``, ``timestamp`` and whatever
+    spelling a sampler stamped all name it. Matching only ``date`` left a
+    collection introspected as ``TIMESTAMP`` outside every document-instant
+    rule, including the one that asks a zoneless source for its zone before the
+    writer refuses the rows.
+    """
+    from services.type_system import (
+        LOGICAL_DATE,
+        LOGICAL_DATETIME,
+        normalize_logical_type,
+        strip_identity_qualifier,
+    )
 
     if (engine or "").strip().lower() not in INSTANT_DATE_TOKEN_ENGINES:
         return False
-    return strip_identity_qualifier(ddl_type_token).upper().strip() == "DATE"
+    token = strip_identity_qualifier(ddl_type_token).upper().strip()
+    return normalize_logical_type(token) in {LOGICAL_DATE, LOGICAL_DATETIME}
 
 
 def transform_narrows_to_calendar_day(transform: str | None) -> bool:
@@ -92,16 +105,53 @@ def document_instant_wire_preserved(
     return int(src_p) <= DOCUMENT_INSTANT_FRACTIONAL_DIGITS
 
 
+def document_instant_utc_invent(
+    source_type: str,
+    target_type: str,
+    *,
+    dest_db: str = "",
+) -> bool:
+    """True when landing this column has to stamp a zone the source never proved.
+
+    The single predicate the writer enforces, so Validate can demand the same
+    contract instead of letting the run discover it: a zoneless *datetime* on an
+    instant-only carrier. A calendar day is excluded — it carries no time of day,
+    so UTC midnight invents nothing an operator has to accept.
+    """
+    from services.type_system import (
+        LOGICAL_DATETIME,
+        datetime_timezone_polarity,
+        normalize_logical_type,
+    )
+
+    if not is_document_instant_token(dest_db, target_type):
+        return False
+    if normalize_logical_type(source_type) != LOGICAL_DATETIME:
+        return False
+    return datetime_timezone_polarity(source_type) == "ntz"
+
+
 @lru_cache(maxsize=8192)
 def instant_date_carrier(engine: str | None, ddl_type_token: str | None) -> str:
     """Return the carrier to bind/fingerprint ``ddl_type_token`` against.
 
-    Identity for SQL engines. On document stores the bare ``date`` token stores
-    an offset-normalized instant, so it resolves to ``TIMESTAMPTZ`` — an
-    offset-bearing wire keeps its instant instead of the wall clock a bare
-    ``TIMESTAMP`` bind would preserve.
+    Identity for SQL engines. A document store has exactly one temporal carrier
+    and it is an instant, so *every* temporal spelling there — ``date``,
+    ``timestamp``, ``timestamp_ntz`` as a sampler may have stamped it — resolves
+    to ``TIMESTAMPTZ``. Resolving only the bare ``date`` token left an
+    introspected ``TIMESTAMP`` reading as zoneless, so the timezone policy saw
+    naive→naive and asked for no contract while the writer refused every naive
+    row: Validate green, Run quarantining the whole batch.
     """
+    from services.type_system import (
+        LOGICAL_DATE,
+        LOGICAL_DATETIME,
+        normalize_logical_type,
+    )
+
     token = (ddl_type_token or "").strip()
     if (engine or "").strip().lower() not in INSTANT_DATE_TOKEN_ENGINES:
         return token
-    return "TIMESTAMPTZ" if token.upper() == "DATE" else token
+    if normalize_logical_type(token) in {LOGICAL_DATE, LOGICAL_DATETIME}:
+        return "TIMESTAMPTZ"
+    return token

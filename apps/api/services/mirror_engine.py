@@ -99,20 +99,37 @@ def lattice_columns_on_table(conn: Any, table_obj: Any) -> tuple[str, ...]:
     return found
 
 
+def _dialect_of(conn: Any) -> str:
+    return str(getattr(getattr(conn, "dialect", None), "name", "") or "")
+
+
+def _qchar(dialect: str) -> str:
+    """Identifier quote character for this destination engine.
+
+    ANSI double quotes are not universal: MySQL reads ``\"sp_dst\"`` as a string
+    literal and raises a syntax error, so a dialect-blind mirror pass could
+    never soft-delete on MySQL. One owner: ``dialect_profiles.quote_char_for``.
+    """
+    from services.dialect_profiles import quote_char_for
+
+    return quote_char_for(dialect) or '"'
+
+
 def _probe_physical_lattice(conn: Any, table_obj: Any) -> tuple[str, ...]:
     """SELECT 1=0 of the lattice column. Failure must not abort the write txn."""
     import sqlalchemy as sa
     from connectors.writer_common import quote_sql_identifier
 
-    col_q = quote_sql_identifier(SOFT_DELETE_COLUMN)
+    q = _qchar(_dialect_of(conn))
+    col_q = quote_sql_identifier(SOFT_DELETE_COLUMN, q)
     parts: list[str] = []
     schema = getattr(table_obj, "schema", None)
     if schema:
-        parts.append(quote_sql_identifier(str(schema)))
+        parts.append(quote_sql_identifier(str(schema), q))
     name = getattr(table_obj, "name", None)
     if not name:
         return ()
-    parts.append(quote_sql_identifier(str(name)))
+    parts.append(quote_sql_identifier(str(name), q))
     qualified = ".".join(parts)
     nested = None
     try:
@@ -162,11 +179,12 @@ def strip_lattice_from_upsert(
     )
 
 
-def _qualified_name(table: str, schema: str | None) -> str:
+def _qualified_name(table: str, schema: str | None, dialect: str = "") -> str:
     from connectors.writer_common import quote_sql_identifier
 
-    table_quoted = quote_sql_identifier(table)
-    schema_quoted = quote_sql_identifier(schema) if schema else None
+    q = _qchar(dialect)
+    table_quoted = quote_sql_identifier(table, q)
+    schema_quoted = quote_sql_identifier(schema, q) if schema else None
     return f"{schema_quoted}.{table_quoted}" if schema_quoted else table_quoted
 
 
@@ -180,12 +198,19 @@ def _compose_key(record: dict[str, Any], columns: list[str]) -> str:
     return _KEY_SEP.join(_key_value(record, c) for c in columns)
 
 
-def _pk_or_clause(columns: list[str], keys: list[str], *, prefix: str) -> tuple[str, dict[str, Any]]:
+def _pk_or_clause(
+    columns: list[str],
+    keys: list[str],
+    *,
+    prefix: str,
+    dialect: str = "",
+) -> tuple[str, dict[str, Any]]:
     from connectors.writer_common import quote_sql_identifier
 
     if not keys or not columns:
         return "1=0", {}
-    quoted = [quote_sql_identifier(c) for c in columns]
+    q = _qchar(dialect)
+    quoted = [quote_sql_identifier(c, q) for c in columns]
     clauses: list[str] = []
     params: dict[str, Any] = {}
     for i, key in enumerate(keys):
@@ -231,8 +256,8 @@ def _ensure_soft_delete_column(
         warehouse_sql_quote_dialect,
     )
 
-    col_quoted = quote_sql_identifier(soft_delete_column)
-    dialect_name = str(getattr(getattr(conn, "dialect", None), "name", "") or "")
+    dialect_name = _dialect_of(conn)
+    col_quoted = quote_sql_identifier(soft_delete_column, _qchar(dialect_name))
     false_lit = sql_bool_false_literal(dialect_name)
     family = warehouse_sql_quote_dialect(dialect_name)
     if family == "sqlserver" or dialect_name.lower().startswith("mssql"):
@@ -269,15 +294,16 @@ def _update_deleted_batch(
     from connectors.writer_common import quote_sql_identifier
     from services.dialect_profiles import sql_bool_false_literal, sql_bool_true_literal
 
-    dialect_name = str(getattr(getattr(conn, "dialect", None), "name", "") or "")
-    col_quoted = quote_sql_identifier(soft_delete_column)
+    dialect_name = _dialect_of(conn)
+    col_quoted = quote_sql_identifier(soft_delete_column, _qchar(dialect_name))
     true_lit = sql_bool_true_literal(dialect_name)
     false_lit = sql_bool_false_literal(dialect_name)
     activated = 0
     deactivated = 0
 
     if activate_keys:
-        where_keys, params = _pk_or_clause(pk_columns, activate_keys, prefix="a")
+        where_keys, params = _pk_or_clause(pk_columns, activate_keys, prefix="a",
+                                           dialect=dialect_name)
         stmt = f"UPDATE {qualified} SET {col_quoted} = {false_lit} WHERE {where_keys}"  # nosec B608
         try:
             result = conn.execute(sa.text(stmt), params)
@@ -287,7 +313,8 @@ def _update_deleted_batch(
             conn.rollback()
 
     if delete_keys:
-        where_keys, params = _pk_or_clause(pk_columns, delete_keys, prefix="d")
+        where_keys, params = _pk_or_clause(pk_columns, delete_keys, prefix="d",
+                                           dialect=dialect_name)
         stmt = (
             f"UPDATE {qualified} SET {col_quoted} = {true_lit} "  # nosec B608
             f"WHERE {where_keys} "
@@ -316,10 +343,11 @@ def _compute_active_checksum(
     from services.dialect_profiles import sql_bool_is_not_true
     from services.reconciliation_api import stream_select_checksum
 
-    dialect_name = str(getattr(getattr(conn, "dialect", None), "name", "") or "")
-    col_quoted = quote_sql_identifier(soft_delete_column)
+    dialect_name = _dialect_of(conn)
+    q = _qchar(dialect_name)
+    col_quoted = quote_sql_identifier(soft_delete_column, q)
     pred = sql_bool_is_not_true(dialect_name, col_quoted)
-    cols_quoted = ",".join(quote_sql_identifier(c) for c in target_cols)
+    cols_quoted = ",".join(quote_sql_identifier(c, q) for c in target_cols)
     sql = f"SELECT {cols_quoted} FROM {qualified} WHERE {pred}"  # nosec B608
     return stream_select_checksum(
         conn,
@@ -382,15 +410,16 @@ def apply_inferred_deletes_via_staging(
     )
 
     _ensure_soft_delete_column(conn, target_qualified, soft_delete_column)
-    dialect_name = dialect or str(getattr(getattr(conn, "dialect", None), "name", "") or "")
-    col_quoted = quote_sql_identifier(soft_delete_column)
+    dialect_name = dialect or _dialect_of(conn)
+    q = _qchar(dialect_name)
+    col_quoted = quote_sql_identifier(soft_delete_column, q)
     true_lit = sql_bool_true_literal(dialect_name)
     false_lit = sql_bool_false_literal(dialect_name)
     deleted_pred = sql_bool_is_true(dialect_name, col_quoted)
     active_pred = sql_bool_is_not_true(dialect_name, col_quoted)
     join_pred = " AND ".join(
-        f"{staging_qualified}.{quote_sql_identifier(c)} = "
-        f"{target_qualified}.{quote_sql_identifier(c)}"
+        f"{staging_qualified}.{quote_sql_identifier(c, q)} = "
+        f"{target_qualified}.{quote_sql_identifier(c, q)}"
         for c in pk_columns
     )
     reactivated = _dest_engine_count(
@@ -704,16 +733,19 @@ def apply_inferred_soft_deletes(
     cfg = resolve_connector_config(endpoint)
     table = endpoint.table or endpoint.collection or "dt_import"
     schema_name = get_sql_schema(cfg)
-    qualified = _qualified_name(table, schema_name)
 
     import sqlalchemy as sa
     from connectors.writer_common import quote_sql_identifier
 
     target_cols = _target_columns(columns, mappings, schema)
     engine = get_sqlalchemy_engine(cfg)
+    engine_dialect = str(getattr(getattr(engine, "dialect", None), "name", "") or "")
+    qualified = _qualified_name(table, schema_name, engine_dialect)
     stg_name = f"_df_mirrorkeys_{uuid.uuid4().hex[:12]}"
-    stg_qualified = _qualified_name(stg_name, schema_name)
-    pk_quoted = ", ".join(quote_sql_identifier(c) for c in pk_columns)
+    stg_qualified = _qualified_name(stg_name, schema_name, engine_dialect)
+    pk_quoted = ", ".join(
+        quote_sql_identifier(c, _qchar(engine_dialect)) for c in pk_columns
+    )
     placeholders = ", ".join(f":p{i}" for i in range(len(pk_columns)))
     insert_sql = (
         f"INSERT INTO {stg_qualified} ({pk_quoted}) VALUES ({placeholders})"  # nosec B608
@@ -725,7 +757,7 @@ def apply_inferred_soft_deletes(
     try:
         with engine.connect() as conn:
             _ensure_soft_delete_column(conn, qualified, soft_delete_column)
-            dialect_name = str(getattr(getattr(conn, "dialect", None), "name", "") or "")
+            dialect_name = _dialect_of(conn) or engine_dialect
             _create_pk_staging(conn, stg_qualified, qualified, pk_quoted, dialect_name)
             conn.commit()
             source_key_rows = _stream_insert_pk_staging(

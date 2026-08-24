@@ -116,8 +116,16 @@ def _normalize(name: str) -> str:
 
 
 def _folded_ident(name: str) -> str:
-    """Case- and underscore-insensitive identifier (UserID ≡ userid ≡ user_id)."""
-    return _normalize(name).replace("_", "")
+    """Case- and separator-insensitive identifier (UserID ≡ userid ≡ user_id).
+
+    A *leading* underscore is kept: MongoDB's reserved ``_id`` is a different
+    column from ``id``, not a separator variant of it, and folding the two onto
+    one slot made every re-run of a DataFlow-created collection ambiguous and
+    let the document key win the assignment over the literal name match.
+    """
+    norm = _normalize(name)
+    prefix = "_" if norm.startswith("_") else ""
+    return prefix + norm.replace("_", "")
 
 
 def _dest_fold_collisions(target_columns: list[str]) -> set[str]:
@@ -201,6 +209,27 @@ def _semantic_tokens(name: str) -> list[str]:
 
 def _semantic_form(name: str) -> str:
     return "_".join(_semantic_tokens(name))
+
+
+def create_new_target_name(source_column: str) -> str:
+    """Destination column name for a CREATE TABLE / ADD COLUMN proposal.
+
+    A migration must land the operator's own column names. Expanding the source
+    name to its canonical semantic form (``qty`` → ``quantity``) renamed columns
+    nobody asked to rename: downstream SQL and BI on the destination break, a
+    by-name reconcile disagrees with a transfer that moved every row correctly,
+    and the next run maps ``qty`` onto the ``quantity`` the product itself just
+    created — scored as a rename, held for review, and refused by Execute, so an
+    unchanged route can never be re-run.
+
+    The canonical form stays available as ``semantic_name`` for enrichment and
+    for an operator who chooses the rename explicitly. Only illegal characters
+    are repaired, by the single identifier owner.
+    """
+    from connectors.sql_identifiers import sanitize_identifier
+
+    raw = (source_column or "").strip()
+    return sanitize_identifier(raw, preserve_case=True) or _semantic_form(raw)
 
 
 def _canonical_form(name: str) -> str:
@@ -726,6 +755,7 @@ def _score_pair(
     target_type: str = "VARCHAR",
     source_samples: list[str] | None = None,
     dest_db: str = "",
+    create_new_target: bool = False,
 ) -> tuple[float, str]:
     from services.semantic_analyzer import role_match_boost
     from services.training_lexicon import lexicon_boost
@@ -735,8 +765,15 @@ def _score_pair(
     src_sem = _semantic_form(source)
     tgt_sem_raw = _semantic_form(target)
 
-    type_penalty = _type_compat_penalty(
-        source_type, target_type, source_name=source, dest_db=dest_db
+    # A column this run will CREATE carries the type the kernel invents for this
+    # very source, so there is no declared destination type to lose fidelity
+    # against; charging a cast there billed create-new for its own carrier.
+    type_penalty = (
+        0.0
+        if create_new_target
+        else _type_compat_penalty(
+            source_type, target_type, source_name=source, dest_db=dest_db
+        )
     )
     type_boost = _type_aware_boost(source_type, target_type, dest_db=dest_db)
     sample_boost = _sample_consistency_boost(source_samples, source_type, target_type)
@@ -749,7 +786,13 @@ def _score_pair(
         sample_boost = -0.90
 
     def _finish(score: float, reason: str) -> tuple[float, str]:
-        adjusted = max(0.0, min(0.995, float(score) - type_penalty + type_boost + sample_boost))
+        # Only a literal name equality may reach the top of the band: type and
+        # sample boosts must never lift a near-name candidate (``_id``) into a
+        # tie with the column that carries the same name (``id``).
+        ceiling = 0.995 if src_norm == tgt_norm else 0.99
+        adjusted = max(
+            0.0, min(ceiling, float(score) - type_penalty + type_boost + sample_boost)
+        )
         review_bits: list[str] = []
         if _identity_leaf_mismatch(source, target):
             src_l = "/".join(sorted(_identity_kind_leaves(source)))
@@ -1138,6 +1181,7 @@ def map_columns(
     threshold: float = 0.85,
     destination_db_type: str = "",
     destination_table_exists: bool | None = None,
+    source_db_type: str = "",
 ) -> list[dict]:
     from services.semantic_analyzer import analyze_column
     from services.conversion_contract import classify_conversion, create_new_mapping_reason
@@ -1152,7 +1196,10 @@ def map_columns(
     src_types: dict[str, str] = {}
     tgt_types: dict[str, str] = {}
     src_samples: dict[str, list[str]] = {}
+    # target column name -> the source column whose create-new carrier it is.
+    create_new_pairs: dict[str, str] = {}
     dest_db = (destination_db_type or "").strip().lower()
+    src_db = (source_db_type or "").strip().lower()
 
     if source_schemas:
         for s in source_schemas:
@@ -1170,10 +1217,32 @@ def map_columns(
         # Names-only without typed introspect: never invent proven VARCHAR.
         # Existing tables must reload schema before create_compatible_new.
         names_only_existing = destination_table_exists is True
+        # A create-new column has no declared type yet: its carrier is the one
+        # this dialect will CREATE for the source column landing in it. Reading
+        # VARCHAR there billed every DECIMAL/DATE source for a cast to a string
+        # column the run never creates.
+        src_by_folded = {_folded_ident(s): s for s in source_columns}
         for t in target_columns:
             analyzed = analyze_column(t, "VARCHAR", [])
             tgt_roles[t] = analyzed["semantic_role"]
-            tgt_types[t] = "" if names_only_existing else "VARCHAR"
+            if names_only_existing:
+                tgt_types[t] = ""
+                continue
+            origin = src_by_folded.get(_folded_ident(t))
+            projected = ""
+            if origin and destination_table_exists is False and dest_db:
+                projected = str(
+                    create_new_mapping_target_type(
+                        src_types.get(origin, "VARCHAR"),
+                        dest_db,
+                        samples=src_samples.get(origin),
+                        source_db=src_db,
+                    )
+                    or ""
+                ).strip()
+                if projected:
+                    create_new_pairs[t] = origin
+            tgt_types[t] = projected or "VARCHAR"
 
     if not target_columns:
         # Empty targets are NOT automatically create-new. Only invent CREATE when
@@ -1182,10 +1251,11 @@ def map_columns(
         out: list[dict] = []
         confirmed_missing = destination_table_exists is False
         for src in source_columns:
+            new_name = create_new_target_name(src)
             src_type = src_types.get(src, "VARCHAR")
             dest_native = ddl_type(dest_db, src_type) if dest_db else src_type
             map_target_type = create_new_mapping_target_type(
-                src_type, dest_db, samples=src_samples.get(src)
+                src_type, dest_db, samples=src_samples.get(src), source_db=src_db
             )
             why_type = _create_new_physical_why_type(
                 src_type, map_target_type or dest_native, dest_db
@@ -1200,7 +1270,8 @@ def map_columns(
                 out.append(
                     {
                         "source": src,
-                        "target": _semantic_form(src),
+                        "target": new_name,
+                        "semantic_name": _semantic_form(src),
                         "confidence": IDENTITY_PASSTHROUGH_CONFIDENCE,
                         "reasoning": create_new_mapping_reason(
                             src_type, why_type, dest_db=dest_db
@@ -1224,7 +1295,8 @@ def map_columns(
                 out.append(
                     {
                         "source": src,
-                        "target": _semantic_form(src),
+                        "target": new_name,
+                        "semantic_name": _semantic_form(src),
                         "confidence": 0.55,
                         "reasoning": (
                             f"{exists_note}. Retry destination schema load before Map "
@@ -1242,7 +1314,9 @@ def map_columns(
                         "requires_review": True,
                     }
                 )
-        return _stamp_review_kinds(_apply_create_new_risk_stamps(out, dest_db))
+        return _stamp_review_kinds(
+            _apply_create_new_risk_stamps(out, dest_db, source_db_type=src_db)
+        )
 
     idf = _build_idf(source_columns + target_columns)
     all_doc_lens = [len(_tokenize(c)) for c in source_columns + target_columns]
@@ -1264,6 +1338,7 @@ def map_columns(
                 tgt_types.get(target, "VARCHAR"),
                 src_samples.get(source),
                 dest_db=dest_db,
+                create_new_target=create_new_pairs.get(target) == source,
             )
             pair_scores[(source, target)] = (score, reason)
 
@@ -1287,7 +1362,9 @@ def map_columns(
         try:
             from services.decision_kernel import is_lossy_coercion
 
-            lossy_pair = is_lossy_coercion(src_type, tgt_type, dest_db=dest_db)
+            lossy_pair = create_new_pairs.get(target) != source and is_lossy_coercion(
+                src_type, tgt_type, dest_db=dest_db
+            )
         except Exception:
             # Fail closed — unknown type authority must not green-path remaps.
             lossy_pair = True
@@ -1333,6 +1410,11 @@ def map_columns(
                 "requires_review": requires_review,
                 "source_type": src_type,
                 "target_type": tgt_type,
+                **(
+                    {"create_new": True}
+                    if create_new_pairs.get(target) == source
+                    else {}
+                ),
             }
         )
 
@@ -1360,6 +1442,7 @@ def map_columns(
                 tgt_types.get(target, "VARCHAR"),
                 src_samples.get(source),
                 dest_db=dest_db,
+                create_new_target=create_new_pairs.get(target) == source,
             )
             if score > best_score:
                 best_score, best_target, best_reason = score, target, reason
@@ -1446,7 +1529,8 @@ def map_columns(
                 mappings.append(
                     {
                         "source": source,
-                        "target": _semantic_form(source),
+                        "target": create_new_target_name(source),
+                        "semantic_name": _semantic_form(source),
                         "confidence": 0.55,
                         "reasoning": (
                             "Destination table exists but column types were not loaded — "
@@ -1503,7 +1587,7 @@ def map_columns(
             greedy_patched = True
             dest_native = ddl_type(dest_db, src_type) if dest_db else src_type
             map_target_type = create_new_mapping_target_type(
-                src_type, dest_db, samples=src_samples.get(source)
+                src_type, dest_db, samples=src_samples.get(source), source_db=src_db
             )
             # Prefer the original source name for ADD COLUMN (_id stays _id).
             # Semantic form alone collapses _id → id, then id_text — a name that
@@ -1544,7 +1628,7 @@ def map_columns(
             continue
         greedy_patched = True
         if not best_target:
-            best_target = _semantic_form(source)
+            best_target = create_new_target_name(source)
             best_score = 0.55
             best_reason = "No target match — inferred semantic name (no destination schema)"
             alternatives = []
@@ -1560,7 +1644,9 @@ def map_columns(
             from services.decision_kernel import is_lossy_coercion
 
             lossy_pair = bool(
-                best_target and is_lossy_coercion(src_type, tgt_type, dest_db=dest_db)
+                best_target
+                and create_new_pairs.get(best_target) != source
+                and is_lossy_coercion(src_type, tgt_type, dest_db=dest_db)
             )
         except Exception:
             lossy_pair = bool(best_target)
@@ -1609,7 +1695,7 @@ def map_columns(
     mappings.sort(key=lambda m: source_columns.index(m["source"]))
     return _stamp_review_kinds(
         _apply_create_new_risk_stamps(
-            mappings, dest_db, source_samples=src_samples
+            mappings, dest_db, source_samples=src_samples, source_db_type=src_db
         ),
         dest_collisions,
     )

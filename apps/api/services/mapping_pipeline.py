@@ -73,6 +73,7 @@ def _stamp_create_new_type_risks(
     *,
     destination_db_type: str = "",
     dest_table_exists: bool | None = None,
+    source_db_type: str = "",
 ) -> list[dict]:
     """Annotate create-new mappings with cross-dialect precision/width risk.
 
@@ -82,7 +83,10 @@ def _stamp_create_new_type_risks(
     from services.create_new_risk_stamp import apply_create_new_risk_stamps
 
     return apply_create_new_risk_stamps(
-        mappings, destination_db_type, dest_table_exists=dest_table_exists
+        mappings,
+        destination_db_type,
+        dest_table_exists=dest_table_exists,
+        source_db_type=source_db_type,
     )
 
 
@@ -311,6 +315,7 @@ def _repair_unparseable_numeric_targets(
     source_schemas: list[dict] | None,
     target_schemas: list[dict] | None,
     destination_db_type: str = "",
+    destination_table_exists: bool | None = None,
 ) -> list[dict]:
     """Rewrite hex/ObjectId → NUMBER/INTEGER mappings to create-new VARCHAR.
 
@@ -351,7 +356,19 @@ def _repair_unparseable_numeric_targets(
             dest_db = (destination_db_type or "").strip().lower()
             dest_native = ddl_type(dest_db, "VARCHAR") if dest_db else "VARCHAR"
             candidate = src.strip() or tgt
-            if candidate.lower() in taken and candidate.lower() == tgt.lower():
+            # A create-new proposal's target is not a column that exists on the
+            # destination, even when Map lists it in ``target_schemas``.
+            existing_dest_column = (
+                destination_table_exists is not False
+                and not _is_create_new_mapping(m)
+                and tgt.lower() in {t.lower() for t in tgt_by}
+            )
+            if not existing_dest_column:
+                # Nothing to sit beside: the column is created by this run, so
+                # widen its own type instead of inventing a ``*_text`` twin the
+                # operator never named.
+                candidate = tgt or candidate
+            elif candidate.lower() in taken and candidate.lower() == tgt.lower():
                 # Keep source name when inventing beside an incompatible dest.
                 base = candidate
                 candidate = f"{base}_text" if f"{base}_text".lower() not in taken else f"src_{base}"
@@ -441,6 +458,7 @@ def assert_mappings_executable(mappings: list[dict] | None) -> None:
     Validate cannot fail Execute solely because the FE still held drafts.
     When ``mappings`` is a list, it is updated in place with signed contracts.
     """
+    from preflight.risk_contract import mapping_review_cleared
     from services.migration_risk_contract import (
         hydrate_mappings_risk_contracts,
         lossy_mappings_missing_risk_contracts,
@@ -455,7 +473,8 @@ def assert_mappings_executable(mappings: list[dict] | None) -> None:
     for m in work:
         if not m.get("requires_review"):
             continue
-        if m.get("user_override") or m.get("approved") or m.get("operator_approved"):
+        # Same clearance owner G4 uses, so a green Validate cannot fail here.
+        if mapping_review_cleared(m):
             continue
         src = str(m.get("source") or "?")
         tgt = str(m.get("target") or "?")
@@ -527,7 +546,7 @@ def run_mapping_pipeline(
 
     if source_schemas is None and source_columns:
         source_schemas = [{"name": c, "inferred_type": "VARCHAR", "samples": []} for c in source_columns]
-    if target_schemas is None and target_columns:
+    if target_schemas is None and target_columns and destination_table_exists is not False:
         target_schemas = [{"name": c, "inferred_type": "VARCHAR", "samples": []} for c in target_columns]
 
     # Carriers that actually exist in the destination. Identity targets derived
@@ -604,7 +623,25 @@ def run_mapping_pipeline(
         target_schemas=target_schemas,
         destination_db_type=destination_db_type,
         destination_table_exists=destination_table_exists,
+        source_db_type=source_db_type,
     )
+
+    if target_schemas is None and target_columns and base_mappings:
+        # A table proved absent declares no types: the carriers are the ones the
+        # mapper just projected for these very sources. Standing in "VARCHAR"
+        # here made every later stage judge a cast into a string column the run
+        # never creates.
+        by_target = {m.get("target"): m for m in base_mappings if m.get("target")}
+        target_schemas = [
+            {
+                "name": c,
+                "inferred_type": str(
+                    (by_target.get(c) or {}).get("target_type") or "VARCHAR"
+                ),
+                "samples": [],
+            }
+            for c in target_columns
+        ]
 
     # If the destination schema is unknown AND confirmed create-new, derive
     # targets from identity mapping. Never invent targets when the table exists
@@ -937,6 +974,7 @@ def run_mapping_pipeline(
         source_schemas=source_schemas,
         target_schemas=target_schemas,
         destination_db_type=destination_db_type,
+        destination_table_exists=destination_table_exists,
     )
 
     from services.mapping_quality import (
@@ -1029,6 +1067,7 @@ def run_mapping_pipeline(
         enriched_mappings,
         destination_db_type=destination_db_type or "",
         dest_table_exists=destination_table_exists,
+        source_db_type=source_db_type,
     )
     # Additive create-new gaps: Kernel stamp before pending honesty pass.
     try:

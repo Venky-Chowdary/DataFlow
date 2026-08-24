@@ -12,6 +12,7 @@ from services.acknowledgment_contract import (
     audit_acknowledgments,
     resolve_acknowledgments,
 )
+from services.preflight_cursor_gate import resolve_read_scope
 from services.shape_preflight import ShapePreflightRefused, shaped_preflight_image
 
 from ..services.preflight_service import (
@@ -442,6 +443,23 @@ async def run_preflight(body: PreflightRequest):
                 ((body.source_config or {}).get("source_read_mode")
                  or ((body.source_config or {}).get("extra") or {}).get("source_read_mode")
                  or "")
+            ),
+            # A stored watermark belongs to the column it was measured on;
+            # Validate refuses a repointed cursor rather than letting Run
+            # apply one column's value to another.
+            read_scope=resolve_read_scope(
+                sync_mode=body.sync_mode,
+                stream_contracts=body.stream_contracts,
+                source_format=body.source_type or "",
+                source_config=body.source_config,
+                source_table=(body.source_table or body.source_collection or ""),
+                destination_db_type=str(
+                    body.dest_type
+                    or (dest_meta.get("db_type") if isinstance(dest_meta, dict) else "")
+                    or ""
+                ),
+                destination_config=dest_meta.get("_probe_cfg") or None,
+                destination_table=(body.dest_table or body.dest_collection or ""),
             ),
             delivery_guarantee=body.delivery_guarantee or "at_least_once",
             allow_append_only=bool((body.dest_extra or {}).get("allow_append_only")),

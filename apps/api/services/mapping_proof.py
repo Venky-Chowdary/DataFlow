@@ -185,6 +185,28 @@ def mapping_fidelity(
 
     from services.timezone_policy import effective_source_type as _tz_effective
 
+    from services.document_instant import document_instant_utc_invent
+
+    if document_instant_utc_invent(
+        _tz_effective(src_type, transform), tgt_type, dest_db=dest
+    ):
+        from services.conversion_contract import ConversionClass
+
+        return {
+            "verdict": "lossy_cast",
+            "reason": (
+                f"{src_type} → {tgt_type} stamps a zone the source never proved: "
+                "this store holds instants only, so every row is written as if "
+                "its wall clock were UTC. Declare the source zone, or accept the "
+                "UTC-normalize risk."
+            ),
+            "type_narrowing": False,
+            "transform_fidelity": t_fidelity,
+            "conversion_class": ConversionClass.NEEDS_TRANSFORM.value,
+            "invents_capacity": False,
+            "requires_risk_contract": True,
+        }
+
     if is_lossy_coercion(
         _tz_effective(src_type, transform),
         tgt_type,

@@ -122,6 +122,15 @@ async def get_cdc_cursor(cursor_key: str = Query(..., min_length=1, max_length=5
     }
 
 
+@router.get("/cdc-cursors/keys")
+async def list_cdc_cursor_keys() -> dict[str, Any]:
+    """List persisted cursor keys so a reset can name one instead of guessing."""
+    from services.sync_cursor import list_cursor_keys
+
+    keys = sorted(list_cursor_keys())
+    return {"count": len(keys), "cursor_keys": keys}
+
+
 class ClearCursorBody(BaseModel):
     cursor_key: str = Field(..., min_length=1, max_length=512)
     reason: str = Field("", max_length=300)

@@ -306,11 +306,27 @@ class IncrementalReadScope:
     primary_key: str = ""
     watermark: str | None = None
     cursor_key: str = ""
+    #: Column the stored watermark was actually measured on ("" when unrecorded).
+    watermark_cursor_column: str = ""
 
     @property
     def bounded(self) -> bool:
         """True when a stored watermark narrows the read to a delta."""
         return bool(self.cursor_column and self.watermark)
+
+    @property
+    def cursor_column_changed(self) -> bool:
+        """Was the stored watermark measured on a different column?
+
+        A watermark is a value *of one column*. Reusing ``id = 250`` to bound a
+        read on ``updated_at`` either explodes (``invalid input syntax for type
+        timestamp: "250"``) or, when both columns happen to be comparable,
+        silently skips rows. Neither may be resolved by guessing.
+        """
+        stored = (self.watermark_cursor_column or "").strip()
+        if not stored or not self.watermark:
+            return False
+        return stored.lower() != (self.cursor_column or "").strip().lower()
 
 
 def resolve_incremental_read_scope(
@@ -355,11 +371,13 @@ def resolve_incremental_read_scope(
     )
     pk_cols = contract.primary_key_columns() if contract else []
     tiebreak = next((c for c in pk_cols if c and c != cursor_column), "")
+    watermark, metadata = get_watermark_record(cursor_key)
     return IncrementalReadScope(
         cursor_column=cursor_column,
         primary_key=tiebreak,
-        watermark=get_watermark(cursor_key),
+        watermark=watermark,
         cursor_key=cursor_key,
+        watermark_cursor_column=str(metadata.get("cursor_column") or ""),
     )
 
 
@@ -393,6 +411,34 @@ def _load() -> dict[str, Any]:
 
 def _save(data: dict[str, Any]) -> None:
     write_json_atomic(STORE_PATH, data, indent=2, default=json_default)
+
+
+def get_watermark_record(cursor_key: str) -> tuple[str | None, dict[str, Any]]:
+    """Return ``(watermark, metadata)`` — the value and what it was measured on.
+
+    The metadata carries the cursor column, so a route whose cursor was changed
+    cannot have the old column's value applied to the new one.
+    """
+    coll = _mongo_cursors()
+    if coll is not None:
+        try:
+            doc = coll.find_one({"key": cursor_key})
+            if doc and doc.get("watermark") is not None:
+                meta = doc.get("metadata")
+                return str(doc["watermark"]), dict(meta) if isinstance(meta, dict) else {}
+            return None, {}
+        except Exception:
+            _logger.exception("Mongo get_watermark failed for %s", cursor_key)
+
+    for entry in _load().get("cursors", []):
+        if entry.get("key") == cursor_key:
+            val = entry.get("watermark")
+            meta = entry.get("metadata")
+            return (
+                str(val) if val is not None else None,
+                dict(meta) if isinstance(meta, dict) else {},
+            )
+    return None, {}
 
 
 def get_watermark(cursor_key: str) -> str | None:
@@ -461,6 +507,21 @@ def set_watermark(cursor_key: str, watermark: str, *, metadata: dict[str, Any] |
     _save(data)
 
 
+def list_cursor_keys() -> list[str]:
+    """Every persisted cursor key, so a reset can be aimed without guessing one.
+
+    Clearing a watermark requires its exact key; an operator who has just reset
+    a destination knows the route, not the key string.
+    """
+    coll = _mongo_cursors()
+    if coll is not None:
+        try:
+            return [str(d.get("key")) for d in coll.find({}, {"key": 1}) if d.get("key")]
+        except Exception:
+            _logger.exception("Mongo list_cursor_keys failed")
+    return [str(e.get("key")) for e in _load().get("cursors", []) if e.get("key")]
+
+
 def clear_watermark(cursor_key: str) -> dict[str, Any]:
     """Delete a CDC/sync watermark so the next run re-snapshots (when_needed/initial).
 
@@ -501,6 +562,46 @@ def _is_composite(watermark: str) -> bool:
     every watermark written from now on is unambiguous.
     """
     return KEYSET_SEP in watermark or "|" in watermark
+
+
+def records_after_watermark(
+    records: list[dict[str, Any]],
+    cursor_column: str,
+    watermark: str | None,
+    *,
+    primary_key: str = "",
+) -> tuple[list[dict[str, Any]], int]:
+    """Bound already-parsed records to the delta past ``watermark``.
+
+    A database source is bounded in its WHERE clause, but a file or document
+    payload arrives whole, so the same cursor contract has to be honoured after
+    the parse — otherwise an "incremental append" of a daily CSV re-appends
+    every row the file still contains, which is the duplicate-load operators
+    report as data corruption and is exactly what the mode promised not to do.
+
+    Comparison goes through :func:`compare_cursor_values`, so a file delta is
+    bounded by the same typed comparator (and the same composite tie-break) the
+    database reader uses. Returns ``(delta, unbounded)`` where ``unbounded``
+    counts records that carry no cursor value: those cannot be proven new or
+    old, and the caller must refuse rather than guess.
+    """
+    col = (cursor_column or "").strip()
+    if not col:
+        return list(records), 0
+    pk = (primary_key or "").strip()
+    delta: list[dict[str, Any]] = []
+    unbounded = 0
+    for rec in records:
+        raw = rec.get(col)
+        if raw is None or str(raw).strip() == "":
+            unbounded += 1
+            continue
+        candidate = str(raw)
+        if pk and pk != col:
+            candidate = encode_keyset_bookmark([candidate, str(rec.get(pk, ""))])
+        if watermark is None or compare_cursor_values(candidate, watermark) > 0:
+            delta.append(rec)
+    return delta, unbounded
 
 
 def max_cursor_value(

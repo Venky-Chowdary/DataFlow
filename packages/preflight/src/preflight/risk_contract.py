@@ -57,6 +57,73 @@ def is_safe_normalize_mapping(mapping: Any) -> bool:
     return transform in SAFE_NORMALIZE_TRANSFORMS
 
 
+def _attr(mapping: Any, name: str, camel: str = "") -> Any:
+    """Read one mapping field from either a dict payload or a model object."""
+    if isinstance(mapping, dict):
+        value = mapping.get(name)
+        if value is None and camel:
+            value = mapping.get(camel)
+        return value
+    value = getattr(mapping, name, None)
+    if value is None and camel:
+        value = getattr(mapping, camel, None)
+    return value
+
+
+def mapping_is_lossy(mapping: Any) -> bool:
+    """Lossy cast or narrowing carrier — the contract families, not a warning."""
+    if str(_attr(mapping, "fidelity") or "").strip().lower() == "lossy_cast":
+        return True
+    return bool(_attr(mapping, "type_narrowing", "typeNarrowing"))
+
+
+def mapping_requires_risk_contract(mapping: Any) -> bool:
+    """Lossy casts, narrowing, and value-mutating transforms need a contract.
+
+    Safe normalize (trim / trim_id / email / phone / case) is Map-Ready — not a
+    Migration Risk Contract path. Must stay aligned with Map
+    ``isSafeNormalizeMapping``.
+    """
+    if is_safe_normalize_mapping(mapping):
+        return False
+    if mapping_is_lossy(mapping):
+        return True
+    return str(_attr(mapping, "fidelity") or "").strip().lower() == "mutate"
+
+
+def mapping_is_structural_review(mapping: Any) -> bool:
+    """STRUCT flatten / specialty identity cannot clear via bare user_override."""
+    if bool(_attr(mapping, "struct_derived", "structDerived")):
+        return True
+    policy = str(_attr(mapping, "struct_policy", "structPolicy") or "").strip().lower()
+    if policy in {"flatten_top_level_keys", "flatten_deep", "explode_rows"}:
+        return True
+    transform = str(_attr(mapping, "transform") or "").strip().lower()
+    return transform in {"identity_specialty", "specialty"}
+
+
+def mapping_operator_overridden(mapping: Any) -> bool:
+    """An explicit Studio confirmation on an ambiguous (non-lossy) mapping."""
+    return bool(
+        _attr(mapping, "user_override", "userOverride")
+        or _attr(mapping, "approved")
+        or _attr(mapping, "operator_approved", "operatorApproved")
+    )
+
+
+def mapping_review_cleared(mapping: Any) -> bool:
+    """True when the operator already resolved this mapping's review demand.
+
+    Single owner for Validate (G4) and Execute so a green Validate cannot fail
+    at Execute: a lossy / narrowing / mutating / structural mapping clears only
+    with a verified continue-policy Risk Contract, and an ambiguous mapping
+    clears with an explicit override.
+    """
+    if mapping_requires_risk_contract(mapping) or mapping_is_structural_review(mapping):
+        return mapping_risk_cleared(mapping)
+    return mapping_operator_overridden(mapping)
+
+
 def _canonical_payload(payload: dict[str, Any]) -> str:
     body = {k: v for k, v in payload.items() if k != "signature"}
     return json.dumps(body, sort_keys=True, separators=(",", ":"), default=str)

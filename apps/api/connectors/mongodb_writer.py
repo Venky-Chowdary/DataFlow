@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from decimal import InvalidOperation
 from typing import Any
@@ -33,6 +33,28 @@ from connectors.writer_common import (
 from services.document_instant import transform_narrows_to_calendar_day
 
 logger = logging.getLogger(__name__)
+
+
+def _target_is_temporal(target_type: str) -> bool:
+    """True when the destination cell holds BSON's single date/time carrier."""
+    from services.type_system import (
+        LOGICAL_DATE,
+        LOGICAL_DATETIME,
+        normalize_logical_type,
+    )
+
+    return normalize_logical_type(target_type) in {LOGICAL_DATE, LOGICAL_DATETIME}
+
+
+def _declares_calendar_day(mapping: Mapping[str, Any]) -> bool:
+    """True when the source column is a calendar day, not an instant."""
+    from services.type_system import LOGICAL_DATE, normalize_logical_type
+
+    declared = mapping.get("source_type") or mapping.get("sourceType") or ""
+    if not isinstance(declared, str) or not declared.strip():
+        return False
+    return normalize_logical_type(declared) == LOGICAL_DATE
+
 
 # MongoDB commands handle ~1000-document batches most reliably through proxies
 # and serverless tiers. 20k-document single calls can hit socket/proxy limits.
@@ -536,6 +558,18 @@ def write_mapped_rows(
             if m.get("risk_acknowledged") or m.get("riskAcknowledged")
         }
         utc_normalized_cols: set[str] = set()
+        # Columns the source declares as a calendar day. A date has no time of
+        # day and therefore no zone to invent: UTC midnight is the one instant
+        # every driver reads back as the same date. Refusing it as "naive"
+        # blocked plain DATE columns behind a contract that answers a question
+        # the value never raised.
+        calendar_day_cols = {
+            sanitize_identifier(
+                m.get("target") or m.get("source"), preserve_case=True
+            )
+            for m in mappings
+            if _declares_calendar_day(m)
+        }
 
         def _to_bson(
             value: Any, stype: str, transform: str = "", column: str = ""
@@ -620,7 +654,10 @@ def write_mapped_rows(
                         "(refuse invent via pass-through)"
                     )
                 return coerced
-            if upper == "DATE" and transform_narrows_to_calendar_day(transform):
+            if _target_is_temporal(upper) and (
+                transform_narrows_to_calendar_day(transform)
+                or column in calendar_day_cols
+            ):
                 from connectors.sql_temporal import coerce_sql_temporal
                 from datetime import timezone as _tz
 

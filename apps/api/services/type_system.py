@@ -5213,7 +5213,15 @@ def resolve_mapping_target_type(
         )
         if stamped:
             # Upgrade legacy bare TIMESTAMP stamps when source declares FSP.
-            return promote_create_new_temporal_stamp(src, stamped, db)
+            promoted = promote_create_new_temporal_stamp(src, stamped, db)
+            if mapping.get("user_override") or mapping.get("risk_acknowledged"):
+                # Operator chose this carrier — a narrowing is their decision.
+                return promoted
+            from services.decision_kernel.type_invent import (
+                promote_create_new_capacity_stamp,
+            )
+
+            return promote_create_new_capacity_stamp(src, promoted, db)
         if live:
             return live
         # Empty stamp must not fall back to source identity (BQ UUID→UUID lie).
@@ -6032,67 +6040,14 @@ def temporal_precision_would_narrow(
     *,
     dest_db: str = "",
 ) -> bool:
-    """True when source fractional seconds exceed destination TIME/TIMESTAMP(p).
+    """Backward-compat shim — body in decision_kernel.type_invent."""
+    from services.decision_kernel.type_invent import (
+        temporal_precision_would_narrow as _impl,
+    )
 
-    ``TIME(6)→TIME(0)`` / ``DATETIME2(7)→DATETIME2(0)`` silently truncates
-    unless G3 blocks and write paths refuse inventing lower precision.
+    return _impl(source_type, target_type, dest_db=dest_db)
 
-    ``SMALLDATETIME`` is one-minute accuracy — any second/fraction datetime
-    source into SMALLDATETIME is a silent round (Microsoft / UGO class).
 
-    Bare ``TIMESTAMP`` defaults are dialect-aware when ``dest_db`` is set:
-    MySQL/Maria → FSP 0; PostgreSQL-family / Redshift → 6; SQL Server
-    DATETIME2 bare → 7. Without ``dest_db``, bare TIMESTAMP stays fail-closed
-    at 0 (MySQL) so truncation cannot silent-green.
-    """
-    src_l = normalize_logical_type(source_type)
-    tgt_l = normalize_logical_type(target_type)
-    if is_document_instant_token(dest_db, target_type):
-        # Millisecond carrier spelled ``date``. Restate it as a datetime of that
-        # precision so the comparison below reports the truncation that actually
-        # happens instead of stopping at the date-family mismatch.
-        target_type = f"DATETIME({DOCUMENT_INSTANT_FRACTIONAL_DIGITS})"
-        tgt_l = LOGICAL_DATETIME
-    if src_l not in {LOGICAL_TIME, LOGICAL_DATETIME} or tgt_l not in {
-        LOGICAL_TIME,
-        LOGICAL_DATETIME,
-    }:
-        return False
-    tgt_u = strip_identity_qualifier(target_type).upper().strip()
-    src_u = strip_identity_qualifier(source_type).upper().strip()
-    if tgt_u == "SMALLDATETIME" and src_u != "SMALLDATETIME" and src_l == LOGICAL_DATETIME:
-        return True
-    tgt_p = destination_temporal_fractional_digits(target_type, dest_db=dest_db)
-    src_p = parse_temporal_fractional_precision(source_type)
-    if tgt_p is None:
-        return False
-    if src_p is None:
-        # SQL Server bare DATETIME2 defaults to precision 7 — never treat as
-        # unknown and soft-pass DATETIME2→DATETIME (≈3.33ms round).
-        bare_src = re.sub(r"\s*\(\s*\d+\s*\)", "", src_u).strip()
-        if bare_src in {"DATETIME2", "DATETIMEOFFSET"}:
-            src_p = 7
-        elif bare_src in _SNOWFLAKE_BARE_TIMESTAMP_SPELLINGS:
-            # Snowflake declares TIMESTAMP_NTZ/LTZ/TZ with no typmod in its
-            # catalog but stores nanoseconds (default scale 9). Reading the
-            # absent typmod as "unknown" green-lit Snowflake→MySQL DATETIME
-            # (FSP 0), which drops every fractional second on write. These
-            # spellings exist in no other dialect, so the default is safe to
-            # apply without knowing the source engine.
-            #
-            # It is a declared ceiling rather than observed nanoseconds, so it
-            # accuses only loss an operator can act on. Every mainstream
-            # destination clamps at microseconds or better, so sub-microsecond
-            # narrowing is unavoidable and reporting it would put a Risk
-            # Contract on every Snowflake timestamp column and teach operators
-            # to sign unread. Landing at millisecond or whole-second FSP is the
-            # fixable case: widen the destination column.
-            if tgt_p >= SNOWFLAKE_UNAVOIDABLE_FSP_FLOOR:
-                return False
-            src_p = SNOWFLAKE_DEFAULT_TIMESTAMP_FRACTIONAL_DIGITS
-        else:
-            return False
-    return src_p > tgt_p
 
 @lru_cache(maxsize=8192)
 def strip_identity_qualifier(inferred: str | None) -> str:

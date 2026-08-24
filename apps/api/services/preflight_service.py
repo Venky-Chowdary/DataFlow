@@ -479,6 +479,7 @@ def run_transfer_policy_gates(
     source_read_mode: str = "",
     delivery_guarantee: str = "at_least_once",
     allow_append_only: bool = False,
+    read_scope: Any = None,
 ) -> list[dict[str, Any]]:
     """Validate enterprise run policy that sits above source/destination probes."""
     contracts = [c for c in stream_contracts or [] if c.get("selected", True)]
@@ -501,6 +502,7 @@ def run_transfer_policy_gates(
             pass_status=GateStatus.PASS.value,
             block_status=GateStatus.BLOCK.value,
             source_read_mode=source_read_mode,
+            read_scope=read_scope,
         )
     )
 

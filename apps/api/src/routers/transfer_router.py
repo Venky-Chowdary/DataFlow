@@ -429,10 +429,20 @@ async def map_columns_route(body: MapColumnsRequest):
         }
         for c in body.source_columns
     ]
-    target_schemas = [
-        {"name": c, "inferred_type": body.target_schema.get(c, "VARCHAR"), "samples": []}
-        for c in body.target_columns
-    ] if body.target_columns else None
+    # Only a destination type the probe actually read is a declared type. Filling
+    # the gap with "VARCHAR" made the mapper compare every DECIMAL/DATE source
+    # against a string column nothing declares, so faithful create-new carriers
+    # were billed as lossy casts; names-only lets the type kernel project the
+    # carrier the run will really CREATE.
+    target_schemas = (
+        [
+            {"name": c, "inferred_type": body.target_schema[c], "samples": []}
+            for c in body.target_columns
+        ]
+        if body.target_columns
+        and all(str(body.target_schema.get(c) or "").strip() for c in body.target_columns)
+        else None
+    )
 
     try:
         from services.tracing import get_correlation_id, start_span

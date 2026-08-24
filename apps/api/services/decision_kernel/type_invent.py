@@ -968,6 +968,64 @@ def promote_create_new_temporal_stamp(src_type: str, stamped: str, dest_db_type:
 
 
 
+# Families whose create-new stamp is a pure *width* projection, so a wider
+# source declaration can only mean the earlier sample was too small. Temporal
+# carriers are excluded on purpose: MySQL ``TIMESTAMP`` → ``DATETIME(6)`` also
+# moves the 1970–2038 range, which is a semantic change an operator must see
+# (``promote_create_new_temporal_stamp`` owns the temporal question).
+_CAPACITY_PROMOTABLE_LOGICALS: Final[frozenset[str]] = frozenset(
+    {LOGICAL_STRING, LOGICAL_TEXT, LOGICAL_INTEGER, LOGICAL_DECIMAL, LOGICAL_BINARY}
+)
+
+
+def promote_create_new_capacity_stamp(
+    src_type: str,
+    stamped: str,
+    dest_db_type: str = "",
+) -> str:
+    """Widen a projected create-new stamp that can no longer hold the source.
+
+    A create-new stamp is a *projection* of the source type, not an operator
+    decision: on a sampled source (CSV/Excel/document store) Map projects it
+    from the first rows, and the full read then declares a wider type —
+    ``DECIMAL(6,4)`` from eight rows becomes ``DECIMAL(8,4)`` over the file.
+    Enforcing the earlier projection makes Datawrap block its own CREATE TABLE
+    for a fidelity collapse it invented, which is the worst kind of refusal:
+    there is no destination DDL to protect yet, and no remap the operator can
+    make that is more correct than the one we would write ourselves.
+
+    So the stamp is re-projected from the current source type, and only ever
+    widened *inside the carrier family the stamp already chose*: a
+    ``NUMBER(6,4)`` that can no longer hold ``DECIMAL(9,4)`` grows its
+    precision, but a ``VARCHAR(64)`` stamped on a decimal column is a
+    deliberate representation change — nobody projects a string carrier for a
+    numeric source — and stands as written. Landing a value the stamp cannot
+    hold is then a real cast failure the writer must quarantine, not a width
+    Datawrap may silently re-choose. An operator-chosen narrowing
+    (``user_override`` / ``risk_acknowledged``) never reaches here.
+    """
+    from services.type_system import is_lossy_coercion, normalize_logical_type
+
+    stamp = (stamped or "").strip()
+    src = (src_type or "").strip()
+    db = (dest_db_type or "").strip()
+    if not stamp or not src:
+        return stamp
+    logical = normalize_logical_type(src)
+    if logical != normalize_logical_type(stamp):
+        return stamp
+    if logical not in _CAPACITY_PROMOTABLE_LOGICALS:
+        return stamp
+    if not is_lossy_coercion(src, stamp, dest_db=db):
+        return stamp
+    reprojected = create_new_mapping_target_type(src, db)
+    if not reprojected or reprojected.strip().upper() == stamp.upper():
+        return stamp
+    if is_lossy_coercion(src, reprojected, dest_db=db):
+        return stamp
+    return reprojected
+
+
 def create_new_mapping_target_type(
     src_type: str,
     dest_db_type: str = "",
@@ -2084,3 +2142,91 @@ __all__ = [
     'ddl_invent_never_narrower_than_table',
     'promote_create_new_temporal_stamp',
 ]
+
+
+def temporal_precision_would_narrow(
+    source_type: str,
+    target_type: str,
+    *,
+    dest_db: str = "",
+) -> bool:
+    """True when source fractional seconds exceed destination TIME/TIMESTAMP(p).
+
+    ``TIME(6)→TIME(0)`` / ``DATETIME2(7)→DATETIME2(0)`` silently truncates
+    unless G3 blocks and write paths refuse inventing lower precision.
+
+    ``SMALLDATETIME`` is one-minute accuracy — any second/fraction datetime
+    source into SMALLDATETIME is a silent round (Microsoft / UGO class).
+
+    Bare ``TIMESTAMP`` defaults are dialect-aware when ``dest_db`` is set:
+    MySQL/Maria → FSP 0; PostgreSQL-family / Redshift → 6; SQL Server
+    DATETIME2 bare → 7. Without ``dest_db``, bare TIMESTAMP stays fail-closed
+    at 0 (MySQL) so truncation cannot silent-green.
+    """
+    from services.type_system import (
+        DOCUMENT_INSTANT_FRACTIONAL_DIGITS,
+        SNOWFLAKE_DEFAULT_TIMESTAMP_FRACTIONAL_DIGITS,
+        SNOWFLAKE_UNAVOIDABLE_FSP_FLOOR,
+        _SNOWFLAKE_BARE_TIMESTAMP_SPELLINGS,
+        destination_temporal_fractional_digits,
+        is_document_instant_token,
+    )
+
+    src_l = normalize_logical_type(source_type)
+    tgt_l = normalize_logical_type(target_type)
+    if is_document_instant_token(dest_db, target_type):
+        # Millisecond carrier spelled ``date``. Restate it as a datetime of that
+        # precision so the comparison below reports the truncation that actually
+        # happens instead of stopping at the date-family mismatch.
+        target_type = f"DATETIME({DOCUMENT_INSTANT_FRACTIONAL_DIGITS})"
+        tgt_l = LOGICAL_DATETIME
+    if src_l not in {LOGICAL_TIME, LOGICAL_DATETIME} or tgt_l not in {
+        LOGICAL_TIME,
+        LOGICAL_DATETIME,
+    }:
+        return False
+    tgt_u = strip_identity_qualifier(target_type).upper().strip()
+    src_u = strip_identity_qualifier(source_type).upper().strip()
+    if tgt_u == "SMALLDATETIME" and src_u != "SMALLDATETIME" and src_l == LOGICAL_DATETIME:
+        return True
+    tgt_p = destination_temporal_fractional_digits(target_type, dest_db=dest_db)
+    src_p = parse_temporal_fractional_precision(source_type)
+    if tgt_p is None:
+        return False
+    if src_p is None:
+        # SQL Server bare DATETIME2 defaults to precision 7 — never treat as
+        # unknown and soft-pass DATETIME2→DATETIME (≈3.33ms round).
+        bare_src = re.sub(r"\s*\(\s*\d+\s*\)", "", src_u).strip()
+        if bare_src in {"DATETIME2", "DATETIMEOFFSET"}:
+            src_p = 7
+        elif bare_src in _SNOWFLAKE_BARE_TIMESTAMP_SPELLINGS:
+            if bare_src == re.sub(r"\s*\(\s*\d+\s*\)", "", tgt_u).strip():
+                # Both sides carry the same unparameterized declaration, so the
+                # column keeps whatever that carrier keeps — it cannot truncate
+                # itself. The underscore spellings are also how introspection
+                # reports a zoneless carrier on MySQL/PostgreSQL, so reading the
+                # source as Snowflake's nanosecond ceiling while the destination
+                # resolves through ``dest_db`` invented a fidelity collapse
+                # (``TIMESTAMP_NTZ → TIMESTAMP_NTZ``) on routes that never
+                # touched Snowflake. One declaration, one precision rule.
+                return False
+            # Snowflake declares TIMESTAMP_NTZ/LTZ/TZ with no typmod in its
+            # catalog but stores nanoseconds (default scale 9). Reading the
+            # absent typmod as "unknown" green-lit Snowflake→MySQL DATETIME
+            # (FSP 0), which drops every fractional second on write. These
+            # spellings exist in no other dialect, so the default is safe to
+            # apply without knowing the source engine.
+            #
+            # It is a declared ceiling rather than observed nanoseconds, so it
+            # accuses only loss an operator can act on. Every mainstream
+            # destination clamps at microseconds or better, so sub-microsecond
+            # narrowing is unavoidable and reporting it would put a Risk
+            # Contract on every Snowflake timestamp column and teach operators
+            # to sign unread. Landing at millisecond or whole-second FSP is the
+            # fixable case: widen the destination column.
+            if tgt_p >= SNOWFLAKE_UNAVOIDABLE_FSP_FLOOR:
+                return False
+            src_p = SNOWFLAKE_DEFAULT_TIMESTAMP_FRACTIONAL_DIGITS
+        else:
+            return False
+    return src_p > tgt_p

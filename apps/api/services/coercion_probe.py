@@ -779,7 +779,15 @@ def analyze_coercion(
             continue
 
         if failed:
-            severity = "block"
+            # A signed continue-policy contract is the operator's decision that
+            # unfit cells hold out to quarantine. Keeping the column at "block"
+            # left Validate green while the report it publishes still declared a
+            # blocking failure — two answers for one column.
+            from services.migration_risk_contract import (
+                mapping_has_clearing_risk_contract,
+            )
+
+            severity = "warn" if mapping_has_clearing_risk_contract(m) else "block"
         elif sentinel_nulls and strict_null_loss:
             # Non-null → NULL is potential data loss; never green-light under strict.
             severity = "block"

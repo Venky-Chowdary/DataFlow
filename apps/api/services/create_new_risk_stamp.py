@@ -19,6 +19,7 @@ def apply_create_new_risk_stamps(
     *,
     source_samples: dict[str, list] | None = None,
     dest_table_exists: bool | None = None,
+    source_db_type: str = "",
 ) -> list[dict]:
     """Stamp create-new type risks without importing mapping_pipeline (cycle-safe)."""
     # Deferred: semantic_mapper imports this module, so binding its calibration
@@ -65,11 +66,15 @@ def apply_create_new_risk_stamps(
         stamped = str(row.get("target_type") or "").strip()
         col_samples = samples_by_src.get(str(row.get("source") or "")) or None
         physical_from_src = (
-            create_new_mapping_target_type(src, db, samples=col_samples) if db else ""
+            create_new_mapping_target_type(
+                src, db, samples=col_samples, source_db=source_db_type
+            )
+            if db
+            else ""
         )
         if db and stamped:
             physical_from_stamp = create_new_mapping_target_type(
-                stamped, db, samples=col_samples
+                stamped, db, samples=col_samples, source_db=source_db_type
             )
             if reinvent_would_drop_dest_instant_carrier(
                 stamped, physical_from_stamp, dest_db=db

@@ -309,9 +309,21 @@ def classify_schema_change(
         old_t, new_t = old_cols[col], new_cols[col]
         same_logical = normalize_logical_type(old_t) == normalize_logical_type(new_t)
         same_length = _type_length(old_t) == _type_length(new_t)
+        # A declaration is not drift against itself. Coercion helpers read the
+        # two spellings through the destination's defaults, so an unparameterized
+        # carrier (TIMESTAMP_NTZ, TIMESTAMP) resolves to the source ceiling on
+        # one side and the destination floor on the other and accuses a column
+        # nobody touched of narrowing. Loss against the destination is the
+        # fidelity gate's concern, measured on real destination types; drift only
+        # reports what changed between two schemas.
+        unchanged_declaration = _norm_type(old_t) == _norm_type(new_t)
         # Never short-circuit on same logical + same first-number length alone —
         # DECIMAL(10,4)→DECIMAL(10,2) and BIGINT→TINYINT share that trap.
-        if same_logical and same_length and not _is_type_narrow(old_t, new_t, dest_db=dest_db):
+        if unchanged_declaration or (
+            same_logical
+            and same_length
+            and not _is_type_narrow(old_t, new_t, dest_db=dest_db)
+        ):
             # Same declared type; nullability tighten is breaking.
             if col in old_null and col in new_null and old_null[col] and not new_null[col]:
                 breaking.append({
