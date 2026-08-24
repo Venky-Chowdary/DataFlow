@@ -68,6 +68,16 @@ class LastAdminProtected(TeamStoreError):
     pass
 
 
+class MemberAlreadyExists(TeamStoreError):
+    """An *add* was asked to overwrite a membership that already exists.
+
+    Adding and re-roling are different acts: an invitation form that quietly
+    re-roles reports "member added" for someone who was already here, and can
+    silently demote an admin to viewer on a typo. The role change has its own
+    route, so the add path refuses and names the role held today.
+    """
+
+
 def _assert_not_last_admin(workspace_id: str, email: str) -> None:
     """Refuse a change that would leave a workspace with nobody who can administer it."""
     admins = [m for m in _read_memberships(workspace_id=workspace_id) if m.role == "admin"]
@@ -399,8 +409,13 @@ def add_workspace_member(
     role: str,
     added_by: str,
     actor_is_platform_admin: bool = False,
+    refuse_existing: bool = False,
 ) -> Membership:
     """Add or re-role a member, or raise the reason it cannot be done.
+
+    ``refuse_existing`` is what an invitation passes: it makes an existing
+    membership a conflict (``MemberAlreadyExists``) instead of a silent re-role.
+    The role-change route leaves it false, because re-roling is its whole job.
 
     A platform administrator may seed the first member of any workspace: without
     that, a workspace created by one admin could never be handed to anyone else.
@@ -418,6 +433,11 @@ def add_workspace_member(
         (m for m in _read_memberships(workspace_id=workspace_id, email=email)),
         None,
     )
+    if existing and refuse_existing:
+        raise MemberAlreadyExists(
+            f"{normalize_email(email)} is already a member of this workspace "
+            f"as {existing.role} — change their role instead of adding them again"
+        )
     if existing and existing.role == "admin" and role != "admin":
         _assert_not_last_admin(workspace_id, email)
     membership = Membership(

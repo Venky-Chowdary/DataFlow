@@ -15,7 +15,6 @@ from services.team_store import (
     can_read_workspace,
     can_write_workspace,
     get_workspace,
-    list_workspace_members,
 )
 from services.tenant_store import (
     Tenant,
@@ -495,11 +494,28 @@ async def post_tenant(body: TenantCreateBody, request: Request):
     from services.audit_log import append_audit_event
 
     actor = _actor(request)
-    if body.workspace_id and not _can_admin_workspace(request, body.workspace_id):
+    # A tenant is read back by the workspace the request is scoped to, so it must
+    # be created against one. An unnamed workspace produced a tenant no GET could
+    # ever resolve — saved, invisible, and never authorized against a workspace.
+    named = (request.headers.get("x-workspace-id") or "").strip()
+    workspace_id = (body.workspace_id or "").strip() or named
+    if not workspace_id:
+        raise HTTPException(
+            status_code=400,
+            detail="workspace_id is required — a tenant belongs to a workspace",
+        )
+    # Authority over the named workspace is asked first: borrowing the header's
+    # scope to write into someone else's workspace is the stronger refusal.
+    if not _can_admin_workspace(request, workspace_id):
         raise HTTPException(status_code=403, detail="Workspace admin required to create a tenant")
+    if body.workspace_id and named and body.workspace_id.strip() != named:
+        raise HTTPException(
+            status_code=403,
+            detail="workspace_id does not match X-Workspace-Id",
+        )
     try:
         tenant = create_tenant(
-            workspace_id=body.workspace_id,
+            workspace_id=workspace_id,
             name=body.name,
             custom_domain=body.custom_domain,
             data_region=body.data_region,

@@ -3,7 +3,8 @@
 Permission model (enterprise-friendly):
 
 - viewer:  read jobs, connectors, schedules, audit, workspace.
-- editor:  viewer + run transfers, manage connectors, schedules, plans.
+- editor:  viewer + run transfers, manage connectors, schedules, plans, and
+           invite non-admin members to the workspace (granting admin is not).
 - admin:   editor + workspace administration, user management, settings.
 
 Unknown roles and the dev "Workspace tester" role map to editor so development
@@ -36,6 +37,12 @@ class Permission:
     AUDIT_READ = "audit.read"
     WORKSPACE_READ = "workspace.read"
     WORKSPACE_MANAGE = "workspace.manage"
+    # Bringing a peer into the workspace you already work in. Held by editor as
+    # well as admin, because ``services.team_store.add_workspace_member`` accepts
+    # an editor adding a non-admin member — a client gating membership on
+    # workspace.manage disabled the control the API would have honoured, and told
+    # an editor to ask for the role it already had.
+    MEMBER_INVITE = "member.invite"
     AI_USE = "ai.use"
     QUERY_USE = "query.use"
     # Acting on your *own* credential (rotating a one-time password). Every role
@@ -58,6 +65,7 @@ _ALL_PERMISSIONS = {
     Permission.AUDIT_READ,
     Permission.WORKSPACE_READ,
     Permission.WORKSPACE_MANAGE,
+    Permission.MEMBER_INVITE,
     Permission.AI_USE,
     Permission.QUERY_USE,
     Permission.ACCOUNT_SELF,
@@ -89,6 +97,7 @@ _ROLE_PERMISSIONS: dict[str, set[str]] = {
         Permission.SCHEDULE_MANAGE,
         Permission.AUDIT_READ,
         Permission.WORKSPACE_READ,
+        Permission.MEMBER_INVITE,
         Permission.ACCOUNT_SELF,
         Permission.AI_USE,
         Permission.QUERY_USE,

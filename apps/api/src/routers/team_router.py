@@ -18,6 +18,7 @@ from services.audit_log import append_audit_event
 from services.team_store import (
     ROLES,
     LastAdminProtected,
+    MemberAlreadyExists,
     MemberNotFound,
     PermissionDenied,
     TeamStoreError,
@@ -45,6 +46,7 @@ from services.user_store import (
     reset_password,
     set_password,
     update_user,
+    validate_email,
 )
 from src.services.auth_service import auth_required, lookup_user
 
@@ -126,6 +128,8 @@ _TEAM_ERROR_STATUS: dict[type[TeamStoreError], int] = {
     # A state conflict, not malformed input: the request is well-formed and would
     # be accepted once another admin exists.
     LastAdminProtected: 409,
+    # Same class of answer: the membership this add would create is already there.
+    MemberAlreadyExists: 409,
 }
 
 
@@ -384,7 +388,24 @@ async def post_member(workspace_id: str, body: MemberBody, request: Request):
     platform_admin = _is_platform_admin(actor)
     if not get_workspace(workspace_id):
         raise HTTPException(status_code=404, detail="Workspace not found")
-    email = normalize_email(body.email)
+    try:
+        email = validate_email(body.email)
+    except UserStoreError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    # Membership first, so authority and the duplicate refusal are both decided
+    # before a login is minted: creating an account for someone who is already a
+    # member left a fresh one-time password behind a 409 nobody could act on.
+    try:
+        membership = add_workspace_member(
+            workspace_id=workspace_id,
+            email=email,
+            role=body.role,
+            added_by=actor,
+            actor_is_platform_admin=platform_admin,
+            refuse_existing=True,
+        )
+    except TeamStoreError as e:
+        raise _http_error(e) from e
     account = get_user(email)
     issued: str | None = None
     if account is None and body.create_account:
@@ -396,17 +417,9 @@ async def post_member(workspace_id: str, body: MemberBody, request: Request):
                 created_by=actor,
             )
         except UserStoreError as e:
+            # The membership stands and is reported as "no login yet" rather than
+            # being rolled back into a silent no-op.
             raise HTTPException(status_code=400, detail=str(e)) from e
-    try:
-        membership = add_workspace_member(
-            workspace_id=workspace_id,
-            email=email,
-            role=body.role,
-            added_by=actor,
-            actor_is_platform_admin=platform_admin,
-        )
-    except TeamStoreError as e:
-        raise _http_error(e) from e
     _audit(
         "team.member.add",
         actor=actor,

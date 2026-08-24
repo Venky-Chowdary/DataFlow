@@ -149,10 +149,14 @@ async function readApiRefusal(
   }
   if (res.status === 403) {
     // A denial the gate phrased for itself is rewritten for the person reading
-    // it, whether or not the body named the permission.
+    // it — but only when a permission is actually identified. Not every 403 is a
+    // role problem: rewriting an unnamed one invented "ask a workspace admin for
+    // the editor role" for a mistyped current password, hiding the real reason.
     const named = permissionFromRefusal(detail, permission);
-    detail = refusalSentence(named, role);
-    permission = permission || named;
+    if (named) {
+      detail = refusalSentence(named, role);
+      permission = named;
+    }
   }
   return { detail, permission, role };
 }
@@ -179,6 +183,13 @@ async function apiFetch(input: RequestInfo | URL, init: TimedRequestInit = {}): 
   const workspaceId = getActiveWorkspaceId();
   if (workspaceId && !headers.has("X-Workspace-Id")) {
     headers.set("X-Workspace-Id", workspaceId);
+  }
+  // A JSON body the caller forgot to label is still a JSON body. Without this
+  // the request reaches FastAPI as an unparsed string and every field of the
+  // model comes back as missing — a 422 that reads like the payload was wrong.
+  // FormData and Blob bodies are left alone so the browser sets their boundary.
+  if (typeof requestInit.body === "string" && !headers.has("Content-Type")) {
+    headers.set("Content-Type", "application/json");
   }
   const mergedInit = { ...requestInit, headers };
   if (timeoutMs <= 0) return fetch(input, { ...mergedInit, signal });
@@ -3292,7 +3303,10 @@ export async function loginWorkspace(email: string, password: string): Promise<{
     body: JSON.stringify({ email, password }),
   });
   if (!res.ok) {
-    throw new Error(await parseApiError(res, "Sign-in failed"));
+    // Carry the status: a refused password (401) and an unreachable control
+    // plane are different facts, and the sign-in screen cannot tell them apart
+    // from message text alone.
+    throw new ApiError(await parseApiError(res, "Sign-in failed"), res.status);
   }
   return res.json();
 }

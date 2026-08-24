@@ -27,17 +27,30 @@ const PERMISSION_PHRASE: Record<string, string> = {
   "schedule.authorize": "approve a scheduled run",
   "workspace.read": "read workspace settings",
   "workspace.manage": "change workspace settings",
+  "member.invite": "add or remove workspace members",
   "audit.read": "read the audit log",
+};
+
+/**
+ * The lowest role that holds each permission, so a refusal names a role the
+ * reader does not already have. Telling an editor to "ask for the editor role"
+ * is not an instruction; it is a dead end.
+ */
+const PERMISSION_ROLE: Record<string, string> = {
+  "connector.delete": "admin",
+  "schedule.authorize": "admin",
+  "workspace.manage": "admin",
 };
 
 /** The sentence a refused caller should read. */
 export function refusalSentence(permission: string, role: string): string {
   const action = PERMISSION_PHRASE[permission] ?? "do this";
   const who = ROLE_PHRASE[role];
+  const needed = PERMISSION_ROLE[permission] ?? "editor";
   return (
     `You don't have permission to ${action}` +
     (who ? ` — you are ${who} in this workspace` : "") +
-    `. Ask a workspace admin for the editor role` +
+    `. Ask a workspace admin for the ${needed} role` +
     (permission ? ` (needs ${permission})` : "") +
     `.`
   );

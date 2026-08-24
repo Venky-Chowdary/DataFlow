@@ -72,6 +72,16 @@ def _validate_email(email: str) -> str:
     return normalized
 
 
+def validate_email(email: str) -> str:
+    """The normalized address, or the reason it is not one.
+
+    Exported because membership is keyed by email as well: an invitation has to
+    refuse a malformed address before it writes a member nobody can ever sign in
+    as, and there is one spelling of "valid email" in the product.
+    """
+    return _validate_email(email)
+
+
 def _validate_role(role: str) -> str:
     value = (role or "").strip().lower()
     if value not in PLATFORM_ROLES:

@@ -3,6 +3,7 @@ import { BrandWordmark } from "../components/BrandWordmark";
 import { DtIcon } from "../components/DtIcon";
 import { useToast } from "../components/Toast";
 import { fetchSsoProviders, loginWorkspace, ssoStartUrl, SsoType } from "../lib/api";
+import { classifySignInFailure, SignInFailure } from "../lib/signInFailure";
 import { writeSession } from "../lib/session";
 import { Screen } from "../lib/types";
 import type { PublicRoute } from "../lib/publicNavigation";
@@ -28,7 +29,7 @@ const TARGET_LABELS: Partial<Record<Screen, string>> = {
 };
 
 const TRUST_METRICS = [
-  { value: "9", label: "Core gates (G1–G9)" },
+  { value: "9", label: "Preflight gates" },
   { value: "Map", label: "Semantic confidence" },
   { value: "Σ", label: "Checksum proof" },
 ];
@@ -44,6 +45,10 @@ export function LoginPage({ target, onAuthenticated, onBack, onLegal }: LoginPag
   const [passwordTouched, setPasswordTouched] = useState(false);
   const [checking, setChecking] = useState(false);
   const [credentialError, setCredentialError] = useState("");
+  // Which failure happened, taken from the response — not guessed from words in
+  // the message. Sniffing for "api" reported a rejected password as an
+  // unreachable control plane, sending the operator to check the deployment.
+  const [failure, setFailure] = useState<SignInFailure>("auth");
   const [capsLock, setCapsLock] = useState(false);
   const [ssoProviders, setSsoProviders] = useState<Array<{ type: SsoType; label: string; login_path: string }>>([]);
 
@@ -107,12 +112,9 @@ export function LoginPage({ target, onAuthenticated, onBack, onLegal }: LoginPag
       onAuthenticated(result.user.email);
     } catch (err) {
       const msg = err instanceof Error ? err.message : "";
-      const apiOffline =
-        msg.includes("Failed to fetch") ||
-        msg.includes("NetworkError") ||
-        msg.includes("timed out") ||
-        (msg.includes("fetch") && !msg.includes("Sign-in"));
-      if (apiOffline) {
+      const kind = classifySignInFailure(err);
+      setFailure(kind);
+      if (kind === "api") {
         setCredentialError("Cannot reach the API. Confirm the control plane URL and that the API service is online.");
         toast({
           title: "API offline",
@@ -157,11 +159,7 @@ export function LoginPage({ target, onAuthenticated, onBack, onLegal }: LoginPag
     onAuthenticated("test@gmail.com");
   };
 
-  const alertKind = credentialError.toLowerCase().includes("api")
-    ? "api"
-    : credentialError.toLowerCase().includes("configured")
-      ? "config"
-      : "auth";
+  const alertKind = failure;
 
   return (
     <main className="lp-login lp-login--gate">
@@ -188,7 +186,7 @@ export function LoginPage({ target, onAuthenticated, onBack, onLegal }: LoginPag
             <p className="lp-login-brand-kicker">Enterprise data platform</p>
             <h1 className="lp-login-brand-title">Sign in to governed transfers</h1>
             <p className="lp-login-brand-lead">
-              Semantic mapping, nine core gates (G1–G9), and checksum proof — for humans and agents.
+              Semantic mapping, named preflight gates, and checksum proof — for humans and agents.
             </p>
 
             <div className="lp-login-proof" aria-hidden>
@@ -240,7 +238,7 @@ export function LoginPage({ target, onAuthenticated, onBack, onLegal }: LoginPag
               <p className="lp-login-auth-kicker">Secure workspace access</p>
               <h2 id="login-form-title">Welcome back</h2>
               <p className="lp-login-auth-sub">
-                Sign in to open <strong>{targetLabel}</strong> — same Map → G1–G9 → prove path.
+                Sign in to open <strong>{targetLabel}</strong> — same map → validate → move → prove path.
               </p>
             </div>
 

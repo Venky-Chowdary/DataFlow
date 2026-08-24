@@ -3,7 +3,6 @@ from __future__ import annotations
 import base64
 import hashlib
 import logging
-import os
 from services.brand_env import getenv_brand
 import secrets
 from typing import Any
@@ -650,14 +649,12 @@ async def login(body: LoginRequest, request: Request):
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     if not user:
         record_login_failure(ip=ip, email=body.email)
-        raise HTTPException(
-            status_code=401,
-            detail=(
-                "Invalid email or password. If your password contains `$`, re-set "
-                "DATAFLOW_ADMIN_PASSWORD in Railway (escape as `$$` or wrap in quotes) "
-                "and redeploy the API."
-            ),
-        )
+        # What an anonymous caller is told is exactly what happened: the pair did
+        # not authenticate. Deployment advice (env var escaping) belongs to the
+        # operator configuring the service, not to an unauthenticated 401 — it
+        # leaks how identities are provisioned and, as the sign-in screen read it,
+        # turned a stale password into "control plane unreachable".
+        raise HTTPException(status_code=401, detail="Invalid email or password.")
     record_login_success(ip=ip, email=body.email)
     try:
         token, expires_at = create_token(user["email"])

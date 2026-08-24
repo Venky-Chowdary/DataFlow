@@ -39,9 +39,12 @@ const ACCOUNT_LABELS: Record<string, string> = {
 export function TeamSettings() {
   const { toast } = useToast();
   const { confirm } = useConfirm();
-  // Membership is workspace administration: a workspace admin holds it without
-  // being a platform admin, and everyone else is refused before the request.
+  // Two authorities, because the API has two: creating a workspace is workspace
+  // administration, while bringing a peer into the workspace you already work in
+  // is member.invite — which an editor holds. Gating both on workspace.manage
+  // disabled a control the API would have honoured for an editor.
   const manage = useWriteGate(PERMISSIONS.workspaceManage);
+  const membership = useWriteGate(PERMISSIONS.memberInvite);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [platformAdmin, setPlatformAdmin] = useState(false);
   // The workspace being administered here is also the workspace every other
@@ -116,13 +119,16 @@ export function TeamSettings() {
   }, [selectedWorkspace, refreshMembers]);
 
   /** Refuse in words rather than sending a request that will be refused. */
-  const refuse = () => {
-    toast({ title: "No write permission", message: manage.reason, tone: "warning" });
+  const refuse = (reason: string) => {
+    toast({ title: "No write permission", message: reason, tone: "warning" });
     return false;
   };
+  // Granting admin is the one membership change an editor may not make, and the
+  // store refuses it — so the option says why instead of failing on submit.
+  const canGrantAdmin = manage.allowed;
 
   const addWorkspace = async () => {
-    if (!manage.allowed) return void refuse();
+    if (!manage.allowed) return void refuse(manage.reason);
     const name = newWorkspaceName.trim();
     if (!name) return;
     setCreatingWorkspace(true);
@@ -144,7 +150,8 @@ export function TeamSettings() {
   };
 
   const invite = async () => {
-    if (!manage.allowed) return void refuse();
+    if (!membership.allowed) return void refuse(membership.reason);
+    if (inviteRole === "admin" && !canGrantAdmin) return void refuse(manage.reason);
     const email = inviteEmail.trim();
     if (!selectedWorkspace) {
       toast({
@@ -195,7 +202,7 @@ export function TeamSettings() {
   };
 
   const remove = async (email: string) => {
-    if (!manage.allowed) return void refuse();
+    if (!membership.allowed) return void refuse(membership.reason);
     if (!selectedWorkspace) return;
     const ok = await confirm({
       title: `Remove ${email}?`,
@@ -222,7 +229,8 @@ export function TeamSettings() {
   };
 
   const changeRole = async (email: string, role: WorkspaceRole) => {
-    if (!manage.allowed) return void refuse();
+    if (!membership.allowed) return void refuse(membership.reason);
+    if (role === "admin" && !canGrantAdmin) return void refuse(manage.reason);
     if (!selectedWorkspace) return;
     setRoleChangeEmail(email);
     try {
@@ -289,8 +297,8 @@ export function TeamSettings() {
         {loadError && <div className="df2-team-error df2-mb-md">{loadError}</div>}
 
         <PermissionNotice
-          allowed={manage.allowed}
-          reason={manage.reason}
+          allowed={membership.allowed}
+          reason={membership.reason}
           what="Membership is read-only for you."
         />
 
@@ -400,8 +408,10 @@ export function TeamSettings() {
                   onChange={(e) => setInviteRole(e.target.value as WorkspaceRole)}
                 >
                   <option value="viewer">Viewer — read jobs, connectors and proofs</option>
-                  <option value="editor">Editor — run transfers, edit connectors, add members</option>
-                  <option value="admin">Admin — full workspace access incl. roles</option>
+                  <option value="editor">Editor — run transfers, edit connectors, add non-admin members</option>
+                  <option value="admin" disabled={!canGrantAdmin}>
+                    Admin — full workspace access incl. roles{canGrantAdmin ? "" : " (workspace admin only)"}
+                  </option>
                 </select>
               </div>
               <label className="df2-team-check" htmlFor="df2-team-create-login">
@@ -416,8 +426,8 @@ export function TeamSettings() {
               <button
                 type="button"
                 className="df2-btn df2-btn-primary"
-                disabled={inviting || !manage.allowed}
-                title={manage.reason || undefined}
+                disabled={inviting || !membership.allowed}
+                title={membership.reason || undefined}
                 onClick={() => void invite()}
               >
                 <DtIcon name="plus" size={14} />
@@ -456,13 +466,15 @@ export function TeamSettings() {
                             className="df2-select df2-team-role-select"
                             aria-label={`Role for ${m.email}`}
                             value={m.role}
-                            disabled={roleChangeEmail === m.email || !manage.allowed}
-                            title={manage.reason || undefined}
+                            disabled={roleChangeEmail === m.email || !membership.allowed}
+                            title={membership.reason || undefined}
                             onChange={(e) => void changeRole(m.email, e.target.value as WorkspaceRole)}
                           >
                             <option value="viewer">Viewer</option>
                             <option value="editor">Editor</option>
-                            <option value="admin">Admin</option>
+                            <option value="admin" disabled={!canGrantAdmin && m.role !== "admin"}>
+                              Admin
+                            </option>
                           </select>
                         </td>
                         <td>{ACCOUNT_LABELS[m.account_status ?? "no_account"]}</td>
@@ -471,8 +483,8 @@ export function TeamSettings() {
                           <button
                             type="button"
                             className="df2-btn df2-btn-sm df2-btn-danger"
-                            disabled={removingEmail === m.email || !manage.allowed}
-                            title={manage.reason || undefined}
+                            disabled={removingEmail === m.email || !membership.allowed}
+                            title={membership.reason || undefined}
                             onClick={() => void remove(m.email)}
                           >
                             {removingEmail === m.email ? "Removing…" : "Remove"}

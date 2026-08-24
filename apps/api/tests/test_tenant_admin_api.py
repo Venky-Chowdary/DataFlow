@@ -116,6 +116,46 @@ def test_platform_admin_creates_a_tenant_for_a_workspace(admin):
     }
 
 
+def test_tenant_without_a_workspace_is_refused_and_a_named_one_reads_back(admin):
+    """A tenant is resolved by workspace, so it must be created against one.
+
+    An unnamed ``workspace_id`` wrote a tenant that ``GET /workspace/tenant``
+    could never resolve — saved, invisible on reload, and never authorized
+    against any workspace.
+    """
+    unscoped = admin.post("/api/v1/workspace/tenant", json={"name": "Nowhere"})
+    assert unscoped.status_code == 400, unscoped.text
+    assert "workspace_id" in unscoped.json()["detail"]
+    assert admin.get("/api/v1/workspace/tenants").json()["tenants"] == []
+
+    ws_id = _workspace(admin, "Scoped")
+    # The header alone names the workspace, as the browser sends it.
+    created = admin.post(
+        "/api/v1/workspace/tenant",
+        json={"name": "Scoped Tenant"},
+        headers={"X-Workspace-Id": ws_id},
+    )
+    assert created.status_code == 200, created.text
+    assert created.json()["workspace_id"] == ws_id
+
+    read = admin.get("/api/v1/workspace/tenant", headers={"X-Workspace-Id": ws_id})
+    assert read.status_code == 200, read.text
+    assert read.json()["name"] == "Scoped Tenant"
+
+
+def test_tenant_created_for_a_workspace_other_than_the_active_one_is_refused(admin):
+    """Saving into a workspace the session is not scoped to is a contradiction."""
+    active = _workspace(admin, "Active")
+    other = _workspace(admin, "Other")
+    conflict = admin.post(
+        "/api/v1/workspace/tenant",
+        json={"workspace_id": other, "name": "Mismatched"},
+        headers={"X-Workspace-Id": active},
+    )
+    assert conflict.status_code == 403, conflict.text
+    assert admin.get("/api/v1/workspace/tenants").json()["tenants"] == []
+
+
 def test_tenant_is_amended_and_removed_by_its_workspace_admin(admin):
     ws_id = _workspace(admin, "Beta")
     lead = _signed_in(admin, email="lead@example.com", workspace_id=ws_id, workspace_role="admin")

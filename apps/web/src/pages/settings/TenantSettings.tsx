@@ -3,6 +3,7 @@ import { useToast } from "../../components/Toast";
 import { ByokKey, createByokKey, createTenant, fetchByokKeys, fetchSecurityPosture, fetchTenant, fetchWorkspaces, SecurityPosture, Tenant, updateTenant } from "../../lib/api";
 import { PermissionNotice } from "../../components/PermissionNotice";
 import { PERMISSIONS, useWriteGate } from "../../lib/PermissionsContext";
+import { getActiveWorkspaceId } from "../../lib/workspace";
 
 const REGIONS = [
   "us-east-1", "us-east-2", "us-west-1", "us-west-2",
@@ -81,8 +82,14 @@ export function TenantSettings() {
           setSessionTimeout(t.session_timeout_hours);
           setIpAllowlist((t.ip_allowlist || []).join("\n"));
           setWorkspaceId(t.workspace_id);
-        } else if (ws.length > 0) {
-          setWorkspaceId(ws[0].id);
+        } else {
+          // The workspace this session is working in — the same one the read is
+          // scoped to. Defaulting to the first workspace in the list saved a
+          // tenant the operator could not then read back, because GET resolves
+          // the tenant by the active workspace.
+          const active = getActiveWorkspaceId();
+          const scoped = ws.find((w) => w.id === active)?.id || (ws.length === 1 ? ws[0].id : "");
+          setWorkspaceId(scoped);
         }
       })
       .finally(() => setLoading(false));

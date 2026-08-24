@@ -291,6 +291,58 @@ def test_unknown_workspace_and_invalid_input_are_distinguishable(client):
     assert bad_email.status_code == 400
 
 
+def test_inviting_someone_who_is_already_a_member_is_refused(client):
+    """An invitation must not silently re-role, nor mint a second credential.
+
+    The form said "member added" for someone who was already here, and a typo in
+    the role would have demoted them — while the account path had already issued
+    a fresh one-time password behind the scenes.
+    """
+    ws_id = _workspace(client, "Already In")
+    first = client.post(
+        f"/api/v1/team/workspaces/{ws_id}/members",
+        json={"email": "ana@example.com", "role": "editor", "create_account": True},
+    )
+    assert first.status_code == 200, first.text
+    issued = first.json()["temporary_password"]
+    assert issued
+
+    again = client.post(
+        f"/api/v1/team/workspaces/{ws_id}/members",
+        json={"email": "ana@example.com", "role": "viewer", "create_account": True},
+    )
+    assert again.status_code == 409, again.text
+    assert "already a member" in again.json()["detail"]
+    assert "editor" in again.json()["detail"]
+
+    # The role stands, and the credential issued the first time still works.
+    members = {m["email"]: m for m in client.get(f"/api/v1/team/workspaces/{ws_id}/members").json()["members"]}
+    assert members["ana@example.com"]["role"] == "editor"
+    stored = next(
+        c for c in user_store.credentials_for_auth() if c["email"] == "ana@example.com"
+    )
+    assert verify_password(issued, stored["password_hash"])
+
+    # Re-roling has its own route and is unaffected.
+    changed = client.patch(
+        f"/api/v1/team/workspaces/{ws_id}/members/ana@example.com",
+        json={"role": "viewer"},
+    )
+    assert changed.status_code == 200, changed.text
+    assert changed.json()["membership"]["role"] == "viewer"
+
+
+def test_malformed_member_email_is_refused_before_any_write(client):
+    """A membership is keyed by email: an unusable address is not a member."""
+    ws_id = _workspace(client, "Addresses")
+    bad = client.post(
+        f"/api/v1/team/workspaces/{ws_id}/members",
+        json={"email": "not-an-email", "role": "viewer"},
+    )
+    assert bad.status_code == 400, bad.text
+    assert "not-an-email" not in {m["email"] for m in team_store.list_workspace_members(ws_id)}
+
+
 def test_member_mutations_are_audited(client):
     ws_id = _workspace(client, "Audited")
     client.post(
@@ -506,6 +558,57 @@ def test_viewer_cannot_add_a_member_through_the_api(authenticated):
     )
     assert denied.status_code == 403, denied.text
     assert viewer.get(f"/api/v1/team/workspaces/{ws_id}/members").status_code == 200
+
+
+def test_editor_invites_a_peer_but_cannot_grant_admin_through_the_api(authenticated):
+    """The authority the UI must mirror: editors invite, admins grant admin.
+
+    The Team tab gated every membership control on ``workspace.manage`` and told
+    an editor to ask for the editor role, while this route accepted the request.
+    """
+    ws_id = authenticated.post(
+        "/api/v1/team/workspaces", json={"name": "Editors"}
+    ).json()["workspace"]["id"]
+    issued = authenticated.post(
+        "/api/v1/team/users",
+        json={
+            "email": "editor2@example.com",
+            "platform_role": "member",
+            "workspace_id": ws_id,
+            "workspace_role": "editor",
+        },
+    ).json()["temporary_password"]
+    editor = TestClient(app)
+    token = editor.post(
+        "/api/v1/auth/login",
+        json={"email": "editor2@example.com", "password": issued},
+    ).json()["token"]
+    editor.headers["Authorization"] = f"Bearer {token}"
+
+    invited = editor.post(
+        f"/api/v1/team/workspaces/{ws_id}/members",
+        json={"email": "peer@example.com", "role": "editor"},
+    )
+    assert invited.status_code == 200, invited.text
+    escalate = editor.post(
+        f"/api/v1/team/workspaces/{ws_id}/members",
+        json={"email": "boss@example.com", "role": "admin"},
+    )
+    assert escalate.status_code == 403, escalate.text
+    assert "boss@example.com" not in {
+        m["email"] for m in team_store.list_workspace_members(ws_id)
+    }
+
+
+def test_editor_holds_member_invite_and_viewer_does_not():
+    """The permission the client reads to enable the control."""
+    from services.rbac import Permission, role_permissions
+
+    assert Permission.MEMBER_INVITE in role_permissions("editor")
+    assert Permission.MEMBER_INVITE in role_permissions("admin")
+    assert Permission.MEMBER_INVITE not in role_permissions("viewer")
+    # Granting admin stays workspace administration, not invitation.
+    assert Permission.WORKSPACE_MANAGE not in role_permissions("editor")
 
 
 def test_non_admin_cannot_create_accounts_or_read_the_directory(authenticated):
