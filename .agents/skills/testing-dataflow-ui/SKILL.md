@@ -1080,3 +1080,85 @@ before claiming a recording exists**. There is no annotation tool in this enviro
 Do not put literal `NaN`/`Infinity` in a source column: `/api/v1/shape/{profile,preview}` returns
 HTTP 500 (`shape_suggest.py:181`, `as_tuple().exponent` is `'n'`/`'F'` for non-finite Decimals),
 Continue is disabled, and the whole step becomes unreachable — masking everything under test.
+
+## Settings end-to-end (Team / RBAC / Notifications) — enterprise verification notes
+
+Scope: `#/settings` tab rail *General · Security · Enterprise · SSO · Team · Notifications ·
+AI Models · API Keys · Audit Logs*. Everything below was measured with
+`DATAFLOW_REQUIRE_AUTH=1`; with auth off every refusal is vacuous.
+
+### Getting a real viewer / editor / admin identity in the browser
+1. As the seeded platform admin, Settings → Team → fill Email/Full name, pick the Role
+   `<select>`, keep **Create a login (one-time password)** checked, press **Add member**.
+   The one-time password is shown once in a `<code>` block — copy it before pressing Done.
+2. Sign out (sidebar **Sign out**), then sign in as that member. First sign-in lands on
+   *Change your temporary password* (`POST /api/v1/auth/change-password`). A fresh
+   viewer/editor **can** complete this (permission `account.self`); if it returns 403 for an
+   older account, that account predates the permission and is not a fresh-account defect —
+   create a new member instead of fighting it.
+3. `localStorage['df2.workspace']` holds the active workspace, sent as `X-Workspace-Id`.
+   Tenant/notification/member reads are scoped by it, so a "missing" tenant after F5 is
+   usually the wrong active workspace, not lost data — re-check with the matching workspace
+   before calling persistence broken.
+
+### Role gating: where the UI and the API can disagree
+- Viewer sees stated refusals, not blank screens: Team shows *"Membership is read-only for
+  you… you are a viewer"* with **Add member**, **Remove** and every role `<select>` disabled;
+  Connectors shows *"Connections are read-only for you… (needs connector.write)"*.
+- Editor is **also** blocked in the Team UI (same notice, "you are an editor … ask a workspace
+  admin for the editor role"), yet `POST /api/v1/team/workspaces/{id}/members` with the
+  editor's own token returns **200**. Always probe both surfaces: the UI gate is
+  `workspace.manage`, the store rule is "editor may add viewer/editor", so UI-only or
+  API-only testing will each miss half the truth. Editor does get connector write.
+- Server-side authority checks that behaved correctly: editor `PATCH …/members/{email}`
+  to `admin` → 403 `"Only a workspace admin can grant the admin role"`; editor
+  `POST /api/v1/team/users` → 403 `"Permission denied: workspace.manage"`; last-admin
+  demote/remove → visible *"This is the only admin — grant the admin role to someone else
+  first"* and the row survives.
+
+### Notifications: the create call is missing a content type
+`apps/web/src/lib/api.ts::createNotificationChannel()` posts `JSON.stringify(channel)` with no
+`Content-Type: application/json`, so every browser channel create (email, Slack, Teams) fails
+**422** `model_attributes_type` and the UI shows *"Could not add channel / Could not create
+channel"*. To reach the test-send path anyway, create one channel via API **with** the header,
+then F5 — it appears in the list. Test send is honest: `{"ok":false,"error":"SMTP host not
+configured"}`.
+
+(Fixed on later revisions where `apiFetch` sets the JSON content type for string bodies — then
+create/edit works from the browser. If a create fails again, check that header first.)
+
+### Notifications: channels are a JSON file, and webhook "Test" can lie
+- Channels persist to `apps/api/data/notifications.json` (`notification_store.STORE_PATH`), **not**
+  Mongo — do not look for a `notification_channels` collection to prove persistence; restart the
+  API and re-read the list in the UI instead. Webhook targets are rendered as their encrypted
+  blob in the list, so a row showing gibberish is masking, not corruption.
+- Email test-send is honest (`Channel disabled`, `SMTP host not configured`). Slack/Teams test-send
+  only checks for an HTTP 2xx, so **any** endpoint that answers 200 (e.g. a local echo server or an
+  unrelated URL) renders *Test message sent*. Always point a Slack/Teams channel at a bogus URL
+  that returns 200 as well as one that 404s — the 404 fails correctly, the 200 fake-succeeds.
+
+### Login failure classification is masked by the Vite dev proxy
+`signInFailure.ts` decides "unreachable API" from `status === 0` (a fetch network error). Behind the
+Vite dev proxy a **stopped backend still yields an HTTP status** (`POST /api/v1/auth/login` → **500**,
+empty body), so the login screen shows *"Sign-in failed"* instead of *"Control plane unreachable"*.
+When testing that copy, confirm the observed proxy status from the page (fetch in the console) before
+calling it a product bug or a pass — and note that a direct `:8001` origin would behave differently.
+
+### Tenant scoping traps (Settings → Enterprise)
+The Enterprise tab reads `GET /api/v1/workspace/tenant`, which 404s (*"No tenant configured for this
+workspace or domain"*) unless the request carries the workspace. `df2.workspace` may be **absent from
+localStorage even after a successful login**, and a long-lived pre-restart session was observed
+showing *"No tenant configured"* while an explicit `X-Workspace-Id` fetch returned 200 with the saved
+tenant. Distinguish these before reporting lost data: (1) fetch the tenant with the explicit header in
+the browser console, (2) open the **Team** tab (loads workspaces / sets the active one) then re-open
+Enterprise, (3) sign out and back in. Re-selecting the workspace in Enterprise's own dropdown did
+**not** re-fetch the tenant. Also check `apps/api/data/tenants.json` for records with an empty
+`workspace_id` — diagnostic POSTs can leave unscoped tenants behind, and the compliance report has
+been seen emitting `Tenant ID: default` / `Workspace ID: default` rather than the active tenant.
+
+### Audit Logs
+Team/tenant actions land as `team.workspace.create`, `team.member.add`,
+`team.member.role_change`, `team.member.remove`, `auth.password_change`,
+`workspace.tenant.*`, with actor email, the workspace id inside Resource, and a timestamp.
+Level chips (All/Info/Success/Warnings/Errors) really re-filter rows; most membership events
+are level `warn`, so "no rows" under **Success** is expected, not a defect.

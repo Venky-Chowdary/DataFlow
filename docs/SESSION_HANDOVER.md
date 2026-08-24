@@ -268,6 +268,26 @@ the compensating rollback.
 | Pilot answering off-subject questions | Deterministic refusal, no sources, confidence 0.2, no navigation |
 | Jobs counting only the loaded page | Counts the whole history; the row list states which slice it holds |
 
+### Settings wave on `devin/settings-enterprise-1787535434` (PR #72, head `46cdaaeb`)
+
+Each item was found by driving the tab in a browser and re-proven there after the fix
+(recordings on the PR; latest run against `635676b2`).
+
+| Defect | Fix and proof |
+| --- | --- |
+| Notification create/update always 422 | `apiFetch` labels a string body as JSON; channel create/edit/persist through F5 and an API restart |
+| Slack/Teams "Test message sent" for any HTTP 2xx | Provider acknowledgement required (`ok` / `{"ok": true}`; `1` / 202 empty); an HTML 200 endpoint now reads *Test failed* |
+| Missing SMTP reported as sent | `{"ok": false, "error": "SMTP host not configured"}` surfaced as *Test failed* |
+| A duplicate invitation re-roled (and could demote) a member | 409 naming the role held today, before any account is created or password rotated |
+| Editor UI contradicted the editor API | `Permission.MEMBER_INVITE` (editor + admin); granting the admin *role* stays `workspace.manage` |
+| A tenant saved with no workspace could never be read back | Creation refuses an unnamed workspace and a body/header scope mismatch |
+| A rejected password read as "Control plane unreachable" | `classifySignInFailure` by status/transport; every 5xx is the API, 503 is deployment config, an answered 401 is the credential |
+| Enterprise showed "No tenant configured" over a saved tenant | An account with several memberships gets no `workspace_id` from `/auth/me`, so the client names one; the tab re-reads on `WORKSPACE_CHANGED_EVENT` and a successful re-read clears the banner |
+| A workspace-less legacy tenant still answered host routing and CORS | `get_tenant_by_domain` and `cors_origins` both skip records with no `workspace_id` |
+
+Still not proven for these tabs: real SMTP / Slack / Teams delivery, SSO/IdP, KMS/BYOK
+material, and host routing in a real browser vhost (verified at service level only).
+
 ---
 
 ## 5. Open defects (found, reproduced, not yet fixed)
