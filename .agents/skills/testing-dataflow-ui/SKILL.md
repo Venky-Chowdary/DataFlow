@@ -897,6 +897,121 @@ assert geometry numerically (`getBoundingClientRect().left` equal for all grid c
 `.df2-xform-scroll` `scrollWidth > clientWidth` = table scrolls inside its card), and capture the
 image via Playwright directly. Cards are two-column at 1440 and collapse to one below 1180.
 
+### Transform builder: required free-text options are easy to miss with a selector
+Several ops take a **required free-text** option that is NOT a `<select>`: `strip_characters` needs
+`Characters *` (type `non_printable`), `filter_rows` needs `Condition *`, `round_number` needs
+`Decimal places`. These inputs often carry **no `type` attribute**, so `main input[type=text]` misses
+them — locate them by the surrounding `label`/`div` text instead. Always assert `Steps applied`
+incremented and a `recipe <hash>` badge rendered before believing a step was applied.
+
+Historically a blank required option left `Add step` **enabled** and silently added nothing. As of the
+PR #71 fix round the builder shows a visible `role="alert"` inline error (e.g. *"Characters is required
+for strip_characters."*), marks the field `is-invalid`, and disables `Add step` **before** the click.
+If you are testing this, set the **operation `<select>` first** — otherwise `Add step` is disabled for
+the wrong reason and the test passes vacuously.
+
+Operation error policy lives in a `<select>` whose surrounding text reads *"If a value cannot be
+computed"*, with values `refuse` / `divert` / `null` (**not** `fail` — that enum is invalid and yields a
+recipe-validation error that is easily mistaken for a row refusal). `refuse` is the default.
+
+### A retyped carrier can be refused at Map as "lossy" (carrier widening) — and how to verify it isn't
+`/shape/preview` may re-read a rounded column as `INTEGER`, yet Map can render the source type as the
+wider engine carrier (`BIGINT`) and judge `BIGINT → INT4` a fidelity loss, with a self-contradictory
+banner: *"arr_time loses fidelity (BIGINT → INT4) — INTEGER → INT4 round-trips without loss."* and
+`Continue to Validate` disabled. Fixed in the PR #71 era via `_reported_source_carrier` /
+`declared_source_types` in `mapping_pipeline.py`, but it is the most regression-prone surface here.
+
+Do not read a transformed carrier on the wire as proof Map accepted it — assert the **rendered row**
+plus the enabled/disabled state of Continue. Three traps make this assertion lie:
+
+- **The Map safe band is COLLAPSED by default**, so the row looks absent. Expand by clicking only a
+  header matching `/^\d+ (safe mappings|ready)/i` that also contains the word `Expand`. A generic
+  "click anything that expands" loop also hits **`Approve safe (n)`**, which collapses the table into
+  an approved group rendering *"No matching columns"* — a screenshot of that proves nothing.
+- **Never do a page-wide type-name search.** The destination `<select>` renders the whole engine type
+  vocabulary (`TEXT SMALLINT INTEGER BIGINT NUMERIC …`), so "does the page say `BIGINT`" always
+  false-positives. Read the row's own **Type cell** (index 2 of the row's cells).
+- **Word-boundary regexes fail on concatenated `innerText`.** The row flattens to `…p3,s0 · intINTEGER`,
+  so `/\bINTEGER\b/` is `false` even though the Type cell is exactly `INTEGER`. Extract per-cell text.
+
+A correct pass renders Type **`INTEGER`** → Destination **`INT4 — current`** + `exists`, Transform
+`None`, ~99% confidence, inside the *safe* band, Continue enabled with no Risk Contract.
+
+### Prove the transformed path against a matched UNSHAPED control
+A build that greens everything is indistinguishable from a real fix unless you also run the same decimal
+source into the same integer destination with **zero** steps. That unshaped run must still be refused
+(row badged **Lossy**, `DECIMAL(11,8) → INT4`, `Sign Risk Contract`, Continue disabled, wizard never
+reaches Validate) and the destination `count(*)` must stay **0**. Build fixtures so the arithmetic
+discriminates: values `22.433332, 21.833334, 9.500001, 8.499999, 4.100000` give round ⇒ SUM **66**,
+truncate ⇒ **64**, ceil ⇒ **69**, so a reread cannot pass with the wrong operation.
+
+### Map dead ends are sometimes escapable via the row-level "Review" button
+When bulk `Approve eligible (n)` excludes an existing-DDL conflict and `Sign Risk Contract` never
+appears (or stays disabled), selecting the row's `Execution policy for <col>` select and then clicking
+the **row-level `Review` button inside the table** can approve it and enable `Continue to Validate`.
+Prefer this over declaring the wizard unreachable, but report that the workaround was required.
+
+### Validate can green the transform panel while other panels still judge RAW values
+`plans/{id}/preflight` receives `shape_recipe` and returns `transform_image` + the "Transform recipe
+… applied before the gates" warning. Historically the sibling call `/api/v1/preflight/preview-cells`
+was sent **without** the recipe, so the quarantine preview still cited raw values (e.g. "Invalid
+integer: '22.43'") directly under a panel claiming the transformed rows were judged; and a
+`Schema drift` / `hard_breaking:narrow_type` root cause fired on every transformed narrowing (with
+`source_changed:false`) because the drift gate compared the **declared** source carrier to the target.
+Both are fixed in the PR #71 era (`preview-cells` accepts `shape_recipe`; `detect_schema_drift()` takes
+`declared_source_*` for fingerprint questions while `source_*` carries the transformed image).
+
+**Assert the verdict and every panel**, not just the transform panel: no `Invalid integer` / "fractional
+value is not an integer" anywhere, `blockers: []`, no `Schema drift`, no `hard_breaking:narrow_type`.
+If drift ever returns, note that the UI's own **`Re-map drifted columns`** remediation does not clear it
+(rows come back `ready (approved)` and Validate still returns `schema_drift`) — a hard dead end.
+
+### API fail-closed contract: 400 vs 200-with-refusal differ per endpoint (not a bug)
+- `/api/v1/preflight/preview-cells` — body is `{headers, sample_rows: [[...]], mappings, column_types,
+  shape_recipe}`. Row refusal, missing column and bogus op all return **400**; empty recipe returns
+  **200 with no `transform_image`**; a valid recipe returns **200 with** it.
+- `/api/v1/shape/preview` — body is `{sample_rows: [{col: val}, …], source_columns, column_types,
+  recipe}` (**objects**, not header+array rows; the wrong shape yields a pydantic **422** that is easy
+  to misreport as a defect). Unrunnable/bogus recipes are **400**, but a **row refusal returns 200 with
+  a structured `refusal` object** — by design, since this is the preview that must *render* the refusal
+  and disable Continue. Do not report that 200 as a fail-closed violation.
+- A bogus op must say *"is not a **transform** operation"* (no "shaping").
+
+### Do not flag "Dest-exists shape" as a shaping-wording leak
+When sweeping rendered text for `/shap\w*/i`, the Validate gate list legitimately contains the
+pre-existing gate **"Dest-exists shape"** (*"Dest-exists shape is bound — insert more into the existing
+table"*) — that is the destination table's *shape*, unrelated to transform "shaping". Also run the sweep
+on the **actual Run/Proof screen**: if Execute silently did not start you are still on Validate, whose
+gate list contains those matches, and you will report a phantom regression.
+
+### Execute often needs an exact-text, document-wide click
+A `main button:has-text("Execute")` click can silently no-op — the flow stays on Validate, the
+completion banner never appears, and the destination stays empty. Click the button whose
+`innerText.trim().toLowerCase() === "execute"` that is enabled and has an `offsetParent`, document-wide,
+after `scrollIntoView`, then poll `document.body.innerText` for `/Transfer complete|Data transferred/`.
+Enumerate candidates first (`[...document.querySelectorAll("button,[role=button]")]` filtered by
+`/execute/i`) — that immediately shows whether the control is disabled, offscreen, or absent.
+The run screen's own counters say `DEST UNMEASURED` / `Writer ack is not destination proof`, so an
+independent SQL reread is mandatory, not optional.
+
+### Screenshotting one specific sentence: pick the DEEPEST matching element
+`[...document.querySelectorAll("*")].find(e => re.test(e.textContent))` returns a huge ancestor (its
+`textContent` starts with the whole sidebar), so `scrollIntoView` targets the wrong place and the
+screenshot is not evidence. Take the **last** element of the filtered list, or select by the real class
+(e.g. `.df2-xform-ledger`, which also exposes `is-unbalanced` state in `className`).
+
+### MySQL via `docker exec` exits 1 even on success
+`mysql -u… -p…` prints *"Using a password on the command line interface can be insecure"* to stderr,
+which PowerShell turns into `NativeCommandError` and exit code 1 while stdout is perfectly valid. An
+**empty** result is then ambiguous (did the query run?) — include a control column such as
+`SELECT 'CONTROL_QUERY_RAN' AS proof;` in the same `-e` batch so an empty table is provably empty.
+
+### ffmpeg recording must be stopped gracefully or the mp4 is unplayable
+`gdigrab` capture works, but `Stop-Process -Force` kills ffmpeg before it writes the `moov` atom and
+`ffprobe` then reports *"moov atom not found / Invalid data"* — the file is a worthless ~MB blob.
+Send `q` to ffmpeg's stdin (or start it so stdin is writable) to finalize, and **ffprobe the file
+before claiming a recording exists**. There is no annotation tool in this environment.
+
 ### Fixture caution
 Do not put literal `NaN`/`Infinity` in a source column: `/api/v1/shape/{profile,preview}` returns
 HTTP 500 (`shape_suggest.py:181`, `as_tuple().exponent` is `'n'`/`'F'` for non-finite Decimals),
