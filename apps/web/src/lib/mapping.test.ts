@@ -904,6 +904,33 @@ describe("destination schema honesty", () => {
     assert.ok(engineStampedRiskChip(editable[0])?.label === "TZ risk");
   });
 
+  it("shows the epoch ceiling of a MySQL TIMESTAMP as a review, not a contract", () => {
+    const editable = editableFromPipelineMappings(
+      [{
+        source: "created_at",
+        target: "created_at",
+        confidence: 0.92,
+        source_type: "TIMESTAMPTZ",
+        target_type: "TIMESTAMP(6)",
+        create_new: true,
+        assignment_strategy: "identity_passthrough",
+        create_new_risks: [{
+          kind: "instant_range_cap",
+          severity: "warn",
+          message:
+            "Create-new TIMESTAMPTZ → TIMESTAMP(6) keeps the instant but caps its "
+            + "range to 1970-01-01 00:00:01 UTC .. 2038-01-19 03:14:07 UTC.",
+        }],
+      }],
+      [],
+      [],
+      0.75,
+    );
+    assert.equal(createNewRiskChipLabel(editable[0]), "range risk");
+    assert.equal(engineStampedRiskChip(editable[0])?.severity, "warn");
+    assert.equal(mappingAckTier(editable[0]), "review");
+  });
+
   it("cast fidelity never auto-approves as Ready without Accept risk", () => {
     const editable = editableFromPipelineMappings(
       [{

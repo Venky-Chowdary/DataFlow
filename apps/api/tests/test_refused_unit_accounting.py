@@ -203,4 +203,3 @@ def test_an_unmeasured_read_is_not_an_unbalanced_ledger() -> None:
     assert ledger.conservation_kind == "unmeasured"
     assert ledger.rows_read is None
     assert ledger.unaccounted is None
-||||||| 794465db

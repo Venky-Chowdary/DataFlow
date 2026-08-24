@@ -136,6 +136,8 @@ def test_connector_pair_mapping_accuracy(pair_id: str, tmp_path: Path) -> None:
                 "precision_collapse",
                 "varchar_width_cap",
                 "varchar_narrow",
+                # MySQL TIMESTAMP keeps the instant but only 1970..2038 of it.
+                "instant_range_cap",
             }
     assert score >= 0.85, (
         f"{pair_id}: mapping score {score:.2%} below 85% "

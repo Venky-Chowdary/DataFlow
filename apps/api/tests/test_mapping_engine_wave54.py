@@ -101,9 +101,16 @@ def test_mapping_pipeline_stamps_create_new_type_risks():
     }
 
 
-def test_mapping_pipeline_keeps_the_instant_carrier_unstamped():
-    """MySQL ``TIMESTAMP(6)`` is an instant carrier — nothing is lost to stamp."""
+def test_mapping_pipeline_keeps_the_instant_carrier_without_a_contract():
+    """MySQL ``TIMESTAMP(6)`` keeps the instant — its 2038 ceiling is the only cost.
+
+    Polarity and precision survive, so no Risk Contract is demanded. The carrier
+    still holds only 1970..2038 of the source's range, which is a review chip
+    rather than the silence that let out-of-range rows fail at the write.
+    """
     row = _create_new_row("TIMESTAMPTZ")
     assert row["target_type"].upper().startswith("TIMESTAMP(6)"), row["target_type"]
-    assert (row.get("create_new_risks") or []) == []
+    assert {r.get("kind") for r in row.get("create_new_risks") or []} == {
+        "instant_range_cap"
+    }
     assert row.get("requires_risk_contract") is False
