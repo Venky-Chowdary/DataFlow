@@ -796,17 +796,17 @@ def _shape_stream_refusal(
     sync = (effective_sync or "").lower()
     if sync in ("cdc", "scd2", "full_refresh_mirror", "mirror"):
         return (
-            f"Shaping is not applied on the {sync} route: it merges each row "
-            "against history already stored on the destination, which was not "
-            "written by this recipe. Remove the Shape recipe for this sync mode, "
-            "or use full refresh / incremental append and shape on the read."
+            f"Transform (pre-load) is not applied on the {sync} route: it merges "
+            "each row against history already stored on the destination, which was "
+            "not written by this recipe. Remove the transform recipe for this sync "
+            "mode, or use full refresh / incremental append and transform on the read."
         )
     if multi_stream:
         return (
-            "Shaping a multi-stream selection is refused: one recipe names "
+            "Transforming a multi-stream selection is refused: one recipe names "
             "columns of one stream, so applying it to every selected stream "
             "would either miss columns or rewrite unrelated ones. Run one "
-            "stream per transfer to shape it."
+            "stream per transfer to transform it."
         )
     touched = set(runner.recipe.touched_columns)
     outputs = set(runner.output_columns)
@@ -814,11 +814,11 @@ def _shape_stream_refusal(
     hit = [c for c in guarded if c in touched or c not in outputs]
     if hit:
         return (
-            "Shaping refuses to rewrite the columns this sync mode resolves rows "
-            f"by ({', '.join(sorted(set(hit)))}): the cursor and key decide which "
-            "rows are read and which stored row is replaced, so a shaped value "
-            "there would move the watermark or change row identity. Shape other "
-            "columns, or switch to a full refresh."
+            "Transform (pre-load) refuses to rewrite the columns this sync mode "
+            f"resolves rows by ({', '.join(sorted(set(hit)))}): the cursor and key "
+            "decide which rows are read and which stored row is replaced, so a "
+            "transformed value there would move the watermark or change row "
+            "identity. Transform other columns, or switch to a full refresh."
         )
     return ""
 

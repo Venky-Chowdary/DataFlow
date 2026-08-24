@@ -65,6 +65,165 @@ describe("Transfer Studio chrome contracts", () => {
     assert.match(css, /\.df2-app \.df2-main \{[\s\S]*margin-left:\s*0\s*!important/);
   });
 
+  it("the pre-load step is named for the operator, never 'Shape'", () => {
+    const constants = readFileSync(join(webRoot, "pages/transfer/studioConstants.ts"), "utf8");
+    const inspector = readFileSync(join(webRoot, "components/transfer/TransferStudioInspector.tsx"), "utf8");
+    const page = readFileSync(join(webRoot, "pages/TransferPage.tsx"), "utf8");
+
+    assert.match(constants, /label: "Transform", shortLabel: "Xform"/);
+    assert.doesNotMatch(constants, /label: "Shape"/);
+    assert.match(inspector, /title: "Transform \(pre-load\)"/);
+    assert.match(page, /Continue to Transform/);
+    assert.doesNotMatch(page, /Continue to Shape/);
+  });
+
+  it("Validate is asked about the transformed rows, not the raw source", () => {
+    // The run shapes on the read, so a Validate that scores the source refuses
+    // values the write never carries (a stripped control character, a rounded
+    // decimal). Both calls must carry the same recipe.
+    const page = readFileSync(join(webRoot, "pages/TransferPage.tsx"), "utf8");
+    const api = readFileSync(join(webRoot, "lib/api.ts"), "utf8");
+
+    const preflightCall = page.slice(page.indexOf("pf = await runPreflight("));
+    assert.match(
+      preflightCall.slice(0, preflightCall.indexOf("});")),
+      /shape_recipe: recipePayload\(shapeSteps\)/,
+      "runPreflight must send the approved recipe",
+    );
+    assert.match(api, /shape_recipe\?: ShapeRecipeWire/);
+  });
+
+  it("Validate renders the transformed image it was judged on", () => {
+    // The backend already returned `transform_image`; an operator who cannot see
+    // it has no way to know which rows the verdict covers, or that the rows the
+    // recipe removed are absent by instruction rather than lost.
+    const dash = readFileSync(join(webRoot, "components/transfer/ValidateDashboard.tsx"), "utf8");
+    const types = readFileSync(join(webRoot, "lib/types.ts"), "utf8");
+    const css = readFileSync(join(webRoot, "styles/transfer-studio.css"), "utf8");
+
+    assert.match(types, /transform_image\?: \{/);
+    assert.match(dash, /preflight\?\.transform_image \?\? null/);
+    assert.match(dash, /Gates judged the transformed rows, not the raw source/);
+    assert.match(dash, /recipe \{transformImage\.recipe_hash/);
+    assert.match(dash, /removed by\s*\n?\s*transform/);
+    assert.match(dash, /diverted by\s*\n?\s*transform/);
+    assert.match(dash, /Re-read carrier\(s\) after transform/);
+    // Sample counts are not population proof, and the panel must say so.
+    assert.match(dash, /never the whole\s*\n?\s*population/);
+    assert.ok(css.includes(".df2-vd-xform {"), ".df2-vd-xform has no rule");
+  });
+
+  it("Map decides carriers from the transformed image, and the plan keeps source truth", () => {
+    // Transform runs before Map by design: a column rounded to whole numbers is
+    // no longer a lossy decimal, so mapping it against the raw carrier explains
+    // a narrowing the write will never perform. The persisted plan must stay raw
+    // — the engine applies the recipe once, on the read.
+    const page = readFileSync(join(webRoot, "pages/TransferPage.tsx"), "utf8");
+    const step = readFileSync(join(webRoot, "pages/transfer/TransferTransformStep.tsx"), "utf8");
+    const router = readFileSync(
+      join(webRoot, "../../api/src/routers/shape_router.py"),
+      "utf8",
+    );
+
+    const mapCalls = page.slice(page.indexOf("const useDirect ="));
+    const mapBody = mapCalls.slice(0, mapCalls.indexOf("// Do NOT create an empty draft plan"));
+    assert.match(mapBody, /source_columns: mapSourceCols/);
+    assert.match(mapBody, /source_schema: mapSourceSchema/);
+    // The plan override keeps declared truth so the recipe is not applied twice.
+    assert.match(mapBody, /source_schema: declaredSchema/);
+    assert.doesNotMatch(mapBody, /source_schema: mapSourceSchema,\s*\n\s*target_columns: mapTargetCols,/);
+    // Sampled values shown to the mapping engine follow the transform too.
+    assert.match(page, /image\.sampleRows\s*\n?\s*\.slice\(0, 8\)/);
+    // The carrier of a transformed column is re-read from the transformed rows.
+    assert.match(step, /column_types: sourceSchema/);
+    assert.match(router, /out_types, retyped = shaped_column_types\(/);
+  });
+
+  it("the cell-level preview scans the transformed values, not the raw cell", () => {
+    // `/preflight/run` carried the recipe while `/preflight/preview-cells` did
+    // not, so the quarantine table cited `Invalid integer: '22.43'` on a column
+    // the approved recipe rounds to 22 — a finding no writer would ever raise.
+    const page = readFileSync(join(webRoot, "pages/TransferPage.tsx"), "utf8");
+    const api = readFileSync(join(webRoot, "lib/api.ts"), "utf8");
+    const router = readFileSync(
+      join(webRoot, "../../api/src/routers/preflight_router.py"),
+      "utf8",
+    );
+
+    const cellCall = page.slice(page.indexOf("previewQuarantineCells({"));
+    const cellBody = cellCall.slice(0, cellCall.indexOf("});"));
+    assert.match(cellBody, /shape_recipe: recipePayload\(shapeSteps\)/);
+    // A changed recipe is different evidence, so the effect must re-run on it.
+    const deps = cellCall.slice(cellCall.indexOf("}, ["), cellCall.indexOf("]);") + 3);
+    assert.match(deps, /shapeSteps/);
+    assert.match(api, /shape_recipe\?: ShapeRecipeWire \| null;/);
+    // The backend applies the same pre-load image before it scans a cell.
+    assert.match(router, /shape_recipe: dict\[str, Any\] \| None = None/);
+    assert.match(router, /image = shaped_preflight_image\(/);
+    assert.match(router, /if image\.applied:/);
+  });
+
+  it("a refused row is not reported as an accounting defect", () => {
+    const step = readFileSync(
+      join(webRoot, "pages/transfer/TransferTransformStep.tsx"),
+      "utf8",
+    );
+    const ledger = step.slice(step.indexOf("df2-xform-ledger"));
+    const block = ledger.slice(0, ledger.indexOf("</p>"));
+    assert.match(block, /preview\?\.refusal/);
+    assert.match(block, /the preview stopped at the refused row above/);
+    // The defect wording survives, but only for an imbalance with no refusal.
+    assert.match(block, /: " · ledger does not balance/);
+  });
+
+  it("a required Transform option says so before Add is clicked", () => {
+    const builder = readFileSync(
+      join(webRoot, "components/transfer/TransformStepBuilder.tsx"),
+      "utf8",
+    );
+    const css = readFileSync(join(webRoot, "styles/transform-prep.css"), "utf8");
+
+    assert.match(builder, /const blankRequired = useMemo\(/);
+    assert.match(builder, /is-invalid/);
+    assert.match(builder, /role="alert"/);
+    // Add cannot append a step the engine would refuse, and says why.
+    assert.match(builder, /disabled=\{!canPlan \|\| !operation \|\| Boolean\(missing\)/);
+    assert.ok(css.includes(".df2-xform-required {"), ".df2-xform-required has no rule");
+    assert.ok(
+      css.includes(".df2-field.is-invalid > .df2-input"),
+      "invalid required inputs are not marked",
+    );
+  });
+
+  it("the Transform step ships the stylesheet its own namespace needs", () => {
+    const entry = readFileSync(join(webRoot, "styles/app-styles.css"), "utf8");
+    const css = readFileSync(join(webRoot, "styles/transform-prep.css"), "utf8");
+
+    // Every class the step used was previously undefined, so the panel laid out
+    // in default flow. The stylesheet must be reachable from the one entrypoint.
+    assert.match(entry, /@import "\.\/transform-prep\.css";/);
+    for (const rule of [".df2-xform-grid", ".df2-xform-card", ".df2-xform-bars", ".df2-xform-scroll"]) {
+      assert.ok(css.includes(rule), `${rule} has no rule`);
+    }
+    assert.match(css, /grid-template-columns: minmax\(0, 5fr\) minmax\(0, 6fr\)/);
+    assert.match(css, /@media \(max-width: 1180px\)/);
+  });
+
+  it("the Transform step states its own rules on screen", () => {
+    const guide = readFileSync(join(webRoot, "components/transfer/TransformGuidePanel.tsx"), "utf8");
+    const step = readFileSync(join(webRoot, "pages/transfer/TransferTransformStep.tsx"), "utf8");
+
+    assert.match(guide, /runs on the read, before anything is written/);
+    assert.match(guide, /never modified/);
+    assert.match(guide, /not as loss/);
+    assert.match(guide, /post-load transform/);
+    assert.match(guide, /re-checks every row of the[\s\S]{0,40}population/);
+    // Identity is what Execute is held to, so it is stated where it is approved.
+    assert.match(step, /recipe \{preview\.recipe\.recipe_hash\}/);
+    // A refused recipe has no identity — Map must not be reachable behind it.
+    assert.match(step, /disabled=\{Boolean\(previewError\) \|\| Boolean\(preview\?\.refusal\)\}/);
+  });
+
   it("transfer-studio stacks chrome via container query + 1280 fallback", () => {
     const css = readFileSync(join(webRoot, "styles/transfer-studio.css"), "utf8");
     assert.match(css, /container-type:\s*inline-size/);

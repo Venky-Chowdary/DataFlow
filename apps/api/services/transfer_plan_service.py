@@ -13,6 +13,7 @@ from services.acknowledgment_contract import (
     audit_acknowledgments,
 )
 from services.audit_log import append_audit_event
+from services.shape_preflight import shaped_preflight_image
 from services.transfer_plan_store import (
     TransferPlanRecord,
     add_mapping_revision,
@@ -153,6 +154,7 @@ def run_plan_preflight(
     plan_id: str,
     *,
     acknowledgments: Acknowledgments | None = None,
+    shape_recipe: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run preflight for a persisted plan, honouring operator acknowledgments.
 
@@ -160,6 +162,11 @@ def run_plan_preflight(
     recorded on the plan (stamped with the mapping revision it was granted for)
     so Execute and a page reload see the same attestation, and so a remap cannot
     inherit a green from the shape it replaced.
+
+    ``shape_recipe`` is the approved pre-load transform. Execute shapes rows on
+    the read, so the gates must judge that image: without it Validate blocks on
+    values — a control character, an unrounded decimal — that the writer never
+    sees. Raises :class:`ShapePreflightRefused` when the recipe cannot run.
     """
     (
         apply_policy_gates,
@@ -299,9 +306,16 @@ def run_plan_preflight(
     # run_file_preflight is the SSOT for drift + gates — do not re-detect/overwrite.
     # Source connector/table/config + stream_contracts required for uniqueness probe
     # (Studio plan Validate must not skip the probe Execute will run).
-    pf = run_file_preflight(
+    shaped_image = shaped_preflight_image(
+        shape_recipe,
         columns=plan.source_columns,
         column_types=plan.source_schema,
+        sample_rows=sample_rows,
+    )
+
+    pf = run_file_preflight(
+        columns=shaped_image.columns,
+        column_types=shaped_image.column_types,
         row_count=plan.row_count_estimate,
         mappings=rev.mappings,
         destination_connected=bool(dest_meta.get("connected")),
@@ -310,7 +324,7 @@ def run_plan_preflight(
         source_kind=source_kind,
         source_format=source_format,
         sync_mode=policies.get("sync_mode", "full_refresh_overwrite"),
-        sample_rows=sample_rows,
+        sample_rows=shaped_image.sample_rows,
         confidence_threshold=threshold,
         validation_mode=validation_mode,
         date_locale=policies.get("date_locale", ""),
@@ -331,6 +345,10 @@ def run_plan_preflight(
         destination_table=dest_table,
         schema_policy=policies.get("schema_policy", "manual_review"),
         backfill_new_fields=bool(policies.get("backfill_new_fields")),
+        # Drift compares against the revision's declared-source fingerprint, so
+        # it must see the declared source — an approved transform is not drift.
+        declared_source_columns=list(plan.source_columns),
+        declared_source_schema=dict(plan.source_schema or {}),
         stored_source_fp=rev.source_schema_hash or "",
         stored_target_fp=rev.target_schema_hash or "",
         previous_source_columns=prev_cols or None,
@@ -357,7 +375,7 @@ def run_plan_preflight(
             validation_mode=validation_mode,
             stream_contracts=stream_contracts,
             backfill_new_fields=bool(policies.get("backfill_new_fields")),
-            source_columns=plan.source_columns,
+            source_columns=shaped_image.columns,
             dest_type=dest_db_type,
             source_type=source_format,
             source_kind=source_kind,
@@ -372,6 +390,23 @@ def run_plan_preflight(
 
     if pf.get("effective_mappings"):
         pf["mappings"] = pf["effective_mappings"]
+    if shaped_image.applied:
+        # Name the image the gates judged. A verdict on transformed rows that
+        # reads as a verdict on the source is how an operator loses the thread.
+        pf["transform_image"] = {
+            "recipe_hash": shaped_image.recipe_hash,
+            "columns": shaped_image.columns,
+            "sample_rows_in": shaped_image.rows_in,
+            "sample_rows_out": shaped_image.rows_out,
+            "sample_rows_removed": shaped_image.rows_removed,
+            "sample_rows_diverted": shaped_image.rows_diverted,
+            "retyped_columns": shaped_image.retyped_columns,
+        }
+        note = shaped_image.note()
+        if note:
+            bucket = pf.setdefault("warnings", [])
+            if note not in bucket:
+                bucket.append(note)
     # Surface destination catalog honesty (BQ/Redshift/SF NOT ENFORCED) warn-only.
     for w in dest_meta.get("warnings") or dest_meta.get("schema_warnings") or []:
         note = str(w).strip()

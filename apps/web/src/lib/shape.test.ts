@@ -125,7 +125,7 @@ test("the effect sentence carries the ledger terms, not just a row count", () =>
   };
   const sentence = summarizeEffect(effect);
   assert.match(sentence, /100 row\(s\) in/);
-  assert.match(sentence, /2 shaped out/);
+  assert.match(sentence, /2 removed/);
   assert.match(sentence, /1 diverted/);
   assert.match(sentence, /14 cell\(s\) changed/);
   assert.match(sentence, /3 null\(s\) introduced/);

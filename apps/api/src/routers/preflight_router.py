@@ -12,6 +12,7 @@ from services.acknowledgment_contract import (
     audit_acknowledgments,
     resolve_acknowledgments,
 )
+from services.shape_preflight import ShapePreflightRefused, shaped_preflight_image
 
 from ..services.preflight_service import (
     apply_policy_gates,
@@ -115,6 +116,9 @@ class PreflightRequest(BaseModel):
     dest_extra: dict[str, Any] | None = None
     # CDC delivery — default at_least_once; exactly_once is opt-in and fail-closed.
     delivery_guarantee: str = "at_least_once"
+    # Approved pre-load transform recipe. Execute shapes rows on the read, so the
+    # gates must judge the transformed image, not the raw source.
+    shape_recipe: dict[str, Any] | None = None
 
 
 def _schema_default(db_type: str) -> str:
@@ -241,6 +245,22 @@ async def run_preflight(body: PreflightRequest):
             source_collection=body.source_collection or "",
         ),
     )
+    # The write never sees the raw source when a recipe is approved: shape the
+    # image first so a gate cannot block on a value the transform removes.
+    try:
+        shaped_image = shaped_preflight_image(
+            body.shape_recipe,
+            columns=body.columns,
+            column_types=source_column_types,
+            sample_rows=body.sample_rows,
+        )
+    except ShapePreflightRefused as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    preflight_columns = shaped_image.columns
+    source_column_types = shaped_image.column_types
+    preflight_sample_rows = shaped_image.sample_rows
+
     preflight_mappings = restamp_mapping_source_types(
         [m.model_dump() for m in body.mappings],
         source_column_types,
@@ -296,7 +316,7 @@ async def run_preflight(body: PreflightRequest):
         else __import__("contextlib").nullcontext()
     ):
         result = run_file_preflight(
-            columns=body.columns,
+            columns=preflight_columns,
             column_types=source_column_types,
             row_count=body.row_count,
             mappings=preflight_mappings,
@@ -307,7 +327,7 @@ async def run_preflight(body: PreflightRequest):
             source_kind=body.source_kind or ("database" if body.source_connector_id else "file"),
             source_format=body.source_type or body.source_kind,
             sync_mode=body.sync_mode,
-            sample_rows=body.sample_rows,
+            sample_rows=preflight_sample_rows,
             estimated_bytes=body.estimated_bytes,
             confidence_threshold=confidence_threshold_for_mode(body.validation_mode),
             destination_column_types=dest_column_types,
@@ -368,6 +388,22 @@ async def run_preflight(body: PreflightRequest):
             note = str(dest_identity["note"])
             if note not in bucket:
                 bucket.append(note)
+    if shaped_image.applied:
+        # Say which image the gates judged. A verdict on transformed rows that
+        # reads as a verdict on the source is how an operator loses the thread.
+        result["transform_image"] = {
+            "recipe_hash": shaped_image.recipe_hash,
+            "columns": shaped_image.columns,
+            "sample_rows_in": shaped_image.rows_in,
+            "sample_rows_out": shaped_image.rows_out,
+            "sample_rows_removed": shaped_image.rows_removed,
+            "sample_rows_diverted": shaped_image.rows_diverted,
+            "retyped_columns": shaped_image.retyped_columns,
+        }
+        note = shaped_image.note()
+        bucket = result.setdefault("warnings", [])
+        if note and note not in bucket:
+            bucket.append(note)
     if source_type_drift:
         # The operator's Map rows disagreed with the live source. Gates already
         # ran on the live truth — say so instead of silently rescoring.
@@ -396,7 +432,7 @@ async def run_preflight(body: PreflightRequest):
             validation_mode=body.validation_mode,
             stream_contracts=body.stream_contracts,
             backfill_new_fields=body.backfill_new_fields,
-            source_columns=body.columns,
+            source_columns=preflight_columns,
             dest_type=body.dest_type
             or (dest_meta.get("db_type") if isinstance(dest_meta, dict) else None),
             source_type=body.source_type,
@@ -521,11 +557,18 @@ class CellPreviewRequest(BaseModel):
     column_types: dict[str, str] = Field(default_factory=dict)
     sample_size: int = Field(25, ge=1, le=200)
     date_locale: str = ""
+    shape_recipe: dict[str, Any] | None = None
 
 
 @router.post("/preview-cells")
 async def preview_quarantine_cells(body: CellPreviewRequest):
-    """Cell-level quarantine/coerce preview before transfer run."""
+    """Cell-level quarantine/coerce preview before transfer run.
+
+    The recipe travels with the request for the same reason it travels with
+    ``/preflight/run``: Execute transforms on the read, so a cell preview that
+    scans raw values reports findings on values no writer will ever bind —
+    ``Invalid integer: '22.43'`` on a column the approved recipe rounds to 22.
+    """
     from services.transform_engine import preview_quarantine_cells as _preview
 
     try:
@@ -537,14 +580,43 @@ async def preview_quarantine_cells(body: CellPreviewRequest):
         locale_token = set_active_date_locale(body.date_locale)
         try:
             rows = [[("" if c is None else str(c)) for c in row] for row in body.sample_rows]
-            return _preview(
-                headers=body.headers,
+            headers = list(body.headers)
+            column_types = dict(body.column_types)
+            try:
+                image = shaped_preflight_image(
+                    body.shape_recipe,
+                    columns=headers,
+                    column_types=column_types,
+                    sample_rows=[dict(zip(headers, row)) for row in rows],
+                )
+            except ShapePreflightRefused as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            if image.applied:
+                headers = image.columns
+                column_types = image.column_types
+                rows = [
+                    [("" if row.get(h) is None else str(row.get(h))) for h in headers]
+                    for row in (image.sample_rows or [])
+                ]
+            result = _preview(
+                headers=headers,
                 sample_rows=rows,
                 mappings=body.mappings,
-                column_types=body.column_types,
+                column_types=column_types,
                 sample_size=body.sample_size,
             )
+            if image.applied:
+                result["transform_image"] = {
+                    "recipe_hash": image.recipe_hash,
+                    "sample_rows_in": image.rows_in,
+                    "sample_rows_out": image.rows_out,
+                    "sample_rows_removed": image.rows_removed,
+                    "retyped_columns": image.retyped_columns,
+                }
+            return result
         finally:
             reset_active_date_locale(locale_token)
+    except HTTPException:
+        raise
     except Exception as e:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=str(e))

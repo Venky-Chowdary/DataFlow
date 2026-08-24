@@ -313,7 +313,7 @@ class ShapeEngine:
             if matched:
                 raise _Drop(
                     diverted=True,
-                    reason=str(options.get("reason") or "diverted by a shaping rule"),
+                    reason=str(options.get("reason") or "diverted by a transform rule"),
                     step_index=index,
                     op=op,
                 )
@@ -363,7 +363,7 @@ class ShapeEngine:
             # A refusal surfaces to the operator as the run's failure message, so
             # it has to say where to look: step 3 of the recipe, row 431, column
             # arr_time — not just "not a number" for a million-row file.
-            located = f"shaping step {index + 1} ({step.op})"
+            located = f"transform step {index + 1} ({step.op})"
             if column:
                 located += f" on column '{column}'"
             # One-based, like every other row citation the operator sees.

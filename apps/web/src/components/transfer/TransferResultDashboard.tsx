@@ -238,16 +238,16 @@ export function TransferResultDashboard({
   }
   if (ledger && ledger.rows_shaped_out > 0) {
     metaChips.push({
-      label: "Shaped out",
+      label: "Removed by transform",
       value: ledger.rows_shaped_out.toLocaleString(),
-      title: "Rows the approved shaping recipe removed on the read. Removal is not quarantine — no cell was found unfit.",
+      title: "Rows the approved pre-load transform removed on the read. Removal is not quarantine — no cell was found unfit.",
     });
   }
   if (ledger && ledger.shape_recipe_hash) {
     metaChips.push({
-      label: "Recipe",
+      label: "Transform recipe",
       value: ledger.shape_recipe_hash,
-      title: "Identity of the shaping recipe this run executed — the same recipe Validate approved.",
+      title: "Identity of the pre-load transform recipe this run executed — the same recipe Validate approved.",
     });
   }
   if (ds?.error_policy) {

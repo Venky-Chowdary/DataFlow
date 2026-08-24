@@ -25,6 +25,7 @@ from pydantic import BaseModel, Field
 from services.shape_engine import ShapeEngine, ShapeRowError
 from services.shape_expr import ExpressionError, compile_expression, describe_functions
 from services.shape_models import MAX_STEPS, ShapeError, ShapeRecipe, describe_catalog
+from services.shape_preflight import shaped_column_types
 from services.shape_suggest import profile_columns, suggest_steps
 
 router = APIRouter(prefix="/shape", tags=["Shape"])
@@ -43,6 +44,10 @@ class _RecipeBody(BaseModel):
 
 class _PreviewBody(_RecipeBody):
     sample_rows: list[dict[str, Any]] = Field(default_factory=list)
+    # Declared source carriers from the catalog. A column no step wrote keeps the
+    # type declared here; one the recipe wrote is re-read from the shaped values,
+    # so Map decides a carrier from the rows the writer will actually be offered.
+    column_types: dict[str, str] = Field(default_factory=dict)
     # Declared destination carriers, so a narrowing decimal is suggested with
     # the scale the writer will actually enforce.
     target_schema: dict[str, str] = Field(default_factory=dict)
@@ -160,9 +165,18 @@ async def preview_recipe(body: _PreviewBody) -> dict[str, Any]:
         if body.include_profile
         else []
     )
+    out_columns = list(recipe.output_columns) or _columns_of(shaped or rows)
+    out_types, retyped = shaped_column_types(
+        out_columns,
+        declared_types=body.column_types,
+        touched=recipe.touched_columns,
+        rows=shaped,
+    )
     return {
         "recipe": _identity(recipe),
         "sampled_rows": len(rows),
+        "column_types": out_types,
+        "retyped_columns": retyped,
         "before": [_wire_row(r) for r in rows[:200]],
         "after": [_wire_row(r) for r in shaped[:200]],
         "effect": _wire(engine.effect.to_dict()),

@@ -1726,7 +1726,7 @@ def _removal_phrase(rows_shaped_out: int, rows_source_filtered: int) -> str:
     if filtered:
         parts.append(f"{filtered:,} by the declared source filter")
     if shaped:
-        parts.append(f"{shaped:,} by the approved shaping recipe")
+        parts.append(f"{shaped:,} by the approved transform recipe")
     if not parts:
         return ""
     return (

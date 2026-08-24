@@ -219,8 +219,8 @@ import {
   STEPS,
   UPLOAD_FORMATS,
 } from "./transfer/studioConstants";
-import { TransferShapeStep } from "./transfer/TransferShapeStep";
-import { recipePayload, type ShapeStepWire } from "../lib/shape";
+import { TransferTransformStep } from "./transfer/TransferTransformStep";
+import { recipePayload, type ShapeStepWire, type TransformImage } from "../lib/shape";
 import {
   analysisFromPipeline,
   fileExtension,
@@ -277,13 +277,20 @@ export function TransferPage({
     unaccounted_sources?: string[];
   } | null>(null);
   /**
-   * The shaping recipe composed on the Shape step, and the identity the engine
+   * The recipe composed on the Transform (pre-load) step, and the identity the engine
    * gave it. The hash is what Execute is held to: if the recipe changes after
    * Validate, the run is refused rather than quietly running a different one.
    */
   const [shapeSteps, setShapeSteps] = useState<ShapeStepWire[]>([]);
-  const [shapeIdentity, setShapeIdentity] = useState<{ hash: string; columns: string[] } | null>(null);
-  /** Sample rows from the last connector introspect, for Shape profile/preview. */
+  const [shapeIdentity, setShapeIdentity] = useState<TransformImage | null>(null);
+  /**
+   * Read inside `applyPipelineMappings` without making the transformed image a
+   * dependency of it: Map must ask about the transformed image, but re-running
+   * every mapping on each preview keystroke is not what the operator asked for.
+   */
+  const shapeIdentityRef = useRef<TransformImage | null>(null);
+  shapeIdentityRef.current = shapeIdentity;
+  /** Sample rows from the last connector introspect, for Transform profile/preview. */
   const [connectorSampleRows, setConnectorSampleRows] = useState<Record<string, unknown>[]>([]);
   const [cloudPath, setCloudPath] = useState("");
   const [advancedOpen, setAdvancedOpen] = useState(false);
@@ -475,6 +482,21 @@ export function TransferPage({
   );
 
   const buildSourceSamples = useCallback((): Record<string, string[]> => {
+    // Sampled values are evidence for the mapping engine, so once a Transform
+    // (pre-load) recipe is declared they must be the transformed values: sending
+    // the raw ones would let the engine re-infer the carrier the transform just
+    // replaced.
+    const image = shapeIdentityRef.current;
+    if (image && image.columns.length && image.sampleRows.length) {
+      const shaped: Record<string, string[]> = {};
+      for (const col of image.columns) {
+        shaped[col] = image.sampleRows
+          .slice(0, 8)
+          .map((r) => String(r[col] ?? ""))
+          .filter((v) => v.length > 0);
+      }
+      return shaped;
+    }
     const rows = (parsed?.data ?? parsed?.sample_data ?? []) as Record<string, unknown>[];
     const cols =
       parsed?.columns ??
@@ -873,7 +895,7 @@ export function TransferPage({
     return {};
   })();
   const samplePreviewRows = parsed?.sample_data ?? parsed?.data ?? [];
-  /** Rows Shape profiles and previews against — file preview or connector sample. */
+  /** Rows Transform profiles and previews against — file preview or connector sample. */
   const shapeSampleRows = (
     sourceKind === "file" ? samplePreviewRows : connectorSampleRows
   ) as Record<string, unknown>[];
@@ -903,6 +925,9 @@ export function TransferPage({
       })),
       column_types: (currentSourceSchema || {}) as Record<string, string>,
       sample_size: 25,
+      // Same image as the gates: the recipe runs on the read, so scanning the
+      // raw cell reports a finding on a value the writer never binds.
+      shape_recipe: recipePayload(shapeSteps),
     })
       .then((res) => {
         if (!cancelled) setCellPreview(res);
@@ -913,7 +938,7 @@ export function TransferPage({
     return () => {
       cancelled = true;
     };
-  }, [step, currentSourceColumnsKey, columnMappings, samplePreviewRows, currentSourceSchema, currentSourceColumns]);
+  }, [step, currentSourceColumnsKey, columnMappings, samplePreviewRows, currentSourceSchema, currentSourceColumns, shapeSteps]);
 
   // A name-matched column is a starting point for the operator, never a claim
   // about the column's behaviour — the declaration beside it carries that.
@@ -1351,7 +1376,24 @@ export function TransferPage({
         ?? [];
       if (!sourceCols.length) return [];
       const threshold = confidenceThresholdForMode(validationMode);
-      const sourceSchema = parsed?.schema ?? transferPlan?.source_schema ?? {};
+      const declaredSchema = parsed?.schema ?? transferPlan?.source_schema ?? {};
+      // Transform (pre-load) runs on the read, before Map. So the columns and
+      // carriers Map decides fidelity from are the ones the recipe produces, not
+      // the raw source they replaced — otherwise a column rounded to whole
+      // numbers is still explained as a lossy decimal the writer would refuse.
+      // The plan keeps declared source truth: the recipe is applied once, by the
+      // engine, on the read.
+      const image = shapeIdentityRef.current;
+      const transformed = Boolean(image && image.columns.length);
+      const mapSourceCols = transformed && image ? image.columns : sourceCols;
+      const mapSourceSchema = transformed && image
+        ? Object.fromEntries(
+            mapSourceCols.map((column) => [
+              column,
+              image.columnTypes[column] ?? declaredSchema[column] ?? "VARCHAR",
+            ]),
+          )
+        : declaredSchema;
       const gen = ++mappingGenRef.current;
       const rows = parsed?.data ?? parsed?.sample_data;
       const analysisCols = analysisOverride?.columns ?? analysis?.columns;
@@ -1413,12 +1455,18 @@ export function TransferPage({
       try {
         // Prefer direct map when fresh dest schema is in-hand — plan persistence
         // can lag React state and previously wiped create-new proposals.
-        const useDirect = Boolean(mapTargetCols?.length) || !persistedPlanId;
+        // A declared transform is also a reason to map directly: the persisted
+        // plan holds declared source truth, not the transformed image, so only
+        // the direct call can be asked about the columns the writer will see.
+        const useDirect = Boolean(mapTargetCols?.length) || !persistedPlanId || transformed;
         let result: Awaited<ReturnType<typeof mapTransferColumns>>;
         if (!useDirect) {
+          // The plan records declared source truth — the engine applies the
+          // recipe on the read, so persisting the transformed image here would
+          // apply it twice.
           const planId = await ensurePersistedPlan(undefined, {
             source_columns: sourceCols,
-            source_schema: sourceSchema,
+            source_schema: declaredSchema,
             target_columns: mapTargetCols,
             target_schema: mapTargetSchema,
           });
@@ -1430,8 +1478,8 @@ export function TransferPage({
             });
           } else {
             result = await mapTransferColumns({
-              source_columns: sourceCols,
-              source_schema: sourceSchema,
+              source_columns: mapSourceCols,
+              source_schema: mapSourceSchema,
               target_columns: mapTargetCols?.length ? mapTargetCols : undefined,
               target_schema: mapTargetSchema,
               validation_mode: validationMode,
@@ -1449,8 +1497,8 @@ export function TransferPage({
           }
         } else {
           result = await mapTransferColumns({
-            source_columns: sourceCols,
-            source_schema: sourceSchema,
+            source_columns: mapSourceCols,
+            source_schema: mapSourceSchema,
             target_columns: mapTargetCols?.length ? mapTargetCols : undefined,
             target_schema: mapTargetSchema,
             validation_mode: validationMode,
@@ -2596,7 +2644,7 @@ export function TransferPage({
       setSourceRowEstimate(intro.row_estimate);
     }
     const sampleRows = intro.data ?? intro.sample_data ?? [];
-    // Kept so Shape can profile and preview a connector source without a second
+    // Kept so Transform can profile and preview a connector source without a second
     // round-trip — the same rows Map was seeded from.
     setConnectorSampleRows(sampleRows);
     const columnSamples = Object.fromEntries(
@@ -4059,13 +4107,17 @@ export function TransferPage({
           await syncTransferPlanMappings(planId, mappings);
           // The plan transport must carry the attestation — a body-less call
           // cannot clear a PII/drift/FK gate, and Execute would stay locked.
-          const pf = await preflightTransferPlan(planId, {
-            compliance_acknowledged: ackCompliance,
-            schema_drift_acknowledged: ackSchemaDrift,
-            fk_risk_acknowledged: ackFkRisk,
-            acknowledgment_actor: ackActor,
-            acknowledgment_reason: ackReason,
-          });
+          const pf = await preflightTransferPlan(
+            planId,
+            {
+              compliance_acknowledged: ackCompliance,
+              schema_drift_acknowledged: ackSchemaDrift,
+              fk_risk_acknowledged: ackFkRisk,
+              acknowledgment_actor: ackActor,
+              acknowledgment_reason: ackReason,
+            },
+            recipePayload(shapeSteps),
+          );
           // Never stamp plan approved on review-grade / soft-pass — Execute
           // unlock requires decision===approve (same bar as Validate rail).
           const decision = pf.proof_bundle?.transfer_decision?.decision;
@@ -4173,6 +4225,10 @@ export function TransferPage({
             && Object.keys(destSchemaMap).length
               ? destSchemaMap
               : undefined,
+          // Validate must score the rows the write will carry: the run shapes on
+          // the read, so a gate judging the raw source refuses values the
+          // transform already removed.
+          shape_recipe: recipePayload(shapeSteps),
           sample_rows: sampleRows,
           estimated_bytes: estimatedBytes,
           sync_mode: syncMode,
@@ -6707,7 +6763,7 @@ export function TransferPage({
             onClick={() => setStep(STEP_SHAPE)}
             disabled={!canRunPreflight || analyzing}
           >
-            {analyzing ? <ButtonLoader label="Preparing mappings…" /> : <><DtIcon name="layers" size={18} /> Continue to Shape</>}
+            {analyzing ? <ButtonLoader label="Preparing mappings…" /> : <><DtIcon name="layers" size={18} /> Continue to Transform</>}
           </button>
           </div>
         </div>
@@ -6715,9 +6771,10 @@ export function TransferPage({
       )}
 
       {step === STEP_SHAPE && (
-        <TransferShapeStep
+        <TransferTransformStep
           sampleRows={shapeSampleRows}
           sourceColumns={currentSourceColumns}
+          sourceSchema={currentSourceSchema}
           targetSchema={destSchemaMap}
           sourceLabel={sourceLabel}
           destRouteLabel={mapDestRouteLabel}

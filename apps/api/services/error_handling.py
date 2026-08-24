@@ -163,19 +163,19 @@ NON_RETRIABLE_PATTERNS: set[str] = {
 # `fix` must list *likely checks* — never a single guaranteed remedy.
 _OPERATOR_FAILURE_RULES: tuple[tuple[tuple[str, ...], dict[str, str]], ...] = (
     (
-        # First, because a shaping refusal names a column and would otherwise be
+        # First, because a transform refusal names a column and would otherwise be
         # read as a destination-column error by the driver-text rules below —
-        # sending the operator to Map for a decision that belongs to Shape, and
-        # inviting a Resume that cannot help.
-        ("shaping step",),
+        # sending the operator to Map for a decision that belongs to Transform,
+        # and inviting a Resume that cannot help.
+        ("transform step", "shaping step"),
         {
             "code": "shape_refused_row",
             "category": "data_quality",
             "confidence": "high",
-            "title": "A shaping step refused a row rather than guess at its value",
+            "title": "A transform step refused a row rather than guess at its value",
             "fix": (
                 "The recipe's error policy for that step is Refuse, so the run stopped at the "
-                "named source row instead of writing a value it could not compute. Open Shape "
+                "named source row instead of writing a value it could not compute. Open Transform "
                 "and either fix the step for that shape of value, or change the step's policy "
                 "to Divert (quarantine the row, keep the load) or Null (write null, counted as "
                 "information loss). Re-run Validate afterwards: a changed recipe is a different "

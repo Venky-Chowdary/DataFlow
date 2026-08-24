@@ -525,6 +525,64 @@ def test_pg_bare_decimal_is_widen_not_narrow_type_drift():
     assert any(b.get("kind") == "narrow_type" for b in mysql["schema_evolution"]["hard_breaking"])
 
 
+def test_a_transformed_carrier_is_graded_and_the_declared_one_fingerprinted():
+    """A rounded column is not a precision collapse, and not source drift either.
+
+    The two source questions have two answers: the revision fingerprinted the
+    declared ``DECIMAL(11,8)``, while the writer will bind the transformed
+    ``INTEGER``. Grading the carrier on the declared type blocked the run as
+    ``narrow_type`` (``source_changed:false, target_changed:false``, no operator
+    remedy); fingerprinting the transformed image reported the operator's own
+    approved recipe as "source schema changed".
+    """
+    from services.schema_fingerprint import fingerprint_schema
+
+    declared_cols = ["name", "arr_time"]
+    declared_schema = {"name": "VARCHAR(64)", "arr_time": "DECIMAL(11,8)"}
+    mappings = [
+        {"source": "name", "target": "name", "confidence": 0.99, "transform": "none"},
+        {"source": "arr_time", "target": "arr_time", "confidence": 0.99, "transform": "none"},
+    ]
+    report = detect_schema_drift(
+        # The transformed image the gates judge and the writer receives.
+        source_columns=declared_cols,
+        source_schema={"name": "VARCHAR(64)", "arr_time": "INTEGER"},
+        declared_source_columns=declared_cols,
+        declared_source_schema=declared_schema,
+        target_columns=declared_cols,
+        target_schema={"name": "VARCHAR(64)", "arr_time": "INT4"},
+        mappings=mappings,
+        destination_db_type="postgresql",
+        table_exists=True,
+        schema_policy="manual_review",
+        stored_source_fp=fingerprint_schema(declared_cols, declared_schema),
+        sample_rows=[{"name": "ACME", "arr_time": "22"}],
+    )
+    assert report["type_mismatches"] == []
+    assert report["schema_evolution"]["hard_breaking"] == []
+    assert not report["source_changed"]
+    assert not report["drift_detected"]
+
+
+def test_an_unshaped_narrowing_is_still_blocked():
+    """The default path is unchanged: no transform means declared is the image."""
+    report = detect_schema_drift(
+        source_columns=["arr_time"],
+        source_schema={"arr_time": "DECIMAL(11,8)"},
+        target_columns=["arr_time"],
+        target_schema={"arr_time": "INT4"},
+        mappings=[{"source": "arr_time", "target": "arr_time", "confidence": 0.99}],
+        destination_db_type="postgresql",
+        table_exists=True,
+        schema_policy="manual_review",
+    )
+    assert report["type_mismatches"]
+    assert any(
+        b.get("kind") == "narrow_type"
+        for b in report["schema_evolution"]["hard_breaking"]
+    )
+
+
 def test_propagate_policy_synonym_target_fp_does_not_require_ack():
     from services.preflight_service import run_file_preflight
     from services.schema_fingerprint import fingerprint_schema_legacy

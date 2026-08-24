@@ -2219,7 +2219,7 @@ def _stream_database_transfer_impl(
             if not _mark_raw_page(batch, raw_rows, cursor_mark, keyset_mark or ""):
                 raise ValueError(
                     "this source's read page cannot record the page as it was read, "
-                    "so a filter or a shaping recipe cannot be proven to be applied "
+                    "so a filter or a transform recipe cannot be proven to be applied "
                     "to it exactly once, nor the next page proven to resume where "
                     "this one ended — refusing rather than risk skipping source rows"
                 )
@@ -2237,7 +2237,7 @@ def _stream_database_transfer_impl(
                 raise ValueError(
                     "this source's read page cannot record how many rows the "
                     "declared source filter removed, so proof cannot say whether "
-                    "the filter or the shaping recipe removed a row — refusing "
+                    "the filter or the transform recipe removed a row — refusing "
                     "rather than attributing it to the wrong authority"
                 ) from exc
         if shape_runner is not None and batch.rows is not None:
@@ -2249,7 +2249,7 @@ def _stream_database_transfer_impl(
                 # different rules in one row. Fail closed, naming it.
                 raise ValueError(
                     f"source column(s) {', '.join(sorted(unknown))} appeared on the read "
-                    f"but the approved shaping recipe ({shape_runner.recipe_hash}) was "
+                    f"but the approved transform recipe ({shape_runner.recipe_hash}) was "
                     "validated against a different column set — re-validate the recipe "
                     "against the source as it is now"
                 )

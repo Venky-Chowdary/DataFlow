@@ -171,6 +171,50 @@ def test_a_preview_keeps_a_decimal_exact_on_the_wire(client):
     assert Decimal(body["after"][0]["n"]) == Decimal("1.01")
 
 
+def test_a_preview_reports_the_carriers_map_must_decide_from(client):
+    """A rounded decimal is no longer a decimal, and Map has to be told so.
+
+    The carrier of a column the recipe wrote is re-read from the transformed
+    values; a column no step touched keeps the type the catalog declared, so a
+    12-row sample cannot demote an introspected DECIMAL(12,2) to DECIMAL(4,1).
+    """
+    body = client.post(
+        "/api/v1/shape/preview",
+        json={
+            "sample_rows": [{"arr_time": "22.43", "code": "AA"}, {"arr_time": "21.05", "code": "BB"}],
+            "source_columns": ["arr_time", "code"],
+            "column_types": {"arr_time": "DECIMAL(12,8)", "code": "VARCHAR(64)"},
+            "recipe": {
+                "steps": [
+                    {"op": "round_number", "column": "arr_time", "options": {"places": 0}}
+                ]
+            },
+        },
+    ).json()
+
+    assert body["after"] == [{"arr_time": "22", "code": "AA"}, {"arr_time": "21", "code": "BB"}]
+    # Written by the recipe → re-read from what it produced.
+    assert body["retyped_columns"] == {"arr_time": body["column_types"]["arr_time"]}
+    assert "INT" in body["column_types"]["arr_time"].upper()
+    # Untouched → declared truth survives the sample.
+    assert body["column_types"]["code"] == "VARCHAR(64)"
+
+
+def test_a_preview_without_declared_types_claims_no_retyping(client):
+    body = client.post(
+        "/api/v1/shape/preview",
+        json={
+            "sample_rows": [{"city": " Paris "}],
+            "source_columns": ["city"],
+            "recipe": {"steps": [{"op": "trim", "column": "city"}]},
+        },
+    ).json()
+    # With nothing declared there is no carrier to have changed, so the preview
+    # reads one for Map without claiming the transform retyped anything.
+    assert set(body["column_types"]) == {"city"}
+    assert body["retyped_columns"] == {}
+
+
 def test_a_filtered_row_is_reported_as_shaped_out_not_as_a_finding(client):
     body = client.post(
         "/api/v1/shape/preview",
@@ -297,6 +341,8 @@ def test_an_empty_recipe_returns_the_rows_unchanged(client):
 
 def test_reading_the_vocabulary_is_a_read_and_designing_a_recipe_is_planning():
     assert _required_permission("GET", "/api/v1/shape/catalog") == Permission.JOB_READ
+    # Profiling describes rows the caller sent and mints no identity, so a viewer
+    # told it may inspect the step actually sees the findings.
+    assert _required_permission("POST", "/api/v1/shape/profile") == Permission.JOB_READ
     assert _required_permission("POST", "/api/v1/shape/preview") == Permission.JOB_PLAN
-    assert _required_permission("POST", "/api/v1/shape/profile") == Permission.JOB_PLAN
     assert _required_permission("POST", "/api/v1/shape/validate") == Permission.JOB_PLAN

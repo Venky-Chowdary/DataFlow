@@ -423,6 +423,12 @@ export async function runPreflight(payload: {
   dest_extra?: Record<string, unknown>;
   source_kind?: string;
   source_type?: string;
+  /**
+   * Approved pre-load transform recipe. Execute shapes rows on the read, so the
+   * gates have to judge the transformed rows or they refuse values the write
+   * never carries.
+   */
+  shape_recipe?: ShapeRecipeWire;
 }): Promise<import("./types").PreflightResult> {
   const res = await apiFetch(`${API_BASE}/preflight/run`, {
     method: "POST",
@@ -470,6 +476,13 @@ export type CellPreviewResult = {
     message?: string;
     transform?: string;
   }>;
+  transform_image?: {
+    recipe_hash?: string;
+    sample_rows_in?: number;
+    sample_rows_out?: number;
+    sample_rows_removed?: number;
+    retyped_columns?: Record<string, string>;
+  };
 };
 
 /** Cell-level will-quarantine / will-coerce preview before run. */
@@ -479,6 +492,11 @@ export async function previewQuarantineCells(payload: {
   mappings: Array<{ source: string; target: string; transform?: string | null; target_type?: string | null }>;
   column_types?: Record<string, string>;
   sample_size?: number;
+  /**
+   * The approved pre-load recipe. Execute transforms on the read, so a cell
+   * preview scanned on raw values reports findings the writer never sees.
+   */
+  shape_recipe?: ShapeRecipeWire | null;
 }): Promise<CellPreviewResult> {
   const res = await apiFetch(`${API_BASE}/preflight/preview-cells`, {
     method: "POST",
@@ -535,6 +553,8 @@ export async function previewShapeRecipe(payload: {
   recipe: ShapeRecipeWire;
   sample_rows: Record<string, unknown>[];
   source_columns?: string[];
+  /** Declared source carriers — untouched columns keep them, touched ones are re-read. */
+  column_types?: Record<string, string>;
   target_schema?: Record<string, string>;
   include_profile?: boolean;
 }): Promise<ShapePreviewResponse> {
@@ -2388,6 +2408,10 @@ export type PreflightAcknowledgments = {
 export async function preflightTransferPlan(
   planId: string,
   acknowledgments: PreflightAcknowledgments = {},
+  // The run shapes rows on the read, so the plan-scoped Validate — the call the
+  // wizard actually makes — has to carry the approved recipe too, or the gates
+  // score a source image the writer never sees.
+  shapeRecipe?: ShapeRecipeWire,
 ) {
   const res = await apiFetch(`${API_BASE}/transfer/plans/${planId}/preflight`, {
     method: "POST",
@@ -2398,6 +2422,7 @@ export async function preflightTransferPlan(
       fk_risk_acknowledged: acknowledgments.fk_risk_acknowledged ?? false,
       acknowledgment_actor: acknowledgments.acknowledgment_actor ?? "",
       acknowledgment_reason: acknowledgments.acknowledgment_reason ?? "",
+      shape_recipe: shapeRecipe ?? null,
     }),
     timeoutMs: LONG_REQUEST_TIMEOUT_MS,
   });
