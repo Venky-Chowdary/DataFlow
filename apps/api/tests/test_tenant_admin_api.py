@@ -312,3 +312,29 @@ def test_a_record_belonging_to_no_workspace_never_serves_a_domain(stores):
     assert tenant_store.get_tenant_by_domain("legacy.example.com") is None
     found = tenant_store.get_tenant_by_domain("scoped.example.com")
     assert found is not None and found.id == scoped.id
+
+
+def test_an_unscoped_record_is_not_a_trusted_browser_origin(stores, monkeypatch):
+    """CORS may not trust a domain that resolution itself refuses.
+
+    Domain resolution stopped answering for a record with no workspace, but
+    ``cors_origins`` still appended every ``custom_domain`` — so a browser at
+    that host was handed ``access-control-allow-origin`` for credentialed calls.
+    """
+    import json
+
+    import services.platform_config as platform_config
+    import services.tenant_store as tenant_store
+
+    tenant_store.create_tenant(workspace_id="ws-1", name="Scoped", custom_domain="scoped.example.com")
+    legacy = tenant_store.create_tenant(workspace_id="ws-2", name="Legacy", custom_domain="legacy.example.com")
+    raw = json.loads(tenant_store.STORE_PATH.read_text(encoding="utf-8"))
+    for t in raw["tenants"]:
+        if t["id"] == legacy.id:
+            t["workspace_id"] = ""
+    tenant_store.STORE_PATH.write_text(json.dumps(raw), encoding="utf-8")
+    monkeypatch.delenv("CORS_ORIGINS", raising=False)
+
+    origins = platform_config.cors_origins()
+    assert "https://scoped.example.com" in origins
+    assert "https://legacy.example.com" not in origins

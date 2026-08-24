@@ -135,8 +135,11 @@ def cors_origins() -> list[str]:
             from services.tenant_store import list_tenants
 
             for tenant in list_tenants():
-                host = (getattr(tenant, "custom_domain", None) or "").strip().lower()
-                if not host:
+                host = (tenant.custom_domain or "").strip().lower()
+                # A record predating workspace scoping serves no workspace, so
+                # its domain is not a browser origin we trust with credentials —
+                # the same refusal domain resolution already makes.
+                if not host or not tenant.workspace_id:
                     continue
                 if host.startswith("http://") or host.startswith("https://"):
                     origins.append(host.rstrip("/"))
