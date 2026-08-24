@@ -56,6 +56,14 @@ MY = {
 ROWS = int(os.environ.get("BENCH_ROWS", "1000000"))
 SRC_TABLE = f"bench_emp_{ROWS}"
 
+#: Which sync mode to time. A throughput number belongs to one mode: an append
+#: is a bulk insert, an upsert is a MERGE against an index, and quoting the
+#: append number for either of the others would be a fabricated SLA.
+SYNC_MODE = os.environ.get("BENCH_SYNC", "full_refresh_append")
+#: The identity/cursor the keyed modes merge on — the source fixture's own PK.
+BENCH_PK = "employee_id"
+BENCH_CURSOR = "hire_date"
+
 COLUMNS: list[tuple[str, str]] = [
     ("employee_id", "VARCHAR(32)"),
     ("first_name", "VARCHAR(64)"),
@@ -202,6 +210,18 @@ def run(dest_table: str, *, profile: bool) -> None:
     job_id = f"bench-{dest_table}-{int(time.time())}"
     get_mongodb_service().create_transfer_job({"_id": job_id, "name": job_id})
 
+    from services.sync_cursor import requires_incremental
+
+    contracts: list[dict[str, object]] | None = None
+    if requires_incremental(SYNC_MODE) or SYNC_MODE in {"upsert", "mirror"}:
+        contracts = [{
+            "name": "bench",
+            "selected": True,
+            "sync_mode": SYNC_MODE,
+            "cursor_field": BENCH_CURSOR,
+            "primary_key": BENCH_PK,
+        }]
+
     profiler = cProfile.Profile() if profile else None
     started = time.monotonic()
     if profiler is not None:
@@ -212,7 +232,8 @@ def run(dest_table: str, *, profile: bool) -> None:
         mappings,
         schema,
         None,
-        sync_mode="full_refresh_append",
+        sync_mode=SYNC_MODE,
+        stream_contracts=contracts,
         job_id=job_id,
     )
     if profiler is not None:
@@ -220,7 +241,7 @@ def run(dest_table: str, *, profile: bool) -> None:
     elapsed = time.monotonic() - started
 
     print(
-        f"\n=== {dest_table}: {rows} rows in {elapsed:.1f}s "
+        f"\n=== {dest_table} [{SYNC_MODE}]: {rows} rows in {elapsed:.1f}s "
         f"= {rows / elapsed:,.0f} rows/s"
     )
     print(json.dumps(summary.get("phase_profile", {}), indent=2)[:2500])
@@ -249,5 +270,9 @@ def run(dest_table: str, *, profile: bool) -> None:
 if __name__ == "__main__":
     seed_source()
     table = os.environ.get("BENCH_DEST", "bench_dest")
-    reset_destination(table)
+    # ``BENCH_KEEP_DEST=1`` times a re-sync into the destination this fixture
+    # already filled — the run a client actually repeats, where an upsert must
+    # merge a million keys instead of inserting them.
+    if os.environ.get("BENCH_KEEP_DEST") != "1":
+        reset_destination(table)
     run(table, profile=os.environ.get("BENCH_PROFILE", "0") == "1")

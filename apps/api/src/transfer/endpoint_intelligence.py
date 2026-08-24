@@ -8,6 +8,7 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 from connectors.mongodb_common import _mongo_client
+from services.schema_introspect import split_object_namespace
 from services.value_serializer import cell_to_string
 
 from .adapters import (
@@ -63,6 +64,25 @@ def _is_absent_object_error(message: str) -> bool:
             "no columns for table",
         )
     )
+
+
+#: Scratch objects this product creates for its own mirror/SCD2 bookkeeping.
+#: They are not the operator's data: showing them wastes the object picker and,
+#: because the listing is bounded, can push a real table out of the page.
+_INTERNAL_OBJECT_PREFIXES = ("_df_mirrorkeys_", "_dataflow_stg_", "_df_dlq_")
+
+
+def _operator_visible_objects(names, type_label: str) -> list[dict]:
+    """Listing entries for objects the operator owns, in probe order."""
+    out: list[dict] = []
+    for raw in names or []:
+        name = str(raw)
+        if not name or name.startswith("("):
+            continue
+        if name.startswith(_INTERNAL_OBJECT_PREFIXES):
+            continue
+        out.append({"name": name, "type": type_label})
+    return out
 
 
 def _attach_dest_table_schema(out: dict, endpoint: EndpointConfig) -> dict:
@@ -150,7 +170,7 @@ def introspect_endpoint(
             ssl=cfg.get("ssl", False),
         )
         out["connected"] = probe.ok
-        out["objects"] = [{"name": t, "type": "table"} for t in probe.tables if not t.startswith("(")]
+        out["objects"] = _operator_visible_objects(probe.tables, "table")
         out["objects_truncated"] = bool(getattr(probe, "tables_truncated", False))
         out["message"] = probe.message if probe.ok else (probe.error or "Connection failed")
         if probe.ok and (endpoint.table or is_callable_source(endpoint)):
@@ -256,7 +276,7 @@ def introspect_endpoint(
             **snowflake_session_kwargs(cfg),
         )
         out["connected"] = probe.ok
-        out["objects"] = [{"name": t, "type": "table"} for t in probe.tables if not t.startswith("(")]
+        out["objects"] = _operator_visible_objects(probe.tables, "table")
         out["message"] = probe.message if probe.ok else (probe.error or "Connection failed")
         if probe.ok and (endpoint.table or is_callable_source(endpoint)):
             if endpoint.table and not _mark_table_listed_if_present(out, endpoint.table):
@@ -280,7 +300,7 @@ def introspect_endpoint(
             ssl=cfg.get("ssl", False),
         )
         out["connected"] = probe.ok
-        out["objects"] = [{"name": t, "type": "table"} for t in probe.tables if not t.startswith("(")]
+        out["objects"] = _operator_visible_objects(probe.tables, "table")
         out["message"] = probe.message if probe.ok else (probe.error or "Connection failed")
         if probe.ok and (endpoint.table or is_callable_source(endpoint)):
             if endpoint.table and not _mark_table_listed_if_present(out, endpoint.table):
@@ -306,7 +326,7 @@ def introspect_endpoint(
             service_account=cfg.get("service_account", ""),
         )
         out["connected"] = probe.ok
-        out["objects"] = [{"name": t, "type": "table"} for t in probe.tables if not t.startswith("(")]
+        out["objects"] = _operator_visible_objects(probe.tables, "table")
         out["message"] = probe.message if probe.ok else (probe.error or "Connection failed")
         if probe.ok and (endpoint.table or is_callable_source(endpoint)):
             if endpoint.table and not _mark_table_listed_if_present(out, endpoint.table):
@@ -326,7 +346,7 @@ def introspect_endpoint(
             ssl=cfg.get("ssl", False),
         )
         out["connected"] = probe.ok
-        out["objects"] = [{"name": t, "type": "table"} for t in probe.tables if not t.startswith("(")]
+        out["objects"] = _operator_visible_objects(probe.tables, "table")
         out["message"] = probe.message if probe.ok else (probe.error or "Connection failed")
         if probe.ok and (endpoint.table or is_callable_source(endpoint)):
             if endpoint.table and not _mark_table_listed_if_present(out, endpoint.table):
@@ -448,7 +468,7 @@ def introspect_endpoint(
             api_key=cfg.get("api_key", ""),
         )
         out["connected"] = probe.ok
-        out["objects"] = [{"name": t, "type": "index"} for t in probe.tables if not t.startswith("(")]
+        out["objects"] = _operator_visible_objects(probe.tables, "index")
         out["message"] = probe.message if probe.ok else (probe.error or "Connection failed")
         if endpoint.database and probe.ok:
             _attach_db_sample(out, endpoint)
@@ -857,6 +877,22 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
         if not table:
             out["table_exists"] = False
             return
+        # A qualified name carries a namespace and an object, and every reader
+        # below re-qualifies what it is given: passing `public.vt_src` straight
+        # through produced a catalog lookup for a table of that literal name and
+        # a sample SELECT from `public.public.vt_src`.
+        ns_schema, ns_database, ns_table = split_object_namespace(
+            fmt,
+            table,
+            schema=str(cfg.get("schema") or endpoint.schema or ""),
+            database=str(cfg.get("database") or endpoint.database or ""),
+        )
+        if ns_table and ns_table != table:
+            table = ns_table
+            cfg = {**cfg, "schema": ns_schema, "database": ns_database}
+            endpoint.schema = ns_schema
+            endpoint.database = ns_database
+            endpoint.table = ns_table
         listed = _mark_table_listed_if_present(out, table) or _object_name_match(
             _listed_object_names(out), table
         )

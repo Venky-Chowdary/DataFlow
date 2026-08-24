@@ -107,3 +107,57 @@ still apply); it just no longer narrows the read. Regression:
   destinations.
 * Throughput: only PostgreSQL→MySQL `full_refresh_append` at 1M rows is measured
   (`docs/THROUGHPUT_1M_EVIDENCE.md`). These cases are 200-row correctness cases.
+
+## Existence must not depend on where a name sorts (fixed)
+
+Browser testing found a live source table refused as absent. Measured against
+the local PostgreSQL fixture (`dataflow`, schema `public`, 354 tables):
+
+```
+POST /transfer/introspect  table="public.vt_src"  →  table_exists=false, columns=[]
+                                                    "not found"
+```
+
+The object listing is bounded (`listing first 200`), and that listing was also
+what normalised `public.vt_src` to `vt_src`. Past the cap, the catalog was asked
+for a table whose name literally contained a dot and answered no rows — so a
+readable table became "not found", with Continue disabled, purely because of
+where it sorted. A second defect hid behind it: the bounded sample SELECT was
+handed the qualified string too and read `public.public.vt_src`.
+
+Fixed with one owner for qualified names — `services.schema_introspect.split_object_namespace()`
+— applied at the introspect entry, so catalog lookup, sample read and every
+downstream step receive namespace and object apart. MySQL is namespaced by
+database, not schema; MongoDB collection names may contain dots and are not
+split. Measured after the fix:
+
+| request | table_exists | columns | sample rows |
+| --- | --- | --- | --- |
+| pg `public.vt_src` | true | 5 | 6 |
+| pg `vt_src` | true | 5 | 6 |
+| pg `public.nope_x` | false | 0 | 0 |
+| mysql `dataflow.bench_1m_proof` | true | 10 | 100 |
+| mysql `bench_1m_proof` | true | 10 | 100 |
+| mysql `dataflow.nope_y` | false | 0 | 0 |
+
+The 60-case matrix was re-run after the change: **58 pass, 2 blocked
+consistently, 0 parity breaks** — unchanged (`/home/ubuntu/parity_after_ns.json`).
+
+### Why 354 tables existed at all
+
+32 of them were our own leaked `_df_mirrorkeys_*` mirror key-staging tables — so
+the product's own scratch was consuming the bounded page that pushed a real
+table out of the listing. Three fixes:
+
+* Staging names are stamped (`_df_mirrorkeys_<epoch>_<rand>`), and a mirror run
+  sweeps stamped orphans older than 6h plus pre-stamp names under a bounded lock
+  wait (2s), so a table a concurrent or older-build run holds is skipped, never
+  waited on. A sweep failure never fails the mirror.
+* An all-digit legacy suffix (`_df_mirrorkeys_255577532241`) previously parsed as
+  an epoch stamp dated year 10069 — an orphan that could never age out. A stamp
+  is only read as a clock between 2020-01-01 and now.
+* Internal scratch prefixes are hidden from operator-facing object listings.
+* A staging table that cannot be dropped is now logged as a warning instead of
+  swallowed.
+
+Regression: `apps/api/tests/test_qualified_object_existence.py` (12 cases).
