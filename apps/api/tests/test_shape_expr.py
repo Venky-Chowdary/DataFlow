@@ -138,3 +138,18 @@ def test_evaluating_the_same_row_twice_returns_the_same_value():
     expression = compile_expression("concat(upper([a]), '-', round([b], 2))")
     row = {"a": "x", "b": "1.239"}
     assert expression.evaluate(row) == expression.evaluate(row) == "X-1.24"
+
+
+def test_a_missing_right_hand_value_is_not_reported_as_an_empty_expression():
+    """"[status] <>" is half-written, not blank; saying "empty" sends the
+    operator looking at the wrong end of the line."""
+    from services.shape_expr import ExpressionError
+
+    with pytest.raises(ExpressionError) as blank:
+        compile_expression("   ")
+    assert str(blank.value) == "expression is empty"
+
+    with pytest.raises(ExpressionError) as partial:
+        compile_expression("[status] <>")
+    assert "a value is missing" in str(partial.value)
+    assert "empty" not in str(partial.value)

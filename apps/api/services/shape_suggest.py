@@ -410,19 +410,28 @@ def _narrowing_scale(profile: ColumnProfile, declared: str) -> tuple[int, int] |
 
 
 def _plain_decimal(value: Any) -> Decimal | None:
+    """The finite number this cell holds, or ``None``.
+
+    ``NaN`` / ``Infinity`` parse as Decimal but have no digits or exponent to
+    measure — ``as_tuple().exponent`` is ``'n'`` / ``'F'``, so profiling them
+    raised and the whole Transform preview answered 500. They are
+    non-numbers here and profile as text.
+    """
     if isinstance(value, bool):
         return None
     if isinstance(value, Decimal):
-        return value
+        return value if value.is_finite() else None
     if isinstance(value, int):
         return Decimal(value)
     if isinstance(value, float):
-        return Decimal(str(value))
+        parsed = Decimal(str(value))
+        return parsed if parsed.is_finite() else None
     if isinstance(value, str):
         try:
-            return Decimal(value.strip())
+            parsed = Decimal(value.strip())
         except (InvalidOperation, DecimalException, ValueError):
             return None
+        return parsed if parsed.is_finite() else None
     return None
 
 
@@ -443,6 +452,8 @@ def _human_decimal(text: str) -> Decimal | None:
     try:
         number = Decimal(cleaned)
     except (InvalidOperation, DecimalException, ValueError):
+        return None
+    if not number.is_finite():
         return None
     return -number if negative else number
 

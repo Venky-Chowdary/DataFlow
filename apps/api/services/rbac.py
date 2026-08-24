@@ -169,12 +169,16 @@ _PATH_RULES: list[tuple[str, str, str]] = [
     ("POST", "/api/v1/audit/tip/", Permission.WORKSPACE_MANAGE),
     ("GET", "/api/v1/cdc/mapping-reviews", Permission.JOB_READ),
     ("POST", "/api/v1/cdc/mapping-reviews/", Permission.JOB_MANAGE),
-    # Shape. Reading the vocabulary is a read every role holds, so a viewer's
-    # Shape step renders the real operations it cannot apply instead of an empty
-    # panel. Profiling and previewing are design work on a route — the same
-    # permission that plans a transfer (an operator runs approved plans, it does
-    # not author the recipe inside one).
+    # Transform (pre-load). Reading the vocabulary is a read every role holds, so
+    # a viewer's Transform step renders the real operations it cannot apply
+    # instead of an empty panel. Profiling is also a read: it only describes rows
+    # the caller sent, touches no route and composes no recipe, so a viewer sees
+    # the same findings it is being told it may inspect. Previewing and validating
+    # mint a recipe identity that Execute is held to — that is design work on a
+    # route, gated by the permission that plans a transfer (an operator runs
+    # approved plans, it does not author the recipe inside one).
     ("GET", "/api/v1/shape/catalog", Permission.JOB_READ),
+    ("POST", "/api/v1/shape/profile", Permission.JOB_READ),
     ("*", "/api/v1/shape/", Permission.JOB_PLAN),
     ("POST", "/api/v1/transfer/run", Permission.JOB_RUN),
     ("*", "/api/v1/transfer/plans/", Permission.JOB_PLAN),

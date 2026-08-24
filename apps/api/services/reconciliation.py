@@ -691,7 +691,7 @@ def reconcile(
             target_checksum=target_checksum,
             message=(
                 f"Row count mismatch: source {source_rows}, rejected {rejected_rows}, "
-                f"skipped {rows_skipped}, shaped out {rows_shaped_out}, "
+                f"skipped {rows_skipped}, removed by transform {rows_shaped_out}, "
                 f"filtered out {rows_source_filtered}, "
                 f"expected target {expected_rows} vs target {target_rows}{extra_note}"
             ),

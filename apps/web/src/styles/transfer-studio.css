@@ -7292,6 +7292,46 @@ th.df2-type-string .df2-type-badge {
   line-height: 1.5;
   color: #64748b;
 }
+/* Transform (pre-load) evidence: what the gates actually judged. */
+.df2-vd-xform {
+  margin-top: 8px;
+  padding: 10px 12px;
+  border-radius: var(--df-radius-md, 8px);
+  border: 1px solid var(--df-brand-border, #99f6e4);
+  background: var(--df-brand-bg, #f0fdfa);
+}
+.df2-vd-xform-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin: 0;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--df-brand-strong, #0f766e);
+}
+.df2-vd-xform-hash {
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--df-brand-border, #99f6e4);
+  background: #fff;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--df-brand, #0f766e);
+}
+.df2-vd-xform-facts {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  font-size: 12px;
+  line-height: 1.55;
+  color: #334155;
+}
+.df2-vd-xform-limit {
+  margin: 6px 0 0;
+  font-size: 11px;
+  line-height: 1.5;
+  color: #64748b;
+}
 .df2-vd-exec-summary {
   margin-top: 8px;
   padding: 10px 12px;

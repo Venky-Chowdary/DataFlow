@@ -39,7 +39,7 @@ def test_a_global_operation_is_refused_with_where_it_can_be_done():
 
 
 def test_an_unknown_operation_lists_the_ones_that_exist():
-    with pytest.raises(ShapeError, match="is not a shaping operation"):
+    with pytest.raises(ShapeError, match="is not a transform operation"):
         recipe({"op": "sprinkle", "column": "id"})
 
 

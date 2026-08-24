@@ -8220,7 +8220,7 @@ def test_rows_removed_by_filter_and_recipe_close_the_population():
     assert ledger.unaccounted == 0
     assert ledger.balanced is True
     assert "declared source filter" in ledger.note
-    assert "approved shaping recipe" in ledger.note
+    assert "approved transform recipe" in ledger.note
     assert "Removal is not quarantine" in ledger.note
 
 
@@ -8467,7 +8467,7 @@ def test_job_rollup_sums_each_stream_removals_and_keeps_one_recipe_identity():
     assert ledger.shape_recipe_hash == "abc123def4567890"
     assert ledger.unaccounted == 0
     assert ledger.balanced is True
-    assert "approved shaping recipe" in ledger.note
+    assert "approved transform recipe" in ledger.note
 
 
 def test_job_rollup_does_not_name_one_recipe_when_the_streams_ran_two():

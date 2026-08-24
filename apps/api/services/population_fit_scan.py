@@ -46,6 +46,29 @@ EVIDENCE_UNMEASURED = "unmeasured"
 CARRIER_DECIMAL = "decimal"
 CARRIER_STRING = "string"
 CARRIER_INTEGER = "integer"
+#: Not a width bound — a *parse* bound. ``'2024-02-31' → DATE``,
+#: ``'maybe' → BOOLEAN``, ``'nope' → CHAR(36)`` have no size a bound could
+#: measure, yet the write refuses every one of them. The scan decides them on
+#: the write's own coercion (``apply_transform``), so Validate speaks for them
+#: instead of leaving them to fail at row 1.
+CARRIER_TYPED = "typed"
+
+#: Transforms whose parse is cheap, deterministic and row-local enough to run
+#: over a population. JSON/vector/binary payloads are deliberately excluded:
+#: their cost is unbounded in the cell size and other probes own them.
+_SCANNABLE_TRANSFORMS = frozenset(
+    {
+        "integer",
+        "decimal",
+        "currency",
+        "percentage",
+        "boolean",
+        "date",
+        "datetime",
+        "time",
+        "uuid",
+    }
+)
 
 #: Writer actions that abort the write unit rather than hold rows out.
 _ABORTING_ACTIONS = frozenset(
@@ -75,6 +98,8 @@ class BoundedTarget:
     write_action: str = "fail"
     execution_policy: str = ""
     risk_id: str = ""
+    #: Engine transform the write resolves for this column (typed carriers).
+    transform: str = ""
 
     @property
     def aborts_job(self) -> bool:
@@ -86,6 +111,7 @@ class BoundedTarget:
             "target": self.target,
             "target_type": self.target_type,
             "carrier": self.carrier,
+            "transform": self.transform,
             "write_action": self.write_action,
             "execution_policy": self.execution_policy,
             "risk_id": self.risk_id,
@@ -201,6 +227,46 @@ def _carrier_for(target_type: str, *, dest_db: str) -> str:
     return ""
 
 
+def _parse_in_doubt(source_type: str) -> bool:
+    """True when the source declaration cannot vouch for the value's parse.
+
+    A DB column declared ``DECIMAL(12,9)`` hands the write a numeric wire, so a
+    decimal parse over it proves nothing a million times over. Text, unknown and
+    undeclared sources are where ``'ABC-1' → INT`` lives.
+    """
+    from services.type_system import normalize_logical_type
+
+    declared = str(source_type or "").strip()
+    if not declared:
+        return True
+    return normalize_logical_type(declared) in {"string", "text", "unknown"}
+
+
+def _scannable_transform(
+    mapping: Mapping[str, Any],
+    *,
+    source_types: Mapping[str, str],
+    dest_types: Mapping[str, str],
+) -> str:
+    """The write's own transform for this column, when its parse is decidable.
+
+    Resolved through ``resolve_transform`` — the same SSOT ``build_mapped_rows``
+    binds through — so Validate never screens a column with a rule the write
+    does not use. A native path resolves to ``none`` and costs nothing.
+    """
+    from services.transform_resolver import resolve_transform
+
+    resolved = str(
+        resolve_transform(
+            dict(mapping),
+            column_types=dict(source_types),
+            dest_types=dict(dest_types),
+        )
+        or ""
+    ).strip().lower()
+    return resolved if resolved in _SCANNABLE_TRANSFORMS else ""
+
+
 def _source_cannot_exceed(
     source_type: str,
     target: BoundedTarget,
@@ -286,9 +352,23 @@ def bounded_targets(
         declared = str(m.get("target_type") or m.get("dest_type") or "").strip()
         target_type = declared or types.get(target) or lowered.get(target.lower(), "")
         carrier = _carrier_for(target_type, dest_db=dest_db)
+        transform = _scannable_transform(m, source_types=src_types, dest_types=types)
         if not carrier:
-            if target_type:
-                undecidable.append(target)
+            if not transform:
+                if target_type:
+                    undecidable.append(target)
+                continue
+            carrier = CARRIER_TYPED
+        declared_source = (
+            str(m.get("source_type") or "").strip()
+            or src_types.get(source)
+            or src_lowered.get(source.lower(), "")
+        )
+        parse_in_doubt = bool(transform) and _parse_in_doubt(declared_source)
+        if carrier == CARRIER_TYPED and not parse_in_doubt:
+            # A typed source wire parses by construction — scanning it would
+            # cost a million parses to prove what the declaration already does.
+            safe.append(target)
             continue
         action, exec_pol, risk_id = _resolve_action(m, job_error_policy)
         candidate = BoundedTarget(
@@ -299,13 +379,19 @@ def bounded_targets(
             write_action=action,
             execution_policy=exec_pol,
             risk_id=risk_id,
+            transform=transform,
         )
-        declared_source = (
-            str(m.get("source_type") or "").strip()
-            or src_types.get(source)
-            or src_lowered.get(source.lower(), "")
-        )
-        if _source_cannot_exceed(declared_source, candidate, dest_db=dest_db):
+        if carrier == CARRIER_TYPED:
+            # A parse bound has no width to compare declarations against: a
+            # DATE-declared source column of text still holds '2024-02-31'.
+            out.append(candidate)
+            continue
+        if not parse_in_doubt and _source_cannot_exceed(
+            declared_source, candidate, dest_db=dest_db
+        ):
+            # Width is decided by declaration; a parse is only decided with it
+            # when the source declares the same typed carrier. Text into a
+            # typed column still holds 'ABC-1' at any width.
             safe.append(target)
             continue
         out.append(candidate)
@@ -386,6 +472,46 @@ def _fit_predicate(
     return lambda _value: None
 
 
+def _typed_predicate(transform: str) -> Callable[[Any], str | None]:
+    """The write's coercion, asked as a question instead of at row 1."""
+    from services.transform_engine import apply_transform
+
+    def _typed_reason(value: Any) -> str | None:
+        _out, err = apply_transform(
+            value if isinstance(value, str) else str(value), transform
+        )
+        return err or None
+
+    return _typed_reason
+
+
+def fit_predicate_for(
+    target: BoundedTarget,
+    *,
+    dest_db: str,
+    dialect_label: str,
+) -> Callable[[Any], str | None]:
+    """Everything the write decides about one cell of this column.
+
+    A cell must survive two questions, in the order the write asks them: does
+    the declared transform accept the value at all (``'2024-02-31'`` into DATE,
+    ``'maybe'`` into BOOLEAN, ``'nope'`` into CHAR(36)), and does the result fit
+    the carrier's bound. Asking only the second is how a passing Validate was
+    followed by a write that refused every row.
+    """
+    typed = _typed_predicate(target.transform) if target.transform else None
+    if target.carrier == CARRIER_TYPED:
+        return typed or (lambda _value: None)
+    bound = _fit_predicate(target, dest_db=dest_db, dialect_label=dialect_label)
+    if typed is None:
+        return bound
+
+    def _both(value: Any) -> str | None:
+        return typed(value) or bound(value)
+
+    return _both
+
+
 def _skip_value(value: Any, is_missing_sentinel: Callable[[Any], bool]) -> bool:
     """NULL-ish cells are a nullability question, not a fit question."""
     if value is None:
@@ -439,7 +565,11 @@ def scan_rows(
 
     # Bound once per column, then applied per value — see _fit_predicate.
     probes = tuple(
-        (idx, t.source, _fit_predicate(t, dest_db=dest_db, dialect_label=dialect_label))
+        (
+            idx,
+            t.source,
+            fit_predicate_for(t, dest_db=dest_db, dialect_label=dialect_label),
+        )
         for idx, t in enumerate(bounded)
     )
 

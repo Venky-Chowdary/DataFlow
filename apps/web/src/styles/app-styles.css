@@ -38,6 +38,8 @@
 @import "./responsive-shell-fixes.css";
 /* transfer-studio.css is exclusively namespaced; load before final layer. */
 @import "./transfer-studio.css";
+/* Transform (pre-load) step — sole authority for the .df2-xform namespace. */
+@import "./transform-prep.css";
 /* Canonical final component layer — extend this or tokens.css only. */
 @import "./enterprise-ui.css";
 /* Public hero system — authority for the marketing hero band + hero drawings. */

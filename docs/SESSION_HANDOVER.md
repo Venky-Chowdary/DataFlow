@@ -1,13 +1,16 @@
 # DataFlow / Datawrap — engineering handover
 
-Branch `venkat` → remote `feature/Venkat-Analysis`, PR
-[#43](https://github.com/Venky-Chowdary/DataFlow/pull/43). Head at time of
-writing: `a1cc1f91`.
+Integration branch: `feature/Venkat-Analysis` (**not** `main` — merges land
+there, and no CI workflow triggers on it). Latest wave head:
+`3e3dd8a4` on `devin/1787950000-transform-preload-ui`
+([#71](https://github.com/Venky-Chowdary/DataFlow/pull/71)). Earlier accounts /
+workspaces wave: `a1cc1f91` via
+[#43](https://github.com/Venky-Chowdary/DataFlow/pull/43).
 
 This document is written so the next engineer can continue without re-deriving
 anything. It separates **proven** (a command or artifact anyone can re-run) from
 **open** (known defect) and **unproven** (never measured). Nothing here says the
-product is deployment-ready; §6 lists exactly what is missing for that claim.
+product is deployment-ready; §7 lists exactly what is missing for that claim.
 
 ---
 
@@ -27,6 +30,13 @@ export DATAFLOW_REQUIRE_AUTH=1
 # Web — port 5173
 cd apps/web && npm run dev
 ```
+
+On the Windows dev box the interpreter is `dfvenv` and the shell is PowerShell
+(`&&` is not a separator; use `;` or two calls), and the API is started as
+`python -m uvicorn main:app --host 127.0.0.1 --port 8001` from `apps/api`.
+Run it **without `--reload`** and hard-restart it after any Python edit —
+`--reload` has repeatedly served stale service modules while the tests passed,
+which is how a fixed gate can still look broken in the browser.
 
 Test commands:
 
@@ -55,7 +65,144 @@ That token was pasted into chat and **must be rotated**.
 
 ---
 
-## 2. Accounts, workspaces and roles (this wave, `a1cc1f91`)
+## 2. Latest wave — Validate≡Execute, Transform (pre-load), RBAC (PRs #44–#71)
+
+The theme of this wave is one rule per question. Every defect below was the same
+shape: two layers answered the same question differently, so a run passed
+Validate and died at the writer, or was blocked by a gate the operator had
+already satisfied.
+
+### Validate must promise only what the writer will accept
+
+| Defect | Fix | PR |
+| --- | --- | --- |
+| `fits_integer("22.433332", "INT")` did `int(Decimal(v))` → 22, in range, pass — the writer refuses any fractional value, so a 1M-row MySQL load died at row 1 with 4,917 findings | fit and the write share one rule, across all five dialect families | [#67](https://github.com/Venky-Chowdary/DataFlow/pull/67) |
+| `'ABC-1'`, `'NaN'`, `'--3'` into INT and `'maybe'` into BOOLEAN passed a bounds test | Validate asks the exact parser the write binds through; a parse bound with no width bound (BOOLEAN) is screened, not filed "undecidable". Also fixes a `NaN` cell making Transform preview 500 | [#70](https://github.com/Venky-Chowdary/DataFlow/pull/70) (**open**) |
+| A too-wide decimal was judged on textual padding (`1.50000000` read as scale 8) | the gate measures the value, and a test asserts it agrees with the writer's `fits_decimal` on every sample | [#54](https://github.com/Venky-Chowdary/DataFlow/pull/54) |
+| A held-out row was judged by whoever asked last: Validate said "27 will be quarantined", Execute aborted on the strict job posture | the signed Risk Contract on that column decides both | [#54](https://github.com/Venky-Chowdary/DataFlow/pull/54) |
+| `5,000 quarantined / 0 findings`, and a rolled-back row counted as quarantine | a quarantined row is one with a persisted finding; a rolled-back row is named as one | [#68](https://github.com/Venky-Chowdary/DataFlow/pull/68) |
+
+Still open in that family: **unparseable dates** (`2024-02-31`) are not decided
+at Validate. Our date parser refuses ambiguous forms MySQL may accept, and
+trading a real failure for a false refusal is worse; this needs a
+dialect-truthful probe.
+
+### Transform (pre-load) — the operator's own name for it
+
+The step was called "Shape" (engine vocabulary) and shipped no stylesheet or
+guidance. It is now **Transform (pre-load)** everywhere an operator reads it,
+with on-screen rules, per-column finding charts and a recipe-identity badge.
+Internal `shape*` names (`shapeSteps`, `ShapeStepWire`, `/shape/profile`,
+`shape_recipe_hash`, `shape_refused_row`) are deliberately unchanged — renaming
+them breaks stored recipes and running jobs.
+
+Semantics, and they are the contract to preserve:
+
+* The recipe runs **on the read**, before Map, Validate and the write. Only
+  row-local deterministic ops are allowed in flight; joins/aggregates/pivots stay
+  post-load and are refused at design time with a pointer there.
+* Validate judges the **transformed image** (`services/shape_preflight.py`),
+  assembled from the same `ShapeRecipe`/`ShapeEngine` Execute runs. No gate logic
+  is duplicated.
+* Type resolution is asymmetric on purpose — a sample is weaker evidence than a
+  catalog: a column the recipe never wrote keeps its declared carrier; a column
+  the recipe wrote (or created) is re-read from the transformed values.
+* One recipe identity spans approval, Validate, Execute, Proof, reconciliation
+  and replay. A changed recipe is a different recipe and must be revalidated; an
+  empty or all-disabled recipe has **no** identity (an early build minted one and
+  refused plain transfers at Execute).
+* An unrunnable recipe, or one that refuses a sampled row, is a `400` — Validate
+  never scores a program Execute would abort on.
+* Sources are never mutated. A row the recipe removed is `rows_shaped_out`
+  ("Removed by transform"), never a quarantine finding and never silent loss.
+* A shaped DB run declines the source/destination cell ladder and says why: the
+  source still holds pre-transform values, so cell equality would report every
+  transformed cell as a mismatch. Its proof is the pinned hash plus the
+  destination re-read.
+
+PRs: [#65](https://github.com/Venky-Chowdary/DataFlow/pull/65) (execution on all
+three read paths), [#66](https://github.com/Venky-Chowdary/DataFlow/pull/66)
+(ledger term), [#71](https://github.com/Venky-Chowdary/DataFlow/pull/71) (naming,
+UI, transformed-image Validate — **open**).
+
+#### The four-layer "Case A" fix (head `3e3dd8a4`, browser-unverified)
+
+A DECIMAL source column rounded to whole numbers for an existing `INT`/`int4`
+destination was blocked with no operator remedy. Four layers each held a piece:
+
+1. **Drift asked one question and used one answer for two meanings.**
+   `detect_schema_drift()` now takes `declared_source_columns` /
+   `declared_source_schema`, which answer *"did the source change under the
+   stored revision?"*, while `source_columns` / `source_schema` are the
+   transformed image and answer *"do these values fit the destination carrier?"*.
+   Judging the fingerprint on the transformed image reported the operator's own
+   recipe as source drift; judging the carrier on the declared type graded the run
+   `hard_breaking:narrow_type` with `source_changed:false` — nothing to re-map.
+   They default to each other, so an unshaped run is unchanged and an unshaped
+   `DECIMAL → INT4` is still blocked.
+2. **Map reported the create-new DDL carrier as the source's own.**
+   `ddl_carrier_type` widens ambiguous `INTEGER` to `BIGINT` — correct for the
+   CREATE question, wrong as a *report*, so an `INTEGER` source into an existing
+   `int4` column read back as a `BIGINT → INT4` narrowing and demanded a Risk
+   Contract for a path this same engine grades `preserve`.
+   `_reported_source_carrier()` undoes only the ambiguous-width integer widening;
+   every invent still uses the never-narrower carrier.
+3. **`/preflight/preview-cells` scanned raw cells**, reporting
+   `Invalid integer: '22.43'` on values the approved recipe rounds to 22. The
+   recipe now travels with that request too, and an unrunnable one refuses `400`.
+4. **A blank required option looked usable** in the step builder; `Add` is now
+   disabled with the missing field named on the field and on the button.
+
+Also: a row refused by the operator's own Refuse policy stopped the sample short
+of a balance and the panel called that "a defect, do not approve". Only an
+imbalance with **no** refusal is an accounting defect now.
+
+### Scheduling, RBAC, tenants, file reads
+
+* **The deterministic park never fired** — it compared a classification dict to
+  the string `"deterministic"`, so every 2-minute beat re-ran a failing job and
+  appended the same rows (5 → 25 at the destination). A failed beat now parks on
+  one finding when the verdict cannot change by itself, which suppresses the
+  cadence. Approve/reject/revoke also stopped 400-ing for a signed-in operator,
+  and deleting the last schedule stays deleted.
+  [#55](https://github.com/Venky-Chowdary/DataFlow/pull/55)
+* **RBAC was cosmetic**: a viewer saw every control enabled, backend `403`s were
+  swallowed and replaced with hardcoded placeholders, `Settings → General → Save`
+  issued no request at all, a Team-created login landed with platform role
+  `member`, the "change it at first sign-in" promise was false, and
+  `GET /api/v1/auth/me` was a 404. Authority now resolves once per workspace on
+  the server, every write surface refuses **in words**, and Settings saves.
+  `POST /api/v1/fidelity/check` had no rule and fell through to the mutation
+  default `connector.write`, refusing the **operator** — it is `job.run`.
+  [#58](https://github.com/Venky-Chowdary/DataFlow/pull/58),
+  [#59](https://github.com/Venky-Chowdary/DataFlow/pull/59)
+* **The Excel/CSV reader always read `wb.active` with row 1 as header**, so a
+  workbook with a title row or data on sheet 2 could not be loaded at all. Sheet,
+  header row, skip rows, encoding and delimiter now govern the read, the count,
+  the write and reconciliation. Browser testing on the same PR caught a worse
+  defect: retargeting the destination table in a finished draft left "Transfer
+  complete" showing for a table that did not exist.
+  [#61](https://github.com/Venky-Chowdary/DataFlow/pull/61)
+* **Tenant create/amend/delete/BYOK all 500'd** on one undefined name, and
+  `level="warning"` is not this system's vocabulary (`warn`), so tenant deletion
+  and an executed rollback were filed INFO and invisible under Warnings. The
+  level is canonicalized at the write.
+  [#63](https://github.com/Venky-Chowdary/DataFlow/pull/63)
+* `sqlparse` CVE floor — the `security` CI job was failing on every branch
+  because of it. [#56](https://github.com/Venky-Chowdary/DataFlow/pull/56)
+
+### Open PRs in this wave (do not assume merged)
+
+[#69](https://github.com/Venky-Chowdary/DataFlow/pull/69) (destination quarantine
+DDL carrier), [#70](https://github.com/Venky-Chowdary/DataFlow/pull/70) (parser
+parity), [#71](https://github.com/Venky-Chowdary/DataFlow/pull/71) (Transform).
+No CI runs on PRs targeting `feature/Venkat-Analysis`; workflows trigger on
+`main` only, so a green tick is not available on this base and its absence is not
+a failure.
+
+---
+
+## 3. Accounts, workspaces and roles (wave `a1cc1f91`)
 
 ### What was broken
 
@@ -107,7 +254,7 @@ the compensating rollback.
 
 ---
 
-## 3. Earlier waves on this branch (already pushed and proven)
+## 4. Earlier waves on this branch (already pushed and proven)
 
 | Area | Evidence |
 | --- | --- |
@@ -123,7 +270,7 @@ the compensating rollback.
 
 ---
 
-## 4. Open defects (found, reproduced, not yet fixed)
+## 5. Open defects (found, reproduced, not yet fixed)
 
 1. **`TIMESTAMPTZ → DATETIME(6)` refused as a fidelity collapse.** Three
    `tests/test_typed_fidelity_transfer_matrix_e2e.py` cases fail (PostgreSQL→
@@ -145,10 +292,32 @@ the compensating rollback.
 6. **Map API vs UI type spelling.** The map API returns `TIMESTAMP_NTZ(6)` while
    the UI shows `DATETIME(6)`; a separate physical/native type through
    introspection was proposed and not yet decided.
+7. **Case A is browser-unverified.** The four-layer fix at `3e3dd8a4` passes unit
+   and API tests, but the last browser run (before it) showed Validate still
+   blocking on `schema_drift`, so nothing yet proves the decimal→integer route
+   reaches Execute in the real UI. Treat it as unproven until an independent SQL
+   re-read shows whole-number values, the expected row count, and **rounding
+   rather than truncation** (the fixture is chosen so the two differ: `SUM = 66`,
+   not 65).
+8. **A file-export destination is not approvable at all** — Map says
+   "Destination schema not loaded", so the export retarget path is unit-tested
+   only. Awaiting a decision on whether file export is meant to be live.
+9. **Tenant delete and BYOK rotate have no UI surface** (API only). Awaiting a
+   decision on whether they should be operator-reachable.
+10. **`round_number` collapse through the profiler.** A literal
+    `1.50000000 → NUMBER(9,2)` case is unreachable through the UI because the CSV
+    profiler collapses the padded value to `DECIMAL(7,4)`, so a `(9,2)`
+    destination is held earlier by the narrowing Risk-Contract gate. Awaiting a
+    decision on whether the profiler should preserve declared scale.
+11. **Environment failures that are not product defects** — do not "fix" these by
+    changing production semantics: PyIceberg reads a Windows path `C:\...` as URI
+    scheme `c` (7 `test_row_conservation.py` failures on this box), and the local
+    MySQL fixture refuses `root@172.17.0.1`
+    (`test_source_duplicate_probe_live`).
 
 ---
 
-## 5. Unproven — never measured, must not be claimed
+## 6. Unproven — never measured, must not be claimed
 
 * Live Snowflake authentication and network (all Snowflake evidence to date is
   emulator or fixture).
@@ -163,10 +332,19 @@ the compensating rollback.
 * Per-client domains and host routing; tenant isolation under hard isolation.
 * Email, Slack and Microsoft Teams delivery.
 * Documentation screenshots and the per-section explainer videos.
+* The connector-family matrix, the type-family matrix and the sync-mode matrix
+  (append / overwrite-full-refresh / upsert-sync) across the 40 connectors.
+* SFTP daily-Excel ingestion into an existing table under each sync mode, with a
+  2-minute schedule replaying the same Transform recipe.
+* Governance operations (mask / hash / redact) recorded in the audit certificate
+  — designed, not built.
+* SAML / single sign-on against a real IdP.
+* 1M / 10M-row phase timing for this branch (the only measured throughput figure
+  is the earlier `docs/THROUGHPUT_1M_EVIDENCE.md` append).
 
 ---
 
-## 6. What "ready to deploy to a client" still needs
+## 7. What "ready to deploy to a client" still needs
 
 1. Fix defect §4.1 (typed instant route) — it blocks a common real route.
 2. Browser proof for every Settings tab: load, save, reload, validation, secret
@@ -179,6 +357,41 @@ the compensating rollback.
 7. Documentation refreshed with current screenshots; the requested ~1 minute
    explainer per section.
 8. Rotate the GitHub token that was pasted into chat.
+9. Case A (§5.7) proven in the browser on MySQL **and** PostgreSQL with an
+   independent destination re-read, and B–H re-run after it.
+10. The three matrices in §6 (connector family, type family, sync mode) run as
+    named matrices with pass/fail/skip counts, not as a spot check.
+11. SAML/SSO proven against a real IdP.
+
+---
+
+## 8. How to test this branch (what the last waves actually ran)
+
+```powershell
+# API, focused on this wave
+cd apps\api
+C:\Users\Administrator\dfvenv\Scripts\python.exe -m pytest tests -q `
+  -k "shape or transform or conservation or certificate or reconcil or preflight or drift or mapping"
+
+# Web, focused
+cd apps\web
+npx tsx --test src/lib/transferStudioChrome.test.ts src/lib/transformProfile.test.ts `
+  src/lib/conservationLedger.test.ts src/lib/shape.test.ts
+npx tsc -b; npx vite build
+```
+
+Browser evidence is driven with Playwright over CDP at `http://127.0.0.1:29229`;
+write `.mjs` files rather than `node -e`, because PowerShell mangles inline JS.
+Live fixtures are Docker containers `df-mysql` (3306), `df-pg-5432` (5432),
+`df-pg` (5433), `df-mongo` and `df-redis`. Traps learned the hard way live in
+`.agents/skills/testing-dataflow-ui/SKILL.md` — read it before writing browser
+checks; Map's safe band is collapsed by default, the expand control exists both
+inline and in a drawer outside `main`, and a role test must assert the signed-in
+email before reporting anything about viewer behaviour.
+
+**A passing test suite is not evidence a transfer works.** Every claim in §2 that
+says "browser" means a real connector, a real Execute, and a destination re-read
+issued independently of the app. Where that is missing, the row says so.
 
 ---
 

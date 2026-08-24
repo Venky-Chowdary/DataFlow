@@ -1,5 +1,5 @@
 /**
- * What a shaping recipe is on the client, and the pure decisions about it.
+ * What a pre-load transform recipe is on the client, and the pure decisions about it.
  *
  * The server owns the meaning of a recipe (which operations exist, what each
  * one does to a value, what its identity is). This module owns only what the
@@ -111,6 +111,24 @@ export interface ShapeIdentity {
   steps: ShapeStepWire[];
 }
 
+/**
+ * The transformed image a declared recipe produces, as the studio carries it
+ * from Transform (pre-load) into Map, Validate and the run request.
+ *
+ * `columnTypes` is what the columns hold *after* the recipe: declared carriers
+ * where no step wrote the column, re-read carriers where one did. Map must
+ * decide fidelity from these — a column rounded to whole numbers is no longer a
+ * lossy decimal, and saying otherwise is an untrue refusal.
+ */
+export interface TransformImage {
+  hash: string;
+  columns: string[];
+  columnTypes: Record<string, string>;
+  retypedColumns: Record<string, string>;
+  /** Transformed sample rows — the values Map is shown, never a population claim. */
+  sampleRows: Record<string, unknown>[];
+}
+
 export interface ShapeStepEffect {
   step: number;
   op: string;
@@ -155,6 +173,14 @@ export interface ShapeRefusal {
 export interface ShapePreviewResponse {
   recipe: ShapeIdentity;
   sampled_rows: number;
+  /**
+   * Carriers of the transformed image: declared where no step wrote the column,
+   * re-read from the transformed values where one did. Map decides fidelity from
+   * these, so a rounded decimal is not still described as a lossy decimal.
+   */
+  column_types?: Record<string, string>;
+  /** Only the columns whose carrier the recipe changed. */
+  retyped_columns?: Record<string, string>;
   before: Record<string, unknown>[];
   after: Record<string, unknown>[];
   effect: ShapeEffect;
@@ -320,7 +346,7 @@ export function linesToList(raw: string): string[] {
 export function summarizeEffect(effect: ShapeEffect | null): string {
   if (!effect) return "";
   const parts = [`${effect.rows_in.toLocaleString()} row(s) in`, `${effect.rows_out.toLocaleString()} out`];
-  if (effect.rows_shaped_out) parts.push(`${effect.rows_shaped_out.toLocaleString()} shaped out`);
+  if (effect.rows_shaped_out) parts.push(`${effect.rows_shaped_out.toLocaleString()} removed`);
   if (effect.rows_diverted) parts.push(`${effect.rows_diverted.toLocaleString()} diverted`);
   if (effect.cells_changed) parts.push(`${effect.cells_changed.toLocaleString()} cell(s) changed`);
   if (effect.nulls_introduced) parts.push(`${effect.nulls_introduced.toLocaleString()} null(s) introduced`);

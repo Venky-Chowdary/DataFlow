@@ -6,6 +6,7 @@ import json
 import logging
 import os
 from services.brand_env import getenv_brand
+from services.shape_preflight import ShapePreflightRefused
 from pathlib import Path
 from typing import Any, Optional
 
@@ -629,6 +630,9 @@ class PlanPreflightRequest(BaseModel):
     fk_risk_acknowledged: bool = False
     acknowledgment_actor: str = ""
     acknowledgment_reason: str = ""
+    # Approved pre-load transform recipe. Execute shapes rows on the read, so the
+    # gates have to judge the transformed image, not the raw source.
+    shape_recipe: dict[str, Any] | None = None
 
 
 @router.post("/plans/{plan_id}/preflight")
@@ -655,7 +659,13 @@ async def preflight_transfer_plan(
         raise HTTPException(status_code=400, detail=str(e)) from e
 
     try:
-        return run_plan_preflight(plan_id, acknowledgments=ack)
+        return run_plan_preflight(
+            plan_id,
+            acknowledgments=ack,
+            shape_recipe=payload.shape_recipe,
+        )
+    except ShapePreflightRefused as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 

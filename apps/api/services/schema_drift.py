@@ -662,8 +662,26 @@ def detect_schema_drift(
     cursor_fields: list[str] | None = None,
     schema_policy: str = "manual_review",
     table_exists: bool | None = None,
+    declared_source_columns: list[str] | None = None,
+    declared_source_schema: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    """Compare live schemas to stored contracts; attach schema_evolution plan."""
+    """Compare live schemas to stored contracts; attach schema_evolution plan.
+
+    Two different questions are asked of the source here, and an approved
+    pre-load transform separates them:
+
+    * *Did the source change under the stored mapping revision?* — answered by
+      the **declared** source, because that is what the revision fingerprinted.
+    * *Do the values this run will bind fit the destination carrier?* — answered
+      by the **transformed** image, because that is what the writer receives.
+
+    Conflating them blocks a correct run either way: judging the fingerprint on
+    the transformed image reports the operator's own recipe as source drift,
+    while judging the carrier on the declared type grades a column rounded to
+    whole numbers as a ``DECIMAL(11,8) → INT4`` precision collapse for values
+    that are now integers. ``declared_source_*`` default to the live arguments,
+    so an unshaped run behaves exactly as before.
+    """
     source_schema = source_schema or {}
     target_columns = target_columns or []
     target_schema = target_schema or {}
@@ -675,7 +693,13 @@ def detect_schema_drift(
     # (None) and create-new must not invent destination drift from Studio maps.
     live_ddl_contract = bool(table_exists is True and target_schema and not schemaless)
 
-    live_source_fp = fingerprint_schema(source_columns, source_schema)
+    # The revision signed the declared source, so the fingerprint questions read
+    # it; every value/carrier question below reads the live (possibly
+    # transformed) image.
+    fp_source_columns = list(declared_source_columns or source_columns)
+    fp_source_schema = dict(declared_source_schema or source_schema)
+
+    live_source_fp = fingerprint_schema(fp_source_columns, fp_source_schema)
     live_target_fp = (
         fingerprint_schema(target_columns, target_schema)
         if target_columns and live_ddl_contract
@@ -683,7 +707,7 @@ def detect_schema_drift(
     )
 
     source_changed = bool(stored_source_fp) and not schemas_match(
-        stored_source_fp, source_columns, source_schema
+        stored_source_fp, fp_source_columns, fp_source_schema
     )
     target_changed = bool(
         live_ddl_contract
@@ -799,8 +823,8 @@ def detect_schema_drift(
         classification = classify_from_column_maps(
             prev_cols or list(prev_types.keys()),
             prev_types,
-            source_columns,
-            source_schema,
+            fp_source_columns,
+            fp_source_schema,
             old_pk=previous_primary_key,
             new_pk=live_primary_key,
             cursor_fields=cursor_fields,

@@ -238,9 +238,9 @@ function fmt(value: number | null | undefined): string {
 /**
  * Rows the read counted and, by instruction, never offered the writer.
  *
- * A declared source filter and an approved shaping recipe both remove rows
- * inside the population the reader counted, so the identity has to name them
- * or a correct shaped run reads as silent loss.
+ * A declared source filter and an approved pre-load transform recipe both remove
+ * rows inside the population the reader counted, so the identity has to name
+ * them or a correct transformed run reads as silent loss.
  */
 export function removedOnRead(ledger: ConservationLedger): number {
   return (
@@ -595,14 +595,14 @@ export type LedgerIdentityCell = { label: string; value: string };
 
 /** Display-only identity cells from engine fields — not a second algorithm. */
 export function ledgerIdentityCells(ledger: ConservationLedger): LedgerIdentityCell[] {
-  return [...identityCellsForKind(ledger), ...shapeIdentityCells(ledger)];
+  return [...identityCellsForKind(ledger), ...transformIdentityCells(ledger)];
 }
 
 /**
  * Removal and recipe identity, stated only when the run reported them, so a
- * plain transfer shows no shaping row and a zero is never drawn as evidence.
+ * plain transfer shows no transform row and a zero is never drawn as evidence.
  */
-function shapeIdentityCells(ledger: ConservationLedger): LedgerIdentityCell[] {
+function transformIdentityCells(ledger: ConservationLedger): LedgerIdentityCell[] {
   const cells: LedgerIdentityCell[] = [];
   const filtered = num(ledger.rows_source_filtered) ?? 0;
   const shaped = num(ledger.rows_shaped_out) ?? 0;
@@ -610,10 +610,10 @@ function shapeIdentityCells(ledger: ConservationLedger): LedgerIdentityCell[] {
     cells.push({ label: "Filtered on read", value: fmt(filtered) });
   }
   if (shaped > 0) {
-    cells.push({ label: "Shaped out", value: fmt(shaped) });
+    cells.push({ label: "Removed by transform", value: fmt(shaped) });
   }
   if (ledger.shape_recipe_hash) {
-    cells.push({ label: "Recipe", value: ledger.shape_recipe_hash });
+    cells.push({ label: "Transform recipe", value: ledger.shape_recipe_hash });
   }
   return cells;
 }

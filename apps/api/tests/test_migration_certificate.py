@@ -406,7 +406,7 @@ def test_rows_a_recipe_removed_close_the_certificate_ledger() -> None:
 def test_certificate_page_names_each_removal_authority_and_the_recipe() -> None:
     md = render_certificate_markdown(build_migration_certificate(_shaped_job()))
     assert "| Removed by the declared source filter | 1 |" in md
-    assert "| Removed by the approved shaping recipe | 2 |" in md
+    assert "| Removed by the approved transform recipe | 2 |" in md
     assert "abc123def4567890" in md
     assert "by instruction, not by loss or quarantine" in md
 

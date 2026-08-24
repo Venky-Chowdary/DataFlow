@@ -380,7 +380,7 @@ class ShapeRecipe:
 
     def describe(self) -> str:
         if not self.enabled_steps:
-            return "no shaping"
+            return "no transform"
         return ", ".join(s.describe() for s in self.enabled_steps)
 
     @classmethod
@@ -472,7 +472,7 @@ def _parse_step(
     definition = STEP_CATALOG.get(op)
     if definition is None:
         raise ShapeError(
-            f"{where}: '{op}' is not a shaping operation. Available: "
+            f"{where}: '{op}' is not a transform operation. Available: "
             f"{', '.join(sorted(STEP_CATALOG))}"
         )
 
@@ -665,7 +665,7 @@ def _normalize_options(
 
     if op == "divert_rows":
         reason = str(out.get("reason") or "").strip()
-        out["reason"] = reason or "diverted by a shaping rule"
+        out["reason"] = reason or "diverted by a transform rule"
 
     return out
 

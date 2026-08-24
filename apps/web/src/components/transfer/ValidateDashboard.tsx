@@ -1136,6 +1136,15 @@ export function ValidateDashboard({
         : "approve";
   const heroTone = running ? "live" : preflight ? decisionTone : "idle";
 
+  /**
+   * The transformed image the gates judged. Present only when an approved
+   * Transform (pre-load) recipe ran before them, so its absence is itself the
+   * truth: the gates read the source as declared.
+   */
+  const transformImage = preflight?.transform_image ?? null;
+  const transformRetyped = Object.entries(transformImage?.retyped_columns ?? {})
+    .sort(([a], [b]) => a.localeCompare(b));
+
   const semantic = proof?.semantic_mapping_score ?? 0;
   const qualityRaw = proof?.quality_score;
   const qualityNotProfiled =
@@ -1614,6 +1623,49 @@ export function ValidateDashboard({
               <strong>{skippedCount}</strong> skipped
             </span>
           </div>
+
+          {!running && transformImage && (
+            <div className="df2-vd-xform" role="note" aria-label="Transform evidence">
+              <p className="df2-vd-xform-head">
+                <DtIcon name="layers" size={14} />
+                {" "}Gates judged the transformed rows, not the raw source
+                <code className="df2-vd-xform-hash" title="Recipe identity Execute is held to">
+                  recipe {transformImage.recipe_hash || "—"}
+                </code>
+              </p>
+              <ul className="df2-vd-xform-facts">
+                <li>
+                  <strong>{(transformImage.sample_rows_in ?? 0).toLocaleString()}</strong> sampled row(s)
+                  read · <strong>{(transformImage.sample_rows_out ?? 0).toLocaleString()}</strong> reached
+                  the gates
+                </li>
+                {Boolean(transformImage.sample_rows_removed) && (
+                  <li>
+                    <strong>{(transformImage.sample_rows_removed ?? 0).toLocaleString()}</strong> removed by
+                    transform — absent by instruction, not quarantined and not lost
+                  </li>
+                )}
+                {Boolean(transformImage.sample_rows_diverted) && (
+                  <li>
+                    <strong>{(transformImage.sample_rows_diverted ?? 0).toLocaleString()}</strong> diverted by
+                    transform to quarantine, with the rule's reason
+                  </li>
+                )}
+                {transformRetyped.length > 0 && (
+                  <li>
+                    Re-read carrier(s) after transform:{" "}
+                    {transformRetyped.map(([column, carrier]) => `${column} → ${carrier}`).join(", ")}
+                    {" — "}columns no step wrote keep their declared source type
+                  </li>
+                )}
+              </ul>
+              <p className="df2-vd-xform-limit">
+                Sample-scoped evidence: these counts describe the rows Validate held, never the whole
+                population. The source is not modified — the recipe runs on the read, and Execute is
+                refused if its identity changes.
+              </p>
+            </div>
+          )}
 
           {!running && preflight && executiveSummary && !preflight.passed && (
             <div className="df2-vd-exec-summary" role="alert">
