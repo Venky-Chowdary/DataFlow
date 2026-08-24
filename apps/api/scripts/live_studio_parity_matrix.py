@@ -45,6 +45,9 @@ SRC_TABLE = "sp_src"
 DST_TABLE = "sp_dst"
 # File-export destinations must land inside the API workspace root (apps/api).
 API_ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
+# The proofs read the product's own column names rather than restating them.
+if API_ROOT not in sys.path:
+    sys.path.insert(0, API_ROOT)
 EXPORT_DIR = os.path.join(API_ROOT, "exports", "parity")
 
 # One fixture row shape used by every route, so a difference between two routes
@@ -328,6 +331,89 @@ def dest_active_count(engine: str) -> int:
     except Exception:
         return -1
     return -1
+
+
+def mirror_soft_deleted_keys(engine: str) -> set[int] | None:
+    """Which keys the mirror hid — a count cannot tell you it hid the right rows."""
+    try:
+        if engine in ("postgresql", "mysql"):
+            truthy = "TRUE" if engine == "postgresql" else "1"
+            return {
+                int(r[0]) for r in sql_rows(
+                    engine,
+                    f"SELECT id FROM {DST_TABLE} WHERE _deleted = {truthy}")
+            }
+        if engine == "mongodb":
+            return {int(d["id"]) for d in mongo_db()[DST_TABLE].find({"_deleted": True})}
+    except Exception:
+        return None
+    return None
+
+
+def surviving_values(engine: str, column: str) -> dict[int, Any] | None:
+    """``{key: value}`` for rows the mirror still shows as live."""
+    try:
+        if engine in ("postgresql", "mysql"):
+            falsy = "FALSE" if engine == "postgresql" else "0"
+            return {
+                int(r[0]): r[1] for r in sql_rows(
+                    engine,
+                    f"SELECT id, {column} FROM {DST_TABLE} "
+                    f"WHERE _deleted IS NULL OR _deleted = {falsy}")
+            }
+        if engine == "mongodb":
+            return {
+                int(d["id"]): d.get(column)
+                for d in mongo_db()[DST_TABLE].find(
+                    {"$or": [{"_deleted": {"$exists": False}}, {"_deleted": False}]})
+            }
+    except Exception:
+        return None
+    return None
+
+
+def scd2_versions(engine: str, key: int) -> list[dict[str, Any]] | None:
+    """Every version of one key, oldest first, with its validity window."""
+    from services.scd2_engine import (
+        IS_CURRENT_COLUMN,
+        VALID_FROM_COLUMN,
+        VALID_TO_COLUMN,
+    )
+
+    try:
+        if engine in ("postgresql", "mysql"):
+            rows = sql_rows(
+                engine,
+                f"SELECT name, {VALID_FROM_COLUMN}, {VALID_TO_COLUMN}, "
+                f"{IS_CURRENT_COLUMN} FROM {DST_TABLE} WHERE id = {key} "
+                f"ORDER BY {VALID_FROM_COLUMN}",
+            )
+            return [
+                {"name": r[0], "valid_from": r[1], "valid_to": r[2],
+                 "is_current": bool(r[3])}
+                for r in rows
+            ]
+    except Exception:
+        return None
+    return None
+
+
+def scd2_population(engine: str) -> tuple[int, int]:
+    """``(current versions, total versions)`` — the census Gate-8 must agree with."""
+    from services.scd2_engine import IS_CURRENT_COLUMN
+
+    try:
+        if engine in ("postgresql", "mysql"):
+            truthy = "TRUE" if engine == "postgresql" else "1"
+            cur = int(sql_rows(
+                engine,
+                f"SELECT COUNT(*) FROM {DST_TABLE} "
+                f"WHERE {IS_CURRENT_COLUMN} = {truthy}")[0][0])
+            tot = int(sql_rows(engine, f"SELECT COUNT(*) FROM {DST_TABLE}")[0][0])
+            return cur, tot
+    except Exception:
+        return -1, -1
+    return -1, -1
 
 
 def dest_value(engine: str, key: int, column: str) -> Any:
@@ -1013,8 +1099,28 @@ def case_mirror(src: str, dst: str) -> Measurement:
     m.detail["rows_after_first_run"] = first
     active = dest_active_count(dst)
     m.detail["active_rows"] = active
-    judge(m, expected_rows=None, extra_ok=(active == N - len(gone)))
-    if m.verdict == "pass" and active != N - len(gone):
+
+    # A count of live rows cannot tell you the mirror hid the *right* rows, so
+    # name them, and prove every survivor still holds its source value.
+    hidden = mirror_soft_deleted_keys(dst)
+    survivors = surviving_values(dst, "name")
+    m.detail["soft_deleted_keys"] = sorted(hidden) if hidden is not None else None
+    expected_survivors = {r["id"]: r["name"] for r in rows}
+    drifted = (
+        None if survivors is None else
+        {k: str(v) for k, v in survivors.items()
+         if str(v) != str(expected_survivors.get(k))}
+    )
+    m.detail["survivors_with_wrong_value"] = drifted
+    row_level_ok = (
+        hidden == set(gone)
+        and survivors is not None
+        and set(survivors) == set(expected_survivors)
+        and not drifted
+    )
+    m.detail["row_level_proof"] = row_level_ok
+    judge(m, expected_rows=None, extra_ok=(active == N - len(gone) and row_level_ok))
+    if m.verdict == "pass" and not (active == N - len(gone) and row_level_ok):
         m.verdict = "contract_break"
     return m
 
@@ -1043,8 +1149,39 @@ def case_scd2(src: str, dst: str) -> Measurement:
     m.detail["rows_after_first_run"] = first
     versions = dest_key_count(dst, keys[0])
     m.detail["versions_for_updated_key"] = versions
-    judge(m, expected_rows=None, extra_ok=(versions >= 2))
-    if m.verdict == "pass" and versions < 2:
+
+    # "two rows exist" is not SCD2. Prove the window: the old version closed
+    # holding the old value, the new one open holding the new value, an
+    # untouched key still on one open version, and a census Gate-8 can prove.
+    changed = scd2_versions(dst, keys[0])
+    untouched_key = next(r["id"] for r in rows if r["id"] not in keys)
+    untouched = scd2_versions(dst, untouched_key)
+    current_rows, total_rows = scd2_population(dst)
+    m.detail["updated_key_versions"] = changed
+    m.detail["untouched_key_versions"] = untouched
+    m.detail["current_versions"] = current_rows
+    m.detail["total_versions"] = total_rows
+
+    row_level_ok = False
+    if changed and len(changed) == 2 and untouched and len(untouched) == 1:
+        closed, open_ = changed
+        row_level_ok = (
+            not closed["is_current"]
+            and closed["valid_to"] is not None
+            and str(closed["name"]) != f"updated_{keys[0]}"
+            and open_["is_current"]
+            and open_["valid_to"] is None
+            and str(open_["name"]) == f"updated_{keys[0]}"
+            and closed["valid_to"] >= closed["valid_from"]
+            and untouched[0]["is_current"]
+            and untouched[0]["valid_to"] is None
+            # One current version per source key, one extra closed version.
+            and current_rows == N
+            and total_rows == N + len(keys)
+        )
+    m.detail["row_level_proof"] = row_level_ok
+    judge(m, expected_rows=None, extra_ok=row_level_ok)
+    if m.verdict == "pass" and not row_level_ok:
         m.verdict = "contract_break"
     return m
 
@@ -1110,7 +1247,7 @@ def main() -> int:
             row["case"] = name
             row["seconds"] = round(time.time() - started, 1)
             results.append(row)
-            print(json.dumps(row), flush=True)
+            print(json.dumps(row, default=str), flush=True)
 
     summary: dict[str, int] = {}
     for r in results:

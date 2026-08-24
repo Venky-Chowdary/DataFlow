@@ -254,6 +254,43 @@ the compensating rollback.
 
 ---
 
+## 3b. Transfer Studio parity wave — row-level mirror/SCD2 proof
+
+The 60-case live matrix (`apps/api/scripts/live_studio_parity_matrix.py`, 13
+routes × 7 sync modes over PostgreSQL, MySQL, MongoDB, CSV, Excel and file
+export) stands at **58 pass, 2 blocked consistently, 0 parity breaks**. The two
+blocked cases are the correct answer: a second `full_refresh_append` into a
+destination that enforces uniqueness is refused at Validate *and* at Run with the
+same reason.
+
+Mirror and SCD2 no longer pass on a destination count. Per route the matrix
+asserts deleted keys are the soft-deleted ones, survivors still hold their source
+values, the updated key has exactly two versions (old closed with
+`is_current=false` and `valid_to >= valid_from`, new current with `valid_to NULL`),
+untouched keys stay on one version, and totals equal population plus changed
+versions. Details in `docs/STUDIO_PARITY_MATRIX_EVIDENCE.md`.
+
+| Defect found by that proof | Fix |
+| --- | --- |
+| Mirror key-staging tables accumulated in the customer's schema | `Connection.execution_options()` mutates the connection, so a streamed digest left `stream_results` set and the following `DROP TABLE` compiled as `DECLARE ... CURSOR FOR DROP TABLE`. Streaming is now statement-scoped; live re-run leaves **0** orphans and logs **0** drop failures |
+| SCD2 history collapsed on MySQL (`valid_from == valid_to`) | MySQL `DATETIME` defaults to fsp 0. MySQL-family destinations carry `DATETIME(6)`; `DATE` stays `DATE` |
+| A retry could drop the spool the first attempt was still reading; a source that died mid-stage leaked its spool | Spools are stamped per attempt, the stage runs inside the cleanup's try, and cleanup never masks the transfer's own error |
+| Two engines each owned staging naming/reaping | One owner: `services.staging_reaper` (6h TTL, `keep` for the live table, bounded lock wait, catalog failure = skipped sweep) |
+| An existing table outside the bounded object listing read as absent | One owner for qualified names: `split_object_namespace()` at the introspect entry |
+
+Regressions: `tests/test_naive_datetime_subsecond_carrier.py` (18),
+`tests/test_staging_spool_lifecycle.py` (8),
+`tests/test_qualified_object_existence.py` (12). Full backend suite after the
+wave: **16,365 passed, 1,532 skipped, 0 failed**; frontend `npm run build` clean;
+CI ruff allowlist (now including `services/staging_reaper.py`) and the Decision
+Kernel mypy gate clean.
+
+Not yet measured for this wave: CDC on these routes at volume, a 1M-row run per
+sync mode (only `full_refresh_append` at 221.5 s and `incremental_deduped` at
+393.2 s are measured), and any Snowflake route (no live credentials/network).
+
+---
+
 ## 4. Earlier waves on this branch (already pushed and proven)
 
 | Area | Evidence |

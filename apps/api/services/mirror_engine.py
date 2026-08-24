@@ -22,12 +22,16 @@ exists.
 from __future__ import annotations
 
 import logging
-import time
-import uuid
 from collections.abc import Iterable, Iterator
 from typing import Any
 
 from services.engine_pool import release_engine
+from services.staging_reaper import (
+    drop_staging_table,
+    reap_orphan_staging,
+    staging_age_seconds,
+    staging_table_name,
+)
 
 SOFT_DELETE_COLUMN = "_deleted"
 _KEY_SEP = "\x1f"
@@ -663,136 +667,31 @@ def _create_pk_staging(
 #: listings hide it, and orphans are reaped: a run killed mid-flight (deploy,
 #: OOM, API restart) leaves one behind, and 32 of them accumulated in a schema
 #: is both noise and the reason a real table sorted out of a bounded listing.
+#: Naming, age stamps, lock bounding and the sweep itself live in
+#: ``services.staging_reaper`` — the SCD2 source spool has the same problem and
+#: must not carry a second copy of the rules.
 MIRROR_STAGING_PREFIX = "_df_mirrorkeys_"
-#: An orphan older than this cannot belong to a live run.
-_MIRROR_STAGING_TTL_SECONDS = 6 * 3600
 
 
 def _staging_table_name() -> str:
-    """``_df_mirrorkeys_<epoch>_<rand>`` — the stamp is what makes reaping safe.
-
-    Age is read from the name, so a sweep needs no shared state and can never
-    drop a table a concurrent run is still filling.
-    """
-    return f"{MIRROR_STAGING_PREFIX}{int(time.time())}_{uuid.uuid4().hex[:8]}"
-
-
-#: Epoch floor for a stamp to be read as a time. A legacy random suffix can be
-#: all digits (``_df_mirrorkeys_255577532241``), and reading that as a stamp
-#: dated it in the year 10069 — an orphan that could never age out.
-_MIRROR_STAMP_EPOCH_FLOOR = 1_577_836_800  # 2020-01-01T00:00:00Z
+    """``_df_mirrorkeys_<epoch>_<rand>`` — the stamp is what makes reaping safe."""
+    return staging_table_name(MIRROR_STAGING_PREFIX)
 
 
 def _staging_age_seconds(name: str) -> float | None:
     """Seconds since this staging table was named, or ``None`` if unstamped."""
-    parts = name[len(MIRROR_STAGING_PREFIX):].split("_")
-    if len(parts) != 2 or not parts[0].isdigit() or not parts[1]:
-        return None
-    stamp = float(parts[0])
-    now = time.time()
-    if stamp < _MIRROR_STAMP_EPOCH_FLOOR or stamp > now + 86_400:
-        # Not a clock this process can reason about — treat it as unstamped
-        # rather than granting it an age that never exceeds the TTL.
-        return None
-    return max(now - stamp, 0.0)
-
-
-def _bound_lock_wait(conn: Any, dialect_name: str) -> None:
-    """Cap how long a reap may wait for a lock — best effort, never fatal.
-
-    An unstamped orphan has no age, so the only thing that distinguishes it
-    from a table an older build is filling right now is the lock it holds.
-    Waiting is what must not happen: this sweep runs inside a real mirror.
-    """
-    import sqlalchemy as sa
-    from services.dialect_profiles import dialect_profile
-
-    stmt = {
-        "postgresql": "SET lock_timeout = '2s'",
-        "redshift": "SET lock_timeout = '2s'",
-        "mysql": "SET SESSION lock_wait_timeout = 2",
-        "sqlserver": "SET LOCK_TIMEOUT 2000",
-        "mssql": "SET LOCK_TIMEOUT 2000",
-    }.get(dialect_profile(dialect_name).driver, "")
-    if not stmt:
-        return
-    try:
-        conn.execute(sa.text(stmt))
-    except Exception as exc:
-        logging.getLogger(__name__).debug("staging reap lock bound skipped: %s", exc)
-        try:
-            conn.rollback()
-        except Exception:
-            pass
+    return staging_age_seconds(MIRROR_STAGING_PREFIX, name)
 
 
 def _reap_orphan_staging(conn: Any, schema_name: str, dialect_name: str) -> list[str]:
     """Drop key-staging tables no live run can own. Returns what was dropped."""
-    import sqlalchemy as sa
-
-    sql = "SELECT table_name FROM information_schema.tables WHERE table_name LIKE :pat"
-    params: dict[str, Any] = {"pat": f"{MIRROR_STAGING_PREFIX}%"}
-    if schema_name:
-        sql += " AND table_schema = :schema"
-        params["schema"] = schema_name
-    try:
-        rows = conn.execute(sa.text(sql), params).fetchall()
-    except Exception as exc:
-        # No catalog access is not a mirror failure — this run's own staging
-        # table is still dropped by the caller.
-        logging.getLogger(__name__).debug("staging reap skipped: %s", exc)
-        try:
-            conn.rollback()
-        except Exception:
-            pass
-        return []
-    dropped: list[str] = []
-    bounded = False
-    for row in rows:
-        name = str(row[0])
-        age = _staging_age_seconds(name)
-        if age is not None and age < _MIRROR_STAGING_TTL_SECONDS:
-            # In TTL: a concurrent run may still be filling this one.
-            continue
-        if age is None and not bounded:
-            # Unstamped names predate the stamp scheme, so age is unknowable —
-            # a bounded lock wait skips one an older build still holds.
-            _bound_lock_wait(conn, dialect_name)
-            bounded = True
-        _drop_pk_staging(conn, _qualified_name(name, schema_name, dialect_name))
-        dropped.append(name)
-    if dropped:
-        logging.getLogger(__name__).info(
-            "reaped %d orphaned mirror staging table(s)", len(dropped)
-        )
-    return dropped
+    return reap_orphan_staging(
+        conn, MIRROR_STAGING_PREFIX, schema_name, dialect_name
+    )
 
 
 def _drop_pk_staging(conn: Any, stg_qualified: str) -> None:
-    import sqlalchemy as sa
-
-    try:
-        conn.execute(sa.text(f"DROP TABLE IF EXISTS {stg_qualified}"))  # nosec B608
-        conn.commit()
-        return
-    except Exception:
-        try:
-            conn.rollback()
-        except Exception:
-            pass
-    try:
-        conn.execute(sa.text(f"DROP TABLE {stg_qualified}"))  # nosec B608
-        conn.commit()
-    except Exception as exc:
-        # A staging table we cannot drop is a leak the next sweep must find, so
-        # say so once instead of leaving the operator to notice 30 of them.
-        logging.getLogger(__name__).warning(
-            "mirror staging table %s could not be dropped: %s", stg_qualified, exc
-        )
-        try:
-            conn.rollback()
-        except Exception:
-            pass
+    drop_staging_table(conn, stg_qualified)
 
 
 def apply_inferred_soft_deletes(

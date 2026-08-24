@@ -62,11 +62,8 @@ def test_internal_scratch_objects_stay_out_of_the_operator_listing() -> None:
 
 def test_orphaned_mirror_staging_is_reaped_only_once_it_cannot_be_live() -> None:
     """Age comes from the name, so a sweep never drops a concurrent run's table."""
-    from services.mirror_engine import (
-        _MIRROR_STAGING_TTL_SECONDS,
-        _staging_age_seconds,
-        _staging_table_name,
-    )
+    from services.mirror_engine import _staging_age_seconds, _staging_table_name
+    from services.staging_reaper import STAGING_TTL_SECONDS as _MIRROR_STAGING_TTL_SECONDS
 
     fresh = _staging_table_name()
     age = _staging_age_seconds(fresh)

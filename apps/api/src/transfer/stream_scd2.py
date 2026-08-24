@@ -41,16 +41,48 @@ def _qualified(table: str, schema: str | None, dialect: str = "") -> str:
     return table_q
 
 
+#: Prefix of the SCD2/mirror source spool inside the destination schema.
+#: Operator listings hide it, so a spool left behind by a run killed mid-flight
+#: (deploy, OOM, API restart) was invisible and never cleaned. Naming, age
+#: stamps and the sweep are owned once in ``services.staging_reaper``.
+SCD2_STAGING_PREFIX = "_dataflow_stg_"
+
+
 def _staging_endpoint(destination: EndpointConfig, job_id: str) -> EndpointConfig:
-    """Clone a destination endpoint for use as a per-transfer staging table."""
+    """Clone a destination endpoint for use as a per-transfer staging table.
+
+    The name carries the job it belongs to *and* an age stamp: a job's retry can
+    start while the first attempt is still draining, and a name derived from the
+    job alone let the second run drop the first one's spool mid-read.
+    """
     from dataclasses import replace
 
-    suffix = re.sub(r"[^a-zA-Z0-9_]", "", job_id)[:16] or "stg"
-    return replace(
-        destination,
-        table=f"_dataflow_stg_{suffix}",
-        collection=f"_dataflow_stg_{suffix}",
-    )
+    from services.staging_reaper import staging_table_name
+
+    suffix = re.sub(r"[^a-zA-Z0-9]", "", job_id)[:16] or "stg"
+    name = staging_table_name(SCD2_STAGING_PREFIX, suffix)
+    return replace(destination, table=name, collection=name)
+
+
+def _reap_orphan_spools(
+    dest_cfg: dict[str, Any], schema_name: str, dest_type: str, *, keep: str
+) -> list[str]:
+    """Drop source spools no live run can own. Never fatal to the transfer."""
+    from connectors.generic_sql import get_sqlalchemy_engine
+    from services.staging_reaper import reap_orphan_staging
+
+    engine = get_sqlalchemy_engine(dest_cfg)
+    dialect = str(getattr(getattr(engine, "dialect", None), "name", "") or dest_type)
+    try:
+        with engine.connect() as conn:
+            return reap_orphan_staging(
+                conn, SCD2_STAGING_PREFIX, schema_name or "", dialect, keep=keep
+            )
+    except Exception as exc:
+        logger.debug("staging spool sweep skipped: %s", exc)
+        return []
+    finally:
+        release_engine(engine)
 
 
 def stream_scd2_mirror_transfer(
@@ -123,7 +155,8 @@ def stream_scd2_mirror_transfer(
     target_qualified = _qualified(destination.table or staging.table, schema_name,
                                   dest_type)
 
-    # 1. Drop any leftover staging table and stream source into staging.
+    # 1. Sweep spools no live run can own, then stream source into staging.
+    _reap_orphan_spools(dest_cfg, schema_name, dest_type, keep=staging.table)
     drop_table(dest_cfg, staging.table, schema_name or None)
 
     stage_cb: Callable[..., None] | None = None
@@ -132,35 +165,40 @@ def stream_scd2_mirror_transfer(
             pct = int(25 + (chunk / max(chunks, 1)) * 35)
             on_checkpoint(chunk, chunks, rows, checkpoint=checkpoint or {"phase": "staging", "progress_pct": pct})
 
-    rows_staged, stage_ddl, stage_summary, stage_columns = stream_database_transfer(
-        source,
-        staging,
-        mappings,
-        schema,
-        on_checkpoint=stage_cb,
-        sync_mode="full_refresh_overwrite",
-        stream_contracts=[{"selected": True, "sync_mode": "full_refresh_overwrite"}],
-        job_id=f"{job_id or ''}_stage",
-        checkpoint_service=_NoOpCheckpointService(),
-        backfill_new_fields=backfill_new_fields,
-        validation_mode=validation_mode,
-        limit=limit,
-    )
-
-    ddl_log = [
-        f"STAGING {src_type}.{source.table or source.collection} → {staging_qualified} "
-        f"({rows_staged:,} rows)",
-    ]
-
     rows_written = 0
-    dest_summary: dict[str, Any] = {
-        "source_rows": rows_staged,
-        "source_row_count": rows_staged,
-        "staging_table": staging_qualified,
-        "sync_mode": effective_sync,
-    }
+    ddl_log: list[str] = []
+    dest_summary: dict[str, Any] = {}
 
+    # The staging load is inside the same try as the apply: a source that dies
+    # mid-stage is the most likely failure of the two, and outside the try it
+    # left its spool behind in the customer's schema forever.
     try:
+        rows_staged, stage_ddl, stage_summary, stage_columns = stream_database_transfer(
+            source,
+            staging,
+            mappings,
+            schema,
+            on_checkpoint=stage_cb,
+            sync_mode="full_refresh_overwrite",
+            stream_contracts=[{"selected": True, "sync_mode": "full_refresh_overwrite"}],
+            job_id=f"{job_id or ''}_stage",
+            checkpoint_service=_NoOpCheckpointService(),
+            backfill_new_fields=backfill_new_fields,
+            validation_mode=validation_mode,
+            limit=limit,
+        )
+
+        ddl_log = [
+            f"STAGING {src_type}.{source.table or source.collection} → {staging_qualified} "
+            f"({rows_staged:,} rows)",
+        ]
+        dest_summary = {
+            "source_rows": rows_staged,
+            "source_row_count": rows_staged,
+            "staging_table": staging_qualified,
+            "sync_mode": effective_sync,
+        }
+
         if effective_sync == "scd2":
             from services.scd2_engine import apply_scd2, prepare_scd2_mapped_rows
 
@@ -349,11 +387,14 @@ def stream_scd2_mirror_transfer(
         else:
             raise ValueError(f"Unsupported sync mode for SCD2/mirror streaming: {effective_sync}")
     finally:
-        # Clean up the temporary staging table.
+        # This run's spool goes on both the success and the failure path, and a
+        # drop that fails must not mask the transfer's own error.
         try:
             drop_table(dest_cfg, staging.table, schema_name or None)
         except Exception as exc:
-            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+            logger.warning(
+                "staging table %s could not be dropped: %s", staging_qualified, exc
+            )
 
     ddl_log.append(f"{effective_sync.upper()} {staging_qualified} → {target_qualified}")
     # Rejected/coerced counts come from the staging write and the SCD2/mirror

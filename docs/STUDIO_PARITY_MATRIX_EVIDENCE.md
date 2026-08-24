@@ -161,3 +161,83 @@ table out of the listing. Three fixes:
   swallowed.
 
 Regression: `apps/api/tests/test_qualified_object_existence.py` (12 cases).
+
+## Staging lifecycle, SCD2 temporal boundaries, and the leak's real cause
+
+Three defects found while proving mirror/SCD2 row content on live PostgreSQL and
+MySQL. All three could only be seen with a destination re-read; every one of them
+had a green run and a green count.
+
+### 1. Mirror key-staging tables survived their own DROP
+
+The leak above (`32` orphaned `_df_mirrorkeys_*`) was not a missing cleanup — the
+cleanup ran and failed:
+
+```
+could not drop staging table "public"."_df_mirrorkeys_1787567311_d5bee446":
+syntax error at or near "DROP"
+LINE 1: ...DECLARE "c_7f9e87466a20_13" CURSOR WITHOUT HOLD FOR DROP TABLE...
+```
+
+`Connection.execution_options()` **mutates the connection**, so once a mirror run
+took its streamed active-row digest, every later statement on that connection
+inherited `stream_results` — and PostgreSQL compiled the following DDL as
+`DECLARE ... CURSOR FOR DROP TABLE`. Streaming is now requested on the
+*statement* (`services.reconciliation.sa_streaming_result`,
+`connectors.generic_sql` snapshot scan), so a scan can no longer poison the
+connection that has to clean up after it.
+
+Measured, after re-running the whole 60-case matrix against live services:
+
+| check | before | after |
+| --- | --- | --- |
+| `_df_mirrorkeys_*` + `_dataflow_stg_*` left in PostgreSQL | 8 | **0** |
+| same in MySQL | 0 | **0** |
+| `could not drop staging table` warnings in the API log | 4 | **0** |
+| matrix verdict | 58 pass / 2 blocked / 0 parity break | **unchanged** |
+
+### 2. SCD2 version boundaries collapsed on MySQL
+
+`sa.DateTime()` compiles to MySQL `DATETIME` with **fsp 0**, so two versions
+written inside the same second got one instant: `valid_from == valid_to` on the
+closed version, and no as-of query could see history. MySQL-family destinations
+now carry `DATETIME(6)`. `DATE` stays `DATE` — widening it would invent a time of
+day the source never held. Live PostgreSQL→MySQL after the fix:
+
+```
+old: valid_from 2026-08-24 10:20:57.808242  valid_to 2026-08-24 10:20:59.348525  is_current=false
+new: valid_from 2026-08-24 10:20:59.348525  valid_to NULL                        is_current=true
+```
+
+Regression: `apps/api/tests/test_naive_datetime_subsecond_carrier.py` (18 cases,
+covering MySQL/MariaDB/TiDB × `datetime`/`TIMESTAMP`/`TIMESTAMP_NTZ(6)`, the
+DATE guard, and the SCD2 audit columns).
+
+### 3. A source spool could outlive its transfer, and two retries could share one
+
+The SCD2/mirror source spool was named from the job id alone, so a retry that
+started while the first attempt was still draining could drop the spool the first
+one was reading. It was also created *before* the try block that cleans up, so a
+source that died mid-stage left `_dataflow_stg_*` in the customer's schema
+forever. Spools are now stamped per attempt (`_dataflow_stg_<job>_<epoch>_<rand>`),
+the stage runs inside the same try as the apply, and cleanup happens on the
+success and failure paths without masking the transfer's own error.
+
+Both engines now share one lifecycle owner, `services.staging_reaper` — naming,
+age parsing, bounded lock wait, drop, and orphan sweep. Only stamped tables older
+than 6h are reaped, the current run's table is never touched, and no catalog
+access is a skipped sweep, not a failed transfer.
+
+Regression: `apps/api/tests/test_staging_spool_lifecycle.py` (8 cases, including
+the streamed-read-then-DDL invariant that caused defect 1).
+
+### Row-level proof now asserted by the matrix
+
+`scripts/live_studio_parity_matrix.py` no longer accepts a destination count as
+mirror/SCD2 proof. Per route it asserts: the deleted keys are the soft-deleted
+ones, every survivor still holds its source value, the updated key has exactly
+two versions with the old one closed (`is_current=false`, `valid_to` non-null,
+`valid_to >= valid_from`) and the new one current, untouched keys stay on one
+version, the current-version census equals the source population, and total rows
+equal population plus changed versions. Latest full run:
+`58 pass, 2 blocked_consistently, 0 parity breaks` (`/home/ubuntu/parity_final.json`).

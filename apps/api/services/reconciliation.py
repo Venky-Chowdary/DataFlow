@@ -912,10 +912,21 @@ def sa_streaming_result(
     Drivers without server-side cursors ignore ``stream_results`` and buffer as
     before — no engine is made worse, and those that can stream stop paying for
     the whole table.
+
+    The option is set on the *statement*, not the connection:
+    ``Connection.execution_options()`` mutates the connection in place, so every
+    later statement on it inherited streaming. PostgreSQL then compiled a
+    following ``DROP TABLE`` as ``DECLARE ... CURSOR FOR DROP TABLE`` and raised
+    a syntax error — which is how mirror key-staging tables survived their own
+    cleanup and accumulated in the customer's schema.
     """
-    result = conn.execution_options(
-        stream_results=True, max_row_buffer=itersize
-    ).execute(statement)
+    try:
+        stmt = statement.execution_options(
+            stream_results=True, max_row_buffer=itersize
+        )
+    except AttributeError:  # a raw string has no execution_options
+        stmt = statement
+    result = conn.execute(stmt)
     names = [str(k) for k in result.keys()]
 
     def _rows() -> Iterator[Any]:

@@ -82,7 +82,7 @@ logger = logging.getLogger(__name__)
 try:
     import sqlalchemy as sa
     from sqlalchemy import create_engine, inspect
-    from sqlalchemy.dialects import mssql, oracle, postgresql
+    from sqlalchemy.dialects import mssql, mysql, oracle, postgresql
     from sqlalchemy.exc import NoSuchModuleError
 
     SQLALCHEMY_AVAILABLE = True
@@ -115,6 +115,7 @@ try:
 except (ImportError, AttributeError):  # pragma: no cover
     SQLALCHEMY_AVAILABLE = False
     mssql = None  # type: ignore[assignment]
+    mysql = None  # type: ignore[assignment]
     oracle = None  # type: ignore[assignment]
     ch_engines = None
     ChDateTime64 = None
@@ -1027,6 +1028,7 @@ _ORACLE_WIRES: Final = {"oracle", "oracledb", "oracle_autonomous", "oracle_adw",
 
 
 _MSSQL_WIRES: Final = {"sqlserver", "mssql", "azure_sql", "synapse", "azure_synapse"}
+_MYSQL_WIRES: Final = {"mysql", "mariadb", "tidb", "singlestore"}
 
 
 def physical_table_spelling(
@@ -1177,10 +1179,14 @@ def _is_oracle_wire(dialect_name: str, db_type: str) -> bool:
 def _sub_second_naive_wire(dialect_name: str, db_type: str) -> Any:
     """Naive-datetime carrier that keeps sub-second precision, else ``None``.
 
-    ``sa.DateTime()`` compiles to Oracle ``DATE`` (whole seconds, no fraction)
-    and SQL Server ``DATETIME`` (rounded to 1/300 s), so a PostgreSQL
-    microsecond stamp lands altered and a row checksum can only match by luck.
-    ``None`` means the dialect's own default already carries fractions.
+    ``sa.DateTime()`` compiles to Oracle ``DATE`` (whole seconds, no fraction),
+    SQL Server ``DATETIME`` (rounded to 1/300 s) and MySQL ``DATETIME``
+    (fsp 0 — the fraction is dropped), so a PostgreSQL microsecond stamp lands
+    altered and a row checksum can only match by luck. On MySQL that also
+    collapsed SCD2 version boundaries: two versions written in the same second
+    got one instant, so ``valid_from == valid_to`` and no as-of query could see
+    the closed version. ``None`` means the dialect's own default already
+    carries fractions.
     """
     if _is_oracle_wire(dialect_name, db_type):
         return oracle.TIMESTAMP()
@@ -1188,6 +1194,10 @@ def _sub_second_naive_wire(dialect_name: str, db_type: str) -> Any:
         (dialect_name or "").lower() == "mssql" or (db_type or "").lower() in _MSSQL_WIRES
     ):
         return mssql.DATETIME2()
+    if mysql is not None and _MYSQL_WIRES & {
+        (dialect_name or "").lower(), (db_type or "").lower()
+    }:
+        return mysql.DATETIME(fsp=6)
     return None
 
 
@@ -1261,6 +1271,13 @@ def _sa_type_for_logical(
             return _maybe_nullable(
                 oracle.TIMESTAMP(timezone=not local, local_timezone=local)
             )
+        if mysql is not None and _MYSQL_WIRES & {
+            (dialect_name or "").lower(), (db_type or "").lower()
+        }:
+            # No MySQL carrier holds an offset, so the zone decision is made
+            # upstream. sa.DateTime(timezone=True) compiles to fsp-0 DATETIME,
+            # dropping the fraction too — a second loss for nothing.
+            return _maybe_nullable(mysql.DATETIME(fsp=6))
         return sa.DateTime(timezone=True)
     if (
         "timestamp_ntz" in raw_lower
@@ -3155,7 +3172,9 @@ def read_table_scan_batch(
                 stmt = sa.select(*_tz_safe_projection(cfg, selected_cols))
                 if order_cols:
                     stmt = stmt.order_by(*order_cols)
-                result = conn.execution_options(stream_results=True).execute(stmt)
+                # Statement-scoped: on the connection it leaks into later DDL,
+                # which then compiles as DECLARE CURSOR FOR <ddl> and fails.
+                result = conn.execute(stmt.execution_options(stream_results=True))
                 headers = [c.name for c in selected_cols]
                 serialize = True
             except Exception:
