@@ -12,6 +12,7 @@ The contract these tests pin down:
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -24,6 +25,41 @@ if str(_API_ROOT) not in sys.path:
 from fastapi.testclient import TestClient  # noqa: E402
 
 from services import integrations_store  # noqa: E402
+
+# Saving a provider hydrates the process environment on purpose — the SDKs read
+# their key from there — so a key saved here outlives the test that saved it.
+_HYDRATED_ENV = (
+    "OPENAI_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "OPENAI_MODEL",
+    "ANTHROPIC_MODEL",
+    "OLLAMA_BASE_URL",
+    "OLLAMA_MODEL",
+    "DATAFLOW_PILOT_ENGINE",
+)
+
+
+@pytest.fixture(autouse=True)
+def _keys_saved_here_do_not_outlive_the_test():
+    """Restore the hydrated credential env, which monkeypatch cannot.
+
+    ``monkeypatch.delenv(name, raising=False)`` records nothing when the
+    variable was absent to begin with, so a key this module saved afterwards
+    leaked for the rest of the process: a later test asking whether a cloud
+    provider was configured was answered by this module's fixture keys.
+    Autouse, so the restore outlives the per-test ``monkeypatch`` teardown.
+    """
+    before = {name: os.environ.get(name) for name in _HYDRATED_ENV}
+    for name in _HYDRATED_ENV:
+        os.environ.pop(name, None)
+    try:
+        yield
+    finally:
+        for name, value in before.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
 
 
 @pytest.fixture

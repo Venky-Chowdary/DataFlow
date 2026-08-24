@@ -39,7 +39,7 @@ def _ensure_executor() -> concurrent.futures.ThreadPoolExecutor:
             max_workers=max_workers,
             thread_name_prefix="df-transfer-",
         )
-        atexit.register(shutdown, wait=False)
+        atexit.register(shutdown, wait=False, log=False)
     return _executor
 
 
@@ -50,15 +50,22 @@ def start() -> None:
     _logger.info("Transfer scheduler started")
 
 
-def shutdown(wait: bool = True) -> None:
-    """Gracefully stop accepting new work and optionally wait for in-flight jobs."""
+def shutdown(wait: bool = True, log: bool = True) -> None:
+    """Gracefully stop accepting new work and optionally wait for in-flight jobs.
+
+    ``log`` is off for the interpreter-exit path: the logging handlers' streams
+    are already closed by then, so the shutdown line was emitted as a
+    ``--- Logging error --- ValueError: I/O operation on closed file`` traceback
+    on every process exit rather than as a message anyone could read.
+    """
     global _executor, _shutdown
     _shutdown = True
     _started.clear()
     if _executor:
         _executor.shutdown(wait=wait, cancel_futures=False)
         _executor = None
-    _logger.info("Transfer scheduler shut down")
+    if log:
+        _logger.info("Transfer scheduler shut down")
 
 
 def running() -> bool:
