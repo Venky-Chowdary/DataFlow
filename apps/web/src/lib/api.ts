@@ -3794,14 +3794,24 @@ export async function downloadSecurityReport(): Promise<Blob> {
   return res.blob();
 }
 
-export async function fetchSecurityPosture(): Promise<SecurityPosture> {
-  const res = await apiFetch(`${API_BASE}/workspace/security/posture`);
+export async function fetchSecurityPosture(workspaceId?: string): Promise<SecurityPosture> {
+  const res = await apiFetch(
+    `${API_BASE}/workspace/security/posture`,
+    workspaceId ? { headers: { "X-Workspace-Id": workspaceId } } : {},
+  );
   if (!res.ok) throw new Error(await parseApiError(res, "Could not load security posture"));
   return res.json();
 }
 
-export async function fetchByokKeys(): Promise<{ keys: ByokKey[] }> {
-  const res = await apiFetch(`${API_BASE}/workspace/tenant/byok-keys`);
+export async function fetchByokKeys(workspaceId?: string): Promise<{ keys: ByokKey[] }> {
+  const res = await apiFetch(
+    `${API_BASE}/workspace/tenant/byok-keys`,
+    workspaceId ? { headers: { "X-Workspace-Id": workspaceId } } : {},
+  );
+  // Keys hang off a tenant, so a workspace with no tenant has none — that is an
+  // empty list, not a failed read. Reporting it as an error printed "No tenant
+  // configured" as a red banner over a working page.
+  if (res.status === 404) return { keys: [] };
   if (!res.ok) throw new Error(await parseApiError(res, "Could not load BYOK keys"));
   return res.json();
 }

@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
 
-import { ApiError, fetchEffectiveIdentity, type EffectiveIdentity } from "./api";
+import { ApiError, fetchEffectiveIdentity, fetchWorkspaces, type EffectiveIdentity } from "./api";
 import { refusalSentence } from "./permissionCopy";
 import { WORKSPACE_CHANGED_EVENT, getActiveWorkspaceId, setActiveWorkspaceId } from "./workspace";
 
@@ -73,6 +73,14 @@ export function PermissionsProvider({
       // every later request is decided in the same workspace this answer
       // described instead of being re-resolved per request.
       if (next.workspace_id && !getActiveWorkspaceId()) setActiveWorkspaceId(next.workspace_id);
+      else if (!next.workspace_id && !getActiveWorkspaceId()) {
+        // The API only resolves an unnamed workspace when the account has
+        // exactly one membership. With two, every workspace-scoped read ran
+        // against no workspace at all — the Enterprise tab reported a saved
+        // tenant as missing — so the client names one and the switcher moves it.
+        const { workspaces } = await fetchWorkspaces().catch(() => ({ workspaces: [] }));
+        if (workspaces.length) setActiveWorkspaceId(workspaces[0].id);
+      }
     } catch (err) {
       setIdentity(null);
       // A 401 is handled by the shell (back to sign-in). Anything else is

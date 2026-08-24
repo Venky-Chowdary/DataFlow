@@ -288,3 +288,27 @@ def test_www_prefix_is_the_same_domain(stores):
     tenant_store.create_tenant(workspace_id="ws-1", name="One", custom_domain="www.acme.com")
     found = tenant_store.get_tenant_by_domain("acme.com")
     assert found is not None and found.workspace_id == "ws-1"
+
+
+def test_a_record_belonging_to_no_workspace_never_serves_a_domain(stores):
+    """A pre-scoping record must not answer host routing.
+
+    Tenants written before they were workspace-scoped hold ``workspace_id: ""``.
+    Resolving one for a client domain would serve that domain out of an empty
+    scope — no workspace to read data, members or audit from.
+    """
+    import json
+
+    import services.tenant_store as tenant_store
+
+    scoped = tenant_store.create_tenant(workspace_id="ws-1", name="Scoped", custom_domain="scoped.example.com")
+    unscoped = tenant_store.create_tenant(workspace_id="ws-2", name="Legacy", custom_domain="legacy.example.com")
+    raw = json.loads(tenant_store.STORE_PATH.read_text(encoding="utf-8"))
+    for t in raw["tenants"]:
+        if t["id"] == unscoped.id:
+            t["workspace_id"] = ""
+    tenant_store.STORE_PATH.write_text(json.dumps(raw), encoding="utf-8")
+
+    assert tenant_store.get_tenant_by_domain("legacy.example.com") is None
+    found = tenant_store.get_tenant_by_domain("scoped.example.com")
+    assert found is not None and found.id == scoped.id

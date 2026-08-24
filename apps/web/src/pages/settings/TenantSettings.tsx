@@ -3,7 +3,7 @@ import { useToast } from "../../components/Toast";
 import { ByokKey, createByokKey, createTenant, fetchByokKeys, fetchSecurityPosture, fetchTenant, fetchWorkspaces, SecurityPosture, Tenant, updateTenant } from "../../lib/api";
 import { PermissionNotice } from "../../components/PermissionNotice";
 import { PERMISSIONS, useWriteGate } from "../../lib/PermissionsContext";
-import { getActiveWorkspaceId } from "../../lib/workspace";
+import { WORKSPACE_CHANGED_EVENT, getActiveWorkspaceId } from "../../lib/workspace";
 
 const REGIONS = [
   "us-east-1", "us-east-2", "us-west-1", "us-west-2",
@@ -47,6 +47,16 @@ export function TenantSettings() {
   const [newKeyProvider, setNewKeyProvider] = useState<ByokKey["provider"]>("local");
   const [newKeyMaterial, setNewKeyMaterial] = useState("");
 
+  // The workspace being viewed, re-read when the switcher moves: mounting before
+  // the shell had named one read the tenant of no workspace and reported a saved
+  // tenant as missing.
+  const [activeWorkspace, setActiveWorkspace] = useState(getActiveWorkspaceId());
+  useEffect(() => {
+    const onChanged = () => setActiveWorkspace(getActiveWorkspaceId());
+    window.addEventListener(WORKSPACE_CHANGED_EVENT, onChanged);
+    return () => window.removeEventListener(WORKSPACE_CHANGED_EVENT, onChanged);
+  }, []);
+
   useEffect(() => {
     setLoading(true);
     // A refused read is not an unconfigured tenant: reporting "no tenant yet"
@@ -57,9 +67,9 @@ export function TenantSettings() {
       return null;
     };
     Promise.all([
-      fetchTenant().catch(remember),
-      fetchSecurityPosture().catch(remember),
-      fetchByokKeys().catch((err) => {
+      fetchTenant(activeWorkspace).catch(remember),
+      fetchSecurityPosture(activeWorkspace).catch(remember),
+      fetchByokKeys(activeWorkspace).catch((err) => {
         remember(err);
         return { keys: [] };
       }),
@@ -89,13 +99,12 @@ export function TenantSettings() {
           // scoped to. Defaulting to the first workspace in the list saved a
           // tenant the operator could not then read back, because GET resolves
           // the tenant by the active workspace.
-          const active = getActiveWorkspaceId();
-          const scoped = ws.find((w) => w.id === active)?.id || (ws.length === 1 ? ws[0].id : "");
+          const scoped = ws.find((w) => w.id === activeWorkspace)?.id || (ws.length === 1 ? ws[0].id : "");
           setWorkspaceId(scoped);
         }
       })
       .finally(() => setLoading(false));
-  }, []);
+  }, [activeWorkspace]);
 
   /** Read the named workspace's tenant instead of assuming it has none.
    *
@@ -111,6 +120,9 @@ export function TenantSettings() {
     try {
       const t = await fetchTenant(id).catch(() => null);
       setTenant(t);
+      // A read that answered is not a failed read: leaving the earlier message up
+      // rendered "No tenant configured" above the tenant it had just loaded.
+      setLoadError("");
       if (t) {
         setName(t.name);
         setCustomDomain(t.custom_domain);

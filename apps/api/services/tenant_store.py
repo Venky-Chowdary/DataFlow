@@ -180,7 +180,10 @@ def get_tenant_by_domain(domain: str) -> Tenant | None:
     if not target:
         return None
     for t in _tenants():
-        if t.normalized_domain == target:
+        # A record written before tenants were workspace-scoped belongs to no
+        # workspace, so host routing cannot decide what data it would serve:
+        # resolving it would answer a client domain out of an empty scope.
+        if t.normalized_domain == target and t.workspace_id:
             return t
     return None
 
