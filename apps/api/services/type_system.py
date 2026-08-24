@@ -6899,6 +6899,33 @@ def assess_create_new_type_risk(
             "severity": "warn",
             "message": f"Create-new drops timezone polarity: {src} → {tgt}.",
         })
+    else:
+        from services.timezone_policy import (
+            MYSQL_TIMESTAMP_RANGE_TEXT,
+            instant_range_would_cap,
+            samples_outside_instant_range,
+        )
+
+        if instant_range_would_cap(src, tgt, dest_db=db):
+            # The carrier keeps the instant, so this is not a polarity loss and
+            # not a Risk Contract — but its domain is 68 years wide, and a row
+            # outside it is rejected at the write, not at Map.
+            outside = samples_outside_instant_range(samples)
+            risks.append({
+                "kind": "instant_range_cap",
+                "severity": "block" if outside else "warn",
+                "message": (
+                    f"Create-new {src} → {tgt} keeps the instant but caps its range "
+                    f"to {MYSQL_TIMESTAMP_RANGE_TEXT}"
+                    + (
+                        f"; sampled value(s) outside it: {', '.join(outside[:3])}. "
+                        if outside
+                        else ". "
+                    )
+                    + "Use DATETIME(6) with a UTC-normalize contract for the full "
+                    "1000..9999 range, or accept that out-of-range rows quarantine."
+                ),
+            })
     if uuid_would_collapse(src, tgt):
         risks.append({
             "kind": "uuid_domain",

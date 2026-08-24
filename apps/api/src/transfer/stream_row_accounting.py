@@ -86,3 +86,75 @@ def stamp_incremental_no_op(dest_summary: dict[str, Any]) -> None:
     """
     dest_summary["source_row_count"] = 0
     dest_summary["source_row_count_source"] = "incremental_watermark_empty"
+
+
+def _raw_page_marked(batch: Any) -> bool:
+    """True when this page already recorded how the source handed it over.
+
+    Rewriting a page (source filter, shaping recipe) is not idempotent, and the
+    first page is prepared twice — its DDL is committed before any worker starts.
+    The mark is what proves a page is rewritten exactly once.
+    """
+    if batch is None:
+        return False
+    try:
+        return batch.raw_page_rows is not None
+    except AttributeError:
+        return False
+
+
+def _mark_raw_page(batch: Any, rows: int, cursor: str, keyset: str) -> bool:
+    """Record the page as the source handed it over; False if it cannot hold it."""
+    try:
+        batch.raw_page_rows = int(rows)
+        batch.raw_page_cursor = str(cursor or "")
+        batch.raw_page_keyset = str(keyset or "")
+    except AttributeError:
+        return False
+    return True
+
+
+def _raw_page_rows(batch: Any) -> int:
+    """How many rows the source handed over for this page.
+
+    Unmarked pages were never rewritten, so their surviving rows *are* the page.
+    """
+    if batch is None:
+        return 0
+    try:
+        marked = batch.raw_page_rows
+    except AttributeError:
+        marked = None
+    if marked is None:
+        return len(batch.rows or [])
+    return int(marked)
+
+
+def _raw_page_filtered(batch: Any) -> int:
+    """Rows the declared source filter removed from this page (0 if none)."""
+    if batch is None:
+        return 0
+    try:
+        return int(batch.raw_page_filtered or 0)
+    except AttributeError:
+        return 0
+
+
+def _raw_page_cursor(batch: Any) -> str:
+    """The page's highest cursor value before it was rewritten ("" if unmarked)."""
+    if batch is None:
+        return ""
+    try:
+        return str(batch.raw_page_cursor or "")
+    except AttributeError:
+        return ""
+
+
+def _raw_page_keyset(batch: Any) -> str:
+    """The page's keyset bookmark before it was rewritten ("" if unmarked)."""
+    if batch is None:
+        return ""
+    try:
+        return str(batch.raw_page_keyset or "")
+    except AttributeError:
+        return ""

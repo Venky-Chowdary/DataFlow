@@ -54,8 +54,6 @@ try:
         ShapeError,
         ShapeRowError,
         ShapeRunner,
-        build_shape_runner,
-        shape_ledger_terms,
         shaped_schema,
     )
     from services.sync_cursor import (
@@ -99,8 +97,6 @@ except (
         ShapeError,
         ShapeRowError,
         ShapeRunner,
-        build_shape_runner,
-        shape_ledger_terms,
         shaped_schema,
     )
     from src.services.sync_cursor import (
@@ -314,183 +310,6 @@ def _validation_plan_for_result(pf: dict | None) -> dict:
     return plan
 
 
-def _inline_stamp_ddl_identity(mappings: list, dest_db: str) -> str | None:
-    """Stamp Map→DDL fingerprint for programmatic skip_preflight callers.
-
-    Returns None on success, or an error message when the stamp cannot be built.
-    """
-    try:
-        from services.decision_kernel import approved_mapping_ddl_fingerprint
-
-        stamped = approved_mapping_ddl_fingerprint(mappings, dest_db=dest_db or "")
-        if not str(stamped or "").strip():
-            return (
-                "DDL identity inline stamp produced an empty fingerprint — "
-                "refuse write (check Map target_type stamps)."
-            )
-    except Exception as exc:
-        # Fail closed with the exception attached — never soft-pass invent.
-        logger.error("DDL identity inline stamp failed: %s", exc, exc_info=exc)
-        return f"DDL identity inline stamp failed closed: {exc}"
-    return None
-
-
-def _enforce_ddl_identity(
-    pf: dict | None,
-    mappings: list,
-    *,
-    dest_db: str,
-    approved_ddl_identity_hash: str = "",
-    skip_preflight: bool = False,
-    preflight_mappings: list | None = None,
-) -> str | None:
-    """Module 12 / GA — fail closed when Map→DDL fingerprint drifts after Validate.
-
-    Returns an error message when identity fails.
-
-    Programmatic callers (``skip_preflight=True``: API/CLI/scheduler/tests) may
-    omit a Validate fingerprint: the engine stamps Map→DDL **inline** from the
-    current mappings. That applies when preflight is absent **or** when a stub
-    proof_bundle lacks ``ddl_identity_hash`` (incomplete Validate must not block
-    skip_preflight callers — audit ITEM 2).
-
-    UI Validate→Execute (``skip_preflight=False``) still requires a stamped hash
-    from preflight proof or ``approved_ddl_identity_hash``. When a hash is
-    present, drift vs current mappings is always refused.
-
-    A fingerprint is only meaningful against the mapping set it was taken over.
-    The operator's hash (from Validate) is checked against the operator contract
-    rows; Execute's *own* preflight hash is checked against the rows that
-    preflight ran on. Crossing them refused every UI job whose destination
-    catalog spells a bound column differently from the Map stamp.
-    """
-    has_maps = bool(mappings)
-    operator_approved = (approved_ddl_identity_hash or "").strip()
-    approved = operator_approved
-    approved_columns: list[dict] = []
-    checked = mappings
-    if not approved and pf:
-        stamp = (pf.get("proof_bundle") or {}).get("ddl_identity") or {}
-        approved = stamp.get("ddl_identity_hash") or ""
-        approved_columns = [
-            c for c in (stamp.get("columns") or []) if isinstance(c, dict)
-        ]
-        if preflight_mappings is not None:
-            checked = preflight_mappings
-
-    if not approved:
-        if has_maps and skip_preflight:
-            # Programmatic path — inline stamp whether or not a hollow pf exists.
-            return _inline_stamp_ddl_identity(mappings, dest_db)
-        if pf and has_maps:
-            return (
-                "DDL identity fingerprint missing after Validate — refuse Execute "
-                "(Map→DDL identity not stamped; re-run Validate)."
-            )
-        if has_maps:
-            return (
-                "DDL identity requires Validate preflight before Execute — "
-                "refuse write without Map→DDL fingerprint (re-run Validate)."
-            )
-        return None
-
-    try:
-        from services.decision_kernel import DdlIdentityError, assert_ddl_identity
-
-        assert_ddl_identity(
-            str(approved),
-            checked,
-            dest_db=dest_db or "",
-            approved_columns=approved_columns,
-        )
-    except DdlIdentityError as exc:
-        return str(exc)
-    except Exception as exc:  # pragma: no cover — never invent soft-pass on check crash
-        logger.error("DDL identity check crashed: %s", exc, exc_info=exc)
-        return f"DDL identity check failed closed: {exc}"
-    return None
-
-
-def _request_decision_artifact_payload(request) -> dict | None:
-    raw = getattr(request, "decision_artifact", None)
-    if isinstance(raw, dict) and raw:
-        return raw
-    return None
-
-
-def _operator_contract_maps(request, mappings: list) -> list:
-    """Mappings an operator-stamped artifact/fingerprint was hashed over.
-
-    Validate hashes the Map rows the operator approved (``request.mappings``).
-    Execute re-derives its own set (``_auto_map`` → enrich → auto-propagate →
-    additive stamps), so hashing the derived set compared a stamp against
-    facts the operator never saw: an untouched Map came back as "Decision
-    Artifact DDL identity diverged from current Map". Whenever the caller
-    supplies a stamp, it must be checked against the contract it was taken
-    over; only an unstamped run falls back to the derived set.
-    """
-    supplied = bool(
-        str(getattr(request, "approved_ddl_identity_hash", "") or "").strip()
-        or str(getattr(request, "approved_decision_artifact_hash", "") or "").strip()
-        or _request_decision_artifact_payload(request)
-    )
-    if not supplied:
-        return mappings
-    return list(getattr(request, "mappings", None) or []) or mappings
-
-
-def _enforce_decision_artifact(
-    pf: dict | None,
-    mappings: list,
-    *,
-    dest_db: str,
-    approved_decision_artifact_hash: str = "",
-    decision_artifact: dict | None = None,
-    skip_preflight: bool = False,
-    sync_mode: str = "full_refresh_overwrite",
-    error_policy: str = "quarantine",
-) -> tuple[str | None, dict | None]:
-    """Phase C11 — refuse Execute without Decision Artifact authority.
-
-    Returns ``(error, artifact_dict)``. Programmatic ``skip_preflight`` stamps
-    an inline artifact (parity with DDL identity). Validate paths may carry
-    ``proof_bundle.decision_artifact`` or ``approved_decision_artifact_hash``.
-    """
-    from services.decision_kernel import enforce_decision_artifact
-
-    approved = (approved_decision_artifact_hash or "").strip()
-    payload = decision_artifact if isinstance(decision_artifact, dict) and decision_artifact else None
-    if pf and not payload:
-        pb = (pf.get("proof_bundle") or {}).get("decision_artifact")
-        if isinstance(pb, dict) and pb:
-            payload = pb
-    if pf and not approved:
-        approved = str(
-            ((pf.get("proof_bundle") or {}).get("decision_artifact") or {}).get(
-                "content_hash"
-            )
-            or (pf.get("proof_bundle") or {}).get("decision_artifact_hash")
-            or ""
-        ).strip()
-    # C11: UI Validate→Execute requires a Decision Artifact (or hash).
-    # Programmatic skip_preflight may inline-stamp even when proof_bundle is a
-    # hollow stub — same honesty as DDL identity (audit ITEM 2).
-    if pf and not approved and not payload and not skip_preflight:
-        return (
-            "Decision Artifact missing from Validate proof_bundle — refuse Execute "
-            "(re-run Validate to stamp decision_artifact.content_hash).",
-            None,
-        )
-    err, art = enforce_decision_artifact(
-        mappings=list(mappings or []),
-        dest_db=dest_db or "",
-        approved_content_hash=approved,
-        artifact_payload=payload,
-        skip_preflight=bool(skip_preflight),
-        sync_mode=sync_mode,
-        error_policy=error_policy,
-    )
-    return err, (art.to_dict() if art is not None else None)
 
 
 def _fail_job_preflight(mongo, job_id: str, pf: dict, *, lineage) -> tuple[str, dict]:
@@ -695,144 +514,6 @@ def _authoritative_source_schema(
         return schema
 
 
-def _open_shape_runner(
-    request: TransferRequest,
-    columns: list[str] | None,
-) -> "ShapeRunner | None":
-    """The declared shaping recipe, refused unless it is the approved one.
-
-    Shaping runs before mapping on purpose: Map decides carriers, narrowing risk
-    contracts and the DDL identity from the columns and values it is shown, so a
-    recipe that changes source-side truth has to run first or those decisions
-    describe data that never reaches the writer.
-    """
-    return build_shape_runner(
-        getattr(request, "shape_recipe", None),
-        source_columns=list(columns or []),
-        approved_hash=str(getattr(request, "approved_shape_recipe_hash", "") or ""),
-    )
-
-
-def _stamp_shape_evidence(
-    dest_summary: dict[str, Any],
-    runner: "ShapeRunner | None",
-) -> None:
-    """Record what the recipe did to this run, on the run's own summary.
-
-    Without this the ledger would compare a source COUNT(*) against a
-    destination population short by the removed rows and report an unbalanced
-    load, and the proof pack would not say which recipe produced the values it
-    is proving.
-    """
-    if runner is None:
-        return
-    terms = shape_ledger_terms(runner)
-    # A resumed streaming pass carries the removals of every committed page,
-    # earlier passes included, while this runner only shaped the tail. Taking
-    # the runner's smaller tally would drop the earlier passes' removed rows
-    # out of conservation and read a correct load as short delivery.
-    for key in ("rows_shaped_out", "rows_shaped_in", "rows_shape_filtered"):
-        prior = dest_summary.get(key)
-        if isinstance(prior, int) and prior > int(terms.get(key, 0) or 0):
-            terms[key] = prior
-    dest_summary.update(terms)
-    dest_summary["shape_proof"] = runner.report()
-    # The rows the recipe read are this run's source population, whether or not
-    # they reached the writer. A materialized read hands reconciliation only the
-    # surviving records, so the removed rows would be missing from both sides of
-    # conservation and the recipe's effect would balance by disappearing.
-    if not isinstance(dest_summary.get("source_row_count"), int):
-        dest_summary["source_row_count"] = int(runner.effect.rows_in)
-        dest_summary["source_row_count_source"] = "shape_read"
-
-
-def _shaped_population_rows(
-    runner: "ShapeRunner | None",
-    rows: Iterator[dict[str, Any]],
-) -> Iterator[dict[str, Any]]:
-    """The population the writer will see, for the pre-write fit scan.
-
-    The scan asks whether every row survives the destination carrier, so it has
-    to be asked of the shaped values: a ``round to 8`` step makes 27 otherwise
-    unfittable decimals fit, and scanning the raw file would block a run that is
-    correct. Its own runner, because the scan's counts are not the load's.
-    """
-    if runner is None:
-        return rows
-    probe = ShapeRunner(runner.recipe)
-
-    def _iter() -> Iterator[dict[str, Any]]:
-        for row in rows:
-            shaped = probe.records([row])
-            if shaped:
-                yield shaped[0]
-
-    return _iter()
-
-
-def _shape_stream_refusal(
-    runner: "ShapeRunner | None",
-    *,
-    effective_sync: str,
-    multi_stream: bool,
-    cursor_field: str,
-    key_columns: Sequence[str],
-) -> str:
-    """Why this streaming route cannot honour the recipe, or ``""``.
-
-    Silently ignoring a recipe on a route that cannot run it is the worst
-    outcome: the operator approved shaped values and the destination would
-    receive raw ones. So each route that cannot re-apply the recipe row by row
-    says so before anything is written.
-
-    History and change-data routes compare a row against the row already stored,
-    which was written by a possibly different recipe — that comparison is not
-    ours to guess at. An incremental or upsert route resolves rows and watermarks
-    by cursor and key, so a recipe that rewrites, renames or drops one of those
-    columns would move the watermark or the identity itself.
-    """
-    if runner is None:
-        return ""
-    sync = (effective_sync or "").lower()
-    if sync in ("cdc", "scd2", "full_refresh_mirror", "mirror"):
-        return (
-            f"Transform (pre-load) is not applied on the {sync} route: it merges "
-            "each row against history already stored on the destination, which was "
-            "not written by this recipe. Remove the transform recipe for this sync "
-            "mode, or use full refresh / incremental append and transform on the read."
-        )
-    if multi_stream:
-        return (
-            "Transforming a multi-stream selection is refused: one recipe names "
-            "columns of one stream, so applying it to every selected stream "
-            "would either miss columns or rewrite unrelated ones. Run one "
-            "stream per transfer to transform it."
-        )
-    touched = set(runner.recipe.touched_columns)
-    outputs = set(runner.output_columns)
-    guarded = [c for c in ([cursor_field] if cursor_field else []) + list(key_columns) if c]
-    hit = [c for c in guarded if c in touched or c not in outputs]
-    if hit:
-        return (
-            "Transform (pre-load) refuses to rewrite the columns this sync mode "
-            f"resolves rows by ({', '.join(sorted(set(hit)))}): the cursor and key "
-            "decide which rows are read and which stored row is replaced, so a "
-            "transformed value there would move the watermark or change row "
-            "identity. Transform other columns, or switch to a full refresh."
-        )
-    return ""
-
-
-def _shape_materialized_read(
-    runner: "ShapeRunner",
-    records: list[dict[str, Any]],
-    columns: list[str],
-    schema: dict[str, str],
-) -> tuple[list[dict[str, Any]], list[str], dict[str, str]]:
-    """Apply the recipe to a fully-read source and re-declare what it produced."""
-    shaped = runner.records(records)
-    out_columns = list(runner.output_columns or columns)
-    return shaped, out_columns, shaped_schema(runner, shaped, schema)
 
 
 def _widen_design_sample(
@@ -1529,6 +1210,20 @@ from .job_quarantine import (  # noqa: E402,F401 — re-export
     _persist_checkpoint_quarantine_delta,
     _persist_job_quarantine,
     checkpoint_quarantine_summary,
+)
+from .engine_identity import (  # noqa: E402,F401 — re-export
+    _enforce_ddl_identity,
+    _enforce_decision_artifact,
+    _inline_stamp_ddl_identity,
+    _operator_contract_maps,
+    _request_decision_artifact_payload,
+)
+from .engine_shape import (  # noqa: E402,F401 — re-export
+    _open_shape_runner,
+    _shape_materialized_read,
+    _shape_stream_refusal,
+    _shaped_population_rows,
+    _stamp_shape_evidence,
 )
 
 

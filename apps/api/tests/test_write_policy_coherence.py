@@ -140,28 +140,30 @@ def test_a_tampered_contract_cannot_grant_a_holdout() -> None:
 
 
 #: One narrowing bounded carrier per destination family, with a value that cannot
-#: fit it. The incoherence was never Snowflake-specific — every typed writer runs
-#: the same matrix — so every family is asserted on the same contract.
-_CARRIERS: list[tuple[str, str, str, str]] = [
-    ("snowflake", "Snowflake", "NUMBER(11,8)", "12.123456789012"),
-    ("postgresql", "Postgres", "NUMERIC(6,2)", "123456.78"),
-    ("mysql", "MySQL", "DECIMAL(6,2)", "9999999.99"),
-    ("sqlserver", "SQL Server", "DECIMAL(5,2)", "12345.67"),
-    ("oracle", "Oracle", "NUMBER(6,2)", "1234567.89"),
-    ("bigquery", "BigQuery", "NUMERIC(6,2)", "1234567.89"),
-    ("redshift", "Redshift", "NUMERIC(6,2)", "1234567.89"),
-    ("postgresql", "Postgres", "VARCHAR(4)", "far-too-wide"),
-    ("mysql", "MySQL", "VARCHAR(4)", "far-too-wide"),
-    ("snowflake", "Snowflake", "VARCHAR(4)", "far-too-wide"),
-    ("postgresql", "Postgres", "SMALLINT", "99999"),
-    ("mysql", "MySQL", "TINYINT", "9999"),
-    ("sqlserver", "SQL Server", "SMALLINT", "99999"),
+#: fit it and two that can. The incoherence was never Snowflake-specific — every
+#: typed writer runs the same matrix — so every family is asserted on the same
+#: contract. The fitting pair is carrier-shaped: a fractional value is not an
+#: integer, so an integer carrier's good rows are integral.
+_CARRIERS: list[tuple[str, str, str, str, tuple[str, str]]] = [
+    ("snowflake", "Snowflake", "NUMBER(11,8)", "12.123456789012", ("1.5", "2.25")),
+    ("postgresql", "Postgres", "NUMERIC(6,2)", "123456.78", ("1.5", "2.25")),
+    ("mysql", "MySQL", "DECIMAL(6,2)", "9999999.99", ("1.5", "2.25")),
+    ("sqlserver", "SQL Server", "DECIMAL(5,2)", "12345.67", ("1.5", "2.25")),
+    ("oracle", "Oracle", "NUMBER(6,2)", "1234567.89", ("1.5", "2.25")),
+    ("bigquery", "BigQuery", "NUMERIC(6,2)", "1234567.89", ("1.5", "2.25")),
+    ("redshift", "Redshift", "NUMERIC(6,2)", "1234567.89", ("1.5", "2.25")),
+    ("postgresql", "Postgres", "VARCHAR(4)", "far-too-wide", ("1.5", "2.25")),
+    ("mysql", "MySQL", "VARCHAR(4)", "far-too-wide", ("1.5", "2.25")),
+    ("snowflake", "Snowflake", "VARCHAR(4)", "far-too-wide", ("1.5", "2.25")),
+    ("postgresql", "Postgres", "SMALLINT", "99999", ("15", "225")),
+    ("mysql", "MySQL", "TINYINT", "9999", ("15", "25")),
+    ("sqlserver", "SQL Server", "SMALLINT", "99999", ("15", "225")),
 ]
 
 
-@pytest.mark.parametrize(("dest_db", "label", "target_type", "bad"), _CARRIERS)
+@pytest.mark.parametrize(("dest_db", "label", "target_type", "bad", "good"), _CARRIERS)
 def test_every_family_reads_the_same_contract(
-    dest_db: str, label: str, target_type: str, bad: str
+    dest_db: str, label: str, target_type: str, bad: str, good: tuple[str, str]
 ) -> None:
     """One bad cell, one contract, one answer — per destination family."""
     contract = _signed_contract("QUARANTINE_ROW")
@@ -172,7 +174,7 @@ def test_every_family_reads_the_same_contract(
     contract["signature"] = sign_risk_contract(contract)
     mappings = _mappings(contract)
     mappings[1]["target_type"] = target_type
-    rows: list[tuple[Any, ...]] = [(1, "1.5"), (2, bad), (3, "2.25")]
+    rows: list[tuple[Any, ...]] = [(1, good[0]), (2, bad), (3, good[1])]
 
     def _run(policy: str, maps: list[dict[str, Any]] | None):
         rejected: list[dict[str, Any]] = []

@@ -193,8 +193,10 @@ export interface TransferJob {
   failed_at_phase?: string;
   rejected_rows?: number;
   coerced_null_rows?: number;
-  /** Quarantine evidence dropped past the sample cap (exact count still in rejected_rows). */
-  rejected_details_truncated?: number;
+  /** True when quarantine evidence was dropped past the sample cap. */
+  rejected_details_truncated?: boolean;
+  /** Findings the run recorded, whether or not the sample kept them all. */
+  rejected_details_total?: number;
   chunk_current?: number;
   chunk_total?: number;
   checkpoint?: TransferCheckpoint;
@@ -1225,8 +1227,10 @@ export interface TransferResult {
     rejected_rows?: number;
     coerced_null_rows?: number;
     rejected_details?: RejectedDetail[];
-    /** How many quarantine details were dropped past the sample cap. */
-    rejected_details_truncated?: number;
+    /** True when quarantine details were dropped past the sample cap. */
+    rejected_details_truncated?: boolean;
+    /** Findings the run recorded, whether or not the sample kept them all. */
+    rejected_details_total?: number;
     warnings?: string[];
     /** How many distinct warnings were suppressed past the display sample. */
     warnings_suppressed?: number;

@@ -525,6 +525,7 @@ export function createNewRiskChipLabel(m: EditableMapping): string | null {
   if (!hasCreateNewTypeRisk(m)) return null;
   const kinds = new Set((m.createNewRisks || []).map((r) => (r.kind || "").toLowerCase()));
   if (kinds.has("timezone_polarity")) return "TZ risk";
+  if (kinds.has("instant_range_cap")) return "range risk";
   if (kinds.has("varchar_width_cap") || kinds.has("varchar_narrow")) return "width risk";
   if (kinds.has("precision_collapse")) return "precision";
   if (kinds.has("uuid_domain")) return "UUID domain";

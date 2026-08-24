@@ -44,6 +44,7 @@ from connectors.sql_dsn import is_masked_secret, sync_credentials_into_connectio
 from services.read_options import ReadOptions
 
 from .connector_registry import run_probe
+from .job_quarantine import split_refused_unit
 from .models import EndpointConfig
 from .type_mapper import ddl_carrier_type, ddl_type, normalize_inferred
 
@@ -159,38 +160,6 @@ def _writer_diagnostics(result: Any) -> dict[str, Any]:
             if key in meta and meta[key] is not None:
                 out[key] = meta[key]
     return out
-
-
-def rows_with_findings(details: list[dict[str, Any]]) -> int:
-    """Distinct source rows that carry a finding of their own."""
-    return len(
-        {
-            d.get("row")
-            for d in details
-            if isinstance(d, dict) and d.get("row") is not None
-        }
-    )
-
-
-def split_refused_unit(
-    details: list[dict[str, Any]], rejected_rows: int, summary: dict[str, Any]
-) -> int:
-    """Name the rows a refused write unit rolled back, and return the true rejects.
-
-    A refused unit reports every uncommitted row as rejected, because the writers
-    count ``source - kept`` and an abort keeps nothing. A 5,000-row batch holding
-    2,500 bad cells therefore claimed "5,000 quarantined" while only 2,500 rows
-    had a finding to review — a total Inspect could never explain, and no
-    remediation could act on. Quarantine is what the writer found; the rest of
-    the unit was rolled back with it.
-    """
-    found = rows_with_findings(details)
-    if not found or rejected_rows <= found:
-        return rejected_rows
-    summary["rows_rolled_back"] = rejected_rows - found
-    summary["rows_refused_unit"] = rejected_rows
-    summary["rejected_rows"] = found
-    return found
 
 
 def raise_writer_failure(result: Any, label: str) -> None:

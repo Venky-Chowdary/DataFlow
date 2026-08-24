@@ -830,7 +830,11 @@ export function TransferResultDashboard({
               rejectedRows={rejected || issueFindings}
               coercedNullRows={coercedNull}
               initialDetails={result.destination_summary?.rejected_details}
-              truncatedDetails={result.destination_summary?.rejected_details_truncated}
+              truncatedDetails={Math.max(
+                0,
+                Number(result.destination_summary?.rejected_details_total ?? 0) -
+                  (result.destination_summary?.rejected_details?.length ?? 0),
+              )}
               autoLoad
               initiallyOpen
               repairMappings={repairMappings}

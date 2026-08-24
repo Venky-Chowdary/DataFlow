@@ -52,6 +52,11 @@ POLICY_OFFSET_TEXT: Final[str] = "offset_preserving_text"
 POLICY_WALL_CLOCK_LOCAL: Final[str] = "wall_clock_local_only"
 POLICY_UTC_INVENT: Final[str] = "utc_invented_from_naive"
 
+#: The window a MySQL-family ``TIMESTAMP`` column can hold, in words.
+MYSQL_TIMESTAMP_RANGE_TEXT: Final[str] = (
+    "1970-01-01 00:00:01 UTC .. 2038-01-19 03:14:07 UTC"
+)
+
 
 @dataclass(frozen=True)
 class TimezoneTransferPolicy:
@@ -310,8 +315,43 @@ def resolve_timezone_policy(
 
 def _range_limit(target_type: str, db: str) -> str:
     if db == "mysql" and _polarity(target_type, dest_db="mysql") in {"tz", "ltz"}:
-        return "1970-01-01 00:00:01 UTC .. 2038-01-19 03:14:07 UTC"
+        return MYSQL_TIMESTAMP_RANGE_TEXT
     return "engine default"
+
+
+def instant_range_would_cap(
+    source_type: str,
+    target_type: str,
+    *,
+    dest_db: str = "",
+) -> bool:
+    """True when an aware source lands in an epoch-bounded instant carrier.
+
+    MySQL ``TIMESTAMP`` is the right carrier for an instant — it is the only
+    MySQL column that stores one — but it holds barely 68 years of them. A
+    PostgreSQL ``TIMESTAMPTZ`` or Snowflake ``TIMESTAMP_TZ`` column spans
+    4713 BC..294276 AD, so create-new picks a carrier whose *domain* is
+    narrower than the source's even though its polarity and precision are
+    exact. That narrowing is invisible until a row outside the window reaches
+    the writer, which rejects it (or, outside STRICT mode, zeroes it).
+    """
+    from services.type_system import _normalize_dest_db
+
+    db = _normalize_dest_db(dest_db) if dest_db else ""
+    if db != "mysql":
+        return False
+    if not is_mysql_timestamp_carrier(target_type):
+        return False
+    return _polarity(source_type) in {"tz", "ltz"}
+
+
+def samples_outside_instant_range(samples: Sequence[Any] | None) -> list[str]:
+    """The sampled values a MySQL ``TIMESTAMP`` column could not hold."""
+    return [
+        str(v)
+        for v in (samples or [])
+        if v is not None and mysql_timestamp_out_of_range(v)
+    ]
 
 
 def is_mysql_timestamp_carrier(target_type: str) -> bool:

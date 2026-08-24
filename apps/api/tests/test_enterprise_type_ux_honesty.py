@@ -112,8 +112,16 @@ def test_create_new_mysql_timestamptz_pipeline_stamps_visible_risks():
     assert row.get("requires_review") is True
 
 
-def test_create_new_mysql_timestamptz_keeps_the_instant_unstamped():
-    """MySQL ``TIMESTAMP(6)`` is an instant carrier — nothing is lost to stamp."""
+def test_create_new_mysql_timestamptz_keeps_the_instant_and_names_its_ceiling():
+    """MySQL ``TIMESTAMP(6)`` keeps the instant; only its 1970..2038 range is a cost.
+
+    Nothing about polarity or precision is lost, so the row carries no lossy
+    verdict — but the carrier is 68 years wide, and that is stated at Map
+    instead of surfacing as quarantined rows mid-run.
+    """
     row = _mysql_create_new_row("TIMESTAMPTZ")
     assert row["target_type"].upper().startswith("TIMESTAMP(6)"), row["target_type"]
-    assert (row.get("create_new_risks") or []) == []
+    risks = row.get("create_new_risks") or []
+    assert {r.get("kind") for r in risks} == {"instant_range_cap"}
+    assert {r.get("severity") for r in risks} == {"warn"}
+    assert str(row.get("fidelity") or "").lower() in {"", "preserve", "lossless"}

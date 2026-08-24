@@ -22,6 +22,8 @@ from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any
 
+from services.type_system import materialize_dest_ddl
+
 logger = logging.getLogger(__name__)
 
 # Destinations that can host a durable DLQ table/collection via the writer path.
@@ -157,7 +159,15 @@ def write_dest_quarantine(
     endpoint = dlq_endpoint(destination)
     columns = list(META_COLUMNS)
     schema = {c: "string" for c in columns}
-    mappings = [{"source": c, "target": c, "confidence": 1.0} for c in columns]
+    # Unstamped mappings fell back to the Map default carrier `VARCHAR`, which
+    # MySQL rejects outright (1064: a width is mandatory) — so the DLQ table
+    # could never be created and no destination copy of the evidence existed.
+    # The carrier is materialized for the destination dialect instead.
+    dlq_carrier = materialize_dest_ddl(dest_type, "string")
+    mappings = [
+        {"source": c, "target": c, "target_type": dlq_carrier, "confidence": 1.0}
+        for c in columns
+    ]
 
     rows_written, ddl_log, summary = write_destination_database(
         endpoint,
@@ -170,10 +180,19 @@ def write_dest_quarantine(
         job_id=f"{job_id}_dlq" if job_id else None,
     )
     table = endpoint.table or dlq_table_name("import")
+    written = int(rows_written or 0)
+    # A short write is not a durable destination copy: report it as such rather
+    # than claiming `ok` beside a table holding fewer rows than the findings.
+    ok = written >= len(records)
     return {
-        "ok": True,
+        "ok": ok,
+        "error": (
+            ""
+            if ok
+            else f"destination DLQ wrote {written} of {len(records)} finding(s)"
+        ),
         "skipped": False,
-        "rows_written": int(rows_written or 0),
+        "rows_written": written,
         "table": table,
         "ddl": list(ddl_log or [])[:20],
         "writer_summary": {
