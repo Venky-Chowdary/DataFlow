@@ -281,4 +281,33 @@ def run_pg_mysql_volume(
             raise AssertionError(
                 f"engine transferred {transferred}, requested {rows}"
             )
+
+    try:
+        from services.data_quality_history import profile_batch, save_profile
+
+        save_profile(
+            {
+                "kind": "database",
+                "format": "postgresql",
+                "host": pg["host"],
+                "port": pg["port"],
+                "database": pg["dbname"],
+                "table": src_table,
+            },
+            {
+                "kind": "database",
+                "format": "mysql",
+                "host": mysql["host"],
+                "port": mysql["port"],
+                "database": mysql["database"],
+                "table": dest_table,
+            },
+            profile_batch([], dict(COLUMNS)),
+            job_id=job_id,
+            rejected_rows=rejected,
+            row_count=landed,
+        )
+    except Exception as exc:
+        print(f"load-history save_profile skipped: {exc}")
+
     return report
