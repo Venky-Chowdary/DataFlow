@@ -35,6 +35,7 @@ import {
   widenMappingToVarchar,
   type EditableMapping,
 } from "./mapping.js";
+import { needsMappingReview } from "./columnWorkbench.js";
 import { typeFamily } from "./typeDisplay.js";
 
 describe("transform SSOT round-trip", () => {
@@ -969,6 +970,38 @@ describe("destination schema honesty", () => {
     );
     assert.equal(editable[0].approved, false);
     assert.equal(editable[0].requiresReview, false);
+  });
+
+  it("first Validate does not need Approve for INTEGER → existing INT4 after round", () => {
+    // Engine path after apply_shape_type_ceilings: rounded decimal is INTEGER,
+    // dest is the existing int4. Continue already treats preserve as not-Issues;
+    // the G4 wire must not re-invent requires_review from the missing click.
+    const dests = ["INT4", "INT", "INTEGER"] as const;
+    for (const dest of dests) {
+      const editable = editableFromPipelineMappings(
+        [{
+          source: "arr_time",
+          target: "arr_time",
+          confidence: 0.99,
+          source_type: "INTEGER",
+          target_type: dest,
+          fidelity: "preserve",
+          requires_review: false,
+          transform: "none",
+        }],
+        [],
+        ["arr_time"],
+        0.85,
+        { arr_time: dest },
+      );
+      assert.equal(editable[0].approved, false, dest);
+      assert.equal(editable[0].requiresReview, false, dest);
+      assert.equal(needsMappingReview(editable[0], 0.85), false, dest);
+      const wire = buildPreflightMappings([], editable);
+      assert.equal(wire[0].requires_review, false, dest);
+      assert.equal(wire[0].user_override, false, dest);
+      assert.equal(wire[0].source_type, "INTEGER", dest);
+    }
   });
 
   it("does not treat pending dest schema as create-new Widen", () => {
