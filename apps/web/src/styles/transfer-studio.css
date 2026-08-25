@@ -4286,12 +4286,12 @@ th.df2-type-string .df2-type-badge {
 }
 
 
-@media (max-width: 1280px) {
+@media (max-width: 1100px) {
   .df2-source-step .df2-transfer-step-split {
     grid-template-columns: 1fr;
   }
 
-  /* Preview grows with the 10-row floor; body scrolls ? do not cap at 36vh */
+  /* Preview grows with the 10-row floor; body scrolls — do not cap at 36vh */
   .df2-source-step .df2-transfer-step-secondary {
     max-height: none;
   }
@@ -10040,7 +10040,7 @@ button.df2-vd-assist-toggle:focus-visible {
   min-height: 28px;
 }
 
-/* ?1280: stack source, hide intel, keep 10-row floors */
+/* ≤1280: Map intel aside hides; Source stays 50/50 until 1100 */
 @media (max-width: 1280px) {
   .df2-page-transfer-studio {
     --df-preview-row-h: 30px;
@@ -10065,58 +10065,6 @@ button.df2-vd-assist-toggle:focus-visible {
 
   .df2-map-footer {
     flex-wrap: wrap;
-  }
-
-  .df2-source-step .df2-transfer-step-split {
-    /* Flex column stack ? CSS grid was crushing the primary row to ~14px */
-    display: flex !important;
-    flex-direction: column !important;
-    grid-template-columns: none !important;
-    grid-template-rows: none !important;
-    gap: 10px !important;
-    flex: 0 0 auto !important;
-    height: auto !important;
-    min-height: 0 !important;
-    align-items: stretch !important;
-  }
-
-  .df2-source-step .df2-transfer-step-primary {
-    display: flex !important;
-    flex-direction: column !important;
-    height: auto !important;
-    max-height: none !important;
-    min-height: 0 !important;
-    align-self: stretch !important;
-    overflow-x: hidden !important;
-    overflow-y: visible !important;
-    flex: 0 0 auto !important;
-  }
-
-  .df2-source-step .df2-transfer-step-secondary {
-    border-left: none !important;
-    padding-left: 0 !important;
-    border-top: 1px solid #f1f5f9;
-    padding-top: 10px;
-    /* Kill older 36vh cap that fought the 10-row floor and collapsed primary */
-    max-height: none !important;
-    min-height: var(--df-preview-card-min);
-    height: auto !important;
-    overflow: visible !important;
-    align-self: stretch !important;
-    flex: 0 0 auto !important;
-  }
-
-  .df2-source-step .df2-transfer-step-secondary > .df2-structure-preview,
-  .df2-source-step .df2-transfer-step-secondary > .df2-source-aside {
-    height: auto !important;
-    max-height: none !important;
-    min-height: var(--df-preview-card-min) !important;
-    flex: 1 1 auto !important;
-  }
-
-  .df2-source-step.df2-transfer-step-viewport > .df2-card-body {
-    overflow-x: hidden !important;
-    overflow-y: auto !important;
   }
 
   .df2-page-transfer-studio .df2-source-kind-tile {
@@ -10988,7 +10936,7 @@ button.df2-vd-assist-toggle:focus-visible {
   flex: 1 1 auto !important;
 }
 
-.df2-page-transfer-studio .df2-source-step .df2-transfer-step-split {
+.df2-app .df2-page-transfer-studio .df2-source-step .df2-transfer-step-split {
   display: grid !important;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) !important;
   grid-template-rows: auto !important;
@@ -11034,7 +10982,7 @@ button.df2-vd-assist-toggle:focus-visible {
 }
 
 @media (max-width: 1100px) {
-  .df2-page-transfer-studio .df2-source-step .df2-transfer-step-split {
+  .df2-app .df2-page-transfer-studio .df2-source-step .df2-transfer-step-split {
     grid-template-columns: minmax(0, 1fr) !important;
   }
 

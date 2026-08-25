@@ -353,12 +353,12 @@ describe("Transfer Studio chrome contracts", () => {
     const lock = css.slice(css.lastIndexOf("Studio source / destination — one owner"));
     assert.match(
       lock,
-      /\.df2-page-transfer-studio \.df2-source-step \.df2-transfer-step-split \{[\s\S]*grid-template-columns:\s*minmax\(0, 1fr\) minmax\(0, 1fr\)/,
+      /\.df2-app \.df2-page-transfer-studio \.df2-source-step \.df2-transfer-step-split \{[\s\S]*grid-template-columns:\s*minmax\(0, 1fr\) minmax\(0, 1fr\)/,
     );
     assert.match(lock, /@media \(max-width: 1100px\)/);
     assert.doesNotMatch(
-      lock,
-      /@media \(max-width: 1280px\)/,
+      css,
+      /@media \(max-width: 1280px\) \{[\s\S]{0,400}?\.df2-source-step \.df2-transfer-step-split \{[\s\S]{0,80}?grid-template-columns:\s*1fr/,
       "1280 laptop must keep the two-pane grid; stack only at 1100",
     );
     assert.match(
