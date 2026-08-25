@@ -3096,9 +3096,29 @@ export function ValidateDashboard({
                 </span>
               </li>
             ) : null}
-            <li>
+            <li
+              className="df2-vd-hs-item"
+              data-historical-success-measured={honestyControls.historicalSuccess.measured ? "true" : "false"}
+              data-historical-success-has-percent={honestyControls.historicalSuccess.hasPercent ? "true" : "false"}
+            >
               <strong>Historical success</strong>
-              <span>{honestyControls.historicalSuccess.headline}</span>
+              <div
+                className={`df2-vd-hs-metric ${honestyControls.historicalSuccess.measured ? "is-measured" : "is-unmeasured"}`}
+                aria-label="Historical success process metric"
+              >
+                <span className="df2-vd-hs-badge">{honestyControls.historicalSuccess.badge}</span>
+                <span className="df2-vd-hs-headline">{honestyControls.historicalSuccess.headline}</span>
+                {honestyControls.historicalSuccess.measured ? (
+                  <span className="df2-vd-hs-counts">
+                    {honestyControls.historicalSuccess.runsObserved} load
+                    {honestyControls.historicalSuccess.runsObserved === 1 ? "" : "s"}
+                    {" · "}
+                    {honestyControls.historicalSuccess.keptLabel}
+                    {" · "}
+                    {honestyControls.historicalSuccess.rejectedLabel}
+                  </span>
+                ) : null}
+              </div>
             </li>
             <li>
               <strong>Decision Artifact</strong>

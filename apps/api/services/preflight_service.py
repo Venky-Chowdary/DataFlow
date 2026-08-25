@@ -1955,20 +1955,21 @@ def run_file_preflight(
     try:
         from services.data_quality_history import compare_route_to_history
 
+        from services.data_quality_history import resolve_history_endpoints
+
         src_table = (source_table or source_filename or "").strip()
         dst_table = (destination_table or "").strip()
-        src_ep = {
-            "kind": source_kind,
-            "format": source_format or "",
-            "table": src_table,
-            "collection": src_table,
-        }
-        dst_ep = {
-            "kind": "database",
-            "format": destination_db_type or "",
-            "table": dst_table,
-            "collection": dst_table,
-        }
+        src_ep, dst_ep = resolve_history_endpoints(
+            source_kind=source_kind,
+            source_format=source_format or "",
+            source_table=src_table,
+            source_config=source_config,
+            source_connector_id=source_connector_id or "",
+            dest_kind="database",
+            dest_format=destination_db_type or "",
+            dest_table=dst_table,
+            dest_config=destination_config,
+        )
         out["load_history_report"] = compare_route_to_history(
             sample_rows or [],
             src_ep,

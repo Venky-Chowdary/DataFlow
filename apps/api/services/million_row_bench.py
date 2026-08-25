@@ -282,32 +282,63 @@ def run_pg_mysql_volume(
                 f"engine transferred {transferred}, requested {rows}"
             )
 
+    persist_volume_history(
+        pg=pg,
+        mysql=mysql,
+        src_table=src_table,
+        dest_table=dest_table,
+        job_id=job_id,
+        rejected_rows=rejected,
+        row_count=landed,
+    )
+
+    return report
+
+
+def persist_volume_history(
+    *,
+    pg: dict[str, Any],
+    mysql: dict[str, Any],
+    src_table: str,
+    dest_table: str,
+    job_id: str,
+    rejected_rows: int,
+    row_count: int,
+) -> None:
+    """Stamp the volume route into load history so Validate can measure a rate."""
     try:
-        from services.data_quality_history import profile_batch, save_profile
+        from services.data_quality_history import (
+            history_endpoint_from_config,
+            profile_batch,
+            save_profile,
+        )
 
         save_profile(
-            {
-                "kind": "database",
-                "format": "postgresql",
-                "host": pg["host"],
-                "port": pg["port"],
-                "database": pg["dbname"],
-                "table": src_table,
-            },
-            {
-                "kind": "database",
-                "format": "mysql",
-                "host": mysql["host"],
-                "port": mysql["port"],
-                "database": mysql["database"],
-                "table": dest_table,
-            },
+            history_endpoint_from_config(
+                {
+                    "host": pg["host"],
+                    "port": pg["port"],
+                    "database": pg["dbname"],
+                    "schema": "public",
+                },
+                kind="database",
+                format="postgresql",
+                table=src_table,
+            ),
+            history_endpoint_from_config(
+                {
+                    "host": mysql["host"],
+                    "port": mysql["port"],
+                    "database": mysql["database"],
+                },
+                kind="database",
+                format="mysql",
+                table=dest_table,
+            ),
             profile_batch([], dict(COLUMNS)),
             job_id=job_id,
-            rejected_rows=rejected,
-            row_count=landed,
+            rejected_rows=rejected_rows,
+            row_count=row_count,
         )
     except Exception as exc:
         print(f"load-history save_profile skipped: {exc}")
-
-    return report

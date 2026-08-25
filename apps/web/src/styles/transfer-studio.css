@@ -8252,6 +8252,52 @@ th.df2-type-string .df2-type-badge {
   color: #0f172a;
   line-height: 1.4;
 }
+.df2-vd-hs-metric {
+  display: grid;
+  gap: 4px;
+  margin-top: 4px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid #e2e8f0;
+  background: #fff;
+}
+.df2-vd-hs-metric.is-measured {
+  border-color: #a7f3d0;
+  background: #ecfdf5;
+}
+.df2-vd-hs-metric.is-unmeasured {
+  border-color: #e2e8f0;
+  background: #f8fafc;
+}
+.df2-vd-hs-badge {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  min-height: 22px;
+  padding: 0 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+.df2-vd-hs-metric.is-measured .df2-vd-hs-badge {
+  background: #059669;
+  color: #ecfdf5;
+}
+.df2-vd-hs-metric.is-unmeasured .df2-vd-hs-badge {
+  background: #e2e8f0;
+  color: #334155;
+}
+.df2-vd-hs-headline {
+  font-size: 13px;
+  color: #0f172a;
+  line-height: 1.4;
+}
+.df2-vd-hs-counts {
+  font-size: 12px;
+  color: #475569;
+}
 .df2-vd-honesty-toggle {
   display: flex;
   gap: 10px;

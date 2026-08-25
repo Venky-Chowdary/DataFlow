@@ -4,6 +4,7 @@
  * Surfaces what Validate actually proved (sample vs population RI, ConversionClass)
  * so operators never confuse sample gates with migration_proven / RI proven.
  */
+import { buildHistoricalSuccessMetric, type HistoricalSuccessMetric } from "./historicalSuccessMetric.js";
 import type { PreflightResult } from "./types.js";
 
 export interface ReferentialIntegrityHonesty {
@@ -51,12 +52,7 @@ export interface ValidateHonestyControls {
   migrationProven: boolean;
   ddlIdentityHash: string | null;
   /** Module 17 — measured route success or explicitly unmeasured. */
-  historicalSuccess: {
-    measured: boolean;
-    successRate: number | null;
-    runsObserved: number;
-    headline: string;
-  };
+  historicalSuccess: HistoricalSuccessMetric;
   note: string;
 }
 
@@ -178,24 +174,17 @@ export function buildValidateHonestyControls(
   const hsRaw =
     (preflight?.proof_bundle as Record<string, unknown> | undefined)?.historical_success
     ?? (preflight as Record<string, unknown> | null | undefined)?.historical_success;
-  const hs = (hsRaw && typeof hsRaw === "object")
-    ? (hsRaw as {
-      measured?: boolean;
-      success_rate?: number | null;
-      runs_observed?: number;
-    })
-    : undefined;
-  const hsMeasured = Boolean(hs?.measured);
-  const hsRate = typeof hs?.success_rate === "number" ? hs.success_rate : null;
-  const hsRuns = typeof hs?.runs_observed === "number" ? hs.runs_observed : 0;
-  const historicalSuccess = {
-    measured: hsMeasured,
-    successRate: hsMeasured ? hsRate : null,
-    runsObserved: hsRuns,
-    headline: hsMeasured && hsRate != null
-      ? `Historical success measured: ${(hsRate * 100).toFixed(1)}% over ${hsRuns} load(s)`
-      : "Historical success unmeasured — no invented rate",
-  };
+  const historicalSuccess = buildHistoricalSuccessMetric(
+    hsRaw && typeof hsRaw === "object"
+      ? (hsRaw as {
+        measured?: boolean;
+        success_rate?: number | null;
+        runs_observed?: number;
+        rows_written_total?: number;
+        rows_rejected_total?: number;
+      })
+      : undefined,
+  );
 
   return {
     referentialIntegrity: ri,
