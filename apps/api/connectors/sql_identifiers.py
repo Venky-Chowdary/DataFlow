@@ -102,6 +102,94 @@ def quote_column_list(columns: list[str] | None, *, quote_char: str = '"') -> st
     return ", ".join(quote_sql_identifier(c, quote_char) for c in columns)
 
 
+def _unquote_sql_ident(part: str) -> str:
+    """Strip one layer of SQL identifier quotes, including doubled escapes."""
+    raw = (part or "").strip()
+    if len(raw) >= 2:
+        if raw[0] == '"' and raw[-1] == '"':
+            return raw[1:-1].replace('""', '"')
+        if raw[0] == "`" and raw[-1] == "`":
+            return raw[1:-1].replace("``", "`")
+        if raw[0] == "[" and raw[-1] == "]":
+            return raw[1:-1].replace("]]", "]")
+    return raw
+
+
+def _ident_parts(name: str) -> list[str]:
+    """Split ``schema.table`` on dots that are not inside quotes."""
+    parts: list[str] = []
+    buf: list[str] = []
+    quote: str | None = None
+    i = 0
+    n = len(name)
+    while i < n:
+        ch = name[i]
+        if quote is None:
+            if ch in {'"', "`"}:
+                quote = ch
+                buf.append(ch)
+            elif ch == "[":
+                quote = "]"
+                buf.append(ch)
+            elif ch == ".":
+                part = "".join(buf).strip()
+                if part:
+                    parts.append(part)
+                buf = []
+            else:
+                buf.append(ch)
+            i += 1
+            continue
+        buf.append(ch)
+        closer = quote
+        if ch == closer:
+            nxt = name[i + 1] if i + 1 < n else ""
+            if closer == "]" and nxt == "]":
+                buf.append(nxt)
+                i += 2
+                continue
+            if closer in {'"', "`"} and nxt == closer:
+                buf.append(nxt)
+                i += 2
+                continue
+            quote = None
+        i += 1
+    tail = "".join(buf).strip()
+    if tail:
+        parts.append(tail)
+    return parts
+
+
+def split_qualified_table(
+    table: str,
+    schema: str | None = None,
+) -> tuple[str | None, str]:
+    """Return ``(schema, table)`` without double-prefixing a qualified name.
+
+    Studio and schedules often store ``public.case_a_src`` while the connector
+    already has ``schema=public``. Callers that then do
+    ``sa.table(table, schema=schema)`` or ``quote_table_ref(table, schema)``
+    addressed ``public."public.case_a_src"`` — a relation that does not exist —
+    so uniqueness and collision probes failed closed on a table the operator
+    had already chosen.
+
+    A quoted identifier that contains a dot (``"foo.bar"``) is one name and is
+    not split. Unquoted ``schema.table`` (and ``catalog.schema.table``) yields
+    the last segment as the table and the preceding segment as the schema.
+    The table's own qualifier wins over ``schema`` when both are set.
+    """
+    fallback = (schema or "").strip() or None
+    raw = (table or "").strip()
+    if not raw:
+        return fallback, raw
+    parts = _ident_parts(raw)
+    if len(parts) <= 1:
+        return fallback, _unquote_sql_ident(parts[0] if parts else raw)
+    tbl = _unquote_sql_ident(parts[-1])
+    sch = _unquote_sql_ident(parts[-2])
+    return sch or fallback, tbl
+
+
 def quote_table_ref(
     table: str,
     schema: str | None = None,
@@ -116,6 +204,7 @@ def quote_table_ref(
 
     ``dialect``: ansi | postgresql | snowflake | sqlite | duckdb | mysql | bigquery
     """
+    schema, table = split_qualified_table(table, schema)
     dialect = (dialect or "ansi").lower()
     try:
         from services.dialect_profiles import normalize_driver

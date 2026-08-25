@@ -82,14 +82,12 @@ def _sql_existing_parent_keys(
     if not values or not parent_table or not parent_column:
         return []
 
+    from connectors.sql_identifiers import split_qualified_table
+
     engine = _engine(cfg)
-    schema = (cfg.get("schema") or "").strip() or None
-    table_name = parent_table
-    if "." in parent_table and schema is None:
-        parts = parent_table.split(".", 1)
-        schema, table_name = parts[0].strip() or None, parts[1].strip()
-    elif "." in parent_table:
-        table_name = parent_table.split(".", 1)[-1].strip()
+    schema, table_name = split_qualified_table(
+        parent_table, (cfg.get("schema") or "").strip() or None
+    )
 
     tbl = sa.table(table_name, schema=schema)
     col = sa.column(parent_column)

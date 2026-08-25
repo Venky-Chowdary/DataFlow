@@ -133,6 +133,57 @@ def test_live_duplicate_key_probe(
     assert values.get("b") == 2
 
 
+def test_live_pg_qualified_table_name_does_not_double_prefix(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    unique_table: str,
+) -> None:
+    """Studio ``public.t`` + connector schema=public probes ``public.t``, not public.public.t."""
+    from tests.typed_fidelity_helpers import require_ports
+
+    require_ports(5432)
+    _seed_postgresql(unique_table)
+
+    monkeypatch.setenv("DATAFLOW_CONNECTOR_STORE_BACKEND", "file")
+    monkeypatch.setenv("DATAFLOW_CONNECTOR_STORE", str(tmp_path / "connectors.json"))
+
+    from services.connector_store import create_connector
+    from services.source_duplicate_probe import probe_source_duplicate_keys_result
+
+    saved = create_connector(
+        {
+            "name": "PG Qualified Dupes",
+            "type": "postgresql",
+            "role": "source",
+            "host": "localhost",
+            "port": 5432,
+            "database": "dataflow",
+            "username": "dataflow",
+            "password": "dataflow",
+            "schema": "public",
+            "ssl": False,
+        }
+    )
+    result = probe_source_duplicate_keys_result(
+        source_connector_id=saved.id,
+        source_table=f"public.{unique_table}",
+        primary_key="id",
+    )
+    assert result.status == "ran", result.message
+    assert "does not exist" not in (result.message or "").lower()
+    values = {r["value"]: r["count"] for r in result.findings}
+    assert values.get("a") == 2
+    assert values.get("b") == 2
+
+    bare = probe_source_duplicate_keys_result(
+        source_connector_id=saved.id,
+        source_table=unique_table,
+        primary_key="id",
+    )
+    assert bare.status == "ran", bare.message
+    assert {r["value"]: r["count"] for r in bare.findings} == values
+
+
 def test_preflight_blocks_inline_mysql_duplicate_keys(
     tmp_path: Any,
     monkeypatch: pytest.MonkeyPatch,

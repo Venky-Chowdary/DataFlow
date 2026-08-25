@@ -33,16 +33,6 @@ _SQLISH = {
 }
 
 
-def _split_table(name: str, default_schema: str | None) -> tuple[str | None, str]:
-    raw = (name or "").strip()
-    if not raw:
-        return default_schema, ""
-    if "." in raw:
-        schema, table = raw.split(".", 1)
-        return (schema.strip() or None), table.strip()
-    return default_schema, raw
-
-
 def _sql_population_orphan_scan(
     cfg: dict[str, Any],
     *,
@@ -56,9 +46,11 @@ def _sql_population_orphan_scan(
 
     from connectors.generic_sql import _engine
 
+    from connectors.sql_identifiers import split_qualified_table
+
     schema = (cfg.get("schema") or "").strip() or None
-    child_schema, child_name = _split_table(child_table, schema)
-    parent_schema, parent_name = _split_table(parent_table, schema)
+    child_schema, child_name = split_qualified_table(child_table, schema)
+    parent_schema, parent_name = split_qualified_table(parent_table, schema)
     if not child_name or not parent_name or not child_column or not parent_column:
         raise ValueError("incomplete table/column for population orphan scan")
 

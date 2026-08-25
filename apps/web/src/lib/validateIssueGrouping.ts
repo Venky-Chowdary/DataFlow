@@ -144,6 +144,11 @@ export function isFidelityCollapseSignal(
   gateId?: string,
 ): boolean {
   const blob = textBlob(message, details);
+  // A uniqueness-probe error is not a type-path. G9 still says
+  // "integrity failed", which must not become Accept risk on Map.
+  if (/uniqueness probe/i.test(blob) && details?.fidelity_collapse !== true) {
+    return false;
+  }
   if (FIDELITY_RE.test(blob)) return true;
   if (details?.fidelity_collapse === true) return true;
   const framing = asRecord(details?.framing);

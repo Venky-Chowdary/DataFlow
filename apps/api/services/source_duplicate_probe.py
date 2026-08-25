@@ -111,9 +111,18 @@ def _sql_duplicates(
     import sqlalchemy as sa
 
     from connectors.generic_sql import _engine
+    from connectors.sql_identifiers import split_qualified_table
+    from services.sql_object_identity import resolve_object_identity
 
     engine = _engine(cfg)
-    schema = (cfg.get("schema") or "").strip() or None
+    schema, table = split_qualified_table(table, (cfg.get("schema") or "").strip() or None)
+    # Case-folding engines and Studio ``schema.table`` spellings must address
+    # the catalog object, not ``public."public.case_a_src"``.
+    ident = resolve_object_identity(engine, table, schema, columns=pk_columns)
+    if ident.exists:
+        table = sa.sql.quoted_name(ident.table, True)
+        schema = sa.sql.quoted_name(ident.schema, True) if ident.schema else None
+        pk_columns = [ident.columns.get(c, c) for c in pk_columns]
 
     # Build a dialect-agnostic query so SQLAlchemy emits the right LIMIT/TOP/FETCH
     # syntax for SQL Server, Oracle, etc.
