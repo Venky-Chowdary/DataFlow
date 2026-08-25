@@ -107,6 +107,7 @@ def shaped_preflight_image(
         declared_types=declared_types,
         touched=recipe.touched_columns,
         rows=shaped,
+        recipe=recipe,
     )
     return ShapedPreflightImage(
         applied=True,
@@ -138,6 +139,7 @@ def shaped_column_types(
     declared_types: Mapping[str, str],
     touched: frozenset[str],
     rows: Sequence[Mapping[str, Any]],
+    recipe: ShapeRecipe | None = None,
 ) -> tuple[dict[str, str], dict[str, str]]:
     """Types for the transformed image: declared where untouched, re-read where not.
 
@@ -145,8 +147,12 @@ def shaped_column_types(
     sample is weaker evidence than the catalog. A column the recipe wrote (a cast,
     a parse, a derived column) no longer holds the declared carrier, so its type is
     re-read from the transformed values through the same inference every other read
-    path uses.
+    path uses. The recipe's scale ceiling is then applied so Validate and Execute
+    report the same carrier — a column rounded to whole numbers is ``INTEGER``,
+    not a leftover ``DECIMAL(p,s)`` that Map would refuse into an existing INT.
     """
+    from services.shape_apply import apply_shape_type_ceilings
+
     resolved: dict[str, str] = {}
     retyped: dict[str, str] = {}
     needs_inference = [
@@ -170,8 +176,6 @@ def shaped_column_types(
             carrier = str(inferred.get(name) or "").strip()
             if carrier:
                 resolved[name] = carrier
-                if declared_types.get(name, carrier) != carrier:
-                    retyped[name] = carrier
                 continue
             # Nothing to read from (an all-null derived column in this sample):
             # keep the declared carrier if there is one and say nothing more.
@@ -179,4 +183,9 @@ def shaped_column_types(
                 resolved[name] = declared_types[name]
             continue
         resolved[name] = declared_types[name]
+    if recipe is not None:
+        resolved = apply_shape_type_ceilings(resolved, recipe)
+    for name, carrier in resolved.items():
+        if declared_types.get(name, carrier) != carrier:
+            retyped[name] = carrier
     return resolved, retyped

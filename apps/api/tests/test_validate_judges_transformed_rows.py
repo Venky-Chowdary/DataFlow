@@ -97,7 +97,9 @@ def test_a_fractional_value_rounded_by_the_transform_fits_the_integer_column() -
         dest_types={"arr_time": "INT"},
         db="mysql",
     )
+    assert image.column_types["arr_time"] == "INTEGER"
     assert "invalid integer" not in _findings(shaped)
     assert not [
         b for b in shaped.get("blockers") or [] if "integer" in str(b.get("message") or "").casefold()
     ]
+    assert shaped["passed"] is True, _findings(shaped)
