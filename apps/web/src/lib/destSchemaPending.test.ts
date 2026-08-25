@@ -329,6 +329,14 @@ describe("an existing destination column is named in its own engine's DDL", () =
     assert.equal(options.some((o) => o.value === "DATETIME(6)"), true);
     assert.equal(normalizeDestTypeValue("TIMESTAMP_NTZ(6)", "mysql"), "DATETIME(6)");
   });
+
+  it("maps Postgres INT4 onto INTEGER instead of a truncated current chip", () => {
+    const options = destTypeSelectOptions("INT4", "postgresql");
+    assert.equal(options.some((o) => /current/i.test(o.label)), false);
+    assert.equal(options.some((o) => o.value === "INTEGER"), true);
+    assert.equal(normalizeDestTypeValue("INT4", "postgresql"), "INTEGER");
+    assert.equal(normalizeDestTypeValue("INT8", "postgresql"), "BIGINT");
+  });
 });
 
 describe("a measured lossy path still needs a signed contract", () => {
