@@ -406,6 +406,7 @@ describe("Transfer Studio chrome contracts", () => {
     // Rank-19 48px lock must not be the last Dest/Validate footer owner.
     const afterRank19 = studio.slice(studio.lastIndexOf("Rank 19: never clip Studio primary actions"));
     assert.match(afterRank19, /df2-dest-step[\s\S]*max-height:\s*none/);
+    assert.match(afterRank19, /df2-validate-footer[\s\S]*max-height:\s*none/);
     assert.match(studio, /df2-validate-rail-actions/);
   });
 

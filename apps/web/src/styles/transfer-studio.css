@@ -10975,7 +10975,10 @@ button.df2-vd-assist-toggle:focus-visible {
 .df2-page-transfer-studio .df2-dest-step > .df2-card-footer.df2-wizard-footer,
 .df2-page-transfer-studio .df2-dest-step > .df2-wizard-footer,
 .df2-page-transfer-studio .df2-source-step > .df2-card-footer.df2-wizard-footer,
-.df2-page-transfer-studio .df2-source-step > .df2-wizard-footer {
+.df2-page-transfer-studio .df2-source-step > .df2-wizard-footer,
+.df2-page-transfer-studio .df2-validate-step > .df2-card-footer.df2-wizard-footer,
+.df2-page-transfer-studio .df2-validate-step > .df2-wizard-footer,
+.df2-page-transfer-studio .df2-validate-footer {
   max-height: none !important;
   flex-wrap: wrap !important;
   height: auto !important;
