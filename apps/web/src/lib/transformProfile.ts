@@ -109,3 +109,100 @@ export function isNumericText(profile: ShapeColumnProfile): boolean {
   if (profile.logical_type !== "string" && profile.logical_type !== "text") return false;
   return profile.non_blank > 0 && profile.numeric_like === profile.non_blank;
 }
+
+/** DataKitchen-style family — the detail pane changes with this, not with a guess. */
+export type ColumnKitchenFamily = "numeric" | "text" | "datetime" | "boolean" | "empty";
+
+export function columnFamily(profile: ShapeColumnProfile): ColumnKitchenFamily {
+  const type = (profile.logical_type || "").toLowerCase();
+  if (!profile.rows || profile.non_blank === 0) return "empty";
+  if (type === "boolean" || (profile.boolean_like === profile.non_blank && profile.non_blank > 0)) {
+    return "boolean";
+  }
+  if (type === "date" || type === "datetime" || type === "timestamp" || type === "timestamptz" || type === "time") {
+    return "datetime";
+  }
+  if (
+    type === "integer"
+    || type === "decimal"
+    || type === "float"
+    || type === "number"
+    || isNumericText(profile)
+  ) {
+    return "numeric";
+  }
+  return "text";
+}
+
+/** 0–100 score of sampled hygiene — findings shrink the score, they never invent one. */
+export function qualityScore(profile: ShapeColumnProfile): number {
+  if (profile.rows <= 0) return 0;
+  const dirty = columnFindings(profile).reduce((sum, finding) => sum + finding.count, 0);
+  const ratio = Math.min(dirty / profile.rows, 1);
+  return Math.max(0, Math.round((1 - ratio) * 100));
+}
+
+export interface FrequentValue {
+  value: string;
+  count: number;
+}
+
+/** Most common sampled values, longest first — TestGen's frequent-values pane. */
+export function frequentValues(values: unknown[], limit = 8): FrequentValue[] {
+  const counts = new Map<string, number>();
+  for (const raw of values) {
+    if (raw === null || raw === undefined) continue;
+    const text = String(raw).trim();
+    if (!text) continue;
+    counts.set(text, (counts.get(text) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .map(([value, count]) => ({ value, count }))
+    .sort((a, b) => b.count - a.count || a.value.localeCompare(b.value))
+    .slice(0, limit);
+}
+
+export interface HistogramBin {
+  label: string;
+  count: number;
+}
+
+function asFiniteNumber(raw: unknown): number | null {
+  if (typeof raw === "number" && Number.isFinite(raw)) return raw;
+  if (typeof raw === "bigint") return Number(raw);
+  const text = String(raw ?? "").replace(/,/g, "").trim();
+  if (!text) return null;
+  const n = Number(text);
+  return Number.isFinite(n) ? n : null;
+}
+
+/** Equal-width numeric distribution from the values the operator can already see. */
+export function numericHistogram(values: unknown[], bins = 8): HistogramBin[] {
+  const numbers = values.map(asFiniteNumber).filter((n): n is number => n !== null);
+  if (numbers.length === 0) return [];
+  const min = Math.min(...numbers);
+  const max = Math.max(...numbers);
+  if (min === max) {
+    return [{ label: String(min), count: numbers.length }];
+  }
+  const width = (max - min) / bins;
+  const counts = Array.from({ length: bins }, () => 0);
+  for (const n of numbers) {
+    const index = Math.min(bins - 1, Math.max(0, Math.floor((n - min) / width)));
+    counts[index] += 1;
+  }
+  return counts.map((count, index) => {
+    const start = min + width * index;
+    const end = index === bins - 1 ? max : min + width * (index + 1);
+    return {
+      label: `${trimNum(start)}–${trimNum(end)}`,
+      count,
+    };
+  });
+}
+
+function trimNum(n: number): string {
+  if (Number.isInteger(n)) return String(n);
+  const text = n.toFixed(2);
+  return text.replace(/\.?0+$/, "");
+}

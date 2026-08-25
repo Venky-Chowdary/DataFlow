@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { DtIcon } from "../../components/DtIcon";
+import { TransformColumnCatalog } from "../../components/transfer/TransformColumnCatalog";
 import { TransformColumnChart } from "../../components/transfer/TransformColumnChart";
 import { TransformGuidePanel } from "../../components/transfer/TransformGuidePanel";
 import { TransformStepBuilder } from "../../components/transfer/TransformStepBuilder";
@@ -107,6 +108,7 @@ export function TransferTransformStep({
     }
   });
   const [showAllColumns, setShowAllColumns] = useState(false);
+  const [selectedColumn, setSelectedColumn] = useState("");
   const [showBuilder, setShowBuilder] = useState(false);
 
   const rowsKey = useMemo(() => JSON.stringify(sampleRows.slice(0, 200)), [sampleRows]);
@@ -231,10 +233,20 @@ export function TransferTransformStep({
 
   const profiledColumns = profile?.columns ?? [];
   const attention = columnsNeedingAttention(profiledColumns);
-  const chartedColumns = showAllColumns
+  const catalogColumns = showAllColumns || attention === 0
     ? profiledColumns
     : profiledColumns.filter((column) => column.blanks || column.untrimmed || column.inner_whitespace
       || column.non_printable || column.unnormalized_unicode || Object.keys(column.sentinels).length);
+  const visibleColumns = catalogColumns.length ? catalogColumns : profiledColumns;
+  const selectedProfile = visibleColumns.find((column) => column.name === selectedColumn)
+    ?? visibleColumns[0]
+    ?? null;
+  const selectedSuggestion = selectedProfile
+    ? openSuggestions.find((item) => item.step.column === selectedProfile.name) ?? null
+    : null;
+  const selectedSamples = selectedProfile
+    ? sampleRows.map((row) => row[selectedProfile.name])
+    : [];
 
   return (
     <section className="df2-xform" aria-labelledby="xform-title">
@@ -350,25 +362,53 @@ export function TransferTransformStep({
         </div>
       )}
 
-      <div className="df2-xform-grid">
-        <section className="df2-xform-card" aria-labelledby="xform-profile-title">
+      {profiledColumns.length > 0 && (
+        <section className="df2-xform-card df2-xform-kitchen-card" aria-labelledby="xform-profile-title">
           <header className="df2-xform-card-head">
             <h3 id="xform-profile-title">
-              <span className="df2-xform-card-num">1</span> What the sample holds
+              <span className="df2-xform-card-num">1</span> Column catalog
             </h3>
-            {profiledColumns.length > 0 && (
-              <button
-                type="button"
-                className="df2-btn df2-btn-ghost df2-btn-sm"
-                onClick={() => setShowAllColumns((all) => !all)}
-              >
-                {showAllColumns ? "Only columns with findings" : `All ${profiledColumns.length} columns`}
-              </button>
-            )}
+            <button
+              type="button"
+              className="df2-btn df2-btn-ghost df2-btn-sm"
+              onClick={() => setShowAllColumns((all) => !all)}
+            >
+              {showAllColumns || attention === 0
+                ? (attention ? "Only columns with findings" : `All ${profiledColumns.length} columns`)
+                : `All ${profiledColumns.length} columns`}
+            </button>
           </header>
-
           {profile?.sample_notice && <p className="df2-xform-note">{profile.sample_notice}</p>}
+          <div className="df2-xform-kitchen">
+            <TransformColumnCatalog
+              columns={visibleColumns}
+              selected={selectedProfile?.name ?? ""}
+              onSelect={setSelectedColumn}
+            />
+            {selectedProfile ? (
+              <TransformColumnChart
+                profile={selectedProfile}
+                targetType={targetSchema[selectedProfile.name]}
+                sampleValues={selectedSamples}
+                suggestion={selectedSuggestion}
+                canApply={plan.allowed}
+                applyReason={plan.reason}
+                onApplySuggestion={applySuggestion}
+              />
+            ) : (
+              <p className="df2-xform-empty">Select a column to inspect its profile.</p>
+            )}
+          </div>
+        </section>
+      )}
 
+      <div className="df2-xform-grid">
+        <section className="df2-xform-card" aria-labelledby="xform-decisions-title">
+          <header className="df2-xform-card-head">
+            <h3 id="xform-decisions-title">
+              <span className="df2-xform-card-num">1b</span> Suggested repairs
+            </h3>
+          </header>
           {openSuggestions.length > 0 ? (
             <ul className="df2-xform-suggestions">
               {openSuggestions.map((suggestion) => (
@@ -399,18 +439,6 @@ export function TransferTransformStep({
               Nothing in the sample needs a transform. Validate still re-checks the whole population.
             </p>
           ) : null}
-
-          {chartedColumns.length > 0 && (
-            <ul className="df2-xform-cols">
-              {chartedColumns.map((column) => (
-                <TransformColumnChart
-                  key={column.name}
-                  profile={column}
-                  targetType={targetSchema[column.name]}
-                />
-              ))}
-            </ul>
-          )}
         </section>
 
         <section className="df2-xform-card" aria-labelledby="xform-recipe-title">

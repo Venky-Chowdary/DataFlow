@@ -2,10 +2,14 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { ShapeColumnProfile } from "./shape";
 import {
+  columnFamily,
   columnFindings,
   columnsNeedingAttention,
   findingShare,
+  frequentValues,
   isNumericText,
+  numericHistogram,
+  qualityScore,
   readsAsSummary,
 } from "./transformProfile";
 
@@ -76,6 +80,35 @@ test("text that is numeric in every non-blank row is called out", () => {
     false,
   );
   assert.equal(isNumericText(profile({ non_blank: 0, numeric_like: 0 })), false);
+});
+
+test("column family follows the profile, not a stacked guess", () => {
+  assert.equal(columnFamily(profile({ logical_type: "decimal", non_blank: 10 })), "numeric");
+  assert.equal(columnFamily(profile({ logical_type: "string", numeric_like: 100, non_blank: 100 })), "numeric");
+  assert.equal(columnFamily(profile({ logical_type: "date" })), "datetime");
+  assert.equal(columnFamily(profile({ logical_type: "boolean", boolean_like: 100, non_blank: 100 })), "boolean");
+  assert.equal(columnFamily(profile({ logical_type: "string", non_blank: 10 })), "text");
+  assert.equal(columnFamily(profile({ rows: 0, non_blank: 0 })), "empty");
+});
+
+test("quality score shrinks with findings and never exceeds 100", () => {
+  assert.equal(qualityScore(profile({ rows: 100 })), 100);
+  assert.equal(qualityScore(profile({ rows: 100, untrimmed: 25 })), 75);
+  assert.equal(qualityScore(profile({ rows: 0 })), 0);
+});
+
+test("frequent values and numeric histogram are measured from the sample", () => {
+  assert.deepEqual(
+    frequentValues(["NY", "NY", "LA", "NY", "LA", ""]),
+    [
+      { value: "NY", count: 3 },
+      { value: "LA", count: 2 },
+    ],
+  );
+  const bins = numericHistogram([22.6, 21.4, 22.0, 23, 21]);
+  assert.ok(bins.length >= 1);
+  assert.equal(bins.reduce((sum, bin) => sum + bin.count, 0), 5);
+  assert.deepEqual(numericHistogram([10, 10, 10]), [{ label: "10", count: 3 }]);
 });
 
 test("reads-as states scale, length and date ambiguity when they exist", () => {
