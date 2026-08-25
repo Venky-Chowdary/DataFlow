@@ -1568,6 +1568,9 @@ def write_mapped_rows(
                 error=str(exc),
             )
 
+    from connectors.sql_identifiers import split_qualified_table
+
+    schema, table_name = split_qualified_table(table_name, schema or "public")
     schema = schema or "public"
     table_name = sanitize_identifier(table_name, preserve_case=True)
     engine = str(_kwargs.get("engine") or _kwargs.get("db_type") or "postgresql").lower()
