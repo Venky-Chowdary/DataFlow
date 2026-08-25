@@ -744,6 +744,56 @@ def test_g2_pass_includes_probe_method_in_message():
     assert g2["details"]["privilege_probe"]["method"] == "SHOW GRANTS"
 
 
+def test_mysql_privilege_probe_uses_the_caller_tls_posture():
+    """Validate must not demand TLS the writer was not asked to use.
+
+    Local / emulator MySQL answers Error 2026 when the probe forced ssl=True
+    while the transfer connected with ssl=False — CREATE then died as
+    ``Privilege catalog unavailable`` after the write path was already proven.
+    """
+    captured: dict[str, object] = {}
+
+    class _Cur:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def execute(self, *_a, **_k):
+            return None
+
+        def fetchall(self):
+            return [("GRANT ALL PRIVILEGES ON *.* TO 'dataflow'@'%'",)]
+
+    class _Conn:
+        def cursor(self):
+            return _Cur()
+
+        def close(self):
+            return None
+
+    def _fake_get_connection(**kwargs):
+        captured.update(kwargs)
+        return _Conn()
+
+    with patch("connectors.mysql_conn.get_connection", side_effect=_fake_get_connection):
+        result = probe_destination_privileges(
+            "mysql",
+            host="127.0.0.1",
+            port=3306,
+            database="dataflow",
+            username="dataflow",
+            password="dataflow",
+            table="orders",
+            ssl=False,
+        )
+    assert captured.get("ssl") is False
+    assert captured.get("purpose") == "probe"
+    assert result.status == "ok"
+    assert result.can_create_table is True
+
+
 def test_g2_blocks_redshift_staging_denied_via_run_file_preflight():
     from services.preflight_service import run_file_preflight
 

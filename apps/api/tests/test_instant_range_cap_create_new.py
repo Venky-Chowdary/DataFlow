@@ -21,7 +21,10 @@ _API_ROOT = Path(__file__).resolve().parents[1]
 if str(_API_ROOT) not in sys.path:
     sys.path.insert(0, str(_API_ROOT))
 
-from services.create_new_risk_stamp import apply_create_new_risk_stamps  # noqa: E402
+from services.create_new_risk_stamp import (  # noqa: E402
+    apply_create_new_risk_stamps,
+    create_new_risk_locks_review,
+)
 from services.timezone_policy import (  # noqa: E402
     instant_range_would_cap,
     samples_outside_instant_range,
@@ -108,6 +111,8 @@ def test_mapping_keeps_the_instant_carrier_and_asks_for_review_not_a_contract() 
                 "source_type": "TIMESTAMPTZ",
                 "target_type": "TIMESTAMP(6)",
                 "create_new": True,
+                "confidence": 0.95,
+                "assignment_strategy": "identity_passthrough",
             }
         ],
         "mysql",
@@ -116,8 +121,37 @@ def test_mapping_keeps_the_instant_carrier_and_asks_for_review_not_a_contract() 
     row = stamped[0]
     assert row["target_type"].upper().startswith("TIMESTAMP(6)")
     assert _kinds(row["create_new_risks"]) == {"instant_range_cap"}
-    assert row["requires_review"] is True
+    # The chip is the review. A theoretical 2038 ceiling must not drop G4
+    # under the floor — out-of-range rows already quarantine at write.
+    assert row["requires_review"] is False
+    assert float(row.get("confidence") or 0) >= 0.85
+    assert create_new_risk_locks_review(row["create_new_risks"][0]) is False
     # Range is not fidelity: the instant survives, so no lossy verdict and no
     # Risk Contract is demanded of the operator.
     assert str(row.get("fidelity") or "").lower() in {"", "preserve", "lossless"}
     assert not row.get("requires_risk_contract")
+
+
+def test_a_sampled_year_past_2038_still_locks_review() -> None:
+    stamped = apply_create_new_risk_stamps(
+        [
+            {
+                "source": "created_at",
+                "target": "created_at",
+                "source_type": "TIMESTAMPTZ",
+                "target_type": "TIMESTAMP(6)",
+                "create_new": True,
+                "confidence": 0.95,
+                "assignment_strategy": "identity_passthrough",
+            }
+        ],
+        "mysql",
+        source_samples={"created_at": ["2024-01-01T00:00:00Z", "2044-06-01T12:00:00Z"]},
+        dest_table_exists=False,
+    )
+    row = stamped[0]
+    chip = row["create_new_risks"][0]
+    assert chip["severity"] == "block"
+    assert create_new_risk_locks_review(chip) is True
+    assert row["requires_review"] is True
+    assert float(row.get("confidence") or 1) < 0.85
