@@ -485,7 +485,8 @@ def test_g9_uniqueness_probe_error_is_not_fidelity_collapse_root():
     assert "fidelity_collapse" not in kinds, kinds
     assert "uniqueness_probe_unavailable" in kinds, kinds
     probe = next(r for r in roots if r.kind == "uniqueness_probe_unavailable")
-    assert "Accept risk" not in probe.recommended_fix
+    assert "remap" not in probe.recommended_fix.lower()
+    assert "Risk Contract" not in probe.recommended_fix
     assert probe.as_operator_blocker()["guidance"]["suggested_actions"][0]["kind"] == (
         "recheck_source"
     )

@@ -20,9 +20,9 @@ def unique_table() -> str:
 def _seed_mysql(table: str) -> None:
     pymysql = pytest.importorskip("pymysql")
     conn = pymysql.connect(
-        host="localhost",
+        host="127.0.0.1",
         port=3306,
-        user="root",
+        user="dataflow",
         password="dataflow",
         database="dataflow",
     )
@@ -73,10 +73,10 @@ def _seed_postgresql(table: str) -> None:
                 "name": "MySQL Dupes Live",
                 "type": "mysql",
                 "role": "source",
-                "host": "localhost",
+                "host": "127.0.0.1",
                 "port": 3306,
                 "database": "dataflow",
-                "username": "root",
+                "username": "dataflow",
                 "password": "dataflow",
                 "ssl": False,
             },
@@ -204,10 +204,10 @@ def test_preflight_blocks_inline_mysql_duplicate_keys(
     source_config = {
         "kind": "database",
         "format": "mysql",
-        "host": "localhost",
+        "host": "127.0.0.1",
         "port": 3306,
         "database": "dataflow",
-        "username": "root",
+        "username": "dataflow",
         "password": "dataflow",
         "ssl": False,
         "table": unique_table,
