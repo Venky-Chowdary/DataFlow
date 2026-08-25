@@ -1,6 +1,7 @@
 import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { DtIcon } from "../DtIcon";
+import { filterObjectNames } from "./objectNameFilter";
 
 interface ObjectNameComboboxProps {
   id: string;
@@ -44,19 +45,7 @@ export function ObjectNameCombobox({
     maxHeight: number;
   } | null>(null);
 
-  const filtered = useMemo(() => {
-    const q = value.trim().toLowerCase();
-    if (!q) return options.slice(0, 200);
-    const starts: string[] = [];
-    const contains: string[] = [];
-    for (const name of options) {
-      const n = name.toLowerCase();
-      if (n === q) continue;
-      if (n.startsWith(q)) starts.push(name);
-      else if (n.includes(q)) contains.push(name);
-    }
-    return [...starts, ...contains].slice(0, 200);
-  }, [options, value]);
+  const filtered = useMemo(() => filterObjectNames(options, value), [options, value]);
 
   const exactMatch = useMemo(() => {
     const q = value.trim().toLowerCase();
@@ -180,7 +169,9 @@ export function ObjectNameCombobox({
                       onClick={() => pick(name)}
                     >
                       <span className="df2-object-combobox-option-name">{name}</span>
-                      <span className="df2-object-combobox-option-meta">existing</span>
+                      <span className="df2-object-combobox-option-meta">
+                        {name.trim().toLowerCase() === value.trim().toLowerCase() ? "selected" : "existing"}
+                      </span>
                     </button>
                   </li>
                 ))}
