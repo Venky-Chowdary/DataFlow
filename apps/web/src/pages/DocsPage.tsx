@@ -511,7 +511,7 @@ export function DocsPage() {
                 <strong>Connectors</strong> — add or test sources/destinations; watch Test passed vs failed.
               </li>
               <li>
-                <strong>Transfer Studio</strong> — Source → Destination → Map → Validate → Run.
+                <strong>Transfer Studio</strong> — Source → Destination → Transform → Map → Validate → Run.
               </li>
               <li>
                 <strong>Job Theater</strong> — open the job and verify reconcile / row fidelity.

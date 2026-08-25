@@ -4,6 +4,7 @@ import { DtIcon } from "../DtIcon";
 import { Button } from "../ui/Button";
 import type { PreflightResult } from "../../lib/types";
 import { buildDisplayBlockers, buildExecutiveSummary } from "../../lib/validateIssueGrouping";
+import { resolveValidateStudioPrimary } from "../../lib/validateStudioPrimary";
 
 interface ValidateActionsRailProps {
   preflight: PreflightResult | null;
@@ -81,6 +82,19 @@ export function ValidateActionsRail({
     ?? (preflight ? "review" : "pending");
   const reviewGrade = Boolean(passed && decision === "review");
   const executeDisabled = transferring || !passed || reviewGrade || executeBlocked;
+  const studioPrimary = resolveValidateStudioPrimary({
+    preflight,
+    preflighting,
+    transferring,
+    mappingReviewCount,
+    riskAckPendingCount,
+    transferLaunch,
+    executeBlocked,
+    hasPrimaryFix: Boolean(onPrimaryFix && primaryFixLabel),
+    primaryFixLabel,
+    hasHoldOut: Boolean(onHoldOutRows),
+  });
+  const isPrimary = (kind: typeof studioPrimary.kind) => studioPrimary.kind === kind;
   const executiveSummary = useMemo(() => buildExecutiveSummary(preflight), [preflight]);
   const displayBlockers = useMemo(
     () => (preflight ? buildDisplayBlockers(preflight) : []),
@@ -148,12 +162,13 @@ export function ValidateActionsRail({
           )}
         </div>
 
-        <div className="df2-validate-footer-actions">
+        <div className="df2-validate-footer-actions" data-studio-primary-kind={studioPrimary.kind}>
           {transferLaunch ? (
             <Button
               variant="primary"
               onClick={onOpenJobTheater}
               leadingIcon={<DtIcon name="activity" size={14} />}
+              data-studio-primary="true"
             >
               Open live progress
             </Button>
@@ -163,10 +178,11 @@ export function ValidateActionsRail({
                   source, destination or mappings move, so re-running the same
                   governed gates must not require a trip back through Map. */}
               <Button
-                variant={!preflight ? "primary" : "ghost"}
+                variant={isPrimary("run_preflight") ? "primary" : "ghost"}
                 onClick={onRunPreflight}
                 loading={preflighting}
                 leadingIcon={<DtIcon name="gate" size={16} />}
+                data-studio-primary={isPrimary("run_preflight") ? "true" : "false"}
                 title={
                   preflight
                     ? "Discard this verdict and re-run the same API gates — acknowledgments and Risk Contracts still apply"
@@ -178,7 +194,7 @@ export function ValidateActionsRail({
 
               {blocked && onPrimaryFix && primaryFixLabel && (
                 <Button
-                  variant="primary"
+                  variant={isPrimary("primary_fix") ? "primary" : "ghost"}
                   onClick={onPrimaryFix}
                   leadingIcon={
                     <DtIcon
@@ -191,10 +207,9 @@ export function ValidateActionsRail({
                     />
                   }
                   title={primaryFixLabel}
+                  data-studio-primary={isPrimary("primary_fix") ? "true" : "false"}
                 >
-                  {primaryFixLabel.length > 28
-                    ? `${primaryFixLabel.slice(0, 26)}…`
-                    : primaryFixLabel}
+                  {primaryFixLabel}
                 </Button>
               )}
 
@@ -202,20 +217,22 @@ export function ValidateActionsRail({
                 <>
                   {onHoldOutRows && (
                     <Button
-                      variant="primary"
+                      variant={isPrimary("hold_out") ? "primary" : "ghost"}
                       onClick={onHoldOutRows}
                       loading={holdingOutRows}
                       loadingLabel="Signing…"
                       leadingIcon={<DtIcon name="shield" size={16} />}
+                      data-studio-primary={isPrimary("hold_out") ? "true" : "false"}
                       title={`Sign a quarantine Risk Contract for ${riskAckPendingCount} column(s) and re-validate here. Failing rows go to quarantine for replay — nothing is written lossily.`}
                     >
                       Run with rows held out
                     </Button>
                   )}
                   <Button
-                    variant={onHoldOutRows ? "ghost" : "primary"}
+                    variant={isPrimary("choose_policy") ? "primary" : "ghost"}
                     onClick={onOpenMapForRisk || onBack}
                     leadingIcon={<DtIcon name="layers" size={16} />}
+                    data-studio-primary={isPrimary("choose_policy") ? "true" : "false"}
                     title="Choose a per-column execution policy on Map — approvals are preserved"
                   >
                     Choose policy on Map
@@ -229,9 +246,10 @@ export function ValidateActionsRail({
                 && riskAckPendingCount === 0
                 && !onPrimaryFix && (
                 <Button
-                  variant="primary"
+                  variant={isPrimary("approve_mappings") ? "primary" : "ghost"}
                   onClick={onApproveMappings}
                   leadingIcon={<DtIcon name="check" size={16} />}
+                  data-studio-primary={isPrimary("approve_mappings") ? "true" : "false"}
                 >
                   Approve mappings
                 </Button>
@@ -239,11 +257,12 @@ export function ValidateActionsRail({
 
               {preflight && (
                 <Button
-                  variant={blocked || reviewGrade ? "ghost" : "primary"}
+                  variant={studioPrimary.executeIsPrimary ? "primary" : "ghost"}
                   onClick={onExecute}
                   loading={transferring}
                   loadingLabel="Starting…"
                   disabled={executeDisabled}
+                  data-studio-primary={studioPrimary.executeIsPrimary ? "true" : "false"}
                   title={
                     executeBlocked
                       ? (executeBlockedReason || "Execution blocked")
@@ -257,11 +276,12 @@ export function ValidateActionsRail({
                   }
                   leadingIcon={<DtIcon name="arrow-right" size={16} />}
                 >
-                  {executeBlocked || !passed
-                    ? "Execute (blocked)"
-                    : reviewGrade
-                      ? "Execute (review)"
-                      : "Execute"}
+                  {studioPrimary.executeLabel
+                    ?? (executeBlocked || !passed
+                      ? "Execute (blocked)"
+                      : reviewGrade
+                        ? "Execute (review)"
+                        : "Execute")}
                 </Button>
               )}
 

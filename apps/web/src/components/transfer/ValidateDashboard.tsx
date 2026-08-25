@@ -36,6 +36,7 @@ import {
 } from "../../lib/validateIssueGrouping";
 import { buildValidateDecisionPath } from "../../lib/validateDecisionPath";
 import { buildValidateHonestyControls, schemaDriftAllowsAcknowledge, schemaDriftCompatibilityHeadline, schemaDriftRequiresRemap } from "../../lib/validateHonestyControls";
+import { dashboardCtaVariant, type ValidateStudioPrimary } from "../../lib/validateStudioPrimary";
 import { isFkOrphanBlockerText, isFkOrphanCtaKind } from "../../lib/fkOrphanCta";
 import {
   callableExtractNote,
@@ -300,6 +301,11 @@ interface ValidateDashboardProps {
    */
   badDataFixOpen?: boolean;
   onBadDataFixOpenChange?: (open: boolean) => void;
+  /**
+   * Rail-owned studio primary. Dashboard remediations stay ghost/secondary
+   * so Validate never shows two teal buttons for the same root cause.
+   */
+  studioPrimary?: ValidateStudioPrimary | null;
 }
 
 /** Plain-language report of what a Validate remediation button just did. */
@@ -755,7 +761,9 @@ export function ValidateDashboard({
   onSeedRepairConsumed,
   badDataFixOpen,
   onBadDataFixOpenChange,
+  studioPrimary: _studioPrimary,
 }: ValidateDashboardProps) {
+  const dashCta = dashboardCtaVariant;
   const [elapsedMs, setElapsedMs] = useState(0);
   const [revealCount, setRevealCount] = useState(0);
   const [explain, setExplain] = useState<ValidationExplanation | null>(null);
@@ -1816,7 +1824,7 @@ export function ValidateDashboard({
           {destShapeCta && (
             <Button
               size="sm"
-              variant="primary"
+              variant={dashCta("dest_shape")}
               leadingIcon={<DtIcon name={ACTION_ICON[destShapeCta.kind] ?? "layers"} size={14} />}
               onClick={() => handleSuggestedAction({
                 kind: destShapeCta.kind,
@@ -1832,7 +1840,11 @@ export function ValidateDashboard({
 
       {/* One root cause → real Button CTAs (no Mapping proof here — evidence lives on Column matches). */}
       {!running && preflight && !preflight.passed && (
-        <div className="df2-vd-assist-actions df2-vd-assist-remediate df2-vd-remediate-bar" aria-label="Suggested fixes">
+        <div
+          className="df2-vd-assist-actions df2-vd-assist-remediate df2-vd-remediate-bar"
+          aria-label="Suggested fixes"
+          data-studio-primary-kind={_studioPrimary?.kind ?? "none"}
+        >
           <span className="df2-vd-assist-actions-title">Suggested fixes</span>
           <div className="df2-vd-fix-actions">
             {duplicateRoot ? (
@@ -1840,7 +1852,7 @@ export function ValidateDashboard({
                 {onOpenIdentitySettings && (
                   <Button
                     size="sm"
-                    variant="primary"
+                    variant={dashCta("identity")}
                     disabled={remediating}
                     leadingIcon={<DtIcon name="settings" size={14} />}
                     onClick={onOpenIdentitySettings}
@@ -1904,7 +1916,7 @@ export function ValidateDashboard({
                 {isPrivilegeBlock && (
                   <Button
                     size="sm"
-                    variant="primary"
+                    variant={dashCta("privilege")}
                     disabled={remediating}
                     leadingIcon={<DtIcon name="shield" size={14} />}
                     onClick={() => {
@@ -1928,7 +1940,7 @@ export function ValidateDashboard({
                 {isConnectionBlock && (
                   <Button
                     size="sm"
-                    variant="primary"
+                    variant={dashCta("connection")}
                     disabled={remediating}
                     leadingIcon={<DtIcon name="server" size={14} />}
                     onClick={() => {
@@ -1957,11 +1969,11 @@ export function ValidateDashboard({
                       <Button
                         key="fidelity-open-map"
                         size="sm"
-                        variant="primary"
+                        variant={dashCta("map_open")}
                         disabled={remediating}
                         leadingIcon={<DtIcon name="layers" size={14} />}
                         onClick={() => onReviewMappings()}
-                        title={fidelityRoot.fix || "Open Map to remap or Accept risk"}
+                        title={fidelityRoot.fix || "Open Map to remap or Accept risk — same destination as the footer"}
                       >
                         Open Map · remap / Accept risk
                       </Button>
@@ -2017,7 +2029,7 @@ export function ValidateDashboard({
                     <Button
                       key={`${col.source}-${col.target}`}
                       size="sm"
-                      variant="primary"
+                      variant={dashCta("remap_column")}
                       disabled={remediating || !onApplyAction}
                       leadingIcon={<DtIcon name="layers" size={14} />}
                       title={`Remap ${col.source} off typed ${col.target} → ${col.toType}`}
@@ -2050,7 +2062,7 @@ export function ValidateDashboard({
                 {showEncodingRemediation && (
                   <Button
                     size="sm"
-                    variant="primary"
+                    variant={dashCta("bad_data")}
                     disabled={remediating}
                     leadingIcon={<DtIcon name="shield" size={14} />}
                     onClick={() => setBadDataOpen(true)}
@@ -2062,7 +2074,7 @@ export function ValidateDashboard({
                   <Button
                     key={`${action.kind}-${action.column ?? ""}-${i}`}
                     size="sm"
-                    variant={i === 0 ? "primary" : "secondary"}
+                    variant={i === 0 ? dashCta("orphan") : "ghost"}
                     disabled={remediating || (!onApplyAction && action.kind !== "fix_orphans")}
                     leadingIcon={<DtIcon name={ACTION_ICON[action.kind] ?? "alert"} size={14} />}
                     onClick={() => handleSuggestedAction(action)}
@@ -2079,10 +2091,11 @@ export function ValidateDashboard({
                   && onReviewMappings && (
                   <Button
                     size="sm"
-                    variant="primary"
+                    variant={dashCta("map_open")}
                     disabled={remediating}
                     leadingIcon={<DtIcon name="layers" size={14} />}
                     onClick={() => onReviewMappings()}
+                    title="Same destination as the footer primary — open Map to fix target DDL or mappings"
                   >
                     Open Map to fix
                   </Button>
@@ -2244,7 +2257,7 @@ export function ValidateDashboard({
               {onRunPreflight && !preflight && !running && (
                 <Button
                   size="sm"
-                  variant="primary"
+                  variant={dashCta("run_preflight")}
                   onClick={onRunPreflight}
                   leadingIcon={<DtIcon name="gate" size={14} />}
                 >
@@ -2458,7 +2471,7 @@ export function ValidateDashboard({
             <div className="df2-vd-assist-head-actions">
               <Button
                 size="sm"
-                variant={explain ? "secondary" : "primary"}
+                variant="secondary"
                 disabled={!preflight || explaining}
                 onClick={(e) => {
                   e.stopPropagation();
@@ -2729,7 +2742,13 @@ export function ValidateDashboard({
                           <Button
                             key={`${action.kind}-${action.column ?? ""}-${i}`}
                             size="sm"
-                            variant={i === 0 ? "primary" : "secondary"}
+                            variant={
+                              action.kind === "review_mappings"
+                              || action.kind === "change_target_type"
+                              || action.kind === "open_mapping"
+                                ? dashCta("map_open")
+                                : dashCta("other")
+                            }
                             onClick={() => handleSuggestedAction(action)}
                             disabled={
                               !onApplyAction
@@ -3172,7 +3191,7 @@ export function ValidateDashboard({
                       {!isFidelity && onOpenIdentitySettings && (
                         <Button
                           size="sm"
-                          variant="primary"
+                          variant={dashCta("identity")}
                           leadingIcon={<DtIcon name="settings" size={14} />}
                           onClick={onOpenIdentitySettings}
                           title={item.fix || duplicateRoot?.fixHint}
@@ -3185,10 +3204,10 @@ export function ValidateDashboard({
                       {isFidelity && onReviewMappings && (
                         <Button
                           size="sm"
-                          variant="primary"
+                          variant={dashCta("map_open")}
                           leadingIcon={<DtIcon name="layers" size={14} />}
                           onClick={() => onReviewMappings()}
-                          title={item.fix || "Open Map to remap or Accept risk"}
+                          title={item.fix || "Open Map to remap or Accept risk — same destination as the footer"}
                         >
                           Open Map · remap / Accept risk
                         </Button>
@@ -3241,7 +3260,7 @@ export function ValidateDashboard({
                           <Button
                             key={`${col.source}-${col.target}`}
                             size="sm"
-                            variant="primary"
+                            variant={dashCta("remap_column")}
                             disabled={!onApplyAction || !col.suggested_target_type}
                             title={
                               col.suggested_fix
@@ -3290,7 +3309,7 @@ export function ValidateDashboard({
                     <div className="df2-vd-blocker-actions df2-vd-fix-actions">
                       <Button
                         size="sm"
-                        variant="primary"
+                        variant={dashCta("acknowledge_pii")}
                         leadingIcon={<DtIcon name="shield" size={14} />}
                         onClick={() => onAcknowledgeCompliance()}
                         disabled={running}
@@ -3313,7 +3332,7 @@ export function ValidateDashboard({
                     <div className="df2-vd-blocker-actions df2-vd-fix-actions">
                       <Button
                         size="sm"
-                        variant="primary"
+                        variant={dashCta("acknowledge_drift")}
                         leadingIcon={<DtIcon name="shield" size={14} />}
                         onClick={() => onAcknowledgeSchemaDrift()}
                         disabled={running}
@@ -3336,11 +3355,11 @@ export function ValidateDashboard({
                     <div className="df2-vd-blocker-actions df2-vd-fix-actions">
                       <Button
                         size="sm"
-                        variant="primary"
+                        variant={dashCta("map_open")}
                         leadingIcon={<DtIcon name="layers" size={14} />}
                         onClick={() => onReviewMappings()}
                         disabled={running}
-                        title="Hard-breaking schema change — remap or re-sign the contract. Acknowledge cannot green this gate."
+                        title="Hard-breaking schema change — remap or re-sign the contract. Same destination as the footer primary."
                       >
                         Open Map to fix breaking change
                       </Button>
@@ -3354,7 +3373,7 @@ export function ValidateDashboard({
                     <div className="df2-vd-blocker-actions df2-vd-fix-actions">
                       <Button
                         size="sm"
-                        variant="primary"
+                        variant={dashCta("acknowledge_fk")}
                         leadingIcon={<DtIcon name="shield" size={14} />}
                         onClick={() => onAcknowledgeFkRisk()}
                         disabled={running}
@@ -3384,7 +3403,7 @@ export function ValidateDashboard({
                           <Button
                             key={`block-${col.source}-${col.target}`}
                             size="sm"
-                            variant="primary"
+                            variant={dashCta("remap_column")}
                             disabled={!onApplyAction}
                             leadingIcon={<DtIcon name="layers" size={14} />}
                             onClick={() =>

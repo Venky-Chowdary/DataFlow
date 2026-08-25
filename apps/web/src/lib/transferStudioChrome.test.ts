@@ -420,4 +420,31 @@ describe("Transfer Studio chrome contracts", () => {
       /@media \(max-width: 1280px\) \{[\s\S]*\.df2-map-intel-aside \{\s*\n\s*display: none !important/,
     );
   });
+
+  it("Validate owns one studio primary — dashboard Map CTAs are not teal", () => {
+    const rail = readFileSync(join(webRoot, "components/transfer/ValidateActionsRail.tsx"), "utf8");
+    const dash = readFileSync(join(webRoot, "components/transfer/ValidateDashboard.tsx"), "utf8");
+    const page = readFileSync(join(webRoot, "pages/TransferPage.tsx"), "utf8");
+    const help = readFileSync(join(webRoot, "lib/helpDocs.ts"), "utf8");
+
+    assert.match(rail, /resolveValidateStudioPrimary/);
+    assert.match(rail, /data-studio-primary/);
+    assert.doesNotMatch(rail, /slice\(0,\s*26\)/);
+    assert.match(dash, /dashboardCtaVariant/);
+    assert.match(dash, /dashCta\("map_open"\)/);
+    assert.doesNotMatch(
+      dash,
+      /variant="primary"[\s\S]{0,200}Open Map to fix|Open Map to fix[\s\S]{0,80}variant="primary"/,
+    );
+    assert.match(page, /studioPrimary=\{studioPrimary\}/);
+    assert.match(page, /promoteBlockedPrimaryFix/);
+    assert.match(
+      help,
+      /Source → Destination → Transform → Map → Validate → Run/,
+    );
+    assert.doesNotMatch(
+      help,
+      /five-step rail: \*\*Src → Dest → Map → Validate → Run\*\*/,
+    );
+  });
 });
