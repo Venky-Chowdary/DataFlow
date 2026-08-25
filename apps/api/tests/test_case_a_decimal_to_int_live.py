@@ -181,7 +181,7 @@ def _execute(request: TransferRequest):
 
 
 def test_case_a_postgresql_existing_int_sum_is_rounded_not_truncated() -> None:
-    require_ports(5432, 27017)
+    require_ports(5432)
     src = uniq("case_a_pg_src")
     dst = uniq("case_a_pg_dst")
     _seed_pg_source(src)
@@ -211,7 +211,7 @@ def test_case_a_postgresql_existing_int_sum_is_rounded_not_truncated() -> None:
 def test_case_a_mysql_existing_int_sum_is_rounded_not_truncated() -> None:
     if not reachable("localhost", 3306):
         pytest.skip("MySQL not reachable on localhost:3306")
-    require_ports(5432, 27017, 3306)
+    require_ports(5432, 3306)
     src = uniq("case_a_my_src")
     dst = uniq("case_a_my_dst")
     _seed_pg_source(src)
