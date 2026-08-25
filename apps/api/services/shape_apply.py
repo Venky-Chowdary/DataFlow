@@ -24,6 +24,7 @@ __all__ = [
     "ShapeError",
     "ShapeRowError",
     "ShapeRunner",
+    "apply_shape_type_ceilings",
     "build_shape_runner",
     "shape_ledger_terms",
     "shaped_schema",
@@ -177,14 +178,57 @@ def _scale_ceilings(recipe: ShapeRecipe) -> dict[str, int]:
 
 
 def _capped_decimal(declared: str, places: int) -> str:
-    """``declared`` with its scale held down to ``places``, integer digits kept."""
-    from services.type_system import parse_numeric_precision_scale
+    """``declared`` with its scale held down to ``places``, integer digits kept.
 
+    A recipe that bounds every value to a whole number (``places=0``) is an
+    integer carrier. Reporting ``DECIMAL(p,0)`` made Map treat an existing
+    ``INT`` / ``int4`` destination as a fidelity collapse for values the writer
+    would accept — Case A: the operator rounded, and the product still refused.
+    Digits beyond signed BIGINT stay ``DECIMAL(p,0)``; that is the same rule
+    ``observe_numeric_samples`` uses for unshaped integers.
+    """
+    from services.type_system import (
+        SIGNED_BIGINT_SAFE_PRECISION,
+        normalize_logical_type,
+        parse_numeric_precision_scale,
+    )
+
+    logical = ""
+    try:
+        logical = normalize_logical_type(declared)
+    except Exception:
+        logical = ""
     precision, scale = parse_numeric_precision_scale(declared)
+    if places == 0 and logical in {"decimal", "integer", "float", "number"}:
+        int_digits = 1
+        if precision is not None:
+            int_digits = max(precision - (scale or 0), 1)
+        if int_digits <= SIGNED_BIGINT_SAFE_PRECISION:
+            return "INTEGER"
+        return f"DECIMAL({int_digits},0)"
     if precision is None or scale is None or scale <= places:
         return declared
     int_digits = max(precision - scale, 1)
     return f"DECIMAL({int_digits + places},{places})"
+
+
+def apply_shape_type_ceilings(
+    column_types: Mapping[str, str],
+    recipe: ShapeRecipe,
+) -> dict[str, str]:
+    """Hold inferred carriers down to the scale the recipe promised.
+
+    Validate and Execute must ask this together. Inferring from the shaped
+    sample alone can still report ``DECIMAL(12,9)`` (or ``DECIMAL(3,0)``) after
+    ``round_number(places=0)``, and Map then blocks an existing INT destination
+    that the write would have filled with whole numbers.
+    """
+    ceilings = _scale_ceilings(recipe)
+    resolved = {str(k): str(v) for k, v in column_types.items()}
+    for column, places in ceilings.items():
+        if column in resolved:
+            resolved[column] = _capped_decimal(resolved[column], places)
+    return resolved
 
 
 def shaped_schema(

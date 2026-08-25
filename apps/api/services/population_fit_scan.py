@@ -224,7 +224,28 @@ def _carrier_for(target_type: str, *, dest_db: str) -> str:
         return CARRIER_STRING
     if integer_storage_bounds(typ, dest_db=dest_db) is not None:
         return CARRIER_INTEGER
+    # DATE / DATETIME / TIME have no width, but they have a parse bound — the
+    # write's ``coerce_sql_temporal``. Leaving them undecidable is how
+    # ``2024-02-31`` passed Validate and died at the driver.
+    from connectors.sql_temporal import sql_type_is_temporal
+
+    if sql_type_is_temporal(typ):
+        return CARRIER_TYPED
     return ""
+
+
+def _calendar_parse_required(transform: str, target_type: str) -> bool:
+    """True when a type name cannot vouch that the cell is a real calendar value.
+
+    A DECIMAL wire parses by construction. A column *named* DATE does not:
+    files infer DATE from a sample, and MySQL can hold zero / invalid dates.
+    Those cells must meet the write's temporal bind, not the declaration.
+    """
+    if transform in {"date", "datetime", "time"}:
+        return True
+    from connectors.sql_temporal import sql_type_is_temporal
+
+    return sql_type_is_temporal(target_type)
 
 
 def _parse_in_doubt(source_type: str) -> bool:
@@ -365,9 +386,12 @@ def bounded_targets(
             or src_lowered.get(source.lower(), "")
         )
         parse_in_doubt = bool(transform) and _parse_in_doubt(declared_source)
-        if carrier == CARRIER_TYPED and not parse_in_doubt:
-            # A typed source wire parses by construction — scanning it would
-            # cost a million parses to prove what the declaration already does.
+        calendar = _calendar_parse_required(transform, target_type)
+        if carrier == CARRIER_TYPED and not parse_in_doubt and not calendar:
+            # A typed numeric/boolean/uuid wire parses by construction —
+            # scanning it would cost a million parses to prove the declaration.
+            # Calendar types are excluded: the declaration does not prove
+            # ``2024-02-31`` is a date.
             safe.append(target)
             continue
         action, exec_pol, risk_id = _resolve_action(m, job_error_policy)
@@ -472,15 +496,65 @@ def _fit_predicate(
     return lambda _value: None
 
 
-def _typed_predicate(transform: str) -> Callable[[Any], str | None]:
+def _temporal_bind_reason(value: Any, target_type: str, dest_db: str) -> str | None:
+    """Ask the write's temporal bind, not a second calendar.
+
+    ``coerce_sql_temporal`` is what the SQL writers call. When it cannot parse
+    it currently *returns the original string* (passthrough). The driver then
+    accepts or rejects per dialect — PostgreSQL errors, MySQL may store a zero
+    date. Validate must not copy that passthrough: a cell the parser could not
+    bind is unfit, named the same way ``apply_transform(..., "date")`` names it.
+    Native ``date`` / ``datetime`` / ``time`` objects already bound.
+    """
+    from datetime import date, datetime, time
+
+    from connectors.sql_temporal import coerce_sql_temporal, sql_base_type
+
+    base = sql_base_type(target_type).lower() or "date"
+    if isinstance(value, (date, datetime, time)):
+        try:
+            coerce_sql_temporal(value, target_type, engine=dest_db)
+        except ValueError as exc:
+            return str(exc)
+        return None
+    try:
+        coerced = coerce_sql_temporal(value, target_type, engine=dest_db)
+    except ValueError as exc:
+        return str(exc)
+    if coerced is value and not isinstance(value, (date, datetime, time)):
+        shown = value if isinstance(value, str) else str(value)
+        return f"Invalid {base}: {shown!r}"
+    return None
+
+
+def _typed_predicate(
+    transform: str,
+    target_type: str,
+    dest_db: str,
+) -> Callable[[Any], str | None] | None:
     """The write's coercion, asked as a question instead of at row 1."""
+    from connectors.sql_temporal import sql_type_is_temporal
     from services.transform_engine import apply_transform
 
+    temporal = sql_type_is_temporal(target_type)
+    if not transform and not temporal:
+        return None
+
     def _typed_reason(value: Any) -> str | None:
-        _out, err = apply_transform(
-            value if isinstance(value, str) else str(value), transform
-        )
-        return err or None
+        # Write order is apply_transform then coerce_sql_temporal on the
+        # converted cell. Binding the raw token after a successful date parse
+        # would refuse ``31/12/2024`` that the write already ISO-normalized.
+        bound = value
+        if transform:
+            out, err = apply_transform(value, transform)
+            if err:
+                return err
+            if out is None:
+                return None
+            bound = out
+        if temporal:
+            return _temporal_bind_reason(bound, target_type, dest_db)
+        return None
 
     return _typed_reason
 
@@ -499,7 +573,7 @@ def fit_predicate_for(
     the carrier's bound. Asking only the second is how a passing Validate was
     followed by a write that refused every row.
     """
-    typed = _typed_predicate(target.transform) if target.transform else None
+    typed = _typed_predicate(target.transform, target.target_type, dest_db)
     if target.carrier == CARRIER_TYPED:
         return typed or (lambda _value: None)
     bound = _fit_predicate(target, dest_db=dest_db, dialect_label=dialect_label)

@@ -142,7 +142,7 @@ export function BenchmarksPage() {
         <div className="df2-page-benchmarks-content">
           <FilterTabs
             items={[
-              { id: "integrity", label: "Integrity ledger", count: metrics?.production_sku_routes },
+              { id: "integrity", label: "Integrity ledger", count: metrics?.production_sku_sold ?? metrics?.production_sku_routes },
               { id: "scale", label: "Scale throughput" },
             ]}
             value={tab}
@@ -184,10 +184,10 @@ export function BenchmarksPage() {
                         sub="Honest alias count over those drivers"
                       />
                       <StatCard
-                        label="PRODUCTION_SKU routes"
-                        value={formatNumber(metrics?.production_sku_routes ?? 0)}
+                        label="SKU sold on this host"
+                        value={formatNumber(metrics?.production_sku_sold ?? 0)}
                         icon="gate"
-                        sub="Routes committed in CI when emulators are up"
+                        sub={`${metrics?.production_sku_sold ?? 0} of ${metrics?.production_sku_routes ?? 0} claimed — validate_transfer + driver present`}
                       />
                       <StatCard
                         label="Fidelity proofs passed"
@@ -253,10 +253,10 @@ export function BenchmarksPage() {
                     </div>
 
                     <div className="df2-page-benchmarks-section">
-                      <h3>PRODUCTION_SKU — committed migration routes</h3>
+                      <h3>PRODUCTION_SKU — sold vs claimed</h3>
                       <p className="df2-page-benchmarks-note">
-                        These {ledger.production_sku.length} routes are the CI-committed set. Capability math
-                        ({metrics?.live_route_combinations ?? "—"} combinations) is larger; SKU is what we prove.
+                        {metrics?.production_sku_note
+                          || `Sold ${metrics?.production_sku_sold ?? 0} of ${ledger.production_sku.length} claimed routes on this host. Catalog tiles are not this list.`}
                       </p>
                       <div className="df2-page-benchmarks-table-wrap">
                         <table className="df2-page-benchmarks-table">
@@ -274,7 +274,24 @@ export function BenchmarksPage() {
                                 <td>{r.route}</td>
                                 <td>{r.source_kind}/{r.source_format}</td>
                                 <td>{r.dest_kind}/{r.dest_format}</td>
-                                <td><span className="df2-badge df2-badge-success">{r.status}</span></td>
+                                <td>
+                                  <span
+                                    className={
+                                      r.status === "sold"
+                                        ? "df2-badge df2-badge-success"
+                                        : r.status === "driver_missing"
+                                          ? "df2-badge df2-badge-warning"
+                                          : "df2-badge df2-badge-error"
+                                    }
+                                    title={r.driver_gap || undefined}
+                                  >
+                                    {r.status === "sold"
+                                      ? "sold now"
+                                      : r.status === "driver_missing"
+                                        ? "driver missing"
+                                        : "refused"}
+                                  </span>
+                                </td>
                               </tr>
                             ))}
                           </tbody>

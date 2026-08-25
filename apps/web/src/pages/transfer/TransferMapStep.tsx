@@ -13,6 +13,7 @@ import type { ColumnFilter } from "../../lib/columnWorkbench";
 import { countByFilter, needsMappingReview } from "../../lib/columnWorkbench";
 import type { EditableMapping } from "../../lib/mapping";
 import { mappingHealthSummary } from "../../lib/mapping";
+import { destCatalogExists } from "../../lib/destSchemaIdentity";
 import { mapBlockerSummary } from "../../lib/mapBlockers";
 import type { UniqueKeySuggestion } from "../../lib/uniqueKeySuggestions";
 
@@ -179,7 +180,7 @@ export function TransferMapStep({
     onIdentityFixConsumed?.();
   }, [initialFocusSource]);
 
-  const destDisplayType = destKindMode === "database" ? destType : "file";
+  const destDisplayType = destType || (destKindMode === "database" ? "" : "file");
 
   const filterCounts = useMemo(
     () => countByFilter(columnMappings, confidenceThreshold),
@@ -204,7 +205,7 @@ export function TransferMapStep({
     () => mergeMappingProof(mappingProof, columnMappings, {
       destColumns,
       destType: destDisplayType,
-      destTableExists: destKindMode === "database" ? destTableExists : false,
+      destTableExists: destCatalogExists(destKindMode, destTableExists),
     }),
     [mappingProof, columnMappings, destColumns, destDisplayType, destKindMode, destTableExists],
   );

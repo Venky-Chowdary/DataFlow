@@ -193,6 +193,25 @@ class TestKeysetBookmarkTieBreak:
         assert decision.resume_fallback is True
         assert decision.pagination_mode == "offset"
 
+    def test_a_resume_without_a_bookmark_holds_the_scan_instead_of_offset(self):
+        """A held snapshot is the 1M-safe continuation when no bookmark exists."""
+        from services.keyset_pagination import decide_keyset_pagination
+
+        decision = decide_keyset_pagination(
+            src_type="postgresql",
+            keyset_order_cols=["id"],
+            keyset_col="id",
+            keyset_tiebreak="",
+            incremental=False,
+            offset=5000,
+            chunk_index=2,
+            cursor_after=None,
+            snapshot_scan=True,
+        )
+        assert decision.use_keyset is False
+        assert decision.resume_fallback is True
+        assert decision.pagination_mode == "scan"
+
     def test_an_incremental_cursor_seeks_with_a_tiebreak(self):
         from services.keyset_pagination import decide_keyset_pagination
 

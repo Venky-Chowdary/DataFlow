@@ -3835,6 +3835,10 @@ export type ProofLedger = {
     catalog_transfer_ready_aliases?: number;
     live_route_combinations?: number;
     production_sku_routes: number;
+    production_sku_sold?: number;
+    production_sku_driver_missing?: number;
+    production_sku_refused?: number;
+    production_sku_note?: string;
     fidelity_proofs_on_disk: number;
     fidelity_proofs_passed: number;
     planned_catalog_entries?: number;
@@ -3846,6 +3850,9 @@ export type ProofLedger = {
     dest_format: string;
     route: string;
     status: string;
+    sold?: boolean;
+    validate_ok?: boolean;
+    driver_gap?: string | null;
   }[];
   recent_proofs: {
     id: string;

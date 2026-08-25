@@ -381,6 +381,33 @@ export function destPhysicalTypeLabel(type: string, destType?: string): string {
   return raw;
 }
 
+/** Postgres catalog aliases that are the same type as a Map select option. */
+function destSelectAlias(upper: string, destType?: string): string | undefined {
+  const d = (destType || "").toLowerCase();
+  if (!(d.includes("postgres") || d === "pg")) return undefined;
+  const aliases: Record<string, string> = {
+    INT: "INTEGER",
+    INT4: "INTEGER",
+    INT8: "BIGINT",
+    INT2: "SMALLINT",
+    FLOAT4: "REAL",
+    FLOAT8: "DOUBLE PRECISION",
+    BOOL: "BOOLEAN",
+  };
+  return aliases[upper];
+}
+
+function matchDestSelectOption<T extends { value: string }>(
+  options: T[],
+  upper: string,
+  destType?: string,
+): T | undefined {
+  return (
+    options.find((o) => o.value.toUpperCase() === upper)
+    || options.find((o) => destSelectAlias(upper, destType) === o.value.toUpperCase())
+  );
+}
+
 /** Options for a select, always including the current value if custom. */
 export function destTypeSelectOptions(
   current?: string,
@@ -392,7 +419,7 @@ export function destTypeSelectOptions(
   if (!cur) return base;
   const physical = destPhysicalTypeLabel(cur, destType);
   const upper = physical.toUpperCase();
-  const matched = base.find((o) => o.value.toUpperCase() === upper);
+  const matched = matchDestSelectOption(base, upper, destType);
   if (matched) return base;
   // Map generic INTEGER → Snowflake NUMBER(38,0) label when selecting for snowflake.
   if ((destType || "").toLowerCase().includes("snowflake")) {
@@ -413,7 +440,7 @@ export function normalizeDestTypeValue(current?: string, destType?: string): str
   const physical = destPhysicalTypeLabel(cur, destType);
   const upper = physical.toUpperCase();
   const options = typeOptionsForDest(destType);
-  const matched = options.find((o) => o.value.toUpperCase() === upper);
+  const matched = matchDestSelectOption(options, upper, destType);
   if (matched) return matched.value;
   if ((destType || "").toLowerCase().includes("snowflake")) {
     // Width-preserving invent — never collapse SMALLINT/INTEGER into NUMBER(38,0).

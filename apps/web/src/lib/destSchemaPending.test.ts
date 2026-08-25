@@ -25,6 +25,7 @@ import {
   normalizeDestTypeValue,
 } from "./typeDisplay";
 import {
+  destCatalogExists,
   destProbeSettled,
   sameColumnList,
   sameSchemaMap,
@@ -216,6 +217,19 @@ describe("marking a row unread erases every destination claim", () => {
   });
 });
 
+describe("a file export has no destination catalog to reload", () => {
+  it("is proven create-new even when the database probe was never run", () => {
+    // Switching dest mode to File export used to leave destTableExists=null,
+    // so Map printed "Destination schema not loaded" on a route with no table.
+    assert.equal(destCatalogExists("file_export", null), false);
+    assert.equal(destCatalogExists("file_export", undefined), false);
+    assert.equal(destCatalogExists("file_export", true), false);
+    assert.equal(destCatalogExists("database", null), null);
+    assert.equal(destCatalogExists("database", true), true);
+    assert.equal(destCatalogExists("database", false), false);
+  });
+});
+
 describe("an unanswered destination probe returns the operator to retry", () => {
   it("waits for a warehouse cold start but not for an OLTP engine", () => {
     // A suspended Snowflake warehouse resumes on the first statement, so a slow
@@ -314,6 +328,14 @@ describe("an existing destination column is named in its own engine's DDL", () =
     );
     assert.equal(options.some((o) => o.value === "DATETIME(6)"), true);
     assert.equal(normalizeDestTypeValue("TIMESTAMP_NTZ(6)", "mysql"), "DATETIME(6)");
+  });
+
+  it("maps Postgres INT4 onto INTEGER instead of a truncated current chip", () => {
+    const options = destTypeSelectOptions("INT4", "postgresql");
+    assert.equal(options.some((o) => /current/i.test(o.label)), false);
+    assert.equal(options.some((o) => o.value === "INTEGER"), true);
+    assert.equal(normalizeDestTypeValue("INT4", "postgresql"), "INTEGER");
+    assert.equal(normalizeDestTypeValue("INT8", "postgresql"), "BIGINT");
   });
 });
 

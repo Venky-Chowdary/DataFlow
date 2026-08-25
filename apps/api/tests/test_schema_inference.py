@@ -17,8 +17,10 @@ class TestInferType:
         "samples,expected",
         [
             (["1", "2", "100"], "INTEGER"),
-            # Sample-aware DECIMAL(p,s) — bare DECIMAL invents (38,15) floors.
-            (["1.5", "2.0", "100.99"], "DECIMAL(8,4)"),
+            # Source inference uses the cells (scale 2). Create-new dest invent
+            # still adds the +2 margin (DECIMAL(8,4)); that must not become the
+            # declared source type.
+            (["1.5", "2.0", "100.99"], "DECIMAL(6,2)"),
             (["true", "false"], "BOOLEAN"),
             (["0", "1"], "INTEGER"),
             (["2024-01-15"], "DATE"),

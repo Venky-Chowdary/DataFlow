@@ -7,10 +7,32 @@ cd apps/api
 BENCH_ROWS=1000000 BENCH_DEST=bench_1m python scripts/bench_pg_to_mysql_million.py
 ```
 
-The harness calls `src.transfer.stream.stream_database_transfer` — the same
-entry point a UI job uses — and always prints the destination `COUNT(*)`
-alongside the timing, so a rows/s number cannot be quoted without its
-row-conservation proof.
+The harness discovers the reachable local pair (`5432`/`3306` first, then
+`5433`/`3307`), uses the memory job store when Mongo is down, and calls
+`src.transfer.stream.stream_database_transfer` — the same entry point a UI job
+uses. It always prints destination `COUNT(*)` and fails closed unless that
+count equals the source with `rejected_rows = 0`.
+
+Conservation algorithm: `services/million_row_proof.py` (`row_conservation`).
+
+## Reproduced on this workspace (2026-08-25)
+
+| Item | Value |
+|------|-------|
+| Host | Linux container, Python 3.12 |
+| Source | PostgreSQL **5432** (`bench_emp_1000000`, 10 columns, PK `employee_id`) |
+| Destination | MySQL **3306**, create-new `bench_1m`, `full_refresh_append` |
+| Job store | **memory** (Mongo 27017 closed) |
+| Rows | **1,000,000** |
+| Elapsed | **170.3 s** |
+| rows/s | **5,871** |
+| dest `COUNT(*)` | **1,000,000** |
+| `rejected_rows` | **0** |
+| Conservation | **OK** |
+| Artifact | `/opt/cursor/artifacts/pg_mysql_1000000_proof.json` |
+
+These numbers replace nothing from the earlier 5433/3307 Mongo run below. They
+are this fixture, this hardware, these ports. Not an SLA.
 
 ## Environment (must be restated with any quote of these numbers)
 

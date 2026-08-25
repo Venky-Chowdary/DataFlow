@@ -146,10 +146,11 @@ def _sql_existing_keys(
     import sqlalchemy as sa
 
     from connectors.generic_sql import _engine
+    from connectors.sql_identifiers import split_qualified_table
     from services.sql_object_identity import resolve_object_identity
 
     engine = _engine(cfg)
-    schema = (cfg.get("schema") or "").strip() or None
+    schema, table = split_qualified_table(table, (cfg.get("schema") or "").strip() or None)
     # Case-folding engines (Oracle/Snowflake/DB2) render an unquoted lower-case
     # name folded, so the probe hit "table does not exist" and degraded to
     # ``error`` — a skip that is not proof of a clean append. Address the object

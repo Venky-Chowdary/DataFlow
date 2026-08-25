@@ -22,7 +22,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from services.atomic_file import write_json_atomic
 from services.platform_config import data_dir
@@ -192,6 +192,100 @@ def quarantine_histogram(rejected_details: list[dict[str, Any]] | None) -> dict[
         key = f"{col}|{reason[:80]}"
         hist[key] += 1
     return dict(hist.most_common(50))
+
+
+def history_endpoint_from_config(
+    config: Mapping[str, Any] | None,
+    *,
+    kind: str,
+    format: str = "",
+    table: str = "",
+) -> dict[str, Any]:
+    """Build the endpoint identity persist and Validate both use.
+
+    Table-only keys collapse distinct hosts onto one history file. Host, port,
+    database, schema, and connection_string come from the live config when
+    present — the same fields ``save_profile`` / Execute persist.
+    """
+    cfg = dict(config or {})
+    extra = cfg.get("extra") if isinstance(cfg.get("extra"), dict) else {}
+    fmt = format or str(
+        cfg.get("format") or cfg.get("type") or cfg.get("db_type") or extra.get("type") or ""
+    )
+    tbl = table or str(cfg.get("table") or cfg.get("collection") or extra.get("table") or "")
+    host = cfg.get("host")
+    if host in (None, ""):
+        host = extra.get("host") or ""
+    port = cfg.get("port")
+    if port in (None, ""):
+        port = extra.get("port") or ""
+    return {
+        "kind": kind or str(cfg.get("kind") or ""),
+        "format": fmt,
+        "host": str(host or ""),
+        "port": str(port or ""),
+        "database": str(cfg.get("database") or extra.get("database") or ""),
+        "schema": str(cfg.get("schema") or extra.get("schema") or ""),
+        "table": tbl,
+        "collection": tbl,
+        "connection_string": str(
+            cfg.get("connection_string") or extra.get("connection_string") or ""
+        ),
+    }
+
+
+def resolve_history_endpoints(
+    *,
+    source_kind: str,
+    source_format: str = "",
+    source_table: str = "",
+    source_config: Mapping[str, Any] | None = None,
+    source_connector_id: str = "",
+    dest_kind: str = "database",
+    dest_format: str = "",
+    dest_table: str = "",
+    dest_config: Mapping[str, Any] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Hydrate persist-grade identities for Validate historical success.
+
+    A thin Studio ``source_config`` (type only) cannot find a load Execute
+    stored with host/port. When a saved connector id is present and the
+    config has no host, resolve the connector so the key matches persist.
+    """
+    src_cfg: dict[str, Any] = dict(source_config or {})
+    if (
+        source_connector_id
+        and not src_cfg.get("host")
+        and not src_cfg.get("connection_string")
+    ):
+        try:
+            from services.connector_probe import endpoint_from_saved_connector
+            from src.transfer.models import endpoint_to_dict
+
+            ep = endpoint_from_saved_connector(
+                source_connector_id,
+                table=source_table or "",
+                collection=source_table or "",
+            )
+            if ep:
+                src_cfg = {**endpoint_to_dict(ep), **src_cfg}
+        except Exception as exc:
+            logging.getLogger(__name__).warning(
+                "history source connector hydrate skipped: %s", exc, exc_info=exc
+            )
+    src = history_endpoint_from_config(
+        src_cfg,
+        kind=source_kind,
+        format=source_format,
+        table=source_table,
+    )
+    dst = history_endpoint_from_config(
+        dest_config,
+        kind=dest_kind or "database",
+        format=dest_format,
+        table=dest_table,
+    )
+    return src, dst
 
 
 def _endpoint_identity(endpoint: dict[str, Any]) -> str:

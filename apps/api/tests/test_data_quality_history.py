@@ -186,6 +186,46 @@ def test_novel_quarantine_pattern_detected(source_dest, tmp_path, monkeypatch) -
     assert report["novel_quarantine_patterns"][0]["column"] == "column_5"
 
 
+def test_history_identity_distinguishes_host_from_table_only() -> None:
+    """Validate must use the same host/port key Execute persist writes.
+
+    Table-only lookup used to miss a 1M load and invent unmeasured.
+    """
+    from services.data_quality_history import history_endpoint_from_config
+    from services.historical_success_contract import measure_route_historical_success
+
+    full_src = history_endpoint_from_config(
+        {"host": "127.0.0.1", "port": 5432, "database": "dataflow", "schema": "public"},
+        kind="database",
+        format="postgresql",
+        table="bench_hist_src",
+    )
+    full_dst = history_endpoint_from_config(
+        {"host": "127.0.0.1", "port": 3306, "database": "dataflow"},
+        kind="database",
+        format="mysql",
+        table="bench_hist_dst",
+    )
+    save_profile(
+        full_src,
+        full_dst,
+        profile_batch([], {"employee_id": "VARCHAR(32)"}),
+        job_id="hist-identity",
+        rejected_rows=0,
+        row_count=1000,
+    )
+    measured = measure_route_historical_success(full_src, full_dst)
+    assert measured["measured"] is True
+    assert measured["success_rate"] == 1.0
+    assert measured["rows_written_total"] == 1000
+
+    table_only_src = {"kind": "database", "format": "postgresql", "table": "bench_hist_src"}
+    table_only_dst = {"kind": "database", "format": "mysql", "table": "bench_hist_dst"}
+    missed = measure_route_historical_success(table_only_src, table_only_dst)
+    assert missed["measured"] is False
+    assert missed["success_rate"] is None
+
+
 def test_quarantine_histogram_stable_keys() -> None:
     h = quarantine_histogram(
         [

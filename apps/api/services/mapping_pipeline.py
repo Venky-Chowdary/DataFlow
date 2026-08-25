@@ -59,7 +59,11 @@ def _canonicalize_schema_rows(schemas: list[dict] | None) -> list[dict] | None:
     out: list[dict] = []
     for s in schemas:
         raw = s.get("native_type") or s.get("inferred_type") or "VARCHAR"
-        carrier = ddl_carrier_type(str(raw))
+        # ddl_carrier_type answers the CREATE question (INTEGER → BIGINT).
+        # Mapping / lossy-check must keep the source's own carrier — otherwise
+        # INTEGER → existing INT4 is billed as a BIGINT narrowing and G4 blocks
+        # a path stamp_mapping_fidelity later grades preserve.
+        carrier = _reported_source_carrier(str(raw), ddl_carrier_type(str(raw)))
         out.append({
             **s,
             "inferred_type": carrier,
@@ -188,6 +192,44 @@ def _reported_source_carrier(declared: str, invent_carrier: str) -> str:
         # The source named its own width (INT4 / SMALLINT / BIGINT) — canonical.
         return invent_carrier
     return strip_identity_qualifier(declared).strip() or invent_carrier
+
+
+def _reconcile_preserve_lossy_review(mappings: list[dict]) -> list[dict]:
+    """A preserve verdict is not a lossy type pair.
+
+    The mapper used to stamp ``requires_review`` from a CREATE-widened
+    INTEGER→BIGINT vs existing INT4, then the fidelity owner graded the
+    reported INTEGER→INT4 path ``preserve``. Validate G4 then blocked
+    first-pass Studio (no ``user_override``) on a pair Approve eligible
+    only existed to click through. Fidelity is the type-path SSOT: drop
+    the leftover lossy review when the verdict says the write is lossless.
+    False-friend / create-new / score-gap review kinds are untouched.
+    """
+    from services.semantic_mapper import REVIEW_KIND_LOSSY, _stamp_review_kinds
+
+    out: list[dict] = []
+    for m in mappings:
+        row = dict(m)
+        fid = str(row.get("fidelity") or "").strip().lower()
+        reason = str(row.get("reasoning") or "")
+        if (
+            fid in {"preserve", "lossless"}
+            and not row.get("type_narrowing")
+            and row.get("requires_review")
+            and "lossy type pair" in reason.lower()
+            and str(row.get("review_kind") or "") in {"", REVIEW_KIND_LOSSY}
+        ):
+            row["requires_review"] = False
+            cleaned = (
+                reason.replace(" · lossy type pair", "")
+                .replace("lossy type pair · ", "")
+                .replace("lossy type pair", "")
+                .strip(" ·")
+            )
+            row["reasoning"] = cleaned
+            row.pop("review_kind", None)
+        out.append(row)
+    return _stamp_review_kinds(out)
 
 
 def classify_format(source_columns: list[str], file_format: str | None = None) -> dict:
@@ -1144,7 +1186,7 @@ def run_mapping_pipeline(
                 row["confidence"] = 0.55
             row.pop("mapping_class", None)
         fixed_pending.append(row)
-    enriched_mappings = fixed_pending
+    enriched_mappings = _reconcile_preserve_lossy_review(fixed_pending)
 
     from services.structural_array import (
         array_strategy_gate_issues,

@@ -4286,12 +4286,12 @@ th.df2-type-string .df2-type-badge {
 }
 
 
-@media (max-width: 1280px) {
+@media (max-width: 1100px) {
   .df2-source-step .df2-transfer-step-split {
     grid-template-columns: 1fr;
   }
 
-  /* Preview grows with the 10-row floor; body scrolls ? do not cap at 36vh */
+  /* Preview grows with the 10-row floor; body scrolls — do not cap at 36vh */
   .df2-source-step .df2-transfer-step-secondary {
     max-height: none;
   }
@@ -8252,6 +8252,52 @@ th.df2-type-string .df2-type-badge {
   color: #0f172a;
   line-height: 1.4;
 }
+.df2-vd-hs-metric {
+  display: grid;
+  gap: 4px;
+  margin-top: 4px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid #e2e8f0;
+  background: #fff;
+}
+.df2-vd-hs-metric.is-measured {
+  border-color: #a7f3d0;
+  background: #ecfdf5;
+}
+.df2-vd-hs-metric.is-unmeasured {
+  border-color: #e2e8f0;
+  background: #f8fafc;
+}
+.df2-vd-hs-badge {
+  display: inline-flex;
+  align-items: center;
+  width: fit-content;
+  min-height: 22px;
+  padding: 0 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+.df2-vd-hs-metric.is-measured .df2-vd-hs-badge {
+  background: #059669;
+  color: #ecfdf5;
+}
+.df2-vd-hs-metric.is-unmeasured .df2-vd-hs-badge {
+  background: #e2e8f0;
+  color: #334155;
+}
+.df2-vd-hs-headline {
+  font-size: 13px;
+  color: #0f172a;
+  line-height: 1.4;
+}
+.df2-vd-hs-counts {
+  font-size: 12px;
+  color: #475569;
+}
 .df2-vd-honesty-toggle {
   display: flex;
   gap: 10px;
@@ -10040,7 +10086,7 @@ button.df2-vd-assist-toggle:focus-visible {
   min-height: 28px;
 }
 
-/* ?1280: stack source, hide intel, keep 10-row floors */
+/* ≤1280: Map intel aside hides; Source stays 50/50 until 1100 */
 @media (max-width: 1280px) {
   .df2-page-transfer-studio {
     --df-preview-row-h: 30px;
@@ -10065,58 +10111,6 @@ button.df2-vd-assist-toggle:focus-visible {
 
   .df2-map-footer {
     flex-wrap: wrap;
-  }
-
-  .df2-source-step .df2-transfer-step-split {
-    /* Flex column stack ? CSS grid was crushing the primary row to ~14px */
-    display: flex !important;
-    flex-direction: column !important;
-    grid-template-columns: none !important;
-    grid-template-rows: none !important;
-    gap: 10px !important;
-    flex: 0 0 auto !important;
-    height: auto !important;
-    min-height: 0 !important;
-    align-items: stretch !important;
-  }
-
-  .df2-source-step .df2-transfer-step-primary {
-    display: flex !important;
-    flex-direction: column !important;
-    height: auto !important;
-    max-height: none !important;
-    min-height: 0 !important;
-    align-self: stretch !important;
-    overflow-x: hidden !important;
-    overflow-y: visible !important;
-    flex: 0 0 auto !important;
-  }
-
-  .df2-source-step .df2-transfer-step-secondary {
-    border-left: none !important;
-    padding-left: 0 !important;
-    border-top: 1px solid #f1f5f9;
-    padding-top: 10px;
-    /* Kill older 36vh cap that fought the 10-row floor and collapsed primary */
-    max-height: none !important;
-    min-height: var(--df-preview-card-min);
-    height: auto !important;
-    overflow: visible !important;
-    align-self: stretch !important;
-    flex: 0 0 auto !important;
-  }
-
-  .df2-source-step .df2-transfer-step-secondary > .df2-structure-preview,
-  .df2-source-step .df2-transfer-step-secondary > .df2-source-aside {
-    height: auto !important;
-    max-height: none !important;
-    min-height: var(--df-preview-card-min) !important;
-    flex: 1 1 auto !important;
-  }
-
-  .df2-source-step.df2-transfer-step-viewport > .df2-card-body {
-    overflow-x: hidden !important;
-    overflow-y: auto !important;
   }
 
   .df2-page-transfer-studio .df2-source-kind-tile {
@@ -10962,5 +10956,109 @@ button.df2-vd-assist-toggle:focus-visible {
 @media (prefers-reduced-motion: reduce) {
   .df2-stage-ticker-name {
     animation: none;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   Studio source / destination — one owner, natural height.
+   Earlier viewport locks (`height:100%` + `overflow:hidden`) crushed the
+   primary pane to ~14px, so a 1280 laptop was forced into a column stack.
+   Content sizes the row; the page scrolls. Stack only below 1100px.
+   --------------------------------------------------------------------------- */
+
+.df2-page-transfer-studio .df2-source-step.df2-transfer-step-viewport,
+.df2-page-transfer-studio .df2-dest-step.df2-transfer-step-viewport {
+  height: auto !important;
+  max-height: none !important;
+  overflow: visible !important;
+  flex: 1 1 auto !important;
+}
+
+.df2-page-transfer-studio .df2-source-step.df2-transfer-step-viewport > .df2-card-body,
+.df2-page-transfer-studio .df2-dest-step.df2-transfer-step-viewport > .df2-card-body {
+  overflow: visible !important;
+  height: auto !important;
+  max-height: none !important;
+  flex: 1 1 auto !important;
+}
+
+.df2-app .df2-page-transfer-studio .df2-source-step .df2-transfer-step-split {
+  display: grid !important;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) !important;
+  grid-template-rows: auto !important;
+  align-items: start !important;
+  flex: 0 0 auto !important;
+  height: auto !important;
+  min-height: 0 !important;
+}
+
+.df2-page-transfer-studio .df2-source-step .df2-transfer-step-primary,
+.df2-page-transfer-studio .df2-source-step .df2-transfer-step-secondary {
+  height: auto !important;
+  max-height: none !important;
+  min-height: 0 !important;
+  overflow: visible !important;
+  flex: 0 0 auto !important;
+}
+
+.df2-page-transfer-studio .df2-source-step .df2-transfer-step-secondary {
+  border-left: 1px solid #f1f5f9 !important;
+  padding-left: 12px !important;
+  border-top: none !important;
+  padding-top: 0 !important;
+}
+
+.df2-page-transfer-studio .df2-dest-step-layout {
+  align-items: start !important;
+  overflow: visible !important;
+  height: auto !important;
+}
+
+.df2-page-transfer-studio .df2-dest-step-left {
+  overflow: visible !important;
+}
+
+.df2-page-transfer-studio .df2-dest-step > .df2-card-footer.df2-wizard-footer,
+.df2-page-transfer-studio .df2-dest-step > .df2-wizard-footer,
+.df2-page-transfer-studio .df2-source-step > .df2-card-footer.df2-wizard-footer,
+.df2-page-transfer-studio .df2-source-step > .df2-wizard-footer,
+.df2-page-transfer-studio .df2-validate-step > .df2-card-footer.df2-wizard-footer,
+.df2-page-transfer-studio .df2-validate-step > .df2-wizard-footer,
+.df2-page-transfer-studio .df2-validate-footer {
+  max-height: none !important;
+  flex-wrap: wrap !important;
+  height: auto !important;
+}
+
+/* Studio primary — label stays readable. Density locks must not collapse it to 32px. */
+.df2-page-transfer-studio .df2-validate-footer-actions .df2-btn[data-studio-primary="true"],
+.df2-page-transfer-studio .df2-validate-footer-actions .df2-validate-studio-primary {
+  min-width: max-content !important;
+  max-width: none !important;
+  width: auto !important;
+  overflow: visible !important;
+  white-space: nowrap !important;
+  flex-shrink: 0 !important;
+}
+.df2-page-transfer-studio .df2-validate-studio-primary-label {
+  display: inline !important;
+  position: static !important;
+  width: auto !important;
+  height: auto !important;
+  overflow: visible !important;
+  clip: auto !important;
+  font-size: inherit !important;
+}
+
+@media (max-width: 1100px) {
+  .df2-app .df2-page-transfer-studio .df2-source-step .df2-transfer-step-split {
+    grid-template-columns: minmax(0, 1fr) !important;
+  }
+
+  .df2-page-transfer-studio .df2-source-step .df2-transfer-step-secondary {
+    border-left: none !important;
+    padding-left: 0 !important;
+    border-top: 1px solid #f1f5f9 !important;
+    padding-top: 10px !important;
   }
 }

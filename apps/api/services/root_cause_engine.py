@@ -82,6 +82,7 @@ _PRIMARY_ACTION_LABELS: dict[str, str] = {
     "encoding_normalization": "Open Map · normalize text",
     "duplicate_identity": "Open Sync · choose identity key",
     "mapping_confidence": "Open Map · confirm mapping",
+    "uniqueness_probe_unavailable": "Re-read the source table",
 }
 
 
@@ -146,7 +147,11 @@ class MigrationRootCause:
                 "examples": self.alternative_fixes[:4],
                 "suggested_actions": [
                     {
-                        "kind": "open_map",
+                        "kind": (
+                            "recheck_source"
+                            if self.kind == "uniqueness_probe_unavailable"
+                            else "open_map"
+                        ),
                         "label": _PRIMARY_ACTION_LABELS.get(
                             self.kind, "Open Map · remap / Risk Contract"
                         ),
@@ -268,6 +273,11 @@ def _is_fidelity_signal(
             return False
         if framing_kind in {"transform_errors"}:
             return False
+        # A uniqueness-probe skip/error is an identity/probe root. The G9
+        # summary still says "integrity failed", which used to trip the
+        # fidelity matcher and send operators to Map with Accept risk.
+        if _is_uniqueness_probe_signal(message, details, gate_id):
+            return False
         msg_l = (message or "").lower()
         # Transform dry-run / empty-url integrity copy — not declared type collapse.
         if (
@@ -302,6 +312,8 @@ def _is_fidelity_signal(
     # "Data integrity failed: id duplicate key…" into fidelity collapse.
     if _is_duplicate_signal(message, details, gate_id):
         return False
+    if _is_uniqueness_probe_signal(message, details, gate_id):
+        return False
     if _FIDELITY_RE.search(blob):
         return True
     if _TYPE_ARROW_RE.search(blob) and gate_id in _FIDELITY_GATE_IDS:
@@ -309,6 +321,35 @@ def _is_fidelity_signal(
     if gate_id in _FIDELITY_GATE_IDS and re.search(
         r"loss|truncat|collapse|\bcast\b|coercion|integrity failed", blob, re.I
     ):
+        return True
+    return False
+
+
+def _is_uniqueness_probe_signal(
+    message: str,
+    details: dict[str, Any] | None,
+    gate_id: str,
+) -> bool:
+    """True when G9 blocked because the uniqueness probe did not run.
+
+    A missing relation (``public."public.case_a_src"``) or a probe ``status=error``
+    is not a type-path fidelity collapse. Operators were sent to Map with
+    Accept risk because the G9 summary still contains ``integrity failed``.
+    """
+    details = details or {}
+    if details.get("fidelity_collapse") is True:
+        return False
+    blob = _blob(message, details).lower()
+    if "uniqueness probe" in blob:
+        return True
+    probe = details.get("source_uniqueness_probe")
+    probe_status = ""
+    if isinstance(probe, dict):
+        probe_status = str(probe.get("status") or "")
+    status = str(
+        details.get("status") or details.get("probe_status") or probe_status or ""
+    ).lower()
+    if status == "error" and "probe" in blob:
         return True
     return False
 
@@ -1257,17 +1298,87 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
             )
         )
 
+    probe_gates = [
+        g
+        for g in gates
+        if g.get("status") == "block"
+        and _is_uniqueness_probe_signal(
+            str(g.get("message") or ""), g.get("details") or {}, str(g.get("id") or "")
+        )
+    ]
+    probe_blockers = [
+        b
+        for b in blockers
+        if _is_uniqueness_probe_signal(
+            str(b.get("message") or ""), b.get("details") or {}, str(b.get("id") or "")
+        )
+    ]
+    if probe_gates or probe_blockers:
+        absorbed = sorted(
+            {
+                *[str(g.get("id")) for g in probe_gates if g.get("id")],
+                *[str(b.get("id")) for b in probe_blockers if b.get("id")],
+            }
+        )
+        if absorbed:
+            roots.append(
+                MigrationRootCause(
+                    root_id=_root_id("uniqueness_probe_unavailable", [], absorbed),
+                    kind="uniqueness_probe_unavailable",
+                    title="Source uniqueness probe could not run",
+                    summary=(
+                        "Validate could not prove source identity uniqueness — "
+                        "the probe did not address the source table"
+                    ),
+                    business_impact=(
+                        "A uniqueness-required sync cannot be approved from the sample "
+                        "alone. This is not a type-path fidelity loss and Accept risk "
+                        "on Map will not make the probe run."
+                    ),
+                    affected_columns=[],
+                    affected_rows_sample=sample_n,
+                    estimated_total_rows=est_n,
+                    risk_level="high",
+                    recommended_fix=(
+                        "Re-run Validate so the uniqueness probe addresses the "
+                        "real source relation. Do not Approve eligible or Accept "
+                        "risk — a missing table is not a type-path."
+                    ),
+                    alternative_fixes=[
+                        "Re-select the source table from the catalog dropdown",
+                        "Switch to append only when the destination has no covering UNIQUE",
+                    ],
+                    recovery_strategy=(
+                        "After the probe runs against the real table, re-Validate. "
+                        "No write occurs until G9 can prove or refuse uniqueness."
+                    ),
+                    expected_runtime_impact="Re-Validate only — no destination rewrite",
+                    quarantine_policy="n/a — the probe must run, rows are not quarantined",
+                    rollback_policy="DOCUMENT_ONLY",
+                    documentation="docs/MIGRATION_ROLLBACK.md",
+                    impacted_gates=absorbed,
+                    absorbed_blocker_ids=absorbed,
+                    severity="block",
+                )
+            )
+
     dup_gates = [
         g
         for g in gates
         if g.get("status") == "block"
         and not _is_destination_collision_signal(g.get("details") or {})
+        and not _is_uniqueness_probe_signal(
+            str(g.get("message") or ""), g.get("details") or {}, str(g.get("id") or "")
+        )
         and _is_duplicate_signal(str(g.get("message") or ""), g.get("details") or {}, str(g.get("id") or ""))
     ]
     dup_blockers = [
         b
         for b in blockers
         if not _is_destination_collision_signal(b.get("details") or {})
+        and not _is_uniqueness_probe_signal(
+            str(b.get("message") or ""), b.get("details") or {}, str(b.get("id") or "")
+        )
         and _is_duplicate_signal(str(b.get("message") or ""), b.get("details") or {}, str(b.get("id") or ""))
     ]
     if len(dup_gates) + len(dup_blockers) >= 1:

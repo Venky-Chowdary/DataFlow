@@ -17,6 +17,7 @@ from connectors.sql_identifiers import (
     quote_table_ref,
     require_safe_identifier,
     sanitize_identifier,
+    split_qualified_table,
 )
 
 
@@ -46,6 +47,26 @@ def test_quote_table_ref_mysql_never_embeds_raw_payload() -> None:
 def test_quote_table_ref_postgresql_schema_table() -> None:
     ref = quote_table_ref("orders", "public", dialect="postgresql")
     assert ref == '"public"."orders"'
+
+
+def test_split_qualified_table_does_not_double_prefix() -> None:
+    """Studio stores ``public.case_a_src`` while the connector has schema=public."""
+    assert split_qualified_table("public.case_a_src", "public") == ("public", "case_a_src")
+    assert split_qualified_table("case_a_src", "public") == ("public", "case_a_src")
+    assert split_qualified_table("other.case_a_src", "public") == ("other", "case_a_src")
+    assert split_qualified_table('"public"."case_a_src"', "public") == ("public", "case_a_src")
+    assert split_qualified_table('"public.case_a_src"', "public") == ("public", "public.case_a_src")
+    assert split_qualified_table("case_a_src", None) == (None, "case_a_src")
+    assert quote_table_ref("public.case_a_src", "public", dialect="postgresql") == (
+        '"public"."case_a_src"'
+    )
+    assert quote_table_ref("case_a_src", "public", dialect="postgresql") == (
+        '"public"."case_a_src"'
+    )
+    compiled_wrong = 'public."public.case_a_src"'
+    assert compiled_wrong not in quote_table_ref(
+        "public.case_a_src", "public", dialect="postgresql"
+    )
 
 
 def test_quote_table_ref_snowflake() -> None:

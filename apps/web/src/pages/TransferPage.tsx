@@ -172,6 +172,7 @@ import {
   shouldSkipAutoDestProbe,
 } from "../lib/destProbeTimeout";
 import {
+  destCatalogExists,
   destProbeSettled,
   sameColumnList,
   sameSchemaMap,
@@ -192,6 +193,12 @@ import {
   isEncodingIntegritySignal,
   rankAndDedupeSuggestedActions,
 } from "../lib/validateIssueGrouping";
+import { schemaDriftRequiresRemap } from "../lib/validateHonestyControls";
+import {
+  promoteBlockedPrimaryFix,
+  resolveValidateStudioPrimary,
+  type PromotedPrimaryFix,
+} from "../lib/validateStudioPrimary";
 import { planFkOrphanSuggestedAction, resolvePopulationOrphanScanFlag } from "../lib/fkOrphanCta";
 import { suggestUniqueKeyCandidates, suggestCompositeUniqueKeyCandidates } from "../lib/uniqueKeySuggestions";
 import { needsMappingReview } from "../lib/columnWorkbench";
@@ -1687,7 +1694,7 @@ export function TransferPage({
       return {
         columns: destColumns,
         schema: destSchemaMap,
-        tableExists: destTableExists,
+        tableExists: destCatalogExists(destKindMode, destTableExists),
         connected: null,
         message: "",
       };
@@ -4381,19 +4388,83 @@ export function TransferPage({
         primaryFixLabel: "Fix bad data…",
       };
     }
+    const applyPromoted = (promoted: PromotedPrimaryFix) => {
+      switch (promoted.destination) {
+        case "map":
+          return { onPrimaryFix: () => setStep(STEP_MAP), primaryFixLabel: promoted.label };
+        case "connectors":
+          return {
+            onPrimaryFix: () => { window.location.hash = "#/connectors"; },
+            primaryFixLabel: promoted.label,
+          };
+        case "ack_drift":
+          return {
+            onPrimaryFix: () => {
+              toast({
+                title: "Submitting schema-drift acknowledgment",
+                message: "Re-running Validate — existing mappings kept for this run (exception recorded).",
+                tone: "info",
+              });
+              void executePreflight(undefined, undefined, {
+                schemaDriftAcknowledged: true,
+                acknowledgmentReason: "Keep existing mappings for this run; ignore new/changed columns",
+              });
+            },
+            primaryFixLabel: promoted.label,
+          };
+        case "ack_pii":
+          return {
+            onPrimaryFix: () => {
+              toast({
+                title: "Submitting PII approval",
+                message: "Re-running Validate with governance approval for detected PII fields.",
+                tone: "info",
+              });
+              void executePreflight(undefined, undefined, {
+                complianceAcknowledged: true,
+                acknowledgmentReason: "Governance policy allows moving detected PII for this transfer",
+              });
+            },
+            primaryFixLabel: promoted.label,
+          };
+        case "ack_fk":
+          return {
+            onPrimaryFix: () => {
+              toast({
+                title: "Submitting FK-risk acknowledgment",
+                message: "Re-running Validate — FK mapping risk accepted for this run (RI not proven).",
+                tone: "info",
+              });
+              void executePreflight(undefined, undefined, {
+                fkRiskAcknowledged: true,
+                acknowledgmentReason: "Accept destination FK mapping risk for this run; population orphans not proven",
+              });
+            },
+            primaryFixLabel: promoted.label,
+          };
+        default:
+          return { onPrimaryFix: undefined, primaryFixLabel: undefined };
+      }
+    };
+
     const g15Cta = destExistsPrimaryCta(shapeContractFromPreflight(preflight));
     const action = rankAndDedupeSuggestedActions(firstBlocker?.suggested_actions)[0]
       || (g15Cta
         ? { kind: g15Cta.kind, label: g15Cta.label, column: g15Cta.column }
         : undefined);
-    if (!action) return { onPrimaryFix: undefined, primaryFixLabel: undefined };
+    if (!action) return applyPromoted(promoteBlockedPrimaryFix(firstBlocker));
 
     switch (action.kind) {
       case "review_mappings":
       case "change_target_type":
       case "add_transform":
-      case "map_column":
-        return { onPrimaryFix: () => setStep(STEP_MAP), primaryFixLabel: action.label };
+      case "map_column": {
+        const details = firstBlocker?.source?.details ?? null;
+        const label = schemaDriftRequiresRemap(details)
+          ? "Open Map to fix breaking change"
+          : action.label;
+        return { onPrimaryFix: () => setStep(STEP_MAP), primaryFixLabel: label };
+      }
       case "confirm_or_remap":
         return {
           onPrimaryFix: () => {
@@ -4494,7 +4565,7 @@ export function TransferPage({
         };
       }
       default:
-        return { onPrimaryFix: undefined, primaryFixLabel: undefined };
+        return applyPromoted(promoteBlockedPrimaryFix(firstBlocker));
     }
   }, [duplicateKeyRoot, openIdentitySettings, preflight, syncMode, toast]);
 
@@ -5141,6 +5212,18 @@ export function TransferPage({
    * place for a plan that was never executed.
    */
   const routeScopedLaunch = runResultDescribesCurrentPlan ? transferLaunch : null;
+  const studioPrimary = resolveValidateStudioPrimary({
+    preflight,
+    preflighting,
+    transferring,
+    mappingReviewCount,
+    riskAckPendingCount,
+    transferLaunch: routeScopedLaunch,
+    executeBlocked: multiStreamUnsupportedMode || Boolean(contractBlockReason),
+    hasPrimaryFix: Boolean(primaryFix.onPrimaryFix && primaryFix.primaryFixLabel),
+    primaryFixLabel: primaryFix.primaryFixLabel,
+    hasHoldOut: true,
+  });
   /**
    * Route the superseded run actually wrote, named from the route it recorded so
    * the sentence matches the label the result dashboard uses for the same run.
@@ -5226,7 +5309,7 @@ export function TransferPage({
       mergeMappingProof(mappingProof, columnMappings, {
         destColumns,
         destType: destKindMode === "file_export" ? exportFormat : destType,
-        destTableExists: destKindMode === "database" ? destTableExists : false,
+        destTableExists: destCatalogExists(destKindMode, destTableExists),
       }),
     [mappingProof, columnMappings, destColumns, destKindMode, exportFormat, destType, destTableExists],
   );
@@ -5549,7 +5632,7 @@ export function TransferPage({
           analysis={analysis}
           destColumns={destColumns}
           destSchemaLoading={destSchemaLoading}
-          destTableExists={destTableExists}
+          destTableExists={destCatalogExists(destKindMode, destTableExists)}
           extraSourceColumns={shapeContract?.extra_source_columns ?? []}
           destShapeHeadline={shapeContract?.headline ?? ""}
           onReloadDestSchema={async () => {
@@ -5569,7 +5652,7 @@ export function TransferPage({
           targetCollection={targetCollection}
           targetDatabase={targetDb}
           destKindMode={destKindMode}
-          destType={destType}
+          destType={destKindMode === "file_export" ? exportFormat : destType}
           sourceLabel={sourceLabel}
           sourceSubtitle={mapSourceSubtitle}
           sourceType={mapSourceType}
@@ -6864,6 +6947,7 @@ export function TransferPage({
             onRunPopulationOrphanScanChange={setRunPopulationOrphanScan}
             repairJobId={activeJobId || seedStudioIntent?.jobId || persistedPlanId || ""}
             seedRepairProposalId={seedRepairProposalId}
+            studioPrimary={studioPrimary}
             onSeedRepairConsumed={() => setSeedRepairProposalId(null)}
             repairMappings={columnMappings.map((m) => ({
               source: m.source,

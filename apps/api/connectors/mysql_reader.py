@@ -168,7 +168,10 @@ def read_table_batch(
     known_total_rows: int | None = None,
     conn: Any | None = None,
 ) -> ReadBatch:
-    del schema
+    from connectors.sql_identifiers import split_qualified_table
+
+    _schema, table = split_qualified_table(table, schema)
+    del schema, _schema
     table_ref = quote_table_ref(table, dialect="mysql")
     safe_table = require_safe_identifier(table, preserve_case=True)
     close_conn = conn is None
@@ -241,8 +244,10 @@ def read_table_scan_batch(
 ) -> ReadBatch:
     """Page one ``SELECT … ORDER BY`` with ``fetchmany`` — no OFFSET, one login."""
     from connectors.sql_snapshot_scan import close_table_scan
+    from connectors.sql_identifiers import split_qualified_table
 
-    del schema
+    _schema, table = split_qualified_table(table, schema)
+    del schema, _schema
     if not scan_state.get("started"):
         table_ref = quote_table_ref(table, dialect="mysql")
         safe_table = require_safe_identifier(table, preserve_case=True)
@@ -337,9 +342,11 @@ def read_table_cursor_batch(
     timestamp ties are not skipped forever. Optional ``conn`` reuses a locked
     CDC snapshot session (LOCK TABLES is connection-scoped).
     """
+    from connectors.sql_identifiers import split_qualified_table
     from services.keyset_pagination import split_cursor_bookmark
 
-    del schema
+    _schema, table = split_qualified_table(table, schema)
+    del schema, _schema
     table_ref = quote_table_ref(table, dialect="mysql")
     cursor_q = quote_sql_identifier(require_safe_identifier(cursor_column, preserve_case=True), "`")
     close_conn = conn is None

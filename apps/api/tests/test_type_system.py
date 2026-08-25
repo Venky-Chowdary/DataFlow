@@ -87,6 +87,22 @@ def test_decimal_precision_propagated_not_truncated():
     assert decimal_scale_would_truncate("NUMBER(38,18)", "mysql") is False
 
 
+def test_studio_file_export_formats_keep_the_source_class():
+    """``json`` / ``csv`` are Studio dest ids, not unknown dialects that invent TEXT."""
+    from services.type_system import destination_is_file_export
+
+    for dest in ("json", "csv", "parquet", "file_export", "jsonl", "xlsx", "s3"):
+        assert destination_is_file_export(dest) is True, dest
+        # Ambiguous INTEGER invents 64-bit on every dest — file export included.
+        assert ddl_type(dest, "INTEGER") == "BIGINT", dest
+        assert ddl_type(dest, "BIGINT") == "BIGINT", dest
+        assert ddl_type(dest, "DATE") == "DATE", dest
+        assert ddl_type(dest, "DECIMAL(10,2)") == "DECIMAL(38,2)", dest
+        assert ddl_type(dest, "VARCHAR(50)") == "VARCHAR", dest
+    assert destination_is_file_export("mysql") is False
+    assert destination_is_file_export("postgresql") is False
+
+
 def test_vector_dimension_propagated_never_invented():
     """VECTOR dims flow like DECIMAL(p,s); bare VECTOR must not invent 1536."""
     from services.type_system import (

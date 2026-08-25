@@ -450,6 +450,48 @@ def test_g9_duplicate_integrity_is_not_fidelity_collapse_root():
     assert any(r.kind == "duplicate_identity" for r in roots)
 
 
+def test_g9_uniqueness_probe_error_is_not_fidelity_collapse_root():
+    """A missing ``public."public.case_a_src"`` is a probe error, not Accept risk."""
+    from services.root_cause_engine import build_root_causes
+
+    msg = (
+        "Data integrity failed: id: source uniqueness probe unavailable "
+        '(Source uniqueness probe failed: (psycopg2.errors.UndefinedTable) '
+        'relation public."public.case_a_src" does not exist) — '
+        "cannot approve uniqueness-required sync on sample alone"
+    )
+    pf = {
+        "gates": [
+            {
+                "id": "g9_data_integrity",
+                "status": "block",
+                "message": msg,
+                "details": {
+                    "status": "error",
+                    "source_uniqueness_probe": {"status": "error", "ran": False},
+                },
+            }
+        ],
+        "blockers": [
+            {
+                "id": "g9_data_integrity",
+                "message": msg,
+                "details": {"status": "error"},
+            }
+        ],
+    }
+    roots = build_root_causes(pf)
+    kinds = [r.kind for r in roots]
+    assert "fidelity_collapse" not in kinds, kinds
+    assert "uniqueness_probe_unavailable" in kinds, kinds
+    probe = next(r for r in roots if r.kind == "uniqueness_probe_unavailable")
+    assert "remap" not in probe.recommended_fix.lower()
+    assert "Risk Contract" not in probe.recommended_fix
+    assert probe.as_operator_blocker()["guidance"]["suggested_actions"][0]["kind"] == (
+        "recheck_source"
+    )
+
+
 def test_risk_unacknowledged_is_not_zero_column_fidelity_collapse():
     """Map→Validate: missing contracts list columns — never '0 columns collapse'."""
     from services.root_cause_engine import build_root_causes

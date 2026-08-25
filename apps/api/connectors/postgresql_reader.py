@@ -10,6 +10,7 @@ from typing import Any
 from connectors.base import ReadBatch
 from connectors.driver_guard import require_driver
 from connectors.postgresql_conn import get_connection
+from connectors.sql_identifiers import split_qualified_table
 
 _api_root = Path(__file__).resolve().parents[1]
 
@@ -33,6 +34,11 @@ def _cell(value: Any) -> str:
     return cell_to_string(value, preserve_sql_null=True)
 
 
+def _bind(schema: str | None, table: str) -> tuple[str, str]:
+    """Studio ``public.t`` plus connector schema=public must address ``public.t``."""
+    sch, tbl = split_qualified_table(table, schema or "public")
+    return sch or "public", tbl
+
 
 def count_table_rows(
     *,
@@ -48,7 +54,7 @@ def count_table_rows(
 ) -> int:
     from psycopg2 import sql
 
-    schema = schema or "public"
+    schema, table = _bind(schema, table)
     conn = get_connection(
         host=host,
         port=port,
@@ -216,7 +222,7 @@ def read_table_batch(
 
     from services.source_snapshot import get_source_snapshot_conn
 
-    schema = schema or "public"
+    schema, table = _bind(schema, table)
     # Prefer an explicit conn, then a transfer-bound RR snapshot (Property 3).
     shared = conn if conn is not None else get_source_snapshot_conn()
     close_conn = shared is None
@@ -307,7 +313,7 @@ def read_table_scan_batch(
     from connectors.sql_snapshot_scan import close_table_scan
     from services.source_snapshot import get_source_snapshot_conn
 
-    schema = schema or "public"
+    schema, table = _bind(schema, table)
     if not scan_state.get("started"):
         shared = get_source_snapshot_conn()
         close_conn = shared is None
@@ -447,7 +453,7 @@ def read_table_cursor_batch(
     from services.keyset_pagination import split_cursor_bookmark
     from services.source_snapshot import get_source_snapshot_conn
 
-    schema = schema or "public"
+    schema, table = _bind(schema, table)
     shared = conn if conn is not None else get_source_snapshot_conn()
     close_conn = shared is None
     if shared is None:

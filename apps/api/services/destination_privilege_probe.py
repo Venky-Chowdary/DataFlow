@@ -306,6 +306,7 @@ def probe_destination_privileges(
                 connection_string=connection_string,
                 table_exists=table_exists,
                 need_update=need_update,
+                ssl=ssl,
             )
         if engine == "snowflake":
             return _probe_snowflake(
@@ -706,10 +707,14 @@ def _probe_mysql(
     connection_string: str,
     table_exists: bool,
     need_update: bool,
+    ssl: bool = False,
 ) -> PrivilegeProbeResult:
     from connectors.mysql_conn import get_connection
 
     db_name = schema or database
+    # Same TLS posture as the writer. Forcing SSL here made Validate refuse
+    # CREATE on a server the write path already used without TLS
+    # (Error 2026: SSL is required but the server doesn't support it).
     conn = get_connection(
         host=host,
         port=port,
@@ -717,7 +722,8 @@ def _probe_mysql(
         username=username,
         password=password,
         connection_string=connection_string,
-        ssl=True,
+        ssl=ssl,
+        purpose="probe",
     )
     try:
         with conn.cursor() as cur:

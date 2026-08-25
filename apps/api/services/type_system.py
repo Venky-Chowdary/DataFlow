@@ -2135,6 +2135,22 @@ FILE_EXPORT_DESTS: Final[frozenset[str]] = frozenset(
         "azure_data_lake",
         "sftp",
         "ftp",
+        # Studio file_export kind + format ids. Leaving these out sent
+        # ``ddl_type("json", "INTEGER")`` through the unknown-dialect TEXT
+        # default, so Map treated a typed export as an unread VARCHAR sink.
+        "file_export",
+        "csv",
+        "tsv",
+        "json",
+        "jsonl",
+        "ndjson",
+        "parquet",
+        "avro",
+        "orc",
+        "xlsx",
+        "xls",
+        "excel",
+        "feather",
     }
 )
 

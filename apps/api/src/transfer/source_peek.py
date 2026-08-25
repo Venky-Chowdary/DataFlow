@@ -86,7 +86,14 @@ def iter_stream_source_column_rows(
     Yields nothing for a reader that pages by opaque cursor rather than offset —
     the caller then reports unmeasured/preview evidence rather than claiming a
     population walk it did not do.
+
+    Snapshot-scan sources (Postgres/MySQL/…) share the write loop's one-SELECT
+    + ``fetchmany`` contract. A 1M-row walk that used OFFSET + COUNT-per-page
+    was O(n²) and could time out, leaving Execute-time population fit
+    unproven while Validate's 100-row sample still looked clean.
     """
+    from connectors.sql_snapshot_scan import SNAPSHOT_SCAN_SOURCES, close_table_scan
+
     from .adapters import resolve_connector_config
     from .connector_capabilities import resolve_driver_type
     from .stream import CHUNK_SIZE, _read_batch, _source_name, _unwrap_read
@@ -105,21 +112,49 @@ def iter_stream_source_column_rows(
         "test" if src_type == "mongodb" else ""
     )
     page = int(chunk_size or CHUNK_SIZE)
+    scan_state: dict[str, Any] | None = (
+        {} if src_type in SNAPSHOT_SCAN_SOURCES else None
+    )
+    total: int | None = None
     offset = 0
     emitted = 0
-    while True:
-        batch, _ = _unwrap_read(
-            _read_batch(src_type, src_cfg, table, wanted, offset, page, database=src_db)
-        )
-        rows = list(batch.rows or [])
-        if not rows:
-            return
-        headers = list(batch.headers or wanted)
-        for row in rows:
-            yield dict(zip(headers, row))
-            emitted += 1
-            if limit > 0 and emitted >= limit:
+    try:
+        while True:
+            extra: dict[str, Any] = {}
+            if scan_state is not None:
+                extra["scan_state"] = scan_state
+            if total is not None:
+                extra["known_total_rows"] = total
+            batch, _ = _unwrap_read(
+                _read_batch(
+                    src_type,
+                    src_cfg,
+                    table,
+                    wanted,
+                    offset,
+                    page,
+                    database=src_db,
+                    **extra,
+                )
+            )
+            rows = list(batch.rows or [])
+            if not rows:
                 return
-        if len(rows) < page:
-            return
-        offset += len(rows)
+            if total is None:
+                reported = getattr(batch, "total_rows", None)
+                if isinstance(reported, int) and reported >= 0:
+                    total = reported
+            headers = list(batch.headers or wanted)
+            for row in rows:
+                yield dict(zip(headers, row))
+                emitted += 1
+                if limit > 0 and emitted >= limit:
+                    return
+            if len(rows) < page:
+                return
+            offset += len(rows)
+            if total is not None and offset >= total:
+                return
+    finally:
+        if scan_state is not None:
+            close_table_scan(scan_state)

@@ -1349,9 +1349,10 @@ def _stream_database_transfer_impl(
     from connectors.sql_snapshot_scan import SNAPSHOT_SCAN_SOURCES as _SNAPSHOT_SCAN_SOURCES
 
     src_scan: dict[str, Any] = {}
-    # A held scan always starts at row 0. Resume must not rewrite the prefix
-    # the first probe would otherwise become. Keyset seek (after introspect)
-    # or OFFSET (legacy checkpoint) owns mid-run continuation.
+    # A held scan always starts at row 0. A resume with a keyset bookmark
+    # seeks and must not open that scan. A resume that only has a row count
+    # keeps the scan: one SELECT, then drain the committed prefix — OFFSET
+    # pages are O(n²) and can skip/duplicate under concurrent writes.
     _is_resume = bool(
         checkpoint
         and (
@@ -1359,11 +1360,13 @@ def _stream_database_transfer_impl(
             or int(getattr(checkpoint, "chunk_index", 0) or 0) > 0
         )
     )
-    _scan_kw: dict[str, Any] = (
-        {"scan_state": src_scan}
-        if src_type in _SNAPSHOT_SCAN_SOURCES and not incremental and not _is_resume
-        else {}
+    _resume_bookmark = (
+        getattr(checkpoint, "cursor_value", None) if checkpoint is not None else None
     )
+    _hold_snapshot = src_type in _SNAPSHOT_SCAN_SOURCES and not incremental and not (
+        _is_resume and _resume_bookmark not in (None, "")
+    )
+    _scan_kw: dict[str, Any] = {"scan_state": src_scan} if _hold_snapshot else {}
     probe, ddb_cursor = _unwrap_read(
         _read_batch(
             src_type, src_cfg, table, None, 0, _batch_limit(0), database=src_db,
@@ -1761,19 +1764,54 @@ def _stream_database_transfer_impl(
     )
     use_keyset = decision.use_keyset
     keyset_order_cols = decision.order_cols
+    _resume_scan_aligned = False
     if decision.resume_fallback:
-        logger.warning(
-            "Resume checkpoint offset=%s chunk_index=%s has no keyset cursor_value — "
-            "falling back to OFFSET pagination to avoid re-reading committed rows.",
-            offset,
-            chunk_idx,
-        )
+        if src_scan.get("started"):
+            logger.warning(
+                "Resume checkpoint offset=%s chunk_index=%s has no keyset cursor_value — "
+                "continuing the snapshot scan past the committed prefix (not OFFSET pages).",
+                offset,
+                chunk_idx,
+            )
+        else:
+            logger.warning(
+                "Resume checkpoint offset=%s chunk_index=%s has no keyset cursor_value — "
+                "falling back to OFFSET pagination to avoid re-reading committed rows.",
+                offset,
+                chunk_idx,
+            )
     pagination_mode = decision.pagination_mode
     if use_keyset and src_scan.get("started"):
         # First page already landed from the snapshot scan; later pages seek.
         from connectors.sql_snapshot_scan import close_table_scan
 
         close_table_scan(src_scan)
+    elif (
+        _is_resume
+        and not use_keyset
+        and src_scan.get("started")
+        and offset > 0
+    ):
+        from connectors.sql_snapshot_scan import align_snapshot_resume
+
+        def _resume_scan_next():
+            nxt, _extra = _unwrap_read(
+                _read_batch(
+                    src_type,
+                    src_cfg,
+                    table,
+                    columns,
+                    offset,
+                    _batch_limit(offset),
+                    database=src_db,
+                    known_total_rows=total_rows,
+                    scan_state=src_scan,
+                )
+            )
+            return nxt
+
+        probe = align_snapshot_resume(probe, offset, _resume_scan_next)
+        _resume_scan_aligned = True
     # Phase F3 — PostgreSQL COPY TO STDOUT bulk export (full refresh, no filter).
     bulk_export_iter = None
     try:
@@ -1788,6 +1826,7 @@ def _stream_database_transfer_impl(
             bulk_export_enabled()
             and bulk_export_implemented(src_type)
             and not incremental
+            and not _is_resume
             and not source_filter
             and not limit
             and not is_callable_source(source)
@@ -2213,7 +2252,17 @@ def _stream_database_transfer_impl(
             batch.rows, batch.headers, cursor_source_col, cursor_pk_source or None
         )
 
-    batch = _filter_batch(_fetch_next_batch(None) if (offset > 0 or chunk_idx > 0) else probe)
+    if use_keyset and (offset > 0 or chunk_idx > 0):
+        # Bookmark seek — the probe was schema-only (or the first page of a
+        # scan we closed). Fetch the first uncommitted page from the key.
+        first_page = _fetch_next_batch(None)
+    elif _resume_scan_aligned:
+        first_page = probe
+    elif offset > 0 or chunk_idx > 0:
+        first_page = _fetch_next_batch(None)
+    else:
+        first_page = probe
+    batch = _filter_batch(first_page)
     batch_quality_enabled = validation_mode in ("strict", "maximum")
     # Identity key for duplicate audit — NEVER reuse the CDC cursor column.
     # Cursor fields (updated_at, id) are not the uniqueness contract; Mongo→Redis
@@ -2422,7 +2471,10 @@ def _stream_database_transfer_impl(
                 batch.rows, batch.headers, cursor_source_col, cursor_pk_source or None
             )
         batch_keyset = None
-        if use_keyset:
+        # Persist a PK bookmark even on a snapshot scan so the next resume
+        # seeks instead of draining the prefix again. Never invent a bookmark
+        # from an arbitrary first column — that skips tied peers.
+        if use_keyset or keyset_order_cols:
             batch_keyset = _raw_page_keyset(batch) or max_keyset_bookmark(
                 batch.rows,
                 batch.headers,
@@ -3076,6 +3128,10 @@ def _stream_database_transfer_impl(
     )
     # Phase F2 — operator-visible pagination honesty (OFFSET cliff vs keyset).
     dest_summary["pagination_mode"] = pagination_mode
+    if decision.resume_fallback:
+        dest_summary["resume_pagination"] = (
+            "snapshot_prefix" if pagination_mode == "scan" else "offset_legacy"
+        )
     if pagination_warning:
         dest_summary["pagination_warning"] = pagination_warning
     elif pagination_mode == "offset":

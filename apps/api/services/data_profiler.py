@@ -196,9 +196,9 @@ def profile_column(name: str, values: list[Any], *, sample_limit: int = 200) -> 
                     pass
             histogram = _histogram(nums)
         # Sample-aware DECIMAL(p,s) / IEEE kind for Map profiling strip.
-        from services.decimal_observe import observe_numeric_samples
+        from services.decimal_observe import observe_source_numeric_samples
 
-        obs = observe_numeric_samples(non_empty)
+        obs = observe_source_numeric_samples(non_empty)
         if obs.get("kind") not in {None, "empty"}:
             stats = {
                 **stats,

@@ -70,6 +70,9 @@ def test_an_ambiguous_integer_source_is_reported_as_itself():
     assert m["source_type"] == "INTEGER"
     assert m.get("fidelity") in {"preserve", None}
     assert not m.get("narrowing")
+    assert not m.get("type_narrowing")
+    assert not m.get("requires_review"), m.get("reasoning")
+    assert "lossy type pair" not in str(m.get("reasoning") or "").lower()
 
 
 def test_a_source_that_named_its_own_width_keeps_the_canonical_spelling():

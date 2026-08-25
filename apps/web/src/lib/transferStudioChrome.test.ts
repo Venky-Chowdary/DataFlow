@@ -347,4 +347,110 @@ describe("Transfer Studio chrome contracts", () => {
     assert.match(card, /df2-btn-label/);
     assert.match(card, /size=\{16\}/);
   });
+
+  it("Source/Dest studio panes share one 50/50 owner and stack only at 1100px", () => {
+    const css = readFileSync(join(webRoot, "styles/transfer-studio.css"), "utf8");
+    const lock = css.slice(css.lastIndexOf("Studio source / destination — one owner"));
+    assert.match(
+      lock,
+      /\.df2-app \.df2-page-transfer-studio \.df2-source-step \.df2-transfer-step-split \{[\s\S]*grid-template-columns:\s*minmax\(0, 1fr\) minmax\(0, 1fr\)/,
+    );
+    assert.match(lock, /@media \(max-width: 1100px\)/);
+    assert.doesNotMatch(
+      css,
+      /@media \(max-width: 1280px\) \{[\s\S]{0,400}?\.df2-source-step \.df2-transfer-step-split \{[\s\S]{0,80}?grid-template-columns:\s*1fr/,
+      "1280 laptop must keep the two-pane grid; stack only at 1100",
+    );
+    assert.match(
+      lock,
+      /\.df2-page-transfer-studio \.df2-dest-step > \.df2-wizard-footer[\s\S]*max-height:\s*none/,
+    );
+  });
+
+  it("every Transfer step owns a visible primary CTA and does not reuse Shape", () => {
+    const constants = readFileSync(join(webRoot, "pages/transfer/studioConstants.ts"), "utf8");
+    const page = readFileSync(join(webRoot, "pages/TransferPage.tsx"), "utf8");
+    const mapStep = readFileSync(join(webRoot, "pages/transfer/TransferMapStep.tsx"), "utf8");
+    const xform = readFileSync(join(webRoot, "pages/transfer/TransferTransformStep.tsx"), "utf8");
+    const rail = readFileSync(join(webRoot, "components/transfer/ValidateActionsRail.tsx"), "utf8");
+
+    assert.match(constants, /label: "Source".*label: "Destination".*label: "Transform".*label: "Map".*label: "Validate".*label: "Run"/s);
+    assert.match(page, /Continue to Destination/);
+    assert.match(page, /Analyze Route/);
+    assert.match(page, /Continue to Transform/);
+    assert.match(page, /← Back to source/);
+    assert.match(xform, /Back to Destination/);
+    assert.match(xform, /Continue without transforming/);
+    assert.match(xform, /Continue with this transform/);
+    assert.match(mapStep, /Continue to Validate →/);
+    assert.match(mapStep, /← Back/);
+    assert.match(rail, /"Execute"/);
+    assert.match(page, /Execute Transfer/);
+    assert.doesNotMatch(page, /Continue to Shape/);
+    // One primary exit per step — dest Analyze is ghost, not a second primary.
+    assert.match(page, /className="df2-btn df2-btn-ghost"[\s\S]{0,500}Analyze Route/);
+    assert.match(page, /className="df2-btn df2-btn-primary"[\s\S]{0,400}Continue to Transform/);
+  });
+
+  it("laptop density does not hide Dest/Transform/Validate primary actions behind 48px", () => {
+    const studio = readFileSync(join(webRoot, "styles/transfer-studio.css"), "utf8");
+    const xform = readFileSync(join(webRoot, "styles/transform-prep.css"), "utf8");
+    const lock = studio.slice(studio.lastIndexOf("Studio source / destination — one owner"));
+    assert.match(lock, /max-height:\s*none !important/);
+    assert.match(
+      studio,
+      /df2-map-step-panel > \.df2-card-footer\.df2-wizard-footer\.df2-map-footer \{[\s\S]*max-height:\s*none/,
+    );
+    assert.match(xform, /\.df2-xform-actions \{/);
+    assert.match(xform, /flex-wrap:\s*wrap/);
+    // Rank-19 48px lock must not be the last Dest/Validate footer owner.
+    const afterRank19 = studio.slice(studio.lastIndexOf("Rank 19: never clip Studio primary actions"));
+    assert.match(afterRank19, /df2-dest-step[\s\S]*max-height:\s*none/);
+    assert.match(afterRank19, /df2-validate-footer[\s\S]*max-height:\s*none/);
+    assert.match(studio, /df2-validate-rail-actions/);
+  });
+
+  it("Transform kitchen stays 5fr/6fr until 1180; Map intel hides only at 1280", () => {
+    const xform = readFileSync(join(webRoot, "styles/transform-prep.css"), "utf8");
+    const studio = readFileSync(join(webRoot, "styles/transfer-studio.css"), "utf8");
+    assert.match(xform, /grid-template-columns: minmax\(0, 5fr\) minmax\(0, 6fr\)/);
+    assert.match(xform, /@media \(max-width: 1180px\) \{\s*\n\s*\.df2-xform-grid \{ grid-template-columns: minmax\(0, 1fr\)/);
+    assert.match(
+      studio,
+      /@media \(max-width: 1280px\) \{[\s\S]*\.df2-map-intel-aside \{\s*\n\s*display: none !important/,
+    );
+  });
+
+  it("Validate owns one studio primary — dashboard Map CTAs are not teal", () => {
+    const rail = readFileSync(join(webRoot, "components/transfer/ValidateActionsRail.tsx"), "utf8");
+    const dash = readFileSync(join(webRoot, "components/transfer/ValidateDashboard.tsx"), "utf8");
+    const page = readFileSync(join(webRoot, "pages/TransferPage.tsx"), "utf8");
+    const help = readFileSync(join(webRoot, "lib/helpDocs.ts"), "utf8");
+
+    assert.match(rail, /resolveValidateStudioPrimary/);
+    assert.match(rail, /data-studio-primary/);
+    assert.match(rail, /df2-validate-studio-primary-label/);
+    assert.doesNotMatch(rail, /slice\(0,\s*26\)/);
+    const studio = readFileSync(join(webRoot, "styles/transfer-studio.css"), "utf8");
+    assert.match(
+      studio,
+      /df2-validate-footer-actions \.df2-btn\[data-studio-primary="true"\][\s\S]*min-width:\s*max-content/,
+    );
+    assert.match(dash, /dashboardCtaVariant/);
+    assert.match(dash, /dashCta\("map_open"\)/);
+    assert.doesNotMatch(
+      dash,
+      /variant="primary"[\s\S]{0,200}Open Map to fix|Open Map to fix[\s\S]{0,80}variant="primary"/,
+    );
+    assert.match(page, /studioPrimary=\{studioPrimary\}/);
+    assert.match(page, /promoteBlockedPrimaryFix/);
+    assert.match(
+      help,
+      /Source → Destination → Transform → Map → Validate → Run/,
+    );
+    assert.doesNotMatch(
+      help,
+      /five-step rail: \*\*Src → Dest → Map → Validate → Run\*\*/,
+    );
+  });
 });

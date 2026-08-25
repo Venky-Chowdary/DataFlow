@@ -275,7 +275,7 @@ export function DocsPortal({ onNavigate, onGetStarted }: DocsPortalProps) {
           <button type="button" className="docs-featured-card" onClick={() => onNavigate("help-transfer-studio")}>
             <span>04</span>
             <strong>Transfer Studio guide</strong>
-            <em>Full sample-orders example: Source → Destination → Map → Validate → Run.</em>
+            <em>Full sample-orders example: Source → Destination → Transform → Map → Validate → Run.</em>
           </button>
         </div>
       </section>
