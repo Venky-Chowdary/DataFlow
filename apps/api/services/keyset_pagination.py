@@ -300,10 +300,12 @@ def decide_keyset_pagination(
 
     Seeking needs unique evidence: without a declared key a strict ``>`` on a
     tied bookmark skips the peers sharing that value, so no evidence means
-    OFFSET (quadratic, but it cannot lose rows). An incremental run may seek on
+    scan (one SELECT + fetchmany) when a snapshot is held, else OFFSET
+    (quadratic, but it cannot lose rows). An incremental run may seek on
     its declared cursor plus a tie-break instead. A resume that carries a row
-    offset but no bookmark also falls back, or the seek would restart at the
-    top of the table and re-read rows already committed.
+    offset but no bookmark also refuses to seek, or the seek would restart at
+    the top of the table and re-read rows already committed — the stream then
+    drains the held scan past that offset instead of OFFSET-paging.
     """
     order_cols = [c for c in keyset_order_cols if c]
     capable = str(src_type or "") in KEYSET_CAPABLE_SOURCES
