@@ -172,6 +172,7 @@ import {
   shouldSkipAutoDestProbe,
 } from "../lib/destProbeTimeout";
 import {
+  destCatalogExists,
   destProbeSettled,
   sameColumnList,
   sameSchemaMap,
@@ -1687,7 +1688,7 @@ export function TransferPage({
       return {
         columns: destColumns,
         schema: destSchemaMap,
-        tableExists: destTableExists,
+        tableExists: destCatalogExists(destKindMode, destTableExists),
         connected: null,
         message: "",
       };
@@ -5226,7 +5227,7 @@ export function TransferPage({
       mergeMappingProof(mappingProof, columnMappings, {
         destColumns,
         destType: destKindMode === "file_export" ? exportFormat : destType,
-        destTableExists: destKindMode === "database" ? destTableExists : false,
+        destTableExists: destCatalogExists(destKindMode, destTableExists),
       }),
     [mappingProof, columnMappings, destColumns, destKindMode, exportFormat, destType, destTableExists],
   );
@@ -5549,7 +5550,7 @@ export function TransferPage({
           analysis={analysis}
           destColumns={destColumns}
           destSchemaLoading={destSchemaLoading}
-          destTableExists={destTableExists}
+          destTableExists={destCatalogExists(destKindMode, destTableExists)}
           extraSourceColumns={shapeContract?.extra_source_columns ?? []}
           destShapeHeadline={shapeContract?.headline ?? ""}
           onReloadDestSchema={async () => {
@@ -5569,7 +5570,7 @@ export function TransferPage({
           targetCollection={targetCollection}
           targetDatabase={targetDb}
           destKindMode={destKindMode}
-          destType={destType}
+          destType={destKindMode === "file_export" ? exportFormat : destType}
           sourceLabel={sourceLabel}
           sourceSubtitle={mapSourceSubtitle}
           sourceType={mapSourceType}

@@ -37,3 +37,18 @@ export function destProbeSettled(
 ): boolean {
   return connected && tableExists !== null;
 }
+
+/**
+ * Destination-object existence Map/Validate may act on.
+ *
+ * A file export has no catalog and no table to reload. Leaving that as
+ * ``null`` printed "Destination schema not loaded" on a route the write
+ * already treats as create-new. A database dest keeps the probe's tri-state.
+ */
+export function destCatalogExists(
+  destKindMode: string,
+  destTableExists: boolean | null | undefined,
+): boolean | null {
+  if (destKindMode === "file_export") return false;
+  return destTableExists ?? null;
+}

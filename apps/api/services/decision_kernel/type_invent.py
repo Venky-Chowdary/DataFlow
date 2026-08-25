@@ -254,8 +254,10 @@ def _file_export_ddl(inferred: str | None) -> str:
         if scale is None:
             return carrier
         return f"DECIMAL({_FILE_EXPORT_DECIMAL_PRECISION},{min(int(scale), _FILE_EXPORT_DECIMAL_PRECISION)})"
-    width = parse_string_carrier_width(carrier)
-    if width is not None and logical in {LOGICAL_STRING, LOGICAL_TEXT}:
+    # Warehouse LOB ceilings (VARCHAR(16777216), VARCHAR(65535), TEXT) parse as
+    # unbounded, so a width check would keep the source spelling. A file has
+    # no column width — the class is VARCHAR, not an unread Snowflake sink.
+    if logical in {LOGICAL_STRING, LOGICAL_TEXT}:
         return "VARCHAR"
     return carrier
 
@@ -1047,6 +1049,11 @@ def create_new_mapping_target_type(
         stamp, dest_db=dest_db_type, source_db=source_db
     )
     stamp = refuse_create_new_numeric_collapse(src_type, stamp, dest_db_type)
+    # A file has no column width. Re-inheriting VARCHAR(16777216) from a
+    # warehouse source would make Map look like an unread Snowflake sink and
+    # would quarantine later rows that exceed a sample-sized width.
+    if destination_is_file_export(dest_db_type):
+        return _file_export_ddl(stamp)
     inherited = inherit_measured_string_width(
         stamp, src_type, dest_db=dest_db_type
     )

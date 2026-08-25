@@ -25,6 +25,7 @@ import {
   normalizeDestTypeValue,
 } from "./typeDisplay";
 import {
+  destCatalogExists,
   destProbeSettled,
   sameColumnList,
   sameSchemaMap,
@@ -213,6 +214,19 @@ describe("marking a row unread erases every destination claim", () => {
       options.some((o) => o.value === "VARCHAR(16777216)"),
       false,
     );
+  });
+});
+
+describe("a file export has no destination catalog to reload", () => {
+  it("is proven create-new even when the database probe was never run", () => {
+    // Switching dest mode to File export used to leave destTableExists=null,
+    // so Map printed "Destination schema not loaded" on a route with no table.
+    assert.equal(destCatalogExists("file_export", null), false);
+    assert.equal(destCatalogExists("file_export", undefined), false);
+    assert.equal(destCatalogExists("file_export", true), false);
+    assert.equal(destCatalogExists("database", null), null);
+    assert.equal(destCatalogExists("database", true), true);
+    assert.equal(destCatalogExists("database", false), false);
   });
 });
 

@@ -64,6 +64,34 @@ def test_unproven_destination_is_unread_not_a_cast() -> None:
     assert result["shape_contract"]["shape"] == SHAPE_UNKNOWN
 
 
+def test_a_file_export_is_create_new_with_typed_carriers_not_unread_text() -> None:
+    """Studio file_export has no catalog. Inventing TEXT for every column made
+    Map look like an unread VARCHAR sink; ``_file_export_ddl`` keeps the class."""
+    for dest in ("json", "csv", "parquet", "file_export", "xlsx"):
+        result = run_mapping_pipeline(
+            _SOURCE_COLUMNS,
+            [],
+            source_schemas=_SOURCE_SCHEMAS,
+            target_schemas=[],
+            source_db_type="postgresql",
+            destination_db_type=dest,
+            destination_table_exists=False,
+            use_llm=False,
+        )
+        assert result["shape_contract"]["shape"] == SHAPE_CREATE_NEW, dest
+        by_source = {m["source"]: m for m in result["mappings"]}
+        emp = by_source["employee_id"]
+        age = by_source["age"]
+        assert emp["assignment_strategy"] != "pending_dest_schema", dest
+        assert age["assignment_strategy"] != "pending_dest_schema", dest
+        assert emp.get("fidelity") != FIDELITY_DEST_TYPE_UNREAD, dest
+        emp_type = str(emp.get("target_type") or "").upper()
+        age_type = str(age.get("target_type") or "").upper()
+        assert emp_type == "VARCHAR", (dest, emp_type)
+        assert "16777216" not in emp_type, dest
+        assert age_type == "BIGINT", (dest, age_type)
+
+
 def test_proven_absent_destination_table_is_create_new_with_real_types() -> None:
     result = _pipeline(False)
     assert result["shape_contract"]["shape"] == SHAPE_CREATE_NEW
