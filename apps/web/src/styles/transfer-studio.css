@@ -10964,3 +10964,84 @@ button.df2-vd-assist-toggle:focus-visible {
     animation: none;
   }
 }
+
+/* ---------------------------------------------------------------------------
+   Studio source / destination — one owner, natural height.
+   Earlier viewport locks (`height:100%` + `overflow:hidden`) crushed the
+   primary pane to ~14px, so a 1280 laptop was forced into a column stack.
+   Content sizes the row; the page scrolls. Stack only below 1100px.
+   --------------------------------------------------------------------------- */
+
+.df2-page-transfer-studio .df2-source-step.df2-transfer-step-viewport,
+.df2-page-transfer-studio .df2-dest-step.df2-transfer-step-viewport {
+  height: auto !important;
+  max-height: none !important;
+  overflow: visible !important;
+  flex: 1 1 auto !important;
+}
+
+.df2-page-transfer-studio .df2-source-step.df2-transfer-step-viewport > .df2-card-body,
+.df2-page-transfer-studio .df2-dest-step.df2-transfer-step-viewport > .df2-card-body {
+  overflow: visible !important;
+  height: auto !important;
+  max-height: none !important;
+  flex: 1 1 auto !important;
+}
+
+.df2-page-transfer-studio .df2-source-step .df2-transfer-step-split {
+  display: grid !important;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) !important;
+  grid-template-rows: auto !important;
+  align-items: start !important;
+  flex: 0 0 auto !important;
+  height: auto !important;
+  min-height: 0 !important;
+}
+
+.df2-page-transfer-studio .df2-source-step .df2-transfer-step-primary,
+.df2-page-transfer-studio .df2-source-step .df2-transfer-step-secondary {
+  height: auto !important;
+  max-height: none !important;
+  min-height: 0 !important;
+  overflow: visible !important;
+  flex: 0 0 auto !important;
+}
+
+.df2-page-transfer-studio .df2-source-step .df2-transfer-step-secondary {
+  border-left: 1px solid #f1f5f9 !important;
+  padding-left: 12px !important;
+  border-top: none !important;
+  padding-top: 0 !important;
+}
+
+.df2-page-transfer-studio .df2-dest-step-layout {
+  align-items: start !important;
+  overflow: visible !important;
+  height: auto !important;
+}
+
+.df2-page-transfer-studio .df2-dest-step-left {
+  overflow: visible !important;
+}
+
+.df2-page-transfer-studio .df2-dest-step > .df2-card-footer.df2-wizard-footer,
+.df2-page-transfer-studio .df2-dest-step > .df2-wizard-footer,
+.df2-page-transfer-studio .df2-source-step > .df2-card-footer.df2-wizard-footer,
+.df2-page-transfer-studio .df2-source-step > .df2-wizard-footer {
+  max-height: none !important;
+  flex-wrap: wrap !important;
+  height: auto !important;
+}
+
+@media (max-width: 1100px) {
+  .df2-page-transfer-studio .df2-source-step .df2-transfer-step-split {
+    grid-template-columns: minmax(0, 1fr) !important;
+  }
+
+  .df2-page-transfer-studio .df2-source-step .df2-transfer-step-secondary {
+    border-left: none !important;
+    padding-left: 0 !important;
+    border-top: 1px solid #f1f5f9 !important;
+    padding-top: 10px !important;
+  }
+}

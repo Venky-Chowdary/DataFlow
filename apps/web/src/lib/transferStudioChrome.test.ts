@@ -347,4 +347,23 @@ describe("Transfer Studio chrome contracts", () => {
     assert.match(card, /df2-btn-label/);
     assert.match(card, /size=\{16\}/);
   });
+
+  it("Source/Dest studio panes share one 50/50 owner and stack only at 1100px", () => {
+    const css = readFileSync(join(webRoot, "styles/transfer-studio.css"), "utf8");
+    const lock = css.slice(css.lastIndexOf("Studio source / destination — one owner"));
+    assert.match(
+      lock,
+      /\.df2-page-transfer-studio \.df2-source-step \.df2-transfer-step-split \{[\s\S]*grid-template-columns:\s*minmax\(0, 1fr\) minmax\(0, 1fr\)/,
+    );
+    assert.match(lock, /@media \(max-width: 1100px\)/);
+    assert.doesNotMatch(
+      lock,
+      /@media \(max-width: 1280px\)/,
+      "1280 laptop must keep the two-pane grid; stack only at 1100",
+    );
+    assert.match(
+      lock,
+      /\.df2-page-transfer-studio \.df2-dest-step > \.df2-wizard-footer[\s\S]*max-height:\s*none/,
+    );
+  });
 });
