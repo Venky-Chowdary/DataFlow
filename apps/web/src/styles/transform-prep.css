@@ -51,13 +51,15 @@
 
 .df2-transfer-main-panel > .df2-xform::-webkit-scrollbar-thumb,
 .df2-transfer-step-viewport > .df2-xform::-webkit-scrollbar-thumb {
-  background: #cbd5e1;
+  background: var(--df-scrollbar-thumb);
   border: 2px solid var(--df-surface, #ffffff);
   border-radius: 8px;
 }
 
 .df2-transfer-main-panel > .df2-xform::-webkit-scrollbar-thumb:hover,
-.df2-transfer-step-viewport > .df2-xform::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+.df2-transfer-step-viewport > .df2-xform::-webkit-scrollbar-thumb:hover {
+  background: var(--df-scrollbar-thumb-hover);
+}
 
 /* ── Header ─────────────────────────────────────────────────────────────── */
 

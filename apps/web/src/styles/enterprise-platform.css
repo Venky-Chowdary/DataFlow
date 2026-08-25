@@ -408,7 +408,7 @@ body {
 }
 
 .df2-catalog-nav button:hover {
-  background: #f0f3f6;
+  background: var(--df-surface-muted);
   color: var(--df-ink-primary);
 }
 
@@ -453,7 +453,7 @@ body {
 .df2-connector-tile.is-planned {
   opacity: 0.72;
   cursor: not-allowed;
-  background: #fafbfc;
+  background: var(--df-surface-muted);
 }
 
 .df2-connector-tile.is-planned:hover {
