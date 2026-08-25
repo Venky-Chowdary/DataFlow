@@ -367,6 +367,45 @@ describe("Transfer Studio chrome contracts", () => {
     );
   });
 
+  it("Destination saved/new lists nest-scroll above the wizard footer", () => {
+    const css = readFileSync(join(webRoot, "styles/transfer-studio.css"), "utf8");
+    const landing = readFileSync(join(webRoot, "styles/landing.css"), "utf8");
+    const destOwner = css.slice(css.lastIndexOf("Destination rail — last owner"));
+    assert.match(
+      destOwner,
+      /\.df2-page-transfer-studio \.df2-dest-step\.df2-transfer-step-viewport \{[\s\S]*overflow:\s*hidden !important/,
+    );
+    assert.doesNotMatch(
+      destOwner,
+      /\.df2-page-transfer-studio \.df2-dest-step\.df2-transfer-step-viewport \{[\s\S]*overflow:\s*visible/,
+    );
+    assert.match(
+      destOwner,
+      /\.df2-page-transfer-studio \.df2-dest-connector-list \{[\s\S]*overflow-y:\s*auto !important/,
+    );
+    assert.match(
+      destOwner,
+      /\.df2-page-transfer-studio \.df2-dest-picker\.is-new-connection \.df2-dest-engine-panel \{[\s\S]*overflow-y:\s*auto !important/,
+    );
+    assert.match(
+      destOwner,
+      /\.df2-page-transfer-studio \.df2-dest-step > \.df2-wizard-footer \{[\s\S]*flex:\s*0 0 auto !important/,
+    );
+    const afterSourceOwner = css.slice(css.lastIndexOf("Studio source / destination — one owner"));
+    assert.doesNotMatch(
+      afterSourceOwner,
+      /\.df2-page-transfer-studio \.df2-dest-step\.df2-transfer-step-viewport \{[\s\S]{0,160}overflow:\s*visible/,
+      "Source natural-height must not unlock Destination overflow",
+    );
+    assert.doesNotMatch(
+      destOwner,
+      /\.df2-dest-connector-list \{[\s\S]{0,120}overflow:\s*visible/,
+      "1100px must not disable dest list scroll after the last dest owner",
+    );
+    assert.match(landing, /Marketing cards — last owner/);
+    assert.match(landing, /overflow-wrap:\s*anywhere/);
+  });
+
   it("every Transfer step owns a visible primary CTA and does not reuse Shape", () => {
     const constants = readFileSync(join(webRoot, "pages/transfer/studioConstants.ts"), "utf8");
     const page = readFileSync(join(webRoot, "pages/TransferPage.tsx"), "utf8");

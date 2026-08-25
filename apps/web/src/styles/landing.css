@@ -13293,3 +13293,39 @@ html:has(.lp) {
   }
   .lp-sales-form-foot { flex-direction: column; align-items: stretch; }
 }
+
+/* ---------------------------------------------------------------------------
+   Marketing cards — last owner. Copy wraps inside the card; long tokens
+   never paint past the border. Cinema identifiers keep their own keep-all.
+   --------------------------------------------------------------------------- */
+.lp .lp-usecase,
+.lp .lp-product-card,
+.lp .lp-platform-step,
+.lp .lp-together > *,
+.lp .lp-mkt-concept-card,
+.lp .lp-mkt-guide-card,
+.lp .lp-mkt-faq-card,
+.lp .lp-sales-faq,
+.lp [class*="lp-"][class*="-card"] {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.lp .lp-usecase h3,
+.lp .lp-usecase p,
+.lp .lp-usecase li,
+.lp .lp-product-card h3,
+.lp .lp-product-card p,
+.lp [class*="lp-"][class*="-card"] h3,
+.lp [class*="lp-"][class*="-card"] p,
+.lp [class*="lp-"][class*="-card"] li {
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+.lp .lp-cinema-field code {
+  overflow-wrap: normal;
+  word-break: keep-all;
+}
