@@ -18,6 +18,47 @@
   background: var(--df-surface, #ffffff);
 }
 
+/*
+ * Scroll host. The studio panel that holds a step is a fixed-height flex column
+ * that clips its overflow, and this step is the tallest one in the wizard
+ * (guide + profile charts + suggestions + recipe + before/after preview), so it
+ * has to own its own vertical scroll or its footer — the only way to Map — is
+ * laid out below the clip and can never be reached. Both possible parents are
+ * named so the step scrolls whether or not it is wrapped in a step viewport.
+ */
+.df2-transfer-main-panel > .df2-xform,
+.df2-transfer-step-viewport > .df2-xform {
+  flex: 1 1 0;
+  min-height: 0;
+  max-height: 100%;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+}
+
+/* Keep the scrollbar visibly present: the operator must see there is more. */
+.df2-transfer-main-panel > .df2-xform::-webkit-scrollbar,
+.df2-transfer-step-viewport > .df2-xform::-webkit-scrollbar { width: 11px; }
+
+.df2-transfer-main-panel > .df2-xform::-webkit-scrollbar-track,
+.df2-transfer-step-viewport > .df2-xform::-webkit-scrollbar-track {
+  background: var(--df-surface-muted, #f8fafc);
+  border-radius: 8px;
+}
+
+.df2-transfer-main-panel > .df2-xform::-webkit-scrollbar-thumb,
+.df2-transfer-step-viewport > .df2-xform::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border: 2px solid var(--df-surface, #ffffff);
+  border-radius: 8px;
+}
+
+.df2-transfer-main-panel > .df2-xform::-webkit-scrollbar-thumb:hover,
+.df2-transfer-step-viewport > .df2-xform::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+
 /* ── Header ─────────────────────────────────────────────────────────────── */
 
 .df2-xform-head {
@@ -201,7 +242,9 @@
   display: grid;
   grid-template-columns: minmax(0, 5fr) minmax(0, 6fr);
   gap: 14px;
-  align-items: start;
+  /* Stretch, not start: the two cards hold lists of different length, and a
+   * ragged pair leaves a tall empty column beside the longer one. */
+  align-items: stretch;
 }
 
 @media (max-width: 1180px) {
@@ -275,10 +318,17 @@
 .df2-xform-suggestions {
   list-style: none;
   margin: 0;
-  padding: 0;
+  padding: 0 2px 0 0;
   display: flex;
   flex-direction: column;
   gap: 8px;
+  /* A wide, dirty source can suggest one cleanup per column; bound the list so
+   * it cannot push the rest of the step (and the footer) into a long scroll. */
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: 420px;
+  overflow-y: auto;
+  scrollbar-width: thin;
 }
 
 .df2-xform-suggestions > li {
@@ -322,8 +372,11 @@
   display: flex;
   flex-direction: column;
   gap: 8px;
-  max-height: 460px;
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: 420px;
   overflow-y: auto;
+  scrollbar-width: thin;
 }
 
 .df2-xform-col {
@@ -710,4 +763,50 @@
   flex-wrap: wrap;
   padding-top: 12px;
   border-top: 1px solid var(--df-border, #e4e8ee);
+}
+
+/*
+ * Navigation stays on screen while the step scrolls: `bottom` cancels the host
+ * padding so the bar sits flush on the panel edge instead of floating.
+ */
+.df2-xform > .df2-xform-actions {
+  position: sticky;
+  bottom: -16px;
+  z-index: 6;
+  margin: 2px -16px -16px;
+  padding: 12px 16px;
+  background: var(--df-surface, #ffffff);
+  border-radius: 0 0 var(--df-radius-lg, 12px) var(--df-radius-lg, 12px);
+  box-shadow: 0 -10px 18px -14px rgba(15, 23, 42, 0.45);
+}
+
+/* Header keeps the step title and identity anchored, but only where there is
+ * enough height for it to cost nothing. */
+@media (min-height: 720px) {
+  .df2-transfer-main-panel > .df2-xform > .df2-xform-head,
+  .df2-transfer-step-viewport > .df2-xform > .df2-xform-head {
+    position: sticky;
+    top: -16px;
+    z-index: 5;
+    margin: -16px -16px 0;
+    padding: 16px 16px 10px;
+    background: var(--df-surface, #ffffff);
+    border-radius: var(--df-radius-lg, 12px) var(--df-radius-lg, 12px) 0 0;
+  }
+}
+
+@media (max-width: 860px) {
+  .df2-transfer-main-panel > .df2-xform,
+  .df2-transfer-step-viewport > .df2-xform { padding: 12px; }
+
+  .df2-xform > .df2-xform-actions {
+    bottom: -12px;
+    margin: 2px -12px -12px;
+    padding: 10px 12px;
+  }
+
+  .df2-xform > .df2-xform-actions .df2-btn { flex: 1 1 160px; justify-content: center; }
+
+  .df2-xform-suggestions,
+  .df2-xform-cols { max-height: 360px; }
 }
