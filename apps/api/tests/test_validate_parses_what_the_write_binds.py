@@ -10,6 +10,8 @@ truncated the value first.
 
 from __future__ import annotations
 
+from datetime import date
+
 import pytest
 
 from connectors.writer_common import integer_fit_failure
@@ -109,3 +111,120 @@ def test_a_typed_source_wire_is_not_rescanned_for_its_parse() -> None:
     assert targets == ()
     assert safe == ("c",)
     assert report.findings == ()
+
+
+def test_a_boolean_typed_wire_is_still_not_rescanned() -> None:
+    """Calendar scanning must not pull BOOLEAN off the typed-skip cost path."""
+    targets, _und, safe, report = _scan("BOOLEAN", "BOOLEAN", ["true", "false"])
+
+    assert targets == ()
+    assert safe == ("c",)
+    assert report.findings == ()
+
+
+@pytest.mark.parametrize("dest_db", ["mysql", "postgresql"])
+@pytest.mark.parametrize("source_type", ["VARCHAR", "DATE"])
+def test_an_unreal_calendar_day_blocks_at_validate(
+    dest_db: str, source_type: str
+) -> None:
+    """``2024-02-31`` used to pass Validate because DATE was undecidable or
+    skipped as a typed wire. The write's temporal bind cannot hold it — PG
+    errors, MySQL may store a zero date — so Validate must name it first."""
+    targets, _und, safe, report = _scan(
+        "DATE",
+        source_type,
+        ["2024-02-31", "2024-02-29", "2024-03-01"],
+        dest_db=dest_db,
+    )
+
+    assert [t.carrier for t in targets] == [CARRIER_TYPED]
+    assert safe == ()
+    assert report.findings[0].unfit_rows == 1
+    assert report.findings[0].example_rows == (1,)
+    assert "Invalid date" in report.findings[0].unfit_reason
+    assert "2024-02-31" in report.findings[0].unfit_reason
+
+
+@pytest.mark.parametrize("dest_db", ["mysql", "postgresql"])
+def test_a_non_leap_29_feb_blocks_and_a_leap_day_fits(dest_db: str) -> None:
+    targets, _und, _safe, report = _scan(
+        "DATE",
+        "VARCHAR",
+        ["2024-02-29", "2023-02-29"],
+        dest_db=dest_db,
+    )
+
+    assert [t.carrier for t in targets] == [CARRIER_TYPED]
+    assert report.findings[0].unfit_rows == 1
+    assert report.findings[0].example_rows == (2,)
+    assert "2023-02-29" in report.findings[0].unfit_reason
+
+
+@pytest.mark.parametrize("dest_db", ["mysql", "postgresql"])
+def test_a_native_date_object_fits_a_date_carrier(dest_db: str) -> None:
+    mappings = [
+        {
+            "source": "c",
+            "target": "c",
+            "target_type": "DATE",
+            "source_type": "DATE",
+            "confidence": 1.0,
+        }
+    ]
+    targets, _und, safe = bounded_targets(
+        mappings, dest_db=dest_db, source_types={"c": "DATE"}
+    )
+    assert [t.carrier for t in targets] == [CARRIER_TYPED]
+    assert safe == ()
+    report = scan_rows(
+        [{"c": date(2024, 2, 29)}, {"c": date(2024, 3, 1)}],
+        targets,
+        dest_db=dest_db,
+        rows_total=2,
+    )
+    assert report.findings == ()
+
+
+@pytest.mark.parametrize("dest_db", ["mysql", "postgresql"])
+def test_a_date_transform_the_write_accepts_is_not_refused(
+    dest_db: str,
+) -> None:
+    """``31/12/2024`` is unambiguous day-first. ``apply_transform(..., "date")``
+    ISO-normalizes it; coercing the raw slash form would false-refuse a cell
+    the write already binds."""
+    mappings = [
+        {
+            "source": "c",
+            "target": "c",
+            "target_type": "DATE",
+            "source_type": "VARCHAR",
+            "transform": "date",
+            "confidence": 1.0,
+        }
+    ]
+    targets, _und, safe = bounded_targets(
+        mappings, dest_db=dest_db, source_types={"c": "VARCHAR"}
+    )
+    report = scan_rows(
+        [{"c": "31/12/2024"}, {"c": "2024-02-31"}],
+        targets,
+        dest_db=dest_db,
+        rows_total=2,
+    )
+    assert safe == ()
+    assert report.findings[0].unfit_rows == 1
+    assert report.findings[0].example_rows == (2,)
+    assert "2024-02-31" in report.findings[0].unfit_reason
+
+
+@pytest.mark.parametrize("dest_db", ["mysql", "postgresql"])
+def test_slash_dates_without_a_date_transform_stay_unfit(dest_db: str) -> None:
+    """VARCHAR → DATE with no date transform is identity then
+    ``coerce_sql_temporal``. Slash forms do not parse there — Validate must
+    not invent a calendar the write does not use."""
+    targets, _und, _safe, report = _scan(
+        "DATE", "VARCHAR", ["31/12/2024"], dest_db=dest_db
+    )
+
+    assert report.findings[0].unfit_rows == 1
+    assert "Invalid date" in report.findings[0].unfit_reason
