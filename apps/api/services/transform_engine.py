@@ -211,6 +211,121 @@ def reset_active_date_locale(token: contextvars.Token[str]) -> None:
     """Restore the previous date locale."""
     _DATE_LOCALE_VAR.reset(token)
 
+
+# Number grouping: 'US' (1,234.56), 'EU' (1.234,56), or '' fail-closed on
+# a lone 3-digit group (1,234 / 1.234). Same contract shape as date_locale —
+# never guess US vs EU. Currency marks and both separators still parse.
+_NUMBER_LOCALE_VAR: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "number_locale", default=""
+)
+
+
+def _active_number_locale(explicit: str = "") -> str:
+    loc = (explicit or _NUMBER_LOCALE_VAR.get() or "").strip().upper()
+    return loc if loc in {"US", "EU"} else ""
+
+
+def set_active_number_locale(locale: str) -> contextvars.Token[str]:
+    """Pin the number locale for this transfer. Returns a reset token."""
+    return _NUMBER_LOCALE_VAR.set(_active_number_locale(locale))
+
+
+def reset_active_number_locale(token: contextvars.Token[str]) -> None:
+    """Restore the previous number locale."""
+    _NUMBER_LOCALE_VAR.reset(token)
+
+
+def _implied_number_locale_from_currency(raw: str) -> str:
+    """Currency marks that carry a grouping convention, or '' if mixed/absent.
+
+    ``$`` / USD / ``£`` / GBP use 1,234.56. ``€`` / EUR use 1.234,56.
+    A mark is evidence for that *cell*, not a column-wide guess.
+    """
+    text = unicodedata.normalize("NFKC", str(raw or ""))
+    us = bool(re.search(r"(?<![A-Za-z])(?:USD|GBP|US\$)(?![A-Za-z])|[$£]", text, re.I))
+    eu = bool(re.search(r"(?<![A-Za-z])EUR(?![A-Za-z])|[€]", text, re.I))
+    if us and not eu:
+        return "US"
+    if eu and not us:
+        return "EU"
+    return ""
+
+
+def infer_number_locale(
+    rows: list[dict] | None,
+    columns: list[str] | None = None,
+    existing_locale: str = "",
+) -> str:
+    """US or EU when every marked/both-separator sample agrees; else ''."""
+    pinned = _active_number_locale(existing_locale)
+    if pinned:
+        return pinned
+    if not rows:
+        return ""
+    cols = columns or (list(rows[0].keys()) if rows and isinstance(rows[0], dict) else [])
+    votes = {"US": 0, "EU": 0}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        for col in cols:
+            raw = str(row.get(col) or "").strip()
+            if not raw:
+                continue
+            implied = _implied_number_locale_from_currency(raw)
+            if implied:
+                votes[implied] += 1
+                continue
+            if "." in raw and "," in raw:
+                if raw.rfind(".") > raw.rfind(","):
+                    votes["US"] += 1
+                else:
+                    votes["EU"] += 1
+    if votes["US"] and not votes["EU"]:
+        return "US"
+    if votes["EU"] and not votes["US"]:
+        return "EU"
+    return ""
+
+
+def _looks_like_grouped_number(raw: str) -> bool:
+    text = str(raw or "").strip()
+    if not text or not any(ch.isdigit() for ch in text):
+        return False
+    return "," in text or "." in text
+
+
+def ambiguous_number_columns(
+    rows: list[dict] | None,
+    columns: list[str] | None = None,
+    number_locale: str = "",
+) -> list[dict[str, Any]]:
+    """Columns whose samples fail Auto grouping and look numeric.
+
+    Operator next action: set number locale US or EU. Never invent a parse.
+    """
+    if _active_number_locale(number_locale) or not rows:
+        return []
+    cols = columns or (list(rows[0].keys()) if rows and isinstance(rows[0], dict) else [])
+    findings: list[dict[str, Any]] = []
+    for col in cols:
+        samples: list[str] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            raw = str(row.get(col) or "").strip()
+            if not raw or not _looks_like_grouped_number(raw):
+                continue
+            if _parse_decimal(raw) is None:
+                samples.append(raw)
+        if samples:
+            findings.append({
+                "column": col,
+                "samples": samples[:5],
+                "next_action": "Set number locale US or EU in Destination → Advanced",
+            })
+    return findings
+
+
 # Currency symbols and codes that are safe to strip from numeric values.
 _CURRENCY_SYMBOLS = "".join({
     "$", "€", "£", "¥", "₹", "₩", "₽", "₺", "₴", "₱", "₫", "₭", "₦", "₲",
@@ -504,17 +619,28 @@ def _normalize_numeric_text(value: str) -> str:
     return text.strip()
 
 
-def _normalize_locale_separators(text: str) -> str | None:
-    """Resolve . / , / space separator ambiguity into a decimal string.
+def _digit_parts(parts: list[str]) -> bool:
+    if not parts or not parts[0]:
+        return False
+    head = parts[0][1:] if parts[0].startswith("-") else parts[0]
+    if not head.isdigit():
+        return False
+    return all(part.isdigit() for part in parts[1:])
 
-    Returns None for unambiguous null sentinels and values that are not
-    parseable numbers.
+
+def _normalize_locale_separators(text: str, number_locale: str = "") -> str | None:
+    """Resolve . / , / space separators, or None when the grouping is ambiguous.
+
+    Auto (no locale): both separators, 3+ thousand groups, and a 1–2 digit
+    last group still parse. A lone 3-digit group (``1,234`` / ``1.234``)
+    fails closed — US thousands and EU decimals share that shape.
     """
     if text.lower() in NULL_SENTINELS:
         return None
     if not text:
         return None
 
+    locale = _active_number_locale(number_locale)
     # Remove ASCII spaces used as thousands separators (e.g. "1 000 000").
     text = text.replace(" ", "").replace("\t", "")
 
@@ -522,61 +648,80 @@ def _normalize_locale_separators(text: str) -> str | None:
         last_dot = text.rfind(".")
         last_comma = text.rfind(",")
         if last_dot > last_comma:
-            # Dot is the decimal separator; commas are thousands separators.
             candidate = text.replace(",", "")
             if candidate.count(".") <= 1:
                 return candidate
             return None
-        # Comma is the decimal separator; thousand dots are removed.
         text = text.replace(".", "")
         last_comma = text.rfind(",")
         candidate = text[:last_comma] + "." + text[last_comma + 1:]
         if "," in candidate or candidate.count(".") > 1:
             return None
         return candidate
+
     if "," in text:
         parts = text.split(",")
+        if not _digit_parts(parts):
+            return None
+        if locale == "US":
+            if all(len(part) == 3 for part in parts[1:]):
+                return "".join(parts)
+            return None
+        if locale == "EU":
+            if len(parts) == 2:
+                return parts[0] + "." + parts[1]
+            if (
+                len(parts) >= 2
+                and all(len(part) == 3 for part in parts[1:-1])
+                and 1 <= len(parts[-1]) <= 2
+            ):
+                return "".join(parts[:-1]) + "." + parts[-1]
+            return None
         if (
-            len(parts) >= 2
+            len(parts) >= 3
             and parts[0]
-            and not parts[0].startswith("0")
-            and all(part.isdigit() and len(part) == 3 for part in parts[1:])
+            and not parts[0].lstrip("-").startswith("0")
+            and all(len(part) == 3 for part in parts[1:])
         ):
-            return text.replace(",", "")
-        # European decimal / decimal with 3-digit groups and a short final group.
+            return "".join(parts)
         if (
             len(parts) >= 2
-            and parts[0].isdigit()
-            and all(part.isdigit() and len(part) == 3 for part in parts[1:-1])
-            and parts[-1].isdigit()
+            and all(len(part) == 3 for part in parts[1:-1])
             and 1 <= len(parts[-1]) <= 2
-            and len(parts[0]) <= 3
         ):
             return "".join(parts[:-1]) + "." + parts[-1]
-        if len(parts) == 2:
-            return parts[0] + "." + parts[1]
         return None
+
     if "." in text:
         parts = text.split(".")
-        # Multi-dot US/ISO thousands: 1.234.567 (but not 1.234, which is decimal).
+        if not _digit_parts(parts):
+            return text
+        if locale == "US":
+            if len(parts) == 2:
+                return text
+            return None
+        if locale == "EU":
+            if all(len(part) == 3 for part in parts[1:]):
+                return "".join(parts)
+            if len(parts) == 2 and 1 <= len(parts[1]) <= 2:
+                return text
+            return None
         if (
-            len(parts) > 2
+            len(parts) >= 3
             and parts[0]
-            and not parts[0].startswith("0")
-            and all(part.isdigit() and len(part) == 3 for part in parts[1:])
+            and not parts[0].lstrip("-").startswith("0")
+            and all(len(part) == 3 for part in parts[1:])
         ):
-            return text.replace(".", "")
+            return "".join(parts)
         if (
             len(parts) >= 2
-            and parts[0].isdigit()
-            and all(part.isdigit() and len(part) == 3 for part in parts[1:-1])
-            and parts[-1].isdigit()
+            and all(len(part) == 3 for part in parts[1:-1])
             and 1 <= len(parts[-1]) <= 2
-            and len(parts[0]) <= 3
         ):
             return "".join(parts[:-1]) + "." + parts[-1]
-        # Single dot is a decimal point (e.g. 1.234), not a thousands separator.
-        return text
+        if len(parts) == 2 and 1 <= len(parts[1]) <= 2:
+            return text
+        return None
     return text
 
 
@@ -585,8 +730,9 @@ def _parse_decimal(value: str) -> str | None:
     # Tuple / point / coordinate strings such as (1,2) or (1, 2) are not numbers.
     if text.startswith("(") and text.endswith(")") and "," in text and "." not in text:
         return None
+    implied = _implied_number_locale_from_currency(text)
     text = _normalize_numeric_text(text)
-    text = _normalize_locale_separators(text)
+    text = _normalize_locale_separators(text, implied)
     if text is None or text == "":
         return None
     try:
@@ -645,8 +791,9 @@ def _parse_integer(value: str) -> int | None:
     # budget by construction — the common integer column skips all of it.
     if _PLAIN_ASCII_INT_RE.match(plain):
         return int(plain)
+    implied = _implied_number_locale_from_currency(plain)
     text = _normalize_numeric_text(plain)
-    text = _normalize_locale_separators(text)
+    text = _normalize_locale_separators(text, implied)
     if text is None or text == "":
         return None
     try:

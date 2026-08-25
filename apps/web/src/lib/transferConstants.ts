@@ -75,6 +75,7 @@ export const VALIDATION_MODES: {
 ];
 
 export type DateLocaleId = "" | "DMY" | "MDY";
+export type NumberLocaleId = "" | "US" | "EU";
 
 export const SYNC_MODES: { id: SyncModeId; label: string; detail: string }[] = [
   { id: "full_refresh_overwrite", label: "Full overwrite", detail: "Drop/replace destination, then load the full snapshot. Destroys existing rows." },
@@ -208,6 +209,12 @@ export const DATE_LOCALES: { id: DateLocaleId; label: string; detail: string }[]
   { id: "", label: "Auto", detail: "Infer day/month order from source sample; fail closed if ambiguous." },
   { id: "DMY", label: "DMY (day/month/year)", detail: "European / Indian / Australian date order." },
   { id: "MDY", label: "MDY (month/day/year)", detail: "United States date order." },
+];
+
+export const NUMBER_LOCALES: { id: NumberLocaleId; label: string; detail: string }[] = [
+  { id: "", label: "Auto", detail: "Parse $1,000.00 and €2.000,50. Refuse a lone 1,234 / 1.234 — that is US thousands or EU decimal." },
+  { id: "US", label: "US (1,234.56)", detail: "Comma thousands, dot decimal." },
+  { id: "EU", label: "EU (1.234,56)", detail: "Dot thousands, comma decimal." },
 ];
 
 /** Single operator-facing copy for SCD2/mirror + multi-stream block (rank 74). */

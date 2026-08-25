@@ -91,6 +91,8 @@ class PreflightRequest(BaseModel):
     destination_column_types: dict[str, str] = Field(default_factory=dict)
     # Locale for ambiguous day/month dates: 'DMY' (European/Indian/Australian), 'MDY' (US), or ''.
     date_locale: str = ""
+    # Locale for ambiguous grouping: 'US' (1,234.56), 'EU' (1.234,56), or ''.
+    number_locale: str = ""
     dest_schema: str | None = None
     dest_warehouse: str | None = None
     dest_auth_source: str | None = None
@@ -356,6 +358,7 @@ async def run_preflight(body: PreflightRequest):
             destination_config=dest_meta.get("_probe_cfg") or None,
             stream_contracts=list(body.stream_contracts or []),
             date_locale=body.date_locale,
+            number_locale=body.number_locale,
             compliance_acknowledged=ack.compliance,
             schema_drift_acknowledged=ack.schema_drift,
             fk_risk_acknowledged=ack.fk_risk,
@@ -575,6 +578,7 @@ class CellPreviewRequest(BaseModel):
     column_types: dict[str, str] = Field(default_factory=dict)
     sample_size: int = Field(25, ge=1, le=200)
     date_locale: str = ""
+    number_locale: str = ""
     shape_recipe: dict[str, Any] | None = None
 
 
@@ -592,10 +596,13 @@ async def preview_quarantine_cells(body: CellPreviewRequest):
     try:
         from services.transform_engine import (
             reset_active_date_locale,
+            reset_active_number_locale,
             set_active_date_locale,
+            set_active_number_locale,
         )
 
         locale_token = set_active_date_locale(body.date_locale)
+        number_token = set_active_number_locale(body.number_locale)
         try:
             rows = [[("" if c is None else str(c)) for c in row] for row in body.sample_rows]
             headers = list(body.headers)
@@ -633,6 +640,7 @@ async def preview_quarantine_cells(body: CellPreviewRequest):
                 }
             return result
         finally:
+            reset_active_number_locale(number_token)
             reset_active_date_locale(locale_token)
     except HTTPException:
         raise

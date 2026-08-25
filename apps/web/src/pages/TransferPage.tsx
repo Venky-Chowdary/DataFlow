@@ -98,11 +98,13 @@ import { diagnoseSql } from "../lib/sqlEditorModel";
 import {
   availableSyncModes,
   DATE_LOCALES,
+  NUMBER_LOCALES,
   PREFLIGHT_SAMPLE_LIMIT,
   SCHEMA_POLICIES,
   SYNC_MODES,
   VALIDATION_MODES,
   type DateLocaleId,
+  type NumberLocaleId,
   type SchemaPolicyId,
   type SyncModeId,
   type ValidationModeId,
@@ -393,6 +395,7 @@ export function TransferPage({
   /** Module 16 — opt-in population orphan scan (only path to RI proven). */
   const [runPopulationOrphanScan, setRunPopulationOrphanScan] = useState(false);
   const [dateLocale, setDateLocale] = useState<DateLocaleId>("");
+  const [numberLocale, setNumberLocale] = useState<NumberLocaleId>("");
   const [backfillNewFields, setBackfillNewFields] = useState(false);
   const [writeViaStaging, setWriteViaStaging] = useState(false);
   const [vectorContentColumn, setVectorContentColumn] = useState("");
@@ -935,6 +938,8 @@ export function TransferPage({
       // Same image as the gates: the recipe runs on the read, so scanning the
       // raw cell reports a finding on a value the writer never binds.
       shape_recipe: recipePayload(shapeSteps),
+      date_locale: dateLocale,
+      number_locale: numberLocale,
     })
       .then((res) => {
         if (!cancelled) setCellPreview(res);
@@ -945,7 +950,7 @@ export function TransferPage({
     return () => {
       cancelled = true;
     };
-  }, [step, currentSourceColumnsKey, columnMappings, samplePreviewRows, currentSourceSchema, currentSourceColumns, shapeSteps]);
+  }, [step, currentSourceColumnsKey, columnMappings, samplePreviewRows, currentSourceSchema, currentSourceColumns, shapeSteps, dateLocale, numberLocale]);
 
   // A name-matched column is a starting point for the operator, never a claim
   // about the column's behaviour — the declaration beside it carries that.
@@ -1208,6 +1213,7 @@ export function TransferPage({
       schema_policy: schemaPolicy,
       validation_mode: validationMode,
       date_locale: dateLocale,
+      number_locale: numberLocale,
       backfill_new_fields: backfillNewFields,
       write_via_staging: writeViaStaging,
       stream_contracts: streamContracts,
@@ -1247,6 +1253,7 @@ export function TransferPage({
     schemaPolicy,
     validationMode,
     dateLocale,
+    numberLocale,
     backfillNewFields,
     writeViaStaging,
     streamContracts,
@@ -4249,6 +4256,7 @@ export function TransferPage({
           schema_policy: schemaPolicy,
           validation_mode: validationOverride ?? validationMode,
           date_locale: dateLocale,
+          number_locale: numberLocale,
           backfill_new_fields: backfillNewFields,
           stream_contracts: streamContracts,
           compliance_acknowledged: ackCompliance,
@@ -4742,6 +4750,7 @@ export function TransferPage({
           callableSource: sourceReadMode === "procedure" || sourceReadMode === "query",
         }),
         dateLocale,
+        numberLocale,
         backfillNewFields,
         writeViaStaging,
         enableOcr,
@@ -7445,10 +7454,12 @@ export function TransferPage({
         schemaPolicies={SCHEMA_POLICIES}
         validationModes={VALIDATION_MODES}
         dateLocales={DATE_LOCALES}
+        numberLocales={NUMBER_LOCALES}
         syncMode={syncMode}
         schemaPolicy={schemaPolicy}
         validationMode={validationMode}
         dateLocale={dateLocale}
+        numberLocale={numberLocale}
         backfillNewFields={backfillNewFields}
         streamNames={advancedStreamNames}
         streamFields={streamFields}
@@ -7540,6 +7551,7 @@ export function TransferPage({
         }}
         onValidationModeChange={setValidationMode}
         onDateLocaleChange={setDateLocale}
+        onNumberLocaleChange={setNumberLocale}
         onBackfillChange={setBackfillNewFields}
         onStreamCursorChange={(stream, value) => {
           setStreamFields((prev) => ({

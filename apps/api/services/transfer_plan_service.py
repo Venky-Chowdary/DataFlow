@@ -328,6 +328,7 @@ def run_plan_preflight(
         confidence_threshold=threshold,
         validation_mode=validation_mode,
         date_locale=policies.get("date_locale", ""),
+        number_locale=policies.get("number_locale", ""),
         destination_column_types=live_target_schema,
         destination_column_nullability=dest_meta.get("column_nullability") or {},
         destination_column_defaults=dest_meta.get("column_defaults") or {},

@@ -45,9 +45,13 @@ from services.preflight_cursor_gate import (
 )
 from services.source_duplicate_probe import probe_source_duplicate_keys_result
 from services.transform_engine import (
+    ambiguous_number_columns,
     infer_date_locale,
+    infer_number_locale,
     reset_active_date_locale,
+    reset_active_number_locale,
     set_active_date_locale,
+    set_active_number_locale,
 )
 from services.validation_plan import build_validation_plan
 from services.value_serializer import cell_to_string, project_row_cells
@@ -66,15 +70,16 @@ def _hydrate_risk_contract(
 
 
 def _with_date_locale(fn):
-    """Set the active date_locale context for the duration of the call."""
+    """Set date_locale and number_locale for the duration of the call."""
 
     def wrapper(*args, **kwargs):
-        locale = kwargs.get("date_locale", "")
-        token = set_active_date_locale(locale)
+        date_token = set_active_date_locale(kwargs.get("date_locale", ""))
+        number_token = set_active_number_locale(kwargs.get("number_locale", ""))
         try:
             return fn(*args, **kwargs)
         finally:
-            reset_active_date_locale(token)
+            reset_active_number_locale(number_token)
+            reset_active_date_locale(date_token)
 
     return wrapper
 
@@ -729,6 +734,7 @@ def run_file_preflight(
     destination_config: Mapping[str, Any] | None = None,
     stream_contracts: list[dict[str, Any]] | None = None,
     date_locale: str = "",
+    number_locale: str = "",
     cursor_fields: list[str] | None = None,
     compliance_acknowledged: bool = False,
     schema_drift_acknowledged: bool = False,
@@ -805,6 +811,12 @@ def run_file_preflight(
         if inferred_locale and not date_locale:
             date_locale = inferred_locale
             set_active_date_locale(date_locale)
+        inferred_numbers = infer_number_locale(
+            sample_rows, columns, existing_locale=number_locale
+        )
+        if inferred_numbers and not number_locale:
+            number_locale = inferred_numbers
+            set_active_number_locale(number_locale)
 
     # If the caller did not supply rich source types, infer them from the sample
     # rows. This keeps schemaless sources (MongoDB, DynamoDB, Redis, S3 JSON) from
@@ -1631,6 +1643,7 @@ def run_file_preflight(
         # Canonical Kernel findings — Map / Proof / root-cause must not re-classify.
         "validation_findings": [],
         "date_locale": date_locale,
+        "number_locale": number_locale,
         "privilege_probe": privilege_probe or {},
         "redshift_staging_probe": redshift_staging_probe or {},
         "recommended_batch_size": min(
@@ -2235,6 +2248,29 @@ def run_file_preflight(
 
     from services.root_cause_engine import apply_root_causes_to_preflight
     from services.validation_mode_contract import stamp_validation_mode
+
+    number_findings = ambiguous_number_columns(
+        sample_rows, columns, number_locale=number_locale
+    )
+    out["number_locale"] = number_locale
+    out["number_locale_report"] = {
+        "number_locale": number_locale or "",
+        "ambiguous_columns": number_findings,
+        "decision": "set_locale" if number_findings else "ok",
+    }
+    if number_findings:
+        cols = ", ".join(f["column"] for f in number_findings[:6])
+        out.setdefault("warnings", []).append(
+            {
+                "id": "number_locale",
+                "message": (
+                    f"{cols}: grouping is ambiguous (1,234 vs 1.234). "
+                    "Set number locale US or EU in Destination → Advanced — "
+                    "Auto will not guess."
+                ),
+                "details": {"columns": number_findings},
+            }
+        )
 
     stamp_validation_mode(out, validation_mode)
     # Discovery / Audit: never invent an Execute unlock from Validate readiness.

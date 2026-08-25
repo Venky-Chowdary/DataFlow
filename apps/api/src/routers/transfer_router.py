@@ -255,6 +255,8 @@ class ExecuteTransferRequest(BaseModel):
     require_signed_contract: bool = False
     # Locale for ambiguous day/month dates: 'DMY' (European/Indian/Australian), 'MDY' (US), or ''.
     date_locale: str = ""
+    # Locale for ambiguous grouping: 'US' (1,234.56), 'EU' (1.234,56), or ''.
+    number_locale: str = ""
     # Delivery guarantee — default at_least_once; exactly_once is opt-in.
     delivery_guarantee: str = "at_least_once"
     # Validate→Execute ack trail (must match Studio Validate acknowledgments).
@@ -815,6 +817,7 @@ async def execute_transfer_json(
         enforce_contract=bool(body.enforce_contract),
         require_signed_contract=bool(body.require_signed_contract),
         date_locale=body.date_locale,
+        number_locale=body.number_locale,
         triggered_by=_actor_email(request),
         idempotency_key=idempotency_key,
         delivery_guarantee=body.delivery_guarantee or "at_least_once",
@@ -1027,6 +1030,7 @@ async def run_universal_transfer(
     stream_contracts_json: str = Form(""),
     data_region: str = Form(""),
     date_locale: str = Form(""),
+    number_locale: str = Form(""),
     delivery_guarantee: str = Form("at_least_once"),
     compliance_acknowledged: str = Form("false"),
     schema_drift_acknowledged: str = Form("false"),
@@ -1167,6 +1171,7 @@ async def run_universal_transfer(
         backfill_new_fields=backfill_new_fields.lower() in ("true", "1", "yes"),
         write_via_staging=write_via_staging.lower() in ("true", "1", "yes"),
         date_locale=date_locale,
+        number_locale=number_locale,
         triggered_by=_actor_email(request),
         idempotency_key=idempotency_key,
         delivery_guarantee=delivery_guarantee or "at_least_once",
@@ -1237,6 +1242,8 @@ async def run_universal_transfer(
                 request_obj.write_via_staging = True
             if not date_locale:
                 request_obj.date_locale = policies.get("date_locale", request_obj.date_locale)
+            if not number_locale:
+                request_obj.number_locale = policies.get("number_locale", request_obj.number_locale)
             if not stream_contracts_json.strip():
                 plan_contracts = payload.get("stream_contracts") or policies.get("stream_contracts")
                 if isinstance(plan_contracts, list) and plan_contracts:

@@ -492,4 +492,20 @@ describe("Transfer Studio chrome contracts", () => {
       /five-step rail: \*\*Src → Dest → Map → Validate → Run\*\*/,
     );
   });
+
+  it("Destination Advanced owns a number locale contract next to date locale", () => {
+    const constants = readFileSync(join(webRoot, "lib/transferConstants.ts"), "utf8");
+    const drawer = readFileSync(join(webRoot, "components/transfer/DestinationAdvancedDrawer.tsx"), "utf8");
+    const page = readFileSync(join(webRoot, "pages/TransferPage.tsx"), "utf8");
+    const api = readFileSync(join(webRoot, "lib/api.ts"), "utf8");
+
+    assert.match(constants, /export type NumberLocaleId = "" \| "US" \| "EU"/);
+    assert.match(constants, /label: "US \(1,234\.56\)"/);
+    assert.match(constants, /label: "EU \(1\.234,56\)"/);
+    assert.match(drawer, /Number locale/);
+    assert.match(drawer, /onNumberLocaleChange/);
+    assert.match(page, /numberLocales=\{NUMBER_LOCALES\}/);
+    assert.match(page, /number_locale: numberLocale/);
+    assert.match(api, /formData.append\("number_locale"/);
+  });
 });

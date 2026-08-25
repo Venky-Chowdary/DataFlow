@@ -35,6 +35,7 @@ export type DestValidationMode =
   | "discovery"
   | "audit";
 export type DestDateLocale = "" | "DMY" | "MDY";
+export type DestNumberLocale = "" | "US" | "EU";
 
 export interface SyncModeOption {
   id: DestSyncMode;
@@ -61,6 +62,12 @@ export interface DateLocaleOption {
   detail: string;
 }
 
+export interface NumberLocaleOption {
+  id: DestNumberLocale;
+  label: string;
+  detail: string;
+}
+
 interface DestinationAdvancedDrawerProps {
   open: boolean;
   onClose: () => void;
@@ -68,10 +75,12 @@ interface DestinationAdvancedDrawerProps {
   schemaPolicies: SchemaPolicyOption[];
   validationModes: ValidationModeOption[];
   dateLocales: DateLocaleOption[];
+  numberLocales: NumberLocaleOption[];
   syncMode: DestSyncMode;
   schemaPolicy: DestSchemaPolicy;
   validationMode: DestValidationMode;
   dateLocale: DestDateLocale;
+  numberLocale: DestNumberLocale;
   backfillNewFields: boolean;
   /** Stream names (one row each when multi-stream). */
   streamNames: string[];
@@ -96,6 +105,7 @@ interface DestinationAdvancedDrawerProps {
   onSchemaPolicyChange: (policy: DestSchemaPolicy) => void;
   onValidationModeChange: (mode: DestValidationMode) => void;
   onDateLocaleChange: (locale: DestDateLocale) => void;
+  onNumberLocaleChange: (locale: DestNumberLocale) => void;
   onBackfillChange: (value: boolean) => void;
   onStreamCursorChange: (stream: string, value: string) => void;
   onStreamCursorSemanticsChange: (stream: string, value: string) => void;
@@ -192,10 +202,12 @@ export function DestinationAdvancedDrawer({
   schemaPolicies,
   validationModes,
   dateLocales,
+  numberLocales,
   syncMode,
   schemaPolicy,
   validationMode,
   dateLocale,
+  numberLocale,
   backfillNewFields,
   streamNames,
   streamFields,
@@ -215,6 +227,7 @@ export function DestinationAdvancedDrawer({
   onSchemaPolicyChange,
   onValidationModeChange,
   onDateLocaleChange,
+  onNumberLocaleChange,
   onBackfillChange,
   onStreamCursorChange,
   onStreamCursorSemanticsChange,
@@ -559,6 +572,22 @@ export function DestinationAdvancedDrawer({
               ))}
             </select>
             <small className="df2-label-hint">Auto infers from unambiguous rows. Set DMY or MDY for all-ambiguous samples.</small>
+          </div>
+          <div className="df2-field">
+            <label className="df2-label">Number locale</label>
+            <select
+              className="df2-select"
+              value={numberLocale}
+              onChange={(e) => onNumberLocaleChange(e.target.value as DestNumberLocale)}
+              title="How to interpret 1,234 versus 1.234"
+            >
+              {numberLocales.map((loc) => (
+                <option key={loc.id || "auto"} value={loc.id} title={loc.detail}>
+                  {loc.label}
+                </option>
+              ))}
+            </select>
+            <small className="df2-label-hint">Auto will not guess a lone 1,234. Set US or EU, or use $ / € on the cell.</small>
           </div>
           <div className="df2-field">
             <label className="df2-label">Validation</label>
