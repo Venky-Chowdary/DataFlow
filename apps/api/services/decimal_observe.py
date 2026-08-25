@@ -147,13 +147,40 @@ def _significant_scale(scales: list[int]) -> int:
     return ordered[-1]
 
 
+#: Head-room applied only when inventing a create-new destination carrier.
+#: Source inference must not use it — that is how ``10.50`` became
+#: ``DECIMAL(7,4)`` and then blocked an existing ``NUMBER(9,2)`` the writer
+#: already accepts (``1.50000000`` is 1.50, not a scale-8 domain).
+CREATE_NEW_NUMERIC_SAFETY_MARGIN = 2
+
+
+def observe_source_numeric_samples(
+    samples: list[Any] | None,
+    *,
+    max_precision: int = 38,
+) -> dict[str, Any]:
+    """What the column *is*, from the cells — no create-new dest margin.
+
+    Trailing zeros still collapse through ``cell_int_digits_and_scale`` (same
+    rule as ``fits_decimal`` / Validate). The +2 scale buffer stays on
+    :func:`create_new_decimal_carrier` only.
+    """
+    return observe_numeric_samples(
+        samples, safety_margin=0, max_precision=max_precision
+    )
+
+
 def observe_numeric_samples(
     samples: list[Any] | None,
     *,
-    safety_margin: int = 2,
+    safety_margin: int = CREATE_NEW_NUMERIC_SAFETY_MARGIN,
     max_precision: int = 38,
 ) -> dict[str, Any]:
     """Profile numeric samples into invent-ready precision/scale + kind.
+
+    ``safety_margin`` is create-new dest head-room. Callers that stamp a
+    *source* type must use :func:`observe_source_numeric_samples` (margin 0)
+    so Map does not compare an invented typmod against a live destination.
 
     Returns keys: ``kind``, ``max_int_digits``, ``max_scale``, ``scale``,
     ``precision``, ``carrier``, ``parse_rate``, ``sample_count``, ``ieee_signals``,
@@ -354,7 +381,9 @@ def create_new_decimal_carrier(
         if p is not None:
             return src if s is not None else f"DECIMAL({p},0)"
 
-    obs = observe_numeric_samples(samples)
+    obs = observe_numeric_samples(
+        samples, safety_margin=CREATE_NEW_NUMERIC_SAFETY_MARGIN
+    )
     if obs.get("kind") in {None, "empty"}:
         # No evidence — keep declared source token (caller falls through to ddl).
         return src or "DECIMAL"

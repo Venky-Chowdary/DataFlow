@@ -218,9 +218,9 @@ def analyze_column_profile(name: str, samples: list[str]) -> dict[str, Any]:
         # Sample-aware DECIMAL(p,s) / IEEE kind for Map profiling strip.
         if numeric_ratio >= 0.5 or profile["likely_numeric"]:
             try:
-                from services.decimal_observe import observe_numeric_samples
+                from services.decimal_observe import observe_source_numeric_samples
 
-                obs = observe_numeric_samples(vals)
+                obs = observe_source_numeric_samples(vals)
                 if obs.get("kind") not in {None, "empty"}:
                     profile["observed_precision"] = obs.get("precision")
                     profile["observed_scale"] = obs.get("scale")

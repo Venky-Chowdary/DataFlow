@@ -28,7 +28,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from typing import Any
 
-from services.decimal_observe import observe_numeric_samples
+from services.decimal_observe import observe_source_numeric_samples
 from services.transform_engine import (
     NULL_SENTINELS,
     _active_date_locale,
@@ -851,7 +851,7 @@ def infer_column(
 
     if types <= {"INTEGER", "DECIMAL"}:
         # Sample-aware DECIMAL(p,s) / FLOAT invent — never bare DECIMAL → (38,15).
-        obs = observe_numeric_samples(non_empty)
+        obs = observe_source_numeric_samples(non_empty)
         inferred = str(obs.get("carrier") or ("DECIMAL" if "DECIMAL" in types else "INTEGER"))
         role = "numeric"
         if obs.get("kind") == "ieee_float":
@@ -994,7 +994,7 @@ def infer_column(
                     int(v)
                 # Re-observe so a value beyond int64 still widens to DECIMAL
                 # rather than being forced into INTEGER.
-                obs = observe_numeric_samples(non_empty)
+                obs = observe_source_numeric_samples(non_empty)
                 inferred = str(obs.get("carrier") or "INTEGER")
                 role = "numeric"
                 notes.append("long digits without temporal name — numeric not TIMESTAMP")

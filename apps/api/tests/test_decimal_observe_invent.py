@@ -82,6 +82,38 @@ def test_schema_inference_stamps_observed_decimal():
     assert s >= 2
 
 
+def test_padded_trailing_zeros_do_not_invent_a_tighter_source_than_the_write():
+    """CSV ``1.50000000`` is 1.5. The writer stores it in NUMBER(9,2).
+
+    Observing it as DECIMAL(7,4) (create-new +2 scale) made Map demand a Risk
+    Contract for a narrowing the values do not have. Source inference uses the
+    cells; dest invent keeps the margin.
+    """
+    from services.decimal_observe import observe_source_numeric_samples
+    from services.type_system import is_precision_collapse_coercion
+    from connectors.writer_common import fits_decimal
+
+    assert cell_int_digits_and_scale("1.50000000") == (1, 1)
+    samples = ["1.50000000", "10.50"]
+    assert all(fits_decimal(v, 9, 2, dest_db="snowflake") for v in samples)
+
+    source = observe_source_numeric_samples(samples)
+    invent = observe_numeric_samples(samples)
+    assert source["kind"] == "fixed_decimal"
+    assert source["scale"] == 2
+    assert invent["scale"] == 4
+    assert invent["carrier"] == "DECIMAL(7,4)"
+
+    col = infer_column(samples, field_name="amount")
+    logical = str(col.get("logical_type") or "")
+    p, s = parse_numeric_precision_scale(logical)
+    assert s == 2, logical
+    assert p is not None and p < 7
+    assert is_precision_collapse_coercion(
+        logical, "NUMBER(9,2)", dest_db="snowflake"
+    ) is False
+
+
 def test_money_with_currency_symbols():
     samples = ["$1,234.56", "$99.00", "£10.50"]
     obs = observe_numeric_samples(samples)
