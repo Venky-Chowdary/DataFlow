@@ -429,7 +429,13 @@ describe("Transfer Studio chrome contracts", () => {
 
     assert.match(rail, /resolveValidateStudioPrimary/);
     assert.match(rail, /data-studio-primary/);
+    assert.match(rail, /df2-validate-studio-primary-label/);
     assert.doesNotMatch(rail, /slice\(0,\s*26\)/);
+    const studio = readFileSync(join(webRoot, "styles/transfer-studio.css"), "utf8");
+    assert.match(
+      studio,
+      /df2-validate-footer-actions \.df2-btn\[data-studio-primary="true"\][\s\S]*min-width:\s*max-content/,
+    );
     assert.match(dash, /dashboardCtaVariant/);
     assert.match(dash, /dashCta\("map_open"\)/);
     assert.doesNotMatch(

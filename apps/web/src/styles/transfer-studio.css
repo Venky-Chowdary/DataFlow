@@ -10984,6 +10984,26 @@ button.df2-vd-assist-toggle:focus-visible {
   height: auto !important;
 }
 
+/* Studio primary — label stays readable. Density locks must not collapse it to 32px. */
+.df2-page-transfer-studio .df2-validate-footer-actions .df2-btn[data-studio-primary="true"],
+.df2-page-transfer-studio .df2-validate-footer-actions .df2-validate-studio-primary {
+  min-width: max-content !important;
+  max-width: none !important;
+  width: auto !important;
+  overflow: visible !important;
+  white-space: nowrap !important;
+  flex-shrink: 0 !important;
+}
+.df2-page-transfer-studio .df2-validate-studio-primary-label {
+  display: inline !important;
+  position: static !important;
+  width: auto !important;
+  height: auto !important;
+  overflow: visible !important;
+  clip: auto !important;
+  font-size: inherit !important;
+}
+
 @media (max-width: 1100px) {
   .df2-app .df2-page-transfer-studio .df2-source-step .df2-transfer-step-split {
     grid-template-columns: minmax(0, 1fr) !important;

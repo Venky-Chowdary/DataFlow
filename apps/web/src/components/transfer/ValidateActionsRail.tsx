@@ -183,6 +183,7 @@ export function ValidateActionsRail({
                 loading={preflighting}
                 leadingIcon={<DtIcon name="gate" size={16} />}
                 data-studio-primary={isPrimary("run_preflight") ? "true" : "false"}
+                className={isPrimary("run_preflight") ? "df2-validate-studio-primary" : undefined}
                 title={
                   preflight
                     ? "Discard this verdict and re-run the same API gates — acknowledgments and Risk Contracts still apply"
@@ -208,8 +209,9 @@ export function ValidateActionsRail({
                   }
                   title={primaryFixLabel}
                   data-studio-primary={isPrimary("primary_fix") ? "true" : "false"}
+                  className={isPrimary("primary_fix") ? "df2-validate-studio-primary" : undefined}
                 >
-                  {primaryFixLabel}
+                  <span className="df2-validate-studio-primary-label">{primaryFixLabel}</span>
                 </Button>
               )}
 
@@ -263,6 +265,7 @@ export function ValidateActionsRail({
                   loadingLabel="Starting…"
                   disabled={executeDisabled}
                   data-studio-primary={studioPrimary.executeIsPrimary ? "true" : "false"}
+                  className={studioPrimary.executeIsPrimary ? "df2-validate-studio-primary" : undefined}
                   title={
                     executeBlocked
                       ? (executeBlockedReason || "Execution blocked")
