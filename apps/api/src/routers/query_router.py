@@ -584,22 +584,32 @@ def _run_mongodb_query(connector, body):
 def _parse_mongodb_json(raw: str) -> Any:
     """Parse a Mongo filter/pipeline, honouring Extended JSON type wrappers.
 
-    Plain ``json.loads`` turns ``{"$date": "..."}`` into a dict, so a date
-    predicate silently matches nothing against a real BSON Date. ``json_util``
-    reconstructs the typed values ($date, $oid, $regex) the server expects.
+    ``json_util.loads`` rebuilds ``$date`` / ``$oid`` / ``$numberDecimal``, but
+    it still calls stdlib ``json.loads``, so a long fraction in a predicate
+    collapses to IEEE before ``find()``. ``parse_float=Decimal`` plus
+    ``demote_exact_json`` keeps digits; ``object_hook`` still rebuilds BSON.
     """
+    from decimal import Decimal
+
+    from services.value_serializer import demote_exact_json, json_loads_exact
+
     try:
         from bson import json_util
-
-        return json_util.loads(raw)
     except ImportError:
-        return json.loads(raw)
+        return json_loads_exact(raw)
+    try:
+        parsed = json.loads(
+            raw,
+            parse_float=Decimal,
+            object_hook=json_util.object_hook,
+        )
     except json.JSONDecodeError:
         raise
     except Exception as exc:
         raise HTTPException(
             status_code=400, detail=f"Invalid MongoDB query: {exc}"
         ) from exc
+    return demote_exact_json(parsed)
 
 
 def _normalize_rows(rows: list[dict]) -> tuple[list[dict], list[str], dict[str, str], bool]:
