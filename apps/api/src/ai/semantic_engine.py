@@ -1123,8 +1123,60 @@ def generate_mappings(
     target_columns: list[str],
     source_samples: dict[str, list[str]] = None
 ) -> list[MappingSuggestion]:
-    """Generate intelligent column mappings"""
-    return _mapper.map_columns(source_columns, target_columns, source_samples)
+    """Assign columns with ``map_columns`` — the same SSOT as Transfer/Validate.
+
+    The local SmartMapper invented pair scores and “Convert X to Y” from AI
+    inferred types. That suggested Date→ISO for Auto-ambiguous ``01/02/2024``.
+    Transform stamps now come from ``infer_transform_for_mapping`` with no
+    invented dest type (this assist API does not carry destination DDL).
+    """
+    from services.semantic_mapper import authority_mappings
+    from services.transform_engine import infer_transform_for_mapping
+
+    source_schemas = None
+    if source_samples:
+        source_schemas = [
+            {
+                "name": col,
+                "inferred_type": "VARCHAR",
+                "samples": list(source_samples.get(col) or [])[:8],
+            }
+            for col in source_columns
+        ]
+    rows = authority_mappings(
+        source_columns,
+        target_columns,
+        source_schemas=source_schemas,
+    )
+    out: list[MappingSuggestion] = []
+    samples_by_source = source_samples or {}
+    for row in rows:
+        source = str(row.get("source") or "")
+        target = str(row.get("target") or "<unmapped>")
+        if row.get("create_new"):
+            target = "<unmapped>"
+        transform = None
+        needed = False
+        if target != "<unmapped>":
+            inferred = infer_transform_for_mapping(
+                source,
+                target,
+                "string",
+                None,
+                list(samples_by_source.get(source) or []),
+            )
+            if inferred and inferred != "none":
+                transform = inferred
+                needed = True
+        out.append(MappingSuggestion(
+            source_column=source,
+            target_column=target,
+            confidence=float(row.get("confidence") or 0),
+            reason=str(row.get("reasoning") or "map_columns SSOT"),
+            transformation_needed=needed,
+            suggested_transformation=transform,
+        ))
+    return out
 
 
 def detect_pii(columns: dict[str, list[str]]) -> dict[str, list[ComplianceFramework]]:

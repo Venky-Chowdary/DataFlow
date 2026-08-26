@@ -56,6 +56,18 @@ def test_analyze_column_does_not_invent_datetime_from_auto_ambiguous_slash_dates
     assert "standardize_iso8601" in iso.suggested_transformations
 
 
+def test_generate_mappings_does_not_invent_date_transform_for_ambiguous_slash():
+    mappings = generate_mappings(
+        ["event_date"],
+        ["event_date"],
+        {"event_date": ["01/02/2024", "03/04/2024"]},
+    )
+    by = _by_source(mappings)
+    assert by["event_date"].target_column == "event_date"
+    assert by["event_date"].suggested_transformation is None
+    assert by["event_date"].transformation_needed is False
+
+
 def test_reasoning_chain_does_not_invent_date_iso_from_auto_ambiguous_slash_dates():
     from src.ai.llm.chain import DataTransferReasoningChain
 
@@ -66,6 +78,21 @@ def test_reasoning_chain_does_not_invent_date_iso_from_auto_ambiguous_slash_date
     iso = chain.analyze_column("event_date", ["2024-03-05", "2024-03-06"])
     assert iso.answer["inferred_type"] == "date"
     assert "standardize_iso8601" in (iso.answer.get("transformations") or [])
+
+
+def test_reasoning_chain_map_does_not_invent_parse_date_for_ambiguous_slash():
+    from src.ai.llm.chain import DataTransferReasoningChain
+
+    chain = DataTransferReasoningChain()
+    result = chain.map_columns(
+        ["event_date"],
+        ["event_date"],
+        source_samples={"event_date": ["01/02/2024", "03/04/2024"]},
+    )
+    row = result.answer["mappings"][0]
+    assert row["target_column"] == "event_date"
+    assert row["suggested_transformation"] is None
+    assert row["transformation_needed"] is False
 
 
 def test_deterministic_output():

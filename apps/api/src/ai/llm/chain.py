@@ -10,7 +10,6 @@ from dataclasses import dataclass
 
 from ..knowledge.semantic_patterns import SEMANTIC_PATTERNS
 from ..knowledge.synonyms import resolve_canonical
-from ..knowledge.type_conversions import suggest_type_conversion
 from .provider import DataTransferLLMProvider, DataTransferLocalProvider
 
 
@@ -210,19 +209,13 @@ class DataTransferReasoningChain:
             tgt = str(row.get("target") or "")
             conf = float(row.get("confidence") or 0)
             if tgt and not row.get("create_new") and conf > 0.5:
-                src_analysis = self.analyze_column(
-                    src_col, (source_samples or {}).get(src_col, [])
+                from services.transform_engine import infer_transform_for_mapping
+
+                samples = list((source_samples or {}).get(src_col) or [])
+                inferred = infer_transform_for_mapping(
+                    src_col, tgt, "string", None, samples,
                 )
-                src_ans = src_analysis.answer if isinstance(src_analysis.answer, dict) else {}
-                tgt_analysis = self.analyze_column(tgt)
-                tgt_ans = tgt_analysis.answer if isinstance(tgt_analysis.answer, dict) else {}
-                transform = None
-                if src_ans.get("inferred_type") != tgt_ans.get("inferred_type"):
-                    conv = suggest_type_conversion(
-                        src_ans.get("inferred_type", "string"),
-                        tgt_ans.get("inferred_type", "string"),
-                    )
-                    transform = conv["method"] if conv else None
+                transform = inferred if inferred and inferred != "none" else None
                 mappings.append({
                     "source_column": src_col,
                     "target_column": tgt,
