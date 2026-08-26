@@ -4334,6 +4334,15 @@ def row_has_missing_sentinel(row: tuple | list) -> bool:
     return any(is_missing_sentinel(v) for v in row)
 
 
+def _dense_write_needs_null_materialize(row: tuple | list) -> bool:
+    """True when a dense row still carries an extract token (not already None)."""
+
+    return any(
+        is_missing_sentinel(v) or (is_reader_null_cell(v) and v is not None)
+        for v in row
+    )
+
+
 def materialize_missing_as_null_for_dense_write(
     mapped_rows: list[tuple],
 ) -> list[tuple]:
@@ -4341,18 +4350,28 @@ def materialize_missing_as_null_for_dense_write(
 
     Sparse CDC upsert must keep ``DF_MISSING`` and omit columns from SET.
     Full-refresh / create-new / dense bulk loads union a schemaless schema —
-    missing keys are SQL NULL, not the literal ``__DF_MISSING__`` string
-    (Snowflake BOOL / Postgres BOOLEAN reject that string).
+    missing keys are SQL NULL, not the literal ``__DF_MISSING__`` / extract
+    ``SQL_NULL_SENTINEL`` string (Snowflake BOOL / Postgres BOOLEAN reject
+    those tokens). Empty string stays present.
     """
 
-    if not mapped_rows or not any(row_has_missing_sentinel(r) for r in mapped_rows):
+    if not mapped_rows or not any(
+        _dense_write_needs_null_materialize(r) for r in mapped_rows
+    ):
         return mapped_rows
     out: list[tuple] = []
     for row in mapped_rows:
-        if not row_has_missing_sentinel(row):
+        if not _dense_write_needs_null_materialize(row):
             out.append(row)
             continue
-        out.append(tuple(None if is_missing_sentinel(v) else v for v in row))
+        out.append(
+            tuple(
+                None
+                if is_missing_sentinel(v) or is_reader_null_cell(v)
+                else v
+                for v in row
+            )
+        )
     return out
 
 
