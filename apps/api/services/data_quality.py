@@ -126,7 +126,8 @@ def _is_date_column(name: str) -> bool:
     )
 
 
-def _iqr_outliers(values: list[float]) -> list[float]:
+def _iqr_outliers(values: list[Decimal]) -> list[Decimal]:
+    """IQR fences on write-path Decimals. ``float`` invented a second magnitude."""
     if len(values) < 4:
         return []
     sorted_vals = sorted(values)
@@ -134,8 +135,8 @@ def _iqr_outliers(values: list[float]) -> list[float]:
     q1 = sorted_vals[n // 4] if n >= 4 else sorted_vals[0]
     q3 = sorted_vals[(3 * n) // 4] if n >= 4 else sorted_vals[-1]
     iqr = q3 - q1
-    lower = q1 - 1.5 * iqr
-    upper = q3 + 1.5 * iqr
+    lower = q1 - Decimal("1.5") * iqr
+    upper = q3 + Decimal("1.5") * iqr
     return [v for v in values if v < lower or v > upper]
 
 
@@ -508,7 +509,7 @@ def run_integrity_audit(
         if col_type in {"INTEGER", "DECIMAL", "NUMERIC", "FLOAT", "DOUBLE", "REAL"} or (
             col_type == "STRING" and _is_amount_column(h)
         ):
-            nums = [_to_float(v) for v in non_null]
+            nums = [_to_decimal(v) for v in non_null]
             nums = [n for n in nums if n is not None]
             if nums:
                 col_stats["min"] = min(nums)
@@ -550,7 +551,7 @@ def run_integrity_audit(
                     stdev = col_stats["stdev"]
                     if stdev:
                         for offset, v in enumerate(values):
-                            f = _to_float(v)
+                            f = _to_decimal(v)
                             if f is None:
                                 continue
                             z = abs(f - mean) / stdev
