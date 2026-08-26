@@ -801,7 +801,7 @@ class OverwriteSourceKeySet:
 
         for raw in keys:
             tup = tuple(raw)
-            if len(tup) != self._width or any(v is None for v in tup):
+            if len(tup) != self._width or any(is_null_evidence(v) for v in tup):
                 self._failed = True
                 return
             coerced = tuple(coerce_pk_part(p) for p in tup)
