@@ -1008,12 +1008,20 @@ def _pk_predicate_variants(value: Any) -> list[Any]:
     without a full table scan on every batch. ``float(text)`` is not lossless
     — Auto ``1.000`` became ``1``.
     """
+    from services.value_serializer import (
+        is_missing_sentinel,
+        is_reader_null_cell,
+        present_cell_text,
+    )
+
+    if is_missing_sentinel(value):
+        return [value]
+    if is_reader_null_cell(value):
+        return [None]
     variants: list[Any] = [value]
-    if value is None:
-        return variants
-    as_str = str(value)
-    if as_str not in variants:
-        variants.append(as_str)
+    text = present_cell_text(value)
+    if text is not None and text not in variants:
+        variants.append(text)
     if isinstance(value, bool):
         return variants
     if isinstance(value, int):
@@ -1033,6 +1041,21 @@ def _pk_predicate_variants(value: Any) -> list[Any]:
             if as_int not in variants:
                 variants.append(as_int)
     return variants
+
+
+def _pk_lookup_part(value: Any) -> str:
+    """One Iceberg leftover PK part on the dest cell wire.
+
+    ``str(True)`` is ``True``; dest and source ``true`` share one token.
+    Reader-null / blank stay empty so a sentinel is not probed as a key.
+    """
+    from connectors.writer_common import _is_nullish_conflict_key
+    from services.value_serializer import present_cell_text
+
+    if _is_nullish_conflict_key(value):
+        return ""
+    text = present_cell_text(value)
+    return "" if text is None else text
 
 
 def _pk_row_filter(pk_cols: list[str], key_tuples: list[tuple]) -> Any:
@@ -1098,16 +1121,11 @@ def _scan_existing_by_pk(
             row = {name: columns[name][idx] for name in names}
             if any(_is_nullish_conflict_key(row.get(c)) for c in pk_cols):
                 continue
-            key = tuple(
-                "" if _is_nullish_conflict_key(row.get(c)) else str(row.get(c))
-                for c in pk_cols
-            )
+            key = tuple(_pk_lookup_part(row.get(c)) for c in pk_cols)
             existing[key] = row
 
     unique_keys = list(dict.fromkeys(key_tuples))
-    wanted = {
-        tuple("" if v is None else str(v) for v in tup) for tup in unique_keys
-    }
+    wanted = {tuple(_pk_lookup_part(v) for v in tup) for tup in unique_keys}
     try:
         for start in range(0, len(unique_keys), _PK_SCAN_SLICE):
             chunk = unique_keys[start : start + _PK_SCAN_SLICE]

@@ -4778,14 +4778,12 @@ def overlay_physical_bind_types(
 
 def _is_nullish_conflict_key(val: Any) -> bool:
     """True when a conflict-key cell cannot identify a dense upsert row."""
-    if val is None:
-        return True
+    from services.value_serializer import is_reader_null_cell
 
-    if is_missing_sentinel(val):
+    if is_reader_null_cell(val):
         return True
-    if isinstance(val, str):
-        text = val.strip()
-        return not text or text == SQL_NULL_SENTINEL
+    if isinstance(val, str) and not val.strip():
+        return True
     return False
 
 
