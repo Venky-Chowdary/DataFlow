@@ -716,17 +716,12 @@ def _load_existing_rows(table_dir: Path, columns: list[str], current_meta: dict[
 
 
 def _upsert_pk_key(row: dict[str, Any], pk_cols: Sequence[str]) -> tuple:
-    """Comparable PK tuple. Never stringify None → ``\"None\"``."""
-    from connectors.writer_common import _is_nullish_conflict_key
+    """Leftover merge key on the same dest cell wire as ``_pk_lookup_part``.
 
-    out: list[str] = []
-    for col in pk_cols:
-        val = row.get(col)
-        if _is_nullish_conflict_key(val):
-            out.append("")
-        else:
-            out.append(str(val))
-    return tuple(out)
+    ``str(True)`` is ``True`` and would miss dest ``true``. Reader-null /
+    blank stay empty so a sentinel is not a second identity.
+    """
+    return tuple(_pk_lookup_part(row.get(col)) for col in pk_cols)
 
 
 def _iceberg_present_fields(row: dict[str, Any]) -> dict[str, Any]:
