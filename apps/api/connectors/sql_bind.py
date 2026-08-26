@@ -1377,11 +1377,11 @@ def coerce_integer_wire(
     ddl_type: str | None = None,
     engine: str = "",
 ) -> Any:
-    """Normalize integer-family bind (TINYINT…BIGINT). Digit strings → int.
+    """Normalize integer-family bind (TINYINT…BIGINT) via the write-path parser.
 
-    SQL Server ``TINYINT`` is unsigned 0–255 (Microsoft / pyodbc), not MySQL's
-    TINYINT(1) boolean convention. Out-of-range and non-integral floats refuse
-    invent — quarantine owns the row.
+    Auto ``1,234`` / ``1.000`` refuse (``Decimal(text)`` invented ``1.000`` →
+    ``1``). Locale money the write path stores still binds. Wordy boolean
+    tokens refuse. SQL Server ``TINYINT`` is unsigned 0–255.
     """
     if value is None:
         return None
@@ -1473,28 +1473,14 @@ def coerce_integer_wire(
                 f"refuse invent integer from boolean token {value!r} "
                 f"for {ddl_type or upper}"
             )
-        try:
-            if any(c in token for c in ".eE") and not re.fullmatch(
-                r"[-+]?\d+", token
-            ):
-                dec = Decimal(token)
-                if dec != dec.to_integral_value():
-                    raise ValueError(
-                        f"refuse invent integer from fractional {value!r}"
-                    )
-                return _range_check(int(dec))
-            return _range_check(int(token, 10))
-        except InvalidOperation as exc:
+        from services.transform_engine import integer_wire_value
+
+        parsed = integer_wire_value(token)
+        if parsed is None:
             raise ValueError(
                 f"refuse invent integer from {value!r} for {ddl_type or upper}"
-            ) from exc
-        except ValueError as exc:
-            msg = str(exc)
-            if "out of range" in msg or msg.startswith("refuse invent"):
-                raise
-            raise ValueError(
-                f"refuse invent integer from {value!r} for {ddl_type or upper}"
-            ) from exc
+            )
+        return _range_check(parsed)
     raise ValueError(
         f"refuse invent integer from {type(value).__name__} {value!r} "
         f"for {ddl_type or upper}"
