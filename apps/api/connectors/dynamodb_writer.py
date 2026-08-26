@@ -352,7 +352,7 @@ def _coerce_dynamo_cell(
     """Apply Dynamo key-type / binary wire coercion before AttributeValue encode."""
     attr_type = key_types.get(col)
     if attr_type == "S":
-        from services.value_serializer import is_reader_null_cell
+        from services.value_serializer import is_reader_null_cell, present_cell_text
 
         if is_reader_null_cell(value) or (
             isinstance(value, str) and value.strip() == ""
@@ -361,7 +361,13 @@ def _coerce_dynamo_cell(
                 f"DynamoDB key type S refused {value!r} for {col!r} — "
                 "refuse silent empty-string invent (HASH/RANGE identity)"
             )
-        return str(value)
+        token = present_cell_text(value)
+        if token is None:
+            raise ValueError(
+                f"DynamoDB key type S refused {value!r} for {col!r} — "
+                "refuse silent empty-string invent (HASH/RANGE identity)"
+            )
+        return token
     if attr_type == "N":
         from services.value_serializer import is_reader_null_cell
 
