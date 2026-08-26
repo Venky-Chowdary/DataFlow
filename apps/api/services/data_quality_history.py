@@ -25,7 +25,7 @@ from typing import Any, Mapping
 
 from services.atomic_file import write_json_atomic
 from services.platform_config import data_dir
-from services.value_serializer import cell_to_string
+from services.value_serializer import cell_to_string, is_null_evidence
 
 # Keep enough history to answer "what changed across the last ~10 loads".
 DEFAULT_HISTORY_LIMIT = max(5, min(50, int(getenv_brand("QUALITY_HISTORY_LIMIT", "20"))))
@@ -124,7 +124,8 @@ def profile_column(values: list[Any], column: str, dtype: str = "string") -> Col
     non_null = [
         v
         for v in values
-        if v is not None and cell_to_string(v).strip().lower() not in {"", "null", "none"}
+        if not is_null_evidence(v)
+        and cell_to_string(v).strip().lower() not in {"null", "none"}
     ]
     profile.null_count = profile.count - len(non_null)
 

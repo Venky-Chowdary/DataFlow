@@ -20,6 +20,7 @@ from services.data_quality_history import (  # noqa: E402
     profile_column,
     save_profile,
 )
+from services.value_serializer import SQL_NULL_SENTINEL  # noqa: E402
 
 
 def test_locale_money_minmax_are_decimals():
@@ -61,3 +62,17 @@ def test_locale_money_survives_history_roundtrip(tmp_path, monkeypatch):
     assert historical["amount"].max_value == "2000.00"
     assert historical["amount"].mean == Decimal("1081.52")
     assert isinstance(historical["amount"].mean, Decimal)
+
+
+def test_reader_null_is_absence_not_a_token():
+    p = profile_column(
+        [None, SQL_NULL_SENTINEL, "", "kept", "null"],
+        "note",
+        "string",
+    )
+    assert p.count == 5
+    assert p.null_count == 4
+    assert p.distinct_count == 1
+    assert p.min_value == "kept"
+    assert p.max_value == "kept"
+    assert not any(v == SQL_NULL_SENTINEL for v, _ in p.top_values)
