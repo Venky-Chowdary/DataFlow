@@ -221,7 +221,12 @@ def analyze_column_profile(name: str, samples: list[str]) -> dict[str, Any]:
         profile["likely_email"] = email_ratio >= 0.5 or _contains_term(name, {"email", "mail"})
         profile["likely_phone"] = phone_ratio >= 0.5 or _contains_term(name, {"phone", "mobile", "tel"})
         profile["likely_uuid"] = uuid_ratio >= 0.5 or _contains_term(name, {"uuid", "guid", "identifier"})
-        profile["likely_numeric"] = numeric_ratio >= 0.75 or _contains_term(name, {"amount", "qty", "total", "balance", "price"})
+        # Name may disambiguate only when samples already bind. Auto-ambiguous
+        # 1,234 must not score as numeric — the write path refuses them.
+        profile["likely_numeric"] = numeric_ratio >= 0.75 or (
+            numeric_ratio >= 0.5
+            and _contains_term(name, {"amount", "qty", "total", "balance", "price"})
+        )
         # Name may disambiguate only when samples already bind. Auto-ambiguous
         # 01/02/2024 must not score as date-like — the write path refuses them.
         profile["likely_date"] = date_ratio >= 0.7 or (

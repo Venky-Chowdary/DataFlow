@@ -59,6 +59,39 @@ def test_email_to_varchar_snowflake_is_pii_note_not_type_defect():
     assert not any("non-string" in n for n in notes)
 
 
+def test_auto_ambiguous_grouped_numbers_are_not_numeric_like():
+    """1,234 is US thousands or EU decimal — name must not invent likely_numeric."""
+    profile = analyze_column_profile("amount", ["1,234", "5,678"])
+    assert profile["likely_numeric"] is False
+    _, notes = score_mapping_pair(
+        {
+            "source": "amount",
+            "target": "amount",
+            "target_type": "DECIMAL",
+            "confidence": 0.9,
+        },
+        source_profile=profile,
+    )
+    assert not any("numeric samples" in n for n in notes)
+
+
+def test_bindable_currency_still_scores_as_numeric_like():
+    us = analyze_column_profile("amount", ["$1,000.00", "$2,500.50"])
+    assert us["likely_numeric"] is True
+    euro = analyze_column_profile("price", ["€1.000,89", "€2.500,00"])
+    assert euro["likely_numeric"] is True
+    _, notes = score_mapping_pair(
+        {
+            "source": "amount",
+            "target": "amount",
+            "target_type": "DECIMAL",
+            "confidence": 0.9,
+        },
+        source_profile=us,
+    )
+    assert any("numeric samples on numeric target" in n for n in notes)
+
+
 def test_auto_ambiguous_slash_dates_are_not_date_like():
     """01/02/2024 is Jan 2 or Feb 1 — name must not invent likely_date."""
     profile = analyze_column_profile("event_date", ["01/02/2024", "03/04/2024"])
