@@ -23,7 +23,7 @@ from services.read_options import ReadOptions, ReadOptionsError
 from services.schema_inference import infer_columns_from_rows
 from services.tabular_rows import is_blank_row
 from services.tabular_window import header_and_rows, row_to_record
-from services.value_serializer import cell_to_string, json_default
+from services.value_serializer import cell_to_string, json_default, json_loads_exact
 
 UPLOAD_DIR = upload_dir()
 REGISTRY_PATH = data_dir() / "upload_registry.json"
@@ -171,7 +171,7 @@ def parse_jsonl(content: bytes) -> tuple[list[str], list[list[str]], int]:
         line = line.strip()
         if not line:
             continue
-        objects.append(json.loads(line))
+        objects.append(json_loads_exact(line))
     if not objects:
         raise ValueError("JSONL must contain at least one JSON object per line")
     if not all(isinstance(item, dict) for item in objects):
@@ -229,7 +229,7 @@ def _iter_jsonl_dicts_from_reader(reader: Any) -> Any:
         if not line:
             continue
         try:
-            obj = json.loads(line)
+            obj = json_loads_exact(line)
         except json.JSONDecodeError as exc:
             raise UnmeasuredArtifact("jsonl_poison_line") from exc
         if not isinstance(obj, dict):
@@ -483,7 +483,7 @@ def get_file_chunks(file_id: str, chunk_size: int = 10000):
         from services.json_tabular import extract_json_records
 
         with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
+            data = json_loads_exact(f.read())
         records = extract_json_records(data)
         if not records:
             return
@@ -509,7 +509,7 @@ def get_file_chunks(file_id: str, chunk_size: int = 10000):
                 line = line.strip()
                 if not line:
                     continue
-                obj = json.loads(line)
+                obj = json_loads_exact(line)
                 if not isinstance(obj, dict):
                     raise ValueError("JSONL must contain one JSON object per line")
                 for k in obj.keys():
@@ -524,7 +524,7 @@ def get_file_chunks(file_id: str, chunk_size: int = 10000):
                 line = line.strip()
                 if not line:
                     continue
-                obj = json.loads(line)
+                obj = json_loads_exact(line)
                 row = [cell_to_string(obj.get(h, "")) for h in headers]
                 chunk.append(row)
                 if len(chunk) >= chunk_size:
@@ -659,7 +659,7 @@ class FileParser:
         try:
             from services.json_tabular import extract_json_records
 
-            data = json.loads(content)
+            data = json_loads_exact(content)
             try:
                 records = extract_json_records(data)
             except ValueError as exc:
@@ -738,7 +738,7 @@ class FileParser:
                 if not line:
                     continue
                 try:
-                    record = json.loads(line)
+                    record = json_loads_exact(line)
                     if not isinstance(record, dict):
                         return ParseResult(
                             success=False,

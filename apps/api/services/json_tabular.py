@@ -172,7 +172,9 @@ def load_json_records(raw: bytes | str, *, records_path: str | None = None) -> l
     if not text:
         raise ValueError("JSON file is empty")
     try:
-        data = json.loads(text)
+        from services.value_serializer import json_loads_exact
+
+        data = json_loads_exact(text)
     except json.JSONDecodeError as exc:
         raise ValueError(f"Invalid JSON: {exc}") from exc
     return extract_json_records(data, records_path=records_path)
@@ -516,7 +518,9 @@ def _iter_json_dicts_dom(text: str) -> Any:
     from services.dest_precount import UnmeasuredArtifact
 
     try:
-        data = json.loads(text)
+        from services.value_serializer import json_loads_exact
+
+        data = json_loads_exact(text)
     except (json.JSONDecodeError, ValueError) as exc:
         raise UnmeasuredArtifact("json_unparseable") from exc
     found = _json_unique_from_stats(_json_collect_array_stats(data))
