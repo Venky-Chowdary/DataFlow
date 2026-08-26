@@ -35,3 +35,17 @@ def test_auto_grouping_refuses():
 def test_mantissa_beyond_float_stays_exact():
     assert _to_decimal("9007199254740993") == Decimal("9007199254740993")
     assert _to_decimal("9007199254740993") != Decimal("9007199254740992")
+
+
+def test_boolean_is_not_a_magnitude():
+    assert _to_decimal(True) is None
+    assert _to_decimal(False) is None
+    assert _to_decimal("true") is None
+    assert _to_decimal("True") is None
+    assert _to_decimal("t") is None
+    assert _to_decimal("false") is None
+
+
+def test_decimal_scientific_stays_identity():
+    assert _to_decimal(Decimal("1E+2")) == Decimal("1E+2")
+    assert _to_decimal(Decimal("100")) == Decimal("100")

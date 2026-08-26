@@ -17,11 +17,11 @@ from typing import Any
 
 try:
     from services.pii_guard import is_sensitive_name, pii_findings
-    from services.transform_engine import apply_transform
+    from services.transform_engine import apply_transform, decimal_wire_value
     from services.value_serializer import is_null_evidence
 except ImportError:  # pragma: no cover - compatibility for tests
     from src.services.pii_guard import is_sensitive_name, pii_findings
-    from src.services.transform_engine import apply_transform
+    from src.services.transform_engine import apply_transform, decimal_wire_value
     from src.services.value_serializer import is_null_evidence
 
 _UTC = timezone.utc
@@ -55,18 +55,14 @@ def _is_null(value: Any) -> bool:
 
 
 def _to_decimal(value: Any) -> Decimal | None:
-    """Write-path decimal bind — locale/currency money, Auto 1,234 refuses."""
+    """Write-path decimal bind — locale/currency money, Auto 1,234 refuses.
+
+    ``apply_transform(str(True), 'decimal')`` invented ``1``. Reader-wired
+    ``true`` / ``t`` did the same. ``decimal_wire_value`` is the one binder.
+    """
     if _is_null(value):
         return None
-    parsed, err = apply_transform(str(value).strip(), "decimal")
-    if parsed is None or err:
-        return None
-    if isinstance(parsed, Decimal):
-        return parsed
-    try:
-        return Decimal(str(parsed))
-    except (InvalidOperation, ValueError, TypeError):
-        return None
+    return decimal_wire_value(value)
 
 
 def _as_decimal_stat(value: Any) -> Decimal | None:
