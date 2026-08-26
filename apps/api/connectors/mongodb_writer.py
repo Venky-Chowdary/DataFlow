@@ -31,8 +31,34 @@ from connectors.writer_common import (
     WriteResult as _WriteResult,
 )
 from services.document_instant import transform_narrows_to_calendar_day
+from services.value_serializer import json_loads_exact
 
 logger = logging.getLogger(__name__)
+
+
+def bind_mongo_json_document(value: Any) -> Any:
+    """Parse a Mongo JSON/OBJECT/ARRAY/VARIANT cell.
+
+    Numbers match ``json_loads_exact``. Invalid text refuses — never store the
+    raw string as a silent invent. Non-finite constants refuse.
+    """
+    if isinstance(value, (dict, list)):
+        return value
+    if isinstance(value, str):
+        def _reject(name: str) -> None:
+            raise ValueError(f"non-finite JSON constant: {name}")
+
+        try:
+            return json_loads_exact(value, parse_constant=_reject)
+        except (json.JSONDecodeError, TypeError, ValueError) as exc:
+            raise ValueError(
+                f"MongoDB JSON refused {value!r} "
+                "(refuse silent string invent)"
+            ) from exc
+    raise ValueError(
+        f"MongoDB JSON refused {value!r} "
+        "(refuse silent pass-through invent)"
+    )
 
 
 def _target_is_temporal(target_type: str) -> bool:
@@ -720,23 +746,7 @@ def write_mapped_rows(
                 # Fail-closed — never UTF-8-invent bytes.
                 return _Bin(coerce_binary_wire(value))
             if upper in {"JSON", "OBJECT", "ARRAY", "VARIANT"}:
-                if isinstance(value, (dict, list)):
-                    return value
-                if isinstance(value, str):
-                    try:
-                        def _reject(name: str) -> None:
-                            raise ValueError(f"non-finite JSON constant: {name}")
-
-                        return json.loads(value, parse_constant=_reject)
-                    except (json.JSONDecodeError, TypeError, ValueError) as exc:
-                        raise ValueError(
-                            f"MongoDB JSON refused {value!r} "
-                            "(refuse silent string invent)"
-                        ) from exc
-                raise ValueError(
-                    f"MongoDB JSON refused {value!r} "
-                    "(refuse silent pass-through invent)"
-                )
+                return bind_mongo_json_document(value)
             if upper in {"UUID", "UNIQUEIDENTIFIER", "GUID"}:
                 from connectors.sql_bind import coerce_uuid_wire
 
