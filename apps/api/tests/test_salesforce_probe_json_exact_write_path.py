@@ -1,15 +1,15 @@
 """Salesforce uniqueness probe uses load_http_json, not Response.json().
 
 stdlib Response.json() collapsed a long fraction in an External Id before
-Validate showed the duplicate key. IEEE-exact 1.5 stays float. Id-only
-identity still skips the query.
+Validate showed the duplicate key. Findings now use the cell_to_string
+wire (long fraction stays digits; 1.5 is "1.5"). Id-only identity still
+skips the query.
 """
 
 from __future__ import annotations
 
 import json
 import sys
-from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -57,9 +57,9 @@ def test_external_id_long_fraction_stays_decimal(monkeypatch: pytest.MonkeyPatch
         {}, "Account", ["External_Id__c"]
     )
     assert status == "ran"
-    assert findings[0]["value"] == Decimal(LONG)
+    assert findings[0]["value"] == LONG
     stock = json.loads(f'{{"External_Id__c": {LONG}}}')["External_Id__c"]
-    assert findings[0]["value"] != stock
+    assert findings[0]["value"] != str(stock)
     assert findings[0]["count"] == 2
 
 
@@ -72,8 +72,7 @@ def test_ieee_exact_fraction_stays_float(monkeypatch: pytest.MonkeyPatch):
         {}, "Account", ["External_Id__c"]
     )
     assert status == "ran"
-    assert findings[0]["value"] == 1.5
-    assert isinstance(findings[0]["value"], float)
+    assert findings[0]["value"] == "1.5"
 
 
 def test_int_past_ieee_mantissa_stays_int(monkeypatch: pytest.MonkeyPatch):
@@ -85,8 +84,7 @@ def test_int_past_ieee_mantissa_stays_int(monkeypatch: pytest.MonkeyPatch):
         {}, "Account", ["External_Id__c"]
     )
     assert status == "ran"
-    assert findings[0]["value"] == IEEE_LOSSY
-    assert type(findings[0]["value"]) is int
+    assert findings[0]["value"] == str(IEEE_LOSSY)
 
 
 def test_platform_id_skips_query(monkeypatch: pytest.MonkeyPatch):
