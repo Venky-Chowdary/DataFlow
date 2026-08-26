@@ -53,22 +53,13 @@ def require_cdc_primary_key(
 def is_present_cdc_row_key(value: Any) -> bool:
     """True when a CDC row key can be used for delete/upsert identity.
 
-    ``SQL_NULL_SENTINEL`` / ``DF_MISSING`` / blank must not pass truthiness checks
-    — they are not valid HASH/PK identity (would invent ``__DF_SQL_NULL__`` keys).
+    ``SQL_NULL_SENTINEL`` / DuckDB null / ``DF_MISSING`` / blank must not
+    pass — they are not valid HASH/PK identity. ``True`` and dest ``true``
+    share one present token. ``0`` stays present.
     """
-    if value is None:
-        return False
-    from services.value_serializer import (
-        SQL_NULL_SENTINEL,
-        is_missing_sentinel,
-    )
+    from services.value_serializer import present_cell_text
 
-    if is_missing_sentinel(value):
-        return False
-    text = str(value).strip()
-    if not text or text == SQL_NULL_SENTINEL:
-        return False
-    return True
+    return present_cell_text(value) is not None
 
 
 def require_cdc_primary_keys_map(

@@ -225,7 +225,9 @@ def _normalize_redis_typed_doc(
 
     out = dict(doc)
     for col, typ in zip(target_cols, logical_types):
-        if col not in out or out[col] is None:
+        from services.value_serializer import is_reader_null_cell
+
+        if col not in out or is_reader_null_cell(out[col]):
             continue
         upper = (typ or "").upper()
         if upper in {"UUID", "UNIQUEIDENTIFIER", "GUID"}:
@@ -291,15 +293,15 @@ def _redis_row_to_doc(
     """Build Redis JSON doc with null-polarity honesty.
 
     * ``DF_MISSING`` / STOP_COLUMN → omit key (sparse merge keeps prior JSON)
-    * ``None`` / ``SQL_NULL_SENTINEL`` → JSON ``null`` (explicit wipe)
+    * ``None`` / reader-null → JSON ``null`` (explicit wipe)
     """
-    from services.value_serializer import SQL_NULL_SENTINEL, is_missing_sentinel
+    from services.value_serializer import is_missing_sentinel, is_reader_null_cell
 
     doc: dict[str, Any] = {}
     for c, v in zip(target_cols, row):
         if is_missing_sentinel(v):
             continue
-        if v is None or v == SQL_NULL_SENTINEL:
+        if is_reader_null_cell(v):
             doc[c] = None
         else:
             doc[c] = v
@@ -337,7 +339,9 @@ def _resolve_redis_key_id(
 
         if not is_present_cdc_row_key(val):
             return None, col
-        parts.append(str(val))
+        from services.value_serializer import present_cell_text
+
+        parts.append(present_cell_text(val) or "")
     return "|".join(parts), cols[0]
 
 

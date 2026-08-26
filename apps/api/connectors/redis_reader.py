@@ -182,8 +182,10 @@ def redis_key_for(prefix: str, identity: Any) -> str:
     the moment either side changed.
     """
     from connectors.sql_identifiers import sanitize_identifier
+    from services.value_serializer import present_cell_text
 
-    return f"{prefix}:{sanitize_identifier(str(identity), preserve_case=True)}"
+    text = present_cell_text(identity)
+    return f"{prefix}:{sanitize_identifier(text or '', preserve_case=True)}"
 
 
 def resolve_key_pattern(name: str | None) -> str:
