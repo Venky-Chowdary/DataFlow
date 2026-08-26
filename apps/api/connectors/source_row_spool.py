@@ -32,7 +32,9 @@ from typing import Any
 from services.brand_env import getenv_brand
 from services.value_serializer import (
     DF_MISSING_SENTINEL,
+    cell_to_string,
     is_missing_sentinel,
+    is_reader_null_cell,
     json_default,
     json_loads_exact,
 )
@@ -64,18 +66,25 @@ def resolve_source_spill_max(extra: dict[str, Any] | None = None) -> int:
     return DEFAULT_SOURCE_SPILL_MAX
 
 
-def matrix_cell_from_record(record: dict[str, Any], col: str) -> Any:
-    """One source cell. Absent key is DF_MISSING, not NULL or empty string."""
-    from services.value_serializer import cell_to_string
+def matrix_present_cell(val: Any) -> Any:
+    """One transfer-matrix cell.
 
-    if col not in record:
-        return DF_MISSING_SENTINEL
-    val = record[col]
+    Missing stays Missing (sparse omit). Reader-null is None — never the
+    extract wire token. Present cells use dest-canonical ``cell_to_string``.
+    Empty string stays empty string (distinct from SQL NULL).
+    """
     if is_missing_sentinel(val):
         return DF_MISSING_SENTINEL
-    if val is None:
+    if is_reader_null_cell(val):
         return None
     return cell_to_string(val)
+
+
+def matrix_cell_from_record(record: dict[str, Any], col: str) -> Any:
+    """One source cell. Absent key is DF_MISSING, not NULL or empty string."""
+    if col not in record:
+        return DF_MISSING_SENTINEL
+    return matrix_present_cell(record[col])
 
 
 def matrix_row_from_record(record: dict[str, Any], columns: list[str]) -> list[Any]:

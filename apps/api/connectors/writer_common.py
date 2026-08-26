@@ -24,6 +24,7 @@ from services.value_serializer import (
     Missing,
     cell_to_string,
     is_missing_sentinel,
+    is_null_evidence,
     json_loads_exact,
     public_mapped_cell,
 )
@@ -1471,9 +1472,13 @@ def build_mapped_rows(
 
 
 def _is_blank_cell(val: Any) -> bool:
-    if val is None:
-        return True
-    return str(val).strip() == ""
+    """File empty→null treats extract NULL / blank as absence.
+
+    Empty and whitespace stay blank (``is_null_evidence``, not
+    ``is_reader_null_cell``). ``0`` / ``False`` stay present. Missing is
+    already omitted before this helper runs.
+    """
+    return is_null_evidence(val)
 
 
 def _is_empty_typed_coerce_error(err: str | None) -> bool:

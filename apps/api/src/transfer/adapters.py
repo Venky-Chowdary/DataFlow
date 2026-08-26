@@ -287,16 +287,11 @@ def parse_file_route_sample(
 
 
 def _matrix_cell(value: Any) -> Any:
-    # Preserve SQL NULL / missing distinctly from the literal empty string so
-    # downstream writers can tell the difference.
-    from services.value_serializer import DF_MISSING_SENTINEL, is_missing_sentinel
+    # One owner with ``matrix_cell_from_record``: Missing stays Missing,
+    # reader-null is None (not the extract wire token).
+    from connectors.source_row_spool import matrix_present_cell
 
-    if value is None:
-        return None
-    # STOP_COLUMN / sparse CDC — never collapse DF_MISSING to "" via cell_to_string.
-    if is_missing_sentinel(value):
-        return DF_MISSING_SENTINEL
-    return cell_to_string(value)
+    return matrix_present_cell(value)
 
 
 def records_to_matrix(
@@ -2115,28 +2110,10 @@ def write_destination_file(
             reject_on_strict_policy,
             transform_error_policy,
         )
-        from services.value_serializer import (
-            DF_MISSING_SENTINEL,
-            is_missing_sentinel,
-        )
+        from connectors.source_row_spool import matrix_row_from_record
 
         headers = columns
-        data_rows: list[list[Any]] = []
-        for rec in records:
-            row: list[Any] = []
-            for col in headers:
-                if col not in rec:
-                    # Absent key ≠ empty string — preserve omit semantics for Map.
-                    row.append(DF_MISSING_SENTINEL)
-                    continue
-                val = rec[col]
-                if is_missing_sentinel(val):
-                    row.append(val)
-                elif val is None:
-                    row.append(None)
-                else:
-                    row.append(cell_to_string(val))
-            data_rows.append(row)
+        data_rows = [matrix_row_from_record(rec, headers) for rec in records]
         target_cols, _ = resolve_target_columns(mappings, types)
         error_policy = transform_error_policy_for_validation_mode(validation_mode)
         mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
