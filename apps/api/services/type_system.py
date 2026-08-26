@@ -18,6 +18,7 @@ ETL contract (Informatica / Airbyte / Fivetran class)
 from __future__ import annotations
 
 import re
+from decimal import Decimal, InvalidOperation
 from functools import lru_cache
 from typing import Any, Final
 
@@ -5635,6 +5636,42 @@ _FILTER_EQ_BOOL_RE = re.compile(
 )
 
 
+def _unique_filter_decimal(value: Any) -> Decimal | None:
+    """Bind a unique-filter number as dest-canonical Decimal, then write path.
+
+    ``Decimal(text)`` first keeps stored ``1.234`` identity. Locale money
+    falls through to ``decimal_wire_value``. Auto ``1,234`` returns None —
+    never invent 1234 so a partial unique includes the wrong row. IEEE
+    ``float(val) == float(literal)`` collapsed 2**53+1 onto 2**53.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, Decimal):
+        return value if value.is_finite() else None
+    if isinstance(value, int):
+        return Decimal(value)
+    if isinstance(value, float):
+        if value != value or value in (float("inf"), float("-inf")):
+            return None
+        try:
+            parsed = Decimal(str(value))
+        except (InvalidOperation, ValueError, OverflowError):
+            return None
+        return parsed if parsed.is_finite() else None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        parsed = Decimal(text)
+        if parsed.is_finite():
+            return parsed
+    except (InvalidOperation, ValueError):
+        pass
+    from services.transform_engine import decimal_wire_value
+
+    return decimal_wire_value(text)
+
+
 def _split_top_level_and(predicate: str) -> list[str]:
     """Split ``a AND b AND c`` at top level (respecting quotes/parens)."""
     parts: list[str] = []
@@ -5725,20 +5762,30 @@ def row_matches_unique_filter(
 
     m = _FILTER_EQ_NUM_RE.match(pred)
     if m:
-        val = _cell(m.group(1))
-        try:
-            return float(val) == float(m.group(2))
-        except Exception:
+        cell_d = _unique_filter_decimal(_cell(m.group(1)))
+        lit_d = _unique_filter_decimal(m.group(2))
+        if cell_d is None or lit_d is None:
             return False
+        return +cell_d == +lit_d
 
     m = _FILTER_EQ_BOOL_RE.match(pred)
     if m:
-        raw_exp = m.group(2).lower()
-        expected = raw_exp in {"true", "1"}
+        from services.transform_engine import apply_transform
+
+        expected, err = apply_transform(str(m.group(2)).strip(), "boolean")
+        if err or expected is None:
+            return True
         val = _cell(m.group(1))
-        text = str(val if val is not None else "").strip().lower()
-        actual = text in {"true", "1", "t", "yes"}
-        return actual is expected
+        if isinstance(val, bool):
+            actual = val
+        else:
+            parsed, perr = apply_transform(
+                str(val).strip() if val is not None else "", "boolean"
+            )
+            if perr or parsed is None:
+                return False
+            actual = bool(parsed)
+        return actual is bool(expected)
 
     # Unevaluable filter — include row (prefer Validate block over silent 23505).
     return True
