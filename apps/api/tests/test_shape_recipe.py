@@ -161,7 +161,7 @@ def test_cleansing_steps_produce_the_values_an_operator_expects():
         ),
         ROWS,
     )
-    assert [r["name"] for r in shaped] == ["Ada Lovelace", "Grace Hopper", ""]
+    assert [r["name"] for r in shaped] == ["Ada Lovelace", "Grace Hopper", None]
     assert shaped[0]["amount"] == Decimal("1234.50")
     assert shaped[1]["amount"] == Decimal("-9.99")
     assert shaped[2]["amount"] is None
