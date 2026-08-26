@@ -38,6 +38,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
+from services.value_serializer import json_loads_exact
+
 logger = logging.getLogger(__name__)
 
 MODE_TABLE = "table"
@@ -993,10 +995,10 @@ def _read_spool_page(
                     continue
                 if i >= end:
                     break
-                obj = json.loads(line)
+                obj = json_loads_exact(line)
                 rows.append(_row_from_spool_line(obj, spool.headers))
                 continue
-            obj = json.loads(line)
+            obj = json_loads_exact(line)
             row = _row_from_spool_line(obj, spool.headers)
             if cursor_idx is None or not _row_after_cursor(row, cursor_idx, cursor_after):
                 continue
