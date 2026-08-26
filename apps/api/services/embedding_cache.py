@@ -172,10 +172,19 @@ def get_cached(keys: list[str]) -> dict[str, list[float]]:
                 _SESSION_MISSES += 1
                 continue
             try:
-                vector = [float(x) for x in json.loads(row[0])]
+                parsed = json.loads(row[0])
             except Exception:
                 _SESSION_MISSES += 1
                 continue
+            from services.vector_embedding import coerce_embedding
+
+            bound, err = coerce_embedding(parsed)
+            if err or not bound:
+                # Corrupt / Auto-ambiguous cache row — miss and re-embed.
+                # float(x) invented Auto 1.234 and collapsed 2**53+1.
+                _SESSION_MISSES += 1
+                continue
+            vector = bound
             conn.execute(
                 "UPDATE embeddings SET last_hit_at = ?, hit_count = hit_count + 1 WHERE cache_key = ?",
                 (now, key),
