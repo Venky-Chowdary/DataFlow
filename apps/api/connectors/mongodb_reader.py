@@ -327,7 +327,7 @@ def read_collection_cursor_batch(
     """
     from bson.objectid import ObjectId
 
-    from services.keyset_pagination import split_cursor_bookmark
+    from services.keyset_pagination import present_cursor_bookmark, split_cursor_bookmark
 
     client = _mongo_client(_connection_string(cfg))
     coll = client[database][collection]
@@ -360,9 +360,10 @@ def read_collection_cursor_batch(
             raw, casted, pk_kind if as_id else cursor_kind
         )
 
-    if cursor_after is not None and cursor_after != "":
+    bookmark = present_cursor_bookmark(cursor_after)
+    if bookmark is not None:
         cur_raw, pk_raw = split_cursor_bookmark(
-            cursor_after, has_tiebreak=use_composite
+            bookmark, has_tiebreak=use_composite
         )
         if use_composite and pk_raw != "":
             casted = _as_mongo_cursor(cur_raw)

@@ -67,6 +67,17 @@ def encode_keyset_bookmark(parts: Sequence[Any]) -> str:
     return KEYSET_SEP.join(vals)
 
 
+def present_cursor_bookmark(value: Any) -> str | None:
+    """Keyset resume token, or None when the cell is absent (first page).
+
+    ``if cursor_after`` dropped integer ``0``. Reader-null sentinels are
+    truthy and became ``WHERE col > '__DF_SQL_NULL__'``. Composite
+    ``KEYSET_SEP`` bookmarks stay intact. Incremental empty-string
+    watermarks are a different polarity — do not use this in CDC coalesce.
+    """
+    return present_cell_text(value)
+
+
 def decode_keyset_bookmark(bookmark: str, *, expected_parts: int) -> list[str]:
     """Decode a bookmark into ``expected_parts`` string parts.
 

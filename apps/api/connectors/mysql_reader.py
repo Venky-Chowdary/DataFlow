@@ -343,7 +343,7 @@ def read_table_cursor_batch(
     CDC snapshot session (LOCK TABLES is connection-scoped).
     """
     from connectors.sql_identifiers import split_qualified_table
-    from services.keyset_pagination import split_cursor_bookmark
+    from services.keyset_pagination import present_cursor_bookmark, split_cursor_bookmark
 
     _schema, table = split_qualified_table(table, schema)
     del schema, _schema
@@ -385,19 +385,20 @@ def read_table_cursor_batch(
                 if pk and pk != cursor_column
                 else ""
             )
-            if cursor_after:
+            bookmark = present_cursor_bookmark(cursor_after)
+            if bookmark is not None:
                 if pk_q:
                     query = (
                         f"{base} WHERE ({cursor_q}, {pk_q}) > (%s, %s) "
                         f"ORDER BY {cursor_q}, {pk_q} LIMIT %s"
                     )
                     cur_val, pk_val = split_cursor_bookmark(
-                        cursor_after, has_tiebreak=True
+                        bookmark, has_tiebreak=True
                     )
                     cur.execute(query, (cur_val, pk_val, limit))
                 else:
                     query = f"{base} WHERE {cursor_q} > %s ORDER BY {cursor_q} LIMIT %s"
-                    cur_val, _ = split_cursor_bookmark(cursor_after, has_tiebreak=False)
+                    cur_val, _ = split_cursor_bookmark(bookmark, has_tiebreak=False)
                     cur.execute(query, (cur_val, limit))
             else:
                 if pk_q:

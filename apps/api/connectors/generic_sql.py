@@ -3309,7 +3309,7 @@ def read_table_cursor_batch(
     if not SQLALCHEMY_AVAILABLE:
         raise RuntimeError("SQLAlchemy is not installed")
 
-    from services.keyset_pagination import sqlalchemy_keyset_clause
+    from services.keyset_pagination import present_cursor_bookmark, sqlalchemy_keyset_clause
 
     cfg = _cfg_from_params(
         host,
@@ -3356,9 +3356,10 @@ def read_table_cursor_batch(
 
             key_cols = [table_obj.c[n] for n in key_names]
             stmt = sa.select(*_tz_safe_projection(cfg, selected_cols))
-            if cursor_after:
+            bookmark = present_cursor_bookmark(cursor_after)
+            if bookmark is not None:
                 stmt = stmt.where(
-                    sqlalchemy_keyset_clause(sa, key_cols, str(cursor_after))
+                    sqlalchemy_keyset_clause(sa, key_cols, bookmark)
                 )
             stmt = stmt.order_by(*key_cols).limit(limit)
 

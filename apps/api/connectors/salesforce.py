@@ -36,9 +36,18 @@ def _validate_api_name(name: str, label: str) -> str:
     return name
 
 
-def soql_literal(value: Any) -> str:
-    """Quote a SOQL string literal, escaping backslash and single quote."""
-    text = "" if value is None else str(value)
+def soql_literal(value: Any) -> str | None:
+    """Quote a present SOQL literal on the dest cell wire.
+
+    Reader-null / blank is not a seek token. ``str(True)`` invented
+    ``'True'`` so dest ``true`` missed the keyset resume. ``0`` stays
+    ``'0'``.
+    """
+    from services.value_serializer import present_cell_text
+
+    text = present_cell_text(value)
+    if text is None:
+        return None
     escaped = text.replace("\\", "\\\\").replace("'", "\\'")
     return f"'{escaped}'"
 
@@ -229,7 +238,7 @@ def read_object(
     seek_column = (cursor_column or "").strip()
     if seek_column:
         _validate_api_name(seek_column, "cursor field")
-    seek_after = cursor_after if cursor_after not in (None, "") else None
+    seek_sql = soql_literal(cursor_after)
     if not seek_column and offset and int(offset) > SOQL_MAX_OFFSET:
         raise RuntimeError(
             f"Salesforce OFFSET is capped at {SOQL_MAX_OFFSET} rows; offset={int(offset)} "
@@ -248,8 +257,8 @@ def read_object(
         # ORDER BY identity so wide-schema field chunks merge by the same row set.
         order_field = seek_column or identity_field
         where = ""
-        if seek_column and seek_after is not None:
-            where = f" WHERE {seek_column} > {soql_literal(seek_after)}"
+        if seek_column and seek_sql is not None:
+            where = f" WHERE {seek_column} > {seek_sql}"
         query = (
             f"SELECT {field_list} FROM {sobject}{where} ORDER BY {order_field}"  # nosec B608
         )
