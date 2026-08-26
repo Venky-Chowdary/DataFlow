@@ -240,7 +240,17 @@ def _to_dynamo_value(value: Any, source_type: str) -> Any:
         if kind == "SS":
             return {str(x) for x in items}
         if kind == "NS":
-            return {Decimal(str(x)) for x in items}
+            from connectors.sql_bind import coerce_decimal_wire
+
+            out = set()
+            for x in items:
+                parsed = coerce_decimal_wire(x, ddl_type="DECIMAL")
+                if parsed is None:
+                    raise ValueError(
+                        f"DynamoDB NS refused {x!r} — refuse silent Decimal invent"
+                    )
+                out.add(parsed)
+            return out
         if kind == "BS":
             from connectors.sql_bind import coerce_binary_wire
 
@@ -353,13 +363,21 @@ def _coerce_dynamo_cell(
                 f"DynamoDB key type N refused {value!r} for {col!r} — "
                 "refuse silent null invent (HASH/RANGE identity)"
             )
+        from connectors.sql_bind import coerce_decimal_wire
+
         try:
-            return Decimal(value)
+            parsed = coerce_decimal_wire(value, ddl_type="DECIMAL")
         except Exception as exc:
             raise ValueError(
                 f"DynamoDB key type N refused {value!r} "
                 "(refuse silent pass-through invent)"
             ) from exc
+        if parsed is None:
+            raise ValueError(
+                f"DynamoDB key type N refused {value!r} "
+                "(refuse silent pass-through invent)"
+            )
+        return parsed
     if attr_type == "B":
         from connectors.sql_bind import coerce_binary_wire
 
