@@ -18,9 +18,11 @@ from typing import Any
 try:
     from services.pii_guard import is_sensitive_name, pii_findings
     from services.transform_engine import apply_transform
+    from services.value_serializer import is_null_evidence
 except ImportError:  # pragma: no cover - compatibility for tests
     from src.services.pii_guard import is_sensitive_name, pii_findings
     from src.services.transform_engine import apply_transform
+    from src.services.value_serializer import is_null_evidence
 
 _UTC = timezone.utc
 
@@ -43,11 +45,13 @@ class DataQualityReport:
 
 
 def _is_null(value: Any) -> bool:
-    if value is None:
-        return True
-    if isinstance(value, str) and value.strip() == "":
-        return True
-    return False
+    """Absence, not a customer token.
+
+    Reader-wired ``SQL_NULL_SENTINEL`` used to look like a present string, so
+    required-null gates missed it and two NULL PKs were a duplicate-key hit
+    on the sentinel spelling.
+    """
+    return is_null_evidence(value)
 
 
 def _to_decimal(value: Any) -> Decimal | None:
@@ -438,7 +442,9 @@ def run_integrity_audit(
         stats["primary_key"] = pk_source
 
         dup_counts = Counter(pk_values)
-        duplicates = {v: c for v, c in dup_counts.items() if c > 1 and str(v).strip()}
+        duplicates = {
+            v: c for v, c in dup_counts.items() if c > 1 and not _is_null(v)
+        }
         if duplicates:
             examples = ", ".join(str(v) for v in list(duplicates)[:3])
             if require_unique_identity:
