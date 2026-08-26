@@ -125,6 +125,33 @@ def test_build_preflight_proof_bundle_blocks_on_pii_risk_and_missing_keys() -> N
     assert bundle["transfer_decision"].get("compliance_only") is True
 
 
+def test_build_preflight_proof_bundle_does_not_invent_pii_from_event_date() -> None:
+    """Slash dates on event_date are not a HIPAA / PII hold."""
+    columns = ["id", "event_date"]
+    sample_rows = [
+        {"id": "1", "event_date": "01/02/2024"},
+        {"id": "2", "event_date": "03/04/2024"},
+    ]
+    bundle = build_preflight_proof_bundle(
+        columns=columns,
+        sample_rows=sample_rows,
+        mappings=[
+            {"source": "id", "target": "id", "confidence": 0.95},
+            {"source": "event_date", "target": "event_date", "confidence": 0.93},
+        ],
+        source_schemas=[
+            {"name": "id", "inferred_type": "INTEGER", "samples": ["1", "2"]},
+            {"name": "event_date", "inferred_type": "VARCHAR", "samples": ["01/02/2024", "03/04/2024"]},
+        ],
+        source_records=sample_rows,
+        target_records=[],
+        primary_key="id",
+    )
+    assert bundle["compliance"]["requires_review"] is False
+    assert "event_date" not in bundle["compliance"].get("high_risk_fields", [])
+    assert "PII/compliance review required" not in bundle.get("transfer_decision", {}).get("blockers", [])
+
+
 def test_build_preflight_proof_bundle_reports_low_confidence_without_reblocking() -> None:
     """Module 3: G4 owns confidence blocks — proof reports score only."""
     bundle = build_preflight_proof_bundle(

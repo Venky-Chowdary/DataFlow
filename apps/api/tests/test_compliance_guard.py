@@ -83,3 +83,47 @@ def test_bank_account_number_still_high_risk() -> None:
     )
     assert report["requires_review"] is True
     assert "bank_account_number" in report["high_risk_fields"]
+
+
+def test_slash_dates_on_event_date_are_not_dob_pii() -> None:
+    """01/02/2024 is a calendar string, not date-of-birth, unless the name says so."""
+    report = score_compliance_risk(
+        ["id", "event_date"],
+        [
+            {"id": "1", "event_date": "01/02/2024"},
+            {"id": "2", "event_date": "03/04/2024"},
+        ],
+    )
+    assert "event_date" not in report["sensitive_fields"]
+    assert "event_date" not in report["high_risk_fields"]
+    assert "dob" not in report.get("field_risk", {}).get("event_date", [])
+    assert "HIPAA" not in report["compliance_tags"]
+    assert report["requires_review"] is False
+
+
+def test_iso_dates_on_created_at_are_not_dob_pii() -> None:
+    report = score_compliance_risk(
+        ["created_at"],
+        [{"created_at": "2024-01-02"}, {"created_at": "2024-03-04"}],
+    )
+    assert report["high_risk_fields"] == []
+    assert report["requires_review"] is False
+
+
+def test_named_dob_column_still_high_risk() -> None:
+    report = score_compliance_risk(
+        ["patient_id", "date_of_birth"],
+        [{"patient_id": "1", "date_of_birth": "1990-01-01"}],
+    )
+    assert "date_of_birth" in report["high_risk_fields"]
+    assert report["requires_review"] is True
+    assert "HIPAA" in report["compliance_tags"]
+
+
+def test_birth_date_name_gates_slash_samples() -> None:
+    report = score_compliance_risk(
+        ["birth_date"],
+        [{"birth_date": "01/02/1990"}],
+    )
+    assert "birth_date" in report["high_risk_fields"]
+    assert report["requires_review"] is True
