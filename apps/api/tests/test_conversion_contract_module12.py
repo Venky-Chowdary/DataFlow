@@ -201,3 +201,14 @@ def test_ai_type_matrix_is_non_authoritative():
     assert dec_bool.get("lossy") is True
     assert dec_bool.get("method") == "parse_bool"
     assert "non-zero=true" not in (dec_bool.get("note") or "").lower()
+    int_dt = tc.suggest_type_conversion("integer", "datetime")
+    assert int_dt is not None
+    assert int_dt.get("lossy") is True
+    assert int_dt.get("method") == "unix_timestamp"
+    assert "2" in (int_dt.get("note") or "")
+    assert "millis" in (int_dt.get("note") or "").lower()
+    dt_int = tc.suggest_type_conversion("datetime", "integer")
+    assert dt_int is not None
+    assert dt_int.get("lossy") is True
+    assert dt_int.get("method") == "unix_timestamp"
+    assert "millis" in (dt_int.get("note") or "").lower()

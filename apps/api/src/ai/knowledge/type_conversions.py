@@ -59,7 +59,11 @@ TYPE_CONVERSION_MATRIX: dict[str, dict[str, dict]] = {
             "mapping": {"0": False, "1": True},
             "note": "Write-path tokens only (0/1). Non-zero integers like 2 are not TRUE. Assist only.",
         },
-        "datetime": {"method": "unix_timestamp", "lossy": False},
+        "datetime": {
+            "method": "unix_timestamp",
+            "lossy": True,
+            "note": "Write path binds 10-digit seconds or 13-digit millis only. Ordinary integers like 2 refuse. Seconds vs millis invent. Assist only.",
+        },
     },
     "decimal": {
         "string": {"method": "to_string", "lossy": False},
@@ -77,7 +81,11 @@ TYPE_CONVERSION_MATRIX: dict[str, dict[str, dict]] = {
     "datetime": {
         "string": {"method": "format", "lossy": False, "format": "%Y-%m-%dT%H:%M:%SZ"},
         "date": {"method": "truncate_time", "lossy": True},
-        "integer": {"method": "unix_timestamp", "lossy": False},
+        "integer": {
+            "method": "unix_timestamp",
+            "lossy": True,
+            "note": "Write-path integer transform does not emit epoch from ISO datetimes. Seconds vs millis invent. Assist only.",
+        },
     },
     "date": {
         "string": {"method": "format", "lossy": False, "format": "%Y-%m-%d"},
