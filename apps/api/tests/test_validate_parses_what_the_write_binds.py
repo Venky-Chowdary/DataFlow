@@ -218,13 +218,20 @@ def test_a_date_transform_the_write_accepts_is_not_refused(
 
 
 @pytest.mark.parametrize("dest_db", ["mysql", "postgresql"])
-def test_slash_dates_without_a_date_transform_stay_unfit(dest_db: str) -> None:
+def test_slash_dates_without_a_date_transform_match_the_write(dest_db: str) -> None:
     """VARCHAR → DATE with no date transform is identity then
-    ``coerce_sql_temporal``. Slash forms do not parse there — Validate must
-    not invent a calendar the write does not use."""
-    targets, _und, _safe, report = _scan(
+    ``coerce_sql_temporal``. That bind now uses the same Auto date parser as
+    the write path: unambiguous ``31/12/2024`` lands; ``01/02/2024`` does not.
+    Validate must not invent a calendar the write refuses.
+    """
+    _targets, _und, _safe, fit = _scan(
         "DATE", "VARCHAR", ["31/12/2024"], dest_db=dest_db
     )
+    assert fit.findings == ()
 
-    assert report.findings[0].unfit_rows == 1
-    assert "Invalid date" in report.findings[0].unfit_reason
+    _targets, _und, _safe, unfit = _scan(
+        "DATE", "VARCHAR", ["01/02/2024"], dest_db=dest_db
+    )
+    assert unfit.findings[0].unfit_rows == 1
+    reason = unfit.findings[0].unfit_reason
+    assert "01/02/2024" in reason or "Invalid date" in reason
