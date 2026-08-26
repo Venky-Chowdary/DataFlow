@@ -128,6 +128,8 @@ from connectors.writer_common import (
     CHUNK_SIZE,
     DF_LSN_COL,
     _coerced_null_row_count,
+    _conflict_key_identity,
+    _is_nullish_conflict_key,
     _rejected_row_count,
     assert_sparse_upsert_has_pk,
     compare_lsn,
@@ -3395,7 +3397,7 @@ def _delete_by_keys(
     for row in rows:
         for c in conflict_cols:
             val = row.get(c) if isinstance(row, dict) else None
-            if val is None or (isinstance(val, str) and str(val).strip() == ""):
+            if _is_nullish_conflict_key(val):
                 raise ValueError(
                     f"upsert delete-by-keys refused null/empty conflict key {c!r} — "
                     "IS NULL predicates would mass-delete destination rows"
@@ -3427,12 +3429,12 @@ def _prefetch_existing_lsn(
         return existing
     clauses = []
     for row in rows:
-        if any(row.get(c) in (None, "") for c in conflict_cols):
-            continue
         clauses.append(
             sa.and_(
                 *[
-                    table_obj.c[c].is_(None) if row[c] is None else table_obj.c[c] == row[c]
+                    table_obj.c[c].is_(None)
+                    if _is_nullish_conflict_key(row.get(c))
+                    else table_obj.c[c] == row[c]
                     for c in conflict_cols
                 ]
             )
@@ -3446,7 +3448,7 @@ def _prefetch_existing_lsn(
     for found in conn.execute(stmt):
         # Use positional indices because some dialects (DuckDB, SQLite raw) return
         # plain tuples rather than key-addressable Row objects.
-        key = tuple(found[i] for i in range(len(conflict_cols)))
+        key = tuple(_conflict_key_identity(found[i]) for i in range(len(conflict_cols)))
         existing[key] = found[len(conflict_cols)]
     return existing
 
@@ -3533,7 +3535,7 @@ def _upsert_batch(
     if lsn_guarded:
         best: dict[tuple[Any, ...], dict[str, Any]] = {}
         for row in batch:
-            key = tuple(row[c] for c in conflict_cols)
+            key = tuple(_conflict_key_identity(row[c]) for c in conflict_cols)
             prev = best.get(key)
             if prev is None or compare_lsn(row.get(DF_LSN_COL), prev.get(DF_LSN_COL)) >= 0:
                 best[key] = row
@@ -3543,7 +3545,7 @@ def _upsert_batch(
         existing_lsn = _prefetch_existing_lsn(conn, table_obj, rows, conflict_cols)
         filtered: list[dict[str, Any]] = []
         for row in rows:
-            key = tuple(row.get(c) for c in conflict_cols)
+            key = tuple(_conflict_key_identity(row.get(c)) for c in conflict_cols)
             prior = existing_lsn.get(key)
             incoming = row.get(DF_LSN_COL)
             if incoming is not None and compare_lsn(incoming, prior) <= 0:
@@ -3553,7 +3555,7 @@ def _upsert_batch(
     else:
         deduped: dict[tuple[Any, ...], dict[str, Any]] = {}
         for row in batch:
-            key = tuple(row[c] for c in conflict_cols)
+            key = tuple(_conflict_key_identity(row[c]) for c in conflict_cols)
             deduped[key] = row
         rows = list(deduped.values())
 

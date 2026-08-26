@@ -806,7 +806,9 @@ def filter_stale_lsn_rows(
     conflict_idxs = [target_cols.index(c) for c in conflict_cols]
     lsn_idx = target_cols.index(DF_LSN_COL)
 
-    # Build OR clauses for non-null conflict keys.
+    # Build OR clauses. Reader-null / blank use IS NULL — never
+    # ``col = '__DF_SQL_NULL__'``, which misses dest NULL PKs and fail-opens
+    # the LSN gate on at-least-once redelivery.
     params: list[Any] = []
     clauses: list[str] = []
     q = quote_sql_identifier
@@ -815,13 +817,11 @@ def filter_stale_lsn_rows(
     else:
         qualified = f"{q(table_name, quote)}"
     for row in rows:
-        if any(row[idx] in (None, "") for idx in conflict_idxs):
-            continue
         parts = []
         for idx in conflict_idxs:
             val = row[idx]
             col = conflict_cols[conflict_idxs.index(idx)]
-            if val is None:
+            if _is_nullish_conflict_key(val):
                 parts.append(f"{q(col, quote)} IS NULL")
             else:
                 parts.append(f"{q(col, quote)} = {placeholder}")
@@ -836,13 +836,13 @@ def filter_stale_lsn_rows(
     stmt = f"SELECT {select_cols} FROM {qualified} WHERE " + " OR ".join(clauses)  # nosec B608
     cursor.execute(stmt, params)
     for found in cursor.fetchall():
-        key = tuple(found[i] for i in range(len(conflict_cols)))
+        key = tuple(_conflict_key_identity(found[i]) for i in range(len(conflict_cols)))
         existing[key] = found[-1]
 
     to_write: list[tuple] = []
     skipped = 0
     for row in rows:
-        key = tuple(row[idx] for idx in conflict_idxs)
+        key = tuple(_conflict_key_identity(row[idx]) for idx in conflict_idxs)
         incoming = row[lsn_idx]
         prior = existing.get(key)
         # Align with lsn_is_newer: empty/None incoming must not overwrite a
@@ -4784,6 +4784,15 @@ def _is_nullish_conflict_key(val: Any) -> bool:
     if isinstance(val, str) and not val.strip():
         return True
     return False
+
+
+def _conflict_key_identity(val: Any) -> Any:
+    """Canonical identity for dest LSN / conflict-key lookup.
+
+    Reader-null and blank collapse to ``None`` so extract ``SQL_NULL_SENTINEL``
+    matches a destination SQL NULL. 0 / false / present text stay themselves.
+    """
+    return None if _is_nullish_conflict_key(val) else val
 
 
 def assert_sparse_upsert_has_pk(
