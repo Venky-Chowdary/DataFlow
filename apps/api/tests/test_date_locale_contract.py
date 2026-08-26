@@ -4,7 +4,9 @@ from services.preflight_service import run_file_preflight
 from services.transform_engine import (
     ambiguous_date_columns,
     infer_date_locale,
+    infer_transform_for_mapping,
     reset_active_date_locale,
+    samples_are_auto_ambiguous_dates,
     set_active_date_locale,
 )
 
@@ -25,6 +27,40 @@ def test_ambiguous_date_columns_empty_when_locale_set():
         assert ambiguous_date_columns(rows, ["event_date"]) == []
     finally:
         reset_active_date_locale(token)
+
+
+def test_samples_are_auto_ambiguous_dates_settled_by_unambiguous_member():
+    assert samples_are_auto_ambiguous_dates(["01/02/2024", "03/04/2024"]) is True
+    assert samples_are_auto_ambiguous_dates(["31/12/2024", "01/02/2024"]) is False
+    assert samples_are_auto_ambiguous_dates(["2024-01-02"]) is False
+    token = set_active_date_locale("MDY")
+    try:
+        assert samples_are_auto_ambiguous_dates(["01/02/2024"]) is False
+    finally:
+        reset_active_date_locale(token)
+
+
+def test_name_does_not_invent_date_transform_on_auto_ambiguous_samples():
+    assert (
+        infer_transform_for_mapping(
+            "event_date",
+            "event_date",
+            "VARCHAR",
+            "VARCHAR",
+            source_samples=["01/02/2024", "03/04/2024"],
+        )
+        == "none"
+    )
+    assert (
+        infer_transform_for_mapping(
+            "event_date",
+            "event_date",
+            "VARCHAR",
+            "DATE",
+            source_samples=["01/02/2024", "03/04/2024"],
+        )
+        == "date"
+    )
 
 
 def test_infer_date_locale_empty_when_only_ambiguous_pairs():

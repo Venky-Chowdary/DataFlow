@@ -11,7 +11,10 @@ from services.shape_contract import (
     DEST_TYPE_UNREAD_REASON,
     FIDELITY_DEST_TYPE_UNREAD,
 )
-from services.transform_engine import infer_transform_for_mapping
+from services.transform_engine import (
+    infer_transform_for_mapping,
+    samples_are_auto_ambiguous_dates,
+)
 from services.decision_kernel import (
     create_new_mapping_target_type,
     ddl_type,
@@ -901,6 +904,10 @@ def run_mapping_pipeline(
         typed_stamp_has_evidence = not declared_untyped_text or (
             bool(col_samples) and not (source_types_authoritative and intentional_create)
         )
+        # Slash dates that Auto cannot settle (01/02/2024) are not evidence
+        # for DATE dest. The operator sets DMY/MDY; we do not invent one.
+        if typed_stamp_has_evidence and samples_are_auto_ambiguous_dates(col_samples):
+            typed_stamp_has_evidence = False
         if (
             not pending_dest
             and tgt_type

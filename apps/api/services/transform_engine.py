@@ -460,6 +460,33 @@ def ambiguous_date_columns(
     return findings
 
 
+def samples_are_auto_ambiguous_dates(
+    source_samples: list[str] | None,
+    date_locale: str = "",
+) -> bool:
+    """True when slash dates exist and Auto cannot settle MDY vs DMY.
+
+    An unambiguous member (31/12/2024, ISO) is enough to type the column.
+    A lone 01/02/2024 is not — inventing DATE / Date→ISO from the name then
+    billing a Risk Contract is this pipeline charging for its own guess.
+    """
+    if _active_date_locale(date_locale) or not source_samples:
+        return False
+    saw_ambiguous = False
+    for raw in source_samples[:25]:
+        text = str(raw or "").strip()
+        if not text:
+            continue
+        if _is_ambiguous_mdy_dmy(text, date_locale):
+            saw_ambiguous = True
+            continue
+        if _parse_date(text, date_locale=date_locale) is not None:
+            return False
+        if _parse_datetime(text, date_locale=date_locale) is not None:
+            return False
+    return saw_ambiguous
+
+
 def infer_date_locale(
     records: Iterable[Any],
     columns: list[str] | None = None,
@@ -1501,6 +1528,12 @@ def infer_transform_for_mapping(
         or src_col.endswith("_DT")
         or src_col in {"TXN_DT", "PAY_DT", "PAYMENT_DT", "TRANS_DT"}
     ):
+        # Auto-ambiguous 01/02/2024 is not a calendar type. Inventing Date→ISO
+        # from the name, then DATE dest, then a Risk Contract, is this
+        # pipeline charging for its own guess. Existing DATE dest already
+        # returned above via tgt == "date".
+        if samples_are_auto_ambiguous_dates(source_samples):
+            return "none"
         return "datetime" if src == "datetime" or "epoch" in src_lower else "date"
     if tgt_name.endswith("_id") or tgt_name.endswith("id") or src_col.endswith("_ID"):
         return "trim_id"

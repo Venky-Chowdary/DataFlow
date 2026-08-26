@@ -119,6 +119,42 @@ def test_absent_table_target_schema_is_a_proposal_not_a_declared_type():
     assert m.get("target_type_origin") != "destination_catalog", m
 
 
+def test_auto_ambiguous_slash_dates_do_not_invent_date_or_a_risk_contract():
+    """01/02/2024 is Jan 2 or Feb 1 — not a DATE dest the operator never chose.
+
+    File sources are not catalog-authoritative. The name ``event_date`` plus
+    slash samples used to invent Date→ISO and DATE dest, then demand a Risk
+    Contract for the pipeline's own VARCHAR→DATE cast.
+    """
+    result = run_mapping_pipeline(
+        source_columns=["event_date"],
+        target_columns=[],
+        source_schemas=[
+            {
+                "name": "event_date",
+                "inferred_type": "VARCHAR",
+                "native_type": "VARCHAR",
+                "nullable": True,
+                "samples": ["01/02/2024", "03/04/2024"],
+            }
+        ],
+        source_samples={"event_date": ["01/02/2024", "03/04/2024"]},
+        destination_db_type="json",
+        destination_table_exists=False,
+        source_types_authoritative=False,
+    )
+    m = result["mappings"][0]
+    assert m["transform"] == "none", m
+    assert normalize_target(m["target_type"]) in {"VARCHAR", "TEXT", "STRING", ""}, m
+    assert m.get("fidelity") in {None, "", "preserve", "lossless"}, m
+    assert not m.get("requires_risk_contract"), m
+    assert (m.get("fidelity") or "") != "lossy_cast", m
+
+
+def normalize_target(raw: str) -> str:
+    return str(raw or "").split("(")[0].upper()
+
+
 def test_operator_chosen_typed_target_survives_and_discloses_its_risk():
     """The refusal is against silent invention, not against an operator decision."""
     m = _project_text(
