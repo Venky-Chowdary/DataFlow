@@ -2,15 +2,11 @@
 
 from __future__ import annotations
 
-import base64
-import json
 import re
 from collections import Counter
-from datetime import date, datetime, time
 from decimal import Decimal
 from typing import Any
 
-from services.value_serializer import json_default
 from services.transform_engine import (
     _parse_boolean,
     _parse_date,
@@ -20,6 +16,7 @@ from services.transform_engine import (
     _parse_uuid,
     decimal_wire_value,
 )
+from services.value_serializer import cell_to_string, is_null_evidence
 
 EMAIL_RE = re.compile(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
 UUID_RE = re.compile(
@@ -30,21 +27,19 @@ DATE_PATTERN_RE = re.compile(r"^\d{4}-\d{2}-\d{2}|^\d{2}/\d{2}/\d{4}|^\d{8}$")
 
 
 def _as_str(value: Any) -> str:
-    if value is None:
+    """One profiler sample. Same spelling as the transfer wire.
+
+    ``str(Decimal('1E+2'))`` invented ``1E+2``. Reader-wired
+    ``SQL_NULL_SENTINEL`` looked like a VARCHAR token. NULL / Missing /
+    blank still collapse to ``""`` so null-rate counts absence, not the
+    sentinel — that polarity is profiler-only, not extract.
+    """
+    if value is None or is_null_evidence(value):
         return ""
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    if isinstance(value, (bytes, bytearray)):
-        return base64.b64encode(bytes(value)).decode("ascii")
-    if isinstance(value, (dict, list, tuple, set, frozenset)):
-        return json.dumps(value, default=json_default)
-    if isinstance(value, datetime):
-        return value.isoformat()
-    if isinstance(value, date):
-        return value.isoformat()
-    if isinstance(value, time):
-        return value.isoformat()
-    return str(value).strip()
+    text = cell_to_string(value, preserve_sql_null=True)
+    if is_null_evidence(text):
+        return ""
+    return text.strip()
 
 
 def _percentile(sorted_vals: list[Decimal], p: float) -> Decimal | None:
