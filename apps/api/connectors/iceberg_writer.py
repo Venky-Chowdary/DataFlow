@@ -1003,8 +1003,9 @@ def _pk_predicate_variants(value: Any) -> list[Any]:
     column is typed as ``long``/``int``. A strict ``In``/``EqualTo`` then
     returns zero rows, the overlay treats the destination as empty, and a
     sparse CDC update invents NULLs (or the LSN guard sees nothing to compare).
-    Including every lossless coercion keeps the pushdown honest without a full
-    table scan on every batch.
+    Including every lossless write-path coercion keeps the pushdown honest
+    without a full table scan on every batch. ``float(text)`` is not lossless
+    — Auto ``1.000`` became ``1``.
     """
     variants: list[Any] = [value]
     if value is None:
@@ -1021,18 +1022,15 @@ def _pk_predicate_variants(value: Any) -> list[Any]:
         return variants
     if isinstance(value, str):
         text = value.strip()
-        if text.isdigit() or (text.startswith("-") and text[1:].isdigit()):
-            try:
-                variants.append(int(text))
-            except Exception:
-                pass
-        else:
-            try:
-                as_float = float(text)
-            except Exception:
-                as_float = None
-            if as_float is not None and as_float.is_integer():
-                variants.append(int(as_float))
+        from services.transform_engine import integer_wire_value
+
+        # Write-path integers only. float(text) invented Auto 1.000 → 1
+        # and missed $1,234 the leftover long column actually stores.
+        whole = integer_wire_value(text)
+        if whole is not None:
+            as_int = int(whole)
+            if as_int not in variants:
+                variants.append(as_int)
     return variants
 
 
