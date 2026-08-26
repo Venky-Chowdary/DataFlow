@@ -16,6 +16,7 @@ import json
 import os
 import uuid
 from datetime import date, datetime, timezone
+from decimal import Decimal
 
 import pytest
 
@@ -221,7 +222,7 @@ def test_numeric_column_refuses_auto_ambiguous_grouping():
 
 def test_numeric_column_accepts_currency_and_both_separators():
     preds = _ground("amount > $1,234.56")
-    assert preds[0].values == [1234.56]
+    assert preds[0].values == [Decimal("1234.56")]
 
 
 def test_boolean_column_accepts_canonical_wire_only():

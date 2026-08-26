@@ -444,7 +444,7 @@ def _coerce(value: str, kind: str, column: str) -> Any:
             )
         if dec == dec.to_integral_value():
             return int(dec)
-        return float(dec)
+        return dec
     if kind == "boolean":
         from services.transform_engine import apply_transform
 
