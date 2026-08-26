@@ -614,11 +614,12 @@ def _fn_to_number(value: Any, *, allow_grouping: bool = True) -> Any:
 
 
 def _fn_to_date(value: Any, fmt: Any = None) -> Any:
-    """Parse a date with an *explicit* format, or ISO when none is given.
+    """Parse a date with an *explicit* format, or the write-path calendar parser.
 
-    There is deliberately no ambiguous auto-detection: `03/04/2026` is two
-    different dates in two countries, and a migration that guesses is a
-    migration that silently corrupts a quarter of the rows.
+    Ambiguous ``03/04/2026`` / ``01/02/2024`` still refuse — day/month order
+    is never guessed. Unambiguous ``31/12/2024`` / ``12/31/2024`` / ISO /
+    ``YYYYMMDD`` bind the same way DATE bind does. Epoch instants refuse
+    (they invent a UTC day).
     """
     if is_blank(value):
         return None
@@ -635,13 +636,22 @@ def _fn_to_date(value: Any, fmt: Any = None) -> Any:
             return datetime.strptime(text, pattern)
         except ValueError as exc:
             raise EvalError(f"'{text}' does not match format '{pattern}'") from exc
+    from services.transform_engine import apply_transform
+
+    iso, err = apply_transform(text, "date")
+    if err or iso is None:
+        raise EvalError(
+            f"'{text}' is not a calendar date; pass an explicit format as the "
+            "second argument (day/month order is never guessed)"
+        )
     try:
-        return datetime.fromisoformat(text.replace("Z", "+00:00"))
+        parsed = date.fromisoformat(str(iso)[:10])
     except ValueError as exc:
         raise EvalError(
-            f"'{text}' is not an ISO date; pass an explicit format as the second "
-            "argument (day/month order is never guessed)"
+            f"'{text}' is not a calendar date; pass an explicit format as the "
+            "second argument (day/month order is never guessed)"
         ) from exc
+    return datetime(parsed.year, parsed.month, parsed.day)  # noqa: DTZ001
 
 
 def _fn_format_date(value: Any, fmt: Any) -> Any:

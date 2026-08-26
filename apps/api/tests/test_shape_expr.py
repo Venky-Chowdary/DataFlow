@@ -93,9 +93,20 @@ def test_to_boolean_uses_write_path_tokens_only():
 def test_to_date_never_guesses_day_month_order():
     with pytest.raises(EvalError, match="explicit format"):
         value("to_date('03/04/2026')")
+    with pytest.raises(EvalError, match="explicit format"):
+        value("to_date('01/02/2024')")
     # Naive on purpose: a source date declares no zone (see _comparable_moment).
     assert value("to_date('03/04/2026', '%d/%m/%Y')") == datetime(2026, 4, 3)  # noqa: DTZ001
     assert value("to_date('2026-04-03')") == datetime(2026, 4, 3)  # noqa: DTZ001
+
+
+def test_to_date_binds_write_path_calendars_and_refuses_epoch():
+    """31/12/2024 is unambiguous DMY — ISO-only fromisoformat used to refuse it."""
+    assert value("to_date('31/12/2024')") == datetime(2024, 12, 31)  # noqa: DTZ001
+    assert value("to_date('12/31/2024')") == datetime(2024, 12, 31)  # noqa: DTZ001
+    assert value("to_date('20240115')") == datetime(2024, 1, 15)  # noqa: DTZ001
+    with pytest.raises(EvalError, match="explicit format"):
+        value("to_date('1704067200')")
 
 
 def test_blank_and_null_are_the_same_emptiness():
