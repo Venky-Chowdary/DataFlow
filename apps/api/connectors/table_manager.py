@@ -1069,21 +1069,75 @@ def _mongo_bind_keys(coll: Any, pk_col: str, keys: list[str]) -> list[Any]:
 
 
 def _mongo_typed_key(raw: Any, sample: Any) -> Any:
-    text = str(raw)
+    """Bind one leftover/CDC key to the stored PK type — write-path, no invent.
+
+    Informal ``yes`` is not True. Auto ``1.234`` is not a float PK. Locale
+    money the write path stores still binds. Dest-canonical storage text
+    (``1.234`` on a float PK) uses ``Decimal(text)`` first so leftover
+    delete still finds the row.
+    """
     if sample is None:
         return raw
     type_name = type(sample).__name__
     if type_name == "ObjectId":
         from bson import ObjectId
 
-        return ObjectId(text)
+        return ObjectId(str(raw))
     if isinstance(sample, bool):
-        return text.strip().lower() in {"1", "true", "t", "yes"}
+        if isinstance(raw, bool):
+            return raw
+        from connectors.sql_bind import coerce_boolean_wire
+
+        parsed = coerce_boolean_wire(raw)
+        if isinstance(parsed, bool):
+            return parsed
+        raise ValueError(
+            f"Mongo leftover key {raw!r} is not a write-path boolean "
+            "(true/t/1/false/f/0) — refuse invent from yes/on"
+        )
     if isinstance(sample, int) and not isinstance(sample, bool):
-        return int(text)
+        if isinstance(raw, int) and not isinstance(raw, bool):
+            return raw
+        from connectors.sql_bind import coerce_integer_wire
+
+        try:
+            parsed = coerce_integer_wire(raw, ddl_type="INTEGER")
+        except ValueError as exc:
+            raise ValueError(
+                f"Mongo leftover key {raw!r} is not an integer — refuse invent"
+            ) from exc
+        if parsed is None:
+            raise ValueError(
+                f"Mongo leftover key {raw!r} is not an integer — refuse invent"
+            )
+        return int(parsed)
     if isinstance(sample, float):
-        return float(text)
-    return text
+        if isinstance(raw, float):
+            return raw
+        if isinstance(raw, int) and not isinstance(raw, bool):
+            return float(raw)
+        text = str(raw).strip()
+        if not text:
+            raise ValueError(
+                f"Mongo leftover key {raw!r} is not a number — refuse invent"
+            )
+        from decimal import Decimal, InvalidOperation
+
+        try:
+            dest = Decimal(text)
+            if dest.is_finite():
+                return float(dest)
+        except (InvalidOperation, ValueError, ArithmeticError):
+            pass
+        from connectors.sql_bind import coerce_float_wire
+
+        try:
+            return coerce_float_wire(raw, ddl_type="FLOAT")
+        except ValueError as exc:
+            raise ValueError(
+                f"Mongo leftover key {raw!r} is not a number — refuse invent"
+            ) from exc
+    return str(raw) if raw is not None else raw
 
 
 def _delete_clickhouse(
