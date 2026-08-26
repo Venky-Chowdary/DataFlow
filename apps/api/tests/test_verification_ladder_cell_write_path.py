@@ -3,7 +3,8 @@
 str(True) invented True. str(Decimal('1E+2')) invented scientific.
 SQL_NULL_SENTINEL was counted as a non-null string, so L2 under-counted
 NULLs after PostgreSQL / Iceberg / procedure extract. Empty string stays
-a value. Population reads and PK index use the same wire.
+a value. Min/max of dest-canonical numbers compare as Decimal — wire
+lexicographic ``10`` < ``9`` invented the wrong extrema.
 """
 
 from __future__ import annotations
@@ -63,6 +64,16 @@ def test_l2_counts_sql_null_as_null_not_a_string():
     assert aggs["amt"].sum_value == format(Decimal(LONG) + Decimal("100") + Decimal("1.50"), "f")
     assert aggs["amt"].min_value == LONG
     assert aggs["amt"].max_value == "100"
+
+
+def test_l2_minmax_uses_numeric_order_not_lexicographic_wire():
+    aggs = compute_column_aggregates(
+        [{"amt": "9"}, {"amt": "10"}, {"amt": Decimal("1E+2")}],
+        ["amt"],
+    )
+    assert aggs["amt"].min_value == "9"
+    assert aggs["amt"].max_value == "100"
+    assert aggs["amt"].min_value != "10"
 
 
 def test_l2_does_not_sum_auto_ambiguous_group():

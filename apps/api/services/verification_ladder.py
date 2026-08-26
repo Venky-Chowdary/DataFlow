@@ -216,6 +216,20 @@ def _try_decimal(text: str | None) -> Decimal | None:
     return decimal_wire_value(text)
 
 
+def _wire_less(left: str, right: str) -> bool:
+    """True when ``left`` is smaller than ``right`` for L2 min/max.
+
+    Dest-canonical numbers compare as Decimal (``9`` before ``10``). Mixed
+    or unparseable cells stay wire-lexicographic — Auto ``1,234`` still
+    refuses numeric invent.
+    """
+    left_n = _try_decimal(left)
+    right_n = _try_decimal(right)
+    if left_n is not None and right_n is not None:
+        return left_n < right_n
+    return left < right
+
+
 def compute_column_aggregates(
     rows: Iterable[dict[str, Any]],
     columns: list[str],
@@ -240,9 +254,9 @@ def compute_column_aggregates(
                 continue
             non_null[col] += 1
             distinct[col].add(text)
-            if mins[col] is None or text < mins[col]:
+            if mins[col] is None or _wire_less(text, mins[col]):
                 mins[col] = text
-            if maxs[col] is None or text > maxs[col]:
+            if maxs[col] is None or _wire_less(maxs[col], text):
                 maxs[col] = text
             if sum_ok[col]:
                 d = _try_decimal(text)
