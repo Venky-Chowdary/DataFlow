@@ -24,6 +24,7 @@ from connectors.writer_common import (
     reject_on_strict_policy,
     CHUNK_SIZE,
     _coerced_null_row_count,
+    _conflict_key_identity,
     _rejected_row_count,
     bind_sql_mapped_rows_with_quarantine,
     filter_stale_lsn_rows,
@@ -668,7 +669,9 @@ def _sqlite_upsert_batch(
 
     # delete+insert fallback when the dest has no dest-owned lattice columns.
     indices = [target_cols.index(c) for c in conflict_cols]
-    deduped = {tuple(row[i] for i in indices): row for row in rows}
+    deduped = {
+        tuple(_conflict_key_identity(row[i]) for i in indices): row for row in rows
+    }
     rows = list(deduped.values())
     col_sql = ", ".join(quote_sql_identifier(c) for c in conflict_cols)
     del_placeholders = ", ".join(

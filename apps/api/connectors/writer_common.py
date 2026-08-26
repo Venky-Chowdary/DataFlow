@@ -922,7 +922,7 @@ def dedupe_rows_keeping_numbers(
     seen: dict[tuple, tuple] = {}
     seen_numbers: dict[tuple, int] = {}
     for position, row in enumerate(rows):
-        key = tuple(row[i] for i in indices)
+        key = tuple(_conflict_key_identity(row[i]) for i in indices)
         seen[key] = row
         seen_numbers[key] = resolve_row_number(row_numbers, position)
     if row_numbers is None:
