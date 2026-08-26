@@ -1112,27 +1112,38 @@ def _mongo_typed_key(raw: Any, sample: Any) -> Any:
             )
         return int(parsed)
     if isinstance(sample, float):
-        if isinstance(raw, float):
-            return raw
-        if isinstance(raw, int) and not isinstance(raw, bool):
-            return float(raw)
-        text = str(raw).strip()
-        if not text:
+        if isinstance(raw, bool):
             raise ValueError(
                 f"Mongo leftover key {raw!r} is not a number — refuse invent"
             )
         from decimal import Decimal, InvalidOperation
+        from services.transform_engine import decimal_wire_value, float_carrier_or_refuse
 
+        parsed: Decimal | None = None
+        if isinstance(raw, float):
+            if raw != raw or raw in (float("inf"), float("-inf")):
+                return raw
+            parsed = Decimal(str(raw))
+        elif isinstance(raw, int):
+            parsed = Decimal(raw)
+        else:
+            text = str(raw).strip()
+            if not text:
+                raise ValueError(
+                    f"Mongo leftover key {raw!r} is not a number — refuse invent"
+                )
+            try:
+                dest = Decimal(text)
+                if dest.is_finite():
+                    parsed = dest
+            except (InvalidOperation, ValueError, ArithmeticError):
+                parsed = decimal_wire_value(text)
+        if parsed is None or not parsed.is_finite():
+            raise ValueError(
+                f"Mongo leftover key {raw!r} is not a number — refuse invent"
+            )
         try:
-            dest = Decimal(text)
-            if dest.is_finite():
-                return float(dest)
-        except (InvalidOperation, ValueError, ArithmeticError):
-            pass
-        from connectors.sql_bind import coerce_float_wire
-
-        try:
-            return coerce_float_wire(raw, ddl_type="FLOAT")
+            return float_carrier_or_refuse(parsed)
         except ValueError as exc:
             raise ValueError(
                 f"Mongo leftover key {raw!r} is not a number — refuse invent"

@@ -941,6 +941,24 @@ def decimal_wire_value(value: Any) -> Decimal | None:
     return dec if dec.is_finite() else None
 
 
+def float_carrier_or_refuse(parsed: Decimal) -> float:
+    """IEEE float only when it is the same number the write path bound.
+
+    ``float(2**53+1)`` is ``2**53``. Leftover/CDC Float keys must refuse
+    that collapse rather than delete the wrong row. Scale-only money
+    (``10.00``) still fits.
+    """
+    try:
+        as_float = float(parsed)
+    except (OverflowError, ValueError, InvalidOperation) as exc:
+        raise ValueError("float write path refused") from exc
+    if as_float != as_float or as_float in (float("inf"), float("-inf")):
+        raise ValueError("float write path refused")
+    if +parsed != +Decimal(repr(as_float)):
+        raise ValueError("float write path refused")
+    return as_float
+
+
 def is_fractional_wire_value(value: Any) -> bool:
     """True when the write path binds a non-integral decimal.
 

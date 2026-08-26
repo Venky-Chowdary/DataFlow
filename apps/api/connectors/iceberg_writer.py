@@ -2704,21 +2704,10 @@ def _iceberg_split_key(key: str, width: int) -> list[str]:
 
 
 def _iceberg_float_carrier(parsed: Decimal) -> float:
-    """Iceberg Float/Double carrier after a successful write-path bind.
+    """Iceberg Float/Double carrier after a successful write-path bind."""
+    from services.transform_engine import float_carrier_or_refuse
 
-    IEEE ``float(parsed)`` collapses 2**53+1 onto 2**53 and would delete
-    the wrong leftover row. Refuse when the float is not the same number.
-    Scale-only money (``10.00``) still fits.
-    """
-    try:
-        as_float = float(parsed)
-    except (OverflowError, ValueError) as exc:
-        raise ValueError("float write path refused") from exc
-    if as_float != as_float or as_float in (float("inf"), float("-inf")):
-        raise ValueError("float write path refused")
-    if +parsed != +Decimal(repr(as_float)):
-        raise ValueError("float write path refused")
-    return as_float
+    return float_carrier_or_refuse(parsed)
 
 
 def _iceberg_typed_literal(tbl: Any, column: str, raw: Any) -> Any:

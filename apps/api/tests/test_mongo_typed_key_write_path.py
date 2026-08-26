@@ -49,3 +49,10 @@ def test_float_pk_dest_canonical_and_locale_money():
     assert _mongo_typed_key("€1.234", 1.0) == pytest.approx(1234.0)
     with pytest.raises(ValueError, match="refuse invent"):
         _mongo_typed_key("1,234", 1.0)
+
+
+def test_float_pk_refuses_ieee_lossy_mantissa():
+    with pytest.raises(ValueError, match="refuse invent"):
+        _mongo_typed_key("9007199254740993", 1.0)
+    with pytest.raises(ValueError, match="refuse invent"):
+        _mongo_typed_key(9007199254740993, 1.0)
