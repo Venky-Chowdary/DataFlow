@@ -310,7 +310,7 @@ def _as_number(value: Any) -> Decimal:
     if isinstance(value, Decimal):
         return value
     if isinstance(value, bool):
-        return Decimal(1) if value else Decimal(0)
+        raise EvalError("a boolean is not a number")
     if isinstance(value, int):
         return Decimal(value)
     if isinstance(value, float):
@@ -595,6 +595,8 @@ def _fn_to_number(value: Any) -> Any:
     """
     if is_blank(value):
         return None
+    if isinstance(value, bool):
+        raise EvalError("a boolean is not a number")
     if isinstance(value, (int, float, Decimal)) and not isinstance(value, bool):
         return _as_number(value)
     from services.transform_engine import decimal_wire_value

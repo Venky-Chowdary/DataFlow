@@ -43,3 +43,12 @@ def test_to_number_locale_money_and_bindable_scale():
 def test_to_number_typed_decimal_stays_dest_canonical():
     assert _value("to_number([x])", {"x": Decimal("1.234")}) == Decimal("1.234")
     assert _value("to_number([x])", {"x": 42}) == Decimal("42")
+
+
+def test_boolean_is_not_a_magnitude():
+    with pytest.raises(EvalError, match="boolean is not a number"):
+        _value("to_number([x])", {"x": True})
+    with pytest.raises(EvalError, match="boolean is not a number"):
+        _value("[x] + 1", {"x": False})
+    with pytest.raises(EvalError, match="not a number"):
+        _value("to_number('true')")
