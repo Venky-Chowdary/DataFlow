@@ -15,6 +15,7 @@ import hashlib
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
+from decimal import Decimal
 from enum import Enum
 from typing import Any
 
@@ -77,16 +78,17 @@ def _sample_is_datetime_watermark(text: str) -> bool:
     return parsed is not None and not err
 
 
-def _parse_float(s: str) -> float | None:
+def _parse_float(s: str) -> Decimal | None:
+    """Bind a FLOAT watermark through the write-path decimal parser.
+
+    Locale money (``$1,234.56``, ``€2.000,00``) keeps exact scale. Auto
+    ``1,234`` / ``1.234`` return None so compare falls through to string —
+    never invent a US/EU magnitude for a cursor. IEEE ``float(parsed)``
+    collapsed 2**53+1 against 2**53.
+    """
     from services.transform_engine import decimal_wire_value
 
-    parsed = decimal_wire_value(s)
-    if parsed is None:
-        return None
-    try:
-        return float(parsed)
-    except (OverflowError, ValueError):
-        return None
+    return decimal_wire_value(s)
 
 
 def _parse_datetime_key(s: str) -> float | None:
