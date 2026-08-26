@@ -49,6 +49,19 @@ def test_ieee_nonfinite_and_bool_empty_still_hold():
         coerce_float_wire("not-a-number")
 
 
+def test_ieee_lossy_mantissa_refuses():
+    with pytest.raises(ValueError, match="refuse invent"):
+        coerce_float_wire(9007199254740993)
+    with pytest.raises(ValueError, match="refuse invent"):
+        coerce_float_wire("9007199254740993")
+    from decimal import Decimal
+
+    with pytest.raises(ValueError, match="refuse invent"):
+        coerce_float_wire(Decimal("9007199254740993"))
+    assert coerce_float_wire(2) == 2.0
+    assert coerce_float_wire(Decimal("10.00")) == 10.0
+
+
 def test_normalize_sql_bind_float_carriers():
     assert normalize_sql_bind_value("$1,234.56", "FLOAT", engine="postgresql") == pytest.approx(
         1234.56

@@ -1576,7 +1576,7 @@ def coerce_float_wire(value: Any, *, ddl_type: str | None = None) -> Any:
     """
     if value is None:
         return None
-    from decimal import Decimal, InvalidOperation
+    from decimal import Decimal
     from services.value_serializer import is_missing_sentinel
 
     if is_missing_sentinel(value):
@@ -1587,12 +1587,19 @@ def coerce_float_wire(value: Any, *, ddl_type: str | None = None) -> Any:
         )
     if isinstance(value, float):
         return value
+    from services.transform_engine import float_carrier_or_refuse
+
     if isinstance(value, int):
-        return float(value)
+        try:
+            return float_carrier_or_refuse(Decimal(value))
+        except ValueError as exc:
+            raise ValueError(
+                f"refuse invent float from {value!r} for {ddl_type or 'FLOAT'}"
+            ) from exc
     if isinstance(value, Decimal):
         try:
-            return float(value)
-        except (InvalidOperation, OverflowError, ValueError) as exc:
+            return float_carrier_or_refuse(value)
+        except ValueError as exc:
             raise ValueError(
                 f"refuse invent float from decimal {value!r}"
             ) from exc
@@ -1618,8 +1625,8 @@ def coerce_float_wire(value: Any, *, ddl_type: str | None = None) -> Any:
                 f"refuse invent float from {value!r} for {ddl_type or 'FLOAT'}"
             )
         try:
-            return float(parsed)
-        except (OverflowError, ValueError) as exc:
+            return float_carrier_or_refuse(parsed)
+        except ValueError as exc:
             raise ValueError(
                 f"refuse invent float from {value!r} for {ddl_type or 'FLOAT'}"
             ) from exc
