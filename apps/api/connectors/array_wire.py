@@ -94,15 +94,20 @@ def _pg_array_element(raw: str) -> Any:
 
 
 def _is_numeric_wire(value: Any) -> bool:
-    """True when a cell parses as a finite number (never invent 0 from text)."""
-    from decimal import Decimal, InvalidOperation
+    """True when the write path binds this cell as a finite number.
 
-    if isinstance(value, bool) or isinstance(value, (int, float)):
+    ``Decimal(text)`` invented Auto ``1.234`` / ``1.000`` as numeric and
+    missed ``$1,234`` / ``€1.234`` that INTEGER and DECIMAL bind store.
+    Wordy ``true`` is not a decimal wire — ``coerce_integer_wire`` still
+    refuses it — so this stays False for that token.
+    """
+    if isinstance(value, bool):
         return True
-    try:
-        return Decimal(str(value).strip()).is_finite()
-    except (InvalidOperation, ValueError, TypeError, ArithmeticError):
-        return False
+    if isinstance(value, (int, float)):
+        return True
+    from services.transform_engine import decimal_wire_value
+
+    return decimal_wire_value(value) is not None
 
 
 def _is_temporal_wire(value: Any) -> bool:
