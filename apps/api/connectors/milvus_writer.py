@@ -145,6 +145,8 @@ def build_milvus_entities(
         coerce_chunk_index,
         coerce_embedding,
         embedding_reject_reason,
+        vector_cell_token,
+        vector_fallback_material,
     )
 
     entities: list[dict[str, Any]] = []
@@ -189,9 +191,8 @@ def build_milvus_entities(
             else:
                 entity_id = raw_s
         else:
-            source = cell_to_string(row.get("source_id", ""))
-            content = str(row.get("content") or "")
-            if not source and not content:
+            material = vector_fallback_material(row.get("source_id"), chunk, row.get("content"))
+            if material is None:
                 rejected.append({
                     "row": "",
                     "column": "id",
@@ -201,13 +202,13 @@ def build_milvus_entities(
                     "policy": "quarantine",
                 })
                 continue
-            digest = hashlib.sha256(f"{source}\0{chunk}\0{content}".encode("utf-8")).hexdigest()
+            digest = hashlib.sha256(material.encode("utf-8")).hexdigest()
             entity_id = str(uuid.UUID(digest[:32]))
         entity: dict[str, Any] = {
             "id": entity_id,
             "vector": sanitize_json_value(values),
-            "content": str(row.get("content") or "")[:65000],
-            "source_id": cell_to_string(row.get("source_id", ""))[:256],
+            "content": vector_cell_token(row.get("content"))[:65000],
+            "source_id": vector_cell_token(row.get("source_id"))[:256],
             "chunk_index": chunk,
             "filename": str(meta.get("filename") or "")[:512],
             "page": str(meta.get("page") or "")[:64],

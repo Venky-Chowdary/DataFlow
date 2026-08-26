@@ -543,7 +543,10 @@ def write_mapped_rows(
                 values = []
                 batch_written: list[dict[str, Any]] = []
                 for row in batch:
-                    from services.vector_embedding import coerce_chunk_index
+                    from services.vector_embedding import (
+                        coerce_chunk_index,
+                        vector_cell_token,
+                    )
 
                     vector = _vector_literal(row.get("embedding"))
                     metadata = row.get("metadata") or {}
@@ -561,10 +564,10 @@ def write_mapped_rows(
                         continue
                     values.append((
                         row["id"],
-                        row.get("content", ""),
+                        vector_cell_token(row.get("content")),
                         vector,
                         json.dumps(metadata, ensure_ascii=False, default=sanitize_json_value),
-                        row.get("source_id", ""),
+                        vector_cell_token(row.get("source_id")),
                         chunk_idx,
                     ))
                     batch_written.append(row)

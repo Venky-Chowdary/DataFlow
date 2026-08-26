@@ -122,6 +122,32 @@ def coerce_chunk_index(value: Any, *, default: int = 0) -> int:
     )
 
 
+def vector_cell_token(value: Any) -> str:
+    """Dest-canonical present token for vector content / source_id.
+
+    ``or ""`` dropped ``0`` / ``False`` into empty hash material. ``str(True)``
+    invented ``True`` so dest ``true`` missed retry identity. Reader-null
+    sentinels hashed as the wire spelling. Absence collapses to ``""`` —
+    callers treat all-empty source+content as missing identity.
+    """
+    from services.value_serializer import present_cell_text
+
+    return present_cell_text(value) or ""
+
+
+def vector_fallback_material(
+    source_id: Any,
+    chunk_index: int,
+    content: Any,
+) -> str | None:
+    """Digest material for missing-id fallback, or None when both cells are absent."""
+    source = vector_cell_token(source_id)
+    text = vector_cell_token(content)
+    if not source and not text:
+        return None
+    return f"{source}\0{chunk_index}\0{text}"
+
+
 def resolve_embedding_dimension(
     rows: list[dict[str, Any]],
     *,

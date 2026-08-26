@@ -203,6 +203,8 @@ def build_qdrant_points(
         coerce_chunk_index,
         coerce_embedding,
         embedding_reject_reason,
+        vector_cell_token,
+        vector_fallback_material,
     )
 
     points: list[dict[str, Any]] = []
@@ -238,9 +240,8 @@ def build_qdrant_points(
             cell_to_string(raw_id).strip() if is_present_cdc_row_key(raw_id) else ""
         )
         if not point_id:
-            source = cell_to_string(row.get("source_id", ""))
-            content = str(row.get("content") or "")
-            if not source and not content:
+            material = vector_fallback_material(row.get("source_id"), chunk, row.get("content"))
+            if material is None:
                 rejected.append({
                     "row": "",
                     "column": "id",
@@ -250,13 +251,13 @@ def build_qdrant_points(
                     "policy": "quarantine",
                 })
                 continue
-            digest = hashlib.sha256(f"{source}\0{chunk}\0{content}".encode("utf-8")).hexdigest()
+            digest = hashlib.sha256(material.encode("utf-8")).hexdigest()
             point_id = str(uuid_mod.UUID(digest[:32]))
         payload = sanitize_json_value(row.get("metadata") or {}) or {}
         if not isinstance(payload, dict):
             payload = {"_meta": payload}
-        payload["content"] = row.get("content", "")
-        payload["source_id"] = cell_to_string(row.get("source_id", ""))
+        payload["content"] = vector_cell_token(row.get("content"))
+        payload["source_id"] = vector_cell_token(row.get("source_id"))
         payload["chunk_index"] = chunk
         points.append({
             "id": point_id,

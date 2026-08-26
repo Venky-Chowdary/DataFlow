@@ -313,14 +313,16 @@ def build_pinecone_vectors(
         coerce_chunk_index,
         coerce_embedding,
         embedding_reject_reason,
+        vector_cell_token,
+        vector_fallback_material,
     )
 
     vectors: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = []
     for row in vector_rows:
         meta = dict(sanitize_json_value(row.get("metadata") or {}) or {})
-        meta["content"] = str(row.get("content") or "")[:40000]
-        meta["source_id"] = cell_to_string(row.get("source_id", ""))
+        meta["content"] = vector_cell_token(row.get("content"))[:40000]
+        meta["source_id"] = vector_cell_token(row.get("source_id"))
         try:
             chunk = coerce_chunk_index(row.get("chunk_index"))
         except ValueError as exc:
@@ -363,9 +365,8 @@ def build_pinecone_vectors(
             cell_to_string(raw_id).strip() if is_present_cdc_row_key(raw_id) else ""
         )
         if not vector_id:
-            source = cell_to_string(row.get("source_id", ""))
-            content = str(row.get("content") or "")
-            if not source and not content:
+            material = vector_fallback_material(row.get("source_id"), chunk, row.get("content"))
+            if material is None:
                 rejected.append({
                     "row": "",
                     "column": "id",
@@ -375,9 +376,7 @@ def build_pinecone_vectors(
                     "policy": "quarantine",
                 })
                 continue
-            vector_id = hashlib.sha256(
-                f"{source}\0{chunk}\0{content}".encode("utf-8")
-            ).hexdigest()
+            vector_id = hashlib.sha256(material.encode("utf-8")).hexdigest()
         vectors.append({
             "id": vector_id,
             "values": sanitize_json_value(values),
