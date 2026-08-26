@@ -118,6 +118,40 @@ def test_auto_ambiguous_slash_dates_are_not_date_like():
     assert not any("non-temporal" in n for n in varchar_notes)
 
 
+def test_name_alone_does_not_invent_email_phone_or_uuid():
+    """contact_email / phone / uuid with plain-text samples must not invent a type."""
+    email = analyze_column_profile("contact_email", ["alice", "bob"])
+    assert email["likely_email"] is False
+    phone = analyze_column_profile("phone_number", ["alice", "bob"])
+    assert phone["likely_phone"] is False
+    uuid = analyze_column_profile("user_uuid", ["alice", "bob"])
+    assert uuid["likely_uuid"] is False
+    identifier = analyze_column_profile("identifier", ["alice", "bob"])
+    assert identifier["likely_uuid"] is False
+    _, notes = score_mapping_pair(
+        {
+            "source": "contact_email",
+            "target": "amount",
+            "target_type": "DECIMAL",
+            "confidence": 0.8,
+        },
+        source_profile=email,
+    )
+    assert not any("email-like" in n for n in notes)
+
+
+def test_bindable_email_phone_uuid_still_score():
+    email = analyze_column_profile(
+        "notes",
+        ["alice@example.com", "bob@corp.io", "carol@test.org", "dave@x.io"],
+    )
+    assert email["likely_email"] is True
+    phone = analyze_column_profile("notes", ["555-123-4567", "+1 555 000 1212"])
+    assert phone["likely_phone"] is True
+    mid = analyze_column_profile("contact_email", ["a@b.com", "not-an-email"])
+    assert mid["likely_email"] is True
+
+
 def test_unambiguous_and_iso_dates_still_score_as_date_like():
     dmy = analyze_column_profile("event_date", ["31/12/2024", "30/11/2024"])
     assert dmy["likely_date"] is True

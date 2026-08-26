@@ -218,9 +218,17 @@ def analyze_column_profile(name: str, samples: list[str]) -> dict[str, Any]:
         profile["semantic_pattern_score"] = round(best_ratio, 3)
 
         profile["likely_identifier"] = profile["unique_ratio"] >= 0.95 or uuid_ratio >= 0.5
-        profile["likely_email"] = email_ratio >= 0.5 or _contains_term(name, {"email", "mail"})
-        profile["likely_phone"] = phone_ratio >= 0.5 or _contains_term(name, {"phone", "mobile", "tel"})
-        profile["likely_uuid"] = uuid_ratio >= 0.5 or _contains_term(name, {"uuid", "guid", "identifier"})
+        # Name may disambiguate only when samples already match. A column named
+        # email/phone/uuid whose values are plain text must not invent a type.
+        profile["likely_email"] = email_ratio >= 0.75 or (
+            email_ratio >= 0.5 and _contains_term(name, {"email", "mail"})
+        )
+        profile["likely_phone"] = phone_ratio >= 0.75 or (
+            phone_ratio >= 0.5 and _contains_term(name, {"phone", "mobile", "tel"})
+        )
+        profile["likely_uuid"] = uuid_ratio >= 0.75 or (
+            uuid_ratio >= 0.5 and _contains_term(name, {"uuid", "guid"})
+        )
         # Name may disambiguate only when samples already bind. Auto-ambiguous
         # 1,234 must not score as numeric — the write path refuses them.
         profile["likely_numeric"] = numeric_ratio >= 0.75 or (
