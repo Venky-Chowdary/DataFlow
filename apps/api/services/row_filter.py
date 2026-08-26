@@ -58,10 +58,16 @@ def _compare_values(row_value: Any, filter_value: Any, op: str) -> bool:
         except re.error:
             return False
 
-    # Numeric comparison when both sides parse cleanly as floats.
+    # Numeric comparison when both sides parse on the write-path locale contract.
     try:
-        rv_num = float(rv_str.replace(",", ""))
-        fv_num = float(fv_str.replace(",", ""))
+        from services.transform_engine import decimal_wire_value
+
+        rv_parsed = decimal_wire_value(rv_str)
+        fv_parsed = decimal_wire_value(fv_str)
+        if rv_parsed is None or fv_parsed is None:
+            raise ValueError("not a locale-safe number")
+        rv_num = float(rv_parsed)
+        fv_num = float(fv_parsed)
         if op == "eq":
             return rv_num == fv_num
         if op == "ne":

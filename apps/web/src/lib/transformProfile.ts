@@ -9,6 +9,7 @@
  * the sampled rows and nothing more.
  */
 
+import { parseLocaleNumber } from "./numberLocale";
 import type { ShapeColumnProfile } from "./shape";
 
 export interface ColumnFinding {
@@ -170,10 +171,7 @@ export interface HistogramBin {
 function asFiniteNumber(raw: unknown): number | null {
   if (typeof raw === "number" && Number.isFinite(raw)) return raw;
   if (typeof raw === "bigint") return Number(raw);
-  const text = String(raw ?? "").replace(/,/g, "").trim();
-  if (!text) return null;
-  const n = Number(text);
-  return Number.isFinite(n) ? n : null;
+  return parseLocaleNumber(raw);
 }
 
 /** Equal-width numeric distribution from the values the operator can already see. */

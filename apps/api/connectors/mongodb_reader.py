@@ -32,13 +32,18 @@ def _cast_cursor_value(value: str, cursor_type: str | None = None) -> Any:
 
     ctype = (cursor_type or "").upper()
     if ctype in {"INTEGER", "INT", "BIGINT", "SMALLINT", "TINYINT", "SERIAL", "BIGSERIAL"}:
-        try:
-            return int(value.replace(",", ""))
-        except ValueError:
-            return value
+        from services.transform_engine import integer_wire_value
+
+        parsed = integer_wire_value(value)
+        return parsed if parsed is not None else value
     if ctype in {"DECIMAL", "NUMERIC", "NUMBER", "MONEY", "SMALLMONEY"}:
+        from services.transform_engine import decimal_wire_value
+
+        parsed = decimal_wire_value(value)
+        if parsed is None:
+            return value
         try:
-            return Decimal128(value.replace(",", ""))
+            return Decimal128(str(parsed))
         except (InvalidOperation, Overflow, ValueError):
             return value
     if ctype in {"BOOLEAN", "BOOL"}:
@@ -54,13 +59,18 @@ def _cast_cursor_value(value: str, cursor_type: str | None = None) -> Any:
 
     wm_type = infer_watermark_type([value])
     if wm_type == WatermarkType.INTEGER:
-        try:
-            return int(value.replace(",", ""))
-        except ValueError:
-            return value
+        from services.transform_engine import integer_wire_value
+
+        parsed = integer_wire_value(value)
+        return parsed if parsed is not None else value
     if wm_type == WatermarkType.FLOAT:
+        from services.transform_engine import decimal_wire_value
+
+        parsed = decimal_wire_value(value)
+        if parsed is None:
+            return value
         try:
-            return Decimal128(value.replace(",", ""))
+            return Decimal128(str(parsed))
         except (InvalidOperation, Overflow, ValueError):
             return value
     if wm_type == WatermarkType.DATETIME:
@@ -128,7 +138,7 @@ def stored_cursor_bson_kind(
 def _align_cursor_to_stored_kind(raw: str, casted: Any, kind: str) -> Any:
     """Re-cast a watermark into the BSON family the collection stores."""
     import datetime as _dt
-    from decimal import Decimal, InvalidOperation
+    from decimal import InvalidOperation
 
     from bson.decimal128 import Decimal128
     from bson.objectid import ObjectId
@@ -151,16 +161,21 @@ def _align_cursor_to_stored_kind(raw: str, casted: Any, kind: str) -> Any:
     if kind == "number":
         if isinstance(casted, (int, float, Decimal128)) and not isinstance(casted, bool):
             return casted
-        try:
-            text = str(raw).replace(",", "")
-            return int(text) if text.lstrip("+-").isdigit() else Decimal128(
-                str(Decimal(text))
-            )
-        except (InvalidOperation, ValueError, TypeError) as exc:
-            raise ValueError(
-                f"Watermark '{raw}' is not numeric, but this collection stores "
-                "numbers in the cursor field. Reset the cursor for this stream."
-            ) from exc
+        from services.transform_engine import decimal_wire_value, integer_wire_value
+
+        as_int = integer_wire_value(str(raw))
+        if as_int is not None:
+            return as_int
+        parsed = decimal_wire_value(raw)
+        if parsed is not None:
+            try:
+                return Decimal128(str(parsed))
+            except (InvalidOperation, ValueError, TypeError):
+                pass
+        raise ValueError(
+            f"Watermark '{raw}' is not numeric, but this collection stores "
+            "numbers in the cursor field. Reset the cursor for this stream."
+        )
     if kind == "bool":
         return bool(casted) if isinstance(casted, bool) else str(raw).strip().lower() in {
             "true", "t", "yes", "y", "1",

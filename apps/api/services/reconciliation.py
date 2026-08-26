@@ -4031,10 +4031,16 @@ def _canonicalize_number(value: Any) -> str | None:
                     except (OverflowError, ValueError):
                         pass
         else:
-            text = str(value).strip().replace(",", "")
+            text = str(value).strip()
             if not text:
                 return None
-            d = Decimal(text)
+            from services.transform_engine import decimal_wire_value
+
+            parsed = decimal_wire_value(text)
+            if parsed is not None:
+                d = parsed
+            else:
+                d = Decimal(text)
             # String form of float residue (common from Excel/CSV readers).
             if d.is_finite() and ("." in text or "e" in text.lower()):
                 head = text.split("e")[0].split("E")[0]

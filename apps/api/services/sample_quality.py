@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 import re
-from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from services.db_type_utils import SCHEMALESS_DESTS
-from services.transform_engine import _parse_boolean, _parse_date, _parse_datetime
+from services.transform_engine import _parse_boolean, _parse_date, _parse_datetime, decimal_wire_value
 from services.value_serializer import cell_to_string
 
 EMAIL_RE = re.compile(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
@@ -18,10 +17,10 @@ def _numeric_values(values: list[str]) -> list[float]:
     for raw in values:
         if not raw:
             continue
-        try:
-            out.append(float(Decimal(raw.replace(",", ""))))
-        except (InvalidOperation, ValueError):
+        parsed = decimal_wire_value(raw)
+        if parsed is None:
             continue
+        out.append(float(parsed))
     return out
 
 

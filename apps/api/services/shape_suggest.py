@@ -174,6 +174,9 @@ def profile_columns(
                     profile.numeric_like += 1
                     profile.needs_parse_number += 1
                     number = human
+                elif "," in stripped or (stripped.count(".") > 1):
+                    # Grouped but Auto refused — still needs parse_number + locale.
+                    profile.needs_parse_number += 1
             else:
                 profile.numeric_like += 1
             if number is not None:
@@ -440,22 +443,12 @@ def _human_decimal(text: str) -> Decimal | None:
 
     Only reached for values a plain ``Decimal`` refused, so anything this returns
     is by definition a value that needs a `parse_number` step to land as a
-    number rather than as text.
+    number rather than as text. Uses the write-path parser — Auto fails closed
+    on a lone ``1,234`` / ``1.234``.
     """
-    candidate = text
-    negative = candidate.startswith("(") and candidate.endswith(")")
-    if negative:
-        candidate = candidate[1:-1].strip()
-    cleaned = candidate.strip("$€£¥₹% ").replace(",", "").strip()
-    if not cleaned:
-        return None
-    try:
-        number = Decimal(cleaned)
-    except (InvalidOperation, DecimalException, ValueError):
-        return None
-    if not number.is_finite():
-        return None
-    return -number if negative else number
+    from services.transform_engine import decimal_wire_value
+
+    return decimal_wire_value(text)
 
 
 def _date_formats_for(text: str, original: Any) -> set[str]:

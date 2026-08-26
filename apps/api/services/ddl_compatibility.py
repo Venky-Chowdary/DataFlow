@@ -108,13 +108,14 @@ def _decimal_overflow_issue(samples: list[str], tgt: str, tgt_type: str) -> str 
     except ImportError:
         return None
     for raw in samples[:50]:
-        text = (raw or "").strip().replace(",", "")
+        from services.transform_engine import decimal_wire_value
+
+        text = (raw or "").strip()
         if not text or text.lower() in {"null", "none", "nan"}:
             continue
-        try:
-            value = Decimal(text)
-        except (InvalidOperation, ValueError):
-            # Non-numeric into DECIMAL is a type/coercion problem handled elsewhere.
+        value = decimal_wire_value(text)
+        if value is None:
+            # Auto refused grouping, or non-numeric — type/coercion handled elsewhere.
             continue
         int_digits, scale_digits = _digits_needed(value)
         if scale_digits > scale:

@@ -4284,6 +4284,7 @@ export function TransferPage({
             sourceReadMode,
             destWriteMode,
             syncMode,
+            numberLocale,
           });
           toast({
             title: "Validated locally",
@@ -4350,6 +4351,7 @@ export function TransferPage({
           sourceReadMode,
           destWriteMode,
           syncMode,
+          numberLocale,
         });
         setPreflight(pf);
         setValidatedContractKey(buildValidateContractKey(activeMappings));
@@ -4918,6 +4920,7 @@ export function TransferPage({
           mappings: columnMappings,
           format: exportFormat,
           outputBasename: targetCollection || undefined,
+          numberLocale,
         });
         setResult(localResult);
         setRunStartupProgress(100);

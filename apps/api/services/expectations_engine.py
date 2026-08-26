@@ -14,7 +14,6 @@ import math
 import re
 from collections import Counter
 from dataclasses import dataclass, field
-from decimal import Decimal, InvalidOperation
 from typing import Any, Callable
 
 from services.db_type_utils import SCHEMALESS_DESTS
@@ -163,13 +162,15 @@ def expect_column_values_between(
         # Missing / SQL NULL sentinels from schemaless unions are not numeric values.
         if str(raw).strip() in {"__DF_MISSING__", "__df_sql_null__", "__df_ddb_null__"}:
             continue
-        try:
-            num = float(Decimal(str(raw).replace(",", "").replace("$", "")))
-        except (InvalidOperation, ValueError):
+        from services.transform_engine import decimal_wire_value
+
+        parsed = decimal_wire_value(raw)
+        if parsed is None:
             bad += 1
             if len(failures) < 10:
                 failures.append({"row_index": i, "value": str(raw)[:40], "reason": "not_numeric"})
             continue
+        num = float(parsed)
         checked += 1
         if min_value is not None and num < min_value:
             bad += 1
@@ -333,18 +334,18 @@ def expect_column_distribution_drift(
             severity=severity,
         )
 
+    from services.transform_engine import decimal_wire_value
+
     nums_cur: list[float] = []
     nums_base: list[float] = []
     for v in cur_vals:
-        try:
-            nums_cur.append(float(Decimal(v.replace(",", ""))))
-        except (InvalidOperation, ValueError):
-            pass
+        parsed = decimal_wire_value(v)
+        if parsed is not None:
+            nums_cur.append(float(parsed))
     for v in base_vals:
-        try:
-            nums_base.append(float(Decimal(v.replace(",", ""))))
-        except (InvalidOperation, ValueError):
-            pass
+        parsed = decimal_wire_value(v)
+        if parsed is not None:
+            nums_base.append(float(parsed))
 
     if len(nums_cur) >= 8 and len(nums_base) >= 8:
         hist_cur = _numeric_histogram(nums_cur)

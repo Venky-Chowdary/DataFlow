@@ -8,7 +8,6 @@ import math
 import re
 from collections import Counter
 from datetime import date, datetime, time
-from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from services.value_serializer import json_default
@@ -16,8 +15,10 @@ from services.transform_engine import (
     _parse_boolean,
     _parse_date,
     _parse_datetime,
+    _parse_decimal,
     _parse_integer,
     _parse_uuid,
+    decimal_wire_value,
 )
 
 EMAIL_RE = re.compile(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
@@ -60,10 +61,10 @@ def _percentile(sorted_vals: list[float], p: float) -> float | None:
 def _numeric_stats(values: list[str]) -> dict[str, Any]:
     nums: list[float] = []
     for raw in values:
-        try:
-            nums.append(float(Decimal(raw.replace(",", "").replace("$", ""))))
-        except (InvalidOperation, ValueError):
+        parsed = decimal_wire_value(raw)
+        if parsed is None:
             continue
+        nums.append(float(parsed))
     if not nums:
         return {}
     sorted_nums = sorted(nums)
@@ -139,11 +140,8 @@ def _type_scores(values: list[str]) -> dict[str, float]:
             scores["BOOLEAN"] += 1
         if _parse_integer(raw) is not None:
             scores["INTEGER"] += 1
-        try:
-            Decimal(raw.replace(",", ""))
+        if _parse_decimal(raw) is not None:
             scores["DECIMAL"] += 1
-        except InvalidOperation:
-            pass
         if _parse_date(raw):
             scores["DATE"] += 1
         if _parse_datetime(raw):
@@ -190,10 +188,9 @@ def profile_column(name: str, values: list[Any], *, sample_limit: int = 200) -> 
         if stats:
             nums = []
             for raw in non_empty:
-                try:
-                    nums.append(float(Decimal(raw.replace(",", "").replace("$", ""))))
-                except (InvalidOperation, ValueError):
-                    pass
+                parsed = decimal_wire_value(raw)
+                if parsed is not None:
+                    nums.append(float(parsed))
             histogram = _histogram(nums)
         # Sample-aware DECIMAL(p,s) / IEEE kind for Map profiling strip.
         from services.decimal_observe import observe_source_numeric_samples

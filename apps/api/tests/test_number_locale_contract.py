@@ -7,6 +7,7 @@ A naive US default would silently rewrite EU ``1,234`` as 1234.
 from __future__ import annotations
 
 import sys
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -18,6 +19,7 @@ if str(_API_ROOT) not in sys.path:
 from services.transform_engine import (  # noqa: E402
     ambiguous_number_columns,
     apply_transform,
+    decimal_wire_value,
     infer_number_locale,
     reset_active_number_locale,
     set_active_number_locale,
@@ -232,6 +234,55 @@ def test_execute_us_writes_comma_group_as_thousands(monkeypatch):
     assert result.success is True, result.error
     assert rows
     assert str(rows[0][1]) in {"1234", "1234.0", "1234.00"}
+
+
+def test_decimal_wire_value_is_the_one_parser():
+    assert decimal_wire_value("$1,000.00") == Decimal("1000.00")
+    assert decimal_wire_value("€2.000,50") == Decimal("2000.50")
+    assert decimal_wire_value("1,234") is None
+    assert decimal_wire_value("1.234") is None
+    token = set_active_number_locale("US")
+    try:
+        assert decimal_wire_value("1,234") == Decimal("1234")
+    finally:
+        reset_active_number_locale(token)
+
+
+def test_profiler_does_not_score_lone_group_as_decimal():
+    from services.data_profiler import profile_column
+
+    prof = profile_column("amt", ["1,234", "5,678"])
+    assert prof["inferred_type"] != "DECIMAL"
+    scores = prof.get("type_scores") or {}
+    assert float(scores.get("DECIMAL") or 0) == 0
+
+
+def test_profiler_scores_currency_markers_as_decimal():
+    from services.data_profiler import profile_column
+
+    prof = profile_column("amt", ["$1,000.00", "$2,500.50"])
+    assert float((prof.get("type_scores") or {}).get("DECIMAL") or 0) == 1.0
+
+
+def test_csv_validator_refuses_ambiguous_group_under_auto():
+    from services.csv_validator import validate_csv_content
+
+    report = validate_csv_content(
+        b'id,amount\n1,"1,234"\n',
+        ["id", "amount"],
+        {"id": "INTEGER", "amount": "DECIMAL"},
+    )
+    assert report["ok"] is False
+    assert report["issue_count"] >= 1
+
+
+def test_shape_to_number_refuses_lone_group():
+    from services.shape_expr import EvalError, compile_expression
+
+    expr = compile_expression("to_number([x])")
+    with pytest.raises(EvalError, match="not a number"):
+        expr({"x": "1,234"})
+    assert expr({"x": "$1,000.00"}) == Decimal("1000.00")
 
 
 def test_execute_eu_writes_comma_group_as_decimal(monkeypatch):

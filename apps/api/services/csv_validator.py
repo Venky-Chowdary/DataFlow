@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import csv
 import io
-import re
 from pathlib import Path
 from typing import Any
 
@@ -13,11 +12,10 @@ from services.transform_engine import (
     _parse_boolean,
     _parse_date,
     _parse_datetime,
+    _parse_decimal,
     _parse_integer,
 )
 
-_INT_RE = re.compile(r"^-?\d+$")
-_DEC_RE = re.compile(r"^-?\d+(\.\d+)?([eE][+-]?\d+)?$")
 _BOOL_VALUES = frozenset({"true", "false", "yes", "no", "1", "0", "y", "n", "t", "f"})
 
 
@@ -30,8 +28,7 @@ def _check_value(value: str, inferred: str) -> str | None:
         if _parse_integer(v) is None:
             return f"expected integer, got {v[:40]!r}"
     elif t in ("DECIMAL", "NUMERIC", "FLOAT", "DOUBLE"):
-        cleaned = v.replace("$", "").replace(",", "").replace("€", "").strip()
-        if not _DEC_RE.match(cleaned) and _parse_integer(cleaned) is None:
+        if _parse_decimal(v) is None:
             return f"expected number, got {v[:40]!r}"
     elif t in ("BOOLEAN", "BOOL"):
         if _parse_boolean(v) is None and v.lower() not in _BOOL_VALUES:

@@ -831,6 +831,43 @@ def _parse_integer(value: str) -> int | None:
         return None
 
 
+def decimal_wire_value(value: Any) -> Decimal | None:
+    """The decimal the write path would bind for ``value``, or ``None``.
+
+    The one parser profilers, preflight, reconcile, and shape must consult.
+    Auto fails closed on ``1,234`` / ``1.234``. Currency marks and both-separator
+    forms still parse. ``Decimal(text.replace(",", ""))`` is a second algorithm
+    and is forbidden at call sites.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, Decimal):
+        return value if value.is_finite() else None
+    if isinstance(value, int):
+        return Decimal(value)
+    if isinstance(value, float):
+        if value != value or value in (float("inf"), float("-inf")):
+            return None
+        try:
+            parsed = Decimal(str(value))
+        except (InvalidOperation, Overflow, ValueError):
+            return None
+        return parsed if parsed.is_finite() else None
+    text = str(value).strip()
+    if not text:
+        return None
+    rendered = _parse_decimal(text)
+    if rendered is None:
+        return None
+    try:
+        dec = Decimal(rendered)
+    except (InvalidOperation, Overflow, ValueError):
+        return None
+    return dec if dec.is_finite() else None
+
+
 def integer_wire_value(value: str) -> int | None:
     """The integer the write path would bind for ``value``, or ``None``.
 

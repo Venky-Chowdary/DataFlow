@@ -84,9 +84,14 @@ def _to_sortable(value: Any) -> Any:
 def _coerce_number(value: Any) -> float | None:
     if value is None:
         return None
+    from services.transform_engine import decimal_wire_value
+
+    parsed = decimal_wire_value(value)
+    if parsed is None:
+        return None
     try:
-        return float(Decimal(str(value).replace(",", "")))
-    except Exception:
+        return float(parsed)
+    except (OverflowError, ValueError):
         return None
 
 

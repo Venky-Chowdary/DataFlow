@@ -584,25 +584,31 @@ def _fn_truncate(value: Any, places: Any = 0) -> Any:
 
 
 def _fn_to_number(value: Any, *, allow_grouping: bool = True) -> Any:
-    """Parse a number a human typed: grouping, currency, parenthesised negative."""
+    """Parse a number a human typed: grouping, currency, parenthesised negative.
+
+    Grouping uses the write-path locale contract. Auto refuses a lone ``1,234``.
+    """
     if is_blank(value):
         return None
     if isinstance(value, (int, float, Decimal)) and not isinstance(value, bool):
         return _as_number(value)
-    text = (_as_text(value) or "").strip()
-    negative = text.startswith("(") and text.endswith(")")
-    if negative:
-        text = text[1:-1].strip()
-    text = re.sub(r"[^0-9eE+\-.,]", "", text)
-    if allow_grouping:
-        text = text.replace(",", "")
-    if text in ("", "-", "+", "."):
-        raise EvalError(f"'{value}' is not a number")
-    try:
-        number = Decimal(text)
-    except (InvalidOperation, DecimalException) as exc:
-        raise EvalError(f"'{value}' is not a number") from exc
-    return -number if negative else number
+    from services.transform_engine import decimal_wire_value
+
+    parsed = decimal_wire_value(value)
+    if parsed is not None:
+        return parsed
+    if not allow_grouping:
+        text = (_as_text(value) or "").strip()
+        if text in ("", "-", "+", "."):
+            raise EvalError(f"'{value}' is not a number")
+        try:
+            number = Decimal(text)
+        except (InvalidOperation, DecimalException) as exc:
+            raise EvalError(f"'{value}' is not a number") from exc
+        if not number.is_finite():
+            raise EvalError(f"'{value}' is not a number")
+        return number
+    raise EvalError(f"'{value}' is not a number")
 
 
 def _fn_to_date(value: Any, fmt: Any = None) -> Any:

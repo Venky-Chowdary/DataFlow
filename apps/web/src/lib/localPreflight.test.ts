@@ -4,6 +4,7 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { applyLocalTransform } from "./localTransform.js";
 import { isLocalPreflight, runLocalPreflight } from "./localPreflight.js";
 
 describe("runLocalPreflight file export honesty", () => {
@@ -145,5 +146,13 @@ describe("runLocalPreflight file export honesty", () => {
     });
     assert.equal(pf.passed, false);
     assert.ok(pf.blockers.some((b) => b.id === "g4_mapping_confidence"));
+  });
+
+  it("does not invent 1234 from 1,234 on a local decimal transform", () => {
+    assert.equal(applyLocalTransform("1,234", "decimal"), "1,234");
+    assert.equal(applyLocalTransform("1,234", "cast_number"), "1,234");
+    assert.equal(applyLocalTransform("$1,000.00", "decimal"), 1000);
+    assert.equal(applyLocalTransform("1,234", "decimal", "US"), 1234);
+    assert.equal(applyLocalTransform("1,234", "decimal", "EU"), 1.234);
   });
 });

@@ -184,10 +184,9 @@ def _cell_text(value: Any) -> str | None:
 def _try_decimal(text: str | None) -> Decimal | None:
     if text is None:
         return None
-    try:
-        return Decimal(str(text).replace(",", "").strip())
-    except (InvalidOperation, ValueError):
-        return None
+    from services.transform_engine import decimal_wire_value
+
+    return decimal_wire_value(text)
 
 
 def compute_column_aggregates(

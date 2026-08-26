@@ -15,7 +15,6 @@ import hashlib
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
-from decimal import Decimal, InvalidOperation
 from enum import Enum
 from typing import Any
 
@@ -42,8 +41,10 @@ def infer_watermark_type(samples: list[str]) -> WatermarkType:
     if not non_empty:
         return WatermarkType.STRING
 
-    int_hits = sum(1 for s in non_empty if re.match(r"^-?\d+$", s.replace(",", "")))
-    float_hits = sum(1 for s in non_empty if _parse_float(s) is not None)
+    from services.transform_engine import decimal_wire_value, integer_wire_value
+
+    int_hits = sum(1 for s in non_empty if integer_wire_value(s) is not None)
+    float_hits = sum(1 for s in non_empty if decimal_wire_value(s) is not None)
     dt_hits = sum(
         1 for s in non_empty
         if _ISO_DT_RE.match(s) or _EPOCH_MS_RE.match(s) or _EPOCH_S_RE.match(s)
@@ -60,9 +61,14 @@ def infer_watermark_type(samples: list[str]) -> WatermarkType:
 
 
 def _parse_float(s: str) -> float | None:
+    from services.transform_engine import decimal_wire_value
+
+    parsed = decimal_wire_value(s)
+    if parsed is None:
+        return None
     try:
-        return float(Decimal(s.replace(",", "")))
-    except (InvalidOperation, ValueError):
+        return float(parsed)
+    except (OverflowError, ValueError):
         return None
 
 
@@ -93,11 +99,12 @@ def compare_watermarks(a: str, b: str, wm_type: WatermarkType) -> int:
     Used for monotonic advancement validation and max() selection.
     """
     if wm_type == WatermarkType.INTEGER:
-        try:
-            ai, bi = int(a.replace(",", "")), int(b.replace(",", ""))
+        from services.transform_engine import integer_wire_value
+
+        ai, bi = integer_wire_value(a), integer_wire_value(b)
+        if ai is not None and bi is not None:
             return (ai > bi) - (ai < bi)
-        except ValueError:
-            return (a > b) - (a < b)
+        return (a > b) - (a < b)
     if wm_type == WatermarkType.FLOAT:
         fa, fb = _parse_float(a), _parse_float(b)
         if fa is not None and fb is not None:
@@ -221,7 +228,19 @@ def build_incremental_predicate(
             return f"`{col}` > '{watermark}'"
         return f"{col} > '{watermark}'"
     if wm_type in {WatermarkType.INTEGER, WatermarkType.FLOAT}:
-        val = watermark.replace(",", "")
+        from services.transform_engine import decimal_wire_value, integer_wire_value
+
+        parsed = (
+            integer_wire_value(watermark)
+            if wm_type == WatermarkType.INTEGER
+            else decimal_wire_value(watermark)
+        )
+        if parsed is None:
+            # Fail closed — never embed an invented grouping in SQL.
+            if dialect == "mysql":
+                return f"`{col}` > '{watermark}'"
+            return f'"{col}" > \'{watermark}\''
+        val = format(parsed, "f") if wm_type == WatermarkType.FLOAT else str(int(parsed))
         if dialect == "mysql":
             return f"`{col}` > {val}"
         return f'"{col}" > {val}'

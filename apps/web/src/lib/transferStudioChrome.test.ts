@@ -520,4 +520,18 @@ describe("Transfer Studio chrome contracts", () => {
     assert.match(panel, /onOpenAdvanced/);
     assert.doesNotMatch(panel, /Set number locale[\s\S]*Set number locale/);
   });
+
+  it("local preflight and file export use the write-path number locale parser", () => {
+    const localPf = readFileSync(join(webRoot, "lib/localPreflight.ts"), "utf8");
+    const localEx = readFileSync(join(webRoot, "lib/localFileExport.ts"), "utf8");
+    const localTx = readFileSync(join(webRoot, "lib/localTransform.ts"), "utf8");
+    const page = readFileSync(join(webRoot, "pages/TransferPage.tsx"), "utf8");
+    assert.match(localTx, /parseLocaleNumber/);
+    assert.match(localPf, /applyLocalTransform/);
+    assert.match(localEx, /applyLocalTransform/);
+    assert.match(page, /numberLocale,/);
+    assert.doesNotMatch(localPf, /replace\(\/,\/g/);
+    assert.doesNotMatch(localEx, /replace\(\/,\/g/);
+    assert.doesNotMatch(localTx, /replace\(\/,\/g/);
+  });
 });

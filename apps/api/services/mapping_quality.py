@@ -191,13 +191,12 @@ def analyze_column_profile(name: str, samples: list[str]) -> dict[str, Any]:
         uuid_ratio = _pattern_rate(vals, UUID_RE)
         date_ratio = _pattern_rate(vals, DATE_RE)
         bool_hits = sum(1 for v in vals if v.lower() in BOOL_VALUES)
+        from services.transform_engine import decimal_wire_value
+
         numeric = 0
         for v in vals:
-            try:
-                float(v.replace(",", ""))
+            if decimal_wire_value(v) is not None:
                 numeric += 1
-            except ValueError:
-                pass
 
         numeric_ratio = numeric / len(vals)
         bool_ratio = bool_hits / len(vals)
@@ -231,10 +230,9 @@ def analyze_column_profile(name: str, samples: list[str]) -> dict[str, Any]:
                 pass
             nums: list[float] = []
             for v in vals:
-                try:
-                    nums.append(float(v.replace(",", "").replace("$", "").replace("£", "").replace("€", "")))
-                except ValueError:
-                    continue
+                parsed = decimal_wire_value(v)
+                if parsed is not None:
+                    nums.append(float(parsed))
             if nums:
                 profile["min"] = min(nums)
                 profile["max"] = max(nums)
