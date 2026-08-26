@@ -107,6 +107,35 @@ def test_assist_boolean_patterns_are_write_path_tokens_only():
     assert canonical_q["metrics"]["validity"] == 100.0
 
 
+def test_assist_date_quality_uses_write_path_bind():
+    """01/02/2024 is not a valid Date under Auto; 31/12/2024 and ISO still bind."""
+    from src.ai.knowledge.data_quality_rules import FORMAT_VALIDATORS, validate_column_quality
+
+    assert not any("/" in pattern for pattern in FORMAT_VALIDATORS["Date"])
+    ambiguous = validate_column_quality(
+        "event_date", ["01/02/2024", "03/04/2024"], semantic_type="Date"
+    )
+    assert ambiguous["metrics"]["validity"] == 0.0
+    dmy = validate_column_quality(
+        "event_date", ["31/12/2024", "30/11/2024"], semantic_type="Date"
+    )
+    assert dmy["metrics"]["validity"] == 100.0
+    iso = validate_column_quality(
+        "event_date", ["2024-03-05", "2024-03-06"], semantic_type="Date"
+    )
+    assert iso["metrics"]["validity"] == 100.0
+    ts = validate_column_quality(
+        "last_login",
+        ["2024-01-01 12:00:00", "2024-02-01T08:30:00"],
+        semantic_type="Timestamp",
+    )
+    assert ts["metrics"]["validity"] == 100.0
+    amb_ts = validate_column_quality(
+        "last_login", ["01/02/2024 00:00:00"], semantic_type="Timestamp"
+    )
+    assert amb_ts["metrics"]["validity"] == 0.0
+
+
 def test_generate_mappings_does_not_invent_date_transform_for_ambiguous_slash():
     mappings = generate_mappings(
         ["event_date"],
