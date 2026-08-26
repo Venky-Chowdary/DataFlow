@@ -36,7 +36,11 @@ def parse_array_wire_elements(value: Any) -> tuple[list[Any] | None, str | None]
         return None, None
     if text.startswith("[") and text.endswith("]"):
         try:
-            parsed = json.loads(text)
+            from services.value_serializer import json_loads_exact
+
+            # stdlib json.loads rounds every non-integer through binary64.
+            # 0.1 and 1.234567890123456789 lost digits before element fit.
+            parsed = json_loads_exact(text)
         except Exception:
             return None, "malformed JSON array payload"
         if not isinstance(parsed, list):
