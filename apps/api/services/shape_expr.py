@@ -29,6 +29,8 @@ from datetime import date, datetime
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Any, Callable, Mapping, Sequence
 
+from services.value_serializer import is_null_evidence
+
 __all__ = [
     "ExpressionError",
     "EvalError",
@@ -273,18 +275,17 @@ class _Call(_Node):
 
 
 def is_blank(value: Any) -> bool:
-    """Null-ish for shaping purposes: ``None``, an empty/whitespace string, NaN.
+    """Null-ish for shaping purposes: SQL NULL, empty/whitespace, Missing, NaN.
 
     A spreadsheet's empty cell arrives as ``""`` from one reader and ``None``
     from another; treating them differently would make the same recipe behave
-    differently per source.
+    differently per source. Reader-wired ``SQL_NULL_SENTINEL`` used to look
+    like a present string, so ``is_null`` / ``coalesce`` invented a token.
     """
-    if value is None:
+    if is_null_evidence(value):
         return True
-    if isinstance(value, str):
-        return value.strip() == ""
-    if isinstance(value, float):
-        return value != value
+    if isinstance(value, float) and value != value:
+        return True
     return False
 
 
