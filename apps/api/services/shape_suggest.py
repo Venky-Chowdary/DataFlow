@@ -173,8 +173,10 @@ def profile_columns(
                     profile.numeric_like += 1
                     profile.needs_parse_number += 1
                     number = human
-                elif "," in stripped or (stripped.count(".") > 1):
-                    # Grouped but Auto refused — still needs parse_number + locale.
+                elif _looks_grouped_or_auto_ambiguous(stripped):
+                    # Grouped but Auto refused (1,234 / 1.234 / 1.000) — evidence
+                    # only. parse_number is not offered until locale makes the
+                    # write path bind; do not invent numeric_like.
                     profile.needs_parse_number += 1
             else:
                 profile.numeric_like += 1
@@ -412,12 +414,18 @@ def _narrowing_scale(profile: ColumnProfile, declared: str) -> tuple[int, int] |
 
 
 def _plain_decimal(value: Any) -> Decimal | None:
-    """The finite number this cell holds, or ``None``.
+    """The finite number this cell already is, or ``None``.
 
     ``NaN`` / ``Infinity`` parse as Decimal but have no digits or exponent to
     measure — ``as_tuple().exponent`` is ``'n'`` / ``'F'``, so profiling them
     raised and the whole Transform preview answered 500. They are
     non-numbers here and profile as text.
+
+    Strings must also bind on the write path. ``Decimal("1.234")`` succeeds
+    while Auto refuses that 3-digit last group — treating it as already-numeric
+    hid the locale pin and invented a ready decimal the writer quarantines.
+    Currency / grouping still return ``None`` here so ``_human_decimal`` can
+    mark ``needs_parse_number``.
     """
     if isinstance(value, bool):
         return None
@@ -429,12 +437,36 @@ def _plain_decimal(value: Any) -> Decimal | None:
         parsed = Decimal(str(value))
         return parsed if parsed.is_finite() else None
     if isinstance(value, str):
+        text = value.strip()
         try:
-            parsed = Decimal(value.strip())
+            parsed = Decimal(text)
         except (InvalidOperation, DecimalException, ValueError):
             return None
-        return parsed if parsed.is_finite() else None
+        if not parsed.is_finite():
+            return None
+        from services.transform_engine import decimal_wire_value
+
+        if decimal_wire_value(text) is None:
+            return None
+        return parsed
     return None
+
+
+def _looks_grouped_or_auto_ambiguous(text: str) -> bool:
+    """True when the token looks numeric-grouped but Auto cannot bind it.
+
+    Covers ``1,234``, multi-dot thousands, and a single ``.`` whose last
+    group is exactly three digits (``1.234`` / ``1.000``).
+    """
+    if "," in text or text.count(".") > 1:
+        return True
+    if "." not in text:
+        return False
+    if not any(ch.isdigit() for ch in text):
+        return False
+    from services.transform_engine import decimal_wire_value
+
+    return decimal_wire_value(text) is None
 
 
 def _human_decimal(text: str) -> Decimal | None:

@@ -124,6 +124,27 @@ def test_a_plain_decimal_column_is_not_told_to_parse_itself():
     assert _suggestion(suggest_steps(profiles), "parse_number", "amount") is None
 
 
+def test_auto_ambiguous_dot_group_is_not_already_numeric():
+    """Decimal('1.234') succeeds; the write path refuses. Do not invent decimal."""
+    from services.transform_engine import decimal_wire_value
+
+    assert decimal_wire_value("1.234") is None
+    assert decimal_wire_value("1.000") is None
+    profiles = profile_columns([{"amount": "1.234"}, {"amount": "1.000"}])
+    assert profiles[0].numeric_like == 0
+    assert profiles[0].logical_type == "text"
+    assert profiles[0].needs_parse_number == 2
+    # parse_number cannot bind these under Auto — do not offer a dead CTA.
+    assert _suggestion(suggest_steps(profiles), "parse_number", "amount") is None
+
+
+def test_bindable_scale_longer_than_three_stays_plain_decimal():
+    profiles = profile_columns([{"amount": "1.2345"}, {"amount": "1.23"}])
+    assert profiles[0].numeric_like == 2
+    assert profiles[0].logical_type == "decimal"
+    assert _suggestion(suggest_steps(profiles), "parse_number", "amount") is None
+
+
 def test_blanks_and_declared_columns_survive_a_column_missing_from_every_row():
     profiles = profile_columns([{"a": 1}], columns=["a", "b"])
     by_name = {p.name: p for p in profiles}
