@@ -53,13 +53,22 @@ TYPE_CONVERSION_MATRIX: dict[str, dict[str, dict]] = {
     "integer": {
         "string": {"method": "to_string", "lossy": False},
         "decimal": {"method": "cast", "lossy": False},
-        "boolean": {"method": "cast", "lossy": True, "note": "0=false, non-zero=true"},
+        "boolean": {
+            "method": "parse_bool",
+            "lossy": True,
+            "mapping": {"0": False, "1": True},
+            "note": "Write-path tokens only (0/1). Non-zero integers like 2 are not TRUE. Assist only.",
+        },
         "datetime": {"method": "unix_timestamp", "lossy": False},
     },
     "decimal": {
         "string": {"method": "to_string", "lossy": False},
         "integer": {"method": "truncate", "lossy": True, "note": "Truncates decimal portion"},
-        "boolean": {"method": "cast", "lossy": True},
+        "boolean": {
+            "method": "parse_bool",
+            "lossy": True,
+            "note": "Write-path tokens only (0/1). Non-zero decimals are not TRUE. Assist only.",
+        },
     },
     "boolean": {
         "string": {"method": "to_string", "lossy": False, "mapping": {True: "true", False: "false"}},

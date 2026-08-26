@@ -190,3 +190,14 @@ def test_ai_type_matrix_is_non_authoritative():
     assert dec_hint.get("lossy") is True
     assert "1,234" in (dec_hint.get("note") or "")
     assert dec_hint.get("validation") is None
+    int_bool = tc.suggest_type_conversion("integer", "boolean")
+    assert int_bool is not None
+    assert int_bool.get("lossy") is True
+    assert int_bool.get("mapping") == {"0": False, "1": True}
+    assert "non-zero" not in (int_bool.get("note") or "").lower() or "not TRUE" in (int_bool.get("note") or "")
+    assert "2" in (int_bool.get("note") or "")
+    dec_bool = tc.suggest_type_conversion("decimal", "boolean")
+    assert dec_bool is not None
+    assert dec_bool.get("lossy") is True
+    assert dec_bool.get("method") == "parse_bool"
+    assert "non-zero=true" not in (dec_bool.get("note") or "").lower()
