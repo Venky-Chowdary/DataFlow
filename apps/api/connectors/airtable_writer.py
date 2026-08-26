@@ -279,10 +279,10 @@ def _present_fields(row: Any, target_cols: list[str]) -> dict[str, Any]:
     sending DF_MISSING writes the sentinel's text. Omitting the key is the only
     way to leave a cell untouched, so the filter is a fidelity rule, not tidying.
     """
-    from services.value_serializer import is_missing_sentinel
+    from services.value_serializer import is_reader_null_cell
 
     def _present(value: Any) -> bool:
-        if is_missing_sentinel(value) or value is None:
+        if is_reader_null_cell(value):
             return False
         return not (isinstance(value, str) and not value.strip())
 

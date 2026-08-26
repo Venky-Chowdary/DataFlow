@@ -256,15 +256,13 @@ def _as_property_value(
     row_idx: int,
 ) -> Any:
     """Map a single cell value into a Notion property object value."""
-    from services.value_serializer import is_missing_sentinel
+    from services.value_serializer import is_reader_null_cell, present_cell_text
 
-    # STOP_COLUMN / coerce_null → DF_MISSING: omit property (never write sentinel).
-    if value is None or is_missing_sentinel(value):
+    # STOP_COLUMN / coerce_null / reader-null: omit property (never write sentinel).
+    if is_reader_null_cell(value):
         return None
 
-    text = ""
-    if value is not None:
-        text = str(value)
+    text = present_cell_text(value) or ""
 
     if notion_type == "title":
         chunks = _rich_text_chunks(text) or [{"type": "text", "text": {"content": ""}}]
