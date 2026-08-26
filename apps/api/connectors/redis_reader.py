@@ -6,7 +6,7 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-from services.value_serializer import cell_to_string, json_default
+from services.value_serializer import cell_to_string, json_default, json_loads_exact
 
 from connectors.base import ReadBatch
 
@@ -105,6 +105,22 @@ def redis_zset_score_carrier(score: Any) -> float:
             f"Redis zset score cannot bind {score!r} — refuse invent"
         )
     return bound
+
+
+def load_redis_json_doc(raw: Any) -> Any:
+    """Parse a Redis JSON document. Numbers match ``json_loads_exact``.
+
+    Invalid UTF-8, non-JSON, or non-text payloads return ``None`` — callers
+    must not invent an empty object.
+    """
+    try:
+        if isinstance(raw, (bytes, bytearray)):
+            raw = raw.decode("utf-8")
+        if not isinstance(raw, str):
+            return None
+        return json_loads_exact(raw)
+    except (TypeError, ValueError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
 
 
 def _decode(value: Any) -> str:
@@ -267,10 +283,7 @@ def read_keys_batch(
         # redis_type so upsert identity is never silently dropped.
         object_values: list[dict] = []
         for row in rows:
-            try:
-                parsed = json.loads(row[1])
-            except Exception:
-                parsed = None
+            parsed = load_redis_json_doc(row[1])
             if not isinstance(parsed, dict):
                 object_values = []
                 break

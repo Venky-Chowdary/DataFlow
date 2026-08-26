@@ -16,7 +16,7 @@ from services.primary_key import (
 from services.sync_cursor import is_overwrite_sync
 from services.value_serializer import json_default, sanitize_json_value
 
-from connectors.redis_reader import _redis_client, redis_key_for
+from connectors.redis_reader import _redis_client, load_redis_json_doc, redis_key_for
 from connectors.writer_common import WriteResult as _WriteResult
 from connectors.writer_common import (
     build_mapped_rows_with_details,
@@ -68,12 +68,7 @@ def _fetch_redis_physical_types(
                 raw = client.get(key)
                 if not raw:
                     continue
-                try:
-                    if isinstance(raw, (bytes, bytearray)):
-                        raw = raw.decode("utf-8")
-                    doc = json.loads(raw)
-                except (TypeError, ValueError, UnicodeDecodeError, json.JSONDecodeError):
-                    continue
+                doc = load_redis_json_doc(raw)
                 if not isinstance(doc, dict):
                     continue
                 sampled += 1
@@ -794,10 +789,7 @@ def write_mapped_rows(
                 if needs_merge:
                     existing_raw = client.get(key)
                     if existing_raw:
-                        try:
-                            existing = json.loads(existing_raw)
-                        except (TypeError, ValueError, json.JSONDecodeError):
-                            existing = None
+                        existing = load_redis_json_doc(existing_raw)
                         if isinstance(existing, dict):
                             doc = {**existing, **doc}
                 safe_doc = sanitize_json_value(doc)
