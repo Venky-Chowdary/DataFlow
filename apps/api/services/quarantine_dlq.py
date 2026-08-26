@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import Any
 
 from services.platform_config import data_dir
-from services.value_serializer import json_default
+from services.value_serializer import json_default, json_loads_exact
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +39,18 @@ DLQ_PATH = data_dir() / "quarantine_dlq.jsonl"
 _MONGO_COLL = "quarantine_dlq"
 # Rotate JSONL before unbounded growth fills the disk (and then silently fails).
 _DLQ_MAX_BYTES = 100 * 1024 * 1024  # 100 MiB
+
+
+def load_dlq_event(line: str) -> dict[str, Any] | None:
+    """One JSONL DLQ event. Numbers match ``json_loads_exact``.
+
+    Invalid JSON or a non-object line is skipped — never invent an event.
+    """
+    try:
+        ev = json_loads_exact(line)
+    except (json.JSONDecodeError, ValueError, TypeError):
+        return None
+    return ev if isinstance(ev, dict) else None
 
 
 class QuarantineDlqLostError(RuntimeError):
@@ -378,9 +390,8 @@ def list_dlq_events(*, job_id: str | None = None, limit: int = 100) -> list[dict
         line = line.strip()
         if not line:
             continue
-        try:
-            ev = json.loads(line)
-        except json.JSONDecodeError:
+        ev = load_dlq_event(line)
+        if ev is None:
             continue
         if job_id and ev.get("job_id") != job_id:
             continue
