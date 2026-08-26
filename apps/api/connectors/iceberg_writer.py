@@ -875,6 +875,30 @@ def _coerce_arrow_cell(value: Any, arrow_type: Any, pa: Any) -> Any:
     return coerce_arrow_cell(value, arrow_type, pa, dialect="iceberg")
 
 
+def _iceberg_jsonl_payload(
+    row: dict[str, Any],
+    column_types: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """JSONL fallback cell bind — reader-null is JSON null, never the extract token.
+
+    Residual ``DF_MISSING`` still raises: overlay must expand first, same as
+    the Parquet path. Empty string / 0 / false stay present.
+    """
+    from connectors.writer_common import to_json_value
+    from services.value_serializer import is_missing_sentinel
+
+    types = column_types or {}
+    out: dict[str, Any] = {}
+    for key, val in row.items():
+        if is_missing_sentinel(val):
+            raise ValueError(
+                f"Iceberg JSONL write refused residual DF_MISSING on column {key!r} "
+                "— would serialize the sentinel literally into the data file"
+            )
+        out[key] = to_json_value(val, key, types)
+    return out
+
+
 def _write_data_file(
     data_dir: Path,
     columns: list[str],
@@ -922,22 +946,15 @@ def _write_data_file(
                 f"Iceberg Parquet type conversion failed; refusing JSONL type downgrade: {exc}"
             ) from exc
 
-    from services.value_serializer import is_missing_sentinel
-
-    for row in dict_rows:
-        for k, v in row.items():
-            if is_missing_sentinel(v):
-                raise ValueError(
-                    f"Iceberg JSONL write refused residual DF_MISSING on column {k!r} "
-                    "— would serialize the sentinel literally into the data file"
-                )
-
     rel = f"data/{file_id}.jsonl"
     path = data_dir.parent / rel
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as fh:
         for row in dict_rows:
-            line = json.dumps(row, default=json_default)
+            line = json.dumps(
+                _iceberg_jsonl_payload(row, types),
+                default=json_default,
+            )
             fh.write(line + "\n")
             digest.update(line.encode())
     return rel, len(dict_rows), digest.hexdigest()[:16], warnings
