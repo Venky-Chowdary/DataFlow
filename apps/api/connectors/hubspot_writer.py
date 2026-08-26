@@ -68,12 +68,11 @@ def coerce_hubspot_datetime_wire(value: Any) -> str | None:
     (Airbyte / Census class). Refuse invent for unparseable values — never
     silently stringify a bad ISO fragment into a CRM cell.
     """
-    if value is None:
-        return None
-    from services.value_serializer import is_missing_sentinel
+    from services.value_serializer import absent_sql_bind
 
-    if is_missing_sentinel(value):
-        return value
+    handled, bound = absent_sql_bind(value)
+    if handled:
+        return bound
     if isinstance(value, bool):
         raise ValueError("HubSpot datetime cannot bind bool — refuse invent")
     if isinstance(value, (int, float)):
@@ -117,12 +116,11 @@ def coerce_hubspot_datetime_wire(value: Any) -> str | None:
 
 def coerce_hubspot_date_wire(value: Any) -> str | None:
     """Normalize HubSpot ``date`` property to ``YYYY-MM-DD`` (midnight UTC day)."""
-    if value is None:
-        return None
-    from services.value_serializer import is_missing_sentinel
+    from services.value_serializer import absent_sql_bind
 
-    if is_missing_sentinel(value):
-        return value
+    handled, bound = absent_sql_bind(value)
+    if handled:
+        return bound
     if isinstance(value, str) and not value.strip():
         raise ValueError(
             "empty HubSpot date — refuse silent NULL invent "

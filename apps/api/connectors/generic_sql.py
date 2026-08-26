@@ -1822,6 +1822,8 @@ def _to_sa_value(
         base = str(coerce_ddl).upper()
 
         if base == "DATE":
+            if coerced is None:
+                return None
             if isinstance(coerced, datetime):
                 return coerced.date()
             if isinstance(coerced, date):
@@ -1829,6 +1831,8 @@ def _to_sa_value(
             return value
 
         if base == "TIME":
+            if coerced is None:
+                return None
             if _is_string_type(sa_type):
                 if isinstance(coerced, time):
                     return coerced.isoformat()
@@ -1862,6 +1866,8 @@ def _to_sa_value(
         if is_tz_aware:
             from services.offset_label import bind_aware_datetime
 
+            if coerced is None:
+                return None
             if isinstance(coerced, datetime):
                 if coerced.tzinfo is None:
                     raise ValueError(
@@ -1881,6 +1887,8 @@ def _to_sa_value(
                 )
             return value
         # NTZ / DATETIME: keep civil digits; strip offset without astimezone.
+        if coerced is None:
+            return None
         if isinstance(coerced, datetime):
             if coerced.tzinfo is not None:
                 return coerced.replace(tzinfo=None)

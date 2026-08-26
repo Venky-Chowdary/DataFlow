@@ -57,11 +57,18 @@ def bigquery_temporal_ddl(bq_type: str) -> str | None:
 
 def format_snowflake_bind(value: Any, sf_type: str) -> Any:
     """Return a Snowflake-friendly bind/CSV cell for temporal DDL, else value."""
+    from services.value_serializer import absent_sql_bind
+
+    handled, bound = absent_sql_bind(value)
+    if handled:
+        return bound
     ddl = snowflake_temporal_ddl(sf_type)
     if not ddl:
         return value
     if ddl == "DATE":
         coerced = coerce_sql_temporal(value, "DATE")
+        if coerced is None:
+            return None
         if isinstance(coerced, date) and not isinstance(coerced, datetime):
             return coerced.isoformat()
         if isinstance(coerced, datetime):
@@ -131,6 +138,11 @@ def format_snowflake_bind(value: Any, sf_type: str) -> Any:
 
 def format_bigquery_bind(value: Any, bq_type: str) -> Any:
     """Return a BigQuery JSON/API-friendly temporal value."""
+    from services.value_serializer import absent_sql_bind
+
+    handled, bound = absent_sql_bind(value)
+    if handled:
+        return bound
     ddl = bigquery_temporal_ddl(bq_type)
     if not ddl:
         return value

@@ -181,6 +181,8 @@ def _to_sqlite_value(value: Any, source_type: str) -> Any:
             raise
         if wire is not None:
             return wire
+        if coerced is None:
+            return None
         if isinstance(coerced, datetime):
             return coerced.isoformat(sep=" ")
         if isinstance(coerced, date) and not isinstance(coerced, datetime):

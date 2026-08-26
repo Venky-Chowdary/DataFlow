@@ -690,6 +690,8 @@ def write_mapped_rows(
                 coerced = coerce_sql_temporal(value, "DATE")
                 # DATE → BSON Date as UTC midnight (calendar date instant), never
                 # leave naive for PyMongo local-TZ invent.
+                if coerced is None:
+                    return None
                 if isinstance(coerced, _datetime):
                     d = coerced.date()
                     return _datetime(d.year, d.month, d.day, tzinfo=_tz.utc)
@@ -715,6 +717,8 @@ def write_mapped_rows(
                     coerced = coerce_sql_temporal(value, "TIMESTAMPTZ")
                 except ValueError:
                     coerced = coerce_sql_temporal(value, "DATETIME")
+                if coerced is None:
+                    return None
                 if isinstance(coerced, _datetime):
                     # Never invent UTC on a naive wall-clock (would silently shift
                     # polarity). Require offset/Z from the wire, a prior coerce, or

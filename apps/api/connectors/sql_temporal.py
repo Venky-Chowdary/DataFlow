@@ -312,6 +312,11 @@ def coerce_sql_temporal(value: Any, source_type: str, *, engine: str = "") -> An
     rather than having its offset stripped off the civil digits. Everywhere else
     bare ``TIMESTAMP`` stays wall-clock.
     """
+    from services.value_serializer import absent_sql_bind
+
+    handled, bound = absent_sql_bind(value)
+    if handled:
+        return bound
     base = sql_base_type(source_type)
     # Empty → SQL NULL / MySQL zero-date on upsert wipe. Quarantine owns the cell.
     if base in _TEMPORAL_BASES and isinstance(value, str) and not value.strip():
@@ -575,7 +580,10 @@ def wire_check_temporal(value: Any, ddl_type: str, *, engine: str = "") -> dict[
     if base not in _TEMPORAL_BASES:
         return {"ok": True, "wire_value": None, "reason": "", "needs_normalize": False}
 
-    if value is None:
+    from services.value_serializer import absent_sql_bind
+
+    handled, bound = absent_sql_bind(value)
+    if handled:
         return {"ok": True, "wire_value": None, "reason": "", "needs_normalize": False}
     if isinstance(value, str) and not value.strip():
         return {

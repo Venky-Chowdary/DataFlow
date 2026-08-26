@@ -88,6 +88,20 @@ def is_reader_null_cell(value: Any) -> bool:
     return value.strip() in NULL_WIRE_SENTINELS
 
 
+def absent_sql_bind(value: Any) -> tuple[bool, Any]:
+    """Return ``(True, bind)`` when the cell is absence.
+
+    Missing stays Missing (sparse omit). Reader-wired SQL NULL / None /
+    DuckDB null bind as SQL NULL. Empty string is not absence — specialty
+    and temporal coerces refuse it instead of inventing NULL.
+    """
+    if is_missing_sentinel(value):
+        return True, value
+    if is_reader_null_cell(value):
+        return True, None
+    return False, value
+
+
 def present_cell_text(value: Any) -> str | None:
     """One present cell on the reader wire.
 

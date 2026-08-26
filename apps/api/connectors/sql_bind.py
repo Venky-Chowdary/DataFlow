@@ -20,26 +20,12 @@ from typing import Any
 # so there is no cycle to avoid here.
 from connectors.sql_bind_route import BindRoute, bind_route
 from connectors.sql_temporal import coerce_sql_temporal
-from services.value_serializer import is_missing_sentinel, is_reader_null_cell
+from services.value_serializer import absent_sql_bind as _absent_sql_bind
 
 # Canonical boolean wire only — SSOT with type_system / transform_engine.
 # Informal yes/on/y/no/n invents truth; quarantine or operator transform owns those.
 _TRUE_TOKENS = frozenset({"true", "t", "1"})
 _FALSE_TOKENS = frozenset({"false", "f", "0"})
-
-
-def _absent_sql_bind(value: Any) -> tuple[bool, Any]:
-    """Return ``(True, bind)`` when the cell is absence.
-
-    Missing stays Missing (sparse omit). Reader-wired SQL NULL / None /
-    DuckDB null bind as SQL NULL. Empty string is not absence — specialty
-    coerces refuse it instead of inventing NULL.
-    """
-    if is_missing_sentinel(value):
-        return True, value
-    if is_reader_null_cell(value):
-        return True, None
-    return False, value
 
 
 def _refuse_empty_specialty(text: str, label: str) -> str:
