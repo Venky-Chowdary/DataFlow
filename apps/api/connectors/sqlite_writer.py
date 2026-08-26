@@ -97,23 +97,18 @@ def _sqlite_bind_carrier(map_carrier: str, physical_or_ddl: str = "") -> str:
 
 
 def _to_sqlite_value(value: Any, source_type: str) -> Any:
-    from services.value_serializer import is_missing_sentinel, safe_decimal_text
+    from services.value_serializer import is_missing_sentinel
 
     # Sparse CDC: never coerce DF_MISSING → NULL (would wipe present destination cols).
     if is_missing_sentinel(value):
         return value
     if value is None:
         return None
-    # SQLite has no Decimal affinity — always bind exact decimal text (currency /
-    # DECIMAL / MONEY carriers and TEXT affinity after semantic currency normalize).
+    # SQLite has no Decimal affinity — dest-canonical text (shared adapter).
     if isinstance(value, Decimal):
-        text = safe_decimal_text(value)
-        if text is None:
-            raise ValueError(
-                f"SQLite refused non-finite Decimal {value!r} "
-                "(refuse silent NULL / float invent)"
-            )
-        return text
+        from connectors.sqlite_common import sqlite_decimal_bind_text
+
+        return sqlite_decimal_bind_text(value)
     upper = source_type.upper()
     if upper in {
         "DECIMAL",

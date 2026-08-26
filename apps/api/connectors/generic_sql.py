@@ -613,6 +613,13 @@ def _build_engine(cfg: dict[str, Any]) -> Any:
             # money/numeric fidelity.  Decimal is native in DuckDB, so enable it.
             if db_type == "duckdb" or "duckdb" in connection_string:
                 engine.dialect.supports_native_decimal = True
+            # SQLite has no Decimal affinity. Register dest-canonical text bind so
+            # SQLAlchemy/sqlite3 accept Python Decimal (apply_transform decimal
+            # wire) instead of ProgrammingError or IEEE float invent.
+            if db_type == "sqlite" or "sqlite://" in connection_string:
+                from connectors.sqlite_common import register_sqlite_decimal_adapter
+
+                register_sqlite_decimal_adapter()
             return engine
         from services.engine_pool import pool_settings
 
