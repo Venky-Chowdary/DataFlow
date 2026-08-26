@@ -26,7 +26,7 @@ import re
 import unicodedata
 from dataclasses import dataclass
 from datetime import date, datetime
-from decimal import Decimal, DecimalException, InvalidOperation, ROUND_HALF_UP
+from decimal import Decimal, ROUND_HALF_UP
 from typing import Any, Callable, Mapping, Sequence
 
 __all__ = [
@@ -585,10 +585,12 @@ def _fn_truncate(value: Any, places: Any = 0) -> Any:
     return number.quantize(quantum, rounding="ROUND_DOWN")
 
 
-def _fn_to_number(value: Any, *, allow_grouping: bool = True) -> Any:
+def _fn_to_number(value: Any) -> Any:
     """Parse a number a human typed: grouping, currency, parenthesised negative.
 
     Grouping uses the write-path locale contract. Auto refuses a lone ``1,234``.
+    There is no ``Decimal(text)`` fallback — that invented Auto ``1.234``.
+    Dest-canonical ``Decimal`` cells still bind via ``_as_number``.
     """
     if is_blank(value):
         return None
@@ -599,17 +601,6 @@ def _fn_to_number(value: Any, *, allow_grouping: bool = True) -> Any:
     parsed = decimal_wire_value(value)
     if parsed is not None:
         return parsed
-    if not allow_grouping:
-        text = (_as_text(value) or "").strip()
-        if text in ("", "-", "+", "."):
-            raise EvalError(f"'{value}' is not a number")
-        try:
-            number = Decimal(text)
-        except (InvalidOperation, DecimalException) as exc:
-            raise EvalError(f"'{value}' is not a number") from exc
-        if not number.is_finite():
-            raise EvalError(f"'{value}' is not a number")
-        return number
     raise EvalError(f"'{value}' is not a number")
 
 
