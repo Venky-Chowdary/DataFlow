@@ -64,6 +64,17 @@ def test_milvus_entity_omits_reader_null_page():
     assert SQL_NULL_SENTINEL not in entity.values()
 
 
+def test_milvus_page_zero_and_false_stay_present():
+    row = dict(_ROW)
+    row["metadata"] = {"page": 0, "filename": False, "heading": "kept"}
+    entities, rejected = build_milvus_entities([row], dimension=3)
+    assert rejected == []
+    entity = entities[0]
+    assert entity["page"] == "0"
+    assert entity["filename"] == "false"
+    assert entity["heading"] == "kept"
+
+
 def test_pinecone_metadata_still_omits_reader_null():
     vectors, rejected = build_pinecone_vectors([_ROW], dimension=3)
     assert rejected == []

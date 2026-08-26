@@ -128,6 +128,14 @@ def test_milvus(
         return False, str(exc)
 
 
+def _milvus_schema_text(value: Any, cap: int) -> str:
+    """Dest-canonical schema field text. ``or ''`` wiped integer 0 / False."""
+    from services.value_serializer import present_cell_text
+
+    text = present_cell_text(value)
+    return (text or "")[:cap]
+
+
 def build_milvus_entities(
     vector_rows: list[dict[str, Any]],
     *,
@@ -215,10 +223,13 @@ def build_milvus_entities(
             "content": vector_cell_token(row.get("content"))[:65000],
             "source_id": vector_cell_token(row.get("source_id"))[:256],
             "chunk_index": chunk,
-            "filename": str(meta.get("filename") or "")[:512],
-            "page": str(meta.get("page") or "")[:64],
-            "heading": str(meta.get("heading") or "")[:1024],
-            "element_type": str(meta.get("element_type") or row.get("element_type") or "")[:128],
+            "filename": _milvus_schema_text(meta.get("filename"), 512),
+            "page": _milvus_schema_text(meta.get("page"), 64),
+            "heading": _milvus_schema_text(meta.get("heading"), 1024),
+            "element_type": _milvus_schema_text(
+                meta["element_type"] if "element_type" in meta else row.get("element_type"),
+                128,
+            ),
         }
         entities.append(entity)
     return entities, rejected
