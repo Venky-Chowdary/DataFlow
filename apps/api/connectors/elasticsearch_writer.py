@@ -251,8 +251,12 @@ def _resolve_doc_id(
     Prefer explicit ``_id``, then configured conflict/PK columns (including
     composite keys), then a single ``id`` field when present.
     """
-    if "_id" in source and source.get("_id") is not None and str(source.get("_id")).strip() != "":
-        return str(source["_id"])
+    from services.value_serializer import present_cell_text
+
+    if "_id" in source:
+        text = present_cell_text(source.get("_id"))
+        if text is not None:
+            return text
     configured = [c for c in conflict_columns if c]
     if configured:
         # Fail closed on partial composite identity: every configured PK part must
@@ -266,19 +270,21 @@ def _resolve_doc_id(
             return None
         parts: list[str] = []
         for col in keys:
-            val = source.get(col)
-            if val is None or str(val).strip() == "":
+            text = present_cell_text(source.get(col))
+            if text is None:
                 return None
-            parts.append(str(val).strip())
+            parts.append(text)
         return "|".join(parts) if len(parts) > 1 else parts[0]
     for alias in ("id", "ID", "Id", "pk", "PK"):
-        if alias in source and source.get(alias) is not None and str(source.get(alias)).strip() != "":
-            return str(source[alias])
+        if alias in source:
+            text = present_cell_text(source.get(alias))
+            if text is not None:
+                return text
     for col in target_cols:
         if col.lower() in {"id", "pk", "doc_id", "document_id"} and col in source:
-            val = source.get(col)
-            if val is not None and str(val).strip() != "":
-                return str(val)
+            text = present_cell_text(source.get(col))
+            if text is not None:
+                return text
     return None
 
 
