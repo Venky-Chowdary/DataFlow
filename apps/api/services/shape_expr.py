@@ -723,14 +723,14 @@ def _fn_concat(*values: Any) -> Any:
 
 
 def _fn_least(*values: Any) -> Any:
-    present = [v for v in values if v is not None]
+    present = [v for v in values if not is_blank(v)]
     if not present:
         return None
     return min(present, key=_sort_key)
 
 
 def _fn_greatest(*values: Any) -> Any:
-    present = [v for v in values if v is not None]
+    present = [v for v in values if not is_blank(v)]
     if not present:
         return None
     return max(present, key=_sort_key)
