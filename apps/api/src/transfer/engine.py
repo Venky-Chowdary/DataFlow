@@ -36,6 +36,7 @@ try:
     from services.mongodb_service import get_mongodb_service
     from services.pipeline_explanation import build_pipeline_explanation
     from services.transform_engine import (
+        decimal_wire_value,
         infer_date_locale,
         infer_number_locale,
         reset_active_date_locale,
@@ -83,6 +84,7 @@ except (
     from src.services.mongodb_service import get_mongodb_service
     from src.services.pipeline_explanation import build_pipeline_explanation
     from src.services.transform_engine import (
+        decimal_wire_value,
         infer_number_locale,
         reset_active_date_locale,
         reset_active_number_locale,
@@ -396,15 +398,19 @@ def _fail_job_preflight(mongo, job_id: str, pf: dict, *, lineage) -> tuple[str, 
 
 
 def _coalesce_sort_value(value: Any) -> Any:
-    """Return a tuple that sorts None/empty values last regardless of direction."""
+    """Return a tuple that sorts None/empty values last regardless of direction.
+
+    Numeric strings use ``decimal_wire_value`` — the write-path parser — so
+    Auto ``1,234`` / ``1.234`` stay lexical instead of inventing 1.234.
+    """
     if value is None or value == "":
         return (1, "")
     if isinstance(value, (int, float)):
         return (0, value)
-    try:
-        return (0, float(value))
-    except (TypeError, ValueError):
-        return (0, str(value).lower())
+    parsed = decimal_wire_value(value)
+    if parsed is not None:
+        return (0, parsed)
+    return (1, str(value).lower())
 
 
 def _apply_priority_and_limit(
