@@ -52,7 +52,12 @@ from services.transform_engine import (
     set_active_number_locale,
 )
 from services.type_system import instant_date_carrier, normalize_logical_type
-from services.value_serializer import cell_to_string, is_missing_sentinel, json_default
+from services.value_serializer import (
+    cell_to_string,
+    is_missing_sentinel,
+    json_default,
+    json_loads_exact,
+)
 
 # Fingerprinting runs once per cell on both the write and the read-back pass, so
 # resolving these names inside the function costs a module lookup per cell.
@@ -3907,7 +3912,7 @@ def normalize_cell(value: Any, *, ddl_type: str = "", engine: str = "") -> str:
     # JSON payloads (e.g. jsonb).
     if text.startswith(("{", "[")):
         try:
-            parsed = json.loads(text)
+            parsed = json_loads_exact(text)
             if isinstance(parsed, (dict, list)):
                 return json.dumps(parsed, sort_keys=True, default=json_default)
         except (json.JSONDecodeError, TypeError):
