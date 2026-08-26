@@ -152,6 +152,12 @@ def expect_column_values_between(
     severity: str = "block",
 ) -> ExpectationResult:
     """GX: expect_column_values_to_be_between."""
+    from decimal import Decimal
+
+    from services.transform_engine import decimal_wire_value
+
+    lo = None if min_value is None else Decimal(str(min_value))
+    hi = None if max_value is None else Decimal(str(max_value))
     failures: list[dict[str, Any]] = []
     checked = 0
     bad = 0
@@ -162,24 +168,21 @@ def expect_column_values_between(
         # Missing / SQL NULL sentinels from schemaless unions are not numeric values.
         if str(raw).strip() in {"__DF_MISSING__", "__df_sql_null__", "__df_ddb_null__"}:
             continue
-        from services.transform_engine import decimal_wire_value
-
         parsed = decimal_wire_value(raw)
         if parsed is None:
             bad += 1
             if len(failures) < 10:
                 failures.append({"row_index": i, "value": str(raw)[:40], "reason": "not_numeric"})
             continue
-        num = float(parsed)
         checked += 1
-        if min_value is not None and num < min_value:
+        if lo is not None and parsed < lo:
             bad += 1
             if len(failures) < 10:
-                failures.append({"row_index": i, "value": num, "reason": f"below_min_{min_value}"})
-        elif max_value is not None and num > max_value:
+                failures.append({"row_index": i, "value": str(parsed), "reason": f"below_min_{min_value}"})
+        elif hi is not None and parsed > hi:
             bad += 1
             if len(failures) < 10:
-                failures.append({"row_index": i, "value": num, "reason": f"above_max_{max_value}"})
+                failures.append({"row_index": i, "value": str(parsed), "reason": f"above_max_{max_value}"})
     rate = 1.0 - (bad / max(checked, 1))
     return ExpectationResult(
         expectation="expect_column_values_between",
