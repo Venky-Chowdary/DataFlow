@@ -56,6 +56,8 @@ def test_dest_canonical_1_234_stays_identity():
 
 
 def test_bool_is_not_a_magnitude():
+    # True == 1 in Python; the set must be the bool itself, not 1 / 1.0.
     assert numeric_sample_key_variants(True) == {True}
-    assert 1 not in numeric_sample_key_variants(True)
-    assert 1.0 not in numeric_sample_key_variants(True)
+    assert all(v is True for v in numeric_sample_key_variants(True))
+    assert numeric_sample_key_variants(False) == {False}
+    assert all(v is False for v in numeric_sample_key_variants(False))
