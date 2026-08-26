@@ -85,6 +85,28 @@ def _redis_client(cfg: dict[str, Any]):
     )
 
 
+def redis_zset_score_carrier(score: Any) -> float:
+    """Bind a Redis zset score through the write-path float carrier.
+
+    Redis scores are IEEE doubles. ``float(text)`` invented Auto ``1.234``
+    and collapsed ``2**53+1``. Native Python floats pass through (already
+    IEEE). Locale money the write path stores still binds.
+    """
+    from connectors.sql_bind import coerce_float_wire
+
+    try:
+        bound = coerce_float_wire(score, ddl_type="FLOAT")
+    except (ValueError, TypeError) as exc:
+        raise ValueError(
+            f"Redis zset score cannot bind {score!r} — refuse invent"
+        ) from exc
+    if not isinstance(bound, float):
+        raise ValueError(
+            f"Redis zset score cannot bind {score!r} — refuse invent"
+        )
+    return bound
+
+
 def _decode(value: Any) -> str:
     """Decode Redis bytes — binary payloads become a typed base64 envelope."""
     from services.value_serializer import json_default
@@ -174,7 +196,7 @@ def _read_redis_value(client: Any, key: str, ktype: str) -> str:
                 f"{_REDIS_COLLECTION_CAP} cap; refuse silent truncation"
             )
         pairs = client.zrange(key, 0, _REDIS_COLLECTION_CAP - 1, withscores=True)
-        vals = [[_decode(m), float(s)] for m, s in pairs]
+        vals = [[_decode(m), redis_zset_score_carrier(s)] for m, s in pairs]
         return json.dumps(vals, default=json_default)
     if ktype == "stream":
         xlen = int(client.xlen(key) or 0)
