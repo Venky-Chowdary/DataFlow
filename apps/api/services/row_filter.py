@@ -26,7 +26,17 @@ def _to_scalar(value: Any) -> Any:
 
 
 def _is_null(value: Any) -> bool:
-    return value is None or value == "" or (isinstance(value, float) and value != value)
+    """Absence for source filters. Reader-wired SQL NULL is not a token.
+
+    ``None`` / ``""`` / NaN used to be the only blanks. After PostgreSQL /
+    SQLite extract emits ``SQL_NULL_SENTINEL``, ``is_null`` missed it and
+    ``is_not_null`` kept the sentinel as a present row.
+    """
+    from services.value_serializer import is_null_evidence
+
+    if is_null_evidence(value):
+        return True
+    return isinstance(value, float) and value != value
 
 
 def _compare_values(row_value: Any, filter_value: Any, op: str) -> bool:
