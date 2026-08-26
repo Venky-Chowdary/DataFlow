@@ -230,6 +230,15 @@ def _wire_less(left: str, right: str) -> bool:
     return left < right
 
 
+def compare_present_wires(left: str, right: str) -> int:
+    """``-1`` / ``0`` / ``1`` using the same order as L2 min/max."""
+    if _wire_less(left, right):
+        return -1
+    if _wire_less(right, left):
+        return 1
+    return 0
+
+
 def compute_column_aggregates(
     rows: Iterable[dict[str, Any]],
     columns: list[str],

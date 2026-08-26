@@ -66,6 +66,13 @@ def test_locale_money_survives_history_roundtrip(tmp_path, monkeypatch):
     assert isinstance(historical["amount"].mean, Decimal)
 
 
+def test_string_profile_minmax_uses_numeric_order_not_lexicographic_wire():
+    p = profile_column(["9", "10", "100"], "code", "string")
+    assert p.min_value == "9"
+    assert p.max_value == "100"
+    assert p.min_value != "10"
+
+
 def test_reader_null_is_absence_not_a_token():
     p = profile_column(
         [None, SQL_NULL_SENTINEL, "", "kept", "null"],

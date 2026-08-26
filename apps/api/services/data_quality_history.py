@@ -164,7 +164,11 @@ def profile_column(values: list[Any], column: str, dtype: str = "string") -> Col
                 profile.min_value = lo.isoformat()
                 profile.max_value = hi.isoformat()
         else:
-            sorted_vals = sorted(as_text)
+            from functools import cmp_to_key
+
+            from services.verification_ladder import compare_present_wires
+
+            sorted_vals = sorted(as_text, key=cmp_to_key(compare_present_wires))
             profile.min_value = sorted_vals[0]
             profile.max_value = sorted_vals[-1]
 
