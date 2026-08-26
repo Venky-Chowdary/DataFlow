@@ -24,6 +24,63 @@ from services.reconciliation import (
 logger = logging.getLogger(__name__)
 
 from services.keyed_read import execute_keyed_read  # noqa: E402
+
+
+def numeric_sample_key_variants(key: Any) -> set[Any]:
+    """Widen one Gate-8 sample key the way the writer may have stored it.
+
+    Always includes the original. Write-path integer/decimal bind locale
+    money (``$1,234`` → 1234). Dest-canonical ``1.234`` stays identity.
+    Auto ``1,234`` stays the original token only. IEEE-lossy ``2**53+1``
+    does not add ``float(2**53)``. Bool is not a magnitude.
+    """
+    from decimal import Decimal, InvalidOperation
+
+    from connectors.sql_bind import coerce_integer_wire
+    from services.transform_engine import decimal_wire_value, float_carrier_or_refuse
+
+    if isinstance(key, bool):
+        return {key}
+
+    out: set[Any] = {key}
+    try:
+        parsed_int = coerce_integer_wire(key, ddl_type="INTEGER")
+        if parsed_int is not None and not isinstance(parsed_int, bool):
+            out.add(int(parsed_int))
+    except (ValueError, TypeError, OverflowError):
+        pass
+
+    parsed_dec: Decimal | None = None
+    if isinstance(key, Decimal):
+        parsed_dec = key if key.is_finite() else None
+    elif isinstance(key, int):
+        parsed_dec = Decimal(key)
+    elif isinstance(key, float):
+        if key == key and key not in (float("inf"), float("-inf")):
+            try:
+                parsed_dec = Decimal(str(key))
+            except (InvalidOperation, ValueError, OverflowError):
+                parsed_dec = None
+    else:
+        text = str(key).strip()
+        if text:
+            try:
+                dest = Decimal(text)
+                if dest.is_finite():
+                    parsed_dec = dest
+            except (InvalidOperation, ValueError, ArithmeticError):
+                parsed_dec = None
+            if parsed_dec is None:
+                parsed_dec = decimal_wire_value(text)
+    if parsed_dec is not None and parsed_dec.is_finite():
+        out.add(parsed_dec)
+        try:
+            out.add(float_carrier_or_refuse(parsed_dec))
+        except ValueError:
+            pass
+    return out
+
+
 from services.target_sample_vector import (  # noqa: E402
     read_pgvector_target_sample,
 )
@@ -388,16 +445,7 @@ def read_target_sample(
                     # integers, and decimals that the writer may have produced.
                     widened: set[Any] = set()
                     for k in keys:
-                        widened.add(k)
-                        try:
-                            if str(k).isdigit():
-                                widened.add(int(k))
-                        except Exception as exc:
-                            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
-                        try:
-                            widened.add(float(k))
-                        except Exception as exc:
-                            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+                        widened.update(numeric_sample_key_variants(k))
                         # ObjectId keys from schemaless sources are serialized as hex strings.
                         try:
                             from bson import ObjectId
@@ -679,19 +727,10 @@ def read_target_sample(
                         key_col = quote_sql_identifier(
                             require_safe_identifier(sort_key, preserve_case=True)
                         )
-                        # Snowflake IN is type-sensitive; widen strings to ints/floats.
+                        # Snowflake IN is type-sensitive; widen via write-path variants.
                         widened: set[Any] = set()
                         for k in keys:
-                            widened.add(k)
-                            try:
-                                if str(k).isdigit():
-                                    widened.add(int(k))
-                            except Exception as exc:
-                                logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
-                            try:
-                                widened.add(float(k))
-                            except Exception as exc:
-                                logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+                            widened.update(numeric_sample_key_variants(k))
                         placeholders = ",".join(["%s"] * len(widened))
                         cur.execute(
                             f"SELECT {sf_col_sql} FROM {qualified_name} "  # nosec B608
@@ -741,16 +780,7 @@ def read_target_sample(
                     widened = set()
                     if keys and sort_key:
                         for k in keys:
-                            widened.add(k)
-                            try:
-                                if str(k).isdigit():
-                                    widened.add(int(k))
-                            except Exception as exc:
-                                logger.debug("Could not widen key %r to int: %s", k, exc)
-                            try:
-                                widened.add(float(k))
-                            except Exception as exc:
-                                logger.debug("Could not widen key %r to float: %s", k, exc)
+                            widened.update(numeric_sample_key_variants(k))
                     for row in client.list_rows(table_id, max_results=scan_limit):
                         d = dict(row.items()) if hasattr(row, "items") else {k: v for k, v in zip(cols, row)}
                         if cols and cols != ["*"]:
