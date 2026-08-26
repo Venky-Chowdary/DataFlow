@@ -1528,10 +1528,15 @@ def infer_transform_for_mapping(
         or src_col.endswith("_DT")
         or src_col in {"TXN_DT", "PAY_DT", "PAYMENT_DT", "TRANS_DT"}
     ):
+        # Text sinks store the source token. Date→ISO here invents a parse,
+        # fails Auto-ambiguous 01/02/2024, then frames VARCHAR→VARCHAR as
+        # fidelity collapse. Existing DATE dest already returned above via
+        # tgt == "date". Currency / email / phone already preserve text sinks.
+        if tgt in {"string", "text", "unknown"} or not tgt:
+            return "none"
         # Auto-ambiguous 01/02/2024 is not a calendar type. Inventing Date→ISO
         # from the name, then DATE dest, then a Risk Contract, is this
-        # pipeline charging for its own guess. Existing DATE dest already
-        # returned above via tgt == "date".
+        # pipeline charging for its own guess.
         if samples_are_auto_ambiguous_dates(source_samples):
             return "none"
         return "datetime" if src == "datetime" or "epoch" in src_lower else "date"

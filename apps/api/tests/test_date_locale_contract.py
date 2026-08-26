@@ -40,6 +40,36 @@ def test_samples_are_auto_ambiguous_dates_settled_by_unambiguous_member():
         reset_active_date_locale(token)
 
 
+def test_name_does_not_invent_date_transform_into_a_text_sink():
+    """event_date → VARCHAR is identity even when samples are omitted.
+
+    Write-path resolve_transform used to re-infer Date→ISO from the name after
+    Map stripped transform=none, then Validate blocked 01/02/2024 as
+    INVALID_TIMESTAMP on a VARCHAR destination.
+    """
+    assert infer_transform_for_mapping("event_date", "event_date", "VARCHAR", "VARCHAR") == "none"
+    assert (
+        infer_transform_for_mapping(
+            "event_date",
+            "event_date",
+            "VARCHAR",
+            "VARCHAR",
+            source_samples=["01/02/2024", "03/04/2024"],
+        )
+        == "none"
+    )
+    assert (
+        infer_transform_for_mapping(
+            "event_date",
+            "event_date",
+            "VARCHAR",
+            "TEXT",
+            source_samples=["31/12/2024"],
+        )
+        == "none"
+    )
+
+
 def test_name_does_not_invent_date_transform_on_auto_ambiguous_samples():
     assert (
         infer_transform_for_mapping(
@@ -95,6 +125,25 @@ def test_preflight_surfaces_ambiguous_dates_with_next_action():
         or (isinstance(w, str) and "date locale" in w.lower())
         for w in warns
     )
+
+
+def test_varchar_event_date_preflight_does_not_fail_as_invalid_timestamp():
+    """Identity VARCHAR write of 01/02/2024 is not a sample-transform failure."""
+    pf = run_file_preflight(
+        columns=["event_date"],
+        column_types={"event_date": "VARCHAR"},
+        row_count=2,
+        mappings=[{"source": "event_date", "target": "event_date", "target_type": "VARCHAR"}],
+        sample_rows=[{"event_date": "01/02/2024"}, {"event_date": "03/04/2024"}],
+        destination_connected=True,
+    )
+    text = str(pf).lower()
+    assert "invalid date" not in text
+    assert "invalid_timestamp" not in text
+    blockers = pf.get("blockers") or []
+    assert not any("fidelity collapse" in str(b).lower() for b in blockers)
+    report = pf.get("date_locale_report") or {}
+    assert report.get("decision") == "set_locale"
 
 
 def test_preflight_ok_when_unambiguous_day_forces_dmy():
