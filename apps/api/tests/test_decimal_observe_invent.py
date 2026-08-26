@@ -121,6 +121,39 @@ def test_money_with_currency_symbols():
     assert obs["parse_rate"] >= 0.9
 
 
+def test_auto_ambiguous_grouping_does_not_invent_digits():
+    """Auto 1,234 / 1.234 / 1.000 refuse — same as the write path.
+
+    Decimal(text) / strip-then-separators used to either invent 1.234 or
+    miss whole-currency cells. Create-new must not stamp a typmod from
+    a grouping the writer will quarantine.
+    """
+    from services.transform_engine import decimal_wire_value
+
+    for token in ("1.234", "1,234", "1.000", "1.005"):
+        assert decimal_wire_value(token) is None
+        assert cell_int_digits_and_scale(token) == (0, 0)
+    obs = observe_numeric_samples(["1.234", "1,234", "1.000"])
+    assert obs["kind"] == "empty"
+    assert obs["parse_rate"] == 0.0
+    assert obs["carrier"] == "DECIMAL"
+
+
+def test_whole_currency_binds_same_as_write_path():
+    """$1,234 / €1.234 bind as 1234. Invent used to miss them after strip."""
+    from services.transform_engine import decimal_wire_value
+
+    assert decimal_wire_value("$1,234") == 1234
+    assert decimal_wire_value("€1.234") == 1234
+    assert cell_int_digits_and_scale("$1,234") == (4, 0)
+    assert cell_int_digits_and_scale("€1.234") == (4, 0)
+    obs = observe_numeric_samples(["$1,234", "€1.234", "$99"])
+    assert obs["kind"] == "integer"
+    assert obs["parse_rate"] == 1.0
+    assert obs["max_int_digits"] == 4
+    assert obs["carrier"] == "INTEGER"
+
+
 def test_money_locale_and_currency_codes_widen_for_population():
     """EU decimal comma + USD codes must not invent DECIMAL(11,6) from mis-strip."""
     samples = ["$1,000.00", "€2.000,50", "USD 1000000.89"]
