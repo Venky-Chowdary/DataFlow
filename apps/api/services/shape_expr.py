@@ -830,9 +830,9 @@ _FUNCTION_LIST: tuple[_Function, ...] = (
     # typing
     _Function("to_number", 1, 1, _fn_to_number, "Parse a human-written number"),
     _Function("to_text", 1, 1, lambda v: _as_text(v), "Render as text"),
-    _Function("to_date", 1, 2, _fn_to_date, "Parse a date with an explicit format"),
+    _Function("to_date", 1, 2, _fn_to_date, "Parse a write-path calendar date, or an explicit format"),
     _Function("format_date", 2, 2, _fn_format_date, "Render a date with a format"),
-    _Function("to_boolean", 1, 1, _fn_to_boolean, "Parse Y/N, 1/0, true/false"),
+    _Function("to_boolean", 1, 1, _fn_to_boolean, "Parse true/t/1 and false/f/0 — informal yes/Y/2 refuse"),
     # null and conditional
     _Function("coalesce", 1, -1, _fn_coalesce, "First value that is not blank"),
     _Function("nullif", 2, 2, _fn_nullif, "Null when the value equals the sentinel"),

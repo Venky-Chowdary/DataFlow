@@ -168,6 +168,22 @@ def test_the_catalog_states_the_operations_the_engine_will_accept(client):
     assert body["max_steps"] > 0
 
 
+def test_catalog_does_not_advertise_yn_boolean_or_iso_only_dates():
+    """Operators used to be told parse_boolean accepts Y/N; Execute refuses it."""
+    from services.shape_expr import describe_functions
+    from services.shape_models import describe_catalog
+
+    ops = {row["op"]: row["summary"] for row in describe_catalog()}
+    assert "Y/N" not in ops["parse_boolean"]
+    assert "yes" in ops["parse_boolean"]
+    assert "refuse" in ops["parse_boolean"]
+    assert "write-path" in ops["parse_date"]
+    fns = {row["name"]: row["summary"] for row in describe_functions()}
+    assert "Y/N" not in fns["to_boolean"]
+    assert "refuse" in fns["to_boolean"]
+    assert "write-path" in fns["to_date"]
+
+
 def test_a_preview_reports_the_value_it_changed_and_the_cell_it_changed_it_in(client):
     body = client.post(
         "/api/v1/shape/preview",

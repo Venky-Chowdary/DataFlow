@@ -174,10 +174,13 @@ _CATALOG_LIST: tuple[_StepDef, ...] = (
     _StepDef("parse_number", "Parse a human-written number"),
     _StepDef(
         "parse_date",
-        "Parse a date with an explicit format",
+        "Parse a write-path calendar date, or an explicit format",
         options=("format", "output_format"),
     ),
-    _StepDef("parse_boolean", "Parse Y/N, 1/0, true/false"),
+    _StepDef(
+        "parse_boolean",
+        "Parse true/t/1 and false/f/0 — informal yes/Y/2 refuse",
+    ),
     _StepDef("normalize_unicode", "Apply a Unicode normal form", options=("form",)),
     _StepDef(
         "set_value",
