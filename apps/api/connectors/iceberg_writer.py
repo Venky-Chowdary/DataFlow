@@ -2708,52 +2708,56 @@ def _iceberg_typed_literal(tbl: Any, column: str, raw: Any) -> Any:
     """Bind a leftover/CDC key part to the Iceberg field type.
 
     Digit strings on a string PK must stay strings (LongLiteral cannot
-    convert into string). Integer/long fields take int. Decimal/date/
-    timestamp/uuid bind to the field type. Fail closed on a missing
-    field or a value that cannot convert — never guess.
+    convert into string). Numbers, calendars, and booleans use the same
+    write-path parsers as ``coerce_arrow_cell`` — ``Decimal(text)`` /
+    ``fromisoformat`` / informal ``yes`` invented deletes the writer
+    would not store. Fail closed on a missing field or a refused cell.
     """
-    from datetime import date, datetime
-    from decimal import Decimal
-
-    from pyiceberg.types import (
-        BooleanType,
-        DateType,
-        DecimalType,
-        DoubleType,
-        FloatType,
-        IntegerType,
-        LongType,
-        TimestampType,
-        TimestamptzType,
-        UUIDType,
-    )
+    from services.arrow_write import _date_from_write_path, _datetime_from_write_path
+    from services.transform_engine import apply_transform, decimal_wire_value, integer_wire_value
 
     field = tbl.schema().find_field(column, case_sensitive=False)
     ftype = getattr(field, "field_type", None)
     if ftype is None:
         raise ValueError(f"Iceberg delete: unknown field {column!r}")
+    kind = type(ftype).__name__
     text = str(raw)
     try:
-        if isinstance(ftype, (IntegerType, LongType)):
-            return int(text)
-        if isinstance(ftype, BooleanType):
-            return text.strip().lower() in {"1", "true", "t", "yes"}
-        if isinstance(ftype, (DoubleType, FloatType)):
-            return float(text)
-        if isinstance(ftype, DecimalType):
-            return Decimal(text)
-        if isinstance(ftype, DateType):
-            return date.fromisoformat(text[:10])
-        if isinstance(ftype, (TimestampType, TimestamptzType)):
-            return datetime.fromisoformat(text.replace("Z", "+00:00"))
-        if isinstance(ftype, UUIDType):
+        if kind in {"IntegerType", "LongType"}:
+            parsed_int = integer_wire_value(text)
+            if parsed_int is None:
+                raise ValueError("integer write path refused")
+            return parsed_int
+        if kind == "BooleanType":
+            parsed_bool, err = apply_transform(text, "boolean")
+            if parsed_bool is None or err:
+                raise ValueError("boolean write path refused")
+            return bool(parsed_bool)
+        if kind in {"DoubleType", "FloatType"}:
+            parsed_num = decimal_wire_value(text)
+            if parsed_num is None:
+                raise ValueError("float write path refused")
+            return float(parsed_num)
+        if kind == "DecimalType":
+            parsed_dec = decimal_wire_value(text)
+            if parsed_dec is None:
+                raise ValueError("decimal write path refused")
+            return parsed_dec
+        if kind == "DateType":
+            return _date_from_write_path(text)
+        if kind == "TimestampType":
+            parsed_ts = _datetime_from_write_path(text)
+            return parsed_ts.replace(tzinfo=None) if parsed_ts.tzinfo is not None else parsed_ts
+        if kind == "TimestamptzType":
+            return _datetime_from_write_path(text)
+        if kind == "UUIDType":
             import uuid as _uuid
 
             return _uuid.UUID(text)
     except (TypeError, ValueError) as exc:
         raise ValueError(
             f"Iceberg delete: {column!r} value {text!r} does not bind "
-            f"to {type(ftype).__name__}"
+            f"to {kind}"
         ) from exc
     return text
 
