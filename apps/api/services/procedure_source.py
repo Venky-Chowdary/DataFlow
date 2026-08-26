@@ -795,7 +795,21 @@ def _literal(token: str) -> Any:
         return upper == "TRUE"
     if _NUMBER.match(token):
         if any(c in token for c in ".eE"):
-            return float(token)
+            from decimal import Decimal, InvalidOperation
+
+            # SQL grammar number (dot is the decimal mark). Not locale Auto.
+            # float(token) collapsed 1.2300 and lost digits past 2**53.
+            try:
+                parsed = Decimal(token)
+            except (InvalidOperation, ValueError) as exc:
+                raise ProcedureSourceError(
+                    f"Argument `{token}` is not an exact numeric literal."
+                ) from exc
+            if not parsed.is_finite():
+                raise ProcedureSourceError(
+                    f"Argument `{token}` is not a finite numeric literal."
+                )
+            return parsed
         return int(token)
     if _STRING.match(token):
         return token[1:-1].replace("''", "'")
