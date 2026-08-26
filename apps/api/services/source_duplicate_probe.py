@@ -341,8 +341,15 @@ def _salesforce_duplicates(
         timeout=60,
     )
     response.raise_for_status()
+    from services.value_serializer import load_http_json
+
+    # Identity cells live in ``records``. Response.json() is stdlib
+    # json.loads — a long fraction in an External Id collapses to IEEE
+    # before Validate shows the duplicate key.
+    body = load_http_json(response)
+    records = body.get("records") if isinstance(body, dict) else None
     findings: list[dict[str, Any]] = []
-    for record in (response.json().get("records") or [])[: max(1, int(limit))]:
+    for record in (records or [])[: max(1, int(limit))]:
         if not isinstance(record, dict):
             continue
         value = record.get(field)
