@@ -275,8 +275,10 @@ def _as_property_value(
         if text == "":
             # Omit empty — never invent JSON null (destination wipe).
             return None
+        from connectors.sql_bind import coerce_float_wire
+
         try:
-            return {"number": float(text)}
+            return {"number": coerce_float_wire(value, ddl_type="NUMBER")}
         except ValueError as exc:
             raise ValueError(
                 f"Notion number property {property_name!r} refused {value!r} "
