@@ -636,21 +636,29 @@ def max_cursor_value(
             pk_idx = None
 
     if pk_idx is None:
-        values = [rows[i][idx] for i in range(len(rows)) if idx < len(rows[i]) and rows[i][idx]]
+        values: list[str] = []
+        for row in rows:
+            if idx >= len(row):
+                continue
+            text = present_cell_text(row[idx])
+            if text is not None:
+                values.append(text)
         if not values:
             return None
         from services.cdc_engine import infer_watermark_type, max_watermark
 
-        str_values = [str(v) for v in values]
-        wm_type = infer_watermark_type(str_values)
-        return max_watermark(str_values, wm_type)
+        wm_type = infer_watermark_type(values)
+        return max_watermark(values, wm_type)
 
     best: str | None = None
     for row in rows:
-        if idx >= len(row) or not row[idx]:
+        if idx >= len(row):
+            continue
+        cursor_text = present_cell_text(row[idx])
+        if cursor_text is None:
             continue
         pk_val = row[pk_idx] if pk_idx < len(row) else ""
-        cand = encode_keyset_bookmark([row[idx], pk_val])
+        cand = encode_keyset_bookmark([cursor_text, pk_val])
         if best is None or compare_cursor_values(cand, best) > 0:
             best = cand
     return best

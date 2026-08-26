@@ -14,6 +14,8 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any, Sequence
 
+from services.value_serializer import present_cell_text
+
 # Unit separator — stable for composite bookmarks (CDC + transfer).
 KEYSET_SEP = "\x1f"
 # Legacy transfer watermark for 2-col ``cursor|pk`` (pre-F2).
@@ -50,8 +52,14 @@ def keyset_successor_predicate(
 
 
 def encode_keyset_bookmark(parts: Sequence[Any]) -> str:
-    """Encode ordered key parts into a bookmark string."""
-    vals = ["" if p is None else str(p) for p in parts]
+    """Encode ordered key parts into a bookmark string.
+
+    Each part uses :func:`present_cell_text` so ``True`` and dest ``"true"``
+    share one token and reader-null cells become empty parts, not the
+    ``SQL_NULL_SENTINEL`` spelling. Callers that skip missing rows must do
+    so before encode — this function preserves arity.
+    """
+    vals = [present_cell_text(p) or "" for p in parts]
     if not vals:
         raise ValueError("keyset bookmark requires at least one part")
     if len(vals) == 1:
@@ -206,10 +214,14 @@ def max_keyset_bookmark(
         parts: list[str] = []
         skip = False
         for i in idxs:
-            if i >= len(row) or row[i] is None or str(row[i]) == "":
+            if i >= len(row):
                 skip = True
                 break
-            parts.append(str(row[i]))
+            text = present_cell_text(row[i])
+            if text is None:
+                skip = True
+                break
+            parts.append(text)
         if skip:
             continue
         candidates.append(parts)
