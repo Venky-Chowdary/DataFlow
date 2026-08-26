@@ -19,9 +19,33 @@ from services.value_serializer import cell_to_string
 from .mongodb_common import _mongo_client
 
 
+def _cursor_boolean(value: str) -> bool | None:
+    """Write-path boolean tokens only — informal yes/y/2 are not TRUE."""
+    from services.transform_engine import apply_transform
+
+    parsed, err = apply_transform(value, "boolean")
+    if parsed is None or err:
+        return None
+    return bool(parsed)
+
+
+def _cursor_datetime(value: str) -> Any:
+    """Write-path datetime bind — ISO, epoch, unambiguous calendars. Auto slash refuses."""
+    from datetime import datetime
+
+    from services.transform_engine import apply_transform
+
+    parsed, err = apply_transform(value, "datetime")
+    if parsed is None or err:
+        return None
+    try:
+        return datetime.fromisoformat(str(parsed).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
 def _cast_cursor_value(value: str, cursor_type: str | None = None) -> Any:
     """Convert a string cursor value into a BSON-native type for MongoDB queries."""
-    from datetime import datetime
     from decimal import InvalidOperation, Overflow
 
     from bson.decimal128 import Decimal128
@@ -47,13 +71,11 @@ def _cast_cursor_value(value: str, cursor_type: str | None = None) -> Any:
         except (InvalidOperation, Overflow, ValueError):
             return value
     if ctype in {"BOOLEAN", "BOOL"}:
-        return value.strip().lower() in {"true", "t", "yes", "y", "1"}
+        parsed_bool = _cursor_boolean(value)
+        return parsed_bool if parsed_bool is not None else value
     if ctype in {"DATETIME", "TIMESTAMP", "TIMESTAMPTZ", "TIMESTAMP_TZ", "TIMESTAMP_LTZ", "DATE"}:
-        text = value.strip().replace("Z", "+00:00")
-        try:
-            return datetime.fromisoformat(text)
-        except ValueError:
-            return value
+        parsed_dt = _cursor_datetime(value)
+        return parsed_dt if parsed_dt is not None else value
     if ctype in {"STRING", "VARCHAR", "TEXT", "CHAR"}:
         return value
 
@@ -74,11 +96,8 @@ def _cast_cursor_value(value: str, cursor_type: str | None = None) -> Any:
         except (InvalidOperation, Overflow, ValueError):
             return value
     if wm_type == WatermarkType.DATETIME:
-        text = value.strip().replace("Z", "+00:00")
-        try:
-            return datetime.fromisoformat(text)
-        except ValueError:
-            return value
+        parsed_dt = _cursor_datetime(value)
+        return parsed_dt if parsed_dt is not None else value
     return value
 
 
@@ -177,9 +196,16 @@ def _align_cursor_to_stored_kind(raw: str, casted: Any, kind: str) -> Any:
             "numbers in the cursor field. Reset the cursor for this stream."
         )
     if kind == "bool":
-        return bool(casted) if isinstance(casted, bool) else str(raw).strip().lower() in {
-            "true", "t", "yes", "y", "1",
-        }
+        if isinstance(casted, bool):
+            return casted
+        parsed_bool = _cursor_boolean(str(raw))
+        if parsed_bool is not None:
+            return parsed_bool
+        raise ValueError(
+            f"Watermark '{raw}' is not a canonical boolean "
+            "(true/false/t/f/1/0), but this collection stores booleans in "
+            "the cursor field. Reset the cursor for this stream."
+        )
     if kind == "objectid":
         if isinstance(casted, ObjectId):
             return casted
