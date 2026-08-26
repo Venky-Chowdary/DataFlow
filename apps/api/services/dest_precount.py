@@ -176,6 +176,8 @@ from contextlib import closing, contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from services.value_serializer import is_null_evidence, present_cell_text
+
 if TYPE_CHECKING:
     from src.transfer.models import EndpointConfig
 
@@ -657,16 +659,7 @@ def destination_key_hits(
     table = (table_name or "").strip()
     if not table or not cols:
         return None
-    unique: list[tuple[Any, ...]] = []
-    seen: set[tuple[Any, ...]] = set()
-    for raw in keys or []:
-        tup = tuple(raw)
-        if len(tup) != len(cols) or any(v is None for v in tup):
-            continue
-        if tup in seen:
-            continue
-        seen.add(tup)
-        unique.append(tup)
+    unique = _unique_key_tuples(keys or [], len(cols))
     if not unique:
         return 0
     # Missing / empty dest: no hits, and IN against a missing table would error.
@@ -708,14 +701,15 @@ def _unique_key_tuples(
     width: int,
 ) -> list[tuple[Any, ...]]:
     unique: list[tuple[Any, ...]] = []
-    seen: set[tuple[Any, ...]] = set()
+    seen: set[tuple[str, ...]] = set()
     for raw in keys or []:
         tup = tuple(raw)
-        if len(tup) != width or any(v is None for v in tup):
+        if len(tup) != width:
             continue
-        if tup in seen:
+        norm = _norm_dest_key(tup)
+        if norm is None or norm in seen:
             continue
-        seen.add(tup)
+        seen.add(norm)
         unique.append(tup)
     return unique
 
@@ -745,7 +739,7 @@ def records_to_key_tuples(
                 break
         source_fields.append(field)
     tuples: list[tuple[Any, ...]] = []
-    seen: set[tuple[Any, ...]] = set()
+    seen: set[tuple[str, ...]] = set()
     for rec in records:
         if not isinstance(rec, Mapping):
             return None
@@ -754,13 +748,14 @@ def records_to_key_tuples(
             raw = rec.get(field)
             if raw is None and field != target:
                 raw = rec.get(target)
-            if raw is None or raw == "":
+            if is_null_evidence(raw):
                 return None
             row.append(raw)
         tup = tuple(row)
-        if tup in seen:
+        norm = _norm_dest_key(tup)
+        if norm is None or norm in seen:
             return None
-        seen.add(tup)
+        seen.add(norm)
         tuples.append(tup)
     if len(tuples) != len(records):
         return None
@@ -2765,9 +2760,10 @@ def _norm_dest_key(values: Sequence[Any]) -> tuple[str, ...] | None:
     """Comparable dest key — JSONL strings and catalog ints must hit the same PK."""
     out: list[str] = []
     for value in values:
-        if value is None or value == "":
+        key = present_cell_text(value)
+        if key is None:
             return None
-        out.append(str(value))
+        out.append(key)
     return tuple(out)
 
 
@@ -2784,7 +2780,7 @@ def _row_values_for_cols(
             if lower is None:
                 lower = {str(k).lower(): v for k, v in row.items()}
             val = lower.get(col.lower())
-        if val is None:
+        if is_null_evidence(val):
             return None
         parts.append(val)
     return tuple(parts)
@@ -2847,8 +2843,12 @@ def iceberg_target_sample(
     if rows is None:
         return None
     if key_values and key_col:
-        wanted = {str(k) for k in key_values if k is not None and str(k) != ""}
-        rows = [r for r in rows if str(r.get(key_col, "")) in wanted]
+        wanted = {
+            key for k in key_values if (key := present_cell_text(k)) is not None
+        }
+        rows = [
+            r for r in rows if present_cell_text(r.get(key_col)) in wanted
+        ]
     if limit is not None and int(limit) > 0:
         rows = rows[: int(limit)]
     return list(rows)
@@ -3402,12 +3402,16 @@ def sample_artifact_records(
     as UTF-8 JSON garbage (that greens a lost write). Well-formed empty
     is ``[]``.
     """
-    wanted = {str(k) for k in keys} if keys else set()
+    wanted = (
+        {key for k in keys if (key := present_cell_text(k)) is not None}
+        if keys
+        else set()
+    )
     lim = max(1, int(limit or 50))
     projection = None if not columns or columns == ["*"] else list(columns)
     out: list[dict[str, Any]] = []
     for rec in _iter_artifact_records(source, name=name):
-        if wanted and sort_key and str(rec.get(sort_key)) not in wanted:
+        if wanted and sort_key and present_cell_text(rec.get(sort_key)) not in wanted:
             continue
         if projection is not None:
             rec = {k: rec.get(k) for k in projection}
@@ -3445,7 +3449,11 @@ def sample_object_store(
         raise UnmeasuredArtifact("object_store_list_unknowable")
     if not listed:
         return []
-    wanted = {str(k) for k in keys} if keys else set()
+    wanted = (
+        {key for k in keys if (key := present_cell_text(k)) is not None}
+        if keys
+        else set()
+    )
     lim = max(1, int(limit or 50))
     out: list[dict[str, Any]] = []
     for obj_key in listed:
