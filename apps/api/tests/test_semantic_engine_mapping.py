@@ -67,9 +67,12 @@ def test_reasoning_chain_does_not_invent_boolean_from_informal_yes_no():
     from src.ai.llm.chain import DataTransferReasoningChain
 
     chain = DataTransferReasoningChain()
-    informal = chain.analyze_column("is_paid", ["yes", "no", "yes"])
+    # ``is_paid`` matches Payment Status first — use a Flag-shaped name.
+    informal = chain.analyze_column("is_active", ["yes", "no", "yes"])
+    assert informal.answer["semantic_type"] == "Boolean Flag"
     assert informal.answer["inferred_type"] == "string"
-    canonical = chain.analyze_column("is_paid", ["true", "false", "true"])
+    canonical = chain.analyze_column("is_active", ["true", "false", "true"])
+    assert canonical.answer["semantic_type"] == "Boolean Flag"
     assert canonical.answer["inferred_type"] == "boolean"
 
 
