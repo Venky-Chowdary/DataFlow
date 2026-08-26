@@ -1530,17 +1530,30 @@ def _xml_count_open(content: bytes | str | Path) -> tuple[Any, Any]:
 
 
 def _xml_count_as_text(content: bytes | str | Path) -> str | None:
-    """ImportError fallback only — never the GB-scale COUNT path."""
+    """ImportError fallback only — never the GB-scale COUNT path.
+
+    Gzip paths use ``artifact_byte_source`` so ``*.xml.gz`` decodes the
+    decompressed stream. ``Path.read_text`` on compressed bytes was
+    unmeasured dest COUNT (None), not dest=0.
+    """
     try:
-        if isinstance(content, Path):
-            return content.read_text(encoding="utf-8")
-        if isinstance(content, bytes):
-            return content.decode("utf-8")
         if isinstance(content, str):
             return content
-    except (OSError, UnicodeDecodeError):
+        from services.dest_precount import artifact_byte_source
+
+        source, closer = artifact_byte_source(content)
+        try:
+            raw = source.read()
+        finally:
+            if closer is not None:
+                closer()
+        if raw is None:
+            return None
+        if isinstance(raw, str):
+            return raw
+        return raw.decode("utf-8")
+    except (OSError, UnicodeDecodeError, TypeError, ValueError):
         return None
-    return None
 
 
 def _xml_unique_from_parent_stats(
