@@ -286,7 +286,12 @@ def expect_column_pair_values_equal(
     )
 
 
-def _numeric_histogram(values: list[float], buckets: int = 10) -> list[float]:
+def _numeric_histogram(values: list[Any], buckets: int = 10) -> list[float]:
+    """Bucket write-path decimals. Frequencies stay IEEE for JS divergence.
+
+    Bin edges use the same Decimal the write path bound — ``float(parsed)``
+    collapsed money scale before the first bucket was chosen.
+    """
     if not values:
         return [0.0] * buckets
     lo, hi = min(values), max(values)
@@ -337,18 +342,20 @@ def expect_column_distribution_drift(
             severity=severity,
         )
 
+    from decimal import Decimal
+
     from services.transform_engine import decimal_wire_value
 
-    nums_cur: list[float] = []
-    nums_base: list[float] = []
+    nums_cur: list[Decimal] = []
+    nums_base: list[Decimal] = []
     for v in cur_vals:
         parsed = decimal_wire_value(v)
         if parsed is not None:
-            nums_cur.append(float(parsed))
+            nums_cur.append(parsed)
     for v in base_vals:
         parsed = decimal_wire_value(v)
         if parsed is not None:
-            nums_base.append(float(parsed))
+            nums_base.append(parsed)
 
     if len(nums_cur) >= 8 and len(nums_base) >= 8:
         hist_cur = _numeric_histogram(nums_cur)
