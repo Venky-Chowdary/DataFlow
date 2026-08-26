@@ -212,3 +212,13 @@ def test_ai_type_matrix_is_non_authoritative():
     assert dt_int.get("lossy") is True
     assert dt_int.get("method") == "unix_timestamp"
     assert "millis" in (dt_int.get("note") or "").lower()
+    dt_str = tc.suggest_type_conversion("datetime", "string")
+    assert dt_str is not None
+    assert dt_str.get("lossy") is False
+    assert dt_str.get("format") == "%Y-%m-%dT%H:%M:%S"
+    assert not str(dt_str.get("format") or "").endswith("Z")
+    assert "no Z invent" in (dt_str.get("note") or "")
+    date_dt = tc.suggest_type_conversion("date", "datetime")
+    assert date_dt is not None
+    assert date_dt.get("lossy") is False
+    assert date_dt.get("method") == "add_midnight"

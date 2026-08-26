@@ -79,7 +79,12 @@ TYPE_CONVERSION_MATRIX: dict[str, dict[str, dict]] = {
         "integer": {"method": "cast", "lossy": False, "mapping": {True: 1, False: 0}},
     },
     "datetime": {
-        "string": {"method": "format", "lossy": False, "format": "%Y-%m-%dT%H:%M:%SZ"},
+        "string": {
+            "method": "format",
+            "lossy": False,
+            "format": "%Y-%m-%dT%H:%M:%S",
+            "note": "Write path keeps naive wall-clock (no Z invent). UTC-aware uses Z. Assist only.",
+        },
         "date": {"method": "truncate_time", "lossy": True},
         "integer": {
             "method": "unix_timestamp",
@@ -89,7 +94,11 @@ TYPE_CONVERSION_MATRIX: dict[str, dict[str, dict]] = {
     },
     "date": {
         "string": {"method": "format", "lossy": False, "format": "%Y-%m-%d"},
-        "datetime": {"method": "add_midnight", "lossy": False},
+        "datetime": {
+            "method": "add_midnight",
+            "lossy": False,
+            "note": "Lossless widening — midnight, no timezone invent. Assist only.",
+        },
     },
     "json": {
         "string": {"method": "serialize", "lossy": False},
