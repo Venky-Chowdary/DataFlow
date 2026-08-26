@@ -9,6 +9,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 
+from services.transform_engine import CANONICAL_BOOLEAN_SAMPLE_PATTERN
+
 
 class PatternCategory(Enum):
     IDENTIFIER = "identifier"
@@ -347,7 +349,7 @@ def _build_patterns() -> list[SemanticPattern]:
         sample_patterns=[r"^(active|inactive|pending|complete)$"], synonyms=["sts", "current_status", "order_status"],
         base_confidence=0.85)
     add("Boolean Flag", PatternCategory.BINARY, ["is_", "has_", "can_", "flag", "enabled", "active", "deleted"],
-        regex_patterns=[r"^is_", r"^has_", r"_flag$"], sample_patterns=[r"^(true|false|1|0|yes|no)$"],
+        regex_patterns=[r"^is_", r"^has_", r"_flag$"], sample_patterns=[CANONICAL_BOOLEAN_SAMPLE_PATTERN],
         synonyms=["indicator", "bool"], base_confidence=0.90, data_type="boolean")
     add("Priority", PatternCategory.STATUS, ["priority", "urgency", "importance", "severity"],
         sample_patterns=[r"^(low|medium|high|critical)$"], base_confidence=0.88)

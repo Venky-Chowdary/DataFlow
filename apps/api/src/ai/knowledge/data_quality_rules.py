@@ -9,6 +9,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from services.transform_engine import CANONICAL_BOOLEAN_SAMPLE_PATTERN
+
 DATA_QUALITY_RULES: dict[str, dict] = {
     "completeness": {
         "name": "Completeness",
@@ -50,7 +52,7 @@ FORMAT_VALIDATORS: dict[str, list[str]] = {
     "URL": [r"^https?://"],
     "IP Address": [r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$", r"^[0-9a-fA-F:]+$"],
     "Currency Code": [r"^[A-Z]{3}$"],
-    "Boolean Flag": [r"^(true|false|1|0|yes|no|y|n)$"],
+    "Boolean Flag": [CANONICAL_BOOLEAN_SAMPLE_PATTERN],
 }
 
 

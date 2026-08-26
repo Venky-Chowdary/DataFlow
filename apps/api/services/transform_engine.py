@@ -986,6 +986,15 @@ _STRICT_BOOL_FALSE = frozenset({"false", "f", "0"})
 #: boolean: 'Y'"), so any caller routing values through the boolean transform
 #: must first check the destination can hold the outcome.
 CANONICAL_BOOLEAN_TOKENS: frozenset[str] = _STRICT_BOOL_TRUE | _STRICT_BOOL_FALSE
+# Assist / quality sample regex — same tokens, longer first so ``true`` beats ``t``.
+CANONICAL_BOOLEAN_SAMPLE_PATTERN = (
+    r"^(?:"
+    + "|".join(
+        re.escape(tok)
+        for tok in sorted(CANONICAL_BOOLEAN_TOKENS, key=lambda s: (-len(s), s))
+    )
+    + r")$"
+)
 
 
 def _parse_boolean(value: str) -> bool | None:

@@ -105,12 +105,15 @@ class DataTransferReasoningChain:
 
             non_empty = [v for v in sample_values if v and str(v).strip()]
             if non_empty:
-                use_write_bind = "standardize_iso8601" in (matched_pattern.transformations or [])
+                use_datetime_bind = "standardize_iso8601" in (matched_pattern.transformations or [])
+                use_boolean_bind = getattr(matched_pattern, "name", "") == "Boolean Flag"
                 match_count = 0
                 for raw in non_empty[:50]:
                     text = str(raw).strip()
-                    if use_write_bind:
-                        parsed, err = apply_transform(text, "datetime")
+                    if use_datetime_bind or use_boolean_bind:
+                        parsed, err = apply_transform(
+                            text, "datetime" if use_datetime_bind else "boolean"
+                        )
                         if parsed is not None and not err:
                             match_count += 1
                     elif any(
@@ -141,13 +144,19 @@ class DataTransferReasoningChain:
         inferred = matched_pattern.data_type if matched_pattern else "string"
         transforms = list(matched_pattern.transformations) if matched_pattern else []
         if sample_values:
-            from services.transform_engine import samples_are_auto_ambiguous_dates
+            from services.transform_engine import apply_transform, samples_are_auto_ambiguous_dates
 
             texts = [str(v) for v in sample_values if v is not None and str(v).strip()]
             if samples_are_auto_ambiguous_dates(texts):
                 if inferred in {"date", "datetime"}:
                     inferred = "string"
                 transforms = [t for t in transforms if t != "standardize_iso8601"]
+            if inferred == "boolean" and texts:
+                if any(
+                    parsed is None or err
+                    for parsed, err in (apply_transform(t, "boolean") for t in texts)
+                ):
+                    inferred = "string"
 
         answer = {
             "column_name": column_name,

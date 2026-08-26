@@ -16,6 +16,8 @@ from difflib import SequenceMatcher
 from enum import Enum
 from typing import Optional
 
+from services.transform_engine import CANONICAL_BOOLEAN_SAMPLE_PATTERN
+
 
 class DataCategory(Enum):
     """High-level data categories"""
@@ -467,7 +469,7 @@ SEMANTIC_TYPES: list[SemanticType] = [
         category=DataCategory.BINARY,
         patterns=["is_", "has_", "can_", "flag", "enabled", "active", "deleted"],
         regex_patterns=[r"^is_", r"^has_", r"^can_", r"_flag$"],
-        sample_patterns=[r"^(true|false|1|0|yes|no|y|n)$"],
+        sample_patterns=[CANONICAL_BOOLEAN_SAMPLE_PATTERN],
         synonyms=["indicator", "bool"],
         base_confidence=0.90,
     ),
@@ -707,12 +709,14 @@ class SemanticAnalyzer:
             or semantic_type.sample_patterns
         ):
             match_count = 0
-            use_write_bind = "standardize_iso8601" in semantic_type.transformations
-            if use_write_bind:
+            use_datetime_bind = "standardize_iso8601" in semantic_type.transformations
+            use_boolean_bind = semantic_type.name == "Boolean Flag"
+            if use_datetime_bind or use_boolean_bind:
                 from services.transform_engine import apply_transform
 
+                transform = "datetime" if use_datetime_bind else "boolean"
                 for value in non_empty[:100]:
-                    parsed, err = apply_transform(str(value).strip(), "datetime")
+                    parsed, err = apply_transform(str(value).strip(), transform)
                     if parsed is not None and not err:
                         match_count += 1
             else:

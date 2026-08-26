@@ -63,6 +63,47 @@ def test_analyze_column_does_not_invent_boolean_from_informal_yes_no():
     assert canonical.inferred_type == "boolean"
 
 
+def test_reasoning_chain_does_not_invent_boolean_from_informal_yes_no():
+    from src.ai.llm.chain import DataTransferReasoningChain
+
+    chain = DataTransferReasoningChain()
+    informal = chain.analyze_column("is_paid", ["yes", "no", "yes"])
+    assert informal.answer["inferred_type"] == "string"
+    canonical = chain.analyze_column("is_paid", ["true", "false", "true"])
+    assert canonical.answer["inferred_type"] == "boolean"
+
+
+def test_assist_boolean_patterns_are_write_path_tokens_only():
+    import re
+
+    from services.transform_engine import CANONICAL_BOOLEAN_SAMPLE_PATTERN, _parse_boolean
+    from src.ai.knowledge.data_quality_rules import FORMAT_VALIDATORS, validate_column_quality
+    from src.ai.knowledge.semantic_patterns import SEMANTIC_PATTERNS
+    from src.ai.knowledge.type_conversions import suggest_type_conversion
+    from ai.semantic_engine import SEMANTIC_TYPES
+
+    flag = next(st for st in SEMANTIC_TYPES if st.name == "Boolean Flag")
+    rag_flag = next(p for p in SEMANTIC_PATTERNS if p.name == "Boolean Flag")
+    for pattern in (*flag.sample_patterns, *rag_flag.sample_patterns, *FORMAT_VALIDATORS["Boolean Flag"]):
+        assert re.match(pattern, "true", re.IGNORECASE)
+        assert re.match(pattern, "false", re.IGNORECASE)
+        assert not re.match(pattern, "yes", re.IGNORECASE)
+        assert not re.match(pattern, "no", re.IGNORECASE)
+        assert pattern == CANONICAL_BOOLEAN_SAMPLE_PATTERN
+
+    hint = suggest_type_conversion("string", "boolean")
+    assert hint is not None
+    assert "yes" not in (hint.get("mapping") or {})
+    assert "no" not in (hint.get("mapping") or {})
+    assert all(_parse_boolean(tok) is not None for tok in (hint.get("mapping") or {}))
+    assert "yes/on" in (hint.get("note") or "").lower() or "informal" in (hint.get("note") or "").lower()
+
+    informal_q = validate_column_quality("is_paid", ["yes", "no"], semantic_type="Boolean Flag")
+    assert informal_q["metrics"]["validity"] < 90
+    canonical_q = validate_column_quality("is_paid", ["true", "false"], semantic_type="Boolean Flag")
+    assert canonical_q["metrics"]["validity"] == 100.0
+
+
 def test_generate_mappings_does_not_invent_date_transform_for_ambiguous_slash():
     mappings = generate_mappings(
         ["event_date"],

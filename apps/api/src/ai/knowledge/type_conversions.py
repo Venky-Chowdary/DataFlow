@@ -21,7 +21,12 @@ TYPE_CONVERSION_MATRIX: dict[str, dict[str, dict]] = {
     "string": {
         "integer": {"method": "cast", "lossy": False, "validation": r"^-?\d+$"},
         "decimal": {"method": "cast", "lossy": False, "validation": r"^-?\d+\.?\d*$"},
-        "boolean": {"method": "parse_bool", "lossy": False, "mapping": {"true": True, "false": False, "1": True, "0": False, "yes": True, "no": False}},
+        "boolean": {
+            "method": "parse_bool",
+            "lossy": False,
+            "mapping": {"true": True, "false": False, "t": True, "f": False, "1": True, "0": False},
+            "note": "Write-path tokens only (true/false/t/f/1/0). Informal yes/on refuse. Assist only.",
+        },
         "datetime": {
             "method": "parse_date",
             "lossy": True,

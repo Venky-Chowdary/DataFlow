@@ -177,3 +177,7 @@ def test_ai_type_matrix_is_non_authoritative():
     assert date_hint.get("lossy") is True
     assert "%m/%d/%Y" not in (date_hint.get("formats") or [])
     assert "01/02/2024" in (date_hint.get("note") or "")
+    bool_hint = tc.suggest_type_conversion("string", "boolean")
+    assert bool_hint is not None
+    assert "yes" not in (bool_hint.get("mapping") or {})
+    assert "no" not in (bool_hint.get("mapping") or {})
