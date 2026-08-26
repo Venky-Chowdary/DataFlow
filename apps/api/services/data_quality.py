@@ -18,11 +18,11 @@ from typing import Any
 try:
     from services.pii_guard import is_sensitive_name, pii_findings
     from services.transform_engine import _parse_date, _parse_datetime, decimal_wire_value
-    from services.value_serializer import cell_to_string, is_null_evidence
+    from services.value_serializer import cell_to_string, is_null_evidence, present_cell_text
 except ImportError:  # pragma: no cover - compatibility for tests
     from src.services.pii_guard import is_sensitive_name, pii_findings
     from src.services.transform_engine import _parse_date, _parse_datetime, decimal_wire_value
-    from src.services.value_serializer import cell_to_string, is_null_evidence
+    from src.services.value_serializer import cell_to_string, is_null_evidence, present_cell_text
 
 _UTC = timezone.utc
 
@@ -465,15 +465,16 @@ def run_integrity_audit(
         stats["primary_key"] = None
     else:
         pk_idx = header_index.get(pk_source, 0)
-        pk_values = [row[pk_idx] if pk_idx < len(row) else "" for row in rows]
+        pk_values = [
+            present_cell_text(row[pk_idx] if pk_idx < len(row) else "")
+            for row in rows
+        ]
         stats["primary_key"] = pk_source
 
         dup_counts = Counter(pk_values)
-        duplicates = {
-            v: c for v, c in dup_counts.items() if c > 1 and not _is_null(v)
-        }
+        duplicates = {v: c for v, c in dup_counts.items() if v is not None and c > 1}
         if duplicates:
-            examples = ", ".join(str(v) for v in list(duplicates)[:3])
+            examples = ", ".join(list(duplicates)[:3])
             if require_unique_identity:
                 _hard(
                     f"Duplicate primary key values in '{pk_source}': "

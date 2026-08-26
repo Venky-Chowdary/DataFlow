@@ -14,6 +14,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from decimal import Decimal
+
 from services.data_quality import _is_null, run_integrity_audit  # noqa: E402
 from services.value_serializer import SQL_NULL_SENTINEL  # noqa: E402
 
@@ -53,6 +55,36 @@ def test_two_null_pks_are_required_null_not_sentinel_duplicate():
     assert any("null/empty" in issue for issue in report.issues)
     assert not any("Duplicate primary key" in issue for issue in report.issues)
     assert not any(SQL_NULL_SENTINEL in issue for issue in report.issues)
+
+
+def test_true_and_dest_true_are_one_duplicate_pk():
+    report = run_integrity_audit(
+        headers=["id", "amount"],
+        rows=[[True, "100"], ["true", "200"]],
+        dest_kind="postgresql",
+        sync_mode="incremental_deduped",
+        primary_key="id",
+    )
+    assert not report.passed
+    assert any("Duplicate primary key" in issue for issue in report.issues)
+    blob = " ".join(report.issues)
+    assert "true" in blob
+    assert "True" not in blob
+
+
+def test_scientific_and_dest_100_are_one_duplicate_pk():
+    report = run_integrity_audit(
+        headers=["id", "amount"],
+        rows=[[Decimal("1E+2"), "a"], ["100", "b"]],
+        dest_kind="postgresql",
+        sync_mode="incremental_deduped",
+        primary_key="id",
+    )
+    assert not report.passed
+    assert any("Duplicate primary key" in issue for issue in report.issues)
+    blob = " ".join(report.issues)
+    assert "100" in blob
+    assert "1E+2" not in blob
 
 
 def test_real_duplicate_pk_still_blocks():
