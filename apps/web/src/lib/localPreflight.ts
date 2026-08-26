@@ -3,6 +3,7 @@ import { mappingRequiresRiskAck } from "./mapping";
 import { applyLocalTransform } from "./localTransform";
 import { GATE_CATALOG } from "./preflightGates";
 import type { NumberLocale } from "./numberLocale";
+import { ambiguousDateColumns, type DateLocale } from "./dateLocale";
 import type { PreflightGate, PreflightResult } from "./types";
 
 /** Canonical local gate order — matches GATE_CATALOG (unique IDs). */
@@ -22,6 +23,7 @@ export interface LocalPreflightInput {
   destWriteMode?: string;
   syncMode?: string;
   numberLocale?: NumberLocale | string;
+  dateLocale?: DateLocale | string;
 }
 
 /** True when this preflight was produced entirely in the browser (no API gates). */
@@ -286,11 +288,20 @@ export function runLocalPreflight(input: LocalPreflightInput): PreflightResult {
       ]
     : ["Database destinations require API preflight — local checks cannot approve remote writes."];
 
+  const dateFindings = ambiguousDateColumns(rows, input.columns, input.dateLocale);
+  const dateLocaleReport = {
+    date_locale: String(input.dateLocale || ""),
+    ambiguous_columns: dateFindings,
+    decision: dateFindings.length ? "set_locale" as const : "ok" as const,
+  };
+
   return {
     passed,
     passed_count: passedCount,
     total_gates: totalGates,
     readiness_score: readinessScore,
+    date_locale: String(input.dateLocale || ""),
+    date_locale_report: dateLocaleReport,
     run_id: `pf_local_${Math.random().toString(16).slice(2, 10)}`,
     gates,
     blockers,

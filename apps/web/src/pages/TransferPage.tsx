@@ -4286,6 +4286,7 @@ export function TransferPage({
             destWriteMode,
             syncMode,
             numberLocale,
+            dateLocale,
           });
           toast({
             title: "Validated locally",
@@ -4353,6 +4354,7 @@ export function TransferPage({
           destWriteMode,
           syncMode,
           numberLocale,
+          dateLocale,
         });
         setPreflight(pf);
         setValidatedContractKey(buildValidateContractKey(activeMappings));

@@ -571,6 +571,8 @@ describe("Transfer Studio chrome contracts", () => {
     assert.match(localPf, /applyLocalTransform/);
     assert.match(localEx, /applyLocalTransform/);
     assert.match(page, /numberLocale,/);
+    assert.match(page, /dateLocale,/);
+    assert.match(localPf, /date_locale_report/);
     assert.doesNotMatch(localPf, /replace\(\/,\/g/);
     assert.doesNotMatch(localEx, /replace\(\/,\/g/);
     assert.doesNotMatch(localTx, /replace\(\/,\/g/);

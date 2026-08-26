@@ -155,4 +155,35 @@ describe("runLocalPreflight file export honesty", () => {
     assert.equal(applyLocalTransform("1,234", "decimal", "US"), 1234);
     assert.equal(applyLocalTransform("1,234", "decimal", "EU"), 1.234);
   });
+
+  it("stamps date_locale_report set_locale when Auto cannot parse 01/02/2024", () => {
+    const pf = runLocalPreflight({
+      columns: ["event_date"],
+      rowCount: 2,
+      mappings: [
+        { source: "event_date", target: "event_date", confidence: 0.9, transform: "none", approved: true, requiresReview: false, isPii: false },
+      ],
+      sampleRows: [{ event_date: "01/02/2024" }, { event_date: "03/04/2024" }],
+      destKind: "file_export",
+    });
+    assert.equal(pf.date_locale_report?.decision, "set_locale");
+    assert.deepEqual(
+      (pf.date_locale_report?.ambiguous_columns || []).map((c) => c.column),
+      ["event_date"],
+    );
+  });
+
+  it("does not invent set_locale when date locale is MDY", () => {
+    const pf = runLocalPreflight({
+      columns: ["event_date"],
+      rowCount: 1,
+      mappings: [
+        { source: "event_date", target: "event_date", confidence: 0.9, transform: "none", approved: true, requiresReview: false, isPii: false },
+      ],
+      sampleRows: [{ event_date: "01/02/2024" }],
+      destKind: "file_export",
+      dateLocale: "MDY",
+    });
+    assert.equal(pf.date_locale_report?.decision, "ok");
+  });
 });
