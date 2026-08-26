@@ -325,7 +325,14 @@ class ValidationFinding:
 
 
 def fingerprint_value(value: Any, *, limit: int = 64) -> str:
-    text = "" if value is None else str(value)
+    """Dest-canonical preview + digest. Reader-null fingerprints as empty.
+
+    ``str(value)`` invented ``True`` / the SQL NULL wire token. ``if value``
+    at the call site dropped integer ``0``.
+    """
+    from services.value_serializer import present_cell_text
+
+    text = present_cell_text(value) or ""
     digest = hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()[:16]
     preview = text[:limit].replace("\n", " ")
     return f"{digest}:{preview}"
@@ -348,6 +355,9 @@ def build_finding(
     suggested_target_type: str = "",
 ) -> ValidationFinding:
     """Construct a canonical finding from a transform/coercion failure."""
+    from services.value_serializer import present_cell_text
+
+    present = present_cell_text(source_value)
     fc = failure_class or classify_transform_failure(
         failure_message,
         source_type=source_type,
@@ -359,7 +369,7 @@ def build_finding(
         target_type=target_type,
         dest_db=dest_db,
         failure_class=fc,
-        failure_examples=[source_value] if source_value else None,
+        failure_examples=[present] if present is not None else None,
     )
     action = recommended_action_for_failure(
         fc, source=source_column, suggested_target_type=suggested
@@ -376,7 +386,9 @@ def build_finding(
         target_type=target_type,
         source_type=source_type,
         row_number=row_number,
-        source_value_fingerprint=fingerprint_value(source_value) if source_value else "",
+        source_value_fingerprint=(
+            fingerprint_value(source_value) if present is not None else ""
+        ),
         operation=operation,
         result="FAIL",
         failure_message=failure_message,
@@ -421,7 +433,9 @@ def findings_from_coercion_report(
             or col.get("suggested_fix")
             or ("fidelity collapse" if fidelity else "coercion failure")
         )
-        source_value = str((first or {}).get("value") or "")
+        from services.value_serializer import present_cell_text
+
+        source_value = present_cell_text((first or {}).get("value")) or ""
         row_number = (first or {}).get("row")
         if row_number is not None:
             try:
