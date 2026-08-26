@@ -259,15 +259,16 @@ def rows_a_cursor_read_will_deliver(
         if cursor_column not in row:
             return rows
         cell = row.get(cursor_column)
-        if present_cell_text(cell) is None:
+        text = present_cell_text(cell)
+        if text is None:
             delta.append(row)
             continue
         if use_tiebreak:
             candidate = encode_keyset_bookmark(
-                [str(cell), str(row.get(tiebreak_column, ""))]
+                [text, present_cell_text(row.get(tiebreak_column)) or ""]
             )
         else:
-            candidate = str(cell)
+            candidate = text
         if compare_cursor_values(candidate, str(watermark)) > 0:
             delta.append(row)
     return delta
