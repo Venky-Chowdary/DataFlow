@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from datetime import date, datetime
 
+from decimal import Decimal
+
 from src.ai.copilot.query_tools import _infer_kind, _try_bool, _try_datetime, _try_float
 from src.ai.copilot.transfer_rules import _utterance_row_limit
 
@@ -14,8 +16,8 @@ def test_try_float_fails_closed_on_lone_grouping():
 
 
 def test_try_float_parses_currency_and_both_separators():
-    assert _try_float("$1,234.56") == 1234.56
-    assert _try_float("€1.234,56") == 1234.56
+    assert _try_float("$1,234.56") == Decimal("1234.56")
+    assert _try_float("€1.234,56") == Decimal("1234.56")
     assert _try_float("1234") == 1234.0
 
 

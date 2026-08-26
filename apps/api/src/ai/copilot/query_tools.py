@@ -12,6 +12,7 @@ import math
 import re
 from collections import Counter
 from datetime import date
+from decimal import Decimal
 from typing import Any
 
 from .schema_tools import AmbiguousConnectorError, _safe_connector, list_connector_objects
@@ -128,14 +129,15 @@ def _is_nullish(v: Any) -> bool:
     return v is None or v == ""
 
 
-def _try_float(v: Any) -> float | None:
-    """Same decimal the write path would bind — never ``replace(",", "")``."""
+def _try_float(v: Any) -> Decimal | None:
+    """Same decimal the write path would bind — never ``replace(",", "")``.
+
+    Locale money keeps exact scale. Auto ``1,234`` / ``1.234`` return None.
+    IEEE ``float(dec)`` collapsed 2**53+1 against 2**53 in Pilot compare.
+    """
     from services.transform_engine import decimal_wire_value
 
-    dec = decimal_wire_value(v)
-    if dec is None:
-        return None
-    return float(dec)
+    return decimal_wire_value(v)
 
 
 def _try_bool(v: Any) -> bool | None:
@@ -184,7 +186,7 @@ def _infer_kind(non_null: list[Any]) -> str:
     ints = sum(
         1
         for v in non_null
-        if (f := _try_float(v)) is not None and float(f).is_integer()
+        if (f := _try_float(v)) is not None and f == f.to_integral_value()
     )
     bools = sum(1 for v in non_null if _try_bool(v) is not None)
     dates = sum(1 for v in non_null if _try_datetime(v))
@@ -200,7 +202,7 @@ def _infer_kind(non_null: list[Any]) -> str:
     return "string"
 
 
-def _numeric_stats(vals: list[float]) -> dict[str, Any]:
+def _numeric_stats(vals: list[Decimal]) -> dict[str, Any]:
     if not vals:
         return {}
     n = len(vals)
@@ -213,11 +215,12 @@ def _numeric_stats(vals: list[float]) -> dict[str, Any]:
         p50 = ordered[mid]
     else:
         p50 = (ordered[mid - 1] + ordered[mid]) / 2
+    stdev = var.sqrt() if isinstance(var, Decimal) else math.sqrt(var)
     return {
         "min": ordered[0],
         "max": ordered[-1],
         "mean": round(mean, 6),
-        "stdev": round(math.sqrt(var), 6),
+        "stdev": round(stdev, 6),
         "p50": p50,
     }
 
@@ -746,7 +749,14 @@ def filter_stored_result(
             ok = str(value).lower() in str(cell if cell is not None else "").lower()
         elif op_n == "in":
             parts = [p.strip() for p in str(value).split(",") if p.strip()]
-            ok = str(cell) in parts or (str(_try_float(cell)) in parts if _try_float(cell) is not None else False)
+            ok = str(cell) in parts
+            if not ok:
+                bound = _try_float(cell)
+                if bound is not None:
+                    ok = any(
+                        (p_bound := _try_float(p)) is not None and p_bound == bound
+                        for p in parts
+                    )
         else:
             ok = _cmp(cell, value, op_n)
         if ok:
