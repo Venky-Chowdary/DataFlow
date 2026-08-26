@@ -81,6 +81,13 @@ def test_arrow_integer_locale_and_auto_refuse():
     i64 = pa.int64()
     assert coerce_arrow_cell("$1,234", i64, pa) == 1234
     assert coerce_arrow_cell("true", i64, pa) == 1
+    assert coerce_arrow_cell(0, i64, pa) == 0
+    with pytest.raises(ValueError, match="boolean|INTEGER|invent"):
+        coerce_arrow_cell(True, i64, pa)
+    with pytest.raises(ValueError, match="boolean|INTEGER|invent"):
+        coerce_arrow_cell(False, i64, pa)
+    with pytest.raises(ValueError, match="boolean|INTEGER|invent"):
+        _coerce_arrow_cell(True, i64, pa)
     with pytest.raises(ValueError, match="INTEGER|invent"):
         coerce_arrow_cell("1,234", i64, pa)
     with pytest.raises(ValueError, match="INTEGER|invent"):

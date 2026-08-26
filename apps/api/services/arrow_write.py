@@ -172,7 +172,9 @@ def coerce_arrow_cell(
         return out
     if pa.types.is_integer(arrow_type):
         if isinstance(value, bool):
-            return int(value)
+            raise ValueError(
+                f"cannot coerce boolean {value!r} to INTEGER — refuse invent"
+            )
         if isinstance(value, int):
             return value
         if isinstance(value, float):
