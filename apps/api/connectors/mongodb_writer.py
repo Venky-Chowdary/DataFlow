@@ -890,25 +890,21 @@ def write_mapped_rows(
             if not batch:
                 break
 
-            # Convert row tuples to documents; omit missing-field sentinels.
-            # Track sparse rows so upsert uses $set (never ReplaceOne — that
-            # would delete destination keys for fields absent in the CDC image).
-            from services.value_serializer import is_missing_sentinel
-
-            from connectors.writer_common import row_has_missing_sentinel
+            # Convert row tuples to documents; omit Missing, bind reader-null
+            # as None (shared present_field_bindings). Track sparse rows so
+            # upsert uses $set (never ReplaceOne — that would delete dest
+            # keys for fields absent in the CDC image).
+            from connectors.writer_common import (
+                present_field_bindings,
+                row_has_missing_sentinel,
+            )
 
             docs: list[dict[str, Any]] = []
             sparse_flags: list[bool] = []
             for row in batch:
                 sparse = row_has_missing_sentinel(row)
                 sparse_flags.append(sparse)
-                docs.append(
-                    {
-                        k: v
-                        for k, v in dict(zip(target_cols, row)).items()
-                        if not is_missing_sentinel(v)
-                    }
-                )
+                docs.append(present_field_bindings(dict(zip(target_cols, row))))
 
             # Preserve MongoDB ObjectId identity when a 24-char hex _id is present.
             from bson.objectid import ObjectId

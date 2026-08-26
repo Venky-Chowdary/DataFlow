@@ -295,17 +295,9 @@ def _redis_row_to_doc(
     * ``DF_MISSING`` / STOP_COLUMN → omit key (sparse merge keeps prior JSON)
     * ``None`` / reader-null → JSON ``null`` (explicit wipe)
     """
-    from services.value_serializer import is_missing_sentinel, is_reader_null_cell
+    from connectors.writer_common import present_field_bindings
 
-    doc: dict[str, Any] = {}
-    for c, v in zip(target_cols, row):
-        if is_missing_sentinel(v):
-            continue
-        if is_reader_null_cell(v):
-            doc[c] = None
-        else:
-            doc[c] = v
-    return doc
+    return present_field_bindings(dict(zip(target_cols, row)))
 
 
 # Thin aliases — tests/engine may import these names from the writer module.

@@ -4475,18 +4475,30 @@ def combined_mapped_rows_for_checksum(
     return list(dense_rows) + list(sparse_rows)
 
 
+def present_field_bindings(row: dict[str, Any]) -> dict[str, Any]:
+    """Omit Missing; bind reader-null as None (wipe dest, never the extract token).
+
+    Iceberg leftover merge, Redis JSON, Mongo ``$set``, sparse CDC SET, and
+    BigQuery ``insert_rows_json`` share this polarity. Empty string / ``0`` /
+    ``False`` stay present. ``DF_MISSING`` stays omitted so sparse CDC does
+    not NULL-wipe destination columns.
+    """
+
+    out: dict[str, Any] = {}
+    for key, val in row.items():
+        if is_missing_sentinel(val):
+            continue
+        out[key] = None if is_reader_null_cell(val) else val
+    return out
+
+
 def sparse_present_bindings(
     row: tuple | list,
     target_cols: list[str],
 ) -> dict[str, Any]:
     """Column→value for cells that are present (not DF_MISSING)."""
 
-    out: dict[str, Any] = {}
-    for col, val in zip(target_cols, row):
-        if is_missing_sentinel(val):
-            continue
-        out[col] = val
-    return out
+    return present_field_bindings(dict(zip(target_cols, row)))
 
 
 def materialize_sparse_row_for_checksum(
@@ -4632,11 +4644,7 @@ def run_sparse_cdc_upsert(
                         present, existing, target_cols
                     )
                     insert_present(
-                        {
-                            c: v
-                            for c, v in zip(target_cols, hydrated)
-                            if not is_missing_sentinel(v)
-                        }
+                        present_field_bindings(dict(zip(target_cols, hydrated)))
                     )
             else:
                 insert_present(present)

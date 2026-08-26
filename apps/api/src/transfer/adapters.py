@@ -2244,15 +2244,14 @@ def write_destination_file(
         )
 
     def _json_export_records(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        from connectors.writer_common import to_json_value
-        from services.value_serializer import is_missing_sentinel
+        from connectors.writer_common import present_field_bindings, to_json_value
 
         # Kafka/object-store class: omit STOP_COLUMN / sparse CDC keys entirely.
+        # Reader-null binds as None then JSON null — never the extract token.
         return [
             {
                 c: to_json_value(v, c, export_dest_types)
-                for c, v in r.items()
-                if not is_missing_sentinel(v)
+                for c, v in present_field_bindings(r).items()
             }
             for r in rows
         ]

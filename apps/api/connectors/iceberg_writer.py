@@ -731,14 +731,9 @@ def _upsert_pk_key(row: dict[str, Any], pk_cols: Sequence[str]) -> tuple:
 
 def _iceberg_present_fields(row: dict[str, Any]) -> dict[str, Any]:
     """Sparse omit Missing; bind reader-null as None, not the extract token."""
-    from services.value_serializer import is_missing_sentinel, is_reader_null_cell
+    from connectors.writer_common import present_field_bindings
 
-    out: dict[str, Any] = {}
-    for key, val in row.items():
-        if is_missing_sentinel(val):
-            continue
-        out[key] = None if is_reader_null_cell(val) else val
-    return out
+    return present_field_bindings(row)
 
 
 def _merge_upsert_rows(

@@ -337,17 +337,22 @@ def records_for_bigquery(
 ) -> list[dict[str, Any]]:
     """Build insert_rows_json / load_table_from_json records with temporal + bool/JSON normalize."""
     from connectors.sql_bind import normalize_sql_bind_value
-    from services.value_serializer import is_missing_sentinel
+    from connectors.writer_common import present_field_bindings
 
     records: list[dict[str, Any]] = []
     for row in batch:
         rec: dict[str, Any] = {}
+        present = present_field_bindings(
+            {
+                col: (row[i] if i < len(row) else None)
+                for i, col in enumerate(target_cols)
+            }
+        )
         for i, col in enumerate(target_cols):
-            val = row[i] if i < len(row) else None
-            typ = logical_or_bq_types[i] if i < len(logical_or_bq_types) else "STRING"
-            # Sparse CDC: omit DF_MISSING — never leak sentinel or invent NULL via MERGE.
-            if is_missing_sentinel(val):
+            if col not in present:
                 continue
+            val = present[col]
+            typ = logical_or_bq_types[i] if i < len(logical_or_bq_types) else "STRING"
             element_type = bigquery_repeated_element(typ)
             try:
                 if val is not None and element_type is not None:
