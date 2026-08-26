@@ -171,6 +171,18 @@ def layer_l1_row_balance(
     )
 
 
+def _cell_wire(value: Any) -> str:
+    """One ladder population cell. Same wire as SQL extract."""
+    from services.value_serializer import cell_to_string
+
+    return cell_to_string(value, preserve_sql_null=True)
+
+
+def _row_cells(row: dict[str, Any], columns: list[str] | None = None) -> dict[str, str]:
+    keys = columns if columns else list(row.keys())
+    return {c: _cell_wire(row.get(c)) for c in keys}
+
+
 def _cell_text(value: Any) -> str | None:
     """One L2 cell. Same wire as SQL readers; NULL is absence, not a string.
 
@@ -181,7 +193,6 @@ def _cell_text(value: Any) -> str | None:
     """
     from services.value_serializer import (
         NULL_WIRE_SENTINELS,
-        cell_to_string,
         is_missing_sentinel,
     )
 
@@ -191,7 +202,7 @@ def _cell_text(value: Any) -> str | None:
         if value in NULL_WIRE_SENTINELS or value == "\x00NULL\x00":
             return None
         return value
-    text = cell_to_string(value, preserve_sql_null=True)
+    text = _cell_wire(value)
     if text in NULL_WIRE_SENTINELS or text == "\x00NULL\x00":
         return None
     return text
@@ -443,8 +454,8 @@ def binary_search_row_diff(
                         "pk_column": pk_column,
                         "pk": pk,
                         "column": col,
-                        "source_value": srec.get(col),
-                        "target_value": trec.get(col),
+                        "source_value": _cell_text(srec.get(col)),
+                        "target_value": _cell_text(trec.get(col)),
                         "source_fingerprint": sfp,
                         "target_fingerprint": tfp,
                     }
@@ -496,6 +507,23 @@ def binary_search_row_diff(
     )
 
 
+def _pk_key(value: Any) -> str | None:
+    """Address one ladder row. Same wire as extract; NULL is not a key.
+
+    ``str(True)`` / ``str(Decimal('1E+2'))`` invented a second PK spelling, so
+    L5 reported missing_side against dest text ``true`` / ``100``. Reader-wired
+    ``SQL_NULL_SENTINEL`` looked like a present key.
+    """
+    from services.value_serializer import is_null_evidence
+
+    if is_null_evidence(value):
+        return None
+    text = _cell_wire(value) if not isinstance(value, str) else value
+    if is_null_evidence(text):
+        return None
+    return text
+
+
 def _index_by_pk(
     rows: Iterable[dict[str, Any]],
     pk_column: str,
@@ -504,10 +532,10 @@ def _index_by_pk(
     for rec in rows:
         if not isinstance(rec, dict):
             continue
-        pk = rec.get(pk_column)
-        if pk is None or pk == "":
+        key = _pk_key(rec.get(pk_column))
+        if key is None:
             continue
-        out[str(pk)] = rec
+        out[key] = rec
     return out
 
 
@@ -540,8 +568,7 @@ def read_sqlite_rows(
             if not batch:
                 return rows
             for r in batch:
-                row = dict(r)
-                rows.append({c: row.get(c) for c in columns} if columns else row)
+                rows.append(_row_cells(dict(r), columns))
             if max_rows and len(rows) > max_rows:
                 raise PopulationTooLarge(len(rows), max_rows)
     finally:
@@ -607,7 +634,7 @@ def read_postgres_rows(
                     return rows
                 if not names:
                     names = [d[0] for d in cur.description] if cur.description else []
-                rows.extend(dict(zip(names, row)) for row in batch)
+                rows.extend(_row_cells(dict(zip(names, rec))) for rec in batch)
                 if max_rows and len(rows) > max_rows:
                     raise PopulationTooLarge(len(rows), max_rows)
     finally:
