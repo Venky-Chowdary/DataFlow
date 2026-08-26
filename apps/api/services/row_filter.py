@@ -66,20 +66,18 @@ def _compare_values(row_value: Any, filter_value: Any, op: str) -> bool:
         fv_parsed = decimal_wire_value(fv_str)
         if rv_parsed is None or fv_parsed is None:
             raise ValueError("not a locale-safe number")
-        rv_num = float(rv_parsed)
-        fv_num = float(fv_parsed)
         if op == "eq":
-            return rv_num == fv_num
+            return rv_parsed == fv_parsed
         if op == "ne":
-            return rv_num != fv_num
+            return rv_parsed != fv_parsed
         if op == "gt":
-            return rv_num > fv_num
+            return rv_parsed > fv_parsed
         if op == "gte":
-            return rv_num >= fv_num
+            return rv_parsed >= fv_parsed
         if op == "lt":
-            return rv_num < fv_num
+            return rv_parsed < fv_parsed
         if op == "lte":
-            return rv_num <= fv_num
+            return rv_parsed <= fv_parsed
     except (ValueError, TypeError):
         pass
 
