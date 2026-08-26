@@ -94,6 +94,8 @@ def _sqlite_amount(monkeypatch, number_locale: str, amount: str) -> tuple[object
         ("12.34", "12.34"),
         ("12,34", "12.34"),
         ("1000", "1000"),
+        ("1.2345", "1.2345"),
+        ("52.310500000000000", "52.310500000000000"),
     ],
 )
 def test_auto_parses_unambiguous_money_and_both_separators(raw, expected):
@@ -281,8 +283,8 @@ def test_shape_to_number_refuses_lone_group():
 
     expr = compile_expression("to_number([x])")
     with pytest.raises(EvalError, match="not a number"):
-        expr({"x": "1,234"})
-    assert expr({"x": "$1,000.00"}) == Decimal("1000.00")
+        expr.evaluate({"x": "1,234"})
+    assert expr.evaluate({"x": "$1,000.00"}) == Decimal("1000.00")
 
 
 def test_execute_eu_writes_comma_group_as_decimal(monkeypatch):

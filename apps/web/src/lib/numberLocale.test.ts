@@ -16,6 +16,8 @@ describe("number locale contract (browser = write path)", () => {
       ["12.34", "12.34"],
       ["12,34", "12.34"],
       ["1000", "1000"],
+      ["1.2345", "1.2345"],
+      ["52.310500000000000", "52.310500000000000"],
     ];
     for (const [raw, expected] of cases) {
       assert.equal(parseLocaleDecimalText(raw), expected, raw);

@@ -690,6 +690,9 @@ def _normalize_locale_separators(text: str, number_locale: str = "") -> str | No
             and 1 <= len(parts[-1]) <= 2
         ):
             return "".join(parts[:-1]) + "." + parts[-1]
+        # A last group longer than 3 cannot be thousands — it is a decimal scale.
+        if len(parts) == 2 and len(parts[1]) > 3:
+            return parts[0] + "." + parts[1]
         return None
 
     if "." in text:
@@ -704,6 +707,8 @@ def _normalize_locale_separators(text: str, number_locale: str = "") -> str | No
             if all(len(part) == 3 for part in parts[1:]):
                 return "".join(parts)
             if len(parts) == 2 and 1 <= len(parts[1]) <= 2:
+                return text
+            if len(parts) == 2 and len(parts[1]) > 3:
                 return text
             return None
         if (
@@ -720,6 +725,10 @@ def _normalize_locale_separators(text: str, number_locale: str = "") -> str | No
         ):
             return "".join(parts[:-1]) + "." + parts[-1]
         if len(parts) == 2 and 1 <= len(parts[1]) <= 2:
+            return text
+        # A last group longer than 3 cannot be thousands — IEEE/Excel residue
+        # and money scales (52.310500000000000, 1.2345) stay decimals.
+        if len(parts) == 2 and len(parts[1]) > 3:
             return text
         return None
     return text

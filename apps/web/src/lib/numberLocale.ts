@@ -102,6 +102,9 @@ function normalizeLocaleSeparators(text: string, numberLocale: NumberLocale = ""
     ) {
       return `${parts.slice(0, -1).join("")}.${parts[parts.length - 1]}`;
     }
+    if (parts.length === 2 && parts[1].length > 3) {
+      return `${parts[0]}.${parts[1]}`;
+    }
     return null;
   }
 
@@ -114,6 +117,7 @@ function normalizeLocaleSeparators(text: string, numberLocale: NumberLocale = ""
     if (locale === "EU") {
       if (parts.slice(1).every((part) => part.length === 3)) return parts.join("");
       if (parts.length === 2 && parts[1].length >= 1 && parts[1].length <= 2) return text;
+      if (parts.length === 2 && parts[1].length > 3) return text;
       return null;
     }
     if (
@@ -133,6 +137,7 @@ function normalizeLocaleSeparators(text: string, numberLocale: NumberLocale = ""
       return `${parts.slice(0, -1).join("")}.${parts[parts.length - 1]}`;
     }
     if (parts.length === 2 && parts[1].length >= 1 && parts[1].length <= 2) return text;
+    if (parts.length === 2 && parts[1].length > 3) return text;
     return null;
   }
   return text;
