@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from services.value_serializer import load_http_json
+
 from connectors.saas_common import (
     ReadBatch,
     base_url,
@@ -72,7 +74,7 @@ def list_object_types(cfg: dict[str, Any]) -> list[str]:
             timeout=30,
         )
         r.raise_for_status()
-        for item in r.json().get("results") or []:
+        for item in load_http_json(r).get("results") or []:
             oid = item.get("objectTypeId") or item.get("name") or item.get("fullyQualifiedName")
             if oid and str(oid) not in names:
                 names.append(str(oid))
@@ -110,7 +112,7 @@ def describe_properties(cfg: dict[str, Any], object_type: str = "") -> list[dict
             timeout=45,
         )
         r.raise_for_status()
-        payload = r.json() if hasattr(r, "json") else {}
+        payload = load_http_json(r)
         for p in payload.get("results") or []:
             # Preserve validation / length / enumeration options so reverse-ETL
             # quarantine emits ENUM/SET domains (not open VARCHAR invent).
@@ -210,7 +212,7 @@ def read_object(
 
         r = request(method="GET", url=url, token=access_token, params=params, timeout=60)
         r.raise_for_status()
-        data = r.json()
+        data = load_http_json(r)
 
         results = data.get("results", [])
         for item in results:

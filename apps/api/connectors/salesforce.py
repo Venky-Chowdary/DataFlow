@@ -5,6 +5,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from services.value_serializer import load_http_json
+
 from connectors.saas_common import (
     ReadBatch,
     base_url,
@@ -105,7 +107,7 @@ def list_sobjects(cfg: dict[str, Any]) -> list[str]:
     )
     r.raise_for_status()
     out: list[str] = []
-    for item in (r.json().get("sobjects") or []):
+    for item in (load_http_json(r).get("sobjects") or []):
         if item.get("queryable") and item.get("name"):
             out.append(str(item["name"]))
     return out
@@ -125,7 +127,7 @@ def describe_sobject(cfg: dict[str, Any], sobject: str) -> list[dict[str, Any]]:
     )
     r.raise_for_status()
     fields: list[dict[str, Any]] = []
-    for f in r.json().get("fields") or []:
+    for f in load_http_json(r).get("fields") or []:
         # Preserve write-safety + picklist metadata. Stripping these made live
         # Map/Validate invent writable formula fields and lose ENUM domains —
         # both are demo-breakers against a real Salesforce org.
@@ -259,7 +261,7 @@ def read_object(
             query += f" LIMIT {int(limit)} OFFSET {int(offset)}"  # nosec B608
             r = request(method="GET", url=query_url, token=access_token, params={"q": query}, timeout=60)
             r.raise_for_status()
-            data = r.json()
+            data = load_http_json(r)
             if "totalSize" in data and data.get("totalSize") is not None:
                 published = int(data["totalSize"])
                 total_size = published if total_size is None else max(total_size, published)
@@ -269,7 +271,7 @@ def read_object(
             query += f" LIMIT {min(limit, 2000)}"  # nosec B608
         r = request(method="GET", url=query_url, token=access_token, params={"q": query}, timeout=60)
         r.raise_for_status()
-        data = r.json()
+        data = load_http_json(r)
         if "totalSize" in data and data.get("totalSize") is not None:
             published = int(data["totalSize"])
             total_size = published if total_size is None else max(total_size, published)
@@ -291,7 +293,7 @@ def read_object(
                 abs_url = next_url
             r = request(method="GET", url=abs_url, token=access_token, timeout=60)
             r.raise_for_status()
-            data = r.json()
+            data = load_http_json(r)
             chunk = list(data.get("records") or [])
             next_url = data.get("nextRecordsUrl")
             if not data.get("done", True) and not next_url:

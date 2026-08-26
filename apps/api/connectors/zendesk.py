@@ -12,6 +12,7 @@ from typing import Any
 
 from connectors import rest_api
 from connectors.saas_common import ReadBatch, base_url, request, token
+from services.value_serializer import load_http_json
 
 DEFAULT_HOST = "zendesk.com"
 
@@ -82,7 +83,7 @@ def describe_fields(cfg: dict[str, Any], object_type: str = "") -> list[dict[str
             auth_scheme=scheme,
             timeout=30,
         )
-        body = resp.json() if hasattr(resp, "json") else {}
+        body = load_http_json(resp)
         for f in body.get(key) or []:
             if not isinstance(f, dict):
                 continue
