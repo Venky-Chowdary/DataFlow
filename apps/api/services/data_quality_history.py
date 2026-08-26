@@ -537,7 +537,7 @@ def save_profile(
     _save_store(source, destination, {"runs": runs})
 
 
-def _median(values: list[float]) -> float | None:
+def _median(values: list[Any]) -> Any:
     if not values:
         return None
     s = sorted(values)
@@ -545,10 +545,11 @@ def _median(values: list[float]) -> float | None:
     mid = n // 2
     if n % 2:
         return s[mid]
-    return (s[mid - 1] + s[mid]) / 2.0
+    # ``/ 2`` keeps Decimal series Decimal. ``/ 2.0`` raises on Decimal.
+    return (s[mid - 1] + s[mid]) / 2
 
 
-def _mad(values: list[float], med: float | None = None) -> float | None:
+def _mad(values: list[Any], med: Any = None) -> Any:
     """Median absolute deviation (robust scale)."""
     if not values:
         return None
@@ -558,19 +559,27 @@ def _mad(values: list[float], med: float | None = None) -> float | None:
     return _median([abs(v - m) for v in values])
 
 
-def _robust_z(value: float, series: list[float]) -> float | None:
-    """Modified z-score using MAD; None when series too short / zero scale."""
-    if len(series) < 2:
+def _robust_z(value: Any, series: list[Any]) -> Decimal | None:
+    """Modified z-score using MAD on write-path Decimals.
+
+    None when the series is too short or a cell cannot bind. IEEE
+    ``float(mean)`` invented a second magnitude on scale-20 money.
+    """
+    bound = _rehydrate_stat(value)
+    nums = [d for v in series if (d := _rehydrate_stat(v)) is not None]
+    if bound is None or len(nums) < 2:
         return None
-    med = _median(series)
-    mad = _mad(series, med)
+    med = _median(nums)
+    mad = _mad(nums, med)
     if med is None or mad is None:
         return None
-    if mad == 0.0:
+    if mad == 0:
         # All identical historically — any material delta is noteworthy.
-        return abs(value - med) / max(abs(med) * 0.01, 1e-9) if value != med else 0.0
+        if bound == med:
+            return Decimal("0")
+        return abs(bound - med) / max(abs(med) * Decimal("0.01"), Decimal("1e-9"))
     # 0.6745 makes MAD comparable to std for normal data.
-    return 0.6745 * (value - med) / mad
+    return Decimal("0.6745") * (bound - med) / mad
 
 
 def detect_anomalies(
@@ -643,7 +652,7 @@ def build_load_history_report(
     column_findings: list[dict[str, Any]] = []
 
     # Build per-column series from history.
-    col_series: dict[str, dict[str, list[float]]] = {}
+    col_series: dict[str, dict[str, list[Any]]] = {}
     for run in history:
         cols = _deserialize_profile(run.get("columns") or {})
         for name, prof in cols.items():
@@ -651,8 +660,9 @@ def build_load_history_report(
             bucket["null_rate"].append(prof.null_rate)
             bucket["count"].append(float(prof.count))
             bucket["distinct_rate"].append(prof.distinct_rate)
-            if prof.mean is not None:
-                bucket["mean"].append(float(prof.mean))
+            bound = _rehydrate_stat(prof.mean)
+            if bound is not None:
+                bucket["mean"].append(bound)
 
     # If no ring history, fall back to single baseline dict.
     if not history and fallback_baseline:
@@ -661,8 +671,9 @@ def build_load_history_report(
             bucket["null_rate"].append(prof.null_rate)
             bucket["count"].append(float(prof.count))
             bucket["distinct_rate"].append(prof.distinct_rate)
-            if prof.mean is not None:
-                bucket["mean"].append(float(prof.mean))
+            bound = _rehydrate_stat(prof.mean)
+            if bound is not None:
+                bucket["mean"].append(bound)
 
     z_cut = 3.5
     null_abs_cut = 0.10
@@ -697,17 +708,16 @@ def build_load_history_report(
                     finding["signals"].append({"kind": "count_drop", "message": msg})
 
         if cur.mean is not None and series["mean"]:
-            z = _robust_z(float(cur.mean), series["mean"])
+            z = _robust_z(cur.mean, series["mean"])
             # Single prior observation: fall back to classic z vs that mean's std
             # when available on the fallback baseline profile.
             if z is None and len(series["mean"]) == 1 and fallback_baseline:
                 hist_prof = fallback_baseline.get(col)
-                if (
-                    hist_prof
-                    and hist_prof.mean is not None
-                    and hist_prof.std not in (None, 0.0)
-                ):
-                    z = abs(float(cur.mean) - float(hist_prof.mean)) / float(hist_prof.std)
+                cur_d = _rehydrate_stat(cur.mean)
+                hist_d = _rehydrate_stat(hist_prof.mean) if hist_prof else None
+                std_d = _rehydrate_stat(hist_prof.std) if hist_prof else None
+                if cur_d is not None and hist_d is not None and std_d not in (None, 0):
+                    z = abs(cur_d - hist_d) / std_d
             if z is not None and abs(z) > z_cut:
                 med = _median(series["mean"])
                 msg = (
