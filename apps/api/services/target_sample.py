@@ -81,6 +81,27 @@ def numeric_sample_key_variants(key: Any) -> set[Any]:
     return out
 
 
+def mongo_query_key_variants(key: Any) -> set[Any]:
+    """Mongo ``$in`` variants: write-path numbers plus ObjectId hex.
+
+    LSN fetch and Gate-8 dest-sample share this. ``isdigit()`` missed
+    locale money and did not refuse Auto grouping.
+    """
+    out = set(numeric_sample_key_variants(key))
+    try:
+        from bson import ObjectId
+
+        if (
+            isinstance(key, str)
+            and len(key) == 24
+            and all(c in "0123456789abcdefABCDEF" for c in key)
+        ):
+            out.add(ObjectId(key))
+    except Exception:
+        pass
+    return out
+
+
 from services.target_sample_vector import (  # noqa: E402
     read_pgvector_target_sample,
 )
@@ -445,19 +466,7 @@ def read_target_sample(
                     # integers, and decimals that the writer may have produced.
                     widened: set[Any] = set()
                     for k in keys:
-                        widened.update(numeric_sample_key_variants(k))
-                        # ObjectId keys from schemaless sources are serialized as hex strings.
-                        try:
-                            from bson import ObjectId
-
-                            if (
-                                isinstance(k, str)
-                                and len(k) == 24
-                                and all(c in "0123456789abcdefABCDEF" for c in k)
-                            ):
-                                widened.add(ObjectId(k))
-                        except Exception as exc:
-                            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+                        widened.update(mongo_query_key_variants(k))
                     query_filter = {sort_key: {"$in": list(widened)}}
                 cursor = coll.find(query_filter)
                 if sort_key:

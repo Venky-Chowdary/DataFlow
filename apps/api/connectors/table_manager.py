@@ -526,12 +526,13 @@ def _fetch_pk_lsn_map_mongodb(
     try:
         db_name = cfg.get("database") or mongodb_database_from_uri(conn_str) or "test"
         coll = client[db_name][table_name]
-        # Coerce numeric-looking keys when docs store ints.
+        # Writer may have stored int / Decimal / ObjectId. isdigit() missed
+        # locale money and did not refuse Auto grouping.
+        from services.target_sample import mongo_query_key_variants
+
         query_keys: list[Any] = []
         for k in keys:
-            query_keys.append(k)
-            if isinstance(k, str) and k.isdigit():
-                query_keys.append(int(k))
+            query_keys.extend(mongo_query_key_variants(k))
         cursor = coll.find(
             {primary_key_column: {"$in": query_keys}},
             {primary_key_column: 1, lsn_column: 1},
