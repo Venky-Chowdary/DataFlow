@@ -96,28 +96,27 @@ def _coerce_number(value: Any) -> float | None:
 
 
 def _coerce_datetime(value: Any) -> datetime | None:
+    """Bind history min/max through the write-path datetime parser.
+
+    ISO, 10-digit seconds, 13-digit millis, and unambiguous calendars
+    (``31/12/2024``) profile as instants. Auto-ambiguous ``01/02/2024``
+    returns None — never invent MDY/DMY for a load comparison.
+    """
     if value is None:
         return None
     if isinstance(value, datetime):
         return value
     if isinstance(value, date):
         return datetime(value.year, value.month, value.day)
-    text = str(value).strip()
-    text = text.replace("Z", "+0000")
-    if text.endswith(("+00:00", "+0000")):
-        text = text[:-6].replace("T", " ")
-    for fmt in (
-        "%Y-%m-%dT%H:%M:%S.%f",
-        "%Y-%m-%dT%H:%M:%S",
-        "%Y-%m-%d %H:%M:%S.%f",
-        "%Y-%m-%d %H:%M:%S",
-        "%Y-%m-%d",
-    ):
-        try:
-            return datetime.strptime(text, fmt)
-        except ValueError:
-            continue
-    return None
+    from services.transform_engine import apply_transform
+
+    parsed, err = apply_transform(str(value).strip(), "datetime")
+    if parsed is None or err:
+        return None
+    try:
+        return datetime.fromisoformat(str(parsed).replace("Z", "+00:00"))
+    except ValueError:
+        return None
 
 
 def profile_column(values: list[Any], column: str, dtype: str = "string") -> ColumnProfile:
@@ -156,8 +155,14 @@ def profile_column(values: list[Any], column: str, dtype: str = "string") -> Col
         elif dtype in {"date", "datetime", "timestamp"}:
             dts = [d for v in non_null if (d := _coerce_datetime(v)) is not None]
             if dts:
-                profile.min_value = min(dts).isoformat()
-                profile.max_value = max(dts).isoformat()
+                try:
+                    lo, hi = min(dts), max(dts)
+                except TypeError:
+                    # Naive calendar vs aware instant — compare as timestamps.
+                    ordered = sorted(dts, key=lambda d: d.timestamp())
+                    lo, hi = ordered[0], ordered[-1]
+                profile.min_value = lo.isoformat()
+                profile.max_value = hi.isoformat()
         else:
             sorted_vals = sorted(as_text)
             profile.min_value = sorted_vals[0]

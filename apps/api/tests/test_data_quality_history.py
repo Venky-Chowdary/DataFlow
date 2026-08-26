@@ -44,6 +44,26 @@ def test_profile_column_basic() -> None:
     assert p.std is not None
 
 
+def test_profile_datetime_uses_write_path_not_iso_only() -> None:
+    """31/12/2023 is before 01/01/2024; Auto 01/02/2024 must not invent a calendar."""
+    from services.data_quality_history import _coerce_datetime
+
+    slash = profile_column(["31/12/2023", "01/01/2024", "15/06/2023"], "event_date", "date")
+    assert slash.min_value is not None and slash.min_value.startswith("2023-06-15")
+    assert slash.max_value is not None and slash.max_value.startswith("2024-01-01")
+    iso = profile_column(["2025-01-01", "2025-03-01", "2025-02-01"], "ts", "datetime")
+    assert iso.min_value is not None and iso.min_value.startswith("2025-01-01")
+    assert iso.max_value is not None and iso.max_value.startswith("2025-03-01")
+    epoch = profile_column(["1704451800", "1704451800000"], "updated_epoch", "timestamp")
+    assert epoch.min_value is not None
+    assert epoch.max_value is not None
+    assert _coerce_datetime("1704451800").timestamp() == _coerce_datetime("1704451800000").timestamp()
+    ambiguous = profile_column(["01/02/2024", "03/04/2024"], "event_date", "date")
+    assert ambiguous.min_value is None
+    assert ambiguous.max_value is None
+    assert _coerce_datetime("01/02/2024") is None
+
+
 def test_profile_column_string_lengths() -> None:
     p = profile_column(["a", "bb", "ccc", None], "name", "string")
     assert p.min_length == 1
