@@ -335,10 +335,21 @@ def _profile_collection():
     return None
 
 
-def _profile_path(key: str) -> Path:
-    base = data_dir() / "quality_profiles"
+def quality_profiles_dir() -> Path:
+    """JSON fallback store for last-N load profiles.
+
+    Override with ``QUALITY_PROFILES_DIR`` so a pytest worker can isolate
+    history without rewriting ``DATAFLOW_DATA_DIR`` (that path also holds
+    connectors and tenants).
+    """
+    raw = (getenv_brand("QUALITY_PROFILES_DIR") or "").strip()
+    base = Path(raw) if raw else data_dir() / "quality_profiles"
     base.mkdir(parents=True, exist_ok=True)
-    return base / f"{key}.json"
+    return base
+
+
+def _profile_path(key: str) -> Path:
+    return quality_profiles_dir() / f"{key}.json"
 
 
 def _serialize_profile(profile: dict[str, ColumnProfile]) -> dict[str, Any]:

@@ -50,6 +50,13 @@ if _xdist_worker:
         "FAKESNOW_DB_PATH",
         str(_api_root / "data" / f"fakesnow_data_{_xdist_worker}"),
     )
+    # Load-history JSON must not share apps/api/data/quality_profiles across
+    # workers — leftover 1M / prior-pytest runs inflate rows_written_total.
+    # Do not rewrite DATAFLOW_DATA_DIR here (connectors/tenants live there).
+    os.environ.setdefault(
+        "DATAFLOW_QUALITY_PROFILES_DIR",
+        str(_api_root / "data" / f"quality_profiles_{_xdist_worker}"),
+    )
 
 # Slim CI images omit sentence-transformers; use a deterministic hash embedder
 # so vector destination matrices still exercise the write path.

@@ -304,6 +304,46 @@ def test_isolated_data_dir_does_not_see_other_store(tmp_path, monkeypatch) -> No
     assert seen["runs_observed"] == 1
 
 
+def test_quality_profiles_dir_override_does_not_rewrite_data_dir(tmp_path, monkeypatch) -> None:
+    """Workers isolate load history without moving connectors/tenants."""
+    from services.data_quality_history import (
+        history_endpoint_from_config,
+        quality_profiles_dir,
+    )
+    from services.historical_success_contract import measure_route_historical_success
+    from services.platform_config import data_dir
+
+    data = tmp_path / "shared-data"
+    override = tmp_path / "profiles_gw0"
+    data.mkdir()
+    monkeypatch.setenv("DATAFLOW_DATA_DIR", str(data))
+    monkeypatch.setenv("DATAFLOW_QUALITY_PROFILES_DIR", str(override))
+
+    src = history_endpoint_from_config(
+        {"host": "10.0.0.9", "port": 5432, "database": "dataflow"},
+        kind="database",
+        format="postgresql",
+        table="hist_override_src",
+    )
+    dst = history_endpoint_from_config(
+        {"host": "10.0.0.9", "port": 3306, "database": "dataflow"},
+        kind="database",
+        format="mysql",
+        table="hist_override_dst",
+    )
+    cols = profile_batch([], {"id": "INTEGER"})
+    save_profile(src, dst, cols, job_id="override-1", row_count=42)
+
+    assert quality_profiles_dir() == override
+    assert data_dir() == data
+    assert list(override.glob("*.json"))
+    default = data / "quality_profiles"
+    assert not default.exists() or not list(default.glob("*.json"))
+    measured = measure_route_historical_success(src, dst)
+    assert measured["rows_written_total"] == 42
+    assert measured["runs_observed"] == 1
+
+
 def test_quarantine_histogram_stable_keys() -> None:
     h = quarantine_histogram(
         [
