@@ -1246,14 +1246,9 @@ def verify_pgvector_table(
                 for raw in raw_rows:
                     rec = dict(zip(names, raw))
                     source_id = rec.get("source_id", "")
-                    metadata = rec.get("metadata") or {}
-                    if isinstance(metadata, str):
-                        try:
-                            metadata = json.loads(metadata)
-                        except Exception:
-                            metadata = {}
-                    if not isinstance(metadata, dict):
-                        metadata = {}
+                    from services.target_sample_vector import load_pgvector_metadata
+
+                    metadata = load_pgvector_metadata(rec.get("metadata"))
                     # Reconstruct a source-shaped row from metadata; fall back
                     # to source_id for 'id'.
                     row: dict[str, Any] = dict(metadata)
