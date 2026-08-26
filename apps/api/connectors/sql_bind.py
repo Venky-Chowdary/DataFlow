@@ -579,6 +579,57 @@ def coerce_tsvector_wire(value: Any) -> Any:
     return text  # empty tsvector is valid — never invent NULL
 
 
+def geo_coord_carrier(value: Any) -> float:
+    """One IEEE coordinate for POINT/BOX/CIRCLE/LINE/LSEG/PATH/POLYGON.
+
+    Write-path decimal first. Locale money binds. Auto ``1,234`` refuses.
+    Dest-canonical ``1.234`` stays identity. ``2**53+1`` refuses.
+    Native bool is not a magnitude.
+    """
+    from decimal import Decimal, InvalidOperation
+
+    from services.transform_engine import decimal_wire_value, float_carrier_or_refuse
+
+    if isinstance(value, bool):
+        raise ValueError("geo coord cannot bind bool — refuse invent")
+    if isinstance(value, Decimal):
+        try:
+            return float_carrier_or_refuse(value)
+        except ValueError as exc:
+            raise ValueError(
+                f"refuse invent geo coord from decimal {value!r}"
+            ) from exc
+    if isinstance(value, int):
+        try:
+            return float_carrier_or_refuse(Decimal(value))
+        except ValueError as exc:
+            raise ValueError(
+                f"refuse invent geo coord from {value!r}"
+            ) from exc
+    if isinstance(value, float):
+        if value != value or value in (float("inf"), float("-inf")):
+            raise ValueError("geo coord cannot bind non-finite — refuse invent")
+        return value
+    text = str(value).strip()
+    if not text:
+        raise ValueError("geo coord empty — refuse invent")
+    parsed: Decimal | None = None
+    try:
+        dest = Decimal(text)
+        if dest.is_finite():
+            parsed = dest
+    except (InvalidOperation, ValueError, ArithmeticError):
+        parsed = None
+    if parsed is None:
+        parsed = decimal_wire_value(text)
+    if parsed is None or not parsed.is_finite():
+        raise ValueError(f"refuse invent geo coord from {value!r}")
+    try:
+        return float_carrier_or_refuse(parsed)
+    except ValueError as exc:
+        raise ValueError(f"refuse invent geo coord from {value!r}") from exc
+
+
 def coerce_point_wire(value: Any) -> Any:
     """Normalize PostgreSQL ``POINT`` wire (Fivetran JSON / PG literal class).
 
@@ -601,8 +652,8 @@ def coerce_point_wire(value: Any) -> Any:
                 "point object requires x and y — refuse invent into POINT"
             )
         try:
-            x = float(value["x"])
-            y = float(value["y"])
+            x = geo_coord_carrier(value["x"])
+            y = geo_coord_carrier(value["y"])
         except (TypeError, ValueError) as exc:
             raise ValueError(
                 "point x/y must be numeric — refuse invent into POINT"
@@ -614,8 +665,8 @@ def coerce_point_wire(value: Any) -> Any:
                 "point sequence must have length 2 — refuse invent into POINT"
             )
         try:
-            x = float(value[0])
-            y = float(value[1])
+            x = geo_coord_carrier(value[0])
+            y = geo_coord_carrier(value[1])
         except (TypeError, ValueError) as exc:
             raise ValueError(
                 "point sequence values must be numeric — refuse invent into POINT"
@@ -632,6 +683,13 @@ def coerce_point_wire(value: Any) -> Any:
         raise ValueError(
             "point wire is not (x,y) literal — refuse invent into POINT"
         )
+    try:
+        geo_coord_carrier(m.group(1))
+        geo_coord_carrier(m.group(2))
+    except ValueError as exc:
+        raise ValueError(
+            "point wire is not (x,y) literal — refuse invent into POINT"
+        ) from exc
     return f"({m.group(1)},{m.group(2)})"
 
 
@@ -655,8 +713,8 @@ def coerce_box_wire(value: Any) -> Any:
         if {"x1", "y1", "x2", "y2"} <= set(value.keys()):
             try:
                 return (
-                    f"(({float(value['x1'])},{float(value['y1'])}),"
-                    f"({float(value['x2'])},{float(value['y2'])}))"
+                    f"(({geo_coord_carrier(value['x1'])},{geo_coord_carrier(value['y1'])}),"
+                    f"({geo_coord_carrier(value['x2'])},{geo_coord_carrier(value['y2'])}))"
                 )
             except (TypeError, ValueError) as exc:
                 raise ValueError(
@@ -684,6 +742,13 @@ def coerce_box_wire(value: Any) -> Any:
         raise ValueError(
             "box wire must contain four coordinates — refuse invent into BOX"
         )
+    try:
+        for n in nums:
+            geo_coord_carrier(n)
+    except ValueError as exc:
+        raise ValueError(
+            "box corners must be numeric — refuse invent into BOX"
+        ) from exc
     return f"(({nums[0]},{nums[1]}),({nums[2]},{nums[3]}))"
 
 
@@ -712,7 +777,7 @@ def coerce_circle_wire(value: Any) -> Any:
             )
         try:
             pt = coerce_point_wire(center)
-            r = float(value.get("r", value.get("radius")))
+            r = geo_coord_carrier(value.get("r", value.get("radius")))
         except (TypeError, ValueError) as exc:
             raise ValueError(
                 "circle center/radius must be numeric — refuse invent into CIRCLE"
@@ -727,7 +792,7 @@ def coerce_circle_wire(value: Any) -> Any:
             )
         pt = coerce_point_wire(value[0])
         try:
-            r = float(value[1])
+            r = geo_coord_carrier(value[1])
         except (TypeError, ValueError) as exc:
             raise ValueError(
                 "circle radius must be numeric — refuse invent into CIRCLE"
@@ -745,7 +810,14 @@ def coerce_circle_wire(value: Any) -> Any:
         raise ValueError(
             "circle wire must contain x,y,r — refuse invent into CIRCLE"
         )
-    r = float(nums[2])
+    try:
+        geo_coord_carrier(nums[0])
+        geo_coord_carrier(nums[1])
+        r = geo_coord_carrier(nums[2])
+    except ValueError as exc:
+        raise ValueError(
+            "circle center/radius must be numeric — refuse invent into CIRCLE"
+        ) from exc
     if r < 0:
         raise ValueError("circle radius cannot be negative — refuse invent")
     return f"<({nums[0]},{nums[1]}),{nums[2]}>"
@@ -758,6 +830,11 @@ def _extract_coord_pairs(text: str) -> list[tuple[str, str]]:
         text,
     )
     if len(nums) < 2 or len(nums) % 2 != 0:
+        return []
+    try:
+        for n in nums:
+            geo_coord_carrier(n)
+    except ValueError:
         return []
     return [(nums[i], nums[i + 1]) for i in range(0, len(nums), 2)]
 
@@ -778,8 +855,8 @@ def coerce_lseg_wire(value: Any) -> Any:
         if {"x1", "y1", "x2", "y2"} <= set(value.keys()):
             try:
                 return (
-                    f"[({float(value['x1'])},{float(value['y1'])}),"
-                    f"({float(value['x2'])},{float(value['y2'])})]"
+                    f"[({geo_coord_carrier(value['x1'])},{geo_coord_carrier(value['y1'])}),"
+                    f"({geo_coord_carrier(value['x2'])},{geo_coord_carrier(value['y2'])})]"
                 )
             except (TypeError, ValueError) as exc:
                 raise ValueError(
@@ -818,7 +895,11 @@ def coerce_line_wire(value: Any) -> Any:
             # Case-insensitive key pick.
             kv = {str(k).lower(): v for k, v in value.items()}
             try:
-                a, b, c = float(kv["a"]), float(kv["b"]), float(kv["c"])
+                a, b, c = (
+                    geo_coord_carrier(kv["a"]),
+                    geo_coord_carrier(kv["b"]),
+                    geo_coord_carrier(kv["c"]),
+                )
             except (TypeError, ValueError) as exc:
                 raise ValueError(
                     "line a,b,c must be numeric — refuse invent into LINE"
@@ -834,7 +915,11 @@ def coerce_line_wire(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         if len(value) == 3:
             try:
-                a, b, c = float(value[0]), float(value[1]), float(value[2])
+                a, b, c = (
+                    geo_coord_carrier(value[0]),
+                    geo_coord_carrier(value[1]),
+                    geo_coord_carrier(value[2]),
+                )
             except (TypeError, ValueError) as exc:
                 raise ValueError(
                     "line coefficients must be numeric — refuse invent into LINE"
@@ -855,7 +940,8 @@ def coerce_line_wire(value: Any) -> Any:
         )
         if len(nums) != 3:
             raise ValueError("line {A,B,C} needs three coeffs — refuse invent")
-        a, b = float(nums[0]), float(nums[1])
+        a, b = geo_coord_carrier(nums[0]), geo_coord_carrier(nums[1])
+        geo_coord_carrier(nums[2])
         if a == 0 and b == 0:
             raise ValueError("line A and B cannot both be zero — refuse invent")
         return f"{{{nums[0]},{nums[1]},{nums[2]}}}"
