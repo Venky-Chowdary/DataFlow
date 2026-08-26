@@ -3240,18 +3240,30 @@ def integer_fit_failure(
             return f"empty value is not an integer for {type_str}"
         parsed = integer_wire_value(text)
         if parsed is None:
-            try:
-                unwritable = Decimal(text)
-            except (InvalidOperation, ValueError, TypeError, OverflowError):
-                unwritable = None
-            if unwritable is not None and unwritable.is_finite():
-                if unwritable != unwritable.to_integral_value():
+            from services.transform_engine import decimal_wire_value
+
+            # Write-path decimal first. Decimal(text) invented Auto 1.000 as
+            # integral 1 and called it overflow. Locale money with cents is
+            # fractional. Dest-canonical 1.234 stays the fractional message.
+            wire = decimal_wire_value(text)
+            if wire is not None and wire.is_finite():
+                if wire != wire.to_integral_value():
                     return (
-                        f"fractional value {unwritable} is not an integer for "
+                        f"fractional value {wire} is not an integer for "
                         f"{type_str} — widen the destination to DECIMAL/DOUBLE, "
                         "or round it explicitly before the write"
                     )
                 return f"{text} exceeds the integer wire budget for {type_str}"
+            try:
+                dest = Decimal(text)
+            except (InvalidOperation, ValueError, TypeError, OverflowError):
+                dest = None
+            if dest is not None and dest.is_finite() and dest != dest.to_integral_value():
+                return (
+                    f"fractional value {dest} is not an integer for "
+                    f"{type_str} — widen the destination to DECIMAL/DOUBLE, "
+                    "or round it explicitly before the write"
+                )
             return (
                 f"{text!r} is not an integer for {type_str} — repair the source "
                 "value, or map the column to a text or decimal carrier"
