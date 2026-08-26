@@ -259,7 +259,7 @@ def rows_a_cursor_read_will_deliver(
         if cursor_column not in row:
             return rows
         cell = row.get(cursor_column)
-        if cell is None or str(cell) == "":
+        if present_cell_text(cell) is None:
             delta.append(row)
             continue
         if use_tiebreak:
