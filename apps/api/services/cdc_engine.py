@@ -45,10 +45,7 @@ def infer_watermark_type(samples: list[str]) -> WatermarkType:
 
     int_hits = sum(1 for s in non_empty if integer_wire_value(s) is not None)
     float_hits = sum(1 for s in non_empty if decimal_wire_value(s) is not None)
-    dt_hits = sum(
-        1 for s in non_empty
-        if _ISO_DT_RE.match(s) or _EPOCH_MS_RE.match(s) or _EPOCH_S_RE.match(s)
-    )
+    dt_hits = sum(1 for s in non_empty if _sample_is_datetime_watermark(s))
 
     n = len(non_empty)
     if dt_hits / n >= 0.8:
@@ -58,6 +55,26 @@ def infer_watermark_type(samples: list[str]) -> WatermarkType:
     if float_hits / n >= 0.85:
         return WatermarkType.FLOAT
     return WatermarkType.STRING
+
+
+def _sample_is_datetime_watermark(text: str) -> bool:
+    """True when a cursor sample is an instant, not a digit-only integer.
+
+    ISO and 10/13-digit epochs stay DATETIME. Unambiguous calendars such as
+    ``31/12/2024`` also count. Auto-ambiguous ``01/02/2024`` and YYYYMMDD
+    integers do not invent a DATETIME cursor type.
+    """
+    raw = (text or "").strip()
+    if not raw:
+        return False
+    if _ISO_DT_RE.match(raw) or _EPOCH_MS_RE.match(raw) or _EPOCH_S_RE.match(raw):
+        return True
+    from services.transform_engine import apply_transform, integer_wire_value
+
+    if integer_wire_value(raw) is not None:
+        return False
+    parsed, err = apply_transform(raw, "datetime")
+    return parsed is not None and not err
 
 
 def _parse_float(s: str) -> float | None:

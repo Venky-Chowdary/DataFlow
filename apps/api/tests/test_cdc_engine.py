@@ -32,6 +32,19 @@ def test_infer_integer_watermark():
     assert infer_watermark_type(samples) == WatermarkType.INTEGER
 
 
+def test_infer_unambiguous_slash_calendars_are_datetime():
+    assert infer_watermark_type(["31/12/2024", "30/11/2024", "15/06/2023"]) == WatermarkType.DATETIME
+
+
+def test_infer_auto_ambiguous_slash_dates_stay_string():
+    assert infer_watermark_type(["01/02/2024", "03/04/2024", "05/06/2024"]) == WatermarkType.STRING
+
+
+def test_infer_yyyymmdd_digits_stay_integer():
+    """20240105 binds as a date on the write path but is a digit cursor here."""
+    assert infer_watermark_type(["20240105", "20240106", "20240107"]) == WatermarkType.INTEGER
+
+
 def test_max_watermark_datetime():
     values = ["2025-01-01", "2025-03-01", "2025-02-01"]
     assert max_watermark(values, WatermarkType.DATETIME) == "2025-03-01"
