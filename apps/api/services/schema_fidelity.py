@@ -27,6 +27,7 @@ from services.identity_carry import plan_identity_carry
 from services.offset_label import plan_offset_label_carry
 from services.physical_placement_ddl import plan_physical_placement, verify_placement
 from services.unicode_form import plan_unicode_form_carry
+from services.value_serializer import present_cell_text
 
 logger = logging.getLogger(__name__)
 
@@ -360,9 +361,9 @@ def build_catalog_from_introspect(
         if cols:
             unique_keys.append(cols)
     merged_defaults = {
-        str(k): str(v)
+        str(k): text
         for k, v in (defaults or keys.get("defaults") or {}).items()
-        if v is not None and str(v).strip()
+        if (text := present_cell_text(v)) is not None
     }
     return SourceSchemaCatalog(
         dialect=(dialect or "").strip().lower(),
@@ -444,7 +445,11 @@ def catalog_from_payload(payload: Any) -> SourceSchemaCatalog | None:
             columns=list(payload.get("columns") or []),
             column_types=dict(payload.get("column_types") or {}),
             nullable={str(k): bool(v) for k, v in (payload.get("nullable") or {}).items()},
-            defaults={str(k): str(v) for k, v in (payload.get("defaults") or {}).items()},
+            defaults={
+                str(k): text
+                for k, v in (payload.get("defaults") or {}).items()
+                if (text := present_cell_text(v)) is not None
+            },
             primary_key=[str(c) for c in (payload.get("primary_key") or []) if c],
             unique_keys=[
                 [str(c) for c in uk if c]
