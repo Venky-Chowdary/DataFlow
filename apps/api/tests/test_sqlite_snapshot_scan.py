@@ -38,8 +38,8 @@ def test_sqlite_scan_reads_all_pages_without_offset(tmp_path: Path) -> None:
         )
         pages.append(list(batch.rows))
 
-    assert pages[0] == [(1, "r1"), (2, "r2")]
-    assert pages[1] == [(3, "r3"), (4, "r4")]
-    assert pages[2] == [(5, "r5")]
+    assert pages[0] == [("1", "r1"), ("2", "r2")]
+    assert pages[1] == [("3", "r3"), ("4", "r4")]
+    assert pages[2] == [("5", "r5")]
     assert pages[3] == []
     assert not state.get("started")
