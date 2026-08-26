@@ -306,6 +306,16 @@ def json_loads_exact(text: str, *, parse_constant: Any = None) -> Any:
     return _demote_exactly_representable(parsed)
 
 
+def demote_exact_json(value: Any) -> Any:
+    """Same IEEE-exact number demotion ``json_loads_exact`` applies.
+
+    ijson default ``use_float=False`` yields ``Decimal`` for every fraction,
+    including ``1.5``. Streaming ingest must share this demote so DOM and
+    StAX never disagree on a leaf the write path already binds as float.
+    """
+    return _demote_exactly_representable(value)
+
+
 def _json_default(value: Any) -> Any:
     """Fallback for values that the stdlib json encoder does not understand.
 

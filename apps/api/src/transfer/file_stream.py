@@ -429,7 +429,9 @@ def peek_file_source(
                 prefix = None
         if prefix:
             with _open_binary(content) as bio:
-                for obj in ijson.items(bio, prefix):
+                from services.json_tabular import ijson_items_exact
+
+                for obj in ijson_items_exact(bio, prefix):
                     if not isinstance(obj, dict):
                         continue
                     total += 1
