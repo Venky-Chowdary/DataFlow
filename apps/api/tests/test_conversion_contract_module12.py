@@ -181,3 +181,12 @@ def test_ai_type_matrix_is_non_authoritative():
     assert bool_hint is not None
     assert "yes" not in (bool_hint.get("mapping") or {})
     assert "no" not in (bool_hint.get("mapping") or {})
+    int_hint = tc.suggest_type_conversion("string", "integer")
+    assert int_hint is not None
+    assert int_hint.get("lossy") is True
+    assert "1,234" in (int_hint.get("note") or "")
+    dec_hint = tc.suggest_type_conversion("string", "decimal")
+    assert dec_hint is not None
+    assert dec_hint.get("lossy") is True
+    assert "1,234" in (dec_hint.get("note") or "")
+    assert dec_hint.get("validation") is None

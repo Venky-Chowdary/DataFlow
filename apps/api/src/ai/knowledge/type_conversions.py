@@ -19,8 +19,17 @@ AUTHORITY_NOTE = (
 
 TYPE_CONVERSION_MATRIX: dict[str, dict[str, dict]] = {
     "string": {
-        "integer": {"method": "cast", "lossy": False, "validation": r"^-?\d+$"},
-        "decimal": {"method": "cast", "lossy": False, "validation": r"^-?\d+\.?\d*$"},
+        "integer": {
+            "method": "cast",
+            "lossy": True,
+            "validation": r"^-?\d+$",
+            "note": "Auto fails closed on 1,234 / 1.234 — set number locale US or EU. Assist only.",
+        },
+        "decimal": {
+            "method": "cast",
+            "lossy": True,
+            "note": "Auto fails closed on a lone 1,234 / 1.234. $1,000.00 and €1.000,89 bind. Assist only.",
+        },
         "boolean": {
             "method": "parse_bool",
             "lossy": False,
