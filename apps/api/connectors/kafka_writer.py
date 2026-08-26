@@ -30,6 +30,20 @@ from connectors.writer_common import (
 logger = logging.getLogger(__name__)
 
 
+def kafka_produce_key(raw_key: Any) -> str | None:
+    """Dest-canonical Kafka message key, or None when identity is absent.
+
+    ``str(True)`` is ``True``; dest and compaction use ``true``. Reader-null
+    / blank must not become ``__DF_SQL_NULL__`` or DuckDB-null keys.
+    """
+    from services.cdc_identity import is_present_cdc_row_key
+    from services.value_serializer import present_cell_text
+
+    if not is_present_cdc_row_key(raw_key):
+        return None
+    return present_cell_text(raw_key)
+
+
 def _fetch_kafka_physical_types(
     registry_url: str,
     topic: str,
@@ -662,7 +676,7 @@ def write_mapped_rows(
                     if i < len(row) and not is_missing_sentinel(row[i])
                 }
             raw_key = payload.get(key_col) if key_col else None
-            if key_col and (raw_key is None or str(raw_key).strip() == ""):
+            if key_col and kafka_produce_key(raw_key) is None:
                 null_key_rejected += 1
                 rejected_details.append({
                     "row": idx + 1,
@@ -690,7 +704,7 @@ def write_mapped_rows(
                         driver="kafka",
                     )
                 continue
-            key = str(raw_key) if key_col and raw_key is not None else None
+            key = kafka_produce_key(raw_key) if key_col else None
             fut = producer.send(topic, value=payload, key=key)
             fut.get(timeout=30)
             written += 1
