@@ -990,12 +990,12 @@ def _logical_type_from_sa(col_type: Any) -> str:
 
 
 class _DuckDBJSON(sa.JSON):
-    """JSON type that stores compact, deterministic JSON text in DuckDB.
+    """JSON type that stores canonical JSON text in DuckDB.
 
-    SQLAlchemy's default ``sa.JSON`` re-serializes dict/list with spaces and
-    binds Python ``None`` as the JSON literal ``null``.  This subclass keeps
-    source JSON text compact and treats ``None`` as SQL NULL so round-trips are
-    exact and checksums line up.
+    SQLAlchemy's default ``sa.JSON`` re-parses with ``json.loads`` (IEEE invent)
+    and binds Python ``None`` as the JSON literal ``null``. This subclass uses
+    ``json_document_wire``: valid JSON text keeps its digits and polarity
+    (``\"1\"`` stays a string). Python trees dump compact. ``None`` is SQL NULL.
     """
 
     __visit_name__ = "JSON"
@@ -1004,19 +1004,9 @@ class _DuckDBJSON(sa.JSON):
         def process(value: Any) -> Any:
             if value is None:
                 return None
-            if isinstance(value, str):
-                try:
-                    value = json.loads(value)
-                except (json.JSONDecodeError, ValueError):
-                    return value
-            if isinstance(value, (dict, list, tuple, set, frozenset)):
-                return json.dumps(
-                    value,
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                    default=json_default,
-                )
-            return value
+            from services.json_polarity import json_document_wire
+
+            return json_document_wire(value)
 
         return process
 
