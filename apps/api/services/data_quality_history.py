@@ -87,7 +87,7 @@ def _coerce_number(value: Any) -> Decimal | None:
     Auto-ambiguous grouping (``1,234``, ``1.000``, ``1.234``) returns None —
     never invent a US/EU magnitude for a load comparison.
     """
-    if value is None:
+    if is_null_evidence(value):
         return None
     from services.transform_engine import decimal_wire_value
 
@@ -101,7 +101,7 @@ def _coerce_datetime(value: Any) -> datetime | None:
     (``31/12/2024``) profile as instants. Auto-ambiguous ``01/02/2024``
     returns None — never invent MDY/DMY for a load comparison.
     """
-    if value is None:
+    if is_null_evidence(value):
         return None
     if isinstance(value, datetime):
         return value
@@ -368,7 +368,7 @@ def _rehydrate_stat(value: Any) -> Decimal | None:
     storage identity (``1.234`` stays 1.234). Auto locale must not re-parse
     stored stats — that would refuse dest-canonical ``1.234`` or invent 1234.
     """
-    if value is None or value == "":
+    if is_null_evidence(value):
         return None
     if isinstance(value, Decimal):
         return value if value.is_finite() else None

@@ -15,6 +15,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from services.data_quality_history import (  # noqa: E402
+    _coerce_datetime,
+    _rehydrate_stat,
     load_historical_profile,
     profile_batch,
     profile_column,
@@ -76,3 +78,15 @@ def test_reader_null_is_absence_not_a_token():
     assert p.min_value == "kept"
     assert p.max_value == "kept"
     assert not any(v == SQL_NULL_SENTINEL for v, _ in p.top_values)
+
+
+def test_rehydrate_and_datetime_skip_reader_null():
+    assert _rehydrate_stat(None) is None
+    assert _rehydrate_stat("") is None
+    assert _rehydrate_stat("   ") is None
+    assert _rehydrate_stat(SQL_NULL_SENTINEL) is None
+    assert _rehydrate_stat(True) is None
+    assert _rehydrate_stat("1.234") == Decimal("1.234")
+    assert _coerce_datetime(None) is None
+    assert _coerce_datetime(SQL_NULL_SENTINEL) is None
+    assert _coerce_datetime("") is None
