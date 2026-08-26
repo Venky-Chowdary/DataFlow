@@ -729,6 +729,18 @@ def _upsert_pk_key(row: dict[str, Any], pk_cols: Sequence[str]) -> tuple:
     return tuple(out)
 
 
+def _iceberg_present_fields(row: dict[str, Any]) -> dict[str, Any]:
+    """Sparse omit Missing; bind reader-null as None, not the extract token."""
+    from services.value_serializer import is_missing_sentinel, is_reader_null_cell
+
+    out: dict[str, Any] = {}
+    for key, val in row.items():
+        if is_missing_sentinel(val):
+            continue
+        out[key] = None if is_reader_null_cell(val) else val
+    return out
+
+
 def _merge_upsert_rows(
     existing: list[dict[str, Any]],
     incoming: list[dict[str, Any]],
@@ -744,9 +756,6 @@ def _merge_upsert_rows(
     from connectors.writer_common import compare_lsn, _is_nullish_conflict_key
     from services.value_serializer import is_missing_sentinel
 
-    def _present(row: dict[str, Any]) -> dict[str, Any]:
-        return {k: v for k, v in row.items() if not is_missing_sentinel(v)}
-
     best: dict[tuple, dict[str, Any]] = {}
     for row in existing:
         key = _upsert_pk_key(row, pk_cols)
@@ -754,7 +763,7 @@ def _merge_upsert_rows(
             continue
         best[key] = dict(row)
     for row in incoming:
-        clean = _present(row)
+        clean = _iceberg_present_fields(row)
         # Sparse/empty PK must quarantine upstream — refuse invent duplicates here.
         from connectors.writer_common import assert_sparse_upsert_has_pk
 
@@ -833,9 +842,7 @@ def _mor_upsert_delta(
         if applied is None:
             continue
         prev = existing_by.get(key)
-        clean = {
-            k: v for k, v in row.items() if not is_missing_sentinel(v)
-        }
+        clean = _iceberg_present_fields(row)
         if prev is None:
             new_rows.append(applied)
             continue
@@ -1752,7 +1759,7 @@ def _write_mapped_rows_pyiceberg(
                         continue
                     existing_by_pk[key] = {
                         **(base or {}),
-                        **{k: v for k, v in row_dict.items() if not is_missing_sentinel(v)},
+                        **_iceberg_present_fields(row_dict),
                     }
                     fold_kept.append(raw)
             _fold_abort = reject_on_strict_policy(policy, rejected_details, "Iceberg")
