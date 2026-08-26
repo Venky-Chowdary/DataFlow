@@ -14,13 +14,12 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import math
 import os
 from services.brand_env import getenv_brand
 from collections import Counter
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -41,8 +40,8 @@ class ColumnProfile:
     distinct_count: int = 0
     min_value: str | None = None
     max_value: str | None = None
-    mean: float | None = None
-    std: float | None = None
+    mean: Decimal | float | None = None
+    std: Decimal | float | None = None
     min_length: int | None = None
     max_length: int | None = None
     avg_length: float | None = None
@@ -75,24 +74,24 @@ def _to_sortable(value: Any) -> Any:
     if isinstance(value, (date, datetime)):
         return value.isoformat()
     if isinstance(value, Decimal):
-        return float(value)
+        return value
     if isinstance(value, (int, float)):
         return value
     return cell_to_string(value)
 
 
-def _coerce_number(value: Any) -> float | None:
+def _coerce_number(value: Any) -> Decimal | None:
+    """Bind history min/max/mean through the write-path decimal parser.
+
+    Locale money (``$1,234.56``, ``€2.000,00``) keeps exact Decimal scale.
+    Auto-ambiguous grouping (``1,234``, ``1.000``, ``1.234``) returns None —
+    never invent a US/EU magnitude for a load comparison.
+    """
     if value is None:
         return None
     from services.transform_engine import decimal_wire_value
 
-    parsed = decimal_wire_value(value)
-    if parsed is None:
-        return None
-    try:
-        return float(parsed)
-    except (OverflowError, ValueError):
-        return None
+    return decimal_wire_value(value)
 
 
 def _coerce_datetime(value: Any) -> datetime | None:
@@ -151,7 +150,7 @@ def profile_column(values: list[Any], column: str, dtype: str = "string") -> Col
                 profile.mean = sum(nums) / len(nums)
                 if len(nums) > 1:
                     variance = sum((x - profile.mean) ** 2 for x in nums) / (len(nums) - 1)
-                    profile.std = math.sqrt(variance)
+                    profile.std = variance.sqrt()
         elif dtype in {"date", "datetime", "timestamp"}:
             dts = [d for v in non_null if (d := _coerce_datetime(v)) is not None]
             if dts:
@@ -361,6 +360,38 @@ def _serialize_profile(profile: dict[str, ColumnProfile]) -> dict[str, Any]:
     return {name: asdict(col) for name, col in profile.items()}
 
 
+def _rehydrate_stat(value: Any) -> Decimal | None:
+    """Reload persisted mean/std as dest-canonical Decimal, not Auto locale.
+
+    ``json_default`` writes Decimal as exact text. ``Decimal(text)`` first keeps
+    storage identity (``1.234`` stays 1.234). Auto locale must not re-parse
+    stored stats — that would refuse dest-canonical ``1.234`` or invent 1234.
+    """
+    if value is None or value == "":
+        return None
+    if isinstance(value, Decimal):
+        return value if value.is_finite() else None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return Decimal(value)
+    if isinstance(value, float):
+        if value != value or value in (float("inf"), float("-inf")):
+            return None
+        try:
+            parsed = Decimal(str(value))
+        except (InvalidOperation, ValueError, OverflowError):
+            return None
+        return parsed if parsed.is_finite() else None
+    if isinstance(value, str):
+        try:
+            parsed = Decimal(value.strip())
+        except (InvalidOperation, ValueError):
+            return None
+        return parsed if parsed.is_finite() else None
+    return None
+
+
 def _deserialize_profile(data: dict[str, Any]) -> dict[str, ColumnProfile]:
     out: dict[str, ColumnProfile] = {}
     for name, col in (data or {}).items():
@@ -376,6 +407,10 @@ def _deserialize_profile(data: dict[str, Any]) -> dict[str, ColumnProfile]:
             if isinstance(item, (list, tuple)) and len(item) >= 2:
                 fixed.append((str(item[0]), int(item[1])))
         payload = {**col, "top_values": fixed, "column": col.get("column", name)}
+        if "mean" in payload:
+            payload["mean"] = _rehydrate_stat(payload.get("mean"))
+        if "std" in payload:
+            payload["std"] = _rehydrate_stat(payload.get("std"))
         out[name] = ColumnProfile(**{
             k: payload[k]
             for k in ColumnProfile.__dataclass_fields__
