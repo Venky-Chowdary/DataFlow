@@ -172,13 +172,29 @@ def layer_l1_row_balance(
 
 
 def _cell_text(value: Any) -> str | None:
-    if value is None:
+    """One L2 cell. Same wire as SQL readers; NULL is absence, not a string.
+
+    ``str(value)`` invented ``True`` / ``1E+2`` / a Python ``b'...'`` repr.
+    ``SQL_NULL_SENTINEL`` was counted as a non-null string, so L2 under-counted
+    NULLs after PostgreSQL / Iceberg / procedure extract. Empty string stays a
+    value. Gate-8 leftover ``\\x00NULL\\x00`` stays null.
+    """
+    from services.value_serializer import (
+        NULL_WIRE_SENTINELS,
+        cell_to_string,
+        is_missing_sentinel,
+    )
+
+    if value is None or is_missing_sentinel(value):
         return None
-    if isinstance(value, str) and value in {"", "\x00NULL\x00"}:
-        # Empty string is a value; SQL NULL sentinel from writers → null.
-        if value == "\x00NULL\x00":
+    if isinstance(value, str):
+        if value in NULL_WIRE_SENTINELS or value == "\x00NULL\x00":
             return None
-    return str(value)
+        return value
+    text = cell_to_string(value, preserve_sql_null=True)
+    if text in NULL_WIRE_SENTINELS or text == "\x00NULL\x00":
+        return None
+    return text
 
 
 def _try_decimal(text: str | None) -> Decimal | None:
