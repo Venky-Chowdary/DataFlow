@@ -68,12 +68,11 @@ def coerce_salesforce_id_wire(value: Any) -> str | None:
     encoding uppercase positions (Informatica / Data Loader class). Refuse
     invent for lengths other than 15/18 or non-base62 payloads.
     """
-    if value is None:
-        return None
-    from services.value_serializer import is_missing_sentinel
+    from services.value_serializer import absent_sql_bind
 
-    if is_missing_sentinel(value):
-        return value
+    handled, bound = absent_sql_bind(value)
+    if handled:
+        return bound
     if isinstance(value, (bytes, bytearray, memoryview, dict, list, tuple, bool, int, float)):
         raise ValueError(
             f"Salesforce Id cannot bind {type(value).__name__} — refuse invent"

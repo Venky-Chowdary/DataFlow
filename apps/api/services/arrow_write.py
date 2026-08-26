@@ -129,7 +129,7 @@ def coerce_arrow_cell(
     from datetime import date, datetime, time
     from decimal import Decimal
 
-    from services.value_serializer import is_missing_sentinel
+    from services.value_serializer import is_missing_sentinel, is_reader_null_cell
 
     label = "Iceberg" if dialect == "iceberg" else "Parquet"
     if is_missing_sentinel(value):
@@ -137,7 +137,7 @@ def coerce_arrow_cell(
             "DF_MISSING reached Arrow coerce — sparse CDC must overlay onto "
             "existing rows before building the Arrow batch"
         )
-    if value is None:
+    if is_reader_null_cell(value):
         return None
     if value == "":
         if pa.types.is_string(arrow_type) or pa.types.is_large_string(arrow_type):
