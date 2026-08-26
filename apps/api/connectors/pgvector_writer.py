@@ -553,7 +553,9 @@ def write_mapped_rows(
                     )
 
                     vector = _vector_literal(row.get("embedding"))
-                    metadata = row.get("metadata") or {}
+                    from connectors.writer_common import vector_prepare_metadata
+
+                    metadata = vector_prepare_metadata(row.get("metadata") or {})
                     try:
                         chunk_idx = coerce_chunk_index(row.get("chunk_index"))
                     except ValueError as exc:
@@ -667,7 +669,9 @@ def _pgvector_gate8_meta(valid_rows: list[dict[str, Any]]) -> dict[str, Any]:
 
     rows = []
     for row in valid_rows:
-        meta = dict(row.get("metadata") or {}) if isinstance(row.get("metadata"), dict) else {}
+        from connectors.writer_common import vector_prepare_metadata
+
+        meta = vector_prepare_metadata(row.get("metadata") or {})
         rows.append({
             "id": row.get("id"),
             "source_id": row.get("source_id"),

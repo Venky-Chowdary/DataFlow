@@ -19,6 +19,7 @@ from connectors.writer_common import (  # noqa: E402
     prepare_records_for_vector_write,
     vector_gate8_meta,
     vector_prepare_cell,
+    vector_prepare_metadata,
 )
 from services.value_serializer import (  # noqa: E402
     DF_MISSING_SENTINEL,
@@ -38,6 +39,23 @@ def test_vector_prepare_cell_keeps_zero_false_and_empty():
     assert vector_prepare_cell(True) is True
     assert vector_prepare_cell("") == ""
     assert vector_prepare_cell("kept") == "kept"
+
+
+def test_vector_prepare_metadata_omits_reader_null_keeps_zero():
+    got = vector_prepare_metadata(
+        {
+            "page": SQL_NULL_SENTINEL,
+            "blank_null": None,
+            "kept": "1",
+            "zero": 0,
+            "flag": False,
+            "tags": ["a", "b"],
+        }
+    )
+    assert got == {"kept": "1", "zero": 0, "flag": False, "tags": ["a", "b"]}
+    assert SQL_NULL_SENTINEL not in got.values()
+    assert vector_prepare_metadata(None) == {}
+    assert vector_prepare_metadata("not-a-dict") == {}
 
 
 def test_vector_prepare_cell_decimal_is_dest_canonical():

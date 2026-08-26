@@ -139,7 +139,11 @@ def build_weaviate_objects(
     objects: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = []
     for row in vector_rows:
-        props = dict(sanitize_json_value(row.get("metadata") or {}) or {})
+        from connectors.writer_common import vector_prepare_metadata
+
+        props = vector_prepare_metadata(
+            sanitize_json_value(row.get("metadata") or {}) or {}
+        )
         props["content"] = vector_cell_token(row.get("content"))
         props["source_id"] = vector_cell_token(row.get("source_id"))
         try:

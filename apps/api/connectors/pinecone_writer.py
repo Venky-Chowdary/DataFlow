@@ -296,25 +296,11 @@ def test_pinecone(
 
 
 def _pinecone_metadata_value(value: Any) -> Any | None:
-    """Omit reader-null metadata; keep Pinecone-legal primitives.
+    """Single-value view of ``vector_prepare_metadata``."""
+    from connectors.writer_common import vector_prepare_metadata
 
-    ``if v is None`` left extract ``SQL_NULL_SENTINEL`` as a string field.
-    ``vector_prepare_cell`` already owns that omit. List[str] stays a list.
-    0 / false stay present.
-    """
-    from connectors.writer_common import vector_prepare_cell
-    from services.value_serializer import is_reader_null_cell, present_cell_text
-
-    if is_reader_null_cell(value):
-        return None
-    if isinstance(value, list) and all(isinstance(x, str) for x in value):
-        return value
-    prepared = vector_prepare_cell(value)
-    if prepared is None:
-        return None
-    if isinstance(prepared, (str, int, float, bool)):
-        return prepared
-    return present_cell_text(prepared)
+    prepared = vector_prepare_metadata({"_": value})
+    return prepared.get("_")
 
 
 def build_pinecone_vectors(
@@ -360,12 +346,9 @@ def build_pinecone_vectors(
             continue
         meta["chunk_index"] = chunk
         # Pinecone metadata values must be string/number/bool/list[string].
-        clean_meta: dict[str, Any] = {}
-        for k, v in meta.items():
-            prepared = _pinecone_metadata_value(v)
-            if prepared is None:
-                continue
-            clean_meta[str(k)] = prepared
+        from connectors.writer_common import vector_prepare_metadata
+
+        clean_meta = vector_prepare_metadata(meta)
         values, err = coerce_embedding(row.get("embedding"), expected_dimension=dimension)
         if err or values is None:
             rejected.append({

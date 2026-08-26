@@ -254,7 +254,11 @@ def build_qdrant_points(
                 continue
             digest = hashlib.sha256(material.encode("utf-8")).hexdigest()
             point_id = str(uuid_mod.UUID(digest[:32]))
-        payload = sanitize_json_value(row.get("metadata") or {}) or {}
+        from connectors.writer_common import vector_prepare_metadata
+
+        payload = vector_prepare_metadata(
+            sanitize_json_value(row.get("metadata") or {}) or {}
+        )
         if not isinstance(payload, dict):
             payload = {"_meta": payload}
         payload["content"] = vector_cell_token(row.get("content"))

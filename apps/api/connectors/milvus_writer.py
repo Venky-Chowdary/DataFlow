@@ -153,7 +153,11 @@ def build_milvus_entities(
     entities: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = []
     for row in vector_rows:
-        meta = dict(sanitize_json_value(row.get("metadata") or {}) or {})
+        from connectors.writer_common import vector_prepare_metadata
+
+        meta = vector_prepare_metadata(
+            sanitize_json_value(row.get("metadata") or {}) or {}
+        )
         try:
             chunk = coerce_chunk_index(row.get("chunk_index"))
         except ValueError as exc:

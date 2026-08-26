@@ -1075,6 +1075,37 @@ def vector_prepare_cell(val: Any) -> Any:
     return present_cell_text(val)
 
 
+def vector_prepare_metadata(meta: Any) -> dict[str, Any]:
+    """Walk a metadata mapping; omit reader-null. Always a dict.
+
+    ``sanitize_json_value`` leaves extract ``SQL_NULL_SENTINEL`` as a string,
+    so Qdrant / Milvus / Weaviate / pgvector / Pinecone stored the wire
+    spelling. ``vector_prepare_cell`` already owns one cell. 0 / false stay.
+    List[str] tags stay a list.
+    """
+    from services.value_serializer import is_reader_null_cell
+
+    if not isinstance(meta, dict):
+        return {}
+    out: dict[str, Any] = {}
+    for key, val in meta.items():
+        if is_reader_null_cell(val):
+            continue
+        if isinstance(val, dict):
+            nested = vector_prepare_metadata(val)
+            if nested:
+                out[str(key)] = nested
+            continue
+        if isinstance(val, list) and all(isinstance(item, str) for item in val):
+            out[str(key)] = val
+            continue
+        prepared = vector_prepare_cell(val)
+        if prepared is None:
+            continue
+        out[str(key)] = prepared
+    return out
+
+
 def vector_gate8_meta(
     records: list[dict[str, Any]],
     *,
