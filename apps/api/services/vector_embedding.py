@@ -39,12 +39,16 @@ def coerce_embedding(
         return None, f"embedding must be a list, got {type(value).__name__}"
     if len(value) == 0:
         return None, "missing embedding — refuse zero-vector fabrication"
+    from services.transform_engine import vector_component_carrier
+
     out: list[float] = []
     for i, item in enumerate(value):
-        try:
-            out.append(float(item))
-        except (TypeError, ValueError):
-            return None, f"embedding[{i}] is not numeric"
+        bound = vector_component_carrier(item)
+        if bound is None:
+            return None, (
+                f"embedding[{i}] cannot bind {item!r} — refuse invent"
+            )
+        out.append(bound)
     if expected_dimension is not None and len(out) != int(expected_dimension):
         return None, (
             f"embedding dimension mismatch: got {len(out)}, "

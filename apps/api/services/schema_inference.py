@@ -38,6 +38,7 @@ from services.transform_engine import (
     _parse_date,
     _parse_datetime,
     _parse_decimal,
+    vector_component_carrier,
 )
 from services.value_serializer import evidence_samples, is_null_evidence
 
@@ -247,9 +248,14 @@ def _parse_vector_array(value: str) -> list[float] | None:
         return None
     out: list[float] = []
     for item in parsed:
+        # JSON numbers only — string components are ARRAY / write-path, not
+        # inferred VECTOR. bool ⊂ int must not invent a 1.0 dimension.
         if isinstance(item, bool) or not isinstance(item, (int, float)):
             return None
-        out.append(float(item))
+        bound = vector_component_carrier(item)
+        if bound is None:
+            return None
+        out.append(bound)
     return out
 
 

@@ -1149,8 +1149,8 @@ def _parse_json(value: Any) -> str | None:
     )
 
 
-def _vector_component_carrier(value: Any) -> float | None:
-    """One VECTOR component through the write-path float binder.
+def vector_component_carrier(value: Any) -> float | None:
+    """One VECTOR / embedding component through the write-path float binder.
 
     ``float(text)`` invented Auto ``1.234`` and collapsed ``2**53+1``.
     Native IEEE floats pass through. Locale money still binds.
@@ -1197,7 +1197,7 @@ def _parse_vector(value: str) -> list[float] | None:
             return None
         out: list[float] = []
         for x in parsed:
-            f = _vector_component_carrier(x)
+            f = vector_component_carrier(x)
             if f is None:
                 return None
             out.append(f)
