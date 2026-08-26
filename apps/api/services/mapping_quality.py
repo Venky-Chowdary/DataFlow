@@ -6,6 +6,7 @@ import re
 from typing import Any
 
 from services.transform_engine import CANONICAL_BOOLEAN_TOKENS, apply_transform, decimal_wire_value
+from services.value_serializer import is_null_evidence
 
 EMAIL_RE = re.compile(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
 UUID_RE = re.compile(
@@ -121,14 +122,22 @@ _STRING_TYPE_TOKENS = (
 )
 
 
-def _non_empty(samples: list[str]) -> list[str]:
-    return [s.strip() for s in samples if s is not None and str(s).strip()]
+def _non_empty(samples: list[Any]) -> list[str]:
+    """Present samples only. Reader-wired SQL NULL is not a VARCHAR token."""
+    out: list[str] = []
+    for raw in samples:
+        if is_null_evidence(raw):
+            continue
+        text = raw.strip() if isinstance(raw, str) else str(raw).strip()
+        if text and not is_null_evidence(text):
+            out.append(text)
+    return out
 
 
-def _null_rate(samples: list[str]) -> float:
+def _null_rate(samples: list[Any]) -> float:
     if not samples:
         return 0.0
-    empty = sum(1 for s in samples if s is None or str(s).strip() == "")
+    empty = sum(1 for raw in samples if is_null_evidence(raw))
     return empty / len(samples)
 
 
@@ -182,7 +191,7 @@ def _sample_binds_temporal(value: str) -> bool:
 
 def analyze_column_profile(name: str, samples: list[str]) -> dict[str, Any]:
     """Infer column profile from sample values for mapping quality scoring."""
-    vals = _non_empty([str(x) for x in samples[:24]])
+    vals = _non_empty(samples[:24])
     profile: dict[str, Any] = {
         "name": name,
         "sample_count": len(samples),
