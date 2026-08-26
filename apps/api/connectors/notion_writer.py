@@ -17,6 +17,7 @@ from connectors.saas_common import (
     humanize_http_error,
     is_auth_error,
     request,
+    saas_record_id,
     token,
 )
 from connectors.writer_common import (
@@ -210,6 +211,19 @@ def _page_id(raw: str) -> str:
     if len(raw) == 32 and re.fullmatch(r"[0-9a-fA-F]{32}", raw):
         return f"{raw[:8]}-{raw[8:12]}-{raw[12:16]}-{raw[16:20]}-{raw[20:]}"
     return raw
+
+
+def _notion_page_identity(value: Any) -> str | None:
+    """Present Notion page id, or None when reader-null / blank.
+
+    ``if val`` treated extract ``SQL_NULL_SENTINEL`` as a page id and PATCHed
+    ``/v1/pages/__DF_SQL_NULL__``. Integer ``0`` stayed a present token.
+    """
+    token_id = saas_record_id(value)
+    if token_id is None:
+        return None
+    page = _page_id(token_id)
+    return page or None
 
 
 def _fetch_database_properties(
@@ -563,14 +577,13 @@ def write_mapped_rows(
                     )
                 continue
             for c in candidates:
-                val = row_dict.get(c)
-                if val:
-                    record_id = _page_id(str(val))
+                record_id = _notion_page_identity(row_dict.get(c))
+                if record_id is not None:
                     break
 
         notion_properties: dict[str, Any] = {}
         has_title = False
-        from services.value_serializer import is_missing_sentinel
+        from services.value_serializer import present_cell_text
 
         for col, val in row_dict.items():
             prop_type = properties.get(col.lower())
@@ -687,7 +700,7 @@ def write_mapped_rows(
                 continue
             if prop_value is not None:
                 notion_properties[col] = prop_value
-                if prop_type == "title" and val is not None and not is_missing_sentinel(val) and str(val):
+                if prop_type == "title" and present_cell_text(val) is not None:
                     has_title = True
 
         if title_name and not has_title:
