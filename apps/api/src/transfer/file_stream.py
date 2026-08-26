@@ -325,12 +325,7 @@ def peek_file_source(
                 if not line:
                     continue
                 total += 1
-                try:
-                    obj = json.loads(line)
-                except json.JSONDecodeError as exc:
-                    raise ValueError(f"Invalid JSONL on line {total}: {exc}") from exc
-                if not isinstance(obj, dict):
-                    raise ValueError(_JSONL_SCALAR_ERROR)
+                obj = _parse_jsonl_object(line, total)
                 for k in obj.keys():
                     name = str(k).strip()
                     if name and name not in columns:
@@ -476,6 +471,19 @@ def _json_empty_to_none(value: Any) -> Any:
     return value
 
 
+def _parse_jsonl_object(line: str, line_no: int) -> dict:
+    """One JSONL object. Numbers use json_loads_exact, not stdlib float()."""
+    from services.value_serializer import json_loads_exact
+
+    try:
+        obj = json_loads_exact(line)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid JSONL on line {line_no}: {exc}") from exc
+    if not isinstance(obj, dict):
+        raise ValueError(_JSONL_SCALAR_ERROR)
+    return obj
+
+
 def _iter_csv_batches(
     content: bytes | str | os.PathLike,
     chunk_size: int,
@@ -524,12 +532,7 @@ def _iter_jsonl_batches(
             if not line:
                 continue
             line_no += 1
-            try:
-                obj = json.loads(line)
-            except json.JSONDecodeError as exc:
-                raise ValueError(f"Invalid JSONL on line {line_no}: {exc}") from exc
-            if not isinstance(obj, dict):
-                raise ValueError(_JSONL_SCALAR_ERROR)
+            obj = _parse_jsonl_object(line, line_no)
             batch.append(_json_empty_to_none(obj))
             if len(batch) >= chunk_size:
                 yield batch
