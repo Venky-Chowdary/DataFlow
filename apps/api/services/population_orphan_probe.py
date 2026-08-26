@@ -15,6 +15,7 @@ import logging
 from typing import Any
 
 from services.sample_orphan_probe import (
+    _fk_display,
     _fk_parts,
     _resolve_source_column,
     _severity,
@@ -353,13 +354,15 @@ def probe_population_fk_orphans(
                 "referenced_table": ref_table,
                 "referenced_column": parent_col,
                 "orphan_count": orphan_count,
-                "examples": [str(v)[:80] for v in examples[:5]],
+                "examples": [_fk_display(v) for v in examples[:5]],
                 "coverage": "population_orphan_probe",
                 "population_proof": orphan_count == 0,
             }
         )
         if orphan_count > 0:
-            ex = ", ".join(str(v)[:40] for v in examples[:3])
+            ex = ", ".join(
+                text for v in examples[:3] if (text := _fk_display(v, limit=40))
+            )
             findings.append(
                 {
                     "code": "fk_orphan_in_population",
