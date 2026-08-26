@@ -315,6 +315,7 @@ def build_pinecone_vectors(
         embedding_reject_reason,
         vector_cell_token,
         vector_fallback_material,
+        vector_reject_row_label,
     )
 
     vectors: list[dict[str, Any]] = []
@@ -327,7 +328,7 @@ def build_pinecone_vectors(
             chunk = coerce_chunk_index(row.get("chunk_index"))
         except ValueError as exc:
             rejected.append({
-                "row": cell_to_string(row.get("id") or ""),
+                "row": vector_reject_row_label(row),
                 "column": "chunk_index",
                 "target": "chunk_index",
                 "value": cell_to_string(row.get("chunk_index")),
@@ -350,7 +351,7 @@ def build_pinecone_vectors(
         values, err = coerce_embedding(row.get("embedding"), expected_dimension=dimension)
         if err or values is None:
             rejected.append({
-                "row": cell_to_string(row.get("id") or ""),
+                "row": vector_reject_row_label(row),
                 "column": "embedding",
                 "target": "values",
                 "value": "",

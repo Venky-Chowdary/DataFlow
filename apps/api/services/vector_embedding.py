@@ -135,6 +135,23 @@ def vector_cell_token(value: Any) -> str:
     return present_cell_text(value) or ""
 
 
+def vector_reject_row_label(row: dict[str, Any], *keys: str) -> str:
+    """Quarantine row label on the dest id wire.
+
+    ``cell_to_string(row.get("id") or "")`` dropped integer ``0`` so the
+    operator saw an empty row. Reader-null stays empty. ``True`` and dest
+    ``true`` share one label. Optional extra keys (``source_id``) are the
+    pgvector fallback when id is absent.
+    """
+    from services.value_serializer import present_cell_text
+
+    for key in keys or ("id",):
+        token = present_cell_text(row.get(key))
+        if token:
+            return token
+    return ""
+
+
 def vector_fallback_material(
     source_id: Any,
     chunk_index: int,

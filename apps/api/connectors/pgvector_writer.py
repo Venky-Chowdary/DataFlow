@@ -491,10 +491,13 @@ def write_mapped_rows(
             for row in vector_rows:
                 emb, err = coerce_embedding(row.get("embedding"), expected_dimension=dimension)
                 if err or emb is None:
-                    from services.vector_embedding import embedding_reject_reason
+                    from services.vector_embedding import (
+                        embedding_reject_reason,
+                        vector_reject_row_label,
+                    )
 
                     rejected_details.append({
-                        "row": str(row.get("id") or ""),
+                        "row": vector_reject_row_label(row, "id", "source_id") or "?",
                         "column": "embedding",
                         "target": "embedding",
                         "value": "",
@@ -546,6 +549,7 @@ def write_mapped_rows(
                     from services.vector_embedding import (
                         coerce_chunk_index,
                         vector_cell_token,
+                        vector_reject_row_label,
                     )
 
                     vector = _vector_literal(row.get("embedding"))
@@ -554,7 +558,7 @@ def write_mapped_rows(
                         chunk_idx = coerce_chunk_index(row.get("chunk_index"))
                     except ValueError as exc:
                         rejected_details.append({
-                            "row": row.get("id") or row.get("source_id") or "?",
+                            "row": vector_reject_row_label(row, "id", "source_id") or "?",
                             "column": "chunk_index",
                             "target": "chunk_index",
                             "value": str(row.get("chunk_index"))[:120],
