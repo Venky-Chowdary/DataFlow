@@ -47,3 +47,12 @@ def test_coalesce_skips_reader_null():
         "coalesce([a], [b])",
         {"a": SQL_NULL_SENTINEL, "b": "kept"},
     ) == "kept"
+
+
+def test_not_null_is_unknown_and_does_not_match():
+    assert value("not [x]", {"x": None}) is None
+    assert value("not [x]", {"x": SQL_NULL_SENTINEL}) is None
+    assert compile_expression("not [x]").matches({"x": None}) is False
+    assert compile_expression("not [x]").matches({"x": SQL_NULL_SENTINEL}) is False
+    assert compile_expression("not [x]").matches({"x": False}) is True
+    assert compile_expression("not [x]").matches({"x": True}) is False

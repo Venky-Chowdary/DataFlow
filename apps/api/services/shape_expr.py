@@ -201,6 +201,10 @@ class _Unary(_Node):
     def evaluate(self, row: Mapping[str, Any]) -> Any:
         value = self.operand.evaluate(row)
         if self.op == "not":
+            # NOT NULL is unknown — inventing False made ``not [flag]`` True
+            # and a filter included every reader-wired SQL NULL.
+            if is_blank(value):
+                return None
             return not _as_bool(value)
         if value is None:
             return None
