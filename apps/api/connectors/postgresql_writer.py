@@ -1231,7 +1231,11 @@ def _copy_text_value(value: Any) -> str:
         # field ``\x68656c6c6f``, which bytea parses as hex.
         raw = "\\x" + bytes(value).hex()
     elif isinstance(value, Decimal):
-        return str(value)
+        from services.value_serializer import safe_decimal_text
+
+        # Dest-canonical text — str(Decimal("1E+2")) is "1E+2" so COPY and
+        # parameter binds checksum-diverged after extract emits 100.
+        return safe_decimal_text(value) or str(value)
     elif isinstance(value, (int, float)):
         return str(value)
     else:

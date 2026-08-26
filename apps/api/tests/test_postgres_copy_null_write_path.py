@@ -37,3 +37,15 @@ def test_copy_zero_and_false_stay_present():
     assert _copy_text_value(0) == "0"
     assert _copy_text_value(False) == "f"
     assert _copy_text_value(True) == "t"
+
+
+def test_copy_decimal_uses_dest_canonical_text():
+    from decimal import Decimal
+
+    from services.value_serializer import safe_decimal_text
+
+    assert _copy_text_value(Decimal("1E+2")) == "100"
+    assert _copy_text_value(Decimal("100")) == "100"
+    assert _copy_text_value(Decimal("1E+2")) == safe_decimal_text(Decimal("1E+2"))
+    assert _copy_text_value(Decimal("1E+2")) != str(Decimal("1E+2"))
+    assert _copy_text_value(Decimal("0")) == "0"
