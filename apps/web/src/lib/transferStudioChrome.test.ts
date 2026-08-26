@@ -521,6 +521,17 @@ describe("Transfer Studio chrome contracts", () => {
     assert.doesNotMatch(panel, /Set number locale[\s\S]*Set number locale/);
   });
 
+  it("Validate surfaces date locale set_locale with one Advanced CTA", () => {
+    const dash = readFileSync(join(webRoot, "components/transfer/ValidateDashboard.tsx"), "utf8");
+    const panel = readFileSync(join(webRoot, "components/transfer/NumberLocalePanel.tsx"), "utf8");
+    const honesty = readFileSync(join(webRoot, "lib/validateHonestyControls.ts"), "utf8");
+    assert.match(honesty, /export function dateLocaleValidateAction/);
+    assert.match(dash, /DateLocalePanel/);
+    assert.match(dash, /dateLocaleValidateAction\(preflight\)/);
+    assert.match(panel, /Set date locale/);
+    assert.doesNotMatch(panel, /Set date locale[\s\S]*Set date locale/);
+  });
+
   it("Source, Schedules, and Gate8 pick files through one sr-only input + label", () => {
     const hidden = readFileSync(join(webRoot, "components/ui/HiddenFileInput.tsx"), "utf8");
     const page = readFileSync(join(webRoot, "pages/TransferPage.tsx"), "utf8");

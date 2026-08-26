@@ -429,6 +429,37 @@ def _is_ambiguous_mdy_dmy(text: str, date_locale: str = "") -> bool:
     )
 
 
+def ambiguous_date_columns(
+    rows: list[dict] | None,
+    columns: list[str] | None = None,
+    date_locale: str = "",
+) -> list[dict[str, Any]]:
+    """Columns whose slash/dash/dot dates are MDY/DMY-ambiguous under Auto.
+
+    Operator next action: set date locale DMY or MDY. Never invent Jan 2 vs Feb 1.
+    """
+    if _active_date_locale(date_locale) or not rows:
+        return []
+    cols = columns or (list(rows[0].keys()) if rows and isinstance(rows[0], dict) else [])
+    findings: list[dict[str, Any]] = []
+    for col in cols:
+        samples: list[str] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            raw = str(row.get(col) or "").strip()
+            if not raw or not _is_ambiguous_mdy_dmy(raw):
+                continue
+            samples.append(raw)
+        if samples:
+            findings.append({
+                "column": col,
+                "samples": samples[:5],
+                "next_action": "Set date locale DMY or MDY in Destination → Advanced",
+            })
+    return findings
+
+
 def infer_date_locale(
     records: Iterable[Any],
     columns: list[str] | None = None,

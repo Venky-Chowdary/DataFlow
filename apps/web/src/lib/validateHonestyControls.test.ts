@@ -8,6 +8,7 @@ import {
   buildConversionClassHonesty,
   buildReferentialIntegrityHonesty,
   buildValidateHonestyControls,
+  dateLocaleValidateAction,
   numberLocaleValidateAction,
   schemaDriftAllowsAcknowledge,
   schemaDriftRequiresRemap,
@@ -225,6 +226,28 @@ describe("validateHonestyControls", () => {
     assert.deepEqual(action.columns, ["amount", "fee"]);
     assert.match(action.message, /amount, fee/);
     assert.match(action.message, /Destination → Advanced/);
+    assert.match(action.message, /Auto will not guess/);
+  });
+
+  it("date locale set_locale names columns and does not invent ok", () => {
+    assert.equal(dateLocaleValidateAction(null), null);
+    assert.equal(
+      dateLocaleValidateAction({
+        date_locale_report: { decision: "ok", ambiguous_columns: [] },
+      } as unknown as PreflightResult),
+      null,
+    );
+    const action = dateLocaleValidateAction({
+      date_locale_report: {
+        decision: "set_locale",
+        ambiguous_columns: [{ column: "event_date" }, { column: "due_on" }],
+      },
+    } as unknown as PreflightResult);
+    assert.ok(action);
+    assert.deepEqual(action.columns, ["event_date", "due_on"]);
+    assert.match(action.message, /event_date, due_on/);
+    assert.match(action.message, /Jan 2 or Feb 1/);
+    assert.match(action.message, /DMY or MDY/);
     assert.match(action.message, /Auto will not guess/);
   });
 });

@@ -283,6 +283,28 @@ export function numberLocaleValidateAction(
   };
 }
 
+export type DateLocaleValidateAction = NumberLocaleValidateAction;
+
+/** Validate next action when Auto cannot tell Jan 2 from Feb 1. */
+export function dateLocaleValidateAction(
+  preflight: PreflightResult | null | undefined,
+): DateLocaleValidateAction | null {
+  const report = preflight?.date_locale_report;
+  if (!report || typeof report !== "object") return null;
+  if (String(report.decision || "") !== "set_locale") return null;
+  const columns = (report.ambiguous_columns || [])
+    .map((row) => String(row?.column || "").trim())
+    .filter(Boolean);
+  const named = columns.slice(0, 6).join(", ") || "event_date";
+  return {
+    decision: "set_locale",
+    columns,
+    message:
+      `${named}: day/month order is ambiguous (01/02/2024 is Jan 2 or Feb 1). ` +
+      "Set date locale DMY or MDY in Destination → Advanced — Auto will not guess.",
+  };
+}
+
 /** Hard-breaking drift (Confluent NONE) — remap / re-sign, never acknowledge. */
 export function schemaDriftRequiresRemap(
   details?: Record<string, unknown> | null,

@@ -45,6 +45,7 @@ from services.preflight_cursor_gate import (
 )
 from services.source_duplicate_probe import probe_source_duplicate_keys_result
 from services.transform_engine import (
+    ambiguous_date_columns,
     ambiguous_number_columns,
     infer_date_locale,
     infer_number_locale,
@@ -2252,12 +2253,34 @@ def run_file_preflight(
     number_findings = ambiguous_number_columns(
         sample_rows, columns, number_locale=number_locale
     )
+    date_findings = ambiguous_date_columns(
+        sample_rows, columns, date_locale=date_locale
+    )
     out["number_locale"] = number_locale
     out["number_locale_report"] = {
         "number_locale": number_locale or "",
         "ambiguous_columns": number_findings,
         "decision": "set_locale" if number_findings else "ok",
     }
+    out["date_locale"] = date_locale
+    out["date_locale_report"] = {
+        "date_locale": date_locale or "",
+        "ambiguous_columns": date_findings,
+        "decision": "set_locale" if date_findings else "ok",
+    }
+    if date_findings:
+        cols = ", ".join(f["column"] for f in date_findings[:6])
+        out.setdefault("warnings", []).append(
+            {
+                "id": "date_locale",
+                "message": (
+                    f"{cols}: day/month order is ambiguous (01/02/2024 is "
+                    "Jan 2 or Feb 1). Set date locale DMY or MDY in "
+                    "Destination → Advanced — Auto will not guess."
+                ),
+                "details": {"columns": date_findings},
+            }
+        )
     if number_findings:
         cols = ", ".join(f["column"] for f in number_findings[:6])
         out.setdefault("warnings", []).append(

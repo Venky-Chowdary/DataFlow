@@ -9510,7 +9510,8 @@ button.df2-vd-assist-toggle:focus-visible {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   opacity: 0.7;
 }
-.df2-vd-number-locale-cta {
+.df2-vd-number-locale-cta,
+.df2-vd-date-locale-cta {
   margin-top: 10px;
 }
 

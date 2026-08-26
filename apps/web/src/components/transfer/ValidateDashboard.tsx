@@ -35,7 +35,7 @@ import {
   remapToTypeForMismatch,
 } from "../../lib/validateIssueGrouping";
 import { buildValidateDecisionPath } from "../../lib/validateDecisionPath";
-import { buildValidateHonestyControls, numberLocaleValidateAction, schemaDriftAllowsAcknowledge, schemaDriftCompatibilityHeadline, schemaDriftRequiresRemap } from "../../lib/validateHonestyControls";
+import { buildValidateHonestyControls, dateLocaleValidateAction, numberLocaleValidateAction, schemaDriftAllowsAcknowledge, schemaDriftCompatibilityHeadline, schemaDriftRequiresRemap } from "../../lib/validateHonestyControls";
 import { dashboardCtaVariant, type ValidateStudioPrimary } from "../../lib/validateStudioPrimary";
 import { isFkOrphanBlockerText, isFkOrphanCtaKind } from "../../lib/fkOrphanCta";
 import {
@@ -50,7 +50,7 @@ import { ringDasharray, validateRingPercent } from "../../lib/progressRing";
 import { BadDataFixDrawer, type BadDataIssue } from "./BadDataFixDrawer";
 import { Gate8ProofCard, type Gate8Reconciliation } from "./Gate8ProofCard";
 import { LoadHistoryPanel } from "./LoadHistoryPanel";
-import { NumberLocalePanel } from "./NumberLocalePanel";
+import { DateLocalePanel, NumberLocalePanel } from "./NumberLocalePanel";
 import { RepairProposalDrawer } from "./RepairProposalDrawer";
 
 type GateMeta = {
@@ -2820,6 +2820,13 @@ export function ValidateDashboard({
       {!running ? (
         <NumberLocalePanel
           action={numberLocaleValidateAction(preflight)}
+          onOpenAdvanced={onOpenIdentitySettings}
+        />
+      ) : null}
+
+      {!running ? (
+        <DateLocalePanel
+          action={dateLocaleValidateAction(preflight)}
           onOpenAdvanced={onOpenIdentitySettings}
         />
       ) : null}
