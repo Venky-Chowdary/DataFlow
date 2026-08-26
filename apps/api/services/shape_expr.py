@@ -326,18 +326,17 @@ def _as_number(value: Any) -> Decimal:
 
 
 def _as_bool(value: Any) -> bool:
+    """Write-path tokens only (true/false/t/f/1/0). Informal yes/y/2 refuse."""
     if isinstance(value, bool):
         return value
     if value is None:
         return False
-    if isinstance(value, (int, float, Decimal)):
-        return value != 0
-    text = str(value).strip().casefold()
-    if text in ("true", "t", "yes", "y", "1"):
-        return True
-    if text in ("false", "f", "no", "n", "0", ""):
-        return False
-    raise EvalError(f"'{value}' is not a truth value")
+    from services.transform_engine import apply_transform
+
+    parsed, err = apply_transform(str(value).strip(), "boolean")
+    if parsed is None or err:
+        raise EvalError(f"'{value}' is not a truth value")
+    return bool(parsed)
 
 
 def _both_numeric(left: Any, right: Any) -> bool:

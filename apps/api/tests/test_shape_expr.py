@@ -62,6 +62,22 @@ def test_to_number_reads_what_a_human_typed():
     assert value("to_number('')") is None
 
 
+def test_to_boolean_uses_write_path_tokens_only():
+    """Informal yes/y and non-zero integers are not TRUE — same as apply_transform."""
+    assert value("to_boolean('true')") is True
+    assert value("to_boolean('t')") is True
+    assert value("to_boolean('1')") is True
+    assert value("to_boolean('false')") is False
+    assert value("to_boolean('0')") is False
+    assert value("to_boolean(1)") is True
+    assert value("to_boolean(0)") is False
+    for raw in ("yes", "y", "no", "on", "2", "-1"):
+        with pytest.raises(EvalError, match="not a truth value"):
+            value(f"to_boolean('{raw}')")
+    with pytest.raises(EvalError, match="not a truth value"):
+        value("to_boolean(2)")
+
+
 def test_to_date_never_guesses_day_month_order():
     with pytest.raises(EvalError, match="explicit format"):
         value("to_date('03/04/2026')")
