@@ -189,20 +189,31 @@ def parse_sql_datetime(
     try:
         dt = datetime.fromisoformat(text)
     except ValueError:
+        # Year-first space forms are unambiguous. Slash/dash day-month pairs
+        # go through apply_transform so Auto fails closed on 01/02/2024 00:00:00
+        # instead of inventing MDY the way strptime did.
+        dt = None
         for fmt in (
             "%Y-%m-%d %H:%M:%S",
             "%Y-%m-%d %H:%M:%S.%f",
             "%Y/%m/%d %H:%M:%S",
-            "%m/%d/%Y %H:%M:%S",
-            "%d/%m/%Y %H:%M:%S",
         ):
             try:
                 dt = datetime.strptime(text, fmt)
                 break
             except ValueError:
                 continue
-        else:
-            return None
+        if dt is None:
+            from services.transform_engine import apply_transform
+
+            iso, err = apply_transform(text, "datetime")
+            if err or iso is None:
+                return None
+            try:
+                parsed = datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
+            except ValueError:
+                return None
+            dt = parsed.replace(tzinfo=None) if parsed.tzinfo is None else parsed
     if dt.tzinfo is not None:
         if wall_clock:
             return dt.replace(tzinfo=None)
