@@ -3709,8 +3709,13 @@ def array_element_unfit_reason(
             return f"element does not fit {carrier}"
     if logical == "boolean" and not boolean_value_fits(element):
         return f"element is not a canonical boolean for {carrier}"
-    if logical in {"date", "time", "datetime"} and not _is_temporal_wire(element):
-        return f"element is not a parseable temporal for {carrier}"
+    if logical in {"date", "time", "datetime"}:
+        text = element if isinstance(element, str) else str(element)
+        text = text.strip()
+        if text:
+            parsed, err = apply_transform(text, logical)
+            if err or parsed is None:
+                return f"element is not a parseable temporal for {carrier}"
 
     from services.ddl_compatibility import parse_varchar_width
 

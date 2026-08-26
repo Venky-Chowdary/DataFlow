@@ -1187,6 +1187,11 @@ def _parse_time(value: str) -> str | None:
     text = value.strip()
     if not text:
         return None
+    # Digit-only / epoch tokens are not clock times. CPython
+    # ``time.fromisoformat("1704067200")`` invents ``17:04:06.720000``.
+    # A real clock always has ``:`` or an AM/PM marker.
+    if ":" not in text and not re.search(r"(?i)\b(?:am|pm)\b", text):
+        return None
     # Prefer fromisoformat so ``15:30:00+05:30`` keeps tzinfo.
     iso_text = text
     if iso_text.upper().endswith("Z"):

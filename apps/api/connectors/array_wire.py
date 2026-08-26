@@ -111,7 +111,12 @@ def _is_numeric_wire(value: Any) -> bool:
 
 
 def _is_temporal_wire(value: Any) -> bool:
-    """True when a cell parses as an ISO-8601 date / time / timestamp."""
+    """True when the write path binds this cell as date, datetime, or time.
+
+    ``time.fromisoformat("1704067200")`` invented ``17:04:06.720000``.
+    Unambiguous ``31/12/2024`` / ``12/31/2024`` bind on the write path but
+    ISO-only parsing refused them. Auto ``01/02/2024`` still refuses.
+    """
     from datetime import date, datetime, time
 
     if isinstance(value, (datetime, date, time)):
@@ -119,14 +124,11 @@ def _is_temporal_wire(value: Any) -> bool:
     text = str(value).strip()
     if not text:
         return True
-    # ``fromisoformat`` gained ``Z`` support in 3.11; normalize for older runtimes.
-    normalized = text[:-1] + "+00:00" if text.endswith(("Z", "z")) else text
-    normalized = normalized.replace(" ", "T", 1) if " " in normalized else normalized
-    for parser in (datetime.fromisoformat, date.fromisoformat, time.fromisoformat):
-        try:
-            parser(normalized)
+    from services.transform_engine import apply_transform
+
+    for kind in ("date", "datetime", "time"):
+        parsed, err = apply_transform(text, kind)
+        if parsed is not None and not err:
             return True
-        except (ValueError, TypeError):
-            continue
     return False
 
