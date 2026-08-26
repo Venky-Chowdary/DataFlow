@@ -226,8 +226,14 @@ def _active_number_locale(explicit: str = "") -> str:
 
 
 def set_active_number_locale(locale: str) -> contextvars.Token[str]:
-    """Pin the number locale for this transfer. Returns a reset token."""
-    return _NUMBER_LOCALE_VAR.set(_active_number_locale(locale))
+    """Pin US/EU for this transfer, or Auto when ``locale`` is empty.
+
+    Empty must clear the pin — ``_active_number_locale("")`` inherits the
+    current context, so ``set(\"\")`` used to leave EU in place and Gate-8
+    re-read dest ``1.234`` as thousands.
+    """
+    pinned = (locale or "").strip().upper()
+    return _NUMBER_LOCALE_VAR.set(pinned if pinned in {"US", "EU"} else "")
 
 
 def reset_active_number_locale(token: contextvars.Token[str]) -> None:
@@ -1674,7 +1680,15 @@ def apply_transform(raw: str | None, transform: str) -> tuple[Any, str | None]:
         parsed = _parse_decimal(text)
         if parsed is None:
             return None, f"Invalid decimal: {text!r}"
-        return parsed, None
+        # Return Decimal so bind does not re-apply locale to the canonical
+        # spelling (EU ``1,234`` → ``1.234`` must not become thousands 1234).
+        # Extreme scientific stays a short string (never expand 1e1000000).
+        if "e" in parsed.lower():
+            return parsed, None
+        try:
+            return Decimal(parsed), None
+        except (InvalidOperation, Overflow, ValueError):
+            return parsed, None
 
     if transform == "integer":
         bool_as_number = canonical_boolean_as_number(text)

@@ -2049,10 +2049,12 @@ def coerce_map_wire(value: Any, *, engine: str = "", ddl_type: str = "") -> Any:
 
 
 def coerce_decimal_wire(value: Any, *, ddl_type: str = "", engine: str = "") -> Any:
-    """Exact ``Decimal`` bind — never float64 round-trip invent.
+    """Exact ``Decimal`` bind — write-path parse, never float64 invent.
 
-    Values that cannot fit ``DECIMAL|NUMERIC|NUMBER(p,s)`` raise. PostgreSQL-
-    family destinations round fractional excess (engine docs) — match
+    Strings go through ``decimal_wire_value``. Auto ``1,234`` / ``1.234``
+    refuse; locale money the write path stores still binds. Values that
+    cannot fit ``DECIMAL|NUMERIC|NUMBER(p,s)`` raise. PostgreSQL-family
+    destinations round fractional excess (engine docs) — match
     ``fits_decimal(..., dest_db=)`` so quarantine and bind never disagree.
     Bare DECIMAL without (p,s) still returns an exact ``Decimal``.
     """
@@ -2105,7 +2107,14 @@ def coerce_decimal_wire(value: Any, *, ddl_type: str = "", engine: str = "") -> 
                     f"empty string cannot coerce to decimal for {ddl_type or 'DECIMAL'} — "
                     "refuse silent NULL invent (quarantine or remap upstream)"
                 )
-            d = Decimal(text)
+            from services.transform_engine import decimal_wire_value
+
+            parsed = decimal_wire_value(text)
+            if parsed is None:
+                raise ValueError(
+                    f"decimal wire parse failed — refuse invent into {ddl_type or 'DECIMAL'}"
+                )
+            d = parsed
         else:
             raise ValueError(
                 f"unsupported decimal wire type: {type(value).__name__}"

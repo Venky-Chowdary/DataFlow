@@ -48,6 +48,8 @@ from services.transform_engine import (
     _parse_datetime,
     apply_transform,
     decimal_wire_value,
+    reset_active_number_locale,
+    set_active_number_locale,
 )
 from services.type_system import instant_date_carrier, normalize_logical_type
 from services.value_serializer import cell_to_string, is_missing_sentinel, json_default
@@ -3755,10 +3757,16 @@ def fingerprint_for_reconcile(
         wire = cell_to_string(value, preserve_sql_null=True)
 
     if ddl_type:
+        # Dest read-back is storage-canonical. Re-applying the transfer locale
+        # turns EU ``1.234`` (from ``1,234``) into 1234 and false-fails Gate-8.
+        token = set_active_number_locale("")
         try:
-            wire = normalize_sql_bind_value(wire, ddl_type, engine=engine)
-        except Exception:
-            pass
+            try:
+                wire = normalize_sql_bind_value(wire, ddl_type, engine=engine)
+            except Exception:
+                pass
+        finally:
+            reset_active_number_locale(token)
         # Fingerprint the instant at the granularity the carrier keeps, or a
         # declared narrowing (Snowflake TIMESTAMP → MySQL DATETIME) reports as
         # a whole-column checksum mismatch with no column named.
@@ -4061,7 +4069,13 @@ def _canonicalize_number(value: Any) -> str | None:
             text = str(value).strip()
             if not text:
                 return None
-            parsed = decimal_wire_value(text)
+            # Checksum dest text is already storage-canonical. Re-applying the
+            # transfer locale turns EU ``1.234`` (from ``1,234``) into 1234.
+            token = set_active_number_locale("")
+            try:
+                parsed = decimal_wire_value(text)
+            finally:
+                reset_active_number_locale(token)
             if parsed is None:
                 # Write path refused (Auto ``1,234`` / ``1.234`` / ``1.000``).
                 # Decimal(text) invented a different number (``1.000`` → ``1``).
