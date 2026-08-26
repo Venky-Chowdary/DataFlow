@@ -11,18 +11,18 @@ import logging
 import statistics
 from collections import Counter
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
 try:
     from services.pii_guard import is_sensitive_name, pii_findings
-    from services.transform_engine import apply_transform, decimal_wire_value
-    from services.value_serializer import is_null_evidence
+    from services.transform_engine import _parse_date, _parse_datetime, decimal_wire_value
+    from services.value_serializer import cell_to_string, is_null_evidence
 except ImportError:  # pragma: no cover - compatibility for tests
     from src.services.pii_guard import is_sensitive_name, pii_findings
-    from src.services.transform_engine import apply_transform, decimal_wire_value
-    from src.services.value_serializer import is_null_evidence
+    from src.services.transform_engine import _parse_date, _parse_datetime, decimal_wire_value
+    from src.services.value_serializer import cell_to_string, is_null_evidence
 
 _UTC = timezone.utc
 
@@ -102,19 +102,50 @@ def _is_fractional_decimal(value: Any) -> bool:
     return is_fractional_wire_value(value)
 
 
-def _parse_iso_date(value: Any) -> datetime | None:
+def _temporal_kind(col_type: str) -> str:
+    """DATE refuses epoch; TIMESTAMP / DATETIME bind epoch as an instant."""
+    text = (col_type or "").upper()
+    if "DATE" in text and "TIME" not in text:
+        return "date"
+    if any(tok in text for tok in ("TIMESTAMP", "DATETIME", "TIMESTAMPTZ")):
+        return "datetime"
+    return "date"
+
+
+def _parse_iso_date(value: Any, *, temporal: str = "datetime") -> datetime | None:
+    """Write-path temporal bind, then a datetime for the future-date fence.
+
+    ``apply_transform(str(value), 'datetime')`` invented a calendar from
+    DATE epoch seconds and from ``str(datetime)`` space form. DATE uses
+    ``_parse_date`` (epoch refuses, YYYYMMDD still binds). TIMESTAMP uses
+    ``_parse_datetime``. Auto ``01/02/2024`` still refuses.
+    """
     if _is_null(value):
         return None
-    # Reuse the engine's full date/datetime parser (handles ISO, day-first,
-    # epoch, and many locale formats) and convert the canonical result back.
-    parsed, _ = apply_transform(str(value).strip(), "datetime")
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, date):
+        return datetime(value.year, value.month, value.day)
+    text = value if isinstance(value, str) else cell_to_string(value, preserve_sql_null=True)
+    if is_null_evidence(text):
+        return None
+    kind = (temporal or "datetime").strip().lower()
+    if kind == "date":
+        parsed = _parse_date(text, with_time=True)
+        if parsed is None:
+            return None
+        try:
+            return datetime.fromisoformat(parsed)
+        except ValueError:
+            return None
+    parsed = _parse_datetime(text)
     if not parsed:
         return None
-    text = str(parsed).strip()
-    if text.endswith("Z"):
-        text = text[:-1] + "+00:00"
+    instant = str(parsed).strip()
+    if instant.endswith("Z"):
+        instant = instant[:-1] + "+00:00"
     try:
-        return datetime.fromisoformat(text)
+        return datetime.fromisoformat(instant)
     except ValueError:
         return None
 
@@ -564,7 +595,8 @@ def run_integrity_audit(
 
         # Date validity / future dates (soft)
         if col_type in {"DATE", "TIMESTAMP", "DATETIME"} or _is_date_column(h):
-            dates = [_parse_iso_date(v) for v in non_null]
+            kind = _temporal_kind(col_type)
+            dates = [_parse_iso_date(v, temporal=kind) for v in non_null]
             valid_dates = [d for d in dates if d is not None]
             if valid_dates:
                 now = datetime.now(_UTC)
