@@ -73,6 +73,18 @@ def _mongo_incomplete_pk_cols(doc: Mapping[str, Any], pk_cols: list[str]) -> lis
     return [c for c in pk_cols if _is_nullish_conflict_key(doc.get(c))]
 
 
+def _mongo_insert_id_is_null(doc: Mapping[str, Any]) -> bool:
+    """True when insert would store reader-null as a real ``_id``.
+
+    Only Python None was refused. After extract emits SQL_NULL_SENTINEL,
+    insert_many stored the wire spelling as document identity.
+    Empty string stays a present key (not extract NULL).
+    """
+    from services.value_serializer import is_reader_null_cell
+
+    return "_id" in doc and is_reader_null_cell(doc.get("_id"))
+
+
 def _target_is_temporal(target_type: str) -> bool:
     """True when the destination cell holds BSON's single date/time carrier."""
     from services.type_system import (
@@ -244,7 +256,7 @@ def _idempotent_insert_many(coll, docs: list[dict]) -> int:
     for doc in docs:
         if not isinstance(doc, dict):
             continue
-        if "_id" in doc and doc["_id"] is None:
+        if _mongo_insert_id_is_null(doc):
             raise ValueError(
                 "MongoDB insert refused null `_id` — map a real identity or omit "
                 "`_id` for server-assigned ObjectId (refuse null PK invent)"
