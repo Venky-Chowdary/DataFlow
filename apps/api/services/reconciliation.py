@@ -47,6 +47,7 @@ from services.transform_engine import (
     _parse_date,
     _parse_datetime,
     apply_transform,
+    decimal_wire_value,
 )
 from services.type_system import instant_date_carrier, normalize_logical_type
 from services.value_serializer import cell_to_string, is_missing_sentinel, json_default
@@ -62,15 +63,37 @@ SPILL_THRESHOLD = int(getenv_brand("FINGERPRINT_SPILL_THRESHOLD", "1000000"))
 
 # Quick pre-filter for the expensive Decimal / date normalization in
 # normalize_cell.  Most string columns (names, emails, codes) are clearly not
-# numbers or dates, so we can skip the exception-heavy Decimal constructor and
-# the date regex for them.
+# numbers or dates, so we can skip the write-path parser and the date regex.
 _NUMERIC_RE = re.compile(r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$")
+# Currency / grouping marks the write path may still bind (or Auto-refuse).
+_NUMERIC_WIRE_MARKS = ("$", "€", "£", "¥")
+_NUMERIC_WIRE_CODES = ("USD", "EUR", "GBP")
 _DATE_LIKE_CHARS = frozenset("-:/T ")
 # RFC 4122 UUID wire — engines differ on case (PG lower, some drivers upper).
 _UUID_RE = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
 )
 _NULL_SENTINEL = "\x00NULL\x00"
+
+
+def _looks_like_numeric_wire(text: str) -> bool:
+    """True when ``text`` might be a number the write path binds or Auto-refuses.
+
+    ASCII scientific / plain decimals stay on the cheap ``_NUMERIC_RE`` path.
+    Locale money and grouped forms (``$1,234.56`` / ``1,234.56``) must also
+    reach ``decimal_wire_value`` so Gate-8 matches the dest DECIMAL, without
+    running the parser on every name or email.
+    """
+    if not text:
+        return False
+    if text[0] in "+-0123456789." and _NUMERIC_RE.match(text):
+        return True
+    if any(mark in text for mark in _NUMERIC_WIRE_MARKS):
+        return True
+    upper = text.upper()
+    if any(code in upper for code in _NUMERIC_WIRE_CODES):
+        return True
+    return text[0] in "+-0123456789(" and "," in text
 
 
 @dataclass(frozen=True, slots=True)
@@ -3864,9 +3887,11 @@ def normalize_cell(value: Any, *, ddl_type: str = "", engine: str = "") -> str:
         return "1"
     if lowered in _STRICT_BOOL_FALSE:
         return "0"
-    # Numeric fast path: only attempt Decimal normalization for strings that look
-    # like numbers, avoiding the expensive exception path for names, emails, codes.
-    if text[0] in "+-0123456789" and _NUMERIC_RE.match(text):
+    # Numeric fast path: write-path bind only. Auto-ambiguous ``1,234`` /
+    # ``1.234`` / ``1.000`` stay opaque text — ``Decimal(text)`` is a second
+    # algorithm and invented ``1.000`` → ``1``. Locale money the write path
+    # binds still folds so Gate-8 matches the dest DECIMAL.
+    if _looks_like_numeric_wire(text):
         canonical = _canonicalize_number(text)
         if canonical is not None:
             return canonical
@@ -4009,8 +4034,10 @@ def _is_exact_double(d: Decimal) -> bool:
 def _canonicalize_number(value: Any) -> str | None:
     """Return a canonical string for numeric values so 9.5 == 9.5000000000.
 
-    Also collapses IEEE float residue so Excel/JSON floats match DECIMAL sinks,
-    but only where that collapse is provably information-free.
+    Strings go through ``decimal_wire_value`` — the same parser the write path
+    binds. Auto-ambiguous ``1,234`` / ``1.234`` / ``1.000`` return ``None`` so
+    Gate-8 cannot invent ``1.000`` → ``1``. Locale money and both-separator
+    forms still fold. IEEE residue still collapses when information-free.
     """
     try:
         if isinstance(value, float):
@@ -4034,15 +4061,14 @@ def _canonicalize_number(value: Any) -> str | None:
             text = str(value).strip()
             if not text:
                 return None
-            from services.transform_engine import decimal_wire_value
-
             parsed = decimal_wire_value(text)
-            if parsed is not None:
-                d = parsed
-            else:
-                d = Decimal(text)
+            if parsed is None:
+                # Write path refused (Auto ``1,234`` / ``1.234`` / ``1.000``).
+                # Decimal(text) invented a different number (``1.000`` → ``1``).
+                return None
+            d = parsed
             # String form of float residue (common from Excel/CSV readers).
-            if d.is_finite() and ("." in text or "e" in text.lower()):
+            if d.is_finite() and ("." in text or "e" in text.lower() or "," in text):
                 head = text.split("e")[0].split("E")[0]
                 frac = head.split(".")[-1] if "." in head else ""
                 if len(frac.rstrip("0")) > 12 and _is_exact_double(d):
@@ -4412,10 +4438,10 @@ def sample_compare_rows(
             except Exception:
                 return (1, str(value))
         text = str(value).strip()
-        try:
-            return (0, Decimal(text))
-        except Exception:
-            return (1, text.lower())
+        parsed = decimal_wire_value(text)
+        if parsed is not None:
+            return (0, parsed)
+        return (1, text.lower())
 
     import hashlib
 

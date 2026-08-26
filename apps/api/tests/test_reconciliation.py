@@ -263,7 +263,9 @@ def test_normalize_cell_equates_decimal_representations():
     assert normalize_cell("9.5") == normalize_cell("9.5000000000")
     assert normalize_cell(Decimal("9.5")) == normalize_cell("9.5000000000")
     assert normalize_cell("1000") == normalize_cell("1E+3")
-    assert normalize_cell("0.000") == "0"
+    # Auto 0.000 is a 3-digit last group — write path refuses. Do not invent 0.
+    assert normalize_cell("0.000") == "0.000"
+    assert normalize_cell("0.00") == "0"
 
 
 def test_normalize_cell_uuid_case_fold_with_ddl():
