@@ -743,8 +743,14 @@ class SemanticAnalyzer:
                 float_count += 1
             elif val.lower() in ('true', 'false', '0', '1', 'yes', 'no', 'y', 'n'):
                 bool_count += 1
-            elif re.match(r'^\d{4}-\d{2}-\d{2}', val) or re.match(r'^\d{2}/\d{2}/\d{4}', val):
-                date_count += 1
+            else:
+                # Same bind as the write path — Auto-ambiguous 01/02/2024 is
+                # not a datetime we can read, so do not label the column one.
+                from services.transform_engine import apply_transform
+
+                parsed, err = apply_transform(val, "datetime")
+                if parsed is not None and not err:
+                    date_count += 1
 
         sample_size = min(len(non_empty), 100)
         if int_count / sample_size > 0.8:

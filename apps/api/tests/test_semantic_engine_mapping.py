@@ -5,7 +5,7 @@ earlier column may not steal a target that is a stronger match for a later one)
 and must recover from typos / abbreviations via character-level similarity.
 """
 
-from ai.semantic_engine import generate_mappings
+from ai.semantic_engine import analyze_column, generate_mappings
 
 
 def _by_source(mappings):
@@ -40,6 +40,16 @@ def test_typo_recovers_via_char_similarity():
     by_source = _by_source(mappings)
     assert by_source["custmer_id"].target_column == "customer_id"
     assert by_source["custmer_id"].confidence > 0.5
+
+
+def test_analyze_column_does_not_invent_datetime_from_auto_ambiguous_slash_dates():
+    """01/02/2024 is Jan 2 or Feb 1 — Auto must not label the column datetime."""
+    ambiguous = analyze_column("event_date", ["01/02/2024", "03/04/2024"])
+    assert ambiguous.inferred_type == "string"
+    unambiguous = analyze_column("event_date", ["31/12/2024", "30/11/2024"])
+    assert unambiguous.inferred_type == "datetime"
+    iso = analyze_column("event_date", ["2024-03-05", "2024-03-06"])
+    assert iso.inferred_type == "datetime"
 
 
 def test_deterministic_output():

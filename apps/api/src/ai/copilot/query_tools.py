@@ -11,7 +11,7 @@ import logging
 import math
 import re
 from collections import Counter
-from datetime import datetime
+from datetime import date
 from typing import Any
 
 from .schema_tools import AmbiguousConnectorError, _safe_connector, list_connector_objects
@@ -26,15 +26,6 @@ _MAX_QUERY_ROWS = 200
 _RESOLVE_INVENTORY_LIMIT = 100_000
 _BOOL_TRUE = {"true", "t", "yes", "y", "1"}
 _BOOL_FALSE = {"false", "f", "no", "n", "0"}
-_DATE_HINTS = (
-    "%Y-%m-%d",
-    "%Y-%m-%d %H:%M:%S",
-    "%Y-%m-%dT%H:%M:%S",
-    "%Y-%m-%dT%H:%M:%S.%f",
-    "%Y-%m-%dT%H:%M:%SZ",
-    "%m/%d/%Y",
-    "%d/%m/%Y",
-)
 _MISSING_TABLE_RE = re.compile(
     r"(?:undefinedtable|does not exist|doesn't exist|unknown relation|"
     r"no such table|invalid object name|relation\s+[\"'].+[\"']\s+does not exist|"
@@ -164,27 +155,23 @@ def _try_bool(v: Any) -> bool | None:
 
 
 def _try_datetime(v: Any) -> bool:
-    if isinstance(v, datetime):
+    """True when the write path would bind this cell as a date/datetime.
+
+    Dual MDY+DMY strptime used to call ``01/02/2024`` a date. Auto cannot
+    bind that cell, so a Pilot profile that labeled the column datetime
+    invented a calendar the write refuses.
+    """
+    if isinstance(v, date):
         return True
     if not isinstance(v, str):
         return False
     s = v.strip()
     if len(s) < 8:
         return False
-    for fmt in _DATE_HINTS:
-        try:
-            datetime.strptime(s[:26].rstrip("Z"), fmt.rstrip("Z"))
-            return True
-        except ValueError:
-            continue
-    # ISO-ish
-    if "T" in s and len(s) >= 10:
-        try:
-            datetime.fromisoformat(s.replace("Z", "+00:00"))
-            return True
-        except ValueError:
-            return False
-    return False
+    from services.transform_engine import apply_transform
+
+    parsed, err = apply_transform(s, "datetime")
+    return parsed is not None and not err
 
 
 def _infer_kind(non_null: list[Any]) -> str:

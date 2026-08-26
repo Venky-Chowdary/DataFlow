@@ -22,8 +22,18 @@ TYPE_CONVERSION_MATRIX: dict[str, dict[str, dict]] = {
         "integer": {"method": "cast", "lossy": False, "validation": r"^-?\d+$"},
         "decimal": {"method": "cast", "lossy": False, "validation": r"^-?\d+\.?\d*$"},
         "boolean": {"method": "parse_bool", "lossy": False, "mapping": {"true": True, "false": False, "1": True, "0": False, "yes": True, "no": False}},
-        "datetime": {"method": "parse_date", "lossy": False, "formats": ["%Y-%m-%d", "%m/%d/%Y", "%d/%m/%Y", "%Y-%m-%dT%H:%M:%S"]},
-        "date": {"method": "parse_date", "lossy": False, "formats": ["%Y-%m-%d", "%m/%d/%Y"]},
+        "datetime": {
+            "method": "parse_date",
+            "lossy": True,
+            "formats": ["%Y-%m-%d", "%Y-%m-%dT%H:%M:%S"],
+            "note": "Auto fails closed on 01/02/2024 — set date locale MDY or DMY. Assist only.",
+        },
+        "date": {
+            "method": "parse_date",
+            "lossy": True,
+            "formats": ["%Y-%m-%d"],
+            "note": "Auto fails closed on 01/02/2024 — set date locale MDY or DMY. Assist only.",
+        },
         "json": {"method": "parse_json", "lossy": False},
     },
     "integer": {
