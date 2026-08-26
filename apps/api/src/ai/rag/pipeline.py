@@ -83,9 +83,17 @@ class DataTransferRAGPipeline:
         source_type: str,
         target_type: str,
         semantic_type: str | None = None,
+        source_column: str = "",
+        target_column: str = "",
     ) -> RAGResponse:
-        """Suggest data transformations."""
-        return self.generator.suggest_transformations(source_type, target_type, semantic_type)
+        """Suggest transforms the write path would stamp."""
+        return self.generator.suggest_transformations(
+            source_type,
+            target_type,
+            semantic_type,
+            source_column=source_column,
+            target_column=target_column,
+        )
 
     def learn_correction(
         self,

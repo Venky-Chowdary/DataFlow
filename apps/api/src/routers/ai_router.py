@@ -646,19 +646,17 @@ async def api_suggest_transforms(request: TransformSuggestionRequest):
         from ..ai.rag.pipeline import get_rag_pipeline
         pipeline = get_rag_pipeline()
         result = pipeline.suggest_transforms(
-            request.source_type, request.target_type, request.semantic_type,
+            request.source_type,
+            request.target_type,
+            request.semantic_type,
+            source_column=request.source_column or "",
+            target_column=request.target_column or "",
         )
-        transforms = []
-        if request.semantic_type:
-            from ..ai.knowledge.semantic_patterns import get_pattern_by_name
-            pattern = get_pattern_by_name(request.semantic_type)
-            if pattern:
-                transforms = pattern.transformations
         return TransformSuggestionResponse(
             answer=result.answer,
             reasoning=result.reasoning,
             confidence=result.confidence,
-            transformations=transforms,
+            transformations=list(result.transformations),
             auto_apply=False,
             requires_human_accept=True,
         )
