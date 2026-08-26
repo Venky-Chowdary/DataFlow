@@ -1057,6 +1057,22 @@ def writer_meta_with_source_rows(
     return out
 
 
+def vector_prepare_cell(val: Any) -> Any:
+    """One flattened vector cell. Reader-null omits; leftover types use dest wire.
+
+    ``SQL_NULL_SENTINEL`` is a string, so a None/Missing-only omit leaked the
+    wire token into metadata. ``str(Decimal("1E+2"))`` invented ``1E+2``.
+    Native ``0`` / ``False`` stay present.
+    """
+    from services.value_serializer import is_reader_null_cell, present_cell_text
+
+    if is_reader_null_cell(val):
+        return None
+    if isinstance(val, (str, int, float, bool)):
+        return val
+    return present_cell_text(val)
+
+
 def vector_gate8_meta(
     records: list[dict[str, Any]],
     *,
@@ -1067,13 +1083,15 @@ def vector_gate8_meta(
     Airbyte-class vector destinations prove identity via record id + metadata,
     not opaque float arrays — match that honesty bar.
     """
+    from services.value_serializer import present_cell_text
+
     ids: list[str] = []
     for rec in records:
         if not isinstance(rec, dict):
             continue
-        vid = rec.get(id_key)
-        if vid is not None and str(vid).strip() != "":
-            ids.append(str(vid))
+        token = present_cell_text(rec.get(id_key))
+        if token:
+            ids.append(token)
     cols = sorted({k for r in records if isinstance(r, dict) for k in r}) or [id_key]
     return gate8_writer_meta(records, cols, ids)
 
@@ -2084,16 +2102,6 @@ def prepare_records_for_vector_write(
         and str(d.get("policy") or "").lower() in holdout_policies
     }
 
-    def _cell(val: Any) -> Any:
-        from services.value_serializer import is_missing_sentinel
-
-        # STOP_COLUMN / coerce_null — omit from vector metadata (never leak sentinel).
-        if val is None or is_missing_sentinel(val):
-            return None
-        if isinstance(val, (str, int, float, bool)):
-            return val
-        return str(val)
-
     records: list[dict[str, Any]] = []
     mapped_i = 0
     for row_number, raw in enumerate(data_rows, start=1):
@@ -2106,11 +2114,11 @@ def prepare_records_for_vector_write(
         # Preserve unmapped source headers for metadata_columns / content_column.
         row: dict[str, Any] = {}
         for i, h in enumerate(headers):
-            cell = _cell(raw[i] if i < len(raw) else None)
+            cell = vector_prepare_cell(raw[i] if i < len(raw) else None)
             if cell is not None:
                 row[h] = cell
         for i, tgt in enumerate(target_cols):
-            val = _cell(tup[i] if i < len(tup) else None)
+            val = vector_prepare_cell(tup[i] if i < len(tup) else None)
             if val is None:
                 # Omit DF_MISSING / null overlay — do not invent "" into metadata.
                 continue
