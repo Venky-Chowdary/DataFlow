@@ -950,7 +950,14 @@ class FileParser:
 
             import pyarrow.parquet as pq
 
+            from services.arrow_schema import (
+                columns_from_arrow_schema,
+                schema_from_arrow,
+            )
+
             table = pq.read_table(io.BytesIO(content))
+            schema_map = schema_from_arrow(table.schema)
+            column_meta = columns_from_arrow_schema(table.schema)
             total_rows = int(table.num_rows)
             if total_rows > max_rows:
                 return ParseResult(
@@ -963,25 +970,21 @@ class FileParser:
                         f"{max_rows:,}-row non-streaming limit; use streaming ingest."
                     ),
                     file_type="parquet",
+                    schema_map=schema_map or None,
+                    column_meta=column_meta or None,
                 )
-            df = table.to_pandas()
-            records = df.to_dict(orient="records")
-            columns = [str(c) for c in df.columns.tolist()]
-            for rec in records:
-                for k, v in list(rec.items()):
-                    if hasattr(v, "item"):
-                        rec[k] = v.item()
-                        v = rec[k]
-                    # Keep IEEE NaN/Inf — never invent SQL NULL (silent loss).
-                    # Downstream quarantine / sanitize_json_value refuse_nonfinite.
-                    if isinstance(v, float) and v != v:
-                        continue
+            # to_pylist keeps DECIMAL / int64 / nested fidelity. to_pandas()
+            # invented nullable integers as float64 and collapsed long decimals.
+            records = table.to_pylist()
+            columns = list(schema_map.keys()) if schema_map else [str(c) for c in table.column_names]
             return ParseResult(
                 success=True,
                 data=records,
                 columns=columns,
                 row_count=total_rows,
                 file_type="parquet",
+                schema_map=schema_map or None,
+                column_meta=column_meta or None,
             )
         except ImportError:
             return ParseResult(

@@ -225,7 +225,14 @@ def parse_file_content(
     )
     if not result.success:
         raise ValueError(result.error or "File parse failed")
-    schema = FileParser.infer_schema(result.data)
+    # Avro / Parquet / ORC already carry the writer contract. Sample inference
+    # invented DECIMAL(38,18) as FLOAT after pandas (and still after to_pylist).
+    writer_schema = getattr(result, "schema_map", None)
+    schema = (
+        dict(writer_schema)
+        if writer_schema
+        else FileParser.infer_schema(result.data)
+    )
     return result.data, result.columns, schema
 
 
@@ -266,10 +273,15 @@ def parse_file_route_sample(
     if not result.success:
         raise ValueError(result.error or "File parse failed")
     sample = result.data[:preview_rows]
+    writer_schema = getattr(result, "schema_map", None)
     schema = (
-        FileParser.infer_schema(sample)
-        if sample
-        else {c: "string" for c in result.columns}
+        dict(writer_schema)
+        if writer_schema
+        else (
+            FileParser.infer_schema(sample)
+            if sample
+            else {c: "string" for c in result.columns}
+        )
     )
     return result.columns, schema, result.row_count
 
