@@ -1568,12 +1568,25 @@ def coerce_rowid_wire(value: Any) -> str | None:
     return text
 
 
-def coerce_float_wire(value: Any, *, ddl_type: str | None = None) -> Any:
-    """Normalize IEEE FLOAT/REAL/DOUBLE bind — digit strings → float.
+_IEEE_NONFINITE_TOKENS = frozenset({
+    "nan",
+    "+nan",
+    "-nan",
+    "inf",
+    "+inf",
+    "-inf",
+    "infinity",
+    "+infinity",
+    "-infinity",
+})
 
-    Non-numeric tokens refuse invent (never silent 0.0). Non-finite floats are
-    kept as IEEE values when the source already produced them; string
-    ``NaN``/``Infinity`` are accepted as explicit IEEE wire.
+
+def coerce_float_wire(value: Any, *, ddl_type: str | None = None) -> Any:
+    """Normalize IEEE FLOAT/REAL/DOUBLE bind — write-path digit strings → float.
+
+    Auto ``1,234`` / ``1.234`` refuse (``float(token)`` invented 1.234). Locale
+    money the write path binds still lands. Non-finite Python floats are kept;
+    string ``NaN``/``Infinity`` stay explicit IEEE wire. Boolean tokens refuse.
     """
     if value is None:
         return None
@@ -1609,9 +1622,18 @@ def coerce_float_wire(value: Any, *, ddl_type: str | None = None) -> Any:
             raise ValueError(
                 f"refuse invent float from boolean token {value!r}"
             )
-        try:
+        if low in _IEEE_NONFINITE_TOKENS:
             return float(token)
-        except ValueError as exc:
+        from services.transform_engine import decimal_wire_value
+
+        parsed = decimal_wire_value(token)
+        if parsed is None:
+            raise ValueError(
+                f"refuse invent float from {value!r} for {ddl_type or 'FLOAT'}"
+            )
+        try:
+            return float(parsed)
+        except (OverflowError, ValueError) as exc:
             raise ValueError(
                 f"refuse invent float from {value!r} for {ddl_type or 'FLOAT'}"
             ) from exc
