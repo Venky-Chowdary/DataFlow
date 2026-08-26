@@ -8,7 +8,6 @@ import json
 import logging
 import re
 import sys
-from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable
 
@@ -46,7 +45,7 @@ from services.read_options import ReadOptions
 from .connector_registry import run_probe
 from .job_quarantine import split_refused_unit
 from .models import EndpointConfig
-from .type_mapper import ddl_carrier_type, ddl_type, normalize_inferred
+from .type_mapper import ddl_carrier_type, ddl_type
 
 
 class FileExportMapBlocked(ValueError):
@@ -2182,6 +2181,19 @@ def write_destination_file(
         export_columns = target_cols
         export_records = [dict(zip(target_cols, row)) for row in mapped_rows]
 
+    if mappings:
+        export_dest_types = {
+            str(m.get("target") or ""): str(
+                m.get("target_type")
+                or m.get("dest_type")
+                or types.get(m.get("source") or "", "")
+            )
+            for m in mappings
+            if str(m.get("target") or "").strip()
+        }
+    else:
+        export_dest_types = dict(types)
+
     def _export_summary(
         filename: str,
         *,
@@ -2242,53 +2254,14 @@ def write_destination_file(
             ),
         )
 
-    def _to_json_value(value: Any, col: str) -> Any:
-        if value is None:
-            return None
-        if isinstance(value, str):
-            text = value.strip()
-            if not text:
-                return value
-            ctype = normalize_inferred(types.get(col, "string")).lower()
-            if ctype in {"json", "array", "object", "struct"}:
-                try:
-                    def _reject(name: str) -> None:
-                        raise ValueError(f"non-finite JSON constant: {name}")
-
-                    return json.loads(
-                        text, parse_float=Decimal, parse_constant=_reject
-                    )
-                except (json.JSONDecodeError, ValueError):
-                    return value
-            if ctype in {
-                "text",
-                "string",
-                "varchar",
-                "uuid",
-                "binary",
-                "date",
-                "datetime",
-                "time",
-            }:
-                return value
-            try:
-                def _reject(name: str) -> None:
-                    raise ValueError(f"non-finite JSON constant: {name}")
-
-                return json.loads(
-                    text, parse_float=Decimal, parse_constant=_reject
-                )
-            except (json.JSONDecodeError, ValueError):
-                return value
-        return value
-
     def _json_export_records(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        from connectors.writer_common import to_json_value
         from services.value_serializer import is_missing_sentinel
 
         # Kafka/object-store class: omit STOP_COLUMN / sparse CDC keys entirely.
         return [
             {
-                c: _to_json_value(v, c)
+                c: to_json_value(v, c, export_dest_types)
                 for c, v in r.items()
                 if not is_missing_sentinel(v)
             }
