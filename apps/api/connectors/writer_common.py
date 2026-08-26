@@ -2647,7 +2647,11 @@ def fits_decimal(
         text = str(value).strip()
         if not text:
             return True
-        d = Decimal(text)
+        from services.transform_engine import decimal_wire_value
+
+        d = decimal_wire_value(text)
+        if d is None:
+            return False
         if not d.is_finite():
             return False
         prec = int(precision)

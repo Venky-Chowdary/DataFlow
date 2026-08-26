@@ -36,16 +36,24 @@ def test_parse_decimal_precision_scale_variants():
 def test_fits_decimal_integer_and_scale_overflow():
     assert fits_decimal("1.50", 10, 2) is True
     assert fits_decimal("99999999999999999999", 10, 2) is False  # int digits
-    assert fits_decimal("1.234", 10, 2) is False  # MySQL/SF fail-closed on scale
+    assert fits_decimal("1.2345", 10, 2) is False  # MySQL/SF fail-closed on scale
     assert fits_decimal(None, 10, 2) is True
     # Trailing wire zeros are not scale overflow (MySQL→PG airports lat cliff).
     assert fits_decimal("52.310500000000000", 38, 9) is True
     assert fits_decimal("-33.939900000000000", 38, 9) is True
     assert fits_decimal("1.2345000001", 10, 2) is False  # non-zero beyond scale
+    # Auto 1.234 is US milli-scale or EU thousands — write path refuses.
+    assert fits_decimal("1.234", 10, 2) is False
+    assert fits_decimal("1.234", 10, 2, dest_db="postgresql") is False
     # PostgreSQL rounds fractional excess — match destination engine, don't invent block.
-    assert fits_decimal("1.234", 10, 2, dest_db="postgresql") is True
+    assert fits_decimal("1.2345", 10, 2, dest_db="postgresql") is True
     assert fits_decimal("1.2345000001", 10, 2, dest_db="postgresql") is True
     assert fits_decimal("99999999999999999999", 10, 2, dest_db="postgresql") is False
+    # Locale money the write path binds must fit a wide enough carrier.
+    assert fits_decimal("$1,234.56", 10, 2) is True
+    assert fits_decimal("€1.234,56", 10, 2) is True
+    assert fits_decimal("$1,234", 10, 2) is True
+    assert fits_decimal("1,234", 10, 2) is False
 
 
 def test_quarantine_holds_out_unfit_row():
