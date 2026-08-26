@@ -37,6 +37,37 @@ def test_trailing_zeros_are_the_money_scale_contract():
     assert identities_same_magnitude(a, b)
 
 
+def test_locale_money_identity_matches_write_path_without_refusing_storage_text():
+    """$1,234.56 binds as 1234.56. Dest-canonical 1.234 stays identity.
+
+    Decimal(text) raised on currency. Auto wire refuses 1.234 — using wire
+    first would drop dest storage identity. Decimal first, wire fallback.
+    """
+    from services.transform_engine import decimal_wire_value
+
+    dest = extract_decimal_identity("1.234")
+    assert dest is not None
+    assert dest.digits == "1234" and dest.scale == 3
+    assert decimal_wire_value("1.234") is None
+
+    us = extract_decimal_identity("$1,234.56")
+    eu = extract_decimal_identity("€1.234,56")
+    plain = extract_decimal_identity("1234.56")
+    assert us is not None and eu is not None and plain is not None
+    assert identities_match(us, plain)
+    assert identities_match(eu, plain)
+
+    whole = extract_decimal_identity("$1,234")
+    assert whole is not None
+    assert whole.digits == "1234" and whole.scale == 0
+    assert decimal_wire_value("1,234") is None
+    try:
+        extract_decimal_identity("1,234")
+        raise AssertionError("Auto 1,234 must not invent identity")
+    except ValueError as exc:
+        assert "refuse" in str(exc).lower() or "parse" in str(exc).lower()
+
+
 def test_identity_never_goes_through_float():
     ident = extract_decimal_identity(str(IEEE754_SAFE_INT + 1))
     assert ident is not None

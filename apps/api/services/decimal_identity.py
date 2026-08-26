@@ -180,6 +180,10 @@ def extract_decimal_identity(value: Any) -> DecimalIdentity | None:
     ``float`` input is marked approximate — the original unscaled integer is
     unrecoverable. Trailing zeros from ``Decimal('1.2300')`` / ``'1.2300'``
     stay in ``digits``.
+
+    Strings try ``Decimal(text)`` first so dest-canonical ``1.234`` stays
+    identity. Locale money (``$1,234.56``) falls through to
+    ``decimal_wire_value``. Auto ``1,234`` still refuses.
     """
     if value is None:
         return None
@@ -204,7 +208,20 @@ def extract_decimal_identity(value: Any) -> DecimalIdentity | None:
             text = value.strip()
             if not text:
                 return None
-            d = Decimal(text)
+            try:
+                # Dest-canonical storage text (``1.234``, ``1.2300``) must
+                # stay bindable — Auto ``decimal_wire_value`` refuses a lone
+                # 3-digit last group and would drop dest identity.
+                d = Decimal(text)
+            except (InvalidOperation, Overflow, ValueError):
+                from services.transform_engine import decimal_wire_value
+
+                parsed = decimal_wire_value(text)
+                if parsed is None:
+                    raise ValueError(
+                        "decimal identity parse failed — refuse float invent"
+                    )
+                d = parsed
         else:
             d = Decimal(str(value).strip())
         if not d.is_finite():
