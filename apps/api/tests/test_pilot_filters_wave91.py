@@ -211,6 +211,19 @@ def test_numeric_column_refuses_text_literal():
     assert "numeric" in str(err.value)
 
 
+def test_numeric_column_refuses_auto_ambiguous_grouping():
+    """Pilot must not invent 1234 from a lone 1,234 — same as the write path."""
+    with pytest.raises(PredicateError) as err:
+        _ground("amount > 1,234")
+    assert "1,234" in str(err.value)
+    assert "locale" in str(err.value).lower()
+
+
+def test_numeric_column_accepts_currency_and_both_separators():
+    preds = _ground("amount > $1,234.56")
+    assert preds[0].values == [1234.56]
+
+
 def test_boolean_column_accepts_words():
     assert _ground("is_paid = yes")[0].values == [True]
     assert _ground("is_paid = false")[0].values == [False]

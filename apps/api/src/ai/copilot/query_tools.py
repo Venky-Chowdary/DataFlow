@@ -140,21 +140,13 @@ def _is_nullish(v: Any) -> bool:
 
 
 def _try_float(v: Any) -> float | None:
-    if isinstance(v, bool):
+    """Same decimal the write path would bind — never ``replace(",", "")``."""
+    from services.transform_engine import decimal_wire_value
+
+    dec = decimal_wire_value(v)
+    if dec is None:
         return None
-    if isinstance(v, (int, float)):
-        if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
-            return None
-        return float(v)
-    if isinstance(v, str):
-        s = v.strip().replace(",", "")
-        if not s:
-            return None
-        try:
-            return float(s)
-        except ValueError:
-            return None
-    return None
+    return float(dec)
 
 
 def _try_bool(v: Any) -> bool | None:

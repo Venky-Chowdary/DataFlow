@@ -101,7 +101,7 @@ _IDENT = r"[A-Za-z_][A-Za-z0-9_ ]{0,40}?"
 # phrase ("... = open on Local Postgres") gets swallowed into the literal.
 _END = (
     r"(?=\s+(?:and|or|group|grouped|by|per|order|ordered|on|from|in|for|with|"
-    r"limit|top|bottom)\b|[.,;?!]|$)"
+    r"limit|top|bottom)\b|[;?!]|(?<!\d)[.,](?!\d)|$)"
 )
 
 # Ordered: the most specific shape must win. Each pattern captures a column and
@@ -121,7 +121,7 @@ _FILTER_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     ),
     (
         re.compile(
-            rf"\b({_IDENT})\s*(>=|<=|!=|<>|>|=|<)\s*['\"]?([^'\"\n,;]{{1,80}}?)['\"]?{_END}",
+            rf"\b({_IDENT})\s*(>=|<=|!=|<>|>|=|<)\s*['\"]?([^'\"\n;]{{1,80}}?)['\"]?{_END}",
             re.I,
         ),
         "cmp",
@@ -437,15 +437,17 @@ def _coerce(value: str, kind: str, column: str) -> Any:
     """Convert a spoken literal to the column's carrier, or refuse honestly."""
     raw = (value or "").strip().strip("\"'`")
     if kind == "numeric":
-        cleaned = raw.replace(",", "").replace("$", "").replace("%", "").strip()
-        try:
-            if re.fullmatch(r"[-+]?\d+", cleaned):
-                return int(cleaned)
-            return float(cleaned)
-        except ValueError:
+        from services.transform_engine import decimal_wire_value
+
+        dec = decimal_wire_value(raw)
+        if dec is None:
             raise PredicateError(
-                f"`{column}` is numeric, so it can't be compared to “{raw}”."
-            ) from None
+                f"`{column}` is numeric, so it can't be compared to “{raw}”. "
+                "Auto will not guess 1,234 vs 1.234 — set number locale US or EU."
+            )
+        if dec == dec.to_integral_value():
+            return int(dec)
+        return float(dec)
     if kind == "boolean":
         low = raw.lower()
         if low in _TRUE_WORDS:

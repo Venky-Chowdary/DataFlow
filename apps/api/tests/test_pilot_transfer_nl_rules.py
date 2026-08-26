@@ -165,6 +165,13 @@ def test_filter_and_limit_reach_the_staged_tool_call():
     assert args["limit"] == 100
 
 
+def test_english_first_n_rows_uses_the_write_parser():
+    _, rules = parse_transfer_data_rules(
+        "copy users from A to B, first 1,000 rows"
+    )
+    assert rules.limit == 1000
+
+
 def test_multiple_conditions_become_one_and_filter():
     _, rules = parse_transfer_data_rules(
         "move users from A to B where status = active, where country in (US, CA)"
