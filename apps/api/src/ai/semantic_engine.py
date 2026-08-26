@@ -382,8 +382,6 @@ SEMANTIC_TYPES: list[SemanticType] = [
         regex_patterns=[r"_date$", r"_dt$", r"^date_"],
         sample_patterns=[
             r"^\d{4}-\d{2}-\d{2}$",
-            r"^\d{2}/\d{2}/\d{4}$",
-            r"^\d{2}-\d{2}-\d{4}$",
         ],
         synonyms=["effective_date", "as_of_date"],
         transformations=["standardize_iso8601"],
@@ -704,13 +702,25 @@ class SemanticAnalyzer:
         if not non_empty:
             return 0.5
 
-        if semantic_type and semantic_type.sample_patterns:
+        if semantic_type and (
+            "standardize_iso8601" in semantic_type.transformations
+            or semantic_type.sample_patterns
+        ):
             match_count = 0
-            for value in non_empty[:100]:
-                for pattern in semantic_type.sample_patterns:
-                    if re.match(pattern, str(value).strip(), re.IGNORECASE):
+            use_write_bind = "standardize_iso8601" in semantic_type.transformations
+            if use_write_bind:
+                from services.transform_engine import apply_transform
+
+                for value in non_empty[:100]:
+                    parsed, err = apply_transform(str(value).strip(), "datetime")
+                    if parsed is not None and not err:
                         match_count += 1
-                        break
+            else:
+                for value in non_empty[:100]:
+                    for pattern in semantic_type.sample_patterns:
+                        if re.match(pattern, str(value).strip(), re.IGNORECASE):
+                            match_count += 1
+                            break
 
             match_rate = match_count / min(len(non_empty), 100)
             if match_rate > 0.8:
@@ -814,6 +824,17 @@ class SemanticAnalyzer:
         if stats.get("unique_percentage", 0) < 1 and inferred_type not in ("boolean",):
             warnings.append("Very low cardinality - consider as enum/category")
 
+        transforms = list(semantic_type.transformations) if semantic_type else []
+        if transforms and sample_values:
+            from services.transform_engine import samples_are_auto_ambiguous_dates
+
+            texts = [str(v) for v in sample_values if v is not None and str(v).strip()]
+            if samples_are_auto_ambiguous_dates(texts) and "standardize_iso8601" in transforms:
+                transforms = [t for t in transforms if t != "standardize_iso8601"]
+                warnings.append(
+                    "Auto cannot bind 01/02/2024 — set date locale MDY or DMY before Date→ISO"
+                )
+
         return ColumnAnalysis(
             column_name=column_name,
             inferred_type=inferred_type,
@@ -822,7 +843,7 @@ class SemanticAnalyzer:
             confidence=round(final_confidence, 3),
             is_pii=semantic_type.is_pii if semantic_type else False,
             compliance=[c for c in (semantic_type.compliance if semantic_type else [])],
-            suggested_transformations=semantic_type.transformations if semantic_type else [],
+            suggested_transformations=transforms,
             null_percentage=stats.get("null_percentage", 0),
             unique_percentage=stats.get("unique_percentage", 0),
             sample_values=sample_values[:5],

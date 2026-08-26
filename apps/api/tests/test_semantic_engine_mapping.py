@@ -46,10 +46,26 @@ def test_analyze_column_does_not_invent_datetime_from_auto_ambiguous_slash_dates
     """01/02/2024 is Jan 2 or Feb 1 — Auto must not label the column datetime."""
     ambiguous = analyze_column("event_date", ["01/02/2024", "03/04/2024"])
     assert ambiguous.inferred_type == "string"
+    assert "standardize_iso8601" not in ambiguous.suggested_transformations
+    assert any("date locale" in w.lower() for w in ambiguous.warnings)
     unambiguous = analyze_column("event_date", ["31/12/2024", "30/11/2024"])
     assert unambiguous.inferred_type == "datetime"
+    assert "standardize_iso8601" in unambiguous.suggested_transformations
     iso = analyze_column("event_date", ["2024-03-05", "2024-03-06"])
     assert iso.inferred_type == "datetime"
+    assert "standardize_iso8601" in iso.suggested_transformations
+
+
+def test_reasoning_chain_does_not_invent_date_iso_from_auto_ambiguous_slash_dates():
+    from src.ai.llm.chain import DataTransferReasoningChain
+
+    chain = DataTransferReasoningChain()
+    ambiguous = chain.analyze_column("event_date", ["01/02/2024", "03/04/2024"])
+    assert ambiguous.answer["inferred_type"] == "string"
+    assert "standardize_iso8601" not in (ambiguous.answer.get("transformations") or [])
+    iso = chain.analyze_column("event_date", ["2024-03-05", "2024-03-06"])
+    assert iso.answer["inferred_type"] == "date"
+    assert "standardize_iso8601" in (iso.answer.get("transformations") or [])
 
 
 def test_deterministic_output():

@@ -102,13 +102,23 @@ class DataTransferReasoningChain:
         data_confidence = 0.8
         if sample_values and matched_pattern and matched_pattern.sample_patterns:
             import re as regex
+            from services.transform_engine import apply_transform
+
             non_empty = [v for v in sample_values if v and str(v).strip()]
             if non_empty:
-                match_count = sum(
-                    1 for v in non_empty[:50]
-                    if any(regex.match(p, str(v).strip(), regex.IGNORECASE)
-                           for p in matched_pattern.sample_patterns)
-                )
+                use_write_bind = "standardize_iso8601" in (matched_pattern.transformations or [])
+                match_count = 0
+                for raw in non_empty[:50]:
+                    text = str(raw).strip()
+                    if use_write_bind:
+                        parsed, err = apply_transform(text, "datetime")
+                        if parsed is not None and not err:
+                            match_count += 1
+                    elif any(
+                        regex.match(p, text, regex.IGNORECASE)
+                        for p in matched_pattern.sample_patterns
+                    ):
+                        match_count += 1
                 data_confidence = match_count / min(len(non_empty), 50)
                 data_confidence = max(data_confidence, 0.3)
 
@@ -129,15 +139,26 @@ class DataTransferReasoningChain:
             final_confidence,
         ))
 
+        inferred = matched_pattern.data_type if matched_pattern else "string"
+        transforms = list(matched_pattern.transformations) if matched_pattern else []
+        if sample_values:
+            from services.transform_engine import samples_are_auto_ambiguous_dates
+
+            texts = [str(v) for v in sample_values if v is not None and str(v).strip()]
+            if samples_are_auto_ambiguous_dates(texts):
+                if inferred in {"date", "datetime"}:
+                    inferred = "string"
+                transforms = [t for t in transforms if t != "standardize_iso8601"]
+
         answer = {
             "column_name": column_name,
             "semantic_type": matched_pattern.name if matched_pattern else None,
             "category": matched_pattern.category.value if matched_pattern else None,
             "is_pii": matched_pattern.is_pii if matched_pattern else False,
             "compliance": matched_pattern.compliance if matched_pattern else [],
-            "transformations": matched_pattern.transformations if matched_pattern else [],
+            "transformations": transforms,
             "canonical_form": canonical,
-            "inferred_type": matched_pattern.data_type if matched_pattern else "string",
+            "inferred_type": inferred,
             "confidence": final_confidence,
         }
 

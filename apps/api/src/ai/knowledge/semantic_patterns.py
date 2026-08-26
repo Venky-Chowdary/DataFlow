@@ -276,7 +276,7 @@ def _build_patterns() -> list[SemanticPattern]:
 
     # ── TEMPORAL (15) ──
     add("Date", PatternCategory.TEMPORAL, ["date", "dt"],
-        regex_patterns=[r"_date$", r"_dt$"], sample_patterns=[r"^\d{4}-\d{2}-\d{2}$", r"^\d{2}/\d{2}/\d{4}$"],
+        regex_patterns=[r"_date$", r"_dt$"], sample_patterns=[r"^\d{4}-\d{2}-\d{2}$"],
         synonyms=["effective_date", "as_of_date"], transformations=["standardize_iso8601"], base_confidence=0.88, data_type="date")
     add("Timestamp", PatternCategory.TEMPORAL, ["timestamp", "datetime", "created_at", "updated_at", "modified_at"],
         regex_patterns=[r"_at$"], sample_patterns=[r"^\d{4}-\d{2}-\d{2}[T\s]\d{2}:\d{2}:\d{2}"],
