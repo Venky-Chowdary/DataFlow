@@ -2574,17 +2574,16 @@ def parse_decimal_precision_scale(
 
 
 def decimal_int_digits_and_scale(value: Any) -> tuple[int, int]:
-    """Return (integer_digits, fractional_scale) for a cell value.
+    """Return (integer_digits, fractional_scale) for write fit / bind.
 
-    Fractional scale ignores trailing zeros in the wire representation
-    (``52.310500000000000`` → scale 4) so DECIMAL fit matches PostgreSQL /
-    warehouse bind capacity rather than string padding from MySQL DOUBLE dumps.
+    Trailing zeros are padding (``2000.00`` → scale 0). Create-new invent
+    keeps money scale via ``cell_int_digits_and_scale`` (``1000.00`` → 2).
 
-    SSOT: ``services.decimal_observe.cell_int_digits_and_scale``.
+    SSOT: ``services.decimal_observe.write_int_digits_and_scale``.
     """
-    from services.decimal_observe import cell_int_digits_and_scale
+    from services.decimal_observe import write_int_digits_and_scale
 
-    return cell_int_digits_and_scale(value)
+    return write_int_digits_and_scale(value)
 
 
 PG_DECIMAL_ROUND_DIALECTS = frozenset({

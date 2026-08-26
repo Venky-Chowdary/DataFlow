@@ -43,6 +43,34 @@ def _canonical_numeric(value: Any) -> Decimal | None:
     return decimal_wire_value(value)
 
 
+def write_int_digits_and_scale(value: Any) -> tuple[int, int]:
+    """(integer_digits, fractional_scale) for write fit / bind.
+
+    Trailing zeros are padding (``2000.00`` → scale 0). Snowflake
+    ``NUMBER(38,0)`` stores that as 2000. Significant cents stay
+    (``2000.10`` → 2). Create-new invent must keep money scale via
+    ``cell_int_digits_and_scale`` and must not call this.
+    """
+    try:
+        d = _canonical_numeric(value)
+        if d is None or not d.is_finite():
+            if isinstance(value, Decimal) and value.is_finite():
+                d = value
+            else:
+                return 0, 0
+        with localcontext() as ctx:
+            ctx.prec = max(len(d.as_tuple().digits) + 1, 28)
+            n = d.normalize()
+        _sign, digits, exponent = n.as_tuple()
+        if not isinstance(exponent, int):
+            return 0, 0
+        scale = -exponent if exponent < 0 else 0
+        int_digits = max(0, len(digits) + exponent)
+        return int_digits, scale
+    except (InvalidOperation, Overflow, ValueError, TypeError):
+        return 0, 0
+
+
 def cell_int_digits_and_scale(value: Any) -> tuple[int, int]:
     """Return (integer_digits, fractional_scale) for create-new invent.
 

@@ -54,6 +54,11 @@ def test_fits_decimal_integer_and_scale_overflow():
     assert fits_decimal("€1.234,56", 10, 2) is True
     assert fits_decimal("$1,234", 10, 2) is True
     assert fits_decimal("1,234", 10, 2) is False
+    # Trailing zeros are write padding, not scale overflow (observe still
+    # keeps 2000.00 → scale 2 for create-new invent).
+    assert fits_decimal("2000.00", 38, 0, dest_db="snowflake") is True
+    assert fits_decimal("2000.10", 38, 0, dest_db="snowflake") is False
+    assert fits_decimal("$1,234.56", 38, 0, dest_db="snowflake") is False
 
 
 def test_quarantine_holds_out_unfit_row():
