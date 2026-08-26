@@ -11,7 +11,30 @@ from __future__ import annotations
 import logging
 from typing import Any, Iterable
 
+from services.value_serializer import cell_to_string, is_null_evidence
+
 logger = logging.getLogger(__name__)
+
+
+def _fk_key(value: Any) -> str | None:
+    """Present FK cell. Reader-wired SQL NULL is not a parent lookup key."""
+    if is_null_evidence(value):
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+        return None if is_null_evidence(text) else text
+    text = cell_to_string(value, preserve_sql_null=True)
+    if is_null_evidence(text):
+        return None
+    return text
+
+
+def _fk_display(value: Any, *, limit: int = 80) -> str:
+    text = _fk_key(value)
+    if text is None:
+        return ""
+    return text[:limit]
+
 
 # Cap distinct FK values probed from the Validate sample (O(sample), not O(table)).
 _MAX_DISTINCT_FK_VALUES = 500
@@ -33,12 +56,8 @@ def distinct_fk_values(
         if not isinstance(row, dict):
             continue
         raw = row.get(column)
-        if raw is None:
-            continue
-        if isinstance(raw, str) and not raw.strip():
-            continue
-        key = str(raw)
-        if key in seen:
+        key = _fk_key(raw)
+        if key is None or key in seen:
             continue
         seen.add(key)
         out.append(raw)
@@ -52,14 +71,12 @@ def orphan_values(
     parent_values: Iterable[Any],
 ) -> list[Any]:
     """Return child values with no match in parent (string-normalized)."""
-    parent_keys = {str(v) for v in parent_values if v is not None and str(v) != ""}
+    parent_keys = {key for v in parent_values if (key := _fk_key(v)) is not None}
     orphans: list[Any] = []
     seen: set[str] = set()
     for v in child_values:
-        if v is None:
-            continue
-        key = str(v)
-        if not key or key in seen:
+        key = _fk_key(v)
+        if key is None or key in seen:
             continue
         if key not in parent_keys:
             seen.add(key)
@@ -421,13 +438,13 @@ def probe_sample_fk_orphans(
             "referenced_column": parent_col,
             "checked_values": len(values),
             "orphan_count": len(missing),
-            "orphan_examples": [str(v)[:80] for v in missing[:5]],
+            "orphan_examples": [_fk_display(v) for v in missing[:5]],
             "coverage": "sample_orphan_probe",
             "population_proof": False,
         }
         checks.append(check)
         if missing:
-            examples = ", ".join(str(v)[:40] for v in missing[:3])
+            examples = ", ".join(_fk_display(v, limit=40) for v in missing[:3])
             findings.append(
                 {
                     "code": "fk_orphan_in_sample",
