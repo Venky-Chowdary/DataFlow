@@ -1149,6 +1149,40 @@ def _parse_json(value: Any) -> str | None:
     )
 
 
+def _vector_component_carrier(value: Any) -> float | None:
+    """One VECTOR component through the write-path float binder.
+
+    ``float(text)`` invented Auto ``1.234`` and collapsed ``2**53+1``.
+    Native IEEE floats pass through. Locale money still binds.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, float):
+        if value != value or value in (float("inf"), float("-inf")):
+            return None
+        return value
+    if isinstance(value, int):
+        try:
+            return float_carrier_or_refuse(Decimal(value))
+        except (ValueError, Overflow, InvalidOperation):
+            return None
+    if isinstance(value, Decimal):
+        try:
+            return float_carrier_or_refuse(value)
+        except (ValueError, Overflow, InvalidOperation):
+            return None
+    text = str(value).strip()
+    if not text:
+        return None
+    parsed = decimal_wire_value(text)
+    if parsed is None:
+        return None
+    try:
+        return float_carrier_or_refuse(parsed)
+    except (ValueError, Overflow, InvalidOperation):
+        return None
+
+
 def _parse_vector(value: str) -> list[float] | None:
     """Parse a vector literal into a float list; reject dim-mismatched later."""
     text = value.strip()
@@ -1158,13 +1192,13 @@ def _parse_vector(value: str) -> list[float] | None:
         if text.startswith("["):
             parsed = json.loads(text, parse_constant=_json_reject_nonfinite)
         else:
-            parsed = [float(x.strip()) for x in text.split(",") if x.strip()]
+            parsed = [x.strip() for x in text.split(",") if x.strip()]
         if not isinstance(parsed, list) or not parsed:
             return None
         out: list[float] = []
         for x in parsed:
-            f = float(x)
-            if f != f or f in (float("inf"), float("-inf")):  # NaN / Inf
+            f = _vector_component_carrier(x)
+            if f is None:
                 return None
             out.append(f)
         return out
