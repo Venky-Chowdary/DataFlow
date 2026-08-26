@@ -5,6 +5,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from services.value_serializer import load_http_json
+
 from connectors.saas_common import (
     ReadBatch,
     base_url,
@@ -34,9 +36,18 @@ def _validate_api_name(name: str, label: str) -> str:
     return name
 
 
-def soql_literal(value: Any) -> str:
-    """Quote a SOQL string literal, escaping backslash and single quote."""
-    text = "" if value is None else str(value)
+def soql_literal(value: Any) -> str | None:
+    """Quote a present SOQL literal on the dest cell wire.
+
+    Reader-null / blank is not a seek token. ``str(True)`` invented
+    ``'True'`` so dest ``true`` missed the keyset resume. ``0`` stays
+    ``'0'``.
+    """
+    from services.value_serializer import present_cell_text
+
+    text = present_cell_text(value)
+    if text is None:
+        return None
     escaped = text.replace("\\", "\\\\").replace("'", "\\'")
     return f"'{escaped}'"
 
@@ -105,7 +116,7 @@ def list_sobjects(cfg: dict[str, Any]) -> list[str]:
     )
     r.raise_for_status()
     out: list[str] = []
-    for item in (r.json().get("sobjects") or []):
+    for item in (load_http_json(r).get("sobjects") or []):
         if item.get("queryable") and item.get("name"):
             out.append(str(item["name"]))
     return out
@@ -125,7 +136,7 @@ def describe_sobject(cfg: dict[str, Any], sobject: str) -> list[dict[str, Any]]:
     )
     r.raise_for_status()
     fields: list[dict[str, Any]] = []
-    for f in r.json().get("fields") or []:
+    for f in load_http_json(r).get("fields") or []:
         # Preserve write-safety + picklist metadata. Stripping these made live
         # Map/Validate invent writable formula fields and lose ENUM domains —
         # both are demo-breakers against a real Salesforce org.
@@ -227,7 +238,7 @@ def read_object(
     seek_column = (cursor_column or "").strip()
     if seek_column:
         _validate_api_name(seek_column, "cursor field")
-    seek_after = cursor_after if cursor_after not in (None, "") else None
+    seek_sql = soql_literal(cursor_after)
     if not seek_column and offset and int(offset) > SOQL_MAX_OFFSET:
         raise RuntimeError(
             f"Salesforce OFFSET is capped at {SOQL_MAX_OFFSET} rows; offset={int(offset)} "
@@ -246,8 +257,8 @@ def read_object(
         # ORDER BY identity so wide-schema field chunks merge by the same row set.
         order_field = seek_column or identity_field
         where = ""
-        if seek_column and seek_after is not None:
-            where = f" WHERE {seek_column} > {soql_literal(seek_after)}"
+        if seek_column and seek_sql is not None:
+            where = f" WHERE {seek_column} > {seek_sql}"
         query = (
             f"SELECT {field_list} FROM {sobject}{where} ORDER BY {order_field}"  # nosec B608
         )
@@ -259,7 +270,7 @@ def read_object(
             query += f" LIMIT {int(limit)} OFFSET {int(offset)}"  # nosec B608
             r = request(method="GET", url=query_url, token=access_token, params={"q": query}, timeout=60)
             r.raise_for_status()
-            data = r.json()
+            data = load_http_json(r)
             if "totalSize" in data and data.get("totalSize") is not None:
                 published = int(data["totalSize"])
                 total_size = published if total_size is None else max(total_size, published)
@@ -269,7 +280,7 @@ def read_object(
             query += f" LIMIT {min(limit, 2000)}"  # nosec B608
         r = request(method="GET", url=query_url, token=access_token, params={"q": query}, timeout=60)
         r.raise_for_status()
-        data = r.json()
+        data = load_http_json(r)
         if "totalSize" in data and data.get("totalSize") is not None:
             published = int(data["totalSize"])
             total_size = published if total_size is None else max(total_size, published)
@@ -291,7 +302,7 @@ def read_object(
                 abs_url = next_url
             r = request(method="GET", url=abs_url, token=access_token, timeout=60)
             r.raise_for_status()
-            data = r.json()
+            data = load_http_json(r)
             chunk = list(data.get("records") or [])
             next_url = data.get("nextRecordsUrl")
             if not data.get("done", True) and not next_url:

@@ -1,6 +1,7 @@
 /** Gate-8 reconciliation proof — source vs destination rows + checksums. */
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
+import { HiddenFileInput } from "../ui/HiddenFileInput";
 import type { Gate8ReconciliationPayload } from "../../lib/types";
 
 /**
@@ -363,7 +364,6 @@ export function Gate8ProofCard({
   onRerun,
   onRerunLabel = "Re-run transfer",
 }: Gate8ProofCardProps) {
-  const verifyInputRef = useRef<HTMLInputElement>(null);
   const [verifyState, setVerifyState] = useState<
     | { status: "idle" }
     | { status: "working" }
@@ -893,11 +893,10 @@ export function Gate8ProofCard({
               Download Migration Certificate (PDF)
             </button>
           )}
-          <input
-            ref={verifyInputRef}
-            type="file"
+          <HiddenFileInput
+            id="df2-gate8-verify-proof"
             accept="application/json,.json"
-            hidden
+            disabled={verifyState.status === "working"}
             onChange={(e) => {
               const file = e.target.files?.[0];
               e.target.value = "";
@@ -922,15 +921,14 @@ export function Gate8ProofCard({
                 });
             }}
           />
-          <button
-            type="button"
+          <label
+            htmlFor="df2-gate8-verify-proof"
             className="df2-btn df2-btn-sm"
-            disabled={verifyState.status === "working"}
-            onClick={() => verifyInputRef.current?.click()}
+            aria-disabled={verifyState.status === "working"}
             title="Re-check an exported HMAC proof pack (buyer diligence)"
           >
             {verifyState.status === "working" ? "Verifying…" : "Verify proof pack"}
-          </button>
+          </label>
         </div>
         {verifyState.status === "ok" && (
           <p className="df2-gate8-proof-verify is-ok" role="status">

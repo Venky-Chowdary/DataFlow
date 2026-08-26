@@ -21,13 +21,13 @@ counters keep accumulating.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import date, datetime
 from decimal import Decimal, DecimalException, InvalidOperation
 from typing import Any, Iterable, Mapping, Sequence
 
 from services.shape_expr import (
     FUNCTIONS,
     EvalError,
+    _as_text,
     is_blank,
 )
 from services.shape_models import ShapeRecipe, ShapeStep
@@ -282,7 +282,7 @@ class ShapeEngine:
         if op == "concat_columns":
             target = str(options.get("to") or "")
             separator = str(options.get("separator") or "")
-            parts = [_text(row.get(name)) for name in options.get("columns", [])]
+            parts = [_as_text(row.get(name)) for name in options.get("columns", [])]
             value = separator.join(p for p in parts if p is not None)
             self._record_write(tally, before=row.get(target), after=value, existed=target in row)
             row[target] = value
@@ -291,7 +291,7 @@ class ShapeEngine:
         if op == "split_column":
             separator = str(options.get("separator") or "")
             targets = [str(name) for name in options.get("into", [])]
-            text = _text(row.get(step.column))
+            text = _as_text(row.get(step.column))
             pieces = text.split(separator) if text is not None else []
             for position, name in enumerate(targets):
                 value = pieces[position] if position < len(pieces) else None
@@ -443,8 +443,14 @@ def _transform_value(step: ShapeStep, value: Any) -> Any:
     if op == "default_if_null":
         return options.get("value") if is_blank(value) else value
     if op == "null_if":
-        sentinels = {str(v) for v in options.get("values", [])}
-        text = _text(value)
+        if is_blank(value):
+            return None
+        sentinels = {
+            text
+            for raw in options.get("values", [])
+            if (text := _as_text(raw)) is not None
+        }
+        text = _as_text(value)
         return None if text is not None and text in sentinels else value
     if op == "round_number":
         return _call("round", value, options.get("places", 0)) if not is_blank(value) else None
@@ -510,26 +516,14 @@ def _cast(value: Any, to_type: str, fmt: Any) -> Any:
     raise EvalError(f"'{to_type}' is not a logical type")
 
 
-def _text(value: Any) -> str | None:
-    if value is None:
-        return None
-    if isinstance(value, str):
-        return value
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    if isinstance(value, Decimal):
-        return format(value, "f")
-    if isinstance(value, (datetime, date)):
-        return value.isoformat()
-    return str(value)
-
-
 def _same_value(before: Any, after: Any) -> bool:
     """Whether a write actually changed the cell, for an honest change count."""
     if before is after:
         return True
-    if before is None or after is None:
-        return before is None and after is None
+    if is_blank(before) and is_blank(after):
+        return True
+    if is_blank(before) or is_blank(after):
+        return False
     if isinstance(before, (int, float, Decimal)) and isinstance(after, (int, float, Decimal)):
         if isinstance(before, bool) != isinstance(after, bool):
             return False
@@ -538,7 +532,7 @@ def _same_value(before: Any, after: Any) -> bool:
         except (InvalidOperation, DecimalException, ValueError):
             # NaN or infinity: not comparable as equal, so the cell counts as written.
             return False
-    return _text(before) == _text(after)
+    return _as_text(before) == _as_text(after)
 
 
 def shape_records(

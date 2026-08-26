@@ -232,6 +232,17 @@ def token(  # nosec B107
     return ""
 
 
+def saas_record_id(value: Any) -> str | None:
+    """Dest-canonical present record id, or None when absent.
+
+    ``if val`` dropped integer ``0``. Reader-null sentinels became URL ids.
+    ``str(True)`` invented ``True`` so dest ``true`` missed upsert identity.
+    """
+    from services.value_serializer import present_cell_text
+
+    return present_cell_text(value)
+
+
 def request(
     *,
     method: str,

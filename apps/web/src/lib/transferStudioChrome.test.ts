@@ -367,6 +367,45 @@ describe("Transfer Studio chrome contracts", () => {
     );
   });
 
+  it("Destination saved/new lists nest-scroll above the wizard footer", () => {
+    const css = readFileSync(join(webRoot, "styles/transfer-studio.css"), "utf8");
+    const landing = readFileSync(join(webRoot, "styles/landing.css"), "utf8");
+    const destOwner = css.slice(css.lastIndexOf("Destination rail — last owner"));
+    assert.match(
+      destOwner,
+      /\.df2-page-transfer-studio \.df2-dest-step\.df2-transfer-step-viewport \{[\s\S]*overflow:\s*hidden !important/,
+    );
+    assert.doesNotMatch(
+      destOwner,
+      /\.df2-page-transfer-studio \.df2-dest-step\.df2-transfer-step-viewport \{[\s\S]*overflow:\s*visible/,
+    );
+    assert.match(
+      destOwner,
+      /\.df2-page-transfer-studio \.df2-dest-connector-list \{[\s\S]*overflow-y:\s*auto !important/,
+    );
+    assert.match(
+      destOwner,
+      /\.df2-page-transfer-studio \.df2-dest-picker\.is-new-connection \.df2-dest-engine-panel \{[\s\S]*overflow-y:\s*auto !important/,
+    );
+    assert.match(
+      destOwner,
+      /\.df2-page-transfer-studio \.df2-dest-step > \.df2-wizard-footer \{[\s\S]*flex:\s*0 0 auto !important/,
+    );
+    const afterSourceOwner = css.slice(css.lastIndexOf("Studio source / destination — one owner"));
+    assert.doesNotMatch(
+      afterSourceOwner,
+      /\.df2-page-transfer-studio \.df2-dest-step\.df2-transfer-step-viewport \{[\s\S]{0,160}overflow:\s*visible/,
+      "Source natural-height must not unlock Destination overflow",
+    );
+    assert.doesNotMatch(
+      destOwner,
+      /\.df2-dest-connector-list \{[\s\S]{0,120}overflow:\s*visible/,
+      "1100px must not disable dest list scroll after the last dest owner",
+    );
+    assert.match(landing, /Marketing cards — last owner/);
+    assert.match(landing, /overflow-wrap:\s*anywhere/);
+  });
+
   it("every Transfer step owns a visible primary CTA and does not reuse Shape", () => {
     const constants = readFileSync(join(webRoot, "pages/transfer/studioConstants.ts"), "utf8");
     const page = readFileSync(join(webRoot, "pages/TransferPage.tsx"), "utf8");
@@ -452,5 +491,99 @@ describe("Transfer Studio chrome contracts", () => {
       help,
       /five-step rail: \*\*Src → Dest → Map → Validate → Run\*\*/,
     );
+  });
+
+  it("Destination Advanced owns a number locale contract next to date locale", () => {
+    const constants = readFileSync(join(webRoot, "lib/transferConstants.ts"), "utf8");
+    const drawer = readFileSync(join(webRoot, "components/transfer/DestinationAdvancedDrawer.tsx"), "utf8");
+    const page = readFileSync(join(webRoot, "pages/TransferPage.tsx"), "utf8");
+    const api = readFileSync(join(webRoot, "lib/api.ts"), "utf8");
+
+    assert.match(constants, /export type NumberLocaleId = "" \| "US" \| "EU"/);
+    assert.match(constants, /label: "US \(1,234\.56\)"/);
+    assert.match(constants, /label: "EU \(1\.234,56\)"/);
+    assert.match(drawer, /Number locale/);
+    assert.match(drawer, /onNumberLocaleChange/);
+    assert.match(page, /numberLocales=\{NUMBER_LOCALES\}/);
+    assert.match(page, /number_locale: numberLocale/);
+    assert.match(api, /formData.append\("number_locale"/);
+  });
+
+  it("Validate surfaces number locale set_locale with one Advanced CTA", () => {
+    const dash = readFileSync(join(webRoot, "components/transfer/ValidateDashboard.tsx"), "utf8");
+    const panel = readFileSync(join(webRoot, "components/transfer/NumberLocalePanel.tsx"), "utf8");
+    const honesty = readFileSync(join(webRoot, "lib/validateHonestyControls.ts"), "utf8");
+    assert.match(honesty, /export function numberLocaleValidateAction/);
+    assert.match(dash, /NumberLocalePanel/);
+    assert.match(dash, /numberLocaleValidateAction\(preflight\)/);
+    assert.match(panel, /Set number locale/);
+    assert.match(panel, /onOpenAdvanced/);
+    assert.doesNotMatch(panel, /Set number locale[\s\S]*Set number locale/);
+  });
+
+  it("Validate surfaces date locale set_locale with one Advanced CTA", () => {
+    const dash = readFileSync(join(webRoot, "components/transfer/ValidateDashboard.tsx"), "utf8");
+    const panel = readFileSync(join(webRoot, "components/transfer/NumberLocalePanel.tsx"), "utf8");
+    const honesty = readFileSync(join(webRoot, "lib/validateHonestyControls.ts"), "utf8");
+    const drawer = readFileSync(join(webRoot, "components/transfer/DestinationAdvancedDrawer.tsx"), "utf8");
+    const page = readFileSync(join(webRoot, "pages/TransferPage.tsx"), "utf8");
+    assert.match(honesty, /export function dateLocaleValidateAction/);
+    assert.match(dash, /DateLocalePanel/);
+    assert.match(dash, /dateLocaleValidateAction\(preflight\)/);
+    assert.match(panel, /Set date locale/);
+    assert.doesNotMatch(panel, /Set date locale[\s\S]*Set date locale/);
+    assert.match(drawer, /id="df2-adv-date-locale"/);
+    assert.match(drawer, /id="df2-adv-number-locale"/);
+    assert.match(drawer, /localeFocus/);
+    assert.match(drawer, /scrollAdvancedLocaleIntoView/);
+    assert.match(dash, /onOpenLocaleSettings/);
+    assert.match(page, /openLocaleSettings/);
+    assert.match(honesty, /export function scrollAdvancedLocaleIntoView/);
+  });
+
+  it("Source, Schedules, and Gate8 pick files through one sr-only input + label", () => {
+    const hidden = readFileSync(join(webRoot, "components/ui/HiddenFileInput.tsx"), "utf8");
+    const page = readFileSync(join(webRoot, "pages/TransferPage.tsx"), "utf8");
+    const schedules = readFileSync(join(webRoot, "pages/SchedulesPage.tsx"), "utf8");
+    const gate8 = readFileSync(join(webRoot, "components/transfer/Gate8ProofCard.tsx"), "utf8");
+    const css = readFileSync(join(webRoot, "styles/enterprise-ui.css"), "utf8");
+
+    assert.match(hidden, /className="df2-sr-only"/);
+    assert.match(hidden, /type="file"/);
+    assert.doesNotMatch(hidden, /<input[\s\S]*\bhidden(?:\s|=|>)/);
+    const srOnly = css.match(/\.df2-sr-only \{([^}]+)\}/);
+    assert.ok(srOnly, ".df2-sr-only rule is missing");
+    assert.match(srOnly[1], /clip: rect\(0, 0, 0, 0\)/);
+    assert.doesNotMatch(srOnly[1], /display:\s*none/);
+
+    assert.match(page, /id="df2-source-file"/);
+    assert.match(page, /htmlFor="df2-source-file"/);
+    assert.match(page, /<label\s+htmlFor="df2-source-file"[\s\S]*className=\{`df2-upload/);
+    assert.doesNotMatch(page, /<input[\s\S]{0,80}type="file"/);
+    assert.doesNotMatch(page, /fileInputRef\.current\?\.click/);
+
+    assert.match(schedules, /id="df2-schedule-import"/);
+    assert.match(schedules, /htmlFor="df2-schedule-import"/);
+    assert.doesNotMatch(schedules, /importInputRef\.current\?\.click/);
+
+    assert.match(gate8, /id="df2-gate8-verify-proof"/);
+    assert.match(gate8, /htmlFor="df2-gate8-verify-proof"/);
+    assert.doesNotMatch(gate8, /verifyInputRef\.current\?\.click/);
+  });
+
+  it("local preflight and file export use the write-path number locale parser", () => {
+    const localPf = readFileSync(join(webRoot, "lib/localPreflight.ts"), "utf8");
+    const localEx = readFileSync(join(webRoot, "lib/localFileExport.ts"), "utf8");
+    const localTx = readFileSync(join(webRoot, "lib/localTransform.ts"), "utf8");
+    const page = readFileSync(join(webRoot, "pages/TransferPage.tsx"), "utf8");
+    assert.match(localTx, /parseLocaleNumber/);
+    assert.match(localPf, /applyLocalTransform/);
+    assert.match(localEx, /applyLocalTransform/);
+    assert.match(page, /numberLocale,/);
+    assert.match(page, /dateLocale,/);
+    assert.match(localPf, /date_locale_report/);
+    assert.doesNotMatch(localPf, /replace\(\/,\/g/);
+    assert.doesNotMatch(localEx, /replace\(\/,\/g/);
+    assert.doesNotMatch(localTx, /replace\(\/,\/g/);
   });
 });

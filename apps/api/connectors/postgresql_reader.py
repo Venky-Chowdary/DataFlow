@@ -450,7 +450,7 @@ def read_table_cursor_batch(
     """
     from psycopg2 import sql
 
-    from services.keyset_pagination import split_cursor_bookmark
+    from services.keyset_pagination import present_cursor_bookmark, split_cursor_bookmark
     from services.source_snapshot import get_source_snapshot_conn
 
     schema, table = _bind(schema, table)
@@ -488,7 +488,8 @@ def read_table_cursor_batch(
                     sql.Identifier(schema),
                     sql.Identifier(table),
                 )
-            if cursor_after:
+            bookmark = present_cursor_bookmark(cursor_after)
+            if bookmark is not None:
                 # Composite order: cursor then primary key when provided so tied
                 # watermarks do not skip peer rows (timestamp-cursor Airbyte trap).
                 pk = (cursor_primary_key or "").strip()
@@ -503,7 +504,7 @@ def read_table_cursor_batch(
                         sql.Identifier(pk),
                     )
                     cur_val, pk_val = split_cursor_bookmark(
-                        cursor_after, has_tiebreak=True
+                        bookmark, has_tiebreak=True
                     )
                     cur.execute(query, (cur_val, pk_val, limit))
                 else:
@@ -512,7 +513,7 @@ def read_table_cursor_batch(
                         sql.Identifier(cursor_column),
                         sql.Identifier(cursor_column),
                     )
-                    cur_val, _ = split_cursor_bookmark(cursor_after, has_tiebreak=False)
+                    cur_val, _ = split_cursor_bookmark(bookmark, has_tiebreak=False)
                     cur.execute(query, (cur_val, limit))
             else:
                 pk = (cursor_primary_key or "").strip()

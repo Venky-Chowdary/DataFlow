@@ -174,10 +174,13 @@ _CATALOG_LIST: tuple[_StepDef, ...] = (
     _StepDef("parse_number", "Parse a human-written number"),
     _StepDef(
         "parse_date",
-        "Parse a date with an explicit format",
+        "Parse a write-path calendar date, or an explicit format",
         options=("format", "output_format"),
     ),
-    _StepDef("parse_boolean", "Parse Y/N, 1/0, true/false"),
+    _StepDef(
+        "parse_boolean",
+        "Parse true/t/1 and false/f/0 — informal yes/Y/2 refuse",
+    ),
     _StepDef("normalize_unicode", "Apply a Unicode normal form", options=("form",)),
     _StepDef(
         "set_value",
@@ -586,11 +589,15 @@ def _normalize_options(
 
     if op == "null_if":
         values = out.get("values")
-        if isinstance(values, (str, int, float)):
+        if isinstance(values, (str, int, float, bool)):
             values = [values]
         if not isinstance(values, (list, tuple)) or not values:
             raise ShapeError(f"{where}: null_if needs a list of sentinel values")
-        out["values"] = [str(v) for v in values]
+        persisted = [_option_cell_token(v) for v in values]
+        persisted = [t for t in persisted if t is not None]
+        if not persisted:
+            raise ShapeError(f"{where}: null_if needs a list of sentinel values")
+        out["values"] = persisted
 
     if op == "normalize_unicode":
         form = str(out.get("form") or "NFC").strip().upper()
@@ -699,17 +706,29 @@ def _apply_column_effect(step: ShapeStep, columns: list[str]) -> None:
         return
 
 
+def _option_cell_token(value: Any) -> str | None:
+    """One recipe option cell on the transfer wire.
+
+    ``str(True)`` is ``True``; dest and apply use ``true``. Reader-null
+    is not a sentinel the operator can ask to match — skip it.
+    """
+    from services.value_serializer import present_cell_text
+
+    return present_cell_text(value)
+
+
 def _canonical_options(options: Mapping[str, Any]) -> dict[str, Any]:
     """Options with list order preserved and scalars stringified consistently."""
     out: dict[str, Any] = {}
     for key in sorted(options):
         value = options[key]
         if isinstance(value, (list, tuple)):
-            out[key] = [str(v) for v in value]
+            out[key] = [t for v in value if (t := _option_cell_token(v)) is not None]
         elif isinstance(value, bool) or value is None:
             out[key] = value
         else:
-            out[key] = str(value)
+            token = _option_cell_token(value)
+            out[key] = value if token is None else token
     return out
 
 

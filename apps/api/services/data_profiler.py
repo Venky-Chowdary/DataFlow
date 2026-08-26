@@ -2,23 +2,21 @@
 
 from __future__ import annotations
 
-import base64
-import json
-import math
 import re
 from collections import Counter
-from datetime import date, datetime, time
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from typing import Any
 
-from services.value_serializer import json_default
 from services.transform_engine import (
     _parse_boolean,
     _parse_date,
     _parse_datetime,
+    _parse_decimal,
     _parse_integer,
     _parse_uuid,
+    decimal_wire_value,
 )
+from services.value_serializer import cell_to_string, is_null_evidence
 
 EMAIL_RE = re.compile(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
 UUID_RE = re.compile(
@@ -29,52 +27,61 @@ DATE_PATTERN_RE = re.compile(r"^\d{4}-\d{2}-\d{2}|^\d{2}/\d{2}/\d{4}|^\d{8}$")
 
 
 def _as_str(value: Any) -> str:
-    if value is None:
+    """One profiler sample. Same spelling as the transfer wire.
+
+    ``str(Decimal('1E+2'))`` invented ``1E+2``. Reader-wired
+    ``SQL_NULL_SENTINEL`` looked like a VARCHAR token. NULL / Missing /
+    blank still collapse to ``""`` so null-rate counts absence, not the
+    sentinel — that polarity is profiler-only, not extract.
+    """
+    if value is None or is_null_evidence(value):
         return ""
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    if isinstance(value, (bytes, bytearray)):
-        return base64.b64encode(bytes(value)).decode("ascii")
-    if isinstance(value, (dict, list, tuple, set, frozenset)):
-        return json.dumps(value, default=json_default)
-    if isinstance(value, datetime):
-        return value.isoformat()
-    if isinstance(value, date):
-        return value.isoformat()
-    if isinstance(value, time):
-        return value.isoformat()
-    return str(value).strip()
+    text = cell_to_string(value, preserve_sql_null=True)
+    if is_null_evidence(text):
+        return ""
+    return text.strip()
 
 
-def _percentile(sorted_vals: list[float], p: float) -> float | None:
+def _percentile(sorted_vals: list[Decimal], p: float) -> Decimal | None:
     if not sorted_vals:
         return None
-    k = (len(sorted_vals) - 1) * p
-    f = math.floor(k)
-    c = math.ceil(k)
-    if f == c:
-        return sorted_vals[int(k)]
-    return sorted_vals[f] * (c - k) + sorted_vals[c] * (k - f)
+    n = len(sorted_vals)
+    if n == 1:
+        return sorted_vals[0]
+    k = Decimal(n - 1) * Decimal(str(p))
+    floor = int(k)
+    ceil = floor if k == floor else min(floor + 1, n - 1)
+    if floor == ceil:
+        return sorted_vals[floor]
+    frac = k - Decimal(floor)
+    return sorted_vals[floor] * (Decimal(1) - frac) + sorted_vals[ceil] * frac
+
+
+def _numeric_values(values: list[str]) -> list[Decimal]:
+    out: list[Decimal] = []
+    for raw in values:
+        parsed = decimal_wire_value(raw)
+        if parsed is None:
+            continue
+        out.append(parsed)
+    return out
 
 
 def _numeric_stats(values: list[str]) -> dict[str, Any]:
-    nums: list[float] = []
-    for raw in values:
-        try:
-            nums.append(float(Decimal(raw.replace(",", "").replace("$", ""))))
-        except (InvalidOperation, ValueError):
-            continue
+    nums = _numeric_values(values)
     if not nums:
         return {}
     sorted_nums = sorted(nums)
     n = len(nums)
-    mean = sum(nums) / n
-    variance = sum((x - mean) ** 2 for x in nums) / n
+    mean = sum(nums, Decimal(0)) / Decimal(n)
+    variance = sum((x - mean) ** 2 for x in nums) / Decimal(n)
+    stddev = variance.sqrt() if variance >= 0 else Decimal(0)
+    quantum = Decimal("0.000001")
     return {
         "min": sorted_nums[0],
         "max": sorted_nums[-1],
-        "mean": round(mean, 6),
-        "stddev": round(math.sqrt(variance), 6),
+        "mean": mean.quantize(quantum) if mean.is_finite() else mean,
+        "stddev": stddev.quantize(quantum) if stddev.is_finite() else stddev,
         "p25": _percentile(sorted_nums, 0.25),
         "p50": _percentile(sorted_nums, 0.50),
         "p75": _percentile(sorted_nums, 0.75),
@@ -102,7 +109,7 @@ def _infer_pattern(values: list[str]) -> str | None:
     return None
 
 
-def _histogram(values: list[float], buckets: int = 10) -> list[dict[str, Any]]:
+def _histogram(values: list[Decimal], buckets: int = 10) -> list[dict[str, Any]]:
     if not values:
         return []
     lo, hi = min(values), max(values)
@@ -113,8 +120,14 @@ def _histogram(values: list[float], buckets: int = 10) -> list[dict[str, Any]]:
     for v in values:
         idx = min(buckets - 1, int((v - lo) / width))
         counts[idx] += 1
+    quantum = Decimal("0.0001")
     return [
-        {"bucket": i, "low": round(lo + i * width, 4), "high": round(lo + (i + 1) * width, 4), "count": c}
+        {
+            "bucket": i,
+            "low": (lo + i * width).quantize(quantum),
+            "high": (lo + (i + 1) * width).quantize(quantum),
+            "count": c,
+        }
         for i, c in enumerate(counts)
     ]
 
@@ -139,11 +152,8 @@ def _type_scores(values: list[str]) -> dict[str, float]:
             scores["BOOLEAN"] += 1
         if _parse_integer(raw) is not None:
             scores["INTEGER"] += 1
-        try:
-            Decimal(raw.replace(",", ""))
+        if _parse_decimal(raw) is not None:
             scores["DECIMAL"] += 1
-        except InvalidOperation:
-            pass
         if _parse_date(raw):
             scores["DATE"] += 1
         if _parse_datetime(raw):
@@ -188,13 +198,7 @@ def profile_column(name: str, values: list[Any], *, sample_limit: int = 200) -> 
     if numeric_logical or best_type in {"INTEGER", "DECIMAL", "NUMERIC", "FLOAT"}:
         stats = _numeric_stats(non_empty)
         if stats:
-            nums = []
-            for raw in non_empty:
-                try:
-                    nums.append(float(Decimal(raw.replace(",", "").replace("$", ""))))
-                except (InvalidOperation, ValueError):
-                    pass
-            histogram = _histogram(nums)
+            histogram = _histogram(_numeric_values(non_empty))
         # Sample-aware DECIMAL(p,s) / IEEE kind for Map profiling strip.
         from services.decimal_observe import observe_source_numeric_samples
 

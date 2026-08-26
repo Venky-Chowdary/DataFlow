@@ -2037,11 +2037,20 @@ def _dry_run_transform(value: str, transform: str | None) -> str | None:
         return "".join(ch for ch in value if ch == "\t" or ch == "\n" or ch == "\r" or ord(ch) >= 32)
     if t in {"integer", "int", "number", "decimal", "float", "double", "numeric", "currency", "percentage"}:
         try:
-            cleaned = value.replace(",", "").replace("$", "").replace("€", "").replace("%", "").strip()
+            from decimal import Decimal, InvalidOperation
+
+            cleaned = value.replace("%", "").strip()
+            for mark in "$€£¥₹":
+                cleaned = cleaned.replace(mark, "")
+            cleaned = cleaned.strip()
+            # Standalone fallback — never invent a locale. Plain Decimal only.
+            parsed = Decimal(cleaned)
+            if not parsed.is_finite():
+                return value
             if "." in cleaned or "e" in cleaned.lower():
-                return str(float(cleaned))
-            return str(int(cleaned))
-        except Exception:
+                return str(parsed)
+            return str(int(parsed))
+        except (InvalidOperation, ValueError, OverflowError, Exception):
             return value
     if t in {"boolean", "bool"}:
         return "true" if value and value.lower() not in {"false", "0", "", "no", "off"} else "false"

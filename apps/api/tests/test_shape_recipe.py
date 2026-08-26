@@ -161,7 +161,7 @@ def test_cleansing_steps_produce_the_values_an_operator_expects():
         ),
         ROWS,
     )
-    assert [r["name"] for r in shaped] == ["Ada Lovelace", "Grace Hopper", ""]
+    assert [r["name"] for r in shaped] == ["Ada Lovelace", "Grace Hopper", None]
     assert shaped[0]["amount"] == Decimal("1234.50")
     assert shaped[1]["amount"] == Decimal("-9.99")
     assert shaped[2]["amount"] is None
@@ -196,7 +196,7 @@ def test_a_cast_declares_the_type_instead_of_letting_a_sample_infer_it():
             },
             source_columns=["n", "d", "b"],
         ),
-        [{"n": "42", "d": "03/04/2026", "b": "Y"}],
+        [{"n": "42", "d": "03/04/2026", "b": "true"}],
     )
     assert shaped[0] == {"n": 42, "d": date(2026, 4, 3), "b": True}
 
@@ -209,6 +209,17 @@ def test_a_cast_that_would_lose_information_refuses_the_row():
                 source_columns=["n"],
             ),
             [{"n": "4.5"}],
+        )
+
+
+def test_boolean_cast_refuses_informal_yes():
+    with pytest.raises(ShapeRowError, match="not a truth value"):
+        shape_records(
+            ShapeRecipe.parse(
+                {"steps": [{"op": "cast_column", "column": "b", "options": {"to_type": "boolean"}}]},
+                source_columns=["b"],
+            ),
+            [{"b": "Y"}],
         )
 
 

@@ -68,9 +68,9 @@ def _now_utc() -> datetime:
 
 
 def _compose_key(row: dict[str, Any], columns: list[str]) -> str:
-    from services.value_serializer import cell_to_string
+    from connectors.writer_common import conflict_key_wire
 
-    return _KEY_SEP.join(cell_to_string(row.get(c)) for c in columns)
+    return _KEY_SEP.join(conflict_key_wire(row.get(c)) for c in columns)
 
 
 def _qchar(dialect: str) -> str:
@@ -140,7 +140,8 @@ def _row_hash(row: dict[str, Any], target_cols: list[str]) -> str:
     from the current SCD2 version before hashing so STOP_COLUMN cannot invent
     false history by hashing as empty/NULL.
     """
-    from services.value_serializer import cell_to_string, is_missing_sentinel
+    from connectors.writer_common import conflict_key_wire
+    from services.value_serializer import is_missing_sentinel
 
     parts = []
     for c in target_cols:
@@ -149,7 +150,7 @@ def _row_hash(row: dict[str, Any], target_cols: list[str]) -> str:
         val = row.get(c)
         if is_missing_sentinel(val):
             continue
-        parts.append(f"{c}={cell_to_string(val)}")
+        parts.append(f"{c}={conflict_key_wire(val)}")
     return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
 
 
@@ -437,8 +438,8 @@ def _pk_validate_mapped_rows(
     *,
     row_numbers: list[int] | None = None,
 ) -> list[dict[str, Any]]:
-    """Empty / DF_MISSING PK identity quarantines — never a silent skip."""
-    from services.value_serializer import is_missing_sentinel
+    """Empty / DF_MISSING / reader-null PK identity quarantines — never a silent skip."""
+    from connectors.writer_common import _is_nullish_conflict_key
 
     pk_ok_rows: list[dict[str, Any]] = []
     for row_idx, row in enumerate(mapped_rows):
@@ -447,36 +448,18 @@ def _pk_validate_mapped_rows(
             if row_numbers is not None and row_idx < len(row_numbers)
             else row_idx + 1
         )
-        if any(is_missing_sentinel(row.get(c)) for c in pk_columns):
+        nullish = [c for c in pk_columns if _is_nullish_conflict_key(row.get(c))]
+        if nullish:
             rejected_details.append(
                 {
                     "row": row_no,
-                    "column": ",".join(pk_columns),
+                    "column": ",".join(nullish),
                     "target": ",".join(pk_columns),
                     "value": "",
-                    "reason": "SCD2 primary key cannot be DF_MISSING / STOP_COLUMN omit",
-                    "policy": "quarantine",
-                    "chars": [],
-                }
-            )
-            continue
-        key = _compose_key(row, pk_columns)
-        # Never use truthiness — numeric 0 / "0" are valid PK values.
-        parts: list[str] = []
-        for c in pk_columns:
-            raw = row.get(c)
-            if raw is None:
-                parts.append("")
-            else:
-                parts.append(str(raw).strip())
-        if not key or any(p == "" for p in parts):
-            rejected_details.append(
-                {
-                    "row": row_no,
-                    "column": ",".join(pk_columns),
-                    "target": ",".join(pk_columns),
-                    "value": "",
-                    "reason": "SCD2 row missing primary key identity",
+                    "reason": (
+                        "SCD2 primary key cannot be DF_MISSING / STOP_COLUMN omit "
+                        "or extract SQL NULL"
+                    ),
                     "policy": "quarantine",
                     "chars": [],
                 }

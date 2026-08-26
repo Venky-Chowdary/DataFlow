@@ -725,6 +725,9 @@ def test_cdc_row_key_rejects_sql_null_sentinel():
     assert not is_present_cdc_row_key("")
     assert not is_present_cdc_row_key(None)
     assert not is_present_cdc_row_key(SQL_NULL_SENTINEL)
+    assert not is_present_cdc_row_key("__df_ddb_null__")
+    assert is_present_cdc_row_key(0)
+    assert is_present_cdc_row_key(False)
 
 
 def test_questdb_ddl_stamps_decimal_as_double():

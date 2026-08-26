@@ -27,7 +27,8 @@ def test_coerce_decimal_overflow_refuse_quantize():
     from connectors.sql_bind import coerce_decimal_wire
 
     with pytest.raises(ValueError, match="refuse silent quantize"):
-        coerce_decimal_wire("12.345", ddl_type="DECIMAL(4,2)")
+        # Auto 12.345 is a 3-digit last group — write path refuses before fit.
+        coerce_decimal_wire("12.3456", ddl_type="DECIMAL(4,2)")
     with pytest.raises(ValueError, match="refuse silent quantize"):
         coerce_decimal_wire("1000", ddl_type="NUMBER(3,0)")
 
@@ -43,7 +44,7 @@ def test_coerce_decimal_pg_rounds_scale_matches_engine():
     )
     assert lat == Decimal("52.310500000000000")
     rounded = coerce_decimal_wire(
-        "12.345",
+        "12.3450",
         ddl_type="DECIMAL(4,2)",
         engine="postgresql",
     )

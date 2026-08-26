@@ -11,8 +11,9 @@ rules that used to exist have been removed and must not return:
   ``deleted_by`` and ``delete_count``. Matching is exact, never substring.
 
 Fail closed on ambiguity: an unrecognised boolean token is *present*, not
-deleted. Refusing to delete is recoverable (a later sync corrects a stale
-row); deleting on a guess is not.
+deleted. Write-path tokens only (true/false/t/f/1/0). Informal yes/y/2
+do not hard-DELETE. Refusing to delete is recoverable; deleting on a
+guess is not.
 
 Debezium envelope rows carry ``__deleted`` / ``__op`` in {d, delete}. Those
 are explicit event flags, not business columns. Bare ``op`` is not read —
@@ -68,8 +69,9 @@ TOMBSTONE_LOOKALIKES = frozenset(
     }
 )
 
-_FALSEY_TOKENS = frozenset({"", "0", "false", "f", "no", "n", "null", "none", "nan"})
-_TRUTHY_TOKENS = frozenset({"1", "true", "t", "yes", "y"})
+# Sentinels that mean "not deleted" without a boolean parse. Informal
+# yes/no/y/n are not here — they fail closed as unrecognised (present).
+_NULLISH_TOKENS = frozenset({"", "null", "none", "nan"})
 _DELETE_OPS = frozenset({"d", "delete"})
 
 #: Timestamp-style tombstones follow ``deleted_at IS NULL``: any concrete
@@ -125,10 +127,13 @@ def is_tombstone_set(record: Mapping[str, Any], tombstone_column: str) -> bool:
     if isinstance(value, bool):
         return value
     text = str(value).strip().lower()
-    if text in _FALSEY_TOKENS:
+    if text in _NULLISH_TOKENS:
         return False
-    if text in _TRUTHY_TOKENS:
-        return True
+    from services.transform_engine import apply_transform
+
+    parsed, err = apply_transform(text, "boolean")
+    if parsed is not None and not err:
+        return bool(parsed)
     if tombstone_column.strip().lower() in TIMESTAMP_TOMBSTONES:
         return looks_like_timestamp(text)
     logger.warning(

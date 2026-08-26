@@ -14,6 +14,8 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any, Sequence
 
+from services.value_serializer import present_cell_text
+
 # Unit separator — stable for composite bookmarks (CDC + transfer).
 KEYSET_SEP = "\x1f"
 # Legacy transfer watermark for 2-col ``cursor|pk`` (pre-F2).
@@ -50,13 +52,30 @@ def keyset_successor_predicate(
 
 
 def encode_keyset_bookmark(parts: Sequence[Any]) -> str:
-    """Encode ordered key parts into a bookmark string."""
-    vals = ["" if p is None else str(p) for p in parts]
+    """Encode ordered key parts into a bookmark string.
+
+    Each part uses :func:`present_cell_text` so ``True`` and dest ``"true"``
+    share one token and reader-null cells become empty parts, not the
+    ``SQL_NULL_SENTINEL`` spelling. Callers that skip missing rows must do
+    so before encode — this function preserves arity.
+    """
+    vals = [present_cell_text(p) or "" for p in parts]
     if not vals:
         raise ValueError("keyset bookmark requires at least one part")
     if len(vals) == 1:
         return vals[0]
     return KEYSET_SEP.join(vals)
+
+
+def present_cursor_bookmark(value: Any) -> str | None:
+    """Keyset resume token, or None when the cell is absent (first page).
+
+    ``if cursor_after`` dropped integer ``0``. Reader-null sentinels are
+    truthy and became ``WHERE col > '__DF_SQL_NULL__'``. Composite
+    ``KEYSET_SEP`` bookmarks stay intact. Incremental empty-string
+    watermarks are a different polarity — do not use this in CDC coalesce.
+    """
+    return present_cell_text(value)
 
 
 def decode_keyset_bookmark(bookmark: str, *, expected_parts: int) -> list[str]:
@@ -120,6 +139,29 @@ def split_cursor_bookmark(
     return raw, ""
 
 
+def _numeric_order_key(value: str) -> Decimal | None:
+    """Bind one bookmark part as a number, or ``None`` when it cannot.
+
+    Dest-canonical storage text (``1.234``, ``1.2300``) uses ``Decimal(text)``
+    first so Auto wire does not refuse a resolved dest value. Locale money the
+    write path stores (``$1,234`` / ``€1.234``) falls through to
+    ``decimal_wire_value``. Auto ``1,234`` stays unbound — the column then
+    orders as text rather than inventing thousands.
+    """
+    text = "" if value is None else str(value).strip()
+    if not text:
+        return None
+    try:
+        parsed = Decimal(text)
+        if parsed.is_finite():
+            return parsed
+    except (ArithmeticError, InvalidOperation, ValueError):
+        pass
+    from services.transform_engine import decimal_wire_value
+
+    return decimal_wire_value(text)
+
+
 def _column_order_keys(values: list[str]) -> list[Any]:
     """Sort keys that order ``values`` the way the source database orders them.
 
@@ -128,11 +170,16 @@ def _column_order_keys(values: list[str]) -> list[Any]:
     ``'99'`` the maximum of an integer page ending at ``200``: the next page
     seeked from 99, re-read rows already transferred, and — because re-read rows
     are charged against the same row budget — the scan ran out before the tail.
+
+    ``Decimal(v)`` on the whole page also failed closed into text when one cell
+    was locale money (``$1,234``), so ``'99'`` beat ``'200'`` again. Bind each
+    part the write path would store; if any part cannot bind, keep text for the
+    whole column — do not invent a numeric max from Auto ``1,234``.
     """
-    try:
-        return [Decimal(v) for v in values]
-    except (ArithmeticError, InvalidOperation, ValueError):
-        return list(values)
+    keys = [_numeric_order_key(v) for v in values]
+    if keys and all(k is not None for k in keys):
+        return keys
+    return list(values)
 
 
 def compare_keyset_bookmark(left: str, right: str) -> int | None:
@@ -178,10 +225,14 @@ def max_keyset_bookmark(
         parts: list[str] = []
         skip = False
         for i in idxs:
-            if i >= len(row) or row[i] is None or str(row[i]) == "":
+            if i >= len(row):
                 skip = True
                 break
-            parts.append(str(row[i]))
+            text = present_cell_text(row[i])
+            if text is None:
+                skip = True
+                break
+            parts.append(text)
         if skip:
             continue
         candidates.append(parts)

@@ -19,7 +19,7 @@ import struct
 from typing import Any
 from urllib.parse import quote
 
-from services.value_serializer import json_default
+from services.value_serializer import json_default, json_loads_exact
 
 CONFLUENT_MAGIC = 0
 
@@ -198,7 +198,7 @@ def decode_with_registered_schema(schema_doc: dict[str, Any], body: bytes) -> An
     schema_type, parsed = _parse_registered_schema(schema_doc)
     if schema_type == "JSON":
         try:
-            return json.loads(body.decode("utf-8"))
+            return json_loads_exact(body.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise SchemaRegistryError(f"JSON Schema Registry payload is not valid JSON: {exc}") from exc
     if schema_type == "AVRO":
@@ -276,7 +276,7 @@ def decode_kafka_value(
         if not text:
             return ""
         try:
-            return json.loads(text)
+            return json_loads_exact(text)
         except json.JSONDecodeError:
             return raw
 
@@ -291,7 +291,7 @@ def decode_kafka_value(
             return decode_with_registered_schema(schema_doc, body)
         # No registry URL — only accept UTF-8 JSON bodies (legacy JSON subjects).
         try:
-            return json.loads(body.decode("utf-8"))
+            return json_loads_exact(body.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise SchemaRegistryError(
                 f"Confluent payload for schema id {schema_id} is not valid JSON and "
@@ -304,6 +304,6 @@ def decode_kafka_value(
     except UnicodeDecodeError:
         return {"_kafka_value_b64": data.hex()}
     try:
-        return json.loads(text)
+        return json_loads_exact(text)
     except json.JSONDecodeError:
         return text

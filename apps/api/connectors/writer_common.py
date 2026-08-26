@@ -24,6 +24,8 @@ from services.value_serializer import (
     Missing,
     cell_to_string,
     is_missing_sentinel,
+    is_null_evidence,
+    is_reader_null_cell,
     json_loads_exact,
     public_mapped_cell,
 )
@@ -148,7 +150,9 @@ def omit_missing_fields(
         if not isinstance(item, (tuple, list)) or len(item) < 2:
             continue
         k, v = item[0], item[1]
-        if v is None or is_missing_sentinel(v):
+        from services.value_serializer import is_reader_null_cell
+
+        if is_reader_null_cell(v):
             continue
         if drop_empty and str(v) == "":
             continue
@@ -551,10 +555,13 @@ def to_json_value(value: Any, col: str, dest_types: dict[str, str]) -> Any:
     last-resort safety net so dense serializers cannot leak ``__DF_MISSING__``.
     """
     try:
-        from services.value_serializer import is_missing_sentinel
+        from services.value_serializer import absent_sql_bind, is_missing_sentinel
 
         if is_missing_sentinel(value):
             return None
+        handled, bound = absent_sql_bind(value)
+        if handled:
+            return bound
     except Exception:
         pass
     if value is None:
@@ -799,7 +806,9 @@ def filter_stale_lsn_rows(
     conflict_idxs = [target_cols.index(c) for c in conflict_cols]
     lsn_idx = target_cols.index(DF_LSN_COL)
 
-    # Build OR clauses for non-null conflict keys.
+    # Build OR clauses. Reader-null / blank use IS NULL — never
+    # ``col = '__DF_SQL_NULL__'``, which misses dest NULL PKs and fail-opens
+    # the LSN gate on at-least-once redelivery.
     params: list[Any] = []
     clauses: list[str] = []
     q = quote_sql_identifier
@@ -808,13 +817,11 @@ def filter_stale_lsn_rows(
     else:
         qualified = f"{q(table_name, quote)}"
     for row in rows:
-        if any(row[idx] in (None, "") for idx in conflict_idxs):
-            continue
         parts = []
         for idx in conflict_idxs:
             val = row[idx]
             col = conflict_cols[conflict_idxs.index(idx)]
-            if val is None:
+            if _is_nullish_conflict_key(val):
                 parts.append(f"{q(col, quote)} IS NULL")
             else:
                 parts.append(f"{q(col, quote)} = {placeholder}")
@@ -829,13 +836,13 @@ def filter_stale_lsn_rows(
     stmt = f"SELECT {select_cols} FROM {qualified} WHERE " + " OR ".join(clauses)  # nosec B608
     cursor.execute(stmt, params)
     for found in cursor.fetchall():
-        key = tuple(found[i] for i in range(len(conflict_cols)))
+        key = tuple(_conflict_key_identity(found[i]) for i in range(len(conflict_cols)))
         existing[key] = found[-1]
 
     to_write: list[tuple] = []
     skipped = 0
     for row in rows:
-        key = tuple(row[idx] for idx in conflict_idxs)
+        key = tuple(_conflict_key_identity(row[idx]) for idx in conflict_idxs)
         incoming = row[lsn_idx]
         prior = existing.get(key)
         # Align with lsn_is_newer: empty/None incoming must not overwrite a
@@ -915,7 +922,7 @@ def dedupe_rows_keeping_numbers(
     seen: dict[tuple, tuple] = {}
     seen_numbers: dict[tuple, int] = {}
     for position, row in enumerate(rows):
-        key = tuple(row[i] for i in indices)
+        key = tuple(_conflict_key_identity(row[i]) for i in indices)
         seen[key] = row
         seen_numbers[key] = resolve_row_number(row_numbers, position)
     if row_numbers is None:
@@ -1052,6 +1059,53 @@ def writer_meta_with_source_rows(
     return out
 
 
+def vector_prepare_cell(val: Any) -> Any:
+    """One flattened vector cell. Reader-null omits; leftover types use dest wire.
+
+    ``SQL_NULL_SENTINEL`` is a string, so a None/Missing-only omit leaked the
+    wire token into metadata. ``str(Decimal("1E+2"))`` invented ``1E+2``.
+    Native ``0`` / ``False`` stay present.
+    """
+    from services.value_serializer import is_reader_null_cell, present_cell_text
+
+    if is_reader_null_cell(val):
+        return None
+    if isinstance(val, (str, int, float, bool)):
+        return val
+    return present_cell_text(val)
+
+
+def vector_prepare_metadata(meta: Any) -> dict[str, Any]:
+    """Walk a metadata mapping; omit reader-null. Always a dict.
+
+    ``sanitize_json_value`` leaves extract ``SQL_NULL_SENTINEL`` as a string,
+    so Qdrant / Milvus / Weaviate / pgvector / Pinecone stored the wire
+    spelling. ``vector_prepare_cell`` already owns one cell. 0 / false stay.
+    List[str] tags stay a list.
+    """
+    from services.value_serializer import is_reader_null_cell
+
+    if not isinstance(meta, dict):
+        return {}
+    out: dict[str, Any] = {}
+    for key, val in meta.items():
+        if is_reader_null_cell(val):
+            continue
+        if isinstance(val, dict):
+            nested = vector_prepare_metadata(val)
+            if nested:
+                out[str(key)] = nested
+            continue
+        if isinstance(val, list) and all(isinstance(item, str) for item in val):
+            out[str(key)] = val
+            continue
+        prepared = vector_prepare_cell(val)
+        if prepared is None:
+            continue
+        out[str(key)] = prepared
+    return out
+
+
 def vector_gate8_meta(
     records: list[dict[str, Any]],
     *,
@@ -1062,13 +1116,15 @@ def vector_gate8_meta(
     Airbyte-class vector destinations prove identity via record id + metadata,
     not opaque float arrays — match that honesty bar.
     """
+    from services.value_serializer import present_cell_text
+
     ids: list[str] = []
     for rec in records:
         if not isinstance(rec, dict):
             continue
-        vid = rec.get(id_key)
-        if vid is not None and str(vid).strip() != "":
-            ids.append(str(vid))
+        token = present_cell_text(rec.get(id_key))
+        if token:
+            ids.append(token)
     cols = sorted({k for r in records if isinstance(r, dict) for k in r}) or [id_key]
     return gate8_writer_meta(records, cols, ids)
 
@@ -1448,9 +1504,13 @@ def build_mapped_rows(
 
 
 def _is_blank_cell(val: Any) -> bool:
-    if val is None:
-        return True
-    return str(val).strip() == ""
+    """File empty→null treats extract NULL / blank as absence.
+
+    Empty and whitespace stay blank (``is_null_evidence``, not
+    ``is_reader_null_cell``). ``0`` / ``False`` stay present. Missing is
+    already omitted before this helper runs.
+    """
+    return is_null_evidence(val)
 
 
 def _is_empty_typed_coerce_error(err: str | None) -> bool:
@@ -2079,16 +2139,6 @@ def prepare_records_for_vector_write(
         and str(d.get("policy") or "").lower() in holdout_policies
     }
 
-    def _cell(val: Any) -> Any:
-        from services.value_serializer import is_missing_sentinel
-
-        # STOP_COLUMN / coerce_null — omit from vector metadata (never leak sentinel).
-        if val is None or is_missing_sentinel(val):
-            return None
-        if isinstance(val, (str, int, float, bool)):
-            return val
-        return str(val)
-
     records: list[dict[str, Any]] = []
     mapped_i = 0
     for row_number, raw in enumerate(data_rows, start=1):
@@ -2101,11 +2151,11 @@ def prepare_records_for_vector_write(
         # Preserve unmapped source headers for metadata_columns / content_column.
         row: dict[str, Any] = {}
         for i, h in enumerate(headers):
-            cell = _cell(raw[i] if i < len(raw) else None)
+            cell = vector_prepare_cell(raw[i] if i < len(raw) else None)
             if cell is not None:
                 row[h] = cell
         for i, tgt in enumerate(target_cols):
-            val = _cell(tup[i] if i < len(tup) else None)
+            val = vector_prepare_cell(tup[i] if i < len(tup) else None)
             if val is None:
                 # Omit DF_MISSING / null overlay — do not invent "" into metadata.
                 continue
@@ -2555,17 +2605,16 @@ def parse_decimal_precision_scale(
 
 
 def decimal_int_digits_and_scale(value: Any) -> tuple[int, int]:
-    """Return (integer_digits, fractional_scale) for a cell value.
+    """Return (integer_digits, fractional_scale) for write fit / bind.
 
-    Fractional scale ignores trailing zeros in the wire representation
-    (``52.310500000000000`` → scale 4) so DECIMAL fit matches PostgreSQL /
-    warehouse bind capacity rather than string padding from MySQL DOUBLE dumps.
+    Trailing zeros are padding (``2000.00`` → scale 0). Create-new invent
+    keeps money scale via ``cell_int_digits_and_scale`` (``1000.00`` → 2).
 
-    SSOT: ``services.decimal_observe.cell_int_digits_and_scale``.
+    SSOT: ``services.decimal_observe.write_int_digits_and_scale``.
     """
-    from services.decimal_observe import cell_int_digits_and_scale
+    from services.decimal_observe import write_int_digits_and_scale
 
-    return cell_int_digits_and_scale(value)
+    return write_int_digits_and_scale(value)
 
 
 PG_DECIMAL_ROUND_DIALECTS = frozenset({
@@ -2605,6 +2654,19 @@ def _schemaless_decimal_capacity_holds(value: Any, *, dest_db: str = "") -> bool
         return False
 
 
+def fit_skips_reader_null(value: Any) -> bool:
+    """True when a fit/quarantine scan must not treat the cell as present text.
+
+    Extract NULL / Missing are not a VARCHAR token and not an integer overflow.
+    Empty string stays present (INTEGER empty still refuses; VARCHAR length 0 fits).
+    """
+    return is_reader_null_cell(value)
+
+
+def _unfit_cell_absent(cells: list[Any], col_idx: int) -> bool:
+    return col_idx >= len(cells) or is_reader_null_cell(cells[col_idx])
+
+
 def fits_decimal(
     value: Any,
     precision: int,
@@ -2632,10 +2694,7 @@ def fits_decimal(
         localcontext,
     )
 
-    if value is None:
-        return True
-
-    if is_missing_sentinel(value):
+    if is_reader_null_cell(value):
         return True
     from services.transform_engine import boolean_carrier_numeric_value
 
@@ -2647,7 +2706,11 @@ def fits_decimal(
         text = str(value).strip()
         if not text:
             return True
-        d = Decimal(text)
+        from services.transform_engine import decimal_wire_value
+
+        d = decimal_wire_value(text)
+        if d is None:
+            return False
         if not d.is_finite():
             return False
         prec = int(precision)
@@ -2729,10 +2792,7 @@ def quarantine_unfit_decimals(
         cells = list(row)
         hold_out = False
         for col_idx, precision, scale, declared_type in number_cols:
-            if col_idx >= len(cells) or cells[col_idx] is None:
-                continue
-
-            if is_missing_sentinel(cells[col_idx]):
+            if _unfit_cell_absent(cells, col_idx):
                 continue
             if fits_decimal(cells[col_idx], precision, scale, dest_db=dest_db):
                 continue
@@ -2810,7 +2870,7 @@ def string_storage_units(
     - Default ``VARCHAR(n)`` / ``VARCHAR2(n CHAR)`` → Unicode code points
     """
 
-    if value is None:
+    if is_reader_null_cell(value):
         return 0
     if isinstance(value, (bytes, bytearray, memoryview)):
         try:
@@ -2837,14 +2897,14 @@ def fits_varchar(
     dialect_label: str = "",
 ) -> bool:
     """True if value fits a bounded VARCHAR/CHAR/NVARCHAR(width) column."""
-    if value is None:
+    if is_reader_null_cell(value):
         return True
     return string_storage_units(value, type_str, dialect_label=dialect_label) <= width
 
 
 def binary_storage_bytes(value: Any) -> bytes | None:
     """Decode binary wire to bytes, or None when wire is invalid / empty skip."""
-    if value is None:
+    if is_reader_null_cell(value):
         return None
     if isinstance(value, (bytes, bytearray, memoryview)):
         return bytes(value)
@@ -2862,7 +2922,7 @@ def binary_storage_bytes(value: Any) -> bytes | None:
 
 def fits_binary(value: Any, width: int) -> bool:
     """True if binary wire fits a bounded BINARY/VARBINARY(width) column."""
-    if value is None:
+    if is_reader_null_cell(value):
         return True
     raw = binary_storage_bytes(value)
     if raw is None:
@@ -2897,10 +2957,7 @@ def quarantine_unfit_years(
         cells = list(row)
         hold_out = False
         for col_idx in year_cols:
-            if col_idx >= len(cells) or cells[col_idx] is None:
-                continue
-
-            if is_missing_sentinel(cells[col_idx]):
+            if _unfit_cell_absent(cells, col_idx):
                 continue
             try:
                 cells[col_idx] = coerce_year_wire(cells[col_idx])
@@ -2967,10 +3024,7 @@ def quarantine_unfit_booleans(
         cells = list(row)
         hold_out = False
         for col_idx in bool_cols:
-            if col_idx >= len(cells) or cells[col_idx] is None:
-                continue
-
-            if is_missing_sentinel(cells[col_idx]):
+            if _unfit_cell_absent(cells, col_idx):
                 continue
             if boolean_value_fits(cells[col_idx]):
                 continue
@@ -3072,9 +3126,7 @@ def quarantine_unfit_temporals(
         cells = list(row)
         hold_out = False
         for col_idx, typ, check_fsp, check_tz in temporal_cols:
-            if col_idx >= len(cells) or cells[col_idx] is None:
-                continue
-            if is_missing_sentinel(cells[col_idx]):
+            if _unfit_cell_absent(cells, col_idx):
                 continue
             reason = ""
             raw = cells[col_idx]
@@ -3160,10 +3212,7 @@ def quarantine_currency_markers_into_numeric(
         cells = list(row)
         hold_out = False
         for col_idx in numeric_cols:
-            if col_idx >= len(cells) or cells[col_idx] is None:
-                continue
-
-            if is_missing_sentinel(cells[col_idx]):
+            if _unfit_cell_absent(cells, col_idx):
                 continue
             if not has_currency_marker(cells[col_idx]):
                 continue
@@ -3218,16 +3267,15 @@ def integer_fit_failure(
     from services.type_system import integer_storage_bounds
 
     bounds = integer_storage_bounds(type_str, dest_db=dest_db)
-    if bounds is None or value is None:
+    if bounds is None:
+        return None
+    if is_reader_null_cell(value):
         return None
     if isinstance(value, bool):
         # bool is a subclass of int — treat as 0/1.
         dec = Decimal(int(value))
     elif isinstance(value, int):
         dec = Decimal(value)
-    elif is_missing_sentinel(value):
-        # Absence, not a value — sparse CDC decides it, not a bounds test.
-        return None
     else:
         text = str(value).strip()
         if not text:
@@ -3236,18 +3284,30 @@ def integer_fit_failure(
             return f"empty value is not an integer for {type_str}"
         parsed = integer_wire_value(text)
         if parsed is None:
-            try:
-                unwritable = Decimal(text)
-            except (InvalidOperation, ValueError, TypeError, OverflowError):
-                unwritable = None
-            if unwritable is not None and unwritable.is_finite():
-                if unwritable != unwritable.to_integral_value():
+            from services.transform_engine import decimal_wire_value
+
+            # Write-path decimal first. Decimal(text) invented Auto 1.000 as
+            # integral 1 and called it overflow. Locale money with cents is
+            # fractional. Dest-canonical 1.234 stays the fractional message.
+            wire = decimal_wire_value(text)
+            if wire is not None and wire.is_finite():
+                if wire != wire.to_integral_value():
                     return (
-                        f"fractional value {unwritable} is not an integer for "
+                        f"fractional value {wire} is not an integer for "
                         f"{type_str} — widen the destination to DECIMAL/DOUBLE, "
                         "or round it explicitly before the write"
                     )
                 return f"{text} exceeds the integer wire budget for {type_str}"
+            try:
+                dest = Decimal(text)
+            except (InvalidOperation, ValueError, TypeError, OverflowError):
+                dest = None
+            if dest is not None and dest.is_finite() and dest != dest.to_integral_value():
+                return (
+                    f"fractional value {dest} is not an integer for "
+                    f"{type_str} — widen the destination to DECIMAL/DOUBLE, "
+                    "or round it explicitly before the write"
+                )
             return (
                 f"{text!r} is not an integer for {type_str} — repair the source "
                 "value, or map the column to a text or decimal carrier"
@@ -3304,10 +3364,7 @@ def quarantine_unfit_integers(
         cells = list(row)
         hold_out = False
         for col_idx, typ in int_cols:
-            if col_idx >= len(cells) or cells[col_idx] is None:
-                continue
-
-            if is_missing_sentinel(cells[col_idx]):
+            if _unfit_cell_absent(cells, col_idx):
                 continue
             unfit = integer_fit_failure(cells[col_idx], typ, dest_db=dest_db)
             if unfit is None:
@@ -3373,9 +3430,7 @@ def quarantine_unfit_floats(
         cells = list(row)
         hold_out = False
         for col_idx, typ in float_cols:
-            if col_idx >= len(cells) or cells[col_idx] is None:
-                continue
-            if is_missing_sentinel(cells[col_idx]):
+            if _unfit_cell_absent(cells, col_idx):
                 continue
             raw = cells[col_idx]
             reason = ""
@@ -3513,7 +3568,7 @@ def bind_rows_keeping_numbers(
         hold_out = False
         for idx in range(len(cells)):
             val = cells[idx]
-            if val is None or is_missing_sentinel(val):
+            if is_reader_null_cell(val):
                 continue
             ddl = target_types[idx] if idx < len(target_types) else ""
             if not ddl:
@@ -3591,15 +3646,13 @@ def quarantine_unfit_strings(
             cells = list(row)
             hold_out = False
             for col_idx, width, typ in width_cols:
-                if col_idx >= len(cells) or cells[col_idx] is None:
+                if _unfit_cell_absent(cells, col_idx):
                     continue
                 cell = cells[col_idx]
                 # ASCII text spends one unit per character under every length
                 # rule (code points, UTF-8 bytes, UTF-16 units), so a short
                 # ASCII value fits without resolving the dialect unit.
                 if type(cell) is str and len(cell) <= width and cell.isascii():
-                    continue
-                if is_missing_sentinel(cell):
                     continue
                 if fits_varchar(
                     cells[col_idx], width, typ, dialect_label=dialect_label
@@ -3673,7 +3726,7 @@ def array_element_unfit_reason(
     ``fits_varchar`` / ``boolean_value_fits``) so array fidelity can never
     drift from column fidelity.
     """
-    if element is None:
+    if is_reader_null_cell(element):
         return None
     carrier = (carrier or "").strip()
     if not carrier:
@@ -3705,8 +3758,13 @@ def array_element_unfit_reason(
             return f"element does not fit {carrier}"
     if logical == "boolean" and not boolean_value_fits(element):
         return f"element is not a canonical boolean for {carrier}"
-    if logical in {"date", "time", "datetime"} and not _is_temporal_wire(element):
-        return f"element is not a parseable temporal for {carrier}"
+    if logical in {"date", "time", "datetime"}:
+        text = element if isinstance(element, str) else str(element)
+        text = text.strip()
+        if text:
+            parsed, err = apply_transform(text, logical)
+            if err or parsed is None:
+                return f"element is not a parseable temporal for {carrier}"
 
     from services.ddl_compatibility import parse_varchar_width
 
@@ -3774,9 +3832,7 @@ def quarantine_unfit_arrays(
         cells = list(row)
         hold_out = False
         for col_idx, element_carrier, typ in array_cols:
-            if col_idx >= len(cells) or cells[col_idx] is None:
-                continue
-            if is_missing_sentinel(cells[col_idx]):
+            if _unfit_cell_absent(cells, col_idx):
                 continue
             elements, parse_error = parse_array_wire_elements(cells[col_idx])
             reason = ""
@@ -4278,6 +4334,15 @@ def row_has_missing_sentinel(row: tuple | list) -> bool:
     return any(is_missing_sentinel(v) for v in row)
 
 
+def _dense_write_needs_null_materialize(row: tuple | list) -> bool:
+    """True when a dense row still carries an extract token (not already None)."""
+
+    return any(
+        is_missing_sentinel(v) or (is_reader_null_cell(v) and v is not None)
+        for v in row
+    )
+
+
 def materialize_missing_as_null_for_dense_write(
     mapped_rows: list[tuple],
 ) -> list[tuple]:
@@ -4285,18 +4350,28 @@ def materialize_missing_as_null_for_dense_write(
 
     Sparse CDC upsert must keep ``DF_MISSING`` and omit columns from SET.
     Full-refresh / create-new / dense bulk loads union a schemaless schema —
-    missing keys are SQL NULL, not the literal ``__DF_MISSING__`` string
-    (Snowflake BOOL / Postgres BOOLEAN reject that string).
+    missing keys are SQL NULL, not the literal ``__DF_MISSING__`` / extract
+    ``SQL_NULL_SENTINEL`` string (Snowflake BOOL / Postgres BOOLEAN reject
+    those tokens). Empty string stays present.
     """
 
-    if not mapped_rows or not any(row_has_missing_sentinel(r) for r in mapped_rows):
+    if not mapped_rows or not any(
+        _dense_write_needs_null_materialize(r) for r in mapped_rows
+    ):
         return mapped_rows
     out: list[tuple] = []
     for row in mapped_rows:
-        if not row_has_missing_sentinel(row):
+        if not _dense_write_needs_null_materialize(row):
             out.append(row)
             continue
-        out.append(tuple(None if is_missing_sentinel(v) else v for v in row))
+        out.append(
+            tuple(
+                None
+                if is_missing_sentinel(v) or is_reader_null_cell(v)
+                else v
+                for v in row
+            )
+        )
     return out
 
 
@@ -4419,18 +4494,30 @@ def combined_mapped_rows_for_checksum(
     return list(dense_rows) + list(sparse_rows)
 
 
+def present_field_bindings(row: dict[str, Any]) -> dict[str, Any]:
+    """Omit Missing; bind reader-null as None (wipe dest, never the extract token).
+
+    Iceberg leftover merge, Redis JSON, Mongo ``$set``, sparse CDC SET, and
+    BigQuery ``insert_rows_json`` share this polarity. Empty string / ``0`` /
+    ``False`` stay present. ``DF_MISSING`` stays omitted so sparse CDC does
+    not NULL-wipe destination columns.
+    """
+
+    out: dict[str, Any] = {}
+    for key, val in row.items():
+        if is_missing_sentinel(val):
+            continue
+        out[key] = None if is_reader_null_cell(val) else val
+    return out
+
+
 def sparse_present_bindings(
     row: tuple | list,
     target_cols: list[str],
 ) -> dict[str, Any]:
     """Column→value for cells that are present (not DF_MISSING)."""
 
-    out: dict[str, Any] = {}
-    for col, val in zip(target_cols, row):
-        if is_missing_sentinel(val):
-            continue
-        out[col] = val
-    return out
+    return present_field_bindings(dict(zip(target_cols, row)))
 
 
 def materialize_sparse_row_for_checksum(
@@ -4576,11 +4663,7 @@ def run_sparse_cdc_upsert(
                         present, existing, target_cols
                     )
                     insert_present(
-                        {
-                            c: v
-                            for c, v in zip(target_cols, hydrated)
-                            if not is_missing_sentinel(v)
-                        }
+                        present_field_bindings(dict(zip(target_cols, hydrated)))
                     )
             else:
                 insert_present(present)
@@ -4752,15 +4835,31 @@ def overlay_physical_bind_types(
 
 def _is_nullish_conflict_key(val: Any) -> bool:
     """True when a conflict-key cell cannot identify a dense upsert row."""
-    if val is None:
-        return True
+    from services.value_serializer import is_reader_null_cell
 
-    if is_missing_sentinel(val):
+    if is_reader_null_cell(val):
         return True
-    if isinstance(val, str):
-        text = val.strip()
-        return not text or text == SQL_NULL_SENTINEL
+    if isinstance(val, str) and not val.strip():
+        return True
     return False
+
+
+def _conflict_key_identity(val: Any) -> Any:
+    """Canonical identity for dest LSN / conflict-key lookup.
+
+    Reader-null and blank collapse to ``None`` so extract ``SQL_NULL_SENTINEL``
+    matches a destination SQL NULL. 0 / false / present text stay themselves.
+    """
+    return None if _is_nullish_conflict_key(val) else val
+
+
+def conflict_key_wire(val: Any) -> str:
+    """Compose-text for a conflict / SCD2 / mirror identity cell.
+
+    Extract ``SQL_NULL_SENTINEL`` and dest ``None`` share ``\"\"`` so a NULL
+    PK cannot invent a ``__DF_SQL_NULL__`` key. 0 / false stay ``0`` / ``false``.
+    """
+    return cell_to_string(_conflict_key_identity(val))
 
 
 def assert_sparse_upsert_has_pk(

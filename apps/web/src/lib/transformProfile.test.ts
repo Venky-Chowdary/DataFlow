@@ -109,6 +109,8 @@ test("frequent values and numeric histogram are measured from the sample", () =>
   assert.ok(bins.length >= 1);
   assert.equal(bins.reduce((sum, bin) => sum + bin.count, 0), 5);
   assert.deepEqual(numericHistogram([10, 10, 10]), [{ label: "10", count: 3 }]);
+  assert.deepEqual(numericHistogram(["1,234", "5,678"]), []);
+  assert.deepEqual(numericHistogram(["$1,000.00", "$1,000.00"]), [{ label: "1000", count: 2 }]);
 });
 
 test("reads-as states scale, length and date ambiguity when they exist", () => {

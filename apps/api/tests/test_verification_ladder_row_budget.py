@@ -47,7 +47,7 @@ def test_reader_returns_everything_under_the_budget(tmp_path: Path) -> None:
     path = _sqlite_with(tmp_path, 120)
     rows = read_sqlite_rows(database=path, table="t", max_rows=BUDGET)
     assert len(rows) == 120
-    assert rows[0] == {"id": 0, "v": "v0"}
+    assert rows[0] == {"id": "0", "v": "v0"}
 
 
 def test_column_projection_survives_batched_reads(tmp_path: Path) -> None:

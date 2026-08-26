@@ -2,9 +2,43 @@
 
 from __future__ import annotations
 
-import os
-from services.brand_env import getenv_brand
+import sqlite3
+from decimal import Decimal
 from pathlib import Path
+
+from services.brand_env import getenv_brand
+
+
+def sqlite_decimal_bind_text(value: Decimal) -> str:
+    """SQLite has no Decimal affinity — bind dest-canonical text.
+
+    Same policy as ``sqlite_writer._to_sqlite_value``: exact scale-preserving
+    text, never IEEE float, never silent NULL for non-finite values.
+    """
+    from services.value_serializer import safe_decimal_text
+
+    if not isinstance(value, Decimal):
+        raise TypeError(f"sqlite_decimal_bind_text expects Decimal, got {type(value)!r}")
+    text = safe_decimal_text(value)
+    if text is None:
+        raise ValueError(
+            f"SQLite refused non-finite Decimal {value!r} "
+            "(refuse silent NULL / float invent)"
+        )
+    return text
+
+
+def register_sqlite_decimal_adapter() -> None:
+    """Teach sqlite3 (and SQLAlchemy-sqlite) to bind Decimal as dest-canonical text.
+
+    ``apply_transform(..., "decimal")`` returns Decimal. SQLAlchemy SCD2 inserts
+    skip ``_to_sqlite_value`` and would otherwise raise ProgrammingError or,
+    if the dialect coerced, invent IEEE float.
+    """
+    sqlite3.register_adapter(Decimal, sqlite_decimal_bind_text)
+
+
+register_sqlite_decimal_adapter()
 
 
 def sqlite_file_path(database: str, connection_string: str, host: str) -> str:

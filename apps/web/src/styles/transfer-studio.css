@@ -3037,12 +3037,13 @@ th.df2-type-string .df2-type-badge {
     padding-bottom: 12px;
   }
 
-  /* Layout is the sole scroll owner on narrow — disable nested list scroll. */
+  /* Dest list keeps nested scroll at every width so cards never hide under the footer. */
   .df2-dest-step .df2-dest-connector-list,
   .df2-page-transfer-studio .df2-dest-connector-list {
-    max-height: none !important;
-    overflow: visible !important;
-    flex: 0 0 auto !important;
+    flex: 1 1 0 !important;
+    min-height: 0 !important;
+    overflow-x: hidden !important;
+    overflow-y: auto !important;
   }
 }
 
@@ -9509,6 +9510,10 @@ button.df2-vd-assist-toggle:focus-visible {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   opacity: 0.7;
 }
+.df2-vd-number-locale-cta,
+.df2-vd-date-locale-cta {
+  margin-top: 10px;
+}
 
 @media (max-width: 1366px) {
   /* Validate: dashboard scrolls; actions stick as a bottom bar (like other steps) */
@@ -10487,15 +10492,15 @@ button.df2-vd-assist-toggle:focus-visible {
   box-sizing: border-box !important;
 }
 
-/* Connection list is the primary left-rail surface — always scrollable. */
+/* Connection list is the primary left-rail surface — always nest-scrolls. */
 .df2-page-transfer-studio .df2-dest-connector-list {
   display: flex !important;
   flex-direction: column !important;
   gap: 5px !important;
   margin: 0 !important;
   padding: 0 2px 2px 0 !important;
-  flex: 1 1 auto !important;
-  min-height: 160px !important;
+  flex: 1 1 0 !important;
+  min-height: 0 !important;
   overflow-x: hidden !important;
   overflow-y: auto !important;
   overscroll-behavior: contain !important;
@@ -10614,11 +10619,13 @@ button.df2-vd-assist-toggle:focus-visible {
   flex-shrink: 0 !important;
 }
 
-/* Engine panel — New connection tab owns the left rail. */
+/* Engine panel — New connection tab fills the left rail and nest-scrolls. */
 .df2-page-transfer-studio .df2-dest-picker.is-new-connection .df2-dest-engine-panel {
-  flex: 1 1 auto !important;
-  max-height: none !important;
+  flex: 1 1 0 !important;
   min-height: 0 !important;
+  max-height: none !important;
+  overflow-x: hidden !important;
+  overflow-y: auto !important;
 }
 
 .df2-page-transfer-studio .df2-dest-engine-panel {
@@ -10859,17 +10866,18 @@ button.df2-vd-assist-toggle:focus-visible {
     border-right: none !important;
     border-bottom: 1px solid #e8edf3 !important;
     padding-bottom: 10px !important;
-    overflow: visible !important;
+    overflow: hidden !important;
   }
 
   .df2-page-transfer-studio .df2-dest-step-right {
-    overflow: visible !important;
+    overflow-y: auto !important;
   }
 
   .df2-page-transfer-studio .df2-dest-connector-list {
-    max-height: none !important;
-    overflow: visible !important;
-    flex: 0 0 auto !important;
+    flex: 1 1 0 !important;
+    min-height: 0 !important;
+    overflow-x: hidden !important;
+    overflow-y: auto !important;
   }
 }
 
@@ -10960,22 +10968,22 @@ button.df2-vd-assist-toggle:focus-visible {
 }
 
 /* ---------------------------------------------------------------------------
-   Studio source / destination — one owner, natural height.
+   Studio source / destination — one owner, natural height for Source only.
    Earlier viewport locks (`height:100%` + `overflow:hidden`) crushed the
-   primary pane to ~14px, so a 1280 laptop was forced into a column stack.
-   Content sizes the row; the page scrolls. Stack only below 1100px.
+   Source primary pane to ~14px, so a 1280 laptop was forced into a column
+   stack. Source content sizes the row; the page scrolls. Destination MUST
+   keep the viewport lock — saved/new lists nest-scroll above the footer.
+   Stack the 50/50 source grid only below 1100px.
    --------------------------------------------------------------------------- */
 
-.df2-page-transfer-studio .df2-source-step.df2-transfer-step-viewport,
-.df2-page-transfer-studio .df2-dest-step.df2-transfer-step-viewport {
+.df2-page-transfer-studio .df2-source-step.df2-transfer-step-viewport {
   height: auto !important;
   max-height: none !important;
   overflow: visible !important;
   flex: 1 1 auto !important;
 }
 
-.df2-page-transfer-studio .df2-source-step.df2-transfer-step-viewport > .df2-card-body,
-.df2-page-transfer-studio .df2-dest-step.df2-transfer-step-viewport > .df2-card-body {
+.df2-page-transfer-studio .df2-source-step.df2-transfer-step-viewport > .df2-card-body {
   overflow: visible !important;
   height: auto !important;
   max-height: none !important;
@@ -11008,15 +11016,7 @@ button.df2-vd-assist-toggle:focus-visible {
   padding-top: 0 !important;
 }
 
-.df2-page-transfer-studio .df2-dest-step-layout {
-  align-items: start !important;
-  overflow: visible !important;
-  height: auto !important;
-}
-
-.df2-page-transfer-studio .df2-dest-step-left {
-  overflow: visible !important;
-}
+/* Destination rail stays locked — do not inherit Source's overflow:visible. */
 
 .df2-page-transfer-studio .df2-dest-step > .df2-card-footer.df2-wizard-footer,
 .df2-page-transfer-studio .df2-dest-step > .df2-wizard-footer,
@@ -11060,5 +11060,99 @@ button.df2-vd-assist-toggle:focus-visible {
     padding-left: 0 !important;
     border-top: 1px solid #f1f5f9 !important;
     padding-top: 10px !important;
+  }
+}
+
+/* ---------------------------------------------------------------------------
+   Destination rail — last owner. Saved + New lists nest-scroll above the
+   wizard footer. Source keeps natural height above; this block must win.
+   --------------------------------------------------------------------------- */
+.df2-page-transfer-studio .df2-dest-step.df2-transfer-step-viewport {
+  display: flex !important;
+  flex-direction: column !important;
+  flex: 1 1 0 !important;
+  min-height: 0 !important;
+  max-height: 100% !important;
+  overflow: hidden !important;
+}
+
+.df2-page-transfer-studio .df2-dest-step > .df2-card-body {
+  display: flex !important;
+  flex-direction: column !important;
+  flex: 1 1 0 !important;
+  min-height: 0 !important;
+  overflow: hidden !important;
+}
+
+.df2-page-transfer-studio .df2-dest-step-layout {
+  display: grid !important;
+  flex: 1 1 0 !important;
+  min-height: 0 !important;
+  align-items: stretch !important;
+  overflow: hidden !important;
+}
+
+.df2-page-transfer-studio .df2-dest-step-left,
+.df2-page-transfer-studio .df2-dest-picker,
+.df2-page-transfer-studio .df2-dest-picker.is-saved-connection,
+.df2-page-transfer-studio .df2-dest-picker.is-new-connection {
+  display: flex !important;
+  flex-direction: column !important;
+  min-height: 0 !important;
+  overflow: hidden !important;
+}
+
+.df2-page-transfer-studio .df2-dest-step-left {
+  flex: 1 1 0 !important;
+}
+
+.df2-page-transfer-studio .df2-dest-picker {
+  flex: 1 1 0 !important;
+}
+
+.df2-page-transfer-studio .df2-dest-connector-list {
+  flex: 1 1 0 !important;
+  min-height: 0 !important;
+  overflow-x: hidden !important;
+  overflow-y: auto !important;
+}
+
+.df2-page-transfer-studio .df2-dest-picker.is-new-connection .df2-dest-engine-panel {
+  flex: 1 1 0 !important;
+  min-height: 0 !important;
+  max-height: none !important;
+  overflow-x: hidden !important;
+  overflow-y: auto !important;
+}
+
+.df2-page-transfer-studio .df2-dest-step > .df2-card-footer.df2-wizard-footer,
+.df2-page-transfer-studio .df2-dest-step > .df2-wizard-footer {
+  flex: 0 0 auto !important;
+  position: relative !important;
+  z-index: 2 !important;
+}
+
+.df2-source-aside-connector-row {
+  min-width: 0;
+}
+
+.df2-source-aside-connector-row strong,
+.df2-source-aside-connector-row span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 1100px) {
+  .df2-page-transfer-studio .df2-dest-step-left,
+  .df2-page-transfer-studio .df2-dest-picker {
+    overflow: hidden !important;
+  }
+
+  .df2-page-transfer-studio .df2-dest-connector-list,
+  .df2-page-transfer-studio .df2-dest-picker.is-new-connection .df2-dest-engine-panel {
+    flex: 1 1 0 !important;
+    min-height: 0 !important;
+    overflow-x: hidden !important;
+    overflow-y: auto !important;
   }
 }

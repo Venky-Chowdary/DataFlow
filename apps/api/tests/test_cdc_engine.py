@@ -32,6 +32,19 @@ def test_infer_integer_watermark():
     assert infer_watermark_type(samples) == WatermarkType.INTEGER
 
 
+def test_infer_unambiguous_slash_calendars_are_datetime():
+    assert infer_watermark_type(["31/12/2024", "30/11/2024", "15/06/2023"]) == WatermarkType.DATETIME
+
+
+def test_infer_auto_ambiguous_slash_dates_stay_string():
+    assert infer_watermark_type(["01/02/2024", "03/04/2024", "05/06/2024"]) == WatermarkType.STRING
+
+
+def test_infer_yyyymmdd_digits_stay_integer():
+    """20240105 binds as a date on the write path but is a digit cursor here."""
+    assert infer_watermark_type(["20240105", "20240106", "20240107"]) == WatermarkType.INTEGER
+
+
 def test_max_watermark_datetime():
     values = ["2025-01-01", "2025-03-01", "2025-02-01"]
     assert max_watermark(values, WatermarkType.DATETIME) == "2025-03-01"
@@ -52,6 +65,20 @@ def test_advance_watermark_rejects_regression():
 def test_compare_watermarks_integer():
     assert compare_watermarks("100", "50", WatermarkType.INTEGER) == 1
     assert compare_watermarks("50", "100", WatermarkType.INTEGER) == -1
+
+
+def test_compare_datetime_uses_write_path_not_string_order():
+    """31/12/2023 is before 01/01/2024; lexicographic string order says the opposite."""
+    assert compare_watermarks("31/12/2023", "01/01/2024", WatermarkType.DATETIME) == -1
+    assert compare_watermarks("01/01/2024", "31/12/2023", WatermarkType.DATETIME) == 1
+    assert max_watermark(["31/12/2023", "01/01/2024", "15/06/2023"], WatermarkType.DATETIME) == "01/01/2024"
+    # 10-digit seconds and 13-digit millis for the same instant compare equal.
+    assert compare_watermarks("1704451800", "1704451800000", WatermarkType.DATETIME) == 0
+    # Auto-ambiguous MDY/DMY must not invent a calendar — both fail closed.
+    from services.cdc_engine import _parse_datetime_key
+
+    assert _parse_datetime_key("01/02/2024") is None
+    assert _parse_datetime_key("03/04/2024") is None
 
 
 def test_row_fingerprint_stable():

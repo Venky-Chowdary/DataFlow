@@ -16,6 +16,8 @@ from difflib import SequenceMatcher
 from enum import Enum
 from typing import Optional
 
+from services.transform_engine import CANONICAL_BOOLEAN_SAMPLE_PATTERN
+
 
 class DataCategory(Enum):
     """High-level data categories"""
@@ -382,8 +384,6 @@ SEMANTIC_TYPES: list[SemanticType] = [
         regex_patterns=[r"_date$", r"_dt$", r"^date_"],
         sample_patterns=[
             r"^\d{4}-\d{2}-\d{2}$",
-            r"^\d{2}/\d{2}/\d{4}$",
-            r"^\d{2}-\d{2}-\d{4}$",
         ],
         synonyms=["effective_date", "as_of_date"],
         transformations=["standardize_iso8601"],
@@ -469,7 +469,7 @@ SEMANTIC_TYPES: list[SemanticType] = [
         category=DataCategory.BINARY,
         patterns=["is_", "has_", "can_", "flag", "enabled", "active", "deleted"],
         regex_patterns=[r"^is_", r"^has_", r"^can_", r"_flag$"],
-        sample_patterns=[r"^(true|false|1|0|yes|no|y|n)$"],
+        sample_patterns=[CANONICAL_BOOLEAN_SAMPLE_PATTERN],
         synonyms=["indicator", "bool"],
         base_confidence=0.90,
     ),
@@ -704,13 +704,26 @@ class SemanticAnalyzer:
         if not non_empty:
             return 0.5
 
-        if semantic_type and semantic_type.sample_patterns:
+        if semantic_type and (
+            "standardize_iso8601" in semantic_type.transformations
+            or semantic_type.sample_patterns
+        ):
             match_count = 0
-            for value in non_empty[:100]:
-                for pattern in semantic_type.sample_patterns:
-                    if re.match(pattern, str(value).strip(), re.IGNORECASE):
+            from src.ai.knowledge.data_quality_rules import WRITE_BIND_SEMANTIC_TYPES
+            from services.transform_engine import apply_transform
+
+            write_transform = WRITE_BIND_SEMANTIC_TYPES.get(semantic_type.name)
+            if write_transform:
+                for value in non_empty[:100]:
+                    parsed, err = apply_transform(str(value).strip(), write_transform)
+                    if parsed is not None and not err:
                         match_count += 1
-                        break
+            else:
+                for value in non_empty[:100]:
+                    for pattern in semantic_type.sample_patterns:
+                        if re.match(pattern, str(value).strip(), re.IGNORECASE):
+                            match_count += 1
+                            break
 
             match_rate = match_count / min(len(non_empty), 100)
             if match_rate > 0.8:
@@ -741,10 +754,22 @@ class SemanticAnalyzer:
                 int_count += 1
             elif re.match(r'^-?\d+\.?\d*$', val):
                 float_count += 1
-            elif val.lower() in ('true', 'false', '0', '1', 'yes', 'no', 'y', 'n'):
-                bool_count += 1
-            elif re.match(r'^\d{4}-\d{2}-\d{2}', val) or re.match(r'^\d{2}/\d{2}/\d{4}', val):
-                date_count += 1
+            else:
+                from services.transform_engine import apply_transform
+
+                parsed, err = apply_transform(val, "boolean")
+                if parsed is not None and not err:
+                    bool_count += 1
+                    continue
+                # Same bind as the write path — Auto-ambiguous 01/02/2024 is
+                # not a datetime we can read, so do not label the column one.
+                parsed, err = apply_transform(val, "datetime")
+                if parsed is not None and not err:
+                    date_count += 1
+                    continue
+                parsed, err = apply_transform(val, "decimal")
+                if parsed is not None and not err:
+                    float_count += 1
 
         sample_size = min(len(non_empty), 100)
         if int_count / sample_size > 0.8:
@@ -808,6 +833,17 @@ class SemanticAnalyzer:
         if stats.get("unique_percentage", 0) < 1 and inferred_type not in ("boolean",):
             warnings.append("Very low cardinality - consider as enum/category")
 
+        transforms = list(semantic_type.transformations) if semantic_type else []
+        if transforms and sample_values:
+            from services.transform_engine import samples_are_auto_ambiguous_dates
+
+            texts = [str(v) for v in sample_values if v is not None and str(v).strip()]
+            if samples_are_auto_ambiguous_dates(texts) and "standardize_iso8601" in transforms:
+                transforms = [t for t in transforms if t != "standardize_iso8601"]
+                warnings.append(
+                    "Auto cannot bind 01/02/2024 — set date locale MDY or DMY before Date→ISO"
+                )
+
         return ColumnAnalysis(
             column_name=column_name,
             inferred_type=inferred_type,
@@ -816,7 +852,7 @@ class SemanticAnalyzer:
             confidence=round(final_confidence, 3),
             is_pii=semantic_type.is_pii if semantic_type else False,
             compliance=[c for c in (semantic_type.compliance if semantic_type else [])],
-            suggested_transformations=semantic_type.transformations if semantic_type else [],
+            suggested_transformations=transforms,
             null_percentage=stats.get("null_percentage", 0),
             unique_percentage=stats.get("unique_percentage", 0),
             sample_values=sample_values[:5],
@@ -1096,8 +1132,60 @@ def generate_mappings(
     target_columns: list[str],
     source_samples: dict[str, list[str]] = None
 ) -> list[MappingSuggestion]:
-    """Generate intelligent column mappings"""
-    return _mapper.map_columns(source_columns, target_columns, source_samples)
+    """Assign columns with ``map_columns`` — the same SSOT as Transfer/Validate.
+
+    The local SmartMapper invented pair scores and “Convert X to Y” from AI
+    inferred types. That suggested Date→ISO for Auto-ambiguous ``01/02/2024``.
+    Transform stamps now come from ``infer_transform_for_mapping`` with no
+    invented dest type (this assist API does not carry destination DDL).
+    """
+    from services.semantic_mapper import authority_mappings
+    from services.transform_engine import infer_transform_for_mapping
+
+    source_schemas = None
+    if source_samples:
+        source_schemas = [
+            {
+                "name": col,
+                "inferred_type": "VARCHAR",
+                "samples": list(source_samples.get(col) or [])[:8],
+            }
+            for col in source_columns
+        ]
+    rows = authority_mappings(
+        source_columns,
+        target_columns,
+        source_schemas=source_schemas,
+    )
+    out: list[MappingSuggestion] = []
+    samples_by_source = source_samples or {}
+    for row in rows:
+        source = str(row.get("source") or "")
+        target = str(row.get("target") or "<unmapped>")
+        if row.get("create_new"):
+            target = "<unmapped>"
+        transform = None
+        needed = False
+        if target != "<unmapped>":
+            inferred = infer_transform_for_mapping(
+                source,
+                target,
+                "string",
+                None,
+                list(samples_by_source.get(source) or []),
+            )
+            if inferred and inferred != "none":
+                transform = inferred
+                needed = True
+        out.append(MappingSuggestion(
+            source_column=source,
+            target_column=target,
+            confidence=float(row.get("confidence") or 0),
+            reason=str(row.get("reasoning") or "map_columns SSOT"),
+            transformation_needed=needed,
+            suggested_transformation=transform,
+        ))
+    return out
 
 
 def detect_pii(columns: dict[str, list[str]]) -> dict[str, list[ComplianceFramework]]:

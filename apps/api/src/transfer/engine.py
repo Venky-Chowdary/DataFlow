@@ -36,9 +36,13 @@ try:
     from services.mongodb_service import get_mongodb_service
     from services.pipeline_explanation import build_pipeline_explanation
     from services.transform_engine import (
+        decimal_wire_value,
         infer_date_locale,
+        infer_number_locale,
         reset_active_date_locale,
+        reset_active_number_locale,
         set_active_date_locale,
+        set_active_number_locale,
     )
     from services.value_serializer import cell_to_string
     from services.preflight_service import (
@@ -80,8 +84,12 @@ except (
     from src.services.mongodb_service import get_mongodb_service
     from src.services.pipeline_explanation import build_pipeline_explanation
     from src.services.transform_engine import (
+        decimal_wire_value,
+        infer_number_locale,
         reset_active_date_locale,
+        reset_active_number_locale,
         set_active_date_locale,
+        set_active_number_locale,
     )
     from src.services.value_serializer import cell_to_string
     from src.services.preflight_service import (
@@ -273,7 +281,7 @@ def _persist_load_history_profile(
     row_count: int,
     mappings: list[dict] | None = None,
 ) -> None:
-    """Append this load to the route ring buffer (streaming-safe)."""
+    """Persist this load to the route ring buffer (same job_id replaces)."""
     try:
         from services import pii_guard
         from services.data_quality_history import profile_batch, save_profile
@@ -390,15 +398,19 @@ def _fail_job_preflight(mongo, job_id: str, pf: dict, *, lineage) -> tuple[str, 
 
 
 def _coalesce_sort_value(value: Any) -> Any:
-    """Return a tuple that sorts None/empty values last regardless of direction."""
+    """Return a tuple that sorts None/empty values last regardless of direction.
+
+    Numeric strings use ``decimal_wire_value`` — the write-path parser — so
+    Auto ``1,234`` / ``1.234`` stay lexical instead of inventing 1.234.
+    """
     if value is None or value == "":
         return (1, "")
     if isinstance(value, (int, float)):
         return (0, value)
-    try:
-        return (0, float(value))
-    except (TypeError, ValueError):
-        return (0, str(value).lower())
+    parsed = decimal_wire_value(value)
+    if parsed is not None:
+        return (0, parsed)
+    return (1, str(value).lower())
 
 
 def _apply_priority_and_limit(
@@ -1857,6 +1869,7 @@ class UniversalTransferEngine:
                 # Audit best-effort — contracts are already on the job document.
                 pass
         locale_token = set_active_date_locale(request.date_locale)
+        number_token = set_active_number_locale(getattr(request, "number_locale", "") or "")
         try:
             from services.tracing import (
                 current_trace_id,
@@ -1948,6 +1961,7 @@ class UniversalTransferEngine:
                 self._notify_job_status(request, result)
                 return result
         finally:
+            reset_active_number_locale(number_token)
             reset_active_date_locale(locale_token)
             # The run is over however it ended, so the slot must be freed here.
             # Releasing only on success would leave a failed job's claim in place
@@ -2222,6 +2236,11 @@ class UniversalTransferEngine:
                 if inferred_locale:
                     request.date_locale = inferred_locale
                     set_active_date_locale(inferred_locale)
+            if not getattr(request, "number_locale", ""):
+                inferred_numbers = infer_number_locale(records, columns)
+                if inferred_numbers:
+                    request.number_locale = inferred_numbers
+                    set_active_number_locale(inferred_numbers)
 
             dest_schema_types, dest_table_exists_flag = _destination_schema_probe(
                 request.destination,
@@ -2401,6 +2420,7 @@ class UniversalTransferEngine:
                     schema_policy=request.schema_policy,
                     backfill_new_fields=request.backfill_new_fields,
                     date_locale=request.date_locale,
+                    number_locale=getattr(request, "number_locale", "") or "",
                     resume=resume,
                     **parity,
                 )
@@ -3594,6 +3614,7 @@ class UniversalTransferEngine:
                     schema_policy=request.schema_policy,
                     backfill_new_fields=request.backfill_new_fields,
                     date_locale=request.date_locale,
+                    number_locale=getattr(request, "number_locale", "") or "",
                     resume=resume,
                     **parity,
                 )
@@ -4296,6 +4317,11 @@ class UniversalTransferEngine:
                 if inferred_locale:
                     request.date_locale = inferred_locale
                     set_active_date_locale(inferred_locale)
+            if not getattr(request, "number_locale", "") and sample_rows and columns:
+                inferred_numbers = infer_number_locale(sample_rows, columns)
+                if inferred_numbers:
+                    request.number_locale = inferred_numbers
+                    set_active_number_locale(inferred_numbers)
 
             mongo.update_job_status(
                 job_id, "running", total_rows=total_rows, records_processed=0
@@ -4396,6 +4422,7 @@ class UniversalTransferEngine:
                     schema_policy=request.schema_policy,
                     backfill_new_fields=request.backfill_new_fields,
                     date_locale=request.date_locale,
+                    number_locale=getattr(request, "number_locale", "") or "",
                     resume=resume,
                     **parity,
                 )

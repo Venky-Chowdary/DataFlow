@@ -15,7 +15,7 @@ import hashlib
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from enum import Enum
 from typing import Any
 
@@ -42,12 +42,11 @@ def infer_watermark_type(samples: list[str]) -> WatermarkType:
     if not non_empty:
         return WatermarkType.STRING
 
-    int_hits = sum(1 for s in non_empty if re.match(r"^-?\d+$", s.replace(",", "")))
-    float_hits = sum(1 for s in non_empty if _parse_float(s) is not None)
-    dt_hits = sum(
-        1 for s in non_empty
-        if _ISO_DT_RE.match(s) or _EPOCH_MS_RE.match(s) or _EPOCH_S_RE.match(s)
-    )
+    from services.transform_engine import decimal_wire_value, integer_wire_value
+
+    int_hits = sum(1 for s in non_empty if integer_wire_value(s) is not None)
+    float_hits = sum(1 for s in non_empty if decimal_wire_value(s) is not None)
+    dt_hits = sum(1 for s in non_empty if _sample_is_datetime_watermark(s))
 
     n = len(non_empty)
     if dt_hits / n >= 0.8:
@@ -59,32 +58,59 @@ def infer_watermark_type(samples: list[str]) -> WatermarkType:
     return WatermarkType.STRING
 
 
-def _parse_float(s: str) -> float | None:
-    try:
-        return float(Decimal(s.replace(",", "")))
-    except (InvalidOperation, ValueError):
-        return None
+def _sample_is_datetime_watermark(text: str) -> bool:
+    """True when a cursor sample is an instant, not a digit-only integer.
+
+    ISO and 10/13-digit epochs stay DATETIME. Unambiguous calendars such as
+    ``31/12/2024`` also count. Auto-ambiguous ``01/02/2024`` and YYYYMMDD
+    integers do not invent a DATETIME cursor type.
+    """
+    raw = (text or "").strip()
+    if not raw:
+        return False
+    if _ISO_DT_RE.match(raw) or _EPOCH_MS_RE.match(raw) or _EPOCH_S_RE.match(raw):
+        return True
+    from services.transform_engine import apply_transform, integer_wire_value
+
+    if integer_wire_value(raw) is not None:
+        return False
+    parsed, err = apply_transform(raw, "datetime")
+    return parsed is not None and not err
+
+
+def _parse_float(s: str) -> Decimal | None:
+    """Bind a FLOAT watermark through the write-path decimal parser.
+
+    Locale money (``$1,234.56``, ``€2.000,00``) keeps exact scale. Auto
+    ``1,234`` / ``1.234`` return None so compare falls through to string —
+    never invent a US/EU magnitude for a cursor. IEEE ``float(parsed)``
+    collapsed 2**53+1 against 2**53.
+    """
+    from services.transform_engine import decimal_wire_value
+
+    return decimal_wire_value(s)
 
 
 def _parse_datetime_key(s: str) -> float | None:
-    text = s.strip()
-    if _EPOCH_MS_RE.match(text):
-        return int(text) / 1000.0
-    if _EPOCH_S_RE.match(text):
-        return float(int(text))
-    for fmt in (
-        "%Y-%m-%dT%H:%M:%S",
-        "%Y-%m-%dT%H:%M:%SZ",
-        "%Y-%m-%dT%H:%M:%S.%f",
-        "%Y-%m-%dT%H:%M:%S.%fZ",
-        "%Y-%m-%d %H:%M:%S",
-        "%Y-%m-%d",
-    ):
-        try:
-            return datetime.strptime(text.replace("Z", ""), fmt.replace("Z", "")).timestamp()
-        except ValueError:
-            continue
-    return None
+    """Bind a CDC watermark through the write-path datetime parser.
+
+    ISO, 10-digit seconds, 13-digit millis, and unambiguous calendars
+    (``31/12/2024``) compare as instants. Auto-ambiguous ``01/02/2024``
+    returns None so compare falls through to string — never invent MDY/DMY.
+    """
+    text = (s or "").strip()
+    if not text:
+        return None
+    from services.transform_engine import apply_transform
+
+    parsed, err = apply_transform(text, "datetime")
+    if parsed is None or err:
+        return None
+    try:
+        moment = datetime.fromisoformat(str(parsed).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return moment.timestamp()
 
 
 def compare_watermarks(a: str, b: str, wm_type: WatermarkType) -> int:
@@ -93,11 +119,12 @@ def compare_watermarks(a: str, b: str, wm_type: WatermarkType) -> int:
     Used for monotonic advancement validation and max() selection.
     """
     if wm_type == WatermarkType.INTEGER:
-        try:
-            ai, bi = int(a.replace(",", "")), int(b.replace(",", ""))
+        from services.transform_engine import integer_wire_value
+
+        ai, bi = integer_wire_value(a), integer_wire_value(b)
+        if ai is not None and bi is not None:
             return (ai > bi) - (ai < bi)
-        except ValueError:
-            return (a > b) - (a < b)
+        return (a > b) - (a < b)
     if wm_type == WatermarkType.FLOAT:
         fa, fb = _parse_float(a), _parse_float(b)
         if fa is not None and fb is not None:
@@ -221,7 +248,19 @@ def build_incremental_predicate(
             return f"`{col}` > '{watermark}'"
         return f"{col} > '{watermark}'"
     if wm_type in {WatermarkType.INTEGER, WatermarkType.FLOAT}:
-        val = watermark.replace(",", "")
+        from services.transform_engine import decimal_wire_value, integer_wire_value
+
+        parsed = (
+            integer_wire_value(watermark)
+            if wm_type == WatermarkType.INTEGER
+            else decimal_wire_value(watermark)
+        )
+        if parsed is None:
+            # Fail closed — never embed an invented grouping in SQL.
+            if dialect == "mysql":
+                return f"`{col}` > '{watermark}'"
+            return f'"{col}" > \'{watermark}\''
+        val = format(parsed, "f") if wm_type == WatermarkType.FLOAT else str(int(parsed))
         if dialect == "mysql":
             return f"`{col}` > {val}"
         return f'"{col}" > {val}'

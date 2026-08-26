@@ -7,7 +7,7 @@ LLM prompt templates for schema analysis, mapping, and transformation.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .evidence import retains_evidence
 from .lexical_index import content_terms
@@ -28,6 +28,7 @@ class RAGResponse:
     confidence: float
     method: str  # "product_doc", "product_doc_llm", "trained_rag", "rag", "pattern", "ungrounded"
     grounded: bool = False
+    transformations: list[str] = field(default_factory=list)
 
 
 class DataTransferRAGGenerator:
@@ -258,45 +259,71 @@ class DataTransferRAGGenerator:
         source_type: str,
         target_type: str,
         semantic_type: str | None = None,
+        source_column: str = "",
+        target_column: str = "",
     ) -> RAGResponse:
-        """Suggest data transformations."""
-        from ..knowledge.type_conversions import (
-            get_compatible_types,
-            suggest_type_conversion,
+        """Suggest transforms the write path would actually stamp.
+
+        The assist type matrix used to say string→integer is lossless ``cast``
+        and string→date is ``parse_date``, and a Date semantic name always
+        recommended ``standardize_iso8601``. Map/Validate use
+        ``classify_conversion`` + ``infer_transform_for_mapping`` — this
+        endpoint must too, or the operator is sold a transform Execute refuses.
+        """
+        from services.conversion_contract import classify_conversion
+        from services.transform_engine import infer_transform_for_mapping
+
+        src_col = (source_column or "source").strip() or "source"
+        tgt_col = (target_column or "target").strip() or "target"
+        transform = infer_transform_for_mapping(
+            src_col,
+            tgt_col,
+            source_type or "string",
+            target_type or None,
+            None,
         )
-
-        conversion = suggest_type_conversion(source_type, target_type)
-        compatible = get_compatible_types(source_type)
-
-        if conversion:
+        classified = classify_conversion(
+            source_type or "",
+            target_type or "",
+            transform=transform,
+            risk_acknowledged=False,
+        )
+        cls = str(classified.get("conversion_class") or "")
+        reason = str(classified.get("reason") or "").strip()
+        lossy = bool(classified.get("lossy"))
+        needs_approval = bool(classified.get("requires_risk_contract")) or cls in {
+            "needs_user_approval",
+            "needs_transform",
+            "needs_manual_mapping",
+            "unsupported",
+        }
+        method = transform if transform and transform != "none" else "none"
+        transforms = [method] if method != "none" else []
+        if method != "none":
             answer = (
-                f"Transform {source_type} → {target_type} using method '{conversion['method']}'. "
-                f"Lossy: {conversion.get('lossy', False)}."
+                f"{source_type} → {target_type} would use write-path transform "
+                f"'{method}'. Conversion class: {cls}. Lossy: {lossy}."
             )
-            if conversion.get("note"):
-                answer += f" Note: {conversion['note']}"
-            confidence = 0.90
         else:
             answer = (
-                f"No direct conversion from {source_type} to {target_type}. "
-                f"Compatible types from {source_type}: {', '.join(compatible) or 'none'}."
+                f"{source_type} → {target_type} stays identity on the write path "
+                f"(no invented parse). Conversion class: {cls}. Lossy: {lossy}."
             )
-            confidence = 0.50
-
-        transforms = []
-        if semantic_type:
-            from ..knowledge.semantic_patterns import get_pattern_by_name
-            pattern = get_pattern_by_name(semantic_type)
-            if pattern and pattern.transformations:
-                transforms = pattern.transformations
-                answer += f" Recommended transforms for {semantic_type}: {', '.join(transforms)}."
-
+        if reason:
+            answer += f" {reason}"
+        if needs_approval:
+            answer += " Accept risk / Risk Contract required before Execute."
+        confidence = 0.55 if needs_approval else 0.85
         return RAGResponse(
             answer=answer,
-            reasoning=f"Checked type conversion matrix for {source_type} → {target_type}",
+            reasoning=(
+                f"classify_conversion + infer_transform_for_mapping for "
+                f"{source_type} → {target_type} (transform={method})"
+            ),
             sources=[],
             confidence=confidence,
-            method="pattern",
+            method="conversion_contract",
+            transformations=transforms,
         )
 
     @staticmethod

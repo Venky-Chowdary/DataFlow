@@ -8,6 +8,22 @@ from typing import Any
 from connectors.base import ReadBatch
 from connectors.sqlite_common import sqlite_file_path
 from connectors.writer_common import quote_sql_identifier
+from services.value_serializer import cell_to_string
+
+
+def _cell(value: Any) -> str:
+    """One SQLite cell. Same wire as PostgreSQL / Iceberg / procedure extract.
+
+    Native INTEGER / REAL / BLOB / NULL used to leave the reader as Python
+    types. ``str(1)`` later invented a second spelling from ``cell_to_string``,
+    BLOB stayed raw bytes, and NULL stayed ``None`` instead of the SQL NULL
+    sentinel.
+    """
+    return cell_to_string(value, preserve_sql_null=True)
+
+
+def _row(row: Any) -> tuple[str, ...]:
+    return tuple(_cell(row[i]) for i in range(len(row)))
 
 
 def read_table_batch(
@@ -64,7 +80,7 @@ def read_table_batch(
             headers = [row[1] for row in cur.fetchall()]
         return ReadBatch(
             headers=headers,
-            rows=[tuple(row) for row in rows],
+            rows=[_row(row) for row in rows],
             total_rows=total,
         )
     finally:
@@ -154,7 +170,7 @@ def read_table_scan_batch(
         return ReadBatch(headers=headers, rows=[], offset=offset, total_rows=total)
     return ReadBatch(
         headers=headers,
-        rows=[tuple(row) for row in raw],
+        rows=[_row(row) for row in raw],
         offset=offset,
         total_rows=total,
     )

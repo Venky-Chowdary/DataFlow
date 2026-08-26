@@ -26,7 +26,29 @@ def _to_scalar(value: Any) -> Any:
 
 
 def _is_null(value: Any) -> bool:
-    return value is None or value == "" or (isinstance(value, float) and value != value)
+    """Absence for source filters. Reader-wired SQL NULL is not a token.
+
+    ``None`` / ``""`` / NaN used to be the only blanks. After PostgreSQL /
+    SQLite extract emits ``SQL_NULL_SENTINEL``, ``is_null`` missed it and
+    ``is_not_null`` kept the sentinel as a present row.
+    """
+    from services.value_serializer import is_null_evidence
+
+    if is_null_evidence(value):
+        return True
+    return isinstance(value, float) and value != value
+
+
+def _cell_text(value: Any) -> str:
+    """One filter token. Reader-null / blank become ``""`` (same as None).
+
+    ``str(value)`` invented ``True`` vs dest ``"true"``, scientific
+    ``1E+2`` vs dest-canonical ``100``, and ``str(None) == "None"`` so
+    ``in ["None"]`` matched a SQL NULL.
+    """
+    from services.value_serializer import present_cell_text
+
+    return present_cell_text(value) or ""
 
 
 def _compare_values(row_value: Any, filter_value: Any, op: str) -> bool:
@@ -40,11 +62,13 @@ def _compare_values(row_value: Any, filter_value: Any, op: str) -> bool:
 
     if op in {"in", "not_in"}:
         allowed = fv if isinstance(fv, (list, tuple, set)) else [fv]
-        allowed_str = {str(v) for v in allowed}
-        return (str(rv) in allowed_str) if op == "in" else (str(rv) not in allowed_str)
+        allowed_str = {_cell_text(v) for v in allowed}
+        return (_cell_text(rv) in allowed_str) if op == "in" else (
+            _cell_text(rv) not in allowed_str
+        )
 
-    rv_str = str(rv) if rv is not None else ""
-    fv_str = str(fv) if fv is not None else ""
+    rv_str = _cell_text(rv)
+    fv_str = _cell_text(fv)
 
     if op == "contains":
         return fv_str in rv_str
@@ -58,22 +82,26 @@ def _compare_values(row_value: Any, filter_value: Any, op: str) -> bool:
         except re.error:
             return False
 
-    # Numeric comparison when both sides parse cleanly as floats.
+    # Numeric comparison when both sides parse on the write-path locale contract.
     try:
-        rv_num = float(rv_str.replace(",", ""))
-        fv_num = float(fv_str.replace(",", ""))
+        from services.transform_engine import decimal_wire_value
+
+        rv_parsed = decimal_wire_value(rv_str)
+        fv_parsed = decimal_wire_value(fv_str)
+        if rv_parsed is None or fv_parsed is None:
+            raise ValueError("not a locale-safe number")
         if op == "eq":
-            return rv_num == fv_num
+            return rv_parsed == fv_parsed
         if op == "ne":
-            return rv_num != fv_num
+            return rv_parsed != fv_parsed
         if op == "gt":
-            return rv_num > fv_num
+            return rv_parsed > fv_parsed
         if op == "gte":
-            return rv_num >= fv_num
+            return rv_parsed >= fv_parsed
         if op == "lt":
-            return rv_num < fv_num
+            return rv_parsed < fv_parsed
         if op == "lte":
-            return rv_num <= fv_num
+            return rv_parsed <= fv_parsed
     except (ValueError, TypeError):
         pass
 

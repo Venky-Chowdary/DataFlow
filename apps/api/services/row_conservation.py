@@ -123,6 +123,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import Any, Mapping, MutableMapping, Sequence
 
+from services.value_serializer import is_null_evidence
 from services.dest_precount import (
     ARTIFACT_COUNT_KEY,
     CURRENT_ROWS_KEY,
@@ -451,23 +452,29 @@ def record_tombstone_digest_scope(
 
 
 def coerce_pk_part(value: Any) -> Any:
-    """Bind a PK part with integer affinity when the token is an integer.
+    """Bind a PK part with integer affinity when the write path would.
 
     CDC ``ChangeBatch.deletes`` are strings. Dest BIGINT columns reject a
     text bind on PostgreSQL (``operator does not exist: bigint = text``).
     Boolean stays boolean — ``bool`` is a subclass of ``int`` in Python.
+    Auto ``1,234`` / ``1.000`` stay text (never invent 1234 / 1). Locale
+    money the write path stores still becomes an int. Informal ``true``
+    stays text — ``integer_wire_value('true')`` is 1 and is forbidden here.
     """
     if value is None or isinstance(value, bool) or isinstance(value, int):
         return value
     text = str(value).strip()
     if not text:
         return value
-    if text.isdigit() or (text.startswith("-") and text[1:].isdigit()):
-        try:
-            return int(text)
-        except ValueError:
-            return value
-    return value
+    from connectors.sql_bind import coerce_integer_wire
+
+    try:
+        parsed = coerce_integer_wire(text, ddl_type="BIGINT")
+    except ValueError:
+        return value
+    if parsed is None:
+        return value
+    return int(parsed)
 
 
 def format_delete_keys(keys: Sequence[tuple[Any, ...]]) -> list[str]:
@@ -476,7 +483,7 @@ def format_delete_keys(keys: Sequence[tuple[Any, ...]]) -> list[str]:
 
     out: list[str] = []
     for tup in keys:
-        if any(p is None for p in tup):
+        if any(is_null_evidence(p) for p in tup):
             continue
         parts = [str(coerce_pk_part(p)) for p in tup]
         out.append(_PK_SEP.join(parts) if len(parts) > 1 else parts[0])
@@ -615,7 +622,7 @@ def _unique_source_keys(
     seen: set[tuple[Any, ...]] = set()
     for raw in keys:
         tup = tuple(raw)
-        if len(tup) != width or any(v is None for v in tup):
+        if len(tup) != width or any(is_null_evidence(v) for v in tup):
             return None
         if tup in seen:
             return None

@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import Any
 
 import requests
-from services.value_serializer import cell_to_string
+from services.value_serializer import cell_to_string, load_http_json
 
 from connectors.saas_common import ReadBatch, humanize_http_error
 
@@ -36,7 +36,7 @@ def _query(url_base: str, database: str, q: str, username: str = "", password: s
     auth = (username, password) if username and password else None
     resp = requests.get(f"{url_base}/query", params=params, auth=auth, timeout=timeout)
     resp.raise_for_status()
-    return resp.json()
+    return load_http_json(resp)
 
 
 def _extract_rows(body: Any) -> tuple[list[str], list[list[str]]]:

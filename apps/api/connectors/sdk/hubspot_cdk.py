@@ -6,6 +6,7 @@ from typing import Any, Iterator
 
 from connectors.saas_common import base_url, humanize_http_error, request, token
 from connectors.sdk import BaseConnector, RecordBatch, StreamSchema, register_connector
+from services.value_serializer import load_http_json
 
 DEFAULT_HOST = "api.hubapi.com"
 
@@ -155,7 +156,7 @@ class HubSpotCDKConnector(BaseConnector):
 
         r = request(method="GET", url=url, token=access, params=params, timeout=60)
         r.raise_for_status()
-        data = r.json()
+        data = load_http_json(r)
         records: list[dict[str, Any]] = []
         for item in data.get("results") or []:
             rec: dict[str, Any] = {"id": item.get("id", "")}

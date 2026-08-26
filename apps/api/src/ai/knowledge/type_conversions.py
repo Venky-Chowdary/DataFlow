@@ -19,36 +19,86 @@ AUTHORITY_NOTE = (
 
 TYPE_CONVERSION_MATRIX: dict[str, dict[str, dict]] = {
     "string": {
-        "integer": {"method": "cast", "lossy": False, "validation": r"^-?\d+$"},
-        "decimal": {"method": "cast", "lossy": False, "validation": r"^-?\d+\.?\d*$"},
-        "boolean": {"method": "parse_bool", "lossy": False, "mapping": {"true": True, "false": False, "1": True, "0": False, "yes": True, "no": False}},
-        "datetime": {"method": "parse_date", "lossy": False, "formats": ["%Y-%m-%d", "%m/%d/%Y", "%d/%m/%Y", "%Y-%m-%dT%H:%M:%S"]},
-        "date": {"method": "parse_date", "lossy": False, "formats": ["%Y-%m-%d", "%m/%d/%Y"]},
+        "integer": {
+            "method": "cast",
+            "lossy": True,
+            "validation": r"^-?\d+$",
+            "note": "Auto fails closed on 1,234 / 1.234 — set number locale US or EU. Assist only.",
+        },
+        "decimal": {
+            "method": "cast",
+            "lossy": True,
+            "note": "Auto fails closed on a lone 1,234 / 1.234. $1,000.00 and €1.000,89 bind. Assist only.",
+        },
+        "boolean": {
+            "method": "parse_bool",
+            "lossy": False,
+            "mapping": {"true": True, "false": False, "t": True, "f": False, "1": True, "0": False},
+            "note": "Write-path tokens only (true/false/t/f/1/0). Informal yes/on refuse. Assist only.",
+        },
+        "datetime": {
+            "method": "parse_date",
+            "lossy": True,
+            "formats": ["%Y-%m-%d", "%Y-%m-%dT%H:%M:%S"],
+            "note": "Auto fails closed on 01/02/2024 — set date locale MDY or DMY. Assist only.",
+        },
+        "date": {
+            "method": "parse_date",
+            "lossy": True,
+            "formats": ["%Y-%m-%d"],
+            "note": "Auto fails closed on 01/02/2024 — set date locale MDY or DMY. Assist only.",
+        },
         "json": {"method": "parse_json", "lossy": False},
     },
     "integer": {
         "string": {"method": "to_string", "lossy": False},
         "decimal": {"method": "cast", "lossy": False},
-        "boolean": {"method": "cast", "lossy": True, "note": "0=false, non-zero=true"},
-        "datetime": {"method": "unix_timestamp", "lossy": False},
+        "boolean": {
+            "method": "parse_bool",
+            "lossy": True,
+            "mapping": {"0": False, "1": True},
+            "note": "Write-path tokens only (0/1). Non-zero integers like 2 are not TRUE. Assist only.",
+        },
+        "datetime": {
+            "method": "unix_timestamp",
+            "lossy": True,
+            "note": "Write path binds 10-digit seconds or 13-digit millis only. Ordinary integers like 2 refuse. Seconds vs millis invent. Assist only.",
+        },
     },
     "decimal": {
         "string": {"method": "to_string", "lossy": False},
         "integer": {"method": "truncate", "lossy": True, "note": "Truncates decimal portion"},
-        "boolean": {"method": "cast", "lossy": True},
+        "boolean": {
+            "method": "parse_bool",
+            "lossy": True,
+            "note": "Write-path tokens only (0/1). Non-zero decimals are not TRUE. Assist only.",
+        },
     },
     "boolean": {
         "string": {"method": "to_string", "lossy": False, "mapping": {True: "true", False: "false"}},
         "integer": {"method": "cast", "lossy": False, "mapping": {True: 1, False: 0}},
     },
     "datetime": {
-        "string": {"method": "format", "lossy": False, "format": "%Y-%m-%dT%H:%M:%SZ"},
+        "string": {
+            "method": "format",
+            "lossy": False,
+            "format": "%Y-%m-%dT%H:%M:%S",
+            "note": "Write path keeps naive wall-clock (no Z invent). UTC-aware uses Z. Assist only.",
+        },
         "date": {"method": "truncate_time", "lossy": True},
-        "integer": {"method": "unix_timestamp", "lossy": False},
+        "integer": {
+            "method": "unix_timestamp",
+            "lossy": True,
+            "note": "Write-path integer transform does not emit epoch from ISO datetimes. Seconds vs millis invent. Assist only.",
+        },
     },
     "date": {
         "string": {"method": "format", "lossy": False, "format": "%Y-%m-%d"},
-        "datetime": {"method": "add_midnight", "lossy": False},
+        "datetime": {
+            "method": "add_midnight",
+            "lossy": False,
+            "note": "Lossless widening — midnight, no timezone invent. Assist only.",
+        },
     },
     "json": {
         "string": {"method": "serialize", "lossy": False},

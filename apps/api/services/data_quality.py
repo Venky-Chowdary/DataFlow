@@ -11,16 +11,18 @@ import logging
 import statistics
 from collections import Counter
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
 try:
     from services.pii_guard import is_sensitive_name, pii_findings
-    from services.transform_engine import apply_transform
+    from services.transform_engine import _parse_date, _parse_datetime, decimal_wire_value
+    from services.value_serializer import cell_to_string, is_null_evidence, present_cell_text
 except ImportError:  # pragma: no cover - compatibility for tests
     from src.services.pii_guard import is_sensitive_name, pii_findings
-    from src.services.transform_engine import apply_transform
+    from src.services.transform_engine import _parse_date, _parse_datetime, decimal_wire_value
+    from src.services.value_serializer import cell_to_string, is_null_evidence, present_cell_text
 
 _UTC = timezone.utc
 
@@ -43,48 +45,107 @@ class DataQualityReport:
 
 
 def _is_null(value: Any) -> bool:
-    if value is None:
-        return True
-    if isinstance(value, str) and value.strip() == "":
-        return True
-    return False
+    """Absence, not a customer token.
+
+    Reader-wired ``SQL_NULL_SENTINEL`` used to look like a present string, so
+    required-null gates missed it and two NULL PKs were a duplicate-key hit
+    on the sentinel spelling.
+    """
+    return is_null_evidence(value)
 
 
 def _to_decimal(value: Any) -> Decimal | None:
+    """Write-path decimal bind — locale/currency money, Auto 1,234 refuses.
+
+    ``apply_transform(str(True), 'decimal')`` invented ``1``. Reader-wired
+    ``true`` / ``t`` did the same. ``decimal_wire_value`` is the one binder.
+    """
     if _is_null(value):
         return None
-    try:
-        return Decimal(str(value))
-    except (InvalidOperation, ValueError, TypeError):
+    return decimal_wire_value(value)
+
+
+def _as_decimal_stat(value: Any) -> Decimal | None:
+    """Bind stored batch stats for relative-drift compare.
+
+    Integrity already stores write-path Decimals. IEEE ``float(cur) - float(base)``
+    collapses scale-20 money and invents drift on values that are exact as Decimal.
+    Bool is refused (it is an ``int`` subclass, not a magnitude).
+    """
+    if value is None or isinstance(value, bool):
         return None
+    if isinstance(value, Decimal):
+        return value
+    if isinstance(value, int):
+        return Decimal(value)
+    if isinstance(value, float):
+        if value != value or value in (float("inf"), float("-inf")):
+            return None
+        try:
+            return Decimal(str(value))
+        except (InvalidOperation, ValueError, OverflowError):
+            return None
+    return None
 
 
-def _to_float(value: Any) -> float | None:
+def _relative_numeric_drift(cur: Any, base: Any, threshold: float) -> bool:
+    cur_d = _as_decimal_stat(cur)
+    base_d = _as_decimal_stat(base)
+    if cur_d is None or base_d is None or base_d == 0:
+        return False
+    return abs(cur_d - base_d) / abs(base_d) > Decimal(str(threshold))
+
+
+def _is_fractional_decimal(value: Any) -> bool:
+    from services.transform_engine import is_fractional_wire_value
+
+    return is_fractional_wire_value(value)
+
+
+def _temporal_kind(col_type: str) -> str:
+    """DATE refuses epoch; TIMESTAMP / DATETIME bind epoch as an instant."""
+    text = (col_type or "").upper()
+    if "DATE" in text and "TIME" not in text:
+        return "date"
+    if any(tok in text for tok in ("TIMESTAMP", "DATETIME", "TIMESTAMPTZ")):
+        return "datetime"
+    return "date"
+
+
+def _parse_iso_date(value: Any, *, temporal: str = "datetime") -> datetime | None:
+    """Write-path temporal bind, then a datetime for the future-date fence.
+
+    ``apply_transform(str(value), 'datetime')`` invented a calendar from
+    DATE epoch seconds and from ``str(datetime)`` space form. DATE uses
+    ``_parse_date`` (epoch refuses, YYYYMMDD still binds). TIMESTAMP uses
+    ``_parse_datetime``. Auto ``01/02/2024`` still refuses.
+    """
     if _is_null(value):
         return None
-    # Reuse the engine's locale/currency/scientific-aware decimal parser.
-    parsed, _ = apply_transform(str(value).strip(), "decimal")
-    if parsed is None:
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, date):
+        return datetime(value.year, value.month, value.day)
+    text = value if isinstance(value, str) else cell_to_string(value, preserve_sql_null=True)
+    if is_null_evidence(text):
         return None
-    try:
-        return float(Decimal(str(parsed)))
-    except (InvalidOperation, ValueError, TypeError, OverflowError):
-        return None
-
-
-def _parse_iso_date(value: Any) -> datetime | None:
-    if _is_null(value):
-        return None
-    # Reuse the engine's full date/datetime parser (handles ISO, day-first,
-    # epoch, and many locale formats) and convert the canonical result back.
-    parsed, _ = apply_transform(str(value).strip(), "datetime")
+    kind = (temporal or "datetime").strip().lower()
+    if kind == "date":
+        parsed = _parse_date(text, with_time=True)
+        if parsed is None:
+            return None
+        try:
+            return datetime.fromisoformat(parsed)
+        except ValueError:
+            return None
+    parsed = _parse_datetime(text)
     if not parsed:
         return None
-    text = str(parsed).strip()
-    if text.endswith("Z"):
-        text = text[:-1] + "+00:00"
+    instant = str(parsed).strip()
+    if instant.endswith("Z"):
+        instant = instant[:-1] + "+00:00"
     try:
-        return datetime.fromisoformat(text)
+        return datetime.fromisoformat(instant)
     except ValueError:
         return None
 
@@ -114,7 +175,8 @@ def _is_date_column(name: str) -> bool:
     )
 
 
-def _iqr_outliers(values: list[float]) -> list[float]:
+def _iqr_outliers(values: list[Decimal]) -> list[Decimal]:
+    """IQR fences on write-path Decimals. ``float`` invented a second magnitude."""
     if len(values) < 4:
         return []
     sorted_vals = sorted(values)
@@ -122,8 +184,8 @@ def _iqr_outliers(values: list[float]) -> list[float]:
     q1 = sorted_vals[n // 4] if n >= 4 else sorted_vals[0]
     q3 = sorted_vals[(3 * n) // 4] if n >= 4 else sorted_vals[-1]
     iqr = q3 - q1
-    lower = q1 - 1.5 * iqr
-    upper = q3 + 1.5 * iqr
+    lower = q1 - Decimal("1.5") * iqr
+    upper = q3 + Decimal("1.5") * iqr
     return [v for v in values if v < lower or v > upper]
 
 
@@ -196,50 +258,26 @@ class BatchDriftDetector:
 
             base_mean = base.get("mean")
             cur_mean = cur.get("mean")
-            if (
-                base_mean is not None
-                and cur_mean is not None
-                and isinstance(base_mean, (int, float, Decimal))
-                and isinstance(cur_mean, (int, float, Decimal))
-                and float(base_mean) != 0.0
-            ):
-                rel = abs(float(cur_mean) - float(base_mean)) / abs(float(base_mean))
-                if rel > self.numeric_threshold:
-                    warnings.append(
-                        f"Column '{col}' mean drift: {base_mean:.4g} → {cur_mean:.4g}"
-                    )
+            if _relative_numeric_drift(cur_mean, base_mean, self.numeric_threshold):
+                warnings.append(
+                    f"Column '{col}' mean drift: {base_mean:.4g} → {cur_mean:.4g}"
+                )
 
             base_stdev = base.get("stdev")
             cur_stdev = cur.get("stdev")
-            if (
-                base_stdev is not None
-                and cur_stdev is not None
-                and isinstance(base_stdev, (int, float, Decimal))
-                and isinstance(cur_stdev, (int, float, Decimal))
-                and float(base_stdev) != 0.0
-            ):
-                rel = abs(float(cur_stdev) - float(base_stdev)) / abs(float(base_stdev))
-                if rel > self.numeric_threshold:
-                    warnings.append(
-                        f"Column '{col}' stdev drift: {base_stdev:.4g} → {cur_stdev:.4g}"
-                    )
+            if _relative_numeric_drift(cur_stdev, base_stdev, self.numeric_threshold):
+                warnings.append(
+                    f"Column '{col}' stdev drift: {base_stdev:.4g} → {cur_stdev:.4g}"
+                )
 
             # Range drift for numeric / date-like columns
             for stat in ("min", "max"):
                 base_val = base.get(stat)
                 cur_val = cur.get(stat)
-                if (
-                    base_val is not None
-                    and cur_val is not None
-                    and isinstance(base_val, (int, float, Decimal))
-                    and isinstance(cur_val, (int, float, Decimal))
-                    and float(base_val) != 0.0
-                ):
-                    rel = abs(float(cur_val) - float(base_val)) / abs(float(base_val))
-                    if rel > self.numeric_threshold:
-                        warnings.append(
-                            f"Column '{col}' {stat} drift: {base_val:.4g} → {cur_val:.4g}"
-                        )
+                if _relative_numeric_drift(cur_val, base_val, self.numeric_threshold):
+                    warnings.append(
+                        f"Column '{col}' {stat} drift: {base_val:.4g} → {cur_val:.4g}"
+                    )
 
         for col in current_cols:
             if col not in self.baseline:
@@ -427,13 +465,16 @@ def run_integrity_audit(
         stats["primary_key"] = None
     else:
         pk_idx = header_index.get(pk_source, 0)
-        pk_values = [row[pk_idx] if pk_idx < len(row) else "" for row in rows]
+        pk_values = [
+            present_cell_text(row[pk_idx] if pk_idx < len(row) else "")
+            for row in rows
+        ]
         stats["primary_key"] = pk_source
 
         dup_counts = Counter(pk_values)
-        duplicates = {v: c for v, c in dup_counts.items() if c > 1 and str(v).strip()}
+        duplicates = {v: c for v, c in dup_counts.items() if v is not None and c > 1}
         if duplicates:
-            examples = ", ".join(str(v) for v in list(duplicates)[:3])
+            examples = ", ".join(list(duplicates)[:3])
             if require_unique_identity:
                 _hard(
                     f"Duplicate primary key values in '{pk_source}': "
@@ -496,7 +537,7 @@ def run_integrity_audit(
         if col_type in {"INTEGER", "DECIMAL", "NUMERIC", "FLOAT", "DOUBLE", "REAL"} or (
             col_type == "STRING" and _is_amount_column(h)
         ):
-            nums = [_to_float(v) for v in non_null]
+            nums = [_to_decimal(v) for v in non_null]
             nums = [n for n in nums if n is not None]
             if nums:
                 col_stats["min"] = min(nums)
@@ -510,10 +551,7 @@ def run_integrity_audit(
 
                 # Financial precision loss: integer target with fractional source (hard)
                 if col_type == "INTEGER" and _is_amount_column(h):
-                    fractional = any(
-                        ("." in str(v) or "," in str(v)) and _to_decimal(v) is not None
-                        for v in non_null
-                    )
+                    fractional = any(_is_fractional_decimal(v) for v in non_null)
                     if fractional:
                         _hard(
                             f"Financial column '{h}' has fractional values but target type is INTEGER — precision loss risk"
@@ -541,7 +579,7 @@ def run_integrity_audit(
                     stdev = col_stats["stdev"]
                     if stdev:
                         for offset, v in enumerate(values):
-                            f = _to_float(v)
+                            f = _to_decimal(v)
                             if f is None:
                                 continue
                             z = abs(f - mean) / stdev
@@ -558,7 +596,8 @@ def run_integrity_audit(
 
         # Date validity / future dates (soft)
         if col_type in {"DATE", "TIMESTAMP", "DATETIME"} or _is_date_column(h):
-            dates = [_parse_iso_date(v) for v in non_null]
+            kind = _temporal_kind(col_type)
+            dates = [_parse_iso_date(v, temporal=kind) for v in non_null]
             valid_dates = [d for d in dates if d is not None]
             if valid_dates:
                 now = datetime.now(_UTC)

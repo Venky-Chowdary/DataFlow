@@ -27,6 +27,16 @@ def test_infer_when_no_transform():
     assert t in {"decimal", "none"}
 
 
+def test_omitted_transform_does_not_invent_date_into_varchar():
+    """Map strips transform=none; write-path must not re-invent Date→ISO."""
+    t = resolve_transform(
+        {"source": "event_date", "target": "event_date", "target_type": "VARCHAR"},
+        column_types={"event_date": "VARCHAR"},
+        dest_types={"event_date": "VARCHAR"},
+    )
+    assert t == "none"
+
+
 def test_resolve_transform_live_dest_beats_map_boolean_stamp():
     """Map BOOLEAN over live VARCHAR must not invent cast_boolean."""
     t = resolve_transform(

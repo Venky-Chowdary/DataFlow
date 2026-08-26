@@ -5934,7 +5934,8 @@ html,
 }
 
 .df2-btn:disabled,
-.df2-btn[disabled] {
+.df2-btn[disabled],
+.df2-btn[aria-disabled="true"] {
   opacity: 0.55;
   cursor: not-allowed;
   transform: none;

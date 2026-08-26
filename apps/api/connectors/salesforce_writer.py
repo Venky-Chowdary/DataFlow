@@ -68,12 +68,11 @@ def coerce_salesforce_id_wire(value: Any) -> str | None:
     encoding uppercase positions (Informatica / Data Loader class). Refuse
     invent for lengths other than 15/18 or non-base62 payloads.
     """
-    if value is None:
-        return None
-    from services.value_serializer import is_missing_sentinel
+    from services.value_serializer import absent_sql_bind
 
-    if is_missing_sentinel(value):
-        return value
+    handled, bound = absent_sql_bind(value)
+    if handled:
+        return bound
     if isinstance(value, (bytes, bytearray, memoryview, dict, list, tuple, bool, int, float)):
         raise ValueError(
             f"Salesforce Id cannot bind {type(value).__name__} — refuse invent"
@@ -291,8 +290,11 @@ def _normalize_salesforce_id_cells(
     policy: str,
 ) -> list[tuple]:
     """Expand 15-char Ids to 18-char on Id/reference VARCHAR(18) columns."""
-    from connectors.writer_common import append_write_quarantine_detail
-    from services.value_serializer import cell_to_string, is_missing_sentinel
+    from connectors.writer_common import (
+        _unfit_cell_absent,
+        append_write_quarantine_detail,
+    )
+    from services.value_serializer import cell_to_string
 
     id_cols = [
         i
@@ -309,9 +311,7 @@ def _normalize_salesforce_id_cells(
         cells = list(row)
         hold_out = False
         for col_idx in id_cols:
-            if col_idx >= len(cells) or cells[col_idx] is None:
-                continue
-            if is_missing_sentinel(cells[col_idx]):
+            if _unfit_cell_absent(cells, col_idx):
                 continue
             try:
                 cells[col_idx] = coerce_salesforce_id_wire(cells[col_idx])

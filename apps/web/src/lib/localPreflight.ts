@@ -1,6 +1,9 @@
 import type { EditableMapping } from "./mapping";
 import { mappingRequiresRiskAck } from "./mapping";
+import { applyLocalTransform } from "./localTransform";
 import { GATE_CATALOG } from "./preflightGates";
+import type { NumberLocale } from "./numberLocale";
+import { ambiguousDateColumns, type DateLocale } from "./dateLocale";
 import type { PreflightGate, PreflightResult } from "./types";
 
 /** Canonical local gate order — matches GATE_CATALOG (unique IDs). */
@@ -8,41 +11,6 @@ const GATE_IDS = GATE_CATALOG
   .map((g) => g.id)
   .filter((id) => id !== "schema_drift") as string[];
 
-function applyTransform(value: unknown, transform?: string): unknown {
-  if (value == null || value === "") return value;
-  const s = String(value);
-  switch (transform) {
-    case "trim":
-      return s.trim();
-    case "upper":
-      return s.toUpperCase();
-    case "lower":
-      return s.toLowerCase();
-    case "hash_pii": {
-      let h = 5381;
-      for (let i = 0; i < s.length; i += 1) h = (h * 33) ^ s.charCodeAt(i);
-      return `sha256:${(h >>> 0).toString(16).padStart(8, "0")}`;
-    }
-    case "datetime":
-    case "date_iso":
-      return s;
-    case "decimal":
-    case "cast_number": {
-      const n = Number(s.replace(/,/g, ""));
-      return Number.isFinite(n) ? n : value;
-    }
-    case "boolean":
-    case "cast_boolean": {
-      // Strict wire only — match transform_engine._STRICT_BOOL_* (no yes/y invent).
-      const t = s.toLowerCase();
-      if (["true", "t", "1"].includes(t)) return true;
-      if (["false", "f", "0"].includes(t)) return false;
-      return value;
-    }
-    default:
-      return value;
-  }
-}
 
 export interface LocalPreflightInput {
   columns: string[];
@@ -54,6 +22,8 @@ export interface LocalPreflightInput {
   sourceReadMode?: string;
   destWriteMode?: string;
   syncMode?: string;
+  numberLocale?: NumberLocale | string;
+  dateLocale?: DateLocale | string;
 }
 
 /** True when this preflight was produced entirely in the browser (no API gates). */
@@ -206,7 +176,11 @@ export function runLocalPreflight(input: LocalPreflightInput): PreflightResult {
   for (const m of input.mappings) {
     for (const row of rows.slice(0, 20)) {
       try {
-        applyTransform(row[m.source], m.transform === "none" ? undefined : m.transform);
+        applyLocalTransform(
+          row[m.source],
+          m.transform === "none" ? undefined : m.transform,
+          input.numberLocale,
+        );
       } catch {
         transformOk = false;
         break;
@@ -314,11 +288,20 @@ export function runLocalPreflight(input: LocalPreflightInput): PreflightResult {
       ]
     : ["Database destinations require API preflight — local checks cannot approve remote writes."];
 
+  const dateFindings = ambiguousDateColumns(rows, input.columns, input.dateLocale);
+  const dateLocaleReport = {
+    date_locale: String(input.dateLocale || ""),
+    ambiguous_columns: dateFindings,
+    decision: dateFindings.length ? "set_locale" as const : "ok" as const,
+  };
+
   return {
     passed,
     passed_count: passedCount,
     total_gates: totalGates,
     readiness_score: readinessScore,
+    date_locale: String(input.dateLocale || ""),
+    date_locale_report: dateLocaleReport,
     run_id: `pf_local_${Math.random().toString(16).slice(2, 10)}`,
     gates,
     blockers,

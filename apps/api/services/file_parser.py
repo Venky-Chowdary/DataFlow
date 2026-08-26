@@ -23,7 +23,7 @@ from services.read_options import ReadOptions, ReadOptionsError
 from services.schema_inference import infer_columns_from_rows
 from services.tabular_rows import is_blank_row
 from services.tabular_window import header_and_rows, row_to_record
-from services.value_serializer import cell_to_string, json_default
+from services.value_serializer import cell_to_string, json_default, json_loads_exact
 
 UPLOAD_DIR = upload_dir()
 REGISTRY_PATH = data_dir() / "upload_registry.json"
@@ -171,7 +171,7 @@ def parse_jsonl(content: bytes) -> tuple[list[str], list[list[str]], int]:
         line = line.strip()
         if not line:
             continue
-        objects.append(json.loads(line))
+        objects.append(json_loads_exact(line))
     if not objects:
         raise ValueError("JSONL must contain at least one JSON object per line")
     if not all(isinstance(item, dict) for item in objects):
@@ -229,7 +229,7 @@ def _iter_jsonl_dicts_from_reader(reader: Any) -> Any:
         if not line:
             continue
         try:
-            obj = json.loads(line)
+            obj = json_loads_exact(line)
         except json.JSONDecodeError as exc:
             raise UnmeasuredArtifact("jsonl_poison_line") from exc
         if not isinstance(obj, dict):
@@ -483,7 +483,7 @@ def get_file_chunks(file_id: str, chunk_size: int = 10000):
         from services.json_tabular import extract_json_records
 
         with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
+            data = json_loads_exact(f.read())
         records = extract_json_records(data)
         if not records:
             return
@@ -509,7 +509,7 @@ def get_file_chunks(file_id: str, chunk_size: int = 10000):
                 line = line.strip()
                 if not line:
                     continue
-                obj = json.loads(line)
+                obj = json_loads_exact(line)
                 if not isinstance(obj, dict):
                     raise ValueError("JSONL must contain one JSON object per line")
                 for k in obj.keys():
@@ -524,7 +524,7 @@ def get_file_chunks(file_id: str, chunk_size: int = 10000):
                 line = line.strip()
                 if not line:
                     continue
-                obj = json.loads(line)
+                obj = json_loads_exact(line)
                 row = [cell_to_string(obj.get(h, "")) for h in headers]
                 chunk.append(row)
                 if len(chunk) >= chunk_size:
@@ -659,7 +659,7 @@ class FileParser:
         try:
             from services.json_tabular import extract_json_records
 
-            data = json.loads(content)
+            data = json_loads_exact(content)
             try:
                 records = extract_json_records(data)
             except ValueError as exc:
@@ -738,7 +738,7 @@ class FileParser:
                 if not line:
                     continue
                 try:
-                    record = json.loads(line)
+                    record = json_loads_exact(line)
                     if not isinstance(record, dict):
                         return ParseResult(
                             success=False,
@@ -950,7 +950,14 @@ class FileParser:
 
             import pyarrow.parquet as pq
 
+            from services.arrow_schema import (
+                columns_from_arrow_schema,
+                schema_from_arrow,
+            )
+
             table = pq.read_table(io.BytesIO(content))
+            schema_map = schema_from_arrow(table.schema)
+            column_meta = columns_from_arrow_schema(table.schema)
             total_rows = int(table.num_rows)
             if total_rows > max_rows:
                 return ParseResult(
@@ -963,25 +970,21 @@ class FileParser:
                         f"{max_rows:,}-row non-streaming limit; use streaming ingest."
                     ),
                     file_type="parquet",
+                    schema_map=schema_map or None,
+                    column_meta=column_meta or None,
                 )
-            df = table.to_pandas()
-            records = df.to_dict(orient="records")
-            columns = [str(c) for c in df.columns.tolist()]
-            for rec in records:
-                for k, v in list(rec.items()):
-                    if hasattr(v, "item"):
-                        rec[k] = v.item()
-                        v = rec[k]
-                    # Keep IEEE NaN/Inf — never invent SQL NULL (silent loss).
-                    # Downstream quarantine / sanitize_json_value refuse_nonfinite.
-                    if isinstance(v, float) and v != v:
-                        continue
+            # to_pylist keeps DECIMAL / int64 / nested fidelity. to_pandas()
+            # invented nullable integers as float64 and collapsed long decimals.
+            records = table.to_pylist()
+            columns = list(schema_map.keys()) if schema_map else [str(c) for c in table.column_names]
             return ParseResult(
                 success=True,
                 data=records,
                 columns=columns,
                 row_count=total_rows,
                 file_type="parquet",
+                schema_map=schema_map or None,
+                column_meta=column_meta or None,
             )
         except ImportError:
             return ParseResult(
@@ -1530,17 +1533,30 @@ def _xml_count_open(content: bytes | str | Path) -> tuple[Any, Any]:
 
 
 def _xml_count_as_text(content: bytes | str | Path) -> str | None:
-    """ImportError fallback only — never the GB-scale COUNT path."""
+    """ImportError fallback only — never the GB-scale COUNT path.
+
+    Gzip paths use ``artifact_byte_source`` so ``*.xml.gz`` decodes the
+    decompressed stream. ``Path.read_text`` on compressed bytes was
+    unmeasured dest COUNT (None), not dest=0.
+    """
     try:
-        if isinstance(content, Path):
-            return content.read_text(encoding="utf-8")
-        if isinstance(content, bytes):
-            return content.decode("utf-8")
         if isinstance(content, str):
             return content
-    except (OSError, UnicodeDecodeError):
+        from services.dest_precount import artifact_byte_source
+
+        source, closer = artifact_byte_source(content)
+        try:
+            raw = source.read()
+        finally:
+            if closer is not None:
+                closer()
+        if raw is None:
+            return None
+        if isinstance(raw, str):
+            return raw
+        return raw.decode("utf-8")
+    except (OSError, UnicodeDecodeError, TypeError, ValueError):
         return None
-    return None
 
 
 def _xml_unique_from_parent_stats(

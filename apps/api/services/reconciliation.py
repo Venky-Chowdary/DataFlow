@@ -47,9 +47,18 @@ from services.transform_engine import (
     _parse_date,
     _parse_datetime,
     apply_transform,
+    decimal_wire_value,
+    reset_active_number_locale,
+    set_active_number_locale,
 )
 from services.type_system import instant_date_carrier, normalize_logical_type
-from services.value_serializer import cell_to_string, is_missing_sentinel, json_default
+from services.value_serializer import (
+    cell_to_string,
+    is_missing_sentinel,
+    json_default,
+    json_loads_exact,
+    load_http_json,
+)
 
 # Fingerprinting runs once per cell on both the write and the read-back pass, so
 # resolving these names inside the function costs a module lookup per cell.
@@ -62,15 +71,37 @@ SPILL_THRESHOLD = int(getenv_brand("FINGERPRINT_SPILL_THRESHOLD", "1000000"))
 
 # Quick pre-filter for the expensive Decimal / date normalization in
 # normalize_cell.  Most string columns (names, emails, codes) are clearly not
-# numbers or dates, so we can skip the exception-heavy Decimal constructor and
-# the date regex for them.
+# numbers or dates, so we can skip the write-path parser and the date regex.
 _NUMERIC_RE = re.compile(r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$")
+# Currency / grouping marks the write path may still bind (or Auto-refuse).
+_NUMERIC_WIRE_MARKS = ("$", "€", "£", "¥")
+_NUMERIC_WIRE_CODES = ("USD", "EUR", "GBP")
 _DATE_LIKE_CHARS = frozenset("-:/T ")
 # RFC 4122 UUID wire — engines differ on case (PG lower, some drivers upper).
 _UUID_RE = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
 )
 _NULL_SENTINEL = "\x00NULL\x00"
+
+
+def _looks_like_numeric_wire(text: str) -> bool:
+    """True when ``text`` might be a number the write path binds or Auto-refuses.
+
+    ASCII scientific / plain decimals stay on the cheap ``_NUMERIC_RE`` path.
+    Locale money and grouped forms (``$1,234.56`` / ``1,234.56``) must also
+    reach ``decimal_wire_value`` so Gate-8 matches the dest DECIMAL, without
+    running the parser on every name or email.
+    """
+    if not text:
+        return False
+    if text[0] in "+-0123456789." and _NUMERIC_RE.match(text):
+        return True
+    if any(mark in text for mark in _NUMERIC_WIRE_MARKS):
+        return True
+    upper = text.upper()
+    if any(code in upper for code in _NUMERIC_WIRE_CODES):
+        return True
+    return text[0] in "+-0123456789(" and "," in text
 
 
 @dataclass(frozen=True, slots=True)
@@ -1216,14 +1247,9 @@ def verify_pgvector_table(
                 for raw in raw_rows:
                     rec = dict(zip(names, raw))
                     source_id = rec.get("source_id", "")
-                    metadata = rec.get("metadata") or {}
-                    if isinstance(metadata, str):
-                        try:
-                            metadata = json.loads(metadata)
-                        except Exception:
-                            metadata = {}
-                    if not isinstance(metadata, dict):
-                        metadata = {}
+                    from services.target_sample_vector import load_pgvector_metadata
+
+                    metadata = load_pgvector_metadata(rec.get("metadata"))
                     # Reconstruct a source-shaped row from metadata; fall back
                     # to source_id for 'id'.
                     row: dict[str, Any] = dict(metadata)
@@ -1305,7 +1331,7 @@ def verify_pinecone_namespace(
                 timeout=30,
             )
             if fetch.status_code in {200, 201}:
-                vectors = (fetch.json() or {}).get("vectors") or {}
+                vectors = (load_http_json(fetch) or {}).get("vectors") or {}
                 for vid, payload in vectors.items():
                     meta = payload.get("metadata") if isinstance(payload, dict) else {}
                     if not isinstance(meta, dict):
@@ -1373,7 +1399,7 @@ def verify_qdrant_collection(
                 timeout=30,
             )
             if retrieve.status_code in {200, 201}:
-                points = (retrieve.json() or {}).get("result") or []
+                points = (load_http_json(retrieve) or {}).get("result") or []
                 for pt in points:
                     if not isinstance(pt, dict):
                         continue
@@ -1391,7 +1417,7 @@ def verify_qdrant_collection(
                 timeout=30,
             )
             if scroll.status_code in {200, 201}:
-                points = ((scroll.json() or {}).get("result") or {}).get("points") or []
+                points = ((load_http_json(scroll) or {}).get("result") or {}).get("points") or []
                 for pt in points:
                     if not isinstance(pt, dict):
                         continue
@@ -1460,7 +1486,7 @@ def verify_weaviate_class(
                     )
                 if resp.status_code not in {200, 201}:
                     continue
-                obj = resp.json() or {}
+                obj = load_http_json(resp) or {}
                 if not isinstance(obj, dict):
                     continue
                 props = obj.get("properties") if isinstance(obj.get("properties"), dict) else {}
@@ -1474,7 +1500,7 @@ def verify_weaviate_class(
             )
             if agg.status_code not in {200, 201}:
                 return -1, ""
-            body = agg.json() or {}
+            body = load_http_json(agg) or {}
             objects = body.get("objects") or []
             count = int(body.get("totalResults") or len(objects))
             for obj in objects:
@@ -1586,7 +1612,7 @@ def verify_milvus_collection(
             headers=hdrs,
             timeout=30,
         )
-        qbody = query.json() if query.content else {}
+        qbody = load_http_json(query) if query.content else {}
         dict_rows: list[dict[str, Any]] = []
         if _ok_response(qbody if isinstance(qbody, dict) else {}, query.status_code):
             rows = qbody.get("data") if isinstance(qbody, dict) else []
@@ -2818,7 +2844,7 @@ def verify_redis_prefix(
     rows the source never sent. Cardinality stays whole-prefix either way.
     """
     try:
-        from connectors.redis_reader import _decode, _redis_client
+        from connectors.redis_reader import _redis_client, redis_json_row
 
         client = _redis_client(
             {
@@ -2851,18 +2877,7 @@ def verify_redis_prefix(
 
         def _row_iter():
             for key in keys:
-                raw = client.get(key)
-                text = _decode(raw)
-                try:
-                    payload = (
-                        json.loads(text) if text.startswith("{") else {"value": text}
-                    )
-                except (json.JSONDecodeError, TypeError):
-                    payload = {"value": text}
-                if isinstance(payload, dict):
-                    yield payload
-                else:
-                    yield {"value": text}
+                yield redis_json_row(client.get(key))
 
         columns = target_columns or []
         if not columns and keys:
@@ -3732,10 +3747,16 @@ def fingerprint_for_reconcile(
         wire = cell_to_string(value, preserve_sql_null=True)
 
     if ddl_type:
+        # Dest read-back is storage-canonical. Re-applying the transfer locale
+        # turns EU ``1.234`` (from ``1,234``) into 1234 and false-fails Gate-8.
+        token = set_active_number_locale("")
         try:
-            wire = normalize_sql_bind_value(wire, ddl_type, engine=engine)
-        except Exception:
-            pass
+            try:
+                wire = normalize_sql_bind_value(wire, ddl_type, engine=engine)
+            except Exception:
+                pass
+        finally:
+            reset_active_number_locale(token)
         # Fingerprint the instant at the granularity the carrier keeps, or a
         # declared narrowing (Snowflake TIMESTAMP → MySQL DATETIME) reports as
         # a whole-column checksum mismatch with no column named.
@@ -3864,9 +3885,11 @@ def normalize_cell(value: Any, *, ddl_type: str = "", engine: str = "") -> str:
         return "1"
     if lowered in _STRICT_BOOL_FALSE:
         return "0"
-    # Numeric fast path: only attempt Decimal normalization for strings that look
-    # like numbers, avoiding the expensive exception path for names, emails, codes.
-    if text[0] in "+-0123456789" and _NUMERIC_RE.match(text):
+    # Numeric fast path: write-path bind only. Auto-ambiguous ``1,234`` /
+    # ``1.234`` / ``1.000`` stay opaque text — ``Decimal(text)`` is a second
+    # algorithm and invented ``1.000`` → ``1``. Locale money the write path
+    # binds still folds so Gate-8 matches the dest DECIMAL.
+    if _looks_like_numeric_wire(text):
         canonical = _canonicalize_number(text)
         if canonical is not None:
             return canonical
@@ -3874,7 +3897,7 @@ def normalize_cell(value: Any, *, ddl_type: str = "", engine: str = "") -> str:
     # JSON payloads (e.g. jsonb).
     if text.startswith(("{", "[")):
         try:
-            parsed = json.loads(text)
+            parsed = json_loads_exact(text)
             if isinstance(parsed, (dict, list)):
                 return json.dumps(parsed, sort_keys=True, default=json_default)
         except (json.JSONDecodeError, TypeError):
@@ -4009,8 +4032,10 @@ def _is_exact_double(d: Decimal) -> bool:
 def _canonicalize_number(value: Any) -> str | None:
     """Return a canonical string for numeric values so 9.5 == 9.5000000000.
 
-    Also collapses IEEE float residue so Excel/JSON floats match DECIMAL sinks,
-    but only where that collapse is provably information-free.
+    Strings go through ``decimal_wire_value`` — the same parser the write path
+    binds. Auto-ambiguous ``1,234`` / ``1.234`` / ``1.000`` return ``None`` so
+    Gate-8 cannot invent ``1.000`` → ``1``. Locale money and both-separator
+    forms still fold. IEEE residue still collapses when information-free.
     """
     try:
         if isinstance(value, float):
@@ -4031,12 +4056,23 @@ def _canonicalize_number(value: Any) -> str | None:
                     except (OverflowError, ValueError):
                         pass
         else:
-            text = str(value).strip().replace(",", "")
+            text = str(value).strip()
             if not text:
                 return None
-            d = Decimal(text)
+            # Checksum dest text is already storage-canonical. Re-applying the
+            # transfer locale turns EU ``1.234`` (from ``1,234``) into 1234.
+            token = set_active_number_locale("")
+            try:
+                parsed = decimal_wire_value(text)
+            finally:
+                reset_active_number_locale(token)
+            if parsed is None:
+                # Write path refused (Auto ``1,234`` / ``1.234`` / ``1.000``).
+                # Decimal(text) invented a different number (``1.000`` → ``1``).
+                return None
+            d = parsed
             # String form of float residue (common from Excel/CSV readers).
-            if d.is_finite() and ("." in text or "e" in text.lower()):
+            if d.is_finite() and ("." in text or "e" in text.lower() or "," in text):
                 head = text.split("e")[0].split("E")[0]
                 frac = head.split(".")[-1] if "." in head else ""
                 if len(frac.rstrip("0")) > 12 and _is_exact_double(d):
@@ -4406,10 +4442,10 @@ def sample_compare_rows(
             except Exception:
                 return (1, str(value))
         text = str(value).strip()
-        try:
-            return (0, Decimal(text))
-        except Exception:
-            return (1, text.lower())
+        parsed = decimal_wire_value(text)
+        if parsed is not None:
+            return (0, parsed)
+        return (1, text.lower())
 
     import hashlib
 

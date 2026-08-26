@@ -90,7 +90,8 @@ def test_integrity_passes_locale_currency_formats():
         {"amount": "€1.000.000,89"},
         {"amount": "1 000 000.89"},
         {"amount": "(1,234.56)"},
-        {"amount": "USD 1 000,00"},
+        # USD pins US — bindable form is comma thousands, not EU 1 000,00.
+        {"amount": "USD 1,000.00"},
     ]
     mappings = [{"source": "amount", "target": "amount", "confidence": 0.95, "transform": "decimal"}]
     report = run_integrity_audit(
@@ -105,6 +106,35 @@ def test_integrity_passes_locale_currency_formats():
     assert financial["passed"] is True
     transform = next((c for c in report["checks"] if c["check"] == "transform_dry_run"), None)
     assert transform is None or transform["passed"] is True
+
+
+def test_integrity_blocks_contradictory_usd_eu_grouping():
+    """USD pins US. Space thousands + comma decimal is EU. Do not invent 1000.
+
+    ``1 000,00`` alone binds. Prefixing USD used to be treated as money in this
+    audit while the write path refused — a green financial check over a row
+    the writer quarantines.
+    """
+    from decimal import Decimal
+
+    from services.transform_engine import decimal_wire_value
+
+    assert decimal_wire_value("1 000,00") == Decimal("1000.00")
+    assert decimal_wire_value("USD 1 000,00") is None
+    rows = [{"amount": "USD 1 000,00"}]
+    mappings = [{"source": "amount", "target": "amount", "confidence": 0.95, "transform": "decimal"}]
+    report = run_integrity_audit(
+        source_columns=["amount"],
+        mappings=mappings,
+        source_schemas=[{"name": "amount", "inferred_type": "DECIMAL"}],
+        sample_rows=rows,
+        validation_mode="strict",
+    )
+    financial = next((c for c in report["checks"] if c["check"] == "financial_precision"), None)
+    assert financial is not None
+    assert financial["passed"] is False
+    assert financial["blocks_transfer"] is True
+    assert any("USD 1 000,00" in i for i in financial["issues"])
 
 
 # ── Required field null checks ─────────────────────────────────────────────

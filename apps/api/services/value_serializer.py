@@ -74,6 +74,51 @@ def is_null_evidence(value: Any) -> bool:
     return not text or text in NULL_WIRE_SENTINELS
 
 
+def is_reader_null_cell(value: Any) -> bool:
+    """Reader-wired SQL NULL / Missing — not empty or whitespace text.
+
+    Extract emits ``SQL_NULL_SENTINEL`` for a database NULL. Empty ``""`` is
+    a present-but-unfit specialty payload (not WKT, not an interval), so
+    GEOGRAPHY / INTERVAL bind must not treat it as SQL NULL.
+    """
+    if value is None or is_missing_sentinel(value):
+        return True
+    if not isinstance(value, str):
+        return False
+    return value.strip() in NULL_WIRE_SENTINELS
+
+
+def absent_sql_bind(value: Any) -> tuple[bool, Any]:
+    """Return ``(True, bind)`` when the cell is absence.
+
+    Missing stays Missing (sparse omit). Reader-wired SQL NULL / None /
+    DuckDB null bind as SQL NULL. Empty string is not absence — specialty
+    and temporal coerces refuse it instead of inventing NULL.
+    """
+    if is_missing_sentinel(value):
+        return True, value
+    if is_reader_null_cell(value):
+        return True, None
+    return False, value
+
+
+def present_cell_text(value: Any) -> str | None:
+    """One present cell on the reader wire.
+
+    SQL NULL / Missing / blank are not a unique key, FK, or collision token.
+    Typed cells use ``cell_to_string`` so ``True`` and dest ``"true"`` match.
+    """
+    if is_null_evidence(value):
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+        return None if is_null_evidence(text) else text
+    text = cell_to_string(value, preserve_sql_null=True)
+    if is_null_evidence(text):
+        return None
+    return text
+
+
 def evidence_samples(values: Any, *, limit: int | None = None) -> list[str]:
     """Sample values usable as type evidence.
 
@@ -165,6 +210,36 @@ def _format_timedelta(value: timedelta) -> str:
     return f"{sign}{hours:02d}:{minutes:02d}:{seconds:09.6f}".rstrip("0").rstrip(".")
 
 
+def _bq_day_second_wire(
+    days: int,
+    hours: int,
+    minutes: int,
+    seconds: Decimal,
+    *,
+    sign: str = "",
+) -> str:
+    """Normalize DS parts and emit BigQuery ``0-0 D H:M:S[.F]``.
+
+    ISO ``PT…S`` seconds stay Decimal identity. ``float(seconds)`` +
+    ``timedelta`` overflowed ``2**53+1`` and rounded long fractions.
+    """
+    extra_min, seconds = divmod(seconds, Decimal(60))
+    minutes += int(extra_min)
+    extra_hr, minutes = divmod(minutes, 60)
+    hours += extra_hr
+    extra_d, hours = divmod(hours, 24)
+    days += extra_d
+    if seconds == seconds.to_integral_value():
+        sec_s = f"{int(seconds):02d}"
+    else:
+        # Fixed-point identity — never scientific, never IEEE :09.6f.
+        text = format(seconds, "f")
+        whole, _, frac = text.partition(".")
+        frac = frac.rstrip("0")
+        sec_s = f"{int(whole):02d}.{frac}" if frac else f"{int(whole):02d}"
+    return f"{sign}0-0 {days} {hours}:{minutes:02d}:{sec_s}"
+
+
 def format_bigquery_interval(value: Any) -> str:
     """Canonical BigQuery INTERVAL wire: ``Y-M D H:M:S[.F]`` (day-to-second).
 
@@ -174,6 +249,7 @@ def format_bigquery_interval(value: Any) -> str:
     if value is None:
         return ""
     if isinstance(value, timedelta):
+        # Python timedelta is IEEE via total_seconds — not claimed exact.
         total = value.total_seconds()
         sign = "-" if total < 0 else ""
         total = abs(total)
@@ -191,7 +267,7 @@ def format_bigquery_interval(value: Any) -> str:
                 whole, frac = sec_s.split(".", 1)
                 sec_s = f"{int(whole):02d}.{frac}"
             else:
-                sec_s = f"{int(float(sec_s)):02d}"
+                sec_s = f"{int(sec_s):02d}"
         return f"{sign}0-0 {days} {hours}:{minutes:02d}:{sec_s}"
 
     text = str(value).strip()
@@ -208,10 +284,19 @@ def format_bigquery_interval(value: Any) -> str:
         days = int(m.group("days") or 0)
         hours = int(m.group("hours") or 0)
         minutes = int(m.group("minutes") or 0)
-        seconds = float(m.group("seconds") or 0)
-        return format_bigquery_interval(
-            timedelta(days=days, hours=hours, minutes=minutes, seconds=seconds)
-        )
+        sec_raw = m.group("seconds")
+        if sec_raw is None:
+            seconds = Decimal(0)
+        else:
+            try:
+                seconds = Decimal(sec_raw)
+            except (InvalidOperation, Overflow):
+                return text
+            if not seconds.is_finite() or seconds < 0:
+                return text
+        # ISO uses ``.`` as the decimal separator (PT1.234S is 1.234s,
+        # not Auto grouping). Do not route through decimal_wire_value.
+        return _bq_day_second_wire(days, hours, minutes, seconds)
     m2 = re.fullmatch(r"^(-)?(\d+):(\d{2}):(\d{2}(?:\.\d+)?)$", text)
     if m2:
         sign, h, mi, s = m2.groups()
@@ -264,6 +349,42 @@ def json_loads_exact(text: str, *, parse_constant: Any = None) -> Any:
     """
     parsed = json.loads(text, parse_float=Decimal, parse_constant=parse_constant)
     return _demote_exactly_representable(parsed)
+
+
+def load_http_json(resp: Any) -> Any:
+    """HTTP JSON body. Numbers match ``json_loads_exact``.
+
+    ``Response.json()`` is stdlib ``json.loads``, so a long fraction in an
+    API cell collapses to IEEE before flatten/bind. Invalid bodies raise.
+    Test doubles that only stub ``.json()`` keep their already-built tree.
+    """
+    text = getattr(resp, "text", None)
+    if isinstance(text, (bytes, bytearray, memoryview)):
+        text = bytes(text).decode("utf-8")
+    if isinstance(text, str) and text.strip():
+        return json_loads_exact(text)
+    content = getattr(resp, "content", None)
+    if isinstance(content, (bytes, bytearray, memoryview)):
+        raw = bytes(content).decode("utf-8")
+        if raw.strip():
+            return json_loads_exact(raw)
+    json_fn = getattr(resp, "json", None)
+    if callable(json_fn):
+        payload = json_fn()
+        if isinstance(payload, str):
+            return json_loads_exact(payload) if payload.strip() else {}
+        return payload if payload is not None else {}
+    return {}
+
+
+def demote_exact_json(value: Any) -> Any:
+    """Same IEEE-exact number demotion ``json_loads_exact`` applies.
+
+    ijson default ``use_float=False`` yields ``Decimal`` for every fraction,
+    including ``1.5``. Streaming ingest must share this demote so DOM and
+    StAX never disagree on a leaf the write path already binds as float.
+    """
+    return _demote_exactly_representable(value)
 
 
 def _json_default(value: Any) -> Any:

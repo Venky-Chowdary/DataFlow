@@ -24,6 +24,7 @@ from connectors.writer_common import (
     reject_on_strict_policy,
     CHUNK_SIZE,
     _coerced_null_row_count,
+    _conflict_key_identity,
     _rejected_row_count,
     bind_sql_mapped_rows_with_quarantine,
     filter_stale_lsn_rows,
@@ -97,23 +98,19 @@ def _sqlite_bind_carrier(map_carrier: str, physical_or_ddl: str = "") -> str:
 
 
 def _to_sqlite_value(value: Any, source_type: str) -> Any:
-    from services.value_serializer import is_missing_sentinel, safe_decimal_text
+    from services.value_serializer import absent_sql_bind, is_missing_sentinel
 
     # Sparse CDC: never coerce DF_MISSING → NULL (would wipe present destination cols).
     if is_missing_sentinel(value):
         return value
-    if value is None:
-        return None
-    # SQLite has no Decimal affinity — always bind exact decimal text (currency /
-    # DECIMAL / MONEY carriers and TEXT affinity after semantic currency normalize).
+    handled, bound = absent_sql_bind(value)
+    if handled:
+        return bound
+    # SQLite has no Decimal affinity — dest-canonical text (shared adapter).
     if isinstance(value, Decimal):
-        text = safe_decimal_text(value)
-        if text is None:
-            raise ValueError(
-                f"SQLite refused non-finite Decimal {value!r} "
-                "(refuse silent NULL / float invent)"
-            )
-        return text
+        from connectors.sqlite_common import sqlite_decimal_bind_text
+
+        return sqlite_decimal_bind_text(value)
     upper = source_type.upper()
     if upper in {
         "DECIMAL",
@@ -186,6 +183,8 @@ def _to_sqlite_value(value: Any, source_type: str) -> Any:
             raise
         if wire is not None:
             return wire
+        if coerced is None:
+            return None
         if isinstance(coerced, datetime):
             return coerced.isoformat(sep=" ")
         if isinstance(coerced, date) and not isinstance(coerced, datetime):
@@ -670,7 +669,9 @@ def _sqlite_upsert_batch(
 
     # delete+insert fallback when the dest has no dest-owned lattice columns.
     indices = [target_cols.index(c) for c in conflict_cols]
-    deduped = {tuple(row[i] for i in indices): row for row in rows}
+    deduped = {
+        tuple(_conflict_key_identity(row[i]) for i in indices): row for row in rows
+    }
     rows = list(deduped.values())
     col_sql = ", ".join(quote_sql_identifier(c) for c in conflict_cols)
     del_placeholders = ", ".join(

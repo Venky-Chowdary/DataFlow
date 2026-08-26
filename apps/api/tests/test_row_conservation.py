@@ -6507,6 +6507,7 @@ def test_iceberg_sql_catalog_leftover_merge_deletes_extra_and_count_is_snapshot_
     from those files. Never pyiceberg scan().count() / to_arrow().
     Incremental remains a hard no-op.
     """
+    pytest.importorskip("pyiceberg")
     from connectors.iceberg_writer import write_mapped_rows
     from pyiceberg.table import DataScan
     from services.dest_precount import _iceberg_snapshot_rows, destination_keyset_census
@@ -6613,6 +6614,7 @@ def test_iceberg_sql_catalog_leftover_merge_composite_pk(
     Never ``In('order_id,line_id', ...)``. Never scan().to_arrow() for
     leftover listing. Incremental remains a hard no-op.
     """
+    pytest.importorskip("pyiceberg")
     from connectors.iceberg_writer import write_mapped_rows
     from pyiceberg.table import DataScan
     from services.dest_precount import _iceberg_snapshot_rows

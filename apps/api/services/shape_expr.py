@@ -26,8 +26,10 @@ import re
 import unicodedata
 from dataclasses import dataclass
 from datetime import date, datetime
-from decimal import Decimal, DecimalException, InvalidOperation, ROUND_HALF_UP
+from decimal import Decimal, ROUND_HALF_UP
 from typing import Any, Callable, Mapping, Sequence
+
+from services.value_serializer import cell_to_string, is_null_evidence
 
 __all__ = [
     "ExpressionError",
@@ -199,6 +201,10 @@ class _Unary(_Node):
     def evaluate(self, row: Mapping[str, Any]) -> Any:
         value = self.operand.evaluate(row)
         if self.op == "not":
+            # NOT NULL is unknown — inventing False made ``not [flag]`` True
+            # and a filter included every reader-wired SQL NULL.
+            if is_blank(value):
+                return None
             return not _as_bool(value)
         if value is None:
             return None
@@ -273,23 +279,23 @@ class _Call(_Node):
 
 
 def is_blank(value: Any) -> bool:
-    """Null-ish for shaping purposes: ``None``, an empty/whitespace string, NaN.
+    """Null-ish for shaping purposes: SQL NULL, empty/whitespace, Missing, NaN.
 
     A spreadsheet's empty cell arrives as ``""`` from one reader and ``None``
     from another; treating them differently would make the same recipe behave
-    differently per source.
+    differently per source. Reader-wired ``SQL_NULL_SENTINEL`` used to look
+    like a present string, so ``is_null`` / ``coalesce`` invented a token.
     """
-    if value is None:
+    if is_null_evidence(value):
         return True
-    if isinstance(value, str):
-        return value.strip() == ""
-    if isinstance(value, float):
-        return value != value
+    if isinstance(value, float) and value != value:
+        return True
     return False
 
 
 def _as_text(value: Any) -> str | None:
-    if value is None:
+    """Present text. Reader-wired SQL NULL is not a customer token."""
+    if is_null_evidence(value):
         return None
     if isinstance(value, str):
         return value
@@ -301,14 +307,18 @@ def _as_text(value: Any) -> str | None:
         return format(value, "f")
     if isinstance(value, (datetime, date)):
         return value.isoformat()
-    return str(value)
+    text = cell_to_string(value, preserve_sql_null=True)
+    if is_null_evidence(text):
+        return None
+    return text
 
 
 def _as_number(value: Any) -> Decimal:
+    """Write-path decimal bind — locale/currency money, Auto 1,234 refuses."""
     if isinstance(value, Decimal):
         return value
     if isinstance(value, bool):
-        return Decimal(1) if value else Decimal(0)
+        raise EvalError("a boolean is not a number")
     if isinstance(value, int):
         return Decimal(value)
     if isinstance(value, float):
@@ -319,25 +329,26 @@ def _as_number(value: Any) -> Decimal:
     text = _as_text(value)
     if text is None or text.strip() == "":
         raise EvalError("expected a number, got an empty value")
-    try:
-        return Decimal(text.strip())
-    except (InvalidOperation, DecimalException) as exc:
-        raise EvalError(f"'{text}' is not a number") from exc
+    from services.transform_engine import decimal_wire_value
+
+    parsed = decimal_wire_value(text)
+    if parsed is None:
+        raise EvalError(f"'{text}' is not a number")
+    return parsed
 
 
 def _as_bool(value: Any) -> bool:
+    """Write-path tokens only (true/false/t/f/1/0). Informal yes/y/2 refuse."""
     if isinstance(value, bool):
         return value
     if value is None:
         return False
-    if isinstance(value, (int, float, Decimal)):
-        return value != 0
-    text = str(value).strip().casefold()
-    if text in ("true", "t", "yes", "y", "1"):
-        return True
-    if text in ("false", "f", "no", "n", "0", ""):
-        return False
-    raise EvalError(f"'{value}' is not a truth value")
+    from services.transform_engine import apply_transform
+
+    parsed, err = apply_transform(str(value).strip(), "boolean")
+    if parsed is None or err:
+        raise EvalError(f"'{value}' is not a truth value")
+    return bool(parsed)
 
 
 def _both_numeric(left: Any, right: Any) -> bool:
@@ -347,9 +358,9 @@ def _both_numeric(left: Any, right: Any) -> bool:
         if isinstance(value, (int, float, Decimal)):
             continue
         if isinstance(value, str):
-            try:
-                Decimal(value.strip())
-            except (InvalidOperation, DecimalException, ValueError):
+            from services.transform_engine import decimal_wire_value
+
+            if decimal_wire_value(value) is None:
                 return False
             continue
         return False
@@ -583,34 +594,34 @@ def _fn_truncate(value: Any, places: Any = 0) -> Any:
     return number.quantize(quantum, rounding="ROUND_DOWN")
 
 
-def _fn_to_number(value: Any, *, allow_grouping: bool = True) -> Any:
-    """Parse a number a human typed: grouping, currency, parenthesised negative."""
+def _fn_to_number(value: Any) -> Any:
+    """Parse a number a human typed: grouping, currency, parenthesised negative.
+
+    Grouping uses the write-path locale contract. Auto refuses a lone ``1,234``.
+    There is no ``Decimal(text)`` fallback — that invented Auto ``1.234``.
+    Dest-canonical ``Decimal`` cells still bind via ``_as_number``.
+    """
     if is_blank(value):
         return None
+    if isinstance(value, bool):
+        raise EvalError("a boolean is not a number")
     if isinstance(value, (int, float, Decimal)) and not isinstance(value, bool):
         return _as_number(value)
-    text = (_as_text(value) or "").strip()
-    negative = text.startswith("(") and text.endswith(")")
-    if negative:
-        text = text[1:-1].strip()
-    text = re.sub(r"[^0-9eE+\-.,]", "", text)
-    if allow_grouping:
-        text = text.replace(",", "")
-    if text in ("", "-", "+", "."):
-        raise EvalError(f"'{value}' is not a number")
-    try:
-        number = Decimal(text)
-    except (InvalidOperation, DecimalException) as exc:
-        raise EvalError(f"'{value}' is not a number") from exc
-    return -number if negative else number
+    from services.transform_engine import decimal_wire_value
+
+    parsed = decimal_wire_value(value)
+    if parsed is not None:
+        return parsed
+    raise EvalError(f"'{value}' is not a number")
 
 
 def _fn_to_date(value: Any, fmt: Any = None) -> Any:
-    """Parse a date with an *explicit* format, or ISO when none is given.
+    """Parse a date with an *explicit* format, or the write-path calendar parser.
 
-    There is deliberately no ambiguous auto-detection: `03/04/2026` is two
-    different dates in two countries, and a migration that guesses is a
-    migration that silently corrupts a quarter of the rows.
+    Ambiguous ``03/04/2026`` / ``01/02/2024`` still refuse — day/month order
+    is never guessed. Unambiguous ``31/12/2024`` / ``12/31/2024`` / ISO /
+    ``YYYYMMDD`` bind the same way DATE bind does. Epoch instants refuse
+    (they invent a UTC day).
     """
     if is_blank(value):
         return None
@@ -627,13 +638,22 @@ def _fn_to_date(value: Any, fmt: Any = None) -> Any:
             return datetime.strptime(text, pattern)
         except ValueError as exc:
             raise EvalError(f"'{text}' does not match format '{pattern}'") from exc
+    from services.transform_engine import apply_transform
+
+    iso, err = apply_transform(text, "date")
+    if err or iso is None:
+        raise EvalError(
+            f"'{text}' is not a calendar date; pass an explicit format as the "
+            "second argument (day/month order is never guessed)"
+        )
     try:
-        return datetime.fromisoformat(text.replace("Z", "+00:00"))
+        parsed = date.fromisoformat(str(iso)[:10])
     except ValueError as exc:
         raise EvalError(
-            f"'{text}' is not an ISO date; pass an explicit format as the second "
-            "argument (day/month order is never guessed)"
+            f"'{text}' is not a calendar date; pass an explicit format as the "
+            "second argument (day/month order is never guessed)"
         ) from exc
+    return datetime(parsed.year, parsed.month, parsed.day)  # noqa: DTZ001
 
 
 def _fn_format_date(value: Any, fmt: Any) -> Any:
@@ -703,14 +723,14 @@ def _fn_concat(*values: Any) -> Any:
 
 
 def _fn_least(*values: Any) -> Any:
-    present = [v for v in values if v is not None]
+    present = [v for v in values if not is_blank(v)]
     if not present:
         return None
     return min(present, key=_sort_key)
 
 
 def _fn_greatest(*values: Any) -> Any:
-    present = [v for v in values if v is not None]
+    present = [v for v in values if not is_blank(v)]
     if not present:
         return None
     return max(present, key=_sort_key)
@@ -812,9 +832,9 @@ _FUNCTION_LIST: tuple[_Function, ...] = (
     # typing
     _Function("to_number", 1, 1, _fn_to_number, "Parse a human-written number"),
     _Function("to_text", 1, 1, lambda v: _as_text(v), "Render as text"),
-    _Function("to_date", 1, 2, _fn_to_date, "Parse a date with an explicit format"),
+    _Function("to_date", 1, 2, _fn_to_date, "Parse a write-path calendar date, or an explicit format"),
     _Function("format_date", 2, 2, _fn_format_date, "Render a date with a format"),
-    _Function("to_boolean", 1, 1, _fn_to_boolean, "Parse Y/N, 1/0, true/false"),
+    _Function("to_boolean", 1, 1, _fn_to_boolean, "Parse true/t/1 and false/f/0 — informal yes/Y/2 refuse"),
     # null and conditional
     _Function("coalesce", 1, -1, _fn_coalesce, "First value that is not blank"),
     _Function("nullif", 2, 2, _fn_nullif, "Null when the value equals the sentinel"),

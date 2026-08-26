@@ -68,12 +68,11 @@ def coerce_hubspot_datetime_wire(value: Any) -> str | None:
     (Airbyte / Census class). Refuse invent for unparseable values — never
     silently stringify a bad ISO fragment into a CRM cell.
     """
-    if value is None:
-        return None
-    from services.value_serializer import is_missing_sentinel
+    from services.value_serializer import absent_sql_bind
 
-    if is_missing_sentinel(value):
-        return value
+    handled, bound = absent_sql_bind(value)
+    if handled:
+        return bound
     if isinstance(value, bool):
         raise ValueError("HubSpot datetime cannot bind bool — refuse invent")
     if isinstance(value, (int, float)):
@@ -117,12 +116,11 @@ def coerce_hubspot_datetime_wire(value: Any) -> str | None:
 
 def coerce_hubspot_date_wire(value: Any) -> str | None:
     """Normalize HubSpot ``date`` property to ``YYYY-MM-DD`` (midnight UTC day)."""
-    if value is None:
-        return None
-    from services.value_serializer import is_missing_sentinel
+    from services.value_serializer import absent_sql_bind
 
-    if is_missing_sentinel(value):
-        return value
+    handled, bound = absent_sql_bind(value)
+    if handled:
+        return bound
     if isinstance(value, str) and not value.strip():
         raise ValueError(
             "empty HubSpot date — refuse silent NULL invent "
@@ -137,6 +135,19 @@ def coerce_hubspot_date_wire(value: Any) -> str | None:
     if isinstance(coerced, date):
         return coerced.isoformat()
     raise ValueError(f"HubSpot date cannot parse {value!r} — refuse invent")
+
+
+def hubspot_property_fields(pairs: Any) -> dict[str, str]:
+    """CRM properties on the dest cell wire. Reader-null / blank omit."""
+    from services.value_serializer import present_cell_text
+
+    props: dict[str, str] = {}
+    for k, v in pairs:
+        token = present_cell_text(v)
+        if token is None:
+            continue
+        props[k] = token
+    return props
 
 
 def hubspot_property_to_carrier(prop: dict[str, Any]) -> str:
@@ -270,7 +281,7 @@ def _normalize_hubspot_temporal_cells(
 ) -> list[tuple]:
     """Convert DATE/TIMESTAMPTZ cells to HubSpot CRM wire (YYYY-MM-DD / epoch ms)."""
     from connectors.writer_common import append_write_quarantine_detail
-    from services.value_serializer import cell_to_string, is_missing_sentinel
+    from services.value_serializer import cell_to_string, is_reader_null_cell
 
     temporal_cols: list[tuple[int, str]] = []
     for i, typ in enumerate(target_types):
@@ -291,9 +302,7 @@ def _normalize_hubspot_temporal_cells(
         cells = list(row)
         hold_out = False
         for col_idx, kind in temporal_cols:
-            if col_idx >= len(cells) or cells[col_idx] is None:
-                continue
-            if is_missing_sentinel(cells[col_idx]):
+            if col_idx >= len(cells) or is_reader_null_cell(cells[col_idx]):
                 continue
             try:
                 if kind == "datetime":
@@ -590,13 +599,11 @@ def write_mapped_rows(
     digest = hashlib.sha256()
     written_ids: list[str] = []
 
-    from services.value_serializer import is_missing_sentinel
-
     try:
         for i in range(0, len(mapped_rows), chunk):
             batch = mapped_rows[i : i + chunk]
             inputs = []
-            # Parallel original mapped rows — CRM props omit DF_MISSING/None.
+            # Parallel original mapped rows — CRM props omit reader-null / Missing.
             input_mapped_rows: list[Any] = []
             for row in batch:
                 if isinstance(row, dict):
@@ -607,13 +614,7 @@ def write_mapped_rows(
                     mapped_src = row if isinstance(row, (tuple, list)) else tuple(
                         row[j] if j < len(row) else None for j in range(len(target_cols))
                     )
-                props = {
-                    k: str(v)
-                    for k, v in pairs
-                    if v is not None
-                    and not is_missing_sentinel(v)
-                    and str(v) != ""
-                }
+                props = hubspot_property_fields(pairs)
                 id_val = props.pop(id_property, None)
                 # Never invent identity from a different property while idProperty
                 # stays configured (wrong-object upsert / create).

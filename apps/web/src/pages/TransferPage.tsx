@@ -21,6 +21,7 @@ import { SqlEditor } from "../components/ui/SqlEditor";
 import { DestinationAdvancedDrawer } from "../components/transfer/DestinationAdvancedDrawer";
 import { ObjectNameCombobox } from "../components/transfer/ObjectNameCombobox";
 import { Button } from "../components/ui/Button";
+import { HiddenFileInput } from "../components/ui/HiddenFileInput";
 import { SourceStepAside } from "../components/transfer/SourceStepAside";
 import { ValidateActionsRail } from "../components/transfer/ValidateActionsRail";
 import { ContractBindField } from "../components/contracts/ContractBindField";
@@ -98,11 +99,13 @@ import { diagnoseSql } from "../lib/sqlEditorModel";
 import {
   availableSyncModes,
   DATE_LOCALES,
+  NUMBER_LOCALES,
   PREFLIGHT_SAMPLE_LIMIT,
   SCHEMA_POLICIES,
   SYNC_MODES,
   VALIDATION_MODES,
   type DateLocaleId,
+  type NumberLocaleId,
   type SchemaPolicyId,
   type SyncModeId,
   type ValidationModeId,
@@ -301,6 +304,7 @@ export function TransferPage({
   const [connectorSampleRows, setConnectorSampleRows] = useState<Record<string, unknown>[]>([]);
   const [cloudPath, setCloudPath] = useState("");
   const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [advancedLocaleFocus, setAdvancedLocaleFocus] = useState<"date" | "number" | null>(null);
   /** Shared Fix-bad-data drawer open state (Validate dashboard + rail Fix CTA). */
   const [badDataFixOpen, setBadDataFixOpen] = useState(false);
   const [file, setFile] = useState<File | null>(null);
@@ -393,6 +397,7 @@ export function TransferPage({
   /** Module 16 — opt-in population orphan scan (only path to RI proven). */
   const [runPopulationOrphanScan, setRunPopulationOrphanScan] = useState(false);
   const [dateLocale, setDateLocale] = useState<DateLocaleId>("");
+  const [numberLocale, setNumberLocale] = useState<NumberLocaleId>("");
   const [backfillNewFields, setBackfillNewFields] = useState(false);
   const [writeViaStaging, setWriteViaStaging] = useState(false);
   const [vectorContentColumn, setVectorContentColumn] = useState("");
@@ -935,6 +940,8 @@ export function TransferPage({
       // Same image as the gates: the recipe runs on the read, so scanning the
       // raw cell reports a finding on a value the writer never binds.
       shape_recipe: recipePayload(shapeSteps),
+      date_locale: dateLocale,
+      number_locale: numberLocale,
     })
       .then((res) => {
         if (!cancelled) setCellPreview(res);
@@ -945,7 +952,7 @@ export function TransferPage({
     return () => {
       cancelled = true;
     };
-  }, [step, currentSourceColumnsKey, columnMappings, samplePreviewRows, currentSourceSchema, currentSourceColumns, shapeSteps]);
+  }, [step, currentSourceColumnsKey, columnMappings, samplePreviewRows, currentSourceSchema, currentSourceColumns, shapeSteps, dateLocale, numberLocale]);
 
   // A name-matched column is a starting point for the operator, never a claim
   // about the column's behaviour — the declaration beside it carries that.
@@ -1099,6 +1106,7 @@ export function TransferPage({
 
   /** Opens Advanced drawer in-place — never navigates away from Map / Validate. */
   const openIdentitySettings = useCallback(() => {
+    setAdvancedLocaleFocus(null);
     setAdvancedOpen(true);
     toast({
       title: "Advanced settings",
@@ -1107,6 +1115,23 @@ export function TransferPage({
       tone: "info",
     });
   }, [toast]);
+
+  /** Validate Set date/number locale — open Advanced and land on that control. */
+  const openLocaleSettings = useCallback(
+    (kind: "date" | "number") => {
+      setAdvancedLocaleFocus(kind);
+      setAdvancedOpen(true);
+      toast({
+        title: kind === "date" ? "Date locale" : "Number locale",
+        message:
+          kind === "date"
+            ? "Set DMY or MDY. Auto will not guess 01/02/2024. Re-run Validate after you choose."
+            : "Set US or EU. Auto will not guess 1,234. Re-run Validate after you choose.",
+        tone: "info",
+      });
+    },
+    [toast],
+  );
 
   // Fix-bad-data is Validate-only — close if the operator leaves the step.
   useEffect(() => {
@@ -1208,6 +1233,7 @@ export function TransferPage({
       schema_policy: schemaPolicy,
       validation_mode: validationMode,
       date_locale: dateLocale,
+      number_locale: numberLocale,
       backfill_new_fields: backfillNewFields,
       write_via_staging: writeViaStaging,
       stream_contracts: streamContracts,
@@ -1247,6 +1273,7 @@ export function TransferPage({
     schemaPolicy,
     validationMode,
     dateLocale,
+    numberLocale,
     backfillNewFields,
     writeViaStaging,
     streamContracts,
@@ -4249,6 +4276,7 @@ export function TransferPage({
           schema_policy: schemaPolicy,
           validation_mode: validationOverride ?? validationMode,
           date_locale: dateLocale,
+          number_locale: numberLocale,
           backfill_new_fields: backfillNewFields,
           stream_contracts: streamContracts,
           compliance_acknowledged: ackCompliance,
@@ -4276,6 +4304,8 @@ export function TransferPage({
             sourceReadMode,
             destWriteMode,
             syncMode,
+            numberLocale,
+            dateLocale,
           });
           toast({
             title: "Validated locally",
@@ -4342,6 +4372,8 @@ export function TransferPage({
           sourceReadMode,
           destWriteMode,
           syncMode,
+          numberLocale,
+          dateLocale,
         });
         setPreflight(pf);
         setValidatedContractKey(buildValidateContractKey(activeMappings));
@@ -4742,6 +4774,7 @@ export function TransferPage({
           callableSource: sourceReadMode === "procedure" || sourceReadMode === "query",
         }),
         dateLocale,
+        numberLocale,
         backfillNewFields,
         writeViaStaging,
         enableOcr,
@@ -4909,6 +4942,7 @@ export function TransferPage({
           mappings: columnMappings,
           format: exportFormat,
           outputBasename: targetCollection || undefined,
+          numberLocale,
         });
         setResult(localResult);
         setRunStartupProgress(100);
@@ -5506,6 +5540,7 @@ export function TransferPage({
     setSourceCollection("");
     setCloudPath("");
     setAdvancedOpen(false);
+    setAdvancedLocaleFocus(null);
     setFile(null);
     setParsed(null);
     setShapeSteps([]);
@@ -5810,12 +5845,12 @@ export function TransferPage({
 
           {sourceKind === "file" ? (
             <>
-              <input
+              <HiddenFileInput
+                id="df2-source-file"
                 ref={fileInputRef}
-                type="file"
                 accept=".json,.csv,.jsonl,.tsv,.parquet,.pdf,.docx,.html,.htm,.xlsx,.xls,.xml"
+                disabled={uploading}
                 onChange={handleFileSelect}
-                hidden
               />
               {uploadError && (
                 <div className="df2-alert df2-alert-error" role="alert">
@@ -5874,25 +5909,22 @@ export function TransferPage({
                       {formatFileSize(file.size)} · {parsed.row_count.toLocaleString()} rows · {parsed.columns.length} columns
                     </span>
                   </div>
-                  <button
-                    type="button"
+                  <label
+                    htmlFor="df2-source-file"
                     className="df2-btn df2-btn-sm"
-                    onClick={() => fileInputRef.current?.click()}
+                    aria-disabled={uploading}
                     title="Replace source file"
                   >
                     <DtIcon name="upload" size={14} /> Replace
-                  </button>
+                  </label>
                 </div>
               ) : (
-              <div
+              <label
+                htmlFor="df2-source-file"
                 className={`df2-upload df2-upload-studio ${dragOver ? "drag-over" : ""} ${uploading ? "is-loading" : ""}`}
-                onClick={() => !uploading && fileInputRef.current?.click()}
                 onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
                 onDragLeave={() => setDragOver(false)}
                 onDrop={handleDrop}
-                role="button"
-                tabIndex={0}
-                onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); fileInputRef.current?.click(); } }}
               >
                 <div className="df2-upload-icon">
                   {uploading || analyzing ? <Spinner /> : <DtIcon name="upload" size={22} />}
@@ -5908,7 +5940,7 @@ export function TransferPage({
                     <span key={fmt} className="df2-upload-format-chip">{fmt}</span>
                   ))}
                 </div>
-              </div>
+              </label>
               )}
               {!parsed && !uploading && (
                 <div className="df2-upload-sample-row">
@@ -6901,6 +6933,7 @@ export function TransferPage({
             }}
             onReloadDestSchema={() => { void loadDestinationSchema({ force: true }); }}
             onOpenIdentitySettings={openIdentitySettings}
+            onOpenLocaleSettings={openLocaleSettings}
             uniqueKeySuggestions={uniqueKeySuggestions}
             compositeKeySuggestions={compositeKeySuggestions}
             onApplyPrimaryKey={(column) => {
@@ -7440,15 +7473,21 @@ export function TransferPage({
       {/* Shared Advanced drawer — Dest / Map / Validate open it in-place (no step change). */}
       <DestinationAdvancedDrawer
         open={advancedOpen}
-        onClose={() => setAdvancedOpen(false)}
+        onClose={() => {
+          setAdvancedOpen(false);
+          setAdvancedLocaleFocus(null);
+        }}
+        localeFocus={advancedLocaleFocus}
         syncModes={routeSyncModes}
         schemaPolicies={SCHEMA_POLICIES}
         validationModes={VALIDATION_MODES}
         dateLocales={DATE_LOCALES}
+        numberLocales={NUMBER_LOCALES}
         syncMode={syncMode}
         schemaPolicy={schemaPolicy}
         validationMode={validationMode}
         dateLocale={dateLocale}
+        numberLocale={numberLocale}
         backfillNewFields={backfillNewFields}
         streamNames={advancedStreamNames}
         streamFields={streamFields}
@@ -7540,6 +7579,7 @@ export function TransferPage({
         }}
         onValidationModeChange={setValidationMode}
         onDateLocaleChange={setDateLocale}
+        onNumberLocaleChange={setNumberLocale}
         onBackfillChange={setBackfillNewFields}
         onStreamCursorChange={(stream, value) => {
           setStreamFields((prev) => ({

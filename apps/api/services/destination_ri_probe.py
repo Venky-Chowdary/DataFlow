@@ -27,12 +27,18 @@ from typing import Any
 import sqlalchemy as sa
 
 from services.physical_state_diff import catalog_table_names, resolve_stored_name
+from services.value_serializer import present_cell_text
 
 logger = logging.getLogger(__name__)
 
 __all__ = ["verify_destination_referential_integrity"]
 
 MAX_EXAMPLES = 10
+
+
+def _orphan_example_text(row: Any) -> str:
+    """One orphan key on the reader wire. SQL NULL is not a customer token."""
+    return "+".join(present_cell_text(v) or "" for v in row)
 
 
 def _fold(name: Any) -> str:
@@ -69,7 +75,7 @@ def _orphan_scan(
         or 0
     )
     examples = [
-        "+".join("" if v is None else str(v) for v in row)
+        _orphan_example_text(row)
         for row in conn.execute(
             sa.select(*c_cols).select_from(joined).where(where).limit(MAX_EXAMPLES)
         ).fetchall()

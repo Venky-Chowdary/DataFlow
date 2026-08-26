@@ -12,6 +12,7 @@ from datetime import date, datetime, time, timezone
 from typing import Any
 
 from connectors.sql_temporal import (
+    bind_time_iso,
     coerce_sql_temporal,
     format_wire_value,
     input_has_timezone,
@@ -57,16 +58,25 @@ def bigquery_temporal_ddl(bq_type: str) -> str | None:
 
 def format_snowflake_bind(value: Any, sf_type: str) -> Any:
     """Return a Snowflake-friendly bind/CSV cell for temporal DDL, else value."""
+    from services.value_serializer import absent_sql_bind
+
+    handled, bound = absent_sql_bind(value)
+    if handled:
+        return bound
     ddl = snowflake_temporal_ddl(sf_type)
     if not ddl:
         return value
     if ddl == "DATE":
         coerced = coerce_sql_temporal(value, "DATE")
+        if coerced is None:
+            return None
         if isinstance(coerced, date) and not isinstance(coerced, datetime):
             return coerced.isoformat()
         if isinstance(coerced, datetime):
             return coerced.date().isoformat()
         return value
+    if ddl == "TIME":
+        return bind_time_iso(value)
     if ddl in {"TIMESTAMP_LTZ", "TIMESTAMP_TZ", "TIMESTAMPTZ"}:
         # Refuse offset-less wires before aware_utc parse attaches UTC invent.
         def _wire_has_tz(raw: Any) -> bool:
@@ -131,6 +141,11 @@ def format_snowflake_bind(value: Any, sf_type: str) -> Any:
 
 def format_bigquery_bind(value: Any, bq_type: str) -> Any:
     """Return a BigQuery JSON/API-friendly temporal value."""
+    from services.value_serializer import absent_sql_bind
+
+    handled, bound = absent_sql_bind(value)
+    if handled:
+        return bound
     ddl = bigquery_temporal_ddl(bq_type)
     if not ddl:
         return value
@@ -159,12 +174,7 @@ def format_bigquery_bind(value: Any, bq_type: str) -> Any:
         coerced = coerced.astimezone(timezone.utc)
         return coerced.isoformat().replace("+00:00", "Z")
     if ddl == "TIME":
-        coerced = coerce_sql_temporal(value, "TIME")
-        if isinstance(coerced, time):
-            return coerced.isoformat()
-        if isinstance(coerced, datetime):
-            return coerced.time().isoformat()
-        return value
+        return bind_time_iso(value)
     # DATETIME: wall-clock only — keep civil digits.
     coerced = parse_sql_datetime(value, wall_clock=True)
     if isinstance(coerced, datetime):
@@ -327,17 +337,22 @@ def records_for_bigquery(
 ) -> list[dict[str, Any]]:
     """Build insert_rows_json / load_table_from_json records with temporal + bool/JSON normalize."""
     from connectors.sql_bind import normalize_sql_bind_value
-    from services.value_serializer import is_missing_sentinel
+    from connectors.writer_common import present_field_bindings
 
     records: list[dict[str, Any]] = []
     for row in batch:
         rec: dict[str, Any] = {}
+        present = present_field_bindings(
+            {
+                col: (row[i] if i < len(row) else None)
+                for i, col in enumerate(target_cols)
+            }
+        )
         for i, col in enumerate(target_cols):
-            val = row[i] if i < len(row) else None
-            typ = logical_or_bq_types[i] if i < len(logical_or_bq_types) else "STRING"
-            # Sparse CDC: omit DF_MISSING — never leak sentinel or invent NULL via MERGE.
-            if is_missing_sentinel(val):
+            if col not in present:
                 continue
+            val = present[col]
+            typ = logical_or_bq_types[i] if i < len(logical_or_bq_types) else "STRING"
             element_type = bigquery_repeated_element(typ)
             try:
                 if val is not None and element_type is not None:

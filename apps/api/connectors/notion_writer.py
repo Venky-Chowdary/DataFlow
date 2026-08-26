@@ -17,6 +17,7 @@ from connectors.saas_common import (
     humanize_http_error,
     is_auth_error,
     request,
+    saas_record_id,
     token,
 )
 from connectors.writer_common import (
@@ -212,6 +213,19 @@ def _page_id(raw: str) -> str:
     return raw
 
 
+def _notion_page_identity(value: Any) -> str | None:
+    """Present Notion page id, or None when reader-null / blank.
+
+    ``if val`` treated extract ``SQL_NULL_SENTINEL`` as a page id and PATCHed
+    ``/v1/pages/__DF_SQL_NULL__``. Integer ``0`` stayed a present token.
+    """
+    token_id = saas_record_id(value)
+    if token_id is None:
+        return None
+    page = _page_id(token_id)
+    return page or None
+
+
 def _fetch_database_properties(
     database_id: str, access_token: str
 ) -> tuple[dict[str, str], dict[str, list[str]]]:
@@ -256,15 +270,13 @@ def _as_property_value(
     row_idx: int,
 ) -> Any:
     """Map a single cell value into a Notion property object value."""
-    from services.value_serializer import is_missing_sentinel
+    from services.value_serializer import is_reader_null_cell, present_cell_text
 
-    # STOP_COLUMN / coerce_null → DF_MISSING: omit property (never write sentinel).
-    if value is None or is_missing_sentinel(value):
+    # STOP_COLUMN / coerce_null / reader-null: omit property (never write sentinel).
+    if is_reader_null_cell(value):
         return None
 
-    text = ""
-    if value is not None:
-        text = str(value)
+    text = present_cell_text(value) or ""
 
     if notion_type == "title":
         chunks = _rich_text_chunks(text) or [{"type": "text", "text": {"content": ""}}]
@@ -275,8 +287,10 @@ def _as_property_value(
         if text == "":
             # Omit empty — never invent JSON null (destination wipe).
             return None
+        from connectors.sql_bind import coerce_float_wire
+
         try:
-            return {"number": float(text)}
+            return {"number": coerce_float_wire(value, ddl_type="NUMBER")}
         except ValueError as exc:
             raise ValueError(
                 f"Notion number property {property_name!r} refused {value!r} "
@@ -563,14 +577,13 @@ def write_mapped_rows(
                     )
                 continue
             for c in candidates:
-                val = row_dict.get(c)
-                if val:
-                    record_id = _page_id(str(val))
+                record_id = _notion_page_identity(row_dict.get(c))
+                if record_id is not None:
                     break
 
         notion_properties: dict[str, Any] = {}
         has_title = False
-        from services.value_serializer import is_missing_sentinel
+        from services.value_serializer import present_cell_text
 
         for col, val in row_dict.items():
             prop_type = properties.get(col.lower())
@@ -687,7 +700,7 @@ def write_mapped_rows(
                 continue
             if prop_value is not None:
                 notion_properties[col] = prop_value
-                if prop_type == "title" and val is not None and not is_missing_sentinel(val) and str(val):
+                if prop_type == "title" and present_cell_text(val) is not None:
                     has_title = True
 
         if title_name and not has_title:

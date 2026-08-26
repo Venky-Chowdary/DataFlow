@@ -35,7 +35,7 @@ import {
   remapToTypeForMismatch,
 } from "../../lib/validateIssueGrouping";
 import { buildValidateDecisionPath } from "../../lib/validateDecisionPath";
-import { buildValidateHonestyControls, schemaDriftAllowsAcknowledge, schemaDriftCompatibilityHeadline, schemaDriftRequiresRemap } from "../../lib/validateHonestyControls";
+import { buildValidateHonestyControls, dateLocaleValidateAction, numberLocaleValidateAction, schemaDriftAllowsAcknowledge, schemaDriftCompatibilityHeadline, schemaDriftRequiresRemap } from "../../lib/validateHonestyControls";
 import { dashboardCtaVariant, type ValidateStudioPrimary } from "../../lib/validateStudioPrimary";
 import { isFkOrphanBlockerText, isFkOrphanCtaKind } from "../../lib/fkOrphanCta";
 import {
@@ -50,6 +50,7 @@ import { ringDasharray, validateRingPercent } from "../../lib/progressRing";
 import { BadDataFixDrawer, type BadDataIssue } from "./BadDataFixDrawer";
 import { Gate8ProofCard, type Gate8Reconciliation } from "./Gate8ProofCard";
 import { LoadHistoryPanel } from "./LoadHistoryPanel";
+import { DateLocalePanel, NumberLocalePanel } from "./NumberLocalePanel";
 import { RepairProposalDrawer } from "./RepairProposalDrawer";
 
 type GateMeta = {
@@ -234,6 +235,8 @@ interface ValidateDashboardProps {
    * Used for duplicate-identity blockers (Map alone cannot change the sync contract).
    */
   onOpenIdentitySettings?: () => void;
+  /** Open Destination → Advanced and scroll Date / Number locale into view. */
+  onOpenLocaleSettings?: (kind: "date" | "number") => void;
   /** Sample-unique key suggestions (honest: Validate sample only). */
   uniqueKeySuggestions?: Array<{
     column: string;
@@ -743,6 +746,7 @@ export function ValidateDashboard({
   onReviewMappings,
   onReloadDestSchema,
   onOpenIdentitySettings,
+  onOpenLocaleSettings,
   uniqueKeySuggestions = [],
   onApplyPrimaryKey,
   compositeKeySuggestions = [],
@@ -2813,6 +2817,28 @@ export function ValidateDashboard({
           report={preflight.load_history_report}
           title="Compared to prior loads"
           className="df2-vd-load-history"
+        />
+      ) : null}
+
+      {!running ? (
+        <NumberLocalePanel
+          action={numberLocaleValidateAction(preflight)}
+          onOpenAdvanced={
+            onOpenLocaleSettings
+              ? () => onOpenLocaleSettings("number")
+              : onOpenIdentitySettings
+          }
+        />
+      ) : null}
+
+      {!running ? (
+        <DateLocalePanel
+          action={dateLocaleValidateAction(preflight)}
+          onOpenAdvanced={
+            onOpenLocaleSettings
+              ? () => onOpenLocaleSettings("date")
+              : onOpenIdentitySettings
+          }
         />
       ) : null}
 

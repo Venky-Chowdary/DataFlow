@@ -194,9 +194,9 @@ def _qualified_name(table: str, schema: str | None, dialect: str = "") -> str:
 
 
 def _key_value(record: dict[str, Any], column: str) -> str:
-    from services.value_serializer import cell_to_string
+    from connectors.writer_common import conflict_key_wire
 
-    return cell_to_string(record.get(column))
+    return conflict_key_wire(record.get(column))
 
 
 def _compose_key(record: dict[str, Any], columns: list[str]) -> str:
@@ -497,14 +497,15 @@ def mirror_pk_sources(
 def complete_mirror_pk_tuple(values: Iterable[Any]) -> tuple[Any, ...] | None:
     """Return the PK tuple, or None when identity is incomplete.
 
-    Incomplete is skip, not invent: None, empty string, or ``DF_MISSING``.
-    A missing CDC field is not a key. Do not coerce it to NULL or ``""``.
+    Incomplete is skip, not invent: None, empty string, ``DF_MISSING``, or
+    extract reader-null (``SQL_NULL_SENTINEL``). A missing CDC field is not
+    a key. Do not coerce it to NULL or ``""``.
     """
-    from services.value_serializer import is_missing_sentinel
+    from connectors.writer_common import _is_nullish_conflict_key
 
     out: list[Any] = []
     for value in values:
-        if value is None or value == "" or is_missing_sentinel(value):
+        if _is_nullish_conflict_key(value):
             return None
         out.append(value)
     if not out:

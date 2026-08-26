@@ -108,13 +108,14 @@ def _decimal_overflow_issue(samples: list[str], tgt: str, tgt_type: str) -> str 
     except ImportError:
         return None
     for raw in samples[:50]:
-        text = (raw or "").strip().replace(",", "")
+        from services.transform_engine import decimal_wire_value
+
+        text = (raw or "").strip()
         if not text or text.lower() in {"null", "none", "nan"}:
             continue
-        try:
-            value = Decimal(text)
-        except (InvalidOperation, ValueError):
-            # Non-numeric into DECIMAL is a type/coercion problem handled elsewhere.
+        value = decimal_wire_value(text)
+        if value is None:
+            # Auto refused grouping, or non-numeric — type/coercion handled elsewhere.
             continue
         int_digits, scale_digits = _digits_needed(value)
         if scale_digits > scale:
@@ -411,12 +412,12 @@ def evaluate_ddl_compatibility(
                 src_logical = normalize_logical_type(src_type)
                 tgt_logical = normalize_logical_type(tgt_type)
                 if src_logical in {"integer", "decimal"} and tgt_logical == "integer":
-                    for s in samples[:20]:
-                        if "." in s and s.replace(".", "", 1).replace("-", "", 1).isdigit():
-                            issues.append(
-                                f"Fractional source values for {src} cannot fit integer target {tgt}"
-                            )
-                            break
+                    from services.transform_engine import is_fractional_wire_value
+
+                    if any(is_fractional_wire_value(s) for s in samples[:20]):
+                        issues.append(
+                            f"Fractional source values for {src} cannot fit integer target {tgt}"
+                        )
 
         if not schemaless and table_exists is False and allow_create:
             inferred_ddl = ddl_type(dest_db_type, src_type)

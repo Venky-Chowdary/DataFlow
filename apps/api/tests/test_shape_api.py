@@ -67,6 +67,13 @@ def test_a_decimal_that_already_fits_is_not_suggested():
     assert _suggestion(suggestions, "round_number", "amount") is None
 
 
+def test_informal_yes_no_is_not_profiled_as_boolean():
+    informal = profile_columns([{"flag": "yes"}, {"flag": "no"}])[0]
+    assert informal.logical_type != "boolean"
+    canonical = profile_columns([{"flag": "true"}, {"flag": "false"}])[0]
+    assert canonical.logical_type == "boolean"
+
+
 def test_whitespace_and_sentinels_are_found_and_counted():
     rows = [
         {"city": " Paris "},
@@ -117,6 +124,27 @@ def test_a_plain_decimal_column_is_not_told_to_parse_itself():
     assert _suggestion(suggest_steps(profiles), "parse_number", "amount") is None
 
 
+def test_auto_ambiguous_dot_group_is_not_already_numeric():
+    """Decimal('1.234') succeeds; the write path refuses. Do not invent decimal."""
+    from services.transform_engine import decimal_wire_value
+
+    assert decimal_wire_value("1.234") is None
+    assert decimal_wire_value("1.000") is None
+    profiles = profile_columns([{"amount": "1.234"}, {"amount": "1.000"}])
+    assert profiles[0].numeric_like == 0
+    assert profiles[0].logical_type == "text"
+    assert profiles[0].needs_parse_number == 2
+    # parse_number cannot bind these under Auto — do not offer a dead CTA.
+    assert _suggestion(suggest_steps(profiles), "parse_number", "amount") is None
+
+
+def test_bindable_scale_longer_than_three_stays_plain_decimal():
+    profiles = profile_columns([{"amount": "1.2345"}, {"amount": "1.23"}])
+    assert profiles[0].numeric_like == 2
+    assert profiles[0].logical_type == "decimal"
+    assert _suggestion(suggest_steps(profiles), "parse_number", "amount") is None
+
+
 def test_blanks_and_declared_columns_survive_a_column_missing_from_every_row():
     profiles = profile_columns([{"a": 1}], columns=["a", "b"])
     by_name = {p.name: p for p in profiles}
@@ -140,6 +168,22 @@ def test_the_catalog_states_the_operations_the_engine_will_accept(client):
     assert body["max_steps"] > 0
 
 
+def test_catalog_does_not_advertise_yn_boolean_or_iso_only_dates():
+    """Operators used to be told parse_boolean accepts Y/N; Execute refuses it."""
+    from services.shape_expr import describe_functions
+    from services.shape_models import describe_catalog
+
+    ops = {row["op"]: row["summary"] for row in describe_catalog()}
+    assert "Y/N" not in ops["parse_boolean"]
+    assert "yes" in ops["parse_boolean"]
+    assert "refuse" in ops["parse_boolean"]
+    assert "write-path" in ops["parse_date"]
+    fns = {row["name"]: row["summary"] for row in describe_functions()}
+    assert "Y/N" not in fns["to_boolean"]
+    assert "refuse" in fns["to_boolean"]
+    assert "write-path" in fns["to_date"]
+
+
 def test_a_preview_reports_the_value_it_changed_and_the_cell_it_changed_it_in(client):
     body = client.post(
         "/api/v1/shape/preview",
@@ -161,7 +205,7 @@ def test_a_preview_keeps_a_decimal_exact_on_the_wire(client):
     body = client.post(
         "/api/v1/shape/preview",
         json={
-            "sample_rows": [{"n": "1.005"}],
+            "sample_rows": [{"n": "1.0050"}],
             "source_columns": ["n"],
             "recipe": {"steps": [{"op": "round_number", "column": "n", "options": {"places": 2}}]},
         },

@@ -85,7 +85,8 @@ def test_transform_dry_run_zero_errors_on_samples() -> None:
     from services.transform_engine import dry_run_sample, infer_transform
 
     # Fail-closed signals that Validate must surface (never silent soft-green):
-    # sparse empties → typed coerce refuse; informal Y/N → boolean refuse.
+    # sparse empties → typed coerce refuse. Informal yes/no no longer invent
+    # BOOLEAN dest, so they dry-run as identity VARCHAR.
     _honest_refuse_markers = (
         "Empty value cannot coerce to decimal",
         "Empty value cannot coerce to binary",

@@ -36,7 +36,11 @@ def parse_array_wire_elements(value: Any) -> tuple[list[Any] | None, str | None]
         return None, None
     if text.startswith("[") and text.endswith("]"):
         try:
-            parsed = json.loads(text)
+            from services.value_serializer import json_loads_exact
+
+            # stdlib json.loads rounds every non-integer through binary64.
+            # 0.1 and 1.234567890123456789 lost digits before element fit.
+            parsed = json_loads_exact(text)
         except Exception:
             return None, "malformed JSON array payload"
         if not isinstance(parsed, list):
@@ -94,19 +98,29 @@ def _pg_array_element(raw: str) -> Any:
 
 
 def _is_numeric_wire(value: Any) -> bool:
-    """True when a cell parses as a finite number (never invent 0 from text)."""
-    from decimal import Decimal, InvalidOperation
+    """True when the write path binds this cell as a finite number.
 
-    if isinstance(value, bool) or isinstance(value, (int, float)):
+    ``Decimal(text)`` invented Auto ``1.234`` / ``1.000`` as numeric and
+    missed ``$1,234`` / ``€1.234`` that INTEGER and DECIMAL bind store.
+    Wordy ``true`` is not a decimal wire — ``coerce_integer_wire`` still
+    refuses it — so this stays False for that token.
+    """
+    if isinstance(value, bool):
         return True
-    try:
-        return Decimal(str(value).strip()).is_finite()
-    except (InvalidOperation, ValueError, TypeError, ArithmeticError):
-        return False
+    if isinstance(value, (int, float)):
+        return True
+    from services.transform_engine import decimal_wire_value
+
+    return decimal_wire_value(value) is not None
 
 
 def _is_temporal_wire(value: Any) -> bool:
-    """True when a cell parses as an ISO-8601 date / time / timestamp."""
+    """True when the write path binds this cell as date, datetime, or time.
+
+    ``time.fromisoformat("1704067200")`` invented ``17:04:06.720000``.
+    Unambiguous ``31/12/2024`` / ``12/31/2024`` bind on the write path but
+    ISO-only parsing refused them. Auto ``01/02/2024`` still refuses.
+    """
     from datetime import date, datetime, time
 
     if isinstance(value, (datetime, date, time)):
@@ -114,14 +128,11 @@ def _is_temporal_wire(value: Any) -> bool:
     text = str(value).strip()
     if not text:
         return True
-    # ``fromisoformat`` gained ``Z`` support in 3.11; normalize for older runtimes.
-    normalized = text[:-1] + "+00:00" if text.endswith(("Z", "z")) else text
-    normalized = normalized.replace(" ", "T", 1) if " " in normalized else normalized
-    for parser in (datetime.fromisoformat, date.fromisoformat, time.fromisoformat):
-        try:
-            parser(normalized)
+    from services.transform_engine import apply_transform
+
+    for kind in ("date", "datetime", "time"):
+        parsed, err = apply_transform(text, kind)
+        if parsed is not None and not err:
             return True
-        except (ValueError, TypeError):
-            continue
     return False
 

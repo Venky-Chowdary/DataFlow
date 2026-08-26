@@ -21,7 +21,7 @@ from services.keyset_pagination import (
     split_cursor_bookmark,
 )
 from services.platform_config import data_dir
-from services.value_serializer import json_default
+from services.value_serializer import json_default, present_cell_text
 
 _logger = logging.getLogger(__name__)
 
@@ -593,12 +593,15 @@ def records_after_watermark(
     unbounded = 0
     for rec in records:
         raw = rec.get(col)
-        if raw is None or str(raw).strip() == "":
+        text = present_cell_text(raw)
+        if text is None:
             unbounded += 1
             continue
-        candidate = str(raw)
+        candidate = text
         if pk and pk != col:
-            candidate = encode_keyset_bookmark([candidate, str(rec.get(pk, ""))])
+            candidate = encode_keyset_bookmark(
+                [candidate, present_cell_text(rec.get(pk)) or ""]
+            )
         if watermark is None or compare_cursor_values(candidate, watermark) > 0:
             delta.append(rec)
     return delta, unbounded
@@ -633,21 +636,29 @@ def max_cursor_value(
             pk_idx = None
 
     if pk_idx is None:
-        values = [rows[i][idx] for i in range(len(rows)) if idx < len(rows[i]) and rows[i][idx]]
+        values: list[str] = []
+        for row in rows:
+            if idx >= len(row):
+                continue
+            text = present_cell_text(row[idx])
+            if text is not None:
+                values.append(text)
         if not values:
             return None
         from services.cdc_engine import infer_watermark_type, max_watermark
 
-        str_values = [str(v) for v in values]
-        wm_type = infer_watermark_type(str_values)
-        return max_watermark(str_values, wm_type)
+        wm_type = infer_watermark_type(values)
+        return max_watermark(values, wm_type)
 
     best: str | None = None
     for row in rows:
-        if idx >= len(row) or not row[idx]:
+        if idx >= len(row):
+            continue
+        cursor_text = present_cell_text(row[idx])
+        if cursor_text is None:
             continue
         pk_val = row[pk_idx] if pk_idx < len(row) else ""
-        cand = encode_keyset_bookmark([row[idx], pk_val])
+        cand = encode_keyset_bookmark([cursor_text, pk_val])
         if best is None or compare_cursor_values(cand, best) > 0:
             best = cand
     return best

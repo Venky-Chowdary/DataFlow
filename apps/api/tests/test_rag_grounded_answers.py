@@ -353,6 +353,14 @@ def test_polish_keeps_facts_only_when_the_rewrite_carries_them():
     # Spelling a small count out is a rewrite, not a lost fact.
     assert keeps_draft_facts("3 jobs listed.", "You have three transfer jobs listed.")
     assert not keeps_draft_facts("3 jobs listed.", "You have several transfer jobs listed.")
+    # Auto cannot bind 1,234, so dropping the comma invents a US reading.
+    assert not keeps_draft_facts("Counted 1,234 rows.", "Counted 1234 rows.")
+    assert not keeps_draft_facts(
+        draft,
+        "1204 rows from `orders` were quarantined on job pf_2f9a1c because a cast failed.",
+    )
+    # Three-or-more thousand groups bind on Auto; a digit-only rewrite is the same figure.
+    assert keeps_draft_facts("Counted 1,000,000 rows.", "Counted 1000000 rows.")
 
 
 def test_provider_that_ignores_the_prompt_cannot_replace_a_grounded_answer(monkeypatch):
@@ -502,3 +510,29 @@ def test_copilot_chat_reports_grounded_only_when_evidence_exists():
     assert refused["grounded"] is False
     assert refused["sources"] == []
     assert refused["confidence"] <= 0.3
+
+
+def test_suggest_transforms_does_not_call_string_to_integer_lossless():
+    """The assist matrix said string→integer was lossless cast. The write path is not."""
+    gen = DataTransferRAGGenerator()
+    out = gen.suggest_transformations("VARCHAR", "INTEGER")
+    assert out.method == "conversion_contract"
+    assert "lossy: false" not in out.answer.lower()
+    assert "cast" not in out.answer.lower()
+    assert "needs_user_approval" in out.answer.lower() or "lossy: true" in out.answer.lower()
+    assert out.confidence < 0.9
+
+
+def test_suggest_transforms_does_not_invent_parse_date_or_iso_from_a_date_name():
+    gen = DataTransferRAGGenerator()
+    out = gen.suggest_transformations(
+        "VARCHAR",
+        "DATE",
+        semantic_type="Date",
+        source_column="event_date",
+        target_column="event_date",
+    )
+    assert "parse_date" not in out.answer.lower()
+    assert "standardize_iso8601" not in out.transformations
+    assert out.transformations == []
+    assert "identity" in out.answer.lower() or "no invented parse" in out.answer.lower()

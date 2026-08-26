@@ -16,6 +16,45 @@ if str(_api_root) not in sys.path:
 from services.value_serializer import cell_to_string
 
 
+def _exact_es_serializers() -> dict[str, Any]:
+    """JSON / NDJSON codecs that do not IEEE-collapse cell numbers.
+
+    elastic_transport.JsonSerializer.json_loads is stdlib ``json.loads``,
+    so a long fraction in ``_source`` collapses before ``cell_to_string``.
+    ``default(Decimal)`` is ``float(data)`` — a second invent on dump.
+    """
+    from decimal import Decimal
+
+    from elastic_transport import JsonSerializer, NdjsonSerializer
+
+    from services.value_serializer import json_default, json_loads_exact
+
+    def _json_loads(_self: Any, data: Any) -> Any:
+        if isinstance(data, (bytes, bytearray, memoryview)):
+            text = bytes(data).decode("utf-8")
+        else:
+            text = data
+        return json_loads_exact(text)
+
+    def _default(self: Any, data: Any) -> Any:
+        if isinstance(data, Decimal):
+            return json_default(data)
+        return JsonSerializer.default(self, data)
+
+    class ExactJsonSerializer(JsonSerializer):
+        json_loads = _json_loads
+        default = _default
+
+    class ExactNdjsonSerializer(NdjsonSerializer):
+        json_loads = _json_loads
+        default = _default
+
+    return {
+        ExactJsonSerializer.mimetype: ExactJsonSerializer(),
+        ExactNdjsonSerializer.mimetype: ExactNdjsonSerializer(),
+    }
+
+
 def _client(cfg: dict[str, Any]):
     from elasticsearch import Elasticsearch
 
@@ -24,7 +63,11 @@ def _client(cfg: dict[str, Any]):
     else:
         scheme = "https" if cfg.get("ssl") or int(cfg.get("port") or 9200) == 443 else "http"
         url = f"{scheme}://{cfg.get('host') or 'localhost'}:{cfg.get('port') or 9200}"
-    kwargs: dict[str, Any] = {"hosts": [url], "request_timeout": 60}
+    kwargs: dict[str, Any] = {
+        "hosts": [url],
+        "request_timeout": 60,
+        "serializers": _exact_es_serializers(),
+    }
     if cfg.get("username") and cfg.get("password"):
         kwargs["basic_auth"] = (cfg["username"], cfg["password"])
     elif cfg.get("api_key"):

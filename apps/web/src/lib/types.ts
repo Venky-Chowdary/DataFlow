@@ -933,6 +933,20 @@ export interface LoadHistoryReport {
   warning?: string;
 }
 
+/** Fail-closed grouping: lone 1,234 / 1.234 needs US or EU. */
+export interface NumberLocaleReport {
+  number_locale?: string;
+  decision?: "ok" | "set_locale" | string;
+  ambiguous_columns?: Array<{ column: string; samples?: string[]; reason?: string }>;
+}
+
+/** Fail-closed calendar: 01/02/2024 needs DMY or MDY. */
+export interface DateLocaleReport {
+  date_locale?: string;
+  decision?: "ok" | "set_locale" | string;
+  ambiguous_columns?: Array<{ column: string; samples?: string[]; reason?: string }>;
+}
+
 export interface PreflightResult {
   passed: boolean;
   passed_count: number;
@@ -987,6 +1001,10 @@ export interface PreflightResult {
   proof_bundle?: PreflightProofBundle;
   coercion_report?: CoercionReport;
   load_history_report?: LoadHistoryReport;
+  number_locale?: string;
+  number_locale_report?: NumberLocaleReport;
+  date_locale?: string;
+  date_locale_report?: DateLocaleReport;
   /** Soft FK / relational hints — structured findings; block via constraint_fk when severity=block. */
   constraint_hints?: Array<Record<string, unknown> | string>;
   /** Structured FK findings (same payloads as constraint_hints when present). */

@@ -8,7 +8,6 @@ import json
 import logging
 import re
 import sys
-from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable
 
@@ -46,7 +45,7 @@ from services.read_options import ReadOptions
 from .connector_registry import run_probe
 from .job_quarantine import split_refused_unit
 from .models import EndpointConfig
-from .type_mapper import ddl_carrier_type, ddl_type, normalize_inferred
+from .type_mapper import ddl_carrier_type, ddl_type
 
 
 class FileExportMapBlocked(ValueError):
@@ -226,7 +225,14 @@ def parse_file_content(
     )
     if not result.success:
         raise ValueError(result.error or "File parse failed")
-    schema = FileParser.infer_schema(result.data)
+    # Avro / Parquet / ORC already carry the writer contract. Sample inference
+    # invented DECIMAL(38,18) as FLOAT after pandas (and still after to_pylist).
+    writer_schema = getattr(result, "schema_map", None)
+    schema = (
+        dict(writer_schema)
+        if writer_schema
+        else FileParser.infer_schema(result.data)
+    )
     return result.data, result.columns, schema
 
 
@@ -267,25 +273,25 @@ def parse_file_route_sample(
     if not result.success:
         raise ValueError(result.error or "File parse failed")
     sample = result.data[:preview_rows]
+    writer_schema = getattr(result, "schema_map", None)
     schema = (
-        FileParser.infer_schema(sample)
-        if sample
-        else {c: "string" for c in result.columns}
+        dict(writer_schema)
+        if writer_schema
+        else (
+            FileParser.infer_schema(sample)
+            if sample
+            else {c: "string" for c in result.columns}
+        )
     )
     return result.columns, schema, result.row_count
 
 
 def _matrix_cell(value: Any) -> Any:
-    # Preserve SQL NULL / missing distinctly from the literal empty string so
-    # downstream writers can tell the difference.
-    from services.value_serializer import DF_MISSING_SENTINEL, is_missing_sentinel
+    # One owner with ``matrix_cell_from_record``: Missing stays Missing,
+    # reader-null is None (not the extract wire token).
+    from connectors.source_row_spool import matrix_present_cell
 
-    if value is None:
-        return None
-    # STOP_COLUMN / sparse CDC — never collapse DF_MISSING to "" via cell_to_string.
-    if is_missing_sentinel(value):
-        return DF_MISSING_SENTINEL
-    return cell_to_string(value)
+    return matrix_present_cell(value)
 
 
 def records_to_matrix(
@@ -2104,28 +2110,10 @@ def write_destination_file(
             reject_on_strict_policy,
             transform_error_policy,
         )
-        from services.value_serializer import (
-            DF_MISSING_SENTINEL,
-            is_missing_sentinel,
-        )
+        from connectors.source_row_spool import matrix_row_from_record
 
         headers = columns
-        data_rows: list[list[Any]] = []
-        for rec in records:
-            row: list[Any] = []
-            for col in headers:
-                if col not in rec:
-                    # Absent key ≠ empty string — preserve omit semantics for Map.
-                    row.append(DF_MISSING_SENTINEL)
-                    continue
-                val = rec[col]
-                if is_missing_sentinel(val):
-                    row.append(val)
-                elif val is None:
-                    row.append(None)
-                else:
-                    row.append(cell_to_string(val))
-            data_rows.append(row)
+        data_rows = [matrix_row_from_record(rec, headers) for rec in records]
         target_cols, _ = resolve_target_columns(mappings, types)
         error_policy = transform_error_policy_for_validation_mode(validation_mode)
         mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
@@ -2171,7 +2159,7 @@ def write_destination_file(
                 mappings=list(mappings) or None,
             )
         # Keep DF_MISSING through export — JSON/JSONL omit keys; dense CSV/grid
-        # render empty via cell_to_string. Never force-null invent before serialize.
+        # render empty via to_delimited_value. Never force-null invent before serialize.
         abort = reject_on_strict_policy(error_policy, rejected_details, "file_export")
         if abort:
             raise FileExportMapBlocked(
@@ -2181,6 +2169,30 @@ def write_destination_file(
             )
         export_columns = target_cols
         export_records = [dict(zip(target_cols, row)) for row in mapped_rows]
+
+    if mappings:
+        export_dest_types = {
+            str(m.get("target") or ""): str(
+                m.get("target_type")
+                or m.get("dest_type")
+                or types.get(m.get("source") or "", "")
+            )
+            for m in mappings
+            if str(m.get("target") or "").strip()
+        }
+    else:
+        export_dest_types = dict(types)
+
+    from connectors.writer_common import to_delimited_value
+
+    def _export_grid_cell(val: Any, col: str) -> str:
+        """One CSV/grid cell — reader-null is empty, never the extract token."""
+        parsed = to_delimited_value(val, col, export_dest_types)
+        if parsed is None:
+            return ""
+        if isinstance(parsed, str):
+            return parsed
+        return cell_to_string(parsed)
 
     def _export_summary(
         filename: str,
@@ -2204,12 +2216,12 @@ def write_destination_file(
         return out
 
     grid = [
-        [cell_to_string(rec.get(col, "")) for col in export_columns]
+        [_export_grid_cell(rec.get(col), col) for col in export_columns]
         for rec in export_records
     ]
 
     # JSON/JSONL must use omit-aware serialization below — the grid convert path
-    # runs cell_to_string which collapses DF_MISSING to "" (false invent).
+    # renders DF_MISSING / reader-null as empty (never the extract token).
     if fmt not in {"json", "jsonl"} and can_convert(src_fmt, fmt) and grid:
         content, mime = convert_rows(
             export_columns, grid, source_format=src_fmt, target_format=fmt
@@ -2242,55 +2254,15 @@ def write_destination_file(
             ),
         )
 
-    def _to_json_value(value: Any, col: str) -> Any:
-        if value is None:
-            return None
-        if isinstance(value, str):
-            text = value.strip()
-            if not text:
-                return value
-            ctype = normalize_inferred(types.get(col, "string")).lower()
-            if ctype in {"json", "array", "object", "struct"}:
-                try:
-                    def _reject(name: str) -> None:
-                        raise ValueError(f"non-finite JSON constant: {name}")
-
-                    return json.loads(
-                        text, parse_float=Decimal, parse_constant=_reject
-                    )
-                except (json.JSONDecodeError, ValueError):
-                    return value
-            if ctype in {
-                "text",
-                "string",
-                "varchar",
-                "uuid",
-                "binary",
-                "date",
-                "datetime",
-                "time",
-            }:
-                return value
-            try:
-                def _reject(name: str) -> None:
-                    raise ValueError(f"non-finite JSON constant: {name}")
-
-                return json.loads(
-                    text, parse_float=Decimal, parse_constant=_reject
-                )
-            except (json.JSONDecodeError, ValueError):
-                return value
-        return value
-
     def _json_export_records(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        from services.value_serializer import is_missing_sentinel
+        from connectors.writer_common import present_field_bindings, to_json_value
 
         # Kafka/object-store class: omit STOP_COLUMN / sparse CDC keys entirely.
+        # Reader-null binds as None then JSON null — never the extract token.
         return [
             {
-                c: _to_json_value(v, c)
-                for c, v in r.items()
-                if not is_missing_sentinel(v)
+                c: to_json_value(v, c, export_dest_types)
+                for c, v in present_field_bindings(r).items()
             }
             for r in rows
         ]
@@ -2301,7 +2273,10 @@ def write_destination_file(
         writer = csv.DictWriter(buf, fieldnames=export_columns, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(
-            [{c: cell_to_string(v) for c, v in r.items()} for r in export_records]
+            [
+                {c: _export_grid_cell(r.get(c), c) for c in export_columns}
+                for r in export_records
+            ]
         )
         content = buf.getvalue().encode("utf-8")
         filename = "export.csv"
@@ -2313,7 +2288,10 @@ def write_destination_file(
         )
         writer.writeheader()
         writer.writerows(
-            [{c: cell_to_string(v) for c, v in r.items()} for r in export_records]
+            [
+                {c: _export_grid_cell(r.get(c), c) for c in export_columns}
+                for r in export_records
+            ]
         )
         content = buf.getvalue().encode("utf-8")
         filename = "export.tsv"

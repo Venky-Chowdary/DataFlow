@@ -20,6 +20,7 @@ from connectors.saas_common import (
 from connectors.writer_common import (
     reject_on_strict_policy,
     WriteResult,
+    _is_nullish_conflict_key,
     apply_write_quarantine_matrix,
     build_mapped_rows_with_details,
     resolve_target_columns,
@@ -250,8 +251,8 @@ def _batch_payload(
         records: list[dict[str, Any]] = []
         indices: list[int] = []
         for idx, r in enumerate(rows):
-            rid = r.get("id") or r.get("Id")
-            if not rid:
+            rid = _airtable_record_id(r)
+            if rid is None:
                 continue
             records.append(
                 {"id": rid, "fields": {k: v for k, v in r.items() if k.lower() != "id"}}
@@ -272,6 +273,15 @@ def _id_from_response(body: Any) -> str | None:
     return None
 
 
+def _airtable_record_id(row: dict[str, Any]) -> Any | None:
+    """Present Airtable record id, or None when reader-null / blank."""
+    for key in ("id", "Id"):
+        val = row.get(key)
+        if not _is_nullish_conflict_key(val):
+            return val
+    return None
+
+
 def _present_fields(row: Any, target_cols: list[str]) -> dict[str, Any]:
     """Airtable cells the batch should carry — sentinels and blanks are absent.
 
@@ -279,12 +289,8 @@ def _present_fields(row: Any, target_cols: list[str]) -> dict[str, Any]:
     sending DF_MISSING writes the sentinel's text. Omitting the key is the only
     way to leave a cell untouched, so the filter is a fidelity rule, not tidying.
     """
-    from services.value_serializer import is_missing_sentinel
-
     def _present(value: Any) -> bool:
-        if is_missing_sentinel(value) or value is None:
-            return False
-        return not (isinstance(value, str) and not value.strip())
+        return not _is_nullish_conflict_key(value)
 
     if isinstance(row, dict):
         return {k: v for k, v in row.items() if _present(v)}
@@ -348,7 +354,7 @@ def _drop_rows_missing_merge_field(
     dropped = 0
     for j, row in enumerate(batch_dicts):
         merge_val = row.get(merge_field)
-        if merge_val is None or str(merge_val).strip() == "":
+        if _is_nullish_conflict_key(merge_val):
             dropped += 1
             _quarantine_row(
                 rejected,
@@ -384,7 +390,7 @@ def _quarantine_rows_without_record_id(
     """Update mode with no merge field can only address rows that carry an id."""
     missing = 0
     for j, row in enumerate(batch_dicts):
-        if row.get("id") or row.get("Id"):
+        if _airtable_record_id(row) is not None:
             continue
         missing += 1
         _quarantine_row(
@@ -420,11 +426,11 @@ def _quarantine_empty_payload(
     """A batch that produced no records must not vanish from the ledger."""
     for j, row in enumerate(batch_dicts):
         # Skip what the id / merge-field passes above already recorded.
-        if update and not merge_field and not (row.get("id") or row.get("Id")):
+        if update and not merge_field and _airtable_record_id(row) is None:
             continue
         if update and merge_field:
             merge_val = row.get(merge_field)
-            if merge_val is None or str(merge_val).strip() == "":
+            if _is_nullish_conflict_key(merge_val):
                 continue
         _quarantine_row(
             rejected,

@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { SectionLoader } from "../components/LoadingState";
 import { Button } from "../components/ui/Button";
+import { HiddenFileInput } from "../components/ui/HiddenFileInput";
 import { EmptyState } from "../components/ui/EmptyState";
 import { PipelineCard } from "../components/ui/PipelineCard";
 import { PageFrame } from "../components/ui/PageFrame";
@@ -356,7 +357,6 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
     }
   };
 
-  const importInputRef = useRef<HTMLInputElement>(null);
   const [gitopsBusy, setGitopsBusy] = useState(false);
   const [gitopsRequireSigned, setGitopsRequireSigned] = useState(false);
 
@@ -498,11 +498,10 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
           actions={
             !showForm ? (
               <>
-                <input
-                  ref={importInputRef}
-                  type="file"
+                <HiddenFileInput
+                  id="df2-schedule-import"
                   accept=".yaml,.yml,.json,application/x-yaml,text/yaml,application/json"
-                  hidden
+                  disabled={!scheduleManage.allowed || gitopsBusy}
                   onChange={(e) => {
                     const f = e.target.files?.[0];
                     e.target.value = "";
@@ -530,15 +529,11 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
                     />
                     <span>Require signed</span>
                   </label>
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    loading={gitopsBusy}
-                    disabled={!scheduleManage.allowed}
-                    onClick={() => importInputRef.current?.click()}
+                  <label
+                    htmlFor="df2-schedule-import"
+                    className="df2-btn df2-btn-sm df2-btn-ghost"
+                    aria-disabled={!scheduleManage.allowed || gitopsBusy}
                     title={
-                      // Importing a manifest creates and updates schedules, so it
-                      // is gated like every other schedule write.
                       scheduleManage.reason ||
                       (gitopsRequireSigned
                         ? "Plan then apply with signed-contract gate"
@@ -546,7 +541,7 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
                     }
                   >
                     Import YAML
-                  </Button>
+                  </label>
                   <Button
                     size="sm"
                     variant="primary"

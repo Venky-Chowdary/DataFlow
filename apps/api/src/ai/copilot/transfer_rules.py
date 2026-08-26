@@ -26,6 +26,27 @@ from typing import Any
 
 from .schedule_cadence import cadence_qualifiers
 
+
+def _utterance_row_limit(raw: str) -> int:
+    """English 'first 1,000 rows' uses US grouping — still the write parser.
+
+    This is spoken English, not a data cell. Auto would fail-close ``1,000``.
+    """
+    from services.transform_engine import (
+        decimal_wire_value,
+        reset_active_number_locale,
+        set_active_number_locale,
+    )
+
+    token = set_active_number_locale("US")
+    try:
+        dec = decimal_wire_value(raw)
+    finally:
+        reset_active_number_locale(token)
+    if dec is None or dec <= 0 or dec != dec.to_integral_value():
+        return 0
+    return int(dec)
+
 # Engine operator spellings (services.row_filter._FILTER_OPS). The analytics
 # filter parser uses "not_null"; the engine wants "is_not_null" — do not mix.
 _NEGATE = {
@@ -388,10 +409,7 @@ def parse_transfer_data_rules(message: str) -> tuple[str, TransferDataRules]:
             cuts.append((start, end))
 
     for m in _LIMIT_RE.finditer(text):
-        try:
-            limit = int(m.group(1).replace(",", ""))
-        except ValueError:
-            limit = 0
+        limit = _utterance_row_limit(m.group(1))
         if limit:
             applied.append(f"first {limit} rows only")
         cut(m)

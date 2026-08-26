@@ -260,6 +260,7 @@ def dedupe_rows_by_pk_and_lsn_keeping_numbers(
     row's number is not simply the last one seen for that key.
     """
     from connectors.writer_common import (
+        _conflict_key_identity,
         dedupe_rows_keeping_numbers,
         resolve_conflict_targets,
         resolve_row_number,
@@ -279,7 +280,7 @@ def dedupe_rows_by_pk_and_lsn_keeping_numbers(
     best: dict[tuple, tuple] = {}
     best_numbers: dict[tuple, int] = {}
     for position, row in enumerate(rows):
-        key = tuple(row[i] for i in indices)
+        key = tuple(_conflict_key_identity(row[i]) for i in indices)
         prev = best.get(key)
         if prev is None or compare_lsn(row[lsn_idx], prev[lsn_idx]) >= 0:
             best[key] = row

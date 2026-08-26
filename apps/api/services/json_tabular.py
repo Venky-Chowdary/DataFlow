@@ -172,7 +172,9 @@ def load_json_records(raw: bytes | str, *, records_path: str | None = None) -> l
     if not text:
         raise ValueError("JSON file is empty")
     try:
-        data = json.loads(text)
+        from services.value_serializer import json_loads_exact
+
+        data = json_loads_exact(text)
     except json.JSONDecodeError as exc:
         raise ValueError(f"Invalid JSON: {exc}") from exc
     return extract_json_records(data, records_path=records_path)
@@ -208,6 +210,26 @@ def detect_ijson_records_prefix(head: bytes) -> str | None:
         if key and "." not in key:
             return f"{key}.item"
     return None
+
+
+def ijson_items_exact(source: Any, prefix: str, **config: Any) -> Iterator[Any]:
+    """``ijson.items`` with write-path number identity.
+
+    Default ijson already uses Decimal (``use_float=False``). This helper
+    makes that pin explicit and demotes IEEE-exact fractions so StAX matches
+    ``json_loads_exact`` (``1.5`` is float; ``1.234567890123456789`` stays
+    Decimal). ``use_float=True`` is refused — that is the IEEE invent path.
+    """
+    import ijson
+    from services.value_serializer import demote_exact_json
+
+    if config.get("use_float"):
+        raise ValueError(
+            "ijson_items_exact refuses use_float=True — that invents IEEE"
+        )
+    config["use_float"] = False
+    for obj in ijson.items(source, prefix, **config):
+        yield demote_exact_json(obj)
 
 
 def iter_json_record_dicts(
@@ -248,7 +270,7 @@ def iter_json_record_dicts(
     if prefix:
         batch: list[dict[str, Any]] = []
         with open_binary(content) as bio:
-            for obj in ijson.items(bio, prefix):
+            for obj in ijson_items_exact(bio, prefix):
                 if not isinstance(obj, dict):
                     continue
                 batch.append(obj)
@@ -516,7 +538,9 @@ def _iter_json_dicts_dom(text: str) -> Any:
     from services.dest_precount import UnmeasuredArtifact
 
     try:
-        data = json.loads(text)
+        from services.value_serializer import json_loads_exact
+
+        data = json_loads_exact(text)
     except (json.JSONDecodeError, ValueError) as exc:
         raise UnmeasuredArtifact("json_unparseable") from exc
     found = _json_unique_from_stats(_json_collect_array_stats(data))
@@ -566,7 +590,7 @@ def iter_json_dicts(content: bytes | str | Path) -> Any:
             return
         rewindable.seek(0)
         yielded = 0
-        for rec in _json_iter_dicts_at_path(rewindable, ijson.items, path):
+        for rec in _json_iter_dicts_at_path(rewindable, ijson_items_exact, path):
             yielded += 1
             yield rec
         if yielded != n:

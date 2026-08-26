@@ -137,6 +137,9 @@ class TransferRequest:
     # Locale for ambiguous day/month dates: 'DMY' (European/Indian/Australian),
     # 'MDY' (US), or '' to infer from env DATAFLOW_DATE_ORDER / fail closed.
     date_locale: str = ""
+    # Locale for ambiguous grouping: 'US' (1,234.56), 'EU' (1.234,56), or ''
+    # to fail closed on a lone 3-digit group. Currency marks still parse.
+    number_locale: str = ""
     # Client-supplied idempotency key. When set it replaces the derived request
     # fingerprint, letting a caller make its own HTTP retries safe. When empty,
     # the fingerprint still guards against accidental double submission.
@@ -301,6 +304,7 @@ def transfer_request_to_dict(request: TransferRequest) -> dict:
         "require_signed_contract": request.require_signed_contract,
         "triggered_by": request.triggered_by,
         "date_locale": request.date_locale,
+        "number_locale": request.number_locale,
         "idempotency_key": request.idempotency_key,
         "delivery_guarantee": request.delivery_guarantee or "at_least_once",
         "compliance_acknowledged": bool(request.compliance_acknowledged),
@@ -401,6 +405,11 @@ def transfer_request_from_dict(data: dict) -> TransferRequest:
         require_signed_contract=bool(data.get("require_signed_contract", False)),
         triggered_by=(data.get("triggered_by") or "").strip(),
         date_locale=(data.get("date_locale") or "").strip().upper(),
+        number_locale=(
+            loc
+            if (loc := (data.get("number_locale") or "").strip().upper()) in {"US", "EU"}
+            else ""
+        ),
         idempotency_key=(data.get("idempotency_key") or "").strip(),
         delivery_guarantee=(data.get("delivery_guarantee") or "at_least_once").strip().lower(),
         compliance_acknowledged=bool(data.get("compliance_acknowledged")),

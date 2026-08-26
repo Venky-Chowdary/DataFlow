@@ -7,8 +7,10 @@ this module before Map / preflight / CREATE TABLE. Rules are fail-safe:
 
 1. **Values beat name guesses.** A typed logical type is emitted only when
    every non-empty sample parses as that type.
-2. **Booleans are true/false family only** (true/false/yes/no/0/1/t/f/y/n/on/off).
-   Words like ``active`` / ``inactive`` / ``pending`` / ``invalidated`` are
+2. **Booleans are write-path tokens only** (true/false/t/f/1/0 — the same
+   set ``transform_engine.CANONICAL_BOOLEAN_TOKENS`` binds). Informal
+   yes/no/y/n/on/off stay VARCHAR: inventing BOOLEAN dest quarantines every
+   informal row. Words like ``active`` / ``inactive`` / ``pending`` are
    **string enums**, never booleans.
 3. **Name heuristics only disambiguate** (e.g. 0/1 on ``is_active`` → BOOLEAN;
    epoch digits on ``created_at`` → TIMESTAMP). Names never invent a type that
@@ -30,13 +32,19 @@ from typing import Any
 
 from services.decimal_observe import observe_source_numeric_samples
 from services.transform_engine import (
+    CANONICAL_BOOLEAN_TOKENS,
     NULL_SENTINELS,
     _active_date_locale,
     _parse_date,
     _parse_datetime,
     _parse_decimal,
+    vector_component_carrier,
 )
-from services.value_serializer import evidence_samples, is_null_evidence
+from services.value_serializer import (
+    evidence_samples,
+    is_null_evidence,
+    is_reader_null_cell,
+)
 
 # Logical types emitted to mapping / preflight / DDL layers
 LOGICAL_TYPES = frozenset({
@@ -44,12 +52,6 @@ LOGICAL_TYPES = frozenset({
     "VARCHAR", "TEXT", "UUID", "JSON", "ARRAY", "BINARY",
     "INTERVAL", "GEOGRAPHY", "VECTOR",
 })
-
-# Informal tokens for *type detection* on flag-shaped names only.
-# Write path (transform_engine / sql_bind) stays canonical — yes/on do not invent TRUE.
-_INFORMAL_BOOL_TRUE = frozenset({"true", "t", "yes", "y", "1", "on"})
-_INFORMAL_BOOL_FALSE = frozenset({"false", "f", "no", "n", "0", "off"})
-_BOOLEAN_STRINGS = _INFORMAL_BOOL_TRUE | _INFORMAL_BOOL_FALSE
 
 # Status / lifecycle vocabulary — never treat as boolean literals.
 _STATUS_ENUM_TOKENS = frozenset({
@@ -217,7 +219,7 @@ def _looks_like_string_enum(samples: list[str]) -> bool:
     distinct = {v.lower() for v in vals}
     if not distinct:
         return False
-    if distinct <= _BOOLEAN_STRINGS:
+    if distinct <= CANONICAL_BOOLEAN_TOKENS:
         return False
     if len(distinct) > 32:
         return False
@@ -243,16 +245,23 @@ def _parse_vector_array(value: str) -> list[float] | None:
     if not (s.startswith("[") and s.endswith("]")):
         return None
     try:
-        parsed = json.loads(s)
+        from services.value_serializer import json_loads_exact
+
+        parsed = json_loads_exact(s)
     except json.JSONDecodeError:
         return None
     if not isinstance(parsed, list) or len(parsed) < 2:
         return None
     out: list[float] = []
     for item in parsed:
+        # JSON numbers only — string components are ARRAY / write-path, not
+        # inferred VECTOR. bool ⊂ int must not invent a 1.0 dimension.
         if isinstance(item, bool) or not isinstance(item, (int, float)):
             return None
-        out.append(float(item))
+        bound = vector_component_carrier(item)
+        if bound is None:
+            return None
+        out.append(bound)
     return out
 
 
@@ -296,7 +305,7 @@ def is_geography_wire(value: Any) -> bool:
     Rejects empty / clearly non-spatial strings so writers can quarantine fail-closed
     instead of letting the driver invent NULLs or abort mid-batch.
     """
-    if value is None:
+    if is_reader_null_cell(value):
         return True
     if isinstance(value, (bytes, bytearray, memoryview)):
         return len(value) > 0
@@ -323,7 +332,7 @@ def is_geography_wire(value: Any) -> bool:
 
 def is_interval_wire(value: Any) -> bool:
     """True when a cell looks like an INTERVAL identity payload (ISO-8601 / SQL)."""
-    if value is None:
+    if is_reader_null_cell(value):
         return True
     if isinstance(value, (int, float)):
         # Raw numeric seconds/days is ambiguous — refuse inventing INTERVAL.
@@ -348,7 +357,7 @@ def interval_wire_family(value: Any) -> str | None:
     Used by write quarantine so YEAR-MONTH values never bind into DAY-SECOND DDL
     (and vice versa) — ANSI/Oracle/Snowflake family polarity.
     """
-    if value is None:
+    if is_reader_null_cell(value):
         return None
     try:
         from datetime import timedelta
@@ -394,7 +403,9 @@ def interval_wire_family(value: Any) -> str | None:
 
 def geography_wire_srid(value: Any) -> int | None:
     """Extract SRID from EWKT (``SRID=4326;POINT(...)``) when present."""
-    if value is None or isinstance(value, (bytes, bytearray, memoryview, dict)):
+    if is_reader_null_cell(value) or isinstance(
+        value, (bytes, bytearray, memoryview, dict)
+    ):
         return None
     text = str(value).strip()
     m = re.match(r"^\s*SRID\s*=\s*(\d+)\s*;", text, re.I)
@@ -409,7 +420,9 @@ def _classify_jsonish(value: str, *, field_name: str | None = None) -> str | Non
     if not ((s.startswith("{") and s.endswith("}")) or (s.startswith("[") and s.endswith("]"))):
         return None
     try:
-        parsed = json.loads(s)
+        from services.value_serializer import json_loads_exact
+
+        parsed = json_loads_exact(s)
     except json.JSONDecodeError:
         return None
 
@@ -455,7 +468,7 @@ def _classify_value(value: str, *, field_name: str | None = None) -> str:
         return "BINARY"
 
     low = s.strip().lower()
-    if low in _BOOLEAN_STRINGS:
+    if low in CANONICAL_BOOLEAN_TOKENS:
         # Defer 0/1 disambiguation to infer_type (field name known).
         if low in {"0", "1"}:
             return "INTEGER"
@@ -828,12 +841,14 @@ def infer_column(
             "samples": non_empty[:8],
         }
 
-    # true/false/yes/no mixed with 0/1 must stay BOOLEAN — classifying "1" as
-    # INTEGER alone would widen the column to VARCHAR and skip bool coercion.
-    if all(v.lower() in _BOOLEAN_STRINGS for v in non_empty):
+    # Write-path tokens only. Informal yes/on mixed with true/1 must stay
+    # VARCHAR — classifying them BOOLEAN invents a dest Execute cannot bind.
+    # Canonical true/false mixed with 0/1 must stay BOOLEAN (classifying "1"
+    # as INTEGER alone would widen and skip bool coercion).
+    if all(v.lower() in CANONICAL_BOOLEAN_TOKENS for v in non_empty):
         only_01 = all(v.strip() in {"0", "1"} for v in non_empty)
         if (not only_01) or _is_boolean_field_name(field_name or ""):
-            notes.append("boolean token family (true/false/0/1) → BOOLEAN")
+            notes.append("canonical boolean wire (true/false/t/f/0/1) → BOOLEAN")
             return {
                 "name": field_name or "",
                 "logical_type": "BOOLEAN",
@@ -940,12 +955,12 @@ def infer_column(
     if inferred in {"GEOGRAPHY", "INTERVAL"}:
         notes.append(f"{inferred} — identity payload (no invented cast)")
 
-    # 0/1 → BOOLEAN only on flag-shaped names
+    # 0/1 → BOOLEAN only on flag-shaped names (canonical wire, not yes/no).
     if (
         inferred in {"INTEGER", "VARCHAR"}
         and field_name
         and _is_boolean_field_name(field_name)
-        and all(v.lower() in _BOOLEAN_STRINGS for v in non_empty)
+        and all(v.strip() in {"0", "1"} for v in non_empty)
     ):
         inferred = "BOOLEAN"
         role = "boolean_flag"

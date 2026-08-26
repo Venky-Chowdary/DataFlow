@@ -494,9 +494,10 @@ def _parse_number_type(sf_type_str: str) -> tuple[int, int] | None:
 
 
 def _decimal_scale_and_int_digits(value: Any) -> tuple[int, int]:
-    from connectors.writer_common import decimal_int_digits_and_scale
+    # Create-new NUMBER(p,s) invent — keep money scale (1000.00 → 2).
+    from services.decimal_observe import cell_int_digits_and_scale
 
-    return decimal_int_digits_and_scale(value)
+    return cell_int_digits_and_scale(value)
 
 
 def _fits_snowflake_number(value: Any, precision: int, scale: int) -> bool:

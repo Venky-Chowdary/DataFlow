@@ -38,6 +38,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Mapping
 
+from services.value_serializer import (
+    SQL_NULL_SENTINEL,
+    cell_to_string,
+    is_null_evidence,
+    json_default,
+    json_loads_exact,
+)
+
 logger = logging.getLogger(__name__)
 
 MODE_TABLE = "table"
@@ -414,12 +422,12 @@ def peek_callable_schema(
         if isinstance(row, Mapping):
             for h in headers:
                 val = row.get(h)
-                if val is not None and str(val) != "":
-                    samples[h].append(str(val))
+                if not is_null_evidence(val):
+                    samples[h].append(_cell(val))
         else:
             for i, h in enumerate(headers):
-                if i < len(row) and row[i] is not None and str(row[i]) != "":
-                    samples[h].append(str(row[i]))
+                if i < len(row) and not is_null_evidence(row[i]):
+                    samples[h].append(_cell(row[i]))
     schema, intel = infer_schema_map(samples)
     for h in headers:
         schema.setdefault(h, "VARCHAR")
@@ -795,7 +803,21 @@ def _literal(token: str) -> Any:
         return upper == "TRUE"
     if _NUMBER.match(token):
         if any(c in token for c in ".eE"):
-            return float(token)
+            from decimal import Decimal, InvalidOperation
+
+            # SQL grammar number (dot is the decimal mark). Not locale Auto.
+            # float(token) collapsed 1.2300 and lost digits past 2**53.
+            try:
+                parsed = Decimal(token)
+            except (InvalidOperation, ValueError) as exc:
+                raise ProcedureSourceError(
+                    f"Argument `{token}` is not an exact numeric literal."
+                ) from exc
+            if not parsed.is_finite():
+                raise ProcedureSourceError(
+                    f"Argument `{token}` is not a finite numeric literal."
+                )
+            return parsed
         return int(token)
     if _STRING.match(token):
         return token[1:-1].replace("''", "'")
@@ -931,10 +953,10 @@ def _cursor_cell(row: list[Any], idx: int) -> str | None:
     if idx < 0 or idx >= len(row):
         return None
     val = row[idx]
-    if val is None:
+    if is_null_evidence(val):
         return None
-    text = str(val)
-    return text if text != "" else None
+    text = val if isinstance(val, str) else _cell(val)
+    return text if text and text != SQL_NULL_SENTINEL else None
 
 
 def _row_after_cursor(row: list[Any], idx: int, cursor_after: Any) -> bool:
@@ -945,8 +967,8 @@ def _row_after_cursor(row: list[Any], idx: int, cursor_after: Any) -> bool:
 
 def _row_from_spool_line(obj: Any, headers: list[str]) -> list[str]:
     if isinstance(obj, dict):
-        return ["" if obj.get(h) is None else str(obj.get(h)) for h in headers]
-    return ["" if v is None else str(v) for v in obj]
+        return [_cell(obj.get(h)) for h in headers]
+    return [_cell(v) for v in obj]
 
 
 def _read_spool_page(
@@ -979,10 +1001,10 @@ def _read_spool_page(
                     continue
                 if i >= end:
                     break
-                obj = json.loads(line)
+                obj = json_loads_exact(line)
                 rows.append(_row_from_spool_line(obj, spool.headers))
                 continue
-            obj = json.loads(line)
+            obj = json_loads_exact(line)
             row = _row_from_spool_line(obj, spool.headers)
             if cursor_idx is None or not _row_after_cursor(row, cursor_idx, cursor_after):
                 continue
@@ -1093,7 +1115,14 @@ def _execute_to_jsonl(
                     cells = [_cell(v) for v in row]
                     if len(sample) < PEEK_ROW_LIMIT:
                         sample.append(cells)
-                    fh.write(json.dumps(cells, default=str))
+                    fh.write(
+                        json.dumps(
+                            cells,
+                            default=json_default,
+                            ensure_ascii=False,
+                            allow_nan=False,
+                        )
+                    )
                     fh.write("\n")
                     total += 1
     except ProcedureSourceError:
@@ -1124,6 +1153,10 @@ def _apply_timeout(conn: Any, dialect: str, timeout_s: int) -> None:
 
 
 def _cell(value: Any) -> str:
-    if value is None:
-        return ""
-    return str(value)
+    """One CALL/SELECT result cell. Same wire as PostgreSQL / Iceberg readers.
+
+    ``str(value)`` invented ``True`` / ``1E+2`` / a Python ``b'...'`` repr and
+    a space timestamp. ``None`` became ``""`` so SQL NULL and empty string
+    collapsed.
+    """
+    return cell_to_string(value, preserve_sql_null=True)

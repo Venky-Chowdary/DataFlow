@@ -33,8 +33,9 @@ from services.transform_engine import apply_transform, infer_date_locale  # noqa
         ("1 000 000", "decimal", "1000000"),
         ("12,34", "decimal", "12.34"),
         ("12.34", "decimal", "12.34"),
-        ("1.234", "decimal", "1.234"),
-        ("1,234", "decimal", "1234"),
+        # Lone 3-digit group is US-thousands XOR EU-decimal — Auto refuses.
+        ("1.234", "decimal", None),
+        ("1,234", "decimal", None),
         ("$1,000.00", "decimal", "1000.00"),
         ("€1.000,00", "decimal", "1000.00"),
         ("USD 1 000 000.89", "decimal", "1000000.89"),

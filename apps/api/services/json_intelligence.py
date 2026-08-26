@@ -78,7 +78,9 @@ def _parse_object_sample(value: Any) -> dict[str, Any] | None:
     if not (s.startswith("{") and s.endswith("}")):
         return None
     try:
-        parsed = json.loads(s)
+        from services.value_serializer import json_loads_exact
+
+        parsed = json_loads_exact(s)
     except json.JSONDecodeError:
         return None
     return parsed if isinstance(parsed, dict) else None
@@ -144,7 +146,9 @@ def _parse_array_sample(value: Any) -> list[Any] | None:
     if not (s.startswith("[") and s.endswith("]")):
         return None
     try:
-        parsed = json.loads(s)
+        from services.value_serializer import json_loads_exact
+
+        parsed = json_loads_exact(s)
     except json.JSONDecodeError:
         return None
     return parsed if isinstance(parsed, list) else None

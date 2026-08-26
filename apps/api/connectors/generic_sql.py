@@ -55,6 +55,7 @@ from connectors.schema_drift import (
     raise_widen_refusal,
 )
 from connectors.sql_temporal import (
+    bind_time_clock,
     coerce_sql_temporal,
     extract_column_from_sql_error,
     is_sql_data_error,
@@ -127,6 +128,8 @@ from connectors.writer_common import (
     CHUNK_SIZE,
     DF_LSN_COL,
     _coerced_null_row_count,
+    _conflict_key_identity,
+    _is_nullish_conflict_key,
     _rejected_row_count,
     assert_sparse_upsert_has_pk,
     compare_lsn,
@@ -613,6 +616,13 @@ def _build_engine(cfg: dict[str, Any]) -> Any:
             # money/numeric fidelity.  Decimal is native in DuckDB, so enable it.
             if db_type == "duckdb" or "duckdb" in connection_string:
                 engine.dialect.supports_native_decimal = True
+            # SQLite has no Decimal affinity. Register dest-canonical text bind so
+            # SQLAlchemy/sqlite3 accept Python Decimal (apply_transform decimal
+            # wire) instead of ProgrammingError or IEEE float invent.
+            if db_type == "sqlite" or "sqlite://" in connection_string:
+                from connectors.sqlite_common import register_sqlite_decimal_adapter
+
+                register_sqlite_decimal_adapter()
             return engine
         from services.engine_pool import pool_settings
 
@@ -982,43 +992,49 @@ def _logical_type_from_sa(col_type: Any) -> str:
     return normalize_logical_type(repr_)
 
 
-class _DuckDBJSON(sa.JSON):
-    """JSON type that stores compact, deterministic JSON text in DuckDB.
+class _ExactJSON(sa.JSON):
+    """JSON type that stores canonical JSON text (no stdlib re-parse).
 
-    SQLAlchemy's default ``sa.JSON`` re-serializes dict/list with spaces and
-    binds Python ``None`` as the JSON literal ``null``.  This subclass keeps
-    source JSON text compact and treats ``None`` as SQL NULL so round-trips are
-    exact and checksums line up.
+    SQLAlchemy's default ``sa.JSON`` re-parses with ``json.loads`` (IEEE invent)
+    and binds Python ``None`` as the JSON literal ``null``. This subclass uses
+    ``json_document_wire``: valid JSON text keeps its digits and polarity
+    (``\"1\"`` stays a string). Python trees dump compact. ``None`` is SQL NULL.
+    Used for DuckDB and every leftover generic-SQL JSON DDL site that would
+    otherwise emit bare ``sa.JSON()`` (MySQL / SQLite / MSSQL / …).
     """
 
     __visit_name__ = "JSON"
 
     def bind_processor(self, dialect: Any) -> Callable[[Any], Any] | None:
         def process(value: Any) -> Any:
-            if value is None:
-                return None
-            if isinstance(value, str):
-                try:
-                    value = json.loads(value)
-                except (json.JSONDecodeError, ValueError):
-                    return value
-            if isinstance(value, (dict, list, tuple, set, frozenset)):
-                return json.dumps(
-                    value,
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                    default=json_default,
-                )
-            return value
+            from services.value_serializer import (
+                absent_sql_bind,
+                is_missing_sentinel,
+            )
+
+            # Missing stays a raise in json_document_wire (omit upstream).
+            # Reader-null is SQL/JSON NULL — never the extract token as text.
+            if not is_missing_sentinel(value):
+                handled, bound = absent_sql_bind(value)
+                if handled:
+                    return bound
+            from services.json_polarity import json_document_wire
+
+            return json_document_wire(value)
 
         return process
 
     def result_processor(
         self, dialect: Any, coltype: Any
     ) -> Callable[[Any], Any] | None:
-        # DuckDB returns JSON values as text.  Keep them as text so the
-        # downstream value serializer can apply the same canonical compact JSON.
+        # Drivers that still return JSON as text stay text. A second
+        # ``json.loads`` here would IEEE-collapse long fractions before
+        # ``json_document_wire`` could keep the engine spelling.
         return lambda value: value
+
+
+# Backward name — DuckDB was the first engine on this wire.
+_DuckDBJSON = _ExactJSON
 
 
 #: Dialects whose catalogs fold unquoted identifiers to a single case.
@@ -1477,12 +1493,12 @@ def _sa_type_for_logical(
                     return sa.ARRAY(
                         _sa_type_for_logical(element, dialect_name, db_type)
                     )
-            return _DuckDBJSON(none_as_null=True)
+            return _ExactJSON(none_as_null=True)
         if db_type in ("oracle", "clickhouse", "trino", "questdb", "presto"):
             return _maybe_nullable(sa.Text())
         if dialect_name == "postgresql":
             return postgresql.JSONB()
-        return sa.JSON()
+        return _ExactJSON(none_as_null=True)
     if t == LOGICAL_BINARY:
         if db_type in ("clickhouse", "trino", "questdb", "presto"):
             return _maybe_nullable(sa.Text())
@@ -1588,7 +1604,7 @@ def _sa_type_for_logical(
         if native_logical == LOGICAL_JSON:
             if dialect_name == "postgresql":
                 return postgresql.JSONB()
-            return sa.JSON()
+            return _ExactJSON(none_as_null=True)
         if _DialectNativeType is None:
             return _maybe_nullable(sa.Text())
         return _maybe_nullable(_DialectNativeType(native))
@@ -1619,13 +1635,12 @@ def _to_sa_value(
     db_type: str = "",
 ) -> Any:
     """Convert transform-engine output values to Python objects SQLAlchemy accepts."""
-    if value is None:
-        return None
-    from services.value_serializer import is_missing_sentinel
+    from services.value_serializer import absent_sql_bind
 
-    # Sparse CDC: never coerce DF_MISSING → NULL (would wipe present destination cols).
-    if is_missing_sentinel(value):
-        return value
+    # Reader-null is SQL NULL. Missing stays Missing (sparse omit, never wipe).
+    handled, bound = absent_sql_bind(value)
+    if handled:
+        return bound
 
     # Specialty carriers (INET, PG_LSN, geometric, OID, snapshots, …) must use
     # the shared sql_bind SSOT before LOGICAL_* collapse invents string/int/geo.
@@ -1732,7 +1747,9 @@ def _to_sa_value(
         from connectors.sql_bind import coerce_json_wire
 
         # Empty JSON wire raises — quarantine upstream (never invent SQL NULL wipe).
-        as_text = _is_string_type(sa_type)
+        # _ExactJSON bind keeps engine text; parsing here then dumping would
+        # stringify non-IEEE Decimals (number → string polarity invent).
+        as_text = _is_string_type(sa_type) or isinstance(sa_type, _ExactJSON)
         bound = coerce_json_wire(value, as_text=as_text)
         if as_text:
             return bound
@@ -1816,6 +1833,8 @@ def _to_sa_value(
         base = str(coerce_ddl).upper()
 
         if base == "DATE":
+            if coerced is None:
+                return None
             if isinstance(coerced, datetime):
                 return coerced.date()
             if isinstance(coerced, date):
@@ -1823,22 +1842,16 @@ def _to_sa_value(
             return value
 
         if base == "TIME":
-            if _is_string_type(sa_type):
-                if isinstance(coerced, time):
-                    return coerced.isoformat()
-                if isinstance(coerced, datetime):
-                    return coerced.time().isoformat()
-                return value if isinstance(value, str) else str(value)
-            if isinstance(coerced, time):
-                if db_type == "presto" or dialect_name == "presto":
-                    return coerced.isoformat()
-                return coerced
-            if isinstance(coerced, datetime):
-                tm = coerced.time()
-                if db_type == "presto" or dialect_name == "presto":
-                    return tm.isoformat()
-                return tm
-            return value
+            clock = bind_time_clock(value)
+            if clock is None:
+                return None
+            if (
+                _is_string_type(sa_type)
+                or db_type == "presto"
+                or dialect_name == "presto"
+            ):
+                return clock.isoformat()
+            return clock
 
         # DATETIME2 (SQL Server) / QuestDB / Oracle TIMESTAMP / ClickHouse DateTime
         # are naive wall clocks. Never invent tzinfo=UTC on naive values — that
@@ -1856,6 +1869,8 @@ def _to_sa_value(
         if is_tz_aware:
             from services.offset_label import bind_aware_datetime
 
+            if coerced is None:
+                return None
             if isinstance(coerced, datetime):
                 if coerced.tzinfo is None:
                     raise ValueError(
@@ -1875,6 +1890,8 @@ def _to_sa_value(
                 )
             return value
         # NTZ / DATETIME: keep civil digits; strip offset without astimezone.
+        if coerced is None:
+            return None
         if isinstance(coerced, datetime):
             if coerced.tzinfo is not None:
                 return coerced.replace(tzinfo=None)
@@ -2892,7 +2909,10 @@ def _is_json_sa(col: Any) -> bool:
     col_type = getattr(col, "type", None)
     if col_type is None:
         return False
-    return type(col_type).__name__.upper() in {"JSON", "JSONB"}
+    if isinstance(col_type, sa.JSON):
+        return True
+    name = type(col_type).__name__.upper()
+    return name in {"JSON", "JSONB"} or name.endswith("JSON") or name.endswith("JSONB")
 
 
 def _serialize_source_row(row: Any, cols: list[Any], dialect: str) -> list[str]:
@@ -3292,7 +3312,7 @@ def read_table_cursor_batch(
     if not SQLALCHEMY_AVAILABLE:
         raise RuntimeError("SQLAlchemy is not installed")
 
-    from services.keyset_pagination import sqlalchemy_keyset_clause
+    from services.keyset_pagination import present_cursor_bookmark, sqlalchemy_keyset_clause
 
     cfg = _cfg_from_params(
         host,
@@ -3339,9 +3359,10 @@ def read_table_cursor_batch(
 
             key_cols = [table_obj.c[n] for n in key_names]
             stmt = sa.select(*_tz_safe_projection(cfg, selected_cols))
-            if cursor_after:
+            bookmark = present_cursor_bookmark(cursor_after)
+            if bookmark is not None:
                 stmt = stmt.where(
-                    sqlalchemy_keyset_clause(sa, key_cols, str(cursor_after))
+                    sqlalchemy_keyset_clause(sa, key_cols, bookmark)
                 )
             stmt = stmt.order_by(*key_cols).limit(limit)
 
@@ -3376,7 +3397,7 @@ def _delete_by_keys(
     for row in rows:
         for c in conflict_cols:
             val = row.get(c) if isinstance(row, dict) else None
-            if val is None or (isinstance(val, str) and str(val).strip() == ""):
+            if _is_nullish_conflict_key(val):
                 raise ValueError(
                     f"upsert delete-by-keys refused null/empty conflict key {c!r} — "
                     "IS NULL predicates would mass-delete destination rows"
@@ -3408,12 +3429,12 @@ def _prefetch_existing_lsn(
         return existing
     clauses = []
     for row in rows:
-        if any(row.get(c) in (None, "") for c in conflict_cols):
-            continue
         clauses.append(
             sa.and_(
                 *[
-                    table_obj.c[c].is_(None) if row[c] is None else table_obj.c[c] == row[c]
+                    table_obj.c[c].is_(None)
+                    if _is_nullish_conflict_key(row.get(c))
+                    else table_obj.c[c] == row[c]
                     for c in conflict_cols
                 ]
             )
@@ -3427,7 +3448,7 @@ def _prefetch_existing_lsn(
     for found in conn.execute(stmt):
         # Use positional indices because some dialects (DuckDB, SQLite raw) return
         # plain tuples rather than key-addressable Row objects.
-        key = tuple(found[i] for i in range(len(conflict_cols)))
+        key = tuple(_conflict_key_identity(found[i]) for i in range(len(conflict_cols)))
         existing[key] = found[len(conflict_cols)]
     return existing
 
@@ -3514,7 +3535,7 @@ def _upsert_batch(
     if lsn_guarded:
         best: dict[tuple[Any, ...], dict[str, Any]] = {}
         for row in batch:
-            key = tuple(row[c] for c in conflict_cols)
+            key = tuple(_conflict_key_identity(row[c]) for c in conflict_cols)
             prev = best.get(key)
             if prev is None or compare_lsn(row.get(DF_LSN_COL), prev.get(DF_LSN_COL)) >= 0:
                 best[key] = row
@@ -3524,7 +3545,7 @@ def _upsert_batch(
         existing_lsn = _prefetch_existing_lsn(conn, table_obj, rows, conflict_cols)
         filtered: list[dict[str, Any]] = []
         for row in rows:
-            key = tuple(row.get(c) for c in conflict_cols)
+            key = tuple(_conflict_key_identity(row.get(c)) for c in conflict_cols)
             prior = existing_lsn.get(key)
             incoming = row.get(DF_LSN_COL)
             if incoming is not None and compare_lsn(incoming, prior) <= 0:
@@ -3534,7 +3555,7 @@ def _upsert_batch(
     else:
         deduped: dict[tuple[Any, ...], dict[str, Any]] = {}
         for row in batch:
-            key = tuple(row[c] for c in conflict_cols)
+            key = tuple(_conflict_key_identity(row[c]) for c in conflict_cols)
             deduped[key] = row
         rows = list(deduped.values())
 

@@ -805,13 +805,19 @@ def update_insert_upsert(
     """
     if not rows or not conflict_cols:
         return 0
+    from connectors.writer_common import (
+        _conflict_key_identity,
+        assert_dense_upsert_keys_present,
+    )
+
+    assert_dense_upsert_keys_present(rows, conflict_cols)
     existing = _existing_conflict_keys(conn, table_obj, rows, conflict_cols)
     update_cols = [c for c in target_cols if c not in conflict_cols]
     to_update: list[dict[str, Any]] = []
     to_insert: list[dict[str, Any]] = []
     for row in rows:
         payload = {c: row.get(c) for c in target_cols}
-        key = tuple(row[c] for c in conflict_cols)
+        key = tuple(_conflict_key_identity(row[c]) for c in conflict_cols)
         if key in existing:
             if update_cols:
                 to_update.append(payload)
@@ -853,13 +859,15 @@ def _existing_conflict_keys(
     rows: list[dict[str, Any]],
     conflict_cols: list[str],
 ) -> set[tuple[Any, ...]]:
+    from connectors.writer_common import _conflict_key_identity, _is_nullish_conflict_key
+
     keys: set[tuple[Any, ...]] = set()
     for i in range(0, len(rows), _KEY_HIT_CHUNK):
         chunk = rows[i : i + _KEY_HIT_CHUNK]
         clauses = [
             sa.and_(*[table_obj.c[c] == row[c] for c in conflict_cols])
             for row in chunk
-            if all(row.get(c) not in (None, "") for c in conflict_cols)
+            if not any(_is_nullish_conflict_key(row.get(c)) for c in conflict_cols)
         ]
         if not clauses:
             continue
@@ -867,7 +875,9 @@ def _existing_conflict_keys(
             sa.or_(*clauses)
         )
         for found in conn.execute(stmt):
-            keys.add(tuple(found[j] for j in range(len(conflict_cols))))
+            keys.add(
+                tuple(_conflict_key_identity(found[j]) for j in range(len(conflict_cols)))
+            )
     return keys
 
 

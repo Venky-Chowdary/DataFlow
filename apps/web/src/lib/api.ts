@@ -416,6 +416,7 @@ export async function runPreflight(payload: {
   backfill_new_fields?: boolean;
   stream_contracts?: Record<string, unknown>[];
   date_locale?: string;
+  number_locale?: string;
   /** Operator attested governance policy allows moving detected PII. */
   compliance_acknowledged?: boolean;
   /** Operator acknowledged schema drift under manual_review for this run. */
@@ -508,6 +509,8 @@ export async function previewQuarantineCells(payload: {
    * preview scanned on raw values reports findings the writer never sees.
    */
   shape_recipe?: ShapeRecipeWire | null;
+  date_locale?: string;
+  number_locale?: string;
 }): Promise<CellPreviewResult> {
   const res = await apiFetch(`${API_BASE}/preflight/preview-cells`, {
     method: "POST",
@@ -2549,6 +2552,7 @@ export async function runUniversalTransfer(options: {
   priorityDirection?: "asc" | "desc";
   limit?: number;
   dateLocale?: string;
+  numberLocale?: string;
   /** Client-supplied key; when omitted a fresh UUID is sent so HTTP retries converge. */
   idempotencyKey?: string;
   /** Validate→Execute ack trail — must match Studio Validate acknowledgments. */
@@ -2652,6 +2656,7 @@ export async function runUniversalTransfer(options: {
     options.requireSignedContract === true ? "true" : "false",
   );
   formData.append("date_locale", options.dateLocale || "");
+  formData.append("number_locale", options.numberLocale || "");
   formData.append(
     "compliance_acknowledged",
     options.complianceAcknowledged === true ? "true" : "false",

@@ -8,6 +8,9 @@ import {
   buildConversionClassHonesty,
   buildReferentialIntegrityHonesty,
   buildValidateHonestyControls,
+  advancedLocaleFieldId,
+  dateLocaleValidateAction,
+  numberLocaleValidateAction,
   schemaDriftAllowsAcknowledge,
   schemaDriftRequiresRemap,
 } from "./validateHonestyControls.ts";
@@ -204,5 +207,53 @@ describe("validateHonestyControls", () => {
       }),
       false,
     );
+  });
+
+  it("number locale set_locale names columns and does not invent ok", () => {
+    assert.equal(numberLocaleValidateAction(null), null);
+    assert.equal(
+      numberLocaleValidateAction({
+        number_locale_report: { decision: "ok", ambiguous_columns: [] },
+      } as unknown as PreflightResult),
+      null,
+    );
+    const action = numberLocaleValidateAction({
+      number_locale_report: {
+        decision: "set_locale",
+        ambiguous_columns: [{ column: "amount" }, { column: "fee" }],
+      },
+    } as unknown as PreflightResult);
+    assert.ok(action);
+    assert.deepEqual(action.columns, ["amount", "fee"]);
+    assert.match(action.message, /amount, fee/);
+    assert.match(action.message, /Destination → Advanced/);
+    assert.match(action.message, /Auto will not guess/);
+  });
+
+  it("date locale set_locale names columns and does not invent ok", () => {
+    assert.equal(dateLocaleValidateAction(null), null);
+    assert.equal(
+      dateLocaleValidateAction({
+        date_locale_report: { decision: "ok", ambiguous_columns: [] },
+      } as unknown as PreflightResult),
+      null,
+    );
+    const action = dateLocaleValidateAction({
+      date_locale_report: {
+        decision: "set_locale",
+        ambiguous_columns: [{ column: "event_date" }, { column: "due_on" }],
+      },
+    } as unknown as PreflightResult);
+    assert.ok(action);
+    assert.deepEqual(action.columns, ["event_date", "due_on"]);
+    assert.match(action.message, /event_date, due_on/);
+    assert.match(action.message, /Jan 2 or Feb 1/);
+    assert.match(action.message, /DMY or MDY/);
+    assert.match(action.message, /Auto will not guess/);
+  });
+
+  it("Advanced locale field ids stay one owner", () => {
+    assert.equal(advancedLocaleFieldId("date"), "df2-adv-date-locale");
+    assert.equal(advancedLocaleFieldId("number"), "df2-adv-number-locale");
   });
 });

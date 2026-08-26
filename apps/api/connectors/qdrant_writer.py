@@ -13,7 +13,12 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from services.value_serializer import cell_to_string, json_default, sanitize_json_value
+from services.value_serializer import (
+    cell_to_string,
+    json_default,
+    load_http_json,
+    sanitize_json_value,
+)
 from services.vectorization import vectorize_records
 
 from connectors.writer_common import WriteResult as _WriteResult
@@ -198,6 +203,9 @@ def build_qdrant_points(
         coerce_chunk_index,
         coerce_embedding,
         embedding_reject_reason,
+        vector_cell_token,
+        vector_fallback_material,
+        vector_reject_row_label,
     )
 
     points: list[dict[str, Any]] = []
@@ -207,7 +215,7 @@ def build_qdrant_points(
             chunk = coerce_chunk_index(row.get("chunk_index"))
         except ValueError as exc:
             rejected.append({
-                "row": cell_to_string(row.get("id") or ""),
+                "row": vector_reject_row_label(row),
                 "column": "chunk_index",
                 "target": "chunk_index",
                 "value": cell_to_string(row.get("chunk_index")),
@@ -218,7 +226,7 @@ def build_qdrant_points(
         values, err = coerce_embedding(row.get("embedding"), expected_dimension=dimension)
         if err or values is None:
             rejected.append({
-                "row": cell_to_string(row.get("id") or ""),
+                "row": vector_reject_row_label(row),
                 "column": "embedding",
                 "target": "vector",
                 "value": "",
@@ -233,9 +241,8 @@ def build_qdrant_points(
             cell_to_string(raw_id).strip() if is_present_cdc_row_key(raw_id) else ""
         )
         if not point_id:
-            source = cell_to_string(row.get("source_id", ""))
-            content = str(row.get("content") or "")
-            if not source and not content:
+            material = vector_fallback_material(row.get("source_id"), chunk, row.get("content"))
+            if material is None:
                 rejected.append({
                     "row": "",
                     "column": "id",
@@ -245,13 +252,17 @@ def build_qdrant_points(
                     "policy": "quarantine",
                 })
                 continue
-            digest = hashlib.sha256(f"{source}\0{chunk}\0{content}".encode("utf-8")).hexdigest()
+            digest = hashlib.sha256(material.encode("utf-8")).hexdigest()
             point_id = str(uuid_mod.UUID(digest[:32]))
-        payload = sanitize_json_value(row.get("metadata") or {}) or {}
+        from connectors.writer_common import vector_prepare_metadata
+
+        payload = vector_prepare_metadata(
+            sanitize_json_value(row.get("metadata") or {}) or {}
+        )
         if not isinstance(payload, dict):
             payload = {"_meta": payload}
-        payload["content"] = row.get("content", "")
-        payload["source_id"] = cell_to_string(row.get("source_id", ""))
+        payload["content"] = vector_cell_token(row.get("content"))
+        payload["source_id"] = vector_cell_token(row.get("source_id"))
         payload["chunk_index"] = chunk
         points.append({
             "id": point_id,
@@ -342,7 +353,7 @@ def scan_source_ids(
             )
             if resp.status_code != 200:
                 return "unmeasured", []
-            payload = resp.json() if resp.content else {}
+            payload = load_http_json(resp) if resp.content else {}
             result = payload.get("result") if isinstance(payload, dict) else None
             if not isinstance(result, dict):
                 return "unmeasured", []

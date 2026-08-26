@@ -356,7 +356,7 @@ def read_table_cursor_batch(
     Optional ``cursor_primary_key`` enables lexicographic ``(cursor, pk)`` so
     rows sharing a timestamp watermark are not skipped forever.
     """
-    from services.keyset_pagination import split_cursor_bookmark
+    from services.keyset_pagination import present_cursor_bookmark, split_cursor_bookmark
 
     del port
     account = normalize_account(host)
@@ -389,10 +389,11 @@ def read_table_cursor_batch(
                 if pk and pk != cursor_column
                 else ""
             )
-            if cursor_after:
+            bookmark = present_cursor_bookmark(cursor_after)
+            if bookmark is not None:
                 if pk_q:
                     cur_val, pk_val = split_cursor_bookmark(
-                        cursor_after, has_tiebreak=True
+                        bookmark, has_tiebreak=True
                     )
                     cur.execute(
                         f"SELECT {col_sql} FROM {table_ref} "  # nosec B608
@@ -401,7 +402,7 @@ def read_table_cursor_batch(
                         (cur_val, pk_val, limit),
                     )
                 else:
-                    bare, _ = split_cursor_bookmark(cursor_after, has_tiebreak=False)
+                    bare, _ = split_cursor_bookmark(bookmark, has_tiebreak=False)
                     cur.execute(
                         f"SELECT {col_sql} FROM {table_ref} "  # nosec B608
                         f"WHERE {cursor_q} > %s ORDER BY {cursor_q} LIMIT %s",

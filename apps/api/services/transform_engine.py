@@ -211,6 +211,127 @@ def reset_active_date_locale(token: contextvars.Token[str]) -> None:
     """Restore the previous date locale."""
     _DATE_LOCALE_VAR.reset(token)
 
+
+# Number grouping: 'US' (1,234.56), 'EU' (1.234,56), or '' fail-closed on
+# a lone 3-digit group (1,234 / 1.234). Same contract shape as date_locale —
+# never guess US vs EU. Currency marks and both separators still parse.
+_NUMBER_LOCALE_VAR: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "number_locale", default=""
+)
+
+
+def _active_number_locale(explicit: str = "") -> str:
+    loc = (explicit or _NUMBER_LOCALE_VAR.get() or "").strip().upper()
+    return loc if loc in {"US", "EU"} else ""
+
+
+def set_active_number_locale(locale: str) -> contextvars.Token[str]:
+    """Pin US/EU for this transfer, or Auto when ``locale`` is empty.
+
+    Empty must clear the pin — ``_active_number_locale("")`` inherits the
+    current context, so ``set(\"\")`` used to leave EU in place and Gate-8
+    re-read dest ``1.234`` as thousands.
+    """
+    pinned = (locale or "").strip().upper()
+    return _NUMBER_LOCALE_VAR.set(pinned if pinned in {"US", "EU"} else "")
+
+
+def reset_active_number_locale(token: contextvars.Token[str]) -> None:
+    """Restore the previous number locale."""
+    _NUMBER_LOCALE_VAR.reset(token)
+
+
+def _implied_number_locale_from_currency(raw: str) -> str:
+    """Currency marks that carry a grouping convention, or '' if mixed/absent.
+
+    ``$`` / USD / ``£`` / GBP use 1,234.56. ``€`` / EUR use 1.234,56.
+    A mark is evidence for that *cell*, not a column-wide guess.
+    """
+    text = unicodedata.normalize("NFKC", str(raw or ""))
+    us = bool(re.search(r"(?<![A-Za-z])(?:USD|GBP|US\$)(?![A-Za-z])|[$£]", text, re.I))
+    eu = bool(re.search(r"(?<![A-Za-z])EUR(?![A-Za-z])|[€]", text, re.I))
+    if us and not eu:
+        return "US"
+    if eu and not us:
+        return "EU"
+    return ""
+
+
+def infer_number_locale(
+    rows: list[dict] | None,
+    columns: list[str] | None = None,
+    existing_locale: str = "",
+) -> str:
+    """US or EU when every marked/both-separator sample agrees; else ''."""
+    pinned = _active_number_locale(existing_locale)
+    if pinned:
+        return pinned
+    if not rows:
+        return ""
+    cols = columns or (list(rows[0].keys()) if rows and isinstance(rows[0], dict) else [])
+    votes = {"US": 0, "EU": 0}
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        for col in cols:
+            raw = str(row.get(col) or "").strip()
+            if not raw:
+                continue
+            implied = _implied_number_locale_from_currency(raw)
+            if implied:
+                votes[implied] += 1
+                continue
+            if "." in raw and "," in raw:
+                if raw.rfind(".") > raw.rfind(","):
+                    votes["US"] += 1
+                else:
+                    votes["EU"] += 1
+    if votes["US"] and not votes["EU"]:
+        return "US"
+    if votes["EU"] and not votes["US"]:
+        return "EU"
+    return ""
+
+
+def _looks_like_grouped_number(raw: str) -> bool:
+    text = str(raw or "").strip()
+    if not text or not any(ch.isdigit() for ch in text):
+        return False
+    return "," in text or "." in text
+
+
+def ambiguous_number_columns(
+    rows: list[dict] | None,
+    columns: list[str] | None = None,
+    number_locale: str = "",
+) -> list[dict[str, Any]]:
+    """Columns whose samples fail Auto grouping and look numeric.
+
+    Operator next action: set number locale US or EU. Never invent a parse.
+    """
+    if _active_number_locale(number_locale) or not rows:
+        return []
+    cols = columns or (list(rows[0].keys()) if rows and isinstance(rows[0], dict) else [])
+    findings: list[dict[str, Any]] = []
+    for col in cols:
+        samples: list[str] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            raw = str(row.get(col) or "").strip()
+            if not raw or not _looks_like_grouped_number(raw):
+                continue
+            if _parse_decimal(raw) is None:
+                samples.append(raw)
+        if samples:
+            findings.append({
+                "column": col,
+                "samples": samples[:5],
+                "next_action": "Set number locale US or EU in Destination → Advanced",
+            })
+    return findings
+
+
 # Currency symbols and codes that are safe to strip from numeric values.
 _CURRENCY_SYMBOLS = "".join({
     "$", "€", "£", "¥", "₹", "₩", "₽", "₺", "₴", "₱", "₫", "₭", "₦", "₲",
@@ -312,6 +433,64 @@ def _is_ambiguous_mdy_dmy(text: str, date_locale: str = "") -> bool:
     return _detect_dayfirst(text, date_locale) is None and bool(
         re.match(r"^(\d{1,2})[-/.](\d{1,2})[-/.](\d{2,4})(?:[ T].*)?$", text.strip())
     )
+
+
+def ambiguous_date_columns(
+    rows: list[dict] | None,
+    columns: list[str] | None = None,
+    date_locale: str = "",
+) -> list[dict[str, Any]]:
+    """Columns whose slash/dash/dot dates are MDY/DMY-ambiguous under Auto.
+
+    Operator next action: set date locale DMY or MDY. Never invent Jan 2 vs Feb 1.
+    """
+    if _active_date_locale(date_locale) or not rows:
+        return []
+    cols = columns or (list(rows[0].keys()) if rows and isinstance(rows[0], dict) else [])
+    findings: list[dict[str, Any]] = []
+    for col in cols:
+        samples: list[str] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            raw = str(row.get(col) or "").strip()
+            if not raw or not _is_ambiguous_mdy_dmy(raw):
+                continue
+            samples.append(raw)
+        if samples:
+            findings.append({
+                "column": col,
+                "samples": samples[:5],
+                "next_action": "Set date locale DMY or MDY in Destination → Advanced",
+            })
+    return findings
+
+
+def samples_are_auto_ambiguous_dates(
+    source_samples: list[str] | None,
+    date_locale: str = "",
+) -> bool:
+    """True when slash dates exist and Auto cannot settle MDY vs DMY.
+
+    An unambiguous member (31/12/2024, ISO) is enough to type the column.
+    A lone 01/02/2024 is not — inventing DATE / Date→ISO from the name then
+    billing a Risk Contract is this pipeline charging for its own guess.
+    """
+    if _active_date_locale(date_locale) or not source_samples:
+        return False
+    saw_ambiguous = False
+    for raw in source_samples[:25]:
+        text = str(raw or "").strip()
+        if not text:
+            continue
+        if _is_ambiguous_mdy_dmy(text, date_locale):
+            saw_ambiguous = True
+            continue
+        if _parse_date(text, date_locale=date_locale) is not None:
+            return False
+        if _parse_datetime(text, date_locale=date_locale) is not None:
+            return False
+    return saw_ambiguous
 
 
 def infer_date_locale(
@@ -504,17 +683,31 @@ def _normalize_numeric_text(value: str) -> str:
     return text.strip()
 
 
-def _normalize_locale_separators(text: str) -> str | None:
-    """Resolve . / , / space separator ambiguity into a decimal string.
+def _digit_parts(parts: list[str]) -> bool:
+    if not parts or not parts[0]:
+        return False
+    head = parts[0][1:] if parts[0].startswith("-") else parts[0]
+    if not head.isdigit():
+        return False
+    return all(part.isdigit() for part in parts[1:])
 
-    Returns None for unambiguous null sentinels and values that are not
-    parseable numbers.
+
+def _normalize_locale_separators(text: str, number_locale: str = "") -> str | None:
+    """Resolve . / , / space separators, or None when the grouping is ambiguous.
+
+    Auto (no locale): both separators, 3+ thousand groups, and a 1–2 digit
+    last group still parse. A lone 3-digit group (``1,234`` / ``1.234``)
+    fails closed — US thousands and EU decimals share that shape.
+    ``0.025`` / ``0,025`` cannot be thousands (leading-zero integer) and
+    stay dest-canonical fractions so FLOAT/DECIMAL samples are not widened
+    to VARCHAR.
     """
     if text.lower() in NULL_SENTINELS:
         return None
     if not text:
         return None
 
+    locale = _active_number_locale(number_locale)
     # Remove ASCII spaces used as thousands separators (e.g. "1 000 000").
     text = text.replace(" ", "").replace("\t", "")
 
@@ -522,61 +715,105 @@ def _normalize_locale_separators(text: str) -> str | None:
         last_dot = text.rfind(".")
         last_comma = text.rfind(",")
         if last_dot > last_comma:
-            # Dot is the decimal separator; commas are thousands separators.
             candidate = text.replace(",", "")
             if candidate.count(".") <= 1:
                 return candidate
             return None
-        # Comma is the decimal separator; thousand dots are removed.
         text = text.replace(".", "")
         last_comma = text.rfind(",")
         candidate = text[:last_comma] + "." + text[last_comma + 1:]
         if "," in candidate or candidate.count(".") > 1:
             return None
         return candidate
+
     if "," in text:
         parts = text.split(",")
+        if not _digit_parts(parts):
+            return None
+        if locale == "US":
+            if all(len(part) == 3 for part in parts[1:]):
+                return "".join(parts)
+            return None
+        if locale == "EU":
+            if len(parts) == 2:
+                return parts[0] + "." + parts[1]
+            if (
+                len(parts) >= 2
+                and all(len(part) == 3 for part in parts[1:-1])
+                and 1 <= len(parts[-1]) <= 2
+            ):
+                return "".join(parts[:-1]) + "." + parts[-1]
+            return None
         if (
-            len(parts) >= 2
+            len(parts) >= 3
             and parts[0]
-            and not parts[0].startswith("0")
-            and all(part.isdigit() and len(part) == 3 for part in parts[1:])
+            and not parts[0].lstrip("-").startswith("0")
+            and all(len(part) == 3 for part in parts[1:])
         ):
-            return text.replace(",", "")
-        # European decimal / decimal with 3-digit groups and a short final group.
+            return "".join(parts)
         if (
             len(parts) >= 2
-            and parts[0].isdigit()
-            and all(part.isdigit() and len(part) == 3 for part in parts[1:-1])
-            and parts[-1].isdigit()
+            and all(len(part) == 3 for part in parts[1:-1])
             and 1 <= len(parts[-1]) <= 2
-            and len(parts[0]) <= 3
         ):
             return "".join(parts[:-1]) + "." + parts[-1]
-        if len(parts) == 2:
+        # A last group longer than 3 cannot be thousands — it is a decimal scale.
+        if len(parts) == 2 and len(parts[1]) > 3:
+            return parts[0] + "." + parts[1]
+        # Leading-zero integer + 3-digit last group is a fraction, not thousands
+        # (``0,025`` is 0.025, never 25).
+        if (
+            len(parts) == 2
+            and len(parts[1]) == 3
+            and parts[0].lstrip("-") == "0"
+        ):
             return parts[0] + "." + parts[1]
         return None
+
     if "." in text:
         parts = text.split(".")
-        # Multi-dot US/ISO thousands: 1.234.567 (but not 1.234, which is decimal).
+        if not _digit_parts(parts):
+            return text
+        if locale == "US":
+            if len(parts) == 2:
+                return text
+            return None
+        if locale == "EU":
+            if all(len(part) == 3 for part in parts[1:]):
+                return "".join(parts)
+            if len(parts) == 2 and 1 <= len(parts[1]) <= 2:
+                return text
+            if len(parts) == 2 and len(parts[1]) > 3:
+                return text
+            return None
         if (
-            len(parts) > 2
+            len(parts) >= 3
             and parts[0]
-            and not parts[0].startswith("0")
-            and all(part.isdigit() and len(part) == 3 for part in parts[1:])
+            and not parts[0].lstrip("-").startswith("0")
+            and all(len(part) == 3 for part in parts[1:])
         ):
-            return text.replace(".", "")
+            return "".join(parts)
         if (
             len(parts) >= 2
-            and parts[0].isdigit()
-            and all(part.isdigit() and len(part) == 3 for part in parts[1:-1])
-            and parts[-1].isdigit()
+            and all(len(part) == 3 for part in parts[1:-1])
             and 1 <= len(parts[-1]) <= 2
-            and len(parts[0]) <= 3
         ):
             return "".join(parts[:-1]) + "." + parts[-1]
-        # Single dot is a decimal point (e.g. 1.234), not a thousands separator.
-        return text
+        if len(parts) == 2 and 1 <= len(parts[1]) <= 2:
+            return text
+        # A last group longer than 3 cannot be thousands — IEEE/Excel residue
+        # and money scales (52.310500000000000, 1.2345) stay decimals.
+        if len(parts) == 2 and len(parts[1]) > 3:
+            return text
+        # Leading-zero integer + 3-digit last group is a fraction, not thousands
+        # (``0.025`` is 0.025, never 25). ``1.234`` stays Auto-ambiguous.
+        if (
+            len(parts) == 2
+            and len(parts[1]) == 3
+            and parts[0].lstrip("-") == "0"
+        ):
+            return text
+        return None
     return text
 
 
@@ -585,8 +822,9 @@ def _parse_decimal(value: str) -> str | None:
     # Tuple / point / coordinate strings such as (1,2) or (1, 2) are not numbers.
     if text.startswith("(") and text.endswith(")") and "," in text and "." not in text:
         return None
+    implied = _implied_number_locale_from_currency(text)
     text = _normalize_numeric_text(text)
-    text = _normalize_locale_separators(text)
+    text = _normalize_locale_separators(text, implied)
     if text is None or text == "":
         return None
     try:
@@ -645,8 +883,9 @@ def _parse_integer(value: str) -> int | None:
     # budget by construction — the common integer column skips all of it.
     if _PLAIN_ASCII_INT_RE.match(plain):
         return int(plain)
+    implied = _implied_number_locale_from_currency(plain)
     text = _normalize_numeric_text(plain)
-    text = _normalize_locale_separators(text)
+    text = _normalize_locale_separators(text, implied)
     if text is None or text == "":
         return None
     try:
@@ -682,6 +921,73 @@ def _parse_integer(value: str) -> int | None:
         return int(dec)
     except (Overflow, ValueError, InvalidOperation):
         return None
+
+
+def decimal_wire_value(value: Any) -> Decimal | None:
+    """The decimal the write path would bind for ``value``, or ``None``.
+
+    The one parser profilers, preflight, reconcile, and shape must consult.
+    Auto fails closed on ``1,234`` / ``1.234``. Currency marks and both-separator
+    forms still parse. ``Decimal(text.replace(",", ""))`` is a second algorithm
+    and is forbidden at call sites.
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, Decimal):
+        return value if value.is_finite() else None
+    if isinstance(value, int):
+        return Decimal(value)
+    if isinstance(value, float):
+        if value != value or value in (float("inf"), float("-inf")):
+            return None
+        try:
+            parsed = Decimal(str(value))
+        except (InvalidOperation, Overflow, ValueError):
+            return None
+        return parsed if parsed.is_finite() else None
+    text = str(value).strip()
+    if not text:
+        return None
+    rendered = _parse_decimal(text)
+    if rendered is None:
+        return None
+    try:
+        dec = Decimal(rendered)
+    except (InvalidOperation, Overflow, ValueError):
+        return None
+    return dec if dec.is_finite() else None
+
+
+def float_carrier_or_refuse(parsed: Decimal) -> float:
+    """IEEE float only when it is the same number the write path bound.
+
+    ``float(2**53+1)`` is ``2**53``. Leftover/CDC Float keys must refuse
+    that collapse rather than delete the wrong row. Scale-only money
+    (``10.00``) still fits.
+    """
+    try:
+        as_float = float(parsed)
+    except (OverflowError, ValueError, InvalidOperation) as exc:
+        raise ValueError("float write path refused") from exc
+    if as_float != as_float or as_float in (float("inf"), float("-inf")):
+        raise ValueError("float write path refused")
+    if +parsed != +Decimal(repr(as_float)):
+        raise ValueError("float write path refused")
+    return as_float
+
+
+def is_fractional_wire_value(value: Any) -> bool:
+    """True when the write path binds a non-integral decimal.
+
+    Locale money (``$1,234.56`` / ``€1.234,56``) counts. Auto ``1,234`` and
+    whole ``$1,234`` do not. ``Decimal(text)`` is a second algorithm.
+    """
+    parsed = decimal_wire_value(value)
+    if parsed is None:
+        return False
+    return parsed != parsed.to_integral_value()
 
 
 def integer_wire_value(value: str) -> int | None:
@@ -724,10 +1030,9 @@ def integer_parse_failure_reason(value: str) -> str:
     return stem
 
 
-# Canonical boolean wire only (SSOT with type_system.boolean_value_fits).
-# Informal "yes"/"on"/"y" invents truth (Airbyte-class); refuse — operator
-# must remap or transform. Schema inference keeps a wider informal set for
-# flag-name detection only.
+# Canonical boolean wire only (SSOT with type_system.boolean_value_fits and
+# schema_inference BOOLEAN dest invent). Informal "yes"/"on"/"y" invents
+# truth (Airbyte-class); refuse — operator must remap or transform.
 _STRICT_BOOL_TRUE = frozenset({"true", "t", "1"})
 _STRICT_BOOL_FALSE = frozenset({"false", "f", "0"})
 
@@ -736,6 +1041,15 @@ _STRICT_BOOL_FALSE = frozenset({"false", "f", "0"})
 #: boolean: 'Y'"), so any caller routing values through the boolean transform
 #: must first check the destination can hold the outcome.
 CANONICAL_BOOLEAN_TOKENS: frozenset[str] = _STRICT_BOOL_TRUE | _STRICT_BOOL_FALSE
+# Assist / quality sample regex — same tokens, longer first so ``true`` beats ``t``.
+CANONICAL_BOOLEAN_SAMPLE_PATTERN = (
+    r"^(?:"
+    + "|".join(
+        re.escape(tok)
+        for tok in sorted(CANONICAL_BOOLEAN_TOKENS, key=lambda s: (-len(s), s))
+    )
+    + r")$"
+)
 
 
 def _parse_boolean(value: str) -> bool | None:
@@ -835,6 +1149,40 @@ def _parse_json(value: Any) -> str | None:
     )
 
 
+def vector_component_carrier(value: Any) -> float | None:
+    """One VECTOR / embedding component through the write-path float binder.
+
+    ``float(text)`` invented Auto ``1.234`` and collapsed ``2**53+1``.
+    Native IEEE floats pass through. Locale money still binds.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, float):
+        if value != value or value in (float("inf"), float("-inf")):
+            return None
+        return value
+    if isinstance(value, int):
+        try:
+            return float_carrier_or_refuse(Decimal(value))
+        except (ValueError, Overflow, InvalidOperation):
+            return None
+    if isinstance(value, Decimal):
+        try:
+            return float_carrier_or_refuse(value)
+        except (ValueError, Overflow, InvalidOperation):
+            return None
+    text = str(value).strip()
+    if not text:
+        return None
+    parsed = decimal_wire_value(text)
+    if parsed is None:
+        return None
+    try:
+        return float_carrier_or_refuse(parsed)
+    except (ValueError, Overflow, InvalidOperation):
+        return None
+
+
 def _parse_vector(value: str) -> list[float] | None:
     """Parse a vector literal into a float list; reject dim-mismatched later."""
     text = value.strip()
@@ -842,15 +1190,15 @@ def _parse_vector(value: str) -> list[float] | None:
         return None
     try:
         if text.startswith("["):
-            parsed = json.loads(text, parse_constant=_json_reject_nonfinite)
+            parsed = json_loads_exact(text, parse_constant=_json_reject_nonfinite)
         else:
-            parsed = [float(x.strip()) for x in text.split(",") if x.strip()]
+            parsed = [x.strip() for x in text.split(",") if x.strip()]
         if not isinstance(parsed, list) or not parsed:
             return None
         out: list[float] = []
         for x in parsed:
-            f = float(x)
-            if f != f or f in (float("inf"), float("-inf")):  # NaN / Inf
+            f = vector_component_carrier(x)
+            if f is None:
                 return None
             out.append(f)
         return out
@@ -909,6 +1257,11 @@ def _parse_time(value: str) -> str | None:
 
     text = value.strip()
     if not text:
+        return None
+    # Digit-only / epoch tokens are not clock times. CPython
+    # ``time.fromisoformat("1704067200")`` invents ``17:04:06.720000``.
+    # A real clock always has ``:`` or an AM/PM marker.
+    if ":" not in text and not re.search(r"(?i)\b(?:am|pm)\b", text):
         return None
     # Prefer fromisoformat so ``15:30:00+05:30`` keeps tzinfo.
     iso_text = text
@@ -1277,6 +1630,17 @@ def infer_transform_for_mapping(
         or src_col.endswith("_DT")
         or src_col in {"TXN_DT", "PAY_DT", "PAYMENT_DT", "TRANS_DT"}
     ):
+        # Text sinks store the source token. Date→ISO here invents a parse,
+        # fails Auto-ambiguous 01/02/2024, then frames VARCHAR→VARCHAR as
+        # fidelity collapse. Existing DATE dest already returned above via
+        # tgt == "date". Currency / email / phone already preserve text sinks.
+        if tgt in {"string", "text", "unknown"} or not tgt:
+            return "none"
+        # Auto-ambiguous 01/02/2024 is not a calendar type. Inventing Date→ISO
+        # from the name, then DATE dest, then a Risk Contract, is this
+        # pipeline charging for its own guess.
+        if samples_are_auto_ambiguous_dates(source_samples):
+            return "none"
         return "datetime" if src == "datetime" or "epoch" in src_lower else "date"
     if tgt_name.endswith("_id") or tgt_name.endswith("id") or src_col.endswith("_ID"):
         return "trim_id"
@@ -1392,7 +1756,15 @@ def apply_transform(raw: str | None, transform: str) -> tuple[Any, str | None]:
         parsed = _parse_decimal(text)
         if parsed is None:
             return None, f"Invalid decimal: {text!r}"
-        return parsed, None
+        # Return Decimal so bind does not re-apply locale to the canonical
+        # spelling (EU ``1,234`` → ``1.234`` must not become thousands 1234).
+        # Extreme scientific stays a short string (never expand 1e1000000).
+        if "e" in parsed.lower():
+            return parsed, None
+        try:
+            return Decimal(parsed), None
+        except (InvalidOperation, Overflow, ValueError):
+            return parsed, None
 
     if transform == "integer":
         bool_as_number = canonical_boolean_as_number(text)

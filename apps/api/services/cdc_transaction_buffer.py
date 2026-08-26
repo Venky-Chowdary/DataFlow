@@ -29,6 +29,19 @@ from typing import Any, Iterator
 
 from services.cdc_engine import ChangeBatch
 from services.cdc_net_effect import CdcTxnEvent, coalesce_cdc_txn_events, infer_row_pk
+from services.value_serializer import json_loads_exact
+
+
+def load_cdc_txn_spill_event(line: str) -> dict[str, Any] | None:
+    """One spilled CDC txn JSONL event. Numbers match ``json_loads_exact``.
+
+    Invalid JSON or a non-object line is skipped — never invent a DML event.
+    """
+    try:
+        rec = json_loads_exact(line)
+    except (json.JSONDecodeError, ValueError, TypeError):
+        return None
+    return rec if isinstance(rec, dict) else None
 
 
 def default_txn_buffer_max_events() -> int:
@@ -301,9 +314,8 @@ class TransactionBuffer:
                     line = line.strip()
                     if not line:
                         continue
-                    try:
-                        rec = json.loads(line)
-                    except json.JSONDecodeError:
+                    rec = load_cdc_txn_spill_event(line)
+                    if rec is None:
                         continue
                     op = rec.get("op")
                     if op not in {"i", "u", "d"}:

@@ -29,40 +29,46 @@ _IEEE_SCALE_TAIL = 8
 _IEEE_MIN_SIGNIFICANT_DIGITS = 15
 
 
-def _canonical_numeric_text(value: Any) -> str | None:
-    """Locale/currency-aware decimal text via transform_engine SSOT.
+def _canonical_numeric(value: Any) -> Decimal | None:
+    """The write-path decimal for this cell, or ``None`` (do not invent 0).
 
-    Returns ``None`` when the cell is empty / unparseable (do not invent 0).
+    Auto ``1,234`` / ``1.234`` / ``1.000`` refuse. Locale money
+    (``$1,234`` / ``€1.234``) binds — stripping the symbol then calling
+    ``_normalize_locale_separators`` without the implied currency locale
+    used to miss those whole-currency cells and invent INTEGER / empty
+    from the leftover ``$99``.
     """
-    if value is None:
-        return None
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, Decimal):
-        if not value.is_finite():
-            return None
-        return format(value.normalize(), "f")
-    if isinstance(value, int) and not isinstance(value, bool):
-        return str(value)
-    if isinstance(value, float):
-        if value != value or value in (float("inf"), float("-inf")):
-            return None
-        try:
-            return format(Decimal(str(value)).normalize(), "f")
-        except (InvalidOperation, Overflow, ValueError):
-            return None
-    text = str(value).strip()
-    if not text:
-        return None
-    from services.transform_engine import (
-        _normalize_locale_separators,
-        _normalize_numeric_text,
-    )
+    from services.transform_engine import decimal_wire_value
 
-    cleaned = _normalize_numeric_text(text)
-    if not cleaned:
-        return None
-    return _normalize_locale_separators(cleaned)
+    return decimal_wire_value(value)
+
+
+def write_int_digits_and_scale(value: Any) -> tuple[int, int]:
+    """(integer_digits, fractional_scale) for write fit / bind.
+
+    Trailing zeros are padding (``2000.00`` → scale 0). Snowflake
+    ``NUMBER(38,0)`` stores that as 2000. Significant cents stay
+    (``2000.10`` → 2). Create-new invent must keep money scale via
+    ``cell_int_digits_and_scale`` and must not call this.
+    """
+    try:
+        d = _canonical_numeric(value)
+        if d is None or not d.is_finite():
+            if isinstance(value, Decimal) and value.is_finite():
+                d = value
+            else:
+                return 0, 0
+        with localcontext() as ctx:
+            ctx.prec = max(len(d.as_tuple().digits) + 1, 28)
+            n = d.normalize()
+        _sign, digits, exponent = n.as_tuple()
+        if not isinstance(exponent, int):
+            return 0, 0
+        scale = -exponent if exponent < 0 else 0
+        int_digits = max(0, len(digits) + exponent)
+        return int_digits, scale
+    except (InvalidOperation, Overflow, ValueError, TypeError):
+        return 0, 0
 
 
 def cell_int_digits_and_scale(value: Any) -> tuple[int, int]:
@@ -73,11 +79,8 @@ def cell_int_digits_and_scale(value: Any) -> tuple[int, int]:
     raw scale is in the float-tail band.
     """
     try:
-        text = _canonical_numeric_text(value)
-        if not text:
-            return 0, 0
-        d = Decimal(text)
-        if not d.is_finite():
+        d = _canonical_numeric(value)
+        if d is None or not d.is_finite():
             return 0, 0
         _sign, digits, exponent = d.as_tuple()
         raw_scale = -exponent if exponent < 0 else 0
@@ -105,11 +108,8 @@ def significant_digit_count(value: Any) -> int:
     context wide enough to leave the value alone.
     """
     try:
-        text = _canonical_numeric_text(value)
-        if not text:
-            return 0
-        d = Decimal(text)
-        if not d.is_finite():
+        d = _canonical_numeric(value)
+        if d is None or not d.is_finite():
             return 0
         with localcontext() as ctx:
             ctx.prec = max(len(d.as_tuple().digits) + 1, 28)
@@ -210,23 +210,17 @@ def observe_numeric_samples(
     residue_scale = 0
     parsed = 0
     for raw in rows[:500]:
-        text = _canonical_numeric_text(raw)
-        if not text:
+        d = _canonical_numeric(raw)
+        if d is None or not d.is_finite():
             continue
-        try:
-            d = Decimal(text)
-            if not d.is_finite():
-                continue
-        except (InvalidOperation, Overflow, ValueError):
-            continue
-        idig, scale = cell_int_digits_and_scale(text)
+        idig, scale = cell_int_digits_and_scale(d)
         parsed += 1
         int_digits_list.append(idig)
         scales.append(scale)
         # Scientific notation is a rendering, not a storage class: exporters emit
         # ``9.87E+20`` for exact decimals all the time, so it is judged on the
         # same mantissa evidence as any other spelling.
-        if looks_like_binary_residue(text):
+        if looks_like_binary_residue(d):
             ieee_signals.append("hard_scale_residue")
             residue_scale = max(residue_scale, scale)
 

@@ -16,6 +16,7 @@ from connectors.saas_common import (
     humanize_http_error,
     is_auth_error,
     request,
+    saas_record_id,
     token,
 )
 from connectors.saas_write_carriers import (
@@ -276,8 +277,6 @@ def write_mapped_rows(
 
         record_id = None
         if mode in upsert_modes:
-            from services.value_serializer import is_missing_sentinel
-
             candidates = [c for c in (conflict_columns or []) if c]
             if not candidates:
                 from connectors.writer_common import append_write_quarantine_detail
@@ -359,11 +358,9 @@ def write_mapped_rows(
                     )
                 continue
             for c in id_cols:
-                val = row_dict.get(c)
-                if val is None or is_missing_sentinel(val):
-                    continue
-                if val:
-                    record_id = str(val).strip() or None
+                token_id = saas_record_id(row_dict.get(c))
+                if token_id:
+                    record_id = token_id
                     break
             if not record_id:
                 from connectors.writer_common import append_write_quarantine_detail

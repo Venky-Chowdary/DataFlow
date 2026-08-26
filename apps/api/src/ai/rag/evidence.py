@@ -30,14 +30,30 @@ _SPELLED = (
 
 
 def _number_forms(fact: str) -> set[str]:
-    """Every spelling of a number that still means the same figure."""
-    forms = {fact, fact.replace(",", "")}
-    digits = fact.replace(",", "")
-    if digits.isdigit():
-        value = int(digits)
+    """Every spelling of a number that still means the same figure.
+
+    The exact token always counts. Canonical / spelled / US-grouped forms are
+    added only when ``decimal_wire_value`` binds — the same parser the write
+    path uses. Auto-ambiguous ``1,234`` / ``1.234`` therefore stay as written;
+    a rewrite that drops the grouping mark invents a US or EU reading Auto
+    itself refuses, so that rewrite is a lost fact.
+    """
+    from services.transform_engine import decimal_wire_value
+
+    forms = {fact}
+    parsed = decimal_wire_value(fact)
+    if parsed is None:
+        return forms
+    if parsed == parsed.to_integral_value():
+        value = int(parsed)
+        forms.add(str(value))
         forms.add(f"{value:,}")
-        if value < len(_SPELLED):
+        if 0 <= value < len(_SPELLED):
             forms.add(_SPELLED[value])
+        return forms
+    wire = format(parsed, "f").rstrip("0").rstrip(".")
+    if wire:
+        forms.add(wire)
     return forms
 
 
