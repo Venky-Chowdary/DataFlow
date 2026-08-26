@@ -29,7 +29,7 @@ from datetime import date, datetime
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Any, Callable, Mapping, Sequence
 
-from services.value_serializer import is_null_evidence
+from services.value_serializer import cell_to_string, is_null_evidence
 
 __all__ = [
     "ExpressionError",
@@ -294,7 +294,8 @@ def is_blank(value: Any) -> bool:
 
 
 def _as_text(value: Any) -> str | None:
-    if value is None:
+    """Present text. Reader-wired SQL NULL is not a customer token."""
+    if is_null_evidence(value):
         return None
     if isinstance(value, str):
         return value
@@ -306,7 +307,10 @@ def _as_text(value: Any) -> str | None:
         return format(value, "f")
     if isinstance(value, (datetime, date)):
         return value.isoformat()
-    return str(value)
+    text = cell_to_string(value, preserve_sql_null=True)
+    if is_null_evidence(text):
+        return None
+    return text
 
 
 def _as_number(value: Any) -> Decimal:
