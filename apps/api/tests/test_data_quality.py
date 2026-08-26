@@ -14,7 +14,6 @@ from services.data_quality import (  # noqa: E402
     BatchDriftDetector,
     _parse_iso_date,
     _to_decimal,
-    _to_float,
     run_integrity_audit,
 )
 
@@ -155,12 +154,13 @@ def test_detects_required_nulls():
     assert "email" in report.issues[0]
 
 
-def test_parses_locale_and_currency_floats():
-    assert _to_float("$1,234.56") == 1234.56
-    assert _to_float("€1.234,56") == 1234.56
-    assert _to_float("1 000 000.89") == 1000000.89
-    assert _to_float("USD 1 000 000.89") == 1000000.89
-    assert _to_float("not a number") is None
+def test_parses_locale_and_currency_as_decimals():
+    assert _to_decimal("$1,234.56") == Decimal("1234.56")
+    assert _to_decimal("€1.234,56") == Decimal("1234.56")
+    assert _to_decimal("1 000 000.89") == Decimal("1000000.89")
+    assert _to_decimal("USD 1 000 000.89") == Decimal("1000000.89")
+    assert _to_decimal("not a number") is None
+    assert _to_decimal("1,234") is None
 
 
 def test_parses_dayfirst_dates():

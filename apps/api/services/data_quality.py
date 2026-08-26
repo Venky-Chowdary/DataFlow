@@ -102,19 +102,6 @@ def _is_fractional_decimal(value: Any) -> bool:
     return is_fractional_wire_value(value)
 
 
-def _to_float(value: Any) -> float | None:
-    if _is_null(value):
-        return None
-    # Reuse the engine's locale/currency/scientific-aware decimal parser.
-    parsed, _ = apply_transform(str(value).strip(), "decimal")
-    if parsed is None:
-        return None
-    try:
-        return float(Decimal(str(parsed)))
-    except (InvalidOperation, ValueError, TypeError, OverflowError):
-        return None
-
-
 def _parse_iso_date(value: Any) -> datetime | None:
     if _is_null(value):
         return None
