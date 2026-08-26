@@ -304,6 +304,7 @@ export function TransferPage({
   const [connectorSampleRows, setConnectorSampleRows] = useState<Record<string, unknown>[]>([]);
   const [cloudPath, setCloudPath] = useState("");
   const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [advancedLocaleFocus, setAdvancedLocaleFocus] = useState<"date" | "number" | null>(null);
   /** Shared Fix-bad-data drawer open state (Validate dashboard + rail Fix CTA). */
   const [badDataFixOpen, setBadDataFixOpen] = useState(false);
   const [file, setFile] = useState<File | null>(null);
@@ -1105,6 +1106,7 @@ export function TransferPage({
 
   /** Opens Advanced drawer in-place — never navigates away from Map / Validate. */
   const openIdentitySettings = useCallback(() => {
+    setAdvancedLocaleFocus(null);
     setAdvancedOpen(true);
     toast({
       title: "Advanced settings",
@@ -1113,6 +1115,23 @@ export function TransferPage({
       tone: "info",
     });
   }, [toast]);
+
+  /** Validate Set date/number locale — open Advanced and land on that control. */
+  const openLocaleSettings = useCallback(
+    (kind: "date" | "number") => {
+      setAdvancedLocaleFocus(kind);
+      setAdvancedOpen(true);
+      toast({
+        title: kind === "date" ? "Date locale" : "Number locale",
+        message:
+          kind === "date"
+            ? "Set DMY or MDY. Auto will not guess 01/02/2024. Re-run Validate after you choose."
+            : "Set US or EU. Auto will not guess 1,234. Re-run Validate after you choose.",
+        tone: "info",
+      });
+    },
+    [toast],
+  );
 
   // Fix-bad-data is Validate-only — close if the operator leaves the step.
   useEffect(() => {
@@ -5521,6 +5540,7 @@ export function TransferPage({
     setSourceCollection("");
     setCloudPath("");
     setAdvancedOpen(false);
+    setAdvancedLocaleFocus(null);
     setFile(null);
     setParsed(null);
     setShapeSteps([]);
@@ -6913,6 +6933,7 @@ export function TransferPage({
             }}
             onReloadDestSchema={() => { void loadDestinationSchema({ force: true }); }}
             onOpenIdentitySettings={openIdentitySettings}
+            onOpenLocaleSettings={openLocaleSettings}
             uniqueKeySuggestions={uniqueKeySuggestions}
             compositeKeySuggestions={compositeKeySuggestions}
             onApplyPrimaryKey={(column) => {
@@ -7452,7 +7473,11 @@ export function TransferPage({
       {/* Shared Advanced drawer — Dest / Map / Validate open it in-place (no step change). */}
       <DestinationAdvancedDrawer
         open={advancedOpen}
-        onClose={() => setAdvancedOpen(false)}
+        onClose={() => {
+          setAdvancedOpen(false);
+          setAdvancedLocaleFocus(null);
+        }}
+        localeFocus={advancedLocaleFocus}
         syncModes={routeSyncModes}
         schemaPolicies={SCHEMA_POLICIES}
         validationModes={VALIDATION_MODES}

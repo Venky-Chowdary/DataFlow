@@ -235,6 +235,8 @@ interface ValidateDashboardProps {
    * Used for duplicate-identity blockers (Map alone cannot change the sync contract).
    */
   onOpenIdentitySettings?: () => void;
+  /** Open Destination → Advanced and scroll Date / Number locale into view. */
+  onOpenLocaleSettings?: (kind: "date" | "number") => void;
   /** Sample-unique key suggestions (honest: Validate sample only). */
   uniqueKeySuggestions?: Array<{
     column: string;
@@ -744,6 +746,7 @@ export function ValidateDashboard({
   onReviewMappings,
   onReloadDestSchema,
   onOpenIdentitySettings,
+  onOpenLocaleSettings,
   uniqueKeySuggestions = [],
   onApplyPrimaryKey,
   compositeKeySuggestions = [],
@@ -2820,14 +2823,22 @@ export function ValidateDashboard({
       {!running ? (
         <NumberLocalePanel
           action={numberLocaleValidateAction(preflight)}
-          onOpenAdvanced={onOpenIdentitySettings}
+          onOpenAdvanced={
+            onOpenLocaleSettings
+              ? () => onOpenLocaleSettings("number")
+              : onOpenIdentitySettings
+          }
         />
       ) : null}
 
       {!running ? (
         <DateLocalePanel
           action={dateLocaleValidateAction(preflight)}
-          onOpenAdvanced={onOpenIdentitySettings}
+          onOpenAdvanced={
+            onOpenLocaleSettings
+              ? () => onOpenLocaleSettings("date")
+              : onOpenIdentitySettings
+          }
         />
       ) : null}
 

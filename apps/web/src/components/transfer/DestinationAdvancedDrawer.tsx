@@ -1,4 +1,9 @@
+import { useEffect } from "react";
 import { Drawer } from "../ui/Drawer";
+import {
+  type AdvancedLocaleKind,
+  scrollAdvancedLocaleIntoView,
+} from "../../lib/validateHonestyControls";
 import { Button } from "../ui/Button";
 import { FilterBar } from "../ui/FilterBar";
 import { FilterTabs } from "../ui/FilterTabs";
@@ -189,6 +194,8 @@ interface DestinationAdvancedDrawerProps {
   embeddingCacheBusy?: boolean;
   onRefreshEmbeddingCache?: () => void;
   onClearEmbeddingCache?: () => void;
+  /** Validate Set date/number locale — scroll that control into view after open. */
+  localeFocus?: AdvancedLocaleKind | null;
 }
 
 /**
@@ -281,9 +288,18 @@ export function DestinationAdvancedDrawer({
   embeddingCacheBusy = false,
   onRefreshEmbeddingCache,
   onClearEmbeddingCache,
+  localeFocus = null,
 }: DestinationAdvancedDrawerProps) {
   const names = streamNames.length > 0 ? streamNames : ["source_stream"];
   const activeMode = syncModes.find((m) => m.id === syncMode);
+
+  useEffect(() => {
+    if (!open || !localeFocus) return;
+    const timer = window.setTimeout(() => {
+      scrollAdvancedLocaleIntoView(localeFocus);
+    }, 80);
+    return () => window.clearTimeout(timer);
+  }, [open, localeFocus]);
 
   return (
     <Drawer
@@ -558,8 +574,9 @@ export function DestinationAdvancedDrawer({
 
         <div className="df2-policy-toolbar">
           <div className="df2-field">
-            <label className="df2-label">Date locale</label>
+            <label className="df2-label" htmlFor="df2-adv-date-locale">Date locale</label>
             <select
+              id="df2-adv-date-locale"
               className="df2-select"
               value={dateLocale}
               onChange={(e) => onDateLocaleChange(e.target.value as DestDateLocale)}
@@ -574,8 +591,9 @@ export function DestinationAdvancedDrawer({
             <small className="df2-label-hint">Auto infers from unambiguous rows. Set DMY or MDY for all-ambiguous samples.</small>
           </div>
           <div className="df2-field">
-            <label className="df2-label">Number locale</label>
+            <label className="df2-label" htmlFor="df2-adv-number-locale">Number locale</label>
             <select
+              id="df2-adv-number-locale"
               className="df2-select"
               value={numberLocale}
               onChange={(e) => onNumberLocaleChange(e.target.value as DestNumberLocale)}

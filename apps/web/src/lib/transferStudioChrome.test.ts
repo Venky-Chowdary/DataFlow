@@ -525,11 +525,20 @@ describe("Transfer Studio chrome contracts", () => {
     const dash = readFileSync(join(webRoot, "components/transfer/ValidateDashboard.tsx"), "utf8");
     const panel = readFileSync(join(webRoot, "components/transfer/NumberLocalePanel.tsx"), "utf8");
     const honesty = readFileSync(join(webRoot, "lib/validateHonestyControls.ts"), "utf8");
+    const drawer = readFileSync(join(webRoot, "components/transfer/DestinationAdvancedDrawer.tsx"), "utf8");
+    const page = readFileSync(join(webRoot, "pages/TransferPage.tsx"), "utf8");
     assert.match(honesty, /export function dateLocaleValidateAction/);
     assert.match(dash, /DateLocalePanel/);
     assert.match(dash, /dateLocaleValidateAction\(preflight\)/);
     assert.match(panel, /Set date locale/);
     assert.doesNotMatch(panel, /Set date locale[\s\S]*Set date locale/);
+    assert.match(drawer, /id="df2-adv-date-locale"/);
+    assert.match(drawer, /id="df2-adv-number-locale"/);
+    assert.match(drawer, /localeFocus/);
+    assert.match(drawer, /scrollAdvancedLocaleIntoView/);
+    assert.match(dash, /onOpenLocaleSettings/);
+    assert.match(page, /openLocaleSettings/);
+    assert.match(honesty, /export function scrollAdvancedLocaleIntoView/);
   });
 
   it("Source, Schedules, and Gate8 pick files through one sr-only input + label", () => {

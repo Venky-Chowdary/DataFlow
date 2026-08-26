@@ -285,6 +285,29 @@ export function numberLocaleValidateAction(
 
 export type DateLocaleValidateAction = NumberLocaleValidateAction;
 
+export type AdvancedLocaleKind = "date" | "number";
+
+/** Stable ids for Destination → Advanced locale selects. One owner. */
+export const ADVANCED_LOCALE_FIELD_ID: Record<AdvancedLocaleKind, string> = {
+  date: "df2-adv-date-locale",
+  number: "df2-adv-number-locale",
+};
+
+export function advancedLocaleFieldId(kind: AdvancedLocaleKind): string {
+  return ADVANCED_LOCALE_FIELD_ID[kind];
+}
+
+/** Scroll + focus the locale control after Advanced mounts. Returns whether it was found. */
+export function scrollAdvancedLocaleIntoView(kind: AdvancedLocaleKind): boolean {
+  const el = document.getElementById(advancedLocaleFieldId(kind));
+  if (!el) return false;
+  el.scrollIntoView({ behavior: "smooth", block: "center" });
+  if ("focus" in el && typeof el.focus === "function") {
+    el.focus();
+  }
+  return true;
+}
+
 /** Validate next action when Auto cannot tell Jan 2 from Feb 1. */
 export function dateLocaleValidateAction(
   preflight: PreflightResult | null | undefined,

@@ -8,6 +8,7 @@ import {
   buildConversionClassHonesty,
   buildReferentialIntegrityHonesty,
   buildValidateHonestyControls,
+  advancedLocaleFieldId,
   dateLocaleValidateAction,
   numberLocaleValidateAction,
   schemaDriftAllowsAcknowledge,
@@ -249,5 +250,10 @@ describe("validateHonestyControls", () => {
     assert.match(action.message, /Jan 2 or Feb 1/);
     assert.match(action.message, /DMY or MDY/);
     assert.match(action.message, /Auto will not guess/);
+  });
+
+  it("Advanced locale field ids stay one owner", () => {
+    assert.equal(advancedLocaleFieldId("date"), "df2-adv-date-locale");
+    assert.equal(advancedLocaleFieldId("number"), "df2-adv-number-locale");
   });
 });
