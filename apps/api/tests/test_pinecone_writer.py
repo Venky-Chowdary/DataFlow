@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -163,11 +164,12 @@ def test_pinecone_write_unreachable_fail_closed():
 class _FakeResp:
     def __init__(self, status: int, payload: dict | None = None):
         self.status_code = status
-        self.content = b"{}" if payload is not None else b""
         self._payload = payload or {}
+        self.text = json.dumps(self._payload) if payload is not None else ""
+        self.content = self.text.encode("utf-8") if self.text else b""
 
     def json(self):
-        return self._payload
+        return json.loads(self.text) if self.text else {}
 
 
 class _PineconeSession:

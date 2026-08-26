@@ -13,7 +13,12 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from services.value_serializer import cell_to_string, json_default, sanitize_json_value
+from services.value_serializer import (
+    cell_to_string,
+    json_default,
+    load_http_json,
+    sanitize_json_value,
+)
 from services.vectorization import vectorize_records
 
 from connectors.writer_common import WriteResult as _WriteResult
@@ -342,7 +347,7 @@ def scan_source_ids(
             )
             if resp.status_code != 200:
                 return "unmeasured", []
-            payload = resp.json() if resp.content else {}
+            payload = load_http_json(resp) if resp.content else {}
             result = payload.get("result") if isinstance(payload, dict) else None
             if not isinstance(result, dict):
                 return "unmeasured", []

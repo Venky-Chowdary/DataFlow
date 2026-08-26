@@ -20,6 +20,7 @@ from typing import Any
 from services.reconciliation import (
     TargetSampleUnavailable,
 )
+from services.value_serializer import load_http_json
 
 logger = logging.getLogger(__name__)
 
@@ -1162,7 +1163,7 @@ def read_target_sample(
                     f"Could not read destination sample from {db_type!r}.{table_name!r}: "
                     f"pinecone fetch HTTP {fetch.status_code}"
                 )
-            vectors = (fetch.json() or {}).get("vectors") or {}
+            vectors = (load_http_json(fetch) or {}).get("vectors") or {}
             out_rows = []
             for vid, payload in vectors.items():
                 meta = payload.get("metadata") if isinstance(payload, dict) else {}
@@ -1205,7 +1206,7 @@ def read_target_sample(
                     timeout=30,
                 )
                 points = (
-                    (retrieve.json() or {}).get("result") or []
+                    (load_http_json(retrieve) or {}).get("result") or []
                     if retrieve.status_code in {200, 201}
                     else []
                 )
@@ -1221,7 +1222,7 @@ def read_target_sample(
                     timeout=30,
                 )
                 points = (
-                    ((scroll.json() or {}).get("result") or {}).get("points") or []
+                    ((load_http_json(scroll) or {}).get("result") or {}).get("points") or []
                     if scroll.status_code in {200, 201}
                     else []
                 )
@@ -1273,7 +1274,7 @@ def read_target_sample(
                         )
                     if resp.status_code not in {200, 201}:
                         continue
-                    obj = resp.json() or {}
+                    obj = load_http_json(resp) or {}
                     if not isinstance(obj, dict):
                         continue
                     props = (
@@ -1293,7 +1294,7 @@ def read_target_sample(
                     timeout=30,
                 )
                 if agg.status_code in {200, 201}:
-                    for obj in (agg.json() or {}).get("objects") or []:
+                    for obj in (load_http_json(agg) or {}).get("objects") or []:
                         if not isinstance(obj, dict):
                             continue
                         props = (
@@ -1354,7 +1355,7 @@ def read_target_sample(
                 headers=hdrs,
                 timeout=30,
             )
-            qbody = query.json() if query.content else {}
+            qbody = load_http_json(query) if query.content else {}
             out_rows = []
             if _ok_response(qbody if isinstance(qbody, dict) else {}, query.status_code):
                 for row in (qbody.get("data") if isinstance(qbody, dict) else []) or []:

@@ -316,18 +316,20 @@ def load_http_json(resp: Any) -> Any:
     text = getattr(resp, "text", None)
     if isinstance(text, (bytes, bytearray, memoryview)):
         text = bytes(text).decode("utf-8")
-    if isinstance(text, str):
+    if isinstance(text, str) and text.strip():
         return json_loads_exact(text)
     content = getattr(resp, "content", None)
     if isinstance(content, (bytes, bytearray, memoryview)):
-        return json_loads_exact(bytes(content).decode("utf-8"))
+        raw = bytes(content).decode("utf-8")
+        if raw.strip():
+            return json_loads_exact(raw)
     json_fn = getattr(resp, "json", None)
     if callable(json_fn):
         payload = json_fn()
         if isinstance(payload, str):
-            return json_loads_exact(payload)
-        return payload
-    return json_loads_exact("")
+            return json_loads_exact(payload) if payload.strip() else {}
+        return payload if payload is not None else {}
+    return {}
 
 
 def demote_exact_json(value: Any) -> Any:

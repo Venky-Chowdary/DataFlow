@@ -15,7 +15,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from services.value_serializer import cell_to_string, sanitize_json_value
+from services.value_serializer import cell_to_string, load_http_json, sanitize_json_value
 from services.vectorization import vectorize_records
 
 from connectors.writer_common import WriteResult as _WriteResult
@@ -579,7 +579,7 @@ def scan_source_ids(
             headers=hdrs,
             timeout=60,
         )
-        query_body = query_resp.json() if query_resp.content else {}
+        query_body = load_http_json(query_resp) if query_resp.content else {}
         if not _ok_response(
             query_body if isinstance(query_body, dict) else {}, query_resp.status_code
         ):

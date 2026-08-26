@@ -15,7 +15,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from services.value_serializer import cell_to_string, sanitize_json_value
+from services.value_serializer import cell_to_string, load_http_json, sanitize_json_value
 from services.vectorization import vectorize_records
 
 from connectors.writer_common import WriteResult as _WriteResult
@@ -200,7 +200,7 @@ def scan_source_ids(
             if listed.status_code != 200:
                 return "unmeasured", []
             try:
-                page = listed.json()
+                page = load_http_json(listed)
             except Exception:
                 return "unmeasured", []
             rows = page.get("vectors") if isinstance(page, dict) else None
@@ -240,7 +240,7 @@ def scan_source_ids(
             if fetched.status_code != 200:
                 return "unmeasured", []
             try:
-                fetched_body = fetched.json()
+                fetched_body = load_http_json(fetched)
             except Exception:
                 return "unmeasured", []
             vectors = fetched_body.get("vectors") if isinstance(fetched_body, dict) else None

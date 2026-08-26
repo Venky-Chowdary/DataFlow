@@ -57,6 +57,7 @@ from services.value_serializer import (
     is_missing_sentinel,
     json_default,
     json_loads_exact,
+    load_http_json,
 )
 
 # Fingerprinting runs once per cell on both the write and the read-back pass, so
@@ -1330,7 +1331,7 @@ def verify_pinecone_namespace(
                 timeout=30,
             )
             if fetch.status_code in {200, 201}:
-                vectors = (fetch.json() or {}).get("vectors") or {}
+                vectors = (load_http_json(fetch) or {}).get("vectors") or {}
                 for vid, payload in vectors.items():
                     meta = payload.get("metadata") if isinstance(payload, dict) else {}
                     if not isinstance(meta, dict):
@@ -1398,7 +1399,7 @@ def verify_qdrant_collection(
                 timeout=30,
             )
             if retrieve.status_code in {200, 201}:
-                points = (retrieve.json() or {}).get("result") or []
+                points = (load_http_json(retrieve) or {}).get("result") or []
                 for pt in points:
                     if not isinstance(pt, dict):
                         continue
@@ -1416,7 +1417,7 @@ def verify_qdrant_collection(
                 timeout=30,
             )
             if scroll.status_code in {200, 201}:
-                points = ((scroll.json() or {}).get("result") or {}).get("points") or []
+                points = ((load_http_json(scroll) or {}).get("result") or {}).get("points") or []
                 for pt in points:
                     if not isinstance(pt, dict):
                         continue
@@ -1485,7 +1486,7 @@ def verify_weaviate_class(
                     )
                 if resp.status_code not in {200, 201}:
                     continue
-                obj = resp.json() or {}
+                obj = load_http_json(resp) or {}
                 if not isinstance(obj, dict):
                     continue
                 props = obj.get("properties") if isinstance(obj.get("properties"), dict) else {}
@@ -1499,7 +1500,7 @@ def verify_weaviate_class(
             )
             if agg.status_code not in {200, 201}:
                 return -1, ""
-            body = agg.json() or {}
+            body = load_http_json(agg) or {}
             objects = body.get("objects") or []
             count = int(body.get("totalResults") or len(objects))
             for obj in objects:
@@ -1611,7 +1612,7 @@ def verify_milvus_collection(
             headers=hdrs,
             timeout=30,
         )
-        qbody = query.json() if query.content else {}
+        qbody = load_http_json(query) if query.content else {}
         dict_rows: list[dict[str, Any]] = []
         if _ok_response(qbody if isinstance(qbody, dict) else {}, query.status_code):
             rows = qbody.get("data") if isinstance(qbody, dict) else []
