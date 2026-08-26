@@ -6253,7 +6253,9 @@ def boolean_value_fits(value: Any) -> bool:
     MySQL TINYINT(1) and PG BOOLEAN accept a wider informal set; Airbyte-style
     silent ``'yes'→true`` invents truth. Fail closed — operator must transform.
     """
-    if value is None:
+    from services.value_serializer import is_reader_null_cell
+
+    if is_reader_null_cell(value):
         return True
     if isinstance(value, bool):
         return True

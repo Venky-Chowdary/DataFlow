@@ -25,6 +25,7 @@ from services.value_serializer import (
     cell_to_string,
     is_missing_sentinel,
     is_null_evidence,
+    is_reader_null_cell,
     json_loads_exact,
     public_mapped_cell,
 )
@@ -2623,6 +2624,19 @@ def _schemaless_decimal_capacity_holds(value: Any, *, dest_db: str = "") -> bool
         return False
 
 
+def fit_skips_reader_null(value: Any) -> bool:
+    """True when a fit/quarantine scan must not treat the cell as present text.
+
+    Extract NULL / Missing are not a VARCHAR token and not an integer overflow.
+    Empty string stays present (INTEGER empty still refuses; VARCHAR length 0 fits).
+    """
+    return is_reader_null_cell(value)
+
+
+def _unfit_cell_absent(cells: list[Any], col_idx: int) -> bool:
+    return col_idx >= len(cells) or is_reader_null_cell(cells[col_idx])
+
+
 def fits_decimal(
     value: Any,
     precision: int,
@@ -2650,10 +2664,7 @@ def fits_decimal(
         localcontext,
     )
 
-    if value is None:
-        return True
-
-    if is_missing_sentinel(value):
+    if is_reader_null_cell(value):
         return True
     from services.transform_engine import boolean_carrier_numeric_value
 
@@ -2751,10 +2762,7 @@ def quarantine_unfit_decimals(
         cells = list(row)
         hold_out = False
         for col_idx, precision, scale, declared_type in number_cols:
-            if col_idx >= len(cells) or cells[col_idx] is None:
-                continue
-
-            if is_missing_sentinel(cells[col_idx]):
+            if _unfit_cell_absent(cells, col_idx):
                 continue
             if fits_decimal(cells[col_idx], precision, scale, dest_db=dest_db):
                 continue
@@ -2832,7 +2840,7 @@ def string_storage_units(
     - Default ``VARCHAR(n)`` / ``VARCHAR2(n CHAR)`` → Unicode code points
     """
 
-    if value is None:
+    if is_reader_null_cell(value):
         return 0
     if isinstance(value, (bytes, bytearray, memoryview)):
         try:
@@ -2859,14 +2867,14 @@ def fits_varchar(
     dialect_label: str = "",
 ) -> bool:
     """True if value fits a bounded VARCHAR/CHAR/NVARCHAR(width) column."""
-    if value is None:
+    if is_reader_null_cell(value):
         return True
     return string_storage_units(value, type_str, dialect_label=dialect_label) <= width
 
 
 def binary_storage_bytes(value: Any) -> bytes | None:
     """Decode binary wire to bytes, or None when wire is invalid / empty skip."""
-    if value is None:
+    if is_reader_null_cell(value):
         return None
     if isinstance(value, (bytes, bytearray, memoryview)):
         return bytes(value)
@@ -2884,7 +2892,7 @@ def binary_storage_bytes(value: Any) -> bytes | None:
 
 def fits_binary(value: Any, width: int) -> bool:
     """True if binary wire fits a bounded BINARY/VARBINARY(width) column."""
-    if value is None:
+    if is_reader_null_cell(value):
         return True
     raw = binary_storage_bytes(value)
     if raw is None:
@@ -2919,10 +2927,7 @@ def quarantine_unfit_years(
         cells = list(row)
         hold_out = False
         for col_idx in year_cols:
-            if col_idx >= len(cells) or cells[col_idx] is None:
-                continue
-
-            if is_missing_sentinel(cells[col_idx]):
+            if _unfit_cell_absent(cells, col_idx):
                 continue
             try:
                 cells[col_idx] = coerce_year_wire(cells[col_idx])
@@ -2989,10 +2994,7 @@ def quarantine_unfit_booleans(
         cells = list(row)
         hold_out = False
         for col_idx in bool_cols:
-            if col_idx >= len(cells) or cells[col_idx] is None:
-                continue
-
-            if is_missing_sentinel(cells[col_idx]):
+            if _unfit_cell_absent(cells, col_idx):
                 continue
             if boolean_value_fits(cells[col_idx]):
                 continue
@@ -3094,9 +3096,7 @@ def quarantine_unfit_temporals(
         cells = list(row)
         hold_out = False
         for col_idx, typ, check_fsp, check_tz in temporal_cols:
-            if col_idx >= len(cells) or cells[col_idx] is None:
-                continue
-            if is_missing_sentinel(cells[col_idx]):
+            if _unfit_cell_absent(cells, col_idx):
                 continue
             reason = ""
             raw = cells[col_idx]
@@ -3182,10 +3182,7 @@ def quarantine_currency_markers_into_numeric(
         cells = list(row)
         hold_out = False
         for col_idx in numeric_cols:
-            if col_idx >= len(cells) or cells[col_idx] is None:
-                continue
-
-            if is_missing_sentinel(cells[col_idx]):
+            if _unfit_cell_absent(cells, col_idx):
                 continue
             if not has_currency_marker(cells[col_idx]):
                 continue
@@ -3240,16 +3237,15 @@ def integer_fit_failure(
     from services.type_system import integer_storage_bounds
 
     bounds = integer_storage_bounds(type_str, dest_db=dest_db)
-    if bounds is None or value is None:
+    if bounds is None:
+        return None
+    if is_reader_null_cell(value):
         return None
     if isinstance(value, bool):
         # bool is a subclass of int — treat as 0/1.
         dec = Decimal(int(value))
     elif isinstance(value, int):
         dec = Decimal(value)
-    elif is_missing_sentinel(value):
-        # Absence, not a value — sparse CDC decides it, not a bounds test.
-        return None
     else:
         text = str(value).strip()
         if not text:
@@ -3338,10 +3334,7 @@ def quarantine_unfit_integers(
         cells = list(row)
         hold_out = False
         for col_idx, typ in int_cols:
-            if col_idx >= len(cells) or cells[col_idx] is None:
-                continue
-
-            if is_missing_sentinel(cells[col_idx]):
+            if _unfit_cell_absent(cells, col_idx):
                 continue
             unfit = integer_fit_failure(cells[col_idx], typ, dest_db=dest_db)
             if unfit is None:
@@ -3407,9 +3400,7 @@ def quarantine_unfit_floats(
         cells = list(row)
         hold_out = False
         for col_idx, typ in float_cols:
-            if col_idx >= len(cells) or cells[col_idx] is None:
-                continue
-            if is_missing_sentinel(cells[col_idx]):
+            if _unfit_cell_absent(cells, col_idx):
                 continue
             raw = cells[col_idx]
             reason = ""
@@ -3547,7 +3538,7 @@ def bind_rows_keeping_numbers(
         hold_out = False
         for idx in range(len(cells)):
             val = cells[idx]
-            if val is None or is_missing_sentinel(val):
+            if is_reader_null_cell(val):
                 continue
             ddl = target_types[idx] if idx < len(target_types) else ""
             if not ddl:
@@ -3625,15 +3616,13 @@ def quarantine_unfit_strings(
             cells = list(row)
             hold_out = False
             for col_idx, width, typ in width_cols:
-                if col_idx >= len(cells) or cells[col_idx] is None:
+                if _unfit_cell_absent(cells, col_idx):
                     continue
                 cell = cells[col_idx]
                 # ASCII text spends one unit per character under every length
                 # rule (code points, UTF-8 bytes, UTF-16 units), so a short
                 # ASCII value fits without resolving the dialect unit.
                 if type(cell) is str and len(cell) <= width and cell.isascii():
-                    continue
-                if is_missing_sentinel(cell):
                     continue
                 if fits_varchar(
                     cells[col_idx], width, typ, dialect_label=dialect_label
@@ -3707,7 +3696,7 @@ def array_element_unfit_reason(
     ``fits_varchar`` / ``boolean_value_fits``) so array fidelity can never
     drift from column fidelity.
     """
-    if element is None:
+    if is_reader_null_cell(element):
         return None
     carrier = (carrier or "").strip()
     if not carrier:
@@ -3813,9 +3802,7 @@ def quarantine_unfit_arrays(
         cells = list(row)
         hold_out = False
         for col_idx, element_carrier, typ in array_cols:
-            if col_idx >= len(cells) or cells[col_idx] is None:
-                continue
-            if is_missing_sentinel(cells[col_idx]):
+            if _unfit_cell_absent(cells, col_idx):
                 continue
             elements, parse_error = parse_array_wire_elements(cells[col_idx])
             reason = ""
