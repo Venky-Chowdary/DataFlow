@@ -769,7 +769,9 @@ def write_mapped_rows(
                     "(expect 24-char hex)"
                 )
             if upper == "TIME":
-                return str(value)
+                from connectors.sql_temporal import bind_time_iso
+
+                return bind_time_iso(value)
             return value
 
         # BSON coercion is fail-closed (ObjectId hex, non-integral ints, binary

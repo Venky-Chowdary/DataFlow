@@ -55,6 +55,7 @@ from connectors.schema_drift import (
     raise_widen_refusal,
 )
 from connectors.sql_temporal import (
+    bind_time_clock,
     coerce_sql_temporal,
     extract_column_from_sql_error,
     is_sql_data_error,
@@ -1831,24 +1832,16 @@ def _to_sa_value(
             return value
 
         if base == "TIME":
-            if coerced is None:
+            clock = bind_time_clock(value)
+            if clock is None:
                 return None
-            if _is_string_type(sa_type):
-                if isinstance(coerced, time):
-                    return coerced.isoformat()
-                if isinstance(coerced, datetime):
-                    return coerced.time().isoformat()
-                return value if isinstance(value, str) else str(value)
-            if isinstance(coerced, time):
-                if db_type == "presto" or dialect_name == "presto":
-                    return coerced.isoformat()
-                return coerced
-            if isinstance(coerced, datetime):
-                tm = coerced.time()
-                if db_type == "presto" or dialect_name == "presto":
-                    return tm.isoformat()
-                return tm
-            return value
+            if (
+                _is_string_type(sa_type)
+                or db_type == "presto"
+                or dialect_name == "presto"
+            ):
+                return clock.isoformat()
+            return clock
 
         # DATETIME2 (SQL Server) / QuestDB / Oracle TIMESTAMP / ClickHouse DateTime
         # are naive wall clocks. Never invent tzinfo=UTC on naive values — that

@@ -450,6 +450,27 @@ def coerce_sql_temporal(value: Any, source_type: str, *, engine: str = "") -> An
     return value
 
 
+def bind_time_clock(value: Any) -> time | None:
+    """One TIME clock. Reader-null is None. Unfit cells raise — never str() invent."""
+    coerced = coerce_sql_temporal(value, "TIME")
+    if coerced is None:
+        return None
+    if isinstance(coerced, time):
+        return coerced
+    if isinstance(coerced, datetime):
+        return coerced.time()
+    raise ValueError(
+        f"TIME refused {value!r} (refuse silent str() invent). "
+        "Send a clock (HH:MM[:SS] or AM/PM)."
+    )
+
+
+def bind_time_iso(value: Any) -> str | None:
+    """Dest-canonical TIME text (ISO clock) or SQL NULL."""
+    clock = bind_time_clock(value)
+    return None if clock is None else clock.isoformat()
+
+
 _TEMPORAL_BASES = frozenset({
     "DATETIME",
     "DATETIME64",

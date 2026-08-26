@@ -12,6 +12,7 @@ from datetime import date, datetime, time, timezone
 from typing import Any
 
 from connectors.sql_temporal import (
+    bind_time_iso,
     coerce_sql_temporal,
     format_wire_value,
     input_has_timezone,
@@ -74,6 +75,8 @@ def format_snowflake_bind(value: Any, sf_type: str) -> Any:
         if isinstance(coerced, datetime):
             return coerced.date().isoformat()
         return value
+    if ddl == "TIME":
+        return bind_time_iso(value)
     if ddl in {"TIMESTAMP_LTZ", "TIMESTAMP_TZ", "TIMESTAMPTZ"}:
         # Refuse offset-less wires before aware_utc parse attaches UTC invent.
         def _wire_has_tz(raw: Any) -> bool:
@@ -171,12 +174,7 @@ def format_bigquery_bind(value: Any, bq_type: str) -> Any:
         coerced = coerced.astimezone(timezone.utc)
         return coerced.isoformat().replace("+00:00", "Z")
     if ddl == "TIME":
-        coerced = coerce_sql_temporal(value, "TIME")
-        if isinstance(coerced, time):
-            return coerced.isoformat()
-        if isinstance(coerced, datetime):
-            return coerced.time().isoformat()
-        return value
+        return bind_time_iso(value)
     # DATETIME: wall-clock only — keep civil digits.
     coerced = parse_sql_datetime(value, wall_clock=True)
     if isinstance(coerced, datetime):
