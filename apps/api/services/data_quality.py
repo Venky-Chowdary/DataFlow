@@ -51,12 +51,25 @@ def _is_null(value: Any) -> bool:
 
 
 def _to_decimal(value: Any) -> Decimal | None:
+    """Write-path decimal bind — locale/currency money, Auto 1,234 refuses."""
     if _is_null(value):
         return None
+    parsed, err = apply_transform(str(value).strip(), "decimal")
+    if parsed is None or err:
+        return None
+    if isinstance(parsed, Decimal):
+        return parsed
     try:
-        return Decimal(str(value))
+        return Decimal(str(parsed))
     except (InvalidOperation, ValueError, TypeError):
         return None
+
+
+def _is_fractional_decimal(value: Any) -> bool:
+    parsed = _to_decimal(value)
+    if parsed is None:
+        return False
+    return parsed != parsed.to_integral_value()
 
 
 def _to_float(value: Any) -> float | None:
@@ -510,10 +523,7 @@ def run_integrity_audit(
 
                 # Financial precision loss: integer target with fractional source (hard)
                 if col_type == "INTEGER" and _is_amount_column(h):
-                    fractional = any(
-                        ("." in str(v) or "," in str(v)) and _to_decimal(v) is not None
-                        for v in non_null
-                    )
+                    fractional = any(_is_fractional_decimal(v) for v in non_null)
                     if fractional:
                         _hard(
                             f"Financial column '{h}' has fractional values but target type is INTEGER — precision loss risk"

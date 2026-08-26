@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sys
+from decimal import Decimal
 from pathlib import Path
 
 
@@ -12,6 +13,7 @@ if str(_API_ROOT) not in sys.path:
 from services.data_quality import (  # noqa: E402
     BatchDriftDetector,
     _parse_iso_date,
+    _to_decimal,
     _to_float,
     run_integrity_audit,
 )
@@ -176,6 +178,42 @@ def test_detects_precision_loss_for_amount_integer():
     )
     assert not report.passed
     assert "precision loss" in report.issues[0]
+
+
+def test_precision_loss_sees_locale_currency_the_write_path_binds():
+    """$1,234.56 / €1.234,56 are fractional; Auto 1,234 and $1,234 are not."""
+    assert _to_decimal("$1,234.56") == Decimal("1234.56")
+    assert _to_decimal("€1.234,56") == Decimal("1234.56")
+    assert _to_decimal("1,234") is None
+    us = run_integrity_audit(
+        headers=["amount"],
+        rows=[["$1,234.56"], ["$2,000.00"]],
+        column_types={"amount": "INTEGER"},
+        mappings=[{"source": "amount", "target": "amount"}],
+    )
+    assert not us.passed
+    assert any("precision loss" in i for i in us.issues)
+    euro = run_integrity_audit(
+        headers=["amount"],
+        rows=[["€1.234,56"]],
+        column_types={"amount": "INTEGER"},
+        mappings=[{"source": "amount", "target": "amount"}],
+    )
+    assert not euro.passed
+    whole = run_integrity_audit(
+        headers=["amount"],
+        rows=[["$1,234"], ["2000.00"]],
+        column_types={"amount": "INTEGER"},
+        mappings=[{"source": "amount", "target": "amount"}],
+    )
+    assert whole.passed, whole.issues
+    auto = run_integrity_audit(
+        headers=["amount"],
+        rows=[["1,234"], ["5,678"]],
+        column_types={"amount": "INTEGER"},
+        mappings=[{"source": "amount", "target": "amount"}],
+    )
+    assert auto.passed, auto.issues
 
 
 def test_row_level_anomaly_count():
