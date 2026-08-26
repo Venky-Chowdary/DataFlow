@@ -1728,6 +1728,27 @@ def _iceberg_missing_table(exc: BaseException) -> bool:
     )
 
 
+def _iceberg_dest_layout(endpoint: dict[str, Any]) -> str | None:
+    """catalog vs filesystem for dest COUNT / key list.
+
+    WRITE uses ``resolve_iceberg_write_path`` and fail-closes when the
+    catalog driver is missing — that must not invent a local warehouse.
+    COUNT still inspects a catalog snapshot when ``load_catalog`` is
+    available (including test fakes). Missing driver then fails inside
+    ``load_catalog`` → unmeasured, not a silent filesystem tree.
+    """
+    from connectors.iceberg_catalog import parse_iceberg_catalog_config
+
+    try:
+        parsed = parse_iceberg_catalog_config(endpoint)
+    except Exception:
+        return None
+    catalog_type = str(parsed.get("catalog_type") or "filesystem").lower()
+    if catalog_type in {"filesystem", "hadoop"}:
+        return "filesystem"
+    return "catalog"
+
+
 def _iceberg_row_count(
     cfg: dict[str, Any], *, schema: str, table_name: str
 ) -> int | None:
@@ -1751,14 +1772,11 @@ def _iceberg_row_count(
     columns from the same snapshot population as COUNT. Never
     ``scan().to_arrow()``.
     """
-    from connectors.iceberg_writer import resolve_iceberg_write_path
-
     endpoint = _iceberg_endpoint(cfg, table_name, schema)
-    try:
-        path = resolve_iceberg_write_path(endpoint)
-    except RuntimeError:
+    layout = _iceberg_dest_layout(endpoint)
+    if layout is None:
         return None
-    if path == "catalog":
+    if layout == "catalog":
         return _iceberg_catalog_file_count(endpoint)
     return _iceberg_filesystem_file_count(cfg, schema=schema, table_name=table_name)
 
@@ -2651,15 +2669,12 @@ def _iceberg_snapshot_rows(
     (``None``), not dest=0. Missing table is ``[]``. Metadata
     ``record-count`` is never dest population.
     """
-    from connectors.iceberg_writer import resolve_iceberg_write_path
-
     wanted = [str(c) for c in cols if str(c).strip()]
     endpoint = _iceberg_endpoint(cfg, table_name, schema)
-    try:
-        path = resolve_iceberg_write_path(endpoint)
-    except RuntimeError:
+    layout = _iceberg_dest_layout(endpoint)
+    if layout is None:
         return None
-    if path == "catalog":
+    if layout == "catalog":
         from connectors.iceberg_catalog import parse_iceberg_catalog_config
 
         snap = _iceberg_catalog_snapshot(endpoint)
