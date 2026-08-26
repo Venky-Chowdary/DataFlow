@@ -224,21 +224,62 @@ def parse_sql_datetime(
     return dt.replace(tzinfo=timezone.utc) if aware_utc else dt
 
 
-def parse_sql_date(value: Any) -> date | None:
-    parsed = parse_sql_datetime(value)
-    if parsed is not None:
-        return parsed.date()
-    if isinstance(value, date) and not isinstance(value, datetime):
-        return value
+def _integral_digit_token(value: Any) -> str | None:
+    """ASCII digits for a whole number, or ``None``.
+
+    Used to send compact ``YYYYMMDD`` / epoch tokens through the write-path
+    date parser without ``float`` scientific spelling.
+    """
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        if value != value or value in (float("inf"), float("-inf")):
+            return None
+        if value != int(value):
+            return None
+        return str(int(value))
     if isinstance(value, str):
         text = value.strip()
-        if "T" in text:
-            text = text.split("T", 1)[0]
-        try:
-            return date.fromisoformat(text)
-        except ValueError:
-            return None
+        if text.isdigit() or (text[:1] in "+-" and text[1:].isdigit()):
+            return text
     return None
+
+
+def parse_sql_date(value: Any) -> date | None:
+    """Calendar date only. Epoch instants refuse — they invent a UTC day.
+
+    Matches ``apply_transform(..., "date")``. Compact ``YYYYMMDD`` still
+    binds. ``DATETIME`` / ``TIMESTAMP`` still bind epoch via
+    ``parse_sql_datetime``. A typed ``datetime`` keeps its calendar day
+    (already a date, not an epoch invent).
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if isinstance(value, (int, float)):
+        text = _integral_digit_token(value)
+        if text is None:
+            return None
+    elif isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+    else:
+        return None
+    from services.transform_engine import apply_transform
+
+    iso, err = apply_transform(text, "date")
+    if err or iso is None:
+        return None
+    try:
+        return date.fromisoformat(str(iso)[:10])
+    except ValueError:
+        return None
 
 
 def _is_mysql_engine(engine: str) -> bool:
@@ -350,7 +391,15 @@ def coerce_sql_temporal(value: Any, source_type: str, *, engine: str = "") -> An
         return parsed
     if base == "DATE":
         parsed = parse_sql_date(value)
-        return parsed if parsed is not None else value
+        if parsed is not None:
+            return parsed
+        if _integral_digit_token(value) is not None:
+            raise ValueError(
+                "DATE refuses epoch instants (would invent a UTC calendar day). "
+                "Map to TIMESTAMP/DATETIME, or send a calendar date "
+                "(ISO, unambiguous slash, or YYYYMMDD)."
+            )
+        return value
     if base in {"TIME", "TIME WITH TIME ZONE", "TIME WITHOUT TIME ZONE", "TIMETZ"}:
         aware = base in {"TIME WITH TIME ZONE", "TIMETZ"}
 
@@ -368,30 +417,29 @@ def coerce_sql_temporal(value: Any, source_type: str, *, engine: str = "") -> An
         def _parse_time_wire(raw: Any) -> time | None:
             if isinstance(raw, time):
                 return raw
-            if not isinstance(raw, str):
+            if isinstance(raw, bool):
                 return None
-            text = raw.strip()
+            from services.transform_engine import apply_transform
+
+            text = str(raw).strip() if raw is not None else ""
             if not text:
                 return None
-            iso = text[:-1] + "+00:00" if text.upper().endswith("Z") else text
+            parsed, err = apply_transform(text, "time")
+            if err or parsed is None:
+                return None
+            iso = str(parsed)
             try:
                 return time.fromisoformat(iso)
             except ValueError:
-                pass
-            # Offset time that fromisoformat rejected — attach dummy date.
-            if input_has_timezone(text):
-                try:
-                    body = text[:-1] + "+00:00" if text.upper().endswith("Z") else text
-                    dt = datetime.fromisoformat(f"1970-01-01T{body}")
-                    return dt.timetz()
-                except ValueError:
-                    return None
-            # AM/PM / odd forms via datetime parse (naive wall-clock).
-            parsed = parse_sql_datetime(text, wall_clock=True)
-            return parsed.time() if parsed is not None else None
+                return None
 
         tm = _parse_time_wire(value)
         if tm is None:
+            if _integral_digit_token(value) is not None:
+                raise ValueError(
+                    "TIME refuses epoch instants (would invent a clock). "
+                    "Send a clock (HH:MM[:SS] or AM/PM)."
+                )
             return value
         return _timetz_or_refuse(tm)
     return value
