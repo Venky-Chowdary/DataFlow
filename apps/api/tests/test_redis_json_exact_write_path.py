@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from connectors.redis_reader import load_redis_json_doc  # noqa: E402
+from connectors.redis_reader import load_redis_json_doc, redis_json_row  # noqa: E402
 
 LONG = "1.234567890123456789"
 
@@ -36,3 +36,12 @@ def test_load_redis_json_doc_invalid_is_none():
     assert load_redis_json_doc(None) is None
     assert load_redis_json_doc(42) is None
     assert load_redis_json_doc("[1, 2]") == [1, 2]
+
+
+def test_redis_json_row_keeps_long_fraction_and_opaque_text():
+    raw = f'{{"amt": {LONG}, "n": 1.5}}'
+    row = redis_json_row(raw)
+    assert row["amt"] == Decimal(LONG)
+    assert row["n"] == 1.5
+    assert redis_json_row("not-json") == {"value": "not-json"}
+    assert redis_json_row("[1, 2]") == {"value": [1, 2]}

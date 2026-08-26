@@ -554,7 +554,7 @@ def read_target_sample(
                 conn.close()
 
         if db_type == "redis":
-            from connectors.redis_reader import _decode, _redis_client
+            from connectors.redis_reader import _decode, _redis_client, redis_json_row
             from connectors.sql_identifiers import sanitize_identifier
 
             prefix = table_name or "dataflow"
@@ -580,14 +580,7 @@ def read_target_sample(
                         text = _decode(raw)
                         if not text:
                             continue
-                        try:
-                            payload = json.loads(text)
-                        except (json.JSONDecodeError, TypeError):
-                            payload = {"value": text}
-                        if isinstance(payload, dict):
-                            rows_out.append(payload)
-                        else:
-                            rows_out.append({"value": payload})
+                        rows_out.append(redis_json_row(text))
                         if len(rows_out) >= limit:
                             break
                 else:
@@ -605,18 +598,7 @@ def read_target_sample(
                             )
                             raw = client.get(key)
                             text = _decode(raw)
-                            try:
-                                payload = (
-                                    json.loads(text)
-                                    if text.startswith("{")
-                                    else {"value": text}
-                                )
-                            except (json.JSONDecodeError, TypeError):
-                                payload = {"value": text}
-                            if isinstance(payload, dict):
-                                rows_out.append(payload)
-                            else:
-                                rows_out.append({"value": payload})
+                            rows_out.append(redis_json_row(text))
                             if len(rows_out) >= limit:
                                 break
                         if cursor == 0 or len(rows_out) >= limit:

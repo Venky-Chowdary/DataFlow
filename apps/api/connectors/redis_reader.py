@@ -107,6 +107,27 @@ def redis_zset_score_carrier(score: Any) -> float:
     return bound
 
 
+def redis_json_row(raw: Any) -> dict[str, Any]:
+    """One Redis value as a sample / Gate-8 row.
+
+    JSON objects keep ``json_loads_exact`` numbers. Invalid or non-object
+    values stay under ``value`` — never invent an empty object.
+    """
+    parsed = load_redis_json_doc(raw)
+    if isinstance(parsed, dict):
+        return parsed
+    if isinstance(raw, (bytes, bytearray)):
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            text = _decode(raw)
+    else:
+        text = "" if raw is None else str(raw)
+    if parsed is None:
+        return {"value": text}
+    return {"value": parsed}
+
+
 def load_redis_json_doc(raw: Any) -> Any:
     """Parse a Redis JSON document. Numbers match ``json_loads_exact``.
 

@@ -2848,7 +2848,7 @@ def verify_redis_prefix(
     rows the source never sent. Cardinality stays whole-prefix either way.
     """
     try:
-        from connectors.redis_reader import _decode, _redis_client
+        from connectors.redis_reader import _redis_client, redis_json_row
 
         client = _redis_client(
             {
@@ -2881,18 +2881,7 @@ def verify_redis_prefix(
 
         def _row_iter():
             for key in keys:
-                raw = client.get(key)
-                text = _decode(raw)
-                try:
-                    payload = (
-                        json.loads(text) if text.startswith("{") else {"value": text}
-                    )
-                except (json.JSONDecodeError, TypeError):
-                    payload = {"value": text}
-                if isinstance(payload, dict):
-                    yield payload
-                else:
-                    yield {"value": text}
+                yield redis_json_row(client.get(key))
 
         columns = target_columns or []
         if not columns and keys:
