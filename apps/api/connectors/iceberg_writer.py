@@ -23,6 +23,7 @@ import os
 import re
 import time
 import uuid
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
@@ -2702,6 +2703,24 @@ def _iceberg_split_key(key: str, width: int) -> list[str]:
     return parts
 
 
+def _iceberg_float_carrier(parsed: Decimal) -> float:
+    """Iceberg Float/Double carrier after a successful write-path bind.
+
+    IEEE ``float(parsed)`` collapses 2**53+1 onto 2**53 and would delete
+    the wrong leftover row. Refuse when the float is not the same number.
+    Scale-only money (``10.00``) still fits.
+    """
+    try:
+        as_float = float(parsed)
+    except (OverflowError, ValueError) as exc:
+        raise ValueError("float write path refused") from exc
+    if as_float != as_float or as_float in (float("inf"), float("-inf")):
+        raise ValueError("float write path refused")
+    if +parsed != +Decimal(repr(as_float)):
+        raise ValueError("float write path refused")
+    return as_float
+
+
 def _iceberg_typed_literal(tbl: Any, column: str, raw: Any) -> Any:
     """Bind a leftover/CDC key part to the Iceberg field type.
 
@@ -2735,7 +2754,7 @@ def _iceberg_typed_literal(tbl: Any, column: str, raw: Any) -> Any:
             parsed_num = decimal_wire_value(text)
             if parsed_num is None:
                 raise ValueError("float write path refused")
-            return float(parsed_num)
+            return _iceberg_float_carrier(parsed_num)
         if kind == "DecimalType":
             parsed_dec = decimal_wire_value(text)
             if parsed_dec is None:
