@@ -21,6 +21,7 @@ import { SqlEditor } from "../components/ui/SqlEditor";
 import { DestinationAdvancedDrawer } from "../components/transfer/DestinationAdvancedDrawer";
 import { ObjectNameCombobox } from "../components/transfer/ObjectNameCombobox";
 import { Button } from "../components/ui/Button";
+import { HiddenFileInput } from "../components/ui/HiddenFileInput";
 import { SourceStepAside } from "../components/transfer/SourceStepAside";
 import { ValidateActionsRail } from "../components/transfer/ValidateActionsRail";
 import { ContractBindField } from "../components/contracts/ContractBindField";
@@ -5822,12 +5823,12 @@ export function TransferPage({
 
           {sourceKind === "file" ? (
             <>
-              <input
+              <HiddenFileInput
+                id="df2-source-file"
                 ref={fileInputRef}
-                type="file"
                 accept=".json,.csv,.jsonl,.tsv,.parquet,.pdf,.docx,.html,.htm,.xlsx,.xls,.xml"
+                disabled={uploading}
                 onChange={handleFileSelect}
-                hidden
               />
               {uploadError && (
                 <div className="df2-alert df2-alert-error" role="alert">
@@ -5886,25 +5887,22 @@ export function TransferPage({
                       {formatFileSize(file.size)} · {parsed.row_count.toLocaleString()} rows · {parsed.columns.length} columns
                     </span>
                   </div>
-                  <button
-                    type="button"
+                  <label
+                    htmlFor="df2-source-file"
                     className="df2-btn df2-btn-sm"
-                    onClick={() => fileInputRef.current?.click()}
+                    aria-disabled={uploading}
                     title="Replace source file"
                   >
                     <DtIcon name="upload" size={14} /> Replace
-                  </button>
+                  </label>
                 </div>
               ) : (
-              <div
+              <label
+                htmlFor="df2-source-file"
                 className={`df2-upload df2-upload-studio ${dragOver ? "drag-over" : ""} ${uploading ? "is-loading" : ""}`}
-                onClick={() => !uploading && fileInputRef.current?.click()}
                 onDragOver={(e) => { e.preventDefault(); setDragOver(true); }}
                 onDragLeave={() => setDragOver(false)}
                 onDrop={handleDrop}
-                role="button"
-                tabIndex={0}
-                onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); fileInputRef.current?.click(); } }}
               >
                 <div className="df2-upload-icon">
                   {uploading || analyzing ? <Spinner /> : <DtIcon name="upload" size={22} />}
@@ -5920,7 +5918,7 @@ export function TransferPage({
                     <span key={fmt} className="df2-upload-format-chip">{fmt}</span>
                   ))}
                 </div>
-              </div>
+              </label>
               )}
               {!parsed && !uploading && (
                 <div className="df2-upload-sample-row">

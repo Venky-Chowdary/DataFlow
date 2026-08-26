@@ -521,6 +521,36 @@ describe("Transfer Studio chrome contracts", () => {
     assert.doesNotMatch(panel, /Set number locale[\s\S]*Set number locale/);
   });
 
+  it("Source, Schedules, and Gate8 pick files through one sr-only input + label", () => {
+    const hidden = readFileSync(join(webRoot, "components/ui/HiddenFileInput.tsx"), "utf8");
+    const page = readFileSync(join(webRoot, "pages/TransferPage.tsx"), "utf8");
+    const schedules = readFileSync(join(webRoot, "pages/SchedulesPage.tsx"), "utf8");
+    const gate8 = readFileSync(join(webRoot, "components/transfer/Gate8ProofCard.tsx"), "utf8");
+    const css = readFileSync(join(webRoot, "styles/enterprise-ui.css"), "utf8");
+
+    assert.match(hidden, /className="df2-sr-only"/);
+    assert.match(hidden, /type="file"/);
+    assert.doesNotMatch(hidden, /<input[\s\S]*\bhidden(?:\s|=|>)/);
+    const srOnly = css.match(/\.df2-sr-only \{([^}]+)\}/);
+    assert.ok(srOnly, ".df2-sr-only rule is missing");
+    assert.match(srOnly[1], /clip: rect\(0, 0, 0, 0\)/);
+    assert.doesNotMatch(srOnly[1], /display:\s*none/);
+
+    assert.match(page, /id="df2-source-file"/);
+    assert.match(page, /htmlFor="df2-source-file"/);
+    assert.match(page, /<label\s+htmlFor="df2-source-file"[\s\S]*className=\{`df2-upload/);
+    assert.doesNotMatch(page, /<input[\s\S]{0,80}type="file"/);
+    assert.doesNotMatch(page, /fileInputRef\.current\?\.click/);
+
+    assert.match(schedules, /id="df2-schedule-import"/);
+    assert.match(schedules, /htmlFor="df2-schedule-import"/);
+    assert.doesNotMatch(schedules, /importInputRef\.current\?\.click/);
+
+    assert.match(gate8, /id="df2-gate8-verify-proof"/);
+    assert.match(gate8, /htmlFor="df2-gate8-verify-proof"/);
+    assert.doesNotMatch(gate8, /verifyInputRef\.current\?\.click/);
+  });
+
   it("local preflight and file export use the write-path number locale parser", () => {
     const localPf = readFileSync(join(webRoot, "lib/localPreflight.ts"), "utf8");
     const localEx = readFileSync(join(webRoot, "lib/localFileExport.ts"), "utf8");
