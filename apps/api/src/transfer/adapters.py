@@ -2159,7 +2159,7 @@ def write_destination_file(
                 mappings=list(mappings) or None,
             )
         # Keep DF_MISSING through export — JSON/JSONL omit keys; dense CSV/grid
-        # render empty via cell_to_string. Never force-null invent before serialize.
+        # render empty via to_delimited_value. Never force-null invent before serialize.
         abort = reject_on_strict_policy(error_policy, rejected_details, "file_export")
         if abort:
             raise FileExportMapBlocked(
@@ -2183,6 +2183,17 @@ def write_destination_file(
     else:
         export_dest_types = dict(types)
 
+    from connectors.writer_common import to_delimited_value
+
+    def _export_grid_cell(val: Any, col: str) -> str:
+        """One CSV/grid cell — reader-null is empty, never the extract token."""
+        parsed = to_delimited_value(val, col, export_dest_types)
+        if parsed is None:
+            return ""
+        if isinstance(parsed, str):
+            return parsed
+        return cell_to_string(parsed)
+
     def _export_summary(
         filename: str,
         *,
@@ -2205,12 +2216,12 @@ def write_destination_file(
         return out
 
     grid = [
-        [cell_to_string(rec.get(col, "")) for col in export_columns]
+        [_export_grid_cell(rec.get(col), col) for col in export_columns]
         for rec in export_records
     ]
 
     # JSON/JSONL must use omit-aware serialization below — the grid convert path
-    # runs cell_to_string which collapses DF_MISSING to "" (false invent).
+    # renders DF_MISSING / reader-null as empty (never the extract token).
     if fmt not in {"json", "jsonl"} and can_convert(src_fmt, fmt) and grid:
         content, mime = convert_rows(
             export_columns, grid, source_format=src_fmt, target_format=fmt
@@ -2262,7 +2273,10 @@ def write_destination_file(
         writer = csv.DictWriter(buf, fieldnames=export_columns, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(
-            [{c: cell_to_string(v) for c, v in r.items()} for r in export_records]
+            [
+                {c: _export_grid_cell(r.get(c), c) for c in export_columns}
+                for r in export_records
+            ]
         )
         content = buf.getvalue().encode("utf-8")
         filename = "export.csv"
@@ -2274,7 +2288,10 @@ def write_destination_file(
         )
         writer.writeheader()
         writer.writerows(
-            [{c: cell_to_string(v) for c, v in r.items()} for r in export_records]
+            [
+                {c: _export_grid_cell(r.get(c), c) for c in export_columns}
+                for r in export_records
+            ]
         )
         content = buf.getvalue().encode("utf-8")
         filename = "export.tsv"
