@@ -412,12 +412,12 @@ def evaluate_ddl_compatibility(
                 src_logical = normalize_logical_type(src_type)
                 tgt_logical = normalize_logical_type(tgt_type)
                 if src_logical in {"integer", "decimal"} and tgt_logical == "integer":
-                    for s in samples[:20]:
-                        if "." in s and s.replace(".", "", 1).replace("-", "", 1).isdigit():
-                            issues.append(
-                                f"Fractional source values for {src} cannot fit integer target {tgt}"
-                            )
-                            break
+                    from services.transform_engine import is_fractional_wire_value
+
+                    if any(is_fractional_wire_value(s) for s in samples[:20]):
+                        issues.append(
+                            f"Fractional source values for {src} cannot fit integer target {tgt}"
+                        )
 
         if not schemaless and table_exists is False and allow_create:
             inferred_ddl = ddl_type(dest_db_type, src_type)
