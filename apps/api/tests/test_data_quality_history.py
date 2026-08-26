@@ -16,6 +16,16 @@ from services.data_quality_history import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _isolate_quality_profile_store(tmp_path, monkeypatch):
+    """Do not read or write ``apps/api/data/quality_profiles`` from this module.
+
+    Host leftovers (1M bench, prior pytest) inflate ``rows_written_total`` and
+    invent measured success for the wrong run. Each test gets its own data dir.
+    """
+    monkeypatch.setenv("DATAFLOW_DATA_DIR", str(tmp_path))
+
+
 @pytest.fixture
 def source_dest():
     return (
@@ -218,12 +228,80 @@ def test_history_identity_distinguishes_host_from_table_only() -> None:
     assert measured["measured"] is True
     assert measured["success_rate"] == 1.0
     assert measured["rows_written_total"] == 1000
+    assert measured["runs_observed"] == 1
 
     table_only_src = {"kind": "database", "format": "postgresql", "table": "bench_hist_src"}
     table_only_dst = {"kind": "database", "format": "mysql", "table": "bench_hist_dst"}
     missed = measure_route_historical_success(table_only_src, table_only_dst)
     assert missed["measured"] is False
     assert missed["success_rate"] is None
+
+
+def test_save_profile_same_job_id_does_not_double_count() -> None:
+    """Execute retry / re-persist of the same job must not invent a second load."""
+    from services.data_quality_history import history_endpoint_from_config
+    from services.historical_success_contract import measure_route_historical_success
+
+    src = history_endpoint_from_config(
+        {"host": "127.0.0.1", "port": 5432, "database": "dataflow"},
+        kind="database",
+        format="postgresql",
+        table="hist_idempotent_src",
+    )
+    dst = history_endpoint_from_config(
+        {"host": "127.0.0.1", "port": 3306, "database": "dataflow"},
+        kind="database",
+        format="mysql",
+        table="hist_idempotent_dst",
+    )
+    cols = profile_batch([], {"id": "INTEGER"})
+    save_profile(src, dst, cols, job_id="job-retry", row_count=1000)
+    save_profile(src, dst, cols, job_id="job-retry", row_count=1000)
+    first = measure_route_historical_success(src, dst)
+    assert first["runs_observed"] == 1
+    assert first["rows_written_total"] == 1000
+
+    save_profile(src, dst, cols, job_id="job-next", row_count=500)
+    second = measure_route_historical_success(src, dst)
+    assert second["runs_observed"] == 2
+    assert second["rows_written_total"] == 1500
+
+
+def test_isolated_data_dir_does_not_see_other_store(tmp_path, monkeypatch) -> None:
+    """A leftover host (or other-worker) profile must not inflate this measure."""
+    from services.data_quality_history import history_endpoint_from_config
+    from services.historical_success_contract import measure_route_historical_success
+
+    src = history_endpoint_from_config(
+        {"host": "10.0.0.8", "port": 5432, "database": "dataflow"},
+        kind="database",
+        format="postgresql",
+        table="hist_isolate_src",
+    )
+    dst = history_endpoint_from_config(
+        {"host": "10.0.0.8", "port": 3306, "database": "dataflow"},
+        kind="database",
+        format="mysql",
+        table="hist_isolate_dst",
+    )
+    leftover = tmp_path / "leftover"
+    isolated = tmp_path / "isolated"
+    leftover.mkdir()
+    isolated.mkdir()
+    cols = profile_batch([], {"id": "INTEGER"})
+
+    monkeypatch.setenv("DATAFLOW_DATA_DIR", str(leftover))
+    save_profile(src, dst, cols, job_id="other-worker", row_count=9999)
+    assert measure_route_historical_success(src, dst)["rows_written_total"] == 9999
+
+    monkeypatch.setenv("DATAFLOW_DATA_DIR", str(isolated))
+    unseen = measure_route_historical_success(src, dst)
+    assert unseen["measured"] is False
+    assert unseen["success_rate"] is None
+    save_profile(src, dst, cols, job_id="this-worker", row_count=1000)
+    seen = measure_route_historical_success(src, dst)
+    assert seen["rows_written_total"] == 1000
+    assert seen["runs_observed"] == 1
 
 
 def test_quarantine_histogram_stable_keys() -> None:

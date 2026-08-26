@@ -279,7 +279,7 @@ def _persist_load_history_profile(
     row_count: int,
     mappings: list[dict] | None = None,
 ) -> None:
-    """Append this load to the route ring buffer (streaming-safe)."""
+    """Persist this load to the route ring buffer (same job_id replaces)."""
     try:
         from services import pii_guard
         from services.data_quality_history import profile_batch, save_profile

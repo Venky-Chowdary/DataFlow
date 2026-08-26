@@ -457,14 +457,22 @@ def save_profile(
     rejected_rows: int = 0,
     row_count: int | None = None,
 ) -> None:
-    """Append a profile to the route ring buffer (does not overwrite history)."""
+    """Append a profile to the route ring buffer.
+
+    Distinct ``job_id`` values stay as separate loads (last-N). The same
+    ``job_id`` replaces its prior run — Execute retry / re-persist must not
+    invent a second load and double ``rows_written_total``.
+    """
     store = _load_store(source, destination)
     runs = list(store.get("runs") or [])
     columns = _serialize_profile(profile)
     rc = row_count if row_count is not None else max((c.count for c in profile.values()), default=0)
+    jid = str(job_id or "").strip()
+    if jid:
+        runs = [r for r in runs if str((r or {}).get("job_id") or "") != jid]
     runs.append({
         "captured_at": datetime.now(timezone.utc).isoformat(),
-        "job_id": job_id,
+        "job_id": jid or None,
         "row_count": rc,
         "columns": columns,
         "quarantine_histogram": quarantine_histogram(rejected_details),
