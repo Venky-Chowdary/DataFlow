@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import date, datetime
 
-from src.ai.copilot.query_tools import _infer_kind, _try_datetime, _try_float
+from src.ai.copilot.query_tools import _infer_kind, _try_bool, _try_datetime, _try_float
 from src.ai.copilot.transfer_rules import _utterance_row_limit
 
 
@@ -51,6 +51,20 @@ def test_try_datetime_honors_date_locale():
         assert _try_datetime("01/02/2024") is True
     finally:
         reset_active_date_locale(token)
+
+
+def test_try_bool_fails_closed_on_informal_yes():
+    assert _try_bool("yes") is None
+    assert _try_bool("on") is None
+    assert _try_bool("y") is None
+    assert _try_bool("true") is True
+    assert _try_bool("false") is False
+    assert _try_bool(True) is True
+
+
+def test_infer_kind_does_not_call_yes_no_boolean():
+    assert _infer_kind(["yes", "no", "yes"]) == "string"
+    assert _infer_kind(["true", "false", "true"]) == "boolean"
 
 
 def test_infer_kind_does_not_call_ambiguous_slash_dates_datetime():

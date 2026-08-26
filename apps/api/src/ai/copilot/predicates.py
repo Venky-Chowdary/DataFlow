@@ -62,9 +62,6 @@ _NUMERIC_HINTS = (
 _TEMPORAL_HINTS = ("date", "time", "timestamp")
 _BOOLEAN_HINTS = ("bool",)
 
-_TRUE_WORDS = frozenset({"true", "t", "yes", "y", "1", "on"})
-_FALSE_WORDS = frozenset({"false", "f", "no", "n", "0", "off"})
-
 
 class PredicateError(ValueError):
     """A filter that cannot be honoured — reported to the operator verbatim."""
@@ -449,14 +446,15 @@ def _coerce(value: str, kind: str, column: str) -> Any:
             return int(dec)
         return float(dec)
     if kind == "boolean":
-        low = raw.lower()
-        if low in _TRUE_WORDS:
-            return True
-        if low in _FALSE_WORDS:
-            return False
-        raise PredicateError(
-            f"`{column}` is boolean — use true/false, not “{raw}”."
-        )
+        from services.transform_engine import apply_transform
+
+        parsed, err = apply_transform(raw, "boolean")
+        if err or parsed is None:
+            raise PredicateError(
+                f"`{column}` is boolean — “{raw}” is not canonical true/false. "
+                "Informal yes/on/y invents truth the write path refuses."
+            )
+        return bool(parsed)
     if kind == "temporal":
         parsed = _parse_date_literal(raw)
         if parsed is None:

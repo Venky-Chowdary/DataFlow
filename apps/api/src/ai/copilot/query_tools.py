@@ -24,8 +24,6 @@ _MAX_QUERY_ROWS = 200
 # asks for far more than a chat reply would ever print. Enterprise schemas with
 # thousands of objects are ordinary.
 _RESOLVE_INVENTORY_LIMIT = 100_000
-_BOOL_TRUE = {"true", "t", "yes", "y", "1"}
-_BOOL_FALSE = {"false", "f", "no", "n", "0"}
 _MISSING_TABLE_RE = re.compile(
     r"(?:undefinedtable|does not exist|doesn't exist|unknown relation|"
     r"no such table|invalid object name|relation\s+[\"'].+[\"']\s+does not exist|"
@@ -141,17 +139,21 @@ def _try_float(v: Any) -> float | None:
 
 
 def _try_bool(v: Any) -> bool | None:
+    """True/False when the write path would bind this cell as a boolean.
+
+    Informal ``yes``/``on``/``y`` invent truth the boolean transform refuses.
+    Native 0/1 integers stay numbers — they are not a boolean wire.
+    """
     if isinstance(v, bool):
         return v
-    if isinstance(v, (int, float)) and v in (0, 1):
-        return bool(v)
-    if isinstance(v, str):
-        s = v.strip().lower()
-        if s in _BOOL_TRUE:
-            return True
-        if s in _BOOL_FALSE:
-            return False
-    return None
+    if not isinstance(v, str):
+        return None
+    from services.transform_engine import apply_transform
+
+    parsed, err = apply_transform(v.strip(), "boolean")
+    if err or parsed is None:
+        return None
+    return bool(parsed)
 
 
 def _try_datetime(v: Any) -> bool:

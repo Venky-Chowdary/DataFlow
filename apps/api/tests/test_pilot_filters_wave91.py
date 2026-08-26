@@ -224,9 +224,18 @@ def test_numeric_column_accepts_currency_and_both_separators():
     assert preds[0].values == [1234.56]
 
 
-def test_boolean_column_accepts_words():
-    assert _ground("is_paid = yes")[0].values == [True]
+def test_boolean_column_accepts_canonical_wire_only():
+    assert _ground("is_paid = true")[0].values == [True]
     assert _ground("is_paid = false")[0].values == [False]
+    assert _ground("is_paid = 1")[0].values == [True]
+
+
+def test_boolean_column_refuses_informal_yes():
+    """Informal yes invents truth the write path refuses."""
+    with pytest.raises(PredicateError) as err:
+        _ground("is_paid = yes")
+    assert "yes" in str(err.value)
+    assert "true/false" in str(err.value).lower() or "canonical" in str(err.value).lower()
 
 
 def test_boolean_column_refuses_a_number_word():

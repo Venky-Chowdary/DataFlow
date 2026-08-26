@@ -56,6 +56,13 @@ def test_analyze_column_does_not_invent_datetime_from_auto_ambiguous_slash_dates
     assert "standardize_iso8601" in iso.suggested_transformations
 
 
+def test_analyze_column_does_not_invent_boolean_from_informal_yes_no():
+    informal = analyze_column("is_paid", ["yes", "no", "yes"])
+    assert informal.inferred_type == "string"
+    canonical = analyze_column("is_paid", ["true", "false", "true"])
+    assert canonical.inferred_type == "boolean"
+
+
 def test_generate_mappings_does_not_invent_date_transform_for_ambiguous_slash():
     mappings = generate_mappings(
         ["event_date"],

@@ -751,13 +751,15 @@ class SemanticAnalyzer:
                 int_count += 1
             elif re.match(r'^-?\d+\.?\d*$', val):
                 float_count += 1
-            elif val.lower() in ('true', 'false', '0', '1', 'yes', 'no', 'y', 'n'):
-                bool_count += 1
             else:
-                # Same bind as the write path — Auto-ambiguous 01/02/2024 is
-                # not a datetime we can read, so do not label the column one.
                 from services.transform_engine import apply_transform
 
+                parsed, err = apply_transform(val, "boolean")
+                if parsed is not None and not err:
+                    bool_count += 1
+                    continue
+                # Same bind as the write path — Auto-ambiguous 01/02/2024 is
+                # not a datetime we can read, so do not label the column one.
                 parsed, err = apply_transform(val, "datetime")
                 if parsed is not None and not err:
                     date_count += 1
