@@ -4853,6 +4853,15 @@ def _conflict_key_identity(val: Any) -> Any:
     return None if _is_nullish_conflict_key(val) else val
 
 
+def conflict_key_wire(val: Any) -> str:
+    """Compose-text for a conflict / SCD2 / mirror identity cell.
+
+    Extract ``SQL_NULL_SENTINEL`` and dest ``None`` share ``\"\"`` so a NULL
+    PK cannot invent a ``__DF_SQL_NULL__`` key. 0 / false stay ``0`` / ``false``.
+    """
+    return cell_to_string(_conflict_key_identity(val))
+
+
 def assert_sparse_upsert_has_pk(
     present: dict[str, Any],
     conflict_columns: list[str],
