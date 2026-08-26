@@ -257,6 +257,32 @@ export function schemaDriftCompatibilityHeadline(
   return `Compatibility ${compat}`;
 }
 
+export interface NumberLocaleValidateAction {
+  decision: "set_locale";
+  columns: string[];
+  message: string;
+}
+
+/** Validate next action when Auto cannot parse 1,234 vs 1.234. */
+export function numberLocaleValidateAction(
+  preflight: PreflightResult | null | undefined,
+): NumberLocaleValidateAction | null {
+  const report = preflight?.number_locale_report;
+  if (!report || typeof report !== "object") return null;
+  if (String(report.decision || "") !== "set_locale") return null;
+  const columns = (report.ambiguous_columns || [])
+    .map((row) => String(row?.column || "").trim())
+    .filter(Boolean);
+  const named = columns.slice(0, 6).join(", ") || "amount";
+  return {
+    decision: "set_locale",
+    columns,
+    message:
+      `${named}: grouping is ambiguous (1,234 vs 1.234). ` +
+      "Set number locale US or EU in Destination → Advanced — Auto will not guess.",
+  };
+}
+
 /** Hard-breaking drift (Confluent NONE) — remap / re-sign, never acknowledge. */
 export function schemaDriftRequiresRemap(
   details?: Record<string, unknown> | null,

@@ -8,6 +8,7 @@ import {
   buildConversionClassHonesty,
   buildReferentialIntegrityHonesty,
   buildValidateHonestyControls,
+  numberLocaleValidateAction,
   schemaDriftAllowsAcknowledge,
   schemaDriftRequiresRemap,
 } from "./validateHonestyControls.ts";
@@ -204,5 +205,26 @@ describe("validateHonestyControls", () => {
       }),
       false,
     );
+  });
+
+  it("number locale set_locale names columns and does not invent ok", () => {
+    assert.equal(numberLocaleValidateAction(null), null);
+    assert.equal(
+      numberLocaleValidateAction({
+        number_locale_report: { decision: "ok", ambiguous_columns: [] },
+      } as unknown as PreflightResult),
+      null,
+    );
+    const action = numberLocaleValidateAction({
+      number_locale_report: {
+        decision: "set_locale",
+        ambiguous_columns: [{ column: "amount" }, { column: "fee" }],
+      },
+    } as unknown as PreflightResult);
+    assert.ok(action);
+    assert.deepEqual(action.columns, ["amount", "fee"]);
+    assert.match(action.message, /amount, fee/);
+    assert.match(action.message, /Destination → Advanced/);
+    assert.match(action.message, /Auto will not guess/);
   });
 });

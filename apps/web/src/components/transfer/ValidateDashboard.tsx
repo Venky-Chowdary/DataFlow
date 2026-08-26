@@ -35,7 +35,7 @@ import {
   remapToTypeForMismatch,
 } from "../../lib/validateIssueGrouping";
 import { buildValidateDecisionPath } from "../../lib/validateDecisionPath";
-import { buildValidateHonestyControls, schemaDriftAllowsAcknowledge, schemaDriftCompatibilityHeadline, schemaDriftRequiresRemap } from "../../lib/validateHonestyControls";
+import { buildValidateHonestyControls, numberLocaleValidateAction, schemaDriftAllowsAcknowledge, schemaDriftCompatibilityHeadline, schemaDriftRequiresRemap } from "../../lib/validateHonestyControls";
 import { dashboardCtaVariant, type ValidateStudioPrimary } from "../../lib/validateStudioPrimary";
 import { isFkOrphanBlockerText, isFkOrphanCtaKind } from "../../lib/fkOrphanCta";
 import {
@@ -50,6 +50,7 @@ import { ringDasharray, validateRingPercent } from "../../lib/progressRing";
 import { BadDataFixDrawer, type BadDataIssue } from "./BadDataFixDrawer";
 import { Gate8ProofCard, type Gate8Reconciliation } from "./Gate8ProofCard";
 import { LoadHistoryPanel } from "./LoadHistoryPanel";
+import { NumberLocalePanel } from "./NumberLocalePanel";
 import { RepairProposalDrawer } from "./RepairProposalDrawer";
 
 type GateMeta = {
@@ -2813,6 +2814,13 @@ export function ValidateDashboard({
           report={preflight.load_history_report}
           title="Compared to prior loads"
           className="df2-vd-load-history"
+        />
+      ) : null}
+
+      {!running ? (
+        <NumberLocalePanel
+          action={numberLocaleValidateAction(preflight)}
+          onOpenAdvanced={onOpenIdentitySettings}
         />
       ) : null}
 

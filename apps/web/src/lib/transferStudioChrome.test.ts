@@ -508,4 +508,16 @@ describe("Transfer Studio chrome contracts", () => {
     assert.match(page, /number_locale: numberLocale/);
     assert.match(api, /formData.append\("number_locale"/);
   });
+
+  it("Validate surfaces number locale set_locale with one Advanced CTA", () => {
+    const dash = readFileSync(join(webRoot, "components/transfer/ValidateDashboard.tsx"), "utf8");
+    const panel = readFileSync(join(webRoot, "components/transfer/NumberLocalePanel.tsx"), "utf8");
+    const honesty = readFileSync(join(webRoot, "lib/validateHonestyControls.ts"), "utf8");
+    assert.match(honesty, /export function numberLocaleValidateAction/);
+    assert.match(dash, /NumberLocalePanel/);
+    assert.match(dash, /numberLocaleValidateAction\(preflight\)/);
+    assert.match(panel, /Set number locale/);
+    assert.match(panel, /onOpenAdvanced/);
+    assert.doesNotMatch(panel, /Set number locale[\s\S]*Set number locale/);
+  });
 });
