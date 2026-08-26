@@ -5,14 +5,13 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from services.transform_engine import CANONICAL_BOOLEAN_TOKENS
+from services.transform_engine import CANONICAL_BOOLEAN_TOKENS, apply_transform, decimal_wire_value
 
 EMAIL_RE = re.compile(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
 UUID_RE = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
 )
 PHONE_RE = re.compile(r"^\+?[0-9][0-9\s().-]{6,18}[0-9]$")
-DATE_RE = re.compile(r"^(?:\d{4}-\d{2}-\d{2}|\d{8}|\d{4}/\d{2}/\d{2})(?:[T\s]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)?$")
 # Write-path tokens only — informal yes/on must not score as boolean dest.
 BOOL_VALUES = set(CANONICAL_BOOLEAN_TOKENS)
 
@@ -169,6 +168,18 @@ def _target_is_temporal(target_name: str, target_type: str) -> bool:
     return _contains_term(target_name, _TEMPORAL_NAME_TERMS)
 
 
+def _sample_binds_temporal(value: str) -> bool:
+    """True when the write path can bind this cell as date or datetime."""
+    text = (value or "").strip()
+    if not text:
+        return False
+    parsed, err = apply_transform(text, "date")
+    if parsed is not None and not err:
+        return True
+    parsed, err = apply_transform(text, "datetime")
+    return parsed is not None and not err
+
+
 def analyze_column_profile(name: str, samples: list[str]) -> dict[str, Any]:
     """Infer column profile from sample values for mapping quality scoring."""
     vals = _non_empty([str(x) for x in samples[:24]])
@@ -192,9 +203,9 @@ def analyze_column_profile(name: str, samples: list[str]) -> dict[str, Any]:
         email_ratio = _pattern_rate(vals, EMAIL_RE)
         phone_ratio = _pattern_rate(vals, PHONE_RE)
         uuid_ratio = _pattern_rate(vals, UUID_RE)
-        date_ratio = _pattern_rate(vals, DATE_RE)
+        date_hits = sum(1 for v in vals if _sample_binds_temporal(v))
+        date_ratio = date_hits / len(vals)
         bool_hits = sum(1 for v in vals if v.lower() in BOOL_VALUES)
-        from services.transform_engine import decimal_wire_value
 
         numeric = 0
         for v in vals:
@@ -211,7 +222,12 @@ def analyze_column_profile(name: str, samples: list[str]) -> dict[str, Any]:
         profile["likely_phone"] = phone_ratio >= 0.5 or _contains_term(name, {"phone", "mobile", "tel"})
         profile["likely_uuid"] = uuid_ratio >= 0.5 or _contains_term(name, {"uuid", "guid", "identifier"})
         profile["likely_numeric"] = numeric_ratio >= 0.75 or _contains_term(name, {"amount", "qty", "total", "balance", "price"})
-        profile["likely_date"] = date_ratio >= 0.5 or _contains_term(name, {"date", "time", "dt", "timestamp", "created", "updated"})
+        # Name may disambiguate only when samples already bind. Auto-ambiguous
+        # 01/02/2024 must not score as date-like — the write path refuses them.
+        profile["likely_date"] = date_ratio >= 0.7 or (
+            date_ratio >= 0.5
+            and _contains_term(name, {"date", "time", "dt", "timestamp", "created", "updated"})
+        )
         # Name alone is not enough for "status" — that is usually a string enum.
         profile["likely_boolean"] = bool_ratio >= 0.7 or (
             bool_ratio >= 0.5 and _contains_term(name, {"flag", "is_", "has_", "active", "enabled", "verified"})

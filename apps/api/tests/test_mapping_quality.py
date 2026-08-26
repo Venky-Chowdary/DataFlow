@@ -59,6 +59,49 @@ def test_email_to_varchar_snowflake_is_pii_note_not_type_defect():
     assert not any("non-string" in n for n in notes)
 
 
+def test_auto_ambiguous_slash_dates_are_not_date_like():
+    """01/02/2024 is Jan 2 or Feb 1 — name must not invent likely_date."""
+    profile = analyze_column_profile("event_date", ["01/02/2024", "03/04/2024"])
+    assert profile["likely_date"] is False
+    delta, notes = score_mapping_pair(
+        {
+            "source": "event_date",
+            "target": "event_date",
+            "target_type": "DATE",
+            "confidence": 0.9,
+        },
+        source_profile=profile,
+    )
+    assert not any("date-like" in n for n in notes)
+    _, varchar_notes = score_mapping_pair(
+        {
+            "source": "event_date",
+            "target": "event_date",
+            "target_type": "VARCHAR",
+            "confidence": 0.9,
+        },
+        source_profile=profile,
+    )
+    assert not any("non-temporal" in n for n in varchar_notes)
+
+
+def test_unambiguous_and_iso_dates_still_score_as_date_like():
+    dmy = analyze_column_profile("event_date", ["31/12/2024", "30/11/2024"])
+    assert dmy["likely_date"] is True
+    iso = analyze_column_profile("event_date", ["2024-03-05", "2024-03-06"])
+    assert iso["likely_date"] is True
+    _, notes = score_mapping_pair(
+        {
+            "source": "event_date",
+            "target": "event_date",
+            "target_type": "DATE",
+            "confidence": 0.9,
+        },
+        source_profile=iso,
+    )
+    assert any("date-like source aligned to temporal target" in n for n in notes)
+
+
 def test_timestamp_to_timestamp_no_non_temporal_warning():
     mapping = {
         "source": "last_login",
