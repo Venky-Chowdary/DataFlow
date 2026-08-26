@@ -5,6 +5,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from decimal import Decimal
+
 from services.db_type_utils import SCHEMALESS_DESTS
 from services.transform_engine import _parse_boolean, _parse_date, _parse_datetime, decimal_wire_value
 from services.value_serializer import cell_to_string
@@ -12,22 +14,27 @@ from services.value_serializer import cell_to_string
 EMAIL_RE = re.compile(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
 
 
-def _numeric_values(values: list[str]) -> list[float]:
-    out: list[float] = []
+def _numeric_values(values: list[str]) -> list[Decimal]:
+    out: list[Decimal] = []
     for raw in values:
         if not raw:
             continue
         parsed = decimal_wire_value(raw)
         if parsed is None:
             continue
-        out.append(float(parsed))
+        out.append(parsed)
     return out
 
 
-def _iqr_outliers(values: list[float]) -> tuple[float, float, int]:
-    """Return (lower_fence, upper_fence, outlier_count) using 1.5×IQR rule."""
+def _iqr_outliers(values: list[Decimal]) -> tuple[Decimal, Decimal, int]:
+    """Return (lower_fence, upper_fence, outlier_count) using 1.5×IQR rule.
+
+    Fences use write-path Decimals. ``float(parsed)`` invented a second
+    magnitude before the first quartile.
+    """
+    zero = Decimal("0")
     if len(values) < 4:
-        return 0.0, 0.0, 0
+        return zero, zero, 0
     sorted_vals = sorted(values)
     n = len(sorted_vals)
     q1 = sorted_vals[n // 4]
@@ -35,8 +42,8 @@ def _iqr_outliers(values: list[float]) -> tuple[float, float, int]:
     iqr = q3 - q1
     if iqr <= 0:
         return sorted_vals[0], sorted_vals[-1], 0
-    lower = q1 - 1.5 * iqr
-    upper = q3 + 1.5 * iqr
+    lower = q1 - Decimal("1.5") * iqr
+    upper = q3 + Decimal("1.5") * iqr
     outliers = sum(1 for v in values if v < lower or v > upper)
     return lower, upper, outliers
 
