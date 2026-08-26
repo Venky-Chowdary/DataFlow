@@ -16,6 +16,8 @@ from connectors.writer_common import (
     CHUNK_SIZE,
     DF_LSN_COL,
     _coerced_null_row_count,
+    _conflict_key_identity,
+    _is_nullish_conflict_key,
     _rejected_row_count,
     build_mapped_rows_with_details,
     compare_lsn,
@@ -59,6 +61,16 @@ def bind_mongo_json_document(value: Any) -> Any:
         f"MongoDB JSON refused {value!r} "
         "(refuse silent pass-through invent)"
     )
+
+
+def _mongo_conflict_key(doc: Mapping[str, Any], pk_cols: list[str]) -> tuple[Any, ...]:
+    """Canonical PK tuple so extract reader-null matches dest None."""
+    return tuple(_conflict_key_identity(doc.get(c)) for c in pk_cols)
+
+
+def _mongo_incomplete_pk_cols(doc: Mapping[str, Any], pk_cols: list[str]) -> list[str]:
+    """Conflict-key columns that cannot identify a dense Mongo upsert."""
+    return [c for c in pk_cols if _is_nullish_conflict_key(doc.get(c))]
 
 
 def _target_is_temporal(target_type: str) -> bool:
@@ -929,7 +941,7 @@ def write_mapped_rows(
                 if DF_LSN_COL in target_cols:
                     best_docs: dict[tuple, tuple[dict[str, Any], bool]] = {}
                     for doc, sparse in paired:
-                        key = tuple(doc.get(c) for c in pk_cols)
+                        key = _mongo_conflict_key(doc, pk_cols)
                         prev = best_docs.get(key)
                         if prev is None or compare_lsn(doc.get(DF_LSN_COL), prev[0].get(DF_LSN_COL)) >= 0:
                             best_docs[key] = (doc, sparse)
@@ -937,7 +949,7 @@ def write_mapped_rows(
                 else:
                     seen_docs: dict[tuple, tuple[dict[str, Any], bool]] = {}
                     for doc, sparse in paired:
-                        key = tuple(doc.get(c) for c in pk_cols)
+                        key = _mongo_conflict_key(doc, pk_cols)
                         seen_docs[key] = (doc, sparse)
                     paired = list(seen_docs.values())
                 docs = [p[0] for p in paired]
@@ -952,13 +964,13 @@ def write_mapped_rows(
                         batch_filters = []
                         for doc in docs:
                             filt = {c: doc.get(c) for c in pk_cols}
-                            if not any(v in (None, "") for v in filt.values()):
+                            if not _mongo_incomplete_pk_cols(filt, pk_cols):
                                 batch_filters.append(filt)
                         if batch_filters:
                             projection = {DF_LSN_COL: 1}
                             projection.update({c: 1 for c in pk_cols})
                             for existing in coll.find({"$or": batch_filters}, projection):
-                                key = tuple(existing.get(c) for c in pk_cols)
+                                key = _mongo_conflict_key(existing, pk_cols)
                                 existing_lsn[key] = existing.get(DF_LSN_COL)
                     except pymongo.errors.PyMongoError as exc:
                         # Fail closed: without the prior LSN map we cannot prove
@@ -984,8 +996,8 @@ def write_mapped_rows(
                 skipped_stale = 0
                 for doc_idx, (doc, sparse) in enumerate(zip(docs, sparse_flags)):
                     filt = {c: doc.get(c) for c in pk_cols}
-                    if any(v in (None, "") for v in filt.values()):
-                        missing_cols = [c for c, v in filt.items() if v in (None, "")]
+                    missing_cols = _mongo_incomplete_pk_cols(filt, pk_cols)
+                    if missing_cols:
                         detail = {
                             "row": start + doc_idx + 1,
                             "column": ",".join(missing_cols),
@@ -1015,7 +1027,7 @@ def write_mapped_rows(
                         continue
                     if use_lsn_guard:
                         incoming_lsn = doc.get(DF_LSN_COL)
-                        key = tuple(doc.get(c) for c in pk_cols)
+                        key = _mongo_conflict_key(doc, pk_cols)
                         prior_lsn = existing_lsn.get(key)
                         if incoming_lsn is not None and not lsn_is_newer(incoming_lsn, prior_lsn):
                             skipped_stale += 1
