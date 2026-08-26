@@ -7,6 +7,8 @@ from services.decision_kernel import (
     FailureClass,
     classify_transform_failure,
     findings_from_coercion_report,
+    findings_from_population_fit,
+    merge_validation_findings,
     rank_suggested_target_type,
 )
 from services.transform_resolver import resolve_transform
@@ -160,3 +162,105 @@ def test_findings_from_coercion_report_stamps_canonical_ssot():
     suggested = (top.get("suggested_target_type") or "").upper()
     assert "DOUBLE" in suggested or "FLOAT" in suggested or "DECIMAL" in suggested
     assert "LONGTEXT" not in suggested
+
+
+def test_population_fit_overflow_classifies_and_widens_dest_number():
+    """flights-1m class: 'does not fit NUMBER(9,6)' is OVERFLOW, not a cast."""
+    assert (
+        classify_transform_failure(
+            "1 value(s) in 'DEP_TIME' do not fit DEP_TIME NUMBER(9,6) "
+            "(first at row 293) — decimal does not fit NUMBER(9,6)",
+            target_type="NUMBER(9,6)",
+            source_value="7.9166665",
+        )
+        is FailureClass.OVERFLOW
+    )
+    assert (
+        classify_transform_failure(
+            "value exceeds NUMBER(9,6)",
+            target_type="NUMBER(9,6)",
+        )
+        is FailureClass.OVERFLOW
+    )
+    suggested = rank_suggested_target_type(
+        source_type="NUMBER(9,6)",
+        target_type="NUMBER(9,6)",
+        dest_db="snowflake",
+        failure_class=FailureClass.OVERFLOW,
+        failure_examples=["7.9166665"],
+    )
+    assert suggested == "NUMBER(10,7)"
+
+
+def test_rank_does_not_invent_widen_for_auto_ambiguous_decimal():
+    """Auto ``1.234`` has no write-path bind — do not stamp a dest widen."""
+    suggested = rank_suggested_target_type(
+        source_type="NUMBER(9,6)",
+        target_type="NUMBER(9,6)",
+        dest_db="snowflake",
+        failure_class=FailureClass.OVERFLOW,
+        failure_examples=["1.234"],
+    )
+    assert suggested != "NUMBER(10,7)"
+    assert "NUMBER(8," not in (suggested or "")
+
+
+def test_findings_from_population_fit_stamps_dest_widen():
+    report = {
+        "evidence": "exact",
+        "findings": [
+            {
+                "source": "DEP_TIME",
+                "target": "DEP_TIME",
+                "target_type": "NUMBER(9,6)",
+                "unfit_rows": 1,
+                "example_rows": [293],
+                "example_values": ["7.9166665"],
+                "aborts_job": True,
+                "reason": (
+                    "1 value(s) in 'DEP_TIME' do not fit DEP_TIME NUMBER(9,6) "
+                    "(first at row 293)"
+                ),
+                "suggested_target_type": "NUMBER(10,7)",
+                "suggested_fix": (
+                    "Open Map → widen DEP_TIME to NUMBER(10,7) "
+                    "(or ALTER the destination) → re-Validate. "
+                    "Do not silently truncate."
+                ),
+            }
+        ],
+    }
+    findings = findings_from_population_fit(report, dest_db="snowflake")
+    assert len(findings) == 1
+    top = findings[0]
+    assert top["failure_class"] == FailureClass.OVERFLOW.value
+    assert top["suggested_target_type"] == "NUMBER(10,7)"
+    assert top["row_number"] == 293
+    assert "g3f_population_fit" in top["gate_ids"]
+    assert "NUMBER(10,7)" in top["recommended_action"]
+    assert "truncate" in top["recommended_action"].lower()
+
+
+def test_merge_prefers_population_fit_widen_over_preview_coercion():
+    coercion = [
+        {
+            "source_column": "DEP_TIME",
+            "target_column": "DEP_TIME",
+            "failure_class": FailureClass.UNKNOWN.value,
+            "suggested_target_type": "VARCHAR",
+            "gate_ids": ["g3_coercion"],
+        }
+    ]
+    population = [
+        {
+            "source_column": "DEP_TIME",
+            "target_column": "DEP_TIME",
+            "failure_class": FailureClass.OVERFLOW.value,
+            "suggested_target_type": "NUMBER(10,7)",
+            "gate_ids": ["g3f_population_fit"],
+        }
+    ]
+    merged = merge_validation_findings(coercion, population)
+    assert len(merged) == 1
+    assert merged[0]["suggested_target_type"] == "NUMBER(10,7)"
+    assert merged[0]["failure_class"] == FailureClass.OVERFLOW.value

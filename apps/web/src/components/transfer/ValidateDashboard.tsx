@@ -3112,11 +3112,14 @@ export function ValidateDashboard({
                 <strong>Population fit</strong>
                 <span>
                   {populationFit.headline}
-                  {populationFit.offenders.length > 0 &&
-                  populationFit.offenders[0].exampleRows.length > 0 ? (
+                  {populationFit.offenders.length > 0 ? (
                     <em>
-                      {" "}· first at row{" "}
-                      {populationFit.offenders[0].exampleRows.slice(0, 3).join(", ")}
+                      {populationFit.offenders[0].exampleRows.length > 0
+                        ? ` · first at row ${populationFit.offenders[0].exampleRows.slice(0, 3).join(", ")}`
+                        : ""}
+                      {populationFit.offenders[0].suggestedTargetType
+                        ? ` · widen to ${populationFit.offenders[0].suggestedTargetType}`
+                        : ""}
                     </em>
                   ) : null}
                 </span>

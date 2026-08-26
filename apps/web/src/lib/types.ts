@@ -1087,7 +1087,7 @@ export interface PreflightResult {
     create_new?: boolean;
     assignment_strategy?: string;
   }>;
-  /** Canonical Kernel ValidationFinding dicts (coercion → findings SSOT). */
+  /** Canonical Kernel ValidationFinding dicts (coercion + population-fit SSOT). */
   validation_findings?: Array<Record<string, unknown>>;
   /** G13/G14/G15 mapping contract — extras, dest-only, write_by=name. */
   source_coverage?: {
@@ -1145,6 +1145,9 @@ export interface PreflightResult {
       example_values?: string[];
       aborts_job?: boolean;
       reason?: string;
+      unfit_reason?: string;
+      suggested_target_type?: string;
+      suggested_fix?: string;
     }>;
     undecidable_columns?: string[];
     safe_by_declaration?: string[];

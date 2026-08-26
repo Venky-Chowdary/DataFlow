@@ -47,6 +47,8 @@ test("findings name the column, the carrier and the first offending rows", () =>
         example_rows: [431, 433, 3596],
         example_values: ["9999.99999999"],
         aborts_job: true,
+        suggested_target_type: "NUMBER(12,9)",
+        suggested_fix: "Open Map → widen arr_time to NUMBER(12,9)",
       },
     ],
   });
@@ -56,6 +58,34 @@ test("findings name the column, the carrier and the first offending rows", () =>
   assert.match(s.headline, /arr_time → NUMBER\(11,8\)/);
   assert.deepEqual(s.offenders[0].exampleRows, [431, 433, 3596]);
   assert.equal(s.offenders[0].abortsJob, true);
+  assert.equal(s.offenders[0].suggestedTargetType, "NUMBER(12,9)");
+  assert.match(s.offenders[0].suggestedFix, /NUMBER\(12,9\)/);
+});
+
+test("float32 clock residue names the dest widen, never a blank fix", () => {
+  const s = populationFitSummary({
+    evidence: "exact",
+    rows_scanned: 293,
+    rows_total: 293,
+    bounded_columns: [{ source: "DEP_TIME", target_type: "NUMBER(9,6)" }],
+    findings: [
+      {
+        source: "DEP_TIME",
+        target: "DEP_TIME",
+        target_type: "NUMBER(9,6)",
+        unfit_rows: 1,
+        example_rows: [293],
+        example_values: ["7.9166665"],
+        aborts_job: true,
+        suggested_target_type: "NUMBER(10,7)",
+        suggested_fix:
+          "Open Map → widen DEP_TIME to NUMBER(10,7) (or ALTER the destination) → re-Validate. Do not silently truncate.",
+      },
+    ],
+  });
+  assert.ok(s);
+  assert.equal(s.offenders[0].suggestedTargetType, "NUMBER(10,7)");
+  assert.match(s.offenders[0].suggestedFix, /Do not silently truncate/);
 });
 
 test("a partial scan says how far it got", () => {

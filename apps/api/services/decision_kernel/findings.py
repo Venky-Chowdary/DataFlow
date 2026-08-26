@@ -124,6 +124,13 @@ def classify_transform_failure(
         return FailureClass.OVERFLOW
     if "underflow" in msg:
         return FailureClass.UNDERFLOW
+    # Population-fit / writer: "N value(s) do not fit NUMBER(9,6)" and
+    # "decimal does not fit" / "value exceeds NUMBER". Not a cast class —
+    # the dest carrier exists and the cell is wider than it.
+    if ("does not fit" in msg or "value exceeds" in msg) and any(
+        t in msg or t in tgt_l for t in ("decimal", "number", "numeric", "bignumeric")
+    ):
+        return FailureClass.OVERFLOW
     if "empty value cannot coerce" in msg or (
         "empty" in msg and ("cannot coerce" in msg or "cannot cast" in msg)
     ):
@@ -217,6 +224,8 @@ def rank_suggested_target_type(
         return ""
 
     # Fractional → integer: prefer DOUBLE/DECIMAL, never text-first.
+    # Do not replace this with a dest NUMBER widen — FLOAT→INT is a
+    # different root cause than scale overflow of an existing DECIMAL.
     if fc is FailureClass.FRACTIONAL_PRECISION_LOSS or (
         src_l in {"float", "decimal", "number"}
         and tgt_l == "integer"
@@ -226,12 +235,48 @@ def rank_suggested_target_type(
             source_type or "DOUBLE", target_type or "INTEGER", dest_db=db
         )
 
+    # Dest NUMBER/DECIMAL cannot hold the cell: dest-spelled widen, never
+    # truncate. Auto-ambiguous ``1.234`` has no write-path bind, so the
+    # widen helper returns empty and we fall through.
+    widened = _decimal_overflow_widen(
+        examples, target_type=target_type, dest_db=db
+    )
+    if widened:
+        return widened
+
     # Encoding / length: text widen is appropriate.
     if fc in {FailureClass.ENCODING_FAILURE, FailureClass.LENGTH_OVERFLOW}:
         return create_new_mapping_target_type("TEXT", db) or "TEXT"
 
     # Default: fidelity-preserving remap SSOT (FLOAT→INT already → DOUBLE).
     return suggest_remap_target(source_type, target_type, dest_db=db)
+
+
+def _decimal_overflow_widen(
+    examples: list[str],
+    *,
+    target_type: str,
+    dest_db: str,
+) -> str:
+    """Dest-spelled NUMBER/DECIMAL that would hold the first overflowing cell."""
+    from connectors.writer_common import fits_decimal, parse_decimal_precision_scale
+    from services.decimal_observe import decimal_widen_carrier
+
+    parsed = parse_decimal_precision_scale(target_type, dest_db=dest_db)
+    if not parsed:
+        return ""
+    precision, scale = parsed
+    for ex in examples:
+        if not (ex or "").strip():
+            continue
+        if fits_decimal(ex, precision, scale, dest_db=dest_db):
+            continue
+        widened = decimal_widen_carrier(
+            ex, dest_db=dest_db, current_type=target_type
+        )
+        if widened:
+            return widened
+    return ""
 
 
 def recommended_action_for_failure(
@@ -272,6 +317,11 @@ def recommended_action_for_failure(
             "no widen or Risk Contract applies until the destination type is read. "
             "If the table does not exist the probe proves it absent and the column "
             "becomes a CREATE."
+        )
+    if fc is FailureClass.OVERFLOW and suggested_target_type:
+        return (
+            f"Open Map → widen {col}to {suggested_target_type} (or ALTER the destination) "
+            f"→ re-Validate. Do not silently truncate."
         )
     if suggested_target_type:
         return (
@@ -472,4 +522,109 @@ def findings_from_coercion_report(
         out.append(finding.to_dict())
         if len(out) >= max_findings:
             break
+    return out
+
+
+def findings_from_population_fit(
+    report: Mapping[str, Any] | None,
+    *,
+    dest_db: str = "",
+    max_findings: int = 64,
+) -> list[dict[str, Any]]:
+    """Promote ``g3f_population_fit`` overflows into ValidationFinding dicts.
+
+    The 25-row coercion preview never sees row 293. Validate's Remap CTA
+    reads ``validation_findings[].suggested_target_type`` — without this
+    promotion the dest-spelled widen stays buried under ``population_fit``
+    and the button shows ``—``.
+    """
+    if not isinstance(report, Mapping):
+        return []
+    findings = report.get("findings")
+    if not isinstance(findings, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for col in findings:
+        if not isinstance(col, Mapping):
+            continue
+        try:
+            unfit = int(col.get("unfit_rows") or 0)
+        except (TypeError, ValueError):
+            unfit = 0
+        if unfit <= 0:
+            continue
+        examples = (
+            col.get("example_values")
+            if isinstance(col.get("example_values"), list)
+            else []
+        )
+        from services.value_serializer import present_cell_text
+
+        source_value = ""
+        if examples:
+            source_value = present_cell_text(examples[0]) or str(examples[0] or "")
+        rows = (
+            col.get("example_rows")
+            if isinstance(col.get("example_rows"), list)
+            else []
+        )
+        row_number = None
+        if rows:
+            try:
+                row_number = int(rows[0])
+            except (TypeError, ValueError):
+                row_number = None
+        reason = str(
+            col.get("reason")
+            or col.get("unfit_reason")
+            or col.get("suggested_fix")
+            or "value does not fit destination NUMBER/DECIMAL"
+        )
+        suggested = str(col.get("suggested_target_type") or "").strip()
+        finding = build_finding(
+            source_column=str(col.get("source") or ""),
+            target_column=str(col.get("target") or col.get("source") or ""),
+            failure_message=reason,
+            source_type=str(col.get("source_type") or ""),
+            target_type=str(col.get("target_type") or ""),
+            source_value=source_value,
+            row_number=row_number,
+            dest_db=dest_db,
+            blocking=True,
+            gate_ids=("g3f_population_fit",),
+            failure_class=FailureClass.OVERFLOW,
+            suggested_target_type=suggested,
+        )
+        payload = finding.to_dict()
+        scan_fix = str(col.get("suggested_fix") or "").strip()
+        if scan_fix:
+            payload["recommended_action"] = scan_fix
+        out.append(payload)
+        if len(out) >= max_findings:
+            break
+    return out
+
+
+def merge_validation_findings(
+    coercion: list[dict[str, Any]] | None,
+    population: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    """One finding per source+target. Population-fit dest widen wins.
+
+    A preview coercion finding for the same column is a 25-row guess.
+    The population scan names the first overflowing row and the dest-spelled
+    carrier that would hold it.
+    """
+    coercion_list = [f for f in (coercion or []) if isinstance(f, Mapping)]
+    population_list = [f for f in (population or []) if isinstance(f, Mapping)]
+
+    def _key(finding: Mapping[str, Any]) -> tuple[str, str]:
+        return (
+            str(finding.get("source_column") or "").strip().lower(),
+            str(finding.get("target_column") or "").strip().lower(),
+        )
+
+    pop_keys = {_key(f) for f in population_list}
+    out = [dict(f) for f in coercion_list if _key(f) not in pop_keys]
+    out.extend(dict(f) for f in population_list)
     return out

@@ -586,4 +586,19 @@ describe("Transfer Studio chrome contracts", () => {
     assert.doesNotMatch(localEx, /replace\(\/,\/g/);
     assert.doesNotMatch(localTx, /replace\(\/,\/g/);
   });
+
+  it("Validate Remap reads kernel findings; population-fit honesty names the dest widen", () => {
+    const dash = readFileSync(join(webRoot, "components/transfer/ValidateDashboard.tsx"), "utf8");
+    const types = readFileSync(join(webRoot, "lib/types.ts"), "utf8");
+    const fit = readFileSync(join(webRoot, "lib/populationFit.ts"), "utf8");
+    assert.match(dash, /Prefer Decision Kernel validation_findings/);
+    assert.match(dash, /suggestedTargetType/);
+    assert.match(dash, /widen to \$\{populationFit\.offenders\[0\]\.suggestedTargetType\}/);
+    assert.match(fit, /suggestedTargetType: String\(f\.suggested_target_type/);
+    assert.match(types, /suggested_target_type\?: string;/);
+    assert.match(types, /suggested_fix\?: string;/);
+    // Existing Remap CTA is the only primary — do not add a second teal for fit.
+    assert.doesNotMatch(dash, /dashCta\("population/);
+    assert.doesNotMatch(dash, /variant="primary"[\s\S]{0,120}widen to NUMBER/);
+  });
 });

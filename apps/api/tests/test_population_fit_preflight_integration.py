@@ -163,6 +163,57 @@ def test_file_inferred_matching_typmod_still_scans_float32_clock_residue() -> No
     assert finding["suggested_target_type"] == "NUMBER(10,7)"
     assert "NUMBER(10,7)" in (finding.get("suggested_fix") or "")
     assert _gate(result)["status"] == "block"
+    kernel = result["validation_findings"]
+    assert kernel, "population-fit overflow must light Validate Remap"
+    assert kernel[0]["suggested_target_type"] == "NUMBER(10,7)"
+    assert kernel[0]["failure_class"] == "OVERFLOW"
+    assert kernel[0]["row_number"] == 293
+    assert "g3f_population_fit" in kernel[0]["gate_ids"]
+    proof_findings = (result.get("proof_bundle") or {}).get("validation_findings") or []
+    assert proof_findings and proof_findings[0]["suggested_target_type"] == "NUMBER(10,7)"
+
+
+def test_csv_bytes_past_preview_stamp_kernel_widen() -> None:
+    """A real CSV of 293 rows: last cell ``7.9166665`` vs dest NUMBER(9,6).
+
+    Peek inference would have typed the column NUMBER(9,6). The 25-row
+    preview is clean. Kernel findings must still name NUMBER(10,7).
+    """
+    from transfer.file_stream import iter_source_rows
+
+    buf = io.StringIO()
+    writer = csv.DictWriter(buf, fieldnames=["DEP_TIME"])
+    writer.writeheader()
+    for i in range(1, 294):
+        writer.writerow({"DEP_TIME": "7.9166665" if i == 293 else "12.345678"})
+    content = buf.getvalue().encode("utf-8")
+
+    result = _preflight(
+        columns=["DEP_TIME"],
+        source_kind="file",
+        source_format="csv",
+        column_types={"DEP_TIME": "NUMBER(9,6)"},
+        destination_column_types={"DEP_TIME": "NUMBER(9,6)"},
+        mappings=[
+            {
+                "source": "DEP_TIME",
+                "target": "DEP_TIME",
+                "confidence": 0.93,
+                "target_type": "NUMBER(9,6)",
+            }
+        ],
+        row_count=293,
+        sample_rows=[{"DEP_TIME": "12.345678"} for _ in range(25)],
+        population_rows=iter_source_rows(content, "flights-clock.csv"),
+        rows_are_population=True,
+    )
+
+    assert result["passed"] is False
+    finding = result["validation_findings"][0]
+    assert finding["suggested_target_type"] == "NUMBER(10,7)"
+    assert finding["failure_class"] == "OVERFLOW"
+    assert finding["row_number"] == 293
+    assert "truncate" in (finding.get("recommended_action") or "").lower()
 
 
 def test_file_row_iterator_replays_every_row_of_a_csv() -> None:

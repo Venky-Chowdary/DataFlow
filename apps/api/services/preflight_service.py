@@ -1691,13 +1691,26 @@ def run_file_preflight(
         out.get("coercion_report"), out.get("gates")
     )
 
-    # Stamp Decision Kernel ValidationFindings onto Validate SSOT (coercion → findings).
+    # Stamp Decision Kernel ValidationFindings onto Validate SSOT.
+    # Coercion preview is 25 rows; population-fit overflows (row 293+)
+    # must share the same Remap surface or the dest widen stays hidden.
     try:
-        from services.decision_kernel import findings_from_coercion_report
+        from services.decision_kernel import (
+            findings_from_coercion_report,
+            findings_from_population_fit,
+            merge_validation_findings,
+        )
 
-        _vf = findings_from_coercion_report(
-            out.get("coercion_report"),
-            dest_db=str(destination_db_type or ""),
+        _dest = str(destination_db_type or "")
+        _vf = merge_validation_findings(
+            findings_from_coercion_report(
+                out.get("coercion_report"),
+                dest_db=_dest,
+            ),
+            findings_from_population_fit(
+                out.get("population_fit"),
+                dest_db=_dest,
+            ),
         )
         out["validation_findings"] = _vf
         if isinstance(out.get("proof_bundle"), dict) and _vf:
