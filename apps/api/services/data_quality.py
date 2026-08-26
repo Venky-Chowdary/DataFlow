@@ -65,6 +65,37 @@ def _to_decimal(value: Any) -> Decimal | None:
         return None
 
 
+def _as_decimal_stat(value: Any) -> Decimal | None:
+    """Bind stored batch stats for relative-drift compare.
+
+    Integrity already stores write-path Decimals. IEEE ``float(cur) - float(base)``
+    collapses scale-20 money and invents drift on values that are exact as Decimal.
+    Bool is refused (it is an ``int`` subclass, not a magnitude).
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, Decimal):
+        return value
+    if isinstance(value, int):
+        return Decimal(value)
+    if isinstance(value, float):
+        if value != value or value in (float("inf"), float("-inf")):
+            return None
+        try:
+            return Decimal(str(value))
+        except (InvalidOperation, ValueError, OverflowError):
+            return None
+    return None
+
+
+def _relative_numeric_drift(cur: Any, base: Any, threshold: float) -> bool:
+    cur_d = _as_decimal_stat(cur)
+    base_d = _as_decimal_stat(base)
+    if cur_d is None or base_d is None or base_d == 0:
+        return False
+    return abs(cur_d - base_d) / abs(base_d) > Decimal(str(threshold))
+
+
 def _is_fractional_decimal(value: Any) -> bool:
     from services.transform_engine import is_fractional_wire_value
 
@@ -209,50 +240,26 @@ class BatchDriftDetector:
 
             base_mean = base.get("mean")
             cur_mean = cur.get("mean")
-            if (
-                base_mean is not None
-                and cur_mean is not None
-                and isinstance(base_mean, (int, float, Decimal))
-                and isinstance(cur_mean, (int, float, Decimal))
-                and float(base_mean) != 0.0
-            ):
-                rel = abs(float(cur_mean) - float(base_mean)) / abs(float(base_mean))
-                if rel > self.numeric_threshold:
-                    warnings.append(
-                        f"Column '{col}' mean drift: {base_mean:.4g} → {cur_mean:.4g}"
-                    )
+            if _relative_numeric_drift(cur_mean, base_mean, self.numeric_threshold):
+                warnings.append(
+                    f"Column '{col}' mean drift: {base_mean:.4g} → {cur_mean:.4g}"
+                )
 
             base_stdev = base.get("stdev")
             cur_stdev = cur.get("stdev")
-            if (
-                base_stdev is not None
-                and cur_stdev is not None
-                and isinstance(base_stdev, (int, float, Decimal))
-                and isinstance(cur_stdev, (int, float, Decimal))
-                and float(base_stdev) != 0.0
-            ):
-                rel = abs(float(cur_stdev) - float(base_stdev)) / abs(float(base_stdev))
-                if rel > self.numeric_threshold:
-                    warnings.append(
-                        f"Column '{col}' stdev drift: {base_stdev:.4g} → {cur_stdev:.4g}"
-                    )
+            if _relative_numeric_drift(cur_stdev, base_stdev, self.numeric_threshold):
+                warnings.append(
+                    f"Column '{col}' stdev drift: {base_stdev:.4g} → {cur_stdev:.4g}"
+                )
 
             # Range drift for numeric / date-like columns
             for stat in ("min", "max"):
                 base_val = base.get(stat)
                 cur_val = cur.get(stat)
-                if (
-                    base_val is not None
-                    and cur_val is not None
-                    and isinstance(base_val, (int, float, Decimal))
-                    and isinstance(cur_val, (int, float, Decimal))
-                    and float(base_val) != 0.0
-                ):
-                    rel = abs(float(cur_val) - float(base_val)) / abs(float(base_val))
-                    if rel > self.numeric_threshold:
-                        warnings.append(
-                            f"Column '{col}' {stat} drift: {base_val:.4g} → {cur_val:.4g}"
-                        )
+                if _relative_numeric_drift(cur_val, base_val, self.numeric_threshold):
+                    warnings.append(
+                        f"Column '{col}' {stat} drift: {base_val:.4g} → {cur_val:.4g}"
+                    )
 
         for col in current_cols:
             if col not in self.baseline:
