@@ -698,6 +698,9 @@ def _normalize_locale_separators(text: str, number_locale: str = "") -> str | No
     Auto (no locale): both separators, 3+ thousand groups, and a 1–2 digit
     last group still parse. A lone 3-digit group (``1,234`` / ``1.234``)
     fails closed — US thousands and EU decimals share that shape.
+    ``0.025`` / ``0,025`` cannot be thousands (leading-zero integer) and
+    stay dest-canonical fractions so FLOAT/DECIMAL samples are not widened
+    to VARCHAR.
     """
     if text.lower() in NULL_SENTINELS:
         return None
@@ -757,6 +760,14 @@ def _normalize_locale_separators(text: str, number_locale: str = "") -> str | No
         # A last group longer than 3 cannot be thousands — it is a decimal scale.
         if len(parts) == 2 and len(parts[1]) > 3:
             return parts[0] + "." + parts[1]
+        # Leading-zero integer + 3-digit last group is a fraction, not thousands
+        # (``0,025`` is 0.025, never 25).
+        if (
+            len(parts) == 2
+            and len(parts[1]) == 3
+            and parts[0].lstrip("-") == "0"
+        ):
+            return parts[0] + "." + parts[1]
         return None
 
     if "." in text:
@@ -793,6 +804,14 @@ def _normalize_locale_separators(text: str, number_locale: str = "") -> str | No
         # A last group longer than 3 cannot be thousands — IEEE/Excel residue
         # and money scales (52.310500000000000, 1.2345) stay decimals.
         if len(parts) == 2 and len(parts[1]) > 3:
+            return text
+        # Leading-zero integer + 3-digit last group is a fraction, not thousands
+        # (``0.025`` is 0.025, never 25). ``1.234`` stays Auto-ambiguous.
+        if (
+            len(parts) == 2
+            and len(parts[1]) == 3
+            and parts[0].lstrip("-") == "0"
+        ):
             return text
         return None
     return text
