@@ -241,7 +241,9 @@ def _parse_vector_array(value: str) -> list[float] | None:
     if not (s.startswith("[") and s.endswith("]")):
         return None
     try:
-        parsed = json.loads(s)
+        from services.value_serializer import json_loads_exact
+
+        parsed = json_loads_exact(s)
     except json.JSONDecodeError:
         return None
     if not isinstance(parsed, list) or len(parsed) < 2:
@@ -412,7 +414,9 @@ def _classify_jsonish(value: str, *, field_name: str | None = None) -> str | Non
     if not ((s.startswith("{") and s.endswith("}")) or (s.startswith("[") and s.endswith("]"))):
         return None
     try:
-        parsed = json.loads(s)
+        from services.value_serializer import json_loads_exact
+
+        parsed = json_loads_exact(s)
     except json.JSONDecodeError:
         return None
 

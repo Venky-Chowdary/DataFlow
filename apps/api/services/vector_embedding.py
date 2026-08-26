@@ -28,9 +28,9 @@ def coerce_embedding(
             return None, "missing embedding — refuse zero-vector fabrication"
         if text.startswith("[") and text.endswith("]"):
             try:
-                import json
+                from services.value_serializer import json_loads_exact
 
-                value = json.loads(text)
+                value = json_loads_exact(text)
             except Exception:
                 return None, "embedding string is not a JSON array"
         else:

@@ -1190,7 +1190,7 @@ def _parse_vector(value: str) -> list[float] | None:
         return None
     try:
         if text.startswith("["):
-            parsed = json.loads(text, parse_constant=_json_reject_nonfinite)
+            parsed = json_loads_exact(text, parse_constant=_json_reject_nonfinite)
         else:
             parsed = [x.strip() for x in text.split(",") if x.strip()]
         if not isinstance(parsed, list) or not parsed:

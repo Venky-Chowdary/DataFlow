@@ -172,7 +172,9 @@ def get_cached(keys: list[str]) -> dict[str, list[float]]:
                 _SESSION_MISSES += 1
                 continue
             try:
-                parsed = json.loads(row[0])
+                from services.value_serializer import json_loads_exact
+
+                parsed = json_loads_exact(row[0])
             except Exception:
                 _SESSION_MISSES += 1
                 continue
