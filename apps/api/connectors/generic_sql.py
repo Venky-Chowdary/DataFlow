@@ -989,13 +989,15 @@ def _logical_type_from_sa(col_type: Any) -> str:
     return normalize_logical_type(repr_)
 
 
-class _DuckDBJSON(sa.JSON):
-    """JSON type that stores canonical JSON text in DuckDB.
+class _ExactJSON(sa.JSON):
+    """JSON type that stores canonical JSON text (no stdlib re-parse).
 
     SQLAlchemy's default ``sa.JSON`` re-parses with ``json.loads`` (IEEE invent)
     and binds Python ``None`` as the JSON literal ``null``. This subclass uses
     ``json_document_wire``: valid JSON text keeps its digits and polarity
     (``\"1\"`` stays a string). Python trees dump compact. ``None`` is SQL NULL.
+    Used for DuckDB and every leftover generic-SQL JSON DDL site that would
+    otherwise emit bare ``sa.JSON()`` (MySQL / SQLite / MSSQL / …).
     """
 
     __visit_name__ = "JSON"
@@ -1013,9 +1015,14 @@ class _DuckDBJSON(sa.JSON):
     def result_processor(
         self, dialect: Any, coltype: Any
     ) -> Callable[[Any], Any] | None:
-        # DuckDB returns JSON values as text.  Keep them as text so the
-        # downstream value serializer can apply the same canonical compact JSON.
+        # Drivers that still return JSON as text stay text. A second
+        # ``json.loads`` here would IEEE-collapse long fractions before
+        # ``json_document_wire`` could keep the engine spelling.
         return lambda value: value
+
+
+# Backward name — DuckDB was the first engine on this wire.
+_DuckDBJSON = _ExactJSON
 
 
 #: Dialects whose catalogs fold unquoted identifiers to a single case.
@@ -1474,12 +1481,12 @@ def _sa_type_for_logical(
                     return sa.ARRAY(
                         _sa_type_for_logical(element, dialect_name, db_type)
                     )
-            return _DuckDBJSON(none_as_null=True)
+            return _ExactJSON(none_as_null=True)
         if db_type in ("oracle", "clickhouse", "trino", "questdb", "presto"):
             return _maybe_nullable(sa.Text())
         if dialect_name == "postgresql":
             return postgresql.JSONB()
-        return sa.JSON()
+        return _ExactJSON(none_as_null=True)
     if t == LOGICAL_BINARY:
         if db_type in ("clickhouse", "trino", "questdb", "presto"):
             return _maybe_nullable(sa.Text())
@@ -1585,7 +1592,7 @@ def _sa_type_for_logical(
         if native_logical == LOGICAL_JSON:
             if dialect_name == "postgresql":
                 return postgresql.JSONB()
-            return sa.JSON()
+            return _ExactJSON(none_as_null=True)
         if _DialectNativeType is None:
             return _maybe_nullable(sa.Text())
         return _maybe_nullable(_DialectNativeType(native))
@@ -1729,7 +1736,9 @@ def _to_sa_value(
         from connectors.sql_bind import coerce_json_wire
 
         # Empty JSON wire raises — quarantine upstream (never invent SQL NULL wipe).
-        as_text = _is_string_type(sa_type)
+        # _ExactJSON bind keeps engine text; parsing here then dumping would
+        # stringify non-IEEE Decimals (number → string polarity invent).
+        as_text = _is_string_type(sa_type) or isinstance(sa_type, _ExactJSON)
         bound = coerce_json_wire(value, as_text=as_text)
         if as_text:
             return bound
@@ -2889,7 +2898,10 @@ def _is_json_sa(col: Any) -> bool:
     col_type = getattr(col, "type", None)
     if col_type is None:
         return False
-    return type(col_type).__name__.upper() in {"JSON", "JSONB"}
+    if isinstance(col_type, sa.JSON):
+        return True
+    name = type(col_type).__name__.upper()
+    return name in {"JSON", "JSONB"} or name.endswith("JSON") or name.endswith("JSONB")
 
 
 def _serialize_source_row(row: Any, cols: list[Any], dialect: str) -> list[str]:
