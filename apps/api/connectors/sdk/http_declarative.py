@@ -9,6 +9,7 @@ from urllib.parse import urljoin
 import requests
 
 from connectors.sdk import BaseConnector, RecordBatch, StreamSchema, register_connector
+from services.value_serializer import load_http_json
 
 
 @dataclass
@@ -176,7 +177,7 @@ class DeclarativeHttpConnector(BaseConnector):
 
         resp = requests.get(url, headers=self._headers(), params=params, timeout=60)
         resp.raise_for_status()
-        payload = resp.json()
+        payload = load_http_json(resp)
         records_raw = _dig(payload, decl.records_path)
         if records_raw is None and isinstance(payload, list):
             records_raw = payload

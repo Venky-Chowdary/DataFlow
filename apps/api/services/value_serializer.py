@@ -306,6 +306,30 @@ def json_loads_exact(text: str, *, parse_constant: Any = None) -> Any:
     return _demote_exactly_representable(parsed)
 
 
+def load_http_json(resp: Any) -> Any:
+    """HTTP JSON body. Numbers match ``json_loads_exact``.
+
+    ``Response.json()`` is stdlib ``json.loads``, so a long fraction in an
+    API cell collapses to IEEE before flatten/bind. Invalid bodies raise.
+    Test doubles that only stub ``.json()`` keep their already-built tree.
+    """
+    text = getattr(resp, "text", None)
+    if isinstance(text, (bytes, bytearray, memoryview)):
+        text = bytes(text).decode("utf-8")
+    if isinstance(text, str):
+        return json_loads_exact(text)
+    content = getattr(resp, "content", None)
+    if isinstance(content, (bytes, bytearray, memoryview)):
+        return json_loads_exact(bytes(content).decode("utf-8"))
+    json_fn = getattr(resp, "json", None)
+    if callable(json_fn):
+        payload = json_fn()
+        if isinstance(payload, str):
+            return json_loads_exact(payload)
+        return payload
+    return json_loads_exact("")
+
+
 def demote_exact_json(value: Any) -> Any:
     """Same IEEE-exact number demotion ``json_loads_exact`` applies.
 

@@ -15,7 +15,7 @@ import time
 from typing import Any
 
 import requests
-from services.value_serializer import cell_to_string
+from services.value_serializer import cell_to_string, load_http_json
 
 from connectors.saas_common import ReadBatch, base_url, token
 
@@ -379,7 +379,7 @@ def _read_page(cfg: dict[str, Any], pagination: dict[str, Any], next_url: str | 
     params = _build_params(cfg, pagination)
     resp = _request_with_retry("GET", url, headers=headers, params=params, timeout=60)
     resp.raise_for_status()
-    body = resp.json()
+    body = load_http_json(resp)
     records = _extract_records(body, cfg.get("data_path", ""))
     next_cursor = _extract_next_cursor(body, cfg, dict(resp.headers))
     has_more = bool(next_cursor)
