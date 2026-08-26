@@ -73,3 +73,13 @@ def test_ieee_lossy_mantissa_cache_misses(isolated_embedding_cache: Path):
 
     _insert_raw(isolated_embedding_cache, "ieee", "[9007199254740993, 1]")
     assert get_cached(["ieee"]) == {}
+
+
+def test_put_cached_refuses_auto_and_lossy_mantissa(isolated_embedding_cache: Path):
+    from services.embedding_cache import get_cached, put_cached
+
+    assert put_cached([("auto", "test-model", ["1.234", 2])]) == 0
+    assert put_cached([("ieee", "test-model", [9007199254740993, 1])]) == 0
+    assert get_cached(["auto", "ieee"]) == {}
+    assert put_cached([("ok", "test-model", [0.1, 0.2])]) == 1
+    assert get_cached(["ok"])["ok"] == [0.1, 0.2]
