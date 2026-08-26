@@ -34,6 +34,7 @@ from services.value_serializer import (
     DF_MISSING_SENTINEL,
     is_missing_sentinel,
     json_default,
+    json_loads_exact,
 )
 
 DEFAULT_SOURCE_SPILL_MAX = 8 * 1024 * 1024
@@ -171,7 +172,7 @@ class SourceRowSpool:
             line = raw.decode("utf-8").rstrip("\n")
             if not line:
                 continue
-            yield [_load_cell(c) for c in json.loads(line)]
+            yield [_load_cell(c) for c in json_loads_exact(line)]
 
     def iter_bundles(self, batch_size: int) -> Iterator[tuple[int, list[list[Any]]]]:
         """Yield ``(1-based start_row, bundle)`` after rewind. ``start_row`` is global."""
