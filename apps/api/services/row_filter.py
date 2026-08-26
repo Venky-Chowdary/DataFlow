@@ -39,6 +39,18 @@ def _is_null(value: Any) -> bool:
     return isinstance(value, float) and value != value
 
 
+def _cell_text(value: Any) -> str:
+    """One filter token. Reader-null / blank become ``""`` (same as None).
+
+    ``str(value)`` invented ``True`` vs dest ``"true"``, scientific
+    ``1E+2`` vs dest-canonical ``100``, and ``str(None) == "None"`` so
+    ``in ["None"]`` matched a SQL NULL.
+    """
+    from services.value_serializer import present_cell_text
+
+    return present_cell_text(value) or ""
+
+
 def _compare_values(row_value: Any, filter_value: Any, op: str) -> bool:
     rv = _to_scalar(row_value)
     fv = _to_scalar(filter_value)
@@ -50,11 +62,13 @@ def _compare_values(row_value: Any, filter_value: Any, op: str) -> bool:
 
     if op in {"in", "not_in"}:
         allowed = fv if isinstance(fv, (list, tuple, set)) else [fv]
-        allowed_str = {str(v) for v in allowed}
-        return (str(rv) in allowed_str) if op == "in" else (str(rv) not in allowed_str)
+        allowed_str = {_cell_text(v) for v in allowed}
+        return (_cell_text(rv) in allowed_str) if op == "in" else (
+            _cell_text(rv) not in allowed_str
+        )
 
-    rv_str = str(rv) if rv is not None else ""
-    fv_str = str(fv) if fv is not None else ""
+    rv_str = _cell_text(rv)
+    fv_str = _cell_text(fv)
 
     if op == "contains":
         return fv_str in rv_str
