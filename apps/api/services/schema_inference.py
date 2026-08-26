@@ -40,7 +40,11 @@ from services.transform_engine import (
     _parse_decimal,
     vector_component_carrier,
 )
-from services.value_serializer import evidence_samples, is_null_evidence
+from services.value_serializer import (
+    evidence_samples,
+    is_null_evidence,
+    is_reader_null_cell,
+)
 
 # Logical types emitted to mapping / preflight / DDL layers
 LOGICAL_TYPES = frozenset({
@@ -301,7 +305,7 @@ def is_geography_wire(value: Any) -> bool:
     Rejects empty / clearly non-spatial strings so writers can quarantine fail-closed
     instead of letting the driver invent NULLs or abort mid-batch.
     """
-    if value is None:
+    if is_reader_null_cell(value):
         return True
     if isinstance(value, (bytes, bytearray, memoryview)):
         return len(value) > 0
@@ -328,7 +332,7 @@ def is_geography_wire(value: Any) -> bool:
 
 def is_interval_wire(value: Any) -> bool:
     """True when a cell looks like an INTERVAL identity payload (ISO-8601 / SQL)."""
-    if value is None:
+    if is_reader_null_cell(value):
         return True
     if isinstance(value, (int, float)):
         # Raw numeric seconds/days is ambiguous — refuse inventing INTERVAL.
@@ -353,7 +357,7 @@ def interval_wire_family(value: Any) -> str | None:
     Used by write quarantine so YEAR-MONTH values never bind into DAY-SECOND DDL
     (and vice versa) — ANSI/Oracle/Snowflake family polarity.
     """
-    if value is None:
+    if is_reader_null_cell(value):
         return None
     try:
         from datetime import timedelta
@@ -399,7 +403,9 @@ def interval_wire_family(value: Any) -> str | None:
 
 def geography_wire_srid(value: Any) -> int | None:
     """Extract SRID from EWKT (``SRID=4326;POINT(...)``) when present."""
-    if value is None or isinstance(value, (bytes, bytearray, memoryview, dict)):
+    if is_reader_null_cell(value) or isinstance(
+        value, (bytes, bytearray, memoryview, dict)
+    ):
         return None
     text = str(value).strip()
     m = re.match(r"^\s*SRID\s*=\s*(\d+)\s*;", text, re.I)

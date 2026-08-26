@@ -74,6 +74,20 @@ def is_null_evidence(value: Any) -> bool:
     return not text or text in NULL_WIRE_SENTINELS
 
 
+def is_reader_null_cell(value: Any) -> bool:
+    """Reader-wired SQL NULL / Missing — not empty or whitespace text.
+
+    Extract emits ``SQL_NULL_SENTINEL`` for a database NULL. Empty ``""`` is
+    a present-but-unfit specialty payload (not WKT, not an interval), so
+    GEOGRAPHY / INTERVAL bind must not treat it as SQL NULL.
+    """
+    if value is None or is_missing_sentinel(value):
+        return True
+    if not isinstance(value, str):
+        return False
+    return value.strip() in NULL_WIRE_SENTINELS
+
+
 def present_cell_text(value: Any) -> str | None:
     """One present cell on the reader wire.
 

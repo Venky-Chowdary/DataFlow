@@ -2242,9 +2242,11 @@ def coerce_interval_wire(
     """
     from services.schema_inference import is_interval_wire, interval_wire_family
     from services.type_system import interval_family
-    from services.value_serializer import format_bigquery_interval
+    from services.value_serializer import format_bigquery_interval, is_reader_null_cell
 
-    if value is None:
+    if is_missing_sentinel(value):
+        return value
+    if is_reader_null_cell(value):
         return None
     if not is_interval_wire(value):
         raise ValueError(
@@ -2283,9 +2285,12 @@ def coerce_geography_wire(
 
     from services.schema_inference import geography_wire_srid, is_geography_wire
     from services.type_system import parse_geography_srid
+    from services.value_serializer import is_reader_null_cell
 
     del engine  # reserved for future engine-native EWKB objects
-    if value is None:
+    if is_missing_sentinel(value):
+        return value
+    if is_reader_null_cell(value):
         return None
     if not is_geography_wire(value):
         raise ValueError(
