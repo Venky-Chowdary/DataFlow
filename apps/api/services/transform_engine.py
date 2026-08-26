@@ -975,10 +975,9 @@ def integer_parse_failure_reason(value: str) -> str:
     return stem
 
 
-# Canonical boolean wire only (SSOT with type_system.boolean_value_fits).
-# Informal "yes"/"on"/"y" invents truth (Airbyte-class); refuse — operator
-# must remap or transform. Schema inference keeps a wider informal set for
-# flag-name detection only.
+# Canonical boolean wire only (SSOT with type_system.boolean_value_fits and
+# schema_inference BOOLEAN dest invent). Informal "yes"/"on"/"y" invents
+# truth (Airbyte-class); refuse — operator must remap or transform.
 _STRICT_BOOL_TRUE = frozenset({"true", "t", "1"})
 _STRICT_BOOL_FALSE = frozenset({"false", "f", "0"})
 

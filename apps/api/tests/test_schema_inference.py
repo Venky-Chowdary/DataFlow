@@ -107,7 +107,9 @@ class TestSchemaTypesFixture:
         types = {c["name"]: c["inferred_type"] for c in record["columns"]}
         assert types["row_id"] == "INTEGER"
         assert str(types["amount"]).startswith("DECIMAL")
-        assert types["is_active"] == "BOOLEAN"
+        # Fixture mixes true/false/1 with informal yes/no — must not invent
+        # BOOLEAN dest the write path cannot bind.
+        assert types["is_active"] == "VARCHAR"
         assert types["created_at"] == "TIMESTAMPTZ"
         assert types["birth_date"] == "DATE"
         assert types["txn_yyyymmdd"] == "DATE"

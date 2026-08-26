@@ -29,7 +29,12 @@ ENUM_CASES = [
 FLAG_CASES = [
     (["true", "false"], "deviceVerified", "BOOLEAN", "boolean_flag"),
     (["0", "1"], "is_active", "BOOLEAN", "boolean_flag"),
-    (["yes", "no"], "email_verified", "BOOLEAN", "boolean_flag"),
+    (["t", "f"], "has_subscription", "BOOLEAN", "boolean_flag"),
+    # Informal tokens cannot bind BOOLEAN dest — stay VARCHAR (string enum).
+    (["yes", "no"], "email_verified", "VARCHAR", "string_enum"),
+    (["Y", "N"], "email_verified", "VARCHAR", "string_enum"),
+    (["on", "off"], "is_active", "VARCHAR", "string_enum"),
+    (["true", "yes"], "is_active", "VARCHAR", "string_enum"),
 ]
 
 TEMPORAL_CASES = [
@@ -57,8 +62,9 @@ def test_classic_booleans(token: str, expected: bool) -> None:
 
 @pytest.mark.parametrize("token", ["yes", "no", "on", "off", "y", "n"])
 def test_informal_booleans_are_not_write_path_tokens(token: str) -> None:
-    """Schema inference may detect flags; write path refuses inventing TRUE/FALSE."""
+    """Write path refuses informal tokens; inference must not invent BOOLEAN dest."""
     assert _parse_boolean(token) is None
+    assert infer_type([token, "yes" if token != "yes" else "no"], field_name="email_verified") == "VARCHAR"
 
 
 @pytest.mark.parametrize(
@@ -123,6 +129,34 @@ def test_infer_schema_map_choke_point():
 def test_status_samples_do_not_fit_boolean():
     assert samples_fit_logical_type(["active", "invalidated"], "BOOLEAN", field_name="status") is False
     assert samples_fit_logical_type(["true", "false"], "BOOLEAN", field_name="flag") is True
+    assert samples_fit_logical_type(["yes", "no"], "BOOLEAN", field_name="email_verified") is False
+
+
+def test_informal_flag_samples_do_not_invent_boolean_dest():
+    """Dirty CSVs with yes/no on a flag name stay VARCHAR — Execute can bind them."""
+    from services.transform_engine import dry_run_sample, infer_transform
+
+    intel = infer_column(["yes", "no", "YES"], field_name="email_verified")
+    assert intel["logical_type"] == "VARCHAR"
+    transform = infer_transform("email_verified", "email_verified", intel["logical_type"])
+    assert transform in {"none", "trim"}
+    ok, errors = dry_run_sample(
+        headers=["email_verified"],
+        sample_rows=[["yes"], ["no"], ["YES"]],
+        mappings=[{
+            "source": "email_verified",
+            "target": "email_verified",
+            "target_type": intel["logical_type"],
+            "transform": transform,
+        }],
+        column_types={"email_verified": intel["logical_type"]},
+    )
+    assert ok is True, errors
+
+
+def test_mixed_canonical_and_informal_boolean_widens():
+    """true/false/1/yes/no on is_active cannot all bind BOOLEAN — widen."""
+    assert infer_type(["true", "false", "1", "yes", "no"], field_name="is_active") == "VARCHAR"
 
 
 def test_safe_ddl_widens_enum_boolean_for_new_table():
