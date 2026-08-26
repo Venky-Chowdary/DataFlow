@@ -105,15 +105,16 @@ class DataTransferReasoningChain:
 
             non_empty = [v for v in sample_values if v and str(v).strip()]
             if non_empty:
-                use_datetime_bind = "standardize_iso8601" in (matched_pattern.transformations or [])
-                use_boolean_bind = getattr(matched_pattern, "name", "") == "Boolean Flag"
+                from src.ai.knowledge.data_quality_rules import WRITE_BIND_SEMANTIC_TYPES
+
+                write_transform = WRITE_BIND_SEMANTIC_TYPES.get(
+                    getattr(matched_pattern, "name", "")
+                )
                 match_count = 0
                 for raw in non_empty[:50]:
                     text = str(raw).strip()
-                    if use_datetime_bind or use_boolean_bind:
-                        parsed, err = apply_transform(
-                            text, "datetime" if use_datetime_bind else "boolean"
-                        )
+                    if write_transform:
+                        parsed, err = apply_transform(text, write_transform)
                         if parsed is not None and not err:
                             match_count += 1
                     elif any(
@@ -151,12 +152,18 @@ class DataTransferReasoningChain:
                 if inferred in {"date", "datetime"}:
                     inferred = "string"
                 transforms = [t for t in transforms if t != "standardize_iso8601"]
-            if inferred == "boolean" and texts:
+            from src.ai.knowledge.data_quality_rules import WRITE_BIND_SEMANTIC_TYPES
+
+            write_transform = WRITE_BIND_SEMANTIC_TYPES.get(
+                getattr(matched_pattern, "name", "") if matched_pattern else ""
+            )
+            if write_transform and texts:
                 if any(
                     parsed is None or err
-                    for parsed, err in (apply_transform(t, "boolean") for t in texts)
+                    for parsed, err in (apply_transform(t, write_transform) for t in texts)
                 ):
-                    inferred = "string"
+                    if inferred in {"date", "datetime", "boolean", "decimal"}:
+                        inferred = "string"
 
         answer = {
             "column_name": column_name,

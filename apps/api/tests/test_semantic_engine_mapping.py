@@ -136,6 +136,36 @@ def test_assist_date_quality_uses_write_path_bind():
     assert amb_ts["metrics"]["validity"] == 0.0
 
 
+def test_assist_currency_quality_uses_write_path_decimal():
+    """Grouped $1,000.00 binds; Auto-ambiguous 1,234 must not score valid."""
+    from src.ai.knowledge.data_quality_rules import validate_column_quality
+    from src.ai.llm.chain import DataTransferReasoningChain
+
+    grouped = validate_column_quality(
+        "amount", ["$1,000.00", "$2,500.50"], semantic_type="Currency Amount"
+    )
+    assert grouped["metrics"]["validity"] == 100.0
+    euro = validate_column_quality(
+        "amount", ["€1.000,89"], semantic_type="Currency Amount"
+    )
+    assert euro["metrics"]["validity"] == 100.0
+    ambiguous = validate_column_quality(
+        "amount", ["1,234", "5,678"], semantic_type="Currency Amount"
+    )
+    assert ambiguous["metrics"]["validity"] == 0.0
+
+    money = analyze_column("amount", ["$1,000.00", "$2,500.50"])
+    assert money.inferred_type == "decimal"
+    lone = analyze_column("amount", ["1,234", "5,678"])
+    assert lone.inferred_type == "string"
+
+    chain = DataTransferReasoningChain()
+    ch_money = chain.analyze_column("amount", ["$1,000.00", "$2,500.50"])
+    assert ch_money.answer["inferred_type"] == "decimal"
+    ch_lone = chain.analyze_column("amount", ["1,234", "5,678"])
+    assert ch_lone.answer["inferred_type"] == "string"
+
+
 def test_generate_mappings_does_not_invent_date_transform_for_ambiguous_slash():
     mappings = generate_mappings(
         ["event_date"],

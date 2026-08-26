@@ -56,17 +56,19 @@ FORMAT_VALIDATORS: dict[str, list[str]] = {
     "Boolean Flag": [CANONICAL_BOOLEAN_SAMPLE_PATTERN],
 }
 
-# Date / Timestamp / Boolean Flag validity is the write path — regex alone
-# called Auto-ambiguous 01/02/2024 and informal yes valid.
-_WRITE_BIND_SEMANTIC_TYPES: dict[str, str] = {
+# Date / Timestamp / Boolean Flag / Currency Amount validity is the write
+# path — regex alone called Auto-ambiguous 01/02/2024, informal yes, and
+# grouped $1,000.00 invalid (or 1,234 valid).
+WRITE_BIND_SEMANTIC_TYPES: dict[str, str] = {
     "Date": "date",
     "Timestamp": "datetime",
     "Boolean Flag": "boolean",
+    "Currency Amount": "decimal",
 }
 
 
 def _value_matches_semantic_type(value: str, semantic_type: str) -> bool:
-    transform = _WRITE_BIND_SEMANTIC_TYPES.get(semantic_type)
+    transform = WRITE_BIND_SEMANTIC_TYPES.get(semantic_type)
     if transform:
         parsed, err = apply_transform(value, transform)
         return parsed is not None and not err
@@ -99,7 +101,7 @@ def validate_column_quality(
     validity = 100.0
     validity_issues = []
     if semantic_type and (
-        semantic_type in _WRITE_BIND_SEMANTIC_TYPES or semantic_type in FORMAT_VALIDATORS
+        semantic_type in WRITE_BIND_SEMANTIC_TYPES or semantic_type in FORMAT_VALIDATORS
     ):
         valid_count = 0
         for val in non_empty[:100]:

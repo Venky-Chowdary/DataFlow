@@ -709,14 +709,13 @@ class SemanticAnalyzer:
             or semantic_type.sample_patterns
         ):
             match_count = 0
-            use_datetime_bind = "standardize_iso8601" in semantic_type.transformations
-            use_boolean_bind = semantic_type.name == "Boolean Flag"
-            if use_datetime_bind or use_boolean_bind:
-                from services.transform_engine import apply_transform
+            from src.ai.knowledge.data_quality_rules import WRITE_BIND_SEMANTIC_TYPES
+            from services.transform_engine import apply_transform
 
-                transform = "datetime" if use_datetime_bind else "boolean"
+            write_transform = WRITE_BIND_SEMANTIC_TYPES.get(semantic_type.name)
+            if write_transform:
                 for value in non_empty[:100]:
-                    parsed, err = apply_transform(str(value).strip(), transform)
+                    parsed, err = apply_transform(str(value).strip(), write_transform)
                     if parsed is not None and not err:
                         match_count += 1
             else:
@@ -767,6 +766,10 @@ class SemanticAnalyzer:
                 parsed, err = apply_transform(val, "datetime")
                 if parsed is not None and not err:
                     date_count += 1
+                    continue
+                parsed, err = apply_transform(val, "decimal")
+                if parsed is not None and not err:
+                    float_count += 1
 
         sample_size = min(len(non_empty), 100)
         if int_count / sample_size > 0.8:
