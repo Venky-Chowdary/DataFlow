@@ -353,6 +353,14 @@ def test_polish_keeps_facts_only_when_the_rewrite_carries_them():
     # Spelling a small count out is a rewrite, not a lost fact.
     assert keeps_draft_facts("3 jobs listed.", "You have three transfer jobs listed.")
     assert not keeps_draft_facts("3 jobs listed.", "You have several transfer jobs listed.")
+    # Auto cannot bind 1,234, so dropping the comma invents a US reading.
+    assert not keeps_draft_facts("Counted 1,234 rows.", "Counted 1234 rows.")
+    assert not keeps_draft_facts(
+        draft,
+        "1204 rows from `orders` were quarantined on job pf_2f9a1c because a cast failed.",
+    )
+    # Three-or-more thousand groups bind on Auto; a digit-only rewrite is the same figure.
+    assert keeps_draft_facts("Counted 1,000,000 rows.", "Counted 1000000 rows.")
 
 
 def test_provider_that_ignores_the_prompt_cannot_replace_a_grounded_answer(monkeypatch):

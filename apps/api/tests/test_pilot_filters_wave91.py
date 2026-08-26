@@ -240,6 +240,39 @@ def test_date_column_refuses_a_non_date():
     assert "date column" in str(err.value)
 
 
+def test_date_column_refuses_auto_ambiguous_slash_date():
+    """01/02/2024 is Jan 2 or Feb 1 — Auto must not invent MDY the way strptime did."""
+    with pytest.raises(PredicateError) as err:
+        _ground("ordered_at = 01/02/2024")
+    message = str(err.value)
+    assert "01/02/2024" in message
+    assert "locale" in message.lower()
+
+
+def test_date_column_accepts_unambiguous_day_first():
+    preds = _ground("ordered_at = 31/12/2024")
+    assert preds[0].op == "range"
+    assert preds[0].values == [date(2024, 12, 31), date(2025, 1, 1)]
+
+
+def test_date_column_honors_mdy_and_dmy_locale():
+    from services.transform_engine import reset_active_date_locale, set_active_date_locale
+
+    mdy = set_active_date_locale("MDY")
+    try:
+        preds = _ground("ordered_at = 01/02/2024")
+        assert preds[0].values == [date(2024, 1, 2), date(2024, 1, 3)]
+    finally:
+        reset_active_date_locale(mdy)
+
+    dmy = set_active_date_locale("DMY")
+    try:
+        preds = _ground("ordered_at = 01/02/2024")
+        assert preds[0].values == [date(2024, 2, 1), date(2024, 2, 2)]
+    finally:
+        reset_active_date_locale(dmy)
+
+
 def test_date_equality_becomes_a_whole_day_range():
     preds = _ground("ordered_at = 2024-03-05")
     assert preds[0].op == "range"

@@ -462,20 +462,42 @@ def _coerce(value: str, kind: str, column: str) -> Any:
         if parsed is None:
             raise PredicateError(
                 f"`{column}` is a date column — “{raw}” is not a date I can read. "
-                "Try 2024-01-31, “in 2024”, or “last 30 days”."
+                "Try 2024-01-31, “in 2024”, or set date locale US or EU for slash dates."
             )
         return parsed
     return raw
 
 
 def _parse_date_literal(raw: str) -> date | None:
-    for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%d-%m-%Y", "%m/%d/%Y", "%Y-%m", "%Y"):
+    """Bind a spoken date the same way the write path binds a DATE cell.
+
+    Year-only and ``YYYY-MM`` stay window helpers (``in 2024``, ``2024-03``).
+    Slash and dash day/month pairs go through ``apply_transform(..., "date")``
+    so Auto fails closed on ``01/02/2024`` instead of inventing MDY.
+    """
+    text = (raw or "").strip()
+    if not text:
+        return None
+    if re.fullmatch(r"\d{4}", text):
+        year = int(text)
+        if 1 <= year <= 9999:
+            return date(year, 1, 1)
+        return None
+    if re.fullmatch(r"\d{4}-\d{2}", text):
+        year_s, month_s = text.split("-")
         try:
-            parsed = datetime.strptime(raw, fmt)
+            return date(int(year_s), int(month_s), 1)
         except ValueError:
-            continue
-        return parsed.date()
-    return None
+            return None
+    from services.transform_engine import apply_transform
+
+    iso, err = apply_transform(text, "date")
+    if err or iso is None:
+        return None
+    try:
+        return datetime.strptime(str(iso)[:10], "%Y-%m-%d").date()
+    except ValueError:
+        return None
 
 
 def ground_filters(
