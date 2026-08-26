@@ -5,13 +5,16 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from services.transform_engine import CANONICAL_BOOLEAN_TOKENS
+
 EMAIL_RE = re.compile(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
 UUID_RE = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
 )
 PHONE_RE = re.compile(r"^\+?[0-9][0-9\s().-]{6,18}[0-9]$")
 DATE_RE = re.compile(r"^(?:\d{4}-\d{2}-\d{2}|\d{8}|\d{4}/\d{2}/\d{2})(?:[T\s]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)?$")
-BOOL_VALUES = {"true", "false", "yes", "no", "y", "n", "1", "0", "t", "f"}
+# Write-path tokens only — informal yes/on must not score as boolean dest.
+BOOL_VALUES = set(CANONICAL_BOOLEAN_TOKENS)
 
 # Create-new identity is "ready to CREATE", not proven against an existing dest.
 IDENTITY_PASSTHROUGH_CONF_CAP = 0.93
@@ -565,8 +568,7 @@ def score_mapping_pair(
         samples = [str(x).strip() for x in profile["sample_values"] if str(x).strip()]
     distinct = {s.lower() for s in samples}
     looks_enum = len(distinct) > 2 or any(
-        s not in {"true", "false", "t", "f", "yes", "no", "y", "n", "0", "1", "on", "off"}
-        for s in distinct
+        s not in CANONICAL_BOOLEAN_TOKENS for s in distinct
     )
     if looks_enum and ("BOOL" in tgt_type or tgt_type == "BOOLEAN" or "bool" in tgt):
         delta -= 0.85
@@ -704,8 +706,7 @@ def detect_cross_field_issues(
         tgt_type = str(m.get("target_type") or "").upper()
         if not samples:
             continue
-        strict_bool = {"true", "false", "t", "f", "yes", "no", "y", "n", "0", "1", "on", "off"}
-        if any(s not in strict_bool for s in samples) and (
+        if any(s not in CANONICAL_BOOLEAN_TOKENS for s in samples) and (
             "BOOL" in tgt_type or "bool" in (m.get("target") or "").lower()
         ):
             issues.append(

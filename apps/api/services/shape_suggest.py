@@ -20,14 +20,13 @@ from decimal import Decimal, DecimalException, InvalidOperation
 from typing import Any, Mapping, Sequence
 
 from services.shape_expr import is_blank
+from services.transform_engine import CANONICAL_BOOLEAN_TOKENS
 
 __all__ = ["ColumnProfile", "profile_columns", "suggest_steps"]
 
 # Values a spreadsheet uses to mean "nothing" that arrive as text and would
 # otherwise be loaded as the literal string.
 _SENTINELS = ("n/a", "na", "null", "none", "nil", "-", "--", "?", "unknown", "#n/a")
-
-_BOOLEAN_WORDS = {"y", "n", "yes", "no", "true", "false", "t", "f"}
 
 # Formats offered for a date-looking column. Ambiguous day/month orders are
 # never chosen automatically: when both fit, the operator is asked.
@@ -164,7 +163,7 @@ def profile_columns(
             folded = stripped.casefold()
             if folded in _SENTINELS:
                 profile.sentinels[stripped] = profile.sentinels.get(stripped, 0) + 1
-            if folded in _BOOLEAN_WORDS or folded in ("0", "1"):
+            if folded in CANONICAL_BOOLEAN_TOKENS:
                 profile.boolean_like += 1
 
             number = _plain_decimal(value)

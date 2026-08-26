@@ -67,6 +67,13 @@ def test_a_decimal_that_already_fits_is_not_suggested():
     assert _suggestion(suggestions, "round_number", "amount") is None
 
 
+def test_informal_yes_no_is_not_profiled_as_boolean():
+    informal = profile_columns([{"flag": "yes"}, {"flag": "no"}])[0]
+    assert informal.logical_type != "boolean"
+    canonical = profile_columns([{"flag": "true"}, {"flag": "false"}])[0]
+    assert canonical.logical_type == "boolean"
+
+
 def test_whitespace_and_sentinels_are_found_and_counted():
     rows = [
         {"city": " Paris "},

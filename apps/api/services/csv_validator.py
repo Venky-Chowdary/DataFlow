@@ -16,8 +16,6 @@ from services.transform_engine import (
     _parse_integer,
 )
 
-_BOOL_VALUES = frozenset({"true", "false", "yes", "no", "1", "0", "y", "n", "t", "f"})
-
 
 def _check_value(value: str, inferred: str) -> str | None:
     v = (value or "").strip()
@@ -31,7 +29,9 @@ def _check_value(value: str, inferred: str) -> str | None:
         if _parse_decimal(v) is None:
             return f"expected number, got {v[:40]!r}"
     elif t in ("BOOLEAN", "BOOL"):
-        if _parse_boolean(v) is None and v.lower() not in _BOOL_VALUES:
+        # Write-path tokens only. Informal yes/on used to pass this check and
+        # then quarantine on Execute (`Invalid boolean: 'yes'`).
+        if _parse_boolean(v) is None:
             return f"expected boolean, got {v[:40]!r}"
     elif t in ("DATE",):
         if not _parse_date(v):
