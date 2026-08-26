@@ -45,6 +45,14 @@ def test_long_json_fraction_stays_decimal_identity():
     assert array_element_unfit_reason(elements[0], "DECIMAL(38,18)") is None
 
 
+def test_coerce_array_wire_keeps_long_fraction():
+    from connectors.sql_bind import coerce_array_wire
+
+    got = coerce_array_wire("[1.234567890123456789]", engine="postgresql")
+    assert got == [Decimal("1.234567890123456789")]
+    assert coerce_array_wire("[1,2,3]", engine="postgresql") == [1, 2, 3]
+
+
 def test_locale_and_auto_string_elements_unchanged():
     elements, err = parse_array_wire_elements('["$1.50", "1.234"]')
     assert err is None

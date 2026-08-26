@@ -1987,15 +1987,12 @@ def coerce_array_wire(value: Any, *, engine: str = "", ddl_type: str = "") -> An
                 "refuse silent NULL invent (quarantine or remap upstream)"
             )
         if text.startswith("[") and text.endswith("]"):
-            try:
-                parsed = json.loads(text)
-            except Exception as exc:
+            from connectors.array_wire import parse_array_wire_elements
+
+            parsed, parse_error = parse_array_wire_elements(text)
+            if parse_error or parsed is None:
                 raise ValueError(
                     "array wire JSON parse failed — refuse invent into ARRAY"
-                ) from exc
-            if not isinstance(parsed, list):
-                raise ValueError(
-                    "array wire JSON must be a list — refuse invent into ARRAY"
                 )
             return _normalize_elems(parsed)
         # Postgres literal form {a,b,c} is driver-specific; pass through only
