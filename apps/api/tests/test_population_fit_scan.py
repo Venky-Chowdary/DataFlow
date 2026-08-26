@@ -434,6 +434,39 @@ def test_a_decimal_population_into_an_integer_carrier_blocks_before_the_write(
     assert "3 value(s)" in gate["message"], dest_db
 
 
+def test_zero_scale_number_sees_locale_money_the_write_path_binds() -> None:
+    """$1,234.56 / €1.234,56 are fractional; Auto 1,234 and $1,234 are not."""
+    from services.transform_engine import is_fractional_wire_value
+
+    assert is_fractional_wire_value("$1,234.56") is True
+    assert is_fractional_wire_value("€1.234,56") is True
+    assert is_fractional_wire_value("$1,234") is False
+    assert is_fractional_wire_value("1,234") is False
+    blocked = scan_population_fit(
+        [{"c": "$1,234.56"}, {"c": "€1.234,56"}, {"c": "1000"}],
+        [{"source": "c", "target": "c", "target_type": "NUMBER(38,0)"}],
+        source_types={"c": "DECIMAL"},
+        dest_db="snowflake",
+        dialect_label="snowflake",
+        job_error_policy="fail",
+        rows_total=3,
+        rows_are_population=True,
+    )
+    assert [f.unfit_rows for f in blocked.findings] == [2]
+    assert "fractional" in blocked.findings[0].unfit_reason
+    whole = scan_population_fit(
+        [{"c": "2000.00"}, {"c": "1000"}, {"c": "1e3"}],
+        [{"source": "c", "target": "c", "target_type": "NUMBER(38,0)"}],
+        source_types={"c": "DECIMAL"},
+        dest_db="snowflake",
+        dialect_label="snowflake",
+        job_error_policy="fail",
+        rows_total=3,
+        rows_are_population=True,
+    )
+    assert whole.findings == ()
+
+
 def test_an_integral_population_still_lands_in_an_integer_carrier() -> None:
     """Integral decimals and scientific notation are what the writer accepts."""
     report = scan_population_fit(

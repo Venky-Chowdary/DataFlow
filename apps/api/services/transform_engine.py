@@ -935,6 +935,18 @@ def decimal_wire_value(value: Any) -> Decimal | None:
     return dec if dec.is_finite() else None
 
 
+def is_fractional_wire_value(value: Any) -> bool:
+    """True when the write path binds a non-integral decimal.
+
+    Locale money (``$1,234.56`` / ``€1.234,56``) counts. Auto ``1,234`` and
+    whole ``$1,234`` do not. ``Decimal(text)`` is a second algorithm.
+    """
+    parsed = decimal_wire_value(value)
+    if parsed is None:
+        return False
+    return parsed != parsed.to_integral_value()
+
+
 def integer_wire_value(value: str) -> int | None:
     """The integer the write path would bind for ``value``, or ``None``.
 

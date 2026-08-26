@@ -66,10 +66,9 @@ def _to_decimal(value: Any) -> Decimal | None:
 
 
 def _is_fractional_decimal(value: Any) -> bool:
-    parsed = _to_decimal(value)
-    if parsed is None:
-        return False
-    return parsed != parsed.to_integral_value()
+    from services.transform_engine import is_fractional_wire_value
+
+    return is_fractional_wire_value(value)
 
 
 def _to_float(value: Any) -> float | None:

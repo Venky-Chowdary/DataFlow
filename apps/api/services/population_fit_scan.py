@@ -29,7 +29,6 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from decimal import Decimal, InvalidOperation
 from typing import Any, Iterable, Mapping
 
 #: Every source row was scanned — a clean column is clean for the population.
@@ -427,14 +426,10 @@ def bounded_targets(
 
 
 def _is_fractional(value: Any) -> bool:
-    """True when the value carries a fraction a zero-scale carrier cannot hold."""
-    if isinstance(value, bool):
-        return False
-    try:
-        dec = Decimal(str(value).strip())
-    except (InvalidOperation, ValueError, TypeError):
-        return False
-    return bool(dec.is_finite() and dec != dec.to_integral_value())
+    """True when the write path binds a fraction a zero-scale carrier cannot hold."""
+    from services.transform_engine import is_fractional_wire_value
+
+    return is_fractional_wire_value(value)
 
 
 def _fit_predicate(
