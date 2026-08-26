@@ -12,6 +12,49 @@ import json
 from typing import Any
 
 from services.value_serializer import json_default
+from services.transform_engine import apply_transform, decimal_wire_value, integer_wire_value
+
+
+def _datetime_from_write_path(value: Any) -> Any:
+    """ISO / epoch / unambiguous calendars. Auto ``01/02/2024`` refuses."""
+    from datetime import datetime
+
+    parsed, err = apply_transform(str(value).strip(), "datetime")
+    if parsed is None or err:
+        raise ValueError(f"cannot cast {value!r} to timestamp — refuse invent")
+    try:
+        return datetime.fromisoformat(str(parsed).replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"cannot cast {value!r} to timestamp — refuse invent") from exc
+
+
+def _date_from_write_path(value: Any) -> Any:
+    """Write-path date bind. ``31/12/2024`` lands; Auto ``01/02/2024`` refuses."""
+    from datetime import date
+
+    parsed, err = apply_transform(str(value).strip(), "date")
+    if parsed is None or err:
+        raise ValueError(f"cannot cast {value!r} to date — refuse invent")
+    try:
+        return date.fromisoformat(str(parsed)[:10])
+    except ValueError as exc:
+        raise ValueError(f"cannot cast {value!r} to date — refuse invent") from exc
+
+
+def _time_from_write_path(value: Any) -> Any:
+    """Write-path time bind — AM/PM and offset forms, no silent UTC invent."""
+    from datetime import time
+
+    parsed, err = apply_transform(str(value).strip(), "time")
+    if parsed is None or err:
+        raise ValueError(f"cannot cast {value!r} to time — refuse invent")
+    iso = str(parsed)
+    if iso.upper().endswith("Z"):
+        iso = iso[:-1] + "+00:00"
+    try:
+        return time.fromisoformat(iso)
+    except ValueError as exc:
+        raise ValueError(f"cannot cast {value!r} to time — refuse invent") from exc
 
 
 def logical_to_arrow_type(logical: str, pa: Any, *, dialect: str = "parquet") -> Any:
@@ -84,7 +127,7 @@ def coerce_arrow_cell(
 ) -> Any:
     """Coerce a Python cell into the declared Arrow type; raise on hard failure."""
     from datetime import date, datetime, time
-    from decimal import Decimal, InvalidOperation
+    from decimal import Decimal
 
     from services.value_serializer import is_missing_sentinel
 
@@ -104,12 +147,12 @@ def coerce_arrow_cell(
             "refuse silent NULL invent (quarantine or remap upstream)"
         )
     if pa.types.is_decimal(arrow_type):
-        try:
-            if isinstance(value, Decimal):
-                return value
-            return Decimal(str(value))
-        except (InvalidOperation, ValueError, TypeError) as exc:
-            raise ValueError(f"cannot cast {value!r} to decimal") from exc
+        if isinstance(value, Decimal):
+            return value
+        parsed = decimal_wire_value(value)
+        if parsed is None:
+            raise ValueError(f"cannot cast {value!r} to decimal — refuse invent")
+        return parsed
     if pa.types.is_floating(arrow_type):
         from connectors.sql_bind import coerce_float_wire
 
@@ -146,12 +189,12 @@ def coerce_arrow_cell(
                     "without truncation"
                 )
             return int(value)
-        try:
-            return int(value)
-        except (ValueError, TypeError) as exc:
+        parsed = integer_wire_value(str(value))
+        if parsed is None:
             raise ValueError(
                 f"cannot coerce {value!r} to INTEGER without invent"
-            ) from exc
+            )
+        return parsed
     if pa.types.is_boolean(arrow_type):
         from connectors.sql_bind import coerce_boolean_wire
 
@@ -174,7 +217,7 @@ def coerce_arrow_cell(
             if not tz and value.tzinfo is not None:
                 return value.replace(tzinfo=None)
             return value
-        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        parsed = _datetime_from_write_path(value)
         if tz and parsed.tzinfo is None:
             raise ValueError(
                 f"{label} TIMESTAMPTZ refused naive datetime — provide "
@@ -188,13 +231,13 @@ def coerce_arrow_cell(
             return value.date()
         if isinstance(value, date):
             return value
-        return date.fromisoformat(str(value)[:10])
+        return _date_from_write_path(value)
     if pa.types.is_time(arrow_type):
         if isinstance(value, time):
             return value
         if isinstance(value, datetime):
             return value.time()
-        return time.fromisoformat(str(value))
+        return _time_from_write_path(value)
     if pa.types.is_binary(arrow_type) or pa.types.is_large_binary(arrow_type):
         if value is None:
             return None
