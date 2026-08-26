@@ -1211,10 +1211,10 @@ def _escape_copy_text(text: str) -> str:
 
 
 def _copy_text_value(value: Any) -> str:
-    from services.value_serializer import is_missing_sentinel
+    from services.value_serializer import is_reader_null_cell
 
-    # Dense COPY: absent schemaless fields → SQL NULL (never bind sentinel text).
-    if value is None or is_missing_sentinel(value):
+    # Dense COPY: reader-null / Missing → SQL NULL (never bind sentinel text).
+    if is_reader_null_cell(value):
         return "\\N"
     if isinstance(value, bool):
         return "t" if value else "f"
