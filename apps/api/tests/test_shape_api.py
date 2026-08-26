@@ -168,7 +168,7 @@ def test_a_preview_keeps_a_decimal_exact_on_the_wire(client):
     body = client.post(
         "/api/v1/shape/preview",
         json={
-            "sample_rows": [{"n": "1.005"}],
+            "sample_rows": [{"n": "1.0050"}],
             "source_columns": ["n"],
             "recipe": {"steps": [{"op": "round_number", "column": "n", "options": {"places": 2}}]},
         },

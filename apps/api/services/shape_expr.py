@@ -305,6 +305,7 @@ def _as_text(value: Any) -> str | None:
 
 
 def _as_number(value: Any) -> Decimal:
+    """Write-path decimal bind — locale/currency money, Auto 1,234 refuses."""
     if isinstance(value, Decimal):
         return value
     if isinstance(value, bool):
@@ -319,10 +320,12 @@ def _as_number(value: Any) -> Decimal:
     text = _as_text(value)
     if text is None or text.strip() == "":
         raise EvalError("expected a number, got an empty value")
-    try:
-        return Decimal(text.strip())
-    except (InvalidOperation, DecimalException) as exc:
-        raise EvalError(f"'{text}' is not a number") from exc
+    from services.transform_engine import decimal_wire_value
+
+    parsed = decimal_wire_value(text)
+    if parsed is None:
+        raise EvalError(f"'{text}' is not a number")
+    return parsed
 
 
 def _as_bool(value: Any) -> bool:
@@ -346,9 +349,9 @@ def _both_numeric(left: Any, right: Any) -> bool:
         if isinstance(value, (int, float, Decimal)):
             continue
         if isinstance(value, str):
-            try:
-                Decimal(value.strip())
-            except (InvalidOperation, DecimalException, ValueError):
+            from services.transform_engine import decimal_wire_value
+
+            if decimal_wire_value(value) is None:
                 return False
             continue
         return False

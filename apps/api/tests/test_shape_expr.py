@@ -21,7 +21,7 @@ def value(source: str, row: dict | None = None):
 def test_arithmetic_is_decimal_so_money_survives_the_trip():
     """A float engine turns 0.1 + 0.2 into 0.30000000000000004 and loses a cent."""
     assert value("0.1 + 0.2") == Decimal("0.3")
-    assert str(value("[amount] * 3", {"amount": "1.005"})) == "3.015"
+    assert str(value("[amount] * 3", {"amount": "1.0050"})) == "3.0150"
 
 
 def test_a_column_name_with_spaces_is_addressable():
@@ -60,6 +60,18 @@ def test_to_number_reads_what_a_human_typed():
     assert value("to_number('(1,234.50)')") == Decimal("-1234.50")
     assert value("to_number('$1,000')") == Decimal("1000")
     assert value("to_number('')") is None
+
+
+def test_compare_and_add_use_write_path_decimals():
+    """$1,234.56 > 1000 must not fall through to string order ($ < 1)."""
+    assert value("[amt] > 1000", {"amt": "$1,234.56"}) is True
+    assert value("[amt] > 2000", {"amt": "$1,234.56"}) is False
+    assert value("[amt] > 1000", {"amt": "€1.234,56"}) is True
+    assert value("[amt] + 1", {"amt": "$1,234.56"}) == Decimal("1235.56")
+    with pytest.raises(EvalError, match="not a number"):
+        value("[amt] * 2", {"amt": "1,234"})
+    with pytest.raises(EvalError, match="not a number"):
+        value("[amt] * 2", {"amt": "1.005"})
 
 
 def test_to_boolean_uses_write_path_tokens_only():
@@ -152,7 +164,7 @@ def test_the_canonical_form_ignores_spelling_so_a_reformat_is_not_a_new_recipe()
 
 def test_evaluating_the_same_row_twice_returns_the_same_value():
     expression = compile_expression("concat(upper([a]), '-', round([b], 2))")
-    row = {"a": "x", "b": "1.239"}
+    row = {"a": "x", "b": "1.2390"}
     assert expression.evaluate(row) == expression.evaluate(row) == "X-1.24"
 
 
