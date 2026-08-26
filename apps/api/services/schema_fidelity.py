@@ -1583,9 +1583,17 @@ def _default_exprs_equivalent(a: str, b: str) -> bool:
     if a in _FALSE_DEFAULTS and b in _FALSE_DEFAULTS:
         return True
     try:
-        return float(a) == float(b)
-    except (TypeError, ValueError):
+        from decimal import Decimal
+
+        from services.decimal_identity import extract_decimal_identity
+
+        ia = extract_decimal_identity(a)
+        ib = extract_decimal_identity(b)
+    except ValueError:
         return False
+    if ia is None or ib is None:
+        return False
+    return +Decimal(ia.to_canonical_text()) == +Decimal(ib.to_canonical_text())
 
 
 def _claimed_default_literal(item: Any) -> str:
