@@ -2797,6 +2797,20 @@ def quarantine_unfit_decimals(
             if fits_decimal(cells[col_idx], precision, scale, dest_db=dest_db):
                 continue
             sample = cell_to_string(cells[col_idx])[:120]
+            from services.decimal_observe import (
+                decimal_scale_overflow_fix,
+                decimal_widen_carrier,
+            )
+
+            suggested_type = decimal_widen_carrier(
+                cells[col_idx], dest_db=dest_db, current_type=declared_type
+            )
+            suggested_fix = decimal_scale_overflow_fix(
+                cells[col_idx],
+                dest_db=dest_db,
+                current_type=declared_type,
+                column=target_cols[col_idx],
+            )
             append_write_quarantine_detail(
                 rejected_details,
                 {
@@ -2811,6 +2825,8 @@ def quarantine_unfit_decimals(
                     "— quarantined (would truncate/overflow on write)"
                     ),
                     "policy": "write_quarantine",
+                    "suggested_fix": suggested_fix,
+                    "suggested_target_type": suggested_type,
                     "chars": [],
                 },
                 mapped_row=cells,

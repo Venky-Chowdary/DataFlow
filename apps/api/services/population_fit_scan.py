@@ -129,6 +129,8 @@ class ColumnFitFinding:
     #: Writer's own words for the first unfit value — a fractional value and an
     #: out-of-range value are different defects with different remediations.
     unfit_reason: str = ""
+    suggested_target_type: str = ""
+    suggested_fix: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -137,6 +139,8 @@ class ColumnFitFinding:
             "example_rows": list(self.example_rows),
             "example_values": list(self.example_values),
             "unfit_reason": self.unfit_reason,
+            "suggested_target_type": self.suggested_target_type,
+            "suggested_fix": self.suggested_fix,
             "reason": self.reason(),
         }
 
@@ -343,6 +347,8 @@ def bounded_targets(
     source_types: Mapping[str, str] | None = None,
     dest_db: str = "",
     job_error_policy: str = "",
+    source_kind: str = "",
+    source_format: str = "",
 ) -> tuple[tuple[BoundedTarget, ...], tuple[str, ...], tuple[str, ...]]:
     """Mapped columns whose destination carrier has a decidable bound *and* a
     source declaration that could exceed it.
@@ -352,11 +358,21 @@ def bounded_targets(
     reported, never silently treated as safe. ``safe_by_declaration`` names the
     widening/identical paths that need no value scan at all, which is what keeps
     this off the cost path of an ordinary transfer.
+
+    File / upload / object-store types are inferred from a peek sample, not
+    declared DDL. Treating ``DECIMAL(9,6)`` from 25 CSV rows as a warehouse
+    domain skipped the 1M-row scan and let Execute fail at write on
+    ``7.9166665`` → Snowflake ``NUMBER(9,6)``. Untyped sources never skip.
     """
+    from services.data_profiler import source_types_are_authoritative
+
     types = {str(k): str(v or "") for k, v in (dest_types or {}).items()}
     lowered = {k.lower(): v for k, v in types.items()}
     src_types = {str(k): str(v or "") for k, v in (source_types or {}).items()}
     src_lowered = {k.lower(): v for k, v in src_types.items()}
+    declared_domain = (not source_kind) or source_types_are_authoritative(
+        source_kind, source_format
+    )
     out: list[BoundedTarget] = []
     undecidable: list[str] = []
     safe: list[str] = []
@@ -409,8 +425,12 @@ def bounded_targets(
             # DATE-declared source column of text still holds '2024-02-31'.
             out.append(candidate)
             continue
-        if not parse_in_doubt and _source_cannot_exceed(
-            declared_source, candidate, dest_db=dest_db
+        if (
+            declared_domain
+            and not parse_in_doubt
+            and _source_cannot_exceed(
+                declared_source, candidate, dest_db=dest_db
+            )
         ):
             # Width is decided by declaration; a parse is only decided with it
             # when the source declares the same typed carrier. Text into a
@@ -673,16 +693,40 @@ def scan_rows(
     else:
         evidence = EVIDENCE_SAMPLED
 
-    findings = tuple(
-        ColumnFitFinding(
-            target=bounded[idx],
-            unfit_rows=counts[idx],
-            example_rows=tuple(example_rows.get(idx, ())),
-            example_values=tuple(example_values.get(idx, ())),
-            unfit_reason=reasons.get(idx, ""),
-        )
-        for idx in sorted(counts)
+    from services.decimal_observe import (
+        decimal_scale_overflow_fix,
+        decimal_widen_carrier,
     )
+
+    findings_list: list[ColumnFitFinding] = []
+    for idx in sorted(counts):
+        target = bounded[idx]
+        examples = tuple(example_values.get(idx, ()))
+        first = examples[0] if examples else ""
+        suggested_type = ""
+        suggested_fix = ""
+        if target.carrier == CARRIER_DECIMAL and first:
+            suggested_type = decimal_widen_carrier(
+                first, dest_db=dest_db, current_type=target.target_type
+            )
+            suggested_fix = decimal_scale_overflow_fix(
+                first,
+                dest_db=dest_db,
+                current_type=target.target_type,
+                column=target.target,
+            )
+        findings_list.append(
+            ColumnFitFinding(
+                target=target,
+                unfit_rows=counts[idx],
+                example_rows=tuple(example_rows.get(idx, ())),
+                example_values=examples,
+                unfit_reason=reasons.get(idx, ""),
+                suggested_target_type=suggested_type,
+                suggested_fix=suggested_fix,
+            )
+        )
+    findings = tuple(findings_list)
     total = int(rows_total or 0) or (scanned if evidence == EVIDENCE_EXACT else 0)
     return FitScanReport(
         evidence=evidence,
@@ -716,6 +760,8 @@ def scan_population_fit(
     rows_total: int = 0,
     rows_are_population: bool = False,
     budget: int = DEFAULT_SCAN_BUDGET,
+    source_kind: str = "",
+    source_format: str = "",
 ) -> FitScanReport:
     """Resolve bounded targets from the mappings, then scan the rows."""
     targets, undecidable, safe = bounded_targets(
@@ -724,6 +770,8 @@ def scan_population_fit(
         source_types=source_types,
         dest_db=dest_db,
         job_error_policy=job_error_policy,
+        source_kind=source_kind,
+        source_format=source_format,
     )
     return scan_rows(
         rows,

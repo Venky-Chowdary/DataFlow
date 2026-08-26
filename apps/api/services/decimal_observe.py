@@ -387,6 +387,87 @@ def create_new_decimal_carrier(
     return carrier
 
 
+def decimal_widen_precision_scale(
+    value: Any,
+    *,
+    dest_db: str = "",
+    current_type: str = "",
+) -> tuple[int, int] | None:
+    """Smallest (precision, scale) that holds ``value`` without shrinking dest.
+
+    Write-path digits (trailing zeros collapse). Dest int-width is kept so a
+    ``NUMBER(9,6)`` clock column that overflowed at scale 7 becomes
+    ``NUMBER(10,7)``, not ``NUMBER(8,7)``. Returns ``None`` when the cell
+    is not a decimal the write path would bind.
+    """
+    from connectors.writer_common import parse_decimal_precision_scale
+
+    d = _canonical_numeric(value)
+    if d is None or not d.is_finite():
+        return None
+    idig, scale = write_int_digits_and_scale(d)
+    parsed = parse_decimal_precision_scale(current_type, dest_db=dest_db)
+    cur_p, cur_s = parsed if parsed else (0, 0)
+    cur_int = max(0, cur_p - cur_s) if parsed else 0
+    need_s = max(cur_s, scale)
+    need_int = max(cur_int, idig, 1 if idig == 0 and scale == 0 else 0)
+    need_p = need_int + need_s
+    dialect = (dest_db or "").strip().lower()
+    cap = 76 if dialect in {"bigquery", "bq"} and need_s > 9 else 38
+    if need_p > cap:
+        need_p = cap
+        need_s = min(need_s, max(0, cap - need_int))
+    if need_p <= 0:
+        return None
+    return need_p, need_s
+
+
+def decimal_widen_carrier(
+    value: Any,
+    *,
+    dest_db: str = "",
+    current_type: str = "",
+) -> str:
+    """Dest-spelled NUMBER/DECIMAL/NUMERIC that would hold ``value``."""
+    got = decimal_widen_precision_scale(
+        value, dest_db=dest_db, current_type=current_type
+    )
+    if got is None:
+        return ""
+    precision, scale = got
+    dialect = (dest_db or "").strip().lower()
+    declared = re.split(r"[\s(]", (current_type or "").strip(), maxsplit=1)[0].upper()
+    if dialect in {"snowflake", "oracle"} or declared == "NUMBER":
+        token = "NUMBER"
+    elif dialect in {"bigquery", "bq"}:
+        token = "BIGNUMERIC" if precision > 38 or scale > 9 else "NUMERIC"
+    elif dialect in {"postgresql", "postgres", "redshift"} or declared == "NUMERIC":
+        token = "NUMERIC"
+    else:
+        token = "DECIMAL"
+    return f"{token}({precision},{scale})"
+
+
+def decimal_scale_overflow_fix(
+    value: Any,
+    *,
+    dest_db: str = "",
+    current_type: str = "",
+    column: str = "",
+) -> str:
+    """One operator action when dest NUMBER/DECIMAL cannot hold the cell."""
+    widened = decimal_widen_carrier(
+        value, dest_db=dest_db, current_type=current_type
+    )
+    if not widened:
+        return ""
+    col = f"{column} " if column else ""
+    return (
+        f"Open Map → widen {col}to {widened} (or ALTER the destination) "
+        "→ re-Validate. Do not silently truncate."
+    )
+
+
 def ieee_float_create_new_risk(observation: dict[str, Any] | None) -> dict[str, str] | None:
     """Risk stamp when invent chose FLOAT due to Excel/IEEE residue."""
     if not observation or observation.get("kind") != "ieee_float":

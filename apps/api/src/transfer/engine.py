@@ -829,6 +829,8 @@ def _table_population_rows(
             dest_types=dest_types,
             source_types=column_types,
             dest_db=dest_db,
+            source_kind=getattr(request.source, "kind", "") or "",
+            source_format=getattr(request.source, "format", "") or "",
         )
         wanted = sorted({t.source for t in targets if t.source})
         if not wanted:

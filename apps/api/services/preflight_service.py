@@ -1523,6 +1523,8 @@ def run_file_preflight(
             job_error_policy=transform_error_policy_for_validation_mode(validation_mode),
             rows_total=int(row_count or 0),
             rows_are_population=bool(rows_are_population and population_rows is not None),
+            source_kind=source_kind,
+            source_format=source_format,
         )
         fit_report_payload = fit_report.to_dict()
         # The gate is always stated, including when nothing needed scanning:

@@ -112,7 +112,12 @@ def test_a_generator_of_population_rows_is_accepted_and_consumed_once() -> None:
 
 
 def test_widening_declaration_keeps_the_gate_passing_without_rows() -> None:
+    """Warehouse DDL can skip the scan. File preflight defaults to source_kind=file,
+    so an inferred DECIMAL(11,8) is not a declared domain — the sample is scanned.
+    """
     result = _preflight(
+        source_kind="database",
+        source_format="snowflake",
         column_types={"arr_time": "DECIMAL(11,8)"},
         sample_rows=_rows(5),
     )
@@ -121,6 +126,43 @@ def test_widening_declaration_keeps_the_gate_passing_without_rows() -> None:
     assert gate["status"] == "pass"
     assert "no value scan required" in gate["message"]
     assert result["population_fit"]["safe_by_declaration"] == ["arr_time"]
+
+
+def test_file_inferred_matching_typmod_still_scans_float32_clock_residue() -> None:
+    """flights-1m.csv class: peek inferred NUMBER(9,6), dest is NUMBER(9,6).
+
+    Treating that as a declared domain skipped the population scan. Row 293
+    ``7.9166665`` (float32 of 7+55/60) then failed at Snowflake write.
+    """
+    rows = [{"arr_time": "12.345678"} for _ in range(292)]
+    rows.append({"arr_time": "7.9166665"})
+    result = _preflight(
+        source_kind="file",
+        source_format="csv",
+        column_types={"arr_time": "NUMBER(9,6)"},
+        destination_column_types={"arr_time": "NUMBER(9,6)"},
+        mappings=[
+            {
+                "source": "arr_time",
+                "target": "arr_time",
+                "confidence": 0.93,
+                "target_type": "NUMBER(9,6)",
+            }
+        ],
+        row_count=len(rows),
+        sample_rows=rows[:25],
+        population_rows=rows,
+        rows_are_population=True,
+    )
+
+    assert result["passed"] is False
+    assert result["population_fit"]["safe_by_declaration"] == []
+    finding = result["population_fit"]["findings"][0]
+    assert finding["example_rows"] == [293]
+    assert finding["example_values"] == ["7.9166665"]
+    assert finding["suggested_target_type"] == "NUMBER(10,7)"
+    assert "NUMBER(10,7)" in (finding.get("suggested_fix") or "")
+    assert _gate(result)["status"] == "block"
 
 
 def test_file_row_iterator_replays_every_row_of_a_csv() -> None:
