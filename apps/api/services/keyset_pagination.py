@@ -120,6 +120,29 @@ def split_cursor_bookmark(
     return raw, ""
 
 
+def _numeric_order_key(value: str) -> Decimal | None:
+    """Bind one bookmark part as a number, or ``None`` when it cannot.
+
+    Dest-canonical storage text (``1.234``, ``1.2300``) uses ``Decimal(text)``
+    first so Auto wire does not refuse a resolved dest value. Locale money the
+    write path stores (``$1,234`` / ``€1.234``) falls through to
+    ``decimal_wire_value``. Auto ``1,234`` stays unbound — the column then
+    orders as text rather than inventing thousands.
+    """
+    text = "" if value is None else str(value).strip()
+    if not text:
+        return None
+    try:
+        parsed = Decimal(text)
+        if parsed.is_finite():
+            return parsed
+    except (ArithmeticError, InvalidOperation, ValueError):
+        pass
+    from services.transform_engine import decimal_wire_value
+
+    return decimal_wire_value(text)
+
+
 def _column_order_keys(values: list[str]) -> list[Any]:
     """Sort keys that order ``values`` the way the source database orders them.
 
@@ -128,11 +151,16 @@ def _column_order_keys(values: list[str]) -> list[Any]:
     ``'99'`` the maximum of an integer page ending at ``200``: the next page
     seeked from 99, re-read rows already transferred, and — because re-read rows
     are charged against the same row budget — the scan ran out before the tail.
+
+    ``Decimal(v)`` on the whole page also failed closed into text when one cell
+    was locale money (``$1,234``), so ``'99'`` beat ``'200'`` again. Bind each
+    part the write path would store; if any part cannot bind, keep text for the
+    whole column — do not invent a numeric max from Auto ``1,234``.
     """
-    try:
-        return [Decimal(v) for v in values]
-    except (ArithmeticError, InvalidOperation, ValueError):
-        return list(values)
+    keys = [_numeric_order_key(v) for v in values]
+    if keys and all(k is not None for k in keys):
+        return keys
+    return list(values)
 
 
 def compare_keyset_bookmark(left: str, right: str) -> int | None:
