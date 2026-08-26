@@ -27,6 +27,7 @@ from collections.abc import Mapping
 from typing import Any, Literal
 
 from services.source_duplicate_probe import SQLISH_SOURCE_TYPES
+from services.value_serializer import present_cell_text
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +53,20 @@ APPEND_ONLY_SYNC_MODES = frozenset(
 )
 
 MAX_PROBE_VALUES = 500
+
+
+def batch_key_texts(values: list[Any] | None, *, limit: int = MAX_PROBE_VALUES) -> list[str]:
+    """Present batch keys on the reader wire. SQL NULL is not a collision token."""
+    out: list[str] = []
+    for raw in values or []:
+        key = present_cell_text(raw)
+        if key is None:
+            continue
+        out.append(key)
+        if len(out) >= limit:
+            break
+    return out
+
 
 # Watermarks persisted before the canonical separator existed used a pipe.
 _LEGACY_SEP = "|"
@@ -379,11 +394,7 @@ def probe_destination_key_collisions(
             message="No single-column identity key resolved for collision probe",
             db_type=db_type,
         )
-    probe_values = [
-        str(v)
-        for v in (values or [])
-        if v is not None and str(v).strip() != ""
-    ][:MAX_PROBE_VALUES]
+    probe_values = batch_key_texts(values, limit=MAX_PROBE_VALUES)
     if not probe_values:
         return DestinationCollisionResult(
             status="skipped_no_values",

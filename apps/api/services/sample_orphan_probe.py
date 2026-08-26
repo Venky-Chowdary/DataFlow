@@ -11,22 +11,14 @@ from __future__ import annotations
 import logging
 from typing import Any, Iterable
 
-from services.value_serializer import cell_to_string, is_null_evidence
+from services.value_serializer import present_cell_text
 
 logger = logging.getLogger(__name__)
 
 
 def _fk_key(value: Any) -> str | None:
     """Present FK cell. Reader-wired SQL NULL is not a parent lookup key."""
-    if is_null_evidence(value):
-        return None
-    if isinstance(value, str):
-        text = value.strip()
-        return None if is_null_evidence(text) else text
-    text = cell_to_string(value, preserve_sql_null=True)
-    if is_null_evidence(text):
-        return None
-    return text
+    return present_cell_text(value)
 
 
 def _fk_display(value: Any, *, limit: int = 80) -> str:

@@ -74,6 +74,23 @@ def is_null_evidence(value: Any) -> bool:
     return not text or text in NULL_WIRE_SENTINELS
 
 
+def present_cell_text(value: Any) -> str | None:
+    """One present cell on the reader wire.
+
+    SQL NULL / Missing / blank are not a unique key, FK, or collision token.
+    Typed cells use ``cell_to_string`` so ``True`` and dest ``"true"`` match.
+    """
+    if is_null_evidence(value):
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+        return None if is_null_evidence(text) else text
+    text = cell_to_string(value, preserve_sql_null=True)
+    if is_null_evidence(text):
+        return None
+    return text
+
+
 def evidence_samples(values: Any, *, limit: int | None = None) -> list[str]:
     """Sample values usable as type evidence.
 

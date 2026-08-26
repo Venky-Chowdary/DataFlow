@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from services.db_type_utils import SCHEMALESS_DESTS
-from services.value_serializer import cell_to_string, is_null_evidence
+from services.value_serializer import is_null_evidence, present_cell_text
 
 ExpectationFn = Callable[..., dict[str, Any]]
 
@@ -55,15 +55,7 @@ def _is_absent(value: Any) -> bool:
 
 def _present_text(value: Any) -> str | None:
     """One present cell. Reader-wired SQL NULL is not a unique key."""
-    if is_null_evidence(value):
-        return None
-    if isinstance(value, str):
-        text = value.strip()
-        return None if is_null_evidence(text) else text
-    text = cell_to_string(value, preserve_sql_null=True)
-    if is_null_evidence(text):
-        return None
-    return text
+    return present_cell_text(value)
 
 
 def _non_empty(values: list[Any]) -> list[str]:
