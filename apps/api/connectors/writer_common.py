@@ -148,7 +148,9 @@ def omit_missing_fields(
         if not isinstance(item, (tuple, list)) or len(item) < 2:
             continue
         k, v = item[0], item[1]
-        if v is None or is_missing_sentinel(v):
+        from services.value_serializer import is_reader_null_cell
+
+        if is_reader_null_cell(v):
             continue
         if drop_empty and str(v) == "":
             continue
@@ -551,10 +553,13 @@ def to_json_value(value: Any, col: str, dest_types: dict[str, str]) -> Any:
     last-resort safety net so dense serializers cannot leak ``__DF_MISSING__``.
     """
     try:
-        from services.value_serializer import is_missing_sentinel
+        from services.value_serializer import absent_sql_bind, is_missing_sentinel
 
         if is_missing_sentinel(value):
             return None
+        handled, bound = absent_sql_bind(value)
+        if handled:
+            return bound
     except Exception:
         pass
     if value is None:

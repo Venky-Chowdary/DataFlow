@@ -97,13 +97,14 @@ def _sqlite_bind_carrier(map_carrier: str, physical_or_ddl: str = "") -> str:
 
 
 def _to_sqlite_value(value: Any, source_type: str) -> Any:
-    from services.value_serializer import is_missing_sentinel
+    from services.value_serializer import absent_sql_bind, is_missing_sentinel
 
     # Sparse CDC: never coerce DF_MISSING → NULL (would wipe present destination cols).
     if is_missing_sentinel(value):
         return value
-    if value is None:
-        return None
+    handled, bound = absent_sql_bind(value)
+    if handled:
+        return bound
     # SQLite has no Decimal affinity — dest-canonical text (shared adapter).
     if isinstance(value, Decimal):
         from connectors.sqlite_common import sqlite_decimal_bind_text

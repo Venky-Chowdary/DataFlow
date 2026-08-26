@@ -229,8 +229,11 @@ def _pick_hash_key(columns: list[str], mappings: list[dict]) -> str:
 
 def _to_dynamo_value(value: Any, source_type: str) -> Any:
     """Convert transform-engine values to DynamoDB-serializable native types."""
-    if value is None:
-        return None
+    from services.value_serializer import absent_sql_bind
+
+    handled, bound = absent_sql_bind(value)
+    if handled:
+        return bound
     # Reader envelopes: {"_df_ddb_set": "SS"|"NS"|"BS", "v": [...]} (also accept "items").
     if isinstance(value, dict) and value.get("_df_ddb_set") in {"SS", "NS", "BS"}:
         kind = value["_df_ddb_set"]
@@ -349,7 +352,9 @@ def _coerce_dynamo_cell(
     """Apply Dynamo key-type / binary wire coercion before AttributeValue encode."""
     attr_type = key_types.get(col)
     if attr_type == "S":
-        if value is None or (
+        from services.value_serializer import is_reader_null_cell
+
+        if is_reader_null_cell(value) or (
             isinstance(value, str) and value.strip() == ""
         ):
             raise ValueError(
@@ -358,7 +363,9 @@ def _coerce_dynamo_cell(
             )
         return str(value)
     if attr_type == "N":
-        if value is None or (isinstance(value, str) and value.strip() == ""):
+        from services.value_serializer import is_reader_null_cell
+
+        if is_reader_null_cell(value) or (isinstance(value, str) and value.strip() == ""):
             raise ValueError(
                 f"DynamoDB key type N refused {value!r} for {col!r} — "
                 "refuse silent null invent (HASH/RANGE identity)"

@@ -144,14 +144,15 @@ def _to_es_value(value: Any, source_type: str) -> Any:
     ValueError so the writer can quarantine — never invent UTF-8 bytes or a
     random UUID (Airbyte/Fivetran fail-closed class).
     """
-    from services.value_serializer import is_missing_sentinel
+    from services.value_serializer import absent_sql_bind, is_missing_sentinel
 
     # STOP_COLUMN / coerce_null omit — callers must skip projecting this cell.
     # Returning None here would write JSON null and wipe prior _source fields.
     if is_missing_sentinel(value):
         raise ValueError("DF_MISSING must be omitted from Elasticsearch _source")
-    if value is None:
-        return None
+    handled, bound = absent_sql_bind(value)
+    if handled:
+        return bound
     upper = source_type.upper()
     if upper in {"DECIMAL", "NUMERIC", "NUMBER", "BIGNUMERIC"}:
         from connectors.sql_bind import coerce_decimal_wire

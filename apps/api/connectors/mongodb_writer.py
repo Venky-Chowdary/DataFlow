@@ -600,14 +600,15 @@ def write_mapped_rows(
         def _to_bson(
             value: Any, stype: str, transform: str = "", column: str = ""
         ) -> Any:
-            from services.value_serializer import is_missing_sentinel
+            from services.value_serializer import absent_sql_bind, is_missing_sentinel
 
             # Preserve DF_MISSING through coercion so sparse upsert can omit
             # the field — never convert the sentinel into a live BSON value.
             if is_missing_sentinel(value):
                 return value
-            if value is None:
-                return None
+            handled, bound = absent_sql_bind(value)
+            if handled:
+                return bound
             upper = stype.upper()
             # An explicit mapping transform overrides the inferred source type so
             # values like decimal strings are stored as the correct BSON type.
