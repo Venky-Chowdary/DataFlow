@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from services.db_type_utils import SCHEMALESS_DESTS
+from services.value_serializer import cell_to_string, is_null_evidence
 
 ExpectationFn = Callable[..., dict[str, Any]]
 
@@ -47,8 +48,31 @@ def _col_values(rows: list[dict[str, Any]], column: str) -> list[Any]:
     return [row.get(column) for row in rows]
 
 
+def _is_absent(value: Any) -> bool:
+    """SQL NULL / Missing / blank — not a customer token."""
+    return is_null_evidence(value)
+
+
+def _present_text(value: Any) -> str | None:
+    """One present cell. Reader-wired SQL NULL is not a unique key."""
+    if is_null_evidence(value):
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+        return None if is_null_evidence(text) else text
+    text = cell_to_string(value, preserve_sql_null=True)
+    if is_null_evidence(text):
+        return None
+    return text
+
+
 def _non_empty(values: list[Any]) -> list[str]:
-    return [str(v).strip() for v in values if v is not None and str(v).strip() != ""]
+    out: list[str] = []
+    for raw in values:
+        text = _present_text(raw)
+        if text is not None:
+            out.append(text)
+    return out
 
 
 def expect_column_unique(
@@ -62,8 +86,8 @@ def expect_column_unique(
     failures: list[dict[str, Any]] = []
     for i, row in enumerate(rows):
         val = row.get(column)
-        key = "" if val is None else str(val).strip()
-        if not key:
+        key = _present_text(val)
+        if key is None:
             continue
         seen[key] = seen.get(key, 0) + 1
         if seen[key] == 2:
@@ -92,7 +116,7 @@ def expect_column_not_null(
     failures: list[dict[str, Any]] = []
     for i, row in enumerate(rows):
         val = row.get(column)
-        if val is None or str(val).strip() == "":
+        if _is_absent(val):
             null_count += 1
             if len(failures) < 10:
                 failures.append({"row_index": i, "value": val})
@@ -123,13 +147,16 @@ def expect_column_accepted_values(
     bad = 0
     for i, row in enumerate(rows):
         val = row.get(column)
-        if val is None or str(val).strip() == "":
+        if _is_absent(val):
+            continue
+        text = _present_text(val)
+        if text is None:
             continue
         checked += 1
-        if str(val).strip().lower() not in allowed:
+        if text.lower() not in allowed:
             bad += 1
             if len(failures) < 10:
-                failures.append({"row_index": i, "value": str(val)[:80]})
+                failures.append({"row_index": i, "value": text[:80]})
     rate = 1.0 - (bad / max(checked, 1))
     return ExpectationResult(
         expectation="expect_column_accepted_values",
@@ -163,10 +190,7 @@ def expect_column_values_between(
     bad = 0
     for i, row in enumerate(rows):
         raw = row.get(column)
-        if raw is None or str(raw).strip() == "":
-            continue
-        # Missing / SQL NULL sentinels from schemaless unions are not numeric values.
-        if str(raw).strip() in {"__DF_MISSING__", "__df_sql_null__", "__df_ddb_null__"}:
+        if _is_absent(raw):
             continue
         parsed = decimal_wire_value(raw)
         if parsed is None:
@@ -210,13 +234,16 @@ def expect_column_values_match_regex(
     bad = 0
     for i, row in enumerate(rows):
         val = row.get(column)
-        if val is None or str(val).strip() == "":
+        if _is_absent(val):
+            continue
+        text = _present_text(val)
+        if text is None:
             continue
         checked += 1
-        if not compiled.match(str(val).strip()):
+        if not compiled.match(text):
             bad += 1
             if len(failures) < 10:
-                failures.append({"row_index": i, "value": str(val)[:60]})
+                failures.append({"row_index": i, "value": text[:60]})
     rate = 1.0 - (bad / max(checked, 1))
     return ExpectationResult(
         expectation="expect_column_values_match_regex",
@@ -267,13 +294,17 @@ def expect_column_pair_values_equal(
     bad = 0
     for i, row in enumerate(rows):
         a, b = row.get(column_a), row.get(column_b)
-        if a is None and b is None:
+        if _is_absent(a) and _is_absent(b):
             continue
         compared += 1
-        if str(a).strip() != str(b).strip():
+        if _is_absent(a) or _is_absent(b) or _present_text(a) != _present_text(b):
             bad += 1
             if len(failures) < 10:
-                failures.append({"row_index": i, column_a: str(a)[:40], column_b: str(b)[:40]})
+                failures.append({
+                    "row_index": i,
+                    column_a: (_present_text(a) or "")[:40],
+                    column_b: (_present_text(b) or "")[:40],
+                })
     rate = 1.0 - (bad / max(compared, 1))
     return ExpectationResult(
         expectation="expect_column_pair_values_equal",
