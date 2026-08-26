@@ -60,11 +60,9 @@ def quarantine_unfit_bitstrings(
         cells = list(row)
         hold_out = False
         for col_idx, typ in bit_cols:
-            if col_idx >= len(cells) or cells[col_idx] is None:
-                continue
-            from services.value_serializer import is_missing_sentinel
+            from connectors.writer_common import _unfit_cell_absent
 
-            if is_missing_sentinel(cells[col_idx]):
+            if _unfit_cell_absent(cells, col_idx):
                 continue
             try:
                 bits = coerce_bitstring_wire(
@@ -143,11 +141,9 @@ def quarantine_unfit_binaries(
         cells = list(row)
         hold_out = False
         for col_idx, width, typ in bin_cols:
-            if col_idx >= len(cells) or cells[col_idx] is None:
-                continue
-            from services.value_serializer import is_missing_sentinel
+            from connectors.writer_common import _unfit_cell_absent
 
-            if is_missing_sentinel(cells[col_idx]):
+            if _unfit_cell_absent(cells, col_idx):
                 continue
             raw = _binary_storage_bytes(cells[col_idx])
             if raw is None:
@@ -244,11 +240,9 @@ def quarantine_unfit_enum_set(
         cells = list(row)
         hold_out = False
         for col_idx, kind, typ in domain_cols:
-            if col_idx >= len(cells) or cells[col_idx] is None:
-                continue
-            from services.value_serializer import is_missing_sentinel
+            from connectors.writer_common import _unfit_cell_absent
 
-            if is_missing_sentinel(cells[col_idx]):
+            if _unfit_cell_absent(cells, col_idx):
                 continue
             try:
                 if kind == "ENUM":
@@ -384,11 +378,9 @@ def quarantine_unfit_specialty_types(
         cells = list(row)
         hold_out = False
         for col_idx, kind, typ in specialty_cols:
-            if col_idx >= len(cells) or cells[col_idx] is None:
-                continue
-            from services.value_serializer import SQL_NULL_SENTINEL, is_missing_sentinel
+            from connectors.writer_common import _unfit_cell_absent
 
-            if is_missing_sentinel(cells[col_idx]) or cells[col_idx] == SQL_NULL_SENTINEL:
+            if _unfit_cell_absent(cells, col_idx):
                 continue
             reason = ""
             ok = True
