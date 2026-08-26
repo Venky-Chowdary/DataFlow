@@ -73,24 +73,25 @@ def _parse_float(s: str) -> float | None:
 
 
 def _parse_datetime_key(s: str) -> float | None:
-    text = s.strip()
-    if _EPOCH_MS_RE.match(text):
-        return int(text) / 1000.0
-    if _EPOCH_S_RE.match(text):
-        return float(int(text))
-    for fmt in (
-        "%Y-%m-%dT%H:%M:%S",
-        "%Y-%m-%dT%H:%M:%SZ",
-        "%Y-%m-%dT%H:%M:%S.%f",
-        "%Y-%m-%dT%H:%M:%S.%fZ",
-        "%Y-%m-%d %H:%M:%S",
-        "%Y-%m-%d",
-    ):
-        try:
-            return datetime.strptime(text.replace("Z", ""), fmt.replace("Z", "")).timestamp()
-        except ValueError:
-            continue
-    return None
+    """Bind a CDC watermark through the write-path datetime parser.
+
+    ISO, 10-digit seconds, 13-digit millis, and unambiguous calendars
+    (``31/12/2024``) compare as instants. Auto-ambiguous ``01/02/2024``
+    returns None so compare falls through to string — never invent MDY/DMY.
+    """
+    text = (s or "").strip()
+    if not text:
+        return None
+    from services.transform_engine import apply_transform
+
+    parsed, err = apply_transform(text, "datetime")
+    if parsed is None or err:
+        return None
+    try:
+        moment = datetime.fromisoformat(str(parsed).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return moment.timestamp()
 
 
 def compare_watermarks(a: str, b: str, wm_type: WatermarkType) -> int:
