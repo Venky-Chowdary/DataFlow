@@ -260,11 +260,11 @@ def analyze_column_profile(name: str, samples: list[str]) -> dict[str, Any]:
                     profile["ieee_signals"] = obs.get("ieee_signals") or []
             except Exception:
                 pass
-            nums: list[float] = []
+            nums = []
             for v in vals:
                 parsed = decimal_wire_value(v)
                 if parsed is not None:
-                    nums.append(float(parsed))
+                    nums.append(parsed)
             if nums:
                 profile["min"] = min(nums)
                 profile["max"] = max(nums)
