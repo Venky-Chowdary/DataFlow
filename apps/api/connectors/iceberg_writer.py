@@ -27,7 +27,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
-from services.value_serializer import json_default
+from services.value_serializer import json_default, json_loads_exact
 
 from connectors.writer_common import (
     WriteResult,
@@ -655,7 +655,7 @@ def _read_snapshot_data_file(
                 if not line:
                     continue
                 try:
-                    obj = json.loads(line)
+                    obj = json_loads_exact(line)
                 except Exception as exc:
                     raise ValueError(
                         f"Iceberg JSONL data-file corrupt at {rel}:{line_no}: {exc}"
