@@ -165,6 +165,36 @@ def _format_timedelta(value: timedelta) -> str:
     return f"{sign}{hours:02d}:{minutes:02d}:{seconds:09.6f}".rstrip("0").rstrip(".")
 
 
+def _bq_day_second_wire(
+    days: int,
+    hours: int,
+    minutes: int,
+    seconds: Decimal,
+    *,
+    sign: str = "",
+) -> str:
+    """Normalize DS parts and emit BigQuery ``0-0 D H:M:S[.F]``.
+
+    ISO ``PT…S`` seconds stay Decimal identity. ``float(seconds)`` +
+    ``timedelta`` overflowed ``2**53+1`` and rounded long fractions.
+    """
+    extra_min, seconds = divmod(seconds, Decimal(60))
+    minutes += int(extra_min)
+    extra_hr, minutes = divmod(minutes, 60)
+    hours += extra_hr
+    extra_d, hours = divmod(hours, 24)
+    days += extra_d
+    if seconds == seconds.to_integral_value():
+        sec_s = f"{int(seconds):02d}"
+    else:
+        # Fixed-point identity — never scientific, never IEEE :09.6f.
+        text = format(seconds, "f")
+        whole, _, frac = text.partition(".")
+        frac = frac.rstrip("0")
+        sec_s = f"{int(whole):02d}.{frac}" if frac else f"{int(whole):02d}"
+    return f"{sign}0-0 {days} {hours}:{minutes:02d}:{sec_s}"
+
+
 def format_bigquery_interval(value: Any) -> str:
     """Canonical BigQuery INTERVAL wire: ``Y-M D H:M:S[.F]`` (day-to-second).
 
@@ -174,6 +204,7 @@ def format_bigquery_interval(value: Any) -> str:
     if value is None:
         return ""
     if isinstance(value, timedelta):
+        # Python timedelta is IEEE via total_seconds — not claimed exact.
         total = value.total_seconds()
         sign = "-" if total < 0 else ""
         total = abs(total)
@@ -191,7 +222,7 @@ def format_bigquery_interval(value: Any) -> str:
                 whole, frac = sec_s.split(".", 1)
                 sec_s = f"{int(whole):02d}.{frac}"
             else:
-                sec_s = f"{int(float(sec_s)):02d}"
+                sec_s = f"{int(sec_s):02d}"
         return f"{sign}0-0 {days} {hours}:{minutes:02d}:{sec_s}"
 
     text = str(value).strip()
@@ -208,10 +239,19 @@ def format_bigquery_interval(value: Any) -> str:
         days = int(m.group("days") or 0)
         hours = int(m.group("hours") or 0)
         minutes = int(m.group("minutes") or 0)
-        seconds = float(m.group("seconds") or 0)
-        return format_bigquery_interval(
-            timedelta(days=days, hours=hours, minutes=minutes, seconds=seconds)
-        )
+        sec_raw = m.group("seconds")
+        if sec_raw is None:
+            seconds = Decimal(0)
+        else:
+            try:
+                seconds = Decimal(sec_raw)
+            except (InvalidOperation, Overflow):
+                return text
+            if not seconds.is_finite() or seconds < 0:
+                return text
+        # ISO uses ``.`` as the decimal separator (PT1.234S is 1.234s,
+        # not Auto grouping). Do not route through decimal_wire_value.
+        return _bq_day_second_wire(days, hours, minutes, seconds)
     m2 = re.fullmatch(r"^(-)?(\d+):(\d{2}):(\d{2}(?:\.\d+)?)$", text)
     if m2:
         sign, h, mi, s = m2.groups()
