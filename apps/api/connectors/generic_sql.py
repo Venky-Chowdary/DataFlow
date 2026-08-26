@@ -1005,8 +1005,17 @@ class _ExactJSON(sa.JSON):
 
     def bind_processor(self, dialect: Any) -> Callable[[Any], Any] | None:
         def process(value: Any) -> Any:
-            if value is None:
-                return None
+            from services.value_serializer import (
+                absent_sql_bind,
+                is_missing_sentinel,
+            )
+
+            # Missing stays a raise in json_document_wire (omit upstream).
+            # Reader-null is SQL/JSON NULL — never the extract token as text.
+            if not is_missing_sentinel(value):
+                handled, bound = absent_sql_bind(value)
+                if handled:
+                    return bound
             from services.json_polarity import json_document_wire
 
             return json_document_wire(value)
@@ -1624,13 +1633,12 @@ def _to_sa_value(
     db_type: str = "",
 ) -> Any:
     """Convert transform-engine output values to Python objects SQLAlchemy accepts."""
-    if value is None:
-        return None
-    from services.value_serializer import is_missing_sentinel
+    from services.value_serializer import absent_sql_bind
 
-    # Sparse CDC: never coerce DF_MISSING → NULL (would wipe present destination cols).
-    if is_missing_sentinel(value):
-        return value
+    # Reader-null is SQL NULL. Missing stays Missing (sparse omit, never wipe).
+    handled, bound = absent_sql_bind(value)
+    if handled:
+        return bound
 
     # Specialty carriers (INET, PG_LSN, geometric, OID, snapshots, …) must use
     # the shared sql_bind SSOT before LOGICAL_* collapse invents string/int/geo.
