@@ -295,6 +295,28 @@ def test_pinecone(
         return False, str(exc)
 
 
+def _pinecone_metadata_value(value: Any) -> Any | None:
+    """Omit reader-null metadata; keep Pinecone-legal primitives.
+
+    ``if v is None`` left extract ``SQL_NULL_SENTINEL`` as a string field.
+    ``vector_prepare_cell`` already owns that omit. List[str] stays a list.
+    0 / false stay present.
+    """
+    from connectors.writer_common import vector_prepare_cell
+    from services.value_serializer import is_reader_null_cell, present_cell_text
+
+    if is_reader_null_cell(value):
+        return None
+    if isinstance(value, list) and all(isinstance(x, str) for x in value):
+        return value
+    prepared = vector_prepare_cell(value)
+    if prepared is None:
+        return None
+    if isinstance(prepared, (str, int, float, bool)):
+        return prepared
+    return present_cell_text(prepared)
+
+
 def build_pinecone_vectors(
     vector_rows: list[dict[str, Any]],
     *,
@@ -340,14 +362,10 @@ def build_pinecone_vectors(
         # Pinecone metadata values must be string/number/bool/list[string].
         clean_meta: dict[str, Any] = {}
         for k, v in meta.items():
-            if v is None:
+            prepared = _pinecone_metadata_value(v)
+            if prepared is None:
                 continue
-            if isinstance(v, (str, int, float, bool)):
-                clean_meta[str(k)] = v
-            elif isinstance(v, list) and all(isinstance(x, str) for x in v):
-                clean_meta[str(k)] = v
-            else:
-                clean_meta[str(k)] = str(v)
+            clean_meta[str(k)] = prepared
         values, err = coerce_embedding(row.get("embedding"), expected_dimension=dimension)
         if err or values is None:
             rejected.append({
