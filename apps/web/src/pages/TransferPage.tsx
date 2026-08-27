@@ -125,7 +125,10 @@ import {
   studioSchedulePolicies,
   writeViaStagingSupported as destSupportsWriteViaStaging,
 } from "../lib/studioDataRules";
-import { buildValidateContractKey as composeValidateContractKey } from "../lib/studioValidateIdentity";
+import {
+  buildValidateContractKey as composeValidateContractKey,
+  studioScheduleValidateIdentity,
+} from "../lib/studioValidateIdentity";
 import {
   CDC_DELIVERY_AT_LEAST_ONCE,
   exactlyOnceWiredDest,
@@ -5216,10 +5219,6 @@ export function TransferPage({
               confidence: m.confidence,
               transform: m.transform,
             }));
-      const decisionHash = String(
-        (preflight?.proof_bundle?.decision_artifact as { content_hash?: string } | undefined)
-          ?.content_hash || "",
-      );
       await createSchedule({
         name: `${sourceConnector?.name ?? "Source"} → ${targetCollection}`,
         source_connector_id: sourceConnectorId,
@@ -5239,7 +5238,7 @@ export function TransferPage({
         stream_contracts: streamContracts,
         shape_recipe: recipePayload(shapeSteps),
         approved_shape_recipe_hash: shapeIdentity?.hash || "",
-        approved_decision_artifact_hash: decisionHash,
+        ...studioScheduleValidateIdentity(preflight),
         ...studioSchedulePolicies({
           validationMode,
           schemaPolicy,

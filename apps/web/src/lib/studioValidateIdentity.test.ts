@@ -6,6 +6,7 @@ import { describe, it } from "node:test";
 
 import {
   buildValidateContractKey,
+  studioScheduleValidateIdentity,
   validateContractStillHolds,
   type ValidateContractInput,
 } from "./studioValidateIdentity.ts";
@@ -86,5 +87,25 @@ describe("studioValidateIdentity", () => {
     );
     assert.match(key, /NUMBER\(9,6\)/);
     assert.doesNotMatch(key, /create-new/);
+  });
+
+  it("stamps Validate DDL identity onto a Studio schedule and does not invent hashes", () => {
+    const empty = studioScheduleValidateIdentity(undefined);
+    assert.equal(empty.approved_decision_artifact_hash, "");
+    assert.equal(empty.approved_ddl_identity_hash, "");
+    const stamped = studioScheduleValidateIdentity({
+      proof_bundle: {
+        decision_artifact_hash: "b".repeat(64),
+        decision_artifact: { content_hash: "legacy".repeat(8) },
+        ddl_identity: { ddl_identity_hash: "c".repeat(64) },
+      },
+    });
+    assert.equal(stamped.approved_decision_artifact_hash, "b".repeat(64));
+    assert.equal(stamped.approved_ddl_identity_hash, "c".repeat(64));
+    const legacy = studioScheduleValidateIdentity({
+      proof_bundle: { decision_artifact: { content_hash: "d".repeat(64) } },
+    });
+    assert.equal(legacy.approved_decision_artifact_hash, "d".repeat(64));
+    assert.equal(legacy.approved_ddl_identity_hash, "");
   });
 });

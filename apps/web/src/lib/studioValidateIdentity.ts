@@ -134,3 +134,27 @@ export function buildValidateContractKey(input: ValidateContractInput): string {
 export function validateContractStillHolds(previous: string | null | undefined, next: string): boolean {
   return Boolean(previous) && previous === next;
 }
+
+/** Validate proof hashes Execute already consumes — Studio→Schedule must not drop them. */
+export type ValidateProofBundle = {
+  decision_artifact_hash?: string;
+  decision_artifact?: { content_hash?: string };
+  ddl_identity?: { ddl_identity_hash?: string };
+};
+
+export function studioScheduleValidateIdentity(preflight: {
+  proof_bundle?: ValidateProofBundle;
+} | null | undefined): {
+  approved_decision_artifact_hash: string;
+  approved_ddl_identity_hash: string;
+} {
+  const bundle = preflight?.proof_bundle;
+  const decision = String(
+    bundle?.decision_artifact_hash || bundle?.decision_artifact?.content_hash || "",
+  ).trim();
+  const ddl = String(bundle?.ddl_identity?.ddl_identity_hash || "").trim();
+  return {
+    approved_decision_artifact_hash: decision,
+    approved_ddl_identity_hash: ddl,
+  };
+}
