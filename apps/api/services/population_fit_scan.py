@@ -107,6 +107,9 @@ class BoundedTarget:
     risk_id: str = ""
     #: Engine transform the write resolves for this column (typed carriers).
     transform: str = ""
+    #: True when ``target_type`` is live destination DDL, not a Map remap.
+    #: Map type alone does not ALTER Snowflake/MySQL/PG — Execute binds this.
+    binds_live_ddl: bool = False
 
     @property
     def aborts_job(self) -> bool:
@@ -123,6 +126,7 @@ class BoundedTarget:
             "execution_policy": self.execution_policy,
             "risk_id": self.risk_id,
             "aborts_job": self.aborts_job,
+            "binds_live_ddl": self.binds_live_ddl,
         }
 
 
@@ -437,6 +441,40 @@ def _source_cannot_exceed(
     return False
 
 
+def _write_bind_target_type(
+    declared: str,
+    live: str,
+    *,
+    sync_mode: str = "",
+    dest_table_exists: bool | None = None,
+) -> tuple[str, bool]:
+    """Carrier the write will bind — live DDL wins on an existing object.
+
+    Remapping ``target_type`` to ``NUMBER(10,7)`` while Snowflake still holds
+    ``NUMBER(9,6)`` used to green Validate and fail Execute on the same cells.
+    That is the 'errors every Run' loop. Overwrite drops and recreates, so
+    mapping / create-new types win there. ``dest_table_exists is False`` is
+    create-new even when a projected schema is sitting in ``dest_types``.
+    """
+    from services.sync_cursor import is_overwrite_sync
+
+    declared = str(declared or "").strip()
+    live = str(live or "").strip()
+    if live and not is_overwrite_sync(sync_mode) and dest_table_exists is not False:
+        return live, True
+    return declared or live, False
+
+
+def _live_ddl_fix_suffix(*, binds_live_ddl: bool) -> str:
+    if not binds_live_ddl:
+        return ""
+    return (
+        " Map type alone does not ALTER live destination DDL — ALTER the "
+        "column or map to a new *_wide column, then start a new transfer. "
+        "Do not Resume the failed job."
+    )
+
+
 def bounded_targets(
     mappings: Iterable[Any] | None,
     *,
@@ -446,6 +484,8 @@ def bounded_targets(
     job_error_policy: str = "",
     source_kind: str = "",
     source_format: str = "",
+    sync_mode: str = "",
+    dest_table_exists: bool | None = None,
 ) -> tuple[tuple[BoundedTarget, ...], tuple[str, ...], tuple[str, ...]]:
     """Mapped columns whose destination carrier has a decidable bound *and* a
     source declaration that could exceed it.
@@ -483,7 +523,13 @@ def bounded_targets(
         if m.get("intentional_omit"):
             continue
         declared = str(m.get("target_type") or m.get("dest_type") or "").strip()
-        target_type = declared or types.get(target) or lowered.get(target.lower(), "")
+        live = types.get(target) or lowered.get(target.lower(), "")
+        target_type, binds_live_ddl = _write_bind_target_type(
+            declared,
+            live,
+            sync_mode=sync_mode,
+            dest_table_exists=dest_table_exists,
+        )
         carrier = _carrier_for(target_type, dest_db=dest_db)
         transform = _scannable_transform(m, source_types=src_types, dest_types=types)
         if not carrier:
@@ -525,6 +571,7 @@ def bounded_targets(
             execution_policy=exec_pol,
             risk_id=risk_id,
             transform=transform,
+            binds_live_ddl=binds_live_ddl,
         )
         if carrier == CARRIER_TYPED:
             # A parse bound has no width to compare declarations against: a
@@ -1058,7 +1105,9 @@ def scan_rows(
                 example_values=examples,
                 unfit_reason=reasons.get(idx, ""),
                 suggested_target_type=suggested_type,
-                suggested_fix=suggested_fix,
+                suggested_fix=suggested_fix + _live_ddl_fix_suffix(
+                    binds_live_ddl=target.binds_live_ddl
+                ),
             )
         )
     findings = tuple(findings_list)
@@ -1097,6 +1146,8 @@ def scan_population_fit(
     budget: int = DEFAULT_SCAN_BUDGET,
     source_kind: str = "",
     source_format: str = "",
+    sync_mode: str = "",
+    dest_table_exists: bool | None = None,
 ) -> FitScanReport:
     """Resolve bounded targets from the mappings, then scan the rows."""
     targets, undecidable, safe = bounded_targets(
@@ -1107,6 +1158,8 @@ def scan_population_fit(
         job_error_policy=job_error_policy,
         source_kind=source_kind,
         source_format=source_format,
+        sync_mode=sync_mode,
+        dest_table_exists=dest_table_exists,
     )
     return scan_rows(
         rows,

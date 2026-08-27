@@ -146,3 +146,66 @@ def test_quarantine_stamps_suggested_fix_on_snowflake_number():
     assert fits_decimal(
         "7.9166665", 10, 7, dest_db="snowflake"
     ), "widen must be the carrier that actually fits"
+
+
+def test_remap_on_existing_dest_still_scans_live_ddl():
+    """Map NUMBER(10,7) does not ALTER live Snowflake NUMBER(9,6).
+
+    That remap used to green Validate and fail Execute on the same 7.9166665
+    cells — the errors-every-Run loop. Validate must keep judging live DDL.
+    """
+    rows = [{"DEP_TIME": "7.5"}] * 292 + [{"DEP_TIME": "7.9166665"}]
+    report = scan_population_fit(
+        rows,
+        [{"source": "DEP_TIME", "target": "DEP_TIME", "target_type": "NUMBER(10,7)"}],
+        dest_types={"DEP_TIME": "NUMBER(9,6)"},
+        source_types={"DEP_TIME": "NUMBER(9,6)"},
+        dest_db="snowflake",
+        dialect_label="snowflake",
+        job_error_policy="fail",
+        rows_are_population=True,
+        source_kind="file",
+        source_format="csv",
+        sync_mode="full_refresh_append",
+        dest_table_exists=True,
+    )
+    assert report.findings
+    assert report.findings[0].target.target_type == "NUMBER(9,6)"
+    assert report.findings[0].target.binds_live_ddl is True
+    assert report.findings[0].suggested_target_type == "NUMBER(10,7)"
+    assert "does not ALTER" in report.findings[0].suggested_fix
+    assert "Resume" in report.findings[0].suggested_fix
+
+
+def test_overwrite_judges_mapping_type_not_dropped_live_ddl():
+    """Overwrite recreates the object — mapping NUMBER(10,7) is the write bind."""
+    rows = [{"DEP_TIME": "7.9166665"}]
+    report = scan_population_fit(
+        rows,
+        [{"source": "DEP_TIME", "target": "DEP_TIME", "target_type": "NUMBER(10,7)"}],
+        dest_types={"DEP_TIME": "NUMBER(9,6)"},
+        dest_db="snowflake",
+        dialect_label="snowflake",
+        job_error_policy="fail",
+        rows_are_population=True,
+        source_kind="file",
+        source_format="csv",
+        sync_mode="full_refresh_overwrite",
+        dest_table_exists=True,
+    )
+    assert report.findings == ()
+    assert report.targets[0].target_type == "NUMBER(10,7)"
+    assert report.targets[0].binds_live_ddl is False
+
+
+def test_create_new_uses_mapping_even_when_projected_types_are_narrow():
+    targets, _, _ = bounded_targets(
+        [{"source": "DEP_TIME", "target": "DEP_TIME", "target_type": "NUMBER(10,7)"}],
+        dest_types={"DEP_TIME": "NUMBER(9,6)"},
+        dest_db="snowflake",
+        source_kind="file",
+        source_format="csv",
+        dest_table_exists=False,
+    )
+    assert [t.target_type for t in targets] == ["NUMBER(10,7)"]
+    assert targets[0].binds_live_ddl is False

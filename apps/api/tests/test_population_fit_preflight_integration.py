@@ -173,6 +173,48 @@ def test_file_inferred_matching_typmod_still_scans_float32_clock_residue() -> No
     assert proof_findings and proof_findings[0]["suggested_target_type"] == "NUMBER(10,7)"
 
 
+def test_existing_dest_stays_blocked_after_map_type_remap() -> None:
+    """Remap on an existing table must not green Validate.
+
+    Operator clicked Remap → mapping.target_type NUMBER(10,7). Live Snowflake
+    is still NUMBER(9,6). Execute binds live DDL. Validate used to pass and
+    Run failed again — the errors-every-Run loop.
+    """
+    rows = [{"arr_time": "12.345678"} for _ in range(292)]
+    rows.append({"arr_time": "7.9166665"})
+    result = _preflight(
+        source_kind="file",
+        source_format="csv",
+        column_types={"arr_time": "NUMBER(9,6)"},
+        destination_column_types={"arr_time": "NUMBER(9,6)"},
+        destination_table_exists=True,
+        sync_mode="full_refresh_append",
+        mappings=[
+            {
+                "source": "arr_time",
+                "target": "arr_time",
+                "confidence": 0.93,
+                "target_type": "NUMBER(10,7)",
+            }
+        ],
+        row_count=len(rows),
+        sample_rows=rows[:25],
+        population_rows=rows,
+        rows_are_population=True,
+    )
+
+    assert result["passed"] is False
+    finding = result["population_fit"]["findings"][0]
+    assert finding["target_type"] == "NUMBER(9,6)"
+    assert finding["binds_live_ddl"] is True
+    assert finding["suggested_target_type"] == "NUMBER(10,7)"
+    assert "does not ALTER" in (finding.get("suggested_fix") or "")
+    assert _gate(result)["status"] == "block"
+    kernel = result["validation_findings"]
+    assert kernel and kernel[0]["failure_class"] == "OVERFLOW"
+    assert kernel[0]["suggested_target_type"] == "NUMBER(10,7)"
+
+
 def test_csv_bytes_past_preview_stamp_kernel_widen() -> None:
     """A real CSV of 293 rows: last cell ``7.9166665`` vs dest NUMBER(9,6).
 

@@ -389,8 +389,9 @@ def recommended_action_for_failure(
         )
     if fc is FailureClass.OVERFLOW and suggested_target_type:
         return (
-            f"Open Map → widen {col}to {suggested_target_type} (or ALTER the destination) "
-            f"→ re-Validate. Do not silently truncate."
+            f"Open Map → widen {col} to {suggested_target_type} (or ALTER the destination) "
+            f"→ re-Validate. Map type alone does not ALTER live destination DDL. "
+            f"Do not silently truncate."
         )
     if suggested_target_type:
         return (
