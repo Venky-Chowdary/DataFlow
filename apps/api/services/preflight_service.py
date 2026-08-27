@@ -486,6 +486,9 @@ def run_transfer_policy_gates(
     delivery_guarantee: str = "at_least_once",
     allow_append_only: bool = False,
     read_scope: Any = None,
+    priority_column: str = "",
+    priority_direction: str = "desc",
+    row_limit: int = 0,
 ) -> list[dict[str, Any]]:
     """Validate enterprise run policy that sits above source/destination probes."""
     from services.schema_drift import schema_policy_honesty_line
@@ -658,6 +661,32 @@ def run_transfer_policy_gates(
     )
     if eos_gate:
         gates.append(eos_gate)
+
+    cap = max(0, int(row_limit or 0))
+    priority = str(priority_column or "").strip()
+    direction = "asc" if str(priority_direction or "").strip().lower() == "asc" else "desc"
+    if cap > 0 or priority:
+        gates.append(
+            {
+                "id": "g17_row_cap",
+                "status": GateStatus.PASS.value,
+                "severity": "warn",
+                "message": (
+                    f"Execute writes"
+                    + (f" at most {cap} rows" if cap > 0 else " the full mapped population")
+                    + (f" after sorting by {priority} {direction}" if priority else "")
+                    + ". Validate type-fit still walks the uncapped source (stricter). "
+                    "Counts and uniqueness are not a proof of the capped write."
+                ),
+                "duration_ms": 0,
+                "details": {
+                    "priority_column": priority or None,
+                    "priority_direction": direction if priority else None,
+                    "row_limit": cap,
+                    "honesty": "execute_applies_cap",
+                },
+            }
+        )
 
     # Redis KV TTL/EXPIRE is not a first-class transfer guarantee (soft warning).
     if dest in {"redis", "redis_enterprise", "amazon_elasticache_redis", "azure_cache_redis", "google_memorystore_redis"} or src in {

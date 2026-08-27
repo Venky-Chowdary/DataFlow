@@ -119,6 +119,10 @@ class PreflightRequest(BaseModel):
     acknowledgment_reason: str = ""
     # Pre-ingestion staging (SQL destinations only) — Validate must fail closed.
     write_via_staging: bool = False
+    # Execute-applied sort + cap. Validate names the cap (G17); type-fit stays uncapped.
+    priority_column: str = ""
+    priority_direction: str = "desc"
+    row_limit: int = 0
     # Connector-specific dest settings (Redshift staging_bucket / iam_role, etc.).
     dest_extra: dict[str, Any] | None = None
     # CDC delivery — default at_least_once; exactly_once is opt-in and fail-closed.
@@ -271,6 +275,18 @@ async def run_preflight(body: PreflightRequest):
     preflight_columns = shaped_image.columns
     source_column_types = shaped_image.column_types
     preflight_sample_rows = shaped_image.sample_rows
+    if int(body.row_limit or 0) > 0 or str(body.priority_column or "").strip():
+        try:
+            from src.transfer.engine import _apply_priority_and_limit
+        except ImportError:
+            from transfer.engine import _apply_priority_and_limit
+
+        preflight_sample_rows = _apply_priority_and_limit(
+            list(preflight_sample_rows or []),
+            str(body.priority_column or "").strip(),
+            str(body.priority_direction or "desc"),
+            int(body.row_limit or 0),
+        )
 
     from services.file_parser import iter_stored_upload_rows
 
@@ -465,6 +481,9 @@ async def run_preflight(body: PreflightRequest):
             source_type=body.source_type,
             source_kind=body.source_kind or ("database" if body.source_connector_id else "file"),
             write_via_staging=bool(body.write_via_staging),
+            priority_column=str(body.priority_column or ""),
+            priority_direction=str(body.priority_direction or "desc"),
+            row_limit=int(body.row_limit or 0),
             source_read_mode=str(
                 ((body.source_config or {}).get("source_read_mode")
                  or ((body.source_config or {}).get("extra") or {}).get("source_read_mode")

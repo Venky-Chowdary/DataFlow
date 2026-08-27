@@ -350,6 +350,22 @@ def run_plan_preflight(
             source_columns=shaped_image.columns,
         )
 
+    plan_priority = str(policies.get("priority_column") or "").strip()
+    plan_limit = max(0, int(policies.get("row_limit") or 0))
+    plan_sample_rows = list(shaped_image.sample_rows or [])
+    if plan_limit > 0 or plan_priority:
+        try:
+            from src.transfer.engine import _apply_priority_and_limit
+        except ImportError:
+            from transfer.engine import _apply_priority_and_limit
+
+        plan_sample_rows = _apply_priority_and_limit(
+            plan_sample_rows,
+            plan_priority,
+            str(policies.get("priority_direction") or "desc"),
+            plan_limit,
+        )
+
     pf = run_file_preflight(
         columns=shaped_image.columns,
         column_types=shaped_image.column_types,
@@ -361,7 +377,7 @@ def run_plan_preflight(
         source_kind=source_kind,
         source_format=source_format,
         sync_mode=policies.get("sync_mode", "full_refresh_overwrite"),
-        sample_rows=shaped_image.sample_rows,
+        sample_rows=plan_sample_rows,
         source_file_id=source_file_id,
         population_rows=stored_population,
         rows_are_population=stored_population is not None,
@@ -424,6 +440,9 @@ def run_plan_preflight(
             source_type=source_format,
             source_kind=source_kind,
             write_via_staging=bool(policies.get("write_via_staging")),
+            priority_column=str(policies.get("priority_column") or ""),
+            priority_direction=str(policies.get("priority_direction") or "desc"),
+            row_limit=max(0, int(policies.get("row_limit") or 0)),
             source_read_mode=str(
                 (source.get("source_read_mode") or (source.get("extra") or {}).get("source_read_mode") or "")
             ),
