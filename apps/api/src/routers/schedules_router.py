@@ -75,6 +75,10 @@ class ScheduleCreate(BaseModel):
     validation_mode: str = "strict"
     schema_policy: SchemaPolicy = "manual_review"
     backfill_new_fields: bool = False
+    write_via_staging: bool = False
+    priority_column: str = ""
+    priority_direction: str = "desc"
+    row_limit: int = Field(default=0, ge=0)
     delivery_guarantee: str = "at_least_once"
     mappings: list[dict[str, Any]] = Field(default_factory=list)
     stream_contracts: list[dict[str, Any]] = Field(default_factory=list)
@@ -113,6 +117,10 @@ class ScheduleUpdate(BaseModel):
     validation_mode: Optional[str] = None
     schema_policy: Optional[SchemaPolicy] = None
     backfill_new_fields: Optional[bool] = None
+    write_via_staging: Optional[bool] = None
+    priority_column: Optional[str] = None
+    priority_direction: Optional[str] = None
+    row_limit: Optional[int] = Field(default=None, ge=0)
     delivery_guarantee: Optional[str] = None
     mappings: Optional[list[dict[str, Any]]] = None
     stream_contracts: Optional[list[dict[str, Any]]] = None
@@ -152,6 +160,10 @@ class ScheduleResponse(BaseModel):
     validation_mode: str = "strict"
     schema_policy: str = "manual_review"
     backfill_new_fields: bool = False
+    write_via_staging: bool = False
+    priority_column: str = ""
+    priority_direction: str = "desc"
+    row_limit: int = 0
     delivery_guarantee: str = "at_least_once"
     cursor_column: str = ""
     primary_key: str = ""

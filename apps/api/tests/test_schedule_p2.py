@@ -821,3 +821,59 @@ def test_build_request_replays_studio_validate_identity():
     assert req.mappings[0]["risk_contract"]["status"] == "signed"
     assert req.stream_contracts[0]["primary_key"] == "id"
     assert req.skip_preflight is False
+
+
+def test_create_schedule_persists_advanced_write_knobs(temp_store):
+    sched = store.create_schedule({
+        "name": "Stage then promote",
+        "source_connector_id": "src-1",
+        "source_table": "orders",
+        "dest_connector_id": "dst-1",
+        "dest_table": "orders_wh",
+        "interval": "daily",
+        "sync_mode": "full_refresh_append",
+        "write_via_staging": True,
+        "priority_column": "updated_at",
+        "priority_direction": "asc",
+        "row_limit": 2500,
+    })
+    reloaded = store.get_schedule(sched.id)
+    assert reloaded.write_via_staging is True
+    assert reloaded.priority_column == "updated_at"
+    assert reloaded.priority_direction == "asc"
+    assert reloaded.row_limit == 2500
+    legacy = store.PipelineSchedule.from_dict({
+        "id": "legacy-adv",
+        "name": "old",
+        "source_connector_id": "a",
+        "source_table": "t",
+        "dest_connector_id": "b",
+        "dest_table": "u",
+        "interval": "daily",
+    })
+    assert legacy.write_via_staging is False
+    assert legacy.priority_column == ""
+    assert legacy.priority_direction == "desc"
+    assert legacy.row_limit == 0
+
+
+def test_build_request_replays_advanced_write_knobs():
+    sched = store.PipelineSchedule.from_dict({
+        "id": "s-adv",
+        "name": "n",
+        "source_connector_id": "src",
+        "source_table": "orders",
+        "dest_connector_id": "dst",
+        "dest_table": "orders_wh",
+        "interval": "daily",
+        "write_via_staging": True,
+        "priority_column": "updated_at",
+        "priority_direction": "asc",
+        "row_limit": 2500,
+    })
+    req = runner.build_schedule_request(sched, _SRC_CONN, _DST_CONN)
+    assert req.write_via_staging is True
+    assert req.priority_column == "updated_at"
+    assert req.priority_direction == "asc"
+    assert req.limit == 2500
+    assert req.skip_preflight is False
