@@ -244,8 +244,10 @@ describe("Transfer Studio chrome contracts", () => {
     assert.match(guide, /re-checks every row of the[\s\S]{0,40}population/);
     // Identity is what Execute is held to, so it is stated where it is approved.
     assert.match(step, /recipe \{preview\.recipe\.recipe_hash\}/);
-    // A refused recipe has no identity — Map must not be reachable behind it.
-    assert.match(step, /disabled=\{Boolean\(previewError\) \|\| Boolean\(preview\?\.refusal\)\}/);
+    // A refused recipe still has no identity — Map stays locked. A transport
+    // timeout on an empty recipe does not, so Continue is not gated on any error.
+    assert.match(step, /Boolean\(preview\?\.refusal\)/);
+    assert.match(step, /\|\| \(Boolean\(previewError\) && steps\.length > 0\)/);
   });
 
   it("transfer-studio stacks chrome via container query + 1280 fallback", () => {
