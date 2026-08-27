@@ -332,14 +332,39 @@ def run_plan_preflight(
         or ""
     ).strip()
 
+    # Validate must score against the schema Execute will read. Live source
+    # introspection wins over the plan's Map-time snapshot; anything it cannot
+    # answer keeps the declared type. Revision ``declared_source_*`` stays the
+    # signed snapshot so an approved transform is not source drift.
+    from services.source_schema_authority import (
+        live_source_column_types,
+        reconcile_source_types,
+        restamp_mapping_source_types,
+    )
+
+    source_column_types, source_type_drift = reconcile_source_types(
+        plan.source_schema,
+        live_source_column_types(
+            source_connector_id=source_connector_id,
+            source_table=str(source.get("table") or ""),
+            source_collection=str(source.get("collection") or ""),
+            source_schema=str(source.get("schema") or ""),
+            source_database=str(source.get("database") or ""),
+        ),
+    )
+
     # run_file_preflight is the SSOT for drift + gates — do not re-detect/overwrite.
     # Source connector/table/config + stream_contracts required for uniqueness probe
     # (Studio plan Validate must not skip the probe Execute will run).
     shaped_image = shaped_preflight_image(
         shape_recipe,
         columns=plan.source_columns,
-        column_types=plan.source_schema,
+        column_types=source_column_types,
         sample_rows=sample_rows,
+    )
+    plan_mappings = restamp_mapping_source_types(
+        list(rev.mappings or []),
+        shaped_image.column_types,
     )
 
     stored_population = iter_stored_upload_rows(source_file_id) if source_file_id else None
@@ -370,7 +395,7 @@ def run_plan_preflight(
         columns=shaped_image.columns,
         column_types=shaped_image.column_types,
         row_count=plan.row_count_estimate,
-        mappings=rev.mappings,
+        mappings=plan_mappings,
         destination_connected=bool(dest_meta.get("connected")),
         destination_error=None if dest_meta.get("connected") else dest_meta.get("message"),
         source_connected=True,
@@ -468,6 +493,17 @@ def run_plan_preflight(
         note = shaped_image.note()
         if note:
             bucket = pf.setdefault("warnings", [])
+            if note not in bucket:
+                bucket.append(note)
+    if source_type_drift:
+        # Gates already ran on live truth — say so instead of silently rescoring.
+        pf["source_schema_drift"] = source_type_drift
+        bucket = pf.setdefault("warnings", [])
+        for d in source_type_drift:
+            note = (
+                f"Source type re-read from live connector: {d['column']} "
+                f"{d['declared']} → {d['live']} (Map stamp was stale)"
+            )
             if note not in bucket:
                 bucket.append(note)
     # Surface destination catalog honesty (BQ/Redshift/SF NOT ENFORCED) warn-only.
