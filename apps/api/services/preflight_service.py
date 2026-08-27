@@ -690,6 +690,7 @@ def _iter_table_population_for_preflight(
     dest_db: str,
     sync_mode: str = "",
     read_scope: Any = None,
+    source_filter: dict[str, Any] | None = None,
 ):
     """Same projected table walk Execute uses — or None when it cannot run.
 
@@ -711,8 +712,6 @@ def _iter_table_population_for_preflight(
         return None
     cfg = dict(source_config or {})
     extra = cfg.get("extra") if isinstance(cfg.get("extra"), dict) else {}
-    if cfg.get("source_filter") or extra.get("source_filter"):
-        return None
     from services.sync_cursor import normalize_sync_mode
 
     if normalize_sync_mode(sync_mode, default="") == "cdc":
@@ -747,6 +746,9 @@ def _iter_table_population_for_preflight(
         source_kind=source_kind,
         source_format=source_format or str(data.get("format") or ""),
         read_scope=read_scope,
+        source_filter=source_filter
+        or (cfg.get("source_filter") if isinstance(cfg.get("source_filter"), dict) else None)
+        or (extra.get("source_filter") if isinstance(extra.get("source_filter"), dict) else None),
     )
 
 
@@ -821,6 +823,7 @@ def run_file_preflight(
     population_rows: Iterable[Mapping[str, Any]] | None = None,
     rows_are_population: bool = False,
     shape_recipe: Mapping[str, Any] | None = None,
+    source_filter: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run preflight gates for file/DB Studio transfers (G1–G9 + host policy)."""
     from services.timezone_policy import declared_source_column_types
@@ -1584,7 +1587,21 @@ def run_file_preflight(
             build_population_fit_gate,
             scan_population_fit,
         )
+        from services.row_filter import iter_filtered_rows
         from services.sync_cursor import incremental_read_narrows, iter_rows_after_watermark
+
+        cfg_extra = (source_config or {}).get("extra")
+        extra_filter = (
+            cfg_extra.get("source_filter")
+            if isinstance(cfg_extra, dict) and isinstance(cfg_extra.get("source_filter"), dict)
+            else None
+        )
+        cfg_filter = (
+            (source_config or {}).get("source_filter")
+            if isinstance((source_config or {}).get("source_filter"), dict)
+            else None
+        )
+        resolved_filter = dict(source_filter or cfg_filter or extra_filter or {})
 
         if population_rows is None and str(source_file_id or "").strip():
             from services.file_parser import iter_stored_upload_rows
@@ -1607,6 +1624,7 @@ def run_file_preflight(
                     dest_db=destination_db_type,
                     sync_mode=sync_mode,
                     read_scope=read_scope if incremental_read_narrows(sync_mode) else None,
+                    source_filter=resolved_filter or None,
                 )
             except Exception as walk_exc:
                 logger.warning(
@@ -1649,6 +1667,11 @@ def run_file_preflight(
                     rows_are_population = True
         scan_input = population_rows if population_rows is not None else sample_rows
         fit_rows_total = int(row_count or 0)
+        if resolved_filter:
+            filtered = iter_filtered_rows(scan_input, resolved_filter)
+            if filtered is not None:
+                scan_input = filtered
+            fit_rows_total = 0
         if incremental_read_narrows(sync_mode) and read_scope.bounded:
             narrowed = iter_rows_after_watermark(
                 scan_input, read_scope, keep_unreadable=True
@@ -1677,6 +1700,12 @@ def run_file_preflight(
             fit_report_payload["delta_scope"] = {
                 "cursor_column": read_scope.cursor_column,
                 "watermark": str(read_scope.watermark),
+            }
+        if resolved_filter:
+            from services.row_filter import filter_columns
+
+            fit_report_payload["filter_scope"] = {
+                "columns": filter_columns(resolved_filter),
             }
         # The gate is always stated, including when nothing needed scanning:
         # "no bounded carrier can be exceeded" is evidence, and a silently

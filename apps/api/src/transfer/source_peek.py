@@ -180,6 +180,7 @@ def iter_bounded_table_population_rows(
     limit: int = 0,
     shape_runner: Any = None,
     read_scope: Any = None,
+    source_filter: Mapping[str, Any] | None = None,
 ) -> Iterator[dict[str, Any]] | None:
     """Projected table walk for the same population-fit scan Execute uses.
 
@@ -227,6 +228,12 @@ def iter_bounded_table_population_rows(
         for extra_col in (cursor_column, cursor_pk):
             if extra_col and extra_col not in columns:
                 columns = [*columns, extra_col]
+    if source_filter:
+        from services.row_filter import filter_columns
+
+        for extra_col in filter_columns(dict(source_filter)):
+            if extra_col and extra_col not in columns:
+                columns = [*columns, extra_col]
 
     def _walk() -> Iterator[dict[str, Any]]:
         rows = iter_stream_source_column_rows(
@@ -237,6 +244,12 @@ def iter_bounded_table_population_rows(
             cursor_after=cursor_after,
             cursor_primary_key=cursor_pk,
         )
+        if source_filter:
+            from services.row_filter import iter_filtered_rows
+
+            filtered = iter_filtered_rows(rows, dict(source_filter))
+            if filtered is not None:
+                rows = filtered
         if shape_runner is not None:
             from services.shape_apply import ShapeRunner
 

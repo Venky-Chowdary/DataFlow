@@ -850,6 +850,7 @@ def _table_population_rows(
             limit=int(request.limit or 0),
             shape_runner=shape_runner,
             read_scope=scope if scope is not None and getattr(scope, "bounded", False) else None,
+            source_filter=getattr(request, "source_filter", None) or None,
         )
         if rows is None:
             return
@@ -3587,8 +3588,7 @@ class UniversalTransferEngine:
                     # writes, and a finding must describe *this* population.
                     population_rows=(
                         None
-                        if request.source_filter
-                        or _sync_mode_is_cdc(request)
+                        if _sync_mode_is_cdc(request)
                         else _table_population_rows(
                             request,
                             mappings,
@@ -3598,8 +3598,8 @@ class UniversalTransferEngine:
                             shape_runner=shape_runner,
                         )
                     ),
-                    rows_are_population=not request.source_filter
-                    and not _sync_mode_is_cdc(request),
+                    rows_are_population=not _sync_mode_is_cdc(request),
+                    source_filter=request.source_filter or None,
                     confidence_threshold=confidence_threshold_for_mode(
                         request.validation_mode
                     ),
@@ -4396,18 +4396,12 @@ class UniversalTransferEngine:
                     # before the first batch, not at row 431 with the load
                     # half-done. Lazy — nothing is re-read when no mapped column
                     # can exceed its destination carrier by declaration.
-                    population_rows=(
-                        None
-                        if request.source_filter
-                        else _shaped_population_rows(
-                            shape_runner,
-                            _file_population_rows(content, filename, read_options),
-                        )
+                    population_rows=_shaped_population_rows(
+                        shape_runner,
+                        _file_population_rows(content, filename, read_options),
                     ),
-                    # A filtered run writes a subset, so the unfiltered re-read
-                    # is not this job's population — fall back to preview
-                    # evidence rather than judging rows that never move.
-                    rows_are_population=not request.source_filter,
+                    rows_are_population=True,
+                    source_filter=request.source_filter or None,
                     confidence_threshold=confidence_threshold_for_mode(
                         request.validation_mode
                     ),

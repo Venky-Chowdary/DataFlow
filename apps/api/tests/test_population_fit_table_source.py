@@ -98,6 +98,7 @@ def _table_rows(count: int, *, unfit_at: tuple[int, ...] = ()) -> list[dict[str,
     return [
         {
             "id": i,
+            "status": "drop" if i == 12 else "keep",
             "arr_time": "9999.99999999" if i in unfit_at else "12.34567890",
             "flight_no": f"DL{i}",
         }
@@ -438,6 +439,131 @@ def test_cdc_validate_does_not_walk_the_table(
     assert calls == []
     assert result["population_fit"]["evidence"] == "sampled"
     assert result["population_fit"]["scanned_population"] is False
+
+
+def test_source_filter_drops_historical_overflow_from_validate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A row filter is the write population. Overflow in a dropped row must
+    not block Validate — that was why the walk used to be skipped entirely."""
+    from services.preflight_service import run_file_preflight
+
+    calls: list[dict[str, Any]] = []
+    rows = _table_rows(450, unfit_at=(12,))
+    _fake_reader(monkeypatch, rows, calls=calls, page=100)
+    spec = {"column": "status", "operator": "eq", "value": "keep"}
+
+    result = run_file_preflight(
+        columns=["arr_time", "status"],
+        column_types=COLUMN_TYPES,
+        row_count=450,
+        mappings=MAPPINGS,
+        destination_connected=True,
+        destination_column_types=DEST_TYPES,
+        destination_db_type="snowflake",
+        source_kind="database",
+        source_format="postgresql",
+        source_table="flights",
+        source_config={"kind": "database", "format": "postgresql", "table": "flights"},
+        sample_rows=rows[:25],
+        source_filter=spec,
+    )
+
+    assert calls, "the filtered walk must still reach the reader"
+    assert result["population_fit"]["evidence"] == "exact"
+    assert result["population_fit"]["findings"] == []
+    assert result["population_fit"]["filter_scope"]["columns"] == ["status"]
+    assert not any(
+        b.get("id") == "g3f_population_fit" for b in (result.get("blockers") or [])
+    )
+
+
+def test_source_filter_still_blocks_overflow_in_kept_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from services.preflight_service import run_file_preflight
+
+    rows = _table_rows(450, unfit_at=(431,))
+    _fake_reader(monkeypatch, rows, calls=[], page=100)
+
+    result = run_file_preflight(
+        columns=["arr_time", "status"],
+        column_types=COLUMN_TYPES,
+        row_count=450,
+        mappings=MAPPINGS,
+        destination_connected=True,
+        destination_column_types=DEST_TYPES,
+        destination_db_type="snowflake",
+        source_kind="database",
+        source_format="postgresql",
+        source_table="flights",
+        source_config={"kind": "database", "format": "postgresql", "table": "flights"},
+        sample_rows=rows[:25],
+        source_filter={"column": "status", "operator": "eq", "value": "keep"},
+    )
+
+    assert result["passed"] is False
+    assert result["population_fit"]["evidence"] == "exact"
+    assert result["population_fit"]["findings"]
+
+
+def test_table_walk_applies_round_recipe_before_fit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Raw 12.345678901 overflows NUMBER(11,8). round_number(places=8) fits.
+    Validate must judge the shaped image Execute writes."""
+    from services.preflight_service import run_file_preflight
+
+    rows = [
+        {
+            "id": i,
+            "status": "keep",
+            "arr_time": "12.345678901" if i == 431 else "12.34567890",
+            "flight_no": f"DL{i}",
+        }
+        for i in range(1, 451)
+    ]
+    _fake_reader(monkeypatch, rows, calls=[], page=100)
+    recipe = {
+        "steps": [
+            {"op": "round_number", "column": "arr_time", "options": {"places": 8}}
+        ]
+    }
+
+    raw = run_file_preflight(
+        columns=["arr_time"],
+        column_types=COLUMN_TYPES,
+        row_count=450,
+        mappings=MAPPINGS,
+        destination_connected=True,
+        destination_column_types=DEST_TYPES,
+        destination_db_type="snowflake",
+        source_kind="database",
+        source_format="postgresql",
+        source_table="flights",
+        source_config={"kind": "database", "format": "postgresql", "table": "flights"},
+        sample_rows=rows[:25],
+    )
+    assert raw["passed"] is False
+    assert raw["population_fit"]["findings"]
+
+    shaped = run_file_preflight(
+        columns=["arr_time"],
+        column_types=COLUMN_TYPES,
+        row_count=450,
+        mappings=MAPPINGS,
+        destination_connected=True,
+        destination_column_types=DEST_TYPES,
+        destination_db_type="snowflake",
+        source_kind="database",
+        source_format="postgresql",
+        source_table="flights",
+        source_config={"kind": "database", "format": "postgresql", "table": "flights"},
+        sample_rows=rows[:25],
+        shape_recipe=recipe,
+    )
+    assert shaped["population_fit"]["evidence"] == "exact"
+    assert shaped["population_fit"]["findings"] == []
 
 
 def test_row_limit_stops_the_pass(monkeypatch: pytest.MonkeyPatch) -> None:
