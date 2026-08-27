@@ -777,3 +777,21 @@ describe("Transfer Studio chrome contracts", () => {
     );
   });
 });
+
+describe("GitOps Advanced allowlist", () => {
+  it("dataflow.yaml allowlists write knobs and strips observed source shape", () => {
+    const manifest = readFileSync(
+      join(webRoot, "..", "..", "api", "services", "gitops_manifest.py"),
+      "utf8",
+    );
+    assert.match(manifest, /_SCHEDULE_DECLARATIVE_KEYS/);
+    assert.match(manifest, /"write_via_staging"/);
+    assert.match(manifest, /"priority_column"/);
+    assert.match(manifest, /"row_limit"/);
+    assert.match(manifest, /"snapshot_mode"/);
+    assert.match(manifest, /_SCHEDULE_OBSERVED_KEYS/);
+    assert.match(manifest, /"source_schema"/);
+    assert.match(manifest, /def apply_schedule_spec/);
+    assert.match(manifest, /apply_spec = apply_schedule_spec\(spec\)/);
+  });
+});
