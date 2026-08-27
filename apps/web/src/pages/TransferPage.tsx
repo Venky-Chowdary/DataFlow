@@ -3597,7 +3597,13 @@ export function TransferPage({
   };
 
   const applyCreateNewTypeWidens = (actions: ValidationSuggestedAction[]) => {
-    const widens = actions.filter((a) => a.kind === "change_target_type" && a.to_type);
+    const widens = actions.filter((a) => (
+      a.kind === "change_target_type"
+      && a.to_type
+      && a.requires_ddl !== true
+      && a.mapping_applyable !== false
+      && a.apply_proven !== false
+    ));
     if (!widens.length) return;
     let hit = 0;
     const next = columnMappings.map((m) => {
@@ -4569,7 +4575,13 @@ export function TransferPage({
 
     const g15Cta = destExistsPrimaryCta(shapeContractFromPreflight(preflight));
     const ranked = rankAndDedupeSuggestedActions(firstBlocker?.suggested_actions);
-    const widens = ranked.filter((a) => a.kind === "change_target_type" && a.to_type);
+    const widens = ranked.filter((a) => (
+      a.kind === "change_target_type"
+      && a.to_type
+      && a.requires_ddl !== true
+      && a.mapping_applyable !== false
+      && a.apply_proven !== false
+    ));
     const createNewFit =
       widens.length > 0
       && widens.every((a) => a.requires_ddl !== true)

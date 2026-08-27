@@ -459,6 +459,11 @@ def decimal_widen_carrier(
     return f"{token}({precision},{scale})"
 
 
+def _decimal_precision_cap(dest_db: str, scale: int) -> int:
+    dialect = (dest_db or "").strip().lower()
+    return 76 if dialect in {"bigquery", "bq"} and scale > 9 else 38
+
+
 def decimal_widen_from_envelope(
     *,
     max_int_digits: int,
@@ -470,6 +475,9 @@ def decimal_widen_from_envelope(
 
     flights-1m: ``0.23333333`` alone suggested NUMBER(11,8); ``0.016666668``
     later still overflowed. The envelope of all unfit cells is NUMBER(12,9).
+
+    Digit math only. Callers that emit an Apply action must use
+    :func:`proven_decimal_widen` so the writer predicate agrees.
     """
     from connectors.writer_common import parse_decimal_precision_scale
 
@@ -481,8 +489,7 @@ def decimal_widen_from_envelope(
     if need_int == 0 and need_s == 0:
         need_int = 1
     need_p = need_int + need_s
-    dialect = (dest_db or "").strip().lower()
-    cap = 76 if dialect in {"bigquery", "bq"} and need_s > 9 else 38
+    cap = _decimal_precision_cap(dest_db, need_s)
     if need_p > cap:
         need_p = cap
         need_s = min(need_s, max(0, cap - need_int))
@@ -492,6 +499,83 @@ def decimal_widen_from_envelope(
         dest_db=dest_db, current_type=current_type, precision=need_p, scale=need_s
     )
     return f"{token}({need_p},{need_s})"
+
+
+def proven_decimal_widen(
+    *,
+    values: list[Any] | tuple[Any, ...] = (),
+    dest_db: str = "",
+    current_type: str = "",
+    max_int_digits: int = 0,
+    max_scale: int = 0,
+    safety_margin: int = 0,
+) -> str:
+    """CREATE/widen type the write path accepts for every supplied overflow.
+
+    Envelope digits can disagree with ``fits_decimal`` (IEEE residue, dest
+    cap shrinking scale). Never emit a ``to_type`` the writer would refuse
+    after the operator clicks Apply.
+    """
+    from connectors.writer_common import fits_decimal, parse_decimal_precision_scale
+
+    parsed = parse_decimal_precision_scale(current_type, dest_db=dest_db)
+    cur_p, cur_s = parsed if parsed else (0, 0)
+    cur_int = max(0, cur_p - cur_s) if parsed else 0
+    need_s = max(cur_s, int(max_scale or 0), 0)
+    need_int = max(cur_int, int(max_int_digits or 0), 0)
+    margin = max(0, int(safety_margin or 0))
+    if margin:
+        need_s += margin
+        if need_int > 0:
+            need_int += 1
+    cells = [v for v in values if v is not None and str(v).strip() != ""]
+    for raw in cells:
+        idig, scale = write_int_digits_and_scale(raw)
+        need_s = max(need_s, scale)
+        need_int = max(need_int, idig)
+    if need_int == 0 and need_s == 0:
+        need_int = 1
+
+    cap = _decimal_precision_cap(dest_db, need_s)
+    for _ in range(cap + 2):
+        need_p = need_int + need_s
+        if need_p > cap:
+            need_s = min(need_s, max(0, cap - need_int))
+            need_p = need_int + need_s
+            if need_p > cap or need_p <= 0:
+                return ""
+        leftovers = [
+            v for v in cells
+            if not fits_decimal(v, need_p, need_s, dest_db=dest_db)
+        ]
+        if not leftovers:
+            token = _decimal_carrier_token(
+                dest_db=dest_db,
+                current_type=current_type,
+                precision=need_p,
+                scale=need_s,
+            )
+            return f"{token}({need_p},{need_s})"
+        grew = False
+        for raw in leftovers:
+            idig, scale = write_int_digits_and_scale(raw)
+            if scale > need_s:
+                need_s = scale
+                grew = True
+            if idig > need_int:
+                need_int = idig
+                grew = True
+        if not grew:
+            if need_int + need_s + 1 <= cap:
+                need_s += 1
+                grew = True
+            elif need_int + 1 + need_s <= cap:
+                need_int += 1
+                grew = True
+        if not grew:
+            return ""
+        cap = _decimal_precision_cap(dest_db, need_s)
+    return ""
 
 
 def decimal_scale_overflow_fix(
@@ -520,7 +604,10 @@ def decimal_scale_overflow_fix(
             f"The 25-row peek stamped {current_type or 'a narrow NUMBER'}. "
             f"{count} in the file need {widened}{where}. "
             f"Approve updates the CREATE type to {widened}. "
-            "The CSV is not modified. Then re-Validate. Do not silently truncate."
+            f"That type is proven against the overflow values Validate scanned "
+            f"(write-path fits_decimal). Re-Validate of those same values "
+            "should clear this gate. The CSV is not modified. "
+            "Do not silently truncate."
         )
     return (
         f"Open Map → widen {col} to {widened} (or ALTER the destination) "

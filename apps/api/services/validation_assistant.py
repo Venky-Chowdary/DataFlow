@@ -245,6 +245,9 @@ def _suggested_actions(
                     "to_type": to_type,
                     "label": label,
                     "requires_ddl": existing,
+                    "mapping_applyable": (not existing)
+                    and cf.get("apply_proven") is not False,
+                    "apply_proven": cf.get("apply_proven"),
                 })
         if cf.get("suggested_transform"):
             key = ("add_transform", cf["column"], cf["suggested_transform"])

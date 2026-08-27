@@ -1196,6 +1196,11 @@ export interface ValidationSuggestedAction {
   label: string;
   /** True when mapping-only type change cannot ALTER existing destination DDL. */
   requires_ddl?: boolean;
+  /** False when Approve must not stamp Map (live DDL or unproven type). */
+  mapping_applyable?: boolean;
+  /** True when to_type was re-checked with the write-path fit predicate. */
+  apply_proven?: boolean;
+  apply_proven_scope?: string;
 }
 
 export interface ValidationIssue {

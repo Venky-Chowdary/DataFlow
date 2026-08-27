@@ -30,6 +30,8 @@ function isMutativeAction(action: Record<string, unknown>): boolean {
   const kind = String(action.kind || "");
   if (!MUTATIVE_KINDS.has(kind)) return false;
   if (action.mapping_applyable === false) return false;
+  if (action.requires_ddl === true && kind === "change_target_type") return false;
+  if (action.apply_proven === false && kind === "change_target_type") return false;
   return Boolean(action.column || action.source);
 }
 
@@ -263,13 +265,12 @@ export function RepairProposalDrawer({
             </p>
             <ol className="df2-repair-next-steps">
               <li>Approve updates the Map CREATE types listed below — Snowflake is not written yet.</li>
-              <li>Validate runs again against the whole scanned file.</li>
-              <li>If those types hold every scanned value, Execute unlocks. Click Execute only then.</li>
+              <li>Each type was proven against the overflow values Validate scanned (same write-path check Execute uses).</li>
+              <li>Validate runs again on those same values and should clear this gate. Click Execute only then.</li>
             </ol>
             <p className="df2-label-hint">
-              One Approve should be enough. If Validate still blocks, the next
-              suggestion is a wider type from values the first peek missed — approve
-              that too; do not truncate.
+              Live destination columns still need ALTER — Map cannot change warehouse
+              DDL. Approve is disabled for those. Do not truncate.
             </p>
           </div>
         )}
