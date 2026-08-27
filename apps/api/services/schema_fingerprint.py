@@ -99,6 +99,29 @@ def live_dest_schema_fingerprint(
     return fingerprint_schema(list(types.keys()), types)
 
 
+def live_source_schema_fingerprint(
+    source_column_types: dict[str, str] | None,
+    *,
+    authoritative: bool = False,
+) -> str:
+    """Hash observed source names+types. Empty when types are inferred or missing.
+
+    Overwrite is a dest concept — source still exists and must bind. File /
+    document inference is not a catalog contract; do not invent from Map
+    ``source_type`` stamps or fall back to the literal ``map``.
+    """
+    if not authoritative:
+        return ""
+    types = {
+        str(k): str(v)
+        for k, v in (source_column_types or {}).items()
+        if str(k).strip()
+    }
+    if not types:
+        return ""
+    return fingerprint_schema(list(types.keys()), types)
+
+
 def fingerprint_schema(
     columns: list[str],
     column_types: dict[str, str] | None = None,

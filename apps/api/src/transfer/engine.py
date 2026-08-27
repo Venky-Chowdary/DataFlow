@@ -2528,6 +2528,9 @@ class UniversalTransferEngine:
                 error_policy="quarantine",
                 destination_column_types=dest_schema_types,
                 destination_table_exists=dest_table_exists_flag,
+                source_column_types=schema,
+                source_kind=str(getattr(request.source, "kind", "") or ""),
+                source_format=str(getattr(request.source, "format", None) or src_fmt or ""),
             )
             if art_err:
                 mongo.update_job_status(
@@ -3730,6 +3733,9 @@ class UniversalTransferEngine:
                 error_policy="quarantine",
                 destination_column_types=dest_schema_types,
                 destination_table_exists=dest_table_exists_flag,
+                source_column_types=schema,
+                source_kind=str(getattr(request.source, "kind", "") or ""),
+                source_format=str(getattr(request.source, "format", None) or src_fmt or ""),
             )
             if art_err:
                 mongo.update_job_status(
@@ -4545,6 +4551,9 @@ class UniversalTransferEngine:
                 error_policy="quarantine",
                 destination_column_types=dest_schema_types,
                 destination_table_exists=dest_table_exists_flag,
+                source_column_types=schema,
+                source_kind=str(getattr(request.source, "kind", "") or ""),
+                source_format=str(getattr(request.source, "format", None) or src_fmt or ""),
             )
             if art_err:
                 mongo.update_job_status(
