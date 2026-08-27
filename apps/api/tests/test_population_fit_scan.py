@@ -217,6 +217,38 @@ def test_budget_truncation_downgrades_the_caller_population_claim() -> None:
     assert "budget" in gate["message"]
 
 
+def test_time_budget_stops_a_million_row_walk_and_stays_partial() -> None:
+    """Studio 1M CSV must not sit in GET /preflight for minutes.
+
+    The predicates stay the write path's. The deadline is honesty: remaining
+    rows are unproven, never silently treated as exact.
+    """
+    import time
+
+    ticks: list[int] = []
+
+    def _slow_rows():
+        for i in range(1, 50_001):
+            time.sleep(0.002)
+            yield {"arr_time": "12.34567890"}
+
+    report = _scan(
+        _slow_rows(),
+        rows_total=1_000_000,
+        deadline_monotonic=time.monotonic() + 0.03,
+        on_progress=ticks.append,
+    )
+    assert report.evidence == EVIDENCE_PARTIAL
+    assert report.truncated_reason == "time"
+    assert 0 < report.rows_scanned < 50_000
+    assert ticks, "worker must heartbeat so GET can show live rows"
+    assert report.duration_ms >= 20
+    gate = build_population_fit_gate(report)
+    assert gate["status"] == "warn"
+    assert "time budget" in gate["message"]
+    assert gate["duration_ms"] == report.duration_ms
+
+
 def test_narrowing_integral_digits_are_scanned_even_when_scale_widens() -> None:
     """``DECIMAL(9,4) → NUMBER(11,8)`` widens scale but leaves only 3 integral
     digits, so it can still overflow — declaration does not decide it."""

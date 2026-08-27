@@ -71,6 +71,7 @@ import {
   type VectorFieldRouting,
   type VectorRoutingPlan,
 } from "../lib/api";
+import type { ValidateProgress } from "../lib/engineProgress";
 import { CdcRetentionPanel } from "../components/transfer/CdcRetentionPanel";
 import {
   defaultSchemaForDriver,
@@ -356,6 +357,7 @@ export function TransferPage({
   const destSchemaTableKeyRef = useRef("");
   const lastNewTableToastRef = useRef("");
   const [preflighting, setPreflighting] = useState(false);
+  const [validateProgress, setValidateProgress] = useState<ValidateProgress | null>(null);
   const [savingContract, setSavingContract] = useState(false);
   const [boundContractId, setBoundContractId] = useState("");
   const [requireSignedContract, setRequireSignedContract] = useState(false);
@@ -3594,6 +3596,62 @@ export function TransferPage({
     };
   };
 
+  const applyCreateNewTypeWidens = (actions: ValidationSuggestedAction[]) => {
+    const widens = actions.filter((a) => (
+      a.kind === "change_target_type"
+      && a.to_type
+      && a.requires_ddl !== true
+      && a.mapping_applyable !== false
+      && a.apply_proven !== false
+    ));
+    if (!widens.length) return;
+    let hit = 0;
+    const next = columnMappings.map((m) => {
+      const action = widens.find(
+        (a) => (a.target && m.target === a.target) || (a.column && m.source === a.column),
+      );
+      if (!action?.to_type) return m;
+      if (m.existsInDestination === true) return m;
+      hit += 1;
+      const widenClearsCast =
+        /varchar|text|string|char|longtext|double|float|decimal|numeric|number|real/i.test(
+          action.to_type || "",
+        );
+      const nextTransform =
+        widenClearsCast
+        && (m.transform === "cast_integer"
+          || m.transform === "cast_number"
+          || m.transform === "cast_boolean"
+          || m.transform === "date_iso"
+          || m.transform === "time_iso")
+          ? "none"
+          : m.transform;
+      return sealRemediationApproval({
+        ...m,
+        destType: action.to_type,
+        transform: nextTransform,
+        approved: true,
+        requiresReview: false,
+      });
+    });
+    if (!hit) {
+      setStep(STEP_MAP);
+      toast({
+        title: "Open Map to widen types",
+        message: "These columns already exist on the destination — Map type cannot ALTER live DDL.",
+        tone: "warning",
+      });
+      return;
+    }
+    setColumnMappings(next);
+    toast({
+      title: "CREATE types updated — re-validating",
+      message: `Updated ${hit} Map type(s) so the new table can hold the file. Snowflake is not written yet.`,
+      tone: "success",
+    });
+    void executePreflight(next);
+  };
+
   /** Map an AI `suggested_action` onto the real Studio controls. */
   const applySuggestedAction = (action: ValidationSuggestedAction) => {
     const matches = (m: EditableMapping) =>
@@ -4034,6 +4092,7 @@ export function TransferPage({
       return;
     }
     setPreflighting(true);
+    setValidateProgress(null);
     setStep(STEP_VALIDATE);
     setPreflight(null);
     setPreflightError("");
@@ -4169,6 +4228,7 @@ export function TransferPage({
               acknowledgment_reason: ackReason,
             },
             recipePayload(shapeSteps),
+            setValidateProgress,
           );
           // Never stamp plan approved on review-grade / soft-pass — Execute
           // unlock requires decision===approve (same bar as Validate rail).
@@ -4514,7 +4574,30 @@ export function TransferPage({
     };
 
     const g15Cta = destExistsPrimaryCta(shapeContractFromPreflight(preflight));
-    const action = rankAndDedupeSuggestedActions(firstBlocker?.suggested_actions)[0]
+    const ranked = rankAndDedupeSuggestedActions(firstBlocker?.suggested_actions);
+    const widens = ranked.filter((a) => (
+      a.kind === "change_target_type"
+      && a.to_type
+      && a.requires_ddl !== true
+      && a.mapping_applyable !== false
+      && a.apply_proven !== false
+    ));
+    const createNewFit =
+      widens.length > 0
+      && widens.every((a) => a.requires_ddl !== true)
+      && (
+        firstBlocker?.source?.id === "g3f_population_fit"
+        || Boolean((firstBlocker?.source?.details as { create_new_table?: boolean } | undefined)?.create_new_table)
+      );
+    if (createNewFit) {
+      return {
+        onPrimaryFix: () => applyCreateNewTypeWidens(widens),
+        primaryFixLabel: widens.length === 1
+          ? (widens[0].label || `Widen ${widens[0].column} to ${widens[0].to_type}`)
+          : `Widen CREATE types to fit this file (${widens.length} columns)`,
+      };
+    }
+    const action = ranked[0]
       || (g15Cta
         ? { kind: g15Cta.kind, label: g15Cta.label, column: g15Cta.column }
         : undefined);
@@ -4633,7 +4716,7 @@ export function TransferPage({
       default:
         return applyPromoted(promoteBlockedPrimaryFix(firstBlocker));
     }
-  }, [duplicateKeyRoot, openIdentitySettings, preflight, syncMode, toast]);
+  }, [duplicateKeyRoot, openIdentitySettings, preflight, syncMode, toast, columnMappings]);
 
   const executeTransfer = async () => {
     if (!jobRun.allowed) {
@@ -6975,6 +7058,7 @@ export function TransferPage({
             preflight={preflight}
             preflightError={preflightError}
             running={preflighting}
+            progress={validateProgress}
             confidenceThreshold={confidenceThreshold}
             destType={destKindMode === "file_export" ? exportFormat : destType}
             validationMode={validationMode}

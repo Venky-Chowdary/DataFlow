@@ -738,7 +738,7 @@ export function QuarantinePanel({
           setRemediatedPendingValidate(true);
           toast({
             title: "Repair applied — re-validate required",
-            message: `${updated.length} mapping(s) updated from proposal ${p.id}. Opening Validate to re-run the nine engine stages.`,
+            message: `${updated.length} mapping(s) updated from proposal ${p.id}. Opening Validate to re-run gates.`,
             tone: "success",
           });
           // Prefer parent closed-loop (Jobs seeds proposal id + mappings).

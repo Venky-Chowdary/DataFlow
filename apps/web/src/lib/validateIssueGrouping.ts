@@ -101,6 +101,16 @@ export interface ExecutiveSummary {
   aiPromptHint: string | null;
 }
 
+function suggestedActionsOf(
+  b: PreflightResult["blockers"][number],
+): ValidationSuggestedAction[] | undefined {
+  if (b.suggested_actions?.length) return b.suggested_actions;
+  const fromDetails = (b.details as { suggested_actions?: ValidationSuggestedAction[] } | undefined)
+    ?.suggested_actions;
+  if (Array.isArray(fromDetails) && fromDetails.length) return fromDetails;
+  return b.guidance?.suggested_actions;
+}
+
 export interface DisplayBlocker {
   key: string;
   kind: "duplicate_root" | "fidelity_root" | "blocker";
@@ -547,7 +557,7 @@ export function buildDisplayBlockers(
           : undefined,
         fix: b.guidance?.fix,
         why: b.guidance?.why,
-        suggested_actions: b.guidance?.suggested_actions,
+        suggested_actions: suggestedActionsOf(b),
         source: b,
       });
     }
@@ -605,7 +615,7 @@ export function buildDisplayBlockers(
         : undefined,
       fix: b.guidance?.fix,
       why: b.guidance?.why,
-      suggested_actions: b.guidance?.suggested_actions,
+      suggested_actions: suggestedActionsOf(b),
       source: b,
     });
   }

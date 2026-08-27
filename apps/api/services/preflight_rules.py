@@ -36,6 +36,7 @@ HARD_GATE_IDS = {
     "g13_source_coverage",
     "g14_destination_requirements",
     "g15_dest_exists_shape",
+    "g3f_population_fit",
 }
 
 SOFT_GATE_IDS = {
@@ -90,6 +91,25 @@ PREFLIGHT_GATE_RULES: dict[str, dict[str, Any]] = {
         "suggested_actions": [
             {"kind": "check_connection", "label": "Check destination privileges"},
         ],
+    },
+    "g3f_population_fit": {
+        "title": "Population fit",
+        "category": "hard",
+        "why": (
+            "The Map type came from a 25-row peek. Values later in the file do not fit "
+            "that NUMBER/DECIMAL. On a new table that peeked type is the CREATE type — "
+            "the CSV is not broken. Widening Map changes CREATE. On an existing table, "
+            "Map cannot ALTER live DDL."
+        ),
+        "fix": (
+            "For a new table: Approve the CREATE-type widen, then re-Validate. "
+            "Nothing is written until Execute. Do not silently truncate. "
+            "For an existing table: ALTER the column or map to a new *_wide column."
+        ),
+        "examples": [
+            "flights-1m.csv DEP_TIME 0.23333333 at row 293 does not fit peeked NUMBER(9,6).",
+        ],
+        "suggested_actions": [],
     },
     "g3_schema_contract": {
         "title": "Schema contract / type coercion",
@@ -949,6 +969,15 @@ def enrich_blockers(
                     nested_bits.append(text)
         message_blob = " ".join([str(b.get("message") or ""), *nested_bits]).strip()
         guidance = explain_gate(gate_id, message_blob or str(b.get("message") or ""), details)
+        owned_actions = b.get("suggested_actions") or details.get("suggested_actions")
+        if isinstance(owned_actions, list) and owned_actions:
+            guidance["suggested_actions"] = list(owned_actions)
+        if details.get("create_new_table") and details.get("corrective_action"):
+            guidance["fix"] = str(details.get("corrective_action"))
+            guidance["why"] = (
+                "Map peeked 25 rows and stamped a NUMBER that is too small for the file. "
+                "This is a new table — widening Map changes CREATE, not the CSV."
+            )
         nested = details.get("issues") or details.get("errors") or []
         if nested and isinstance(nested, list):
             guidance["details"] = [

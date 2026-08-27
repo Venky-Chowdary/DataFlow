@@ -28,6 +28,7 @@ Asymmetry is deliberate and load-bearing:
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Mapping
@@ -86,8 +87,23 @@ _ABORTING_ACTIONS = frozenset(
 #: engine already holds the batch in memory, so the cost is a Decimal parse.
 DEFAULT_SCAN_BUDGET = 5_000_000
 
+# Interactive Studio Validate. A 1M CSV on a small replica sat in
+# GET /preflight?run_id=… for 5+ minutes while the UI looped fake G1–G9
+# stages. Remaining rows stay unproven (PARTIAL) — write-time checks still
+# bind. 12s is the operator's last measured 1M sample-Validate wall clock.
+STUDIO_FIT_SCAN_SECONDS = 12.0
+_PROGRESS_EVERY_ROWS = 4_000
+#: After the first widenable overflow, finish the numeric/string envelope so
+#: Apply does not offer a type that a later scanned-prefix sibling still
+#: refuses. Does not run when the prefix found nothing (PARTIAL stays honest).
+ENVELOPE_CONTINUE_SECONDS = 20.0
+_WIDENABLE_CARRIERS = frozenset(
+    {CARRIER_DECIMAL, CARRIER_INTEGER, CARRIER_STRING, CARRIER_BYTES}
+)
+
 #: Offending row numbers / values kept per column for the operator.
 DEFAULT_MAX_EXAMPLES = 10
+_MAX_PROVE_WITNESSES = 32
 
 GATE_ID = "g3f_population_fit"
 
@@ -143,6 +159,11 @@ class ColumnFitFinding:
     unfit_reason: str = ""
     suggested_target_type: str = ""
     suggested_fix: str = ""
+    #: True when ``suggested_target_type`` was re-checked with the write
+    #: predicate on every overflow witness. Empty suggestion is fail-closed.
+    apply_proven: bool = False
+    #: ``file`` = envelope walk finished; ``scanned`` = proven on prefix only.
+    apply_proven_scope: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -153,6 +174,8 @@ class ColumnFitFinding:
             "unfit_reason": self.unfit_reason,
             "suggested_target_type": self.suggested_target_type,
             "suggested_fix": self.suggested_fix,
+            "apply_proven": self.apply_proven,
+            "apply_proven_scope": self.apply_proven_scope,
             "reason": self.reason(),
         }
 
@@ -182,6 +205,16 @@ class FitScanReport:
     #: Columns whose declared source type cannot exceed the destination carrier,
     #: so no value scan is needed to decide them.
     safe_by_declaration: tuple[str, ...] = field(default=())
+    #: Why a population walk stopped early: ``row`` or ``time``. Empty when
+    #: the walk finished or never started.
+    truncated_reason: str = ""
+    #: Wall-clock of this walk. Studio hero must not sum other gates as 10ms
+    #: after a multi-second 1M scan.
+    duration_ms: int = 0
+    #: Extra rows walked only to finish a widen envelope after the first hit.
+    envelope_rows_scanned: int = 0
+    #: True when that cheap continuation exhausted the iterator.
+    envelope_complete: bool = False
 
     @property
     def scanned_population(self) -> bool:
@@ -211,6 +244,10 @@ class FitScanReport:
             "unfit_rows": self.unfit_rows,
             "undecidable_columns": list(self.undecidable),
             "safe_by_declaration": list(self.safe_by_declaration),
+            "truncated_reason": self.truncated_reason,
+            "duration_ms": self.duration_ms,
+            "envelope_rows_scanned": self.envelope_rows_scanned,
+            "envelope_complete": self.envelope_complete,
             "note": self.note,
         }
 
@@ -870,6 +907,8 @@ def scan_rows(
     max_examples: int = DEFAULT_MAX_EXAMPLES,
     undecidable: Iterable[str] = (),
     safe_by_declaration: Iterable[str] = (),
+    deadline_monotonic: float | None = None,
+    on_progress: Callable[[int], None] | None = None,
 ) -> FitScanReport:
     """Scan ``rows`` against the writer's own fit predicates.
 
@@ -879,6 +918,7 @@ def scan_rows(
     is never stronger than the walk that produced it.
     """
     bounded = tuple(targets)
+    started = time.monotonic()
     if not bounded:
         return FitScanReport(
             evidence=EVIDENCE_UNMEASURED,
@@ -895,10 +935,21 @@ def scan_rows(
     example_rows: dict[int, list[int]] = {}
     example_values: dict[int, list[str]] = {}
     reasons: dict[int, str] = {}
+    env_int: dict[int, int] = {}
+    env_scale: dict[int, int] = {}
+    env_str_len: dict[int, int] = {}
+    env_int_frac: dict[int, bool] = {}
+    witnesses: dict[int, list[Any]] = {}
     scanned = 0
     truncated = False
+    truncated_reason = ""
+    last_progress_at = 0.0
+    envelope_rows_scanned = 0
+    envelope_complete = False
+    envelope_truncated = False
 
-    from services.value_serializer import cell_to_string, is_missing_sentinel
+    from services.decimal_observe import write_int_digits_and_scale
+    from services.value_serializer import cell_to_string, is_missing_sentinel, present_cell_text
 
     # Bound once per column, then applied per value — see _fit_predicate.
     probes = tuple(
@@ -910,14 +961,56 @@ def scan_rows(
         for idx, t in enumerate(bounded)
     )
 
-    for row in rows or ():
-        if scanned >= budget:
-            truncated = True
-            break
-        scanned += 1
+    def _record_unfit(idx: int, value: Any, why: str, row_no: int) -> None:
+        counts[idx] = counts.get(idx, 0) + 1
+        reasons.setdefault(idx, why)
+        carrier = bounded[idx].carrier
+        grew = False
+        if carrier == CARRIER_DECIMAL:
+            idig, scale = write_int_digits_and_scale(value)
+            if idig > env_int.get(idx, 0):
+                env_int[idx] = idig
+                grew = True
+            else:
+                env_int.setdefault(idx, idig)
+            if scale > env_scale.get(idx, 0):
+                env_scale[idx] = scale
+                grew = True
+            else:
+                env_scale.setdefault(idx, scale)
+        elif carrier == CARRIER_INTEGER:
+            if "fractional" in why.lower():
+                env_int_frac[idx] = True
+            idig, _scale = write_int_digits_and_scale(value)
+            if idig > env_int.get(idx, 0):
+                env_int[idx] = idig
+                grew = True
+            else:
+                env_int.setdefault(idx, idig)
+        elif carrier == CARRIER_STRING:
+            text = present_cell_text(value)
+            if text is None:
+                text = str(value or "")
+            n = len(text)
+            if n > env_str_len.get(idx, 0):
+                env_str_len[idx] = n
+                grew = True
+            else:
+                env_str_len.setdefault(idx, n)
+        held = witnesses.setdefault(idx, [])
+        if grew or len(held) < _MAX_PROVE_WITNESSES:
+            if grew or len(held) < max_examples:
+                held.append(value)
+        if len(example_rows.setdefault(idx, [])) < max_examples:
+            example_rows[idx].append(row_no)
+            example_values.setdefault(idx, []).append(cell_to_string(value)[:120])
+
+    def _scan_one_row(row: Any, row_no: int, *, widenable_only: bool) -> None:
         if not isinstance(row, Mapping):
-            continue
+            return
         for idx, source, fit_reason in probes:
+            if widenable_only and bounded[idx].carrier not in _WIDENABLE_CARRIERS:
+                continue
             if source not in row:
                 continue
             value = row.get(source)
@@ -936,11 +1029,61 @@ def scan_rows(
             why = fit_reason(value)
             if why is None:
                 continue
-            counts[idx] = counts.get(idx, 0) + 1
-            reasons.setdefault(idx, why)
-            if len(example_rows.setdefault(idx, [])) < max_examples:
-                example_rows[idx].append(scanned)
-                example_values.setdefault(idx, []).append(cell_to_string(value)[:120])
+            _record_unfit(idx, value, why, row_no)
+
+    row_iter = iter(rows or ())
+    for row in row_iter:
+        if scanned >= budget:
+            truncated = True
+            truncated_reason = "row"
+            break
+        if (
+            deadline_monotonic is not None
+            and scanned > 0
+            and time.monotonic() >= deadline_monotonic
+        ):
+            truncated = True
+            truncated_reason = "time"
+            break
+        scanned += 1
+        now = time.monotonic()
+        if on_progress is not None and (
+            scanned == 1
+            or scanned % _PROGRESS_EVERY_ROWS == 0
+            or now - last_progress_at >= 0.5
+        ):
+            last_progress_at = now
+            try:
+                on_progress(scanned)
+            except Exception:
+                pass
+        _scan_one_row(row, scanned, widenable_only=False)
+    else:
+        row_iter = iter(())
+
+    if (
+        truncated
+        and any(
+            idx in counts and bounded[idx].carrier in _WIDENABLE_CARRIERS
+            for idx in counts
+        )
+    ):
+        envelope_deadline = time.monotonic() + ENVELOPE_CONTINUE_SECONDS
+        for row in row_iter:
+            if time.monotonic() >= envelope_deadline:
+                envelope_truncated = True
+                break
+            envelope_rows_scanned += 1
+            _scan_one_row(row, scanned + envelope_rows_scanned, widenable_only=True)
+        else:
+            envelope_complete = True
+            envelope_truncated = False
+
+    if on_progress is not None and scanned:
+        try:
+            on_progress(scanned)
+        except Exception:
+            pass
 
     if scanned == 0:
         evidence = EVIDENCE_UNMEASURED
@@ -952,12 +1095,30 @@ def scan_rows(
         evidence = EVIDENCE_SAMPLED
 
     from connectors.writer_common import (
+        fits_decimal,
+        fits_integer,
+        fits_varchar,
         integer_overflow_suggested_type,
+        parse_decimal_precision_scale,
         varchar_overflow_suggested_type,
     )
+    from services.ddl_compatibility import parse_varchar_width
     from services.decimal_observe import (
+        CREATE_NEW_NUMERIC_SAFETY_MARGIN,
         decimal_scale_overflow_fix,
         decimal_widen_carrier,
+        proven_decimal_widen,
+    )
+
+    prove_scope = (
+        "file"
+        if (not truncated) or envelope_complete
+        else "scanned"
+    )
+    create_new_margin = (
+        CREATE_NEW_NUMERIC_SAFETY_MARGIN
+        if truncated and not envelope_complete
+        else 0
     )
 
     findings_list: list[ColumnFitFinding] = []
@@ -965,13 +1126,16 @@ def scan_rows(
         target = bounded[idx]
         examples = tuple(example_values.get(idx, ()))
         first = examples[0] if examples else ""
+        prove_values = tuple(witnesses.get(idx, ())) or examples
         suggested_type = ""
         suggested_fix = ""
+        apply_proven = False
+        margin = 0
         why = reasons.get(idx, "")
-        if target.carrier == CARRIER_DECIMAL and first:
+        if target.carrier == CARRIER_DECIMAL and (first or prove_values):
             if "fractional" in why.lower():
                 suggested_type = integer_overflow_suggested_type(
-                    first, target.target_type, dest_db=dest_db
+                    first or prove_values[0], target.target_type, dest_db=dest_db
                 )
                 if not suggested_type:
                     dialect = (dest_db or "").strip().lower()
@@ -981,10 +1145,37 @@ def scan_rows(
                         suggested_type = "FLOAT64"
                     else:
                         suggested_type = "DOUBLE"
+                apply_proven = bool(suggested_type)
             else:
-                suggested_type = decimal_widen_carrier(
-                    first, dest_db=dest_db, current_type=target.target_type
+                margin = create_new_margin if not target.binds_live_ddl else 0
+                suggested_type = proven_decimal_widen(
+                    values=prove_values,
+                    dest_db=dest_db,
+                    current_type=target.target_type,
+                    max_int_digits=env_int.get(idx, 0),
+                    max_scale=env_scale.get(idx, 0),
+                    safety_margin=margin,
                 )
+                if not suggested_type:
+                    suggested_type = decimal_widen_carrier(
+                        first or (prove_values[0] if prove_values else ""),
+                        dest_db=dest_db,
+                        current_type=target.target_type,
+                    )
+                    parsed = parse_decimal_precision_scale(
+                        suggested_type, dest_db=dest_db
+                    )
+                    apply_proven = bool(
+                        parsed
+                        and all(
+                            fits_decimal(v, parsed[0], parsed[1], dest_db=dest_db)
+                            for v in prove_values
+                        )
+                    )
+                    if not apply_proven:
+                        suggested_type = ""
+                else:
+                    apply_proven = True
             if suggested_type and "fractional" in why.lower():
                 suggested_fix = (
                     f"Open Map → widen {target.target} to {suggested_type} "
@@ -992,30 +1183,96 @@ def scan_rows(
                     "→ re-Validate. Do not silently truncate."
                 )
             elif suggested_type:
+                example_row = (example_rows.get(idx) or [None])[0]
                 suggested_fix = decimal_scale_overflow_fix(
                     first,
                     dest_db=dest_db,
                     current_type=target.target_type,
                     column=target.target,
+                    widened=suggested_type,
+                    create_new=not target.binds_live_ddl,
+                    unfit_rows=counts[idx],
+                    example_row=example_row,
                 ) or (
                     f"Open Map → widen {target.target} to {suggested_type} "
                     "(or ALTER the destination) → re-Validate. "
                     "Do not silently truncate."
                 )
-        elif target.carrier == CARRIER_INTEGER and first:
-            suggested_type = integer_overflow_suggested_type(
-                first, target.target_type, dest_db=dest_db
-            )
+                if margin and prove_scope == "scanned" and not target.binds_live_ddl:
+                    suggested_fix += (
+                        f" Scan did not finish the file; CREATE includes a +{margin} "
+                        "scale margin for the unscanned tail. Write-time fit still binds."
+                    )
+            elif target.carrier == CARRIER_DECIMAL:
+                suggested_fix = (
+                    f"No destination NUMBER/DECIMAL can hold every overflow in "
+                    f"'{target.source}' under this engine's precision cap. "
+                    "Remap to FLOAT/text or quarantine — do not Apply a type "
+                    "the writer would still refuse."
+                )
+        elif target.carrier == CARRIER_INTEGER and (first or prove_values):
+            seed = first or prove_values[0]
+            if env_int_frac.get(idx):
+                suggested_type = integer_overflow_suggested_type(
+                    seed, target.target_type, dest_db=dest_db
+                )
+            else:
+                widest = prove_values[-1] if prove_values else seed
+                suggested_type = integer_overflow_suggested_type(
+                    widest, target.target_type, dest_db=dest_db
+                )
+            if suggested_type:
+                parsed = parse_decimal_precision_scale(
+                    suggested_type, dest_db=dest_db
+                )
+                if parsed:
+                    apply_proven = all(
+                        fits_decimal(v, parsed[0], parsed[1], dest_db=dest_db)
+                        for v in prove_values
+                    )
+                elif suggested_type.upper() in {"FLOAT", "FLOAT64", "DOUBLE", "REAL"}:
+                    apply_proven = True
+                else:
+                    apply_proven = all(
+                        fits_integer(v, suggested_type, dest_db=dest_db)
+                        for v in prove_values
+                    )
+                if not apply_proven:
+                    suggested_type = ""
             if suggested_type:
                 suggested_fix = (
                     f"Open Map → widen {target.target} to {suggested_type} "
                     "(or ALTER the destination) → re-Validate. "
                     "Do not silently truncate."
                 )
-        elif target.carrier == CARRIER_STRING and first:
+        elif target.carrier == CARRIER_STRING and (first or prove_values):
+            longest = first
+            if idx in env_str_len:
+                for raw in prove_values:
+                    text = present_cell_text(raw)
+                    if text is None:
+                        text = str(raw or "")
+                    if len(text) >= env_str_len[idx]:
+                        longest = text
+                        break
             suggested_type = varchar_overflow_suggested_type(
-                first, target.target_type, dest_db=dest_db
+                longest or first, target.target_type, dest_db=dest_db
             )
+            width = parse_varchar_width(suggested_type) if suggested_type else None
+            if suggested_type and (
+                suggested_type.upper() == "TEXT"
+                or (
+                    width is not None
+                    and all(
+                        fits_varchar(v, width, suggested_type)
+                        for v in prove_values
+                    )
+                )
+            ):
+                apply_proven = True
+            else:
+                suggested_type = ""
+                apply_proven = False
             if suggested_type:
                 suggested_fix = (
                     f"Open Map → widen {target.target} to {suggested_type} "
@@ -1108,10 +1365,15 @@ def scan_rows(
                 suggested_fix=suggested_fix + _live_ddl_fix_suffix(
                     binds_live_ddl=target.binds_live_ddl
                 ),
+                apply_proven=apply_proven and bool(suggested_type),
+                apply_proven_scope=(
+                    prove_scope if apply_proven and suggested_type else ""
+                ),
             )
         )
     findings = tuple(findings_list)
     total = int(rows_total or 0) or (scanned if evidence == EVIDENCE_EXACT else 0)
+    duration_ms = max(0, int(round((time.monotonic() - started) * 1000)))
     return FitScanReport(
         evidence=evidence,
         rows_scanned=scanned,
@@ -1124,11 +1386,19 @@ def scan_rows(
             "Scanned every source row with the write path's own fit predicates."
             if evidence == EVIDENCE_EXACT
             else (
-                "Scan stopped at the row budget — unscanned rows are unproven."
-                if evidence == EVIDENCE_PARTIAL
-                else "Preview-sized evidence only — population fit is unproven."
+                "Scan stopped at the time budget — unscanned rows are unproven."
+                if truncated_reason == "time"
+                else (
+                    "Scan stopped at the row budget — unscanned rows are unproven."
+                    if evidence == EVIDENCE_PARTIAL
+                    else "Preview-sized evidence only — population fit is unproven."
+                )
             )
         ),
+        truncated_reason=truncated_reason,
+        duration_ms=duration_ms,
+        envelope_rows_scanned=envelope_rows_scanned,
+        envelope_complete=envelope_complete and not envelope_truncated,
     )
 
 
@@ -1148,6 +1418,8 @@ def scan_population_fit(
     source_format: str = "",
     sync_mode: str = "",
     dest_table_exists: bool | None = None,
+    deadline_monotonic: float | None = None,
+    on_progress: Callable[[int], None] | None = None,
 ) -> FitScanReport:
     """Resolve bounded targets from the mappings, then scan the rows."""
     targets, undecidable, safe = bounded_targets(
@@ -1171,6 +1443,8 @@ def scan_population_fit(
         budget=budget,
         undecidable=undecidable,
         safe_by_declaration=safe,
+        deadline_monotonic=deadline_monotonic,
+        on_progress=on_progress,
     )
 
 
@@ -1188,6 +1462,7 @@ def build_population_fit_gate(report: FitScanReport) -> dict[str, Any]:
     aborting = report.aborting_findings
     held_out = report.held_out_findings
     details: dict[str, Any] = report.to_dict()
+    duration_ms = int(report.duration_ms or 0)
 
     if not report.targets:
         safe = len(report.safe_by_declaration)
@@ -1199,7 +1474,7 @@ def build_population_fit_gate(report: FitScanReport) -> dict[str, Any]:
                 f"declaration ({safe} widening/identical bounded path(s)) — "
                 "no value scan required"
             ),
-            "duration_ms": 0,
+            "duration_ms": duration_ms,
             "details": details,
         }
 
@@ -1211,22 +1486,65 @@ def build_population_fit_gate(report: FitScanReport) -> dict[str, Any]:
             if not report.scanned_population
             else f"all {report.rows_scanned} source row(s)"
         )
-        return {
-            "id": GATE_ID,
-            "status": "block",
-            "message": (
+        create_new = all(not f.target.binds_live_ddl for f in aborting)
+        widen_actions = [
+            {
+                "kind": "change_target_type",
+                "column": f.target.source,
+                "target": f.target.target,
+                "to_type": f.suggested_target_type,
+                "label": (
+                    f"Widen '{f.target.source}' CREATE type to {f.suggested_target_type}"
+                    if create_new
+                    else f"Widen '{f.target.source}' to {f.suggested_target_type}"
+                ),
+                "requires_ddl": f.target.binds_live_ddl,
+                "mapping_applyable": (
+                    bool(f.apply_proven) and not f.target.binds_live_ddl
+                ),
+                "apply_proven": bool(f.apply_proven),
+                "apply_proven_scope": f.apply_proven_scope,
+            }
+            for f in aborting
+            if f.suggested_target_type and f.apply_proven
+        ]
+        widen_names = ", ".join(
+            f"{f.target.source} → {f.suggested_target_type}"
+            for f in aborting
+            if f.suggested_target_type
+        )
+        if create_new and widen_names:
+            message = (
+                f"{rows} value(s) in {scope} cannot fit the peeked CREATE type "
+                f"({cols}). This table does not exist yet — widen Map to "
+                f"{widen_names} so CREATE can hold the file. The CSV is not "
+                "the defect. Execute would create a too-narrow table and commit nothing"
+            )
+            corrective = (
+                "Approve the CREATE-type widen below, then re-Validate. "
+                "Nothing is written to the warehouse until Execute."
+            )
+        else:
+            message = (
                 f"{rows} value(s) in {scope} cannot fit the destination carrier "
                 f"({cols}); the resolved write policy for those column(s) aborts "
                 "the load, so Execute would commit nothing"
-            ),
-            "duration_ms": 0,
+            )
+            corrective = (
+                "Widen the destination column, or sign a continue-policy "
+                "Migration Risk Contract so the offending rows are held out "
+                "in quarantine instead of failing the load."
+            )
+        return {
+            "id": GATE_ID,
+            "status": "block",
+            "message": message,
+            "duration_ms": duration_ms,
             "details": {
                 **details,
-                "corrective_action": (
-                    "Widen the destination column, or sign a continue-policy "
-                    "Migration Risk Contract so the offending rows are held out "
-                    "in quarantine instead of failing the load."
-                ),
+                "corrective_action": corrective,
+                "create_new_table": create_new,
+                "suggested_actions": widen_actions,
             },
         }
 
@@ -1241,7 +1559,7 @@ def build_population_fit_gate(report: FitScanReport) -> dict[str, Any]:
                 f"{cols} exceeds the destination carrier under a signed "
                 "continue-policy contract"
             ),
-            "duration_ms": 0,
+            "duration_ms": duration_ms,
             "details": details,
         }
 
@@ -1253,21 +1571,22 @@ def build_population_fit_gate(report: FitScanReport) -> dict[str, Any]:
                 "Population fit unmeasured — no rows were scanned, so bounded "
                 "destination carriers are unproven until write"
             ),
-            "duration_ms": 0,
+            "duration_ms": duration_ms,
             "details": details,
         }
 
     if report.evidence == EVIDENCE_PARTIAL:
+        stop = "time budget" if report.truncated_reason == "time" else "row budget"
         return {
             "id": GATE_ID,
             "status": "warn",
             "message": (
                 f"No unfit value in {report.rows_scanned} of "
                 f"{report.rows_total or report.rows_scanned} source row(s), but the "
-                "scan stopped at the row budget — the remaining rows are unproven "
+                f"scan stopped at the {stop} — the remaining rows are unproven "
                 f"for {len(report.targets)} bounded column(s)"
             ),
-            "duration_ms": 0,
+            "duration_ms": duration_ms,
             "details": details,
         }
 
@@ -1279,7 +1598,7 @@ def build_population_fit_gate(report: FitScanReport) -> dict[str, Any]:
                 f"Every value in {report.rows_scanned} source row(s) fits its "
                 f"destination carrier ({len(report.targets)} bounded column(s))"
             ),
-            "duration_ms": 0,
+            "duration_ms": duration_ms,
             "details": details,
         }
 
@@ -1291,6 +1610,39 @@ def build_population_fit_gate(report: FitScanReport) -> dict[str, Any]:
             f"{len(report.targets)} bounded column(s) are not population-proven — "
             "a later row may still exceed the carrier"
         ),
-        "duration_ms": 0,
+        "duration_ms": duration_ms,
         "details": details,
     }
+
+
+def applyable_widen_actions(report: FitScanReport) -> list[dict[str, Any]]:
+    """change_target_type actions Approve may stamp — proven and not live DDL."""
+    gate = build_population_fit_gate(report)
+    return [
+        a
+        for a in (gate.get("details") or {}).get("suggested_actions") or []
+        if a.get("kind") == "change_target_type"
+        and a.get("to_type")
+        and a.get("apply_proven")
+        and not a.get("requires_ddl")
+        and a.get("mapping_applyable") is not False
+    ]
+
+
+def apply_suggested_widens_and_rescan(
+    rows: Iterable[Mapping[str, Any]] | None,
+    mappings: list[dict[str, Any]],
+    report: FitScanReport,
+    **scan_kw: Any,
+) -> tuple[list[dict[str, Any]], FitScanReport]:
+    """Apply proven CREATE widens, then re-scan the same population.
+
+    This is the Apply-then-Validate proof: a suggested type that still
+    produces findings is a product defect, not an operator mistake.
+    """
+    from services.agentic_repair import apply_actions_to_mappings
+
+    actions = applyable_widen_actions(report)
+    updated = apply_actions_to_mappings(list(mappings), actions)
+    after = scan_population_fit(rows, updated, **scan_kw)
+    return updated, after

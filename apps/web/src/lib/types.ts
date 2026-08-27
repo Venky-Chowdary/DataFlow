@@ -956,8 +956,10 @@ export interface PreflightResult {
   readiness_score: number;
   /** Stable ID for this validation run — surface in UI and feed Datawrap Pilot. */
   run_id?: string;
+  /** Job wall-clock when Validate ran async — not a sum of sample-gate timings. */
+  elapsed_ms?: number;
   gates: PreflightGate[];
-  blockers: { id: string; message: string; details?: Record<string, unknown>; guidance?: { gate?: string; title?: string; category?: string; why?: string; fix?: string; examples?: string[]; suggested_actions?: ValidationSuggestedAction[] } }[];
+  blockers: { id: string; message: string; details?: Record<string, unknown>; suggested_actions?: ValidationSuggestedAction[]; guidance?: { gate?: string; title?: string; category?: string; why?: string; fix?: string; examples?: string[]; suggested_actions?: ValidationSuggestedAction[] } }[];
   /**
    * Engine-level Root Cause Engine output — one explainable problem, many gates.
    * Prefer this over client-side collapse when present.
@@ -1194,6 +1196,11 @@ export interface ValidationSuggestedAction {
   label: string;
   /** True when mapping-only type change cannot ALTER existing destination DDL. */
   requires_ddl?: boolean;
+  /** False when Approve must not stamp Map (live DDL or unproven type). */
+  mapping_applyable?: boolean;
+  /** True when to_type was re-checked with the write-path fit predicate. */
+  apply_proven?: boolean;
+  apply_proven_scope?: string;
 }
 
 export interface ValidationIssue {

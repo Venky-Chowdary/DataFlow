@@ -14,6 +14,7 @@ from services.acknowledgment_contract import (
 )
 from services.audit_log import append_audit_event
 from services.file_parser import iter_stored_upload_rows
+from services.population_fit_scan import STUDIO_FIT_SCAN_SECONDS
 from services.shape_preflight import shaped_population_rows, shaped_preflight_image
 from services.transfer_plan_store import (
     TransferPlanRecord,
@@ -151,6 +152,22 @@ def sync_plan_mappings(plan_id: str, mappings: list[dict[str, Any]]) -> Transfer
     return plan
 
 
+def _plan_fit_progress(plan_id: str, rows_estimate: int):
+    """Heartbeat into the in-memory job so GET /preflight is live, not a hang."""
+
+    def _on_progress(scanned: int) -> None:
+        from services.plan_preflight_job import report_plan_preflight_progress
+
+        report_plan_preflight_progress(
+            plan_id,
+            rows_scanned=scanned,
+            rows_estimate=rows_estimate,
+            phase="scanning_population_fit",
+        )
+
+    return _on_progress
+
+
 def run_plan_preflight(
     plan_id: str,
     *,
@@ -169,6 +186,12 @@ def run_plan_preflight(
     values — a control character, an unrounded decimal — that the writer never
     sees. Raises :class:`ShapePreflightRefused` when the recipe cannot run.
     """
+    try:
+        from services.plan_preflight_job import report_plan_preflight_progress
+
+        report_plan_preflight_progress(plan_id, phase="running_gates")
+    except Exception:
+        pass
     (
         apply_policy_gates,
         confidence_threshold_for_mode,
@@ -385,6 +408,8 @@ def run_plan_preflight(
         fk_risk_acknowledged=ack.fk_risk,
         acknowledgment_actor=ack.actor,
         acknowledgment_reason=ack.reason,
+        fit_scan_seconds=STUDIO_FIT_SCAN_SECONDS,
+        on_fit_progress=_plan_fit_progress(plan_id, int(plan.row_count_estimate or 0)),
     )
     pf = apply_policy_gates(
         pf,

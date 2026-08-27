@@ -79,6 +79,13 @@ export function destExistsPrimaryCta(
       .filter((c) => (c.kind || "") === "false_friend" && c.source)
       .map((c) => String(c.source))),
   ].filter(Boolean);
+  if (
+    String(contract.shape || "") === "create_new_table"
+    && extras.length === 0
+    && friends.length === 0
+  ) {
+    return null;
+  }
   const kind = ACTION_KIND[action] || "review_mappings";
   const label = ACTION_LABEL[action] || ACTION_LABEL.review_map;
   const cta: DestExistsPrimaryCta = { kind, label };

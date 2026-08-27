@@ -41,6 +41,37 @@ def test_reject_proposal() -> None:
     assert decided.status == "rejected"
 
 
+def test_live_ddl_change_target_type_does_not_mutate_mappings() -> None:
+    out = apply_actions_to_mappings(
+        [{"source": "DEP_TIME", "destination": "DEP_TIME", "target_type": "NUMBER(9,6)"}],
+        [
+            {
+                "kind": "change_target_type",
+                "column": "DEP_TIME",
+                "to_type": "NUMBER(12,9)",
+                "requires_ddl": True,
+            }
+        ],
+    )
+    assert out[0].get("target_type") == "NUMBER(9,6)"
+    assert out[0].get("destType") is None
+
+
+def test_unproven_change_target_type_does_not_mutate_mappings() -> None:
+    out = apply_actions_to_mappings(
+        [{"source": "DEP_TIME", "destination": "DEP_TIME", "target_type": "NUMBER(9,6)"}],
+        [
+            {
+                "kind": "change_target_type",
+                "column": "DEP_TIME",
+                "to_type": "NUMBER(11,8)",
+                "apply_proven": False,
+            }
+        ],
+    )
+    assert out[0].get("target_type") == "NUMBER(9,6)"
+
+
 def test_apply_actions_to_mappings_transform() -> None:
     out = apply_actions_to_mappings(
         [{"source": "ts", "destination": "ts"}],

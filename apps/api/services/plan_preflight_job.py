@@ -44,6 +44,8 @@ def start_plan_preflight_job(
         "status": "running",
         "started_at": time.time(),
         "rows_estimate": rows,
+        "rows_scanned": 0,
+        "phase": "queued",
         "error": "",
         "result": None,
     }
@@ -98,6 +100,8 @@ def job_public_view(job: dict[str, Any]) -> dict[str, Any]:
         "run_id": job["run_id"],
         "status": job["status"],
         "rows_estimate": int(job.get("rows_estimate") or 0),
+        "rows_scanned": int(job.get("rows_scanned") or 0),
+        "phase": str(job.get("phase") or ""),
         "elapsed_ms": int(max(0.0, time.time() - started) * 1000),
         "error": str(job.get("error") or ""),
     }
@@ -111,6 +115,26 @@ def job_public_view(job: dict[str, Any]) -> dict[str, Any]:
             merged["job_run_id"] = job["run_id"]
         return merged
     return view
+
+
+def report_plan_preflight_progress(
+    plan_id: str,
+    *,
+    rows_scanned: int | None = None,
+    rows_estimate: int | None = None,
+    phase: str = "",
+) -> None:
+    """Heartbeat for Studio polling — never invents a verdict."""
+    with _LOCK:
+        job = _LATEST.get(plan_id)
+        if job is None or job.get("status") != "running":
+            return
+        if rows_scanned is not None:
+            job["rows_scanned"] = int(rows_scanned)
+        if rows_estimate is not None:
+            job["rows_estimate"] = int(rows_estimate)
+        if phase:
+            job["phase"] = phase
 
 
 def reset_plan_preflight_jobs() -> None:

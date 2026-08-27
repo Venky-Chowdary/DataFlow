@@ -755,6 +755,27 @@ describe("destination schema honesty", () => {
     assert.notEqual(rows[0].confidence, rows[1].confidence);
   });
 
+  it("create-new Approve destType is the target_type Validate reads", () => {
+    const pf = buildPreflightMappings([], [
+      {
+        source: "DEP_TIME",
+        target: "DEP_TIME",
+        confidence: 0.9,
+        transform: "none",
+        approved: true,
+        requiresReview: false,
+        isPii: false,
+        createNew: true,
+        existsInDestination: false,
+        assignmentStrategy: "create_compatible_new",
+        destType: "NUMBER(12,9)",
+        inferredType: "NUMBER(9,6)",
+      },
+    ]);
+    assert.equal(pf[0].target_type, "NUMBER(12,9)");
+    assert.equal(pf[0].create_new, true);
+  });
+
   it("caps create-new confidence in buildPreflightMappings before preflight", () => {
     const fromEditable = buildPreflightMappings([], [
       {

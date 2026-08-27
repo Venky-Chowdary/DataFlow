@@ -752,6 +752,18 @@ def _iter_table_population_for_preflight(
     )
 
 
+def _fit_scan_deadline(
+    absolute: float | None,
+    seconds: float | None,
+) -> float | None:
+    """Studio budget is scan wall-clock, not time spent on sample gates first."""
+    if seconds is not None and float(seconds) > 0:
+        import time
+
+        return time.monotonic() + float(seconds)
+    return absolute
+
+
 # F8: policy-gate merge lives in preflight_policy_gates (single authority).
 from services.preflight_policy_gates import (  # noqa: E402
     apply_policy_gates,
@@ -824,6 +836,9 @@ def run_file_preflight(
     rows_are_population: bool = False,
     shape_recipe: Mapping[str, Any] | None = None,
     source_filter: Mapping[str, Any] | None = None,
+    fit_scan_deadline: float | None = None,
+    fit_scan_seconds: float | None = None,
+    on_fit_progress: Any = None,
 ) -> dict[str, Any]:
     """Run preflight gates for file/DB Studio transfers (G1–G9 + host policy)."""
     from services.timezone_policy import declared_source_column_types
@@ -1696,6 +1711,10 @@ def run_file_preflight(
             source_format=source_format,
             sync_mode=sync_mode,
             dest_table_exists=destination_table_exists,
+            deadline_monotonic=_fit_scan_deadline(
+                fit_scan_deadline, fit_scan_seconds
+            ),
+            on_progress=on_fit_progress,
         )
         fit_report_payload = fit_report.to_dict()
         if incremental_read_narrows(sync_mode) and read_scope.bounded:
@@ -1720,6 +1739,9 @@ def run_file_preflight(
                     "id": _FIT_GATE_ID,
                     "message": str(fit_gate.get("message") or ""),
                     "details": dict(fit_gate.get("details") or {}),
+                    "suggested_actions": list(
+                        (fit_gate.get("details") or {}).get("suggested_actions") or []
+                    ),
                 }
             )
     except Exception as exc:  # noqa: BLE001 - a failed scan is unmeasured, never "fits"

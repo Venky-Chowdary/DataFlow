@@ -109,8 +109,9 @@ export const CORE_ENGINE_GATE_IDS = [
  *
  * "Engine running G1–G9" told an operator nothing: a client watching a million
  * rows migrate could not tell which internal id was inspecting their data, or
- * that the wait was work rather than a hang. These are the same nine checks
- * named as engineering stages, and the running ticker walks them.
+ * that the wait was work rather than a hang. These remain the stage *names*.
+ * The running ticker must not walk them on a timer — that looped 1/9…9/9
+ * during a long 1M scan. Live progress is rows scanned + wall clock.
  */
 export const ENGINE_STAGES: { id: string; stage: string; running: string }[] = [
   { id: "g1_source", stage: "Source acquisition", running: "Reading source catalog and sample" },

@@ -30,6 +30,8 @@ function isMutativeAction(action: Record<string, unknown>): boolean {
   const kind = String(action.kind || "");
   if (!MUTATIVE_KINDS.has(kind)) return false;
   if (action.mapping_applyable === false) return false;
+  if (action.requires_ddl === true && kind === "change_target_type") return false;
+  if (action.apply_proven === false && kind === "change_target_type") return false;
   return Boolean(action.column || action.source);
 }
 
@@ -193,7 +195,9 @@ export function RepairProposalDrawer({
               disabled={!canDecide}
               leadingIcon={<DtIcon name="check" size={14} />}
             >
-              Approve & apply mappings
+              {analysis.mutativeActions.every((a) => a.kind === "change_target_type")
+                ? "Approve & apply CREATE types"
+                : "Approve & apply mappings"}
             </Button>
           ) : mappings.length > 0 ? (
             <Button
@@ -248,6 +252,26 @@ export function RepairProposalDrawer({
                 then Re-run Validate.
               </li>
             </ol>
+          </div>
+        )}
+
+        {!analysis.duplicateRoot && analysis.mutativeActions.some((a) => a.kind === "change_target_type") && (
+          <div className="df2-repair-root" role="status">
+            <strong>What Approve does</strong>
+            <p>
+              The file is not broken. Map guessed NUMBER types from 25 preview rows.
+              The rest of the file has more decimal places, so CREATE would be too
+              narrow and Execute would load nothing.
+            </p>
+            <ol className="df2-repair-next-steps">
+              <li>Approve updates the Map CREATE types listed below — Snowflake is not written yet.</li>
+              <li>Each type was proven against the overflow values Validate scanned (same write-path check Execute uses).</li>
+              <li>Validate runs again on those same values and should clear this gate. Click Execute only then.</li>
+            </ol>
+            <p className="df2-label-hint">
+              Live destination columns still need ALTER — Map cannot change warehouse
+              DDL. Approve is disabled for those. Do not truncate.
+            </p>
           </div>
         )}
 

@@ -278,6 +278,48 @@ def test_file_row_iterator_replays_every_row_of_a_csv() -> None:
     assert len(list(iter_source_rows(content, "flights.csv"))) == 2_000
 
 
+def test_studio_seconds_budget_stops_preflight_and_stays_partial() -> None:
+    """Studio Validate must return, not walk a 1M CSV until GET /preflight 200s
+    pile up with status=running. Remaining rows stay unproven (PARTIAL)."""
+    import time
+
+    def _slow():
+        for _ in range(200_000):
+            time.sleep(0.002)
+            yield {"arr_time": "12.34567890"}
+
+    t0 = time.monotonic()
+    result = _preflight(
+        sample_rows=_rows(25),
+        population_rows=_slow(),
+        rows_are_population=True,
+        row_count=1_000_000,
+        fit_scan_seconds=0.05,
+    )
+    elapsed = time.monotonic() - t0
+    assert elapsed < 2.0
+    assert result["population_fit"]["evidence"] == "partial"
+    assert result["population_fit"]["truncated_reason"] == "time"
+    gate = _gate(result)
+    assert gate["status"] == "warn"
+    assert "time budget" in gate["message"]
+
+
+def test_studio_seconds_budget_does_not_downgrade_a_small_exact_file() -> None:
+    """A 293-row stored upload still finishes EXACT inside the Studio budget."""
+    rows = _rows(293, unfit_at=(293,))
+    result = _preflight(
+        sample_rows=rows[:25],
+        population_rows=rows,
+        rows_are_population=True,
+        row_count=293,
+        fit_scan_seconds=12.0,
+    )
+    assert result["population_fit"]["evidence"] == "exact"
+    assert result["population_fit"]["rows_scanned"] == 293
+    assert result["passed"] is False
+
+
 def test_file_iterator_feeds_preflight_end_to_end() -> None:
     from transfer.file_stream import iter_source_rows
 

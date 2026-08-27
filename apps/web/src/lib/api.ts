@@ -2464,7 +2464,17 @@ export function validateTransportMessage(
   );
 }
 
-async function pollPlanPreflight(planId: string, runId: string): Promise<Record<string, unknown>> {
+async function pollPlanPreflight(
+  planId: string,
+  runId: string,
+  onProgress?: (progress: {
+    status?: string;
+    elapsed_ms?: number;
+    rows_scanned?: number;
+    rows_estimate?: number;
+    phase?: string;
+  }) => void,
+): Promise<Record<string, unknown>> {
   const deadline = Date.now() + PREFLIGHT_POLL_DEADLINE_MS;
   let lastError = "Validate is still running.";
   while (Date.now() < deadline) {
@@ -2487,8 +2497,19 @@ async function pollPlanPreflight(planId: string, runId: string): Promise<Record<
       error?: string;
       passed?: boolean;
       run_id?: string;
+      elapsed_ms?: number;
+      rows_scanned?: number;
+      rows_estimate?: number;
+      phase?: string;
     };
     if (data.status === "running" || data.status === "queued") {
+      onProgress?.({
+        status: data.status,
+        elapsed_ms: data.elapsed_ms,
+        rows_scanned: data.rows_scanned,
+        rows_estimate: data.rows_estimate,
+        phase: data.phase,
+      });
       lastError = "Validate is still scanning the population.";
       continue;
     }
@@ -2509,6 +2530,13 @@ export async function preflightTransferPlan(
   // wizard actually makes — has to carry the approved recipe too, or the gates
   // score a source image the writer never sees.
   shapeRecipe?: ShapeRecipeWire,
+  onProgress?: (progress: {
+    status?: string;
+    elapsed_ms?: number;
+    rows_scanned?: number;
+    rows_estimate?: number;
+    phase?: string;
+  }) => void,
 ) {
   const res = await apiFetch(`${API_BASE}/transfer/plans/${planId}/preflight`, {
     method: "POST",
@@ -2526,7 +2554,7 @@ export async function preflightTransferPlan(
   });
   if (res.status === 202) {
     const started = await res.json() as { plan_id?: string; run_id?: string };
-    return pollPlanPreflight(started.plan_id || planId, started.run_id || "");
+    return pollPlanPreflight(started.plan_id || planId, started.run_id || "", onProgress);
   }
   if (!res.ok) throw new Error(await parseApiError(res, "Plan preflight failed"));
   return res.json();

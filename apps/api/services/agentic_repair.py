@@ -388,6 +388,12 @@ def action_is_mapping_mutative(action: dict[str, Any]) -> bool:
         return False
     if action.get("mapping_applyable") is False:
         return False
+    # Live destination DDL — Map destType cannot ALTER Snowflake/MySQL/PG.
+    # Stamping a wider type would re-Validate against the same live carrier.
+    if action.get("requires_ddl") and kind == "change_target_type":
+        return False
+    if kind == "change_target_type" and action.get("apply_proven") is False:
+        return False
     return bool(action.get("column") or action.get("source"))
 
 
@@ -411,8 +417,11 @@ def apply_actions_to_mappings(
             out.append(m)
             by_source[col] = m
         if kind == "change_target_type" and action.get("to_type"):
-            m["destination_type"] = action["to_type"]
-            m["target_type"] = action["to_type"]
+            widened = action["to_type"]
+            m["destination_type"] = widened
+            m["target_type"] = widened
+            m["destType"] = widened
+            m["dest_type"] = widened
         elif kind == "add_transform" and action.get("transform"):
             xf = action["transform"]
             transforms = list(m.get("transforms") or [])
