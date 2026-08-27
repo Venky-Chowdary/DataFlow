@@ -39,6 +39,29 @@ describe("theaterProgressPct", () => {
     assert.equal(pct, 4);
   });
 
+  it("44,000 of 1,000,000 is 4% — never 44%", () => {
+    const pct = theaterProgressPct({
+      phase: "writing",
+      progress_pct: 15,
+      total_rows: 1_000_000,
+      records_processed: 44_000,
+      isRunning: true,
+    });
+    assert.equal(pct, 4);
+    assert.notEqual(pct, 44);
+  });
+
+  it("44% of 1,000,000 is 440,000 rows, not 44,000", () => {
+    const pct = theaterProgressPct({
+      phase: "writing",
+      progress_pct: 50,
+      total_rows: 1_000_000,
+      records_processed: 440_000,
+      isRunning: true,
+    });
+    assert.equal(pct, 44);
+  });
+
   it("holds 99% in reconcile — never 100% before terminal success", () => {
     const pct = theaterProgressPct({
       phase: "reconcile",
