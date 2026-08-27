@@ -33,6 +33,7 @@ from src.ai.rag.product_docs import (  # noqa: E402
     load_product_doc_chunks,
     nearest_articles,
     product_doc_search,
+    spoken_doc_excerpt,
 )
 from src.ai.rag.retriever import RetrievalResult  # noqa: E402
 
@@ -121,8 +122,36 @@ def test_composed_answer_quotes_the_sections_and_names_them():
     answer = compose_documented_answer(hits)
     assert "Source:" in answer
     assert hits[0].chunk.citation in answer
-    body = hits[0].chunk.text.strip().splitlines()[-1][:40]
-    assert body in answer
+    assert "never silently dropped" in answer
+    # Spoken FAQ — definition, not the procedure dump.
+    assert "Where:" not in answer
+    assert "Open the job" not in answer
+    assert not hits[0].chunk.section_title.startswith("Procedure:")
+
+
+def test_definitional_preflight_ranks_core_gates_not_the_procedure():
+    hits = product_doc_search("what are the preflight gates")
+    assert hits
+    assert "core gates" in hits[0].chunk.section_title.lower()
+    answer = compose_documented_answer(hits)
+    assert "G1 " in answer
+    assert "Where:" not in answer
+    assert "Open the failing gate card" not in answer
+
+
+def test_spoken_doc_excerpt_keeps_definition_sentences():
+    text = (
+        "Procedure: inspect quarantine\n"
+        "Quarantine means bad values were isolated with column, value, and reason — never silently dropped.\n"
+        "Open the job\n"
+        "Look for Quarantine status or a non-zero rejected count in the stats strip.\n"
+        "Where: Operations → Jobs → select run\n"
+        "Tip: Completed with quarantine still wrote clean rows."
+    )
+    spoken = spoken_doc_excerpt(text, "Procedure: inspect quarantine")
+    assert "never silently dropped" in spoken
+    assert "Where:" not in spoken
+    assert "Open the job" not in spoken
 
 
 def test_nearest_articles_are_leads_not_evidence():

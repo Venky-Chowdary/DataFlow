@@ -724,13 +724,29 @@ TOOL_DEFINITIONS: list[dict] = [
             "required": ["source_table"],
         },
     },
+    {
+        "name": "brief_workspace",
+        "description": (
+            "Spoken sitrep of this workspace: connectors (tested/failed), recent "
+            "jobs, pipelines due or parked on approval, contracts. Use when the "
+            "operator asks what's going on, for a briefing, or to summarize the workspace."
+        ),
+        "input_schema": {"type": "object", "properties": {}, "required": []},
+    },
 ]
 
 TOOL_FAMILIES: list[dict] = [
     {
         "id": "discover",
         "label": "Discover",
-        "tools": ["list_datasets", "search_data", "search_connectors", "search_knowledge", "describe_pilot"],
+        "tools": [
+            "list_datasets",
+            "search_data",
+            "search_connectors",
+            "search_knowledge",
+            "describe_pilot",
+            "brief_workspace",
+        ],
     },
     {
         "id": "profile",
@@ -868,6 +884,7 @@ class DataPilotTools:
             "introspect_connector_schema": self._introspect_connector_schema,
             "diff_schemas": self._diff_schemas,
             "map_connector_schemas": self._map_connector_schemas,
+            "brief_workspace": self._brief_workspace,
         }
         handler = handlers.get(name)
         if not handler:
@@ -1400,6 +1417,7 @@ class DataPilotTools:
                     "List and run pipeline schedules (with confirmation)",
                     "Open Fix bad data / quarantine paths in Transfer Studio (Confirm required)",
                     "Open any app screen (Transfer, Jobs, Pipelines, Contracts, Query, …)",
+                    "Brief the live workspace (connectors, jobs, parked pipelines, contracts)",
                 ],
                 "cannot_yet": [
                     "Export a table to a downloadable file from chat "
@@ -1423,6 +1441,7 @@ class DataPilotTools:
                 "datasets": [
                     {"name": d.get("name"), "columns": d.get("column_count"), "rows": d.get("row_count")}
                     for d in datasets
+                    if d.get("name") and not looks_like_index_dump_name(str(d.get("name")))
                 ],
                 "connectors": [
                     {"name": c.get("name"), "type": c.get("type")}
@@ -1437,6 +1456,7 @@ class DataPilotTools:
                     f"Transfer orders from {ex_src} to {ex_dst} as upsert",
                     "Why did job <id> fail?",
                     "Show my pipelines",
+                    "Give me a workspace briefing",
                 ],
                 "remembers": [
                     "Last connector, table, metric, and grouping in this chat",
@@ -1449,13 +1469,29 @@ class DataPilotTools:
             },
         )
 
+    def _brief_workspace(self, workspace_id: str = "") -> ToolResult:
+        """Live sitrep — counts only from the same stores Jobs / Connectors use."""
+        from .workspace_briefing import collect_workspace_briefing
+
+        facts = collect_workspace_briefing(workspace_id=workspace_id or "")
+        attention = [str(a) for a in (facts.get("attention") or []) if a]
+        return ToolResult(
+            name="brief_workspace",
+            success=True,
+            output={
+                "facts": facts,
+                "connector_count": facts.get("connector_count", 0),
+                "job_count": facts.get("job_count", 0),
+                "schedule_count": facts.get("schedule_count", 0),
+                "contract_count": facts.get("contract_count", 0),
+                "attention": attention,
+                "empty_workspace": bool(facts.get("empty_workspace")),
+            },
+        )
+
     def _explain_product(self, query: str = "") -> ToolResult:
         """Curated Datawrap product answers — independent of cloud LLMs and RAG noise."""
-        from ..knowledge.copilot_knowledge import (
-            CONVERSATION_TEMPLATES,
-            INTENT_PATTERNS,
-            PRODUCT_CAPABILITIES,
-        )
+        from ..knowledge.copilot_knowledge import PRODUCT_CAPABILITIES
 
         lower = (query or "").lower().strip()
 
@@ -1584,6 +1620,8 @@ class DataPilotTools:
                 success=True,
                 output={
                     "intent": curated[0] if curated else "documentation",
+                    # Curated regex is the lead definition; Help citations follow
+                    # so every sentence sits next to a page the operator can open.
                     "answer": f"{curated[1]}\n\n{documented}" if curated else documented,
                     "capabilities": PRODUCT_CAPABILITIES[:6],
                     # No navigate action: the citations below are the control that
@@ -1610,59 +1648,12 @@ class DataPilotTools:
                 },
             )
 
-        scores: dict[str, int] = {}
-        for intent, keywords in INTENT_PATTERNS.items():
-            score = sum(1 for kw in keywords if kw in lower)
-            if score:
-                scores[intent] = score
-        # Boost common product how-tos
-        if re.search(r"\b(?:transfer|move|migrate|sync|copy)\b", lower):
-            scores["transfer_help"] = scores.get("transfer_help", 0) + 3
-        if re.search(r"\b(?:map|mapping|column|schema)\b", lower):
-            scores["mapping_help"] = scores.get("mapping_help", 0) + 2
-        if re.search(r"\b(?:preflight|gate|validate|validation)\b", lower):
-            scores["preflight_help"] = scores.get("preflight_help", 0) + 3
-        if re.search(r"\b(?:connector|mongodb|postgres|snowflake|connect)\b", lower):
-            scores["connector_help"] = scores.get("connector_help", 0) + 2
-        if re.search(r"\b(?:pii|gdpr|hipaa|compliance)\b", lower):
-            scores["pii_compliance"] = scores.get("pii_compliance", 0) + 2
-        if re.search(r"\b(?:fail|error|broke|troubleshoot|job)\b", lower):
-            scores["troubleshooting"] = scores.get("troubleshooting", 0) + 2
-        if re.search(
-            r"\b(?:dataflow|datawrap|datatransfer|what is|what'?s different|airbyte|fivetran)\b",
-            lower,
-        ):
-            scores["product_help"] = scores.get("product_help", 0) + 3
-        if re.search(r"\b(?:count|aggregate|analy[sz]e|how many|sql)\b", lower):
-            scores["analytics_help"] = scores.get("analytics_help", 0) + 2
-
-        if not scores or not names_product_subject(query):
-            # Nothing in the documentation and no product keyword: say so. Falling
-            # through to the highest-scoring template answered "how do I cook rice"
-            # with a transfer blurb at full confidence.
-            return ToolResult(
-                name="explain_product",
-                success=True,
-                output=unsupported_question_output(query),
-            )
-
-        intent = max(scores, key=scores.get)
-        matched = next((t for t in CONVERSATION_TEMPLATES if t.get("intent") == intent), None)
-        if not matched:
-            matched = CONVERSATION_TEMPLATES[0]
-        actions = list(matched.get("actions") or [])
+        # No Help hit and no explicit FAQ regex: refuse. Keyword-bucket
+        # CONVERSATION_TEMPLATES are not evidence.
         return ToolResult(
             name="explain_product",
             success=True,
-            output={
-                "intent": intent,
-                "answer": matched.get("assistant") or "",
-                "capabilities": PRODUCT_CAPABILITIES[:6],
-                "actions": actions,
-                "sources": [],
-                "grounded": False,
-                "source": "local_product_faq",
-            },
+            output=unsupported_question_output(query),
         )
 
     def _search_knowledge(self, query: str = "") -> ToolResult:
@@ -1709,76 +1700,20 @@ class DataPilotTools:
                 },
             )
 
-        try:
-            from ..rag.pipeline import get_rag_pipeline
-            rag = get_rag_pipeline()
-            rag.ingestion.ensure_knowledge_loaded()
-            result = rag.retriever.retrieve(query, n_results=8)
-            hits = []
-            for d in result.documents:
-                text = (d.text or "").strip()
-                score = float(d.score or 0)
-                # Drop low-score noise and raw ontology shards that read like debug dumps.
-                if score < 0.28:
-                    continue
-                meta_type = str(d.metadata.get("type") or "").lower()
-                # Prefer real product/docs hits over synthetic catalog training docs.
-                if meta_type in {
-                    "synthetic_catalog",
-                    "catalog_schema",
-                    "generated_qna",
-                    "training",
-                    "ontology",
-                    "embedding_shard",
-                } and score < 0.62:
-                    continue
-                if "650+" in text or "620+" in text:
-                    # Catalog marketing counts are not transfer-ready evidence.
-                    continue
-                if _is_raw_knowledge_shard(text) and not _query_targets_semantic_type(query, text):
-                    continue
-                # Synonym / industry catalog dumps are never answers to "get users
-                # from postgres" — only keep them when the operator asked about
-                # synonyms / PII / semantic types explicitly.
-                qlow = query.lower()
-                wants_ontology = any(
-                    w in qlow
-                    for w in ("synonym", "semantic type", "pii", "column pattern", "canonical")
-                )
-                if _is_noise_knowledge_hit(text) and not wants_ontology:
-                    continue
-                hits.append({
-                    "text": text[:600],
-                    "score": round(score, 3),
-                    "type": d.metadata.get("type", ""),
-                    "summary": _summarize_knowledge_hit(text),
-                })
-                if len(hits) >= 4:
-                    break
-            return ToolResult(
-                name="search_knowledge",
-                success=True,
-                output={
-                    "query": query,
-                    "hits": hits,
-                    "count": len(hits),
-                    "empty": len(hits) == 0,
-                    "sources": [],
-                    "grounded": False,
-                    "source": "vector_knowledge" if hits else "unsupported_question",
-                    "hint": (
-                        None
-                        if hits
-                        else (
-                            "No grounded product knowledge matched. Ask about a saved "
-                            "connector, table, job ID, or pf_ validation run — or say "
-                            "what can you do."
-                        )
-                    ),
-                },
-            )
-        except Exception as e:
-            return ToolResult(name="search_knowledge", success=False, output=None, error=str(e))
+        # On-vocabulary but no citable Help page: refuse. Embedding nearest
+        # neighbours are not an answer — they narrated ontology shards as
+        # product knowledge (subscriber_id → telecom synonym dump).
+        refused = unsupported_question_output(query)
+        refused["hint"] = (
+            "No grounded product knowledge matched. Ask about a saved "
+            "connector, table, job ID, or pf_ validation run — or say "
+            "what can you do."
+        )
+        return ToolResult(
+            name="search_knowledge",
+            success=True,
+            output=refused,
+        )
 
     def _plan_transfer_route(
         self,
@@ -2629,9 +2564,9 @@ def _looks_like_product_howto(lower: str) -> bool:
         return False
     howto = bool(
         re.search(
-            r"\b(?:what is|what'?s|what are|how do i|how does|how to|explain|"
+            r"\b(?:what is|what'?s|what are|what does|what do|how do i|how does|how to|explain|"
             r"tell me (?:everything |more )?about|where (?:do|can) i|can i|"
-            r"what makes|remind me|"
+            r"what makes|remind me|meaning of|"
             r"do i need|is .+ dangerous|how is)\b",
             text,
         )
@@ -2644,7 +2579,7 @@ def _looks_like_product_howto(lower: str) -> bool:
             r"schema types?|semantic types?|type system|logical types?|"
             r"transfers?|pilot|openai|anthropic|"
             r"ollama|confirm|upsert|append|cdc|sync mode|full refresh|merge|"
-            r"api key|accurate)\b",
+            r"api key|accurate|mcp|contracts?|reconcile)\b",
             text,
         )
     )
@@ -3001,6 +2936,7 @@ _TOOL_PRIORITY: dict[str, int] = {
     "get_schedule": 70,
     "list_schedules": 60,
     "list_contracts": 58,
+    "brief_workspace": 56,
     "list_jobs": 55,
     "list_connectors": 52,
     "search_connectors": 50,
@@ -3020,6 +2956,18 @@ _TOOL_PRIORITY: dict[str, int] = {
     "describe_pilot": 5,
     "explain_product": 6,
 }
+
+def looks_like_index_dump_name(name: str) -> bool:
+    """Hash-prefixed upload / synonym shards — never speak these as dataset names."""
+    label = str(name or "").strip()
+    if not label:
+        return True
+    low = label.lower()
+    if "synonym" in low or "industry schema" in low:
+        return True
+    head = label.replace("-", "").replace("_", "")[:16]
+    return len(label) >= 16 and all(c in "0123456789abcdef" for c in head.lower())
+
 
 _LIVE_SCHEMA_TOOLS = frozenset({
     "map_connector_schemas",
@@ -3081,6 +3029,14 @@ def prune_planned_tools(planned: list[tuple[str, dict]]) -> list[tuple[str, dict
         names = {n for n, _ in planned}
     # A concrete transfer already contains the mapping, gates and route, so the
     # generic advice tools beside it are redundant noise.
+    # A product FAQ already answers from Help. Companion quality/dataset dumps
+    # (156 hashed uploads next to "what are the preflight gates") are noise.
+    if "explain_product" in names:
+        planned = [
+            (n, a) for n, a in planned
+            if n not in ("list_datasets", "analyze_dataset", "search_data", "compare_datasets")
+        ]
+        names = {n for n, _ in planned}
     if names & {"start_transfer", "plan_transfer", "create_schedule"}:
         planned = [
             (n, a) for n, a in planned
@@ -3138,6 +3094,7 @@ def prune_planned_tools(planned: list[tuple[str, dict]]) -> list[tuple[str, dict
                 "navigate",
                 "start_transfer_studio",
                 "list_jobs",
+                "brief_workspace",
                 "list_datasets",
                 "describe_pilot",
                 "explain_product",
@@ -3602,6 +3559,21 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
         planned.append(("describe_pilot", {}))
         return planned
 
+    from .dialogue_acts import classify_dialogue_act
+
+    _act = classify_dialogue_act(message)
+    # Sitrep asks own a dedicated tool. Inventory verbs ("show my jobs") and
+    # named objects (job_/pf_) keep their existing routers.
+    if _act == "briefing" and not re.search(
+        r"\b(?:job_|pf_)[a-z0-9]"
+        r"|(?:show|list|open)\s+(?:my\s+)?(?:jobs?|pipelines?|schedules?|connectors?)\b"
+        r"|(?:plan|start|stage)\s+transfer\b"
+        r"|\bsample\b|\bcount\s+rows\b|\bfix\s+(?:my\s+)?mapping\b",
+        lower,
+    ):
+        planned.append(("brief_workspace", {}))
+        return planned
+
     nav_map = {
         "pilot": ["data pilot", "go to pilot", "open pilot"],
         "transfer": ["start transfer", "new transfer", "upload", "move data", "go to transfer", "transfer studio"],
@@ -3969,8 +3941,16 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
             planned.append(("navigate", {"screen": "schedules"}))
             planned = [(n, a) for n, a in planned if n != "sample_connector_object"]
 
-    if any(w in lower for w in ("contracts", "data contract")) and any(w in lower for w in ("list", "show", "what")):
-        # "show contracts" may also navigate — prefer list when asking for contents.
+    # Inventory of signed contracts — not "what is a data contract" (definition).
+    if (
+        re.search(
+            r"\b(?:list|show|my)\s+(?:data\s+)?contracts?\b"
+            r"|\b(?:what|which)\s+(?:data\s+)?contracts?\s+(?:do\s+i|do\s+we|are\s+(?:there|mine|signed))\b"
+            r"|\b(?:data\s+)?contracts?\s+(?:i\s+have|we\s+have|in\s+(?:the|this)\s+workspace)\b",
+            lower,
+        )
+        and not re.search(r"\bwhat\s+is\s+(?:a\s+)?data\s+contract\b", lower)
+    ):
         if not any(v in lower for v in ("go to", "take me", "navigate to", "open ")):
             planned.append(("list_contracts", {"limit": 50}))
             planned = [
@@ -4582,7 +4562,16 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
         r"(?:of|for|on)\s+[\"']?([a-zA-Z_][a-zA-Z0-9_]*)[\"']?\s*$",
         lower,
     )
-    if analyze_follow and "analyze_result" not in [p[0] for p in planned]:
+    # Bare "summarize that" is a recap of the last answer, not a result profile.
+    _last_answer_recap = bool(
+        re.match(
+            r"^\s*(?:summarize\s+(?:that|this|it|what\s+you\s+(?:just\s+)?said)"
+            r"|tl;?dr|in\s+(?:a\s+)?(?:sentence|nutshell)|short\s+version|recap(?:\s+that)?)"
+            r"\s*[.!?]*$",
+            lower,
+        )
+    )
+    if analyze_follow and not _last_answer_recap and "analyze_result" not in [p[0] for p in planned]:
         # Don't steal fresh table sample intents
         if "sample_connector_object" not in [p[0] for p in planned]:
             args = {}
@@ -4897,7 +4886,7 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
     analyst = get_data_analyst()
     hint = analyst.extract_dataset_hint(message)
     data_signals = [
-        "analyze", "what's in", "what is in", "tell me about", "pii",
+        "analyze", "what's in", "what is in", "tell me about", "tell me everything about", "pii",
         "preview", "sample", "quality", "how many rows",
     ]
     # "columns"/"schema" alone often mean live DB — only analyze uploaded data
@@ -4922,6 +4911,7 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
             "profile_quality_rules", "describe_pilot", "explain_product",
             "explain_mapping_assurance", "remediate_validation", "navigate",
             "inspect_schema_policy", "get_transfer_capabilities", "list_jobs",
+            "brief_workspace",
             "list_connectors", "list_schedules", "aggregate_data",
             "list_connector_objects", "sample_connector_object", "plan_transfer",
             "start_transfer", "plan_transfer_route", "create_connector",
@@ -4960,6 +4950,26 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
             }
             and not (n == "introspect_connector_schema" and not _asks_for_schema(lower))
         ]
+
+    # Off-topic / general-web asks must not become product RAG. Vocabulary
+    # overlap ("capital") is not evidence — only a Help hit, a pasted id, or
+    # an explicit knowledge search is.
+    if _act == "general":
+        from ..rag.evidence import names_identifier
+
+        explicit_knowledge = bool(
+            re.search(
+                r"\b(?:search\s+knowledge|knowledge\s+for|semantic\s+types?|ontology)\b",
+                lower,
+            )
+        )
+        keep_rag = (
+            explicit_knowledge
+            or names_identifier(message)
+            or bool(product_doc_search(message, limit=1))
+        )
+        if not keep_rag:
+            planned = [(n, a) for n, a in planned if n != "search_knowledge"]
 
     # Deduplicate while preserving order
     seen: set[str] = set()

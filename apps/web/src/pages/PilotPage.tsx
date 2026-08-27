@@ -450,10 +450,10 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
                 <div className="df2-pilot-hero-icon"><DtIcon name="sparkle" size={28} /></div>
                 {/* PageShell already emits the page's only h1; this is the
                     hero line under it. */}
-                <h2 className="df2-pilot-title">Ask Datawrap Pilot to move, inspect, or govern data.</h2>
+                <h2 className="df2-pilot-title">Talk to Datawrap Pilot like a colleague on the migration desk.</h2>
                 <p className="df2-pilot-subtitle">
-                  Natural-language data ops — schema, mappings, connectors, and jobs with the same governed engine as Transfer Studio.
-                  Chats are saved in this browser so a refresh does not wipe your thread.
+                  Ask in plain language — brief the workspace, summarize a finding, count a live table, or plan a transfer.
+                  Answers come from your connectors, jobs, and Validate proof. Nothing writes until you Confirm.
                 </p>
               </div>
 
@@ -531,7 +531,7 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
           <div className="df2-pilot-composer-bar">
             <textarea
               rows={started ? 2 : 3}
-              placeholder={started ? "Follow up…" : "Set up Postgres source, move Shopify orders to Snowflake, scan HR for PII…"}
+              placeholder={started ? "Follow up — summarize that, or ask what to do next…" : "Give me a workspace briefing, count airports, plan a transfer…"}
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}

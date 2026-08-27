@@ -43,6 +43,7 @@ TOOL_PERMISSIONS: dict[str, tuple[str, str]] = {
     "compare_datasets": (Permission.WORKSPACE_READ, READ),
     "search_knowledge": (Permission.WORKSPACE_READ, READ),
     "describe_pilot": (Permission.WORKSPACE_READ, READ),
+    "brief_workspace": (Permission.WORKSPACE_READ, READ),
     "explain_product": (Permission.WORKSPACE_READ, READ),
     "get_transfer_capabilities": (Permission.WORKSPACE_READ, READ),
     "explain_mapping_assurance": (Permission.WORKSPACE_READ, READ),
