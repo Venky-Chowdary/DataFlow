@@ -2,7 +2,8 @@
 
 **Audience:** enterprise buyer / integration architect / cutover operator  
 **Date:** 2026-08-27  
-**Branch:** `cursor/decimal-fit-untyped-scan-d3bf` @ `2a966d74`  
+**Branch:** `cursor/decimal-fit-untyped-scan-d3bf` (stamp SHA at sign-off)  
+**Pack contents:** this file is the single handover. §§13–20 are the enterprise close-out (rollback, blast radius, FAQ, sign-off form).  
 **Wave:** pasted Studio failure `flights-1m.csv` → Snowflake `EMPLOYEE_DB.tree` (job `6a8f4f89…05ba`)
 
 This pack is the handover for **this wave only**. It does not recertify the whole product, does not replace `docs/CLIENT_READINESS_REPORT.md`, and does not claim warehouse or SaaS routes are live-proven on a customer tenant.
@@ -212,7 +213,7 @@ These are remaining **algorithm or proof** gaps, not promises.
 
 | Document | Role |
 |---|---|
-| This file | Client + architect handover for the Validate≡Execute wave |
+| This file | Client + architect handover, including §§13–20 close-out |
 | `docs/CLIENT_READINESS_REPORT.md` | Prior relational migration-assurance evidence (do not overwrite those live counts with this wave) |
 | `docs/SESSION_HANDOVER.md` | Engineering continuation notes |
 | Population-fit module | `apps/api/services/population_fit_scan.py` — SSOT for the scan |
@@ -231,3 +232,164 @@ These are remaining **algorithm or proof** gaps, not promises.
 | Buyer | Accepts file/table population-fit as fail-closed preflight. Does not accept “650+ live” or “exactly-once CDC.” |
 
 **Verdict:** ready to hand over as a **fail-closed Validate≡Execute upgrade** for file and pageable-table bounded carriers. **Not** ready to hand over as a universally certified 43-connector or live-Snowflake 1M production sign-off.
+
+---
+
+## 13. Scope in / scope out (SOW language)
+
+Use this text in a statement of work or change ticket. Do not expand it in sales decks.
+
+**In scope (this wave)**
+
+- Fail-closed population fit on Studio Validate, plan preflight, Pilot preflight, and Execute preflight for **file uploads** (stored `file_id`) and **pageable table** sources (Postgres-class offset readers).
+- Shared writer predicates for NUMBER/DECIMAL, VARCHAR, integer, DATE/TIME, BOOLEAN, UUID, ENUM/SET, INTERVAL, YEAR, BIT/BINARY.
+- Dest-spelled suggested widen on Remap / Quarantine. No silent truncate. No silent MySQL ENUM `''` or YEAR `0000`.
+- Incremental Validate bound to `cursor > watermark`. CDC Validate does not claim table-exact. SCD2 still snapshots.
+- `source_filter` Validate bound to the kept subset (filter → shape → watermark).
+
+**Out of scope (do not invoice or accept as done)**
+
+- Live Snowflake re-run of `flights-1m.csv` on the client tenant (client acceptance §8).
+- Certification of all 43 drivers or all 716 catalog tiles.
+- Exactly-once CDC.
+- Population-exact Validate for Dynamo, Kafka, Redis, Elasticsearch, callables/procedures.
+- JSON / ARRAY / ClickHouse ENUM8 population scan.
+- SOC 2 / ISO 27001 attestation.
+- ALTER of the client’s existing Snowflake `EMPLOYEE_DB.tree` (client DBA).
+
+---
+
+## 14. Blast radius and compatibility
+
+This is not a Snowflake-only patch. Every path that calls `run_file_preflight` / `scan_population_fit` changes.
+
+| Surface | What changes | Compatibility |
+|---|---|---|
+| Transfer Studio Validate | Scans stored upload or pageable table, not 25 rows | Jobs that **false-greened** will now **block**. That is the intended fail-closed. |
+| Execute preflight | Same scan as Validate when the population is available | Write-time quarantine unchanged and still authoritative. |
+| Pilot `plan_transfer` | Receives `source_filter` and `stream_contracts` | Pilot still has no `shape_recipe`. |
+| Incremental / deduped | Scan is the delta after the watermark | Historical overflows no longer false-block a second run. |
+| CDC | Table walk skipped | Evidence stays sampled/unmeasured. At-least-once upsert unchanged. |
+| SCD Type 2 | Full snapshot scan | Same as a full refresh for fit. |
+| Schedules / Autopilot | Next beat uses the new Validate | A beat that used to start and fail at write may now **park on Validate**. Operator widens/ALTERs, then the beat proceeds. |
+| Existing Risk Contracts | Still resolved by `resolve_write_action_for_mapping` | Quarantine / continue policies still hold rows out. They do not truncate. |
+| Existing destination DDL | Mapping `target_type` does not ALTER | Same as today. Operator or DBA must ALTER. |
+
+**Expected operational surprise:** more Validate **blocks**, fewer Execute **zero-write** failures. Treat a new block as a caught defect, not a regression, when Remap names a dest-spelled widen.
+
+**Scan cost:** default budget is 5,000,000 rows. Warehouse identical/widening declarations still skip the value scan. File peek types never skip.
+
+---
+
+## 15. In-flight jobs, Resume, and rollback
+
+### 15.1 In-flight and failed jobs
+
+| Job state | Action |
+|---|---|
+| Failed job `6a8f4f89…05ba` (0 written, 1,512 quarantined) | **Do not Resume.** Map/ALTER → re-Validate → **new** transfer. |
+| Any failed job with `population_fit` / `do not fit NUMBER` / blank suggested fix | Same: new transfer after widen. Resume reuses the old contract and can miss the scan. |
+| Running job | Let it finish. This wave does not cancel in-flight writers. |
+| `completed_with_quarantine` | Inspect Quarantine. Replay only if the dest carrier already holds the cell. |
+| Schedule parked / needs_approval | Read the finding. If it is dest overflow, ALTER or remap, then approve only scopes the product actually grants. |
+
+### 15.2 Rollback (engineering)
+
+This wave is fail-closed. Rolling it back **re-opens** false-green Validate (the original incident class).
+
+| Path | How | Effect |
+|---|---|---|
+| Do not merge the branch | Stay on `feature/Venkat-Analysis` | Old behaviour: 25-row Validate, peek-as-DDL skip, Remap `—`. |
+| Revert after merge | `git revert` of the population-fit commits on this branch | Same as above. Only do this if the scan itself is defective (wrong writer predicate), not because Validate started blocking real overflows. |
+| Emergency Execute | Do **not** set `skip_preflight=true` to “get the file in” | Engine fidelity gates still fire; you lose the operator-visible Remap. |
+
+If Validate blocks a **good** population (writer would accept the cell): file a defect with `population_fit` JSON, dest dialect, and one failing value. That is a predicate bug. Rollback is the last resort.
+
+### 15.3 Data / destination rollback
+
+The original job wrote **0** rows. There is nothing to undo on `EMPLOYEE_DB.tree` from that run.
+
+A later successful transfer is reversed only by the client’s dest practice (truncate, time-travel, or a compensating overwrite). This product does not silently un-write Snowflake.
+
+---
+
+## 16. Security and data handling
+
+- The incident file `flights-1m.csv` is a **client dataset**. Do not attach the full file to tickets, PRs, or this pack.
+- Share only: column names, dest types, row numbers (293 / 431 class), and redacted samples already in the incident (`7.9166665`).
+- Quarantine DLQ may hold source values. Restrict job-detail access to operators who may see that file.
+- This environment’s Mongo `27017` was down at measurement. Do not assume job documents persisted here.
+- No SOC 2 / ISO letter is included.
+
+---
+
+## 17. FAQ (buyer / operator)
+
+**Is the original Snowflake job fixed if we click Resume?**  
+No. Resume is wrong. Widen or ALTER, re-Validate, new transfer.
+
+**Will Validate always be green after this?**  
+No. Validate will block more often when the dest cannot hold a late row. That is the point.
+
+**Can we keep `NUMBER(9,6)` and load anyway?**  
+Only with an explicit Risk Contract that **quarantines** unfit rows. The product will not silently truncate to 6 decimal places.
+
+**Why not map everything to VARCHAR/TEXT?**  
+That destroys numeric / ENUM / YEAR meaning. Remap offers dest-spelled widen first.
+
+**Did you prove our 1M rows on Snowflake?**  
+No. Proof here is the shared algorithm plus 156 fixture tests. Tenant proof is §8.
+
+**Are 716 connectors live?**  
+No. **43** unique transfer-ready drivers. **78** PRODUCTION_SKU routes on this host. **716** is catalog tiles.
+
+**Is CDC exactly-once?**  
+No. Default is at-least-once upsert until proven otherwise.
+
+**Will incremental nightly jobs re-fail on old overflows?**  
+No. Incremental Validate judges the watermark delta, not the whole table. CDC still does not walk the table.
+
+---
+
+## 18. Communications (copy for the ops channel)
+
+> Validate and Execute now share one population-fit scan for files and pageable tables. A 25-row preview is no longer treated as proof. If Validate blocks and Remap names a dest type (for example `NUMBER(10,7)`), widen or ALTER, re-Validate, and start a **new** transfer. Do not Resume job `6a8f4f89…05ba`. We are not claiming 716 live connectors or exactly-once CDC. Snowflake 1M tenant proof is still the client’s acceptance run.
+
+---
+
+## 19. Support and escalation
+
+| Symptom | First check | Escalate when |
+|---|---|---|
+| Remap still shows `—` | Confirm Validate response `validation_findings[].suggested_target_type` and `population_fit.findings` | Finding exists on `population_fit` only — kernel merge defect |
+| Validate greens, Execute quarantines | `population_fit.evidence` (if `sampled` / `unmeasured`, walk did not run) | File had `file_id` and evidence is still sampled |
+| Incremental blocked on old rows | `read_scope` / watermark in the preflight payload | Walk ignored `cursor_after` |
+| Schedule parked after deploy | Finding class OVERFLOW vs schema drift | Approving a never-delegable narrow |
+
+Attach: `run_id`, preflight JSON (`passed`, `population_fit`, `validation_findings`), dest dialect, one redacted value. Do not attach the full CSV.
+
+---
+
+## 20. Sign-off form (print / attach to the change ticket)
+
+Stamp the merge SHA at signing. Do not sign the “universal certify” line.
+
+| Field | Value |
+|---|---|
+| Change title | Validate ≡ Execute population-fit (file + pageable table) |
+| Branch | `cursor/decimal-fit-untyped-scan-d3bf` |
+| Merge SHA | ________________ |
+| Proof cited | 156 population-fit passed; 39 chrome passed; 2026-08-27 |
+| Tenant Snowflake 1M | □ skip — no credentials &nbsp;&nbsp; □ pass (attach run_id) &nbsp;&nbsp; □ fail |
+
+| Role | Name | Date | Signature |
+|---|---|---|---|
+| Engineering (algorithm + matrices) | | | |
+| Operator (will not Resume `6a8f4f89…`; Map/ALTER → new transfer) | | | |
+| Buyer / integration lead (accepts §13 in-scope; rejects 650+ live and exactly-once CDC) | | | |
+| Client DBA (ALTER `DEP_TIME`/`ARR_TIME` or equivalent, if dest exists) | | | |
+
+Engineering attests only: named carriers share the writer predicates; listed matrices were run; live Snowflake 1M was not run unless the tenant box above is **pass**.
+
+Buyer attests only: this wave is accepted as fail-closed preflight for file and pageable-table bounded carriers, not as product-wide certification.
+
