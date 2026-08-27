@@ -67,6 +67,38 @@ def fingerprint_schema_legacy(
     return _hash_payload(payload)
 
 
+def live_dest_schema_fingerprint(
+    destination_column_types: dict[str, str] | None,
+    *,
+    destination_table_exists: bool | None = None,
+    sync_mode: str = "",
+) -> str:
+    """Hash observed dest names+types. Empty when there is no live DDL contract.
+
+    Overwrite / create-new / unprobed dest must not invent columns from Map
+    or fall back to the engine name. That hid dest-exists drift after Validate.
+    """
+    mode = str(sync_mode or "").strip().lower()
+    try:
+        from services.sync_cursor import is_overwrite_sync
+
+        overwrite = is_overwrite_sync(mode)
+    except Exception:
+        overwrite = mode in {"full_refresh_overwrite", "overwrite"}
+    if overwrite:
+        return ""
+    if destination_table_exists is not True:
+        return ""
+    types = {
+        str(k): str(v)
+        for k, v in (destination_column_types or {}).items()
+        if str(k).strip()
+    }
+    if not types:
+        return ""
+    return fingerprint_schema(list(types.keys()), types)
+
+
 def fingerprint_schema(
     columns: list[str],
     column_types: dict[str, str] | None = None,

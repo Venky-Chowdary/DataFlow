@@ -2526,6 +2526,8 @@ class UniversalTransferEngine:
                 skip_preflight=bool(getattr(request, "skip_preflight", False)),
                 sync_mode=str(getattr(request, "sync_mode", "") or ""),
                 error_policy="quarantine",
+                destination_column_types=dest_schema_types,
+                destination_table_exists=dest_table_exists_flag,
             )
             if art_err:
                 mongo.update_job_status(
@@ -3726,6 +3728,8 @@ class UniversalTransferEngine:
                 skip_preflight=bool(getattr(request, "skip_preflight", False)),
                 sync_mode=str(getattr(request, "sync_mode", "") or ""),
                 error_policy="quarantine",
+                destination_column_types=dest_schema_types,
+                destination_table_exists=dest_table_exists_flag,
             )
             if art_err:
                 mongo.update_job_status(
@@ -4539,6 +4543,8 @@ class UniversalTransferEngine:
                 skip_preflight=bool(getattr(request, "skip_preflight", False)),
                 sync_mode=str(getattr(request, "sync_mode", "") or ""),
                 error_policy="quarantine",
+                destination_column_types=dest_schema_types,
+                destination_table_exists=dest_table_exists_flag,
             )
             if art_err:
                 mongo.update_job_status(

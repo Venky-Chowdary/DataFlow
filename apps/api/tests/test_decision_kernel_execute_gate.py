@@ -125,3 +125,76 @@ def test_build_artifact_never_narrows_bigint_create_new():
     ]
     art = build_artifact_from_mappings(maps, dest_db="postgresql")
     assert art.ddl.column_ddl.get("big_val", "").upper() == "BIGINT"
+    # Map targets are not live dest identity — empty dest_fp, not engine name.
+    assert art.dest_fingerprint == ""
+
+
+def test_approved_artifact_refuses_dest_schema_fingerprint_drift():
+    from services.schema_fingerprint import fingerprint_schema
+
+    maps = [
+        {
+            "source": "id",
+            "target": "id",
+            "source_type": "BIGINT",
+            "target_type": "BIGINT",
+        }
+    ]
+    dest_approved = {"id": "BIGINT"}
+    dest_drifted = {"id": "BIGINT", "email": "VARCHAR"}
+    fp_ok = fingerprint_schema(list(dest_approved.keys()), dest_approved)
+    fp_drift = fingerprint_schema(list(dest_drifted.keys()), dest_drifted)
+    stamped = build_artifact_from_mappings(
+        maps,
+        dest_db="postgresql",
+        dest_fingerprint=fp_ok,
+        artifact_id="da_inline",
+        created_at="1970-01-01T00:00:00+00:00",
+    )
+    err, art = enforce_decision_artifact(
+        mappings=maps,
+        dest_db="postgresql",
+        approved_content_hash=stamped.content_hash,
+        dest_fingerprint=fp_drift,
+        skip_preflight=False,
+    )
+    assert err is not None
+    assert "mismatch" in err.lower() or "Validate" in err
+    assert art is None
+    ok_err, ok_art = enforce_decision_artifact(
+        mappings=maps,
+        dest_db="postgresql",
+        approved_content_hash=stamped.content_hash,
+        dest_fingerprint=fp_ok,
+        skip_preflight=False,
+    )
+    assert ok_err is None
+    assert ok_art is not None
+    assert ok_art.dest_fingerprint == fp_ok
+
+
+def test_live_dest_schema_fingerprint_does_not_invent_map_columns():
+    from services.schema_fingerprint import live_dest_schema_fingerprint
+
+    assert live_dest_schema_fingerprint(
+        {},
+        destination_table_exists=True,
+        sync_mode="full_refresh_append",
+    ) == ""
+    assert live_dest_schema_fingerprint(
+        {"id": "BIGINT", "email": "VARCHAR"},
+        destination_table_exists=True,
+        sync_mode="full_refresh_overwrite",
+    ) == ""
+    assert live_dest_schema_fingerprint(
+        {"id": "BIGINT"},
+        destination_table_exists=False,
+        sync_mode="full_refresh_append",
+    ) == ""
+    live = live_dest_schema_fingerprint(
+        {"id": "BIGINT", "email": "TEXT"},
+        destination_table_exists=True,
+        sync_mode="full_refresh_append",
+    )
+    assert live
+    assert len(live) == 16

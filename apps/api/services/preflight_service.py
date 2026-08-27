@@ -1481,11 +1481,19 @@ def run_file_preflight(
 
         dest_for_ddl = (destination_db_type or "").strip().lower()
         src_for_cap = (source_connector_id or "").strip().lower()
+        from services.schema_fingerprint import live_dest_schema_fingerprint
+
+        dest_fp = live_dest_schema_fingerprint(
+            destination_column_types,
+            destination_table_exists=destination_table_exists,
+            sync_mode=str(sync_mode or ""),
+        )
         decision_art = build_artifact_from_mappings(
             list(mappings or []),
             dest_db=dest_for_ddl,
             source_db=src_for_cap,
             route_id=f"validate:{dest_for_ddl or 'unknown'}",
+            dest_fingerprint=dest_fp,
             sync_mode=str(sync_mode or "full_refresh_overwrite"),
         )
         conv_cols = [
