@@ -1246,6 +1246,8 @@ from .engine_identity import (  # noqa: E402,F401 — re-export
     _inline_stamp_ddl_identity,
     _operator_contract_maps,
     _request_decision_artifact_payload,
+    execute_preflight_progress_message,
+    reuse_approved_validate_population_fit,
 )
 from .engine_shape import (  # noqa: E402,F401 — re-export
     _open_shape_runner,
@@ -2372,12 +2374,13 @@ class UniversalTransferEngine:
                     f"object={plan.object_name} batch={plan.batch_size}"
                 )
 
+            reuse_fit = reuse_approved_validate_population_fit(request)
             mongo.update_job_status(
                 job_id,
                 "running",
                 phase="preflight",
-                progress_pct=15,
-                message="Validating mapping and schema…",
+                progress_pct=compute_transfer_progress_pct(phase="preflight"),
+                message=execute_preflight_progress_message(request),
             )
             # Preflight for every destination kind (database, file_export, object
             # store). Skipping Validate for file sinks was an honesty hole —
@@ -2402,9 +2405,12 @@ class UniversalTransferEngine:
                     sample_rows=_preflight_sample_rows(records),
                     # The whole batch is already in memory — decide bounded
                     # destination carriers here instead of letting the writer
-                    # discover an unfit value mid-load.
-                    population_rows=records,
-                    rows_are_population=True,
+                    # discover an unfit value mid-load. A just-approved Studio
+                    # Validate already asked that question; write-time fit
+                    # still binds every row.
+                    population_rows=None if reuse_fit else records,
+                    rows_are_population=not reuse_fit,
+                    skip_population_fit=reuse_fit,
                     confidence_threshold=confidence_threshold_for_mode(
                         request.validation_mode
                     ),
@@ -3556,12 +3562,13 @@ class UniversalTransferEngine:
                 sample_rows=sample_rows[:100] if sample_rows else None,
                 dest_table_exists=dest_table_exists_flag,
             )
+            reuse_fit = reuse_approved_validate_population_fit(request)
             mongo.update_job_status(
                 job_id,
                 "running",
                 phase="preflight",
-                progress_pct=15,
-                message="Validating mapping and schema…",
+                progress_pct=compute_transfer_progress_pct(phase="preflight"),
+                message=execute_preflight_progress_message(request),
             )
             if not request.skip_preflight:
                 dest_ok, dest_msg = probe_destination(request.destination)
@@ -3583,12 +3590,12 @@ class UniversalTransferEngine:
                     sample_rows=_preflight_sample_rows(sample_rows),
                     # Read-only projected re-read of the same table the write
                     # loop is about to stream, so a narrowing carrier is decided
-                    # before the first batch. Skipped when a row filter is in
-                    # play: the scan would then judge rows this job never
-                    # writes, and a finding must describe *this* population.
+                    # before the first batch. A just-approved Studio Validate
+                    # already asked that; write-time fit still binds every row.
+                    # CDC never walks here (the write loop owns the cursor).
                     population_rows=(
                         None
-                        if _sync_mode_is_cdc(request)
+                        if reuse_fit or _sync_mode_is_cdc(request)
                         else _table_population_rows(
                             request,
                             mappings,
@@ -3598,7 +3605,8 @@ class UniversalTransferEngine:
                             shape_runner=shape_runner,
                         )
                     ),
-                    rows_are_population=not _sync_mode_is_cdc(request),
+                    rows_are_population=not reuse_fit and not _sync_mode_is_cdc(request),
+                    skip_population_fit=reuse_fit,
                     source_filter=request.source_filter or None,
                     confidence_threshold=confidence_threshold_for_mode(
                         request.validation_mode
@@ -4291,7 +4299,7 @@ class UniversalTransferEngine:
                 job_id,
                 "running",
                 phase="reading",
-                progress_pct=5,
+                progress_pct=compute_transfer_progress_pct(phase="reading"),
                 message="Analyzing uploaded file…",
             )
             read_options = resolve_read_options(request)
@@ -4366,12 +4374,13 @@ class UniversalTransferEngine:
                 sample_rows=sample_rows[:100] if sample_rows else None,
                 dest_table_exists=dest_table_exists_flag,
             )
+            reuse_fit = reuse_approved_validate_population_fit(request)
             mongo.update_job_status(
                 job_id,
                 "running",
                 phase="preflight",
-                progress_pct=15,
-                message="Validating mapping and schema…",
+                progress_pct=compute_transfer_progress_pct(phase="preflight"),
+                message=execute_preflight_progress_message(request),
             )
             if not request.skip_preflight:
                 dest_ok, dest_msg = probe_destination(request.destination)
@@ -4396,11 +4405,18 @@ class UniversalTransferEngine:
                     # before the first batch, not at row 431 with the load
                     # half-done. Lazy — nothing is re-read when no mapped column
                     # can exceed its destination carrier by declaration.
-                    population_rows=_shaped_population_rows(
-                        shape_runner,
-                        _file_population_rows(content, filename, read_options),
+                    # A just-approved Studio Validate already walked this file;
+                    # do not spend minutes asking the same question again.
+                    population_rows=(
+                        None
+                        if reuse_fit
+                        else _shaped_population_rows(
+                            shape_runner,
+                            _file_population_rows(content, filename, read_options),
+                        )
                     ),
-                    rows_are_population=True,
+                    rows_are_population=not reuse_fit,
+                    skip_population_fit=reuse_fit,
                     source_filter=request.source_filter or None,
                     confidence_threshold=confidence_threshold_for_mode(
                         request.validation_mode

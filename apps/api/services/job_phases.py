@@ -5,7 +5,10 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
-PHASE_ORDER = ("preflight", "extract", "transform", "load", "reconcile")
+# Engine order is read → confirm/preflight → write → reconcile.
+# Putting preflight first left Extract active during Execute preflight
+# (both chips ticked for minutes after Validate had already passed).
+PHASE_ORDER = ("extract", "transform", "preflight", "load", "reconcile")
 
 
 def _now() -> str:

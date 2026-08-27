@@ -1542,6 +1542,19 @@ def build_population_fit_gate(report: FitScanReport) -> dict[str, Any]:
         }
 
     if report.evidence == EVIDENCE_PARTIAL:
+        if report.truncated_reason == "reused_validate":
+            details["reused_from_validate"] = True
+            return {
+                "id": GATE_ID,
+                "status": "warn",
+                "message": (
+                    "Population fit reused from approved Validate — Execute does "
+                    "not re-walk the source. Write-time fit still binds every row. "
+                    "This is not a new population proof."
+                ),
+                "duration_ms": duration_ms,
+                "details": details,
+            }
         stop = "time budget" if report.truncated_reason == "time" else "row budget"
         return {
             "id": GATE_ID,

@@ -475,6 +475,7 @@ class MongoDBService:
                     "message": 1,
                     "phase": 1,
                     "throughput_marks": 1,
+                    "started_at": 1,
                 },
             )
         except Exception:
@@ -516,7 +517,12 @@ class MongoDBService:
             logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
         if status == "running":
-            updates.setdefault("started_at", datetime.now(timezone.utc))
+            # Heartbeats must not $set started_at to now — Theater elapsed
+            # became 0s on every progress write / SSE reconnect.
+            if (prev_doc or {}).get("started_at") and "started_at" not in kwargs:
+                updates.pop("started_at", None)
+            else:
+                updates.setdefault("started_at", datetime.now(timezone.utc))
         elif status in ("completed", "completed_with_quarantine", "failed", "cancelled"):
             updates["completed_at"] = datetime.now(timezone.utc)
 
@@ -1256,7 +1262,9 @@ class MemoryMongoDBService:
             if marks is not None:
                 rec["throughput_marks"] = marks
         if status == "running":
-            rec.setdefault("started_at", datetime.now(timezone.utc))
+            # create_transfer_job seeds started_at=None; setdefault would keep it.
+            if not rec.get("started_at"):
+                rec["started_at"] = datetime.now(timezone.utc)
         elif status in ("completed", "completed_with_quarantine", "failed", "cancelled"):
             rec["completed_at"] = datetime.now(timezone.utc)
 

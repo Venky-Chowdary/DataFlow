@@ -37,6 +37,7 @@ import { MappingProofDrawer, type MappingProof } from "./MappingProofDrawer";
 import { hashForScreen } from "../lib/appNavigation";
 import { callableExtractNote } from "../lib/destExistsShape";
 import { cdcDeliveryResultCopy } from "../lib/cdcExactlyOnce";
+import { theaterProgressPct } from "../lib/jobTheaterProgress";
 
 function asMappingProof(raw: unknown): MappingProof | null {
   if (!raw || typeof raw !== "object") return null;
@@ -478,20 +479,21 @@ export function JobTheaterView({
 
   // Prefer row-derived progress while writing. Once reconcile starts (or all rows
   // are written), hold 99% — never imply "done" until status is terminal success.
-  const reportedPct = job.progress_pct ?? 0;
-  const derivedPct = total > 0 ? (processed / Math.max(total, 1)) * 100 : null;
-  const indeterminate = Boolean((job as { progress_indeterminate?: boolean }).progress_indeterminate) && !(total > 0);
-  let rawProgress: number;
-  if (reconciling) {
-    rawProgress = Math.max(reportedPct || 99, 99);
-  } else if (derivedPct != null) {
-    rawProgress = derivedPct;
-  } else {
-    rawProgress = indeterminate ? Math.min(reportedPct || 5, 5) : reportedPct;
-  }
-  const progress = isComplete
-    ? 100
-    : Math.min(99, Math.max(isRunning ? 1 : 0, Math.round(rawProgress)));
+  // Before the first write, use the engine phase % — 0/1M must not floor to 1%
+  // and bounce against reading/preflight heartbeats (5% → 1% → 5%).
+  const progress = theaterProgressPct({
+    phase: job.phase,
+    status: job.status,
+    progress_pct: job.progress_pct,
+    total_rows: total,
+    records_processed: processed,
+    progress_indeterminate: Boolean(
+      (job as { progress_indeterminate?: boolean }).progress_indeterminate,
+    ),
+    reconciling,
+    isComplete,
+    isRunning,
+  });
 
   // Detect a stalled bar: same progress value for a few seconds while running.
   const [stalled, setStalled] = useState(false);
@@ -510,7 +512,11 @@ export function JobTheaterView({
     return () => window.clearTimeout(timer);
   }, [progress, isRunning]);
 
-  const startMs = toEpochMs(job.started_at) ?? startedAtFallback ?? Date.now();
+  const startMs =
+    toEpochMs(job.started_at)
+    ?? toEpochMs(job.created_at)
+    ?? startedAtFallback
+    ?? Date.now();
   const endMs = toEpochMs(job.completed_at) ?? Date.now();
   const elapsed = Math.max(0, endMs - startMs);
 

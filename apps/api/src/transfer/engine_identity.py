@@ -190,3 +190,34 @@ def _enforce_decision_artifact(
         error_policy=error_policy,
     )
     return err, (art.to_dict() if art is not None else None)
+
+
+def reuse_approved_validate_population_fit(request) -> bool:
+    """True when Execute should confirm Validate, not re-walk the source.
+
+    Studio Validate already ran mapping, schema, dest access, and a bounded
+    population-fit scan (Studio time budget). Execute still probes dest,
+    enforces the Decision Artifact / Map→DDL fingerprint, and binds
+    write-time ``fits_decimal`` on every row. Re-walking 1M rows before the
+    first batch is the same question asked twice — not a second proof.
+
+    Never set ``skip_preflight``. Missing or short artifact hashes still
+    walk (API / scheduler / tests without a stamped Validate).
+    """
+    if bool(getattr(request, "skip_preflight", False)):
+        return False
+    digest = str(getattr(request, "approved_decision_artifact_hash", "") or "").strip()
+    if len(digest) != 64:
+        return False
+    maps = list(getattr(request, "mappings", None) or [])
+    return bool(maps)
+
+
+def execute_preflight_progress_message(request) -> str:
+    """Operator-facing Run copy — do not say Validate is running again."""
+    if reuse_approved_validate_population_fit(request):
+        return (
+            "Confirming approved Validate — mapping and schema already passed. "
+            "Write-time fit still binds every row."
+        )
+    return "Validating mapping and schema…"
