@@ -145,4 +145,11 @@ describe("schemaPolicyHonestyLine", () => {
     const line = schemaPolicyHonestyLine("type_locked");
     assert.match(line, /silent-cast/i);
   });
+
+  it("propagate_all shares the ADD COLUMN kernel — not a second mapper", () => {
+    const line = schemaPolicyHonestyLine("propagate_all");
+    assert.match(line, /ADD COLUMN kernel/i);
+    assert.match(line, /every selected stream/i);
+    assert.match(line, /Hard-breaking/i);
+  });
 });

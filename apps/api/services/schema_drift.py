@@ -44,8 +44,8 @@ SCHEMA_POLICY_HONESTY: dict[str, str] = {
         "Type narrow, PK, and dest-only NOT NULL still pause — not a silent rewrite."
     ),
     "propagate_all": (
-        "Same ADD COLUMN on every stream. Does not rewrite destination types. "
-        "Hard-breaking changes still pause."
+        "Same ADD COLUMN kernel as propagate columns — every selected stream on this job. "
+        "Does not rewrite destination types. Hard-breaking changes still pause."
     ),
     "pause_on_change": (
         "Any detected change — including additive — pauses Validate and scheduled beats. "

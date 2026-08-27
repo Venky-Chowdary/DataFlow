@@ -124,6 +124,7 @@ import {
   schemaPolicyBackfills,
   studioSchedulePolicies,
 } from "../lib/studioDataRules";
+import { buildValidateContractKey as composeValidateContractKey } from "../lib/studioValidateIdentity";
 import {
   CDC_DELIVERY_AT_LEAST_ONCE,
   exactlyOnceWiredDest,
@@ -5229,6 +5230,10 @@ export function TransferPage({
           validationMode,
           schemaPolicy,
           backfillNewFields,
+          writeViaStaging,
+          priorityColumn,
+          priorityDirection,
+          rowLimit,
         }),
         delivery_guarantee: studioDeliveryGuarantee({
           syncMode,
@@ -5300,30 +5305,38 @@ export function TransferPage({
     exportFormat,
     destOutputPath,
   });
-  /** Map/sync/PK/dest edits must invalidate a prior green Validate before Execute. */
+  /** Map/sync/PK/dest/Advanced edits must invalidate a prior green Validate before Execute. */
   const buildValidateContractKey = useCallback(
     (maps: EditableMapping[]) =>
-      JSON.stringify({
+      composeValidateContractKey({
         syncMode,
         primaryKeyField,
         cursorField,
         validationMode,
         schemaPolicy,
-        targetCollection: targetCollection.trim(),
+        targetCollection,
         destType,
         targetDb,
         destKindMode,
-        destSchema: destSchema.trim(),
-        mappings: maps.map((m) => [
-          m.source,
-          m.target,
-          m.transform,
-          m.engineTransform ?? "",
-          m.approved,
-          Boolean(m.createNew),
-          m.assignmentStrategy ?? "",
-          m.destType ?? "",
-        ]),
+        destSchema,
+        mappings: maps,
+        dateLocale,
+        numberLocale,
+        backfillNewFields,
+        writeViaStaging,
+        deliveryGuarantee,
+        allowAppendOnly,
+        snapshotMode,
+        priorityColumn,
+        priorityDirection,
+        rowLimit,
+        cursorSemantics,
+        streamFields,
+        shapeRecipeHash: shapeIdentity?.hash || "",
+        shapeSteps,
+        multiSubnetFailover,
+        cdcRowFilter,
+        schemaDriftAcknowledged,
       }),
     [
       syncMode,
@@ -5336,6 +5349,23 @@ export function TransferPage({
       targetDb,
       destKindMode,
       destSchema,
+      dateLocale,
+      numberLocale,
+      backfillNewFields,
+      writeViaStaging,
+      deliveryGuarantee,
+      allowAppendOnly,
+      snapshotMode,
+      priorityColumn,
+      priorityDirection,
+      rowLimit,
+      cursorSemantics,
+      streamFields,
+      shapeIdentity?.hash,
+      shapeSteps,
+      multiSubnetFailover,
+      cdcRowFilter,
+      schemaDriftAcknowledged,
     ],
   );
   const validateContractKey = useMemo(

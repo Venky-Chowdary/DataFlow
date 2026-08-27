@@ -848,6 +848,10 @@ def test_schema_policy_honesty_line_matches_evolution_kernel():
     locked = schema_policy_honesty_line("type_locked")
     assert "silent-cast" in locked
 
+    prop_all = schema_policy_honesty_line("propagate_all")
+    assert "ADD COLUMN kernel" in prop_all
+    assert "every selected stream" in prop_all
+
     gates = run_transfer_policy_gates(schema_policy="manual_review")
     g10 = next(g for g in gates if g["id"] == "g10_schema_policy")
     assert g10["status"] == "pass"

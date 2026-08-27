@@ -458,6 +458,8 @@ describe("Transfer Studio chrome contracts", () => {
     assert.doesNotMatch(page, /size="sm"[\s\S]{0,80}df2-dest-advanced-btn|df2-dest-advanced-btn[\s\S]{0,80}size="sm"/);
     assert.match(page, /variant="secondary"[\s\S]{0,120}df2-dest-advanced-btn|df2-dest-advanced-btn[\s\S]{0,80}variant="secondary"/);
     assert.match(page, /schemaPolicyHonestyLine\(schemaPolicy\)/);
+    assert.match(page, /composeValidateContractKey/);
+    assert.match(page, /studioValidateIdentity/);
     assert.match(page, /Existing table detected/);
     assert.match(page, /This is not create-new/);
     assert.match(page, /empty leftover|even if a prior run wrote 0 rows/);
@@ -739,5 +741,8 @@ describe("Transfer Studio chrome contracts", () => {
     assert.match(chunk, /approved_decision_artifact_hash/);
     assert.match(chunk, /mergeSignedRiskContracts/);
     assert.match(chunk, /buildPreflightMappings/);
+    assert.match(chunk, /writeViaStaging/);
+    assert.match(chunk, /priorityColumn/);
+    assert.match(chunk, /rowLimit/);
   });
 });

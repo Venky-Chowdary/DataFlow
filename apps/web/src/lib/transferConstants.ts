@@ -101,7 +101,7 @@ export const SCHEMA_POLICIES: { id: SchemaPolicyId; label: string; detail: strin
   {
     id: "propagate_all",
     label: "Propagate columns (all streams)",
-    detail: "Same ADD COLUMN on every stream. Does not rewrite destination types.",
+    detail: "Same ADD COLUMN kernel as propagate columns — every selected stream on this job. Does not rewrite destination types.",
   },
   {
     id: "pause_on_change",
@@ -269,8 +269,8 @@ export function schemaPolicyHonestyLine(policy: string): string {
       );
     case "propagate_all":
       return (
-        "Same ADD COLUMN on every stream. Does not rewrite destination types. "
-        + "Hard-breaking changes still pause."
+        "Same ADD COLUMN kernel as propagate columns — every selected stream on this job. "
+        + "Does not rewrite destination types. Hard-breaking changes still pause."
       );
     case "pause_on_change":
       return (
