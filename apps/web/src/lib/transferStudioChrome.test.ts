@@ -810,3 +810,16 @@ describe("GitOps Advanced allowlist", () => {
     assert.match(manifest, /apply_spec = apply_schedule_spec\(spec\)/);
   });
 });
+
+describe("Overview parked-decision attention", () => {
+  it("surfaces inbox parked count and does not treat parked as failed or paused", () => {
+    const dash = readFileSync(join(webRoot, "pages/DashboardPage.tsx"), "utf8");
+    const app = readFileSync(join(webRoot, "DataTransferApp.tsx"), "utf8");
+    assert.match(dash, /fetchOpenScheduleApprovals/);
+    assert.match(dash, /parked on a decision/);
+    assert.match(dash, /Open Pipelines inbox/);
+    assert.match(dash, /setParkedCount\(null\)/);
+    assert.doesNotMatch(dash, /parked on a failed/);
+    assert.match(app, /onOpenSchedules=\{\(\) => setScreen\("schedules"\)\}/);
+  });
+});

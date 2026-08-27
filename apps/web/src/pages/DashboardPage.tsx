@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { ConnectorIcon } from "../app/brand-icons";
 import { Connector, PipelineSchedule, TransferJob } from "../lib/types";
-import { fetchOpsDlq, fetchOpsFreshness } from "../lib/api";
+import { fetchOpsDlq, fetchOpsFreshness, fetchOpenScheduleApprovals } from "../lib/api";
 import { formatRelativeTime } from "../lib/connectionWorkbench";
 import {
   buildStatusDistribution,
@@ -39,6 +39,7 @@ interface DashboardPageProps {
   onOpenJobs?: () => void;
   onOpenJob?: (jobId: string) => void;
   onOpenPipeline?: (scheduleId: string) => void;
+  onOpenSchedules?: () => void;
 }
 
 const JOB_LIMIT = 10;
@@ -76,9 +77,12 @@ export function DashboardPage({
   onOpenJobs,
   onOpenJob,
   onOpenPipeline,
+  onOpenSchedules,
 }: DashboardPageProps) {
   const [opsLagSeconds, setOpsLagSeconds] = useState<number | null>(null);
   const [dlqCount, setDlqCount] = useState<number | null>(null);
+  /** Inbox SSOT. null = unknown (failed fetch) — never invent 0 parked. */
+  const [parkedCount, setParkedCount] = useState<number | null>(null);
   const [freshness, setFreshness] = useState<{
     slo_status?: string;
     warn_threshold_seconds?: number;
@@ -110,6 +114,9 @@ export function DashboardPage({
     fetchOpsDlq(50)
       .then((d) => setDlqCount(d.count))
       .catch(() => setDlqCount(null));
+    fetchOpenScheduleApprovals()
+      .then((rows) => setParkedCount(rows.length))
+      .catch(() => setParkedCount(null));
   }, []);
 
   const completed = jobs.filter((j) => isJobSuccess(j.status));
@@ -179,6 +186,9 @@ export function DashboardPage({
         ? `CDC lag ${cdcLagSeconds.toFixed(0)}s`
         : null,
     pausedPipelines > 0 ? `${pausedPipelines} paused schedule${pausedPipelines === 1 ? "" : "s"}` : null,
+    parkedCount != null && parkedCount > 0
+      ? `${parkedCount} schedule${parkedCount === 1 ? "" : "s"} parked on a decision`
+      : null,
   ].filter(Boolean) as string[];
   const attentionSignature = attentionItems.join(" · ");
   const [attentionDismissed, setAttentionDismissed] = useState(false);
@@ -221,6 +231,11 @@ export function DashboardPage({
                 onClick={() => onOpenPipeline(freshness.alerts![0].schedule_id!)}
               >
                 Open pipeline
+              </button>
+            )}
+            {parkedCount != null && parkedCount > 0 && failed.length === 0 && onOpenSchedules && (
+              <button type="button" className="df2-overview-attention-action" onClick={onOpenSchedules}>
+                Open Pipelines inbox
               </button>
             )}
             <button
