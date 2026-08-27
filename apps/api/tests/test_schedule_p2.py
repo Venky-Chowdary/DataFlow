@@ -1058,6 +1058,36 @@ def test_list_summary_exposes_advanced_write_knobs():
     assert summary.number_locale == "EU"
 
 
+def test_patch_empty_preserves_validate_identity_hashes(temp_store):
+    """Blank identity on PATCH is omit — not a wipe of Studio Validate stamps."""
+    sched = store.create_schedule({
+        "name": "Stamped",
+        "source_connector_id": "src-1",
+        "source_table": "orders",
+        "dest_connector_id": "dst-1",
+        "dest_table": "orders_wh",
+        "interval": "daily",
+        "mappings": _MAPPINGS,
+        "shape_recipe": {"steps": [{"op": "trim", "column": "name"}]},
+        "approved_shape_recipe_hash": "a" * 64,
+        "approved_decision_artifact_hash": "b" * 64,
+        "approved_ddl_identity_hash": "c" * 64,
+    })
+    updated = store.update_schedule(sched.id, {
+        "name": "renamed only",
+        "shape_recipe": {},
+        "approved_shape_recipe_hash": "",
+        "approved_decision_artifact_hash": "  ",
+        "approved_ddl_identity_hash": "",
+    })
+    assert updated is not None
+    assert updated.name == "renamed only"
+    assert updated.shape_recipe == {"steps": [{"op": "trim", "column": "name"}]}
+    assert updated.approved_shape_recipe_hash == "a" * 64
+    assert updated.approved_decision_artifact_hash == "b" * 64
+    assert updated.approved_ddl_identity_hash == "c" * 64
+
+
 def test_update_omitting_write_knobs_preserves_them(temp_store):
     sched = store.create_schedule({
         "name": "Stage then promote",

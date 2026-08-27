@@ -679,7 +679,31 @@ def create_schedule(data: dict[str, Any]) -> PipelineSchedule:
     return sched
 
 
+_VALIDATE_IDENTITY_HASH_KEYS = (
+    "approved_shape_recipe_hash",
+    "approved_decision_artifact_hash",
+    "approved_ddl_identity_hash",
+)
+
+
+def drop_blank_validate_identity(data: dict[str, Any]) -> dict[str, Any]:
+    """Empty hash / empty recipe on PATCH is omit, not wipe.
+
+    FastAPI ``"" is not None`` would otherwise clear Studio stamps on an
+    unrelated edit. Re-Validate still overwrites with a non-empty hash.
+    """
+    out = dict(data)
+    for key in _VALIDATE_IDENTITY_HASH_KEYS:
+        if key in out and not str(out.get(key) or "").strip():
+            out.pop(key)
+    recipe = out.get("shape_recipe")
+    if recipe is not None and not (isinstance(recipe, dict) and recipe):
+        out.pop("shape_recipe")
+    return out
+
+
 def update_schedule(schedule_id: str, data: dict[str, Any]) -> PipelineSchedule | None:
+    data = drop_blank_validate_identity(data)
     schedules = _load_all()
     for i, s in enumerate(schedules):
         if s.id != schedule_id:
