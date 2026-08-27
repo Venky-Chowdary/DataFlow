@@ -13,7 +13,8 @@ from services.acknowledgment_contract import (
     audit_acknowledgments,
 )
 from services.audit_log import append_audit_event
-from services.shape_preflight import shaped_preflight_image
+from services.file_parser import iter_stored_upload_rows
+from services.shape_preflight import shaped_population_rows, shaped_preflight_image
 from services.transfer_plan_store import (
     TransferPlanRecord,
     add_mapping_revision,
@@ -302,6 +303,11 @@ def run_plan_preflight(
     ).lower()
     source_kind = str(source.get("kind") or "file")
     source_format = str(source.get("format") or source.get("kind") or "file")
+    source_file_id = str(
+        source.get("file_id")
+        or (source.get("extra") or {}).get("file_id")
+        or ""
+    ).strip()
 
     # run_file_preflight is the SSOT for drift + gates — do not re-detect/overwrite.
     # Source connector/table/config + stream_contracts required for uniqueness probe
@@ -312,6 +318,14 @@ def run_plan_preflight(
         column_types=plan.source_schema,
         sample_rows=sample_rows,
     )
+
+    stored_population = iter_stored_upload_rows(source_file_id) if source_file_id else None
+    if stored_population is not None and shaped_image.applied:
+        stored_population = shaped_population_rows(
+            shape_recipe,
+            stored_population,
+            source_columns=shaped_image.columns,
+        )
 
     pf = run_file_preflight(
         columns=shaped_image.columns,
@@ -325,6 +339,9 @@ def run_plan_preflight(
         source_format=source_format,
         sync_mode=policies.get("sync_mode", "full_refresh_overwrite"),
         sample_rows=shaped_image.sample_rows,
+        source_file_id=source_file_id,
+        population_rows=stored_population,
+        rows_are_population=stored_population is not None,
         confidence_threshold=threshold,
         validation_mode=validation_mode,
         date_locale=policies.get("date_locale", ""),

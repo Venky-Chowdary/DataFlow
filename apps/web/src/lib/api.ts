@@ -435,6 +435,8 @@ export async function runPreflight(payload: {
   dest_extra?: Record<string, unknown>;
   source_kind?: string;
   source_type?: string;
+  /** Persisted /connectors/upload id — Validate scans the stored file, not the preview. */
+  source_file_id?: string;
   /**
    * Approved pre-load transform recipe. Execute shapes rows on the read, so the
    * gates have to judge the transformed rows or they refuse values the write
@@ -2616,6 +2618,8 @@ export async function runUniversalTransfer(options: {
   }
   if (options.sourceExtra && Object.keys(options.sourceExtra).length) {
     formData.append("source_extra_json", JSON.stringify(options.sourceExtra));
+    const storedId = String(options.sourceExtra.file_id || "").trim();
+    if (storedId) formData.append("source_file_id", storedId);
   }
   if (options.priorityColumn) formData.append("priority_column", options.priorityColumn);
   if (options.priorityDirection) formData.append("priority_direction", options.priorityDirection);

@@ -256,3 +256,211 @@ def test_file_iterator_feeds_preflight_end_to_end() -> None:
     assert result["passed"] is False
     assert result["population_fit"]["evidence"] == "exact"
     assert result["population_fit"]["findings"][0]["example_rows"] == [4_812]
+
+
+def test_source_file_id_scans_stored_upload_past_preview(tmp_path, monkeypatch) -> None:
+    """Studio Validate posts 25 preview rows. The stored upload is the population.
+
+    flights-1m class: peek-inferred NUMBER(9,6), last cell 7.9166665 at row 293.
+    Without file_id the gate would warn on a clean preview and Execute would
+    fail-closed at write.
+    """
+    from services import file_parser as fp
+
+    monkeypatch.setattr(fp, "UPLOAD_DIR", tmp_path)
+    monkeypatch.setattr(fp, "REGISTRY_PATH", tmp_path / "upload_registry.json")
+
+    buf = io.StringIO()
+    writer = csv.DictWriter(buf, fieldnames=["DEP_TIME"])
+    writer.writeheader()
+    for i in range(1, 294):
+        writer.writerow({"DEP_TIME": "7.9166665" if i == 293 else "12.345678"})
+    record = fp.store_upload("flights-clock.csv", buf.getvalue().encode("utf-8"))
+
+    result = _preflight(
+        columns=["DEP_TIME"],
+        source_kind="file",
+        source_format="csv",
+        column_types={"DEP_TIME": "NUMBER(9,6)"},
+        destination_column_types={"DEP_TIME": "NUMBER(9,6)"},
+        mappings=[
+            {
+                "source": "DEP_TIME",
+                "target": "DEP_TIME",
+                "confidence": 0.93,
+                "target_type": "NUMBER(9,6)",
+            }
+        ],
+        row_count=293,
+        sample_rows=[{"DEP_TIME": "12.345678"} for _ in range(25)],
+        source_file_id=record["file_id"],
+    )
+
+    assert result["passed"] is False
+    assert result["population_fit"]["evidence"] == "exact"
+    assert result["population_fit"]["scanned_population"] is True
+    assert result["population_fit"]["rows_scanned"] == 293
+    kernel = result["validation_findings"]
+    assert kernel, "stored-file scan must light Validate Remap"
+    assert kernel[0]["suggested_target_type"] == "NUMBER(10,7)"
+    assert kernel[0]["failure_class"] == "OVERFLOW"
+    assert kernel[0]["row_number"] == 293
+
+
+def test_unknown_source_file_id_stays_sampled_and_does_not_claim_fit() -> None:
+    result = _preflight(
+        sample_rows=_rows(25),
+        source_file_id="does-not-exist",
+    )
+    gate = _gate(result)
+    assert gate["status"] == "warn"
+    assert result["population_fit"]["evidence"] == "sampled"
+    assert result["population_fit"]["scanned_population"] is False
+
+
+def test_plan_validate_scans_source_file_id(tmp_path, monkeypatch) -> None:
+    """The primary Studio path is plan preflight, not POST /preflight/run."""
+    from services import file_parser as fp
+    from services.transfer_plan_service import run_plan_preflight, sync_plan_mappings
+    from services.transfer_plan_store import create_plan
+
+    monkeypatch.setattr(fp, "UPLOAD_DIR", tmp_path)
+    monkeypatch.setattr(fp, "REGISTRY_PATH", tmp_path / "upload_registry.json")
+    monkeypatch.setattr(
+        "services.transfer_plan_store.STORE_PATH", tmp_path / "plans.json"
+    )
+    monkeypatch.setattr("services.audit_log.STORE_PATH", tmp_path / "audit.jsonl")
+
+    buf = io.StringIO()
+    writer = csv.DictWriter(buf, fieldnames=["DEP_TIME"])
+    writer.writeheader()
+    for i in range(1, 294):
+        writer.writerow({"DEP_TIME": "7.9166665" if i == 293 else "12.345678"})
+    record = fp.store_upload("flights-clock.csv", buf.getvalue().encode("utf-8"))
+
+    def _inspect(**_kw):
+        return {
+            "connected": True,
+            "table_exists": True,
+            "can_create_table": True,
+            "can_write": True,
+            "db_type": "snowflake",
+            "column_types": {"DEP_TIME": "NUMBER(9,6)"},
+            "message": "ok",
+        }
+
+    monkeypatch.setattr(
+        "src.services.preflight_service.inspect_destination_for_preflight",
+        _inspect,
+    )
+    monkeypatch.setattr(
+        "services.preflight_service.inspect_destination_for_preflight",
+        _inspect,
+    )
+
+    plan = create_plan(
+        {
+            "name": "flights-clock",
+            "source": {
+                "kind": "file",
+                "format": "csv",
+                "file_id": record["file_id"],
+                "filename": "flights-clock.csv",
+            },
+            "destination": {
+                "kind": "database",
+                "format": "snowflake",
+                "table": "TREE",
+            },
+            "source_columns": ["DEP_TIME"],
+            "source_schema": {"DEP_TIME": "NUMBER(9,6)"},
+            "target_columns": ["DEP_TIME"],
+            "target_schema": {"DEP_TIME": "NUMBER(9,6)"},
+            "row_count_estimate": 293,
+            "sample_rows": [{"DEP_TIME": "12.345678"} for _ in range(25)],
+            "policies": {
+                "validation_mode": "strict",
+                "sync_mode": "full_refresh_overwrite",
+                "schema_policy": "manual_review",
+            },
+        }
+    )
+    sync_plan_mappings(
+        plan.id,
+        [
+            {
+                "source": "DEP_TIME",
+                "target": "DEP_TIME",
+                "confidence": 0.93,
+                "target_type": "NUMBER(9,6)",
+            }
+        ],
+    )
+
+    result = run_plan_preflight(plan.id)
+    assert result["passed"] is False
+    assert result["population_fit"]["evidence"] == "exact"
+    kernel = result["validation_findings"]
+    assert kernel[0]["suggested_target_type"] == "NUMBER(10,7)"
+    assert kernel[0]["row_number"] == 293
+
+
+def test_stored_file_integer_and_varchar_overflows_stamp_dest_widen(
+    tmp_path, monkeypatch
+) -> None:
+    """One algorithm, three carriers — integer and VARCHAR must name a dest widen."""
+    from services import file_parser as fp
+
+    monkeypatch.setattr(fp, "UPLOAD_DIR", tmp_path)
+    monkeypatch.setattr(fp, "REGISTRY_PATH", tmp_path / "upload_registry.json")
+
+    buf = io.StringIO()
+    writer = csv.DictWriter(buf, fieldnames=["qty", "code"])
+    writer.writeheader()
+    for i in range(1, 40):
+        writer.writerow(
+            {
+                "qty": "99999999999" if i == 39 else "12",
+                "code": ("X" * 20) if i == 39 else "ok",
+            }
+        )
+    record = fp.store_upload("fit-int-vc.csv", buf.getvalue().encode("utf-8"))
+
+    result = _preflight(
+        columns=["qty", "code"],
+        source_kind="file",
+        source_format="csv",
+        column_types={"qty": "INTEGER", "code": "VARCHAR(8)"},
+        destination_column_types={"qty": "INTEGER", "code": "VARCHAR(8)"},
+        destination_db_type="postgresql",
+        mappings=[
+            {
+                "source": "qty",
+                "target": "qty",
+                "confidence": 0.9,
+                "target_type": "INTEGER",
+            },
+            {
+                "source": "code",
+                "target": "code",
+                "confidence": 0.9,
+                "target_type": "VARCHAR(8)",
+            },
+        ],
+        row_count=39,
+        sample_rows=[{"qty": "12", "code": "ok"} for _ in range(25)],
+        source_file_id=record["file_id"],
+    )
+
+    assert result["passed"] is False
+    suggested = {
+        f["source_column"]: f["suggested_target_type"]
+        for f in result["validation_findings"]
+    }
+    classes = {
+        f["source_column"]: f["failure_class"] for f in result["validation_findings"]
+    }
+    assert "BIGINT" in (suggested.get("qty") or "").upper()
+    assert classes.get("qty") == "OVERFLOW"
+    assert "VARCHAR" in (suggested.get("code") or "").upper()
+    assert classes.get("code") == "LENGTH_OVERFLOW"

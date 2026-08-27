@@ -131,6 +131,14 @@ def classify_transform_failure(
         t in msg or t in tgt_l for t in ("decimal", "number", "numeric", "bignumeric")
     ):
         return FailureClass.OVERFLOW
+    if ("does not fit" in msg or "do not fit" in msg or "value exceeds" in msg) and re.search(
+        r"\b(var)?char|nvarchar|string|text\b", f"{msg} {tgt_l}"
+    ):
+        return FailureClass.LENGTH_OVERFLOW
+    if ("does not fit" in msg or "do not fit" in msg or "value exceeds" in msg) and re.search(
+        r"\b(tiny|small|big|byte)?int(eger)?\b", f"{msg} {tgt_l}"
+    ):
+        return FailureClass.OVERFLOW
     if "empty value cannot coerce" in msg or (
         "empty" in msg and ("cannot coerce" in msg or "cannot cast" in msg)
     ):

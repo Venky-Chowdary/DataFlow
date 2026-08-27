@@ -1170,6 +1170,7 @@ export function TransferPage({
         kind: "file",
         format: parsed?.file_type ?? file?.name.split(".").pop() ?? "csv",
         filename: file?.name,
+        ...(parsed?.file_id ? { file_id: parsed.file_id } : {}),
       };
     }
     if (!sourceConnector) return { kind: "database", format: "", connector_id: sourceConnectorId };
@@ -4297,6 +4298,7 @@ export function TransferPage({
           write_via_staging: writeViaStaging,
           source_kind: sourceKind,
           source_type: resolveDriverType(sourceConnector?.type || "") || undefined,
+          ...(parsed?.file_id ? { source_file_id: parsed.file_id } : {}),
         });
       } catch (apiErr) {
         if (sourceKind === "file" && destKindMode === "file_export" && parsed) {
@@ -4622,7 +4624,7 @@ export function TransferPage({
       return;
     }
     const needsDbTarget = destKindMode === "database";
-    if (sourceKind === "file" && !file) {
+    if (sourceKind === "file" && !file && !parsed?.file_id) {
       toast({ title: "Source file required", message: "Upload a file before executing.", tone: "warning" });
       setStep(STEP_SOURCE);
       return;
@@ -4792,6 +4794,7 @@ export function TransferPage({
             ...(sourceKind === "database"
               ? callableSourceExtra(sourceReadMode, procedureCall, procedureParams) || {}
               : {}),
+            ...(parsed?.file_id ? { file_id: parsed.file_id } : {}),
           };
           if (syncMode === "cdc") {
             if (multiSubnetFailover) extra.multi_subnet_failover = true;

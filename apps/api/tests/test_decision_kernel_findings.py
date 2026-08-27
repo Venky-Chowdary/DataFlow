@@ -205,6 +205,25 @@ def test_rank_does_not_invent_widen_for_auto_ambiguous_decimal():
     assert "NUMBER(8," not in (suggested or "")
 
 
+def test_varchar_and_integer_do_not_fit_classify_to_the_right_class():
+    assert (
+        classify_transform_failure(
+            "1 value(s) in 'code' do not fit code VARCHAR(8) (first at row 39)",
+            target_type="VARCHAR(8)",
+            source_value="XXXXXXXXXXXXXXXXXXXX",
+        )
+        is FailureClass.LENGTH_OVERFLOW
+    )
+    assert (
+        classify_transform_failure(
+            "1 value(s) in 'qty' do not fit qty INTEGER (first at row 39)",
+            target_type="INTEGER",
+            source_value="99999999999",
+        )
+        is FailureClass.OVERFLOW
+    )
+
+
 def test_findings_from_population_fit_stamps_dest_widen():
     report = {
         "evidence": "exact",

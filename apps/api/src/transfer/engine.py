@@ -1705,6 +1705,10 @@ class UniversalTransferEngine:
         # Resolve first: a connector_id reference carries the engine id that
         # create-new invention needs, and an inline format may be empty.
         self._resolve_saved_connectors(request)
+        if request.source.kind == "file":
+            from services.transfer_file_staging import hydrate_file_source
+
+            hydrate_file_source(request)
         # Create-new invention needs the source engine to keep Unicode polarity
         # (PostgreSQL VARCHAR → SQL Server NVARCHAR, not code-page VARCHAR).
         with bind_auto_create_job(job_id), bind_source_engine(
@@ -4961,10 +4965,12 @@ class UniversalTransferEngine:
         self._resolve_saved_connectors(request)
         # Claim-queue / HA: spill file bytes before Mongo serialize so workers
         # can hydrate source_path (never mark requires_file_reupload on fresh submit).
-        if request.source.kind == "file" and request.source_content:
-            from services.transfer_file_staging import persist_file_source
+        if request.source.kind == "file":
+            from services.transfer_file_staging import hydrate_file_source, persist_file_source
 
-            persist_file_source(request)
+            hydrate_file_source(request)
+            if request.source_content:
+                persist_file_source(request)
         mongo = get_mongodb_service()
         from services.procedure_source import source_read_mode_of
 

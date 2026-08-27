@@ -720,6 +720,7 @@ def run_file_preflight(
     source_table: str = "",
     destination_table: str = "",
     source_filename: str = "",
+    source_file_id: str = "",
     schema_policy: str = "manual_review",
     backfill_new_fields: bool = False,
     stored_source_fp: str = "",
@@ -1510,6 +1511,13 @@ def run_file_preflight(
             scan_population_fit,
         )
 
+        if population_rows is None and str(source_file_id or "").strip():
+            from services.file_parser import iter_stored_upload_rows
+
+            stored_rows = iter_stored_upload_rows(source_file_id)
+            if stored_rows is not None:
+                population_rows = stored_rows
+                rows_are_population = True
         scan_input = population_rows if population_rows is not None else sample_rows
         fit_report = scan_population_fit(
             scan_input,

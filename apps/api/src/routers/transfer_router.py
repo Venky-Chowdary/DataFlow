@@ -742,6 +742,16 @@ async def analyze_file_transfer(
         source_schema=schema,
     )
     plan["row_count_estimate"] = row_count
+    stored_file_id = ""
+    try:
+        from services.file_parser import store_upload
+
+        stored = store_upload(file.filename or "upload.csv", content)
+        stored_file_id = str(stored.get("file_id") or "")
+    except Exception:
+        stored_file_id = ""
+    if stored_file_id:
+        plan["file_id"] = stored_file_id
     return plan
 
 
@@ -1027,6 +1037,7 @@ async def run_universal_transfer(
     enable_ocr: str = Form("false"),
     dest_extra_json: str = Form(""),
     source_extra_json: str = Form(""),
+    source_file_id: str = Form(""),
     stream_contracts_json: str = Form(""),
     data_region: str = Form(""),
     date_locale: str = Form(""),
@@ -1090,6 +1101,17 @@ async def run_universal_transfer(
                 source_extra.update(parsed)
         except Exception as exc:
             logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+    stored_file_id = (source_file_id or "").strip() or str(source_extra.get("file_id") or "").strip()
+    if stored_file_id:
+        source_extra["file_id"] = stored_file_id
+        if not content:
+            from services.file_parser import get_file
+
+            stored = get_file(stored_file_id)
+            if stored:
+                filename = filename or str(stored.get("filename") or "upload.csv")
+                if not src_fmt:
+                    src_fmt = str(stored.get("format") or "")
     source = EndpointConfig(
         kind=source_kind,
         format=src_fmt,
@@ -1254,6 +1276,17 @@ async def run_universal_transfer(
                 request_obj.source.extra,
                 payload.get("source") or {},
             )
+            plan_src = payload.get("source") or {}
+            plan_fid = str(
+                plan_src.get("file_id")
+                or (plan_src.get("extra") or {}).get("file_id")
+                or ""
+            ).strip()
+            if plan_fid:
+                request_obj.source.extra = {
+                    **(request_obj.source.extra or {}),
+                    "file_id": plan_fid,
+                }
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
     if mappings_json.strip() and not (plan_id and plan_id.strip()):

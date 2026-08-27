@@ -16,6 +16,7 @@ the values that will actually be written.
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence
 
@@ -189,3 +190,32 @@ def shaped_column_types(
         if declared_types.get(name, carrier) != carrier:
             retyped[name] = carrier
     return resolved, retyped
+
+
+def shaped_population_rows(
+    recipe_payload: Any,
+    rows: Iterable[Mapping[str, Any]] | None,
+    *,
+    source_columns: Sequence[str] | None = None,
+) -> Iterable[Mapping[str, Any]] | None:
+    """Apply the approved recipe to a stored-file population, or pass it through.
+
+    Validate must scan the image Execute will write. A ``round`` step that
+    makes a decimal fit would be blocked if we scanned the raw upload.
+    """
+    if rows is None:
+        return None
+    from services.shape_apply import ShapeRunner, build_shape_runner
+
+    runner = build_shape_runner(recipe_payload, source_columns=source_columns)
+    if runner is None:
+        return rows
+    probe = ShapeRunner(runner.recipe)
+
+    def _iter() -> Iterator[dict[str, Any]]:
+        for row in rows:
+            shaped = probe.records([dict(row)])
+            if shaped:
+                yield shaped[0]
+
+    return _iter()

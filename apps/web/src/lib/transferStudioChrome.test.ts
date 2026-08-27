@@ -601,8 +601,19 @@ describe("Transfer Studio chrome contracts", () => {
     assert.doesNotMatch(dash, /dashCta\("population/);
     assert.doesNotMatch(dash, /variant="primary"[\s\S]{0,120}widen to NUMBER/);
     const page = readFileSync(join(webRoot, "pages/TransferPage.tsx"), "utf8");
+    const api = readFileSync(join(webRoot, "lib/api.ts"), "utf8");
     assert.match(page, /isNumericWiden/);
     assert.match(page, /must not dump clock\/money values into/);
+    // Studio Validate must send the persisted upload so the scan is not preview-only.
+    assert.match(page, /source_file_id: parsed\??\.file_id/);
+    assert.match(page, /file_id: parsed\??\.file_id/);
+    assert.match(page, /!file && !parsed\?\.file_id/);
+    assert.match(page, /file_id: parsed\.file_id/);
+    assert.match(api, /source_file_id/);
+    assert.match(api, /source_file_id\?: string/);
+    assert.match(types, /file_id\?: string;/);
+    // Third overflowing column must still light a Remap control.
+    assert.match(dash, /\.slice\(0, 8\)/);
     const quarantine = readFileSync(join(webRoot, "components/transfer/QuarantinePanel.tsx"), "utf8");
     assert.match(quarantine, /suggested_fix/);
     assert.match(quarantine, /suggested_target_type/);

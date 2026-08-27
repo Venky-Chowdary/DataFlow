@@ -567,6 +567,8 @@ export interface WorkbookSheet {
 export interface ParsedUpload {
   row_count: number;
   columns: string[];
+  /** Persisted upload id — Validate scans this population, not just the preview. */
+  file_id?: string;
   file_type?: string;
   /** Sheet inventory for workbooks, so a sheet is picked from the real names. */
   sheets?: WorkbookSheet[];
