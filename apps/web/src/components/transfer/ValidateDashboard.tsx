@@ -46,7 +46,7 @@ import {
   extraSourceColumnsFromContract,
   shapeContractFromPreflight,
 } from "../../lib/destExistsShape";
-import { populationFitSummary } from "../../lib/populationFit";
+import { createNewFitWidenActions, createNewFitWidenLabel, populationFitSummary } from "../../lib/populationFit";
 import { ringDasharray, validateRingPercent } from "../../lib/progressRing";
 import { BadDataFixDrawer, type BadDataIssue } from "./BadDataFixDrawer";
 import { Gate8ProofCard, type Gate8Reconciliation } from "./Gate8ProofCard";
@@ -222,6 +222,8 @@ interface ValidateDashboardProps {
   writeViaStaging?: boolean;
   /** Apply a one-click AI suggestion to the Studio (change type, add transform, navigate). */
   onApplyAction?: (action: ValidationSuggestedAction) => void;
+  /** Apply every proven create-new CREATE widen, then re-Validate. */
+  onApplyCreateNewWidens?: () => void;
   /** Apply strip_controls across mappings and re-run preflight. Returns what changed. */
   onStripControlChars?: () => void | Promise<RemediationOpResult | void>;
   /** True when text mappings already carry strip_controls (Execute will sanitize). */
@@ -748,6 +750,7 @@ export function ValidateDashboard({
   syncMode,
   writeViaStaging = false,
   onApplyAction,
+  onApplyCreateNewWidens,
   onStripControlChars,
   stripControlsApplied = false,
   onQuarantineAndRerun,
@@ -976,6 +979,11 @@ export function ValidateDashboard({
   const destShapeExtras = useMemo(() => extraSourceColumnsFromContract(destShape), [destShape]);
   const destShapePreserve = useMemo(() => destOnlyPreserveColumns(destShape), [destShape]);
   const destShapeCta = useMemo(() => destExistsPrimaryCta(destShape), [destShape]);
+  const createNewWidens = useMemo(() => createNewFitWidenActions(preflight), [preflight]);
+  const createNewWidenLabel = useMemo(
+    () => createNewFitWidenLabel(createNewWidens),
+    [createNewWidens],
+  );
   const callableNote = useMemo(() => callableExtractNote(preflight), [preflight]);
   const showDestShape = Boolean(
     destShape
@@ -1240,6 +1248,42 @@ export function ValidateDashboard({
     () => findDuplicateKeyRoot(preflight, syncMode),
     [preflight, syncMode],
   );
+  const visibleExplainFixActions = useMemo(() => {
+    if (!explain?.suggested_actions?.length) return [];
+    return collapseEncodingSuggestedActions(
+      explain.suggested_actions.filter((action) => (
+        action.kind !== "open_mapping_proof"
+        && action.kind !== "mapping_proof"
+        && !(duplicateRoot && (
+          action.kind === "fix_source_keys"
+          || action.kind === "quarantine_and_rerun"
+          || action.kind === "review_mappings"
+        ))
+        && !(ENCODING_ACTION_KINDS.has(action.kind) && (showEncodingRemediation || isTypeMismatchBlock))
+        && !(isTypeMismatchBlock && (
+          action.kind === "review_mappings"
+          || action.kind === "change_target_type"
+          || action.kind === "open_mapping"
+        ))
+        && !(isFkOrphanBlock && (
+          action.kind === "fix_orphans"
+          || action.kind === "run_population_orphan_scan"
+          || action.kind === "review_mappings"
+        ))
+        && !(createNewWidens.length > 0 && (
+          action.kind === "review_mappings"
+          || action.kind === "change_target_type"
+        ))
+      )),
+    );
+  }, [
+    explain,
+    duplicateRoot,
+    showEncodingRemediation,
+    isTypeMismatchBlock,
+    isFkOrphanBlock,
+    createNewWidens.length,
+  ]);
   const displayBlockers = useMemo(
     () => (preflight ? buildDisplayBlockers(preflight, syncMode) : []),
     [preflight, syncMode],
@@ -1466,6 +1510,14 @@ export function ValidateDashboard({
   };
 
   const handleSuggestedAction = (action: ValidationSuggestedAction) => {
+    if (
+      createNewWidens.length > 0
+      && action.kind === "change_target_type"
+      && onApplyCreateNewWidens
+    ) {
+      onApplyCreateNewWidens();
+      return;
+    }
     // Encoding remediations share one surface — BadDataFixDrawer — so Strip /
     // Quarantine are not duplicated next to every “Fix bad data…” opener.
     if (action.kind === "normalize_control_chars" || action.kind === "open_bad_data_fix") {
@@ -1572,7 +1624,8 @@ export function ValidateDashboard({
 
   return (
     <section className={`df2-vd df2-vd-${heroTone}`} aria-label="Validation dashboard">
-      <header className="df2-vd-hero">
+      <header className={`df2-vd-hero${running ? " is-glass-live" : ""}`}>
+        {running ? <span className="df2-vd-hero-glow" aria-hidden /> : null}
         <div
           className={`df2-vd-hero-ring tone-${heroTone}${heroRing.indeterminate ? " is-indeterminate" : ""}${!heroRing.indeterminate && heroRing.pct >= 100 ? " is-complete" : ""}`}
           aria-hidden
@@ -2122,7 +2175,20 @@ export function ValidateDashboard({
                     {action.label}
                   </Button>
                 ))}
-                {!isTypeMismatchBlock
+                {createNewWidens.length > 0 && onApplyCreateNewWidens && (
+                  <Button
+                    size="sm"
+                    variant={dashCta("other")}
+                    disabled={remediating}
+                    leadingIcon={<DtIcon name="layers" size={14} />}
+                    onClick={() => onApplyCreateNewWidens()}
+                    title="Applies every proven CREATE type, then re-Validates. Destination is not written yet."
+                  >
+                    {createNewWidenLabel}
+                  </Button>
+                )}
+                {!createNewWidens.length
+                  && !isTypeMismatchBlock
                   && !showEncodingRemediation
                   && !isPrivilegeBlock
                   && !isConnectionBlock
@@ -2734,8 +2800,13 @@ export function ValidateDashboard({
                                           label: fix.suggested_fix || `Fix ${fix.column}`,
                                         })
                                       }
+                                      title={
+                                        createNewWidens.length > 1
+                                          ? `Applies all ${createNewWidens.length} proven CREATE types, then re-Validates`
+                                          : undefined
+                                      }
                                     >
-                                      Apply
+                                      {createNewWidens.length > 1 ? "Apply all" : "Apply"}
                                     </button>
                                   ) : null}
                                 </td>
@@ -2748,35 +2819,11 @@ export function ValidateDashboard({
                     </div>
                     );
                   })()}
-                  {explain.suggested_actions.length > 0 && (
+                  {visibleExplainFixActions.length > 0 && (
                     <div className="df2-vd-assist-actions">
                       <span className="df2-vd-assist-actions-title">Suggested fixes</span>
                       <div className="df2-vd-fix-actions">
-                        {collapseEncodingSuggestedActions(
-                          explain.suggested_actions.filter((action) =>
-                            action.kind !== "open_mapping_proof"
-                            && action.kind !== "mapping_proof"
-                            // Identity CTAs already live in Suggested fixes bar + rail.
-                            && !(duplicateRoot && (
-                              action.kind === "fix_source_keys"
-                              || action.kind === "quarantine_and_rerun"
-                              || action.kind === "review_mappings"
-                            ))
-                            // Encoding / strip CTAs belong only when encoding is the root cause.
-                            && !(ENCODING_ACTION_KINDS.has(action.kind) && (showEncodingRemediation || isTypeMismatchBlock))
-                            // Type-mismatch Map CTA already lives in the top Suggested fixes bar.
-                            && !(isTypeMismatchBlock && (
-                              action.kind === "review_mappings"
-                              || action.kind === "change_target_type"
-                              || action.kind === "open_mapping"
-                            ))
-                            && !(isFkOrphanBlock && (
-                              action.kind === "fix_orphans"
-                              || action.kind === "run_population_orphan_scan"
-                              || action.kind === "review_mappings"
-                            )),
-                          ),
-                        )
+                        {visibleExplainFixActions
                           .map((action, i) => (
                           <Button
                             key={`${action.kind}-${action.column ?? ""}-${i}`}

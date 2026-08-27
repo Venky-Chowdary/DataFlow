@@ -52,19 +52,37 @@ export function studioSchedulePolicies(input: {
   validationMode?: string;
   schemaPolicy?: string;
   backfillNewFields?: boolean;
+  writeViaStaging?: boolean;
+  priorityColumn?: string;
+  priorityDirection?: "asc" | "desc" | string;
+  rowLimit?: number;
 }): {
   validation_mode?: string;
   schema_policy?: string;
   backfill_new_fields: boolean;
+  write_via_staging: boolean;
+  priority_column: string;
+  priority_direction: "asc" | "desc";
+  row_limit: number;
 } {
   const validationMode = namedStudioValidationMode(input.validationMode);
   const schemaPolicy = namedStudioSchemaPolicy(input.schemaPolicy);
+  const direction = input.priorityDirection === "asc" ? "asc" : "desc";
+  const limit = Math.max(0, Number(input.rowLimit || 0) || 0);
   const out: {
     validation_mode?: string;
     schema_policy?: string;
     backfill_new_fields: boolean;
+    write_via_staging: boolean;
+    priority_column: string;
+    priority_direction: "asc" | "desc";
+    row_limit: number;
   } = {
     backfill_new_fields: Boolean(input.backfillNewFields) && schemaPolicyBackfills(schemaPolicy),
+    write_via_staging: Boolean(input.writeViaStaging),
+    priority_column: String(input.priorityColumn || "").trim(),
+    priority_direction: direction,
+    row_limit: limit,
   };
   if (validationMode) out.validation_mode = validationMode;
   if (schemaPolicy) out.schema_policy = schemaPolicy;

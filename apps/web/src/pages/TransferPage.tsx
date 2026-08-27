@@ -114,6 +114,7 @@ import {
   type ValidationModeId,
   multiStreamScd2MirrorBlockCopy,
   MULTI_STREAM_SCD2_MIRROR_BLOCK,
+  schemaPolicyHonestyLine,
   syncModeHonestyLine,
 } from "../lib/transferConstants";
 import {
@@ -123,6 +124,7 @@ import {
   schemaPolicyBackfills,
   studioSchedulePolicies,
 } from "../lib/studioDataRules";
+import { buildValidateContractKey as composeValidateContractKey } from "../lib/studioValidateIdentity";
 import {
   CDC_DELIVERY_AT_LEAST_ONCE,
   exactlyOnceWiredDest,
@@ -207,6 +209,7 @@ import {
   type PromotedPrimaryFix,
 } from "../lib/validateStudioPrimary";
 import { planFkOrphanSuggestedAction, resolvePopulationOrphanScanFlag } from "../lib/fkOrphanCta";
+import { createNewFitWidenActions, createNewFitWidenLabel } from "../lib/populationFit";
 import { suggestUniqueKeyCandidates, suggestCompositeUniqueKeyCandidates } from "../lib/uniqueKeySuggestions";
 import { needsMappingReview } from "../lib/columnWorkbench";
 import {
@@ -684,6 +687,15 @@ export function TransferPage({
       setWriteViaStaging(false);
     }
   }, [writeViaStagingSupported, writeViaStaging]);
+
+  useEffect(() => {
+    if (
+      deliveryGuarantee === "exactly_once"
+      && !exactlyOnceWiredDest(destDriverType || destType)
+    ) {
+      setDeliveryGuarantee("at_least_once");
+    }
+  }, [deliveryGuarantee, destDriverType, destType]);
 
   const applyVectorRoutingPlan = (plan: VectorRoutingPlan) => {
     if (plan.content_column) setVectorContentColumn(plan.content_column);
@@ -1245,6 +1257,9 @@ export function TransferPage({
       number_locale: numberLocale,
       backfill_new_fields: backfillNewFields,
       write_via_staging: writeViaStaging,
+      priority_column: priorityColumn || "",
+      priority_direction: priorityColumn ? priorityDirection : "desc",
+      row_limit: rowLimit > 0 ? rowLimit : 0,
       stream_contracts: streamContracts,
       ...(() => {
         const bind = contractBindFromPolicies({
@@ -1285,6 +1300,9 @@ export function TransferPage({
     numberLocale,
     backfillNewFields,
     writeViaStaging,
+    priorityColumn,
+    priorityDirection,
+    rowLimit,
     streamContracts,
     connectorId,
     destType,
@@ -3646,7 +3664,7 @@ export function TransferPage({
     setColumnMappings(next);
     toast({
       title: "CREATE types updated — re-validating",
-      message: `Updated ${hit} Map type(s) so the new table can hold the file. Snowflake is not written yet.`,
+      message: `Updated ${hit} Map type(s) so the new table can hold the source. The destination is not written yet.`,
       tone: "success",
     });
     void executePreflight(next);
@@ -4373,6 +4391,9 @@ export function TransferPage({
           acknowledgment_actor: ackActor || undefined,
           acknowledgment_reason: ackReason || undefined,
           write_via_staging: writeViaStaging,
+          priority_column: priorityColumn || undefined,
+          priority_direction: priorityColumn ? priorityDirection : undefined,
+          row_limit: rowLimit > 0 ? rowLimit : undefined,
           source_kind: sourceKind,
           source_type: resolveDriverType(sourceConnector?.type || "") || undefined,
           ...(parsed?.file_id ? { source_file_id: parsed.file_id } : {}),
@@ -4575,26 +4596,11 @@ export function TransferPage({
 
     const g15Cta = destExistsPrimaryCta(shapeContractFromPreflight(preflight));
     const ranked = rankAndDedupeSuggestedActions(firstBlocker?.suggested_actions);
-    const widens = ranked.filter((a) => (
-      a.kind === "change_target_type"
-      && a.to_type
-      && a.requires_ddl !== true
-      && a.mapping_applyable !== false
-      && a.apply_proven !== false
-    ));
-    const createNewFit =
-      widens.length > 0
-      && widens.every((a) => a.requires_ddl !== true)
-      && (
-        firstBlocker?.source?.id === "g3f_population_fit"
-        || Boolean((firstBlocker?.source?.details as { create_new_table?: boolean } | undefined)?.create_new_table)
-      );
-    if (createNewFit) {
+    const widens = createNewFitWidenActions(preflight);
+    if (widens.length > 0) {
       return {
         onPrimaryFix: () => applyCreateNewTypeWidens(widens),
-        primaryFixLabel: widens.length === 1
-          ? (widens[0].label || `Widen ${widens[0].column} to ${widens[0].to_type}`)
-          : `Widen CREATE types to fit this file (${widens.length} columns)`,
+        primaryFixLabel: createNewFitWidenLabel(widens),
       };
     }
     const action = ranked[0]
@@ -5242,6 +5248,10 @@ export function TransferPage({
           validationMode,
           schemaPolicy,
           backfillNewFields,
+          writeViaStaging,
+          priorityColumn,
+          priorityDirection,
+          rowLimit,
         }),
         delivery_guarantee: studioDeliveryGuarantee({
           syncMode,
@@ -5313,30 +5323,38 @@ export function TransferPage({
     exportFormat,
     destOutputPath,
   });
-  /** Map/sync/PK/dest edits must invalidate a prior green Validate before Execute. */
+  /** Map/sync/PK/dest/Advanced edits must invalidate a prior green Validate before Execute. */
   const buildValidateContractKey = useCallback(
     (maps: EditableMapping[]) =>
-      JSON.stringify({
+      composeValidateContractKey({
         syncMode,
         primaryKeyField,
         cursorField,
         validationMode,
         schemaPolicy,
-        targetCollection: targetCollection.trim(),
+        targetCollection,
         destType,
         targetDb,
         destKindMode,
-        destSchema: destSchema.trim(),
-        mappings: maps.map((m) => [
-          m.source,
-          m.target,
-          m.transform,
-          m.engineTransform ?? "",
-          m.approved,
-          Boolean(m.createNew),
-          m.assignmentStrategy ?? "",
-          m.destType ?? "",
-        ]),
+        destSchema,
+        mappings: maps,
+        dateLocale,
+        numberLocale,
+        backfillNewFields,
+        writeViaStaging,
+        deliveryGuarantee,
+        allowAppendOnly,
+        snapshotMode,
+        priorityColumn,
+        priorityDirection,
+        rowLimit,
+        cursorSemantics,
+        streamFields,
+        shapeRecipeHash: shapeIdentity?.hash || "",
+        shapeSteps,
+        multiSubnetFailover,
+        cdcRowFilter,
+        schemaDriftAcknowledged,
       }),
     [
       syncMode,
@@ -5349,6 +5367,23 @@ export function TransferPage({
       targetDb,
       destKindMode,
       destSchema,
+      dateLocale,
+      numberLocale,
+      backfillNewFields,
+      writeViaStaging,
+      deliveryGuarantee,
+      allowAppendOnly,
+      snapshotMode,
+      priorityColumn,
+      priorityDirection,
+      rowLimit,
+      cursorSemantics,
+      streamFields,
+      shapeIdentity?.hash,
+      shapeSteps,
+      multiSubnetFailover,
+      cdcRowFilter,
+      schemaDriftAcknowledged,
     ],
   );
   const validateContractKey = useMemo(
@@ -6443,11 +6478,11 @@ export function TransferPage({
                       </button>
                     </div>
                     <Button
-                      variant="ghost"
+                      variant="secondary"
                       className="df2-dest-advanced-btn"
                       onClick={() => setAdvancedOpen(true)}
                       leadingIcon={<DtIcon name="settings" size={16} />}
-                      title="Advanced settings — sync mode, primary key, cursor, and write policies"
+                      title="Advanced settings — sync mode, primary key, cursor, schema drift, and write policies"
                     >
                       Advanced
                     </Button>
@@ -6937,7 +6972,10 @@ export function TransferPage({
                 {syncModeHonestyLine(syncMode, destTableExists)}
               </p>
               <p className="df2-label-hint">
-                Change overwrite, CDC, and identity in Advanced.
+                {schemaPolicyHonestyLine(schemaPolicy)}
+              </p>
+              <p className="df2-label-hint">
+                Change overwrite, CDC, schema drift, and identity in Advanced.
               </p>
             </div>
             <div className="df2-dest-sync-summary-actions">
@@ -7065,6 +7103,7 @@ export function TransferPage({
             syncMode={syncMode}
             writeViaStaging={writeViaStaging}
             onApplyAction={applySuggestedAction}
+            onApplyCreateNewWidens={() => applyCreateNewTypeWidens(createNewFitWidenActions(preflight))}
             onStripControlChars={stripControlCharsAndRerun}
             stripControlsApplied={columnMappings.some(
               (m) => m.transform === "strip_controls",
@@ -7637,6 +7676,7 @@ export function TransferPage({
         numberLocales={NUMBER_LOCALES}
         syncMode={syncMode}
         syncHonestyLine={syncModeHonestyLine(syncMode, destTableExists)}
+        schemaHonestyLine={schemaPolicyHonestyLine(schemaPolicy)}
         schemaPolicy={schemaPolicy}
         validationMode={validationMode}
         dateLocale={dateLocale}

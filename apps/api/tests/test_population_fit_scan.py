@@ -352,9 +352,8 @@ def test_snowflake_number_boundaries_match_the_writer(value, fits: bool) -> None
     assert (report.findings == ()) is fits, f"{value!r} on NUMBER(11,8)"
 
 
-def test_postgres_numeric_rounds_scale_where_the_writer_rounds() -> None:
-    """Postgres rounds to scale on write, so extra scale is not an overflow —
-    the scan must not invent a failure the writer would never raise."""
+def test_postgres_numeric_does_not_round_identity_scale() -> None:
+    """PG would round at INSERT. Identity maps fail-close instead of rewriting."""
     report = scan_population_fit(
         [{"c": "123.123456789012"}],
         [{"source": "c", "target": "c", "target_type": "NUMERIC(11,8)"}],
@@ -365,7 +364,8 @@ def test_postgres_numeric_rounds_scale_where_the_writer_rounds() -> None:
         rows_total=1,
         rows_are_population=True,
     )
-    assert report.findings == ()
+    assert report.findings
+    assert "123.123456789012" in str(report.findings[0].example_values)
 
     overflow = scan_population_fit(
         [{"c": "1234.12345678"}],
@@ -467,8 +467,8 @@ def test_a_decimal_population_into_an_integer_carrier_blocks_before_the_write(
     assert report.findings[0].example_rows == (2, 3, 4), dest_db
     assert "fractional" in report.findings[0].unfit_reason, dest_db
     suggested = (report.findings[0].suggested_target_type or "").upper()
-    assert suggested in {"DOUBLE", "FLOAT", "FLOAT64", "DECIMAL", "NUMERIC"}, dest_db
-    assert "INT" not in suggested.replace("FLOAT", ""), dest_db
+    assert any(tok in suggested for tok in ("DECIMAL", "NUMERIC", "NUMBER")), dest_db
+    assert "FLOAT" not in suggested and "DOUBLE" not in suggested, dest_db
 
     gate = build_population_fit_gate(report)
     assert gate["status"] == "block", dest_db

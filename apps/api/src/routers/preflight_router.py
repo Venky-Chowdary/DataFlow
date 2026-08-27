@@ -119,6 +119,10 @@ class PreflightRequest(BaseModel):
     acknowledgment_reason: str = ""
     # Pre-ingestion staging (SQL destinations only) — Validate must fail closed.
     write_via_staging: bool = False
+    # Execute-applied sort + cap. Validate names the cap (G17); type-fit stays uncapped.
+    priority_column: str = ""
+    priority_direction: str = "desc"
+    row_limit: int = 0
     # Connector-specific dest settings (Redshift staging_bucket / iam_role, etc.).
     dest_extra: dict[str, Any] | None = None
     # CDC delivery — default at_least_once; exactly_once is opt-in and fail-closed.
@@ -271,6 +275,18 @@ async def run_preflight(body: PreflightRequest):
     preflight_columns = shaped_image.columns
     source_column_types = shaped_image.column_types
     preflight_sample_rows = shaped_image.sample_rows
+    if int(body.row_limit or 0) > 0 or str(body.priority_column or "").strip():
+        try:
+            from src.transfer.engine import _apply_priority_and_limit
+        except ImportError:
+            from transfer.engine import _apply_priority_and_limit
+
+        preflight_sample_rows = _apply_priority_and_limit(
+            list(preflight_sample_rows or []),
+            str(body.priority_column or "").strip(),
+            str(body.priority_direction or "desc"),
+            int(body.row_limit or 0),
+        )
 
     from services.file_parser import iter_stored_upload_rows
 
@@ -465,6 +481,9 @@ async def run_preflight(body: PreflightRequest):
             source_type=body.source_type,
             source_kind=body.source_kind or ("database" if body.source_connector_id else "file"),
             write_via_staging=bool(body.write_via_staging),
+            priority_column=str(body.priority_column or ""),
+            priority_direction=str(body.priority_direction or "desc"),
+            row_limit=int(body.row_limit or 0),
             source_read_mode=str(
                 ((body.source_config or {}).get("source_read_mode")
                  or ((body.source_config or {}).get("extra") or {}).get("source_read_mode")
@@ -541,9 +560,14 @@ async def get_preflight_run(run_id: str):
 
 
 class ExplainRequest(BaseModel):
-    """A preflight result to explain (as returned by POST /preflight/run)."""
+    """A preflight result to explain (as returned by POST /preflight/run).
 
-    preflight: dict[str, Any] = Field(..., description="Full preflight result dict")
+    Prefer ``run_id`` plus a slimed payload. The full Validate result is not
+    required and must not be posted after a 1M-row scan (nginx client_temp warn).
+    """
+
+    preflight: dict[str, Any] = Field(default_factory=dict, description="Slimed preflight result dict")
+    run_id: str | None = None
     dest_type: str | None = None
     validation_mode: str = "strict"
     use_llm: bool = Field(True, description="Reuse Datawrap Pilot LLM for a natural-language narrative when available")
@@ -558,11 +582,19 @@ async def explain_preflight(body: ExplainRequest):
     ``suggested_actions``. Works deterministically offline; reuses the Data
     Pilot LLM only to add a friendlier narrative when a provider is configured.
     """
-    from services.validation_assistant import explain_validation
+    from services.validation_assistant import explain_validation, slim_preflight_for_explain
 
+    payload = body.preflight if isinstance(body.preflight, dict) else {}
+    run_id = str(body.run_id or payload.get("run_id") or "").strip()
+    if run_id and not payload.get("blockers") and "passed" not in payload:
+        from services.preflight_run_store import get_preflight_run as _get
+
+        record = _get(run_id)
+        if isinstance(record, dict):
+            payload = record.get("result") or record.get("preflight") or record
     try:
         return explain_validation(
-            body.preflight,
+            slim_preflight_for_explain(payload),
             dest_kind=(body.dest_type or "").lower(),
             validation_mode=body.validation_mode,
             use_llm=body.use_llm,

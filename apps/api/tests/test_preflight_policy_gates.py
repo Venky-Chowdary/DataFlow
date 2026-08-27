@@ -328,6 +328,30 @@ def test_full_refresh_omits_cdc_delivery_gate():
     assert all(g["id"] != "g16_cdc_delivery" for g in gates)
 
 
+def test_row_cap_gate_names_execute_limit_without_blocking():
+    silent = run_transfer_policy_gates(
+        sync_mode="full_refresh_append",
+        schema_policy="manual_review",
+        dest_type="postgresql",
+    )
+    assert all(g["id"] != "g17_row_cap" for g in silent)
+
+    gates = run_transfer_policy_gates(
+        sync_mode="full_refresh_append",
+        schema_policy="manual_review",
+        dest_type="postgresql",
+        priority_column="updated_at",
+        priority_direction="asc",
+        row_limit=2500,
+    )
+    g17 = next(g for g in gates if g["id"] == "g17_row_cap")
+    assert g17["status"] == "pass"
+    assert g17["details"]["row_limit"] == 2500
+    assert g17["details"]["priority_column"] == "updated_at"
+    assert "uncapped source" in g17["message"]
+    assert "capped write" in g17["message"]
+
+
 def test_incremental_deduped_blocks_an_undeclared_cursor():
     """Nothing about `updated_at` proves the source moves it when a row changes.
 

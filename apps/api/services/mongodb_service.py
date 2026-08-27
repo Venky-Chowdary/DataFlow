@@ -475,6 +475,7 @@ class MongoDBService:
                     "message": 1,
                     "phase": 1,
                     "throughput_marks": 1,
+                    "started_at": 1,
                 },
             )
         except Exception:
@@ -516,7 +517,12 @@ class MongoDBService:
             logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
         if status == "running":
-            updates.setdefault("started_at", datetime.now(timezone.utc))
+            # Heartbeats must not $set started_at to now — Theater elapsed
+            # became 0s on every progress write / SSE reconnect.
+            if (prev_doc or {}).get("started_at") and "started_at" not in kwargs:
+                updates.pop("started_at", None)
+            else:
+                updates.setdefault("started_at", datetime.now(timezone.utc))
         elif status in ("completed", "completed_with_quarantine", "failed", "cancelled"):
             updates["completed_at"] = datetime.now(timezone.utc)
 
@@ -533,9 +539,11 @@ class MongoDBService:
         phase_label = kwargs.get("phase")
         message = kwargs.get("message", "")
 
-        # Durable operator event log (Jobs Log tab). Cap to last 200 lines.
+        # Durable operator event log (Jobs Log tab). Keep the run from start.
         try:
             if "event_log" not in updates:
+                from services.job_document_budget import JOB_EVENT_LOG_MAX
+
                 prev_log = list((prev_doc or {}).get("event_log") or [])
                 line_parts: list[str] = []
                 if phase_label and str(phase_label) != str((prev_doc or {}).get("phase") or ""):
@@ -559,7 +567,7 @@ class MongoDBService:
                     stamp = datetime.now(timezone.utc).strftime("%H:%M:%S")
                     for part in line_parts:
                         prev_log.append(f"{stamp} — {part}")
-                    updates["event_log"] = prev_log[-200:]
+                    updates["event_log"] = prev_log[-JOB_EVENT_LOG_MAX:]
         except Exception as exc:
             logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
@@ -1256,7 +1264,9 @@ class MemoryMongoDBService:
             if marks is not None:
                 rec["throughput_marks"] = marks
         if status == "running":
-            rec.setdefault("started_at", datetime.now(timezone.utc))
+            # create_transfer_job seeds started_at=None; setdefault would keep it.
+            if not rec.get("started_at"):
+                rec["started_at"] = datetime.now(timezone.utc)
         elif status in ("completed", "completed_with_quarantine", "failed", "cancelled"):
             rec["completed_at"] = datetime.now(timezone.utc)
 
@@ -1280,10 +1290,12 @@ class MemoryMongoDBService:
                     except Exception as exc:
                         logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
                 if line_parts:
+                    from services.job_document_budget import JOB_EVENT_LOG_MAX
+
                     stamp = datetime.now(timezone.utc).strftime("%H:%M:%S")
                     for part in line_parts:
                         prev_log.append(f"{stamp} — {part}")
-                    rec["event_log"] = prev_log[-200:]
+                    rec["event_log"] = prev_log[-JOB_EVENT_LOG_MAX:]
             except Exception as exc:
                 logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 

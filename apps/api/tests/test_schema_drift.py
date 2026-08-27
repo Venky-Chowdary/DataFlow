@@ -828,3 +828,31 @@ def test_compatibility_lattice_matches_confluent_roles_for_sql():
     assert report["compatibility"] == COMPAT_FORWARD
     assert report["schema_evolution"]["should_propagate"] is True
     assert report["summary"]
+
+
+def test_schema_policy_honesty_line_matches_evolution_kernel():
+    from services.preflight_service import run_transfer_policy_gates
+    from services.schema_drift import schema_policy_honesty_line
+
+    manual = schema_policy_honesty_line("manual_review")
+    assert "does not ADD COLUMN" in manual
+    assert "type-narrow always pauses" in manual
+
+    prop = schema_policy_honesty_line("propagate_columns")
+    assert "ADD COLUMN" in prop
+    assert "silent rewrite" in prop
+
+    pause = schema_policy_honesty_line("pause_on_change")
+    assert "including additive" in pause
+
+    locked = schema_policy_honesty_line("type_locked")
+    assert "silent-cast" in locked
+
+    prop_all = schema_policy_honesty_line("propagate_all")
+    assert "ADD COLUMN kernel" in prop_all
+    assert "every selected stream" in prop_all
+
+    gates = run_transfer_policy_gates(schema_policy="manual_review")
+    g10 = next(g for g in gates if g["id"] == "g10_schema_policy")
+    assert g10["status"] == "pass"
+    assert g10["details"]["honesty_line"] == manual

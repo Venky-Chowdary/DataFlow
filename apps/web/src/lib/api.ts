@@ -11,6 +11,7 @@ import type {
   ShapeProfileResponse,
   ShapeRecipeWire,
 } from "./shape";
+import { slimPreflightForExplain } from "./slimPreflightForExplain";
 
 export { refusalSentence };
 
@@ -439,6 +440,10 @@ export async function runPreflight(payload: {
   acknowledgment_reason?: string;
   /** Pre-ingestion staging (SQL destinations only). */
   write_via_staging?: boolean;
+  /** Execute-applied priority sort + optional row cap. Named on G17. */
+  priority_column?: string;
+  priority_direction?: "asc" | "desc";
+  row_limit?: number;
   /** Connector-specific dest settings (Redshift staging_bucket / iam_role). */
   dest_extra?: Record<string, unknown>;
   source_kind?: string;
@@ -473,10 +478,17 @@ export async function explainPreflight(payload: {
   validation_mode?: string;
   use_llm?: boolean;
 }): Promise<import("./types").ValidationExplanation> {
+  const slimed = slimPreflightForExplain(payload.preflight);
   const res = await apiFetch(`${API_BASE}/preflight/explain`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ use_llm: true, ...payload }),
+    body: JSON.stringify({
+      use_llm: true,
+      dest_type: payload.dest_type,
+      validation_mode: payload.validation_mode,
+      run_id: slimed.run_id,
+      preflight: slimed,
+    }),
     timeoutMs: LONG_REQUEST_TIMEOUT_MS,
   });
   if (!res.ok) throw new Error(await parseApiError(res, "Explain failed"));
@@ -1571,7 +1583,7 @@ export function streamJobProgress(
             })
             .filter((p): p is NonNullable<typeof p> => Boolean(p))
         : undefined,
-      created_at: String(raw.created_at ?? new Date().toISOString()),
+      created_at: raw.created_at ? String(raw.created_at) : "",
       updated_at: raw.updated_at ? String(raw.updated_at) : undefined,
       started_at: raw.started_at ? String(raw.started_at) : undefined,
       completed_at: raw.completed_at ? String(raw.completed_at) : undefined,

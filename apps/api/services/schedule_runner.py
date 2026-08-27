@@ -339,6 +339,14 @@ def build_schedule_request(sched, src: dict, dst: dict):
             schema_policy=schema_policy,
             mappings=mappings,
         ),
+        write_via_staging=bool(getattr(sched, "write_via_staging", False)),
+        priority_column=str(getattr(sched, "priority_column", "") or ""),
+        priority_direction=(
+            "asc"
+            if str(getattr(sched, "priority_direction", "") or "").strip().lower() == "asc"
+            else "desc"
+        ),
+        limit=max(0, int(getattr(sched, "row_limit", 0) or 0)),
         stream_contracts=stream_contracts,
         date_locale=str(getattr(sched, "date_locale", "") or ""),
         number_locale=str(getattr(sched, "number_locale", "") or ""),

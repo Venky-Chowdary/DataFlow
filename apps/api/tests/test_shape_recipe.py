@@ -409,6 +409,28 @@ def test_chunking_the_same_population_yields_the_same_rows_and_the_same_counts()
     assert engine.effect.rows_shaped_out == whole_effect.rows_shaped_out
 
 
+def test_hash_identity_is_stable_and_stamps_the_align_key():
+    """Composite SHA-256 key — Gate-8 align when FL_DATE-class columns repeat."""
+    plan = recipe(
+        {
+            "op": "hash_identity",
+            "options": {"columns": ["id", "name"], "to": "_df_row_key"},
+        },
+    )
+    assert plan.identity_columns == ("_df_row_key",)
+    assert "_df_row_key" in plan.output_columns
+    first, _ = shape_records(plan, ROWS)
+    second, _ = shape_records(plan, ROWS)
+    assert first[0]["_df_row_key"] == second[0]["_df_row_key"]
+    assert first[0]["_df_row_key"] != first[1]["_df_row_key"]
+    assert len(first[0]["_df_row_key"]) == 64
+
+
+def test_hash_identity_defaults_the_output_column():
+    plan = recipe({"op": "hash_identity", "options": {"columns": ["id"]}})
+    assert plan.identity_columns == ("_df_row_key",)
+
+
 def test_an_empty_recipe_is_a_pass_through_that_still_balances():
     shaped, effect = shape_records(ShapeRecipe.parse(None, source_columns=COLUMNS), ROWS)
     assert shaped == ROWS

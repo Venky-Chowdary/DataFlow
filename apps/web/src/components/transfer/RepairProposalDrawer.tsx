@@ -259,17 +259,17 @@ export function RepairProposalDrawer({
           <div className="df2-repair-root" role="status">
             <strong>What Approve does</strong>
             <p>
-              The file is not broken. Map guessed NUMBER types from 25 preview rows.
-              The rest of the file has more decimal places, so CREATE would be too
-              narrow and Execute would load nothing.
+              The source is not broken. Map guessed destination types from the preview.
+              Later values do not fit those types, so CREATE would be too narrow and
+              Execute would load nothing — on any warehouse or database destination.
             </p>
             <ol className="df2-repair-next-steps">
-              <li>Approve updates the Map CREATE types listed below — Snowflake is not written yet.</li>
+              <li>Approve updates the Map CREATE types listed below — the destination is not written yet.</li>
               <li>Each type was proven against the overflow values Validate scanned (same write-path check Execute uses).</li>
               <li>Validate runs again on those same values and should clear this gate. Click Execute only then.</li>
             </ol>
             <p className="df2-label-hint">
-              Live destination columns still need ALTER — Map cannot change warehouse
+              Live destination columns still need ALTER — Map cannot change destination
               DDL. Approve is disabled for those. Do not truncate.
             </p>
           </div>

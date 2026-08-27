@@ -2046,28 +2046,21 @@ def coerce_decimal_wire(value: Any, *, ddl_type: str = "", engine: str = "") -> 
 
     Strings go through ``decimal_wire_value``. Auto ``1,234`` / ``1.234``
     refuse; locale money the write path stores still binds. Values that
-    cannot fit ``DECIMAL|NUMERIC|NUMBER(p,s)`` raise. PostgreSQL-family
-    destinations round fractional excess (engine docs) — match
-    ``fits_decimal(..., dest_db=)`` so quarantine and bind never disagree.
-    Bare DECIMAL without (p,s) still returns an exact ``Decimal``.
+    cannot fit ``DECIMAL|NUMERIC|NUMBER(p,s)`` raise. Identity maps never
+    round or strip currency — match ``fits_decimal`` so quarantine and bind
+    agree on every engine. Bare DECIMAL without (p,s) still returns an
+    exact ``Decimal``.
     """
     handled, bound = _absent_sql_bind(value)
     if handled:
         return bound
     from decimal import (
-        ROUND_HALF_UP,
-        Context,
         Decimal,
         InvalidOperation,
         Overflow,
-        localcontext,
     )
 
-    from connectors.writer_common import (
-        PG_DECIMAL_ROUND_DIALECTS,
-        decimal_int_digits_and_scale,
-        fits_decimal,
-    )
+    from connectors.writer_common import fits_decimal
     from services.type_system import parse_numeric_precision_scale
     from services.transform_engine import boolean_carrier_numeric_value
 
@@ -2096,6 +2089,13 @@ def coerce_decimal_wire(value: Any, *, ddl_type: str = "", engine: str = "") -> 
                 raise ValueError(
                     f"empty string cannot coerce to decimal for {ddl_type or 'DECIMAL'} — "
                     "refuse silent NULL invent (quarantine or remap upstream)"
+                )
+            from services.type_system import has_currency_marker
+
+            if has_currency_marker(text):
+                raise ValueError(
+                    "currency marker on identity decimal — refuse invent "
+                    "(apply an operator currency transform or quarantine)"
                 )
             from services.transform_engine import decimal_wire_value
 
@@ -2132,14 +2132,6 @@ def coerce_decimal_wire(value: Any, *, ddl_type: str = "", engine: str = "") -> 
                 f"decimal overflow: value does not fit {ddl_type or f'DECIMAL({precision},{s})'} "
                 "— refuse silent quantize"
             )
-        # Apply the same PG scale round the engine would perform at INSERT.
-        if dest_db in PG_DECIMAL_ROUND_DIALECTS:
-            _, value_scale = decimal_int_digits_and_scale(d)
-            if value_scale > s:
-                with localcontext(
-                    Context(prec=max(int(precision) + 16, 80), rounding=ROUND_HALF_UP)
-                ):
-                    d = d.quantize(Decimal(1).scaleb(-s))
     return d
 
 

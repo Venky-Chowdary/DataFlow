@@ -72,6 +72,10 @@ def _stamp_shape_evidence(
             terms[key] = prior
     dest_summary.update(terms)
     dest_summary["shape_proof"] = runner.report()
+    identity = [str(c) for c in (getattr(runner.recipe, "identity_columns", ()) or ()) if c]
+    if identity:
+        dest_summary.setdefault("shape_identity_columns", identity)
+        dest_summary.setdefault("primary_key_columns", identity)
     # The rows the recipe read are this run's source population, whether or not
     # they reached the writer. A materialized read hands reconciliation only the
     # surviving records, so the removed rows would be missing from both sides of

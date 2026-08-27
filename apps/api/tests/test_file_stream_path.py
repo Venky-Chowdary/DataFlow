@@ -71,6 +71,7 @@ def test_stream_file_to_database_from_path():
         )
         assert rows == 2
         assert summary.get("checksum")
+        assert summary.get("checksum_mode") == "inline_write_pass"
         assert columns == ["id", "amount"]
 
 

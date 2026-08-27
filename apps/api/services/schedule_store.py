@@ -126,6 +126,12 @@ class PipelineSchedule:
     validation_mode: str = "strict"
     schema_policy: str = "manual_review"
     backfill_new_fields: bool = False
+    # Stage-then-promote. Default off so unattended runs match Studio unless set.
+    write_via_staging: bool = False
+    # Priority-first sync + optional row cap (0 = no limit).
+    priority_column: str = ""
+    priority_direction: str = "desc"
+    row_limit: int = 0
     # CDC dest-owned watermark EOS is opt-in; default stays at_least_once.
     delivery_guarantee: str = "at_least_once"
     mappings: list[dict] = field(default_factory=list)
@@ -223,6 +229,14 @@ class PipelineSchedule:
             validation_mode=data.get("validation_mode") or "strict",
             schema_policy=data.get("schema_policy") or "manual_review",
             backfill_new_fields=bool(data.get("backfill_new_fields", False)),
+            write_via_staging=bool(data.get("write_via_staging", False)),
+            priority_column=str(data.get("priority_column") or "").strip(),
+            priority_direction=(
+                "asc"
+                if str(data.get("priority_direction") or "").strip().lower() == "asc"
+                else "desc"
+            ),
+            row_limit=max(0, int(data.get("row_limit", 0) or 0)),
             delivery_guarantee=(
                 str(data.get("delivery_guarantee") or "at_least_once")
                 .strip()

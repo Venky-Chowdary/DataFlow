@@ -486,8 +486,13 @@ def run_transfer_policy_gates(
     delivery_guarantee: str = "at_least_once",
     allow_append_only: bool = False,
     read_scope: Any = None,
+    priority_column: str = "",
+    priority_direction: str = "desc",
+    row_limit: int = 0,
 ) -> list[dict[str, Any]]:
     """Validate enterprise run policy that sits above source/destination probes."""
+    from services.schema_drift import schema_policy_honesty_line
+
     contracts = [c for c in stream_contracts or [] if c.get("selected", True)]
     sync = (sync_mode or "full_refresh_overwrite").lower()
     schema = (schema_policy or "manual_review").lower()
@@ -574,6 +579,7 @@ def run_transfer_policy_gates(
                     "backfill_new_fields": backfill_new_fields,
                     "breaking_changes": breaking,
                     "policy_coerced_from_manual_review": policy_coerced,
+                    "honesty_line": schema_policy_honesty_line(schema),
                 },
             }
         )
@@ -655,6 +661,32 @@ def run_transfer_policy_gates(
     )
     if eos_gate:
         gates.append(eos_gate)
+
+    cap = max(0, int(row_limit or 0))
+    priority = str(priority_column or "").strip()
+    direction = "asc" if str(priority_direction or "").strip().lower() == "asc" else "desc"
+    if cap > 0 or priority:
+        gates.append(
+            {
+                "id": "g17_row_cap",
+                "status": GateStatus.PASS.value,
+                "severity": "warn",
+                "message": (
+                    f"Execute writes"
+                    + (f" at most {cap} rows" if cap > 0 else " the full mapped population")
+                    + (f" after sorting by {priority} {direction}" if priority else "")
+                    + ". Validate type-fit still walks the uncapped source (stricter). "
+                    "Counts and uniqueness are not a proof of the capped write."
+                ),
+                "duration_ms": 0,
+                "details": {
+                    "priority_column": priority or None,
+                    "priority_direction": direction if priority else None,
+                    "row_limit": cap,
+                    "honesty": "execute_applies_cap",
+                },
+            }
+        )
 
     # Redis KV TTL/EXPIRE is not a first-class transfer guarantee (soft warning).
     if dest in {"redis", "redis_enterprise", "amazon_elasticache_redis", "azure_cache_redis", "google_memorystore_redis"} or src in {
@@ -839,6 +871,7 @@ def run_file_preflight(
     fit_scan_deadline: float | None = None,
     fit_scan_seconds: float | None = None,
     on_fit_progress: Any = None,
+    skip_population_fit: bool = False,
 ) -> dict[str, Any]:
     """Run preflight gates for file/DB Studio transfers (G1–G9 + host policy)."""
     from services.timezone_policy import declared_source_column_types
@@ -1618,14 +1651,53 @@ def run_file_preflight(
         )
         resolved_filter = dict(source_filter or cfg_filter or extra_filter or {})
 
-        if population_rows is None and str(source_file_id or "").strip():
+        if skip_population_fit:
+            # Execute after a stamped Studio Validate: dest probe + sample
+            # gates still run. The 1M walk does not. Write-time fit binds.
+            from services.population_fit_scan import (
+                EVIDENCE_PARTIAL,
+                FitScanReport,
+                bounded_targets,
+            )
+
+            targets, undecidable, safe = bounded_targets(
+                mappings,
+                dest_types=destination_column_types or {},
+                source_types=column_types or {},
+                dest_db=destination_db_type,
+                job_error_policy=transform_error_policy_for_validation_mode(
+                    validation_mode
+                ),
+                source_kind=source_kind,
+                source_format=source_format,
+                sync_mode=sync_mode,
+                dest_table_exists=destination_table_exists,
+            )
+            fit_report = FitScanReport(
+                evidence=EVIDENCE_PARTIAL,
+                rows_scanned=0,
+                rows_total=int(row_count or 0),
+                targets=tuple(targets),
+                undecidable=tuple(undecidable),
+                safe_by_declaration=tuple(safe),
+                truncated_reason="reused_validate",
+                note=(
+                    "Population fit reused from approved Validate. Execute does "
+                    "not re-walk the source; write-time fit still binds every row."
+                ),
+            )
+            fit_report_payload = fit_report.to_dict()
+            fit_report_payload["reused_from_validate"] = True
+            fit_gate = build_population_fit_gate(fit_report)
+        if not skip_population_fit:
+          if population_rows is None and str(source_file_id or "").strip():
             from services.file_parser import iter_stored_upload_rows
 
             stored_rows = iter_stored_upload_rows(source_file_id)
             if stored_rows is not None:
                 population_rows = stored_rows
                 rows_are_population = True
-        if population_rows is None:
+          if population_rows is None:
             try:
                 table_rows = _iter_table_population_for_preflight(
                     source_kind=source_kind,
@@ -1680,14 +1752,14 @@ def run_file_preflight(
                             walked = shaped
                     population_rows = walked
                     rows_are_population = True
-        scan_input = population_rows if population_rows is not None else sample_rows
-        fit_rows_total = int(row_count or 0)
-        if resolved_filter:
+          scan_input = population_rows if population_rows is not None else sample_rows
+          fit_rows_total = int(row_count or 0)
+          if resolved_filter:
             filtered = iter_filtered_rows(scan_input, resolved_filter)
             if filtered is not None:
                 scan_input = filtered
             fit_rows_total = 0
-        if incremental_read_narrows(sync_mode) and read_scope.bounded:
+          if incremental_read_narrows(sync_mode) and read_scope.bounded:
             narrowed = iter_rows_after_watermark(
                 scan_input, read_scope, keep_unreadable=True
             )
@@ -1695,7 +1767,7 @@ def run_file_preflight(
                 scan_input = narrowed
             # Table COUNT is not this run's population — the scan's own count is.
             fit_rows_total = 0
-        fit_report = scan_population_fit(
+          fit_report = scan_population_fit(
             scan_input,
             mappings,
             dest_types=destination_column_types or {},
@@ -1715,23 +1787,23 @@ def run_file_preflight(
                 fit_scan_deadline, fit_scan_seconds
             ),
             on_progress=on_fit_progress,
-        )
-        fit_report_payload = fit_report.to_dict()
-        if incremental_read_narrows(sync_mode) and read_scope.bounded:
+          )
+          fit_report_payload = fit_report.to_dict()
+          if incremental_read_narrows(sync_mode) and read_scope.bounded:
             fit_report_payload["delta_scope"] = {
                 "cursor_column": read_scope.cursor_column,
                 "watermark": str(read_scope.watermark),
             }
-        if resolved_filter:
+          if resolved_filter:
             from services.row_filter import filter_columns
 
             fit_report_payload["filter_scope"] = {
                 "columns": filter_columns(resolved_filter),
             }
-        # The gate is always stated, including when nothing needed scanning:
-        # "no bounded carrier can be exceeded" is evidence, and a silently
-        # absent gate reads as an unasked question.
-        fit_gate = build_population_fit_gate(fit_report)
+          # The gate is always stated, including when nothing needed scanning:
+          # "no bounded carrier can be exceeded" is evidence, and a silently
+          # absent gate reads as an unasked question.
+          fit_gate = build_population_fit_gate(fit_report)
         if fit_gate.get("status") == "block":
             fit_blocked = True
             blockers.append(

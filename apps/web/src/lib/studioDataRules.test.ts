@@ -57,6 +57,9 @@ describe("studioDataRules", () => {
     assert.equal(payload.validation_mode, "strict");
     assert.equal(payload.schema_policy, "type_locked");
     assert.equal(payload.backfill_new_fields, false);
+    assert.equal(payload.write_via_staging, false);
+    assert.equal(payload.priority_column, "");
+    assert.equal(payload.row_limit, 0);
     assert.equal("skip_preflight" in payload, false);
   });
 
@@ -75,5 +78,23 @@ describe("studioDataRules", () => {
     assert.equal(payload.validation_mode, undefined);
     assert.equal(payload.schema_policy, undefined);
     assert.equal(payload.backfill_new_fields, false);
+    assert.equal(payload.write_via_staging, false);
+    assert.equal(payload.row_limit, 0);
+  });
+
+  it("copies Advanced write knobs onto a scheduled pipeline", () => {
+    const payload = studioSchedulePolicies({
+      validationMode: "strict",
+      schemaPolicy: "propagate_columns",
+      backfillNewFields: true,
+      writeViaStaging: true,
+      priorityColumn: "updated_at",
+      priorityDirection: "asc",
+      rowLimit: 5000,
+    });
+    assert.equal(payload.write_via_staging, true);
+    assert.equal(payload.priority_column, "updated_at");
+    assert.equal(payload.priority_direction, "asc");
+    assert.equal(payload.row_limit, 5000);
   });
 });

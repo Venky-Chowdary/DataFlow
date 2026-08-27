@@ -22,6 +22,93 @@ logger = logging.getLogger(__name__)
 from services.blocker_titles import blocker_title
 from services.preflight_rules import explain_gate, explain_issue
 
+# POST /preflight/explain used to echo the full Validate result (gates, 1M-scan
+# findings, sample rows). Nginx then spilled the body to client_temp — a warn,
+# not a 413. Explain only reads blockers / coercion / population_fit / decision.
+_EXPLAIN_FINDING_CAP = 20
+_EXPLAIN_EXAMPLE_CAP = 3
+
+
+def slim_preflight_for_explain(preflight: dict[str, Any] | None) -> dict[str, Any]:
+    """Keep only the fields ``explain_validation`` reads.
+
+    A 1M-row Validate result can be megabytes. The assistant never iterates
+    gates or sample rows — sending them is wasted I/O and a production warn.
+    """
+    pf = preflight if isinstance(preflight, dict) else {}
+    proof = pf.get("proof_bundle") if isinstance(pf.get("proof_bundle"), dict) else {}
+    decision = proof.get("transfer_decision") if isinstance(proof.get("transfer_decision"), dict) else {}
+    pop = pf.get("population_fit") if isinstance(pf.get("population_fit"), dict) else {}
+    findings: list[dict[str, Any]] = []
+    for raw in (pop.get("findings") or [])[:_EXPLAIN_FINDING_CAP]:
+        if not isinstance(raw, dict):
+            continue
+        findings.append({
+            "source": raw.get("source"),
+            "target": raw.get("target"),
+            "target_type": raw.get("target_type"),
+            "unfit_rows": raw.get("unfit_rows"),
+            "example_values": list(raw.get("example_values") or [])[:_EXPLAIN_EXAMPLE_CAP],
+            "suggested_target_type": raw.get("suggested_target_type"),
+            "suggested_fix": raw.get("suggested_fix"),
+            "reason": raw.get("reason") or raw.get("unfit_reason"),
+            "unfit_reason": raw.get("unfit_reason"),
+        })
+    coercion = pf.get("coercion_report") if isinstance(pf.get("coercion_report"), dict) else {}
+    coercion_cols: list[dict[str, Any]] = []
+    for col in (coercion.get("columns") or [])[:_EXPLAIN_FINDING_CAP]:
+        if not isinstance(col, dict) or col.get("severity") == "ok":
+            continue
+        coercion_cols.append({
+            "source": col.get("source"),
+            "target": col.get("target"),
+            "source_type": col.get("source_type"),
+            "target_type": col.get("target_type"),
+            "severity": col.get("severity"),
+            "failed": col.get("failed", 0),
+            "sentinel_nulls": col.get("sentinel_nulls", 0),
+            "sampled": col.get("sampled", 0),
+            "suggested_fix": col.get("suggested_fix"),
+        })
+    blockers: list[dict[str, Any]] = []
+    for raw in pf.get("blockers") or []:
+        if not isinstance(raw, dict):
+            continue
+        details = raw.get("details") if isinstance(raw.get("details"), dict) else {}
+        issues_detail = details.get("issues_detail") if isinstance(details.get("issues_detail"), list) else []
+        blockers.append({
+            "id": raw.get("id") or raw.get("gate"),
+            "gate": raw.get("gate") or raw.get("id"),
+            "message": raw.get("message", ""),
+            "guidance": raw.get("guidance") or {},
+            "details": {
+                "issues": (details.get("issues") or [])[:10],
+                "errors": (details.get("errors") or [])[:10],
+                "issues_detail": [
+                    {"source": d.get("source"), "column": d.get("column")}
+                    for d in issues_detail[:20]
+                    if isinstance(d, dict)
+                ],
+            },
+        })
+    return {
+        "passed": bool(pf.get("passed")),
+        "run_id": pf.get("run_id"),
+        "blockers": blockers,
+        "coercion_report": {"columns": coercion_cols} if coercion_cols else {},
+        "population_fit": {
+            "evidence": pop.get("evidence"),
+            "rows_scanned": pop.get("rows_scanned"),
+            "rows_total": pop.get("rows_total"),
+            "unfit_rows": pop.get("unfit_rows"),
+            "findings": findings,
+        } if pop else {},
+        "proof_bundle": {"transfer_decision": {"decision": decision.get("decision")}} if decision else {},
+        "destination_table_exists": bool(
+            pf.get("destination_table_exists") or proof.get("destination_table_exists")
+        ),
+    }
+
 
 def _coercion_column_fixes(report: dict[str, Any]) -> list[dict[str, Any]]:
     """Flatten the coercion report into per-column, actionable fix entries."""
@@ -390,6 +477,14 @@ def _suggested_actions(
             "kind": "check_connection",
             "label": "Open Connectors — fix credentials / Auth source, then Test",
         })
+    if "g3f_population_fit" in gate_ids and any(
+        a.get("kind") == "change_target_type"
+        and a.get("to_type")
+        and a.get("apply_proven") is not False
+        and a.get("requires_ddl") is not True
+        for a in actions
+    ):
+        actions = [a for a in actions if a.get("kind") != "review_mappings"]
     return actions
 
 
@@ -526,6 +621,7 @@ def explain_validation(
         ``apply_policy_gates`` (contains ``passed``, ``gates``, ``blockers``,
         and optionally ``coercion_report``).
     """
+    preflight = slim_preflight_for_explain(preflight)
     passed = bool(preflight.get("passed"))
     proof = preflight.get("proof_bundle") or {}
     transfer_decision = proof.get("transfer_decision") or {}

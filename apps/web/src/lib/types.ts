@@ -1369,6 +1369,10 @@ export interface ScheduleInput {
   validation_mode: string;
   schema_policy: string;
   backfill_new_fields: boolean;
+  write_via_staging?: boolean;
+  priority_column?: string;
+  priority_direction?: "asc" | "desc" | string;
+  row_limit?: number;
   delivery_guarantee?: string;
   cursor_column: string;
   primary_key: string;

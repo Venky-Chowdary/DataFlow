@@ -1026,6 +1026,20 @@ def scan_rows(
                 and not _is_year_carrier(bounded[idx].target_type)
             ):
                 continue
+            if bounded[idx].carrier in {CARRIER_DECIMAL, CARRIER_INTEGER} or (
+                bounded[idx].carrier == CARRIER_TYPED
+                and bounded[idx].transform
+                in {"integer", "decimal", "currency", "percentage"}
+            ):
+                idig, scale = write_int_digits_and_scale(value)
+                if idig > env_int.get(idx, 0):
+                    env_int[idx] = idig
+                else:
+                    env_int.setdefault(idx, idig)
+                if scale > env_scale.get(idx, 0):
+                    env_scale[idx] = scale
+                else:
+                    env_scale.setdefault(idx, scale)
             why = fit_reason(value)
             if why is None:
                 continue
@@ -1084,7 +1098,6 @@ def scan_rows(
             on_progress(scanned)
         except Exception:
             pass
-
     if scanned == 0:
         evidence = EVIDENCE_UNMEASURED
     elif rows_are_population and not truncated:
@@ -1096,15 +1109,11 @@ def scan_rows(
 
     from connectors.writer_common import (
         fits_decimal,
-        fits_integer,
-        fits_varchar,
-        integer_overflow_suggested_type,
         parse_decimal_precision_scale,
-        varchar_overflow_suggested_type,
+        proven_integer_widen,
+        proven_varchar_widen,
     )
-    from services.ddl_compatibility import parse_varchar_width
     from services.decimal_observe import (
-        CREATE_NEW_NUMERIC_SAFETY_MARGIN,
         decimal_scale_overflow_fix,
         decimal_widen_carrier,
         proven_decimal_widen,
@@ -1115,11 +1124,10 @@ def scan_rows(
         if (not truncated) or envelope_complete
         else "scanned"
     )
-    create_new_margin = (
-        CREATE_NEW_NUMERIC_SAFETY_MARGIN
-        if truncated and not envelope_complete
-        else 0
-    )
+    # Exact observed envelope even on a partial file scan. Write-time
+    # fits_decimal still binds the unscanned tail; inventing +2 scale here
+    # is what printed 9.083333000000 on dest NUMBER.
+    create_new_margin = 0
 
     findings_list: list[ColumnFitFinding] = []
     for idx in sorted(counts):
@@ -1134,18 +1142,34 @@ def scan_rows(
         why = reasons.get(idx, "")
         if target.carrier == CARRIER_DECIMAL and (first or prove_values):
             if "fractional" in why.lower():
-                suggested_type = integer_overflow_suggested_type(
-                    first or prove_values[0], target.target_type, dest_db=dest_db
+                # Exact DECIMAL/NUMBER that holds the fraction. Never FLOAT —
+                # IEEE would invent/destroy money and clock digits.
+                suggested_type = proven_decimal_widen(
+                    values=prove_values,
+                    dest_db=dest_db,
+                    current_type=target.target_type,
+                    max_int_digits=env_int.get(idx, 0),
+                    max_scale=env_scale.get(idx, 0),
+                    safety_margin=0,
                 )
                 if not suggested_type:
-                    dialect = (dest_db or "").strip().lower()
-                    if dialect in {"snowflake"}:
-                        suggested_type = "FLOAT"
-                    elif dialect in {"bigquery", "bq"}:
-                        suggested_type = "FLOAT64"
-                    else:
-                        suggested_type = "DOUBLE"
-                apply_proven = bool(suggested_type)
+                    suggested_type = decimal_widen_carrier(
+                        first or (prove_values[0] if prove_values else ""),
+                        dest_db=dest_db,
+                        current_type=target.target_type,
+                    )
+                parsed = parse_decimal_precision_scale(
+                    suggested_type, dest_db=dest_db
+                )
+                apply_proven = bool(
+                    parsed
+                    and all(
+                        fits_decimal(v, parsed[0], parsed[1], dest_db=dest_db)
+                        for v in prove_values
+                    )
+                )
+                if not apply_proven:
+                    suggested_type = ""
             else:
                 margin = create_new_margin if not target.binds_live_ddl else 0
                 suggested_type = proven_decimal_widen(
@@ -1211,34 +1235,34 @@ def scan_rows(
                     "the writer would still refuse."
                 )
         elif target.carrier == CARRIER_INTEGER and (first or prove_values):
-            seed = first or prove_values[0]
-            if env_int_frac.get(idx):
-                suggested_type = integer_overflow_suggested_type(
-                    seed, target.target_type, dest_db=dest_db
+            if "fractional" in why.lower() or env_int_frac.get(idx):
+                suggested_type = proven_decimal_widen(
+                    values=prove_values or (first,),
+                    dest_db=dest_db,
+                    current_type=target.target_type,
+                    max_int_digits=env_int.get(idx, 0),
+                    max_scale=env_scale.get(idx, 0),
+                    safety_margin=0,
                 )
-            else:
-                widest = prove_values[-1] if prove_values else seed
-                suggested_type = integer_overflow_suggested_type(
-                    widest, target.target_type, dest_db=dest_db
-                )
-            if suggested_type:
                 parsed = parse_decimal_precision_scale(
                     suggested_type, dest_db=dest_db
                 )
-                if parsed:
-                    apply_proven = all(
+                apply_proven = bool(
+                    parsed
+                    and all(
                         fits_decimal(v, parsed[0], parsed[1], dest_db=dest_db)
                         for v in prove_values
                     )
-                elif suggested_type.upper() in {"FLOAT", "FLOAT64", "DOUBLE", "REAL"}:
-                    apply_proven = True
-                else:
-                    apply_proven = all(
-                        fits_integer(v, suggested_type, dest_db=dest_db)
-                        for v in prove_values
-                    )
+                )
                 if not apply_proven:
                     suggested_type = ""
+            else:
+                suggested_type = proven_integer_widen(
+                    prove_values or (first,),
+                    dest_db=dest_db,
+                    current_type=target.target_type,
+                )
+                apply_proven = bool(suggested_type)
             if suggested_type:
                 suggested_fix = (
                     f"Open Map → widen {target.target} to {suggested_type} "
@@ -1246,33 +1270,12 @@ def scan_rows(
                     "Do not silently truncate."
                 )
         elif target.carrier == CARRIER_STRING and (first or prove_values):
-            longest = first
-            if idx in env_str_len:
-                for raw in prove_values:
-                    text = present_cell_text(raw)
-                    if text is None:
-                        text = str(raw or "")
-                    if len(text) >= env_str_len[idx]:
-                        longest = text
-                        break
-            suggested_type = varchar_overflow_suggested_type(
-                longest or first, target.target_type, dest_db=dest_db
+            suggested_type = proven_varchar_widen(
+                prove_values or (first,),
+                dest_db=dest_db,
+                current_type=target.target_type,
             )
-            width = parse_varchar_width(suggested_type) if suggested_type else None
-            if suggested_type and (
-                suggested_type.upper() == "TEXT"
-                or (
-                    width is not None
-                    and all(
-                        fits_varchar(v, width, suggested_type)
-                        for v in prove_values
-                    )
-                )
-            ):
-                apply_proven = True
-            else:
-                suggested_type = ""
-                apply_proven = False
+            apply_proven = bool(suggested_type)
             if suggested_type:
                 suggested_fix = (
                     f"Open Map → widen {target.target} to {suggested_type} "
@@ -1288,12 +1291,64 @@ def scan_rows(
                     "→ re-Validate. Do not silently coerce."
                 )
             elif "uuid" in why_l or target.transform == "uuid":
-                suggested_type = "VARCHAR(36)"
+                uuid_witnesses = prove_values or ((first,) if first else ())
+                suggested_type = proven_varchar_widen(
+                    uuid_witnesses,
+                    dest_db=dest_db,
+                    current_type="VARCHAR(36)",
+                )
+                if not suggested_type and uuid_witnesses:
+                    from connectors.writer_common import fits_varchar as _fits_vc
+
+                    if all(_fits_vc(v, 36, "VARCHAR(36)") for v in uuid_witnesses):
+                        suggested_type = "VARCHAR(36)"
+                apply_proven = bool(suggested_type)
                 suggested_fix = (
-                    f"Open Map → widen {target.target} to {suggested_type} "
+                    f"Open Map → widen {target.target} to {suggested_type or 'VARCHAR'} "
                     "(or fix the source UUID) → re-Validate. "
                     "Do not silently coerce."
                 )
+            elif (
+                target.transform in {"integer", "decimal", "currency", "percentage"}
+                or "fractional" in why_l
+                or "invalid integer" in why_l
+                or "not an integer" in why_l
+            ):
+                # Snowflake/Oracle INTEGER is NUMBER(38,0) — typed parse, not
+                # INT32. A fraction is a DECIMAL propose, never calendar copy
+                # and never FLOAT as Apply-proven.
+                suggested_type = proven_decimal_widen(
+                    values=prove_values or (first,),
+                    dest_db=dest_db,
+                    current_type=target.target_type,
+                    max_int_digits=env_int.get(idx, 0),
+                    max_scale=env_scale.get(idx, 0),
+                    safety_margin=0,
+                )
+                parsed = parse_decimal_precision_scale(
+                    suggested_type, dest_db=dest_db
+                )
+                apply_proven = bool(
+                    parsed
+                    and all(
+                        fits_decimal(v, parsed[0], parsed[1], dest_db=dest_db)
+                        for v in prove_values
+                    )
+                )
+                if not apply_proven:
+                    suggested_type = ""
+                if suggested_type:
+                    suggested_fix = (
+                        f"Open Map → widen {target.target} to {suggested_type} "
+                        "(preserve the fraction, or ALTER the destination) "
+                        "→ re-Validate. Do not silently truncate."
+                    )
+                else:
+                    suggested_fix = (
+                        f"Open Map → remap {target.target} off {target.target_type} "
+                        "to NUMBER/DECIMAL that holds the fraction → re-Validate. "
+                        "Do not Apply FLOAT as a default."
+                    )
             elif target.transform == "time" or "invalid time" in why_l:
                 suggested_fix = (
                     f"Open Map → remap {target.target} off {target.target_type} "
@@ -1517,12 +1572,12 @@ def build_population_fit_gate(report: FitScanReport) -> dict[str, Any]:
             message = (
                 f"{rows} value(s) in {scope} cannot fit the peeked CREATE type "
                 f"({cols}). This table does not exist yet — widen Map to "
-                f"{widen_names} so CREATE can hold the file. The CSV is not "
-                "the defect. Execute would create a too-narrow table and commit nothing"
+                f"{widen_names} so CREATE can hold the source. Source values "
+                "are not the defect. Execute would create a too-narrow table and commit nothing"
             )
             corrective = (
                 "Approve the CREATE-type widen below, then re-Validate. "
-                "Nothing is written to the warehouse until Execute."
+                "Nothing is written to the destination until Execute."
             )
         else:
             message = (
@@ -1576,6 +1631,19 @@ def build_population_fit_gate(report: FitScanReport) -> dict[str, Any]:
         }
 
     if report.evidence == EVIDENCE_PARTIAL:
+        if report.truncated_reason == "reused_validate":
+            details["reused_from_validate"] = True
+            return {
+                "id": GATE_ID,
+                "status": "warn",
+                "message": (
+                    "Population fit reused from approved Validate — Execute does "
+                    "not re-walk the source. Write-time fit still binds every row. "
+                    "This is not a new population proof."
+                ),
+                "duration_ms": duration_ms,
+                "details": details,
+            }
         stop = "time budget" if report.truncated_reason == "time" else "row budget"
         return {
             "id": GATE_ID,

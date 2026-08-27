@@ -62,6 +62,19 @@ export function TransformGuidePanel({ postLoadOnly }: { postLoadOnly: string[] }
         <li>
           <span className="df2-xform-guide-num">5</span>
           <div>
+            <strong>Hash identity is how Gate-8 aligns rows without a natural PK.</strong>
+            <p>
+              File loads like flights CSV have repeating dates. Add{" "}
+              <code>hash_identity</code> on the columns that make a row unique —
+              Datawrap writes a stable SHA-256 key and uses it for dest read-back.
+              Airbyte/Fivetran hash-all-columns or require a warehouse PK; this is
+              the operator-chosen composite.
+            </p>
+          </div>
+        </li>
+        <li>
+          <span className="df2-xform-guide-num">6</span>
+          <div>
             <strong>The recipe is pinned by identity.</strong>
             <p>
               The <code>recipe</code> hash shown above is approved with the plan and re-checked

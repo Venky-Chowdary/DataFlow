@@ -54,7 +54,11 @@ def parse_array_wire_elements(value: Any) -> tuple[list[Any] | None, str | None]
         except Exception:
             return _parse_pg_array_literal(text), None
         if isinstance(parsed_obj, dict):
-            return None, "JSON object payload cannot populate an ARRAY column"
+            if parsed_obj:
+                return None, "JSON object payload cannot populate an ARRAY column"
+            # Postgres empty array `{}` is also valid JSON `{}`. An empty
+            # object is not an ARRAY payload — the PG literal is.
+            return [], None
         return _parse_pg_array_literal(text), None
     return None, None
 

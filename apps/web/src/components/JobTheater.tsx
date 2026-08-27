@@ -31,12 +31,17 @@ import { CdcCursorGapPanel } from "./transfer/CdcCursorGapPanel";
 import { CdcRetentionPanel } from "./transfer/CdcRetentionPanel";
 import { CdcIncrementalSnapshotPanel } from "./transfer/CdcIncrementalSnapshotPanel";
 import { LiveEventLog, type LiveLogEntry } from "./ui/LiveEventLog";
-import { writeJobEventLog } from "../lib/jobEventLog";
+import { mergeEventLogLines, readJobEventLog, writeJobEventLog } from "../lib/jobEventLog";
 import { useToast } from "./Toast";
 import { MappingProofDrawer, type MappingProof } from "./MappingProofDrawer";
 import { hashForScreen } from "../lib/appNavigation";
 import { callableExtractNote } from "../lib/destExistsShape";
 import { cdcDeliveryResultCopy } from "../lib/cdcExactlyOnce";
+import {
+  earliestJobStartMs,
+  jobAverageRowsPerSecond,
+  theaterProgressPct,
+} from "../lib/jobTheaterProgress";
 
 function asMappingProof(raw: unknown): MappingProof | null {
   if (!raw || typeof raw !== "object") return null;
@@ -202,18 +207,18 @@ export function JobTheater({
       const stamped = `${new Date().toLocaleTimeString()} — ${line}`;
       setLog((l) => {
         const entry: LiveLogEntry = { id: ++logSeqRef.current, text: stamped };
-        // Trim oldest only — stable ids on remaining lines prevent remount flicker.
-        const next = l.length >= 400 ? [...l.slice(-(399)), entry] : [...l, entry];
+        const next = [...l, entry];
         writeJobEventLog(jobId, next.map((e) => e.text));
         return next;
       });
     };
-    const boot: LiveLogEntry = {
-      id: ++logSeqRef.current,
-      text: `${new Date().toLocaleTimeString()} — Connecting to live job stream…`,
-    };
-    setLog([boot]);
-    writeJobEventLog(jobId, [boot.text]);
+    const persisted = readJobEventLog(jobId);
+    const bootText = `${new Date().toLocaleTimeString()} — Connecting to live job stream…`;
+    const initial: LiveLogEntry[] = persisted.length
+      ? persisted.map((text) => ({ id: ++logSeqRef.current, text }))
+      : [{ id: ++logSeqRef.current, text: bootText }];
+    setLog(initial);
+    if (!persisted.length) writeJobEventLog(jobId, [bootText]);
     const stop = streamJobProgress(
       jobId,
       (update) => {
@@ -252,23 +257,45 @@ export function JobTheater({
         }
 
         setJob(update);
-        // Recent-window RPS (last ~25s) — start-averaged RPS under-reads after
-        // DDL/first batch and invents multi-hour ETAs on healthy loads.
+        if (update.event_log?.length) {
+          setLog((current) => {
+            const merged = mergeEventLogLines(
+              current.map((e) => e.text),
+              update.event_log!,
+            );
+            const used = new Map(current.map((e) => [e.text, e]));
+            const next = merged.map((text) => {
+              const existing = used.get(text);
+              if (existing) return existing;
+              return { id: ++logSeqRef.current, text };
+            });
+            writeJobEventLog(jobId, next.map((e) => e.text));
+            return next;
+          });
+        }
+        // Recent-window RPS when rows actually advance. Reconnect must not
+        // divide 460k by 0.5s. Fall back to job-average from the earliest clock.
         const now = Date.now();
         const samples = rateSamplesRef.current;
         samples.push({ t: now, rows: processed });
         while (samples.length > 1 && now - samples[0].t > 25_000) samples.shift();
+        const jobElapsedMs = now - earliestJobStartMs({
+          startedAt: update.started_at,
+          createdAt: update.created_at,
+          fallbackMs: startRef.current,
+          nowMs: now,
+        });
+        const averageRps = jobAverageRowsPerSecond(processed, jobElapsedMs);
         if (samples.length >= 2) {
           const dr = samples[samples.length - 1].rows - samples[0].rows;
           const dt = (samples[samples.length - 1].t - samples[0].t) / 1000;
-          if (dt >= 0.75 && dr >= 0) {
+          if (dt >= 0.75 && dr > 0) {
             setThroughput(Math.round(dr / dt));
+          } else if (averageRps > 0) {
+            setThroughput(averageRps);
           }
-        } else {
-          const elapsed = (now - startRef.current) / 1000;
-          if (elapsed > 0.5 && processed > 0) {
-            setThroughput(Math.round(processed / elapsed));
-          }
+        } else if (averageRps > 0) {
+          setThroughput(averageRps);
         }
         if (!doneRef.current && isJobSuccess(update.status)) {
           doneRef.current = true;
@@ -478,20 +505,21 @@ export function JobTheaterView({
 
   // Prefer row-derived progress while writing. Once reconcile starts (or all rows
   // are written), hold 99% — never imply "done" until status is terminal success.
-  const reportedPct = job.progress_pct ?? 0;
-  const derivedPct = total > 0 ? (processed / Math.max(total, 1)) * 100 : null;
-  const indeterminate = Boolean((job as { progress_indeterminate?: boolean }).progress_indeterminate) && !(total > 0);
-  let rawProgress: number;
-  if (reconciling) {
-    rawProgress = Math.max(reportedPct || 99, 99);
-  } else if (derivedPct != null) {
-    rawProgress = derivedPct;
-  } else {
-    rawProgress = indeterminate ? Math.min(reportedPct || 5, 5) : reportedPct;
-  }
-  const progress = isComplete
-    ? 100
-    : Math.min(99, Math.max(isRunning ? 1 : 0, Math.round(rawProgress)));
+  // Before the first write, use the engine phase % — 0/1M must not floor to 1%
+  // and bounce against reading/preflight heartbeats (5% → 1% → 5%).
+  const progress = theaterProgressPct({
+    phase: job.phase,
+    status: job.status,
+    progress_pct: job.progress_pct,
+    total_rows: total,
+    records_processed: processed,
+    progress_indeterminate: Boolean(
+      (job as { progress_indeterminate?: boolean }).progress_indeterminate,
+    ),
+    reconciling,
+    isComplete,
+    isRunning,
+  });
 
   // Detect a stalled bar: same progress value for a few seconds while running.
   const [stalled, setStalled] = useState(false);
@@ -510,9 +538,14 @@ export function JobTheaterView({
     return () => window.clearTimeout(timer);
   }, [progress, isRunning]);
 
-  const startMs = toEpochMs(job.started_at) ?? startedAtFallback ?? Date.now();
+  const startMs = earliestJobStartMs({
+    startedAt: job.started_at,
+    createdAt: job.created_at,
+    fallbackMs: startedAtFallback,
+  });
   const endMs = toEpochMs(job.completed_at) ?? Date.now();
   const elapsed = Math.max(0, endMs - startMs);
+  const averageRps = jobAverageRowsPerSecond(processed, elapsed);
 
   const destinationSummary = (job.destination_summary ?? {}) as Record<string, unknown>;
   const rollbackPlan = (destinationSummary.rollback_plan ?? null) as {
@@ -537,7 +570,11 @@ export function JobTheaterView({
   const callableNote = callableExtractNote(preflight, job);
   const batchSize = Number(job.chunk_size ?? destinationSummary.chunk_size ?? 0) || 0;
   const jobRps = Number(job.records_per_second ?? destinationSummary.records_per_second ?? 0) || 0;
-  const displayRps = isComplete && jobRps > 0 ? Math.round(jobRps) : throughput;
+  const displayRps = isComplete && jobRps > 0
+    ? Math.round(jobRps)
+    : throughput > 0
+      ? throughput
+      : averageRps;
   const routeLabel = [sourceType, destType].filter(Boolean).join(" → ") || "this job";
 
   const timelinePhases = useMemo(() => {

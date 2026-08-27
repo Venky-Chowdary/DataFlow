@@ -1196,11 +1196,19 @@ def run_reconciliation(
             "full_checksum",
         }:
             rows = stamped.get("target_rows") or stamped.get("source_rows") or 0
-            stamped["message"] = (
-                f"Writer acknowledgment for {rows} row(s) — source digest was "
-                "the write-pass hash, not an independent dest read-back. "
-                "Not migration_proven."
-            )
+            dest_hash = str(stamped.get("target_checksum") or "").strip()
+            if assurance == "write_pass_dest_readback" or dest_hash:
+                stamped["message"] = (
+                    f"Destination read-back matches the write-pass fingerprint "
+                    f"({rows} row(s)). Source warehouse was not independently "
+                    "re-read — not migration_proven."
+                )
+            else:
+                stamped["message"] = (
+                    f"Writer acknowledgment for {rows} row(s) — source digest was "
+                    "the write-pass hash, not an independent dest read-back. "
+                    "Not migration_proven."
+                )
         if vector_stamp_ctx:
             stamped = stamp_vector_census(
                 stamped,

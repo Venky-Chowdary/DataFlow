@@ -33,8 +33,8 @@ def test_coerce_decimal_overflow_refuse_quantize():
         coerce_decimal_wire("1000", ddl_type="NUMBER(3,0)")
 
 
-def test_coerce_decimal_pg_rounds_scale_matches_engine():
-    """MySQL→Postgres airports: quarantine≡bind must not invent (38,9) blocks."""
+def test_coerce_decimal_pg_does_not_round_identity_maps():
+    """Trailing-zero pads still bind. Significant extra scale refuses on PG too."""
     from connectors.sql_bind import coerce_decimal_wire, normalize_sql_bind_value
 
     lat = coerce_decimal_wire(
@@ -43,17 +43,25 @@ def test_coerce_decimal_pg_rounds_scale_matches_engine():
         engine="postgresql",
     )
     assert lat == Decimal("52.310500000000000")
-    rounded = coerce_decimal_wire(
-        "12.3450",
-        ddl_type="DECIMAL(4,2)",
-        engine="postgresql",
-    )
-    assert rounded == Decimal("12.35")
-    assert normalize_sql_bind_value(
-        "1.23456789012",
-        "NUMERIC(38,9)",
-        engine="postgresql",
-    ) == Decimal("1.234567890")
+    with pytest.raises(ValueError, match="refuse silent quantize"):
+        coerce_decimal_wire(
+            "12.3450",
+            ddl_type="DECIMAL(4,2)",
+            engine="postgresql",
+        )
+    with pytest.raises(ValueError, match="refuse silent quantize"):
+        normalize_sql_bind_value(
+            "1.23456789012",
+            "NUMERIC(38,9)",
+            engine="postgresql",
+        )
+
+
+def test_coerce_decimal_refuses_currency_marker_on_identity():
+    from connectors.sql_bind import coerce_decimal_wire
+
+    with pytest.raises(ValueError, match="currency marker"):
+        coerce_decimal_wire("$1,234.56", ddl_type="DECIMAL(10,2)")
 
 
 def test_coerce_decimal_refuse_bool_nan_empty():

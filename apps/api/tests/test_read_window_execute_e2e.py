@@ -83,9 +83,9 @@ def _mappings() -> list[dict[str, object]]:
         for name, target_type in (
             ("id", "BIGINT"),
             ("name", "TEXT"),
-            # The profiler reads 10.50 as DECIMAL(7,4); a wider or textual
-            # target is a fidelity collapse and G-gates refuse it, correctly.
-            ("amount", "DECIMAL(7,4)"),
+            # 10.50 / 20.50 / 30.50 are scale 2. A wider or textual target
+            # is a fidelity collapse and G-gates refuse it, correctly.
+            ("amount", "DECIMAL(4,2)"),
         )
     ]
 
