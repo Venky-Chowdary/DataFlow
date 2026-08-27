@@ -207,6 +207,31 @@ describe("Transfer Studio chrome contracts", () => {
     }
     assert.match(css, /grid-template-columns: minmax\(0, 5fr\) minmax\(0, 6fr\)/);
     assert.match(css, /@media \(max-width: 1180px\)/);
+    // Studio cards must outrank the post-load Transforms page sheet.
+    assert.match(css, /\.df2-xform \.df2-xform-card/);
+    assert.match(css, /\.df2-xform \.df2-xform-preview/);
+    assert.match(css, /\.df2-xform > \.df2-alert/);
+    assert.match(css, /\.df2-xform \.df2-xform-card[\s\S]{0,180}flex:\s*0 0 auto/);
+  });
+
+  it("post-load Transforms CSS cannot overlap Studio Transform cards", () => {
+    const enterprise = readFileSync(join(webRoot, "styles/enterprise-ui.css"), "utf8");
+    const page = readFileSync(join(webRoot, "pages/TransformsPage.tsx"), "utf8");
+    const studio = readFileSync(join(webRoot, "pages/TransferPage.tsx"), "utf8");
+    const step = readFileSync(join(webRoot, "pages/transfer/TransferTransformStep.tsx"), "utf8");
+    assert.match(page, /className="df2-page-transforms"/);
+    assert.match(enterprise, /\.df2-page-transforms \.df2-xform-card \{/);
+    assert.match(enterprise, /\.df2-page-transforms \.df2-xform-preview \{/);
+    assert.doesNotMatch(
+      enterprise.replace(/\.df2-page-transforms \.df2-xform-card \{[\s\S]*?\n\}/, ""),
+      /^\.df2-xform-card \{/m,
+    );
+    assert.match(studio, /df2-xform-step/);
+    assert.match(step, /isTransportTimeout/);
+    assert.match(step, /Retry preview/);
+    // A hung preview of an empty recipe must not lock Continue.
+    assert.match(step, /Boolean\(previewError\) && steps\.length > 0/);
+    assert.doesNotMatch(step, /disabled=\{Boolean\(previewError\) \|\| Boolean\(preview\?\.refusal\)\}/);
   });
 
   it("the Transform step states its own rules on screen", () => {
@@ -220,8 +245,10 @@ describe("Transfer Studio chrome contracts", () => {
     assert.match(guide, /re-checks every row of the[\s\S]{0,40}population/);
     // Identity is what Execute is held to, so it is stated where it is approved.
     assert.match(step, /recipe \{preview\.recipe\.recipe_hash\}/);
-    // A refused recipe has no identity — Map must not be reachable behind it.
-    assert.match(step, /disabled=\{Boolean\(previewError\) \|\| Boolean\(preview\?\.refusal\)\}/);
+    // A refused recipe still has no identity — Map stays locked. A transport
+    // timeout on an empty recipe does not, so Continue is not gated on any error.
+    assert.match(step, /Boolean\(preview\?\.refusal\)/);
+    assert.match(step, /\|\| \(Boolean\(previewError\) && steps\.length > 0\)/);
   });
 
   it("transfer-studio stacks chrome via container query + 1280 fallback", () => {

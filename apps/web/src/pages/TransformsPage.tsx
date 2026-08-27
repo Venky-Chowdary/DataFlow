@@ -327,6 +327,7 @@ export function TransformsPage({ connectors, onNavigate }: TransformsPageProps) 
 
   return (
     <PageShell
+      className="df2-page-transforms"
       title="Transforms"
       description="Post-load SQL models that run at the destination after a transfer lands — open a row for Dry run, Run, Export, or Edit."
     >
