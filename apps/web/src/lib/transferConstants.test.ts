@@ -8,6 +8,7 @@ import {
   formatSchemaPolicyLabel,
   formatSyncModeLabel,
   formatValidationModeLabel,
+  syncModeHonestyLine,
 } from "./transferConstants.js";
 
 describe("availableSyncModes", () => {
@@ -99,5 +100,21 @@ describe("formatSyncModeLabel", () => {
   it("does not reuse sync-mode formatting for schema policy or validation", () => {
     assert.equal(formatSchemaPolicyLabel("manual_review"), "Manual approval");
     assert.equal(formatValidationModeLabel("strict"), "Strict");
+  });
+});
+
+describe("syncModeHonestyLine", () => {
+  it("names leftover empty tables as dest-exists on Full append — no CREATE, no ALTER", () => {
+    const line = syncModeHonestyLine("full_refresh_append", true);
+    assert.match(line, /existing table/i);
+    assert.match(line, /does not CREATE/i);
+    assert.match(line, /does not ALTER/i);
+    assert.match(line, /empty leftover/i);
+  });
+
+  it("names missing tables as create-new on Full append", () => {
+    const line = syncModeHonestyLine("full_refresh_append", false);
+    assert.match(line, /CREATE TABLE/i);
+    assert.match(line, /create-new/i);
   });
 });

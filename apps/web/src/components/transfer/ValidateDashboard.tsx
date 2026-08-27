@@ -1178,6 +1178,8 @@ export function ValidateDashboard({
   const mismatches = sampleCompare?.mismatches ?? [];
   const dryGate = preflight?.gates?.find((g) => /dry_run|integrity/i.test(g.id));
   const sampleScanned = Number(dryGate?.details?.sample_rows_scanned ?? dryGate?.details?.sample_size ?? 0) || null;
+  const populationRowsScanned = Number(preflight?.population_fit?.rows_scanned ?? 0);
+  const populationExact = preflight?.population_fit?.evidence === "exact";
   const engineMsTotal = (preflight?.gates ?? []).reduce((sum, g) => sum + (Number(g.duration_ms) || 0), 0);
   // Exact Studio sync ids — avoid /append/i matching accidental substrings.
   const appendLikeSync = [
@@ -1783,9 +1785,14 @@ export function ValidateDashboard({
           {!running && preflight && engineMsTotal > 0 && (
             <p className="df2-vd-hero-engine-meta">
               {formatDuration(engineMsTotal)} · {preflight.gates.length} gates
+              {populationRowsScanned > 0
+                ? ` · ${populationRowsScanned.toLocaleString()} ${populationExact ? "population" : "scanned"} rows`
+                : ""}
               {sampleScanned != null && sampleScanned > 0
                 ? ` · ${sampleScanned.toLocaleString()} preview rows`
-                : " · preview sample"}
+                : populationRowsScanned > 0
+                  ? ""
+                  : " · preview sample"}
             </p>
           )}
           {!running && preflight?.passed && !stripControlsApplied && onStripControlChars && (

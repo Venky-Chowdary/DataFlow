@@ -442,6 +442,23 @@ describe("Transfer Studio chrome contracts", () => {
     );
   });
 
+  it("Destination Advanced matches the 36px button ladder and dest-exists is not create-new", () => {
+    const css = readFileSync(join(webRoot, "styles/transfer-studio.css"), "utf8");
+    const page = readFileSync(join(webRoot, "pages/TransferPage.tsx"), "utf8");
+    const dash = readFileSync(join(webRoot, "components/transfer/ValidateDashboard.tsx"), "utf8");
+    const constants = readFileSync(join(webRoot, "lib/transferConstants.ts"), "utf8");
+    assert.match(css, /\.df2-dest-toolbar \.df2-dest-advanced-btn \{[\s\S]*height:\s*var\(--df-btn-height/);
+    assert.match(css, /\.df2-dest-mode-btn \{[\s\S]*height:\s*var\(--df-btn-height/);
+    assert.doesNotMatch(page, /size="sm"[\s\S]{0,80}df2-dest-advanced-btn|df2-dest-advanced-btn[\s\S]{0,80}size="sm"/);
+    assert.match(page, /Existing table detected/);
+    assert.match(page, /This is not create-new/);
+    assert.match(page, /empty leftover|even if a prior run wrote 0 rows/);
+    assert.match(page, /syncModeHonestyLine\(syncMode, destTableExists\)/);
+    assert.match(constants, /does not CREATE a new table and does not ALTER/);
+    assert.match(dash, /populationRowsScanned/);
+    assert.match(dash, /populationExact \? "population" : "scanned"/);
+  });
+
   it("Destination saved/new lists nest-scroll above the wizard footer", () => {
     const css = readFileSync(join(webRoot, "styles/transfer-studio.css"), "utf8");
     const landing = readFileSync(join(webRoot, "styles/landing.css"), "utf8");

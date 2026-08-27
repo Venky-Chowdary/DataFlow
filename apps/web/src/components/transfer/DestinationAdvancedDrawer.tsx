@@ -152,6 +152,11 @@ interface DestinationAdvancedDrawerProps {
   /** Stage into `{table}_df_staging`, promote only clean rows to primary. */
   writeViaStaging?: boolean;
   onWriteViaStagingChange?: (value: boolean) => void;
+  /**
+   * Destination-aware sync caption (SSOT: syncModeHonestyLine).
+   * Full append into a leftover empty table must not read as CREATE.
+   */
+  syncHonestyLine?: string;
   /** False for Mongo/files/SaaS — hide/disable staging toggle so Execute cannot fail after Validate. */
   writeViaStagingSupported?: boolean;
   /** Show vector destination embedding controls (pgvector / Qdrant / Weaviate / Pinecone / Milvus). */
@@ -265,6 +270,7 @@ export function DestinationAdvancedDrawer({
   writeViaStaging = false,
   onWriteViaStagingChange,
   writeViaStagingSupported = true,
+  syncHonestyLine = "",
   showVectorOptions = false,
   vectorContentColumn = "",
   vectorEmbeddingColumn = "",
@@ -340,10 +346,10 @@ export function DestinationAdvancedDrawer({
             )}
             {syncMode === "full_refresh_append" && (
               <p>
-                <strong>Load more into an existing table:</strong> keeps every destination row and
-                inserts the full source snapshot again (100k existing + 100k file → 200k). Duplicate
-                primary keys will fail or quarantine — use Incremental deduped / Upsert when keys
-                may collide.
+                <strong>Full append:</strong>{" "}
+                {syncHonestyLine
+                  || "Keep existing rows; insert the full snapshot again. Leftover empty tables still exist."}
+                {" "}Duplicate primary keys will fail or quarantine — use Incremental deduped when keys may collide.
               </p>
             )}
             {syncMode === "incremental_append" && (
