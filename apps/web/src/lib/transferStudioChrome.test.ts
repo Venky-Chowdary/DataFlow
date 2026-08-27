@@ -777,6 +777,8 @@ describe("Transfer Studio chrome contracts", () => {
     assert.match(drawer, /Validate identity/);
     assert.match(drawer, /formatValidateIdentitySummary/);
     assert.match(drawer, /formatSchemaPolicyLabel/);
+    assert.doesNotMatch(drawer, /Use Edit to set the schema map/);
+    assert.match(drawer, /create from Transfer Studio after Validate/);
     assert.match(form, /formatValidateIdentitySummary/);
     assert.match(form, /Save does not resubmit these hashes/);
     assert.doesNotMatch(form, /approved_shape_recipe_hash:/);

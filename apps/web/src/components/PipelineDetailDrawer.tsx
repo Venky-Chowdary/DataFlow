@@ -681,7 +681,7 @@ export function PipelineDetailDrawer({
               </ul>
             ) : (
               <p className="df2-drawer-empty-line">
-                No column mappings stored on this pipeline yet. Use Edit to set the schema map, or open the last job for quarantine replay.
+                No column mappings stored on this pipeline yet. Edit cannot set a schema map — create from Transfer Studio after Validate so the beat replays signed column names.
               </p>
             )}
           </section>
