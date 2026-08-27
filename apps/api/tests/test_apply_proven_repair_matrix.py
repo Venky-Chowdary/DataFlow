@@ -182,7 +182,8 @@ def test_fractional_into_integer_apply_then_rescan(dest_db: str, int_type: str) 
     assert report.findings
     assert "fractional" in report.findings[0].unfit_reason
     suggested = (report.findings[0].suggested_target_type or "").upper()
-    assert suggested in {"DOUBLE", "FLOAT", "FLOAT64", "REAL", "DOUBLE PRECISION"}
+    assert any(tok in suggested for tok in ("DECIMAL", "NUMERIC", "NUMBER")), suggested
+    assert "FLOAT" not in suggested and "DOUBLE" not in suggested
     _updated, after = apply_suggested_widens_and_rescan(
         FRACTION_ROWS, mappings, report, **kw
     )

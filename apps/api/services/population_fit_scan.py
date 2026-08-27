@@ -1026,6 +1026,16 @@ def scan_rows(
                 and not _is_year_carrier(bounded[idx].target_type)
             ):
                 continue
+            if bounded[idx].carrier in {CARRIER_DECIMAL, CARRIER_INTEGER}:
+                idig, scale = write_int_digits_and_scale(value)
+                if idig > env_int.get(idx, 0):
+                    env_int[idx] = idig
+                else:
+                    env_int.setdefault(idx, idig)
+                if scale > env_scale.get(idx, 0):
+                    env_scale[idx] = scale
+                else:
+                    env_scale.setdefault(idx, scale)
             why = fit_reason(value)
             if why is None:
                 continue
@@ -1084,7 +1094,6 @@ def scan_rows(
             on_progress(scanned)
         except Exception:
             pass
-
     if scanned == 0:
         evidence = EVIDENCE_UNMEASURED
     elif rows_are_population and not truncated:
@@ -1130,18 +1139,38 @@ def scan_rows(
         why = reasons.get(idx, "")
         if target.carrier == CARRIER_DECIMAL and (first or prove_values):
             if "fractional" in why.lower():
-                suggested_type = integer_overflow_suggested_type(
-                    first or prove_values[0], target.target_type, dest_db=dest_db
+                # Exact DECIMAL/NUMBER that holds the fraction. Never FLOAT —
+                # IEEE would invent/destroy money and clock digits.
+                suggested_type = proven_decimal_widen(
+                    values=prove_values,
+                    dest_db=dest_db,
+                    current_type=target.target_type,
+                    max_int_digits=env_int.get(idx, 0),
+                    max_scale=env_scale.get(idx, 0),
+                    safety_margin=0,
                 )
                 if not suggested_type:
-                    dialect = (dest_db or "").strip().lower()
-                    if dialect in {"snowflake"}:
-                        suggested_type = "FLOAT"
-                    elif dialect in {"bigquery", "bq"}:
-                        suggested_type = "FLOAT64"
-                    else:
-                        suggested_type = "DOUBLE"
-                apply_proven = bool(suggested_type)
+                    suggested_type = integer_overflow_suggested_type(
+                        first or prove_values[0], target.target_type, dest_db=dest_db
+                    )
+                if not suggested_type:
+                    suggested_type = decimal_widen_carrier(
+                        first or (prove_values[0] if prove_values else ""),
+                        dest_db=dest_db,
+                        current_type=target.target_type,
+                    )
+                parsed = parse_decimal_precision_scale(
+                    suggested_type, dest_db=dest_db
+                )
+                apply_proven = bool(
+                    parsed
+                    and all(
+                        fits_decimal(v, parsed[0], parsed[1], dest_db=dest_db)
+                        for v in prove_values
+                    )
+                )
+                if not apply_proven:
+                    suggested_type = ""
             else:
                 margin = create_new_margin if not target.binds_live_ddl else 0
                 suggested_type = proven_decimal_widen(
@@ -1207,11 +1236,21 @@ def scan_rows(
                     "the writer would still refuse."
                 )
         elif target.carrier == CARRIER_INTEGER and (first or prove_values):
-            suggested_type = proven_integer_widen(
-                prove_values or (first,),
-                dest_db=dest_db,
-                current_type=target.target_type,
-            )
+            if "fractional" in why.lower() or env_int_frac.get(idx):
+                suggested_type = proven_decimal_widen(
+                    values=prove_values or (first,),
+                    dest_db=dest_db,
+                    current_type=target.target_type,
+                    max_int_digits=env_int.get(idx, 0),
+                    max_scale=env_scale.get(idx, 0),
+                    safety_margin=0,
+                )
+            else:
+                suggested_type = proven_integer_widen(
+                    prove_values or (first,),
+                    dest_db=dest_db,
+                    current_type=target.target_type,
+                )
             apply_proven = bool(suggested_type)
             if suggested_type:
                 suggested_fix = (

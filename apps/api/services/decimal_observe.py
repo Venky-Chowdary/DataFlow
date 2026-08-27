@@ -458,8 +458,11 @@ def decimal_widen_precision_scale(
     dialect = (dest_db or "").strip().lower()
     cap = 76 if dialect in {"bigquery", "bq"} and need_s > 9 else 38
     if need_p > cap:
-        need_p = cap
-        need_s = min(need_s, max(0, cap - need_int))
+        need_int = max(idig, min(need_int, cap - need_s))
+        need_p = need_int + need_s
+        if need_p > cap:
+            need_p = cap
+            need_s = min(need_s, max(0, cap - need_int))
     if need_p <= 0:
         return None
     return need_p, need_s
@@ -564,18 +567,20 @@ def proven_decimal_widen(
     parsed = parse_decimal_precision_scale(current_type, dest_db=dest_db)
     cur_p, cur_s = parsed if parsed else (0, 0)
     cur_int = max(0, cur_p - cur_s) if parsed else 0
-    need_s = max(cur_s, int(max_scale or 0), 0)
-    need_int = max(cur_int, int(max_int_digits or 0), 0)
+    observed_int = max(0, int(max_int_digits or 0))
+    observed_s = max(0, int(max_scale or 0))
     margin = max(0, int(safety_margin or 0))
+    cells = [v for v in values if v is not None and str(v).strip() != ""]
+    for raw in cells:
+        idig, scale = write_int_digits_and_scale(raw)
+        observed_s = max(observed_s, scale)
+        observed_int = max(observed_int, idig)
+    need_s = max(cur_s, observed_s)
+    need_int = max(cur_int, observed_int)
     if margin:
         need_s += margin
         if need_int > 0:
             need_int += 1
-    cells = [v for v in values if v is not None and str(v).strip() != ""]
-    for raw in cells:
-        idig, scale = write_int_digits_and_scale(raw)
-        need_s = max(need_s, scale)
-        need_int = max(need_int, idig)
     if need_int == 0 and need_s == 0:
         need_int = 1
 
@@ -583,8 +588,13 @@ def proven_decimal_widen(
     for _ in range(cap + 2):
         need_p = need_int + need_s
         if need_p > cap:
-            need_s = min(need_s, max(0, cap - need_int))
+            # Reclaim unused dest integer head-room (NUMBER(38,0) + scale 6)
+            # before shrinking observed scale. Never invent extra scale.
+            need_int = max(observed_int, min(need_int, cap - need_s))
             need_p = need_int + need_s
+            if need_p > cap:
+                need_s = min(need_s, max(0, cap - need_int))
+                need_p = need_int + need_s
             if need_p > cap or need_p <= 0:
                 return ""
         leftovers = [
@@ -609,13 +619,9 @@ def proven_decimal_widen(
                 need_int = idig
                 grew = True
         if not grew:
-            if need_int + need_s + 1 <= cap:
-                need_s += 1
-                grew = True
-            elif need_int + 1 + need_s <= cap:
-                need_int += 1
-                grew = True
-        if not grew:
+            # Do not invent +1 scale/int. Extra dest zeros are data-shape
+            # corruption (currency 12.50 → 12.500). Return empty so the
+            # gate cannot Apply a type the cells did not prove.
             return ""
         cap = _decimal_precision_cap(dest_db, need_s)
     return ""

@@ -2678,21 +2678,13 @@ def fits_decimal(
 
     Trailing wire zeros are stripped (``52.310500000000000`` → scale 4).
 
-    Dialect honesty (PostgreSQL docs): excess *fractional* digits are rounded
-    at bind — do not invent a quarantine block PG would never raise. Integer /
-    precision overflow still fail-closed (PG ``numeric field overflow``).
-
-    MySQL / Snowflake / SQL Server stay fail-closed on significant scale
-    overflow (STRICT / warehouse reject class) unless ``dest_db`` is PG-family.
+    Identity maps are as-is on every engine. Significant scale overflow
+    (digits that are not trailing zeros) fail-closed — including PostgreSQL.
+    PG would round at INSERT; we quarantine instead of writing a different
+    number. Trailing zeros after the decimal still collapse (``52.310500000``
+    is 52.3105) and do not count as overflow.
     """
-    from decimal import (
-        ROUND_HALF_UP,
-        Context,
-        Decimal,
-        InvalidOperation,
-        Overflow,
-        localcontext,
-    )
+    from decimal import InvalidOperation, Overflow
 
     if is_reader_null_cell(value):
         return True
@@ -2716,20 +2708,9 @@ def fits_decimal(
         prec = int(precision)
         scl = int(scale)
         max_int = max(0, prec - scl)
-        dialect = (dest_db or "").strip().lower()
-        pg_rounds_scale = dialect in _PG_DECIMAL_ROUND_DIALECTS
         int_digits, value_scale = decimal_int_digits_and_scale(d)
         if value_scale > scl:
-            if not pg_rounds_scale:
-                return False
-            # Match PG: round fractional excess, then prove integer capacity.
-            with localcontext(Context(prec=max(prec + 16, 80), rounding=ROUND_HALF_UP)):
-                try:
-                    rounded = d.quantize(Decimal(1).scaleb(-scl))
-                except (InvalidOperation, Overflow):
-                    return False
-            int_digits, _ = decimal_int_digits_and_scale(rounded)
-            return int_digits <= max_int
+            return False
         return int_digits <= max_int
     except (InvalidOperation, Overflow, ValueError, TypeError):
         return False
@@ -3397,20 +3378,24 @@ def integer_overflow_suggested_type(
 ) -> str:
     """Dest-spelled carrier that would hold ``value``. Empty when the cell binds.
 
-    Fractional → DOUBLE/FLOAT (not a bigger INT). Range overflow → BIGINT or
-    Snowflake/Oracle ``NUMBER(38,0)``. Values past signed 64-bit use the
-    decimal widen SSOT. Never TEXT — that destroys numeric meaning.
+    Fractional → exact DECIMAL/NUMBER (never FLOAT — IEEE would corrupt
+    money/clock). Range overflow → BIGINT or Snowflake/Oracle ``NUMBER(38,0)``.
+    Values past signed 64-bit use the decimal widen SSOT. Never TEXT.
     """
     why = integer_fit_failure(value, type_str, dest_db=dest_db)
     if why is None:
-        return ""
+        from services.transform_engine import decimal_wire_value
+
+        wire = decimal_wire_value(value)
+        if wire is None or not wire.is_finite() or wire == wire.to_integral_value():
+            return ""
+        why = "fractional"
     if "fractional" in why.lower():
-        dialect = (dest_db or "").strip().lower()
-        if dialect in {"snowflake"}:
-            return "FLOAT"
-        if dialect in {"bigquery", "bq"}:
-            return "FLOAT64"
-        return "DOUBLE"
+        from services.decimal_observe import decimal_widen_carrier
+
+        return decimal_widen_carrier(
+            value, dest_db=dest_db, current_type=type_str
+        ) or ""
     if integer_fit_failure(value, "BIGINT", dest_db=dest_db) is None:
         dialect = (dest_db or "").strip().lower()
         if dialect in {"snowflake", "oracle"}:
@@ -3493,6 +3478,13 @@ def proven_integer_widen(
             frac_seed = v
             break
     if frac_seed is not None:
+        from services.decimal_observe import proven_decimal_widen
+
+        decimal = proven_decimal_widen(
+            values=cells, dest_db=dest_db, current_type=current_type
+        )
+        if decimal and _all_values_fit_suggested_type(cells, decimal, dest_db=dest_db):
+            return decimal
         return integer_overflow_suggested_type(
             frac_seed, current_type, dest_db=dest_db
         )
