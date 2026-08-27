@@ -123,6 +123,7 @@ import {
   namedStudioValidationMode,
   schemaPolicyBackfills,
   studioSchedulePolicies,
+  writeViaStagingSupported as destSupportsWriteViaStaging,
 } from "../lib/studioDataRules";
 import { buildValidateContractKey as composeValidateContractKey } from "../lib/studioValidateIdentity";
 import {
@@ -677,10 +678,7 @@ export function TransferPage({
     destDriverType === "pinecone" ||
     destDriverType === "milvus";
 
-  const writeViaStagingSupported = [
-    "postgresql", "mysql", "sqlite", "sqlserver", "mssql", "oracle",
-    "snowflake", "redshift", "bigquery", "duckdb", "generic_sql",
-  ].includes(destDriverType);
+  const writeViaStagingSupported = destSupportsWriteViaStaging(destDriverType);
 
   useEffect(() => {
     if (!writeViaStagingSupported && writeViaStaging) {

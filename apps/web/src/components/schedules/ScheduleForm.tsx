@@ -13,7 +13,7 @@ import {
   availableSyncModes,
   schemaPolicyHonestyLine,
 } from "../../lib/transferConstants";
-import { schemaPolicyBackfills } from "../../lib/studioDataRules";
+import { schemaPolicyBackfills, studioSchedulePolicies, writeViaStagingSupported } from "../../lib/studioDataRules";
 import type {
   Connector,
   PipelineSchedule,
@@ -100,6 +100,12 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
     namedCdcDeliveryGuarantee(initial?.delivery_guarantee),
   );
   const [snapshotMode, setSnapshotMode] = useState(initial?.snapshot_mode || "initial");
+  const [writeViaStaging, setWriteViaStaging] = useState(Boolean(initial?.write_via_staging));
+  const [priorityColumn, setPriorityColumn] = useState(initial?.priority_column ?? "");
+  const [priorityDirection, setPriorityDirection] = useState<"asc" | "desc">(
+    initial?.priority_direction === "asc" ? "asc" : "desc",
+  );
+  const [rowLimit, setRowLimit] = useState(Math.max(0, Number(initial?.row_limit || 0) || 0));
 
   // Retry & notifications
   const [maxRetries, setMaxRetries] = useState(initial?.max_retries ?? 2);
@@ -115,6 +121,7 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
 
   const sourceConnector = connectors.find((c) => c.id === sourceId);
   const destConnector = connectors.find((c) => c.id === destId);
+  const stagingSupported = writeViaStagingSupported(destConnector?.type);
   const callable = sourceReadMode === "procedure" || sourceReadMode === "query";
   const syncModes = useMemo(() => {
     const offered = availableSyncModes({
@@ -148,6 +155,12 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
       setSyncMode("full_refresh_overwrite");
     }
   }, [syncMode, syncModes]);
+
+  useEffect(() => {
+    if (!stagingSupported && writeViaStaging) {
+      setWriteViaStaging(false);
+    }
+  }, [stagingSupported, writeViaStaging]);
 
   const [contractBlock, setContractBlock] = useState("");
 
@@ -183,6 +196,17 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
   const submit = (e: FormEvent) => {
     e.preventDefault();
     if (!canSubmit) return;
+    const writeKnobs = studioSchedulePolicies({
+      validationMode,
+      schemaPolicy,
+      backfillNewFields: backfill,
+      writeViaStaging: writeViaStaging && stagingSupported,
+      priorityColumn,
+      priorityDirection,
+      rowLimit,
+      syncMode,
+      snapshotMode,
+    });
     onSubmit({
       name: name.trim(),
       source_connector_id: sourceId,
@@ -193,15 +217,19 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
       cron: cadenceMode === "cron" ? cron.trim() : "",
       timezone,
       sync_mode: syncMode,
-      validation_mode: validationMode,
-      schema_policy: schemaPolicy,
-      backfill_new_fields: backfill && schemaPolicyBackfills(schemaPolicy),
+      validation_mode: writeKnobs.validation_mode || validationMode,
+      schema_policy: writeKnobs.schema_policy || schemaPolicy,
+      backfill_new_fields: writeKnobs.backfill_new_fields,
+      write_via_staging: writeKnobs.write_via_staging,
+      priority_column: writeKnobs.priority_column,
+      priority_direction: writeKnobs.priority_direction,
+      row_limit: writeKnobs.row_limit,
       delivery_guarantee: studioDeliveryGuarantee({
         syncMode,
         deliveryGuarantee,
         callableSource: callable,
       }),
-      snapshot_mode: syncMode === "cdc" ? snapshotMode || "initial" : "",
+      snapshot_mode: writeKnobs.snapshot_mode ?? "",
       cursor_column: showCursor ? cursorColumn.trim() : "",
       primary_key: showPrimaryKey ? primaryKey.trim() : "",
       source_read_mode: sourceReadMode,
@@ -480,6 +508,67 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
               />
               Backfill new fields on schema change
             </label>
+            <label className={`df2-sched-check${stagingSupported ? "" : " is-disabled"}`}>
+              <input
+                type="checkbox"
+                checked={writeViaStaging && stagingSupported}
+                disabled={!stagingSupported}
+                onChange={(e) => setWriteViaStaging(e.target.checked)}
+              />
+              Write via staging
+            </label>
+            <span className="df2-field-hint">
+              {stagingSupported
+                ? "Load into {table}_df_staging first, then promote only clean rows. Same as Destination Advanced. Promote is at-least-once."
+                : "Unavailable for this destination — SQL table engines only (PostgreSQL, MySQL, Snowflake, BigQuery, …)."}
+            </span>
+          </div>
+        </div>
+
+        <div className="df2-adv-load-controls">
+          <h4 className="df2-adv-section-title">Load controls</h4>
+          <p className="df2-field-hint">
+            Same knobs as Destination Advanced. The hourly beat replays them — an edit must send them or they vanish.
+          </p>
+          <div className="df2-adv-load-grid">
+            <div className="df2-field">
+              <label className="df2-label" htmlFor="sched-priority-col">Priority column</label>
+              <input
+                id="sched-priority-col"
+                className="df2-input"
+                value={priorityColumn}
+                onChange={(e) => setPriorityColumn(e.target.value)}
+                placeholder="updated_at"
+              />
+              <span className="df2-field-hint">Sort source rows by this column before write. Empty = source order.</span>
+            </div>
+            <div className="df2-field">
+              <label className="df2-label" htmlFor="sched-priority-dir">Direction</label>
+              <select
+                id="sched-priority-dir"
+                className="df2-input"
+                value={priorityDirection}
+                disabled={!priorityColumn.trim()}
+                onChange={(e) => setPriorityDirection(e.target.value === "asc" ? "asc" : "desc")}
+              >
+                <option value="desc">Highest first</option>
+                <option value="asc">Lowest first</option>
+              </select>
+            </div>
+            <div className="df2-field">
+              <label className="df2-label" htmlFor="sched-row-limit">Row limit</label>
+              <input
+                id="sched-row-limit"
+                className="df2-input"
+                type="number"
+                min={0}
+                step={1000}
+                value={rowLimit || ""}
+                placeholder="0 = no limit"
+                onChange={(e) => setRowLimit(Math.max(0, Number(e.target.value) || 0))}
+              />
+              <span className="df2-field-hint">0 means all rows. Validate names this cap as G17 — it is not silent truncation.</span>
+            </div>
           </div>
         </div>
       </section>

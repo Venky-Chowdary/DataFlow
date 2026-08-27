@@ -496,6 +496,14 @@ export function PipelineDetailDrawer({
               {sched.sync_mode === "cdc" && (
                 <div><dt>CDC snapshot</dt><dd>{sched.snapshot_mode || "initial"}</dd></div>
               )}
+              <div><dt>Write via staging</dt><dd>{sched.write_via_staging ? "Yes" : "No"}</dd></div>
+              {sched.priority_column ? (
+                <div>
+                  <dt>Priority</dt>
+                  <dd>{sched.priority_column} · {sched.priority_direction === "asc" ? "lowest first" : "highest first"}</dd>
+                </div>
+              ) : null}
+              {sched.row_limit ? <div><dt>Row limit</dt><dd>{sched.row_limit.toLocaleString()}</dd></div> : null}
               <div><dt>Runs</dt><dd>{sched.run_count.toLocaleString()}</dd></div>
               {sched.contract_id && (
                 <div>
@@ -573,6 +581,16 @@ export function PipelineDetailDrawer({
               )}
               <div><dt>Validation mode</dt><dd>{sched.validation_mode || "—"}</dd></div>
               <div><dt>Backfill new fields</dt><dd>{sched.backfill_new_fields ? "Yes" : "No"}</dd></div>
+              <div><dt>Write via staging</dt><dd>{sched.write_via_staging ? "Yes" : "No"}</dd></div>
+              <div>
+                <dt>Priority column</dt>
+                <dd>
+                  {sched.priority_column
+                    ? `${sched.priority_column} (${sched.priority_direction === "asc" ? "asc" : "desc"})`
+                    : "—"}
+                </dd>
+              </div>
+              <div><dt>Row limit</dt><dd>{sched.row_limit ? sched.row_limit.toLocaleString() : "None"}</dd></div>
             </dl>
             {mappings.length > 0 ? (
               <ul className="df2-drawer-map-list" aria-label="Column mappings">
@@ -616,6 +634,16 @@ export function PipelineDetailDrawer({
               <div><dt>Notify on failure</dt><dd>{sched.notify_on_failure ? "Yes" : "No"}</dd></div>
               <div><dt>Notify on success</dt><dd>{sched.notify_on_success ? "Yes" : "No"}</dd></div>
               <div><dt>Backfill new fields</dt><dd>{sched.backfill_new_fields ? "Yes" : "No"}</dd></div>
+              <div><dt>Write via staging</dt><dd>{sched.write_via_staging ? "Yes" : "No"}</dd></div>
+              <div>
+                <dt>Priority column</dt>
+                <dd>
+                  {sched.priority_column
+                    ? `${sched.priority_column} (${sched.priority_direction === "asc" ? "asc" : "desc"})`
+                    : "—"}
+                </dd>
+              </div>
+              <div><dt>Row limit</dt><dd>{sched.row_limit ? sched.row_limit.toLocaleString() : "None"}</dd></div>
               <div><dt>Created</dt><dd>{formatWhen(sched.created_at)}</dd></div>
             </dl>
             <p className="df2-drawer-empty-line">

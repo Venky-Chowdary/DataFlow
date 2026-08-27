@@ -10,6 +10,7 @@ import {
   namedStudioValidationMode,
   schemaPolicyBackfills,
   studioSchedulePolicies,
+  writeViaStagingSupported,
 } from "./studioDataRules.ts";
 
 describe("studioDataRules", () => {
@@ -96,6 +97,18 @@ describe("studioDataRules", () => {
     assert.equal(payload.priority_column, "updated_at");
     assert.equal(payload.priority_direction, "asc");
     assert.equal(payload.row_limit, 5000);
+  });
+
+  it("writeViaStagingSupported matches the SQL staging engine set", () => {
+    assert.equal(writeViaStagingSupported("postgresql"), true);
+    assert.equal(writeViaStagingSupported("postgres"), true);
+    assert.equal(writeViaStagingSupported("mysql"), true);
+    assert.equal(writeViaStagingSupported("snowflake"), true);
+    assert.equal(writeViaStagingSupported("bigquery"), true);
+    assert.equal(writeViaStagingSupported("mongodb"), false);
+    assert.equal(writeViaStagingSupported("csv"), false);
+    assert.equal(writeViaStagingSupported("s3"), false);
+    assert.equal(writeViaStagingSupported(""), false);
   });
 
   it("stamps CDC snapshot_mode onto a scheduled pipeline and omits it on full refresh", () => {

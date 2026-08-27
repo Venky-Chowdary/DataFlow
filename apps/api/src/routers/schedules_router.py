@@ -244,6 +244,10 @@ class ScheduleSummaryResponse(BaseModel):
     validation_mode: str = "strict"
     schema_policy: str = "manual_review"
     backfill_new_fields: bool = False
+    write_via_staging: bool = False
+    priority_column: str = ""
+    priority_direction: str = "desc"
+    row_limit: int = 0
     delivery_guarantee: str = "at_least_once"
     snapshot_mode: str = ""
     cursor_column: str = ""

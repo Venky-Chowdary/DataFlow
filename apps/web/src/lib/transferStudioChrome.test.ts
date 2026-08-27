@@ -753,4 +753,27 @@ describe("Transfer Studio chrome contracts", () => {
     assert.match(chunk, /priorityColumn/);
     assert.match(chunk, /rowLimit/);
   });
+
+  it("Schedules form submits Studio Advanced write knobs so an edit cannot drop them", () => {
+    const form = readFileSync(join(webRoot, "components/schedules/ScheduleForm.tsx"), "utf8");
+    const drawer = readFileSync(join(webRoot, "components/PipelineDetailDrawer.tsx"), "utf8");
+    const types = readFileSync(join(webRoot, "lib/types.ts"), "utf8");
+    const page = readFileSync(join(webRoot, "pages/TransferPage.tsx"), "utf8");
+    assert.match(form, /studioSchedulePolicies/);
+    assert.match(form, /writeViaStagingSupported/);
+    assert.match(form, /write_via_staging: writeKnobs.write_via_staging/);
+    assert.match(form, /priority_column: writeKnobs.priority_column/);
+    assert.match(form, /row_limit: writeKnobs.row_limit/);
+    assert.match(form, /id="sched-priority-col"/);
+    assert.match(form, /id="sched-row-limit"/);
+    assert.match(form, /Write via staging/);
+    assert.match(drawer, /Write via staging/);
+    assert.match(drawer, /sched.row_limit/);
+    assert.match(types, /interface PipelineSchedule \{[\s\S]*write_via_staging\?: boolean;/);
+    assert.match(page, /destSupportsWriteViaStaging\(destDriverType\)/);
+    assert.doesNotMatch(
+      page,
+      /const writeViaStagingSupported = \[\s*"postgresql", "mysql"/,
+    );
+  });
 });

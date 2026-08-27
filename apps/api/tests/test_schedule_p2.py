@@ -910,3 +910,73 @@ def test_create_schedule_persists_cdc_snapshot_mode(temp_store):
         "snapshot_mode": "when_needed",
     })
     assert overwrite.snapshot_mode == ""
+
+
+def test_list_summary_exposes_advanced_write_knobs():
+    """List/edit/drawer read the summary. Omitting knobs made Save wipe Studio values."""
+    from src.routers.schedules_router import ScheduleSummaryResponse
+
+    sched = store.PipelineSchedule.from_dict({
+        "id": "s-sum",
+        "name": "n",
+        "source_connector_id": "src",
+        "source_table": "orders",
+        "dest_connector_id": "dst",
+        "dest_table": "orders_wh",
+        "interval": "daily",
+        "write_via_staging": True,
+        "priority_column": "updated_at",
+        "priority_direction": "asc",
+        "row_limit": 2500,
+    })
+    summary = ScheduleSummaryResponse.from_schedule(sched)
+    assert summary.write_via_staging is True
+    assert summary.priority_column == "updated_at"
+    assert summary.priority_direction == "asc"
+    assert summary.row_limit == 2500
+
+
+def test_update_omitting_write_knobs_preserves_them(temp_store):
+    sched = store.create_schedule({
+        "name": "Stage then promote",
+        "source_connector_id": "src-1",
+        "source_table": "orders",
+        "dest_connector_id": "dst-1",
+        "dest_table": "orders_wh",
+        "interval": "daily",
+        "write_via_staging": True,
+        "priority_column": "updated_at",
+        "priority_direction": "asc",
+        "row_limit": 2500,
+    })
+    renamed = store.update_schedule(sched.id, {"name": "renamed only"})
+    assert renamed is not None
+    assert renamed.write_via_staging is True
+    assert renamed.priority_column == "updated_at"
+    assert renamed.priority_direction == "asc"
+    assert renamed.row_limit == 2500
+
+
+def test_update_explicit_false_clears_write_knobs(temp_store):
+    sched = store.create_schedule({
+        "name": "Stage then promote",
+        "source_connector_id": "src-1",
+        "source_table": "orders",
+        "dest_connector_id": "dst-1",
+        "dest_table": "orders_wh",
+        "interval": "daily",
+        "write_via_staging": True,
+        "priority_column": "updated_at",
+        "priority_direction": "asc",
+        "row_limit": 2500,
+    })
+    cleared = store.update_schedule(sched.id, {
+        "write_via_staging": False,
+        "priority_column": "",
+        "priority_direction": "desc",
+        "row_limit": 0,
+    })
+    assert cleared is not None
+    assert cleared.write_via_staging is False
+    assert cleared.priority_column == ""
+    assert cleared.row_limit == 0

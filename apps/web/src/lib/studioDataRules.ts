@@ -35,6 +35,33 @@ export function schemaPolicyBackfills(policy: string): boolean {
   return policy === "propagate_columns" || policy === "propagate_all";
 }
 
+/**
+ * SQL table writers only — same set as ``services.pre_ingestion_staging._STAGING_SUPPORTED``.
+ * Mongo / files / SaaS cannot host ``{table}_df_staging``.
+ */
+const STAGING_SUPPORTED_DESTS = new Set([
+  "sqlite",
+  "postgresql",
+  "postgres",
+  "mysql",
+  "sqlserver",
+  "mssql",
+  "oracle",
+  "snowflake",
+  "redshift",
+  "generic_sql",
+  "duckdb",
+  "bigquery",
+]);
+
+export function writeViaStagingSupported(destType?: string | null): boolean {
+  const dest = String(destType || "")
+    .trim()
+    .toLowerCase()
+    .replace(/-/g, "_");
+  return STAGING_SUPPORTED_DESTS.has(dest);
+}
+
 export function jobStudioDataRules(job: {
   validation_mode?: string;
   schema_policy?: string;

@@ -10451,6 +10451,11 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   cursor: pointer;
 }
 
+.df2-sched-check.is-disabled {
+  color: #94a3b8;
+  cursor: not-allowed;
+}
+
 .df2-sched-backoff-hint { margin-top: -4px; }
 
 .df2-sched-switches {
