@@ -912,6 +912,91 @@ def test_create_schedule_persists_cdc_snapshot_mode(temp_store):
     assert overwrite.snapshot_mode == ""
 
 
+def test_create_schedule_persists_cdc_advanced_extras(temp_store):
+    """Studio allow_append_only / row filter / MultiSubnetFailover survive the beat."""
+    sched = store.create_schedule({
+        "name": "CDC append-only orders",
+        "source_connector_id": "src-1",
+        "source_table": "orders",
+        "dest_connector_id": "dst-1",
+        "dest_table": "orders_wh",
+        "interval": "hourly",
+        "sync_mode": "cdc",
+        "primary_key": "id",
+        "allow_append_only": True,
+        "cdc_row_filter": "net",
+        "multi_subnet_failover": True,
+    })
+    reloaded = store.get_schedule(sched.id)
+    assert reloaded.allow_append_only is True
+    assert reloaded.cdc_row_filter == "net"
+    assert reloaded.multi_subnet_failover is True
+    sql_src = {**_SRC_CONN, "type": "sqlserver"}
+    req = runner.build_schedule_request(reloaded, sql_src, _DST_CONN)
+    assert req.destination.extra.get("allow_append_only") is True
+    assert req.source.extra.get("cdc_row_filter") == "net"
+    assert req.source.extra.get("multi_subnet_failover") is True
+    overwrite = store.create_schedule({
+        "name": "Full overwrite",
+        "source_connector_id": "src-1",
+        "source_table": "orders",
+        "dest_connector_id": "dst-1",
+        "dest_table": "orders_wh",
+        "interval": "daily",
+        "sync_mode": "full_refresh_overwrite",
+        "allow_append_only": True,
+        "cdc_row_filter": "net",
+        "multi_subnet_failover": True,
+    })
+    assert overwrite.allow_append_only is False
+    assert overwrite.cdc_row_filter == ""
+    assert overwrite.multi_subnet_failover is False
+
+
+def test_build_request_replays_cdc_advanced_extras():
+    sched = store.PipelineSchedule.from_dict({
+        "id": "s-cdc-x",
+        "name": "n",
+        "source_connector_id": "src",
+        "source_table": "orders",
+        "dest_connector_id": "dst",
+        "dest_table": "orders_wh",
+        "interval": "hourly",
+        "sync_mode": "cdc",
+        "primary_key": "id",
+        "allow_append_only": True,
+        "cdc_row_filter": "all update old",
+        "multi_subnet_failover": True,
+    })
+    req = runner.build_schedule_request(sched, {**_SRC_CONN, "type": "sqlserver"}, _DST_CONN)
+    assert req.destination.extra.get("allow_append_only") is True
+    assert req.source.extra.get("cdc_row_filter") == "all update old"
+    assert req.source.extra.get("multi_subnet_failover") is True
+    assert req.skip_preflight is False
+
+
+def test_list_summary_exposes_cdc_advanced_extras():
+    from src.routers.schedules_router import ScheduleSummaryResponse
+
+    sched = store.PipelineSchedule.from_dict({
+        "id": "s-cdc-sum",
+        "name": "n",
+        "source_connector_id": "src",
+        "source_table": "orders",
+        "dest_connector_id": "dst",
+        "dest_table": "orders_wh",
+        "interval": "hourly",
+        "sync_mode": "cdc",
+        "allow_append_only": True,
+        "cdc_row_filter": "net",
+        "multi_subnet_failover": True,
+    })
+    summary = ScheduleSummaryResponse.from_schedule(sched)
+    assert summary.allow_append_only is True
+    assert summary.cdc_row_filter == "net"
+    assert summary.multi_subnet_failover is True
+
+
 def test_list_summary_exposes_advanced_write_knobs():
     """List/edit/drawer read the summary. Omitting knobs made Save wipe Studio values."""
     from src.routers.schedules_router import ScheduleSummaryResponse

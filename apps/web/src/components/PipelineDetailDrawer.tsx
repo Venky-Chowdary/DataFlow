@@ -494,7 +494,17 @@ export function PipelineDetailDrawer({
               <div><dt>Validation</dt><dd>{sched.validation_mode || "—"}</dd></div>
               <div><dt>Schema policy</dt><dd>{sched.schema_policy || "—"}</dd></div>
               {sched.sync_mode === "cdc" && (
-                <div><dt>CDC snapshot</dt><dd>{sched.snapshot_mode || "initial"}</dd></div>
+                <>
+                  <div><dt>CDC snapshot</dt><dd>{sched.snapshot_mode || "initial"}</dd></div>
+                  <div><dt>Delivery</dt><dd>{sched.delivery_guarantee || "at_least_once"}</dd></div>
+                  <div><dt>Append-only CDC</dt><dd>{sched.allow_append_only ? "Yes — duplicates on redelivery" : "No"}</dd></div>
+                  {sched.cdc_row_filter && sched.cdc_row_filter !== "all" ? (
+                    <div><dt>CDC row filter</dt><dd>{sched.cdc_row_filter}</dd></div>
+                  ) : null}
+                  {sched.multi_subnet_failover ? (
+                    <div><dt>MultiSubnetFailover</dt><dd>Yes</dd></div>
+                  ) : null}
+                </>
               )}
               <div><dt>Write via staging</dt><dd>{sched.write_via_staging ? "Yes" : "No"}</dd></div>
               {sched.priority_column ? (
@@ -579,7 +589,17 @@ export function PipelineDetailDrawer({
               <div><dt>Cursor column</dt><dd>{sched.cursor_column || "—"}</dd></div>
               <div><dt>Schema policy</dt><dd>{sched.schema_policy || "—"}</dd></div>
               {sched.sync_mode === "cdc" && (
-                <div><dt>CDC snapshot</dt><dd>{sched.snapshot_mode || "initial"}</dd></div>
+                <>
+                  <div><dt>CDC snapshot</dt><dd>{sched.snapshot_mode || "initial"}</dd></div>
+                  <div><dt>Delivery</dt><dd>{sched.delivery_guarantee || "at_least_once"}</dd></div>
+                  <div><dt>Append-only CDC</dt><dd>{sched.allow_append_only ? "Yes — duplicates on redelivery" : "No"}</dd></div>
+                  {sched.cdc_row_filter && sched.cdc_row_filter !== "all" ? (
+                    <div><dt>CDC row filter</dt><dd>{sched.cdc_row_filter}</dd></div>
+                  ) : null}
+                  {sched.multi_subnet_failover ? (
+                    <div><dt>MultiSubnetFailover</dt><dd>Yes</dd></div>
+                  ) : null}
+                </>
               )}
               <div><dt>Validation mode</dt><dd>{sched.validation_mode || "—"}</dd></div>
               <div><dt>Backfill new fields</dt><dd>{sched.backfill_new_fields ? "Yes" : "No"}</dd></div>

@@ -11,6 +11,7 @@ import {
   schemaPolicyBackfills,
   namedStudioDateLocale,
   namedStudioNumberLocale,
+  studioScheduleCdcExtras,
   studioSchedulePolicies,
   writeViaStagingSupported,
 } from "./studioDataRules.ts";
@@ -140,5 +141,26 @@ describe("studioDataRules", () => {
       snapshotMode: "when_needed",
     });
     assert.equal(full.snapshot_mode, undefined);
+  });
+
+  it("stamps CDC Advanced extras onto a scheduled pipeline and clears them on full refresh", () => {
+    const cdc = studioScheduleCdcExtras({
+      syncMode: "cdc",
+      allowAppendOnly: true,
+      cdcRowFilter: "net",
+      multiSubnetFailover: true,
+    });
+    assert.equal(cdc.allow_append_only, true);
+    assert.equal(cdc.cdc_row_filter, "net");
+    assert.equal(cdc.multi_subnet_failover, true);
+    const full = studioScheduleCdcExtras({
+      syncMode: "full_refresh_overwrite",
+      allowAppendOnly: true,
+      cdcRowFilter: "net",
+      multiSubnetFailover: true,
+    });
+    assert.equal(full.allow_append_only, false);
+    assert.equal(full.cdc_row_filter, "");
+    assert.equal(full.multi_subnet_failover, false);
   });
 });

@@ -257,6 +257,9 @@ def test_gitops_export_round_trips_advanced_write_knobs(tmp_path, monkeypatch):
         "priority_direction": "asc",
         "row_limit": 2500,
         "snapshot_mode": "when_needed",
+        "allow_append_only": True,
+        "cdc_row_filter": "net",
+        "multi_subnet_failover": True,
         "schema_policy": "propagate_columns",
         "source_schema": {"id": "INTEGER", "joining_date": "TIMESTAMP_NTZ"},
         "source_schema_fingerprint": "fp-prod",
@@ -270,6 +273,9 @@ def test_gitops_export_round_trips_advanced_write_knobs(tmp_path, monkeypatch):
     assert spec["priority_direction"] == "asc"
     assert spec["row_limit"] == 2500
     assert spec["snapshot_mode"] == "when_needed"
+    assert spec["allow_append_only"] is True
+    assert spec["cdc_row_filter"] == "net"
+    assert spec["multi_subnet_failover"] is True
     assert "source_schema" not in spec
     assert "source_schema_fingerprint" not in spec
     assert "source_primary_key" not in spec
@@ -284,6 +290,9 @@ def test_gitops_export_round_trips_advanced_write_knobs(tmp_path, monkeypatch):
     assert cloned.priority_direction == "asc"
     assert cloned.row_limit == 2500
     assert cloned.snapshot_mode == "when_needed"
+    assert cloned.allow_append_only is True
+    assert cloned.cdc_row_filter == "net"
+    assert cloned.multi_subnet_failover is True
     assert cloned.source_schema == {}
     assert cloned.source_schema_fingerprint == ""
 

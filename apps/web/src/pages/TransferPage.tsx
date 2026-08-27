@@ -122,6 +122,7 @@ import {
   namedStudioSchemaPolicy,
   namedStudioValidationMode,
   schemaPolicyBackfills,
+  studioScheduleCdcExtras,
   studioSchedulePolicies,
   writeViaStagingSupported as destSupportsWriteViaStaging,
 } from "../lib/studioDataRules";
@@ -5257,6 +5258,12 @@ export function TransferPage({
           deliveryGuarantee,
           allowAppendOnly,
           callableSource: sourceReadMode === "procedure" || sourceReadMode === "query",
+        }),
+        ...studioScheduleCdcExtras({
+          syncMode,
+          allowAppendOnly,
+          cdcRowFilter,
+          multiSubnetFailover,
         }),
         contract_id: boundContractId.trim(),
         require_signed_contract: Boolean(boundContractId.trim() && requireSignedContract),

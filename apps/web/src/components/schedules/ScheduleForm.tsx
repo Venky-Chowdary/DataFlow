@@ -18,11 +18,15 @@ import {
   type NumberLocaleId,
 } from "../../lib/transferConstants";
 import {
+  isSqlServerCdcSource,
+  namedCdcRowFilter,
   namedStudioDateLocale,
   namedStudioNumberLocale,
   schemaPolicyBackfills,
+  studioScheduleCdcExtras,
   studioSchedulePolicies,
   writeViaStagingSupported,
+  type CdcRowFilterId,
 } from "../../lib/studioDataRules";
 import type {
   Connector,
@@ -110,6 +114,13 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
     namedCdcDeliveryGuarantee(initial?.delivery_guarantee),
   );
   const [snapshotMode, setSnapshotMode] = useState(initial?.snapshot_mode || "initial");
+  const [allowAppendOnly, setAllowAppendOnly] = useState(Boolean(initial?.allow_append_only));
+  const [cdcRowFilter, setCdcRowFilter] = useState<CdcRowFilterId>(
+    namedCdcRowFilter(initial?.cdc_row_filter),
+  );
+  const [multiSubnetFailover, setMultiSubnetFailover] = useState(
+    Boolean(initial?.multi_subnet_failover),
+  );
   const [writeViaStaging, setWriteViaStaging] = useState(Boolean(initial?.write_via_staging));
   const [priorityColumn, setPriorityColumn] = useState(initial?.priority_column ?? "");
   const [priorityDirection, setPriorityDirection] = useState<"asc" | "desc">(
@@ -248,6 +259,12 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
         callableSource: callable,
       }),
       snapshot_mode: writeKnobs.snapshot_mode ?? "",
+      ...studioScheduleCdcExtras({
+        syncMode,
+        allowAppendOnly,
+        cdcRowFilter,
+        multiSubnetFailover,
+      }),
       cursor_column: showCursor ? cursorColumn.trim() : "",
       primary_key: showPrimaryKey ? primaryKey.trim() : "",
       source_read_mode: sourceReadMode,
@@ -490,6 +507,45 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
               Same Debezium modes as Destination Advanced. The hourly beat replays this —
               it does not silently fall back to initial.
             </span>
+            <label className="df2-sched-check" style={{ marginTop: "0.75rem" }}>
+              <input
+                type="checkbox"
+                checked={allowAppendOnly && deliveryGuarantee !== "exactly_once"}
+                disabled={deliveryGuarantee === "exactly_once"}
+                onChange={(e) => setAllowAppendOnly(e.target.checked)}
+              />
+              Allow append-only CDC
+            </label>
+            <span className="df2-field-hint">
+              Same as Destination Advanced. Redelivery will duplicate rows — not idempotent.
+              Prefer a PK upsert sink. The hourly beat must replay this or CDC refuses.
+            </span>
+            {isSqlServerCdcSource(sourceConnector?.type) && (
+              <>
+                <label className="df2-sched-check">
+                  <input
+                    type="checkbox"
+                    checked={multiSubnetFailover}
+                    onChange={(e) => setMultiSubnetFailover(e.target.checked)}
+                  />
+                  SQL Server MultiSubnetFailover
+                </label>
+                <span className="df2-field-hint">
+                  Always On AG listener reconnect. Does not invent continuous CDC across a retention gap.
+                </span>
+                <label className="df2-label" htmlFor="sched-cdc-filter">SQL Server CDC row filter</label>
+                <select
+                  id="sched-cdc-filter"
+                  className="df2-input"
+                  value={cdcRowFilter}
+                  onChange={(e) => setCdcRowFilter(namedCdcRowFilter(e.target.value))}
+                >
+                  <option value="all">all — every change row</option>
+                  <option value="all update old">all update old — pair before-image on updates</option>
+                  <option value="net">net — net changes TVF</option>
+                </select>
+              </>
+            )}
           </div>
         )}
 

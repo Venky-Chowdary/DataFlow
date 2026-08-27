@@ -1375,6 +1375,9 @@ export interface ScheduleInput {
   row_limit?: number;
   delivery_guarantee?: string;
   snapshot_mode?: string;
+  allow_append_only?: boolean;
+  cdc_row_filter?: string;
+  multi_subnet_failover?: boolean;
   cursor_column: string;
   primary_key: string;
   source_read_mode?: string;
@@ -1483,6 +1486,9 @@ export interface PipelineSchedule {
   number_locale?: string;
   delivery_guarantee?: string;
   snapshot_mode?: string;
+  allow_append_only?: boolean;
+  cdc_row_filter?: string;
+  multi_subnet_failover?: boolean;
   cursor_column: string;
   primary_key: string;
   cursor_value: string;

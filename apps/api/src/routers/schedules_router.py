@@ -81,6 +81,9 @@ class ScheduleCreate(BaseModel):
     row_limit: int = Field(default=0, ge=0)
     delivery_guarantee: str = "at_least_once"
     snapshot_mode: str = ""
+    allow_append_only: bool = False
+    cdc_row_filter: str = ""
+    multi_subnet_failover: bool = False
     mappings: list[dict[str, Any]] = Field(default_factory=list)
     stream_contracts: list[dict[str, Any]] = Field(default_factory=list)
     cursor_column: str = ""
@@ -124,6 +127,9 @@ class ScheduleUpdate(BaseModel):
     row_limit: Optional[int] = Field(default=None, ge=0)
     delivery_guarantee: Optional[str] = None
     snapshot_mode: Optional[str] = None
+    allow_append_only: Optional[bool] = None
+    cdc_row_filter: Optional[str] = None
+    multi_subnet_failover: Optional[bool] = None
     mappings: Optional[list[dict[str, Any]]] = None
     stream_contracts: Optional[list[dict[str, Any]]] = None
     cursor_column: Optional[str] = None
@@ -168,6 +174,9 @@ class ScheduleResponse(BaseModel):
     row_limit: int = 0
     delivery_guarantee: str = "at_least_once"
     snapshot_mode: str = ""
+    allow_append_only: bool = False
+    cdc_row_filter: str = ""
+    multi_subnet_failover: bool = False
     cursor_column: str = ""
     primary_key: str = ""
     cursor_value: str = ""
@@ -252,6 +261,9 @@ class ScheduleSummaryResponse(BaseModel):
     number_locale: str = ""
     delivery_guarantee: str = "at_least_once"
     snapshot_mode: str = ""
+    allow_append_only: bool = False
+    cdc_row_filter: str = ""
+    multi_subnet_failover: bool = False
     cursor_column: str = ""
     primary_key: str = ""
     cursor_value: str = ""

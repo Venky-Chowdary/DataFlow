@@ -68,6 +68,17 @@ def _schedule_snapshot_mode(sync_mode: str, raw: Any) -> str:
         return schedule_snapshot_mode(sync_mode, "initial") if str(sync_mode or "").strip().lower() == "cdc" else ""
 
 
+def _schedule_cdc_extras(data: Mapping[str, Any]) -> dict[str, Any]:
+    from services.schedule_cdc_extras import schedule_cdc_extras
+
+    return schedule_cdc_extras(
+        data.get("sync_mode") or "full_refresh_overwrite",
+        allow_append_only=data.get("allow_append_only", False),
+        cdc_row_filter=data.get("cdc_row_filter"),
+        multi_subnet_failover=data.get("multi_subnet_failover", False),
+    )
+
+
 # Keep only the most recent N runs per schedule so the history document stays small.
 RUN_HISTORY_LIMIT = 25
 # Window between taking a claim and its job becoming visible; a claim whose job
@@ -157,6 +168,10 @@ class PipelineSchedule:
     delivery_guarantee: str = "at_least_once"
     # Debezium snapshot mode (CDC only). Empty on full/incremental.
     snapshot_mode: str = ""
+    # Destination Advanced CDC extras. Empty/false on full/incremental.
+    allow_append_only: bool = False
+    cdc_row_filter: str = ""
+    multi_subnet_failover: bool = False
     mappings: list[dict] = field(default_factory=list)
     stream_contracts: list[dict] = field(default_factory=list)
     cursor_column: str = ""  # watermark column for incremental syncs
@@ -237,6 +252,7 @@ class PipelineSchedule:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> PipelineSchedule:
+        cdc_extras = _schedule_cdc_extras(data)
         return cls(
             id=data["id"],
             name=data["name"],
@@ -272,6 +288,9 @@ class PipelineSchedule:
                 data.get("snapshot_mode")
                 or _first_contract_snapshot(data.get("stream_contracts")),
             ),
+            allow_append_only=bool(cdc_extras["allow_append_only"]),
+            cdc_row_filter=str(cdc_extras["cdc_row_filter"]),
+            multi_subnet_failover=bool(cdc_extras["multi_subnet_failover"]),
             mappings=list(data.get("mappings") or []),
             stream_contracts=list(data.get("stream_contracts") or []),
             cursor_column=(data.get("cursor_column") or "").strip(),

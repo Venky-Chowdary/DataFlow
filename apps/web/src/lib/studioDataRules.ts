@@ -150,3 +150,46 @@ export function studioSchedulePolicies(input: {
   }
   return out;
 }
+
+const SQL_SERVER_CDC_TYPES = new Set([
+  "sqlserver",
+  "mssql",
+  "azure_sql_database",
+  "microsoft_sql_server",
+  "amazon_rds_sql_server",
+]);
+
+export function isSqlServerCdcSource(sourceType?: string | null): boolean {
+  return SQL_SERVER_CDC_TYPES.has(String(sourceType || "").trim().toLowerCase().replace(/-/g, "_"));
+}
+
+export type CdcRowFilterId = "all" | "all update old" | "net";
+
+export function namedCdcRowFilter(raw?: string | null): CdcRowFilterId {
+  const value = String(raw || "").trim().toLowerCase().replace(/[_-]+/g, " ");
+  if (value === "all update old") return "all update old";
+  if (value === "net") return "net";
+  return "all";
+}
+
+/** Destination Advanced CDC extras — hourly beat must replay these or Studio diverges. */
+export function studioScheduleCdcExtras(input: {
+  syncMode?: string;
+  allowAppendOnly?: boolean;
+  cdcRowFilter?: string;
+  multiSubnetFailover?: boolean;
+}): {
+  allow_append_only: boolean;
+  cdc_row_filter: string;
+  multi_subnet_failover: boolean;
+} {
+  const cdc = String(input.syncMode || "").trim().toLowerCase() === "cdc";
+  if (!cdc) {
+    return { allow_append_only: false, cdc_row_filter: "", multi_subnet_failover: false };
+  }
+  return {
+    allow_append_only: Boolean(input.allowAppendOnly),
+    cdc_row_filter: namedCdcRowFilter(input.cdcRowFilter),
+    multi_subnet_failover: Boolean(input.multiSubnetFailover),
+  };
+}

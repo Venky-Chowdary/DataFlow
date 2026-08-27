@@ -251,6 +251,9 @@ def build_schedule_request(sched, src: dict, dst: dict):
     source = _endpoint_from_connector(src, sched.source_table)
     destination = _endpoint_from_connector(dst, sched.dest_table)
     _apply_callable_schedule_source(source, sched)
+    from services.schedule_cdc_extras import apply_cdc_schedule_extras
+
+    apply_cdc_schedule_extras(source, destination, sched)
 
     effective_mode = _normalize_sync_mode(sched.sync_mode, sched.primary_key)
     from services.procedure_source import assert_callable_sync_allowed
