@@ -51,6 +51,9 @@ _STEP_HEADING = re.compile(
     r"Use this path|Copy the |Paste into |Expand the |Add the )",
     re.I,
 )
+_UI_CAPTION = re.compile(
+    r"^(Validate|Map|Job Theater|System|Operations|Transfer|Pilot|Connectors) — ",
+)
 
 
 @dataclass(frozen=True)
@@ -177,6 +180,8 @@ def spoken_doc_excerpt(text: str, section_title: str = "", *, max_sentences: int
         if line.startswith(_SKIP_HELP_LINE):
             continue
         if line.startswith("{") or line.startswith(("GET ", "POST ", "PUT ", "DELETE ")):
+            continue
+        if _UI_CAPTION.match(line):
             continue
         if _GATE_LINE.match(line):
             gates.append(line.rstrip("."))
