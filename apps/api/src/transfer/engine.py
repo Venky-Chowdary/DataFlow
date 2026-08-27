@@ -61,7 +61,7 @@ try:
         shaped_schema,
     )
     from services.sync_cursor import (
-        destination_exists_for_typing,
+        destination_exists_for_shape,
         is_overwrite_sync,
         map_source_to_target,
         requires_upsert,
@@ -108,7 +108,7 @@ except (
         shaped_schema,
     )
     from src.services.sync_cursor import (
-        destination_exists_for_typing,
+        destination_exists_for_shape,
         is_overwrite_sync,
         map_source_to_target,
         requires_upsert,
@@ -1364,18 +1364,15 @@ def _auto_map(
                 request=request,
             )
         else:
-            target_schema, dest_exists = _destination_schema_probe(
+            target_schema, probe_exists = _destination_schema_probe(
                 request.destination,
                 sync_mode=sync_mode,
             )
-            # Overwrite recreates the table, and a keyspace store never has a
-            # column shape at all. Either way there is nothing to bind types to,
-            # so the mapper must invent rather than wait for a stamp that is
-            # never coming — see destination_exists_for_typing.
-            dest_exists = destination_exists_for_typing(
-                sync_mode,
-                dest_exists,
-                has_live_column_types=bool(target_schema),
+            # Shape/existence is the raw probe. Typing may collapse
+            # exists+empty-catalog to "no types to bind" — that must not
+            # invent create-new on a listed dest table (G15 pending).
+            dest_exists = destination_exists_for_shape(
+                probe_exists,
                 dest_format=str(getattr(request.destination, "format", "") or ""),
             )
             if not target_schema:
