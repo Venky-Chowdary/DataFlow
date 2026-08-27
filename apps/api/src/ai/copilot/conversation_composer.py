@@ -215,6 +215,14 @@ def _summary_sentences(text: str, *, max_sentences: int) -> list[str]:
         if line.startswith("**") and line.endswith("**") and "—" not in line:
             # Section heading leftover: **I can:**
             continue
+        if re.match(r"^G\d+\b", line.lstrip("*")):
+            gate = line.rstrip(".")
+            if not gate.endswith((".", "!", "?")):
+                gate += "."
+            sentences.append(gate)
+            if len(sentences) >= max_sentences:
+                return sentences
+            continue
         if not any(ch in line for ch in ".!?") and len(line.split()) <= 8:
             if _STEP_HEADING.match(line.lstrip("*")) or "—" not in line:
                 continue
@@ -227,7 +235,16 @@ def _summary_sentences(text: str, *, max_sentences: int) -> list[str]:
             piece = piece.strip().strip("*")
             if not piece or any(piece.startswith(p) for p in _SKIP_SUMMARY_LINE):
                 continue
+            if piece.endswith(":"):
+                continue
             if _STEP_HEADING.match(piece) and len(piece.split()) <= 10:
+                continue
+            if re.match(r"^G\d+\b", piece):
+                if not piece.endswith((".", "!", "?")):
+                    piece += "."
+                sentences.append(piece)
+                if len(sentences) >= max_sentences:
+                    return sentences
                 continue
             if not piece.endswith((".", "!", "?")):
                 piece += "."
@@ -245,11 +262,17 @@ def summarize_text(text: str, *, max_sentences: int = 2) -> str:
             "I don't have a previous answer to summarize. Ask me something "
             "about the workspace first."
         )
-    parts = _summary_sentences(raw, max_sentences=max_sentences)
+    parts = _summary_sentences(raw, max_sentences=max(12, max_sentences))
     if not parts:
         cleaned = raw.replace("\n", " ")
         return f"**Short version:** {cleaned[:280].rstrip()}."
-    picked = " ".join(parts).strip()
+    gates = [p for p in parts if re.match(r"^G\d+\b", p)]
+    other = [p for p in parts if not re.match(r"^G\d+\b", p)]
+    if gates:
+        picked_list = other[:1] + gates[: max(max_sentences, 3)]
+    else:
+        picked_list = other[:max_sentences] or parts[:max_sentences]
+    picked = " ".join(picked_list).strip()
     if not picked.endswith((".", "!", "?")):
         picked += "."
     return f"**Short version:** {picked}"
@@ -301,7 +324,10 @@ def compose_next_action(
             + ". Ask me for the failed job or the parked pipeline and I'll "
             "open the finding instead of guessing a fix."
         )
-    if last_answer and "Confirm" in last_answer:
+    if last_answer and re.search(
+        r"\b(?:Confirm below|press Confirm|Confirm card|Ready to save)\b",
+        last_answer,
+    ):
         return (
             "Next: review the plan in this thread and Confirm if you want it "
             "to run. I will not start a write from a follow-up 'yes' unless "

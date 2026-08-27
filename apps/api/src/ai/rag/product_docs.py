@@ -181,12 +181,17 @@ def spoken_doc_excerpt(text: str, section_title: str = "", *, max_sentences: int
         if _GATE_LINE.match(line):
             gates.append(line.rstrip("."))
             continue
-        if not any(ch in line for ch in ".!?") and len(line.split()) <= 8:
+        if not any(ch in line for ch in ".!?"):
             if _STEP_HEADING.match(line) or ":" not in line:
+                continue
+            # Screenshot captions: "Validate — core gate cards …"
+            if "—" in line:
                 continue
         for piece in _SENTENCE_SPLIT.split(line):
             piece = piece.strip()
             if not piece or piece.startswith(_SKIP_HELP_LINE):
+                continue
+            if piece.endswith(":"):
                 continue
             if not piece.endswith((".", "!", "?")):
                 piece += "."
@@ -198,7 +203,7 @@ def spoken_doc_excerpt(text: str, section_title: str = "", *, max_sentences: int
     out = " ".join(sentences[:max_sentences]).strip()
     if gates:
         gate_bit = " ".join(
-            g if g.endswith((".", "!", "?")) or "—" in g else f"{g}."
+            g if g.endswith((".", "!", "?")) else f"{g}."
             for g in gates[:9]
         )
         out = f"{out} {gate_bit}".strip()

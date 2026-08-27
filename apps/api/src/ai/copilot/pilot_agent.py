@@ -2619,7 +2619,7 @@ Respond as Datawrap Pilot — grounded in tool results."""
                 else:
                     lines.append(
                         "**Indexed datasets:** none named yet — upload in **New Transfer** "
-                        "and I can profile them. Hash-prefixed fixture files stay off this card."
+                        "and I can profile them."
                     )
                 conns = o.get("connectors") or []
                 if conns:

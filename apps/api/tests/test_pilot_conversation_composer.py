@@ -166,6 +166,27 @@ def test_summarize_help_dump_stays_grammatical():
     assert "I only report" not in plain
 
 
+def test_summarize_preflight_keeps_named_gates():
+    src = (
+        "**Core gates (before write)** — These checks run in Transfer Studio Validate. "
+        "Open any failing card for the rule text and remediation. "
+        "G1 Source readable — source connects and rows can be read. "
+        "G2 Destination write access — destination is reachable with write/create privilege. "
+        "G3 Schema contract — source and target schemas are compatible."
+    )
+    short = summarize_text(src)
+    assert "G1 " in short
+    assert "These checks run" in short
+
+
+def test_next_action_ignores_help_confirm_wording():
+    idle = compose_next_action(
+        last_answer="**Append** adds rows. Full refresh overwrite replaces the destination (Confirm required)."
+    )
+    assert "Confirm card" not in idle
+    assert "briefing" in idle.lower()
+
+
 def test_next_action_prefers_confirm_then_attention():
     pending = compose_next_action(pending_labels=["Start transfer"])
     assert "Confirm" in pending
