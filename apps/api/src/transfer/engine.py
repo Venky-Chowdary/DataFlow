@@ -801,6 +801,12 @@ def _file_population_rows(
         )
 
 
+def _sync_mode_is_cdc(request: TransferRequest) -> bool:
+    from services.sync_cursor import normalize_sync_mode
+
+    return normalize_sync_mode(getattr(request, "sync_mode", "") or "", default="") == "cdc"
+
+
 def _table_population_rows(
     request: TransferRequest,
     mappings: list[dict[str, Any]],
@@ -819,7 +825,18 @@ def _table_population_rows(
     paged independently yields nothing, which the scan reports as preview
     evidence rather than as proof of fit.
     """
+    from services.preflight_cursor_gate import read_scope_for_transfer_request
+    from services.sync_cursor import incremental_read_narrows, normalize_sync_mode
     from .source_peek import iter_bounded_table_population_rows
+
+    if normalize_sync_mode(getattr(request, "sync_mode", "") or "", default="") == "cdc":
+        return
+    scope = None
+    if incremental_read_narrows(getattr(request, "sync_mode", "") or ""):
+        try:
+            scope = read_scope_for_transfer_request(request)
+        except Exception:
+            scope = None
 
     try:
         rows = iter_bounded_table_population_rows(
@@ -832,6 +849,7 @@ def _table_population_rows(
             source_format=getattr(request.source, "format", "") or "",
             limit=int(request.limit or 0),
             shape_runner=shape_runner,
+            read_scope=scope if scope is not None and getattr(scope, "bounded", False) else None,
         )
         if rows is None:
             return
@@ -3570,6 +3588,7 @@ class UniversalTransferEngine:
                     population_rows=(
                         None
                         if request.source_filter
+                        or _sync_mode_is_cdc(request)
                         else _table_population_rows(
                             request,
                             mappings,
@@ -3579,7 +3598,8 @@ class UniversalTransferEngine:
                             shape_runner=shape_runner,
                         )
                     ),
-                    rows_are_population=not request.source_filter,
+                    rows_are_population=not request.source_filter
+                    and not _sync_mode_is_cdc(request),
                     confidence_threshold=confidence_threshold_for_mode(
                         request.validation_mode
                     ),

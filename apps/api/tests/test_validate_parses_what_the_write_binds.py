@@ -163,6 +163,15 @@ def test_invalid_calendar_day_stamps_a_fix_not_a_widen() -> None:
     assert not report.findings[0].suggested_target_type
 
 
+def test_invalid_time_stamps_a_fix_not_a_widen() -> None:
+    _targets, _und, _safe, report = _scan(
+        "TIME", "VARCHAR", ["25:61:00"], dest_db="postgresql"
+    )
+    assert report.findings[0].suggested_fix
+    assert "invalid time" in report.findings[0].suggested_fix.lower()
+    assert not report.findings[0].suggested_target_type
+
+
 def test_invalid_uuid_stamps_varchar_widen() -> None:
     _targets, _und, _safe, report = _scan(
         "UUID", "VARCHAR", ["not-a-uuid"], dest_db="postgresql"

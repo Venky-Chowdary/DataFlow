@@ -688,6 +688,8 @@ def _iter_table_population_for_preflight(
     column_types: dict[str, str],
     dest_types: dict[str, str],
     dest_db: str,
+    sync_mode: str = "",
+    read_scope: Any = None,
 ):
     """Same projected table walk Execute uses — or None when it cannot run.
 
@@ -710,6 +712,12 @@ def _iter_table_population_for_preflight(
     cfg = dict(source_config or {})
     extra = cfg.get("extra") if isinstance(cfg.get("extra"), dict) else {}
     if cfg.get("source_filter") or extra.get("source_filter"):
+        return None
+    from services.sync_cursor import normalize_sync_mode
+
+    if normalize_sync_mode(sync_mode, default="") == "cdc":
+        # CDC writes a changelog, not a table rescan. Walking the table
+        # judges the wrong population — preview stays, never exact.
         return None
     try:
         from src.transfer.models import EndpointConfig
@@ -738,6 +746,7 @@ def _iter_table_population_for_preflight(
         dest_db=dest_db,
         source_kind=source_kind,
         source_format=source_format or str(data.get("format") or ""),
+        read_scope=read_scope,
     )
 
 
@@ -1575,6 +1584,7 @@ def run_file_preflight(
             build_population_fit_gate,
             scan_population_fit,
         )
+        from services.sync_cursor import incremental_read_narrows, iter_rows_after_watermark
 
         if population_rows is None and str(source_file_id or "").strip():
             from services.file_parser import iter_stored_upload_rows
@@ -1595,6 +1605,8 @@ def run_file_preflight(
                     column_types=column_types,
                     dest_types=destination_column_types or {},
                     dest_db=destination_db_type,
+                    sync_mode=sync_mode,
+                    read_scope=read_scope if incremental_read_narrows(sync_mode) else None,
                 )
             except Exception as walk_exc:
                 logger.warning(
@@ -1636,6 +1648,15 @@ def run_file_preflight(
                     population_rows = walked
                     rows_are_population = True
         scan_input = population_rows if population_rows is not None else sample_rows
+        fit_rows_total = int(row_count or 0)
+        if incremental_read_narrows(sync_mode) and read_scope.bounded:
+            narrowed = iter_rows_after_watermark(
+                scan_input, read_scope, keep_unreadable=True
+            )
+            if narrowed is not None:
+                scan_input = narrowed
+            # Table COUNT is not this run's population — the scan's own count is.
+            fit_rows_total = 0
         fit_report = scan_population_fit(
             scan_input,
             mappings,
@@ -1646,12 +1667,17 @@ def run_file_preflight(
             # Same policy the writer resolves from the same validation mode —
             # Validate must not forecast a quarantine the writer will abort on.
             job_error_policy=transform_error_policy_for_validation_mode(validation_mode),
-            rows_total=int(row_count or 0),
+            rows_total=fit_rows_total,
             rows_are_population=bool(rows_are_population and population_rows is not None),
             source_kind=source_kind,
             source_format=source_format,
         )
         fit_report_payload = fit_report.to_dict()
+        if incremental_read_narrows(sync_mode) and read_scope.bounded:
+            fit_report_payload["delta_scope"] = {
+                "cursor_column": read_scope.cursor_column,
+                "watermark": str(read_scope.watermark),
+            }
         # The gate is always stated, including when nothing needed scanning:
         # "no bounded carrier can be exceeded" is evidence, and a silently
         # absent gate reads as an unasked question.

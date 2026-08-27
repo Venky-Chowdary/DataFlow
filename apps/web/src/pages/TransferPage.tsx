@@ -4203,11 +4203,17 @@ export function TransferPage({
           dest_kind: destKindMode,
           connector_id: destKindMode === "database" && connectorId ? connectorId : undefined,
           source_connector_id: isConnectorSource ? sourceConnectorId || undefined : undefined,
-          source_table: isConnectorSource && sourceKind === "database" && sourceConnector?.type !== "mongodb"
-            && sourceReadMode === "table"
-            ? (sourceTable || undefined)
+          source_table: isConnectorSource
+            ? (
+              sourceKind === "cloud"
+                ? (cloudPath.trim() || undefined)
+                : sourceKind === "database" && sourceConnector?.type !== "mongodb"
+                  && sourceReadMode === "table"
+                  ? (sourceTable || undefined)
+                  : undefined
+            )
             : undefined,
-          source_config: isConnectorSource && sourceKind === "database"
+          source_config: isConnectorSource && (sourceKind === "database" || sourceKind === "cloud")
             ? {
                 type: sourceConnector?.type,
                 db_type: sourceConnector?.type,

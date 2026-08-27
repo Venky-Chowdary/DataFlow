@@ -97,6 +97,7 @@ def _source() -> EndpointConfig:
 def _table_rows(count: int, *, unfit_at: tuple[int, ...] = ()) -> list[dict[str, Any]]:
     return [
         {
+            "id": i,
             "arr_time": "9999.99999999" if i in unfit_at else "12.34567890",
             "flight_no": f"DL{i}",
         }
@@ -325,6 +326,113 @@ def test_callable_source_does_not_walk_the_table(
             "extra": {"source_read_mode": "procedure"},
         },
         sample_rows=rows[:25],
+    )
+
+    assert calls == []
+    assert result["population_fit"]["evidence"] == "sampled"
+    assert result["population_fit"]["scanned_population"] is False
+
+
+def _incremental_scope(monkeypatch: pytest.MonkeyPatch, *, watermark: str | None):
+    from services.sync_cursor import IncrementalReadScope
+
+    monkeypatch.setattr(
+        "services.preflight_service._resolve_read_scope",
+        lambda **_k: IncrementalReadScope(cursor_column="id", watermark=watermark),
+    )
+
+
+def test_incremental_historical_overflow_does_not_block_validate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A second incremental run writes the delta. Overflow at id=12 is
+    already past the watermark — blocking it is a false refuse."""
+    from services.preflight_service import run_file_preflight
+
+    calls: list[dict[str, Any]] = []
+    rows = _table_rows(450, unfit_at=(12,))
+    _fake_reader(monkeypatch, rows, calls=calls, page=100)
+    _incremental_scope(monkeypatch, watermark="100")
+
+    result = run_file_preflight(
+        columns=["arr_time", "id"],
+        column_types=COLUMN_TYPES,
+        row_count=450,
+        mappings=MAPPINGS,
+        destination_connected=True,
+        destination_column_types=DEST_TYPES,
+        destination_db_type="snowflake",
+        source_kind="database",
+        source_format="postgresql",
+        source_table="flights",
+        source_config={"kind": "database", "format": "postgresql", "table": "flights"},
+        sample_rows=rows[:25],
+        sync_mode="incremental_append",
+    )
+
+    assert result["population_fit"]["evidence"] == "exact"
+    assert result["population_fit"]["findings"] == []
+    assert result["population_fit"]["delta_scope"]["watermark"] == "100"
+    assert not any(
+        b.get("id") == "g3f_population_fit" for b in (result.get("blockers") or [])
+    )
+    assert calls, "the walk must still reach the reader"
+
+
+def test_incremental_delta_overflow_still_blocks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from services.preflight_service import run_file_preflight
+
+    rows = _table_rows(450, unfit_at=(431,))
+    _fake_reader(monkeypatch, rows, calls=[], page=100)
+    _incremental_scope(monkeypatch, watermark="100")
+
+    result = run_file_preflight(
+        columns=["arr_time", "id"],
+        column_types=COLUMN_TYPES,
+        row_count=450,
+        mappings=MAPPINGS,
+        destination_connected=True,
+        destination_column_types=DEST_TYPES,
+        destination_db_type="snowflake",
+        source_kind="database",
+        source_format="postgresql",
+        source_table="flights",
+        source_config={"kind": "database", "format": "postgresql", "table": "flights"},
+        sample_rows=rows[:25],
+        sync_mode="incremental_append",
+    )
+
+    assert result["passed"] is False
+    assert result["population_fit"]["evidence"] == "exact"
+    assert result["population_fit"]["findings"]
+    assert result["population_fit"]["delta_scope"]["cursor_column"] == "id"
+
+
+def test_cdc_validate_does_not_walk_the_table(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from services.preflight_service import run_file_preflight
+
+    calls: list[dict[str, Any]] = []
+    rows = _table_rows(450, unfit_at=(12,))
+    _fake_reader(monkeypatch, rows, calls=calls, page=100)
+
+    result = run_file_preflight(
+        columns=["arr_time"],
+        column_types=COLUMN_TYPES,
+        row_count=450,
+        mappings=MAPPINGS,
+        destination_connected=True,
+        destination_column_types=DEST_TYPES,
+        destination_db_type="snowflake",
+        source_kind="database",
+        source_format="postgresql",
+        source_table="flights",
+        source_config={"kind": "database", "format": "postgresql", "table": "flights"},
+        sample_rows=rows[:25],
+        sync_mode="cdc",
     )
 
     assert calls == []

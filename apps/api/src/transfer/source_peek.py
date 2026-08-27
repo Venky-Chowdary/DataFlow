@@ -74,6 +74,9 @@ def iter_stream_source_column_rows(
     *,
     limit: int = 0,
     chunk_size: int = 0,
+    cursor_column: str = "",
+    cursor_after: str | None = None,
+    cursor_primary_key: str = "",
 ) -> Iterator[dict[str, Any]]:
     """Yield every source row, projected to ``columns``, for a pre-write check.
 
@@ -125,6 +128,11 @@ def iter_stream_source_column_rows(
                 extra["scan_state"] = scan_state
             if total is not None:
                 extra["known_total_rows"] = total
+            if cursor_column:
+                extra["cursor_column"] = cursor_column
+                extra["cursor_after"] = cursor_after
+                if cursor_primary_key:
+                    extra["cursor_primary_key"] = cursor_primary_key
             batch, _ = _unwrap_read(
                 _read_batch(
                     src_type,
@@ -171,6 +179,7 @@ def iter_bounded_table_population_rows(
     source_format: str = "",
     limit: int = 0,
     shape_runner: Any = None,
+    read_scope: Any = None,
 ) -> Iterator[dict[str, Any]] | None:
     """Projected table walk for the same population-fit scan Execute uses.
 
@@ -208,9 +217,26 @@ def iter_bounded_table_population_rows(
         if shape_runner is not None
         else wanted
     )
+    cursor_column = ""
+    cursor_after = None
+    cursor_pk = ""
+    if read_scope is not None and getattr(read_scope, "bounded", False):
+        cursor_column = str(getattr(read_scope, "cursor_column", "") or "")
+        cursor_after = getattr(read_scope, "watermark", None)
+        cursor_pk = str(getattr(read_scope, "primary_key", "") or "")
+        for extra_col in (cursor_column, cursor_pk):
+            if extra_col and extra_col not in columns:
+                columns = [*columns, extra_col]
 
     def _walk() -> Iterator[dict[str, Any]]:
-        rows = iter_stream_source_column_rows(source, columns, limit=limit)
+        rows = iter_stream_source_column_rows(
+            source,
+            columns,
+            limit=limit,
+            cursor_column=cursor_column,
+            cursor_after=cursor_after,
+            cursor_primary_key=cursor_pk,
+        )
         if shape_runner is not None:
             from services.shape_apply import ShapeRunner
 
@@ -222,4 +248,9 @@ def iter_bounded_table_population_rows(
             return
         yield from rows
 
-    return _walk()
+    from services.sync_cursor import iter_rows_after_watermark
+
+    walked = _walk()
+    if read_scope is not None and getattr(read_scope, "bounded", False):
+        return iter_rows_after_watermark(walked, read_scope, keep_unreadable=True)
+    return walked

@@ -787,6 +787,12 @@ def scan_rows(
                     "(or fix the source UUID) → re-Validate. "
                     "Do not silently coerce."
                 )
+            elif target.transform == "time" or "invalid time" in why_l:
+                suggested_fix = (
+                    f"Open Map → remap {target.target} off {target.target_type} "
+                    "or fix the source time value → re-Validate. "
+                    "Do not silently coerce an invalid time."
+                )
             else:
                 suggested_fix = (
                     f"Open Map → remap {target.target} off {target.target_type} "
