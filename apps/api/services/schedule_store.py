@@ -47,6 +47,27 @@ SCHEMA_POLICIES = {
     "pause_on_change",
     "type_locked",
 }
+
+
+def _first_contract_snapshot(contracts: Any) -> str:
+    for row in contracts or []:
+        if not isinstance(row, dict):
+            continue
+        mode = str(row.get("snapshot_mode") or "").strip()
+        if mode:
+            return mode
+    return ""
+
+
+def _schedule_snapshot_mode(sync_mode: str, raw: Any) -> str:
+    from services.cdc_snapshot_mode import schedule_snapshot_mode
+
+    try:
+        return schedule_snapshot_mode(sync_mode, raw)
+    except ValueError:
+        return schedule_snapshot_mode(sync_mode, "initial") if str(sync_mode or "").strip().lower() == "cdc" else ""
+
+
 # Keep only the most recent N runs per schedule so the history document stays small.
 RUN_HISTORY_LIMIT = 25
 # Window between taking a claim and its job becoming visible; a claim whose job
@@ -134,6 +155,8 @@ class PipelineSchedule:
     row_limit: int = 0
     # CDC dest-owned watermark EOS is opt-in; default stays at_least_once.
     delivery_guarantee: str = "at_least_once"
+    # Debezium snapshot mode (CDC only). Empty on full/incremental.
+    snapshot_mode: str = ""
     mappings: list[dict] = field(default_factory=list)
     stream_contracts: list[dict] = field(default_factory=list)
     cursor_column: str = ""  # watermark column for incremental syncs
@@ -243,6 +266,11 @@ class PipelineSchedule:
                 .lower()
                 .replace("-", "_")
                 or "at_least_once"
+            ),
+            snapshot_mode=_schedule_snapshot_mode(
+                data.get("sync_mode") or "full_refresh_overwrite",
+                data.get("snapshot_mode")
+                or _first_contract_snapshot(data.get("stream_contracts")),
             ),
             mappings=list(data.get("mappings") or []),
             stream_contracts=list(data.get("stream_contracts") or []),

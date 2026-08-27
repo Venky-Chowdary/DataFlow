@@ -1374,6 +1374,7 @@ export interface ScheduleInput {
   priority_direction?: "asc" | "desc" | string;
   row_limit?: number;
   delivery_guarantee?: string;
+  snapshot_mode?: string;
   cursor_column: string;
   primary_key: string;
   source_read_mode?: string;
@@ -1475,6 +1476,7 @@ export interface PipelineSchedule {
   schema_policy: string;
   backfill_new_fields: boolean;
   delivery_guarantee?: string;
+  snapshot_mode?: string;
   cursor_column: string;
   primary_key: string;
   cursor_value: string;

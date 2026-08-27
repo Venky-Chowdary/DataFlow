@@ -365,6 +365,7 @@ def test_build_request_cdc():
     req = runner.build_schedule_request(sched, _SRC_CONN, _DST_CONN)
     assert req.sync_mode == "cdc"
     assert req.stream_contracts[0]["sync_mode"] == "cdc"
+    assert req.stream_contracts[0]["snapshot_mode"] == "initial"
 
 
 def test_build_request_explicit_contracts_preserved():
@@ -375,7 +376,9 @@ def test_build_request_explicit_contracts_preserved():
         "sync_mode": "cdc", "stream_contracts": explicit,
     })
     req = runner.build_schedule_request(sched, _SRC_CONN, _DST_CONN)
-    assert req.stream_contracts == explicit
+    assert req.stream_contracts[0]["name"] == "orders"
+    assert req.stream_contracts[0]["sync_mode"] == "cdc"
+    assert req.stream_contracts[0]["snapshot_mode"] == "initial"
 
 
 # --------------------------------------------------------------------------- #
@@ -877,3 +880,33 @@ def test_build_request_replays_advanced_write_knobs():
     assert req.priority_direction == "asc"
     assert req.limit == 2500
     assert req.skip_preflight is False
+
+
+def test_create_schedule_persists_cdc_snapshot_mode(temp_store):
+    """Studio Advanced when_needed must survive onto the hourly beat."""
+    sched = store.create_schedule({
+        "name": "CDC when_needed orders",
+        "source_connector_id": "src-1",
+        "source_table": "orders",
+        "dest_connector_id": "dst-1",
+        "dest_table": "orders_wh",
+        "interval": "hourly",
+        "sync_mode": "cdc",
+        "primary_key": "id",
+        "snapshot_mode": "when_needed",
+    })
+    reloaded = store.get_schedule(sched.id)
+    assert reloaded.snapshot_mode == "when_needed"
+    req = runner.build_schedule_request(reloaded, _SRC_CONN, _DST_CONN)
+    assert req.stream_contracts[0]["snapshot_mode"] == "when_needed"
+    overwrite = store.create_schedule({
+        "name": "Full overwrite",
+        "source_connector_id": "src-1",
+        "source_table": "orders",
+        "dest_connector_id": "dst-1",
+        "dest_table": "orders_wh",
+        "interval": "daily",
+        "sync_mode": "full_refresh_overwrite",
+        "snapshot_mode": "when_needed",
+    })
+    assert overwrite.snapshot_mode == ""

@@ -5252,6 +5252,8 @@ export function TransferPage({
           priorityColumn,
           priorityDirection,
           rowLimit,
+          syncMode,
+          snapshotMode,
         }),
         delivery_guarantee: studioDeliveryGuarantee({
           syncMode,

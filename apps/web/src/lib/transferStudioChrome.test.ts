@@ -448,9 +448,10 @@ describe("Transfer Studio chrome contracts", () => {
     const page = readFileSync(join(webRoot, "pages/TransferPage.tsx"), "utf8");
     const dash = readFileSync(join(webRoot, "components/transfer/ValidateDashboard.tsx"), "utf8");
     const constants = readFileSync(join(webRoot, "lib/transferConstants.ts"), "utf8");
-    assert.match(css, /\.df2-dest-toolbar \.df2-dest-advanced-btn \{[\s\S]*height:\s*var\(--df-btn-height/);
-    assert.match(css, /\.df2-dest-toolbar \.df2-dest-advanced-btn \{[\s\S]*max-height:\s*var\(--df-btn-height/);
-    assert.match(css, /\.df2-dest-mode-btn \{[\s\S]*height:\s*var\(--df-btn-height/);
+    assert.match(css, /\.df2-dest-toolbar \.df2-dest-advanced-btn[\s\S]*\{[\s\S]*height:\s*var\(--df-btn-height/);
+    assert.match(css, /\.df2-dest-toolbar \.df2-dest-advanced-btn[\s\S]*\{[\s\S]*max-height:\s*var\(--df-btn-height/);
+    assert.match(css, /\.df2-dest-mode-toggle \{[\s\S]*box-sizing:\s*border-box/);
+    assert.match(css, /\.df2-dest-toolbar \.df2-dest-advanced-btn[\s\S]*\{[\s\S]*box-sizing:\s*border-box/);
     assert.match(
       css,
       /\.df2-page-transfer-studio \.df2-dest-step > \.df2-wizard-footer \.df2-btn,[\s\S]*height:\s*var\(--df-btn-height/,

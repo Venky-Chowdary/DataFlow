@@ -11,7 +11,9 @@ import {
   SYNC_MODE_META,
   VALIDATION_MODES,
   availableSyncModes,
+  schemaPolicyHonestyLine,
 } from "../../lib/transferConstants";
+import { schemaPolicyBackfills } from "../../lib/studioDataRules";
 import type {
   Connector,
   PipelineSchedule,
@@ -97,6 +99,7 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
   const [deliveryGuarantee, setDeliveryGuarantee] = useState<CdcDeliveryGuarantee>(
     namedCdcDeliveryGuarantee(initial?.delivery_guarantee),
   );
+  const [snapshotMode, setSnapshotMode] = useState(initial?.snapshot_mode || "initial");
 
   // Retry & notifications
   const [maxRetries, setMaxRetries] = useState(initial?.max_retries ?? 2);
@@ -192,12 +195,13 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
       sync_mode: syncMode,
       validation_mode: validationMode,
       schema_policy: schemaPolicy,
-      backfill_new_fields: backfill,
+      backfill_new_fields: backfill && schemaPolicyBackfills(schemaPolicy),
       delivery_guarantee: studioDeliveryGuarantee({
         syncMode,
         deliveryGuarantee,
         callableSource: callable,
       }),
+      snapshot_mode: syncMode === "cdc" ? snapshotMode || "initial" : "",
       cursor_column: showCursor ? cursorColumn.trim() : "",
       primary_key: showPrimaryKey ? primaryKey.trim() : "",
       source_read_mode: sourceReadMode,
@@ -402,12 +406,16 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
               className="df2-input"
               value={deliveryGuarantee}
               onChange={(e) => setDeliveryGuarantee(
-                e.target.value === "exactly_once" ? "exactly_once" : CDC_DELIVERY_AT_LEAST_ONCE,
+                e.target.value === "exactly_once" && exactlyOnceWiredDest(destConnector?.type) && !callable
+                  ? "exactly_once"
+                  : CDC_DELIVERY_AT_LEAST_ONCE,
               )}
             >
               <option value="at_least_once">at_least_once — default PK upsert</option>
-              <option value="exactly_once" disabled={callable}>
-                exactly_once — dest-owned watermark transaction
+              <option value="exactly_once" disabled={callable || !exactlyOnceWiredDest(destConnector?.type)}>
+                {exactlyOnceWiredDest(destConnector?.type) && !callable
+                  ? "exactly_once — dest-owned watermark transaction"
+                  : "exactly_once — not available (this destination is not transactional)"}
               </option>
             </select>
             <span className="df2-field-hint">
@@ -416,6 +424,25 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
                 : exactlyOnceWiredDest(destConnector?.type)
                   ? "Default stays at-least-once. Exactly-once commits apply and a dest watermark in one transaction."
                   : "Default stays at-least-once. Exactly-once fails closed on this destination."}
+            </span>
+            <label className="df2-label" htmlFor="sched-snapshot" style={{ marginTop: "0.75rem" }}>
+              CDC snapshot mode
+            </label>
+            <select
+              id="sched-snapshot"
+              className="df2-input"
+              value={snapshotMode}
+              onChange={(e) => setSnapshotMode(e.target.value)}
+            >
+              <option value="initial">initial — snapshot if no watermark (Debezium default)</option>
+              <option value="always">always — snapshot every run, then stream</option>
+              <option value="never">never — stream only (requires existing watermark)</option>
+              <option value="initial_only">initial_only — snapshot then stop</option>
+              <option value="when_needed">when_needed — snapshot if resume missing/broken</option>
+            </select>
+            <span className="df2-field-hint">
+              Same Debezium modes as Destination Advanced. The hourly beat replays this —
+              it does not silently fall back to initial.
             </span>
           </div>
         )}
@@ -443,8 +470,14 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
             <select id="sched-schema" className="df2-input" value={schemaPolicy} onChange={(e) => setSchemaPolicy(e.target.value)}>
               {SCHEMA_POLICIES.map((p) => <option key={p.id} value={p.id}>{p.label}</option>)}
             </select>
+            <span className="df2-field-hint">{schemaPolicyHonestyLine(schemaPolicy)}</span>
             <label className="df2-sched-check">
-              <input type="checkbox" checked={backfill} onChange={(e) => setBackfill(e.target.checked)} />
+              <input
+                type="checkbox"
+                checked={backfill && schemaPolicyBackfills(schemaPolicy)}
+                disabled={!schemaPolicyBackfills(schemaPolicy)}
+                onChange={(e) => setBackfill(e.target.checked)}
+              />
               Backfill new fields on schema change
             </label>
           </div>

@@ -97,4 +97,17 @@ describe("studioDataRules", () => {
     assert.equal(payload.priority_direction, "asc");
     assert.equal(payload.row_limit, 5000);
   });
+
+  it("stamps CDC snapshot_mode onto a scheduled pipeline and omits it on full refresh", () => {
+    const cdc = studioSchedulePolicies({
+      syncMode: "cdc",
+      snapshotMode: "when_needed",
+    });
+    assert.equal(cdc.snapshot_mode, "when_needed");
+    const full = studioSchedulePolicies({
+      syncMode: "full_refresh_overwrite",
+      snapshotMode: "when_needed",
+    });
+    assert.equal(full.snapshot_mode, undefined);
+  });
 });

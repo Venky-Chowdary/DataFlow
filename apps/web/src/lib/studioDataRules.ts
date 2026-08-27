@@ -56,6 +56,8 @@ export function studioSchedulePolicies(input: {
   priorityColumn?: string;
   priorityDirection?: "asc" | "desc" | string;
   rowLimit?: number;
+  syncMode?: string;
+  snapshotMode?: string;
 }): {
   validation_mode?: string;
   schema_policy?: string;
@@ -64,6 +66,7 @@ export function studioSchedulePolicies(input: {
   priority_column: string;
   priority_direction: "asc" | "desc";
   row_limit: number;
+  snapshot_mode?: string;
 } {
   const validationMode = namedStudioValidationMode(input.validationMode);
   const schemaPolicy = namedStudioSchemaPolicy(input.schemaPolicy);
@@ -77,6 +80,7 @@ export function studioSchedulePolicies(input: {
     priority_column: string;
     priority_direction: "asc" | "desc";
     row_limit: number;
+    snapshot_mode?: string;
   } = {
     backfill_new_fields: Boolean(input.backfillNewFields) && schemaPolicyBackfills(schemaPolicy),
     write_via_staging: Boolean(input.writeViaStaging),
@@ -86,5 +90,9 @@ export function studioSchedulePolicies(input: {
   };
   if (validationMode) out.validation_mode = validationMode;
   if (schemaPolicy) out.schema_policy = schemaPolicy;
+  if (String(input.syncMode || "").trim().toLowerCase() === "cdc") {
+    const mode = String(input.snapshotMode || "initial").trim().toLowerCase().replace(/-/g, "_");
+    out.snapshot_mode = mode || "initial";
+  }
   return out;
 }

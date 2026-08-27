@@ -257,6 +257,22 @@ def build_schedule_request(sched, src: dict, dst: dict):
 
     assert_callable_sync_allowed(effective_mode, source)
     stream_contracts = list(sched.stream_contracts or [])
+    snapshot_mode = ""
+    if effective_mode == "cdc":
+        from services.cdc_snapshot_mode import schedule_snapshot_mode
+
+        snapshot_mode = schedule_snapshot_mode(
+            "cdc",
+            getattr(sched, "snapshot_mode", "")
+            or next(
+                (
+                    str(c.get("snapshot_mode") or "")
+                    for c in stream_contracts
+                    if isinstance(c, dict) and c.get("snapshot_mode")
+                ),
+                "initial",
+            ),
+        )
     if not stream_contracts and effective_mode not in ("full_refresh_overwrite", "full_refresh_append"):
         stream_contracts = [{
             "selected": True,
@@ -267,7 +283,15 @@ def build_schedule_request(sched, src: dict, dst: dict):
             "primary_key": sched.primary_key,
             "schema_policy": sched.schema_policy,
             "validation_mode": sched.validation_mode,
+            **({"snapshot_mode": snapshot_mode} if snapshot_mode else {}),
         }]
+    elif snapshot_mode:
+        stamped: list[dict] = []
+        for raw in stream_contracts:
+            row = dict(raw) if isinstance(raw, dict) else {}
+            row.setdefault("snapshot_mode", snapshot_mode)
+            stamped.append(row)
+        stream_contracts = stamped
 
     from services.schedule_store import assert_schedule_run_allowed
 

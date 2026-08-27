@@ -493,6 +493,9 @@ export function PipelineDetailDrawer({
               <div><dt>Timezone</dt><dd>{sched.cron ? (sched.timezone || "UTC") : "N/A (rolling preset)"}</dd></div>
               <div><dt>Validation</dt><dd>{sched.validation_mode || "—"}</dd></div>
               <div><dt>Schema policy</dt><dd>{sched.schema_policy || "—"}</dd></div>
+              {sched.sync_mode === "cdc" && (
+                <div><dt>CDC snapshot</dt><dd>{sched.snapshot_mode || "initial"}</dd></div>
+              )}
               <div><dt>Runs</dt><dd>{sched.run_count.toLocaleString()}</dd></div>
               {sched.contract_id && (
                 <div>
@@ -565,6 +568,9 @@ export function PipelineDetailDrawer({
               <div><dt>Primary key</dt><dd>{sched.primary_key || "—"}</dd></div>
               <div><dt>Cursor column</dt><dd>{sched.cursor_column || "—"}</dd></div>
               <div><dt>Schema policy</dt><dd>{sched.schema_policy || "—"}</dd></div>
+              {sched.sync_mode === "cdc" && (
+                <div><dt>CDC snapshot</dt><dd>{sched.snapshot_mode || "initial"}</dd></div>
+              )}
               <div><dt>Validation mode</dt><dd>{sched.validation_mode || "—"}</dd></div>
               <div><dt>Backfill new fields</dt><dd>{sched.backfill_new_fields ? "Yes" : "No"}</dd></div>
             </dl>
