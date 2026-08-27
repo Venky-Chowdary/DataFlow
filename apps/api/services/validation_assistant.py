@@ -390,6 +390,14 @@ def _suggested_actions(
             "kind": "check_connection",
             "label": "Open Connectors — fix credentials / Auth source, then Test",
         })
+    if "g3f_population_fit" in gate_ids and any(
+        a.get("kind") == "change_target_type"
+        and a.get("to_type")
+        and a.get("apply_proven") is not False
+        and a.get("requires_ddl") is not True
+        for a in actions
+    ):
+        actions = [a for a in actions if a.get("kind") != "review_mappings"]
     return actions
 
 

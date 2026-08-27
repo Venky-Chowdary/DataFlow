@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { populationFitSummary } from "./populationFit";
+import { createNewFitWidenActions, createNewFitWidenLabel, populationFitSummary } from "./populationFit";
 
 test("a clean preview never claims population fit", () => {
   const s = populationFitSummary({
@@ -117,4 +117,75 @@ test("nothing bounded is a pass, not an unmeasured warning", () => {
 test("no payload renders nothing rather than a guess", () => {
   assert.equal(populationFitSummary(undefined), null);
   assert.equal(populationFitSummary(null), null);
+});
+
+test("flights create-new NUMBER(15,11) widens are one Apply, not Open Map", () => {
+  const actions = createNewFitWidenActions({
+    passed: false,
+    gates: [
+      {
+        id: "g3f_population_fit",
+        status: "block",
+        message: "19564 value(s) in 91944 scanned row(s)",
+        details: {
+          create_new_table: true,
+          suggested_actions: [
+            {
+              kind: "change_target_type",
+              column: "DEP_TIME",
+              to_type: "NUMBER(15,11)",
+              label: "Widen 'DEP_TIME' CREATE type to NUMBER(15,11)",
+              requires_ddl: false,
+              mapping_applyable: true,
+              apply_proven: true,
+            },
+            {
+              kind: "change_target_type",
+              column: "ARR_TIME",
+              to_type: "NUMBER(15,11)",
+              label: "Widen 'ARR_TIME' CREATE type to NUMBER(15,11)",
+              requires_ddl: false,
+              mapping_applyable: true,
+              apply_proven: true,
+            },
+            { kind: "review_mappings", label: "Review mappings" },
+          ],
+        },
+      },
+    ],
+    blockers: [],
+  } as never);
+  assert.equal(actions.length, 2);
+  assert.deepEqual(actions.map((a) => a.column), ["DEP_TIME", "ARR_TIME"]);
+  assert.equal(
+    createNewFitWidenLabel(actions),
+    "Widen CREATE types to fit this source (2 columns)",
+  );
+});
+
+test("live DDL widens are not Apply", () => {
+  const actions = createNewFitWidenActions({
+    passed: false,
+    gates: [
+      {
+        id: "g3f_population_fit",
+        status: "block",
+        details: {
+          create_new_table: false,
+          suggested_actions: [
+            {
+              kind: "change_target_type",
+              column: "DEP_TIME",
+              to_type: "NUMBER(15,11)",
+              requires_ddl: true,
+              mapping_applyable: false,
+              apply_proven: true,
+            },
+          ],
+        },
+      },
+    ],
+    blockers: [],
+  } as never);
+  assert.equal(actions.length, 0);
 });

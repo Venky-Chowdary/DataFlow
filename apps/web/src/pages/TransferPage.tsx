@@ -207,6 +207,7 @@ import {
   type PromotedPrimaryFix,
 } from "../lib/validateStudioPrimary";
 import { planFkOrphanSuggestedAction, resolvePopulationOrphanScanFlag } from "../lib/fkOrphanCta";
+import { createNewFitWidenActions, createNewFitWidenLabel } from "../lib/populationFit";
 import { suggestUniqueKeyCandidates, suggestCompositeUniqueKeyCandidates } from "../lib/uniqueKeySuggestions";
 import { needsMappingReview } from "../lib/columnWorkbench";
 import {
@@ -4575,26 +4576,11 @@ export function TransferPage({
 
     const g15Cta = destExistsPrimaryCta(shapeContractFromPreflight(preflight));
     const ranked = rankAndDedupeSuggestedActions(firstBlocker?.suggested_actions);
-    const widens = ranked.filter((a) => (
-      a.kind === "change_target_type"
-      && a.to_type
-      && a.requires_ddl !== true
-      && a.mapping_applyable !== false
-      && a.apply_proven !== false
-    ));
-    const createNewFit =
-      widens.length > 0
-      && widens.every((a) => a.requires_ddl !== true)
-      && (
-        firstBlocker?.source?.id === "g3f_population_fit"
-        || Boolean((firstBlocker?.source?.details as { create_new_table?: boolean } | undefined)?.create_new_table)
-      );
-    if (createNewFit) {
+    const widens = createNewFitWidenActions(preflight);
+    if (widens.length > 0) {
       return {
         onPrimaryFix: () => applyCreateNewTypeWidens(widens),
-        primaryFixLabel: widens.length === 1
-          ? (widens[0].label || `Widen ${widens[0].column} to ${widens[0].to_type}`)
-          : `Widen CREATE types to fit this file (${widens.length} columns)`,
+        primaryFixLabel: createNewFitWidenLabel(widens),
       };
     }
     const action = ranked[0]
@@ -7065,6 +7051,7 @@ export function TransferPage({
             syncMode={syncMode}
             writeViaStaging={writeViaStaging}
             onApplyAction={applySuggestedAction}
+            onApplyCreateNewWidens={() => applyCreateNewTypeWidens(createNewFitWidenActions(preflight))}
             onStripControlChars={stripControlCharsAndRerun}
             stripControlsApplied={columnMappings.some(
               (m) => m.transform === "strip_controls",

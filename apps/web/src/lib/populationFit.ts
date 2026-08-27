@@ -5,7 +5,7 @@
  * population proof. Only `evidence: "exact"` may say "every row".
  */
 
-import type { PreflightResult } from "./types";
+import type { PreflightResult, ValidationSuggestedAction } from "./types";
 
 export type PopulationFit = NonNullable<PreflightResult["population_fit"]>;
 
@@ -101,4 +101,57 @@ export function populationFitSummary(
     proven: false,
     offenders,
   };
+}
+
+function widenActionsOf(raw: unknown): ValidationSuggestedAction[] {
+  if (!Array.isArray(raw)) return [];
+  return raw.filter((a): a is ValidationSuggestedAction => (
+    Boolean(a)
+    && typeof a === "object"
+    && (a as ValidationSuggestedAction).kind === "change_target_type"
+    && Boolean((a as ValidationSuggestedAction).to_type)
+    && (a as ValidationSuggestedAction).requires_ddl !== true
+    && (a as ValidationSuggestedAction).mapping_applyable !== false
+    && (a as ValidationSuggestedAction).apply_proven !== false
+  ));
+}
+
+/** Proven create-new NUMBER/DECIMAL/VARCHAR widens — Apply updates CREATE, not live DDL. */
+export function createNewFitWidenActions(
+  preflight: PreflightResult | null | undefined,
+): ValidationSuggestedAction[] {
+  if (!preflight) return [];
+  const gates = preflight.gates ?? [];
+  const g3f = gates.find((g) => String(g.id) === "g3f_population_fit");
+  const details = (g3f?.details ?? {}) as Record<string, unknown>;
+  const fromGate = widenActionsOf(details.suggested_actions);
+  const fromBlocker = (preflight.blockers ?? []).flatMap((b) => {
+    if (String(b.id) !== "g3f_population_fit") return [];
+    const top = widenActionsOf(b.suggested_actions);
+    if (top.length) return top;
+    const nested = widenActionsOf(
+      (b.details as { suggested_actions?: unknown } | undefined)?.suggested_actions,
+    );
+    if (nested.length) return nested;
+    return widenActionsOf(b.guidance?.suggested_actions);
+  });
+  const actions = fromGate.length ? fromGate : fromBlocker;
+  const createNew = details.create_new_table === true
+    || actions.length > 0 && actions.every((a) => a.requires_ddl !== true);
+  if (!createNew || !actions.length) return [];
+  const seen = new Set<string>();
+  return actions.filter((a) => {
+    const key = `${a.column || ""}|${a.target || ""}|${a.to_type || ""}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+export function createNewFitWidenLabel(actions: ValidationSuggestedAction[]): string {
+  if (!actions.length) return "";
+  if (actions.length === 1) {
+    return actions[0].label || `Widen ${actions[0].column} to ${actions[0].to_type}`;
+  }
+  return `Widen CREATE types to fit this source (${actions.length} columns)`;
 }

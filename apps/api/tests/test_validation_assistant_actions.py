@@ -132,3 +132,30 @@ def test_population_fit_overflow_reaches_explain_remap():
     widen = next(a for a in explained["suggested_actions"] if a["kind"] == "change_target_type")
     assert widen["to_type"] == "NUMBER(10,7)"
     assert widen["column"] == "DEP_TIME"
+
+
+def test_create_new_fit_widen_does_not_add_review_mappings():
+    actions = _suggested_actions(
+        [{
+            "id": "g3f_population_fit",
+            "message": "cannot fit the peeked CREATE type",
+            "details": {"create_new_table": True},
+        }],
+        [
+            {
+                "column": "DEP_TIME",
+                "suggested_target_type": "NUMBER(15,11)",
+                "severity": "block",
+                "apply_proven": True,
+            },
+            {
+                "column": "ARR_TIME",
+                "suggested_target_type": "NUMBER(15,11)",
+                "severity": "block",
+                "apply_proven": True,
+            },
+        ],
+    )
+    kinds = [a["kind"] for a in actions]
+    assert kinds.count("change_target_type") == 2
+    assert "review_mappings" not in kinds
