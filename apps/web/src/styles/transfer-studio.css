@@ -2667,23 +2667,26 @@ th.df2-type-string .df2-type-badge {
   display: inline-flex;
   flex: 1 1 auto;
   min-width: 0;
-  padding: 2px;
+  height: var(--df-btn-height, 36px);
+  padding: 0;
   border: 1px solid #e2e8f0;
   border-radius: 8px;
   background: #f8fafc;
   gap: 2px;
+  align-items: stretch;
 }
 
 .df2-dest-mode-btn {
   flex: 1 1 0;
   min-width: 0;
-  height: 30px;
+  height: var(--df-btn-height, 36px);
+  min-height: var(--df-btn-height, 36px);
   padding: 0 10px;
   border: 0;
   border-radius: 6px;
   background: transparent;
   color: #64748b;
-  font-size: 12.5px;
+  font-size: 13px;
   font-weight: 600;
   cursor: pointer;
   white-space: nowrap;
@@ -2703,9 +2706,12 @@ th.df2-type-string .df2-type-badge {
 
 .df2-dest-toolbar .df2-dest-advanced-btn {
   flex: 0 0 auto;
-  height: 34px;
-  align-self: center;
+  height: var(--df-btn-height, 36px);
+  min-height: var(--df-btn-height, 36px);
+  padding: 0 12px;
+  align-self: stretch;
   white-space: nowrap;
+  box-sizing: border-box;
 }
 
 .df2-dest-export-select {

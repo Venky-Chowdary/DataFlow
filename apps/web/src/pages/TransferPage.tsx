@@ -113,6 +113,7 @@ import {
   type ValidationModeId,
   multiStreamScd2MirrorBlockCopy,
   MULTI_STREAM_SCD2_MIRROR_BLOCK,
+  syncModeHonestyLine,
 } from "../lib/transferConstants";
 import {
   jobStudioDataRules,
@@ -6340,11 +6341,10 @@ export function TransferPage({
                       </button>
                     </div>
                     <Button
-                      size="sm"
                       variant="ghost"
                       className="df2-dest-advanced-btn"
                       onClick={() => setAdvancedOpen(true)}
-                      leadingIcon={<DtIcon name="settings" size={14} />}
+                      leadingIcon={<DtIcon name="settings" size={16} />}
                       title="Advanced settings — sync mode, primary key, cursor, and write policies"
                     >
                       Advanced
@@ -6724,10 +6724,15 @@ export function TransferPage({
                   <>
                     <DtIcon name="database" size={14} />
                     <p>
-                      <strong>Existing table detected.</strong> New rows will <strong>append</strong> by default.
-                      Open Advanced settings to switch to overwrite or incremental sync.
+                      <strong>Existing table detected</strong>
+                      {targetCollection.trim() ? <> — <code>{targetCollection.trim()}</code></> : null}
+                      . This is not create-new. The object already exists
+                      (even if a prior run wrote 0 rows). Full append inserts into
+                      {" "}<strong>live</strong> column types and does not ALTER them.
+                      To start a new table, type a name that does not exist.
+                      Open Advanced to switch overwrite or incremental.
                       {destColumns.length > 0 ? (
-                        <> · {destColumns.length} columns loaded.</>
+                        <> · {destColumns.length} live columns loaded.</>
                       ) : (
                         <> · Column metadata pending — load the columns before Map invents create-new.</>
                       )}
@@ -6825,6 +6830,9 @@ export function TransferPage({
                 {schemaPolicyLabel}
                 <span aria-hidden> · </span>
                 {VALIDATION_MODES.find((m) => m.id === validationMode)?.label ?? validationMode} validation
+              </p>
+              <p className="df2-label-hint">
+                {syncModeHonestyLine(syncMode, destTableExists)}
               </p>
               <p className="df2-label-hint">
                 Change overwrite, CDC, and identity in Advanced.
@@ -7525,6 +7533,7 @@ export function TransferPage({
         dateLocales={DATE_LOCALES}
         numberLocales={NUMBER_LOCALES}
         syncMode={syncMode}
+        syncHonestyLine={syncModeHonestyLine(syncMode, destTableExists)}
         schemaPolicy={schemaPolicy}
         validationMode={validationMode}
         dateLocale={dateLocale}

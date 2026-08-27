@@ -217,6 +217,45 @@ export const NUMBER_LOCALES: { id: NumberLocaleId; label: string; detail: string
   { id: "EU", label: "EU (1.234,56)", detail: "Dot thousands, comma decimal." },
 ];
 
+/**
+ * Destination-aware sync caption. Full append into a leftover empty table is
+ * still dest-exists — live NUMBER/VARCHAR widths bind; Map does not ALTER them.
+ */
+export function syncModeHonestyLine(
+  mode: string,
+  destTableExists: boolean | null,
+): string {
+  if (mode === "full_refresh_append") {
+    if (destTableExists === true) {
+      return (
+        "Inserts into the existing table. Live destination types bind — Full append "
+        + "does not CREATE a new table and does not ALTER NUMBER/VARCHAR widths. "
+        + "An empty leftover table still exists."
+      );
+    }
+    if (destTableExists === false) {
+      return (
+        "Table is missing — first write CREATE TABLE from Map types, then insert. "
+        + "This is create-new, not append into leftover DDL."
+      );
+    }
+    return (
+      "Keep existing rows; insert the full snapshot again. Confirm whether the "
+      + "destination object exists before Execute — leftover empty tables still count as existing."
+    );
+  }
+  if (mode === "full_refresh_overwrite") {
+    if (destTableExists === true) {
+      return (
+        "Replaces rows in the existing table. Destroys current data. "
+        + "Does not by itself ALTER live column widths — widen in the warehouse or map to a new column."
+      );
+    }
+    return "Drop/replace destination, then load the full snapshot. Destroys existing rows if the object already exists.";
+  }
+  return SYNC_MODES.find((m) => m.id === mode)?.detail ?? "";
+}
+
 /** Single operator-facing copy for SCD2/mirror + multi-stream block (rank 74). */
 export const MULTI_STREAM_SCD2_MIRROR_BLOCK =
   "Multi-stream SCD2/mirror is not supported. Switch to full/incremental/CDC, or select a single table.";
