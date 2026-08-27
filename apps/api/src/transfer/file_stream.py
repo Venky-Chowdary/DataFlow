@@ -98,6 +98,48 @@ STREAMABLE_TYPES = {"csv", "tsv", "jsonl", "ndjson", "json", "excel", "parquet",
 STREAM_THRESHOLD = int(getenv_brand("STREAM_FILE_ROWS", "1"))
 FILE_SPILL_THRESHOLD = int(getenv_brand("FILE_SPILL_THRESHOLD", str(50 * 1024 * 1024)))
 SPILL_DIR = getenv_brand("SPILL_DIR") or None
+# File→Snowflake was 50× 20k reconnect+PUT cycles on a 1M CSV (~1 min/batch).
+# COPY INTO wants fewer larger files; DB stream already reuses one session.
+SNOWFLAKE_FILE_CHUNK_SIZE = int(getenv_brand("SNOWFLAKE_FILE_CHUNK_SIZE", "100000"))
+SNOWFLAKE_FILE_BATCH_MEMORY = 32 * 1024 * 1024
+
+
+def file_dest_batch_size(
+    dest_type: str,
+    *,
+    avg_row_size: int,
+    dest_host: str = "",
+    dest_connection_string: str = "",
+) -> int:
+    """Rows per file-stream write. Snowflake COPY is not a 20k INSERT bind."""
+    dest = (dest_type or "").strip().lower()
+    row_bytes = max(1, int(avg_row_size or 100))
+    if dest == "snowflake":
+        cap = max(1, int(SNOWFLAKE_FILE_CHUNK_SIZE or 100_000))
+        return adaptive_chunk_size(
+            cap,
+            row_bytes,
+            max_size=cap,
+            target_memory_bytes=SNOWFLAKE_FILE_BATCH_MEMORY,
+        )
+    target_memory_bytes = 64 * 1024 * 1024 if dest == "mongodb" else 8 * 1024 * 1024
+    batch_size = adaptive_chunk_size(
+        CHUNK_SIZE,
+        row_bytes,
+        max_size=CHUNK_SIZE,
+        target_memory_bytes=target_memory_bytes,
+    )
+    try:
+        from connectors.write_resilience import proxy_stream_batch_size
+    except ImportError:
+        proxy_stream_batch_size = None  # type: ignore
+    if proxy_stream_batch_size is not None and dest not in {"snowflake"}:
+        batch_size = proxy_stream_batch_size(
+            dest_host,
+            connection_string=dest_connection_string,
+            default=batch_size,
+        )
+    return max(1, int(batch_size))
 
 
 _JSONL_SCALAR_ERROR = (
@@ -750,25 +792,17 @@ def stream_file_to_database(
     avg_row_size = 100
     if sample_rows:
         avg_row_size = max(1, int(sum(len(json.dumps(row, default=json_default)) for row in sample_rows) / len(sample_rows)))
-    # MongoDB can safely ingest larger batches; keep other destinations under 8 MB
-    # to avoid payload limits (e.g. BigQuery streaming insert ~10 MB).
-    target_memory_bytes = 64 * 1024 * 1024 if dest_type == "mongodb" else 8 * 1024 * 1024
-    batch_size = adaptive_chunk_size(CHUNK_SIZE, avg_row_size, max_size=CHUNK_SIZE, target_memory_bytes=target_memory_bytes)
-    # Align file batches to the proxy writer commit size so a dropped socket never
-    # straddles tens of thousands of already-committed rows inside one call.
-    try:
-        from connectors.write_resilience import proxy_stream_batch_size
-    except ImportError:
-        proxy_stream_batch_size = None  # type: ignore
-    if proxy_stream_batch_size is not None:
-        batch_size = proxy_stream_batch_size(
-            dest_cfg.get("host"),
-            connection_string=dest_cfg.get("connection_string")
+    batch_size = file_dest_batch_size(
+        dest_type,
+        avg_row_size=avg_row_size,
+        dest_host=str(dest_cfg.get("host") or ""),
+        dest_connection_string=str(
+            dest_cfg.get("connection_string")
             or dest_cfg.get("uri")
             or dest_cfg.get("url")
-            or "",
-            default=batch_size,
-        )
+            or ""
+        ),
+    )
     # Object-store writers (S3/GCS/ADLS) emit a single destination object per call.
     # Writing multiple batches would overwrite the same key and silently lose data,
     # so force a single batch — never gate on truthy total_rows (None fails open).
@@ -1052,8 +1086,7 @@ def stream_file_to_database(
         getenv_brand("PARALLEL_WORKERS", str(min(4, os.cpu_count() or 1)))
     )
     # SQLite handles concurrency poorly with a single shared file, so keep it sequential.
-    # Snowflake COPY INTO uses a named temporary stage per table; concurrent batches
-    # overwrite each other's stage files, so it must also be sequential.
+    # Snowflake file loads reuse one warehouse session (same as DB stream) — serial.
     # Public TCP proxies (Railway, Neon, etc.) drop when multiple bulk writers share
     # the same host — force a single writer connection for those destinations.
     if dest_type in ("sqlite", "snowflake"):
@@ -1074,6 +1107,29 @@ def stream_file_to_database(
             max_workers = 1
 
     pg_conn_state: dict[str, Any] = {"conn": None}
+    sf_conn_state: dict[str, Any] = {"conn": None, "session_ready": False}
+
+    def _ensure_snowflake_conn() -> Any:
+        existing = sf_conn_state.get("conn")
+        if existing is not None:
+            return existing
+        from connectors.snowflake_conn import get_connection, normalize_account
+        from services.connector_auth import engine_login_role
+
+        pem = str(dest_cfg.get("private_key") or "")
+        sf_conn_state["conn"] = get_connection(
+            account=normalize_account(dest_cfg.get("host", "")),
+            username=dest_cfg.get("username", ""),
+            password=dest_cfg.get("password", ""),
+            database=dest_cfg.get("database", ""),
+            schema=dest_cfg.get("schema", "PUBLIC"),
+            warehouse=dest_cfg.get("warehouse", ""),
+            connection_string=dest_cfg.get("connection_string", ""),
+            role=engine_login_role(dest_cfg.get("auth_role"), dest_cfg.get("role")),
+            private_key=pem,
+            private_key_passphrase=str(dest_cfg.get("password") or "") if pem else "",
+        )
+        return sf_conn_state["conn"]
 
     def _ensure_pg_conn() -> Any:
         existing = pg_conn_state.get("conn")
@@ -1232,6 +1288,12 @@ def stream_file_to_database(
             source_spool=source_spool,
             **(
                 {
+                    "connection": _ensure_snowflake_conn(),
+                    "close_connection": False,
+                    "skip_session_setup": bool(sf_conn_state.get("session_ready")),
+                }
+                if dest_type == "snowflake"
+                else {
                     "connection": _ensure_pg_conn(),
                     "close_connection": False,
                     "connection_holder": pg_conn_state,
@@ -1410,6 +1472,8 @@ def stream_file_to_database(
         if durable_job:
             checkpoint.job_id = durable_job
             checkpoint_service.require_save(checkpoint)
+        if dest_type == "snowflake":
+            sf_conn_state["session_ready"] = True
         if on_checkpoint:
             on_checkpoint(idx, chunks, written, checkpoint.to_dict())
 
@@ -1437,15 +1501,16 @@ def stream_file_to_database(
             for idx, result in runner.run(batch_enum, _process_file_chunk):
                 _apply_file_result(idx, result)
     finally:
-        conn = pg_conn_state.get("conn")
-        if conn is not None:
-            try:
-                conn.close()
-            except Exception as exc:
-                logging.getLogger(__name__).debug(
-                    "Exception suppressed: %s", exc, exc_info=exc
-                )
-            pg_conn_state["conn"] = None
+        for state in (sf_conn_state, pg_conn_state):
+            conn = state.get("conn")
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception as exc:
+                    logging.getLogger(__name__).debug(
+                        "Exception suppressed: %s", exc, exc_info=exc
+                    )
+                state["conn"] = None
 
     if written == 0 and rejected_total == 0 and coerced_null_total == 0:
         raise ValueError("No records found in file")
