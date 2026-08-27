@@ -1624,7 +1624,8 @@ export function ValidateDashboard({
 
   return (
     <section className={`df2-vd df2-vd-${heroTone}`} aria-label="Validation dashboard">
-      <header className="df2-vd-hero">
+      <header className={`df2-vd-hero${running ? " is-glass-live" : ""}`}>
+        {running ? <span className="df2-vd-hero-glow" aria-hidden /> : null}
         <div
           className={`df2-vd-hero-ring tone-${heroTone}${heroRing.indeterminate ? " is-indeterminate" : ""}${!heroRing.indeterminate && heroRing.pct >= 100 ? " is-complete" : ""}`}
           aria-hidden

@@ -539,9 +539,11 @@ class MongoDBService:
         phase_label = kwargs.get("phase")
         message = kwargs.get("message", "")
 
-        # Durable operator event log (Jobs Log tab). Cap to last 200 lines.
+        # Durable operator event log (Jobs Log tab). Keep the run from start.
         try:
             if "event_log" not in updates:
+                from services.job_document_budget import JOB_EVENT_LOG_MAX
+
                 prev_log = list((prev_doc or {}).get("event_log") or [])
                 line_parts: list[str] = []
                 if phase_label and str(phase_label) != str((prev_doc or {}).get("phase") or ""):
@@ -565,7 +567,7 @@ class MongoDBService:
                     stamp = datetime.now(timezone.utc).strftime("%H:%M:%S")
                     for part in line_parts:
                         prev_log.append(f"{stamp} — {part}")
-                    updates["event_log"] = prev_log[-200:]
+                    updates["event_log"] = prev_log[-JOB_EVENT_LOG_MAX:]
         except Exception as exc:
             logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
@@ -1288,10 +1290,12 @@ class MemoryMongoDBService:
                     except Exception as exc:
                         logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
                 if line_parts:
+                    from services.job_document_budget import JOB_EVENT_LOG_MAX
+
                     stamp = datetime.now(timezone.utc).strftime("%H:%M:%S")
                     for part in line_parts:
                         prev_log.append(f"{stamp} — {part}")
-                    rec["event_log"] = prev_log[-200:]
+                    rec["event_log"] = prev_log[-JOB_EVENT_LOG_MAX:]
             except Exception as exc:
                 logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 

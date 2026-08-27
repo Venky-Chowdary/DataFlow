@@ -31,7 +31,7 @@ import { CdcCursorGapPanel } from "./transfer/CdcCursorGapPanel";
 import { CdcRetentionPanel } from "./transfer/CdcRetentionPanel";
 import { CdcIncrementalSnapshotPanel } from "./transfer/CdcIncrementalSnapshotPanel";
 import { LiveEventLog, type LiveLogEntry } from "./ui/LiveEventLog";
-import { writeJobEventLog } from "../lib/jobEventLog";
+import { mergeEventLogLines, readJobEventLog, writeJobEventLog } from "../lib/jobEventLog";
 import { useToast } from "./Toast";
 import { MappingProofDrawer, type MappingProof } from "./MappingProofDrawer";
 import { hashForScreen } from "../lib/appNavigation";
@@ -207,18 +207,18 @@ export function JobTheater({
       const stamped = `${new Date().toLocaleTimeString()} — ${line}`;
       setLog((l) => {
         const entry: LiveLogEntry = { id: ++logSeqRef.current, text: stamped };
-        // Trim oldest only — stable ids on remaining lines prevent remount flicker.
-        const next = l.length >= 400 ? [...l.slice(-(399)), entry] : [...l, entry];
+        const next = [...l, entry];
         writeJobEventLog(jobId, next.map((e) => e.text));
         return next;
       });
     };
-    const boot: LiveLogEntry = {
-      id: ++logSeqRef.current,
-      text: `${new Date().toLocaleTimeString()} — Connecting to live job stream…`,
-    };
-    setLog([boot]);
-    writeJobEventLog(jobId, [boot.text]);
+    const persisted = readJobEventLog(jobId);
+    const bootText = `${new Date().toLocaleTimeString()} — Connecting to live job stream…`;
+    const initial: LiveLogEntry[] = persisted.length
+      ? persisted.map((text) => ({ id: ++logSeqRef.current, text }))
+      : [{ id: ++logSeqRef.current, text: bootText }];
+    setLog(initial);
+    if (!persisted.length) writeJobEventLog(jobId, [bootText]);
     const stop = streamJobProgress(
       jobId,
       (update) => {
@@ -259,11 +259,18 @@ export function JobTheater({
         setJob(update);
         if (update.event_log?.length) {
           setLog((current) => {
-            const onlyBoot =
-              current.length <= 1
-              && String(current[0]?.text || "").includes("Connecting to live job stream");
-            if (!onlyBoot && current.length > 1) return current;
-            return update.event_log!.map((text, i) => ({ id: i + 1, text }));
+            const merged = mergeEventLogLines(
+              current.map((e) => e.text),
+              update.event_log!,
+            );
+            const used = new Map(current.map((e) => [e.text, e]));
+            const next = merged.map((text) => {
+              const existing = used.get(text);
+              if (existing) return existing;
+              return { id: ++logSeqRef.current, text };
+            });
+            writeJobEventLog(jobId, next.map((e) => e.text));
+            return next;
           });
         }
         // Recent-window RPS when rows actually advance. Reconnect must not

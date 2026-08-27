@@ -5765,8 +5765,11 @@ th.df2-type-string .df2-type-badge {
 }
 
 .df2-run-step .df2-theater-v3-progress-block {
-  border-color: #dde7f2;
-  background: linear-gradient(180deg, #f8fbff 0%, #f4f8fc 100%);
+  border-color: rgba(13, 148, 136, 0.18);
+  background:
+    linear-gradient(180deg, rgba(240, 253, 250, 0.65) 0%, rgba(248, 251, 255, 0.92) 100%);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.8), 0 8px 22px rgba(15, 23, 42, 0.04);
+  backdrop-filter: blur(var(--df-blur-glass, 12px));
 }
 
 .df2-run-step .df2-theater-v3-metric {
@@ -6578,8 +6581,9 @@ th.df2-type-string .df2-type-badge {
   flex: 0 0 auto;
   padding: 12px 14px 0 !important;
   border-top: 1px solid #e2e8f0 !important;
-  background: linear-gradient(180deg, rgba(248, 250, 252, 0.92) 0%, #ffffff 40%);
-  backdrop-filter: blur(6px);
+  background: linear-gradient(180deg, rgba(240, 253, 250, 0.55) 0%, rgba(255, 255, 255, 0.94) 42%);
+  backdrop-filter: blur(var(--df-blur-glass, 12px));
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.7);
   display: flex;
   flex-direction: column;
   gap: 0;
@@ -6803,6 +6807,8 @@ th.df2-type-string .df2-type-badge {
   border-bottom: 1px solid rgba(148, 163, 184, 0.1);
   white-space: pre-wrap;
   word-break: break-word;
+  content-visibility: auto;
+  contain-intrinsic-size: 0 22px;
 }
 .df2-live-log-line.is-ok { color: #6ee7b7; }
 .df2-live-log-line.is-warn { color: #fcd34d; }
@@ -7157,6 +7163,7 @@ th.df2-type-string .df2-type-badge {
 
 /* Hero ? one decision surface; proof detail lives in gate cards below */
 .df2-vd-hero {
+  position: relative;
   display: flex;
   align-items: flex-start;
   gap: 14px;
@@ -7164,6 +7171,39 @@ th.df2-type-string .df2-type-badge {
   border: 1px solid var(--df-border, #e2e8f0);
   border-radius: var(--df-radius-panel, 12px);
   background: var(--df-surface, #fff);
+  overflow: hidden;
+}
+.df2-vd-hero.is-glass-live {
+  border-color: rgba(13, 148, 136, 0.28);
+  background:
+    linear-gradient(180deg, rgba(240, 253, 250, 0.72) 0%, rgba(255, 255, 255, 0.86) 68%),
+    var(--df-surface, #fff);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.85),
+    0 10px 28px rgba(15, 118, 110, 0.08);
+  backdrop-filter: blur(var(--df-blur-glass, 12px));
+}
+.df2-vd-hero-glow {
+  position: absolute;
+  width: 240px;
+  height: 240px;
+  left: -40px;
+  top: -80px;
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(20, 184, 166, 0.22) 0%, rgba(20, 184, 166, 0) 70%);
+  animation: df2-validate-pulse 2.2s var(--df-ease, ease-in-out) infinite;
+  pointer-events: none;
+}
+.df2-vd-hero.is-glass-live .df2-vd-hero-ring,
+.df2-vd-hero.is-glass-live .df2-vd-hero-copy {
+  position: relative;
+  z-index: 1;
+}
+@media (prefers-reduced-motion: reduce) {
+  .df2-vd-hero-glow {
+    animation: none;
+    opacity: 0.4;
+  }
 }
 .df2-vd-approve .df2-vd-hero,
 .df2-vd-live .df2-vd-hero { border-color: #99f6e4; }
@@ -7853,7 +7893,10 @@ th.df2-type-string .df2-type-badge {
 .df2-vd-rule.status-warn { border-left-color: #f59e0b; background: #fffbeb; }
 .df2-vd-rule.status-skip { border-left-color: #cbd5e1; background: #f8fafc; opacity: 0.85; }
 .df2-vd-rule.status-running { border-left-color: #0ea5e9; background: #f0f9ff; }
-.df2-vd-rule.status-pending { border-left-color: #e2e8f0; }
+.df2-vd-rule.status-pending {
+  border-left-color: #99f6e4;
+  background: linear-gradient(90deg, rgba(240, 253, 250, 0.55) 0%, #fff 48%);
+}
 .df2-vd-rule.is-compact {
   gap: 4px;
   padding: 8px 10px;
