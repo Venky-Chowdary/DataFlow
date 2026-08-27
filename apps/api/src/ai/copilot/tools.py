@@ -724,13 +724,29 @@ TOOL_DEFINITIONS: list[dict] = [
             "required": ["source_table"],
         },
     },
+    {
+        "name": "brief_workspace",
+        "description": (
+            "Spoken sitrep of this workspace: connectors (tested/failed), recent "
+            "jobs, pipelines due or parked on approval, contracts. Use when the "
+            "operator asks what's going on, for a briefing, or to summarize the workspace."
+        ),
+        "input_schema": {"type": "object", "properties": {}, "required": []},
+    },
 ]
 
 TOOL_FAMILIES: list[dict] = [
     {
         "id": "discover",
         "label": "Discover",
-        "tools": ["list_datasets", "search_data", "search_connectors", "search_knowledge", "describe_pilot"],
+        "tools": [
+            "list_datasets",
+            "search_data",
+            "search_connectors",
+            "search_knowledge",
+            "describe_pilot",
+            "brief_workspace",
+        ],
     },
     {
         "id": "profile",
@@ -868,6 +884,7 @@ class DataPilotTools:
             "introspect_connector_schema": self._introspect_connector_schema,
             "diff_schemas": self._diff_schemas,
             "map_connector_schemas": self._map_connector_schemas,
+            "brief_workspace": self._brief_workspace,
         }
         handler = handlers.get(name)
         if not handler:
@@ -1400,6 +1417,7 @@ class DataPilotTools:
                     "List and run pipeline schedules (with confirmation)",
                     "Open Fix bad data / quarantine paths in Transfer Studio (Confirm required)",
                     "Open any app screen (Transfer, Jobs, Pipelines, Contracts, Query, …)",
+                    "Brief the live workspace (connectors, jobs, parked pipelines, contracts)",
                 ],
                 "cannot_yet": [
                     "Export a table to a downloadable file from chat "
@@ -1437,6 +1455,7 @@ class DataPilotTools:
                     f"Transfer orders from {ex_src} to {ex_dst} as upsert",
                     "Why did job <id> fail?",
                     "Show my pipelines",
+                    "Give me a workspace briefing",
                 ],
                 "remembers": [
                     "Last connector, table, metric, and grouping in this chat",
@@ -1446,6 +1465,26 @@ class DataPilotTools:
                     "Plans use the same mapping pipeline and 9 gates as Transfer Studio",
                     "Nothing moves until you Confirm — overwrite is never the default",
                 ],
+            },
+        )
+
+    def _brief_workspace(self, workspace_id: str = "") -> ToolResult:
+        """Live sitrep — counts only from the same stores Jobs / Connectors use."""
+        from .workspace_briefing import collect_workspace_briefing
+
+        facts = collect_workspace_briefing(workspace_id=workspace_id or "")
+        attention = [str(a) for a in (facts.get("attention") or []) if a]
+        return ToolResult(
+            name="brief_workspace",
+            success=True,
+            output={
+                "facts": facts,
+                "connector_count": facts.get("connector_count", 0),
+                "job_count": facts.get("job_count", 0),
+                "schedule_count": facts.get("schedule_count", 0),
+                "contract_count": facts.get("contract_count", 0),
+                "attention": attention,
+                "empty_workspace": bool(facts.get("empty_workspace")),
             },
         )
 
@@ -3001,6 +3040,7 @@ _TOOL_PRIORITY: dict[str, int] = {
     "get_schedule": 70,
     "list_schedules": 60,
     "list_contracts": 58,
+    "brief_workspace": 56,
     "list_jobs": 55,
     "list_connectors": 52,
     "search_connectors": 50,
@@ -3138,6 +3178,7 @@ def prune_planned_tools(planned: list[tuple[str, dict]]) -> list[tuple[str, dict
                 "navigate",
                 "start_transfer_studio",
                 "list_jobs",
+                "brief_workspace",
                 "list_datasets",
                 "describe_pilot",
                 "explain_product",
@@ -3600,6 +3641,21 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
 
     if _is_meta_pilot_question(lower):
         planned.append(("describe_pilot", {}))
+        return planned
+
+    from .dialogue_acts import classify_dialogue_act
+
+    _act = classify_dialogue_act(message)
+    # Sitrep asks own a dedicated tool. Inventory verbs ("show my jobs") and
+    # named objects (job_/pf_) keep their existing routers.
+    if _act == "briefing" and not re.search(
+        r"\b(?:job_|pf_)[a-z0-9]"
+        r"|(?:show|list|open)\s+(?:my\s+)?(?:jobs?|pipelines?|schedules?|connectors?)\b"
+        r"|(?:plan|start|stage)\s+transfer\b"
+        r"|\bsample\b|\bcount\s+rows\b|\bfix\s+(?:my\s+)?mapping\b",
+        lower,
+    ):
+        planned.append(("brief_workspace", {}))
         return planned
 
     nav_map = {
@@ -4922,6 +4978,7 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
             "profile_quality_rules", "describe_pilot", "explain_product",
             "explain_mapping_assurance", "remediate_validation", "navigate",
             "inspect_schema_policy", "get_transfer_capabilities", "list_jobs",
+            "brief_workspace",
             "list_connectors", "list_schedules", "aggregate_data",
             "list_connector_objects", "sample_connector_object", "plan_transfer",
             "start_transfer", "plan_transfer_route", "create_connector",
@@ -4960,6 +5017,11 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
             }
             and not (n == "introspect_connector_schema" and not _asks_for_schema(lower))
         ]
+
+    # Off-topic / general-web asks must not become product RAG. The composer
+    # refuses guesswork and points at Settings → AI for cloud chat.
+    if _act == "general":
+        planned = [(n, a) for n, a in planned if n != "search_knowledge"]
 
     # Deduplicate while preserving order
     seen: set[str] = set()

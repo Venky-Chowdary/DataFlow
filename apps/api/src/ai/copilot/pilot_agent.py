@@ -74,6 +74,12 @@ def _tool_summary(tr: ToolResult) -> str:
         return f"{o.get('filtered', 0)} connectors"
     if tr.name == "search_knowledge":
         return f"{o.get('count', 0)} knowledge hits"
+    if tr.name == "brief_workspace":
+        facts = o.get("facts") if isinstance(o.get("facts"), dict) else o
+        return (
+            f"{int(facts.get('connector_count') or 0)} connectors, "
+            f"{int(facts.get('job_count') or 0)} jobs"
+        )
     if tr.name == "list_jobs":
         total = int(o.get("total") or 0) or int(o.get("count") or 0)
         window = int(o.get("count") or 0)
@@ -747,31 +753,15 @@ class DataPilotAgent:
         lower_msg = message.lower()
         history = history or []
         data_context = self._ensure_data_context(data_context, history)
-        if not message or lower_msg in {
-            "hi",
-            "hello",
-            "hey",
-            "help",
-            "yo",
-            "good morning",
-            "good afternoon",
-            "good evening",
-        }:
-            return CopilotResponse(
-                answer=(
-                    "I'm **Datawrap Pilot** — ask me anything about your workspace. "
-                    "I can count and aggregate live tables, sample and profile rows, "
-                    "inspect schemas, plan or stage transfers (**Confirm** before anything moves), "
-                    "triage jobs, and open Fix bad data in Transfer Studio. "
-                    'Try: "how many rows in airports on Local Postgres", '
-                    '"plan transfer of orders from Local Postgres to Warehouse", '
-                    'or "fix bad data".'
-                ),
-                intent="greeting",
-                confidence=1.0,
-                method="greeting",
-                suggested_prompts=self._starter_prompts()[:4],
-            )
+        from .dialogue_acts import classify_dialogue_act
+        from .conversation_composer import compose_greeting_response
+
+        if not message or classify_dialogue_act(message) == "greeting":
+            ctx = self.context_builder.build(data_context, message or "hi")
+            greet = compose_greeting_response(ctx)
+            if not greet.suggested_prompts:
+                greet.suggested_prompts = self._starter_prompts()[:4]
+            return greet
 
         # Meta questions stay on the local agent — never RAG-dump ontology shards
         # and never race cloud LLMs for a "who are you" answer.
@@ -1604,6 +1594,10 @@ Draft answer:
             out.setdefault("session_id", session_id)
         if last_result_id and name in ("analyze_result", "filter_result"):
             out.setdefault("result_id", last_result_id)
+        if name == "brief_workspace":
+            ws = str(ctx.get("workspace_id") or "").strip()
+            if ws:
+                out.setdefault("workspace_id", ws)
         return out
 
     def _openai_agent(
@@ -1857,6 +1851,45 @@ Respond as Datawrap Pilot — grounded in tool results."""
                         tools_used=[],
                     )
 
+            from .conversation_composer import (
+                compose_general,
+                compose_greeting_response,
+                compose_history_turn,
+            )
+            from .dialogue_acts import classify_dialogue_act
+
+            act = classify_dialogue_act(message, history=history)
+            if act in {"summarize_last", "explain_simpler", "thanks", "next_action"}:
+                pending_labels = [
+                    str(a.get("label") or "")
+                    for a in (data_context or {}).get("pending_actions") or []
+                    if isinstance(a, dict) and a.get("label")
+                ]
+                return compose_history_turn(
+                    act,
+                    history=history,
+                    message=message,
+                    ctx=ctx,
+                    pending_labels=pending_labels or None,
+                )
+            if act == "greeting":
+                return compose_greeting_response(ctx)
+            if act == "briefing":
+                planned = [("brief_workspace", {})]
+            elif act == "general":
+                return CopilotResponse(
+                    answer=compose_general(message, ctx),
+                    intent="product_help",
+                    confidence=0.7,
+                    method="pilot_conversation",
+                    reasoning="General ask — no workspace evidence; refused guesswork",
+                    suggested_prompts=[
+                        "Give me a workspace briefing",
+                        "Show my transfer jobs",
+                        "What can you do?",
+                    ],
+                )
+
         for name, args in planned:
             tr = self.tools.execute(name, self._with_result_context(name, args, data_context))
             turn.tool_results.append(tr)
@@ -2045,6 +2078,13 @@ Respond as Datawrap Pilot — grounded in tool results."""
                             + f" ({ds['source']})"
                         )
                     parts.append("\n".join(lines))
+            elif tr.name == "brief_workspace" and tr.success:
+                from .conversation_composer import compose_briefing
+
+                facts = (tr.output or {}).get("facts")
+                if not isinstance(facts, dict):
+                    facts = tr.output or {}
+                parts.append(compose_briefing(facts))
             elif tr.name == "list_jobs" and tr.success:
                 parts.append(narrate_jobs(tr.output or {}, message))
             elif tr.name == "get_job" and tr.success:
@@ -2611,9 +2651,23 @@ Respond as Datawrap Pilot — grounded in tool results."""
             parts.insert(0, turn.needs_clarification)
 
         if not parts:
-            parts.append(_unmapped_intent_reply(message, ctx))
+            from .dialogue_acts import classify_dialogue_act
+            from .conversation_composer import compose_general
 
-        return "\n\n".join(parts)
+            if classify_dialogue_act(message, history=None) == "general":
+                parts.append(compose_general(message, ctx))
+            else:
+                parts.append(_unmapped_intent_reply(message, ctx))
+
+        from .dialogue_acts import classify_dialogue_act
+        from .conversation_composer import weave_tool_answer
+
+        woven = weave_tool_answer(
+            message,
+            parts,
+            act=classify_dialogue_act(message),
+        )
+        return woven or "\n\n".join(parts)
 
     def _format_analysis(self, output: dict) -> str:
         name = output.get("dataset", "dataset").replace("sample_", "").replace("_", " ")
@@ -2780,6 +2834,9 @@ Navigate to any screen when asked (including schedules/pipelines, contracts, que
                         prompts.append(f"Tell me about {label}")
                         break
         prompts.extend([
+            "Give me a workspace briefing",
+            "Summarize that",
+            "What should I do next?",
             "Show my pipelines",
             "Show my transfer jobs",
         ])
@@ -2844,6 +2901,7 @@ Navigate to any screen when asked (including schedules/pipelines, contracts, que
                 "Show my recent jobs",
             ])
         prompts.extend([
+            "Give me a workspace briefing",
             "Show my recent jobs",
             "What can you do?",
         ])
