@@ -566,7 +566,7 @@ def test_table_walk_applies_round_recipe_before_fit(
     assert shaped["population_fit"]["findings"] == []
 
 
-def test_source_filter_table_walk_still_sees_late_enum_member(
+def test_table_walk_still_sees_late_enum_member(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Preview of status=active is clean. Row 431 ``late`` is the write refuse."""
@@ -600,9 +600,9 @@ def test_source_filter_table_walk_still_sees_late_enum_member(
         destination_column_types={"status": "ENUM('active','inactive')"},
         destination_db_type="mysql",
         source_kind="database",
-        source_format="mysql",
+        source_format="postgresql",
         source_table="flights",
-        source_config={"kind": "database", "format": "mysql", "table": "flights"},
+        source_config={"kind": "database", "format": "postgresql", "table": "flights"},
         sample_rows=rows[:25],
     )
 
