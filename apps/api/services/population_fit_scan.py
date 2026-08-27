@@ -1105,7 +1105,6 @@ def scan_rows(
 
     from connectors.writer_common import (
         fits_decimal,
-        integer_overflow_suggested_type,
         parse_decimal_precision_scale,
         proven_integer_widen,
         proven_varchar_widen,
@@ -1149,10 +1148,6 @@ def scan_rows(
                     max_scale=env_scale.get(idx, 0),
                     safety_margin=0,
                 )
-                if not suggested_type:
-                    suggested_type = integer_overflow_suggested_type(
-                        first or prove_values[0], target.target_type, dest_db=dest_db
-                    )
                 if not suggested_type:
                     suggested_type = decimal_widen_carrier(
                         first or (prove_values[0] if prove_values else ""),
