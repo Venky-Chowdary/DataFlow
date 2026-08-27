@@ -152,12 +152,12 @@ def compose_thanks() -> str:
 def compose_general(message: str, ctx: dict[str, Any] | None = None) -> str:
     """Honest general-chat path when there is no workspace or product evidence.
 
-    We do not invent recipes, news, or medical advice. We stay a data copilot
-    and offer the live surfaces we can actually read.
+    Refusal wording is owned by ``unsupported_question`` — this composer only
+    adds the live workspace offer and the Settings → AI path for cloud chat.
     """
-    quoted = (message or "").strip()
-    if len(quoted) > 140:
-        quoted = quoted[:137] + "…"
+    from .unsupported_question import unsupported_question_output
+
+    base = str((unsupported_question_output(message) or {}).get("answer") or "").strip()
     ctx = ctx or {}
     n_conn = len(ctx.get("connectors") or [])
     n_jobs = len(ctx.get("recent_jobs") or [])
@@ -168,14 +168,11 @@ def compose_general(message: str, ctx: dict[str, Any] | None = None) -> str:
             "job(s) in this workspace if you want to switch to that."
         )
     return (
-        f"I don't have evidence for “{quoted}” — I'm Datawrap Pilot, so I "
-        "won't guess a general-web answer and dress it up as fact.\n\n"
+        f"{base}\n\n"
         "Turn on OpenAI or Anthropic under **Settings → AI** if you want a "
         "cloud model to chat about topics outside this product. Local Pilot "
         "still answers anything I can prove from your connectors, jobs, "
-        f"pipelines, Validate runs, and docs.{live}\n\n"
-        "Useful from here: *give me a workspace briefing*, *show my jobs*, "
-        "or name a table on a saved connector."
+        f"pipelines, Validate runs, and docs.{live}"
     )
 
 
@@ -300,7 +297,7 @@ def compose_history_turn(
     return CopilotResponse(
         answer=answer,
         intent=intent,
-        confidence=0.72,
+        confidence=0.2 if act == "general" else 0.72,
         method="pilot_conversation",
         reasoning=f"Dialogue act {act} over prior turn — no new warehouse claim",
         suggested_prompts=_followups_for_act(act),

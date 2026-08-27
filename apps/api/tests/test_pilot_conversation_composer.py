@@ -107,7 +107,7 @@ def test_compose_briefing_empty_and_live_facts():
 
 def test_compose_general_refuses_guesswork():
     text = compose_general("how do I cook rice", {"connectors": [], "recent_jobs": []})
-    assert "won't guess" in text.lower() or "will not" in text.lower() or "don't have evidence" in text.lower()
+    assert "will not answer it from guesswork" in text
     assert "Settings → AI" in text
     assert "rice recipe" not in text.lower()
     assert "boil" not in text.lower()
@@ -254,6 +254,8 @@ def test_greeting_and_history_through_agent():
 
     rice = agent.chat("how do I cook rice tonight please", history=[], data_context=None)
     assert rice.method == "pilot_conversation"
+    assert rice.confidence == 0.2
+    assert "will not answer it from guesswork" in rice.answer
     assert "Settings → AI" in rice.answer
     assert "boil water" not in rice.answer.lower()
 

@@ -46,9 +46,9 @@ _BRIEFING = re.compile(
     r"how\s+(?:are|is)\s+(?:we|my\s+(?:workspace|data|platform)|everything)\s+doing|"
     r"morning\s+briefing|stand-?up\s+(?:update|summary)|"
     r"catch\s+me\s+up|bring\s+me\s+up\s+to\s+speed|"
-    r"tell\s+me\s+everything\s+(?:about\s+(?:my\s+)?(?:workspace|platform)|$)|"
     r"what\s+needs\s+(?:my\s+)?(?:attention|review)"
     r")\b|"
+    r"^\s*tell\s+me\s+everything(?:\s+about\s+(?:my\s+)?(?:workspace|platform))?\s*[.!?]*$|"
     r"^\s*any\s+(?:failures?|problems?|issues?)\s*(?:today|right\s+now)?\s*[.!?]*$",
     re.I,
 )
@@ -89,8 +89,8 @@ _NEXT_ACTION = re.compile(
 # Product / workspace nouns — if present, this is not "general internet chat".
 _WORKSPACE_MARKERS = re.compile(
     r"\b(?:"
-    r"connector|pipeline|schedule|job|transfer|validate|preflight|quarantine|"
-    r"mapping|schema|table|warehouse|snowflake|postgres|mysql|cdc|contract|"
+    r"connectors?|pipelines?|schedules?|jobs?|transfers?|validate|preflight|quarantine|"
+    r"mapping|schema|tables?|warehouse|snowflake|postgres|mysql|cdc|contracts?|"
     r"workspace|datawrap|pilot|sync\s+mode|incremental|reconcile|"
     r"export|download|delete|drop|remove"
     r")\b",
@@ -114,6 +114,10 @@ def classify_dialogue_act(message: str, *, history: list[dict] | None = None) ->
         return "next_action"
     if _BRIEFING.search(text):
         return "briefing"
+    # "tell me everything about airports" is a dataset/object ask, not a sitrep
+    # and not general-web chat.
+    if re.search(r"tell\s+me\s+everything\s+about\b", text, re.I):
+        return "workspace"
     if _WORKSPACE_MARKERS.search(text):
         return "workspace"
     # Short follow-ups after a live turn stay in workspace (followup.py owns slots).

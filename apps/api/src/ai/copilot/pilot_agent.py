@@ -763,6 +763,37 @@ class DataPilotAgent:
                 greet.suggested_prompts = self._starter_prompts()[:4]
             return greet
 
+        # Recap / thanks / next-step over the last spoken answer — do this before
+        # tool routing so "summarize that" after a job list does not re-hit Mongo.
+        # A stored sample still wins: "summarize that" then profiles the result.
+        _hist_act = classify_dialogue_act(message, history=history)
+        if _hist_act in {"summarize_last", "explain_simpler", "thanks", "next_action"}:
+            sid = str((data_context or {}).get("pilot_session_id") or "").strip()
+            focus = None
+            if sid:
+                try:
+                    from .working_memory import get_working_memory
+
+                    focus = get_working_memory().get_focus(sid)
+                except Exception:
+                    focus = None
+            if not (_hist_act == "summarize_last" and focus and focus.result_id):
+                from .conversation_composer import compose_history_turn
+
+                ctx = self.context_builder.build(data_context, message)
+                pending_labels = [
+                    str(a.get("label") or "")
+                    for a in (data_context or {}).get("pending_actions") or []
+                    if isinstance(a, dict) and a.get("label")
+                ]
+                return compose_history_turn(
+                    _hist_act,
+                    history=history,
+                    message=message,
+                    ctx=ctx,
+                    pending_labels=pending_labels or None,
+                )
+
         # Meta questions stay on the local agent — never RAG-dump ontology shards
         # and never race cloud LLMs for a "who are you" answer.
         from .tools import _is_meta_pilot_question, _looks_like_unsupported_mutation
@@ -1880,7 +1911,7 @@ Respond as Datawrap Pilot — grounded in tool results."""
                 return CopilotResponse(
                     answer=compose_general(message, ctx),
                     intent="product_help",
-                    confidence=0.7,
+                    confidence=0.2,
                     method="pilot_conversation",
                     reasoning="General ask — no workspace evidence; refused guesswork",
                     suggested_prompts=[

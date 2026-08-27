@@ -4638,7 +4638,16 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
         r"(?:of|for|on)\s+[\"']?([a-zA-Z_][a-zA-Z0-9_]*)[\"']?\s*$",
         lower,
     )
-    if analyze_follow and "analyze_result" not in [p[0] for p in planned]:
+    # Bare "summarize that" is a recap of the last answer, not a result profile.
+    _last_answer_recap = bool(
+        re.match(
+            r"^\s*(?:summarize\s+(?:that|this|it|what\s+you\s+(?:just\s+)?said)"
+            r"|tl;?dr|in\s+(?:a\s+)?(?:sentence|nutshell)|short\s+version|recap(?:\s+that)?)"
+            r"\s*[.!?]*$",
+            lower,
+        )
+    )
+    if analyze_follow and not _last_answer_recap and "analyze_result" not in [p[0] for p in planned]:
         # Don't steal fresh table sample intents
         if "sample_connector_object" not in [p[0] for p in planned]:
             args = {}
@@ -4953,7 +4962,7 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
     analyst = get_data_analyst()
     hint = analyst.extract_dataset_hint(message)
     data_signals = [
-        "analyze", "what's in", "what is in", "tell me about", "pii",
+        "analyze", "what's in", "what is in", "tell me about", "tell me everything about", "pii",
         "preview", "sample", "quality", "how many rows",
     ]
     # "columns"/"schema" alone often mean live DB — only analyze uploaded data
