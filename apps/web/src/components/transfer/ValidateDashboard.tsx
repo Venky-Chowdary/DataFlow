@@ -3117,9 +3117,11 @@ export function ValidateDashboard({
                       {populationFit.offenders[0].exampleRows.length > 0
                         ? ` · first at row ${populationFit.offenders[0].exampleRows.slice(0, 3).join(", ")}`
                         : ""}
-                      {populationFit.offenders[0].suggestedTargetType
-                        ? ` · widen to ${populationFit.offenders[0].suggestedTargetType}`
-                        : ""}
+                      {populationFit.offenders
+                        .filter((o) => o.suggestedTargetType)
+                        .slice(0, 2)
+                        .map((o) => ` · widen ${o.column} to ${o.suggestedTargetType}`)
+                        .join("")}
                     </em>
                   ) : null}
                 </span>

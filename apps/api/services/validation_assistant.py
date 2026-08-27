@@ -48,6 +48,70 @@ def _coercion_column_fixes(report: dict[str, Any]) -> list[dict[str, Any]]:
     return out
 
 
+def _population_fit_column_fixes(
+    fit: dict[str, Any] | None,
+    *,
+    table_exists: bool = False,
+) -> list[dict[str, Any]]:
+    """Promote g3f_population_fit overflows into the same column-fix SSOT."""
+    if not isinstance(fit, dict):
+        return []
+    out: list[dict[str, Any]] = []
+    for col in fit.get("findings") or []:
+        if not isinstance(col, dict):
+            continue
+        try:
+            unfit = int(col.get("unfit_rows") or 0)
+        except (TypeError, ValueError):
+            unfit = 0
+        if unfit <= 0:
+            continue
+        examples = col.get("example_values") if isinstance(col.get("example_values"), list) else []
+        rows = col.get("example_rows") if isinstance(col.get("example_rows"), list) else []
+        sample_failures = []
+        if examples:
+            sample_failures.append({
+                "row": rows[0] if rows else None,
+                "value": examples[0],
+                "reason": col.get("unfit_reason") or col.get("reason") or "",
+            })
+        out.append({
+            "column": col.get("source"),
+            "target": col.get("target") or col.get("source"),
+            "source_type": col.get("source_type") or "",
+            "target_type": col.get("target_type") or "",
+            "severity": "block",
+            "failed": unfit,
+            "sentinel_nulls": 0,
+            "sampled": unfit,
+            "sample_failures": sample_failures,
+            "suggested_fix": col.get("suggested_fix") or "",
+            "suggested_target_type": col.get("suggested_target_type") or "",
+            "suggested_transform": None,
+            "destination_exists": table_exists,
+            "table_exists": table_exists,
+        })
+    return out
+
+
+def _merge_column_fixes(
+    coercion: list[dict[str, Any]],
+    population: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """One row per source+target. Population-fit dest widen wins."""
+
+    def _key(row: dict[str, Any]) -> tuple[str, str]:
+        return (
+            str(row.get("column") or "").strip().lower(),
+            str(row.get("target") or "").strip().lower(),
+        )
+
+    pop_keys = {_key(r) for r in population}
+    out = [r for r in coercion if _key(r) not in pop_keys]
+    out.extend(population)
+    return out
+
+
 def _parse_type_mismatch_columns(text: str) -> list[tuple[str, str]]:
     """Extract (source, target) from messages like ``population (VARCHAR) → population (NUMBER)``."""
     return [(src, tgt) for src, _st, tgt, _tt in _parse_type_mismatch_pairs(text)]
@@ -493,7 +557,16 @@ def explain_validation(
             "detail_messages": [str(n) for n in nested][:10],
         })
 
-    column_fixes = _coercion_column_fixes(coercion_report)
+    column_fixes = _merge_column_fixes(
+        _coercion_column_fixes(coercion_report),
+        _population_fit_column_fixes(
+            preflight.get("population_fit") if isinstance(preflight.get("population_fit"), dict) else {},
+            table_exists=bool(
+                preflight.get("destination_table_exists")
+                or (preflight.get("proof_bundle") or {}).get("destination_table_exists")
+            ),
+        ),
+    )
     # Surface warn-only columns as advisory issues even when nothing blocks.
     for c in column_fixes:
         if c["severity"] == "warn":

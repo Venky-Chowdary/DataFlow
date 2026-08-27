@@ -3628,9 +3628,15 @@ export function TransferPage({
             // Unknown / pending schema — do not invent create-new type rewrite.
             return m;
           }
-          // Existing DDL cannot be widened by mapping alone — remappoint to a free text
-          // column, or invent a new VARCHAR target (ADD / create on write).
-          const freeText = destColumns.find((c) => {
+          // Existing DDL cannot be widened by mapping alone.
+          // A NUMBER/DECIMAL dest-widen must not dump clock/money values into
+          // a leftover TEXT sibling — that is a fidelity collapse.
+          const isNumericWiden = /^(number|decimal|numeric|bignumeric)\b/i.test(
+            (action.to_type || "").trim(),
+          );
+          const freeText = isNumericWiden
+            ? undefined
+            : destColumns.find((c) => {
             const lower = c.toLowerCase();
             if (usedTargets.has(lower) && lower !== m.target.toLowerCase()) return false;
             return isTextType(destSchemaMap[c] || "");
@@ -3663,7 +3669,7 @@ export function TransferPage({
             || destColumns.some((c) => c.toLowerCase() === name.toLowerCase());
           if (!candidate || isTaken(candidate)) {
             const base = (m.source || "field").replace(/[^\w]+/g, "_").replace(/^_+|_+$/g, "") || "field";
-            candidate = `${m.source.startsWith("_") ? m.source : base}_text`;
+            candidate = `${m.source.startsWith("_") ? m.source : base}${isNumericWiden ? "_wide" : "_text"}`;
             if (isTaken(candidate)) {
               candidate = `src_${base}`;
             }

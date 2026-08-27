@@ -89,6 +89,8 @@ def test_quarantine_holds_out_a_fractional_cell_with_the_reason():
     )
     assert out == [("22", "fine")]
     assert details and "fractional" in details[0]["reason"]
+    assert details[0].get("suggested_target_type") == "DOUBLE"
+    assert "DOUBLE" in (details[0].get("suggested_fix") or "")
 
 
 def test_quarantine_holds_out_overflow_integer():
@@ -104,6 +106,7 @@ def test_quarantine_holds_out_overflow_integer():
     )
     assert out == [(1, "fine")]
     assert details and "does not fit" in details[0]["reason"]
+    assert details[0].get("suggested_target_type") == "BIGINT"
 
 
 def test_coerce_null_nulls_overflow_cell():

@@ -370,9 +370,9 @@ def bounded_targets(
     lowered = {k.lower(): v for k, v in types.items()}
     src_types = {str(k): str(v or "") for k, v in (source_types or {}).items()}
     src_lowered = {k.lower(): v for k, v in src_types.items()}
-    declared_domain = (not source_kind) or source_types_are_authoritative(
-        source_kind, source_format
-    )
+    # Empty source_kind is not warehouse DDL. Treating it as a declared
+    # domain skipped the flights CSV scan whenever a caller omitted kind.
+    declared_domain = source_types_are_authoritative(source_kind, source_format)
     out: list[BoundedTarget] = []
     undecidable: list[str] = []
     safe: list[str] = []
@@ -693,6 +693,10 @@ def scan_rows(
     else:
         evidence = EVIDENCE_SAMPLED
 
+    from connectors.writer_common import (
+        integer_overflow_suggested_type,
+        varchar_overflow_suggested_type,
+    )
     from services.decimal_observe import (
         decimal_scale_overflow_fix,
         decimal_widen_carrier,
@@ -705,16 +709,61 @@ def scan_rows(
         first = examples[0] if examples else ""
         suggested_type = ""
         suggested_fix = ""
+        why = reasons.get(idx, "")
         if target.carrier == CARRIER_DECIMAL and first:
-            suggested_type = decimal_widen_carrier(
-                first, dest_db=dest_db, current_type=target.target_type
+            if "fractional" in why.lower():
+                suggested_type = integer_overflow_suggested_type(
+                    first, target.target_type, dest_db=dest_db
+                )
+                if not suggested_type:
+                    dialect = (dest_db or "").strip().lower()
+                    if dialect in {"snowflake"}:
+                        suggested_type = "FLOAT"
+                    elif dialect in {"bigquery", "bq"}:
+                        suggested_type = "FLOAT64"
+                    else:
+                        suggested_type = "DOUBLE"
+            else:
+                suggested_type = decimal_widen_carrier(
+                    first, dest_db=dest_db, current_type=target.target_type
+                )
+            if suggested_type and "fractional" in why.lower():
+                suggested_fix = (
+                    f"Open Map → widen {target.target} to {suggested_type} "
+                    "(preserve the fraction, or ALTER the destination) "
+                    "→ re-Validate. Do not silently truncate."
+                )
+            elif suggested_type:
+                suggested_fix = decimal_scale_overflow_fix(
+                    first,
+                    dest_db=dest_db,
+                    current_type=target.target_type,
+                    column=target.target,
+                ) or (
+                    f"Open Map → widen {target.target} to {suggested_type} "
+                    "(or ALTER the destination) → re-Validate. "
+                    "Do not silently truncate."
+                )
+        elif target.carrier == CARRIER_INTEGER and first:
+            suggested_type = integer_overflow_suggested_type(
+                first, target.target_type, dest_db=dest_db
             )
-            suggested_fix = decimal_scale_overflow_fix(
-                first,
-                dest_db=dest_db,
-                current_type=target.target_type,
-                column=target.target,
+            if suggested_type:
+                suggested_fix = (
+                    f"Open Map → widen {target.target} to {suggested_type} "
+                    "(or ALTER the destination) → re-Validate. "
+                    "Do not silently truncate."
+                )
+        elif target.carrier == CARRIER_STRING and first:
+            suggested_type = varchar_overflow_suggested_type(
+                first, target.target_type, dest_db=dest_db
             )
+            if suggested_type:
+                suggested_fix = (
+                    f"Open Map → widen {target.target} to {suggested_type} "
+                    "(or ALTER the destination) → re-Validate. "
+                    "Do not silently truncate."
+                )
         findings_list.append(
             ColumnFitFinding(
                 target=target,

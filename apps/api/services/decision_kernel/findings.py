@@ -127,7 +127,7 @@ def classify_transform_failure(
     # Population-fit / writer: "N value(s) do not fit NUMBER(9,6)" and
     # "decimal does not fit" / "value exceeds NUMBER". Not a cast class —
     # the dest carrier exists and the cell is wider than it.
-    if ("does not fit" in msg or "value exceeds" in msg) and any(
+    if ("does not fit" in msg or "do not fit" in msg or "value exceeds" in msg) and any(
         t in msg or t in tgt_l for t in ("decimal", "number", "numeric", "bignumeric")
     ):
         return FailureClass.OVERFLOW
@@ -160,6 +160,8 @@ def classify_transform_failure(
         return FailureClass.INVALID_NUMERIC
     if "invalid decimal" in msg or "invalid number" in msg or "invalid float" in msg:
         return FailureClass.INVALID_NUMERIC
+    if "fractional value" in msg:
+        return FailureClass.FRACTIONAL_PRECISION_LOSS
     if any(
         k in msg
         for k in (
@@ -244,6 +246,14 @@ def rank_suggested_target_type(
     if widened:
         return widened
 
+    # Integer range overflow: next integer/decimal carrier, never TEXT-first.
+    if tgt_l == "integer" or fc is FailureClass.OVERFLOW:
+        int_widen = _integer_overflow_widen(
+            examples, target_type=target_type, dest_db=db
+        )
+        if int_widen:
+            return int_widen
+
     # Encoding / length: text widen is appropriate.
     if fc in {FailureClass.ENCODING_FAILURE, FailureClass.LENGTH_OVERFLOW}:
         return create_new_mapping_target_type("TEXT", db) or "TEXT"
@@ -273,6 +283,26 @@ def _decimal_overflow_widen(
             continue
         widened = decimal_widen_carrier(
             ex, dest_db=dest_db, current_type=target_type
+        )
+        if widened:
+            return widened
+    return ""
+
+
+def _integer_overflow_widen(
+    examples: list[str],
+    *,
+    target_type: str,
+    dest_db: str,
+) -> str:
+    """BIGINT / NUMBER(38,0) / DOUBLE that would hold the overflowing cell."""
+    from connectors.writer_common import integer_overflow_suggested_type
+
+    for ex in examples:
+        if not (ex or "").strip():
+            continue
+        widened = integer_overflow_suggested_type(
+            ex, target_type, dest_db=dest_db
         )
         if widened:
             return widened
@@ -371,7 +401,7 @@ class ValidationFinding:
         d["failure_class"] = self.failure_class.value
         d["schema_version"] = FINDING_SCHEMA
         d["gate_ids"] = list(self.gate_ids)
-        return {k: v for k, v in d.items() if v not in (None, "", (), [])}
+        return {k: v for k, v in d.items() if v not in (None, "", (), [], {})}
 
 
 def fingerprint_value(value: Any, *, limit: int = 64) -> str:
@@ -592,7 +622,6 @@ def findings_from_population_fit(
             dest_db=dest_db,
             blocking=True,
             gate_ids=("g3f_population_fit",),
-            failure_class=FailureClass.OVERFLOW,
             suggested_target_type=suggested,
         )
         payload = finding.to_dict()

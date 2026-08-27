@@ -100,6 +100,14 @@ def test_file_inferred_typmod_is_not_a_declared_domain():
     assert warehouse == ()
     assert warehouse_safe == ("DEP_TIME",)
 
+    omitted, _, omitted_safe = bounded_targets(
+        [{"source": "DEP_TIME", "target": "DEP_TIME", "target_type": "NUMBER(9,6)"}],
+        source_types={"DEP_TIME": "NUMBER(9,6)"},
+        dest_db="snowflake",
+    )
+    assert omitted_safe == ()
+    assert [t.target for t in omitted] == ["DEP_TIME"]
+
 
 def test_population_scan_blocks_file_clock_residue_and_stamps_widen():
     rows = [{"DEP_TIME": "7.5"}] * 292 + [{"DEP_TIME": "7.9166665"}]

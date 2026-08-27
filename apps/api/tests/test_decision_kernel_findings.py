@@ -241,6 +241,37 @@ def test_findings_from_population_fit_stamps_dest_widen():
     assert "truncate" in top["recommended_action"].lower()
 
 
+def test_fractional_into_zero_scale_number_is_not_overflow():
+    assert (
+        classify_transform_failure(
+            "fractional value 22.433332 is not an integer for NUMBER(38,0)",
+            target_type="NUMBER(38,0)",
+            source_value="22.433332",
+        )
+        is FailureClass.FRACTIONAL_PRECISION_LOSS
+    )
+    suggested = rank_suggested_target_type(
+        source_type="DECIMAL(13,8)",
+        target_type="INT",
+        dest_db="mysql",
+        failure_class=FailureClass.FRACTIONAL_PRECISION_LOSS,
+        failure_examples=["22.433332"],
+    )
+    assert "DOUBLE" in suggested.upper() or "FLOAT" in suggested.upper()
+    assert "LONGTEXT" not in suggested.upper()
+
+
+def test_integer_range_overflow_ranks_bigint_not_text():
+    suggested = rank_suggested_target_type(
+        source_type="BIGINT",
+        target_type="SMALLINT",
+        dest_db="postgresql",
+        failure_class=FailureClass.OVERFLOW,
+        failure_examples=["40000"],
+    )
+    assert suggested == "BIGINT"
+
+
 def test_merge_prefers_population_fit_widen_over_preview_coercion():
     coercion = [
         {

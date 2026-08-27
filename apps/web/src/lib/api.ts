@@ -3468,6 +3468,8 @@ export interface QuarantineInfo {
     values?: Record<string, string>;
     chars?: string[];
     suggested_transform?: string;
+    suggested_fix?: string;
+    suggested_target_type?: string;
     _df_qid?: string;
     retry_status?: string;
   }[];
@@ -3540,7 +3542,7 @@ export async function downloadJobQuarantineCsv(
 ): Promise<{ filename: string; row_count: number; blob: Blob }> {
   const escape = (v: unknown) => `"${String(v ?? "").replace(/"/g, '""')}"`;
   const toCsv = (rows: QuarantineInfo["quarantine"]) => {
-    const lines = ["row,column,target,value,reason,policy,suggested_transform"];
+    const lines = ["row,column,target,value,reason,policy,suggested_transform,suggested_fix,suggested_target_type"];
     const mark = (v: unknown) => {
       let text = String(v ?? "");
       text = text
@@ -3554,7 +3556,7 @@ export async function downloadJobQuarantineCsv(
     };
     for (const r of rows) {
       lines.push(
-        [r.row, r.column, r.target, mark(r.value), r.reason, r.policy, r.suggested_transform]
+        [r.row, r.column, r.target, mark(r.value), r.reason, r.policy, r.suggested_transform, r.suggested_fix, r.suggested_target_type]
           .map(escape)
           .join(","),
       );

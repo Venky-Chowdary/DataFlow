@@ -29,6 +29,8 @@ def _scan(
     values: list[str],
     *,
     dest_db: str = "mysql",
+    source_kind: str = "",
+    source_format: str = "",
 ):
     mappings = [
         {
@@ -43,6 +45,8 @@ def _scan(
         mappings,
         dest_db=dest_db,
         source_types={"c": source_type},
+        source_kind=source_kind,
+        source_format=source_format,
     )
     report = scan_rows(
         [{"c": v} for v in values],
@@ -105,7 +109,11 @@ def test_a_typed_source_wire_is_not_rescanned_for_its_parse() -> None:
     """Cost stays off an ordinary transfer: a DB numeric wire parses by
     construction, so the declaration decides it without a million parses."""
     targets, _und, safe, report = _scan(
-        "DECIMAL(11,8)", "DECIMAL(11,8)", ["12.34567890"]
+        "DECIMAL(11,8)",
+        "DECIMAL(11,8)",
+        ["12.34567890"],
+        source_kind="database",
+        source_format="mysql",
     )
 
     assert targets == ()

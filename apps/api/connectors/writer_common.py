@@ -3341,6 +3341,60 @@ def integer_fit_failure(
     return None
 
 
+def integer_overflow_suggested_type(
+    value: Any, type_str: str, *, dest_db: str = ""
+) -> str:
+    """Dest-spelled carrier that would hold ``value``. Empty when the cell binds.
+
+    Fractional → DOUBLE/FLOAT (not a bigger INT). Range overflow → BIGINT or
+    Snowflake/Oracle ``NUMBER(38,0)``. Values past signed 64-bit use the
+    decimal widen SSOT. Never TEXT — that destroys numeric meaning.
+    """
+    why = integer_fit_failure(value, type_str, dest_db=dest_db)
+    if why is None:
+        return ""
+    if "fractional" in why.lower():
+        dialect = (dest_db or "").strip().lower()
+        if dialect in {"snowflake"}:
+            return "FLOAT"
+        if dialect in {"bigquery", "bq"}:
+            return "FLOAT64"
+        return "DOUBLE"
+    if integer_fit_failure(value, "BIGINT", dest_db=dest_db) is None:
+        dialect = (dest_db or "").strip().lower()
+        if dialect in {"snowflake", "oracle"}:
+            return "NUMBER(38,0)"
+        return "BIGINT"
+    from services.decimal_observe import decimal_widen_carrier
+
+    return decimal_widen_carrier(
+        value, dest_db=dest_db, current_type=type_str
+    ) or ""
+
+
+def varchar_overflow_suggested_type(
+    value: Any, type_str: str, *, dest_db: str = ""
+) -> str:
+    """VARCHAR(n) / TEXT that would hold ``value``. Empty when it already fits."""
+    from services.ddl_compatibility import parse_varchar_width
+    from services.value_serializer import present_cell_text
+
+    width = parse_varchar_width(type_str)
+    text = present_cell_text(value)
+    if text is None:
+        text = str(value or "")
+    need = len(text)
+    if width is not None and need <= width:
+        return ""
+    dest_n = max(need, (width or 0) + 1)
+    dialect = (dest_db or "").strip().lower()
+    if dialect in {"mysql", "mariadb"} and dest_n > 65535:
+        return "TEXT"
+    if dialect in {"snowflake"} and dest_n > 16_777_216:
+        return "VARCHAR(16777216)"
+    return f"VARCHAR({dest_n})"
+
+
 def fits_integer(value: Any, type_str: str, *, dest_db: str = "") -> bool:
     """True if value fits the signed/unsigned integer destination carrier."""
     return integer_fit_failure(value, type_str, dest_db=dest_db) is None
@@ -3386,6 +3440,18 @@ def quarantine_unfit_integers(
             if unfit is None:
                 continue
             sample = cell_to_string(cells[col_idx])[:120]
+            suggested_type = integer_overflow_suggested_type(
+                cells[col_idx], typ, dest_db=dest_db
+            )
+            suggested_fix = (
+                (
+                    f"Open Map → widen {target_cols[col_idx]} to {suggested_type} "
+                    "(or ALTER the destination) → re-Validate. "
+                    "Do not silently truncate."
+                )
+                if suggested_type
+                else ""
+            )
             append_write_quarantine_detail(
                 rejected_details,
                 {
@@ -3398,6 +3464,8 @@ def quarantine_unfit_integers(
                         f"— quarantined: {unfit}"
                     ),
                     "policy": "write_quarantine",
+                    "suggested_fix": suggested_fix,
+                    "suggested_target_type": suggested_type,
                     "chars": [],
                 },
                 mapped_row=cells,
@@ -3678,6 +3746,18 @@ def quarantine_unfit_strings(
                 units = string_storage_units(
                     cells[col_idx], typ, dialect_label=dialect_label
                 )
+                suggested_type = varchar_overflow_suggested_type(
+                    cells[col_idx], typ, dest_db=dest_db
+                )
+                suggested_fix = (
+                    (
+                        f"Open Map → widen {target_cols[col_idx]} to {suggested_type} "
+                        "(or ALTER the destination) → re-Validate. "
+                        "Do not silently truncate."
+                    )
+                    if suggested_type
+                    else ""
+                )
                 append_write_quarantine_detail(
                     rejected_details,
                     {
@@ -3690,6 +3770,8 @@ def quarantine_unfit_strings(
                         "— quarantined (would truncate on write)"
                         ),
                         "policy": "write_quarantine",
+                        "suggested_fix": suggested_fix,
+                        "suggested_target_type": suggested_type,
                         "chars": [],
                     },
                     mapped_row=cells,
