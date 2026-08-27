@@ -54,6 +54,8 @@ import {
   mapTransferColumns,
   mapTransferPlan,
   preflightTransferPlan,
+  isTransportFailure,
+  validateTransportMessage,
   previewQuarantineCells,
   resumeJob,
   runPreflight,
@@ -317,6 +319,8 @@ export function TransferPage({
   const [sourceRowEstimate, setSourceRowEstimate] = useState<number | null>(null);
   const [analysis, setAnalysis] = useState<EnhancedAnalysis | null>(null);
   const [preflight, setPreflight] = useState<PreflightResult | null>(null);
+  /** Last transport / start failure — Validate must not look "Not run". */
+  const [preflightError, setPreflightError] = useState("");
   /** Fingerprint of Map/sync/PK that produced the current preflight result. */
   const [validatedContractKey, setValidatedContractKey] = useState<string | null>(null);
   /** Destination route of the run on screen. */
@@ -531,6 +535,7 @@ export function TransferPage({
     setAnalysis(null);
     setTransferPlan(null);
     setPreflight(null);
+    setPreflightError("");
     setValidatedContractKey(null);
     setPersistedPlanId(null);
     setParsed(null);
@@ -1985,6 +1990,7 @@ export function TransferPage({
     setTransferPlan(null);
     setPersistedPlanId(null);
     setPreflight(null);
+    setPreflightError("");
     setValidatedContractKey(null);
     setCellPreview(null);
     setDestColumns([]);
@@ -2423,6 +2429,7 @@ export function TransferPage({
     if (!reprofiling) setParsed(null);
     setAnalysis(null);
     setPreflight(null);
+    setPreflightError("");
     setPersistedPlanId(null);
     setLlmMappingUsed(false);
     setMappingProof(null);
@@ -4028,6 +4035,7 @@ export function TransferPage({
     setPreflighting(true);
     setStep(STEP_VALIDATE);
     setPreflight(null);
+    setPreflightError("");
     setValidatedContractKey(null);
     try {
       let columns: string[] = [];
@@ -4405,8 +4413,14 @@ export function TransferPage({
           });
         }
       } else {
-        const message = e instanceof Error ? e.message : "Validation could not complete.";
-        toast({ title: "Preflight failed", message, tone: "error" });
+        const raw = e instanceof Error ? e.message : "Validation could not complete.";
+        const message = validateTransportMessage(raw, parsed?.row_count ?? sourceRowEstimate);
+        setPreflightError(message);
+        toast({
+          title: isTransportFailure(raw) ? "Validate timed out" : "Preflight failed",
+          message,
+          tone: "error",
+        });
         console.error(e);
       }
     } finally {
@@ -5238,6 +5252,7 @@ export function TransferPage({
     if (!preflight) return;
     if (validatedContractKey != null && validatedContractKey !== validateContractKey) {
       setPreflight(null);
+      setPreflightError("");
       setValidatedContractKey(null);
     }
   }, [validateContractKey, validatedContractKey, preflight]);
@@ -5564,6 +5579,7 @@ export function TransferPage({
     setSourceRowEstimate(null);
     setAnalysis(null);
     setPreflight(null);
+    setPreflightError("");
     setComplianceAcknowledged(false);
     setSchemaDriftAcknowledged(false);
     setValidatedContractKey(null);
@@ -6618,6 +6634,7 @@ export function TransferPage({
                   // had never been probed.
                   setColumnMappings((prev) => prev.map(markMappingDestUnread));
                   setPreflight(null);
+                  setPreflightError("");
                   setValidatedContractKey(null);
                   setCellPreview(null);
                 }}
@@ -6924,6 +6941,7 @@ export function TransferPage({
           <div className="df2-card-body df2-validate-body">
           <ValidateDashboard
             preflight={preflight}
+            preflightError={preflightError}
             running={preflighting}
             confidenceThreshold={confidenceThreshold}
             destType={destKindMode === "file_export" ? exportFormat : destType}
@@ -7063,6 +7081,7 @@ export function TransferPage({
           </div>
           <ValidateActionsRail
             preflight={preflight}
+            preflightError={preflightError}
             preflighting={preflighting}
             transferring={transferring}
             mappingReviewCount={mappingReviewCount}

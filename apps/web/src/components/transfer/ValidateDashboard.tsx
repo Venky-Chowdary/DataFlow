@@ -309,6 +309,11 @@ interface ValidateDashboardProps {
    * so Validate never shows two teal buttons for the same root cause.
    */
   studioPrimary?: ValidateStudioPrimary | null;
+  /**
+   * Last Validate attempt failed in transport (504 / hung control plane) before
+   * a verdict arrived. Rail owns Re-run; this card must not invent a second teal.
+   */
+  preflightError?: string;
 }
 
 /** Plain-language report of what a Validate remediation button just did. */
@@ -766,6 +771,7 @@ export function ValidateDashboard({
   badDataFixOpen,
   onBadDataFixOpenChange,
   studioPrimary: _studioPrimary,
+  preflightError = "",
 }: ValidateDashboardProps) {
   const dashCta = dashboardCtaVariant;
   const [elapsedMs, setElapsedMs] = useState(0);
@@ -1146,7 +1152,8 @@ export function ValidateDashboard({
       : decision === "pending"
         ? "pending"
         : "approve";
-  const heroTone = running ? "live" : preflight ? decisionTone : "idle";
+  const transportFailed = Boolean(preflightError) && !preflight && !running;
+  const heroTone = running ? "live" : preflight ? decisionTone : transportFailed ? "block" : "idle";
 
   /**
    * The transformed image the gates judged. Present only when an approved
@@ -1595,7 +1602,7 @@ export function ValidateDashboard({
                 }
                 size={13}
               />
-              {running ? "VALIDATING" : decision === "pending" ? "NOT RUN" : decision.toUpperCase()}
+              {running ? "VALIDATING" : transportFailed ? "FAILED" : decision === "pending" ? "NOT RUN" : decision.toUpperCase()}
             </span>
             <h3>
               {running
@@ -1608,7 +1615,9 @@ export function ValidateDashboard({
                         ? "Review before Execute"
                         : "Action needed before transfer"
                   )
-                  : "Run validation to check this route"}
+                  : transportFailed
+                    ? "Validate did not finish — Re-run from the rail"
+                    : "Run validation to check this route"}
             </h3>
             {running && <EngineStageTicker running />}
           </div>
@@ -1676,6 +1685,18 @@ export function ValidateDashboard({
                 population. The source is not modified — the recipe runs on the read, and Execute is
                 refused if its identity changes.
               </p>
+            </div>
+          )}
+
+          {transportFailed && (
+            <div className="df2-vd-exec-summary" role="alert">
+              <p className="df2-vd-exec-summary-sub">{preflightError}</p>
+              <div className="df2-vd-exec-until">
+                <span className="df2-vd-exec-until-label">Cannot execute until</span>
+                <ul>
+                  <li>The API returns a Validate verdict — Re-run Validate from the rail. Population scan is still required.</li>
+                </ul>
+              </div>
             </div>
           )}
 

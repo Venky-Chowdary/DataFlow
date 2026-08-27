@@ -147,6 +147,14 @@ async function readApiRefusal(
   } catch {
     /* keep the fallback */
   }
+  if (res.status === 502 || res.status === 504) {
+    if (detail === fallback || /<html/i.test(detail)) {
+      detail = (
+        `Control plane timed out (HTTP ${res.status}) while Validate was running. `
+        + `Re-run Validate. Execute stays locked.`
+      );
+    }
+  }
   if (res.status === 403) {
     // A denial the gate phrased for itself is rewritten for the person reading
     // it — but only when a permission is actually identified. Not every 403 is a
@@ -2421,6 +2429,73 @@ export type PreflightAcknowledgments = {
   acknowledgment_reason?: string;
 };
 
+const PREFLIGHT_POLL_MS = 1500;
+const PREFLIGHT_POLL_DEADLINE_MS = 10 * 60 * 1000;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, ms);
+  });
+}
+
+/**
+ * Transport / proxy failures are not recipe refusals. A 504 HTML body used to
+ * become the fallback "Plan preflight failed" and Validate stayed Not run.
+ */
+export function isTransportFailure(message: string, status?: number): boolean {
+  if (status === 502 || status === 504 || status === 0) return true;
+  return /timed out|abort|504|502|network|failed to fetch|econnreset/i.test(message);
+}
+
+export function validateTransportMessage(message: string, rowCount?: number): string {
+  const rows = rowCount && rowCount > 0
+    ? ` while checking ${rowCount.toLocaleString()} row(s)`
+    : "";
+  if (!isTransportFailure(message)) return message;
+  return (
+    `Validate did not finish${rows}. The control plane timed out or hung — `
+    + `Re-run Validate. Execute stays locked until the API returns a verdict.`
+  );
+}
+
+async function pollPlanPreflight(planId: string, runId: string): Promise<Record<string, unknown>> {
+  const deadline = Date.now() + PREFLIGHT_POLL_DEADLINE_MS;
+  let lastError = "Validate is still running.";
+  while (Date.now() < deadline) {
+    await sleep(PREFLIGHT_POLL_MS);
+    const res = await apiFetch(
+      `${API_BASE}/transfer/plans/${planId}/preflight${runId ? `?run_id=${encodeURIComponent(runId)}` : ""}`,
+      { timeoutMs: 20_000 },
+    );
+    if (res.status === 404) {
+      lastError = "Validate run was not found — Re-run Validate.";
+      continue;
+    }
+    if (res.status === 502 || res.status === 504) {
+      lastError = await parseApiError(res, `Control plane timed out (HTTP ${res.status})`);
+      continue;
+    }
+    if (!res.ok) throw new Error(await parseApiError(res, "Plan preflight failed"));
+    const data = await res.json() as {
+      status?: string;
+      error?: string;
+      passed?: boolean;
+      run_id?: string;
+    };
+    if (data.status === "running" || data.status === "queued") {
+      lastError = "Validate is still scanning the population.";
+      continue;
+    }
+    if (data.status === "failed") {
+      throw new Error(data.error || "Plan preflight failed");
+    }
+    return data;
+  }
+  throw new Error(
+    `${lastError} Re-run Validate — Execute stays locked until a verdict lands.`,
+  );
+}
+
 export async function preflightTransferPlan(
   planId: string,
   acknowledgments: PreflightAcknowledgments = {},
@@ -2439,9 +2514,14 @@ export async function preflightTransferPlan(
       acknowledgment_actor: acknowledgments.acknowledgment_actor ?? "",
       acknowledgment_reason: acknowledgments.acknowledgment_reason ?? "",
       shape_recipe: shapeRecipe ?? null,
+      async_run: true,
     }),
-    timeoutMs: LONG_REQUEST_TIMEOUT_MS,
+    timeoutMs: 45_000,
   });
+  if (res.status === 202) {
+    const started = await res.json() as { plan_id?: string; run_id?: string };
+    return pollPlanPreflight(started.plan_id || planId, started.run_id || "");
+  }
   if (!res.ok) throw new Error(await parseApiError(res, "Plan preflight failed"));
   return res.json();
 }
