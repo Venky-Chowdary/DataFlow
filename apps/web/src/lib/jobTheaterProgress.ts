@@ -1,5 +1,38 @@
 /** Honest Theater % — row ratio while writing; engine phase % before first write. */
 
+function parseEpochMs(value?: string | null): number | null {
+  if (!value) return null;
+  const ms = Date.parse(value);
+  return Number.isFinite(ms) ? ms : null;
+}
+
+/** Job clock: never prefer a heartbeat-reset `started_at` over an earlier `created_at`. */
+export function earliestJobStartMs(input: {
+  startedAt?: string | null;
+  createdAt?: string | null;
+  fallbackMs?: number | null;
+  nowMs?: number;
+}): number {
+  const now = input.nowMs ?? Date.now();
+  const fallback =
+    typeof input.fallbackMs === "number" && Number.isFinite(input.fallbackMs) && input.fallbackMs > 0
+      ? input.fallbackMs
+      : null;
+  const candidates = [parseEpochMs(input.startedAt), parseEpochMs(input.createdAt), fallback].filter(
+    (ms): ms is number => ms != null && ms > 0 && ms <= now + 2_000,
+  );
+  if (!candidates.length) return now;
+  return Math.min(...candidates);
+}
+
+/** Job-average rows/s. Refuse a reconnect-window invent (460k / 0.5s). */
+export function jobAverageRowsPerSecond(processed: number, elapsedMs: number): number {
+  if (!(processed > 0) || !(elapsedMs >= 5_000)) return 0;
+  return Math.round(processed / (elapsedMs / 1000));
+}
+
+/** Honest Theater % — row ratio while writing; engine phase % before first write. */
+
 export function theaterProgressPct(input: {
   phase?: string | null;
   status?: string | null;

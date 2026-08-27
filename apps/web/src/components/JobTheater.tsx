@@ -37,7 +37,11 @@ import { MappingProofDrawer, type MappingProof } from "./MappingProofDrawer";
 import { hashForScreen } from "../lib/appNavigation";
 import { callableExtractNote } from "../lib/destExistsShape";
 import { cdcDeliveryResultCopy } from "../lib/cdcExactlyOnce";
-import { theaterProgressPct } from "../lib/jobTheaterProgress";
+import {
+  earliestJobStartMs,
+  jobAverageRowsPerSecond,
+  theaterProgressPct,
+} from "../lib/jobTheaterProgress";
 
 function asMappingProof(raw: unknown): MappingProof | null {
   if (!raw || typeof raw !== "object") return null;
@@ -253,23 +257,38 @@ export function JobTheater({
         }
 
         setJob(update);
-        // Recent-window RPS (last ~25s) — start-averaged RPS under-reads after
-        // DDL/first batch and invents multi-hour ETAs on healthy loads.
+        if (update.event_log?.length) {
+          setLog((current) => {
+            const onlyBoot =
+              current.length <= 1
+              && String(current[0]?.text || "").includes("Connecting to live job stream");
+            if (!onlyBoot && current.length > 1) return current;
+            return update.event_log!.map((text, i) => ({ id: i + 1, text }));
+          });
+        }
+        // Recent-window RPS when rows actually advance. Reconnect must not
+        // divide 460k by 0.5s. Fall back to job-average from the earliest clock.
         const now = Date.now();
         const samples = rateSamplesRef.current;
         samples.push({ t: now, rows: processed });
         while (samples.length > 1 && now - samples[0].t > 25_000) samples.shift();
+        const jobElapsedMs = now - earliestJobStartMs({
+          startedAt: update.started_at,
+          createdAt: update.created_at,
+          fallbackMs: startRef.current,
+          nowMs: now,
+        });
+        const averageRps = jobAverageRowsPerSecond(processed, jobElapsedMs);
         if (samples.length >= 2) {
           const dr = samples[samples.length - 1].rows - samples[0].rows;
           const dt = (samples[samples.length - 1].t - samples[0].t) / 1000;
-          if (dt >= 0.75 && dr >= 0) {
+          if (dt >= 0.75 && dr > 0) {
             setThroughput(Math.round(dr / dt));
+          } else if (averageRps > 0) {
+            setThroughput(averageRps);
           }
-        } else {
-          const elapsed = (now - startRef.current) / 1000;
-          if (elapsed > 0.5 && processed > 0) {
-            setThroughput(Math.round(processed / elapsed));
-          }
+        } else if (averageRps > 0) {
+          setThroughput(averageRps);
         }
         if (!doneRef.current && isJobSuccess(update.status)) {
           doneRef.current = true;
@@ -512,13 +531,14 @@ export function JobTheaterView({
     return () => window.clearTimeout(timer);
   }, [progress, isRunning]);
 
-  const startMs =
-    toEpochMs(job.started_at)
-    ?? toEpochMs(job.created_at)
-    ?? startedAtFallback
-    ?? Date.now();
+  const startMs = earliestJobStartMs({
+    startedAt: job.started_at,
+    createdAt: job.created_at,
+    fallbackMs: startedAtFallback,
+  });
   const endMs = toEpochMs(job.completed_at) ?? Date.now();
   const elapsed = Math.max(0, endMs - startMs);
+  const averageRps = jobAverageRowsPerSecond(processed, elapsed);
 
   const destinationSummary = (job.destination_summary ?? {}) as Record<string, unknown>;
   const rollbackPlan = (destinationSummary.rollback_plan ?? null) as {
@@ -543,7 +563,11 @@ export function JobTheaterView({
   const callableNote = callableExtractNote(preflight, job);
   const batchSize = Number(job.chunk_size ?? destinationSummary.chunk_size ?? 0) || 0;
   const jobRps = Number(job.records_per_second ?? destinationSummary.records_per_second ?? 0) || 0;
-  const displayRps = isComplete && jobRps > 0 ? Math.round(jobRps) : throughput;
+  const displayRps = isComplete && jobRps > 0
+    ? Math.round(jobRps)
+    : throughput > 0
+      ? throughput
+      : averageRps;
   const routeLabel = [sourceType, destType].filter(Boolean).join(" → ") || "this job";
 
   const timelinePhases = useMemo(() => {

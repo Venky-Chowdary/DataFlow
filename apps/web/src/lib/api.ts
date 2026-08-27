@@ -1571,7 +1571,7 @@ export function streamJobProgress(
             })
             .filter((p): p is NonNullable<typeof p> => Boolean(p))
         : undefined,
-      created_at: String(raw.created_at ?? new Date().toISOString()),
+      created_at: raw.created_at ? String(raw.created_at) : "",
       updated_at: raw.updated_at ? String(raw.updated_at) : undefined,
       started_at: raw.started_at ? String(raw.started_at) : undefined,
       completed_at: raw.completed_at ? String(raw.completed_at) : undefined,
