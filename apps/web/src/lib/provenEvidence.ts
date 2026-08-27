@@ -137,6 +137,20 @@ export const BACKEND_SUITE = {
 export const TRANSFER_READY_DRIVERS = 43;
 
 /**
+ * Operator-facing honesty line. Catalog tile count is never a live-driver count.
+ * Hosts without optional warehouse/SaaS packages report fewer via capabilities.
+ */
+export function catalogHonestyLead(readyCount: number = TRANSFER_READY_DRIVERS): string {
+  return (
+    `Catalog tiles are not transfer-live. ${readyCount} drivers are TRANSFER_READY ` +
+    `when optional packages are present. A given host may report fewer via GET /capabilities.`
+  );
+}
+
+/** Studio-aligned family badge. Mixed = at least one name is Planned or package-gated. */
+export type CatalogFamilyBadge = "Certified" | "Mixed" | "Planned";
+
+/**
  * Internal operator ledger — not rendered on marketing pages.
  * Reasons stay factual; they never promise a date.
  */
@@ -186,29 +200,45 @@ export const NOT_PROVEN: UnprovenRow[] = [
   },
 ];
 
-/** Public marketing — product language, never CI blockers. */
-export const MARKETING_STACK = [
+/**
+ * Public catalog families — product language, never CI blockers.
+ * Names may include Planned tiles. `note` must say so; `badge` matches Studio.
+ */
+export const MARKETING_STACK: ReadonlyArray<{
+  family: string;
+  items: string;
+  badge: CatalogFamilyBadge;
+  note: string;
+}> = [
   {
     family: "Warehouses",
     items: "Snowflake, BigQuery, Redshift, Databricks",
-    note: "Native MERGE loaders, capacity checks, and a reconcile report finance can archive.",
+    badge: "Mixed",
+    note:
+      "Snowflake and BigQuery are TRANSFER_READY when their packages are installed. Redshift and Databricks stay Planned until a named PRODUCTION_SKU matrix. Every warehouse load still maps, gates, quarantines, and checksums.",
   },
   {
     family: "Object storage",
     items: "Amazon S3, Azure Data Lake Storage, Google Cloud Storage",
-    note: "Land files and open-table paths with write accounting and quarantine visibility.",
+    badge: "Mixed",
+    note:
+      "S3, ADLS, and GCS are TRANSFER_READY when their packages are installed. Catalog tiles without a named matrix stay Planned. Writes still quarantine and account rows.",
   },
   {
     family: "Databases",
     items: "PostgreSQL, MySQL, SQL Server, Oracle, MongoDB",
-    note: "Schema carry, identity, keys, and checksum reconcile on every cutover.",
+    badge: "Mixed",
+    note:
+      "PostgreSQL, MySQL, and MongoDB are certified full transfer. SQL Server and Oracle are TRANSFER_READY when their packages are installed. Schema carry, identity, and checksum reconcile stay on every cutover.",
   },
   {
     family: "Applications",
     items: "Salesforce, Stripe, Shopify, HubSpot",
-    note: "Connect CRM and commerce systems with your integration user.",
+    badge: "Mixed",
+    note:
+      "Salesforce and HubSpot are certified reverse-ETL. Stripe and Shopify stay Planned until PRODUCTION_SKU. Connecting a catalog tile is not a live transfer.",
   },
-] as const;
+];
 
 export const MARKETING_PROOF_HIGHLIGHTS = [
   {

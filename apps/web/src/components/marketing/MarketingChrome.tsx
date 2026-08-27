@@ -182,7 +182,7 @@ export function MarketingChrome({ route, onNavigate, onLogin, onGetStarted, chil
                   </a>
                   <a href={link("solution-warehouse")} onClick={(e) => { e.preventDefault(); go("solution-warehouse"); }}>
                     <strong>Warehouse loading</strong>
-                    <span>Snowflake, BigQuery, Redshift routes</span>
+                    <span>Warehouse loads with reconcile proof</span>
                   </a>
                   <a href={link("solution-sync")} onClick={(e) => { e.preventDefault(); go("solution-sync"); }}>
                     <strong>Recurring sync</strong>

@@ -10,7 +10,7 @@ import { ProofEvidenceSection } from "../components/landing/ProofEvidenceSection
 import { ProofLoopArt } from "../components/marketing/hero-art/solutionArt";
 import { ObservabilityInAction } from "../components/landing/ObservabilityInAction";
 import { useRevealOnScroll } from "../hooks/useRevealOnScroll";
-import { BACKEND_SUITE, EVIDENCE_AS_OF, TRANSFER_READY_DRIVERS } from "../lib/provenEvidence";
+import { BACKEND_SUITE, EVIDENCE_AS_OF, TRANSFER_READY_DRIVERS, catalogHonestyLead } from "../lib/provenEvidence";
 import { connectorDisplayName } from "../lib/connectorTypes";
 import type { PublicRoute } from "../lib/publicNavigation";
 
@@ -701,7 +701,8 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
         </div>
         <div className="lp-home-connectors-inner">
           <p className="lp-home-connectors-note">
-            Open the catalog to pick a source and destination — warehouses, lakes, databases, and apps.
+            {catalogHonestyLead()} Open the catalog to pick a source and destination — logos
+            include Planned tiles.
           </p>
           <div className="lp-home-arch-cta">
             <button type="button" className="lp-btn lp-btn--brand" onClick={() => onNavigate("integrations")}>

@@ -8,7 +8,9 @@ import { GENERIC_SQL_INFO } from "./genericSqlMap";
  * ``GET /transfer/capabilities`` via ``loadTransferLiveCatalog`` /
  * ``isTransferLiveType``. This set is used only for:
  *   - ``resolveCatalogIdToType`` alias routing before/without API
- *   - degraded readiness when capabilities fetch fails (honest offline mode)
+ *   - degraded readiness when capabilities fetch fails (honest offline mode).
+ *     `certified: False` brands stay in this set for form routing only;
+ *     `isTransferLiveType` and the error fallback exclude `CATALOG_PLANNED_DRIVER_TYPES`.
  */
 export const TRANSFER_LIVE_TYPES = new Set([
   "postgresql", "mysql", "mongodb", "snowflake", "bigquery", "redshift",
@@ -19,6 +21,19 @@ export const TRANSFER_LIVE_TYPES = new Set([
   "salesforce", "hubspot", "stripe", "rest_api", "influxdb", "neo4j", "couchbase",
   "pgvector", "qdrant", "weaviate", "pinecone", "milvus",
   "iceberg",
+]);
+
+/**
+ * Backend `certified: False` — form routing still uses TRANSFER_LIVE_TYPES,
+ * but degraded `isTransferLiveType` must not greenwash them as transfer-live.
+ */
+export const CATALOG_PLANNED_DRIVER_TYPES = new Set([
+  "redshift",
+  "stripe",
+  "shopify",
+  "zendesk",
+  "notion",
+  "airtable",
 ]);
 
 export type TransferCapsState = "idle" | "loading" | "ready" | "error";
@@ -83,11 +98,13 @@ export async function loadTransferLiveCatalog(
       return unique;
     } catch {
       // Degraded: offline mirror only when API caps are unreachable.
-      _liveDriversFromCatalog = new Set(
-        [...TRANSFER_LIVE_TYPES].map((d) => d.toLowerCase()),
-      );
+      // Never greenwash certified:false brands as transfer-live.
+      const offline = [...TRANSFER_LIVE_TYPES]
+        .map((d) => d.toLowerCase())
+        .filter((d) => !CATALOG_PLANNED_DRIVER_TYPES.has(d));
+      _liveDriversFromCatalog = new Set(offline);
       _capsState = "error";
-      return [...TRANSFER_LIVE_TYPES];
+      return offline;
     } finally {
       _capsLoadPromise = null;
     }
@@ -260,6 +277,7 @@ export function isGenericSql(id: string): boolean {
 export function isTransferLiveType(type: string): boolean {
   const id = (type || "").toLowerCase().trim();
   if (!id) return false;
+  if (CATALOG_PLANNED_DRIVER_TYPES.has(id)) return false;
   // Catalog SSOT when loaded (ready) or degraded offline mirror (error).
   if (_liveDriversFromCatalog && _liveDriversFromCatalog.size > 0) {
     return _liveDriversFromCatalog.has(id);
@@ -269,6 +287,7 @@ export function isTransferLiveType(type: string): boolean {
   if (_capsState === "idle" || _capsState === "loading") {
     return false;
   }
+  if (CATALOG_PLANNED_DRIVER_TYPES.has(id)) return false;
   return TRANSFER_LIVE_TYPES.has(id);
 }
 

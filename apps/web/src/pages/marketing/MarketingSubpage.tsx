@@ -23,6 +23,7 @@ import {
   MARKETING_PROOF_HIGHLIGHTS,
   MARKETING_STACK,
   TRANSFER_READY_DRIVERS,
+  catalogHonestyLead,
 } from "../../lib/provenEvidence";
 import type { PublicRoute } from "../../lib/publicNavigation";
 import { DocArticlePage, DocsPortal } from "./DocsPortal";
@@ -618,8 +619,8 @@ function CustomersPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
               <p className="lp-mkt-kicker">Your stack</p>
               <h2>Warehouses, lakes, databases, and apps</h2>
               <p>
-                Connect Snowflake, BigQuery, S3, ADLS, GCS, and the applications your revenue
-                team already runs. Same map, same gates, same reconcile report — every destination.
+                {catalogHonestyLead()} Same map, same gates, same reconcile report — every
+                destination that is actually transfer-live.
               </p>
             </div>
             <div className="lp-mkt-evidence-grid">
@@ -971,33 +972,14 @@ function SecurityPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
   );
 }
 
+const INTEGRATION_FAMILY_ICONS: Record<string, string[]> = {
+  Warehouses: ["snowflake", "bigquery", "redshift"],
+  "Object storage": ["s3"],
+  Databases: ["postgresql", "mysql", "mongodb"],
+  Applications: ["salesforce", "hubspot"],
+};
+
 function IntegrationsPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetStarted" | "onNavigate">) {
-  const families = [
-    {
-      title: "Warehouses",
-      body: "Load Snowflake, BigQuery, Redshift, and Databricks with native MERGE, capacity checks, and a reconcile report finance can archive.",
-      ids: ["snowflake", "bigquery", "redshift"],
-      badge: "Native",
-    },
-    {
-      title: "Object storage",
-      body: "Land files and open-table paths on Amazon S3, Azure Data Lake, and Google Cloud Storage with write accounting.",
-      ids: ["s3"],
-      badge: "Native",
-    },
-    {
-      title: "Databases",
-      body: "PostgreSQL, MySQL, SQL Server, Oracle, and MongoDB — upsert, watermark incremental, and checksum proof.",
-      ids: ["postgresql", "mysql", "mongodb"],
-      badge: "Native",
-    },
-    {
-      title: "Applications",
-      body: "Salesforce, Stripe, Shopify, and HubSpot — connect with your integration user.",
-      ids: ["salesforce"],
-      badge: "Native",
-    },
-  ];
 
   return (
     <div className="lp-mkt-page lp-int-v2">
@@ -1024,7 +1006,7 @@ function IntegrationsPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGet
         }
         slas={[
           { value: String(TRANSFER_READY_DRIVERS), label: "TRANSFER_READY" },
-          { value: "Native", label: "Warehouse MERGE" },
+          { value: "Mixed", label: "Warehouse tiles" },
           { value: "SQLA", label: "Generic SQL drivers" },
           { value: "DLQ", label: "Quarantine replay" },
         ]}
@@ -1038,7 +1020,7 @@ function IntegrationsPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGet
       <MarketingReveal>
         <section className="lp-int-strip" aria-label="Capability labels">
           <div><strong>DLQ</strong><span>Quarantine replay</span></div>
-          <div><strong>Native</strong><span>Warehouse paths</span></div>
+          <div><strong>Mixed</strong><span>Warehouse tiles — not all live</span></div>
           <div><strong>SQLA</strong><span>Generic drivers</span></div>
           <div><strong>Files</strong><span>CSV · JSON · Parquet</span></div>
         </section>
@@ -1049,18 +1031,21 @@ function IntegrationsPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGet
           <div className="lp-int-section-head">
             <p className="lp-mkt-kicker">Catalog families</p>
             <h2>What you can connect</h2>
-            <p>Grouped the way teams plan loads — warehouses first, then lakes, databases, and apps.</p>
+            <p>
+              Grouped the way teams plan loads — warehouses first, then lakes, databases, and apps.
+              Family badges match Studio: Certified, Mixed, or Planned. Tiles are not transfer-live.
+            </p>
           </div>
           <div className="lp-int-family-grid">
-            {families.map((f) => (
-              <article key={f.title} className="lp-int-family-card">
+            {MARKETING_STACK.map((f) => (
+              <article key={f.family} className="lp-int-family-card">
                 <header>
-                  <h3>{f.title}</h3>
+                  <h3>{f.family}</h3>
                   <span>{f.badge}</span>
                 </header>
-                <p>{f.body}</p>
+                <p>{f.note}</p>
                 <div className="lp-int-family-icons">
-                  {f.ids.map((id) => (
+                  {(INTEGRATION_FAMILY_ICONS[f.family] || []).map((id) => (
                     <span key={id} title={id}>
                       <ConnectorIcon id={id} size={24} />
                     </span>
@@ -1100,8 +1085,11 @@ function IntegrationsPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGet
       <MarketingReveal>
         <section className="lp-int-cta">
           <div>
-            <h2>Browse the live catalog</h2>
-            <p>Open Transfer Studio and pick a source and destination — same engine as production.</p>
+            <h2>Browse the connector catalog</h2>
+            <p>
+              Open Transfer Studio and pick a source and destination. Certified filters show
+              TRANSFER_READY drivers only — the same engine as production.
+            </p>
           </div>
           <div className="lp-int-cta-actions">
             <button type="button" className="lp-btn lp-btn--brand" onClick={onGetStarted}>

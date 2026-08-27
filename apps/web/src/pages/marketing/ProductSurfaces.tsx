@@ -924,8 +924,9 @@ export function WarehouseSolutionPage({
             </p>
             <h1>Bulk loads finance can archive</h1>
             <p className="lp-sol-hero-lead">
-              Snowflake, BigQuery, Redshift, and Databricks — native MERGE loaders, destination
-              probes, capacity checks, and a reconcile report finance can archive.
+              Snowflake and BigQuery are TRANSFER_READY when their packages are installed.
+              Redshift and Databricks stay Planned until a named PRODUCTION_SKU matrix. Every
+              warehouse load still maps, gates, quarantines, and returns a dest-engine checksum.
             </p>
             <div className="lp-hero-cta">
               <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={onGetStarted}>
