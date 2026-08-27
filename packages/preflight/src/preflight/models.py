@@ -129,6 +129,10 @@ class DestinationConfig:
     column_defaults: dict[str, str] = field(default_factory=dict)
     identity_columns: list[str] = field(default_factory=list)
     generated_columns: list[str] = field(default_factory=list)
+    # Live dest column → type. Keys are the dest name list for G14 partial-catalog
+    # honesty. target_columns may be mapping targets only — do not treat them as
+    # the full dest when this map is populated.
+    column_types: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass

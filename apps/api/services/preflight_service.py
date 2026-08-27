@@ -1307,6 +1307,7 @@ def run_file_preflight(
             column_defaults=dict(destination_column_defaults or {}),
             identity_columns=list(destination_identity_columns or []),
             generated_columns=list(destination_generated_columns or []),
+            column_types=dict(destination_column_types or {}),
         ),
         mappings=plan_mappings,
         dry_run_passed=False,
@@ -2008,7 +2009,9 @@ def run_file_preflight(
         column_defaults=destination_column_defaults,
         identity_columns=destination_identity_columns,
         generated_columns=destination_generated_columns,
-        dest_columns=list((destination_column_types or destination_column_nullability or {}).keys()),
+        # Types keys are the live dest column list. Nullability keys are a
+        # tautology for the partial-catalog check — do not substitute them.
+        dest_columns=list((destination_column_types or {}).keys()),
     )
     out["source_coverage"] = src_coverage
     if isinstance(out.get("proof_bundle"), dict):

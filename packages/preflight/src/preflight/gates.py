@@ -2863,6 +2863,11 @@ def gate_g14_destination_requirements(ctx: PreflightContext) -> GateResult:
             details={},
             duration_ms=(time.perf_counter() - start) * 1000,
         )
+    type_keys = [str(k) for k in (getattr(dest, "column_types", None) or {}) if k]
+    target_names = [c.name for c in (dest.target_columns or []) if getattr(c, "name", None)]
+    # Types keys are live dest names. Mapping targets alone cannot prove unread
+    # dest columns — pass them only when the host did not stamp column_types.
+    dest_columns = type_keys or target_names
     gate = build_destination_requirements_gate(
         destination_table_exists=dest.table_exists,
         column_nullability=getattr(dest, "column_nullability", None) or {},
@@ -2870,6 +2875,7 @@ def gate_g14_destination_requirements(ctx: PreflightContext) -> GateResult:
         identity_columns=getattr(dest, "identity_columns", None) or [],
         generated_columns=getattr(dest, "generated_columns", None) or [],
         mappings=_plan_mapping_dicts(ctx),
+        dest_columns=dest_columns,
     )
     if not gate:
         return GateResult(
