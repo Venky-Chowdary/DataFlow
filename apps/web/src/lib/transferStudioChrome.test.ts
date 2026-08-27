@@ -604,6 +604,9 @@ describe("Transfer Studio chrome contracts", () => {
     const api = readFileSync(join(webRoot, "lib/api.ts"), "utf8");
     assert.match(page, /isNumericWiden/);
     assert.match(page, /must not dump clock\/money values into/);
+    // Existing dest: Remap must ADD *_wide, not rewrite live NUMBER/DECIMAL.
+    assert.match(page, /isNumericWiden \? "_wide"/);
+    assert.match(page, /Destination \$\{m\.target\} is typed/);
     // Studio Validate must send the persisted upload so the scan is not preview-only.
     assert.match(page, /source_file_id: parsed\??\.file_id/);
     // Table Validate must send connector + table so the shared walk can run.

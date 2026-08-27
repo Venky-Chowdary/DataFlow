@@ -1694,6 +1694,8 @@ def run_file_preflight(
             rows_are_population=bool(rows_are_population and population_rows is not None),
             source_kind=source_kind,
             source_format=source_format,
+            sync_mode=sync_mode,
+            dest_table_exists=destination_table_exists,
         )
         fit_report_payload = fit_report.to_dict()
         if incremental_read_narrows(sync_mode) and read_scope.bounded:
