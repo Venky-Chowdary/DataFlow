@@ -26,3 +26,4 @@ def test_honesty_copy_names_the_equal_pair():
     assert "display scale" in text.lower()
     assert "did not increase" in text.lower()
     assert "9.083333" in text
+    assert "observed scale" in text.lower()

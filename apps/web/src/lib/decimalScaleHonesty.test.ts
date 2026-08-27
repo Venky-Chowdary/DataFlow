@@ -22,5 +22,6 @@ describe("fractionalTrailingZerosSameValue", () => {
   it("states the operator rule on the result screen", () => {
     assert.match(DEST_SCALE_PADDING_HONESTY, /display scale/i);
     assert.match(DEST_SCALE_PADDING_HONESTY, /did not increase/i);
+    assert.match(DEST_SCALE_PADDING_HONESTY, /observed scale/i);
   });
 });

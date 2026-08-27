@@ -4,7 +4,7 @@
  */
 
 export const DEST_SCALE_PADDING_HONESTY =
-  "Zeros after the decimal are display scale, not a bigger number. 9.083333 and 9.083333000000 compare equal — the time did not increase.";
+  "Zeros after the decimal are display scale, not a bigger number. 9.083333 and 9.083333000000 compare equal — the time did not increase. New CREATE uses the observed scale only — extra dest zeros are not invented.";
 
 function significantDecimalText(raw: string): string {
   const text = raw.trim();

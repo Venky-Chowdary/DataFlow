@@ -1102,7 +1102,6 @@ def scan_rows(
         proven_varchar_widen,
     )
     from services.decimal_observe import (
-        CREATE_NEW_NUMERIC_SAFETY_MARGIN,
         decimal_scale_overflow_fix,
         decimal_widen_carrier,
         proven_decimal_widen,
@@ -1113,11 +1112,10 @@ def scan_rows(
         if (not truncated) or envelope_complete
         else "scanned"
     )
-    create_new_margin = (
-        CREATE_NEW_NUMERIC_SAFETY_MARGIN
-        if truncated and not envelope_complete
-        else 0
-    )
+    # Exact observed envelope even on a partial file scan. Write-time
+    # fits_decimal still binds the unscanned tail; inventing +2 scale here
+    # is what printed 9.083333000000 on dest NUMBER.
+    create_new_margin = 0
 
     findings_list: list[ColumnFitFinding] = []
     for idx in sorted(counts):

@@ -990,7 +990,9 @@ def promote_create_new_capacity_stamp(
     A create-new stamp is a *projection* of the source type, not an operator
     decision: on a sampled source (CSV/Excel/document store) Map projects it
     from the first rows, and the full read then declares a wider type —
-    ``DECIMAL(6,4)`` from eight rows becomes ``DECIMAL(8,4)`` over the file.
+    ``DECIMAL(6,4)`` from eight rows becomes ``DECIMAL(8,4)`` over the file
+    because later cells actually used more digits, not because invent added
+    a +2 scale pad.
     Enforcing the earlier projection makes Datawrap block its own CREATE TABLE
     for a fidelity collapse it invented, which is the worst kind of refusal:
     there is no destination DDL to protect yet, and no remap the operator can

@@ -85,9 +85,9 @@ def test_schema_inference_stamps_observed_decimal():
 def test_padded_trailing_zeros_do_not_invent_a_tighter_source_than_the_write():
     """CSV ``1.50000000`` is 1.5. The writer stores it in NUMBER(9,2).
 
-    Observing it as DECIMAL(7,4) (create-new +2 scale) made Map demand a Risk
-    Contract for a narrowing the values do not have. Source inference uses the
-    cells; dest invent keeps the margin.
+    Inventing DECIMAL(7,4) (the old +2 dest scale) made Map demand a Risk
+    Contract for a narrowing the values do not have. Source inference and
+    dest invent now share the exact envelope — scale 2, not scale 4.
     """
     from services.decimal_observe import observe_source_numeric_samples
     from services.type_system import is_precision_collapse_coercion
@@ -101,14 +101,15 @@ def test_padded_trailing_zeros_do_not_invent_a_tighter_source_than_the_write():
     invent = observe_numeric_samples(samples)
     assert source["kind"] == "fixed_decimal"
     assert source["scale"] == 2
-    assert invent["scale"] == 4
-    assert invent["carrier"] == "DECIMAL(7,4)"
+    assert invent["scale"] == 2
+    assert invent["carrier"] == "DECIMAL(4,2)"
+    assert source["scale"] == invent["scale"]
 
     col = infer_column(samples, field_name="amount")
     logical = str(col.get("logical_type") or "")
     p, s = parse_numeric_precision_scale(logical)
     assert s == 2, logical
-    assert p is not None and p < 7
+    assert p is not None and p <= 4
     assert is_precision_collapse_coercion(
         logical, "NUMBER(9,2)", dest_db="snowflake"
     ) is False
@@ -166,10 +167,11 @@ def test_money_locale_and_currency_codes_widen_for_population():
     assert obs["max_int_digits"] == 7
     p, s = parse_numeric_precision_scale(obs["carrier"])
     assert p is not None and s is not None
-    # 7 int digits + margin + scale≥2 must fit 1000000.89 (never 11,6 cliff).
+    # 7 int digits + exact scale 2 must fit 1000000.89 (never 11,6 cliff,
+    # and never a +2 dest pad that prints 1000000.890000).
     assert p - s >= 7
-    assert s >= 2
-    assert p >= 11
+    assert s == 2
+    assert p >= 9
 
 
 def test_empty_samples_no_fake_invent_via_create_new():
