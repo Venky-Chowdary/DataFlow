@@ -28,6 +28,7 @@ Asymmetry is deliberate and load-bearing:
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Mapping
@@ -85,6 +86,13 @@ _ABORTING_ACTIONS = frozenset(
 #: Rows scanned per column before the scan reports PARTIAL. Generous: the
 #: engine already holds the batch in memory, so the cost is a Decimal parse.
 DEFAULT_SCAN_BUDGET = 5_000_000
+
+# Interactive Studio Validate. A 1M CSV on a small replica sat in
+# GET /preflight?run_id=… for 5+ minutes while the UI looped fake G1–G9
+# stages. Remaining rows stay unproven (PARTIAL) — write-time checks still
+# bind. 12s is the operator's last measured 1M sample-Validate wall clock.
+STUDIO_FIT_SCAN_SECONDS = 12.0
+_PROGRESS_EVERY_ROWS = 4_000
 
 #: Offending row numbers / values kept per column for the operator.
 DEFAULT_MAX_EXAMPLES = 10
@@ -182,6 +190,9 @@ class FitScanReport:
     #: Columns whose declared source type cannot exceed the destination carrier,
     #: so no value scan is needed to decide them.
     safe_by_declaration: tuple[str, ...] = field(default=())
+    #: Why a population walk stopped early: ``row`` or ``time``. Empty when
+    #: the walk finished or never started.
+    truncated_reason: str = ""
 
     @property
     def scanned_population(self) -> bool:
@@ -211,6 +222,7 @@ class FitScanReport:
             "unfit_rows": self.unfit_rows,
             "undecidable_columns": list(self.undecidable),
             "safe_by_declaration": list(self.safe_by_declaration),
+            "truncated_reason": self.truncated_reason,
             "note": self.note,
         }
 
@@ -870,6 +882,8 @@ def scan_rows(
     max_examples: int = DEFAULT_MAX_EXAMPLES,
     undecidable: Iterable[str] = (),
     safe_by_declaration: Iterable[str] = (),
+    deadline_monotonic: float | None = None,
+    on_progress: Callable[[int], None] | None = None,
 ) -> FitScanReport:
     """Scan ``rows`` against the writer's own fit predicates.
 
@@ -897,6 +911,8 @@ def scan_rows(
     reasons: dict[int, str] = {}
     scanned = 0
     truncated = False
+    truncated_reason = ""
+    last_progress_at = 0.0
 
     from services.value_serializer import cell_to_string, is_missing_sentinel
 
@@ -913,8 +929,28 @@ def scan_rows(
     for row in rows or ():
         if scanned >= budget:
             truncated = True
+            truncated_reason = "row"
+            break
+        if (
+            deadline_monotonic is not None
+            and scanned > 0
+            and time.monotonic() >= deadline_monotonic
+        ):
+            truncated = True
+            truncated_reason = "time"
             break
         scanned += 1
+        now = time.monotonic()
+        if on_progress is not None and (
+            scanned == 1
+            or scanned % _PROGRESS_EVERY_ROWS == 0
+            or now - last_progress_at >= 0.5
+        ):
+            last_progress_at = now
+            try:
+                on_progress(scanned)
+            except Exception:
+                pass
         if not isinstance(row, Mapping):
             continue
         for idx, source, fit_reason in probes:
@@ -941,6 +977,12 @@ def scan_rows(
             if len(example_rows.setdefault(idx, [])) < max_examples:
                 example_rows[idx].append(scanned)
                 example_values.setdefault(idx, []).append(cell_to_string(value)[:120])
+
+    if on_progress is not None and scanned:
+        try:
+            on_progress(scanned)
+        except Exception:
+            pass
 
     if scanned == 0:
         evidence = EVIDENCE_UNMEASURED
@@ -1124,11 +1166,16 @@ def scan_rows(
             "Scanned every source row with the write path's own fit predicates."
             if evidence == EVIDENCE_EXACT
             else (
-                "Scan stopped at the row budget — unscanned rows are unproven."
-                if evidence == EVIDENCE_PARTIAL
-                else "Preview-sized evidence only — population fit is unproven."
+                "Scan stopped at the time budget — unscanned rows are unproven."
+                if truncated_reason == "time"
+                else (
+                    "Scan stopped at the row budget — unscanned rows are unproven."
+                    if evidence == EVIDENCE_PARTIAL
+                    else "Preview-sized evidence only — population fit is unproven."
+                )
             )
         ),
+        truncated_reason=truncated_reason,
     )
 
 
@@ -1148,6 +1195,8 @@ def scan_population_fit(
     source_format: str = "",
     sync_mode: str = "",
     dest_table_exists: bool | None = None,
+    deadline_monotonic: float | None = None,
+    on_progress: Callable[[int], None] | None = None,
 ) -> FitScanReport:
     """Resolve bounded targets from the mappings, then scan the rows."""
     targets, undecidable, safe = bounded_targets(
@@ -1171,6 +1220,8 @@ def scan_population_fit(
         budget=budget,
         undecidable=undecidable,
         safe_by_declaration=safe,
+        deadline_monotonic=deadline_monotonic,
+        on_progress=on_progress,
     )
 
 
@@ -1258,13 +1309,14 @@ def build_population_fit_gate(report: FitScanReport) -> dict[str, Any]:
         }
 
     if report.evidence == EVIDENCE_PARTIAL:
+        stop = "time budget" if report.truncated_reason == "time" else "row budget"
         return {
             "id": GATE_ID,
             "status": "warn",
             "message": (
                 f"No unfit value in {report.rows_scanned} of "
                 f"{report.rows_total or report.rows_scanned} source row(s), but the "
-                "scan stopped at the row budget — the remaining rows are unproven "
+                f"scan stopped at the {stop} — the remaining rows are unproven "
                 f"for {len(report.targets)} bounded column(s)"
             ),
             "duration_ms": 0,

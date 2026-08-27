@@ -124,6 +124,50 @@ def test_get_shows_running_until_the_ssot_finishes():
     assert done["run_id"] == "pf_ssot_slow"
 
 
+def test_get_publishes_rows_scanned_while_running():
+    """The ticker must read a live count, not invent 1/9…9/9."""
+    from services.plan_preflight_job import report_plan_preflight_progress
+
+    release = threading.Event()
+
+    def slow_run(plan_id, *, acknowledgments=None, shape_recipe=None):
+        report_plan_preflight_progress(
+            plan_id,
+            rows_scanned=412_000,
+            rows_estimate=1_000_000,
+            phase="scanning_population_fit",
+        )
+        release.wait(timeout=2)
+        return {"passed": True, "run_id": "pf_ssot_progress"}
+
+    client = _client()
+    with patch(
+        "services.transfer_plan_service.run_plan_preflight",
+        side_effect=slow_run,
+    ):
+        res = client.post(
+            "/api/v1/transfer/plans/plan-progress/preflight",
+            json={"async_run": True},
+        )
+        assert res.status_code == 202
+        run_id = res.json()["run_id"]
+        # Give the worker one tick to publish.
+        time.sleep(0.05)
+        mid = client.get(
+            "/api/v1/transfer/plans/plan-progress/preflight",
+            params={"run_id": run_id},
+        )
+        assert mid.status_code == 200
+        body = mid.json()
+        assert body["status"] == "running"
+        assert body["rows_scanned"] == 412_000
+        assert body["rows_estimate"] == 1_000_000
+        assert body["phase"] == "scanning_population_fit"
+        release.set()
+        done = _wait_job(client, "plan-progress", run_id)
+    assert done["status"] == "complete"
+
+
 def test_failed_job_surfaces_error():
     def boom(plan_id, *, acknowledgments=None, shape_recipe=None):
         raise RuntimeError("warehouse probe hung")

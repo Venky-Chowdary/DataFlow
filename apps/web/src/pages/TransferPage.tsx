@@ -71,6 +71,7 @@ import {
   type VectorFieldRouting,
   type VectorRoutingPlan,
 } from "../lib/api";
+import type { ValidateProgress } from "../lib/engineProgress";
 import { CdcRetentionPanel } from "../components/transfer/CdcRetentionPanel";
 import {
   defaultSchemaForDriver,
@@ -356,6 +357,7 @@ export function TransferPage({
   const destSchemaTableKeyRef = useRef("");
   const lastNewTableToastRef = useRef("");
   const [preflighting, setPreflighting] = useState(false);
+  const [validateProgress, setValidateProgress] = useState<ValidateProgress | null>(null);
   const [savingContract, setSavingContract] = useState(false);
   const [boundContractId, setBoundContractId] = useState("");
   const [requireSignedContract, setRequireSignedContract] = useState(false);
@@ -4034,6 +4036,7 @@ export function TransferPage({
       return;
     }
     setPreflighting(true);
+    setValidateProgress(null);
     setStep(STEP_VALIDATE);
     setPreflight(null);
     setPreflightError("");
@@ -4169,6 +4172,7 @@ export function TransferPage({
               acknowledgment_reason: ackReason,
             },
             recipePayload(shapeSteps),
+            setValidateProgress,
           );
           // Never stamp plan approved on review-grade / soft-pass — Execute
           // unlock requires decision===approve (same bar as Validate rail).
@@ -6975,6 +6979,7 @@ export function TransferPage({
             preflight={preflight}
             preflightError={preflightError}
             running={preflighting}
+            progress={validateProgress}
             confidenceThreshold={confidenceThreshold}
             destType={destKindMode === "file_export" ? exportFormat : destType}
             validationMode={validationMode}

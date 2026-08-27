@@ -22,6 +22,7 @@ import {
   isInternalGateId,
 } from "../../lib/preflightGates";
 import { EngineStageTicker } from "../EngineStageTicker";
+import type { ValidateProgress } from "../../lib/engineProgress";
 import {
   buildDisplayBlockers,
   buildExecutiveSummary,
@@ -210,6 +211,8 @@ const STATUS_LABEL: Record<string, string> = {
 interface ValidateDashboardProps {
   preflight: PreflightResult | null;
   running?: boolean;
+  /** Live GET /preflight heartbeat — rows scanned, not a looping stage list. */
+  progress?: ValidateProgress | null;
   confidenceThreshold?: number;
   destType?: string;
   validationMode?: string;
@@ -738,6 +741,7 @@ function MetricChip({
 export function ValidateDashboard({
   preflight,
   running = false,
+  progress = null,
   confidenceThreshold = 0.85,
   destType,
   validationMode,
@@ -1608,7 +1612,7 @@ export function ValidateDashboard({
             </span>
             <h3>
               {running
-                ? "Validating route — nine engine stages"
+                ? "Validating route — live engine progress"
                 : preflight
                   ? executiveSummary?.title ?? (
                     decision === "approve" && preflight.passed
@@ -1621,7 +1625,7 @@ export function ValidateDashboard({
                     ? "Validate did not finish — Re-run from the rail"
                     : "Run validation to check this route"}
             </h3>
-            {running && <EngineStageTicker running />}
+            {running && <EngineStageTicker running elapsedMs={elapsedMs} progress={progress} />}
           </div>
 
           <div className="df2-vd-hero-counts">

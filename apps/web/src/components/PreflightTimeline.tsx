@@ -4,6 +4,7 @@ import { PreflightResult } from "../lib/types";
 import { useEffect, useState } from "react";
 import { CORE_ENGINE_GATE_IDS, blockerTitle, gateLabel } from "../lib/preflightGates";
 import { EngineStageTicker } from "./EngineStageTicker";
+import type { ValidateProgress } from "../lib/engineProgress";
 import { ringDasharray, validateRingPercent } from "../lib/progressRing";
 
 const CORE_GATE_ORDER = [...CORE_ENGINE_GATE_IDS];
@@ -23,6 +24,7 @@ function formatDuration(ms: number | undefined): string {
 interface PreflightTimelineProps {
   result: PreflightResult;
   running?: boolean;
+  progress?: ValidateProgress | null;
   confidenceThreshold?: number;
   compact?: boolean;
   hideActions?: boolean;
@@ -34,6 +36,7 @@ interface PreflightTimelineProps {
 export function PreflightTimeline({
   result,
   running,
+  progress = null,
   confidenceThreshold = 0.85,
   compact = false,
   hideActions = false,
@@ -164,7 +167,7 @@ export function PreflightTimeline({
           </h3>
           <p className="df2-preflight-sub">
             {running
-              ? `Wall-clock ${formatElapsed(elapsedMs)} · real gates, not a fake step animation`
+              ? `Wall-clock ${formatElapsed(elapsedMs)} · live row scan, not a repeating stage list`
               : `${passCount} passed · ${blockCount} blocked · ${skipCount} skipped · ${result.total_gates} total`}
             {subExtra}
           </p>
@@ -293,7 +296,7 @@ export function PreflightTimeline({
             <Spinner size="sm" label="" />
             <h3>Validating route</h3>
             <p>
-              <EngineStageTicker running /> · {formatElapsed(elapsedMs)} elapsed
+              <EngineStageTicker running elapsedMs={elapsedMs} progress={progress} />
             </p>
             <div className="df2-preflight-progress is-indeterminate" role="status">
               <div className="df2-mapping-progress-meta">
