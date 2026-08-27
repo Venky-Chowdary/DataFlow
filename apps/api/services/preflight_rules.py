@@ -96,14 +96,14 @@ PREFLIGHT_GATE_RULES: dict[str, dict[str, Any]] = {
         "title": "Population fit",
         "category": "hard",
         "why": (
-            "The Map type came from a 25-row peek. Values later in the file do not fit "
-            "that NUMBER/DECIMAL. On a new table that peeked type is the CREATE type — "
-            "the CSV is not broken. Widening Map changes CREATE. On an existing table, "
-            "Map cannot ALTER live DDL."
+            "The Map type came from a preview peek. Values later in the source do not "
+            "fit that destination NUMBER/DECIMAL/VARCHAR/integer carrier. On a new "
+            "table that peeked type is the CREATE type — the source is not broken. "
+            "Widening Map changes CREATE. On an existing table, Map cannot ALTER live DDL."
         ),
         "fix": (
             "For a new table: Approve the CREATE-type widen, then re-Validate. "
-            "Nothing is written until Execute. Do not silently truncate. "
+            "Nothing is written to the destination until Execute. Do not silently truncate. "
             "For an existing table: ALTER the column or map to a new *_wide column."
         ),
         "examples": [

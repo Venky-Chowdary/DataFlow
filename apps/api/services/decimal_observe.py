@@ -601,12 +601,12 @@ def decimal_scale_overflow_fix(
         count = f"{unfit_rows} value(s)" if unfit_rows else "Values"
         return (
             f"New table — CREATE uses the Map type, not an ALTER. "
-            f"The 25-row peek stamped {current_type or 'a narrow NUMBER'}. "
-            f"{count} in the file need {widened}{where}. "
+            f"The preview peek stamped {current_type or 'a narrow numeric type'}. "
+            f"{count} in the source need {widened}{where}. "
             f"Approve updates the CREATE type to {widened}. "
             f"That type is proven against the overflow values Validate scanned "
             f"(write-path fits_decimal). Re-Validate of those same values "
-            "should clear this gate. The CSV is not modified. "
+            "should clear this gate. Source values are not modified. "
             "Do not silently truncate."
         )
     return (

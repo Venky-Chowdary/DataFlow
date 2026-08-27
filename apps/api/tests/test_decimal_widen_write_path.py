@@ -153,7 +153,7 @@ def test_population_scan_widens_from_all_unfit_cells_not_the_first():
     assert report.findings
     assert report.findings[0].suggested_target_type == "NUMBER(12,9)"
     assert "CREATE" in report.findings[0].suggested_fix
-    assert "CSV is not modified" in report.findings[0].suggested_fix
+    assert "Source values are not modified" in report.findings[0].suggested_fix
     gate = build_population_fit_gate(report)
     assert gate["details"]["create_new_table"] is True
     actions = gate["details"]["suggested_actions"]

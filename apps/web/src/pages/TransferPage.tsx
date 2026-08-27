@@ -3646,7 +3646,7 @@ export function TransferPage({
     setColumnMappings(next);
     toast({
       title: "CREATE types updated — re-validating",
-      message: `Updated ${hit} Map type(s) so the new table can hold the file. Snowflake is not written yet.`,
+      message: `Updated ${hit} Map type(s) so the new table can hold the source. The destination is not written yet.`,
       tone: "success",
     });
     void executePreflight(next);

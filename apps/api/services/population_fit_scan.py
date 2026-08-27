@@ -1096,13 +1096,11 @@ def scan_rows(
 
     from connectors.writer_common import (
         fits_decimal,
-        fits_integer,
-        fits_varchar,
         integer_overflow_suggested_type,
         parse_decimal_precision_scale,
-        varchar_overflow_suggested_type,
+        proven_integer_widen,
+        proven_varchar_widen,
     )
-    from services.ddl_compatibility import parse_varchar_width
     from services.decimal_observe import (
         CREATE_NEW_NUMERIC_SAFETY_MARGIN,
         decimal_scale_overflow_fix,
@@ -1211,34 +1209,12 @@ def scan_rows(
                     "the writer would still refuse."
                 )
         elif target.carrier == CARRIER_INTEGER and (first or prove_values):
-            seed = first or prove_values[0]
-            if env_int_frac.get(idx):
-                suggested_type = integer_overflow_suggested_type(
-                    seed, target.target_type, dest_db=dest_db
-                )
-            else:
-                widest = prove_values[-1] if prove_values else seed
-                suggested_type = integer_overflow_suggested_type(
-                    widest, target.target_type, dest_db=dest_db
-                )
-            if suggested_type:
-                parsed = parse_decimal_precision_scale(
-                    suggested_type, dest_db=dest_db
-                )
-                if parsed:
-                    apply_proven = all(
-                        fits_decimal(v, parsed[0], parsed[1], dest_db=dest_db)
-                        for v in prove_values
-                    )
-                elif suggested_type.upper() in {"FLOAT", "FLOAT64", "DOUBLE", "REAL"}:
-                    apply_proven = True
-                else:
-                    apply_proven = all(
-                        fits_integer(v, suggested_type, dest_db=dest_db)
-                        for v in prove_values
-                    )
-                if not apply_proven:
-                    suggested_type = ""
+            suggested_type = proven_integer_widen(
+                prove_values or (first,),
+                dest_db=dest_db,
+                current_type=target.target_type,
+            )
+            apply_proven = bool(suggested_type)
             if suggested_type:
                 suggested_fix = (
                     f"Open Map → widen {target.target} to {suggested_type} "
@@ -1246,33 +1222,12 @@ def scan_rows(
                     "Do not silently truncate."
                 )
         elif target.carrier == CARRIER_STRING and (first or prove_values):
-            longest = first
-            if idx in env_str_len:
-                for raw in prove_values:
-                    text = present_cell_text(raw)
-                    if text is None:
-                        text = str(raw or "")
-                    if len(text) >= env_str_len[idx]:
-                        longest = text
-                        break
-            suggested_type = varchar_overflow_suggested_type(
-                longest or first, target.target_type, dest_db=dest_db
+            suggested_type = proven_varchar_widen(
+                prove_values or (first,),
+                dest_db=dest_db,
+                current_type=target.target_type,
             )
-            width = parse_varchar_width(suggested_type) if suggested_type else None
-            if suggested_type and (
-                suggested_type.upper() == "TEXT"
-                or (
-                    width is not None
-                    and all(
-                        fits_varchar(v, width, suggested_type)
-                        for v in prove_values
-                    )
-                )
-            ):
-                apply_proven = True
-            else:
-                suggested_type = ""
-                apply_proven = False
+            apply_proven = bool(suggested_type)
             if suggested_type:
                 suggested_fix = (
                     f"Open Map → widen {target.target} to {suggested_type} "
@@ -1288,9 +1243,20 @@ def scan_rows(
                     "→ re-Validate. Do not silently coerce."
                 )
             elif "uuid" in why_l or target.transform == "uuid":
-                suggested_type = "VARCHAR(36)"
+                uuid_witnesses = prove_values or ((first,) if first else ())
+                suggested_type = proven_varchar_widen(
+                    uuid_witnesses,
+                    dest_db=dest_db,
+                    current_type="VARCHAR(36)",
+                )
+                if not suggested_type and uuid_witnesses:
+                    from connectors.writer_common import fits_varchar as _fits_vc
+
+                    if all(_fits_vc(v, 36, "VARCHAR(36)") for v in uuid_witnesses):
+                        suggested_type = "VARCHAR(36)"
+                apply_proven = bool(suggested_type)
                 suggested_fix = (
-                    f"Open Map → widen {target.target} to {suggested_type} "
+                    f"Open Map → widen {target.target} to {suggested_type or 'VARCHAR'} "
                     "(or fix the source UUID) → re-Validate. "
                     "Do not silently coerce."
                 )
@@ -1517,12 +1483,12 @@ def build_population_fit_gate(report: FitScanReport) -> dict[str, Any]:
             message = (
                 f"{rows} value(s) in {scope} cannot fit the peeked CREATE type "
                 f"({cols}). This table does not exist yet — widen Map to "
-                f"{widen_names} so CREATE can hold the file. The CSV is not "
-                "the defect. Execute would create a too-narrow table and commit nothing"
+                f"{widen_names} so CREATE can hold the source. Source values "
+                "are not the defect. Execute would create a too-narrow table and commit nothing"
             )
             corrective = (
                 "Approve the CREATE-type widen below, then re-Validate. "
-                "Nothing is written to the warehouse until Execute."
+                "Nothing is written to the destination until Execute."
             )
         else:
             message = (
