@@ -513,13 +513,13 @@ export function JobTheaterView({
     progress_pct: job.progress_pct,
     total_rows: total,
     records_processed: processed,
-    progress_indeterminate: Boolean(
-      (job as { progress_indeterminate?: boolean }).progress_indeterminate,
-    ),
+    progress_indeterminate: Boolean(job.progress_indeterminate),
     reconciling,
     isComplete,
     isRunning,
   });
+  /** Continuous CDC / no finite denominator — pulse the ring, do not invent %. */
+  const indeterminate = Boolean(job.progress_indeterminate) && !(total > 0);
 
   // Detect a stalled bar: same progress value for a few seconds while running.
   const [stalled, setStalled] = useState(false);
