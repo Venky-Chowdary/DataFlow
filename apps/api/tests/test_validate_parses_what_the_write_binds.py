@@ -122,12 +122,54 @@ def test_a_typed_source_wire_is_not_rescanned_for_its_parse() -> None:
 
 
 def test_a_boolean_typed_wire_is_still_not_rescanned() -> None:
-    """Calendar scanning must not pull BOOLEAN off the typed-skip cost path."""
-    targets, _und, safe, report = _scan("BOOLEAN", "BOOLEAN", ["true", "false"])
+    """Warehouse BOOLEAN wires parse by construction. File peek does not."""
+    targets, _und, safe, report = _scan(
+        "BOOLEAN",
+        "BOOLEAN",
+        ["true", "false"],
+        source_kind="database",
+        source_format="mysql",
+    )
 
     assert targets == ()
     assert safe == ("c",)
     assert report.findings == ()
+
+
+def test_file_inferred_boolean_still_scans_maybe() -> None:
+    """Peek inferred BOOLEAN from true/false is not a domain — ``maybe`` lives later."""
+    targets, _und, safe, report = _scan(
+        "BOOLEAN",
+        "BOOLEAN",
+        ["true", "maybe"],
+        source_kind="file",
+        source_format="csv",
+    )
+
+    assert [t.carrier for t in targets] == [CARRIER_TYPED]
+    assert safe == ()
+    assert report.findings[0].unfit_rows == 1
+    assert "maybe" in (report.findings[0].example_values[0] if report.findings[0].example_values else "maybe")
+    assert report.findings[0].suggested_fix
+    assert "silently coerce" in report.findings[0].suggested_fix
+
+
+def test_invalid_calendar_day_stamps_a_fix_not_a_widen() -> None:
+    _targets, _und, _safe, report = _scan(
+        "DATE", "VARCHAR", ["2024-02-31"], dest_db="mysql"
+    )
+    assert report.findings[0].suggested_fix
+    assert "invalid date" in report.findings[0].suggested_fix.lower()
+    assert not report.findings[0].suggested_target_type
+
+
+def test_invalid_uuid_stamps_varchar_widen() -> None:
+    _targets, _und, _safe, report = _scan(
+        "UUID", "VARCHAR", ["not-a-uuid"], dest_db="postgresql"
+    )
+    assert report.findings[0].suggested_fix
+    assert report.findings[0].suggested_target_type == "VARCHAR(36)"
+    assert "silently coerce" in report.findings[0].suggested_fix
 
 
 @pytest.mark.parametrize("dest_db", ["mysql", "postgresql"])

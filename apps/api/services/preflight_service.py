@@ -677,6 +677,70 @@ def run_transfer_policy_gates(
     return gates
 
 
+def _iter_table_population_for_preflight(
+    *,
+    source_kind: str,
+    source_format: str,
+    source_connector_id: str,
+    source_config: dict[str, Any] | None,
+    source_table: str,
+    mappings: list[dict[str, Any]],
+    column_types: dict[str, str],
+    dest_types: dict[str, str],
+    dest_db: str,
+):
+    """Same projected table walk Execute uses — or None when it cannot run.
+
+    Studio/plan/Pilot used to scan only the preview. A late DECIMAL overflow
+    then passed Validate and blocked Execute. Callable extracts, row filters,
+    and file sources stay out: those populations are not this walk.
+    """
+    kind = (source_kind or "").strip().lower()
+    if kind not in {"database", "cloud"}:
+        return None
+    table = str(source_table or "").strip()
+    if not table:
+        return None
+    if not (source_connector_id or source_config):
+        return None
+    from services.procedure_source import is_callable_source
+
+    if is_callable_source(source_config):
+        return None
+    cfg = dict(source_config or {})
+    extra = cfg.get("extra") if isinstance(cfg.get("extra"), dict) else {}
+    if cfg.get("source_filter") or extra.get("source_filter"):
+        return None
+    try:
+        from src.transfer.models import EndpointConfig
+        from src.transfer.source_peek import iter_bounded_table_population_rows
+    except ImportError:  # pragma: no cover - api root on PYTHONPATH
+        from transfer.models import EndpointConfig
+        from transfer.source_peek import iter_bounded_table_population_rows
+
+    data = dict(cfg)
+    if source_connector_id:
+        data["connector_id"] = source_connector_id
+    data.setdefault("table", table)
+    data.setdefault("collection", table)
+    if source_format:
+        data.setdefault("format", source_format)
+        data.setdefault("type", source_format)
+    endpoint = EndpointConfig.from_dict(
+        kind if kind in {"database", "cloud"} else "database",
+        data,
+    )
+    return iter_bounded_table_population_rows(
+        endpoint,
+        mappings,
+        column_types=column_types,
+        dest_types=dest_types,
+        dest_db=dest_db,
+        source_kind=source_kind,
+        source_format=source_format or str(data.get("format") or ""),
+    )
+
+
 # F8: policy-gate merge lives in preflight_policy_gates (single authority).
 from services.preflight_policy_gates import (  # noqa: E402
     apply_policy_gates,
@@ -747,6 +811,7 @@ def run_file_preflight(
     resume: bool = False,
     population_rows: Iterable[Mapping[str, Any]] | None = None,
     rows_are_population: bool = False,
+    shape_recipe: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run preflight gates for file/DB Studio transfers (G1–G9 + host policy)."""
     from services.timezone_policy import declared_source_column_types
@@ -1518,6 +1583,58 @@ def run_file_preflight(
             if stored_rows is not None:
                 population_rows = stored_rows
                 rows_are_population = True
+        if population_rows is None:
+            try:
+                table_rows = _iter_table_population_for_preflight(
+                    source_kind=source_kind,
+                    source_format=source_format,
+                    source_connector_id=source_connector_id,
+                    source_config=source_config,
+                    source_table=source_table,
+                    mappings=mappings,
+                    column_types=column_types,
+                    dest_types=destination_column_types or {},
+                    dest_db=destination_db_type,
+                )
+            except Exception as walk_exc:
+                logger.warning(
+                    "table population walk failed; Validate will use the preview: %s",
+                    walk_exc,
+                )
+                table_rows = None
+            if table_rows is not None:
+                try:
+                    first = next(table_rows)
+                except StopIteration:
+                    # Honest empty table — not a failed walk.
+                    population_rows = iter(())
+                    rows_are_population = True
+                except Exception as walk_exc:
+                    # Cursor-unreadable / down source must keep the preview,
+                    # never claim an empty population as exact.
+                    logger.warning(
+                        "table population walk failed; Validate will use the preview: %s",
+                        walk_exc,
+                    )
+                else:
+
+                    def _chained():
+                        yield first
+                        yield from table_rows
+
+                    walked: Iterable[Mapping[str, Any]] = _chained()
+                    if shape_recipe:
+                        from services.shape_preflight import shaped_population_rows
+
+                        shaped = shaped_population_rows(
+                            shape_recipe,
+                            walked,
+                            source_columns=columns,
+                        )
+                        if shaped is not None:
+                            walked = shaped
+                    population_rows = walked
+                    rows_are_population = True
         scan_input = population_rows if population_rows is not None else sample_rows
         fit_report = scan_population_fit(
             scan_input,

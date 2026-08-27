@@ -179,6 +179,159 @@ def test_no_bounded_column_issues_no_query(monkeypatch: pytest.MonkeyPatch) -> N
     assert calls == []
 
 
+def test_studio_table_validate_scans_past_the_preview(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """POST /preflight/run used to judge 25 preview rows. Execute already
+    re-reads the table. The late overflow must block Validate too."""
+    from services.preflight_service import run_file_preflight
+
+    calls: list[dict[str, Any]] = []
+    rows = _table_rows(450, unfit_at=(431,))
+    _fake_reader(monkeypatch, rows, calls=calls, page=100)
+
+    result = run_file_preflight(
+        columns=["arr_time"],
+        column_types=COLUMN_TYPES,
+        row_count=450,
+        mappings=MAPPINGS,
+        destination_connected=True,
+        destination_column_types=DEST_TYPES,
+        destination_db_type="snowflake",
+        source_kind="database",
+        source_format="postgresql",
+        source_table="flights",
+        source_config={
+            "kind": "database",
+            "format": "postgresql",
+            "table": "flights",
+        },
+        sample_rows=rows[:25],
+    )
+
+    assert result["passed"] is False
+    assert result["population_fit"]["evidence"] == "exact"
+    assert result["population_fit"]["rows_scanned"] == 450
+    assert result["population_fit"]["findings"][0]["example_rows"] == [431]
+    suggested = result["validation_findings"][0]["suggested_target_type"]
+    assert suggested.startswith("NUMBER(")
+    assert suggested != "NUMBER(11,8)"
+
+
+def test_unreachable_table_falls_back_to_the_preview(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A down source must keep the 25-row preview, never claim empty=exact."""
+    from services.preflight_service import run_file_preflight
+
+    def _boom(*_a: Any, **_kw: Any):
+        def _it():
+            raise RuntimeError("source unreachable")
+            yield {}
+
+        return _it()
+
+    monkeypatch.setattr(
+        "src.transfer.source_peek.iter_bounded_table_population_rows",
+        _boom,
+    )
+    sample = _table_rows(25)
+    result = run_file_preflight(
+        columns=["arr_time"],
+        column_types=COLUMN_TYPES,
+        row_count=450,
+        mappings=MAPPINGS,
+        destination_connected=True,
+        destination_column_types=DEST_TYPES,
+        destination_db_type="snowflake",
+        source_kind="database",
+        source_format="postgresql",
+        source_table="flights",
+        source_config={
+            "kind": "database",
+            "format": "postgresql",
+            "table": "flights",
+        },
+        sample_rows=sample,
+    )
+
+    assert result["population_fit"]["evidence"] == "sampled"
+    assert result["population_fit"]["scanned_population"] is False
+    assert result["population_fit"]["rows_scanned"] == 25
+
+
+def test_cursor_source_validate_uses_preview_not_empty_population(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Dynamo-class readers cannot be re-paged. Claiming 0 rows would hide
+    the preview findings and green a walk that never happened."""
+    from services.preflight_service import run_file_preflight
+
+    calls: list[dict[str, Any]] = []
+    rows = _table_rows(450, unfit_at=(12,))
+    _fake_reader(monkeypatch, rows, calls=calls, page=100)
+
+    result = run_file_preflight(
+        columns=["arr_time"],
+        column_types=COLUMN_TYPES,
+        row_count=450,
+        mappings=MAPPINGS,
+        destination_connected=True,
+        destination_column_types=DEST_TYPES,
+        destination_db_type="snowflake",
+        source_kind="database",
+        source_format="dynamodb",
+        source_table="flights",
+        source_config={
+            "kind": "database",
+            "format": "dynamodb",
+            "table": "flights",
+        },
+        sample_rows=rows[:25],
+    )
+
+    assert calls == []
+    assert result["population_fit"]["evidence"] == "sampled"
+    assert result["population_fit"]["scanned_population"] is False
+    assert result["passed"] is False
+    assert result["population_fit"]["findings"][0]["example_rows"] == [12]
+
+
+def test_callable_source_does_not_walk_the_table(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from services.preflight_service import run_file_preflight
+
+    calls: list[dict[str, Any]] = []
+    rows = _table_rows(450, unfit_at=(431,))
+    _fake_reader(monkeypatch, rows, calls=calls, page=100)
+
+    result = run_file_preflight(
+        columns=["arr_time"],
+        column_types=COLUMN_TYPES,
+        row_count=450,
+        mappings=MAPPINGS,
+        destination_connected=True,
+        destination_column_types=DEST_TYPES,
+        destination_db_type="snowflake",
+        source_kind="database",
+        source_format="postgresql",
+        source_table="flights",
+        source_config={
+            "kind": "database",
+            "format": "postgresql",
+            "table": "flights",
+            "source_read_mode": "procedure",
+            "extra": {"source_read_mode": "procedure"},
+        },
+        sample_rows=rows[:25],
+    )
+
+    assert calls == []
+    assert result["population_fit"]["evidence"] == "sampled"
+    assert result["population_fit"]["scanned_population"] is False
+
+
 def test_row_limit_stops_the_pass(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[dict[str, Any]] = []
     _fake_reader(monkeypatch, _table_rows(450, unfit_at=(431,)), calls=calls, page=100)

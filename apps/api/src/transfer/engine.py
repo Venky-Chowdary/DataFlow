@@ -819,34 +819,22 @@ def _table_population_rows(
     paged independently yields nothing, which the scan reports as preview
     evidence rather than as proof of fit.
     """
-    from services.population_fit_scan import bounded_targets
-
-    from .source_peek import iter_stream_source_column_rows
+    from .source_peek import iter_bounded_table_population_rows
 
     try:
-        targets, _undecidable, _safe = bounded_targets(
+        rows = iter_bounded_table_population_rows(
+            request.source,
             mappings,
+            column_types=column_types,
             dest_types=dest_types,
-            source_types=column_types,
             dest_db=dest_db,
             source_kind=getattr(request.source, "kind", "") or "",
             source_format=getattr(request.source, "format", "") or "",
-        )
-        wanted = sorted({t.source for t in targets if t.source})
-        if not wanted:
-            return
-        rows = iter_stream_source_column_rows(
-            request.source,
-            # A bounded column name is a *shaped* name, which the table may not hold
-            # at all (derived, renamed). So a shaped run projects the recipe's own
-            # inputs and shapes the rows before the scan judges them.
-            sorted({str(c) for c in shape_runner.recipe.input_columns})
-            if shape_runner is not None
-            else wanted,
             limit=int(request.limit or 0),
+            shape_runner=shape_runner,
         )
-        if shape_runner is not None:
-            rows = _shaped_population_rows(shape_runner, rows)
+        if rows is None:
+            return
         yield from rows
     except Exception as exc:  # noqa: BLE001 - unreadable source is unmeasured, never "fits"
         logger.warning("population fit scan could not re-read source table: %s", exc)

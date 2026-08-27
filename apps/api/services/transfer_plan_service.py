@@ -342,6 +342,7 @@ def run_plan_preflight(
         source_file_id=source_file_id,
         population_rows=stored_population,
         rows_are_population=stored_population is not None,
+        shape_recipe=shape_recipe,
         confidence_threshold=threshold,
         validation_mode=validation_mode,
         date_locale=policies.get("date_locale", ""),

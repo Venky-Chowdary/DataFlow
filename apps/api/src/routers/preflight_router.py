@@ -371,6 +371,7 @@ async def run_preflight(body: PreflightRequest):
             source_file_id=source_file_id,
             population_rows=stored_population,
             rows_are_population=stored_population is not None,
+            shape_recipe=body.shape_recipe,
             schema_policy=body.schema_policy,
             backfill_new_fields=body.backfill_new_fields,
             contract_primary_key=contract_pk,

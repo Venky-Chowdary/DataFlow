@@ -234,6 +234,10 @@ def _carrier_for(target_type: str, *, dest_db: str) -> str:
 
     if sql_type_is_temporal(typ):
         return CARRIER_TYPED
+    from services.type_system import normalize_logical_type
+
+    if normalize_logical_type(typ) in {"boolean", "uuid"}:
+        return CARRIER_TYPED
     return ""
 
 
@@ -402,11 +406,15 @@ def bounded_targets(
         )
         parse_in_doubt = bool(transform) and _parse_in_doubt(declared_source)
         calendar = _calendar_parse_required(transform, target_type)
-        if carrier == CARRIER_TYPED and not parse_in_doubt and not calendar:
-            # A typed numeric/boolean/uuid wire parses by construction —
-            # scanning it would cost a million parses to prove the declaration.
-            # Calendar types are excluded: the declaration does not prove
-            # ``2024-02-31`` is a date.
+        if (
+            carrier == CARRIER_TYPED
+            and declared_domain
+            and not parse_in_doubt
+            and not calendar
+        ):
+            # Warehouse BOOLEAN/UUID wires parse by construction. File peek
+            # inferred BOOLEAN is not a domain — ``maybe`` still lives past
+            # the sample. Calendar types never skip: ``2024-02-31`` is DATE.
             safe.append(target)
             continue
         action, exec_pol, risk_id = _resolve_action(m, job_error_policy)
@@ -763,6 +771,27 @@ def scan_rows(
                     f"Open Map → widen {target.target} to {suggested_type} "
                     "(or ALTER the destination) → re-Validate. "
                     "Do not silently truncate."
+                )
+        elif target.carrier == CARRIER_TYPED:
+            why_l = why.lower()
+            if "boolean" in why_l or target.transform == "boolean":
+                suggested_fix = (
+                    f"Open Map → remap {target.target} off {target.target_type} "
+                    "or fix the source value (writer accepts 1/0/true/false/yes/no) "
+                    "→ re-Validate. Do not silently coerce."
+                )
+            elif "uuid" in why_l or target.transform == "uuid":
+                suggested_type = "VARCHAR(36)"
+                suggested_fix = (
+                    f"Open Map → widen {target.target} to {suggested_type} "
+                    "(or fix the source UUID) → re-Validate. "
+                    "Do not silently coerce."
+                )
+            else:
+                suggested_fix = (
+                    f"Open Map → remap {target.target} off {target.target_type} "
+                    "or fix the source calendar value → re-Validate. "
+                    "Do not silently coerce an invalid date."
                 )
         findings_list.append(
             ColumnFitFinding(

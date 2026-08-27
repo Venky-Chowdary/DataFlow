@@ -606,6 +606,9 @@ describe("Transfer Studio chrome contracts", () => {
     assert.match(page, /must not dump clock\/money values into/);
     // Studio Validate must send the persisted upload so the scan is not preview-only.
     assert.match(page, /source_file_id: parsed\??\.file_id/);
+    // Table Validate must send connector + table so the shared walk can run.
+    assert.match(page, /source_table: isConnectorSource && sourceKind === "database"/);
+    assert.match(page, /source_config: isConnectorSource && sourceKind === "database"/);
     assert.match(page, /file_id: parsed\??\.file_id/);
     assert.match(page, /!file && !parsed\?\.file_id/);
     assert.match(page, /file_id: parsed\.file_id/);
