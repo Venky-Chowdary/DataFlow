@@ -157,6 +157,8 @@ interface DestinationAdvancedDrawerProps {
    * Full append into a leftover empty table must not read as CREATE.
    */
   syncHonestyLine?: string;
+  /** Schema-policy caption (SSOT: schemaPolicyHonestyLine). */
+  schemaHonestyLine?: string;
   /** False for Mongo/files/SaaS — hide/disable staging toggle so Execute cannot fail after Validate. */
   writeViaStagingSupported?: boolean;
   /** Show vector destination embedding controls (pgvector / Qdrant / Weaviate / Pinecone / Milvus). */
@@ -271,6 +273,7 @@ export function DestinationAdvancedDrawer({
   onWriteViaStagingChange,
   writeViaStagingSupported = true,
   syncHonestyLine = "",
+  schemaHonestyLine = "",
   showVectorOptions = false,
   vectorContentColumn = "",
   vectorEmbeddingColumn = "",
@@ -412,6 +415,9 @@ export function DestinationAdvancedDrawer({
                 </button>
               ))}
             </div>
+            {schemaHonestyLine ? (
+              <p className="df2-label-hint" role="status">{schemaHonestyLine}</p>
+            ) : null}
           </div>
         </div>
 

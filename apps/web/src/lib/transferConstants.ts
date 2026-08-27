@@ -91,27 +91,27 @@ export const SCHEMA_POLICIES: { id: SchemaPolicyId; label: string; detail: strin
   {
     id: "manual_review",
     label: "Manual approval",
-    detail: "Detect drift; keep the approved contract until you review (safest default).",
+    detail: "Validate blocks on new/renamed columns until you Acknowledge or remap. Execute does not ADD COLUMN.",
   },
   {
     id: "propagate_columns",
     label: "Propagate columns",
-    detail: "Auto-add new destination columns on transfer (type changes still need review).",
+    detail: "Validate auto-maps additive columns. Execute ADD COLUMN. Type narrow still pauses.",
   },
   {
     id: "propagate_all",
     label: "Propagate columns (all streams)",
-    detail: "Same additive ADD COLUMN behavior as Propagate columns (not type auto-rewrite). Incompatible type changes still need review.",
+    detail: "Same ADD COLUMN on every stream. Does not rewrite destination types.",
   },
   {
     id: "pause_on_change",
     label: "Pause on drift",
-    detail: "Stop scheduled runs when schema changes — best for production warehouses.",
+    detail: "Any detected change — including additive — pauses Validate and scheduled beats.",
   },
   {
     id: "type_locked",
     label: "Type locked",
-    detail: "Reject type changes at the destination — fail closed on incompatible casts.",
+    detail: "Widen and dest type changes pause. New columns need review. No silent cast.",
   },
 ];
 
@@ -254,6 +254,41 @@ export function syncModeHonestyLine(
     return "Drop/replace destination, then load the full snapshot. Destroys existing rows if the object already exists.";
   }
   return SYNC_MODES.find((m) => m.id === mode)?.detail ?? "";
+}
+
+/**
+ * Schema-policy caption — matches ``resolve_schema_evolution`` (Validate + Execute SSOT).
+ * Hard type-narrow always pauses, including under propagate_* (not Airbyte airbyte_meta).
+ */
+export function schemaPolicyHonestyLine(policy: string): string {
+  switch ((policy || "").trim().toLowerCase()) {
+    case "propagate_columns":
+      return (
+        "Validate auto-maps additive columns; Execute issues ADD COLUMN. "
+        + "Type narrow, PK, and dest-only NOT NULL still pause — not a silent rewrite."
+      );
+    case "propagate_all":
+      return (
+        "Same ADD COLUMN on every stream. Does not rewrite destination types. "
+        + "Hard-breaking changes still pause."
+      );
+    case "pause_on_change":
+      return (
+        "Any detected change — including additive — pauses Validate and scheduled beats. "
+        + "Nothing is written until you change policy or remap."
+      );
+    case "type_locked":
+      return (
+        "Widen and destination type changes pause. New columns need review. "
+        + "Execute does not silent-cast."
+      );
+    case "manual_review":
+    default:
+      return (
+        "Validate blocks on new or renamed columns until you Acknowledge or remap. "
+        + "Execute does not ADD COLUMN. Hard type-narrow always pauses."
+      );
+  }
 }
 
 /** Single operator-facing copy for SCD2/mirror + multi-stream block (rank 74). */

@@ -33,6 +33,36 @@ from services.decision_kernel import is_lossy_coercion, normalize_logical_type
 # Policies that auto-apply additive field evolution (Airbyte propagate_*).
 PROPAGATE_POLICIES = frozenset({"propagate_columns", "propagate_all"})
 
+#: Operator caption — same meaning as Studio ``schemaPolicyHonestyLine``.
+SCHEMA_POLICY_HONESTY: dict[str, str] = {
+    "manual_review": (
+        "Validate blocks on new or renamed columns until you Acknowledge or remap. "
+        "Execute does not ADD COLUMN. Hard type-narrow always pauses."
+    ),
+    "propagate_columns": (
+        "Validate auto-maps additive columns; Execute issues ADD COLUMN. "
+        "Type narrow, PK, and dest-only NOT NULL still pause — not a silent rewrite."
+    ),
+    "propagate_all": (
+        "Same ADD COLUMN on every stream. Does not rewrite destination types. "
+        "Hard-breaking changes still pause."
+    ),
+    "pause_on_change": (
+        "Any detected change — including additive — pauses Validate and scheduled beats. "
+        "Nothing is written until you change policy or remap."
+    ),
+    "type_locked": (
+        "Widen and destination type changes pause. New columns need review. "
+        "Execute does not silent-cast."
+    ),
+}
+
+
+def schema_policy_honesty_line(policy: str) -> str:
+    """Studio / G10 caption for the Advanced schema-change policy."""
+    key = (policy or "manual_review").strip().lower()
+    return SCHEMA_POLICY_HONESTY.get(key, SCHEMA_POLICY_HONESTY["manual_review"])
+
 # Always pause — Airbyte breaking + Datawrap type-fidelity (no silent narrow).
 HARD_BREAKING_KINDS = frozenset({
     "primary_key_change",

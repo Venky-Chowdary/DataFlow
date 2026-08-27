@@ -449,8 +449,15 @@ describe("Transfer Studio chrome contracts", () => {
     const dash = readFileSync(join(webRoot, "components/transfer/ValidateDashboard.tsx"), "utf8");
     const constants = readFileSync(join(webRoot, "lib/transferConstants.ts"), "utf8");
     assert.match(css, /\.df2-dest-toolbar \.df2-dest-advanced-btn \{[\s\S]*height:\s*var\(--df-btn-height/);
+    assert.match(css, /\.df2-dest-toolbar \.df2-dest-advanced-btn \{[\s\S]*max-height:\s*var\(--df-btn-height/);
     assert.match(css, /\.df2-dest-mode-btn \{[\s\S]*height:\s*var\(--df-btn-height/);
+    assert.match(
+      css,
+      /\.df2-page-transfer-studio \.df2-dest-step > \.df2-wizard-footer \.df2-btn,[\s\S]*height:\s*var\(--df-btn-height/,
+    );
     assert.doesNotMatch(page, /size="sm"[\s\S]{0,80}df2-dest-advanced-btn|df2-dest-advanced-btn[\s\S]{0,80}size="sm"/);
+    assert.match(page, /variant="secondary"[\s\S]{0,120}df2-dest-advanced-btn|df2-dest-advanced-btn[\s\S]{0,80}variant="secondary"/);
+    assert.match(page, /schemaPolicyHonestyLine\(schemaPolicy\)/);
     assert.match(page, /Existing table detected/);
     assert.match(page, /This is not create-new/);
     assert.match(page, /empty leftover|even if a prior run wrote 0 rows/);

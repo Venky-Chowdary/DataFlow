@@ -2706,12 +2706,24 @@ th.df2-type-string .df2-type-badge {
 
 .df2-dest-toolbar .df2-dest-advanced-btn {
   flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
   height: var(--df-btn-height, 36px);
   min-height: var(--df-btn-height, 36px);
+  max-height: var(--df-btn-height, 36px);
   padding: 0 12px;
-  align-self: stretch;
+  align-self: center;
   white-space: nowrap;
   box-sizing: border-box;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1;
+  background: #fff;
+  color: #0f172a;
 }
 
 .df2-dest-export-select {
@@ -10408,8 +10420,8 @@ button.df2-vd-assist-toggle:focus-visible {
   flex-wrap: nowrap !important;
   margin: 0 !important;
   padding: 4px 12px !important;
-  min-height: 0 !important;
-  max-height: 44px !important;
+  max-height: none !important;
+  min-height: calc(var(--df-btn-height, 36px) + 8px) !important;
   height: auto !important;
   border-top: 1px solid #e8edf3 !important;
   background: #fff !important;
@@ -10418,9 +10430,9 @@ button.df2-vd-assist-toggle:focus-visible {
 
 .df2-page-transfer-studio .df2-dest-step > .df2-wizard-footer .df2-btn,
 .df2-page-transfer-studio .df2-dest-step > .df2-card-footer.df2-wizard-footer .df2-btn {
-  height: 32px !important;
-  min-height: 32px !important;
-  max-height: 32px !important;
+  height: var(--df-btn-height, 36px) !important;
+  min-height: var(--df-btn-height, 36px) !important;
+  max-height: var(--df-btn-height, 36px) !important;
   padding: 0 12px !important;
   margin: 0 !important;
   line-height: 1 !important;

@@ -488,6 +488,8 @@ def run_transfer_policy_gates(
     read_scope: Any = None,
 ) -> list[dict[str, Any]]:
     """Validate enterprise run policy that sits above source/destination probes."""
+    from services.schema_drift import schema_policy_honesty_line
+
     contracts = [c for c in stream_contracts or [] if c.get("selected", True)]
     sync = (sync_mode or "full_refresh_overwrite").lower()
     schema = (schema_policy or "manual_review").lower()
@@ -574,6 +576,7 @@ def run_transfer_policy_gates(
                     "backfill_new_fields": backfill_new_fields,
                     "breaking_changes": breaking,
                     "policy_coerced_from_manual_review": policy_coerced,
+                    "honesty_line": schema_policy_honesty_line(schema),
                 },
             }
         )

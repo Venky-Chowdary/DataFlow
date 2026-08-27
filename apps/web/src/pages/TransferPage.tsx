@@ -114,6 +114,7 @@ import {
   type ValidationModeId,
   multiStreamScd2MirrorBlockCopy,
   MULTI_STREAM_SCD2_MIRROR_BLOCK,
+  schemaPolicyHonestyLine,
   syncModeHonestyLine,
 } from "../lib/transferConstants";
 import {
@@ -6429,11 +6430,11 @@ export function TransferPage({
                       </button>
                     </div>
                     <Button
-                      variant="ghost"
+                      variant="secondary"
                       className="df2-dest-advanced-btn"
                       onClick={() => setAdvancedOpen(true)}
                       leadingIcon={<DtIcon name="settings" size={16} />}
-                      title="Advanced settings — sync mode, primary key, cursor, and write policies"
+                      title="Advanced settings — sync mode, primary key, cursor, schema drift, and write policies"
                     >
                       Advanced
                     </Button>
@@ -6923,7 +6924,10 @@ export function TransferPage({
                 {syncModeHonestyLine(syncMode, destTableExists)}
               </p>
               <p className="df2-label-hint">
-                Change overwrite, CDC, and identity in Advanced.
+                {schemaPolicyHonestyLine(schemaPolicy)}
+              </p>
+              <p className="df2-label-hint">
+                Change overwrite, CDC, schema drift, and identity in Advanced.
               </p>
             </div>
             <div className="df2-dest-sync-summary-actions">
@@ -7624,6 +7628,7 @@ export function TransferPage({
         numberLocales={NUMBER_LOCALES}
         syncMode={syncMode}
         syncHonestyLine={syncModeHonestyLine(syncMode, destTableExists)}
+        schemaHonestyLine={schemaPolicyHonestyLine(schemaPolicy)}
         schemaPolicy={schemaPolicy}
         validationMode={validationMode}
         dateLocale={dateLocale}

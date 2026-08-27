@@ -8,6 +8,7 @@ import {
   formatSchemaPolicyLabel,
   formatSyncModeLabel,
   formatValidationModeLabel,
+  schemaPolicyHonestyLine,
   syncModeHonestyLine,
 } from "./transferConstants.js";
 
@@ -116,5 +117,32 @@ describe("syncModeHonestyLine", () => {
     const line = syncModeHonestyLine("full_refresh_append", false);
     assert.match(line, /CREATE TABLE/i);
     assert.match(line, /create-new/i);
+  });
+});
+
+describe("schemaPolicyHonestyLine", () => {
+  it("manual approval does not ADD COLUMN and hard-narrow still pauses", () => {
+    const line = schemaPolicyHonestyLine("manual_review");
+    assert.match(line, /does not ADD COLUMN/i);
+    assert.match(line, /Acknowledge|remap/i);
+    assert.match(line, /type-narrow always pauses/i);
+  });
+
+  it("propagate adds columns but never silent type rewrite", () => {
+    const line = schemaPolicyHonestyLine("propagate_columns");
+    assert.match(line, /ADD COLUMN/i);
+    assert.match(line, /Type narrow/i);
+    assert.doesNotMatch(line, /rewrite destination types/i);
+  });
+
+  it("pause on drift includes additive changes", () => {
+    const line = schemaPolicyHonestyLine("pause_on_change");
+    assert.match(line, /including additive/i);
+    assert.match(line, /scheduled beats/i);
+  });
+
+  it("type locked refuses silent cast", () => {
+    const line = schemaPolicyHonestyLine("type_locked");
+    assert.match(line, /silent-cast/i);
   });
 });
