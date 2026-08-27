@@ -1042,6 +1042,11 @@ def _execute_policy_gates_for_request(
         # Best-effort here; the read side refuses authoritatively with the exact
         # cursor key. Both refuse a watermark measured on another column.
         read_scope=read_scope_for_transfer_request(request),
+        # Advanced write knobs — Validate already emits g17_row_cap. Execute
+        # must name the same cap/sort or Approve hides a leftover filter.
+        priority_column=str(getattr(request, "priority_column", "") or ""),
+        priority_direction=str(getattr(request, "priority_direction", "") or "desc"),
+        row_limit=max(0, int(getattr(request, "limit", 0) or 0)),
     )
 
 
