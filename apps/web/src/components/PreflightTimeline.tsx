@@ -111,7 +111,7 @@ export function PreflightTimeline({
     .find((g) => g.id === "g9_data_integrity")?.message || "";
   const sampleUniqueness = /population uniqueness not proven/i.test(g9Msg);
   const headline = running
-    ? "Validating route — nine engine stages"
+    ? "Validating route — live engine progress"
     : decision === "approve" && result.passed && sampleUniqueness
       ? "Execute-ready · uniqueness sample-only"
       : decision === "approve" && result.passed

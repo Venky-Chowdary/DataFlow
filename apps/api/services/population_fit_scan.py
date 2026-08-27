@@ -914,11 +914,14 @@ def scan_rows(
     example_rows: dict[int, list[int]] = {}
     example_values: dict[int, list[str]] = {}
     reasons: dict[int, str] = {}
+    env_int: dict[int, int] = {}
+    env_scale: dict[int, int] = {}
     scanned = 0
     truncated = False
     truncated_reason = ""
     last_progress_at = 0.0
 
+    from services.decimal_observe import write_int_digits_and_scale
     from services.value_serializer import cell_to_string, is_missing_sentinel
 
     # Bound once per column, then applied per value — see _fit_predicate.
@@ -979,6 +982,10 @@ def scan_rows(
                 continue
             counts[idx] = counts.get(idx, 0) + 1
             reasons.setdefault(idx, why)
+            if bounded[idx].carrier == CARRIER_DECIMAL:
+                idig, scale = write_int_digits_and_scale(value)
+                env_int[idx] = max(env_int.get(idx, 0), idig)
+                env_scale[idx] = max(env_scale.get(idx, 0), scale)
             if len(example_rows.setdefault(idx, [])) < max_examples:
                 example_rows[idx].append(scanned)
                 example_values.setdefault(idx, []).append(cell_to_string(value)[:120])
@@ -1005,6 +1012,7 @@ def scan_rows(
     from services.decimal_observe import (
         decimal_scale_overflow_fix,
         decimal_widen_carrier,
+        decimal_widen_from_envelope,
     )
 
     findings_list: list[ColumnFitFinding] = []
@@ -1029,9 +1037,17 @@ def scan_rows(
                     else:
                         suggested_type = "DOUBLE"
             else:
-                suggested_type = decimal_widen_carrier(
-                    first, dest_db=dest_db, current_type=target.target_type
-                )
+                if idx in env_int:
+                    suggested_type = decimal_widen_from_envelope(
+                        max_int_digits=env_int[idx],
+                        max_scale=env_scale.get(idx, 0),
+                        dest_db=dest_db,
+                        current_type=target.target_type,
+                    )
+                if not suggested_type:
+                    suggested_type = decimal_widen_carrier(
+                        first, dest_db=dest_db, current_type=target.target_type
+                    )
             if suggested_type and "fractional" in why.lower():
                 suggested_fix = (
                     f"Open Map → widen {target.target} to {suggested_type} "
@@ -1039,11 +1055,16 @@ def scan_rows(
                     "→ re-Validate. Do not silently truncate."
                 )
             elif suggested_type:
+                example_row = (example_rows.get(idx) or [None])[0]
                 suggested_fix = decimal_scale_overflow_fix(
                     first,
                     dest_db=dest_db,
                     current_type=target.target_type,
                     column=target.target,
+                    widened=suggested_type,
+                    create_new=not target.binds_live_ddl,
+                    unfit_rows=counts[idx],
+                    example_row=example_row,
                 ) or (
                     f"Open Map → widen {target.target} to {suggested_type} "
                     "(or ALTER the destination) → re-Validate. "
@@ -1270,22 +1291,60 @@ def build_population_fit_gate(report: FitScanReport) -> dict[str, Any]:
             if not report.scanned_population
             else f"all {report.rows_scanned} source row(s)"
         )
-        return {
-            "id": GATE_ID,
-            "status": "block",
-            "message": (
+        create_new = all(not f.target.binds_live_ddl for f in aborting)
+        widen_actions = [
+            {
+                "kind": "change_target_type",
+                "column": f.target.source,
+                "target": f.target.target,
+                "to_type": f.suggested_target_type,
+                "label": (
+                    f"Widen '{f.target.source}' CREATE type to {f.suggested_target_type}"
+                    if create_new
+                    else f"Widen '{f.target.source}' to {f.suggested_target_type}"
+                ),
+                "requires_ddl": f.target.binds_live_ddl,
+            }
+            for f in aborting
+            if f.suggested_target_type
+        ]
+        widen_names = ", ".join(
+            f"{f.target.source} → {f.suggested_target_type}"
+            for f in aborting
+            if f.suggested_target_type
+        )
+        if create_new and widen_names:
+            message = (
+                f"{rows} value(s) in {scope} cannot fit the peeked CREATE type "
+                f"({cols}). This table does not exist yet — widen Map to "
+                f"{widen_names} so CREATE can hold the file. The CSV is not "
+                "the defect. Execute would create a too-narrow table and commit nothing"
+            )
+            corrective = (
+                "Approve the CREATE-type widen below, then re-Validate. "
+                "Nothing is written to the warehouse until Execute."
+            )
+        else:
+            message = (
                 f"{rows} value(s) in {scope} cannot fit the destination carrier "
                 f"({cols}); the resolved write policy for those column(s) aborts "
                 "the load, so Execute would commit nothing"
-            ),
+            )
+            corrective = (
+                "Widen the destination column, or sign a continue-policy "
+                "Migration Risk Contract so the offending rows are held out "
+                "in quarantine instead of failing the load."
+            )
+        return {
+            "id": GATE_ID,
+            "status": "block",
+            "message": message,
             "duration_ms": duration_ms,
             "details": {
                 **details,
-                "corrective_action": (
-                    "Widen the destination column, or sign a continue-policy "
-                    "Migration Risk Contract so the offending rows are held out "
-                    "in quarantine instead of failing the load."
-                ),
+                "corrective_action": corrective,
+                "create_new_table": create_new,
+                "suggested_actions": widen_actions,
             },
         }
 

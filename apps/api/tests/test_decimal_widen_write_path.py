@@ -21,9 +21,14 @@ from connectors.writer_common import (  # noqa: E402
 from services.decimal_observe import (  # noqa: E402
     decimal_scale_overflow_fix,
     decimal_widen_carrier,
+    decimal_widen_from_envelope,
     decimal_widen_precision_scale,
 )
-from services.population_fit_scan import bounded_targets, scan_population_fit  # noqa: E402
+from services.population_fit_scan import (  # noqa: E402
+    bounded_targets,
+    build_population_fit_gate,
+    scan_population_fit,
+)
 
 
 def test_flights_clock_residue_does_not_fit_existing_number():
@@ -107,6 +112,65 @@ def test_file_inferred_typmod_is_not_a_declared_domain():
     )
     assert omitted_safe == ()
     assert [t.target for t in omitted] == ["DEP_TIME"]
+
+
+def test_population_scan_widens_from_all_unfit_cells_not_the_first():
+    """flights-1m: first overflow suggested (11,8); a later cell still needed (12,9).
+
+    One Approve must stamp the envelope of every unfit value so Validate
+    does not play stepwise NUMBER(9,6) → (11,8) → (12,9).
+    """
+    assert (
+        decimal_widen_from_envelope(
+            max_int_digits=1,
+            max_scale=9,
+            dest_db="snowflake",
+            current_type="NUMBER(9,6)",
+        )
+        == "NUMBER(12,9)"
+    )
+    rows = (
+        [{"DEP_TIME": "7.5"}] * 292
+        + [{"DEP_TIME": "0.23333333"}]
+        + [{"DEP_TIME": "7.5"}] * 44
+        + [{"DEP_TIME": "0.016666668"}]
+    )
+    report = scan_population_fit(
+        rows,
+        [{"source": "DEP_TIME", "target": "DEP_TIME", "target_type": "NUMBER(9,6)"}],
+        source_types={"DEP_TIME": "NUMBER(9,6)"},
+        dest_db="snowflake",
+        dialect_label="snowflake",
+        job_error_policy="fail",
+        rows_are_population=True,
+        source_kind="file",
+        source_format="csv",
+        dest_table_exists=False,
+    )
+    assert report.findings
+    assert report.findings[0].suggested_target_type == "NUMBER(12,9)"
+    assert "CREATE" in report.findings[0].suggested_fix
+    assert "CSV is not modified" in report.findings[0].suggested_fix
+    gate = build_population_fit_gate(report)
+    assert gate["details"]["create_new_table"] is True
+    actions = gate["details"]["suggested_actions"]
+    assert actions[0]["to_type"] == "NUMBER(12,9)"
+    assert actions[0]["requires_ddl"] is False
+
+    widened = scan_population_fit(
+        rows,
+        [{"source": "DEP_TIME", "target": "DEP_TIME", "target_type": "NUMBER(12,9)"}],
+        source_types={"DEP_TIME": "NUMBER(9,6)"},
+        dest_db="snowflake",
+        dialect_label="snowflake",
+        job_error_policy="fail",
+        rows_are_population=True,
+        source_kind="file",
+        source_format="csv",
+        dest_table_exists=False,
+    )
+    assert widened.findings == ()
+    assert widened.evidence == "exact"
 
 
 def test_population_scan_blocks_file_clock_residue_and_stamps_widen():

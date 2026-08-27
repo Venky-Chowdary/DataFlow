@@ -411,8 +411,11 @@ def apply_actions_to_mappings(
             out.append(m)
             by_source[col] = m
         if kind == "change_target_type" and action.get("to_type"):
-            m["destination_type"] = action["to_type"]
-            m["target_type"] = action["to_type"]
+            widened = action["to_type"]
+            m["destination_type"] = widened
+            m["target_type"] = widened
+            m["destType"] = widened
+            m["dest_type"] = widened
         elif kind == "add_transform" and action.get("transform"):
             xf = action["transform"]
             transforms = list(m.get("transforms") or [])

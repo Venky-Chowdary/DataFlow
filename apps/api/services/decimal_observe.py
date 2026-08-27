@@ -422,6 +422,24 @@ def decimal_widen_precision_scale(
     return need_p, need_s
 
 
+def _decimal_carrier_token(
+    *,
+    dest_db: str,
+    current_type: str,
+    precision: int,
+    scale: int,
+) -> str:
+    dialect = (dest_db or "").strip().lower()
+    declared = re.split(r"[\s(]", (current_type or "").strip(), maxsplit=1)[0].upper()
+    if dialect in {"snowflake", "oracle"} or declared == "NUMBER":
+        return "NUMBER"
+    if dialect in {"bigquery", "bq"}:
+        return "BIGNUMERIC" if precision > 38 or scale > 9 else "NUMERIC"
+    if dialect in {"postgresql", "postgres", "redshift"} or declared == "NUMERIC":
+        return "NUMERIC"
+    return "DECIMAL"
+
+
 def decimal_widen_carrier(
     value: Any,
     *,
@@ -435,17 +453,45 @@ def decimal_widen_carrier(
     if got is None:
         return ""
     precision, scale = got
-    dialect = (dest_db or "").strip().lower()
-    declared = re.split(r"[\s(]", (current_type or "").strip(), maxsplit=1)[0].upper()
-    if dialect in {"snowflake", "oracle"} or declared == "NUMBER":
-        token = "NUMBER"
-    elif dialect in {"bigquery", "bq"}:
-        token = "BIGNUMERIC" if precision > 38 or scale > 9 else "NUMERIC"
-    elif dialect in {"postgresql", "postgres", "redshift"} or declared == "NUMERIC":
-        token = "NUMERIC"
-    else:
-        token = "DECIMAL"
+    token = _decimal_carrier_token(
+        dest_db=dest_db, current_type=current_type, precision=precision, scale=scale
+    )
     return f"{token}({precision},{scale})"
+
+
+def decimal_widen_from_envelope(
+    *,
+    max_int_digits: int,
+    max_scale: int,
+    dest_db: str = "",
+    current_type: str = "",
+) -> str:
+    """One CREATE/widen type that holds every observed overflow, not the first cell.
+
+    flights-1m: ``0.23333333`` alone suggested NUMBER(11,8); ``0.016666668``
+    later still overflowed. The envelope of all unfit cells is NUMBER(12,9).
+    """
+    from connectors.writer_common import parse_decimal_precision_scale
+
+    parsed = parse_decimal_precision_scale(current_type, dest_db=dest_db)
+    cur_p, cur_s = parsed if parsed else (0, 0)
+    cur_int = max(0, cur_p - cur_s) if parsed else 0
+    need_s = max(cur_s, int(max_scale or 0))
+    need_int = max(cur_int, int(max_int_digits or 0))
+    if need_int == 0 and need_s == 0:
+        need_int = 1
+    need_p = need_int + need_s
+    dialect = (dest_db or "").strip().lower()
+    cap = 76 if dialect in {"bigquery", "bq"} and need_s > 9 else 38
+    if need_p > cap:
+        need_p = cap
+        need_s = min(need_s, max(0, cap - need_int))
+    if need_p <= 0:
+        return ""
+    token = _decimal_carrier_token(
+        dest_db=dest_db, current_type=current_type, precision=need_p, scale=need_s
+    )
+    return f"{token}({need_p},{need_s})"
 
 
 def decimal_scale_overflow_fix(
@@ -454,16 +500,30 @@ def decimal_scale_overflow_fix(
     dest_db: str = "",
     current_type: str = "",
     column: str = "",
+    widened: str = "",
+    create_new: bool = False,
+    unfit_rows: int = 0,
+    example_row: int | None = None,
 ) -> str:
     """One operator action when dest NUMBER/DECIMAL cannot hold the cell."""
-    widened = decimal_widen_carrier(
+    widened = widened or decimal_widen_carrier(
         value, dest_db=dest_db, current_type=current_type
     )
     if not widened:
         return ""
-    col = f"{column} " if column else ""
+    col = str(column or "").strip() or "the column"
+    if create_new:
+        where = f" (first {value!r} at row {example_row})" if example_row else ""
+        count = f"{unfit_rows} value(s)" if unfit_rows else "Values"
+        return (
+            f"New table — CREATE uses the Map type, not an ALTER. "
+            f"The 25-row peek stamped {current_type or 'a narrow NUMBER'}. "
+            f"{count} in the file need {widened}{where}. "
+            f"Approve updates the CREATE type to {widened}. "
+            "The CSV is not modified. Then re-Validate. Do not silently truncate."
+        )
     return (
-        f"Open Map → widen {col}to {widened} (or ALTER the destination) "
+        f"Open Map → widen {col} to {widened} (or ALTER the destination) "
         "→ re-Validate. Do not silently truncate."
     )
 

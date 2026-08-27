@@ -193,7 +193,9 @@ export function RepairProposalDrawer({
               disabled={!canDecide}
               leadingIcon={<DtIcon name="check" size={14} />}
             >
-              Approve & apply mappings
+              {analysis.mutativeActions.every((a) => a.kind === "change_target_type")
+                ? "Approve & apply CREATE types"
+                : "Approve & apply mappings"}
             </Button>
           ) : mappings.length > 0 ? (
             <Button
@@ -248,6 +250,27 @@ export function RepairProposalDrawer({
                 then Re-run Validate.
               </li>
             </ol>
+          </div>
+        )}
+
+        {!analysis.duplicateRoot && analysis.mutativeActions.some((a) => a.kind === "change_target_type") && (
+          <div className="df2-repair-root" role="status">
+            <strong>What Approve does</strong>
+            <p>
+              The file is not broken. Map guessed NUMBER types from 25 preview rows.
+              The rest of the file has more decimal places, so CREATE would be too
+              narrow and Execute would load nothing.
+            </p>
+            <ol className="df2-repair-next-steps">
+              <li>Approve updates the Map CREATE types listed below — Snowflake is not written yet.</li>
+              <li>Validate runs again against the whole scanned file.</li>
+              <li>If those types hold every scanned value, Execute unlocks. Click Execute only then.</li>
+            </ol>
+            <p className="df2-label-hint">
+              One Approve should be enough. If Validate still blocks, the next
+              suggestion is a wider type from values the first peek missed — approve
+              that too; do not truncate.
+            </p>
           </div>
         )}
 

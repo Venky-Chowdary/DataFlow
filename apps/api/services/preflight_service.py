@@ -1739,6 +1739,9 @@ def run_file_preflight(
                     "id": _FIT_GATE_ID,
                     "message": str(fit_gate.get("message") or ""),
                     "details": dict(fit_gate.get("details") or {}),
+                    "suggested_actions": list(
+                        (fit_gate.get("details") or {}).get("suggested_actions") or []
+                    ),
                 }
             )
     except Exception as exc:  # noqa: BLE001 - a failed scan is unmeasured, never "fits"

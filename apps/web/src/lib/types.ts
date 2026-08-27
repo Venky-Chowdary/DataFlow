@@ -959,7 +959,7 @@ export interface PreflightResult {
   /** Job wall-clock when Validate ran async — not a sum of sample-gate timings. */
   elapsed_ms?: number;
   gates: PreflightGate[];
-  blockers: { id: string; message: string; details?: Record<string, unknown>; guidance?: { gate?: string; title?: string; category?: string; why?: string; fix?: string; examples?: string[]; suggested_actions?: ValidationSuggestedAction[] } }[];
+  blockers: { id: string; message: string; details?: Record<string, unknown>; suggested_actions?: ValidationSuggestedAction[]; guidance?: { gate?: string; title?: string; category?: string; why?: string; fix?: string; examples?: string[]; suggested_actions?: ValidationSuggestedAction[] } }[];
   /**
    * Engine-level Root Cause Engine output — one explainable problem, many gates.
    * Prefer this over client-side collapse when present.
