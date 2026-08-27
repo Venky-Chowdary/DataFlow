@@ -578,6 +578,32 @@ def proven_decimal_widen(
     return ""
 
 
+def fractional_trailing_zeros_same_value(left: Any, right: Any) -> bool:
+    """True when dest only padded scale after the decimal — the number is unchanged.
+
+    ``9.083333`` and ``9.083333000000`` are the same value. Zeros *before* the
+    decimal (``9.083333`` → ``908333.3``) would change magnitude and fail this.
+    """
+    a = _canonical_numeric(left)
+    b = _canonical_numeric(right)
+    if a is None or b is None:
+        return False
+    return a == b
+
+
+def dest_scale_padding_honesty(
+    *,
+    source_example: str = "9.083333",
+    dest_example: str = "9.083333000000",
+) -> str:
+    """Operator copy for Snowflake NUMBER display padding (flights DEP_TIME)."""
+    return (
+        f"Zeros after the decimal are display scale, not a bigger number. "
+        f"{source_example} and {dest_example} compare equal — the time did not "
+        f"increase. Zeros before the decimal would change the value; these do not."
+    )
+
+
 def decimal_scale_overflow_fix(
     value: Any,
     *,
@@ -607,6 +633,7 @@ def decimal_scale_overflow_fix(
             f"That type is proven against the overflow values Validate scanned "
             f"(write-path fits_decimal). Re-Validate of those same values "
             "should clear this gate. Source values are not modified. "
+            f"{dest_scale_padding_honesty()} "
             "Do not silently truncate."
         )
     return (

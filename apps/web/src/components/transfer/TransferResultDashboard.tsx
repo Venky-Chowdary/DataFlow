@@ -25,6 +25,7 @@ import { ReplaySafetyCard } from "./ReplaySafetyCard";
 import { TransformationsCard } from "./TransformationsCard";
 import { hashForScreen } from "../../lib/appNavigation";
 import { cdcDeliveryResultCopy } from "../../lib/cdcExactlyOnce";
+import { DEST_SCALE_PADDING_HONESTY } from "../../lib/decimalScaleHonesty";
 
 function asMappingProof(raw: unknown): MappingProof | null {
   if (!raw || typeof raw !== "object") return null;
@@ -812,6 +813,9 @@ export function TransferResultDashboard({
                 <ul className="df2-result-ddl">
                   {result.ddl_executed.map((d) => <li key={d}><code>{d}</code></li>)}
                 </ul>
+              )}
+              {result.ddl_executed?.some((d) => /NUMBER\s*\(\s*\d+\s*,\s*(1[0-9]|[2-9]\d)\s*\)/i.test(d) || /DEP_TIME|ARR_TIME/i.test(d)) && (
+                <p className="df2-result-scale-honesty">{DEST_SCALE_PADDING_HONESTY}</p>
               )}
             </div>
           </details>
