@@ -406,12 +406,26 @@ export function computeJobTrustScore(job: TrustJobInput | null | undefined): Job
     } else if (weakest.id === "quarantine" || (rejected > 0 && (weakest.score as number) < 90)) {
       next_action = { code: "quarantine", label: "Review quarantine", detail: "Replay or export remaining open rows — nothing was silently dropped." };
     } else if (weakest.id === "reconcile") {
+      const assuranceNow = String(recon?.assurance_level || recon?.coverage || "").toLowerCase();
+      const phaseNow = String(recon?.phase || "").toLowerCase();
+      const writePassNow =
+        assuranceNow === "write_pass_dest_readback" || phaseNow.includes("write_pass");
+      const writerAckNow =
+        assuranceNow === "writer_ack"
+        || phaseNow.includes("writer_ack")
+        || /verified by writer|read-back verifier not available/i.test(String(recon?.message || ""));
       next_action = recon?.passed === true && isAppendDeltaProof(recon)
         ? {
             code: "append_delta",
             label: "Append delta closed — not a dest replace",
             detail: "Dest grew by this run. Overwrite to replace existing rows, or add a PK and upsert.",
           }
+        : recon?.passed === true && (writerAckNow || writePassNow)
+          ? {
+              code: "identity_key",
+              label: "Add an identity key for per-row proof",
+              detail: "Rows landed. Re-running Validate will not upgrade Gate-8. Map a PK or add Transform hash identity so dest read-back can align rows. Not migration_proven.",
+            }
         : { code: "reconcile", label: "Investigate Gate-8", detail: "Export proof JSON or re-run Validate after fixing drift." };
     } else if (weakest.id === "freshness") {
       next_action = { code: "freshness", label: "Check CDC freshness", detail: "Open the pipeline — lag may need capacity or lease attention." };

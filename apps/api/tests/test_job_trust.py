@@ -225,6 +225,46 @@ def test_append_delta_pass_does_not_say_investigate_gate8() -> None:
     assert "investigate" not in trust["next_action"]["label"].lower()
 
 
+def test_writer_ack_success_does_not_say_re_run_validate() -> None:
+    """flights-1m completed writer_ack — next action is identity, not Validate."""
+    trust = compute_job_trust({
+        "status": "completed",
+        "records_processed": 1_000_000,
+        "rejected_rows": 0,
+        "coerced_null_rows": 0,
+        "reconciliation": {
+            "passed": True,
+            "phase": "post_write_writer_ack",
+            "assurance_level": "writer_ack",
+            "source_checksum": "ddbe7569",
+            "target_checksum": "ddbe7569",
+            "migration_proven": False,
+            "message": "Writer acknowledgment for 1000000 row(s)",
+        },
+    })
+    assert trust["next_action"]["code"] == "identity_key"
+    assert "validate" not in trust["next_action"]["detail"].lower() or "will not upgrade" in trust["next_action"]["detail"].lower()
+    assert "investigate" not in trust["next_action"]["label"].lower()
+
+
+def test_write_pass_success_does_not_say_investigate_gate8() -> None:
+    trust = compute_job_trust({
+        "status": "completed",
+        "records_processed": 1_000_000,
+        "rejected_rows": 0,
+        "reconciliation": {
+            "passed": True,
+            "phase": "post_write_write_pass",
+            "assurance_level": "write_pass_dest_readback",
+            "source_checksum": "ddbe7569",
+            "target_checksum": "ddbe7569",
+            "migration_proven": False,
+        },
+    })
+    assert trust["next_action"]["code"] == "identity_key"
+    assert "investigate" not in trust["next_action"]["label"].lower()
+
+
 def test_quarantine_lowers_score() -> None:
     trust = compute_job_trust({
         "status": "completed_with_quarantine",

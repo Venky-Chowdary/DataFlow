@@ -300,7 +300,7 @@ def stamp_post_write_phase(report: dict[str, Any]) -> dict[str, Any]:
         # Write-pass fingerprints hash remapped cells in-process. Dest may be
         # independently SELECT'd, but the source warehouse was not re-read —
         # Fivetran/HVR Compare would not call that full_checksum / migration_proven.
-        if provenance == SOURCE_DIGEST_WRITE_PASS:
+        if provenance in {SOURCE_DIGEST_WRITE_PASS, SOURCE_DIGEST_WRITER_ACK}:
             rows = out.get("target_rows") or out.get("source_rows") or 0
             out["phase"] = "post_write_write_pass"
             out["post_write_pending"] = False
@@ -3017,13 +3017,18 @@ def verify_snowflake_table(
             cur.execute(f"SELECT COUNT(*) FROM {qualified_name}")  # nosec B608
             count = int(cur.fetchone()[0])
             ids, pk = keyed_readback_scope(written_ids, pk_column)
+            from connectors.sql_identifiers import quote_column_list
+
+            select_list = quote_column_list(target_columns)
             if ids:
                 where = keyed_readback_where(
                     pk, ids, dialect="snowflake", placeholders=["%s"] * len(ids)
                 )
-                cur.execute(f"SELECT * FROM {qualified_name} {where}", ids)  # nosec B608
+                cur.execute(
+                    f"SELECT {select_list} FROM {qualified_name} {where}", ids
+                )  # nosec B608
             else:
-                cur.execute(f"SELECT * FROM {qualified_name}")  # nosec B608
+                cur.execute(f"SELECT {select_list} FROM {qualified_name}")  # nosec B608
             names = [d[0] for d in cur.description] if cur.description else []
             columns, projected = project_readback(names, target_columns, _iter_fetchmany(cur))
             checksum = canonical_checksum_from_iter(

@@ -239,6 +239,7 @@ describe("Transfer Studio chrome contracts", () => {
     const step = readFileSync(join(webRoot, "pages/transfer/TransferTransformStep.tsx"), "utf8");
 
     assert.match(guide, /runs on the read, before anything is written/);
+    assert.match(guide, /hash_identity/);
     assert.match(guide, /never modified/);
     assert.match(guide, /not as loss/);
     assert.match(guide, /post-load transform/);

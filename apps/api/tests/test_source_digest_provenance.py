@@ -40,8 +40,27 @@ def _report(provenance: str) -> dict:
 
 def test_writer_ack_provenance_cannot_claim_full_checksum():
     report = _report(SOURCE_DIGEST_WRITER_ACK)
+    # Dest was independently hashed; source is still the writer's account.
+    # That is write-pass dest read-back — never full_checksum / migration_proven.
+    assert report["assurance_level"] == "write_pass_dest_readback"
+    assert report["coverage"] == "write_pass_dest_readback"
+    assert report.get("migration_proven") is False
+    assert report["assurance_level"] != "full_checksum"
+
+
+def test_writer_ack_without_dest_digest_stays_writer_ack():
+    report = stamp_post_write_phase(
+        {
+            "passed": True,
+            "message": "Transfer verified by writer: 10 rows written",
+            "source_rows": 100,
+            "target_rows": 100,
+            "source_checksum": "abc123",
+            "target_checksum": "",
+            "source_checksum_provenance": SOURCE_DIGEST_WRITER_ACK,
+        }
+    )
     assert report["assurance_level"] == "writer_ack"
-    assert report["coverage"] == "writer_ack"
     assert report["phase"] == "post_write_writer_ack"
 
 
@@ -68,8 +87,12 @@ def test_buffered_remapped_rows_and_engine_population_earn_full_checksum():
 
 def test_provenance_beats_the_message_text():
     """The caller knows where the digest came from; the message can only guess."""
-    assert is_writer_ack_only(
+    assert not is_writer_ack_only(
         "Reconciliation passed", "target-digest",
+        source_provenance=SOURCE_DIGEST_WRITER_ACK,
+    )
+    assert is_writer_ack_only(
+        "Reconciliation passed", "",
         source_provenance=SOURCE_DIGEST_WRITER_ACK,
     )
     assert not is_writer_ack_only(

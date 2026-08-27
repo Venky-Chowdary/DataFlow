@@ -578,6 +578,22 @@ def _next_action(
                     "or add a PK and upsert."
                 ),
             }
+        assurance = str((recon or {}).get("assurance_level") or (recon or {}).get("coverage") or "").lower()
+        phase = str((recon or {}).get("phase") or "").lower()
+        if recon and recon.get("passed") is True and (
+            assurance in {"writer_ack", "write_pass_dest_readback"}
+            or "writer_ack" in phase
+            or "write_pass" in phase
+        ):
+            return {
+                "code": "identity_key",
+                "label": "Add an identity key for per-row proof",
+                "detail": (
+                    "Rows landed. Re-running Validate will not upgrade Gate-8. "
+                    "Map a PK or add Transform hash identity so dest read-back "
+                    "can align rows. Not migration_proven."
+                ),
+            }
         return {
             "code": "reconcile",
             "label": "Investigate Gate-8",

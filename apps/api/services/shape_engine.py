@@ -20,6 +20,7 @@ counters keep accumulating.
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass, field
 from decimal import Decimal, DecimalException, InvalidOperation
 from typing import Any, Iterable, Mapping, Sequence
@@ -288,6 +289,13 @@ class ShapeEngine:
             row[target] = value
             return row
 
+        if op == "hash_identity":
+            target = str(options.get("to") or "_df_row_key")
+            value = _hash_identity_value(row, [str(c) for c in options.get("columns", [])])
+            self._record_write(tally, before=row.get(target), after=value, existed=target in row)
+            row[target] = value
+            return row
+
         if op == "split_column":
             separator = str(options.get("separator") or "")
             targets = [str(name) for name in options.get("into", [])]
@@ -514,6 +522,24 @@ def _cast(value: Any, to_type: str, fmt: Any) -> Any:
             return None
         return parsed.date() if to_type == "date" else parsed
     raise EvalError(f"'{to_type}' is not a logical type")
+
+
+def _hash_identity_value(row: Mapping[str, Any], columns: Sequence[str]) -> str:
+    """Stable SHA-256 of the named cells — row-local, no clock, no randomness.
+
+    Empty and missing stay distinct so two sparse rows cannot collide into one
+    key. Gate-8 uses this as the align key when the source has no natural PK
+    (flights-1m ``FL_DATE`` repeats).
+    """
+    parts: list[str] = []
+    for name in columns:
+        if name not in row:
+            parts.append("\x1eABSENT")
+            continue
+        text = _as_text(row.get(name))
+        parts.append("\x1eEMPTY" if text is None else text)
+    payload = "\x1f".join(parts)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _same_value(before: Any, after: Any) -> bool:

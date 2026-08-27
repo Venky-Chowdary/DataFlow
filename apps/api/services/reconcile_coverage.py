@@ -102,7 +102,10 @@ def is_writer_ack_only(
     where the digest came from, whereas the message text can only be guessed at.
     """
     if source_provenance == SOURCE_DIGEST_WRITER_ACK:
-        return True
+        # A dest digest is independent even when the source side is the writer's
+        # account. Treating that pair as writer-only hid a 1M-row Snowflake
+        # SELECT * behind "read-back not available".
+        return not bool(target_checksum)
     if source_provenance in INDEPENDENT_SOURCE_DIGESTS:
         return False
     return bool(

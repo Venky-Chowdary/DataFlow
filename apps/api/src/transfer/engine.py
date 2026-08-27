@@ -3121,6 +3121,9 @@ class UniversalTransferEngine:
                 job_id,
                 processed=int(rows_written or 0),
                 total=int(rows_written or 0),
+                proof_kind=str((dest_summary or {}).get("checksum_mode") or "full")
+                if isinstance(dest_summary, dict)
+                else "full",
             ):
                 if isinstance(dest_summary, dict):
                     dest_summary.setdefault("sync_mode", effective_sync)
@@ -4051,6 +4054,9 @@ class UniversalTransferEngine:
                 job_id,
                 processed=int(rows_written or 0),
                 total=int(rows_written or 0),
+                proof_kind=str((dest_summary or {}).get("checksum_mode") or "full")
+                if isinstance(dest_summary, dict)
+                else "full",
             ):
                 if isinstance(dest_summary, dict):
                     dest_summary.setdefault("sync_mode", effective_sync)
@@ -4751,6 +4757,9 @@ class UniversalTransferEngine:
                 job_id,
                 processed=int(rows_written or 0),
                 total=int(rows_written or 0),
+                proof_kind=str((dest_summary or {}).get("checksum_mode") or "full")
+                if isinstance(dest_summary, dict)
+                else "full",
             ):
                 if isinstance(dest_summary, dict):
                     dest_summary.setdefault("sync_mode", effective_sync)

@@ -163,6 +163,27 @@ describe("computeJobTrustScore", () => {
     const factor = ack.factors.find((f) => f.id === "reconcile");
     assert.ok(factor?.note.toLowerCase().includes("writer"));
     assert.ok((factor?.score as number) <= 58);
+    assert.equal(ack.next_action.code, "identity_key");
+    assert.doesNotMatch(ack.next_action.label, /investigate/i);
+  });
+
+  it("completed write-pass 1M append does not tell the operator to re-run Validate", () => {
+    const t = computeJobTrustScore({
+      status: "completed",
+      records_processed: 1_000_000,
+      rejected_rows: 0,
+      reconciliation: {
+        passed: true,
+        phase: "post_write_write_pass",
+        assurance_level: "write_pass_dest_readback",
+        source_checksum: "ddbe7569",
+        target_checksum: "ddbe7569",
+        migration_proven: false,
+      },
+    });
+    assert.equal(t.next_action.code, "identity_key");
+    assert.doesNotMatch(t.next_action.label, /investigate/i);
+    assert.match(t.next_action.detail, /will not upgrade/i);
   });
 
   it("caps sample and file-export unproven below grade A", () => {

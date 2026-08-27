@@ -46,3 +46,21 @@ def test_reconcile_heartbeat_sets_phase_and_pulses_message():
     assert len(mongo.calls) >= 2
     assert all(c["phase"] == "reconcile" and c["progress_pct"] == 99 for c in mongo.calls)
     assert any("Reconciling data" in (c.get("message") or "") for c in mongo.calls[1:])
+
+
+def test_write_pass_heartbeat_does_not_claim_migration_proven():
+    mongo = _FakeMongo()
+    with _reconcile_phase_heartbeat(
+        mongo,
+        "job-file-1m",
+        processed=1_000_000,
+        total=1_000_000,
+        interval_s=0.05,
+        proof_kind="inline_write_pass",
+    ):
+        time.sleep(0.12)
+
+    first = mongo.calls[0]["message"]
+    assert "write-pass" in first.lower()
+    assert "not migration_proven" in first.lower()
+    assert any("write-pass" in (c.get("message") or "").lower() for c in mongo.calls[1:])

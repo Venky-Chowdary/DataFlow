@@ -148,6 +148,14 @@ _CATALOG_LIST: tuple[_StepDef, ...] = (
         options=("to", "columns", "separator"),
         required=("to", "columns"),
     ),
+    _StepDef(
+        "hash_identity",
+        "Add a stable SHA-256 row key from selected columns so Gate-8 can align source and dest",
+        needs_column=False,
+        produces_column=True,
+        options=("to", "columns"),
+        required=("columns",),
+    ),
     # --- value cleansing (Tier 3) -------------------------------------------
     _StepDef("trim", "Remove leading and trailing whitespace"),
     _StepDef("collapse_whitespace", "Squeeze runs of whitespace to one space"),
@@ -277,7 +285,7 @@ class ShapeStep:
         if self.op == "rename_column":
             target = str(options.get("to") or "")
             return (target,) if target else ()
-        if self.op in ("constant_column", "derive_column", "concat_columns"):
+        if self.op in ("constant_column", "derive_column", "concat_columns", "hash_identity"):
             target = str(options.get("to") or "")
             return (target,) if target else ()
         if self.op == "split_column":
@@ -333,6 +341,18 @@ class ShapeRecipe:
     def has_active_step(self) -> bool:
         """Whether any enabled step can remove rows — i.e. the ledger will move."""
         return any(s.active for s in self.enabled_steps)
+
+    @property
+    def identity_columns(self) -> tuple[str, ...]:
+        """Columns a ``hash_identity`` step declared as the Gate-8 align key."""
+        keys: list[str] = []
+        for step in self.enabled_steps:
+            if step.op != "hash_identity":
+                continue
+            target = str(step.options.get("to") or "_df_row_key")
+            if target and target not in keys:
+                keys.append(target)
+        return tuple(keys)
 
     @property
     def recipe_hash(self) -> str:
@@ -641,7 +661,7 @@ def _normalize_options(
             raise ShapeError(f"{where}: split_column needs a separator")
         out["separator"] = separator
 
-    if op in ("concat_columns", "keep_columns"):
+    if op in ("concat_columns", "keep_columns", "hash_identity"):
         names = out.get("columns")
         if isinstance(names, str):
             names = [part.strip() for part in names.split(",") if part.strip()]
@@ -658,6 +678,8 @@ def _normalize_options(
         out["columns"] = names
         if op == "concat_columns":
             out["separator"] = "" if out.get("separator") is None else str(out["separator"])
+        if op == "hash_identity" and not out.get("to"):
+            out["to"] = "_df_row_key"
 
     if definition.produces_column and op != "split_column":
         target = out.get("to")
@@ -694,7 +716,7 @@ def _apply_column_effect(step: ShapeStep, columns: list[str]) -> None:
         if step.column in columns and target:
             columns[columns.index(step.column)] = target
         return
-    if op in ("constant_column", "derive_column", "concat_columns"):
+    if op in ("constant_column", "derive_column", "concat_columns", "hash_identity"):
         target = str(options.get("to") or "")
         if target and target not in columns:
             columns.append(target)

@@ -24,6 +24,21 @@ from typing import Any
 from .models import EndpointConfig
 from .type_mapper import ddl_carrier_type, ddl_type
 
+
+def unique_preserve_warnings(items: list[str], *, limit: int = 10) -> list[str]:
+    """Dedupe batch integrity warnings (identity / nearly-constant repeat every 20k)."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for raw in items:
+        key = str(raw).strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(key)
+        if len(out) >= limit:
+            break
+    return out
+
 try:
     from services.checkpoint_service import Checkpoint, CheckpointService
     from services.error_handling import RetryBudget, with_retry
@@ -779,6 +794,23 @@ def stream_file_to_database(
 
     if not mappings:
         mappings = [{"source": c, "target": c, "confidence": 0.95} for c in columns]
+    # Recipe-declared identity is not a second mapper — the operator named the
+    # column on Transform. Write it and use it as the Gate-8 align key.
+    if shape_runner is not None:
+        for col in getattr(shape_runner.recipe, "identity_columns", ()) or ():
+            name = str(col or "").strip()
+            if not name:
+                continue
+            if not any(
+                str(m.get("source") or "") == name or str(m.get("target") or "") == name
+                for m in mappings
+            ):
+                mappings.append({
+                    "source": name,
+                    "target": name,
+                    "transform": "none",
+                    "confidence": 1.0,
+                })
 
     try:
         from .connector_capabilities import resolve_driver_type
@@ -863,6 +895,13 @@ def stream_file_to_database(
         pk_target_cols = [
             map_source_to_target(col, mappings) for col in contract.primary_key_columns()
         ]
+    if not pk_target_cols and shape_runner is not None:
+        pk_target_cols = [
+            map_source_to_target(col, mappings)
+            for col in (getattr(shape_runner.recipe, "identity_columns", ()) or ())
+            if col
+        ]
+        pk_target_cols = [c for c in pk_target_cols if c]
     # Object-store destinations (S3/GCS/ADLS) write a single object per call, so
     # row-level upsert keys are not required and the object is overwritten.
     object_store = dest_type in ("s3", "gcs", "adls")
@@ -1191,6 +1230,7 @@ def stream_file_to_database(
             validation_mode=validation_mode,
             dest_kind=dest_type,
             sync_mode=audit_sync,
+            primary_key=pk_target_cols[0] if pk_target_cols else None,
         )
         if audit.issues:
             local_warnings.extend(audit.issues[:10])
@@ -1603,11 +1643,19 @@ def stream_file_to_database(
         dest_summary["incremental_watermark"] = running_cursor
 
     dest_summary["checksum"] = final_checksum or last_checksum
+    # Phase F1 — fingerprints are remapped source rows hashed during the write.
+    # Without this stamp, Gate-8 treats the digest as writer_ack even after a
+    # 1M-row dest read-back that matched (job 6a9060db: 3.5 min then writer_ack).
+    if dest_summary.get("checksum"):
+        dest_summary["checksum_mode"] = "inline_write_pass"
     dest_summary["rejected_rows"] = rejected_total
     dest_summary["coerced_null_rows"] = coerced_null_total
     dest_summary["rejected_details"] = list(rejected_details)
     dest_summary["rejected_details_sample"] = list(rejected_details)[:200]
-    dest_summary["warnings"] = warning_samples[:10]
+    dest_summary["warnings"] = unique_preserve_warnings(warning_samples, limit=10)
+    dest_summary["warnings_suppressed"] = max(
+        0, len({str(w).strip() for w in warning_samples if str(w).strip()}) - len(dest_summary["warnings"])
+    )
     dest_summary["error_policy"] = "quarantine" if (rejected_total or coerced_null_total) else "none"
     dest_summary["sync_mode"] = effective_sync
     stamp_overwrite_source_keys(dest_summary, overwrite_keys_acc)
