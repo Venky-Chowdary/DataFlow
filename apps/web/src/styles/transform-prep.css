@@ -492,11 +492,15 @@
 
 .df2-xform-bar-fill.kind-distribution { background: var(--df-brand, #0f766e); }
 
-/* Beat the post-load Transforms page rules that used to share these names. */
+/* Beat the post-load Transforms page rules that used to share these names.
+ * flex-shrink: 0 is required: the step is a flex column scroll host, and
+ * default shrink + kitchen-card min-height:0 collapsed Column catalog to a
+ * 26px header so the kitchen painted over Suggested repairs. */
 .df2-xform .df2-xform-card,
 .df2-xform-card {
   display: flex;
   flex-direction: column;
+  flex: 0 0 auto;
   gap: 10px;
   border: 1px solid var(--df-border, #e4e8ee);
   border-radius: var(--df-radius-md, 8px);

@@ -211,6 +211,7 @@ describe("Transfer Studio chrome contracts", () => {
     assert.match(css, /\.df2-xform \.df2-xform-card/);
     assert.match(css, /\.df2-xform \.df2-xform-preview/);
     assert.match(css, /\.df2-xform > \.df2-alert/);
+    assert.match(css, /\.df2-xform \.df2-xform-card[\s\S]{0,180}flex:\s*0 0 auto/);
   });
 
   it("post-load Transforms CSS cannot overlap Studio Transform cards", () => {
