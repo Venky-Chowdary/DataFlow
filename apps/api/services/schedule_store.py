@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -56,6 +57,8 @@ CLAIM_GRACE = timedelta(minutes=5)
 CLAIM_MAX_RUNTIME = timedelta(hours=4)
 
 _file_import_attempted = False
+# Same-process Run-now + beat must not both observe running=false.
+_CLAIM_LOCK = threading.Lock()
 
 
 def _load_schedules_from_file(path=STORE_PATH) -> list[PipelineSchedule]:
@@ -139,6 +142,14 @@ class PipelineSchedule:
     # Data contract — when set, scheduled runs enforce the signed contract.
     contract_id: str = ""
     require_signed_contract: bool = False
+    # Validate≡Execute identity — scheduled runs must replay the same locales,
+    # pre-load recipe, and approved hashes the operator signed in Studio.
+    date_locale: str = ""
+    number_locale: str = ""
+    shape_recipe: dict[str, Any] = field(default_factory=dict)
+    approved_shape_recipe_hash: str = ""
+    approved_decision_artifact_hash: str = ""
+    approved_ddl_identity_hash: str = ""
     #: The source shape observed on the last successful run, so a later run can
     #: tell a renamed or retyped column from one that was always that way. A
     #: schedule that remembers only its cursor cannot notice that the column it
@@ -238,6 +249,16 @@ class PipelineSchedule:
                     bool((data.get("contract_id") or "").strip()),
                 )
             ),
+            date_locale=str(data.get("date_locale") or "").strip(),
+            number_locale=str(data.get("number_locale") or "").strip(),
+            shape_recipe=dict(data.get("shape_recipe") or {})
+            if isinstance(data.get("shape_recipe"), dict)
+            else {},
+            approved_shape_recipe_hash=str(data.get("approved_shape_recipe_hash") or "").strip(),
+            approved_decision_artifact_hash=str(
+                data.get("approved_decision_artifact_hash") or ""
+            ).strip(),
+            approved_ddl_identity_hash=str(data.get("approved_ddl_identity_hash") or "").strip(),
             source_schema={
                 str(k): str(v)
                 for k, v in (data.get("source_schema") or {}).items()
@@ -678,6 +699,35 @@ def _is_running_stale(sched: PipelineSchedule) -> bool:
     return age > CLAIM_MAX_RUNTIME
 
 
+def _claim_running_mongo(schedule_id: str, instance: str, now: str) -> PipelineSchedule | None:
+    """CAS the running flag on the per-schedule Mongo document."""
+    svc = _mongo_backend()
+    if not svc:
+        return None
+    coll = svc.get_database()["pipeline_schedules"]
+    result = coll.find_one_and_update(
+        {
+            "_id": schedule_id,
+            "$or": [
+                {"running": {"$in": [False, None]}},
+                {"running": {"$exists": False}},
+            ],
+        },
+        {
+            "$set": {
+                "running": True,
+                "running_instance": instance,
+                "running_started_at": now,
+                "running_job_id": "",
+            }
+        },
+        return_document=True,
+    )
+    if not result:
+        return None
+    return PipelineSchedule.from_dict({**result, "id": result.get("id") or str(result.get("_id"))})
+
+
 def mark_schedule_running(schedule_id: str, instance: str) -> PipelineSchedule | None:
     """Mark a schedule as running on this instance.
 
@@ -685,26 +735,30 @@ def mark_schedule_running(schedule_id: str, instance: str) -> PipelineSchedule |
     schedule for the same source→dest connector pair) already has a live,
     non-stale run in flight.
     """
-    schedules = _load_all()
-    now = _now()
-    for i, s in enumerate(schedules):
-        if s.id != schedule_id:
-            continue
-        if s.running and not _is_running_stale(s):
-            return None
-        if connector_pair_busy(s.source_connector_id, s.dest_connector_id, exclude_id=s.id):
-            return None
-        updated = PipelineSchedule.from_dict({
-            **s.to_dict(),
-            "running": True,
-            "running_instance": instance,
-            "running_started_at": now,
-            "running_job_id": "",
-        })
-        schedules[i] = updated
-        _save_all(schedules)
-        return updated
-    return None
+    with _CLAIM_LOCK:
+        schedules = _load_all()
+        now = _now()
+        for i, s in enumerate(schedules):
+            if s.id != schedule_id:
+                continue
+            if s.running and not _is_running_stale(s):
+                return None
+            if connector_pair_busy(s.source_connector_id, s.dest_connector_id, exclude_id=s.id):
+                return None
+            claimed = _claim_running_mongo(schedule_id, instance, now)
+            if claimed is not None:
+                return claimed
+            updated = PipelineSchedule.from_dict({
+                **s.to_dict(),
+                "running": True,
+                "running_instance": instance,
+                "running_started_at": now,
+                "running_job_id": "",
+            })
+            schedules[i] = updated
+            _save_all(schedules)
+            return updated
+        return None
 
 
 def clear_schedule_running(schedule_id: str) -> PipelineSchedule | None:
@@ -735,7 +789,6 @@ def set_running_job(schedule_id: str, job_id: str) -> PipelineSchedule | None:
         schedules[i] = updated
         _save_all(schedules)
         return updated
-    return None
     return None
 
 

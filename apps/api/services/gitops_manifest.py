@@ -21,8 +21,15 @@ _SCHEDULE_RUNTIME_KEYS = frozenset(
         "running",
         "running_instance",
         "running_started_at",
+        "running_job_id",
         "run_history",
         "cursor_value",
+        "retry_at",
+        "retry_attempt",
+        "missed_window_count",
+        "last_missed_windows",
+        "approval_request",
+        "standing_authorization",
     }
 )
 

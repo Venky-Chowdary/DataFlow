@@ -11,7 +11,7 @@ from urllib.parse import urlencode
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import RedirectResponse
 
-from services.platform_config import is_production, web_url
+from services.platform_config import web_url
 from pydantic import BaseModel, Field
 
 from services.user_store import get_user as get_stored_user
@@ -452,8 +452,14 @@ async def sso_callback(sso_type: str, code: str = "", state: str = "", error: st
         id_token = tokens.get("id_token", "")
         if id_token:
             state_info_for_id_token = dict(state_info.get("extra") or {})
-            # In tests, do not perform real network validation.
-            state_info_for_id_token["test_skip_signature"] = not is_production()
+            # Signature skip is pytest-only. Staging/Railway with ENV!=production
+            # must still verify JWKS — forged id_tokens are an auth bypass.
+            import os
+
+            state_info_for_id_token["test_skip_signature"] = (
+                os.getenv("DATAFLOW_TEST_SKIP_OIDC_SIGNATURE", "").strip().lower()
+                in ("1", "true", "yes")
+            )
             try:
                 email = _id_token_email(id_token, state_info_for_id_token)
             except HTTPException:

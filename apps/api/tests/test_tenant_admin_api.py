@@ -265,6 +265,20 @@ def test_domain_already_in_use_is_stated_not_a_fault(admin):
     assert "already in use" in clash.text
 
 
+def test_workspace_admin_cannot_list_another_tenant(admin):
+    mine = _workspace(admin, "Mine-list")
+    theirs = _workspace(admin, "Theirs-list")
+    created = admin.post(
+        "/api/v1/workspace/tenant",
+        json={"workspace_id": theirs, "name": "Secret tenant", "custom_domain": "secret.example.com"},
+    )
+    assert created.status_code == 200, created.text
+    lead = _signed_in(admin, email="mine-list@example.com", workspace_id=mine, workspace_role="admin")
+    listed = lead.get("/api/v1/workspace/tenants")
+    assert listed.status_code == 200, listed.text
+    assert listed.json()["tenants"] == []
+
+
 def test_missing_tenant_is_a_404_on_every_verb(admin):
     assert admin.patch("/api/v1/workspace/tenant/nope", json={"name": "x"}).status_code == 404
     assert admin.delete("/api/v1/workspace/tenant/nope").status_code == 404

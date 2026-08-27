@@ -783,3 +783,41 @@ def test_save_mongo_never_sets_id_path(monkeypatch):
     assert "_id" not in (updates[0].get("$setOnInsert") or {})
     assert mem[sched.id]["running"] is True
     assert mem[sched.id]["id"] == sched.id
+
+
+def test_build_request_replays_studio_validate_identity():
+    """A scheduled run must carry the same recipe/locales/hashes as Studio Execute."""
+    sched = store.PipelineSchedule.from_dict({
+        "id": "s-studio",
+        "name": "n",
+        "source_connector_id": "src",
+        "source_table": "orders",
+        "dest_connector_id": "dst",
+        "dest_table": "orders_wh",
+        "interval": "daily",
+        "date_locale": "DMY",
+        "number_locale": "EU",
+        "shape_recipe": {"version": 1, "steps": [{"op": "trim", "column": "name"}]},
+        "approved_shape_recipe_hash": "a" * 64,
+        "approved_decision_artifact_hash": "b" * 64,
+        "approved_ddl_identity_hash": "c" * 64,
+        "stream_contracts": [{"stream": "orders", "primary_key": "id"}],
+        "mappings": [
+            {
+                "source": "amt",
+                "target": "amt",
+                "target_type": "DECIMAL(18,4)",
+                "risk_contract": {"status": "signed"},
+            }
+        ],
+    })
+    req = runner.build_schedule_request(sched, _SRC_CONN, _DST_CONN)
+    assert req.date_locale == "DMY"
+    assert req.number_locale == "EU"
+    assert req.shape_recipe.get("version") == 1
+    assert req.approved_shape_recipe_hash == "a" * 64
+    assert req.approved_decision_artifact_hash == "b" * 64
+    assert req.approved_ddl_identity_hash == "c" * 64
+    assert req.mappings[0]["risk_contract"]["status"] == "signed"
+    assert req.stream_contracts[0]["primary_key"] == "id"
+    assert req.skip_preflight is False

@@ -340,6 +340,20 @@ def build_schedule_request(sched, src: dict, dst: dict):
             mappings=mappings,
         ),
         stream_contracts=stream_contracts,
+        date_locale=str(getattr(sched, "date_locale", "") or ""),
+        number_locale=str(getattr(sched, "number_locale", "") or ""),
+        shape_recipe=dict(getattr(sched, "shape_recipe", None) or {})
+        if isinstance(getattr(sched, "shape_recipe", None), dict)
+        else {},
+        approved_shape_recipe_hash=str(
+            getattr(sched, "approved_shape_recipe_hash", "") or ""
+        ),
+        approved_decision_artifact_hash=str(
+            getattr(sched, "approved_decision_artifact_hash", "") or ""
+        ),
+        approved_ddl_identity_hash=str(
+            getattr(sched, "approved_ddl_identity_hash", "") or ""
+        ),
         workspace_id=sched.workspace_id or "",
         contract_id=contract_id,
         enforce_contract=bool(contract_id),

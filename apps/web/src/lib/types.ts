@@ -1371,6 +1371,12 @@ export interface ScheduleInput {
   procedure_params?: Record<string, string>;
   mappings: Record<string, unknown>[];
   stream_contracts: Record<string, unknown>[];
+  date_locale?: string;
+  number_locale?: string;
+  shape_recipe?: Record<string, unknown>;
+  approved_shape_recipe_hash?: string;
+  approved_decision_artifact_hash?: string;
+  approved_ddl_identity_hash?: string;
   workspace_id: string;
   max_retries: number;
   retry_backoff_seconds: number;

@@ -250,15 +250,16 @@ export function TenantSettings() {
               <input id="tenant-contact" className="df2-input" value={securityContact} onChange={(e) => setSecurityContact(e.target.value)} placeholder="security@example.com" />
             </div>
             <div className="df2-settings-field">
-              <label htmlFor="tenant-timeout">Session timeout (hours)</label>
+              <label htmlFor="tenant-timeout">Session timeout (hours) — recorded</label>
               <input id="tenant-timeout" className="df2-input" type="number" min={1} max={24} value={sessionTimeout} onChange={(e) => setSessionTimeout(Number(e.target.value))} />
+              <p className="df2-settings-hint">Policy memory only. Token lifetime is DATAFLOW_TOKEN_TTL_SEC, not this field.</p>
             </div>
           </div>
 
           <div className="df2-settings-policy-row" style={{ marginTop: 16 }}>
             <div>
               <h3>Require MFA for admins</h3>
-              <p>Enforce multi-factor authentication for owner and admin roles.</p>
+              <p>Recorded policy. Login MFA is not wired — this switch does not challenge TOTP or WebAuthn yet.</p>
             </div>
             <button type="button" role="switch" aria-checked={mfaRequired} className={`df2-switch ${mfaRequired ? "on" : ""}`} onClick={() => setMfaRequired((v) => !v)}>
               <span className="df2-switch-thumb" />
@@ -266,7 +267,7 @@ export function TenantSettings() {
           </div>
 
           <div className="df2-settings-field" style={{ marginTop: 16 }}>
-            <label htmlFor="tenant-allowlist">IP allowlist (one CIDR or IP per line)</label>
+            <label htmlFor="tenant-allowlist">IP allowlist (enforced only on a custom domain)</label>
             <textarea
               id="tenant-allowlist"
               className="df2-input"
@@ -275,6 +276,7 @@ export function TenantSettings() {
               onChange={(e) => setIpAllowlist(e.target.value)}
               placeholder="10.0.0.0/8&#10;192.168.1.50"
             />
+            <p className="df2-settings-hint">Evaluated only when Host resolves this tenant via custom domain. The default app host never applies the list.</p>
           </div>
         </div>
 
@@ -312,7 +314,7 @@ export function TenantSettings() {
           <div className="df2-settings-section-head">
             <div>
               <h2>Bring your own key (BYOK)</h2>
-              <p>Customer-managed encryption keys for data at rest.</p>
+              <p>Keys are stored here. Connector credentials still use the platform Fernet vault — BYOK does not wrap those secrets yet.</p>
             </div>
           </div>
           <div className="df2-settings-section-body">

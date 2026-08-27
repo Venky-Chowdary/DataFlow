@@ -18,6 +18,7 @@ import urllib.parse
 import urllib.request
 from typing import Any
 
+from services.egress_guard import egress_url_allowed
 from services.notification_store import (
     NotificationChannel,
     get_channel_decrypted,
@@ -27,13 +28,9 @@ from services.value_serializer import json_default
 
 logger = logging.getLogger(__name__)
 
-# Only HTTP(S) webhook/mail APIs are allowed — never file:/ or arbitrary schemes.
-_ALLOWED_SCHEMES = frozenset({"http", "https"})
-
 
 def _allowed_url(url: str) -> bool:
-    parsed = urllib.parse.urlparse(url)
-    return parsed.scheme in _ALLOWED_SCHEMES
+    return egress_url_allowed(url)
 
 
 def _env_smtp() -> dict[str, Any]:
@@ -47,9 +44,16 @@ def _env_smtp() -> dict[str, Any]:
     }
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Refuse redirect follow — a public URL must not bounce onto link-local."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001
+        return None
+
+
 def _http_post(url: str, payload: dict[str, Any], headers: dict[str, str] | None = None) -> dict[str, Any]:
     if not _allowed_url(url):
-        return {"ok": False, "error": f"URL scheme not allowed: {url}"}
+        return {"ok": False, "error": "Webhook URL is not allowed (private, loopback, or non-http(s))"}
     try:
         data = json.dumps(payload, default=json_default).encode("utf-8")
         req = urllib.request.Request(
@@ -58,7 +62,8 @@ def _http_post(url: str, payload: dict[str, Any], headers: dict[str, str] | None
             headers={"Content-Type": "application/json", **(headers or {})},
             method="POST",
         )
-        with urllib.request.urlopen(req, timeout=30) as resp:  # nosec: B310 — scheme is restricted to http(s) above
+        opener = urllib.request.build_opener(_NoRedirect)
+        with opener.open(req, timeout=30) as resp:  # nosec: B310 — scheme + host gated by egress_guard
             body = resp.read().decode("utf-8", errors="ignore")
         return {"ok": True, "status": resp.status, "body": body[:500]}
     except Exception as exc:

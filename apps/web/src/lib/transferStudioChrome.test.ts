@@ -700,4 +700,19 @@ describe("Transfer Studio chrome contracts", () => {
     assert.match(quarantine, /suggested_fix/);
     assert.match(quarantine, /suggested_target_type/);
   });
+
+  it("Studio Schedule persists the same Validate identity Execute sends", () => {
+    const page = readFileSync(join(webRoot, "pages/TransferPage.tsx"), "utf8");
+    const start = page.indexOf("const handleScheduleRoute");
+    assert.ok(start >= 0, "handleScheduleRoute must exist");
+    const chunk = page.slice(start, start + 3500);
+    assert.match(chunk, /stream_contracts: streamContracts/);
+    assert.match(chunk, /shape_recipe: recipePayload\(shapeSteps\)/);
+    assert.match(chunk, /date_locale: dateLocale/);
+    assert.match(chunk, /number_locale: numberLocale/);
+    assert.match(chunk, /approved_shape_recipe_hash/);
+    assert.match(chunk, /approved_decision_artifact_hash/);
+    assert.match(chunk, /mergeSignedRiskContracts/);
+    assert.match(chunk, /buildPreflightMappings/);
+  });
 });

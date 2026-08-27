@@ -26,6 +26,10 @@ import {
 } from "../components/overview/FreshnessSloPanel";
 import { dismissBanner, isBannerDismissed } from "../lib/dismissibleBanner";
 import { buildDataPlaneTopology } from "../lib/topologyUtils";
+import {
+  connectorPassedProbe,
+  connectorTestHealth,
+} from "../lib/connectorHealth";
 
 interface DashboardPageProps {
   connectors: Connector[];
@@ -116,7 +120,9 @@ export function DashboardPage({
     .filter((n): n is number => n != null);
   const totalRecords = destMeasured.reduce((sum, n) => sum + n, 0);
   const successRate = jobs.length ? Math.round((completed.length / jobs.length) * 100) : null;
-  const healthyConnectors = connectors.filter((c) => c.last_test_ok !== false).length;
+  const healthyConnectors = connectors.filter((c) => connectorPassedProbe(c)).length;
+  const untestedConnectors = connectors.filter((c) => connectorTestHealth(c) === "never_tested").length;
+  const failedConnectors = connectors.filter((c) => connectorTestHealth(c) === "failed").length;
   const enabledPipelines = schedules.filter((s) => s.enabled).length;
   const cdcLagSeconds = useMemo(() => {
     const lags = [...running, ...completed]
@@ -140,7 +146,8 @@ export function DashboardPage({
     if (connectors.length === 0 && jobs.length === 0) return null;
     let score = 100;
     if (connectors.length) {
-      score -= ((connectors.length - healthyConnectors) / connectors.length) * 35;
+      score -= (failedConnectors / connectors.length) * 35;
+      score -= (untestedConnectors / connectors.length) * 12;
     }
     if (jobs.length) {
       score -= ((jobs.length - completed.length) / jobs.length) * 25;
@@ -148,7 +155,7 @@ export function DashboardPage({
     if (failed.length) score -= Math.min(15, failed.length * 4);
     if (running.length) score = Math.min(score + 2, 100);
     return Math.round(Math.max(0, Math.min(100, score)));
-  }, [connectors.length, healthyConnectors, jobs.length, completed.length, failed.length, running.length]);
+  }, [connectors.length, failedConnectors, untestedConnectors, jobs.length, completed.length, failed.length, running.length]);
 
   const hasThroughput = throughputSeries.some((d) => d.rows > 0);
   const hasJobs = jobs.length > 0;
@@ -410,7 +417,11 @@ export function DashboardPage({
                   <h2 className="df2-overview-v3-card-title">Connections</h2>
                   <p className="df2-overview-v3-card-sub">
                     {connectors.length
-                      ? `${healthyConnectors} healthy · ${connectors.length - healthyConnectors} need attention`
+                      ? [
+                          `${healthyConnectors} healthy`,
+                          untestedConnectors ? `${untestedConnectors} never tested` : "",
+                          failedConnectors ? `${failedConnectors} need attention` : "",
+                        ].filter(Boolean).join(" · ")
                       : "No connections yet"}
                   </p>
                 </div>
@@ -427,7 +438,7 @@ export function DashboardPage({
                   <ul className="df2-overview-conn-list">
                     {connectors.slice(0, 8).map((c) => (
                       <li key={c.id}>
-                        <span className={`df2-health-dot ${c.status === "error" || c.last_test_ok === false ? "err" : "ok"}`} />
+                        <span className={`df2-health-dot ${connectorTestHealth(c) === "failed" ? "err" : connectorTestHealth(c) === "passed" ? "ok" : "warn"}`} />
                         <ConnectorIcon id={c.type} size={18} />
                         <span className="df2-overview-conn-body">
                           <span className="df2-overview-conn-name" title={c.name}>{c.name}</span>

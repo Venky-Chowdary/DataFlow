@@ -43,6 +43,24 @@ def test_notification_store_crud(tmp_path, monkeypatch):
     assert notification_store.delete_channel(ch.id) is True
 
 
+def test_smtp_password_is_encrypted_at_rest(tmp_path, monkeypatch):
+    from services import notification_store
+
+    monkeypatch.setenv("DATAFLOW_NOTIFICATION_STORE", str(tmp_path / "notifications.json"))
+    ch = notification_store.create_channel(
+        workspace_id="ws-1",
+        kind="email",
+        label="SMTP",
+        config={"smtp_password": "super-secret-mail", "host": "smtp.example.com"},
+    )
+    stored = notification_store.get_channel(ch.id)
+    assert stored
+    assert stored.config["smtp_password"] != "super-secret-mail"
+    decrypted = notification_store.get_channel_decrypted(ch.id)
+    assert decrypted
+    assert decrypted.config["smtp_password"] == "super-secret-mail"
+
+
 def test_build_job_payload():
     from services.notification_service import build_job_payload
 
