@@ -541,9 +541,14 @@ async def get_preflight_run(run_id: str):
 
 
 class ExplainRequest(BaseModel):
-    """A preflight result to explain (as returned by POST /preflight/run)."""
+    """A preflight result to explain (as returned by POST /preflight/run).
 
-    preflight: dict[str, Any] = Field(..., description="Full preflight result dict")
+    Prefer ``run_id`` plus a slimed payload. The full Validate result is not
+    required and must not be posted after a 1M-row scan (nginx client_temp warn).
+    """
+
+    preflight: dict[str, Any] = Field(default_factory=dict, description="Slimed preflight result dict")
+    run_id: str | None = None
     dest_type: str | None = None
     validation_mode: str = "strict"
     use_llm: bool = Field(True, description="Reuse Datawrap Pilot LLM for a natural-language narrative when available")
@@ -558,11 +563,19 @@ async def explain_preflight(body: ExplainRequest):
     ``suggested_actions``. Works deterministically offline; reuses the Data
     Pilot LLM only to add a friendlier narrative when a provider is configured.
     """
-    from services.validation_assistant import explain_validation
+    from services.validation_assistant import explain_validation, slim_preflight_for_explain
 
+    payload = body.preflight if isinstance(body.preflight, dict) else {}
+    run_id = str(body.run_id or payload.get("run_id") or "").strip()
+    if run_id and not payload.get("blockers") and "passed" not in payload:
+        from services.preflight_run_store import get_preflight_run as _get
+
+        record = _get(run_id)
+        if isinstance(record, dict):
+            payload = record.get("result") or record.get("preflight") or record
     try:
         return explain_validation(
-            body.preflight,
+            slim_preflight_for_explain(payload),
             dest_kind=(body.dest_type or "").lower(),
             validation_mode=body.validation_mode,
             use_llm=body.use_llm,

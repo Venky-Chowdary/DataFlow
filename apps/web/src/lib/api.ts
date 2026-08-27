@@ -11,6 +11,7 @@ import type {
   ShapeProfileResponse,
   ShapeRecipeWire,
 } from "./shape";
+import { slimPreflightForExplain } from "./slimPreflightForExplain";
 
 export { refusalSentence };
 
@@ -473,10 +474,17 @@ export async function explainPreflight(payload: {
   validation_mode?: string;
   use_llm?: boolean;
 }): Promise<import("./types").ValidationExplanation> {
+  const slimed = slimPreflightForExplain(payload.preflight);
   const res = await apiFetch(`${API_BASE}/preflight/explain`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ use_llm: true, ...payload }),
+    body: JSON.stringify({
+      use_llm: true,
+      dest_type: payload.dest_type,
+      validation_mode: payload.validation_mode,
+      run_id: slimed.run_id,
+      preflight: slimed,
+    }),
     timeoutMs: LONG_REQUEST_TIMEOUT_MS,
   });
   if (!res.ok) throw new Error(await parseApiError(res, "Explain failed"));
