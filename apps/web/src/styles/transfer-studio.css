@@ -2849,7 +2849,6 @@ th.df2-type-string .df2-type-badge {
 .df2-page-transfer-studio .df2-transfer-step-viewport > .df2-card-footer.df2-wizard-footer .df2-btn,
 .df2-page-transfer-studio .df2-map-step-panel > .df2-card-footer.df2-wizard-footer .df2-btn,
 .df2-page-transfer-studio .df2-validate-step > .df2-card-footer.df2-wizard-footer .df2-btn,
-.df2-page-transfer-studio .df2-dest-step .df2-card-footer.df2-wizard-footer .df2-btn,
 .df2-page-transfer-studio .df2-wizard-footer .df2-btn,
 .df2-page-transfer-studio .df2-validate-footer-actions .df2-btn {
   min-height: 32px !important;

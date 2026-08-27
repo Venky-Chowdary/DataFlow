@@ -500,7 +500,9 @@ export function DestinationAdvancedDrawer({
               className="df2-input df2-select"
               value={deliveryGuarantee}
               onChange={(e) => {
-                const next = e.target.value === "exactly_once" ? "exactly_once" : "at_least_once";
+                const next = e.target.value === "exactly_once" && exactlyOnceWired
+                  ? "exactly_once"
+                  : "at_least_once";
                 onDeliveryGuaranteeChange?.(next);
                 if (next === "exactly_once" && allowAppendOnly) {
                   onAllowAppendOnlyChange?.(false);
@@ -509,8 +511,10 @@ export function DestinationAdvancedDrawer({
               disabled={!onDeliveryGuaranteeChange}
             >
               <option value="at_least_once">at_least_once — default upsert (PK + _df_lsn)</option>
-              <option value="exactly_once">
-                exactly_once — dest-owned watermark + shared-log bundle (opt-in)
+              <option value="exactly_once" disabled={!exactlyOnceWired}>
+                {exactlyOnceWired
+                  ? "exactly_once — dest-owned watermark + shared-log bundle (opt-in)"
+                  : "exactly_once — not available (this destination is not transactional)"}
               </option>
             </select>
             <small className="df2-label-hint">

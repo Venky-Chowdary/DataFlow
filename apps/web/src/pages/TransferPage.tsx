@@ -688,6 +688,15 @@ export function TransferPage({
     }
   }, [writeViaStagingSupported, writeViaStaging]);
 
+  useEffect(() => {
+    if (
+      deliveryGuarantee === "exactly_once"
+      && !exactlyOnceWiredDest(destDriverType || destType)
+    ) {
+      setDeliveryGuarantee("at_least_once");
+    }
+  }, [deliveryGuarantee, destDriverType, destType]);
+
   const applyVectorRoutingPlan = (plan: VectorRoutingPlan) => {
     if (plan.content_column) setVectorContentColumn(plan.content_column);
     if (plan.embedding_column) setVectorEmbeddingColumn(plan.embedding_column);
@@ -1248,6 +1257,9 @@ export function TransferPage({
       number_locale: numberLocale,
       backfill_new_fields: backfillNewFields,
       write_via_staging: writeViaStaging,
+      priority_column: priorityColumn || "",
+      priority_direction: priorityColumn ? priorityDirection : "desc",
+      row_limit: rowLimit > 0 ? rowLimit : 0,
       stream_contracts: streamContracts,
       ...(() => {
         const bind = contractBindFromPolicies({
@@ -1288,6 +1300,9 @@ export function TransferPage({
     numberLocale,
     backfillNewFields,
     writeViaStaging,
+    priorityColumn,
+    priorityDirection,
+    rowLimit,
     streamContracts,
     connectorId,
     destType,
@@ -4376,6 +4391,9 @@ export function TransferPage({
           acknowledgment_actor: ackActor || undefined,
           acknowledgment_reason: ackReason || undefined,
           write_via_staging: writeViaStaging,
+          priority_column: priorityColumn || undefined,
+          priority_direction: priorityColumn ? priorityDirection : undefined,
+          row_limit: rowLimit > 0 ? rowLimit : undefined,
           source_kind: sourceKind,
           source_type: resolveDriverType(sourceConnector?.type || "") || undefined,
           ...(parsed?.file_id ? { source_file_id: parsed.file_id } : {}),

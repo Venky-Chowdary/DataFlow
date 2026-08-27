@@ -467,6 +467,13 @@ describe("Transfer Studio chrome contracts", () => {
     assert.match(constants, /does not CREATE a new table and does not ALTER/);
     assert.match(dash, /populationRowsScanned/);
     assert.match(dash, /populationExact \? "population" : "scanned"/);
+    assert.doesNotMatch(
+      css,
+      /\.df2-dest-step \.df2-card-footer\.df2-wizard-footer \.df2-btn,[\s\S]{0,200}height:\s*32px !important/,
+    );
+    const drawer = readFileSync(join(webRoot, "components/transfer/DestinationAdvancedDrawer.tsx"), "utf8");
+    assert.match(drawer, /exactly_once" disabled=\{!exactlyOnceWired\}/);
+    assert.match(page, /row_limit: rowLimit > 0 \? rowLimit : undefined/);
   });
 
   it("Destination saved/new lists nest-scroll above the wizard footer", () => {
