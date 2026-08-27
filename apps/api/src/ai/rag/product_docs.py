@@ -12,6 +12,7 @@ an answer can be checked against the article it came from.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from functools import lru_cache
@@ -34,6 +35,22 @@ GROUNDING_FLOOR = 0.55
 # question's terms is the strongest signal an operator's own eye uses, so ranking
 # blends it in — and down-weights hits that cover little of the question.
 TITLE_WEIGHT = 3.0
+
+# Definitional asks ("what is quarantine") must not lose to a long Procedure
+# section just because the procedure also says the word. FAQ / core-gate
+# headings are the section an operator's eye would open first.
+_DEFINITIONAL_QUERY = re.compile(
+    r"\b(?:what\s+(?:is|are|does)|what'?s|mean(?:ing)?)\b",
+    re.I,
+)
+_SKIP_HELP_LINE = ("Where:", "Tip:", "Note:")
+_SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+")
+_GATE_LINE = re.compile(r"^G\d+\b")
+_STEP_HEADING = re.compile(
+    r"^(Open the |Look for |Review |Return to |Click |Fix and |Remediate |"
+    r"Use this path|Copy the |Paste into |Expand the |Add the )",
+    re.I,
+)
 
 
 @dataclass(frozen=True)
@@ -123,6 +140,71 @@ def _title_coverage(chunk: ProductDocChunk, terms: Sequence[str]) -> float:
     return sum(1 for t in terms if t in heading) / len(terms)
 
 
+def _section_intent_bonus(chunk: ProductDocChunk, query: str) -> float:
+    """Prefer a definition / core-gate card over a procedure dump for FAQ asks."""
+    title = (chunk.section_title or "").strip().lower()
+    bonus = 0.0
+    if title.startswith("procedure:"):
+        bonus -= 2.8
+    if title.startswith(("what is", "what are", "do ")):
+        bonus += 3.2
+    if "core gates" in title:
+        bonus += 3.0
+    if _DEFINITIONAL_QUERY.search(query or ""):
+        if title.startswith("procedure:"):
+            bonus -= 1.5
+        if "core gates" in title or title.startswith("what is"):
+            bonus += 1.5
+    return bonus
+
+
+def spoken_doc_excerpt(text: str, section_title: str = "", *, max_sentences: int = 3) -> str:
+    """First definition sentences plus named G1–G9 cards — not Where:/Tip: steps."""
+    body = (text or "").strip()
+    title = (section_title or "").strip()
+    if title and (
+        body == title
+        or body.startswith(title + "\n")
+        or body.startswith(title + " ")
+    ):
+        body = body[len(title):].strip()
+    sentences: list[str] = []
+    gates: list[str] = []
+    for raw in body.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        if line.startswith(_SKIP_HELP_LINE):
+            continue
+        if line.startswith("{") or line.startswith(("GET ", "POST ", "PUT ", "DELETE ")):
+            continue
+        if _GATE_LINE.match(line):
+            gates.append(line.rstrip("."))
+            continue
+        if not any(ch in line for ch in ".!?") and len(line.split()) <= 8:
+            if _STEP_HEADING.match(line) or ":" not in line:
+                continue
+        for piece in _SENTENCE_SPLIT.split(line):
+            piece = piece.strip()
+            if not piece or piece.startswith(_SKIP_HELP_LINE):
+                continue
+            if not piece.endswith((".", "!", "?")):
+                piece += "."
+            sentences.append(piece)
+            if len(sentences) >= max_sentences and not gates:
+                break
+        if len(sentences) >= max_sentences and not gates:
+            break
+    out = " ".join(sentences[:max_sentences]).strip()
+    if gates:
+        gate_bit = " ".join(
+            g if g.endswith((".", "!", "?")) or "—" in g else f"{g}."
+            for g in gates[:9]
+        )
+        out = f"{out} {gate_bit}".strip()
+    return out
+
+
 def product_doc_search(
     query: str,
     limit: int = 5,
@@ -139,6 +221,7 @@ def product_doc_search(
             continue
         rank = hit.score * (0.4 + 0.6 * hit.grounding)
         rank += TITLE_WEIGHT * _title_coverage(chunk, terms)
+        rank += _section_intent_bonus(chunk, query)
         ranked.append(
             (
                 rank,
@@ -188,13 +271,13 @@ def nearest_articles(query: str, limit: int = 3) -> list[str]:
 
 
 def compose_documented_answer(hits: Sequence[ProductDocHit], max_sections: int = 2) -> str:
-    """Answer text quoted from the cited sections, so wording never drifts from the docs."""
+    """Spoken answer quoted from the cited sections — definition, not the procedure dump."""
     parts: list[str] = []
     for hit in hits[:max_sections]:
         chunk = hit.chunk
-        body = chunk.text
-        if body.startswith(chunk.section_title):
-            body = body[len(chunk.section_title):].strip()
+        body = spoken_doc_excerpt(chunk.text, chunk.section_title)
+        if not body:
+            continue
         parts.append(f"**{chunk.section_title}** — {body}")
     cited = " · ".join(hit.chunk.citation for hit in hits[:max_sections])
     if cited:

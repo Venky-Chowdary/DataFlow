@@ -551,10 +551,10 @@ def _unmapped_intent_reply(message: str, ctx: dict[str, Any]) -> str:
 
 
 def _llm_unavailable_footnote(engine: str, method: str) -> str:
-    """Only when operator explicitly opted into hybrid/cloud polish."""
+    """Hybrid footnote only on greeting — never after every workspace answer."""
     if engine not in {"hybrid", "cloud"}:
         return ""
-    if method not in {"pilot_local_engine", "greeting"}:
+    if method != "greeting":
         return ""
     try:
         from ..llm.provider import _AUTH_FAILED_PROVIDERS, pick_narration_provider
@@ -1005,13 +1005,17 @@ class DataPilotAgent:
             break
 
         # Suggestions with no active dataset → list uploads so the operator can pick.
+        # Skip when a Help FAQ already answered (gates / quarantine / append).
         for tr in list(turn.tool_results):
             if tr.name != "profile_quality_rules" or not tr.success:
                 continue
             cols = int((tr.output or {}).get("column_count") or 0)
             if cols > 0:
                 continue
-            if "list_datasets" not in {t.name for t in turn.tool_results}:
+            names = {t.name for t in turn.tool_results}
+            if "explain_product" in names:
+                continue
+            if "list_datasets" not in names:
                 ds = self.tools.execute("list_datasets", {})
                 turn.tool_results.append(ds)
                 self._append_tool_actions(turn, ds)
@@ -2118,7 +2122,13 @@ Respond as Datawrap Pilot — grounded in tool results."""
                 else:
                     parts.append("No data contracts yet. Open **Contracts** to define one.")
             elif tr.name == "list_datasets" and tr.success:
-                datasets = tr.output.get("datasets", [])
+                from .tools import looks_like_index_dump_name
+
+                datasets = [
+                    ds
+                    for ds in (tr.output.get("datasets") or [])
+                    if ds.get("name") and not looks_like_index_dump_name(str(ds.get("name")))
+                ]
                 if datasets:
                     lines = [f"I have **{len(datasets)} datasets** indexed:"]
                     for ds in datasets[:6]:
@@ -2256,6 +2266,12 @@ Respond as Datawrap Pilot — grounded in tool results."""
                 o = tr.output or {}
                 rules = o.get("rules") or []
                 cols = int(o.get("column_count") or 0)
+                sibling_docs = any(
+                    t.name == "explain_product" and t.success
+                    for t in turn.tool_results
+                )
+                if sibling_docs and cols <= 0:
+                    continue
                 if cols <= 0:
                     gates = o.get("preflight_gates") or []
                     gate_line = (
@@ -2588,7 +2604,13 @@ Respond as Datawrap Pilot — grounded in tool results."""
                     lines.append("**Not yet from chat:**")
                     for item in cannot[:3]:
                         lines.append(f"• {item}")
-                ds = o.get("datasets") or []
+                from .tools import looks_like_index_dump_name
+
+                ds = [
+                    d
+                    for d in (o.get("datasets") or [])
+                    if d.get("name") and not looks_like_index_dump_name(str(d.get("name")))
+                ]
                 if ds:
                     lines.append(
                         "**Indexed datasets:** "
@@ -2596,7 +2618,8 @@ Respond as Datawrap Pilot — grounded in tool results."""
                     )
                 else:
                     lines.append(
-                        "**Indexed datasets:** none yet — upload in **New Transfer** and I can profile them."
+                        "**Indexed datasets:** none named yet — upload in **New Transfer** "
+                        "and I can profile them. Hash-prefixed fixture files stay off this card."
                     )
                 conns = o.get("connectors") or []
                 if conns:
@@ -2910,15 +2933,11 @@ Navigate to any screen when asked (including schedules/pipelines, contracts, que
     def _starter_prompts(self) -> list[str]:
         datasets = self.analyst.list_datasets()
         prompts = []
-        for d in datasets[:4]:
+        from .tools import looks_like_index_dump_name
+
+        for d in datasets[:8]:
             name = str(d.get("name") or "")
-            # Skip RAG/catalog junk that looks like hash ids or synonym dumps.
-            low = name.lower()
-            if (
-                "synonym" in low
-                or "industry schema" in low
-                or len(name) >= 20 and all(c in "0123456789abcdef" for c in name.replace("-", "").replace("_", "")[:16])
-            ):
+            if looks_like_index_dump_name(name):
                 continue
             label = name.replace("sample_", "").replace("_", " ")
             if label and len(label) < 40:

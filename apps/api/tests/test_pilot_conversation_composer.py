@@ -146,6 +146,26 @@ def test_summarize_and_explain_are_extractive():
     assert "I only report" in plain
 
 
+def test_summarize_help_dump_stays_grammatical():
+    dump = (
+        "**Procedure: inspect quarantine** — Quarantine means bad values were "
+        "isolated with column, value, and reason — never silently dropped.\n"
+        "Open the job\n"
+        "Look for Quarantine status or a non-zero rejected count in the stats strip.\n"
+        "Where: Operations → Jobs → select run\n"
+        "Source: Job Theater & reconciliation → Procedure: inspect quarantine (Help)\n\n"
+        "— Optional narration polish is off (no Ollama/cloud provider ready)."
+    )
+    short = summarize_text(dump)
+    assert "never silently dropped" in short
+    assert "Open the job Look for" not in short
+    assert "Where:" not in short
+    assert "Optional narration" not in short
+    plain = explain_simpler(dump)
+    assert "documented meaning" in plain
+    assert "I only report" not in plain
+
+
 def test_next_action_prefers_confirm_then_attention():
     pending = compose_next_action(pending_labels=["Start transfer"])
     assert "Confirm" in pending
@@ -191,6 +211,15 @@ def test_infer_tools_briefing_and_general():
 
     names = [n for n, _ in infer_tools_from_message("what is the capital of France")]
     assert "search_knowledge" not in names
+
+    # Definitional FAQ — Help, not hashed-upload inventory.
+    names = [n for n, _ in infer_tools_from_message("what does quarantine mean")]
+    assert "explain_product" in names
+    assert "list_datasets" not in names
+
+    names = [n for n, _ in infer_tools_from_message("what are the preflight gates")]
+    assert "explain_product" in names or "profile_quality_rules" in names
+    assert "list_datasets" not in names
 
 
 def test_brief_workspace_is_permissioned_like_other_reads():

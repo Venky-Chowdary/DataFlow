@@ -1441,6 +1441,7 @@ class DataPilotTools:
                 "datasets": [
                     {"name": d.get("name"), "columns": d.get("column_count"), "rows": d.get("row_count")}
                     for d in datasets
+                    if d.get("name") and not looks_like_index_dump_name(str(d.get("name")))
                 ],
                 "connectors": [
                     {"name": c.get("name"), "type": c.get("type")}
@@ -2563,9 +2564,9 @@ def _looks_like_product_howto(lower: str) -> bool:
         return False
     howto = bool(
         re.search(
-            r"\b(?:what is|what'?s|what are|how do i|how does|how to|explain|"
+            r"\b(?:what is|what'?s|what are|what does|what do|how do i|how does|how to|explain|"
             r"tell me (?:everything |more )?about|where (?:do|can) i|can i|"
-            r"what makes|remind me|"
+            r"what makes|remind me|meaning of|"
             r"do i need|is .+ dangerous|how is)\b",
             text,
         )
@@ -2956,6 +2957,18 @@ _TOOL_PRIORITY: dict[str, int] = {
     "explain_product": 6,
 }
 
+def looks_like_index_dump_name(name: str) -> bool:
+    """Hash-prefixed upload / synonym shards — never speak these as dataset names."""
+    label = str(name or "").strip()
+    if not label:
+        return True
+    low = label.lower()
+    if "synonym" in low or "industry schema" in low:
+        return True
+    head = label.replace("-", "").replace("_", "")[:16]
+    return len(label) >= 16 and all(c in "0123456789abcdef" for c in head.lower())
+
+
 _LIVE_SCHEMA_TOOLS = frozenset({
     "map_connector_schemas",
     "diff_schemas",
@@ -3016,6 +3029,14 @@ def prune_planned_tools(planned: list[tuple[str, dict]]) -> list[tuple[str, dict
         names = {n for n, _ in planned}
     # A concrete transfer already contains the mapping, gates and route, so the
     # generic advice tools beside it are redundant noise.
+    # A product FAQ already answers from Help. Companion quality/dataset dumps
+    # (156 hashed uploads next to "what are the preflight gates") are noise.
+    if "explain_product" in names:
+        planned = [
+            (n, a) for n, a in planned
+            if n not in ("list_datasets", "analyze_dataset", "search_data", "compare_datasets")
+        ]
+        names = {n for n, _ in planned}
     if names & {"start_transfer", "plan_transfer", "create_schedule"}:
         planned = [
             (n, a) for n, a in planned

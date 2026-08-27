@@ -10,6 +10,7 @@ and not a JSON pretty-print.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from .agent import CopilotResponse
@@ -176,6 +177,66 @@ def compose_general(message: str, ctx: dict[str, Any] | None = None) -> str:
     )
 
 
+_SKIP_SUMMARY_LINE = (
+    "Where:",
+    "Tip:",
+    "Note:",
+    "Source:",
+    "Optional narration polish",
+    "Optional cloud polish",
+    "Local Datawrap Pilot still answered",
+    "_On your last ask",
+)
+_SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+")
+_STEP_HEADING = re.compile(
+    r"^(Open the |Look for |Review |Return to |Click |Fix and |Remediate |"
+    r"Use this path|I can suggest|Enterprise rules|Indexed datasets)",
+    re.I,
+)
+
+
+def _strip_markdown_decor(text: str) -> str:
+    t = (text or "").strip()
+    t = re.sub(r"^\*\*Short version:\*\*\s*", "", t)
+    t = re.sub(r"^_On your last ask[^\n]*\n+", "", t)
+    return t.strip()
+
+
+def _summary_sentences(text: str, *, max_sentences: int) -> list[str]:
+    """Real sentences only — never smash 'Open the job Look for' across newlines."""
+    raw = _strip_markdown_decor(text)
+    sentences: list[str] = []
+    for raw_line in raw.replace("\n• ", "\n").replace("\n- ", "\n").splitlines():
+        line = raw_line.strip().strip("-• ")
+        if not line:
+            continue
+        if any(line.startswith(p) or p in line[:40] for p in _SKIP_SUMMARY_LINE):
+            continue
+        if line.startswith("**") and line.endswith("**") and "—" not in line:
+            # Section heading leftover: **I can:**
+            continue
+        if not any(ch in line for ch in ".!?") and len(line.split()) <= 8:
+            if _STEP_HEADING.match(line.lstrip("*")) or "—" not in line:
+                continue
+        # Lead "Title — definition" is one spoken sentence.
+        if " — " in line and line.startswith("**"):
+            after = line.split(" — ", 1)[1].strip()
+            if after:
+                line = after
+        for piece in _SENTENCE_SPLIT.split(line):
+            piece = piece.strip().strip("*")
+            if not piece or any(piece.startswith(p) for p in _SKIP_SUMMARY_LINE):
+                continue
+            if _STEP_HEADING.match(piece) and len(piece.split()) <= 10:
+                continue
+            if not piece.endswith((".", "!", "?")):
+                piece += "."
+            sentences.append(piece)
+            if len(sentences) >= max_sentences:
+                return sentences
+    return sentences
+
+
 def summarize_text(text: str, *, max_sentences: int = 2) -> str:
     """Extractive short version of the last answer — no new claims."""
     raw = (text or "").strip()
@@ -184,13 +245,12 @@ def summarize_text(text: str, *, max_sentences: int = 2) -> str:
             "I don't have a previous answer to summarize. Ask me something "
             "about the workspace first."
         )
-    # Drop markdown bullets into sentences.
-    cleaned = raw.replace("\n• ", ". ").replace("\n- ", ". ").replace("\n", " ")
-    parts = [p.strip() for p in cleaned.replace("..", ".").split(".") if p.strip()]
+    parts = _summary_sentences(raw, max_sentences=max_sentences)
     if not parts:
-        return raw[:280]
-    picked = ". ".join(parts[:max_sentences]).strip()
-    if not picked.endswith("."):
+        cleaned = raw.replace("\n", " ")
+        return f"**Short version:** {cleaned[:280].rstrip()}."
+    picked = " ".join(parts).strip()
+    if not picked.endswith((".", "!", "?")):
         picked += "."
     return f"**Short version:** {picked}"
 
@@ -203,6 +263,14 @@ def explain_simpler(text: str) -> str:
             "pipeline, or table and I'll explain it in plain language."
         )
     short = summarize_text(raw, max_sentences=3)
+    documented = "Source:" in raw or "(Help)" in raw
+    if documented:
+        return (
+            f"{short}\n\n"
+            "In plain terms: that is the documented meaning — I did not add a "
+            "new claim. Ask *what should I do next?* for the operator move, or "
+            "name a job if you want to inspect a live run."
+        )
     return (
         f"{short}\n\n"
         "In plain terms: I only report what the workspace stores or what a "

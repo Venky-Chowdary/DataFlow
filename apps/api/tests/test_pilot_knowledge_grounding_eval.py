@@ -145,6 +145,67 @@ def test_pilot_chat_knowledge_fixture_pass_rate():
     )
 
 
+def test_pilot_spoken_english_on_named_faq_fixture():
+    """Named-fixture English bar: spoken definition, cited, no procedure smash."""
+    agent = DataPilotAgent()
+    rows: list[tuple[str, bool, str]] = []
+
+    q = "what does quarantine mean"
+    resp = agent.chat(q)
+    answer = resp.answer or ""
+    ok = (
+        "never silently dropped" in answer
+        and "Source:" in answer
+        and "Where:" not in answer
+        and "Open the job" not in answer
+        and "731c8bbc" not in answer
+        and "Optional narration polish" not in answer
+        and "list_datasets" not in {t.get("name") for t in (resp.tools_used or [])}
+    )
+    rows.append((q, ok, answer[:160]))
+
+    q = "what are the preflight gates"
+    resp = agent.chat(q)
+    answer = resp.answer or ""
+    used = {t.get("name") for t in (resp.tools_used or [])}
+    ok = (
+        "G1 " in answer
+        and "Source:" in answer
+        and "Where:" not in answer
+        and "156 datasets" not in answer
+        and "731c8bbc" not in answer
+        and "no active dataset" not in answer
+        and "list_datasets" not in used
+        and "Optional narration polish" not in answer
+    )
+    rows.append((q, ok, answer[:160]))
+
+    hist = [
+        {"role": "user", "content": "what does quarantine mean"},
+        {
+            "role": "assistant",
+            "content": (
+                "**What is quarantine?** — Rows that fail validation during load are "
+                "isolated with the column, value, and reason — never silently dropped.\n\n"
+                "Source: Frequently asked questions → What is quarantine? (Help)"
+            ),
+        },
+    ]
+    recap = agent.chat("summarize that", history=hist)
+    ok = (
+        "never silently dropped" in (recap.answer or "")
+        and "Open the job Look for" not in (recap.answer or "")
+        and "**Short version:** **" not in (recap.answer or "")
+    )
+    rows.append(("summarize that", ok, (recap.answer or "")[:160]))
+
+    passed = sum(1 for _, ok, _ in rows if ok)
+    assert passed == len(rows), (
+        f"{passed}/{len(rows)} on spoken-English fixture; "
+        f"failed={[n for n, ok, _ in rows if not ok]}"
+    )
+
+
 def test_search_knowledge_never_returns_vector_knowledge_source():
     tools = DataPilotTools()
     for q in DOCUMENTED + OFF_TOPIC + ON_VOCAB_NO_DOC:
