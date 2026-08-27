@@ -4037,12 +4037,14 @@ export function TransferPage({
     setPreflight(null);
     setPreflightError("");
     setValidatedContractKey(null);
+    // Resolved outside try so a transport catch can name the same count
+    // the run already computed — `number | null` is the Studio estimate type.
+    let rowCount = 0;
     try {
       let columns: string[] = [];
       let columnTypes: Record<string, string> = {};
       let mappings: { source: string; target: string; confidence: number; reason?: string }[] = [];
       let sampleRows: Record<string, unknown>[] | undefined;
-      let rowCount = 0;
       let estimatedBytes = file?.size ?? 0;
 
       if (sourceKind === "file") {
@@ -4414,7 +4416,10 @@ export function TransferPage({
         }
       } else {
         const raw = e instanceof Error ? e.message : "Validation could not complete.";
-        const message = validateTransportMessage(raw, parsed?.row_count ?? sourceRowEstimate);
+        const message = validateTransportMessage(
+          raw,
+          rowCount > 0 ? rowCount : sourceRowEstimate,
+        );
         setPreflightError(message);
         toast({
           title: isTransportFailure(raw) ? "Validate timed out" : "Preflight failed",

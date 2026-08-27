@@ -177,5 +177,17 @@ describe("validate transport honesty", () => {
     assert.match(msg, /1,000,000 row/);
     assert.match(msg, /Re-run Validate/);
     assert.match(msg, /Execute stays locked/);
+    assert.equal(
+      validateTransportMessage("upstream timed out", null).includes("while checking"),
+      false,
+    );
+    assert.equal(
+      validateTransportMessage("upstream timed out", 0).includes("while checking"),
+      false,
+    );
+    assert.match(
+      validateTransportMessage("Target DDL cannot accept NUMBER(9,6)", null),
+      /Target DDL/,
+    );
   });
 });

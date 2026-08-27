@@ -304,6 +304,7 @@ describe("Transfer Studio chrome contracts", () => {
 
   it("Studio Validate posts async_run and polls GET /preflight off the event loop", () => {
     const api = readFileSync(join(webRoot, "lib/api.ts"), "utf8");
+    const page = readFileSync(join(webRoot, "pages/TransferPage.tsx"), "utf8");
     const router = readFileSync(join(webRoot, "../../api/src/routers/transfer_router.py"), "utf8");
     const job = readFileSync(join(webRoot, "../../api/services/plan_preflight_job.py"), "utf8");
     const nginx = readFileSync(join(webRoot, "../../../deploy/nginx.conf"), "utf8");
@@ -312,6 +313,10 @@ describe("Transfer Studio chrome contracts", () => {
     assert.match(api, /\/transfer\/plans\/\$\{planId\}\/preflight/);
     assert.match(api, /isTransportFailure/);
     assert.match(api, /Control plane timed out \(HTTP \$\{res\.status\}\)/);
+    // Studio estimates are `number | null`. tsc -b fails if the helper only
+    // accepts `number | undefined` (Railway web image).
+    assert.match(api, /rowCount\?: number \| null/);
+    assert.match(page, /rowCount > 0 \? rowCount : sourceRowEstimate/);
     assert.match(router, /async_run:\s*bool\s*=\s*False/);
     assert.match(router, /status_code=202/);
     assert.match(router, /await asyncio\.to_thread/);

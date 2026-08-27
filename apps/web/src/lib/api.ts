@@ -2447,10 +2447,16 @@ export function isTransportFailure(message: string, status?: number): boolean {
   return /timed out|abort|504|502|network|failed to fetch|econnreset/i.test(message);
 }
 
-export function validateTransportMessage(message: string, rowCount?: number): string {
-  const rows = rowCount && rowCount > 0
-    ? ` while checking ${rowCount.toLocaleString()} row(s)`
-    : "";
+export function validateTransportMessage(
+  message: string,
+  rowCount?: number | null,
+): string {
+  // Studio estimates are `number | null`. Optional params are `undefined`.
+  // Do not invent a row count from 0 / null / NaN.
+  const n = typeof rowCount === "number" && Number.isFinite(rowCount) && rowCount > 0
+    ? rowCount
+    : 0;
+  const rows = n > 0 ? ` while checking ${n.toLocaleString()} row(s)` : "";
   if (!isTransportFailure(message)) return message;
   return (
     `Validate did not finish${rows}. The control plane timed out or hung — `
