@@ -11,7 +11,7 @@ circular.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from typing import Any
 
 from .models import EndpointConfig
@@ -74,6 +74,9 @@ def iter_stream_source_column_rows(
     *,
     limit: int = 0,
     chunk_size: int = 0,
+    cursor_column: str = "",
+    cursor_after: str | None = None,
+    cursor_primary_key: str = "",
 ) -> Iterator[dict[str, Any]]:
     """Yield every source row, projected to ``columns``, for a pre-write check.
 
@@ -125,6 +128,11 @@ def iter_stream_source_column_rows(
                 extra["scan_state"] = scan_state
             if total is not None:
                 extra["known_total_rows"] = total
+            if cursor_column:
+                extra["cursor_column"] = cursor_column
+                extra["cursor_after"] = cursor_after
+                if cursor_primary_key:
+                    extra["cursor_primary_key"] = cursor_primary_key
             batch, _ = _unwrap_read(
                 _read_batch(
                     src_type,
@@ -158,3 +166,104 @@ def iter_stream_source_column_rows(
     finally:
         if scan_state is not None:
             close_table_scan(scan_state)
+
+
+def iter_bounded_table_population_rows(
+    source: EndpointConfig,
+    mappings: Any,
+    *,
+    column_types: Mapping[str, str] | None = None,
+    dest_types: Mapping[str, str] | None = None,
+    dest_db: str = "",
+    source_kind: str = "",
+    source_format: str = "",
+    limit: int = 0,
+    shape_runner: Any = None,
+    read_scope: Any = None,
+    source_filter: Mapping[str, Any] | None = None,
+) -> Iterator[dict[str, Any]] | None:
+    """Projected table walk for the same population-fit scan Execute uses.
+
+    Studio Validate used to post a 25–500 row preview. Execute already re-reads
+    the bounded columns. One helper keeps Validate≡Execute: no second query
+    planner.
+
+    Returns ``None`` when this reader cannot page independently (cursor sources)
+    or the table name is missing — callers must then use the preview, never
+    claim an empty population. An empty iterator is a real empty table.
+    Exceptions propagate so Validate can fall back instead of going silent.
+    """
+    from .connector_capabilities import resolve_driver_type
+    from .stream import _source_name
+    from services.population_fit_scan import bounded_targets
+
+    targets, _undecidable, _safe = bounded_targets(
+        mappings,
+        dest_types=dest_types,
+        source_types=column_types,
+        dest_db=dest_db,
+        source_kind=source_kind or getattr(source, "kind", "") or "",
+        source_format=source_format or getattr(source, "format", "") or "",
+    )
+    wanted = sorted({t.source for t in targets if t.source})
+    if not wanted:
+        return iter(())
+    src_type = resolve_driver_type(source.format or "")
+    if src_type not in _OFFSET_PAGEABLE:
+        return None
+    if not _source_name(source):
+        return None
+    columns = (
+        sorted({str(c) for c in shape_runner.recipe.input_columns})
+        if shape_runner is not None
+        else wanted
+    )
+    cursor_column = ""
+    cursor_after = None
+    cursor_pk = ""
+    if read_scope is not None and getattr(read_scope, "bounded", False):
+        cursor_column = str(getattr(read_scope, "cursor_column", "") or "")
+        cursor_after = getattr(read_scope, "watermark", None)
+        cursor_pk = str(getattr(read_scope, "primary_key", "") or "")
+        for extra_col in (cursor_column, cursor_pk):
+            if extra_col and extra_col not in columns:
+                columns = [*columns, extra_col]
+    if source_filter:
+        from services.row_filter import filter_columns
+
+        for extra_col in filter_columns(dict(source_filter)):
+            if extra_col and extra_col not in columns:
+                columns = [*columns, extra_col]
+
+    def _walk() -> Iterator[dict[str, Any]]:
+        rows = iter_stream_source_column_rows(
+            source,
+            columns,
+            limit=limit,
+            cursor_column=cursor_column,
+            cursor_after=cursor_after,
+            cursor_primary_key=cursor_pk,
+        )
+        if source_filter:
+            from services.row_filter import iter_filtered_rows
+
+            filtered = iter_filtered_rows(rows, dict(source_filter))
+            if filtered is not None:
+                rows = filtered
+        if shape_runner is not None:
+            from services.shape_apply import ShapeRunner
+
+            probe = ShapeRunner(shape_runner.recipe)
+            for row in rows:
+                shaped = probe.records([dict(row)])
+                if shaped:
+                    yield shaped[0]
+            return
+        yield from rows
+
+    from services.sync_cursor import iter_rows_after_watermark
+
+    walked = _walk()
+    if read_scope is not None and getattr(read_scope, "bounded", False):
+        return iter_rows_after_watermark(walked, read_scope, keep_unreadable=True)
+    return walked

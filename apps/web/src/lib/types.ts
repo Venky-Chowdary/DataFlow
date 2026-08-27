@@ -567,6 +567,8 @@ export interface WorkbookSheet {
 export interface ParsedUpload {
   row_count: number;
   columns: string[];
+  /** Persisted upload id — Validate scans this population, not just the preview. */
+  file_id?: string;
   file_type?: string;
   /** Sheet inventory for workbooks, so a sheet is picked from the real names. */
   sheets?: WorkbookSheet[];
@@ -1087,7 +1089,7 @@ export interface PreflightResult {
     create_new?: boolean;
     assignment_strategy?: string;
   }>;
-  /** Canonical Kernel ValidationFinding dicts (coercion → findings SSOT). */
+  /** Canonical Kernel ValidationFinding dicts (coercion + population-fit SSOT). */
   validation_findings?: Array<Record<string, unknown>>;
   /** G13/G14/G15 mapping contract — extras, dest-only, write_by=name. */
   source_coverage?: {
@@ -1145,6 +1147,9 @@ export interface PreflightResult {
       example_values?: string[];
       aborts_job?: boolean;
       reason?: string;
+      unfit_reason?: string;
+      suggested_target_type?: string;
+      suggested_fix?: string;
     }>;
     undecidable_columns?: string[];
     safe_by_declaration?: string[];

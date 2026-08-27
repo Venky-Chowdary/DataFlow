@@ -138,6 +138,44 @@ def _matches(record: dict[str, Any], spec: dict[str, Any]) -> bool:
     return _compare_values(value, spec.get("value"), op)
 
 
+def filter_columns(spec: dict[str, Any] | None) -> list[str]:
+    """Every column a filter spec reads, so a projected walk still has them.
+
+    A walk that only selected the bounded carriers dropped ``status`` and then
+    judged rows the write had already filtered out.
+    """
+    out: list[str] = []
+    node = spec or {}
+    for key in ("and", "or"):
+        if key in node:
+            for child in node.get(key) or []:
+                out.extend(filter_columns(child))
+            return out
+    col = str(node.get("column") or node.get("field") or "").strip()
+    if col:
+        out.append(col)
+    return out
+
+
+def iter_filtered_rows(rows, spec: dict[str, Any] | None):
+    """Yield rows that satisfy ``spec``. Pass-through when there is no filter.
+
+    Streaming counterpart of :func:`apply_row_filter` so a table walk can
+    judge the same subset Execute writes without materialising the table.
+    """
+    if rows is None:
+        return None
+    if not spec:
+        return rows
+
+    def _gen():
+        for rec in rows:
+            if isinstance(rec, dict) and _matches(rec, spec):
+                yield rec
+
+    return _gen()
+
+
 def apply_row_filter(records: list[dict[str, Any]], spec: dict[str, Any] | None) -> list[dict[str, Any]]:
     """Return only records that satisfy ``spec``.
 

@@ -82,3 +82,22 @@ def test_compare_cursor_values_uses_typed_order():
     assert compare_cursor_values("2025-06-01", "2025-01-01") == 1
     assert compare_cursor_values(None, "500") == -1
     assert compare_cursor_values("500", None) == 1
+
+
+def test_incremental_read_narrows_only_delta_modes():
+    from services.sync_cursor import incremental_read_narrows
+
+    assert incremental_read_narrows("incremental_append")
+    assert incremental_read_narrows("incremental_deduped")
+    assert not incremental_read_narrows("cdc")
+    assert not incremental_read_narrows("scd2")
+    assert not incremental_read_narrows("full_refresh_append")
+
+
+def test_row_after_watermark_typed_compare():
+    from services.sync_cursor import row_after_watermark
+
+    assert row_after_watermark({"id": 50}, "id", "100") is False
+    assert row_after_watermark({"id": 101}, "id", "100") is True
+    assert row_after_watermark({"id": None}, "id", "100") is None
+    assert row_after_watermark({"id": 1}, "id", None) is True

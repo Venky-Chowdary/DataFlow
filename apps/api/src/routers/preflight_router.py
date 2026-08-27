@@ -13,7 +13,11 @@ from services.acknowledgment_contract import (
     resolve_acknowledgments,
 )
 from services.preflight_cursor_gate import resolve_read_scope
-from services.shape_preflight import ShapePreflightRefused, shaped_preflight_image
+from services.shape_preflight import (
+    ShapePreflightRefused,
+    shaped_population_rows,
+    shaped_preflight_image,
+)
 
 from ..services.preflight_service import (
     apply_policy_gates,
@@ -122,6 +126,10 @@ class PreflightRequest(BaseModel):
     # Approved pre-load transform recipe. Execute shapes rows on the read, so the
     # gates must judge the transformed image, not the raw source.
     shape_recipe: dict[str, Any] | None = None
+    # Persisted upload from /connectors/upload. Studio posts a preview; when
+    # this id is set, Validate scans the stored population (same bytes Execute
+    # will stream). Browser-local CSV fallback has no file_id — stay sampled.
+    source_file_id: str | None = None
 
 
 def _schema_default(db_type: str) -> str:
@@ -264,6 +272,17 @@ async def run_preflight(body: PreflightRequest):
     source_column_types = shaped_image.column_types
     preflight_sample_rows = shaped_image.sample_rows
 
+    from services.file_parser import iter_stored_upload_rows
+
+    source_file_id = str(body.source_file_id or "").strip()
+    stored_population = iter_stored_upload_rows(source_file_id) if source_file_id else None
+    if stored_population is not None and shaped_image.applied:
+        stored_population = shaped_population_rows(
+            body.shape_recipe,
+            stored_population,
+            source_columns=preflight_columns,
+        )
+
     preflight_mappings = restamp_mapping_source_types(
         [m.model_dump() for m in body.mappings],
         source_column_types,
@@ -349,6 +368,10 @@ async def run_preflight(body: PreflightRequest):
             source_table=(body.source_table or body.source_collection or ""),
             destination_table=(body.dest_table or body.dest_collection or ""),
             source_filename="",
+            source_file_id=source_file_id,
+            population_rows=stored_population,
+            rows_are_population=stored_population is not None,
+            shape_recipe=body.shape_recipe,
             schema_policy=body.schema_policy,
             backfill_new_fields=body.backfill_new_fields,
             contract_primary_key=contract_pk,

@@ -564,6 +564,87 @@ def _is_composite(watermark: str) -> bool:
     return KEYSET_SEP in watermark or "|" in watermark
 
 
+def incremental_read_narrows(sync_mode: str) -> bool:
+    """True when the write reads only rows past the stored watermark.
+
+    SCD2 snapshots the whole source against current destination versions.
+    CDC applies a changelog, not a table rescan. Incremental append/deduped
+    are the modes whose population-fit walk must match the delta — a full
+    table scan false-blocks the second run on historical overflows the
+    write will never re-read.
+    """
+    return normalize_sync_mode(sync_mode, default="") in {
+        "incremental_append",
+        "incremental_deduped",
+    }
+
+
+def row_after_watermark(
+    rec: Any,
+    cursor_column: str,
+    watermark: str | None,
+    *,
+    primary_key: str = "",
+) -> bool | None:
+    """True if ``rec`` is past ``watermark``, False if already landed, None if unreadable.
+
+    One predicate for the batch bound, the collision probe, and the
+    population-fit walk. A missing cursor value is unreadable — callers that
+    write must refuse; callers that only judge keep the row so it cannot
+    silently leave the batch.
+    """
+    col = (cursor_column or "").strip()
+    if not col:
+        return True
+    pk = (primary_key or "").strip()
+    raw = rec.get(col) if isinstance(rec, dict) else None
+    text = present_cell_text(raw)
+    if text is None:
+        return None
+    candidate = text
+    if pk and pk != col:
+        candidate = encode_keyset_bookmark(
+            [candidate, present_cell_text(rec.get(pk) if isinstance(rec, dict) else None) or ""]
+        )
+    if watermark is None:
+        return True
+    return compare_cursor_values(candidate, watermark) > 0
+
+
+def iter_rows_after_watermark(
+    rows: Any,
+    scope: IncrementalReadScope | None,
+    *,
+    keep_unreadable: bool = True,
+):
+    """Yield the rows an incremental write will deliver.
+
+    Historical rows (``cursor <= watermark``) are dropped. Unreadable cursor
+    cells stay in the stream when ``keep_unreadable`` so a checker cannot
+    shrink the batch it is judging. Pass-through when the scope is not bounded.
+    """
+    if rows is None:
+        return None
+    if scope is None or not scope.bounded:
+        return rows
+
+    def _gen():
+        for rec in rows:
+            verdict = row_after_watermark(
+                rec,
+                scope.cursor_column,
+                scope.watermark,
+                primary_key=scope.primary_key,
+            )
+            if verdict is False:
+                continue
+            if verdict is None and not keep_unreadable:
+                continue
+            yield rec
+
+    return _gen()
+
+
 def records_after_watermark(
     records: list[dict[str, Any]],
     cursor_column: str,
@@ -588,21 +669,16 @@ def records_after_watermark(
     col = (cursor_column or "").strip()
     if not col:
         return list(records), 0
-    pk = (primary_key or "").strip()
     delta: list[dict[str, Any]] = []
     unbounded = 0
     for rec in records:
-        raw = rec.get(col)
-        text = present_cell_text(raw)
-        if text is None:
+        verdict = row_after_watermark(
+            rec, cursor_column, watermark, primary_key=primary_key
+        )
+        if verdict is None:
             unbounded += 1
             continue
-        candidate = text
-        if pk and pk != col:
-            candidate = encode_keyset_bookmark(
-                [candidate, present_cell_text(rec.get(pk)) or ""]
-            )
-        if watermark is None or compare_cursor_values(candidate, watermark) > 0:
+        if verdict:
             delta.append(rec)
     return delta, unbounded
 

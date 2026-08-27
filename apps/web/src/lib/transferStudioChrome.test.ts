@@ -586,4 +586,40 @@ describe("Transfer Studio chrome contracts", () => {
     assert.doesNotMatch(localEx, /replace\(\/,\/g/);
     assert.doesNotMatch(localTx, /replace\(\/,\/g/);
   });
+
+  it("Validate Remap reads kernel findings; population-fit honesty names the dest widen", () => {
+    const dash = readFileSync(join(webRoot, "components/transfer/ValidateDashboard.tsx"), "utf8");
+    const types = readFileSync(join(webRoot, "lib/types.ts"), "utf8");
+    const fit = readFileSync(join(webRoot, "lib/populationFit.ts"), "utf8");
+    assert.match(dash, /Prefer Decision Kernel validation_findings/);
+    assert.match(dash, /suggestedTargetType/);
+    assert.match(dash, /widen \$\{o\.column\} to \$\{o\.suggestedTargetType\}/);
+    assert.match(fit, /suggestedTargetType: String\(f\.suggested_target_type/);
+    assert.match(types, /suggested_target_type\?: string;/);
+    assert.match(types, /suggested_fix\?: string;/);
+    // Existing Remap CTA is the only primary — do not add a second teal for fit.
+    assert.doesNotMatch(dash, /dashCta\("population/);
+    assert.doesNotMatch(dash, /variant="primary"[\s\S]{0,120}widen to NUMBER/);
+    const page = readFileSync(join(webRoot, "pages/TransferPage.tsx"), "utf8");
+    const api = readFileSync(join(webRoot, "lib/api.ts"), "utf8");
+    assert.match(page, /isNumericWiden/);
+    assert.match(page, /must not dump clock\/money values into/);
+    // Studio Validate must send the persisted upload so the scan is not preview-only.
+    assert.match(page, /source_file_id: parsed\??\.file_id/);
+    // Table Validate must send connector + table so the shared walk can run.
+    assert.match(page, /sourceKind === "cloud"/);
+    assert.match(page, /cloudPath\.trim\(\)/);
+    assert.match(page, /source_config: isConnectorSource && \(sourceKind === "database" \|\| sourceKind === "cloud"\)/);
+    assert.match(page, /file_id: parsed\??\.file_id/);
+    assert.match(page, /!file && !parsed\?\.file_id/);
+    assert.match(page, /file_id: parsed\.file_id/);
+    assert.match(api, /source_file_id/);
+    assert.match(api, /source_file_id\?: string/);
+    assert.match(types, /file_id\?: string;/);
+    // Third overflowing column must still light a Remap control.
+    assert.match(dash, /\.slice\(0, 8\)/);
+    const quarantine = readFileSync(join(webRoot, "components/transfer/QuarantinePanel.tsx"), "utf8");
+    assert.match(quarantine, /suggested_fix/);
+    assert.match(quarantine, /suggested_target_type/);
+  });
 });

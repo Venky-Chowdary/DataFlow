@@ -1,5 +1,11 @@
 # Datawrap — Client Readiness Report
 
+> **2026-08-27 Validate≡Execute wave:** use
+> [`docs/CLIENT_HANDOVER_VALIDATE_EXECUTE.md`](CLIENT_HANDOVER_VALIDATE_EXECUTE.md)
+> for the `flights-1m.csv` → Snowflake incident, operator runbook, and measured
+> population-fit proof. This file remains the prior relational-assurance pack.
+> Do not mix those live-engine counts with the 2026-08-27 scan matrices.
+
 Measured state of the product for a client handover decision. Every claim below
 is backed by a named artifact (live run JSON, pytest node ids, or a file in this
 repository). Where something is unproven or unmeasured it says so; there are no

@@ -93,3 +93,42 @@ def test_explain_type_mismatch_narrative_mentions_remap():
     )
     assert any(a["kind"] == "change_target_type" for a in explained["suggested_actions"])
     assert not any(a["kind"] == "normalize_control_chars" for a in explained["suggested_actions"])
+
+
+def test_population_fit_overflow_reaches_explain_remap():
+    explained = explain_validation(
+        {
+            "passed": False,
+            "gates": [{
+                "id": "g3f_population_fit",
+                "status": "block",
+                "message": "1 value(s) cannot fit NUMBER(9,6)",
+            }],
+            "blockers": [{
+                "id": "g3f_population_fit",
+                "message": "1 value(s) in DEP_TIME do not fit NUMBER(9,6)",
+                "details": {},
+            }],
+            "coercion_report": {"columns": []},
+            "population_fit": {
+                "evidence": "exact",
+                "findings": [{
+                    "source": "DEP_TIME",
+                    "target": "DEP_TIME",
+                    "target_type": "NUMBER(9,6)",
+                    "unfit_rows": 1,
+                    "example_rows": [293],
+                    "example_values": ["7.9166665"],
+                    "suggested_target_type": "NUMBER(10,7)",
+                    "suggested_fix": "Open Map → widen DEP_TIME to NUMBER(10,7)",
+                }],
+            },
+            "destination_table_exists": True,
+        },
+        dest_kind="snowflake",
+        use_llm=False,
+    )
+    assert explained["column_fixes"][0]["suggested_target_type"] == "NUMBER(10,7)"
+    widen = next(a for a in explained["suggested_actions"] if a["kind"] == "change_target_type")
+    assert widen["to_type"] == "NUMBER(10,7)"
+    assert widen["column"] == "DEP_TIME"

@@ -12,6 +12,34 @@ if str(_API_ROOT) not in sys.path:
     sys.path.insert(0, str(_API_ROOT))
 
 
+def test_stored_upload_file_id_hydrates_without_reupload(tmp_path, monkeypatch):
+    """Validate scanned this upload; Execute must stream the same bytes."""
+    from services import file_parser as fp
+    from src.transfer.models import EndpointConfig, TransferRequest
+    from services.transfer_file_staging import (
+        file_source_bytes_available,
+        hydrate_file_source,
+        requires_file_reupload,
+    )
+
+    monkeypatch.setattr(fp, "UPLOAD_DIR", tmp_path)
+    monkeypatch.setattr(fp, "REGISTRY_PATH", tmp_path / "reg.json")
+    record = fp.store_upload("flights.csv", b"DEP_TIME\n12.345678\n7.9166665\n")
+
+    req = TransferRequest(
+        source=EndpointConfig(kind="file", format="csv", extra={"file_id": record["file_id"]}),
+        destination=EndpointConfig(kind="database", format="snowflake", table="TREE"),
+        source_filename="",
+        source_content=b"",
+    )
+    assert requires_file_reupload(req) is False
+    hydrate_file_source(req)
+    assert file_source_bytes_available(req) is True
+    assert Path(req.source_path).is_file()
+    assert req.source_filename == "flights.csv"
+    assert Path(req.source_path).read_bytes().endswith(b"7.9166665\n")
+
+
 def test_content_only_marks_reupload_until_persisted(tmp_path, monkeypatch):
     from services import platform_config
     from src.transfer.models import (

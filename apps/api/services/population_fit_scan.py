@@ -10,8 +10,9 @@ zero rows committed for a defect that was decidable before a single row moved.
 
 This module names the columns whose fit is *decidable but unproven*, scans rows
 with the **same** writer predicates (``fits_decimal`` / ``fits_varchar`` /
-``fits_integer`` — never a second numeric rule set), and reports evidence
-honestly.
+``fits_integer`` / ``coerce_enum_wire`` / ``is_interval_wire`` /
+``coerce_year_wire`` / ``fits_binary`` / ``coerce_bitstring_wire`` — never a
+second numeric or domain rule set), and reports evidence honestly.
 
 Asymmetry is deliberate and load-bearing:
 
@@ -51,6 +52,13 @@ CARRIER_INTEGER = "integer"
 #: the write's own coercion (``apply_transform``), so Validate speaks for them
 #: instead of leaving them to fail at row 1.
 CARRIER_TYPED = "typed"
+#: Closed ENUM/SET membership. Not a width — a *domain* bound. MySQL
+#: non-strict ENUM stores an invalid label as ``''`` (silent wipe). The
+#: write already refuses via ``coerce_enum_wire`` / ``coerce_set_wire``.
+CARRIER_DOMAIN = "domain"
+#: Bounded BIT(n) / VARBIT(n) / BINARY(n) / VARBINARY(n). Silent truncate
+#: and UTF-8 invent into BYTEA are the write refuses this scan names first.
+CARRIER_BYTES = "bytes"
 
 #: Transforms whose parse is cheap, deterministic and row-local enough to run
 #: over a population. JSON/vector/binary payloads are deliberately excluded:
@@ -129,6 +137,8 @@ class ColumnFitFinding:
     #: Writer's own words for the first unfit value — a fractional value and an
     #: out-of-range value are different defects with different remediations.
     unfit_reason: str = ""
+    suggested_target_type: str = ""
+    suggested_fix: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -137,6 +147,8 @@ class ColumnFitFinding:
             "example_rows": list(self.example_rows),
             "example_values": list(self.example_values),
             "unfit_reason": self.unfit_reason,
+            "suggested_target_type": self.suggested_target_type,
+            "suggested_fix": self.suggested_fix,
             "reason": self.reason(),
         }
 
@@ -230,6 +242,29 @@ def _carrier_for(target_type: str, *, dest_db: str) -> str:
 
     if sql_type_is_temporal(typ):
         return CARRIER_TYPED
+    from services.type_system import (
+        interval_family,
+        is_bitstring_carrier,
+        is_year_carrier,
+        normalize_logical_type,
+        parse_binary_carrier_width,
+        parse_bitstring_width,
+        parse_enum_or_set_ordered_members,
+    )
+
+    if normalize_logical_type(typ) in {"boolean", "uuid"}:
+        return CARRIER_TYPED
+    parsed_domain = parse_enum_or_set_ordered_members(typ)
+    if parsed_domain and parsed_domain[1]:
+        return CARRIER_DOMAIN
+    if interval_family(typ) or normalize_logical_type(typ) == "interval":
+        return CARRIER_TYPED
+    if is_year_carrier(typ):
+        return CARRIER_TYPED
+    if is_bitstring_carrier(typ) and parse_bitstring_width(typ) is not None:
+        return CARRIER_BYTES
+    if parse_binary_carrier_width(typ) is not None:
+        return CARRIER_BYTES
     return ""
 
 
@@ -245,6 +280,48 @@ def _calendar_parse_required(transform: str, target_type: str) -> bool:
     from connectors.sql_temporal import sql_type_is_temporal
 
     return sql_type_is_temporal(target_type)
+
+
+def _is_interval_carrier(type_str: str) -> bool:
+    from services.type_system import interval_family, normalize_logical_type
+
+    typ = str(type_str or "").strip()
+    if not typ:
+        return False
+    if interval_family(typ):
+        return True
+    return normalize_logical_type(typ) == "interval"
+
+
+def _interval_parse_required(target_type: str, source_type: str) -> bool:
+    """True when dest INTERVAL cannot be vouched by a non-interval source.
+
+    Warehouse INTERVAL→INTERVAL wires parse by construction. VARCHAR→INTERVAL
+    still holds ``not-an-interval`` past the preview — same class as
+    ``maybe`` → BOOLEAN.
+    """
+    if not _is_interval_carrier(target_type):
+        return False
+    from services.type_system import normalize_logical_type
+
+    return normalize_logical_type(source_type) != "interval"
+
+
+def _is_year_carrier(type_str: str) -> bool:
+    from services.type_system import is_year_carrier
+
+    return is_year_carrier(type_str)
+
+
+def _year_parse_required(target_type: str, source_type: str) -> bool:
+    """True when dest YEAR cannot be vouched by a non-YEAR source.
+
+    Warehouse YEAR→YEAR wires expand by construction. VARCHAR→YEAR still
+    holds ``1899`` past the preview — non-strict MySQL would store 0000.
+    """
+    if not _is_year_carrier(target_type):
+        return False
+    return not _is_year_carrier(source_type)
 
 
 def _parse_in_doubt(source_type: str) -> bool:
@@ -333,6 +410,30 @@ def _source_cannot_exceed(
             src_bounds[0] >= tgt_bounds[0] and src_bounds[1] <= tgt_bounds[1]
         )
 
+    if target.carrier == CARRIER_DOMAIN:
+        from services.type_system import enum_set_domain_would_reject
+
+        # Same membership rule the Map gate uses — dest members must cover
+        # every declared source member. Open VARCHAR → ENUM is never safe.
+        return not enum_set_domain_would_reject(src, target.target_type)
+
+    if target.carrier == CARRIER_BYTES:
+        from services.type_system import (
+            bitstring_width_would_narrow,
+            is_bitstring_carrier,
+            parse_binary_carrier_width,
+        )
+
+        if is_bitstring_carrier(target.target_type):
+            if not is_bitstring_carrier(src):
+                return False
+            return not bitstring_width_would_narrow(src, target.target_type)
+        src_w = parse_binary_carrier_width(src)
+        tgt_w = parse_binary_carrier_width(target.target_type)
+        if src_w is None or tgt_w is None:
+            return False
+        return src_w <= tgt_w
+
     return False
 
 
@@ -343,6 +444,8 @@ def bounded_targets(
     source_types: Mapping[str, str] | None = None,
     dest_db: str = "",
     job_error_policy: str = "",
+    source_kind: str = "",
+    source_format: str = "",
 ) -> tuple[tuple[BoundedTarget, ...], tuple[str, ...], tuple[str, ...]]:
     """Mapped columns whose destination carrier has a decidable bound *and* a
     source declaration that could exceed it.
@@ -352,11 +455,21 @@ def bounded_targets(
     reported, never silently treated as safe. ``safe_by_declaration`` names the
     widening/identical paths that need no value scan at all, which is what keeps
     this off the cost path of an ordinary transfer.
+
+    File / upload / object-store types are inferred from a peek sample, not
+    declared DDL. Treating ``DECIMAL(9,6)`` from 25 CSV rows as a warehouse
+    domain skipped the 1M-row scan and let Execute fail at write on
+    ``7.9166665`` → Snowflake ``NUMBER(9,6)``. Untyped sources never skip.
     """
+    from services.data_profiler import source_types_are_authoritative
+
     types = {str(k): str(v or "") for k, v in (dest_types or {}).items()}
     lowered = {k.lower(): v for k, v in types.items()}
     src_types = {str(k): str(v or "") for k, v in (source_types or {}).items()}
     src_lowered = {k.lower(): v for k, v in src_types.items()}
+    # Empty source_kind is not warehouse DDL. Treating it as a declared
+    # domain skipped the flights CSV scan whenever a caller omitted kind.
+    declared_domain = source_types_are_authoritative(source_kind, source_format)
     out: list[BoundedTarget] = []
     undecidable: list[str] = []
     safe: list[str] = []
@@ -386,11 +499,20 @@ def bounded_targets(
         )
         parse_in_doubt = bool(transform) and _parse_in_doubt(declared_source)
         calendar = _calendar_parse_required(transform, target_type)
-        if carrier == CARRIER_TYPED and not parse_in_doubt and not calendar:
-            # A typed numeric/boolean/uuid wire parses by construction —
-            # scanning it would cost a million parses to prove the declaration.
-            # Calendar types are excluded: the declaration does not prove
-            # ``2024-02-31`` is a date.
+        interval = _interval_parse_required(target_type, declared_source)
+        year = _year_parse_required(target_type, declared_source)
+        if (
+            carrier == CARRIER_TYPED
+            and declared_domain
+            and not parse_in_doubt
+            and not calendar
+            and not interval
+            and not year
+        ):
+            # Warehouse BOOLEAN/UUID/INTERVAL/YEAR wires parse by construction.
+            # File peek inferred BOOLEAN is not a domain — ``maybe`` still
+            # lives past the sample. Calendar types never skip:
+            # ``2024-02-31`` is DATE. VARCHAR→INTERVAL/YEAR still scans.
             safe.append(target)
             continue
         action, exec_pol, risk_id = _resolve_action(m, job_error_policy)
@@ -409,8 +531,12 @@ def bounded_targets(
             # DATE-declared source column of text still holds '2024-02-31'.
             out.append(candidate)
             continue
-        if not parse_in_doubt and _source_cannot_exceed(
-            declared_source, candidate, dest_db=dest_db
+        if (
+            declared_domain
+            and not parse_in_doubt
+            and _source_cannot_exceed(
+                declared_source, candidate, dest_db=dest_db
+            )
         ):
             # Width is decided by declaration; a parse is only decided with it
             # when the source declares the same typed carrier. Text into a
@@ -488,6 +614,66 @@ def _fit_predicate(
     if target.carrier == CARRIER_INTEGER:
         type_str = target.target_type
         return lambda value: integer_fit_failure(value, type_str, dest_db=dest_db)
+    if target.carrier == CARRIER_DOMAIN:
+        from connectors.sql_bind import coerce_enum_wire, coerce_set_wire
+        from services.type_system import parse_enum_or_set_ordered_members
+
+        parsed = parse_enum_or_set_ordered_members(target.target_type)
+        if not parsed or not parsed[1]:
+            return lambda _value: None
+        kind, _members = parsed
+        type_str = target.target_type
+
+        def _domain_reason(value: Any) -> str | None:
+            try:
+                if kind == "ENUM":
+                    coerce_enum_wire(value, ddl_type=type_str)
+                else:
+                    coerce_set_wire(value, ddl_type=type_str)
+            except ValueError as exc:
+                return str(exc) or f"value not in {kind} domain"
+            return None
+
+        return _domain_reason
+    if target.carrier == CARRIER_BYTES:
+        from connectors.sql_bind import coerce_bitstring_wire
+        from connectors.writer_common import binary_storage_bytes, fits_binary
+        from services.type_system import (
+            is_bitstring_carrier,
+            is_varying_bitstring_carrier,
+            parse_binary_carrier_width,
+            parse_bitstring_width,
+        )
+
+        type_str = target.target_type
+        if is_bitstring_carrier(type_str):
+            width = parse_bitstring_width(type_str)
+            varying = is_varying_bitstring_carrier(type_str)
+
+            def _bit_reason(value: Any) -> str | None:
+                try:
+                    coerce_bitstring_wire(value, width=width, varying=varying)
+                except ValueError as exc:
+                    return str(exc)
+                return None
+
+            return _bit_reason
+        width = parse_binary_carrier_width(type_str)
+        if width is None:
+            return lambda _value: None
+
+        def _bin_reason(value: Any) -> str | None:
+            raw = binary_storage_bytes(value)
+            if raw is None:
+                return (
+                    f"binary wire is not valid base64 for {type_str} "
+                    "— refuse silent UTF-8 encode"
+                )
+            if fits_binary(value, width):
+                return None
+            return f"binary length {len(raw)} exceeds {type_str}"
+
+        return _bin_reason
     return lambda _value: None
 
 
@@ -522,6 +708,35 @@ def _temporal_bind_reason(value: Any, target_type: str, dest_db: str) -> str | N
     return None
 
 
+def _interval_bind_reason(value: Any, target_type: str) -> str | None:
+    """Ask the write's interval quarantine, not a second family table."""
+    from services.schema_inference import interval_wire_family, is_interval_wire
+    from services.type_system import interval_family
+
+    if not is_interval_wire(value):
+        shown = value if isinstance(value, str) else str(value)
+        return f"value is not a valid interval wire payload: {shown!r}"
+    dest_fam = interval_family(target_type)
+    wire_fam = interval_wire_family(value)
+    if dest_fam and wire_fam and dest_fam != wire_fam:
+        return (
+            f"interval family mismatch wire={wire_fam} dest={dest_fam} "
+            "— YEAR-MONTH ↔ DAY-SECOND collapse"
+        )
+    return None
+
+
+def _year_bind_reason(value: Any) -> str | None:
+    """Ask the write's YEAR bind. Non-strict MySQL stores 0000 — silent wipe."""
+    from connectors.sql_bind import coerce_year_wire
+
+    try:
+        coerce_year_wire(value)
+    except ValueError as exc:
+        return str(exc)
+    return None
+
+
 def _typed_predicate(
     transform: str,
     target_type: str,
@@ -532,7 +747,9 @@ def _typed_predicate(
     from services.transform_engine import apply_transform
 
     temporal = sql_type_is_temporal(target_type)
-    if not transform and not temporal:
+    interval = _is_interval_carrier(target_type)
+    year = _is_year_carrier(target_type)
+    if not transform and not temporal and not interval and not year:
         return None
 
     def _typed_reason(value: Any) -> str | None:
@@ -549,6 +766,10 @@ def _typed_predicate(
             bound = out
         if temporal:
             return _temporal_bind_reason(bound, target_type, dest_db)
+        if interval:
+            return _interval_bind_reason(bound, target_type)
+        if year:
+            return _year_bind_reason(bound)
         return None
 
     return _typed_reason
@@ -653,7 +874,17 @@ def scan_rows(
             if source not in row:
                 continue
             value = row.get(source)
-            if _skip_value(value, is_missing_sentinel):
+            if value is None or is_missing_sentinel(value):
+                continue
+            # Blank strings are a nullability question for width/typed
+            # carriers. ENUM/SET treat '' as the MySQL error member; YEAR
+            # refuses empty as a silent 0000 wipe — Validate must name both.
+            if (
+                isinstance(value, str)
+                and not value.strip()
+                and bounded[idx].carrier != CARRIER_DOMAIN
+                and not _is_year_carrier(bounded[idx].target_type)
+            ):
                 continue
             why = fit_reason(value)
             if why is None:
@@ -673,16 +904,164 @@ def scan_rows(
     else:
         evidence = EVIDENCE_SAMPLED
 
-    findings = tuple(
-        ColumnFitFinding(
-            target=bounded[idx],
-            unfit_rows=counts[idx],
-            example_rows=tuple(example_rows.get(idx, ())),
-            example_values=tuple(example_values.get(idx, ())),
-            unfit_reason=reasons.get(idx, ""),
-        )
-        for idx in sorted(counts)
+    from connectors.writer_common import (
+        integer_overflow_suggested_type,
+        varchar_overflow_suggested_type,
     )
+    from services.decimal_observe import (
+        decimal_scale_overflow_fix,
+        decimal_widen_carrier,
+    )
+
+    findings_list: list[ColumnFitFinding] = []
+    for idx in sorted(counts):
+        target = bounded[idx]
+        examples = tuple(example_values.get(idx, ()))
+        first = examples[0] if examples else ""
+        suggested_type = ""
+        suggested_fix = ""
+        why = reasons.get(idx, "")
+        if target.carrier == CARRIER_DECIMAL and first:
+            if "fractional" in why.lower():
+                suggested_type = integer_overflow_suggested_type(
+                    first, target.target_type, dest_db=dest_db
+                )
+                if not suggested_type:
+                    dialect = (dest_db or "").strip().lower()
+                    if dialect in {"snowflake"}:
+                        suggested_type = "FLOAT"
+                    elif dialect in {"bigquery", "bq"}:
+                        suggested_type = "FLOAT64"
+                    else:
+                        suggested_type = "DOUBLE"
+            else:
+                suggested_type = decimal_widen_carrier(
+                    first, dest_db=dest_db, current_type=target.target_type
+                )
+            if suggested_type and "fractional" in why.lower():
+                suggested_fix = (
+                    f"Open Map → widen {target.target} to {suggested_type} "
+                    "(preserve the fraction, or ALTER the destination) "
+                    "→ re-Validate. Do not silently truncate."
+                )
+            elif suggested_type:
+                suggested_fix = decimal_scale_overflow_fix(
+                    first,
+                    dest_db=dest_db,
+                    current_type=target.target_type,
+                    column=target.target,
+                ) or (
+                    f"Open Map → widen {target.target} to {suggested_type} "
+                    "(or ALTER the destination) → re-Validate. "
+                    "Do not silently truncate."
+                )
+        elif target.carrier == CARRIER_INTEGER and first:
+            suggested_type = integer_overflow_suggested_type(
+                first, target.target_type, dest_db=dest_db
+            )
+            if suggested_type:
+                suggested_fix = (
+                    f"Open Map → widen {target.target} to {suggested_type} "
+                    "(or ALTER the destination) → re-Validate. "
+                    "Do not silently truncate."
+                )
+        elif target.carrier == CARRIER_STRING and first:
+            suggested_type = varchar_overflow_suggested_type(
+                first, target.target_type, dest_db=dest_db
+            )
+            if suggested_type:
+                suggested_fix = (
+                    f"Open Map → widen {target.target} to {suggested_type} "
+                    "(or ALTER the destination) → re-Validate. "
+                    "Do not silently truncate."
+                )
+        elif target.carrier == CARRIER_TYPED:
+            why_l = why.lower()
+            if "boolean" in why_l or target.transform == "boolean":
+                suggested_fix = (
+                    f"Open Map → remap {target.target} off {target.target_type} "
+                    "or fix the source value (writer accepts 1/0/true/false/yes/no) "
+                    "→ re-Validate. Do not silently coerce."
+                )
+            elif "uuid" in why_l or target.transform == "uuid":
+                suggested_type = "VARCHAR(36)"
+                suggested_fix = (
+                    f"Open Map → widen {target.target} to {suggested_type} "
+                    "(or fix the source UUID) → re-Validate. "
+                    "Do not silently coerce."
+                )
+            elif target.transform == "time" or "invalid time" in why_l:
+                suggested_fix = (
+                    f"Open Map → remap {target.target} off {target.target_type} "
+                    "or fix the source time value → re-Validate. "
+                    "Do not silently coerce an invalid time."
+                )
+            elif _is_interval_carrier(target.target_type) or "interval" in why_l:
+                suggested_fix = (
+                    f"Open Map → remap {target.target} off {target.target_type} "
+                    "or fix the source interval → re-Validate. "
+                    "Do not silently coerce YEAR-MONTH into DAY-SECOND."
+                )
+            elif _is_year_carrier(target.target_type) or "year" in why_l:
+                suggested_fix = (
+                    f"Open Map → remap {target.target} off {target.target_type} "
+                    "or fix the source year → re-Validate. "
+                    "Do not silently store 0000."
+                )
+            else:
+                suggested_fix = (
+                    f"Open Map → remap {target.target} off {target.target_type} "
+                    "or fix the source calendar value → re-Validate. "
+                    "Do not silently coerce an invalid date."
+                )
+        elif target.carrier == CARRIER_BYTES:
+            from connectors.writer_common import binary_overflow_suggested_type
+
+            suggested_type = binary_overflow_suggested_type(
+                first, target.target_type
+            )
+            if suggested_type:
+                suggested_fix = (
+                    f"Open Map → widen {target.target} to {suggested_type} "
+                    "(or ALTER the destination) → re-Validate. "
+                    "Do not silently truncate or UTF-8 invent."
+                )
+            else:
+                suggested_fix = (
+                    f"Open Map → remap {target.target} off {target.target_type} "
+                    "or fix the source binary/bit wire → re-Validate. "
+                    "Do not silently truncate or UTF-8 invent."
+                )
+        elif target.carrier == CARRIER_DOMAIN:
+            from services.type_system import enum_domain_union_carrier
+
+            suggested_type = enum_domain_union_carrier(
+                target.target_type, examples
+            )
+            if suggested_type:
+                suggested_fix = (
+                    f"Open Map → widen {target.target} to {suggested_type} "
+                    "(or ALTER the destination) → re-Validate. "
+                    "Do not silently store '' / drop SET members."
+                )
+            else:
+                suggested_fix = (
+                    f"Open Map → remap {target.target} off {target.target_type} "
+                    "or fix the source label → re-Validate. "
+                    "Do not silently store '' / drop SET members."
+                )
+        findings_list.append(
+            ColumnFitFinding(
+                target=target,
+                unfit_rows=counts[idx],
+                example_rows=tuple(example_rows.get(idx, ())),
+                example_values=examples,
+                unfit_reason=reasons.get(idx, ""),
+                suggested_target_type=suggested_type,
+                suggested_fix=suggested_fix,
+            )
+        )
+    findings = tuple(findings_list)
     total = int(rows_total or 0) or (scanned if evidence == EVIDENCE_EXACT else 0)
     return FitScanReport(
         evidence=evidence,
@@ -716,6 +1095,8 @@ def scan_population_fit(
     rows_total: int = 0,
     rows_are_population: bool = False,
     budget: int = DEFAULT_SCAN_BUDGET,
+    source_kind: str = "",
+    source_format: str = "",
 ) -> FitScanReport:
     """Resolve bounded targets from the mappings, then scan the rows."""
     targets, undecidable, safe = bounded_targets(
@@ -724,6 +1105,8 @@ def scan_population_fit(
         source_types=source_types,
         dest_db=dest_db,
         job_error_policy=job_error_policy,
+        source_kind=source_kind,
+        source_format=source_format,
     )
     return scan_rows(
         rows,

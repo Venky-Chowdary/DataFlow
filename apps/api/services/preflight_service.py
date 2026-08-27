@@ -677,6 +677,81 @@ def run_transfer_policy_gates(
     return gates
 
 
+def _iter_table_population_for_preflight(
+    *,
+    source_kind: str,
+    source_format: str,
+    source_connector_id: str,
+    source_config: dict[str, Any] | None,
+    source_table: str,
+    mappings: list[dict[str, Any]],
+    column_types: dict[str, str],
+    dest_types: dict[str, str],
+    dest_db: str,
+    sync_mode: str = "",
+    read_scope: Any = None,
+    source_filter: dict[str, Any] | None = None,
+):
+    """Same projected table walk Execute uses — or None when it cannot run.
+
+    Studio/plan/Pilot used to scan only the preview. A late DECIMAL overflow
+    then passed Validate and blocked Execute. Callable extracts, row filters,
+    and file sources stay out: those populations are not this walk.
+    """
+    kind = (source_kind or "").strip().lower()
+    if kind not in {"database", "cloud"}:
+        return None
+    table = str(source_table or "").strip()
+    if not table:
+        return None
+    if not (source_connector_id or source_config):
+        return None
+    from services.procedure_source import is_callable_source
+
+    if is_callable_source(source_config):
+        return None
+    cfg = dict(source_config or {})
+    extra = cfg.get("extra") if isinstance(cfg.get("extra"), dict) else {}
+    from services.sync_cursor import normalize_sync_mode
+
+    if normalize_sync_mode(sync_mode, default="") == "cdc":
+        # CDC writes a changelog, not a table rescan. Walking the table
+        # judges the wrong population — preview stays, never exact.
+        return None
+    try:
+        from src.transfer.models import EndpointConfig
+        from src.transfer.source_peek import iter_bounded_table_population_rows
+    except ImportError:  # pragma: no cover - api root on PYTHONPATH
+        from transfer.models import EndpointConfig
+        from transfer.source_peek import iter_bounded_table_population_rows
+
+    data = dict(cfg)
+    if source_connector_id:
+        data["connector_id"] = source_connector_id
+    data.setdefault("table", table)
+    data.setdefault("collection", table)
+    if source_format:
+        data.setdefault("format", source_format)
+        data.setdefault("type", source_format)
+    endpoint = EndpointConfig.from_dict(
+        kind if kind in {"database", "cloud"} else "database",
+        data,
+    )
+    return iter_bounded_table_population_rows(
+        endpoint,
+        mappings,
+        column_types=column_types,
+        dest_types=dest_types,
+        dest_db=dest_db,
+        source_kind=source_kind,
+        source_format=source_format or str(data.get("format") or ""),
+        read_scope=read_scope,
+        source_filter=source_filter
+        or (cfg.get("source_filter") if isinstance(cfg.get("source_filter"), dict) else None)
+        or (extra.get("source_filter") if isinstance(extra.get("source_filter"), dict) else None),
+    )
+
+
 # F8: policy-gate merge lives in preflight_policy_gates (single authority).
 from services.preflight_policy_gates import (  # noqa: E402
     apply_policy_gates,
@@ -720,6 +795,7 @@ def run_file_preflight(
     source_table: str = "",
     destination_table: str = "",
     source_filename: str = "",
+    source_file_id: str = "",
     schema_policy: str = "manual_review",
     backfill_new_fields: bool = False,
     stored_source_fp: str = "",
@@ -746,6 +822,8 @@ def run_file_preflight(
     resume: bool = False,
     population_rows: Iterable[Mapping[str, Any]] | None = None,
     rows_are_population: bool = False,
+    shape_recipe: Mapping[str, Any] | None = None,
+    source_filter: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run preflight gates for file/DB Studio transfers (G1–G9 + host policy)."""
     from services.timezone_policy import declared_source_column_types
@@ -1509,8 +1587,99 @@ def run_file_preflight(
             build_population_fit_gate,
             scan_population_fit,
         )
+        from services.row_filter import iter_filtered_rows
+        from services.sync_cursor import incremental_read_narrows, iter_rows_after_watermark
 
+        cfg_extra = (source_config or {}).get("extra")
+        extra_filter = (
+            cfg_extra.get("source_filter")
+            if isinstance(cfg_extra, dict) and isinstance(cfg_extra.get("source_filter"), dict)
+            else None
+        )
+        cfg_filter = (
+            (source_config or {}).get("source_filter")
+            if isinstance((source_config or {}).get("source_filter"), dict)
+            else None
+        )
+        resolved_filter = dict(source_filter or cfg_filter or extra_filter or {})
+
+        if population_rows is None and str(source_file_id or "").strip():
+            from services.file_parser import iter_stored_upload_rows
+
+            stored_rows = iter_stored_upload_rows(source_file_id)
+            if stored_rows is not None:
+                population_rows = stored_rows
+                rows_are_population = True
+        if population_rows is None:
+            try:
+                table_rows = _iter_table_population_for_preflight(
+                    source_kind=source_kind,
+                    source_format=source_format,
+                    source_connector_id=source_connector_id,
+                    source_config=source_config,
+                    source_table=source_table,
+                    mappings=mappings,
+                    column_types=column_types,
+                    dest_types=destination_column_types or {},
+                    dest_db=destination_db_type,
+                    sync_mode=sync_mode,
+                    read_scope=read_scope if incremental_read_narrows(sync_mode) else None,
+                    source_filter=resolved_filter or None,
+                )
+            except Exception as walk_exc:
+                logger.warning(
+                    "table population walk failed; Validate will use the preview: %s",
+                    walk_exc,
+                )
+                table_rows = None
+            if table_rows is not None:
+                try:
+                    first = next(table_rows)
+                except StopIteration:
+                    # Honest empty table — not a failed walk.
+                    population_rows = iter(())
+                    rows_are_population = True
+                except Exception as walk_exc:
+                    # Cursor-unreadable / down source must keep the preview,
+                    # never claim an empty population as exact.
+                    logger.warning(
+                        "table population walk failed; Validate will use the preview: %s",
+                        walk_exc,
+                    )
+                else:
+
+                    def _chained():
+                        yield first
+                        yield from table_rows
+
+                    walked: Iterable[Mapping[str, Any]] = _chained()
+                    if shape_recipe:
+                        from services.shape_preflight import shaped_population_rows
+
+                        shaped = shaped_population_rows(
+                            shape_recipe,
+                            walked,
+                            source_columns=columns,
+                        )
+                        if shaped is not None:
+                            walked = shaped
+                    population_rows = walked
+                    rows_are_population = True
         scan_input = population_rows if population_rows is not None else sample_rows
+        fit_rows_total = int(row_count or 0)
+        if resolved_filter:
+            filtered = iter_filtered_rows(scan_input, resolved_filter)
+            if filtered is not None:
+                scan_input = filtered
+            fit_rows_total = 0
+        if incremental_read_narrows(sync_mode) and read_scope.bounded:
+            narrowed = iter_rows_after_watermark(
+                scan_input, read_scope, keep_unreadable=True
+            )
+            if narrowed is not None:
+                scan_input = narrowed
+            # Table COUNT is not this run's population — the scan's own count is.
+            fit_rows_total = 0
         fit_report = scan_population_fit(
             scan_input,
             mappings,
@@ -1521,10 +1690,23 @@ def run_file_preflight(
             # Same policy the writer resolves from the same validation mode —
             # Validate must not forecast a quarantine the writer will abort on.
             job_error_policy=transform_error_policy_for_validation_mode(validation_mode),
-            rows_total=int(row_count or 0),
+            rows_total=fit_rows_total,
             rows_are_population=bool(rows_are_population and population_rows is not None),
+            source_kind=source_kind,
+            source_format=source_format,
         )
         fit_report_payload = fit_report.to_dict()
+        if incremental_read_narrows(sync_mode) and read_scope.bounded:
+            fit_report_payload["delta_scope"] = {
+                "cursor_column": read_scope.cursor_column,
+                "watermark": str(read_scope.watermark),
+            }
+        if resolved_filter:
+            from services.row_filter import filter_columns
+
+            fit_report_payload["filter_scope"] = {
+                "columns": filter_columns(resolved_filter),
+            }
         # The gate is always stated, including when nothing needed scanning:
         # "no bounded carrier can be exceeded" is evidence, and a silently
         # absent gate reads as an unasked question.
@@ -1689,13 +1871,26 @@ def run_file_preflight(
         out.get("coercion_report"), out.get("gates")
     )
 
-    # Stamp Decision Kernel ValidationFindings onto Validate SSOT (coercion → findings).
+    # Stamp Decision Kernel ValidationFindings onto Validate SSOT.
+    # Coercion preview is 25 rows; population-fit overflows (row 293+)
+    # must share the same Remap surface or the dest widen stays hidden.
     try:
-        from services.decision_kernel import findings_from_coercion_report
+        from services.decision_kernel import (
+            findings_from_coercion_report,
+            findings_from_population_fit,
+            merge_validation_findings,
+        )
 
-        _vf = findings_from_coercion_report(
-            out.get("coercion_report"),
-            dest_db=str(destination_db_type or ""),
+        _dest = str(destination_db_type or "")
+        _vf = merge_validation_findings(
+            findings_from_coercion_report(
+                out.get("coercion_report"),
+                dest_db=_dest,
+            ),
+            findings_from_population_fit(
+                out.get("population_fit"),
+                dest_db=_dest,
+            ),
         )
         out["validation_findings"] = _vf
         if isinstance(out.get("proof_bundle"), dict) and _vf:

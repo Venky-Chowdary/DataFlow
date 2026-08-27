@@ -22,6 +22,8 @@ export interface PopulationFitSummary {
     exampleRows: number[];
     exampleValues: string[];
     abortsJob: boolean;
+    suggestedTargetType: string;
+    suggestedFix: string;
   }>;
 }
 
@@ -41,6 +43,8 @@ export function populationFitSummary(
     exampleRows: (f.example_rows ?? []).map((r) => Number(r)).filter((r) => r > 0),
     exampleValues: (f.example_values ?? []).map((v) => String(v)),
     abortsJob: Boolean(f.aborts_job),
+    suggestedTargetType: String(f.suggested_target_type ?? "").trim(),
+    suggestedFix: String(f.suggested_fix ?? "").trim(),
   }));
 
   const scanned = Number(fit.rows_scanned ?? 0);

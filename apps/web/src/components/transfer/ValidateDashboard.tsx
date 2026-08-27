@@ -2004,11 +2004,11 @@ export function ValidateDashboard({
                       String(f.suggested_target_type),
                       String(f.target_type || ""),
                     ))
-                    .slice(0, 2);
+                    .slice(0, 8);
                   const coercionBlocks = (preflight?.coercion_report?.columns ?? [])
                     .filter((c) => c.severity === "block" && c.suggested_target_type)
                     .filter((c) => !isNoopTextRemap(String(c.suggested_target_type), String(c.target_type || "")))
-                    .slice(0, 2);
+                    .slice(0, 8);
                   const remapCols = kernelFindings.length > 0
                     ? kernelFindings.map((f) => ({
                       source: String(f.source_column || ""),
@@ -2023,7 +2023,7 @@ export function ValidateDashboard({
                     }))
                     : typeMismatchColumns
                       .filter((c) => !isNoopTextRemap(c.toType, c.targetType || ""))
-                      .slice(0, 2)
+                      .slice(0, 8)
                       .map((c) => ({
                       source: c.source,
                       target: c.target,
@@ -3112,11 +3112,16 @@ export function ValidateDashboard({
                 <strong>Population fit</strong>
                 <span>
                   {populationFit.headline}
-                  {populationFit.offenders.length > 0 &&
-                  populationFit.offenders[0].exampleRows.length > 0 ? (
+                  {populationFit.offenders.length > 0 ? (
                     <em>
-                      {" "}· first at row{" "}
-                      {populationFit.offenders[0].exampleRows.slice(0, 3).join(", ")}
+                      {populationFit.offenders[0].exampleRows.length > 0
+                        ? ` · first at row ${populationFit.offenders[0].exampleRows.slice(0, 3).join(", ")}`
+                        : ""}
+                      {populationFit.offenders
+                        .filter((o) => o.suggestedTargetType)
+                        .slice(0, 6)
+                        .map((o) => ` · widen ${o.column} to ${o.suggestedTargetType}`)
+                        .join("")}
                     </em>
                   ) : null}
                 </span>

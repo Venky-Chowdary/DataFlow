@@ -1755,9 +1755,19 @@ async def upload_file(
 
             sheets = list_excel_sheets(content)
 
+        stored_file_id = ""
+        try:
+            from services.file_parser import store_upload
+
+            stored = store_upload(file.filename or "upload.csv", content)
+            stored_file_id = str(stored.get("file_id") or "")
+        except Exception:
+            stored_file_id = ""
+
         return {
             "success": True,
             "filename": file.filename,
+            "file_id": stored_file_id or None,
             "file_type": result.file_type,
             "sheets": sheets,
             "read_options": read_options.to_wire(),

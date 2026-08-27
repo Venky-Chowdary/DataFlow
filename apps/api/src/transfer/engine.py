@@ -801,6 +801,12 @@ def _file_population_rows(
         )
 
 
+def _sync_mode_is_cdc(request: TransferRequest) -> bool:
+    from services.sync_cursor import normalize_sync_mode
+
+    return normalize_sync_mode(getattr(request, "sync_mode", "") or "", default="") == "cdc"
+
+
 def _table_population_rows(
     request: TransferRequest,
     mappings: list[dict[str, Any]],
@@ -819,32 +825,35 @@ def _table_population_rows(
     paged independently yields nothing, which the scan reports as preview
     evidence rather than as proof of fit.
     """
-    from services.population_fit_scan import bounded_targets
+    from services.preflight_cursor_gate import read_scope_for_transfer_request
+    from services.sync_cursor import incremental_read_narrows, normalize_sync_mode
+    from .source_peek import iter_bounded_table_population_rows
 
-    from .source_peek import iter_stream_source_column_rows
+    if normalize_sync_mode(getattr(request, "sync_mode", "") or "", default="") == "cdc":
+        return
+    scope = None
+    if incremental_read_narrows(getattr(request, "sync_mode", "") or ""):
+        try:
+            scope = read_scope_for_transfer_request(request)
+        except Exception:
+            scope = None
 
     try:
-        targets, _undecidable, _safe = bounded_targets(
-            mappings,
-            dest_types=dest_types,
-            source_types=column_types,
-            dest_db=dest_db,
-        )
-        wanted = sorted({t.source for t in targets if t.source})
-        if not wanted:
-            return
-        rows = iter_stream_source_column_rows(
+        rows = iter_bounded_table_population_rows(
             request.source,
-            # A bounded column name is a *shaped* name, which the table may not hold
-            # at all (derived, renamed). So a shaped run projects the recipe's own
-            # inputs and shapes the rows before the scan judges them.
-            sorted({str(c) for c in shape_runner.recipe.input_columns})
-            if shape_runner is not None
-            else wanted,
+            mappings,
+            column_types=column_types,
+            dest_types=dest_types,
+            dest_db=dest_db,
+            source_kind=getattr(request.source, "kind", "") or "",
+            source_format=getattr(request.source, "format", "") or "",
             limit=int(request.limit or 0),
+            shape_runner=shape_runner,
+            read_scope=scope if scope is not None and getattr(scope, "bounded", False) else None,
+            source_filter=getattr(request, "source_filter", None) or None,
         )
-        if shape_runner is not None:
-            rows = _shaped_population_rows(shape_runner, rows)
+        if rows is None:
+            return
         yield from rows
     except Exception as exc:  # noqa: BLE001 - unreadable source is unmeasured, never "fits"
         logger.warning("population fit scan could not re-read source table: %s", exc)
@@ -1703,6 +1712,10 @@ class UniversalTransferEngine:
         # Resolve first: a connector_id reference carries the engine id that
         # create-new invention needs, and an inline format may be empty.
         self._resolve_saved_connectors(request)
+        if request.source.kind == "file":
+            from services.transfer_file_staging import hydrate_file_source
+
+            hydrate_file_source(request)
         # Create-new invention needs the source engine to keep Unicode polarity
         # (PostgreSQL VARCHAR → SQL Server NVARCHAR, not code-page VARCHAR).
         with bind_auto_create_job(job_id), bind_source_engine(
@@ -3575,7 +3588,7 @@ class UniversalTransferEngine:
                     # writes, and a finding must describe *this* population.
                     population_rows=(
                         None
-                        if request.source_filter
+                        if _sync_mode_is_cdc(request)
                         else _table_population_rows(
                             request,
                             mappings,
@@ -3585,7 +3598,8 @@ class UniversalTransferEngine:
                             shape_runner=shape_runner,
                         )
                     ),
-                    rows_are_population=not request.source_filter,
+                    rows_are_population=not _sync_mode_is_cdc(request),
+                    source_filter=request.source_filter or None,
                     confidence_threshold=confidence_threshold_for_mode(
                         request.validation_mode
                     ),
@@ -4382,18 +4396,12 @@ class UniversalTransferEngine:
                     # before the first batch, not at row 431 with the load
                     # half-done. Lazy — nothing is re-read when no mapped column
                     # can exceed its destination carrier by declaration.
-                    population_rows=(
-                        None
-                        if request.source_filter
-                        else _shaped_population_rows(
-                            shape_runner,
-                            _file_population_rows(content, filename, read_options),
-                        )
+                    population_rows=_shaped_population_rows(
+                        shape_runner,
+                        _file_population_rows(content, filename, read_options),
                     ),
-                    # A filtered run writes a subset, so the unfiltered re-read
-                    # is not this job's population — fall back to preview
-                    # evidence rather than judging rows that never move.
-                    rows_are_population=not request.source_filter,
+                    rows_are_population=True,
+                    source_filter=request.source_filter or None,
                     confidence_threshold=confidence_threshold_for_mode(
                         request.validation_mode
                     ),
@@ -4959,10 +4967,12 @@ class UniversalTransferEngine:
         self._resolve_saved_connectors(request)
         # Claim-queue / HA: spill file bytes before Mongo serialize so workers
         # can hydrate source_path (never mark requires_file_reupload on fresh submit).
-        if request.source.kind == "file" and request.source_content:
-            from services.transfer_file_staging import persist_file_source
+        if request.source.kind == "file":
+            from services.transfer_file_staging import hydrate_file_source, persist_file_source
 
-            persist_file_source(request)
+            hydrate_file_source(request)
+            if request.source_content:
+                persist_file_source(request)
         mongo = get_mongodb_service()
         from services.procedure_source import source_read_mode_of
 

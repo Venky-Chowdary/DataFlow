@@ -435,6 +435,8 @@ export async function runPreflight(payload: {
   dest_extra?: Record<string, unknown>;
   source_kind?: string;
   source_type?: string;
+  /** Persisted /connectors/upload id — Validate scans the stored file, not the preview. */
+  source_file_id?: string;
   /**
    * Approved pre-load transform recipe. Execute shapes rows on the read, so the
    * gates have to judge the transformed rows or they refuse values the write
@@ -2616,6 +2618,8 @@ export async function runUniversalTransfer(options: {
   }
   if (options.sourceExtra && Object.keys(options.sourceExtra).length) {
     formData.append("source_extra_json", JSON.stringify(options.sourceExtra));
+    const storedId = String(options.sourceExtra.file_id || "").trim();
+    if (storedId) formData.append("source_file_id", storedId);
   }
   if (options.priorityColumn) formData.append("priority_column", options.priorityColumn);
   if (options.priorityDirection) formData.append("priority_direction", options.priorityDirection);
@@ -3468,6 +3472,8 @@ export interface QuarantineInfo {
     values?: Record<string, string>;
     chars?: string[];
     suggested_transform?: string;
+    suggested_fix?: string;
+    suggested_target_type?: string;
     _df_qid?: string;
     retry_status?: string;
   }[];
@@ -3540,7 +3546,7 @@ export async function downloadJobQuarantineCsv(
 ): Promise<{ filename: string; row_count: number; blob: Blob }> {
   const escape = (v: unknown) => `"${String(v ?? "").replace(/"/g, '""')}"`;
   const toCsv = (rows: QuarantineInfo["quarantine"]) => {
-    const lines = ["row,column,target,value,reason,policy,suggested_transform"];
+    const lines = ["row,column,target,value,reason,policy,suggested_transform,suggested_fix,suggested_target_type"];
     const mark = (v: unknown) => {
       let text = String(v ?? "");
       text = text
@@ -3554,7 +3560,7 @@ export async function downloadJobQuarantineCsv(
     };
     for (const r of rows) {
       lines.push(
-        [r.row, r.column, r.target, mark(r.value), r.reason, r.policy, r.suggested_transform]
+        [r.row, r.column, r.target, mark(r.value), r.reason, r.policy, r.suggested_transform, r.suggested_fix, r.suggested_target_type]
           .map(escape)
           .join(","),
       );

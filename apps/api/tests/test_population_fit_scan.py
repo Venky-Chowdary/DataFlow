@@ -241,6 +241,8 @@ def test_widening_and_identical_declarations_need_no_value_scan() -> None:
             [{"source": "c", "target": "c", "target_type": target_type}],
             source_types={"c": source_type},
             dest_db="postgresql",
+            source_kind="database",
+            source_format="postgresql",
         )
         assert targets == (), f"{source_type} → {target_type} should not be scanned"
         assert safe == ("c",), f"{source_type} → {target_type} should be declared safe"
@@ -259,6 +261,8 @@ def test_a_declaration_safe_plan_reads_no_rows_at_all() -> None:
         [{"source": "c", "target": "c", "target_type": "NUMBER(11,8)"}],
         source_types={"c": "NUMBER(11,8)"},
         dest_db="snowflake",
+        source_kind="database",
+        source_format="snowflake",
         rows_are_population=True,
     )
     assert report.targets == ()
@@ -386,6 +390,8 @@ def test_integer_overflow_is_found() -> None:
     )
     assert [f.unfit_rows for f in report.findings] == [2]
     assert report.findings[0].example_rows == (2, 3)
+    assert report.findings[0].suggested_target_type == "BIGINT"
+    assert "BIGINT" in (report.findings[0].suggested_fix or "")
 
 
 @pytest.mark.parametrize(
@@ -428,6 +434,9 @@ def test_a_decimal_population_into_an_integer_carrier_blocks_before_the_write(
     assert [f.unfit_rows for f in report.findings] == [3], dest_db
     assert report.findings[0].example_rows == (2, 3, 4), dest_db
     assert "fractional" in report.findings[0].unfit_reason, dest_db
+    suggested = (report.findings[0].suggested_target_type or "").upper()
+    assert suggested in {"DOUBLE", "FLOAT", "FLOAT64", "DECIMAL", "NUMERIC"}, dest_db
+    assert "INT" not in suggested.replace("FLOAT", ""), dest_db
 
     gate = build_population_fit_gate(report)
     assert gate["status"] == "block", dest_db

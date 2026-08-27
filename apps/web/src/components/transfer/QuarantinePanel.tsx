@@ -14,6 +14,8 @@ type QuarantineRow = {
   values?: Record<string, string>;
   chars?: string[];
   suggested_transform?: string;
+  suggested_fix?: string;
+  suggested_target_type?: string;
   retry_status?: string;
   /** Destination DLQ row id — required to stamp `_df_promoted_at` after Promote. */
   _df_qid?: string;
@@ -671,8 +673,14 @@ export function QuarantinePanel({
                         {formatQuarantineSample(r.value, r.chars)}
                       </td>
                       <td>{r.reason || "—"}</td>
-                      <td className="df2-quarantine-fix" title={r.suggested_transform || ""}>
-                        {r.suggested_transform || "—"}
+                      <td
+                        className="df2-quarantine-fix"
+                        title={r.suggested_fix || r.suggested_target_type || r.suggested_transform || ""}
+                      >
+                        {r.suggested_fix
+                          || r.suggested_target_type
+                          || r.suggested_transform
+                          || "—"}
                       </td>
                       <td>{r.policy || "—"}</td>
                       <td>

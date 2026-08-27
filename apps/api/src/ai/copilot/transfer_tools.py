@@ -633,6 +633,8 @@ def plan_transfer(
         source_primary_key=_source_primary_key(src_info),
         write_via_staging=bool(write_via_staging),
         source_read_mode=str((callable_plan or {}).get("mode") or ""),
+        source_filter=row_rules["source_filter"] or None,
+        stream_contracts=row_rules["stream_contracts"] or None,
     )
 
     conversions = _type_conversions(mappings)
@@ -870,6 +872,8 @@ def _run_preflight(
     source_primary_key: str = "",
     write_via_staging: bool = False,
     source_read_mode: str = "",
+    source_filter: dict[str, Any] | None = None,
+    stream_contracts: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Run the real 9 gates and persist the run so the operator can cite it."""
     from services.preflight_run_store import save_preflight_run
@@ -910,7 +914,7 @@ def _run_preflight(
             sync_mode=mode,
             schema_policy=schema_policy,
             validation_mode=validation_mode,
-            stream_contracts=[],
+            stream_contracts=list(stream_contracts or []),
             backfill_new_fields=False,
             source_columns=columns,
             dest_type=dest_db_type,
@@ -958,6 +962,8 @@ def _run_preflight(
             # this the gate asked the operator to set a key the source catalog
             # had already declared.
             contract_primary_key=source_primary_key or None,
+            source_filter=source_filter or None,
+            stream_contracts=list(stream_contracts or []),
         )
         result = apply_policy_gates(
             result,

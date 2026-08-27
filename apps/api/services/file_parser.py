@@ -451,6 +451,42 @@ def get_file(file_id: str) -> dict | None:
     return record if record.get("object_uri") else None
 
 
+def iter_stored_upload_rows(file_id: str | None):
+    """Lazy iterator over every row of a persisted upload, or ``None``.
+
+    Studio Validate posts a 25–500 row preview. Execute already re-reads the
+    same bytes. When ``/connectors/upload`` persisted a ``file_id``, Validate
+    must scan that population too — peek-inferred NUMBER(9,6) hid
+    ``7.9166665`` at row 293 of flights-1m.csv until write quarantine.
+    Never materializes the file; the fit scan is already lazy when nothing
+    is bounded.
+    """
+    fid = str(file_id or "").strip()
+    if not fid:
+        return None
+    record = get_file(fid)
+    if not record:
+        return None
+    path = Path(record.get("path") or "")
+    if not path.exists():
+        return None
+    filename = str(record.get("filename") or path.name or "upload.csv")
+    try:
+        from transfer.file_stream import iter_source_rows
+    except ImportError:  # pragma: no cover - tests with src on PYTHONPATH
+        from src.transfer.file_stream import iter_source_rows
+    try:
+        return iter_source_rows(str(path), filename)
+    except Exception as exc:
+        logging.getLogger(__name__).warning(
+            "stored upload %s could not be streamed for Validate: %s",
+            fid,
+            exc,
+            exc_info=exc,
+        )
+        return None
+
+
 def get_file_chunks(file_id: str, chunk_size: int = 10000):
     """Generator to yield chunks of a file for streaming transfers."""
     record = get_file(file_id)

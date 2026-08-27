@@ -4499,6 +4499,44 @@ def format_set_domain_carrier(members: list[str] | tuple[str, ...]) -> str:
     return "SET(" + ",".join(parts) + ")"
 
 
+def enum_domain_union_carrier(
+    current_type: str,
+    extra_values: list[str] | tuple[str, ...] | None = None,
+) -> str:
+    """Dest-spelled ENUM/SET that would hold the observed out-of-domain labels.
+
+    Keeps declaration order, then appends new members. Never invents VARCHAR —
+    MySQL non-strict ENUM would store '' and wipe the label.
+    """
+    parsed = parse_enum_or_set_ordered_members(current_type)
+    if parsed is None:
+        return ""
+    kind, members = parsed
+    if not members:
+        return ""
+    seen = set(members)
+    extras: list[str] = []
+    for raw in extra_values or ():
+        text = str(raw or "").strip()
+        if not text:
+            continue
+        tokens = (
+            [p.strip() for p in re.split(r"[,;]", text) if p.strip()]
+            if kind == "SET"
+            else [text]
+        )
+        for tok in tokens:
+            if tok not in seen:
+                seen.add(tok)
+                extras.append(tok)
+    if not extras:
+        return ""
+    widened = list(members) + extras
+    if kind == "ENUM":
+        return format_enum_domain_carrier(widened)
+    return format_set_domain_carrier(widened)
+
+
 def pg_enum_type_name(members: list[str] | tuple[str, ...]) -> str:
     """Stable PostgreSQL type name for an ENUM domain (CREATE TYPE … AS ENUM)."""
     import hashlib

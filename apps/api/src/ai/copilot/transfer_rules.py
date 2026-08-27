@@ -508,15 +508,7 @@ def parse_transfer_data_rules(message: str) -> tuple[str, TransferDataRules]:
 
 
 def filter_columns(spec: dict[str, Any] | None) -> list[str]:
-    """Every column a filter spec reads, so the caller can ground it in the source."""
-    out: list[str] = []
-    node = spec or {}
-    for key in ("and", "or"):
-        if key in node:
-            for child in node.get(key) or []:
-                out.extend(filter_columns(child))
-            return out
-    col = str(node.get("column") or node.get("field") or "").strip()
-    if col:
-        out.append(col)
-    return out
+    """Every column a filter spec reads — SSOT is :func:`services.row_filter.filter_columns`."""
+    from services.row_filter import filter_columns as _impl
+
+    return _impl(spec)

@@ -1170,6 +1170,7 @@ export function TransferPage({
         kind: "file",
         format: parsed?.file_type ?? file?.name.split(".").pop() ?? "csv",
         filename: file?.name,
+        ...(parsed?.file_id ? { file_id: parsed.file_id } : {}),
       };
     }
     if (!sourceConnector) return { kind: "database", format: "", connector_id: sourceConnectorId };
@@ -3628,9 +3629,15 @@ export function TransferPage({
             // Unknown / pending schema — do not invent create-new type rewrite.
             return m;
           }
-          // Existing DDL cannot be widened by mapping alone — remappoint to a free text
-          // column, or invent a new VARCHAR target (ADD / create on write).
-          const freeText = destColumns.find((c) => {
+          // Existing DDL cannot be widened by mapping alone.
+          // A NUMBER/DECIMAL dest-widen must not dump clock/money values into
+          // a leftover TEXT sibling — that is a fidelity collapse.
+          const isNumericWiden = /^(number|decimal|numeric|bignumeric)\b/i.test(
+            (action.to_type || "").trim(),
+          );
+          const freeText = isNumericWiden
+            ? undefined
+            : destColumns.find((c) => {
             const lower = c.toLowerCase();
             if (usedTargets.has(lower) && lower !== m.target.toLowerCase()) return false;
             return isTextType(destSchemaMap[c] || "");
@@ -3663,7 +3670,7 @@ export function TransferPage({
             || destColumns.some((c) => c.toLowerCase() === name.toLowerCase());
           if (!candidate || isTaken(candidate)) {
             const base = (m.source || "field").replace(/[^\w]+/g, "_").replace(/^_+|_+$/g, "") || "field";
-            candidate = `${m.source.startsWith("_") ? m.source : base}_text`;
+            candidate = `${m.source.startsWith("_") ? m.source : base}${isNumericWiden ? "_wide" : "_text"}`;
             if (isTaken(candidate)) {
               candidate = `src_${base}`;
             }
@@ -4196,11 +4203,17 @@ export function TransferPage({
           dest_kind: destKindMode,
           connector_id: destKindMode === "database" && connectorId ? connectorId : undefined,
           source_connector_id: isConnectorSource ? sourceConnectorId || undefined : undefined,
-          source_table: isConnectorSource && sourceKind === "database" && sourceConnector?.type !== "mongodb"
-            && sourceReadMode === "table"
-            ? (sourceTable || undefined)
+          source_table: isConnectorSource
+            ? (
+              sourceKind === "cloud"
+                ? (cloudPath.trim() || undefined)
+                : sourceKind === "database" && sourceConnector?.type !== "mongodb"
+                  && sourceReadMode === "table"
+                  ? (sourceTable || undefined)
+                  : undefined
+            )
             : undefined,
-          source_config: isConnectorSource && sourceKind === "database"
+          source_config: isConnectorSource && (sourceKind === "database" || sourceKind === "cloud")
             ? {
                 type: sourceConnector?.type,
                 db_type: sourceConnector?.type,
@@ -4291,6 +4304,7 @@ export function TransferPage({
           write_via_staging: writeViaStaging,
           source_kind: sourceKind,
           source_type: resolveDriverType(sourceConnector?.type || "") || undefined,
+          ...(parsed?.file_id ? { source_file_id: parsed.file_id } : {}),
         });
       } catch (apiErr) {
         if (sourceKind === "file" && destKindMode === "file_export" && parsed) {
@@ -4616,7 +4630,7 @@ export function TransferPage({
       return;
     }
     const needsDbTarget = destKindMode === "database";
-    if (sourceKind === "file" && !file) {
+    if (sourceKind === "file" && !file && !parsed?.file_id) {
       toast({ title: "Source file required", message: "Upload a file before executing.", tone: "warning" });
       setStep(STEP_SOURCE);
       return;
@@ -4786,6 +4800,7 @@ export function TransferPage({
             ...(sourceKind === "database"
               ? callableSourceExtra(sourceReadMode, procedureCall, procedureParams) || {}
               : {}),
+            ...(parsed?.file_id ? { file_id: parsed.file_id } : {}),
           };
           if (syncMode === "cdc") {
             if (multiSubnetFailover) extra.multi_subnet_failover = true;
