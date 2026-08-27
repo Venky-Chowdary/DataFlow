@@ -956,6 +956,8 @@ export interface PreflightResult {
   readiness_score: number;
   /** Stable ID for this validation run — surface in UI and feed Datawrap Pilot. */
   run_id?: string;
+  /** Job wall-clock when Validate ran async — not a sum of sample-gate timings. */
+  elapsed_ms?: number;
   gates: PreflightGate[];
   blockers: { id: string; message: string; details?: Record<string, unknown>; guidance?: { gate?: string; title?: string; category?: string; why?: string; fix?: string; examples?: string[]; suggested_actions?: ValidationSuggestedAction[] } }[];
   /**

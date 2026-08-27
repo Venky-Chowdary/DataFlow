@@ -1184,7 +1184,10 @@ export function ValidateDashboard({
   const sampleScanned = Number(dryGate?.details?.sample_rows_scanned ?? dryGate?.details?.sample_size ?? 0) || null;
   const populationRowsScanned = Number(preflight?.population_fit?.rows_scanned ?? 0);
   const populationExact = preflight?.population_fit?.evidence === "exact";
-  const engineMsTotal = (preflight?.gates ?? []).reduce((sum, g) => sum + (Number(g.duration_ms) || 0), 0);
+  const engineMsTotal = Math.max(
+    (preflight?.gates ?? []).reduce((sum, g) => sum + (Number(g.duration_ms) || 0), 0),
+    Number(preflight?.elapsed_ms) || 0,
+  );
   // Exact Studio sync ids — avoid /append/i matching accidental substrings.
   const appendLikeSync = [
     "full_refresh_append",

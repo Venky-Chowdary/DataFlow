@@ -193,6 +193,9 @@ class FitScanReport:
     #: Why a population walk stopped early: ``row`` or ``time``. Empty when
     #: the walk finished or never started.
     truncated_reason: str = ""
+    #: Wall-clock of this walk. Studio hero must not sum other gates as 10ms
+    #: after a multi-second 1M scan.
+    duration_ms: int = 0
 
     @property
     def scanned_population(self) -> bool:
@@ -223,6 +226,7 @@ class FitScanReport:
             "undecidable_columns": list(self.undecidable),
             "safe_by_declaration": list(self.safe_by_declaration),
             "truncated_reason": self.truncated_reason,
+            "duration_ms": self.duration_ms,
             "note": self.note,
         }
 
@@ -893,6 +897,7 @@ def scan_rows(
     is never stronger than the walk that produced it.
     """
     bounded = tuple(targets)
+    started = time.monotonic()
     if not bounded:
         return FitScanReport(
             evidence=EVIDENCE_UNMEASURED,
@@ -1154,6 +1159,7 @@ def scan_rows(
         )
     findings = tuple(findings_list)
     total = int(rows_total or 0) or (scanned if evidence == EVIDENCE_EXACT else 0)
+    duration_ms = max(0, int(round((time.monotonic() - started) * 1000)))
     return FitScanReport(
         evidence=evidence,
         rows_scanned=scanned,
@@ -1176,6 +1182,7 @@ def scan_rows(
             )
         ),
         truncated_reason=truncated_reason,
+        duration_ms=duration_ms,
     )
 
 
@@ -1239,6 +1246,7 @@ def build_population_fit_gate(report: FitScanReport) -> dict[str, Any]:
     aborting = report.aborting_findings
     held_out = report.held_out_findings
     details: dict[str, Any] = report.to_dict()
+    duration_ms = int(report.duration_ms or 0)
 
     if not report.targets:
         safe = len(report.safe_by_declaration)
@@ -1250,7 +1258,7 @@ def build_population_fit_gate(report: FitScanReport) -> dict[str, Any]:
                 f"declaration ({safe} widening/identical bounded path(s)) — "
                 "no value scan required"
             ),
-            "duration_ms": 0,
+            "duration_ms": duration_ms,
             "details": details,
         }
 
@@ -1270,7 +1278,7 @@ def build_population_fit_gate(report: FitScanReport) -> dict[str, Any]:
                 f"({cols}); the resolved write policy for those column(s) aborts "
                 "the load, so Execute would commit nothing"
             ),
-            "duration_ms": 0,
+            "duration_ms": duration_ms,
             "details": {
                 **details,
                 "corrective_action": (
@@ -1292,7 +1300,7 @@ def build_population_fit_gate(report: FitScanReport) -> dict[str, Any]:
                 f"{cols} exceeds the destination carrier under a signed "
                 "continue-policy contract"
             ),
-            "duration_ms": 0,
+            "duration_ms": duration_ms,
             "details": details,
         }
 
@@ -1304,7 +1312,7 @@ def build_population_fit_gate(report: FitScanReport) -> dict[str, Any]:
                 "Population fit unmeasured — no rows were scanned, so bounded "
                 "destination carriers are unproven until write"
             ),
-            "duration_ms": 0,
+            "duration_ms": duration_ms,
             "details": details,
         }
 
@@ -1319,7 +1327,7 @@ def build_population_fit_gate(report: FitScanReport) -> dict[str, Any]:
                 f"scan stopped at the {stop} — the remaining rows are unproven "
                 f"for {len(report.targets)} bounded column(s)"
             ),
-            "duration_ms": 0,
+            "duration_ms": duration_ms,
             "details": details,
         }
 
@@ -1331,7 +1339,7 @@ def build_population_fit_gate(report: FitScanReport) -> dict[str, Any]:
                 f"Every value in {report.rows_scanned} source row(s) fits its "
                 f"destination carrier ({len(report.targets)} bounded column(s))"
             ),
-            "duration_ms": 0,
+            "duration_ms": duration_ms,
             "details": details,
         }
 
@@ -1343,6 +1351,6 @@ def build_population_fit_gate(report: FitScanReport) -> dict[str, Any]:
             f"{len(report.targets)} bounded column(s) are not population-proven — "
             "a later row may still exceed the carrier"
         ),
-        "duration_ms": 0,
+        "duration_ms": duration_ms,
         "details": details,
     }

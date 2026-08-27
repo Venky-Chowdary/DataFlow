@@ -242,9 +242,11 @@ def test_time_budget_stops_a_million_row_walk_and_stays_partial() -> None:
     assert report.truncated_reason == "time"
     assert 0 < report.rows_scanned < 50_000
     assert ticks, "worker must heartbeat so GET can show live rows"
+    assert report.duration_ms >= 20
     gate = build_population_fit_gate(report)
     assert gate["status"] == "warn"
     assert "time budget" in gate["message"]
+    assert gate["duration_ms"] == report.duration_ms
 
 
 def test_narrowing_integral_digits_are_scanned_even_when_scale_widens() -> None:
