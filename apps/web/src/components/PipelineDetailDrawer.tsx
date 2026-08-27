@@ -23,7 +23,16 @@ import {
 import { computeJobTrustScore } from "../lib/jobTrustScore";
 import { PERMISSIONS, useWriteGate } from "../lib/PermissionsContext";
 import { destHeadline } from "../lib/conservationLedger";
-import { formatSyncModeLabel } from "../lib/transferConstants";
+import {
+  formatSchemaPolicyLabel,
+  formatSyncModeLabel,
+  schemaPolicyHonestyLine,
+} from "../lib/transferConstants";
+import {
+  formatValidateIdentitySummary,
+  shortHash,
+  type ValidateIdentityView,
+} from "../lib/studioValidateIdentity";
 import { Connector, PipelineSchedule, StandingAuthorization, TransferJob } from "../lib/types";
 import { jobStatusBadgeClass, jobStatusLabel } from "../lib/uiUtils";
 
@@ -103,6 +112,9 @@ export function PipelineDetailDrawer({
   const [checkingParallel, setCheckingParallel] = useState(false);
   /** Standing authority currently recorded on this schedule, if any. */
   const [authorization, setAuthorization] = useState<StandingAuthorization | null>(null);
+  const [validateIdentity, setValidateIdentity] = useState<ValidateIdentityView>(
+    () => formatValidateIdentitySummary(null),
+  );
   const [revoking, setRevoking] = useState(false);
   // Resetting a contract breaker is an editor-level write on the contract; every
   // other write in this drawer is refused before the click, so this one is too.
@@ -116,8 +128,10 @@ export function PipelineDetailDrawer({
       setBreaker(null);
       setCampaign(undefined);
       setAuthorization(null);
+      setValidateIdentity(formatValidateIdentitySummary(null));
       return;
     }
+    setValidateIdentity(formatValidateIdentitySummary(sched));
     let cancelled = false;
     void fetchSchedule(sched.id)
       .then((full) => {
@@ -133,6 +147,7 @@ export function PipelineDetailDrawer({
           typeof full.mapping_count === "number" ? full.mapping_count : maps.length,
         );
         setCampaign(full.fidelity_campaign);
+        setValidateIdentity(formatValidateIdentitySummary(full));
         const grant = full.standing_authorization;
         setAuthorization(grant && "id" in grant ? (grant as StandingAuthorization) : null);
       })
@@ -141,6 +156,7 @@ export function PipelineDetailDrawer({
           setMappingCount(0);
           setMappings([]);
           setAuthorization(null);
+          setValidateIdentity(formatValidateIdentitySummary(sched));
         }
       });
     if (sched.last_job_id) {
@@ -492,7 +508,7 @@ export function PipelineDetailDrawer({
               </div>
               <div><dt>Timezone</dt><dd>{sched.cron ? (sched.timezone || "UTC") : "N/A (rolling preset)"}</dd></div>
               <div><dt>Validation</dt><dd>{sched.validation_mode || "—"}</dd></div>
-              <div><dt>Schema policy</dt><dd>{sched.schema_policy || "—"}</dd></div>
+              <div><dt>Schema policy</dt><dd>{formatSchemaPolicyLabel(sched.schema_policy)}</dd></div>
               {sched.sync_mode === "cdc" && (
                 <>
                   <div><dt>CDC snapshot</dt><dd>{sched.snapshot_mode || "initial"}</dd></div>
@@ -587,7 +603,44 @@ export function PipelineDetailDrawer({
               <div><dt>Mapped columns</dt><dd>{mappingCount || "None stored on schedule"}</dd></div>
               <div><dt>Primary key</dt><dd>{sched.primary_key || "—"}</dd></div>
               <div><dt>Cursor column</dt><dd>{sched.cursor_column || "—"}</dd></div>
-              <div><dt>Schema policy</dt><dd>{sched.schema_policy || "—"}</dd></div>
+              <div>
+                <dt>Schema policy</dt>
+                <dd>
+                  {formatSchemaPolicyLabel(sched.schema_policy)}
+                  <span className="df2-drawer-kv-hint">{schemaPolicyHonestyLine(sched.schema_policy || "")}</span>
+                </dd>
+              </div>
+              <div>
+                <dt>Validate identity</dt>
+                <dd>
+                  {validateIdentity.pinned
+                    ? "Stamped from Studio Validate — replayed on the beat, not a live green"
+                    : "Not stamped — create from Transfer Studio after Validate"}
+                </dd>
+              </div>
+              <div>
+                <dt>Shape recipe</dt>
+                <dd
+                  className="df2-cell-mono"
+                  title={validateIdentity.shapeHash || undefined}
+                >
+                  {validateIdentity.shapeHash
+                    ? `${shortHash(validateIdentity.shapeHash)}${validateIdentity.shapeSteps ? ` · ${validateIdentity.shapeSteps} step${validateIdentity.shapeSteps === 1 ? "" : "s"}` : ""}`
+                    : "—"}
+                </dd>
+              </div>
+              <div>
+                <dt>Decision artifact</dt>
+                <dd className="df2-cell-mono" title={validateIdentity.decisionHash || undefined}>
+                  {validateIdentity.decisionHash ? shortHash(validateIdentity.decisionHash) : "—"}
+                </dd>
+              </div>
+              <div>
+                <dt>DDL identity</dt>
+                <dd className="df2-cell-mono" title={validateIdentity.ddlHash || undefined}>
+                  {validateIdentity.ddlHash ? shortHash(validateIdentity.ddlHash) : "—"}
+                </dd>
+              </div>
               {sched.sync_mode === "cdc" && (
                 <>
                   <div><dt>CDC snapshot</dt><dd>{sched.snapshot_mode || "initial"}</dd></div>

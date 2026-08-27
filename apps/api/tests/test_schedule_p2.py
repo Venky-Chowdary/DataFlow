@@ -1005,6 +1005,31 @@ def test_list_summary_exposes_cdc_advanced_extras():
     assert summary.multi_subnet_failover is True
 
 
+def test_list_summary_exposes_validate_identity():
+    """List/drawer must see Studio hashes. Omitting them hid Validate≡Execute."""
+    from src.routers.schedules_router import ScheduleSummaryResponse
+
+    sched = store.PipelineSchedule.from_dict({
+        "id": "s-ident",
+        "name": "n",
+        "source_connector_id": "src",
+        "source_table": "orders",
+        "dest_connector_id": "dst",
+        "dest_table": "orders_wh",
+        "interval": "daily",
+        "shape_recipe": {"steps": [{"op": "trim", "column": "name"}]},
+        "approved_shape_recipe_hash": "a" * 64,
+        "approved_decision_artifact_hash": "b" * 64,
+        "approved_ddl_identity_hash": "c" * 64,
+    })
+    summary = ScheduleSummaryResponse.from_schedule(sched)
+    assert summary.approved_shape_recipe_hash == "a" * 64
+    assert summary.approved_decision_artifact_hash == "b" * 64
+    assert summary.approved_ddl_identity_hash == "c" * 64
+    dumped = summary.model_dump()
+    assert "shape_recipe" not in dumped
+
+
 def test_list_summary_exposes_advanced_write_knobs():
     """List/edit/drawer read the summary. Omitting knobs made Save wipe Studio values."""
     from src.routers.schedules_router import ScheduleSummaryResponse

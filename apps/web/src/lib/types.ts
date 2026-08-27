@@ -1525,6 +1525,11 @@ export interface PipelineSchedule {
   /** Present on GET /schedules/{id}; omitted from list summaries. */
   mappings?: { source: string; target: string; confidence?: number; transform?: string | null }[];
   mapping_count?: number;
+  /** Validate≡Execute stamps. On GET /schedules/{id}; hashes also on list summary. */
+  shape_recipe?: unknown;
+  approved_shape_recipe_hash?: string;
+  approved_decision_artifact_hash?: string;
+  approved_ddl_identity_hash?: string;
   /** Dual Run campaign (consecutive parallel-run cycles). Display-only. */
   fidelity_campaign?: {
     verdict?: string;

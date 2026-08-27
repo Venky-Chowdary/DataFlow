@@ -774,7 +774,15 @@ describe("Transfer Studio chrome contracts", () => {
     assert.match(form, /Write via staging/);
     assert.match(drawer, /Write via staging/);
     assert.match(drawer, /sched.row_limit/);
+    assert.match(drawer, /Validate identity/);
+    assert.match(drawer, /formatValidateIdentitySummary/);
+    assert.match(drawer, /formatSchemaPolicyLabel/);
+    assert.match(form, /formatValidateIdentitySummary/);
+    assert.match(form, /Save does not resubmit these hashes/);
+    assert.doesNotMatch(form, /approved_shape_recipe_hash:/);
+    assert.doesNotMatch(form, /approved_ddl_identity_hash:/);
     assert.match(types, /interface PipelineSchedule \{[\s\S]*write_via_staging\?: boolean;/);
+    assert.match(types, /approved_ddl_identity_hash\?: string;/);
     assert.match(page, /destSupportsWriteViaStaging\(destDriverType\)/);
     assert.doesNotMatch(
       page,

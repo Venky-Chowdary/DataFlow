@@ -288,6 +288,10 @@ class ScheduleSummaryResponse(BaseModel):
     running: bool = False
     created_at: str
     mapping_count: int = 0
+    # Validate≡Execute stamps. Hashes only — shape_recipe stays on GET /{id}.
+    approved_shape_recipe_hash: str = ""
+    approved_decision_artifact_hash: str = ""
+    approved_ddl_identity_hash: str = ""
     # A parked schedule reads as "off" from run_count and last_status alone. The
     # list row has to say a human owes it a decision, without the full finding.
     needs_approval: bool = False

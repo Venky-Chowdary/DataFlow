@@ -158,3 +158,48 @@ export function studioScheduleValidateIdentity(preflight: {
     approved_ddl_identity_hash: ddl,
   };
 }
+
+/** Read-only display of a persisted hash. Empty is honest — not a green invent. */
+export function shortHash(value?: string | null): string {
+  const hash = String(value || "").trim();
+  if (!hash) return "";
+  if (hash.length <= 12) return hash;
+  return `${hash.slice(0, 8)}…${hash.slice(-4)}`;
+}
+
+export type ValidateIdentityView = {
+  pinned: boolean;
+  shapeHash: string;
+  decisionHash: string;
+  ddlHash: string;
+  shapeSteps: number;
+  missing: string[];
+};
+
+/** Operator-facing Validate≡Execute stamps. Display only — never PATCH empties. */
+export function formatValidateIdentitySummary(input: {
+  shape_recipe?: unknown;
+  approved_shape_recipe_hash?: string | null;
+  approved_decision_artifact_hash?: string | null;
+  approved_ddl_identity_hash?: string | null;
+} | null | undefined): ValidateIdentityView {
+  const shapeHash = String(input?.approved_shape_recipe_hash || "").trim();
+  const decisionHash = String(input?.approved_decision_artifact_hash || "").trim();
+  const ddlHash = String(input?.approved_ddl_identity_hash || "").trim();
+  const recipe = input?.shape_recipe;
+  const steps = recipe && typeof recipe === "object" && Array.isArray((recipe as { steps?: unknown }).steps)
+    ? (recipe as { steps: unknown[] }).steps
+    : [];
+  const missing: string[] = [];
+  if (!shapeHash) missing.push("shape");
+  if (!decisionHash) missing.push("decision");
+  if (!ddlHash) missing.push("ddl");
+  return {
+    pinned: Boolean(shapeHash || decisionHash || ddlHash),
+    shapeHash,
+    decisionHash,
+    ddlHash,
+    shapeSteps: steps.length,
+    missing,
+  };
+}

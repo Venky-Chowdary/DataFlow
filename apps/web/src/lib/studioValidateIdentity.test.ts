@@ -6,6 +6,8 @@ import { describe, it } from "node:test";
 
 import {
   buildValidateContractKey,
+  formatValidateIdentitySummary,
+  shortHash,
   studioScheduleValidateIdentity,
   validateContractStillHolds,
   type ValidateContractInput,
@@ -107,5 +109,29 @@ describe("studioValidateIdentity", () => {
     });
     assert.equal(legacy.approved_decision_artifact_hash, "d".repeat(64));
     assert.equal(legacy.approved_ddl_identity_hash, "");
+  });
+
+  it("shortHash truncates without inventing a stamp", () => {
+    assert.equal(shortHash(""), "");
+    assert.equal(shortHash("   "), "");
+    assert.equal(shortHash("abc"), "abc");
+    assert.equal(shortHash("a".repeat(64)), `${"a".repeat(8)}…${"a".repeat(4)}`);
+  });
+
+  it("formatValidateIdentitySummary does not invent hashes or treat empty as pinned", () => {
+    const empty = formatValidateIdentitySummary(undefined);
+    assert.equal(empty.pinned, false);
+    assert.deepEqual(empty.missing, ["shape", "decision", "ddl"]);
+    assert.equal(empty.shapeSteps, 0);
+    const stamped = formatValidateIdentitySummary({
+      shape_recipe: { steps: [{ op: "trim", column: "name" }] },
+      approved_shape_recipe_hash: "a".repeat(64),
+      approved_decision_artifact_hash: "b".repeat(64),
+      approved_ddl_identity_hash: "c".repeat(64),
+    });
+    assert.equal(stamped.pinned, true);
+    assert.equal(stamped.shapeSteps, 1);
+    assert.deepEqual(stamped.missing, []);
+    assert.equal(stamped.shapeHash, "a".repeat(64));
   });
 });

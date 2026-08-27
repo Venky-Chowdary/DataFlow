@@ -42,6 +42,10 @@ import {
   studioDeliveryGuarantee,
   type CdcDeliveryGuarantee,
 } from "../../lib/cdcExactlyOnce";
+import {
+  formatValidateIdentitySummary,
+  shortHash,
+} from "../../lib/studioValidateIdentity";
 
 interface ScheduleFormProps {
   connectors: Connector[];
@@ -281,8 +285,11 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
       contract_id: contractId.trim(),
       require_signed_contract: requireSigned && Boolean(contractId.trim()),
       ...(isEdit || !missingValidateMappings ? {} : { enabled: false }),
+      // Never PATCH empty Validate hashes — "" is not None and wipes Studio stamps.
     });
   };
+
+  const validateIdentity = formatValidateIdentitySummary(initial);
 
   return (
     <form className="df2-sched-form" onSubmit={submit}>
@@ -295,6 +302,29 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
           {isEdit
             ? "This pipeline has no persisted Validate mappings. Activate stays blocked — the hourly beat will not invent an auto-map. Create from Transfer Studio after Validate, or PATCH mappings."
             : "This form does not store a mapping contract. Save creates a paused draft. Create from Transfer Studio after Validate so the beat replays signed column names — not _auto_map."}
+        </p>
+      )}
+      {isEdit && (
+        <p className="df2-field-hint df2-sched-validate-identity" role="status">
+          Validate identity{" "}
+          {validateIdentity.pinned ? (
+            <>
+              <code title={validateIdentity.shapeHash || undefined}>
+                shape {validateIdentity.shapeHash ? shortHash(validateIdentity.shapeHash) : "—"}
+              </code>
+              {" · "}
+              <code title={validateIdentity.decisionHash || undefined}>
+                decision {validateIdentity.decisionHash ? shortHash(validateIdentity.decisionHash) : "—"}
+              </code>
+              {" · "}
+              <code title={validateIdentity.ddlHash || undefined}>
+                ddl {validateIdentity.ddlHash ? shortHash(validateIdentity.ddlHash) : "—"}
+              </code>
+              . Save does not resubmit these hashes.
+            </>
+          ) : (
+            <>not stamped — create from Transfer Studio after Validate. Save does not invent hashes.</>
+          )}
         </p>
       )}
 

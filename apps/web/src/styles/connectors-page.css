@@ -347,6 +347,22 @@
   overflow-wrap: anywhere;
 }
 
+.df2-drawer-kv dd.df2-cell-mono {
+  font-family: var(--df-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 12px;
+}
+
+.df2-drawer-kv-hint {
+  display: block;
+  margin-top: 4px;
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: var(--df-text-muted, #64748b);
+  text-transform: none;
+  letter-spacing: 0;
+  font-weight: 500;
+}
+
 .df2-drawer-map-list {
   list-style: none;
   margin: 0.75rem 0 0;
