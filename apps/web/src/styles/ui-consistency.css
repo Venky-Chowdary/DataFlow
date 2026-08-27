@@ -23,12 +23,12 @@
     padding: 8px 10px;
   }
 
-  .df2-app .df2-xform-card {
+  .df2-app .df2-page-transforms .df2-xform-card {
     padding: 10px 12px;
     border-radius: var(--df-radius-card);
   }
 
-  .df2-app .df2-xform-card-head h3 {
+  .df2-app .df2-page-transforms .df2-xform-card-head h3 {
     font-size: 14px;
   }
 

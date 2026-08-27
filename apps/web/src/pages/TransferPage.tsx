@@ -6901,6 +6901,7 @@ export function TransferPage({
       )}
 
       {step === STEP_SHAPE && (
+        <div className="df2-transfer-step-panel df2-transfer-step-viewport df2-xform-step">
         <TransferTransformStep
           sampleRows={shapeSampleRows}
           sourceColumns={currentSourceColumns}
@@ -6915,6 +6916,7 @@ export function TransferPage({
           onBack={() => setStep(STEP_DESTINATION)}
           onContinue={() => void goToMapping()}
         />
+        </div>
       )}
 
       {step === STEP_VALIDATE && (

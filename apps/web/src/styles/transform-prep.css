@@ -27,7 +27,8 @@
  * named so the step scrolls whether or not it is wrapped in a step viewport.
  */
 .df2-transfer-main-panel > .df2-xform,
-.df2-transfer-step-viewport > .df2-xform {
+.df2-transfer-step-viewport > .df2-xform,
+.df2-xform-step > .df2-xform {
   flex: 1 1 0;
   min-height: 0;
   max-height: 100%;
@@ -37,11 +38,14 @@
   -webkit-overflow-scrolling: touch;
   scrollbar-gutter: stable;
   scrollbar-width: thin;
+  scroll-padding-top: 72px;
+  scroll-padding-bottom: 72px;
 }
 
 /* Keep the scrollbar visibly present: the operator must see there is more. */
 .df2-transfer-main-panel > .df2-xform::-webkit-scrollbar,
-.df2-transfer-step-viewport > .df2-xform::-webkit-scrollbar { width: 11px; }
+.df2-transfer-step-viewport > .df2-xform::-webkit-scrollbar,
+.df2-xform-step > .df2-xform::-webkit-scrollbar { width: 11px; }
 
 .df2-transfer-main-panel > .df2-xform::-webkit-scrollbar-track,
 .df2-transfer-step-viewport > .df2-xform::-webkit-scrollbar-track {
@@ -197,6 +201,14 @@
 .df2-xform code { font-family: var(--df-font-mono, "JetBrains Mono", monospace); font-size: 11.5px; }
 
 /* ── Stat strip ─────────────────────────────────────────────────────────── */
+
+/* Timeout / refuse banners stay in flow — never absolute over the catalog. */
+.df2-xform > .df2-alert {
+  position: relative;
+  z-index: 2;
+  flex: 0 0 auto;
+  margin: 0;
+}
 
 .df2-xform-stats {
   display: grid;
@@ -480,6 +492,8 @@
 
 .df2-xform-bar-fill.kind-distribution { background: var(--df-brand, #0f766e); }
 
+/* Beat the post-load Transforms page rules that used to share these names. */
+.df2-xform .df2-xform-card,
 .df2-xform-card {
   display: flex;
   flex-direction: column;
@@ -491,6 +505,7 @@
   min-width: 0;
 }
 
+.df2-xform .df2-xform-card-head,
 .df2-xform-card-head {
   display: flex;
   align-items: center;
@@ -499,6 +514,7 @@
   flex-wrap: wrap;
 }
 
+.df2-xform .df2-xform-card-head h3,
 .df2-xform-card-head h3 {
   display: flex;
   align-items: center;
@@ -928,6 +944,14 @@
 
 /* ── Before / after ─────────────────────────────────────────────────────── */
 
+.df2-xform .df2-xform-preview,
+.df2-xform-card.df2-xform-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  grid-column: auto;
+}
+
 .df2-xform-grids {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
@@ -1013,7 +1037,8 @@
  * enough height for it to cost nothing. */
 @media (min-height: 720px) {
   .df2-transfer-main-panel > .df2-xform > .df2-xform-head,
-  .df2-transfer-step-viewport > .df2-xform > .df2-xform-head {
+  .df2-transfer-step-viewport > .df2-xform > .df2-xform-head,
+  .df2-xform-step > .df2-xform > .df2-xform-head {
     position: sticky;
     top: -16px;
     z-index: 5;

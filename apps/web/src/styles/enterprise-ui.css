@@ -11847,14 +11847,17 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   }
 }
 
-.df2-xform-card {
+/* Post-load Transforms page only. Studio pre-load owns `.df2-xform` in
+ * transform-prep.css — these unscoped names overlapped Column catalog,
+ * Suggested repairs, and Before/after on Transfer Studio. */
+.df2-page-transforms .df2-xform-card {
   border: 1px solid var(--df-border);
   border-radius: 12px;
   background: var(--df-surface);
   padding: 14px 16px;
 }
 
-.df2-xform-card-head {
+.df2-page-transforms .df2-xform-card-head {
   display: flex;
   align-items: flex-start;
   justify-content: space-between;
@@ -11862,12 +11865,12 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   flex-wrap: wrap;
 }
 
-.df2-xform-card-head h3 {
+.df2-page-transforms .df2-xform-card-head h3 {
   margin: 0 0 2px;
   font-size: 15px;
 }
 
-.df2-xform-card-head p {
+.df2-page-transforms .df2-xform-card-head p {
   margin: 0;
   font-size: 12px;
   color: var(--df-text-secondary);
@@ -12009,7 +12012,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   color: var(--df-text-secondary);
 }
 
-.df2-xform-preview {
+.df2-page-transforms .df2-xform-preview {
   grid-column: 1 / -1;
   border: 1px solid var(--df-border);
   border-radius: 10px;
@@ -12019,14 +12022,14 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   gap: 10px;
 }
 
-.df2-xform-preview > header {
+.df2-page-transforms .df2-xform-preview > header {
   display: flex;
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
 }
 
-.df2-xform-preview > header span {
+.df2-page-transforms .df2-xform-preview > header span {
   font-size: 11px;
   color: var(--df-text-secondary);
 }
@@ -12050,18 +12053,18 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   background: var(--df-surface-muted);
 }
 
-.df2-xform-preview article {
+.df2-page-transforms .df2-xform-preview article {
   border: 1px solid var(--df-border);
   border-radius: 8px;
   padding: 8px 10px;
 }
 
-.df2-xform-preview article.is-danger {
+.df2-page-transforms .df2-xform-preview article.is-danger {
   border-color: var(--df-danger-border);
   background: var(--df-danger-bg);
 }
 
-.df2-xform-preview article header {
+.df2-page-transforms .df2-xform-preview article header {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
@@ -12069,7 +12072,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   margin-bottom: 6px;
 }
 
-.df2-xform-preview pre {
+.df2-page-transforms .df2-xform-preview pre {
   margin: 4px 0 0;
   padding: 8px 10px;
   border-radius: 6px;

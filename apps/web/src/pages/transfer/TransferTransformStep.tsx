@@ -52,6 +52,10 @@ const PREVIEW_ROWS = 12;
 const PREVIEW_DEBOUNCE_MS = 250;
 const GUIDE_KEY = "df.transform.guide.dismissed";
 
+function isTransportTimeout(message: string): boolean {
+  return /timed out|abort|504|network/i.test(message);
+}
+
 /** Severity → the badge class the rest of the studio already uses. */
 function severityClass(severity: string): string {
   if (severity === "blocking") return "df2-badge df2-badge-error";
@@ -110,6 +114,7 @@ export function TransferTransformStep({
   const [showAllColumns, setShowAllColumns] = useState(false);
   const [selectedColumn, setSelectedColumn] = useState("");
   const [showBuilder, setShowBuilder] = useState(false);
+  const [previewRetry, setPreviewRetry] = useState(0);
 
   const rowsKey = useMemo(() => JSON.stringify(sampleRows.slice(0, 200)), [sampleRows]);
   const stepsKey = useMemo(() => JSON.stringify(steps), [steps]);
@@ -198,7 +203,7 @@ export function TransferTransformStep({
       if (timer.current !== null) window.clearTimeout(timer.current);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [plan.allowed, rowsKey, stepsKey, schemaKey, sourceSchemaKey, sourceColumns.join("|")]);
+  }, [plan.allowed, rowsKey, stepsKey, schemaKey, sourceSchemaKey, sourceColumns.join("|"), previewRetry]);
 
   const operationsByName = useMemo(() => {
     const index = new Map<string, ShapeOperation>();
@@ -336,13 +341,29 @@ export function TransferTransformStep({
         </div>
       )}
       {previewError && (
-        <div className="df2-alert df2-alert-error" role="alert">
-          <DtIcon name="x" size={16} />
+        <div
+          className={`df2-alert ${isTransportTimeout(previewError) ? "df2-alert-warn" : "df2-alert-error"}`}
+          role={isTransportTimeout(previewError) ? "status" : "alert"}
+        >
+          <DtIcon name={isTransportTimeout(previewError) ? "alert" : "x"} size={16} />
           <div>
-            <p>{previewError}</p>
+            <p>{isTransportTimeout(previewError) ? "Preview request timed out." : previewError}</p>
             <p className="df2-label-hint">
-              The recipe is refused, so it has no identity to approve. Fix or remove the step.
+              {isTransportTimeout(previewError)
+                ? steps.length
+                  ? "The recipe has no identity until preview answers. Retry, or remove the steps and continue without transforming."
+                  : "The sample below is still the source. Continue without transforming — Validate still re-checks the whole population. Retry preview if the control plane is back."
+                : "The recipe is refused, so it has no identity to approve. Fix or remove the step."}
             </p>
+            {isTransportTimeout(previewError) && (
+              <button
+                type="button"
+                className="df2-btn df2-btn-sm"
+                onClick={() => { setPreviewError(""); setPreviewRetry((n) => n + 1); }}
+              >
+                Retry preview
+              </button>
+            )}
           </div>
         </div>
       )}
@@ -630,8 +651,19 @@ export function TransferTransformStep({
         <button
           type="button"
           className="df2-btn df2-btn-primary"
-          disabled={Boolean(previewError) || Boolean(preview?.refusal)}
-          title={previewError || (preview?.refusal ? "A refused row must be decided before Map." : "Continue to Map")}
+          disabled={
+            Boolean(preview?.refusal)
+            || (Boolean(previewError) && steps.length > 0)
+          }
+          title={
+            preview?.refusal
+              ? "A refused row must be decided before Map."
+              : previewError && steps.length > 0
+                ? "Preview the recipe before Map — Retry, or remove the steps."
+                : previewError && isTransportTimeout(previewError)
+                  ? "Continue without transforming. Validate still scans the population."
+                  : "Continue to Map"
+          }
           onClick={onContinue}
         >
           {steps.length ? "Continue with this transform" : "Continue without transforming"}
