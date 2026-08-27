@@ -150,12 +150,26 @@ def classify_transform_failure(
             "set domain",
             "interval family",
             "interval wire",
+            "year outside",
+            "store 0000",
+            "coerce to year",
+            "not valid base64",
+            "0/1 digits",
         )
     ) or (
         ("does not fit" in msg or "do not fit" in msg)
-        and re.search(r"\b(enum|set|interval)\b", f"{msg} {tgt_l}")
+        and re.search(r"\b(enum|set|interval|year)\b", f"{msg} {tgt_l}")
     ):
         return FailureClass.TYPE_CAST_FAILURE
+    if (
+        "binary length" in msg
+        or "bitstring length" in msg
+        or (
+            ("does not fit" in msg or "do not fit" in msg)
+            and re.search(r"\b(var)?binary|varbit|\bbit\b", f"{msg} {tgt_l}")
+        )
+    ):
+        return FailureClass.LENGTH_OVERFLOW
     if "empty value cannot coerce" in msg or (
         "empty" in msg and ("cannot coerce" in msg or "cannot cast" in msg)
     ):

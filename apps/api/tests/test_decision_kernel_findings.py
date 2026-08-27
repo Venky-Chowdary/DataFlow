@@ -366,3 +366,25 @@ def test_interval_family_mismatch_classifies_as_cast():
         )
         is FailureClass.TYPE_CAST_FAILURE
     )
+
+
+def test_year_out_of_range_classifies_as_cast_not_overflow():
+    assert (
+        classify_transform_failure(
+            "YEAR 1899 outside 0 or 1901–2155 — refuse invent (MySQL would store 0000)",
+            target_type="YEAR",
+            source_value="1899",
+        )
+        is FailureClass.TYPE_CAST_FAILURE
+    )
+
+
+def test_binary_length_classifies_as_length_overflow():
+    assert (
+        classify_transform_failure(
+            "1 value(s) in 'blob' do not fit blob BINARY(2) — binary length 4 exceeds BINARY(2)",
+            target_type="BINARY(2)",
+            source_value="YWJjZA==",
+        )
+        is FailureClass.LENGTH_OVERFLOW
+    )

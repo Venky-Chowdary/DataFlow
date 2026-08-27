@@ -566,6 +566,54 @@ def test_table_walk_applies_round_recipe_before_fit(
     assert shaped["population_fit"]["findings"] == []
 
 
+def test_table_walk_still_sees_late_year_out_of_range(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Preview of hire_year=1999 is clean. Row 431 ``1899`` is the write refuse."""
+    from services.preflight_service import run_file_preflight
+
+    rows = [
+        {
+            "id": i,
+            "hire_year": "1899" if i == 431 else "1999",
+            "arr_time": "12.34567890",
+            "flight_no": f"DL{i}",
+        }
+        for i in range(1, 451)
+    ]
+    _fake_reader(monkeypatch, rows, calls=[], page=100)
+    mappings = [
+        {
+            "source": "hire_year",
+            "target": "hire_year",
+            "confidence": 0.93,
+            "target_type": "YEAR",
+        }
+    ]
+
+    result = run_file_preflight(
+        columns=["hire_year"],
+        column_types={"hire_year": "VARCHAR"},
+        row_count=450,
+        mappings=mappings,
+        destination_connected=True,
+        destination_column_types={"hire_year": "YEAR"},
+        destination_db_type="mysql",
+        source_kind="database",
+        source_format="postgresql",
+        source_table="flights",
+        source_config={"kind": "database", "format": "postgresql", "table": "flights"},
+        sample_rows=rows[:25],
+    )
+
+    assert result["passed"] is False
+    assert result["population_fit"]["evidence"] == "exact"
+    findings = result["population_fit"]["findings"]
+    assert findings
+    assert findings[0]["example_rows"] == [431]
+    assert "0000" in (findings[0].get("suggested_fix") or "")
+
+
 def test_table_walk_still_sees_late_enum_member(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

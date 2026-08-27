@@ -16,6 +16,7 @@ import pytest
 
 from connectors.writer_common import integer_fit_failure
 from services.population_fit_scan import (
+    CARRIER_BYTES,
     CARRIER_DOMAIN,
     CARRIER_INTEGER,
     CARRIER_TYPED,
@@ -436,3 +437,119 @@ def test_json_and_variant_stay_undecidable() -> None:
         assert targets == (), dest_type
         assert undecidable == ("c",), dest_type
         assert safe == (), dest_type
+
+
+def test_out_of_range_year_blocks_and_does_not_invent_varchar() -> None:
+    """Non-strict MySQL stores invalid YEAR as 0000 — silent wipe."""
+    targets, _und, safe, report = _scan(
+        "YEAR", "VARCHAR", ["1999", "1899", "2156"], dest_db="mysql"
+    )
+    assert [t.carrier for t in targets] == [CARRIER_TYPED]
+    assert safe == ()
+    assert report.findings[0].unfit_rows == 2
+    assert report.findings[0].example_rows == (2, 3)
+    assert "1899" in report.findings[0].unfit_reason
+    assert not report.findings[0].suggested_target_type
+    assert "0000" in report.findings[0].suggested_fix
+    assert "varchar" not in (report.findings[0].suggested_fix or "").lower()
+
+
+def test_empty_year_is_a_silent_wipe_not_nullability() -> None:
+    _targets, _und, _safe, report = _scan("YEAR", "VARCHAR", [""], dest_db="mysql")
+    assert report.findings[0].unfit_rows == 1
+    assert "year" in report.findings[0].unfit_reason.lower()
+
+
+def test_warehouse_year_wire_is_not_rescanned() -> None:
+    targets, _und, safe, report = _scan(
+        "YEAR",
+        "YEAR",
+        ["1999", "2001"],
+        dest_db="mysql",
+        source_kind="database",
+        source_format="mysql",
+    )
+    assert targets == ()
+    assert safe == ("c",)
+    assert report.findings == ()
+
+
+def test_file_inferred_year_still_scans_out_of_range() -> None:
+    targets, _und, safe, report = _scan(
+        "YEAR",
+        "YEAR",
+        ["1999", "1899"],
+        dest_db="mysql",
+        source_kind="file",
+        source_format="csv",
+    )
+    assert [t.carrier for t in targets] == [CARRIER_TYPED]
+    assert safe == ()
+    assert report.findings[0].unfit_rows == 1
+
+
+def test_binary_overflow_stamps_dest_widen_not_text() -> None:
+    import base64
+
+    fit = base64.b64encode(b"ab").decode("ascii")
+    overflow = base64.b64encode(b"abcd").decode("ascii")
+    targets, _und, safe, report = _scan(
+        "BINARY(2)", "VARCHAR", [fit, overflow], dest_db="mysql"
+    )
+    assert [t.carrier for t in targets] == [CARRIER_BYTES]
+    assert safe == ()
+    assert report.findings[0].unfit_rows == 1
+    assert report.findings[0].example_rows == (2,)
+    assert report.findings[0].suggested_target_type == "BINARY(4)"
+    assert "TEXT" not in (report.findings[0].suggested_target_type or "")
+    assert "truncate" in report.findings[0].suggested_fix.lower()
+
+
+def test_invalid_base64_into_binary_is_a_fix_not_a_widen() -> None:
+    _targets, _und, _safe, report = _scan(
+        "VARBINARY(16)", "VARCHAR", ["not-base64!!!"], dest_db="postgresql"
+    )
+    assert report.findings[0].unfit_rows == 1
+    assert not report.findings[0].suggested_target_type
+    assert "utf-8" in report.findings[0].suggested_fix.lower()
+
+
+def test_bitstring_overflow_widens_bit_not_bytea() -> None:
+    targets, _und, _safe, report = _scan(
+        "BIT(8)", "VARCHAR", ["10101010", "101010101"], dest_db="postgresql"
+    )
+    assert [t.carrier for t in targets] == [CARRIER_BYTES]
+    assert report.findings[0].unfit_rows == 1
+    assert report.findings[0].suggested_target_type == "BIT(9)"
+    assert "BYTEA" not in (report.findings[0].suggested_target_type or "")
+
+
+def test_shorter_fixed_bit_is_a_pad_not_a_shrink() -> None:
+    _targets, _und, _safe, report = _scan(
+        "BIT(8)", "VARCHAR", ["101"], dest_db="postgresql"
+    )
+    assert report.findings[0].unfit_rows == 1
+    assert not report.findings[0].suggested_target_type
+
+
+def test_warehouse_binary_identical_width_skips_the_scan() -> None:
+    targets, _und, safe, report = _scan(
+        "VARBINARY(16)",
+        "VARBINARY(16)",
+        ["YWJj"],
+        dest_db="mysql",
+        source_kind="database",
+        source_format="mysql",
+    )
+    assert targets == ()
+    assert safe == ("c",)
+    assert report.findings == ()
+
+
+def test_unbounded_bytea_stays_undecidable() -> None:
+    targets, undecidable, safe, _report = _scan(
+        "BYTEA", "VARCHAR", ["YWJj"], dest_db="postgresql"
+    )
+    assert targets == ()
+    assert undecidable == ("c",)
+    assert safe == ()

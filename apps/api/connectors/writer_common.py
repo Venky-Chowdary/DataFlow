@@ -2946,6 +2946,57 @@ def fits_binary(value: Any, width: int) -> bool:
     return len(raw) <= width
 
 
+def binary_overflow_suggested_type(value: Any, type_str: str) -> str:
+    """Dest-spelled BIT/BINARY that would hold ``value``. Empty when it binds.
+
+    Never TEXT / BYTEA invent — those change bit-vs-byte polarity. A shorter
+    fixed ``BIT(n)`` is a pad/fix, not a shrink.
+    """
+    from services.type_system import (
+        is_bitstring_carrier,
+        is_varying_bitstring_carrier,
+        parse_binary_carrier_width,
+        parse_bitstring_width,
+    )
+
+    if is_bitstring_carrier(type_str):
+        from connectors.sql_bind import coerce_bitstring_wire
+
+        try:
+            bits = coerce_bitstring_wire(value, width=None, varying=True)
+        except ValueError:
+            return ""
+        if not bits:
+            return ""
+        need = len(bits)
+        width = parse_bitstring_width(type_str)
+        if width is None or need <= width:
+            return ""
+        if is_varying_bitstring_carrier(type_str):
+            return (
+                f"VARBIT({need})"
+                if "VARBIT" in (type_str or "").upper()
+                else f"BIT VARYING({need})"
+            )
+        return f"BIT({need})"
+
+    raw = binary_storage_bytes(value)
+    if raw is None:
+        return ""
+    need = len(raw)
+    width = parse_binary_carrier_width(type_str)
+    if width is None or need <= width:
+        return ""
+    upper = (type_str or "").upper()
+    if "VARBINARY" in upper:
+        return f"VARBINARY({need})"
+    if "TINYBLOB" in upper:
+        return "BLOB" if need > 255 else type_str
+    if "BINARY" in upper:
+        return f"BINARY({need})"
+    return f"VARBINARY({need})"
+
+
 
 
 def quarantine_unfit_years(
