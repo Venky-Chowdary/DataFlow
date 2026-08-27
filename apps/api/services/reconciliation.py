@@ -32,6 +32,7 @@ from services.reconcile_sftp import verify_sftp_object
 from services.reconcile_coverage import (
     NO_OP_DEST_UNCHANGED,
     SOURCE_DIGEST_WRITE_PASS,
+    SOURCE_DIGEST_WRITER_ACK,
     WRITTEN_BATCH_KEYS,
     append_row_count_report,
     extra_rows_note,
