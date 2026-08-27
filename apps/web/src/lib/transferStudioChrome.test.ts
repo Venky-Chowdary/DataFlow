@@ -317,6 +317,7 @@ describe("Transfer Studio chrome contracts", () => {
     assert.match(router, /await asyncio\.to_thread/);
     assert.match(job, /run_plan_preflight/);
     assert.match(job, /threading\.Thread/);
+    assert.match(job, /accepted = job_public_view\(job\)/);
     // Health fails fast; transfer /api/ stays at 300s for the 1M scan.
     assert.match(nginx, /location \/health-api \{[\s\S]*proxy_read_timeout 8s/);
     assert.match(nginx, /location \/api\/ \{[\s\S]*proxy_read_timeout 300s/);

@@ -9,6 +9,7 @@ GET polls the same SSOT ``run_plan_preflight``. Sync callers still get 200.
 from __future__ import annotations
 
 import sys
+import threading
 import time
 from pathlib import Path
 from unittest.mock import patch
@@ -90,6 +91,37 @@ def test_async_run_returns_202_then_poll_completes():
     assert done["run_id"] == "pf_ssot_abc"
     assert done["job_run_id"] == started["run_id"]
     assert done["passed_count"] == 18
+
+
+def test_get_shows_running_until_the_ssot_finishes():
+    """Studio polls GET while the 1M walk is still on the worker."""
+    release = threading.Event()
+
+    def slow_run(plan_id, *, acknowledgments=None, shape_recipe=None):
+        release.wait(timeout=2)
+        return {"passed": True, "run_id": "pf_ssot_slow"}
+
+    client = _client()
+    with patch(
+        "services.transfer_plan_service.run_plan_preflight",
+        side_effect=slow_run,
+    ):
+        res = client.post(
+            "/api/v1/transfer/plans/plan-slow/preflight",
+            json={"async_run": True},
+        )
+        assert res.status_code == 202
+        run_id = res.json()["run_id"]
+        mid = client.get(
+            "/api/v1/transfer/plans/plan-slow/preflight",
+            params={"run_id": run_id},
+        )
+        assert mid.status_code == 200
+        assert mid.json()["status"] == "running"
+        release.set()
+        done = _wait_job(client, "plan-slow", run_id)
+    assert done["status"] == "complete"
+    assert done["run_id"] == "pf_ssot_slow"
 
 
 def test_failed_job_surfaces_error():

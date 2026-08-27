@@ -50,6 +50,9 @@ def start_plan_preflight_job(
     with _LOCK:
         _LATEST[plan_id] = job
         _BY_RUN[run_id] = job
+    # 202 is the accept snapshot. The worker may finish before the handler
+    # returns — GET /preflight is the live view; do not race status here.
+    accepted = job_public_view(job)
 
     def _run() -> None:
         try:
@@ -77,7 +80,7 @@ def start_plan_preflight_job(
         name=f"plan-preflight-{plan_id[:8]}",
         daemon=True,
     ).start()
-    return job_public_view(job)
+    return accepted
 
 
 def get_plan_preflight_job(plan_id: str, run_id: str = "") -> dict[str, Any] | None:
