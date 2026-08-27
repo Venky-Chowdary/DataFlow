@@ -6894,6 +6894,32 @@ def assess_create_new_type_risk(
         if ieee:
             risks.append(ieee)
 
+    from services.conversion_contract import invents_unproven_capacity
+
+    if invents_unproven_capacity(src, tgt, dest_db=db):
+        _sp, src_scale = parse_numeric_precision_scale(src)
+        _tp, dest_scale = parse_numeric_precision_scale(tgt)
+        declared_scale = 0 if src_scale is None else int(src_scale)
+        if (
+            dest_scale is not None
+            and int(dest_scale) > declared_scale
+            and not any(r.get("kind") == "invented_decimal_scale" for r in risks)
+        ):
+            # NUMBER(38,10) / DECIMAL(38,15) floors invent zeros after the
+            # decimal the source never declared. Trailing zeros do not change
+            # the value; CREATE still invented the shape.
+            risks.append({
+                "kind": "invented_decimal_scale",
+                "severity": "warn",
+                "message": (
+                    f"Create-new {src} → {tgt} invents destination scale "
+                    f"{int(dest_scale)} the source never declared. Zeros after "
+                    "the decimal do not change the value, but CREATE invented "
+                    "that scale. Use a declared typmod or observed samples — "
+                    "Accept · Risk Contract before Execute if this shape is intended."
+                ),
+            })
+
     if is_precision_collapse_coercion(src, tgt, dest_db=db):
         risks.append({
             "kind": "precision_collapse",

@@ -203,3 +203,35 @@ def test_map_columns_create_new_uses_sample_decimal():
     p, s = parse_numeric_precision_scale(tgt)
     assert p is not None and s is not None
     assert not (p == 38 and s in {10, 15})
+
+
+def test_ieee_risk_refuses_float_as_default_apply():
+    risk = ieee_float_create_new_risk(
+        observe_numeric_samples(
+            ["111.89999999999999", "42.100000000000001"]
+        )
+    )
+    assert risk and risk["kind"] == "ieee_float_artifact"
+    assert "do not Apply" in risk["message"]
+    assert "Accept" in risk["message"]
+
+
+def test_bare_number_floor_invents_scale_chip():
+    """Snowflake NUMBER(38,10) is a product floor, not the engine default (38,0)."""
+    risks = assess_create_new_type_risk(
+        "NUMBER", "NUMBER(38,10)", destination_db_type="snowflake"
+    )
+    assert any(r.get("kind") == "invented_decimal_scale" for r in risks)
+    chip = next(r for r in risks if r["kind"] == "invented_decimal_scale")
+    assert "scale 10" in chip["message"]
+    assert "never declared" in chip["message"]
+
+    declared = assess_create_new_type_risk(
+        "DECIMAL(12,2)", "NUMBER(12,2)", destination_db_type="snowflake"
+    )
+    assert not any(r.get("kind") == "invented_decimal_scale" for r in declared)
+
+    integer_carrier = assess_create_new_type_risk(
+        "BIGINT", "NUMBER(38,0)", destination_db_type="snowflake"
+    )
+    assert not any(r.get("kind") == "invented_decimal_scale" for r in integer_carrier)

@@ -703,7 +703,8 @@ def ieee_float_create_new_risk(observation: dict[str, Any] | None) -> dict[str, 
         "severity": "warn",
         "message": (
             "Samples look like IEEE/Excel binary floats (long fractional residue). "
-            f"Create-new stamps FLOAT (approximate). Prefer {suggested} only when "
-            "the business domain is fixed-point money/scores — accept risk or remap."
+            f"FLOAT is approximate — do not Apply it as the default CREATE type. "
+            f"Prefer {suggested} for money/clocks/scores. Accept · Risk Contract "
+            "only if the business domain is truly IEEE, then remap to FLOAT."
         ),
     }

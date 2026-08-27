@@ -412,3 +412,39 @@ def test_live_ddl_widen_is_not_mapping_applyable():
     assert report.findings[0].target.binds_live_ddl is True
     assert report.findings[0].suggested_target_type == "NUMBER(10,7)"
     assert applyable_widen_actions(report) == []
+
+
+def test_integer_fractional_proposes_decimal_never_float():
+    """INTEGER dest + clock fraction → exact NUMBER/DECIMAL, never FLOAT Apply.
+
+    Snowflake INTEGER is NUMBER(38,0) (typed parse), Postgres INTEGER is INT32.
+    Both must propose a proven decimal — not calendar copy, not FLOAT.
+    """
+    rows = [{"DEP_TIME": "9"}, {"DEP_TIME": "9.083333"}]
+    for dest in ("snowflake", "postgresql"):
+        report = scan_population_fit(
+            rows,
+            [{"source": "DEP_TIME", "target": "DEP_TIME", "target_type": "INTEGER"}],
+            source_types={"DEP_TIME": "NUMBER"},
+            dest_db=dest,
+            dialect_label=dest,
+            job_error_policy="fail",
+            rows_are_population=True,
+            source_kind="file",
+            source_format="csv",
+            dest_table_exists=False,
+        )
+        assert report.findings, dest
+        suggested = str(report.findings[0].suggested_target_type or "").upper()
+        assert suggested.startswith("NUMBER(") or suggested.startswith(
+            ("DECIMAL(", "NUMERIC(")
+        ), (dest, suggested, report.findings[0].unfit_reason)
+        assert "FLOAT" not in suggested and "DOUBLE" not in suggested
+        assert report.findings[0].apply_proven is True
+        assert "calendar" not in report.findings[0].suggested_fix.lower()
+        p_s = suggested.split("(")[1].rstrip(")").split(",")
+        precision, scale = int(p_s[0]), int(p_s[1])
+        assert all(
+            fits_decimal(row["DEP_TIME"], precision, scale, dest_db=dest)
+            for row in rows
+        )

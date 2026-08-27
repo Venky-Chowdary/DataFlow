@@ -1026,7 +1026,11 @@ def scan_rows(
                 and not _is_year_carrier(bounded[idx].target_type)
             ):
                 continue
-            if bounded[idx].carrier in {CARRIER_DECIMAL, CARRIER_INTEGER}:
+            if bounded[idx].carrier in {CARRIER_DECIMAL, CARRIER_INTEGER} or (
+                bounded[idx].carrier == CARRIER_TYPED
+                and bounded[idx].transform
+                in {"integer", "decimal", "currency", "percentage"}
+            ):
                 idig, scale = write_int_digits_and_scale(value)
                 if idig > env_int.get(idx, 0):
                     env_int[idx] = idig
@@ -1240,13 +1244,25 @@ def scan_rows(
                     max_scale=env_scale.get(idx, 0),
                     safety_margin=0,
                 )
+                parsed = parse_decimal_precision_scale(
+                    suggested_type, dest_db=dest_db
+                )
+                apply_proven = bool(
+                    parsed
+                    and all(
+                        fits_decimal(v, parsed[0], parsed[1], dest_db=dest_db)
+                        for v in prove_values
+                    )
+                )
+                if not apply_proven:
+                    suggested_type = ""
             else:
                 suggested_type = proven_integer_widen(
                     prove_values or (first,),
                     dest_db=dest_db,
                     current_type=target.target_type,
                 )
-            apply_proven = bool(suggested_type)
+                apply_proven = bool(suggested_type)
             if suggested_type:
                 suggested_fix = (
                     f"Open Map → widen {target.target} to {suggested_type} "
@@ -1292,6 +1308,47 @@ def scan_rows(
                     "(or fix the source UUID) → re-Validate. "
                     "Do not silently coerce."
                 )
+            elif (
+                target.transform in {"integer", "decimal", "currency", "percentage"}
+                or "fractional" in why_l
+                or "invalid integer" in why_l
+                or "not an integer" in why_l
+            ):
+                # Snowflake/Oracle INTEGER is NUMBER(38,0) — typed parse, not
+                # INT32. A fraction is a DECIMAL propose, never calendar copy
+                # and never FLOAT as Apply-proven.
+                suggested_type = proven_decimal_widen(
+                    values=prove_values or (first,),
+                    dest_db=dest_db,
+                    current_type=target.target_type,
+                    max_int_digits=env_int.get(idx, 0),
+                    max_scale=env_scale.get(idx, 0),
+                    safety_margin=0,
+                )
+                parsed = parse_decimal_precision_scale(
+                    suggested_type, dest_db=dest_db
+                )
+                apply_proven = bool(
+                    parsed
+                    and all(
+                        fits_decimal(v, parsed[0], parsed[1], dest_db=dest_db)
+                        for v in prove_values
+                    )
+                )
+                if not apply_proven:
+                    suggested_type = ""
+                if suggested_type:
+                    suggested_fix = (
+                        f"Open Map → widen {target.target} to {suggested_type} "
+                        "(preserve the fraction, or ALTER the destination) "
+                        "→ re-Validate. Do not silently truncate."
+                    )
+                else:
+                    suggested_fix = (
+                        f"Open Map → remap {target.target} off {target.target_type} "
+                        "to NUMBER/DECIMAL that holds the fraction → re-Validate. "
+                        "Do not Apply FLOAT as a default."
+                    )
             elif target.transform == "time" or "invalid time" in why_l:
                 suggested_fix = (
                     f"Open Map → remap {target.target} off {target.target_type} "
