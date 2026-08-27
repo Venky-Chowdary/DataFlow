@@ -746,7 +746,7 @@ describe("Transfer Studio chrome contracts", () => {
     assert.match(chunk, /dateLocale,/);
     assert.match(chunk, /numberLocale,/);
     assert.match(chunk, /approved_shape_recipe_hash/);
-    assert.match(chunk, /approved_decision_artifact_hash/);
+    assert.match(chunk, /studioScheduleValidateIdentity\(preflight\)/);
     assert.match(chunk, /mergeSignedRiskContracts/);
     assert.match(chunk, /buildPreflightMappings/);
     assert.match(chunk, /writeViaStaging/);
