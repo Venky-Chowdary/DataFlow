@@ -5115,6 +5115,24 @@ export function TransferPage({
       return;
     }
     try {
+      const mappingsForSchedule = mergeSignedRiskContracts(
+        mergeStampedTargetTypes(columnMappings, preflight?.stamped_mappings),
+        preflight?.signed_mappings,
+      );
+      const transferMappings = mappingsForSchedule.length
+        ? buildPreflightMappings(analysis?.columns ?? [], mappingsForSchedule)
+        : analysis
+          ? buildPreflightMappings(analysis.columns)
+          : columnMappings.map((m) => ({
+              source: m.source,
+              target: m.target,
+              confidence: m.confidence,
+              transform: m.transform,
+            }));
+      const decisionHash = String(
+        (preflight?.proof_bundle?.decision_artifact as { content_hash?: string } | undefined)
+          ?.content_hash || "",
+      );
       await createSchedule({
         name: `${sourceConnector?.name ?? "Source"} → ${targetCollection}`,
         source_connector_id: sourceConnectorId,
@@ -5130,12 +5148,13 @@ export function TransferPage({
         procedure_call: sourceReadMode === "procedure" ? procedureCall.trim() : "",
         source_query: sourceReadMode === "query" ? procedureCall.trim() : "",
         procedure_params: Object.keys(procedureParams).length ? procedureParams : {},
-        mappings: columnMappings.map((m) => ({
-          source: m.source,
-          target: m.target,
-          confidence: m.confidence,
-          transform: m.transform,
-        })),
+        mappings: transferMappings,
+        stream_contracts: streamContracts,
+        date_locale: dateLocale,
+        number_locale: numberLocale,
+        shape_recipe: recipePayload(shapeSteps),
+        approved_shape_recipe_hash: shapeIdentity?.hash || "",
+        approved_decision_artifact_hash: decisionHash,
         ...studioSchedulePolicies({
           validationMode,
           schemaPolicy,

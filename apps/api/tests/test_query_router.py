@@ -106,6 +106,35 @@ def test_query_export_csv(test_client, tmp_path, monkeypatch):
     assert data["download_url"].startswith("/api/v1/transfer/download/")
 
 
+def test_query_export_refuses_overwrite_to_connector(test_client, tmp_path, monkeypatch):
+    """Playground export must not replace a table without Transfer Studio gates."""
+    _isolated_store(monkeypatch, tmp_path)
+    db_path = _sqlite_db(tmp_path)
+    src = connector_store.create_connector({
+        "name": "Query src",
+        "type": "sqlite",
+        "role": "both",
+        "connection_string": f"sqlite:///{db_path}",
+        "workspace_id": "",
+    })
+    dest = connector_store.create_connector({
+        "name": "Query dest",
+        "type": "sqlite",
+        "role": "destination",
+        "connection_string": f"sqlite:///{tmp_path / 'dest.db'}",
+        "workspace_id": "",
+    })
+    response = test_client.post("/api/v1/query/export", json={
+        "connector_id": src.id,
+        "query": "SELECT * FROM users",
+        "destination_connector_id": dest.id,
+        "destination": "users_copy",
+        "sync_mode": "overwrite",
+    })
+    assert response.status_code == 400, response.text
+    assert "cannot overwrite" in response.json()["detail"].lower()
+
+
 def test_safe_sql_guard():
     assert _is_safe_sql("SELECT * FROM users") is True
     assert _is_safe_sql("SELECT * FROM users;") is True

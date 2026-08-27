@@ -3837,8 +3837,12 @@ export type SecurityPosture = {
   audit_logging: boolean;
   pii_detection: boolean;
   ip_allowlist_enabled: boolean;
+  ip_allowlist_enforced?: boolean;
   mfa_required: boolean;
+  mfa_enforced?: boolean;
   session_timeout_hours: number;
+  session_timeout_enforced?: boolean;
+  byok_encrypts_secrets?: boolean;
   tls_version: string;
   compliance: Array<{ framework: string; status: string; evidence: string }>;
   attestations: Array<{ name: string; last_completed?: string | null; next_due?: string | null; status?: string }>;

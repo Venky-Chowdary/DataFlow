@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 import {
   coerceLastTestOk,
   connectorLooksHealthy,
+  connectorPassedProbe,
   connectorNeedsAttention,
   connectorTestHealth,
   connectorTestLabel,
@@ -15,6 +16,12 @@ describe("connectorHealth", () => {
     assert.equal(connectorLooksHealthy({ last_test_ok: true, status: "error" }), true);
     assert.equal(connectorNeedsAttention({ last_test_ok: true, status: "error" }), false);
     assert.equal(connectorTestLabel({ last_test_ok: true, status: "error" }), "Test passed");
+  });
+
+  it("does not count never-tested as a passed probe", () => {
+    assert.equal(connectorPassedProbe({}), false);
+    assert.equal(connectorPassedProbe({ last_test_ok: true }), true);
+    assert.equal(connectorLooksHealthy({}), true);
   });
 
   it("treats last_test_ok=false as failed", () => {

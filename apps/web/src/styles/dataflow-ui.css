@@ -1180,6 +1180,7 @@ body {
 
 .df2-health-dot.ok { background: #22c55e; }
 .df2-health-dot.err { background: #ef4444; }
+.df2-health-dot.warn { background: #d97706; }
 
 .df2-copilot-rail {
   width: 360px;

@@ -59,6 +59,51 @@ def test_gitops_plan_and_apply_schedule(tmp_path, monkeypatch):
     assert updated.interval == "hourly"
 
 
+def test_apply_manifest_binds_workspace_and_refuses_foreign_update(tmp_path, monkeypatch):
+    monkeypatch.setenv("DATAFLOW_DATA_DIR", str(tmp_path))
+    import services.gitops_manifest as gm
+    import services.platform_config as pc
+    import services.schedule_store as ss
+    from importlib import reload
+
+    reload(pc)
+    reload(ss)
+    reload(gm)
+
+    foreign = ss.create_schedule(
+        {
+            "name": "theirs",
+            "source_connector_id": "s1",
+            "source_table": "orders",
+            "dest_connector_id": "d1",
+            "dest_table": "orders_copy",
+            "interval": "daily",
+            "workspace_id": "ws-b",
+        }
+    )
+    result = gm.apply_manifest(
+        {
+            "kind": "PipelineSchedule",
+            "spec": {
+                "id": foreign.id,
+                "name": "hijack",
+                "source_connector_id": "s1",
+                "source_table": "orders",
+                "dest_connector_id": "d1",
+                "dest_table": "orders_copy",
+                "interval": "hourly",
+                "workspace_id": "ws-a",
+            },
+        },
+        workspace_id="ws-a",
+    )
+    assert result["failed"] == 1
+    still = ss.get_schedule(foreign.id)
+    assert still is not None
+    assert still.workspace_id == "ws-b"
+    assert still.name == "theirs"
+
+
 def test_contract_artifact_shape(tmp_path, monkeypatch):
     monkeypatch.setenv("DATAFLOW_DATA_DIR", str(tmp_path))
     from services.data_contract import DataContract

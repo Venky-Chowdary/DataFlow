@@ -27,6 +27,20 @@ from services.workspace_access import (
 
 router = APIRouter(prefix="/schedules", tags=["Scheduled Pipelines"])
 
+
+def _schedule_or_404(schedule_id: str) -> PipelineSchedule:
+    sched = get_schedule(schedule_id)
+    if not sched:
+        raise HTTPException(status_code=404, detail="Schedule not found")
+    return sched
+
+
+def _bound_schedule(request: Request, schedule_id: str) -> PipelineSchedule:
+    """Load a schedule and refuse cross-workspace access."""
+    sched = _schedule_or_404(schedule_id)
+    assert_resource_workspace(request, getattr(sched, "workspace_id", "") or "")
+    return sched
+
 SyncMode = Literal[
     "full_refresh_overwrite",
     "full_refresh_append",
@@ -73,6 +87,12 @@ class ScheduleCreate(BaseModel):
     workspace_id: str = ""
     contract_id: str = ""
     require_signed_contract: Optional[bool] = None
+    date_locale: str = ""
+    number_locale: str = ""
+    shape_recipe: dict[str, Any] = Field(default_factory=dict)
+    approved_shape_recipe_hash: str = ""
+    approved_decision_artifact_hash: str = ""
+    approved_ddl_identity_hash: str = ""
     max_retries: int = Field(default=0, ge=0, le=10)
     retry_backoff_seconds: int = Field(default=60, ge=0, le=3600)
     notify_on_failure: bool = True
@@ -105,6 +125,12 @@ class ScheduleUpdate(BaseModel):
     workspace_id: Optional[str] = None
     contract_id: Optional[str] = None
     require_signed_contract: Optional[bool] = None
+    date_locale: Optional[str] = None
+    number_locale: Optional[str] = None
+    shape_recipe: Optional[dict[str, Any]] = None
+    approved_shape_recipe_hash: Optional[str] = None
+    approved_decision_artifact_hash: Optional[str] = None
+    approved_ddl_identity_hash: Optional[str] = None
     max_retries: Optional[int] = Field(default=None, ge=0, le=10)
     retry_backoff_seconds: Optional[int] = Field(default=None, ge=0, le=3600)
     notify_on_failure: Optional[bool] = None
@@ -137,6 +163,12 @@ class ScheduleResponse(BaseModel):
     workspace_id: str = ""
     contract_id: str = ""
     require_signed_contract: bool = False
+    date_locale: str = ""
+    number_locale: str = ""
+    shape_recipe: dict[str, Any] = Field(default_factory=dict)
+    approved_shape_recipe_hash: str = ""
+    approved_decision_artifact_hash: str = ""
+    approved_ddl_identity_hash: str = ""
     max_retries: int = 0
     retry_backoff_seconds: int = 60
     notify_on_failure: bool = True
@@ -157,6 +189,7 @@ class ScheduleResponse(BaseModel):
     created_at: str
     # Pipeline Detail needs schema map without a second Transfer Studio hop.
     mappings: list[dict[str, Any]] = Field(default_factory=list)
+    stream_contracts: list[dict[str, Any]] = Field(default_factory=list)
     # The source shape this schedule last read. A run is refused when a column
     # it carries changes type, is dropped or is renamed, so the operator has to
     # be able to see the baseline that judged it — otherwise the refusal is a
@@ -261,13 +294,22 @@ async def schedule_intervals():
 
 
 @router.get("/export/dataflow")
-def export_dataflow_manifest(format: Literal["yaml", "json"] = "yaml"):
-    """Export all schedules (+ contracts) as a single ``dataflow.yaml`` GitOps manifest."""
+def export_dataflow_manifest(
+    request: Request,
+    format: Literal["yaml", "json"] = "yaml",
+    workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+):
+    """Export schedules (+ contracts) visible in this workspace as dataflow.yaml."""
     import yaml
 
     from services.gitops_manifest import build_dataflow_manifest
+    from services.team_store import require_workspace_isolation
 
-    artifact = build_dataflow_manifest()
+    ws = resolve_read_workspace(request, workspace_id)
+    artifact = build_dataflow_manifest(
+        workspace_id=ws,
+        isolation=require_workspace_isolation(),
+    )
     if format == "yaml":
         return Response(
             content=yaml.safe_dump(artifact, sort_keys=False, default_flow_style=False),
@@ -278,10 +320,15 @@ def export_dataflow_manifest(format: Literal["yaml", "json"] = "yaml"):
 
 
 @router.post("/gitops/plan")
-async def gitops_plan_manifest(payload: dict[str, Any]):
+async def gitops_plan_manifest(
+    payload: dict[str, Any],
+    request: Request,
+    workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+):
     """Dry-run a DatawrapManifest / PipelineSchedule / DataContract YAML body."""
     from services.gitops_manifest import plan_manifest
 
+    resolve_read_workspace(request, workspace_id)
     try:
         return plan_manifest(payload)
     except ValueError as exc:
@@ -291,8 +338,10 @@ async def gitops_plan_manifest(payload: dict[str, Any]):
 @router.post("/gitops/apply")
 async def gitops_apply_manifest(
     payload: dict[str, Any],
+    request: Request,
     dry_run: bool = False,
     require_signed_contracts: bool = False,
+    workspace_id: str = Header(default="", alias="X-Workspace-Id"),
 ):
     """Apply a GitOps manifest (create/update schedules + draft contracts).
 
@@ -302,11 +351,13 @@ async def gitops_apply_manifest(
     """
     from services.gitops_manifest import apply_manifest
 
+    ws = resolve_write_workspace(request, workspace_id)
     try:
         return apply_manifest(
             payload,
             dry_run=dry_run,
             require_signed_contracts=require_signed_contracts,
+            workspace_id=ws,
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -322,7 +373,12 @@ async def list_pipeline_schedules(
     ws = resolve_read_workspace(request, workspace_id)
     schedules = await asyncio.to_thread(list_schedules)
     if ws:
-        schedules = [s for s in schedules if not s.workspace_id or s.workspace_id == ws]
+        from services.team_store import require_workspace_isolation
+
+        if require_workspace_isolation():
+            schedules = [s for s in schedules if s.workspace_id == ws]
+        else:
+            schedules = [s for s in schedules if not s.workspace_id or s.workspace_id == ws]
     return [ScheduleSummaryResponse.from_schedule(s) for s in schedules]
 
 
@@ -374,6 +430,8 @@ async def patch_pipeline_schedule(
         raise HTTPException(status_code=404, detail="Schedule not found")
     assert_resource_workspace(request, getattr(existing, "workspace_id", "") or "")
     data = {k: v for k, v in body.model_dump().items() if v is not None}
+    # A PATCH must not re-home a schedule into another workspace.
+    data.pop("workspace_id", None)
     if not data:
         return ScheduleResponse.from_schedule(existing)
     try:
@@ -386,15 +444,19 @@ async def patch_pipeline_schedule(
 
 
 @router.get("/{schedule_id}/export")
-def export_pipeline_schedule(schedule_id: str, format: Literal["yaml", "json"] = "yaml"):
+def export_pipeline_schedule(
+    schedule_id: str,
+    request: Request,
+    format: Literal["yaml", "json"] = "yaml",
+    workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+):
     """Export a schedule as a versionable YAML/JSON artifact for GitOps."""
     import yaml
 
     from services.gitops_manifest import schedule_artifact
 
-    sched = get_schedule(schedule_id)
-    if not sched:
-        raise HTTPException(status_code=404, detail="Schedule not found")
+    resolve_read_workspace(request, workspace_id)
+    sched = _bound_schedule(request, schedule_id)
     artifact = schedule_artifact(sched)
     if format == "yaml":
         return Response(
@@ -406,12 +468,22 @@ def export_pipeline_schedule(schedule_id: str, format: Literal["yaml", "json"] =
 
 
 @router.post("/import", response_model=ScheduleResponse, status_code=201)
-async def import_pipeline_schedule(payload: dict[str, Any]):
+async def import_pipeline_schedule(
+    payload: dict[str, Any],
+    request: Request,
+    workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+):
     """Import a PipelineSchedule GitOps artifact (create or replace by id)."""
     from services.gitops_manifest import apply_manifest
 
-    # Prefer single-resource apply so kind wrappers and bare specs both work.
-    result = apply_manifest(payload, dry_run=False)
+    ws = resolve_write_workspace(request, workspace_id)
+    if ws:
+        # Bind the imported spec to the caller's workspace so a pasted YAML
+        # cannot land in another tenant.
+        spec = payload.get("spec") if isinstance(payload.get("spec"), dict) else payload
+        if isinstance(spec, dict):
+            spec["workspace_id"] = ws
+    result = apply_manifest(payload, dry_run=False, workspace_id=ws)
     rows = result.get("results") or []
     sched_row = next((r for r in rows if r.get("kind") == "PipelineSchedule" and r.get("ok")), None)
     if not sched_row:
@@ -420,29 +492,42 @@ async def import_pipeline_schedule(payload: dict[str, Any]):
     sched = get_schedule(str(sched_row.get("id") or ""))
     if not sched:
         raise HTTPException(status_code=500, detail="Schedule imported but not readable")
+    assert_resource_workspace(request, getattr(sched, "workspace_id", "") or "")
     return ScheduleResponse.from_schedule(sched)
 
 @router.delete("/{schedule_id}")
-async def remove_pipeline_schedule(schedule_id: str):
+async def remove_pipeline_schedule(
+    schedule_id: str,
+    request: Request,
+    workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+):
+    resolve_write_workspace(request, workspace_id)
+    _bound_schedule(request, schedule_id)
     if not delete_schedule(schedule_id):
         raise HTTPException(status_code=404, detail="Schedule not found")
     return {"success": True}
 
 
 @router.get("/{schedule_id}/history")
-async def get_pipeline_history(schedule_id: str, limit: int = 25):
+async def get_pipeline_history(
+    schedule_id: str,
+    request: Request,
+    limit: int = 25,
+    workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+):
     """Return the persisted run history (most recent first)."""
-    import asyncio
-
-    sched = await asyncio.to_thread(get_schedule, schedule_id)
-    if not sched:
-        raise HTTPException(status_code=404, detail="Schedule not found")
+    resolve_read_workspace(request, workspace_id)
+    sched = _bound_schedule(request, schedule_id)
     history = list(reversed(sched.run_history))[: max(1, min(limit, 100))]
     return {"schedule_id": schedule_id, "runs": history}
 
 
 @router.post("/{schedule_id}/accept-source-schema")
-async def accept_source_schema(schedule_id: str):
+async def accept_source_schema(
+    schedule_id: str,
+    request: Request,
+    workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+):
     """Record the source's current shape as this schedule's baseline.
 
     A run refused for source drift is a finding, not a verdict: the operator has
@@ -463,9 +548,8 @@ async def accept_source_schema(schedule_id: str):
     )
     from services.source_schema_memory import fingerprint_source
 
-    sched = get_schedule(schedule_id)
-    if not sched:
-        raise HTTPException(status_code=404, detail="Schedule not found")
+    resolve_write_workspace(request, workspace_id)
+    sched = _bound_schedule(request, schedule_id)
 
     src = _resolve_connector(sched.source_connector_id)
     if not src:
@@ -513,13 +597,16 @@ async def accept_source_schema(schedule_id: str):
 
 
 @router.post("/{schedule_id}/run")
-async def run_pipeline_now(schedule_id: str):
+async def run_pipeline_now(
+    schedule_id: str,
+    request: Request,
+    workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+):
     """Trigger an immediate run (does not change the regular cadence)."""
     from ..services.schedule_runner import _run_schedule
 
-    sched = get_schedule(schedule_id)
-    if not sched:
-        raise HTTPException(status_code=404, detail="Schedule not found")
+    resolve_write_workspace(request, workspace_id)
+    _bound_schedule(request, schedule_id)
     job_id = _run_schedule(schedule_id)
     if not job_id:
         raise HTTPException(status_code=400, detail="Could not start pipeline — check connectors")

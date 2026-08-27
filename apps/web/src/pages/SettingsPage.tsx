@@ -543,7 +543,7 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                         )}
                       </div>
                     </div>
-                    <p className="df2-settings-hint">Completed jobs older than retention are archived. Write targets stay on each connector.</p>
+                    <p className="df2-settings-hint">Retention is stored on the workspace profile. Job archival is not wired — completed jobs are not deleted by this value. Write targets stay on each connector.</p>
                   </div>
                   <div className="df2-settings-section-footer">
                     <Button
@@ -583,9 +583,9 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                           { title: "Encryption at rest", desc: "AES-256 for stored connector credentials and job artifacts.", on: posture.encryption_at_rest },
                           { title: "Audit logging", desc: "Immutable trail for transfers, configuration, and API access.", on: posture.audit_logging },
                           { title: "PII detection", desc: "Sensitive column tagging at ingest and mapping review.", on: posture.pii_detection },
-                          { title: "IP allowlisting", desc: "Restrict API and MCP access to approved CIDR ranges.", on: posture.ip_allowlist_enabled },
-                          { title: `Session timeout (${posture.session_timeout_hours}h)`, desc: "Automatically sign out idle workspace sessions.", on: posture.session_timeout_hours > 0 },
-                          { title: "MFA required for admins", desc: "Enforce multi-factor authentication for owner and admin roles.", on: posture.mfa_required },
+                          { title: "IP allowlisting", desc: posture.ip_allowlist_enforced ? "Enforced when Host matches this tenant custom domain." : "Stored CIDR list. Not enforced on the default app host.", on: Boolean(posture.ip_allowlist_enforced) },
+                          { title: `Session timeout (${posture.session_timeout_hours}h)`, desc: "Recorded only. Token TTL is DATAFLOW_TOKEN_TTL_SEC — this value does not sign sessions out.", on: false },
+                          { title: "MFA required for admins", desc: "Recorded policy. Login MFA is not wired.", on: false },
                         ].map((item) => (
                           <div key={item.title} className="df2-settings-policy-row">
                             <div>

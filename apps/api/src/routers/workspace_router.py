@@ -485,8 +485,28 @@ async def get_current_tenant(request: Request):
 
 
 @router.get("/tenants")
-async def get_all_tenants():
-    return {"tenants": [t.to_dict() for t in list_tenants()]}
+async def get_all_tenants(request: Request):
+    """List tenants the caller is allowed to see.
+
+    Platform admins see every tenant (or the header workspace when named).
+    Workspace admins see only tenants they administer — never another
+    customer's domain, MFA flag, or IP allowlist.
+    """
+    from src.services import auth_service
+
+    named = (request.headers.get("x-workspace-id") or "").strip()
+    tenants = list_tenants()
+    user = getattr(request.state, "user", None) or {}
+    platform_admin = str(user.get("role") or "") == "admin"
+    if auth_service.auth_required() and not platform_admin:
+        tenants = [
+            t
+            for t in tenants
+            if t.workspace_id and _can_admin_workspace(request, t.workspace_id)
+        ]
+    if named:
+        tenants = [t for t in tenants if t.workspace_id == named]
+    return {"tenants": [t.to_dict() for t in tenants]}
 
 
 @router.post("/tenant")
@@ -690,8 +710,19 @@ def _security_posture(tenant: Tenant | None = None) -> dict[str, Any]:
         "audit_logging": audit_logging,
         "pii_detection": False,  # detector hooks exist; not attested as always-on
         "ip_allowlist_enabled": bool(tenant and tenant.ip_allowlist),
+        # Enforced only when Host resolves this tenant (custom domain). The
+        # vanity app host never evaluates the CIDR list — do not badge it as live.
+        "ip_allowlist_enforced": bool(
+            tenant and tenant.ip_allowlist and (tenant.custom_domain or "").strip()
+        ),
         "mfa_required": tenant.mfa_required if tenant else False,
+        # Login MFA is not wired; the flag is policy memory only.
+        "mfa_enforced": False,
         "session_timeout_hours": tenant.session_timeout_hours if tenant else 8,
+        # Token TTL is DATAFLOW_TOKEN_TTL_SEC, not tenant.session_timeout_hours.
+        "session_timeout_enforced": False,
+        # BYOK keys may be stored; connector secrets still use platform Fernet.
+        "byok_encrypts_secrets": False,
         "tls_version": "1.3",
         # Surfaced CDC posture — explicit EO/ALO/AMO; only ALO is claimed.
         "cdc_delivery": DELIVERY_DEFAULT,
@@ -780,9 +811,9 @@ async def get_security_report(request: Request):
         f"- TLS minimum version: {posture['tls_version']}",
         f"- Audit logging: {'enabled' if posture['audit_logging'] else 'disabled'}",
         f"- PII detection: {'enabled' if posture['pii_detection'] else 'disabled'}",
-        f"- IP allowlisting: {'enabled' if posture['ip_allowlist_enabled'] else 'disabled'}",
-        f"- MFA required for admins: {'yes' if posture['mfa_required'] else 'no'}",
-        f"- Session timeout: {posture['session_timeout_hours']} hours",
+        f"- IP allowlisting: {'enforced on custom domain' if posture.get('ip_allowlist_enforced') else ('stored, not enforced (needs custom domain)' if posture['ip_allowlist_enabled'] else 'disabled')}",
+        f"- MFA required for admins: recorded={('yes' if posture['mfa_required'] else 'no')}; enforced=no (login MFA is not wired)",
+        f"- Session timeout: recorded={posture['session_timeout_hours']}h; enforced=no (token TTL is DATAFLOW_TOKEN_TTL_SEC)",
         "",
         "## Deployment & data path",
         f"- Models: {', '.join((posture.get('deployment') or {}).get('models') or [])}",
