@@ -1373,7 +1373,7 @@ export interface ScheduleInput {
   stream_contracts: Record<string, unknown>[];
   date_locale?: string;
   number_locale?: string;
-  shape_recipe?: Record<string, unknown>;
+  shape_recipe?: unknown;
   approved_shape_recipe_hash?: string;
   approved_decision_artifact_hash?: string;
   approved_ddl_identity_hash?: string;

@@ -126,3 +126,18 @@ def test_unscoped_schedule_hidden_when_isolation_required(isolated):
     listed = editor.get("/api/v1/schedules/")
     assert listed.status_code == 200, listed.text
     assert listed.json() == []
+
+
+def test_patch_cannot_rehome_schedule_to_another_workspace(isolated):
+    admin = _admin(isolated)
+    mine = _workspace(admin, "Mine-patch")
+    theirs = _workspace(admin, "Theirs-patch")
+    sched = _schedule(mine, "Stay put")
+    editor = _member(admin, email="patch@example.com", workspace_id=mine)
+    resp = editor.patch(
+        f"/api/v1/schedules/{sched.id}",
+        json={"workspace_id": theirs, "name": "Renamed"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["workspace_id"] == mine
+    assert resp.json()["name"] == "Renamed"

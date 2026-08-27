@@ -294,13 +294,22 @@ async def schedule_intervals():
 
 
 @router.get("/export/dataflow")
-def export_dataflow_manifest(format: Literal["yaml", "json"] = "yaml"):
-    """Export all schedules (+ contracts) as a single ``dataflow.yaml`` GitOps manifest."""
+def export_dataflow_manifest(
+    request: Request,
+    format: Literal["yaml", "json"] = "yaml",
+    workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+):
+    """Export schedules (+ contracts) visible in this workspace as dataflow.yaml."""
     import yaml
 
     from services.gitops_manifest import build_dataflow_manifest
+    from services.team_store import require_workspace_isolation
 
-    artifact = build_dataflow_manifest()
+    ws = resolve_read_workspace(request, workspace_id)
+    artifact = build_dataflow_manifest(
+        workspace_id=ws,
+        isolation=require_workspace_isolation(),
+    )
     if format == "yaml":
         return Response(
             content=yaml.safe_dump(artifact, sort_keys=False, default_flow_style=False),
@@ -311,10 +320,15 @@ def export_dataflow_manifest(format: Literal["yaml", "json"] = "yaml"):
 
 
 @router.post("/gitops/plan")
-async def gitops_plan_manifest(payload: dict[str, Any]):
+async def gitops_plan_manifest(
+    payload: dict[str, Any],
+    request: Request,
+    workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+):
     """Dry-run a DatawrapManifest / PipelineSchedule / DataContract YAML body."""
     from services.gitops_manifest import plan_manifest
 
+    resolve_read_workspace(request, workspace_id)
     try:
         return plan_manifest(payload)
     except ValueError as exc:
@@ -324,8 +338,10 @@ async def gitops_plan_manifest(payload: dict[str, Any]):
 @router.post("/gitops/apply")
 async def gitops_apply_manifest(
     payload: dict[str, Any],
+    request: Request,
     dry_run: bool = False,
     require_signed_contracts: bool = False,
+    workspace_id: str = Header(default="", alias="X-Workspace-Id"),
 ):
     """Apply a GitOps manifest (create/update schedules + draft contracts).
 
@@ -335,11 +351,13 @@ async def gitops_apply_manifest(
     """
     from services.gitops_manifest import apply_manifest
 
+    ws = resolve_write_workspace(request, workspace_id)
     try:
         return apply_manifest(
             payload,
             dry_run=dry_run,
             require_signed_contracts=require_signed_contracts,
+            workspace_id=ws,
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -412,6 +430,8 @@ async def patch_pipeline_schedule(
         raise HTTPException(status_code=404, detail="Schedule not found")
     assert_resource_workspace(request, getattr(existing, "workspace_id", "") or "")
     data = {k: v for k, v in body.model_dump().items() if v is not None}
+    # A PATCH must not re-home a schedule into another workspace.
+    data.pop("workspace_id", None)
     if not data:
         return ScheduleResponse.from_schedule(existing)
     try:
@@ -463,7 +483,7 @@ async def import_pipeline_schedule(
         spec = payload.get("spec") if isinstance(payload.get("spec"), dict) else payload
         if isinstance(spec, dict):
             spec["workspace_id"] = ws
-    result = apply_manifest(payload, dry_run=False)
+    result = apply_manifest(payload, dry_run=False, workspace_id=ws)
     rows = result.get("results") or []
     sched_row = next((r for r in rows if r.get("kind") == "PipelineSchedule" and r.get("ok")), None)
     if not sched_row:

@@ -29,6 +29,23 @@ def test_rfc1918_and_non_http_are_blocked():
     assert not egress_url_allowed("")
 
 
+def test_smtp_refuses_private_host(monkeypatch):
+    from services.notification_service import _smpt_send
+
+    def boom(*_a, **_k):
+        raise AssertionError("SMTP must not connect to a blocked host")
+
+    monkeypatch.setattr("smtplib.SMTP", boom)
+    result = _smpt_send(
+        ["ops@example.com"],
+        "hi",
+        "body",
+        smtp_cfg={"host": "169.254.169.254", "port": 25, "from": "x@example.com"},
+    )
+    assert result["ok"] is False
+    assert "not allowed" in result["error"]
+
+
 def test_notification_http_post_refuses_private_before_socket(monkeypatch):
     from services.notification_service import _http_post
 

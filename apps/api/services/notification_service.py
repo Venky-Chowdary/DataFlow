@@ -18,7 +18,7 @@ import urllib.parse
 import urllib.request
 from typing import Any
 
-from services.egress_guard import egress_url_allowed
+from services.egress_guard import egress_url_allowed, host_is_blocked
 from services.notification_store import (
     NotificationChannel,
     get_channel_decrypted,
@@ -129,6 +129,8 @@ def _smpt_send(recipients: list[str], subject: str, body: str, smtp_cfg: dict[st
 
     if not host:
         return {"ok": False, "error": "SMTP host not configured"}
+    if host_is_blocked(str(host)):
+        return {"ok": False, "error": "SMTP host is not allowed (private, loopback, or metadata)"}
 
     try:
         import smtplib
