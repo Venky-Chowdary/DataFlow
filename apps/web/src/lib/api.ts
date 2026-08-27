@@ -1719,9 +1719,18 @@ export async function fetchScheduleHistory(
  */
 export async function acceptScheduleSourceSchema(
   id: string,
-): Promise<{ success: boolean; message?: string; columns?: number }> {
+): Promise<{
+  success: boolean;
+  message?: string;
+  columns?: number;
+  recorded_from?: string;
+  approval_closed?: boolean;
+}> {
   const res = await apiFetch(`${API_BASE}/schedules/${id}/accept-source-schema`, {
     method: "POST",
+    // Live probe is capped server-side; 20s leaves room for the 12s ceiling
+    // plus JSON. The old default 15s abort looked like Accept "kept loading".
+    timeoutMs: 20_000,
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
@@ -1729,7 +1738,13 @@ export async function acceptScheduleSourceSchema(
       typeof data?.detail === "string" ? data.detail : "Could not update the baseline",
     );
   }
-  return data as { success: boolean; message?: string; columns?: number };
+  return data as {
+    success: boolean;
+    message?: string;
+    columns?: number;
+    recorded_from?: string;
+    approval_closed?: boolean;
+  };
 }
 
 /**

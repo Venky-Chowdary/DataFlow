@@ -3,7 +3,7 @@ import { DtIcon } from "../DtIcon";
 import { Button } from "../ui/Button";
 import { PageSection } from "../ui/PageSection";
 import { useToast } from "../Toast";
-import { approveScheduleFinding, rejectScheduleFinding } from "../../lib/api";
+import { acceptScheduleSourceSchema, approveScheduleFinding, rejectScheduleFinding } from "../../lib/api";
 import { PERMISSIONS, useWriteGate } from "../../lib/PermissionsContext";
 import type { ScheduleApprovalInboxItem } from "../../lib/types";
 
@@ -27,6 +27,8 @@ interface ApprovalInboxProps {
   /** Reload schedules after a decision so the row leaves this panel. */
   onDecided: () => void | Promise<void>;
   onOpenSchedule?: (scheduleId: string) => void;
+  /** Open the schedule editor / Map so a drift finding can be reviewed. */
+  onReviewMapping?: (scheduleId: string) => void;
 }
 
 /**
@@ -38,14 +40,22 @@ interface ApprovalInboxProps {
  * run of the identical plan — the second stops applying the moment the mapping,
  * source shape or policy moves.
  */
-export function ApprovalInbox({ items, onDecided, onOpenSchedule }: ApprovalInboxProps) {
+function isSourceSchemaDrift(item: ScheduleApprovalInboxItem): boolean {
+  const code = (item.approval.code || "").toUpperCase();
+  const kind = (item.approval.kind || "").toLowerCase();
+  return code === "SOURCE_SCHEMA_DRIFT" || kind === "source_drift";
+}
+
+export function ApprovalInbox({ items, onDecided, onOpenSchedule, onReviewMapping }: ApprovalInboxProps) {
   const { toast } = useToast();
   const authorize = useWriteGate(PERMISSIONS.scheduleAuthorize);
+  const manage = useWriteGate(PERMISSIONS.scheduleManage);
   const [openId, setOpenId] = useState<string | null>(null);
   const [reason, setReason] = useState("");
   const [standing, setStanding] = useState(false);
   const [days, setDays] = useState(30);
   const [busy, setBusy] = useState(false);
+  const [acceptingId, setAcceptingId] = useState<string | null>(null);
 
   if (items.length === 0) return null;
 
@@ -54,6 +64,31 @@ export function ApprovalInbox({ items, onDecided, onOpenSchedule }: ApprovalInbo
     setReason("");
     setStanding(false);
     setDays(30);
+  };
+
+  const acceptSource = async (item: ScheduleApprovalInboxItem) => {
+    if (!manage.allowed) {
+      toast({ title: "No write permission", message: manage.reason, tone: "warning" });
+      return;
+    }
+    setAcceptingId(item.schedule_id);
+    try {
+      const res = await acceptScheduleSourceSchema(item.schedule_id);
+      toast({
+        title: "Baseline recorded",
+        message: res.message || `“${item.schedule_name}” will compare against the current source shape.`,
+        tone: "success",
+      });
+      await onDecided();
+    } catch (err) {
+      toast({
+        title: "Could not record the source shape",
+        message: err instanceof Error ? err.message : undefined,
+        tone: "error",
+      });
+    } finally {
+      setAcceptingId(null);
+    }
   };
 
   const decide = async (item: ScheduleApprovalInboxItem, approve: boolean) => {
@@ -161,10 +196,37 @@ export function ApprovalInbox({ items, onDecided, onOpenSchedule }: ApprovalInbo
               )}
 
               {!appr.approvable ? (
-                <p className="df2-approval-nonapprovable">
-                  No signature can clear this. It is a plan change, not a decision —
-                  approving it would only refuse again on the next run.
-                </p>
+                <div className="df2-approval-plan-change">
+                  <p className="df2-approval-nonapprovable">
+                    No signature can clear this. It is a plan change, not a decision —
+                    approving it would only refuse again on the next run.
+                  </p>
+                  {isSourceSchemaDrift(item) && (
+                    <div className="df2-approval-actions">
+                      {onReviewMapping && (
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          onClick={() => onReviewMapping(item.schedule_id)}
+                        >
+                          Review mapping
+                        </Button>
+                      )}
+                      <Button
+                        size="sm"
+                        variant="primary"
+                        loading={acceptingId === item.schedule_id}
+                        disabled={!manage.allowed || acceptingId === item.schedule_id}
+                        title={manage.reason || "Record the source shape this finding already compared"}
+                        onClick={() => void acceptSource(item)}
+                      >
+                        {acceptingId === item.schedule_id
+                          ? "Recording…"
+                          : "Accept new source shape"}
+                      </Button>
+                    </div>
+                  )}
+                </div>
               ) : expanded ? (
                 <div className="df2-approval-form">
                   <label className="df2-approval-field">

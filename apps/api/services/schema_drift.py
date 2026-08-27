@@ -161,7 +161,14 @@ def _is_type_narrow(old_type: str, new_type: str, *, dest_db: str = "") -> bool:
 
     Same-logical pairs must still consult ``is_lossy_coercion`` — first ``(p``
     digit alone misses DECIMAL(10,4)→DECIMAL(10,2) and BIGINT→TINYINT.
+
+    A declaration is not a narrow of itself. Coercion helpers read two identical
+    unparameterized carriers (``TIMESTAMP_NTZ``) through ``dest_db`` defaults and
+    invent dest-floor vs source-ceiling loss — that is a fidelity-gate concern
+    against the real destination type, not source-vs-source drift.
     """
+    if _norm_type(old_type) == _norm_type(new_type):
+        return False
     old_logical = normalize_logical_type(old_type)
     new_logical = normalize_logical_type(new_type)
     if is_lossy_coercion(old_type, new_type, dest_db=dest_db):
@@ -422,6 +429,27 @@ def _schema_dict_from_flat(
         "nullable": {c: (nullable or {}).get(c, True) for c in cols},
         "primary_key": list(primary_key or []),
     }
+
+
+def is_same_declaration_narrow(entries: list[dict[str, Any]] | None) -> bool:
+    """True when every row is a type-narrow of a declaration against itself.
+
+    ``joining_date: TIMESTAMP_NTZ → TIMESTAMP_NTZ (narrow_type)`` is dest-floor
+    vs source-ceiling invent, not a column anyone changed. A mixed list (a real
+    drop plus this invent) is not a no-op — the operator still owes the drop.
+    """
+    rows = [e for e in (entries or []) if isinstance(e, dict)]
+    if not rows:
+        return False
+    for entry in rows:
+        kind = str(entry.get("kind") or "").strip().lower()
+        if kind != "narrow_type":
+            return False
+        old_t = str(entry.get("old_type") or entry.get("from_type") or "")
+        new_t = str(entry.get("new_type") or entry.get("to_type") or "")
+        if not old_t or not new_t or _norm_type(old_t) != _norm_type(new_t):
+            return False
+    return True
 
 
 def classify_from_column_maps(

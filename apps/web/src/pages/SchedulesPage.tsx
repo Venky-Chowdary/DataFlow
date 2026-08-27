@@ -591,6 +591,10 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
             void onSchedulesChange?.();
           }}
           onOpenSchedule={(id) => openDrawer(id, "Overview")}
+          onReviewMapping={(id) => {
+            const sched = schedules.find((s) => s.id === id);
+            if (sched) openEdit(sched);
+          }}
         />
       )}
 

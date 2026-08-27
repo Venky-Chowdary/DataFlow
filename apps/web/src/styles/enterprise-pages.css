@@ -855,6 +855,13 @@
   color: var(--df-text-muted);
 }
 
+.df2-approval-plan-change {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+}
+
 .df2-approval-actions {
   display: flex;
   flex-wrap: wrap;

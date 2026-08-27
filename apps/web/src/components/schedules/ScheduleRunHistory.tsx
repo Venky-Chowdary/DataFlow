@@ -192,9 +192,13 @@ export function ScheduleRunHistory({ scheduleId, onOpenJob, onEditMapping }: Sch
                           try {
                             const res = await acceptScheduleSourceSchema(scheduleId);
                             setAccepted(res.message || "Baseline updated.");
+                            await load();
                           } catch (err) {
+                            const raw = err instanceof Error ? err.message : "";
                             setAcceptError(
-                              err instanceof Error ? err.message : "Could not update the baseline",
+                              /timed out/i.test(raw)
+                                ? "Accept stopped waiting for the source. The finding already has the compared shape — retry once, or check the Snowflake/MySQL connector is reachable."
+                                : raw || "Could not update the baseline",
                             );
                           } finally {
                             setAccepting(false);

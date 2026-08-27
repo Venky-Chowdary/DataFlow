@@ -147,6 +147,39 @@ def test_fingerprint_moves_only_when_the_shape_moves():
     assert fingerprint_source(list(BASE), {**BASE, "currency": "INTEGER"}) != same
 
 
+def test_joining_date_ntz_against_itself_is_not_mysql_narrow():
+    """venky_schedule1 / tfid_src fixture: dest FSP must not invent source drift.
+
+    Snowflake ``joining_date: TIMESTAMP_NTZ → TIMESTAMP_NTZ`` classified through
+    MySQL's DATETIME floor was ``narrow_type``, parked the hourly beat, and told
+    the operator to Accept a change nobody made.
+    """
+    schema = {"joining_date": "TIMESTAMP_NTZ", "emp_id": "NUMBER"}
+    mappings = [{"source": c, "target": c} for c in schema]
+    verdict = evaluate_source_drift(
+        previous_schema=schema,
+        current_schema=dict(schema),
+        mappings=mappings,
+        dest_db="mysql",
+        source_db="snowflake",
+    )
+    assert verdict.verdict == CLEAR
+    assert verdict.breaking == []
+
+
+def test_bare_vs_default_typmod_is_clear_on_the_source_engine():
+    """Snowflake catalog TIMESTAMP_NTZ and TIMESTAMP_NTZ(9) are the same default."""
+    mappings = [{"source": "joining_date", "target": "joining_date"}]
+    verdict = evaluate_source_drift(
+        previous_schema={"joining_date": "TIMESTAMP_NTZ(9)"},
+        current_schema={"joining_date": "TIMESTAMP_NTZ"},
+        mappings=mappings,
+        source_db="snowflake",
+        dest_db="mysql",
+    )
+    assert verdict.verdict == CLEAR, verdict.summary
+
+
 def test_mapped_columns_are_lower_cased_and_omissions_dropped():
     assert mapped_source_columns(
         [

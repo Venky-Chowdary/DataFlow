@@ -534,6 +534,38 @@ async def get_pipeline_history(
     return {"schedule_id": schedule_id, "runs": history}
 
 
+def _flat_schema_map(raw: Any) -> dict[str, str]:
+    if not isinstance(raw, dict):
+        return {}
+    nested = raw.get("columns")
+    if isinstance(nested, dict):
+        raw = nested
+    return {
+        str(k): str(v)
+        for k, v in raw.items()
+        if not str(k).startswith("_") and not isinstance(v, (dict, list))
+    }
+
+
+def _probe_source_schema_timed(endpoint, seconds: float = 12.0) -> dict[str, Any]:
+    """Live introspect with a hard ceiling so Accept cannot spin on a warehouse."""
+    from concurrent.futures import ThreadPoolExecutor
+    from concurrent.futures import TimeoutError as FuturesTimeout
+
+    from services.schedule_runner import probe_schedule_source_schema
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(probe_schedule_source_schema, endpoint)
+        try:
+            return future.result(timeout=seconds) or {}
+        except FuturesTimeout as exc:
+            raise TimeoutError(
+                "The source did not answer in time. Accept records the shape "
+                "this finding already compared — a sleeping warehouse cannot "
+                "block that."
+            ) from exc
+
+
 @router.post("/{schedule_id}/accept-source-schema")
 async def accept_source_schema(
     schedule_id: str,
@@ -549,61 +581,110 @@ async def accept_source_schema(
 
     Deliberately explicit. Re-baselining is the operator asserting the change is
     understood, so it is never done for them by a retry.
+
+    The shape that parked the run is preferred over a second live introspect.
+    Re-probing Snowflake while the warehouse is asleep is what made Accept hang
+    with no error. A same-spelling ``narrow_type`` (TIMESTAMP_NTZ →
+    TIMESTAMP_NTZ) uses the remembered baseline — there is nothing new to read.
     """
     from datetime import datetime, timezone
 
+    from services.schema_drift import is_same_declaration_narrow
+    from services.schedule_approvals import resolve_plan_change
     from services.schedule_runner import (
         _apply_callable_schedule_source,
         _endpoint_from_connector,
         _resolve_connector,
-        probe_schedule_source_schema,
     )
     from services.source_schema_memory import fingerprint_source
 
     resolve_write_workspace(request, workspace_id)
     sched = _bound_schedule(request, schedule_id)
+    open_req = sched.approval_request if isinstance(sched.approval_request, dict) else {}
+    evidence = (
+        dict(open_req.get("evidence") or {})
+        if str(open_req.get("status") or "") == STATUS_OPEN
+        else {}
+    )
 
-    src = _resolve_connector(sched.source_connector_id)
-    if not src:
-        raise HTTPException(
-            status_code=400,
-            detail="Source connector is unavailable — cannot read the current schema.",
-        )
-    try:
-        endpoint = _endpoint_from_connector(src, sched.source_table)
-        _apply_callable_schedule_source(endpoint, sched)
-        info = probe_schedule_source_schema(endpoint) or {}
-    except Exception as exc:
-        raise HTTPException(
-            status_code=502, detail=f"Could not read the source schema: {exc}"
-        ) from exc
+    schema = _flat_schema_map(evidence.get("current_schema"))
+    columns = [str(c) for c in (evidence.get("current_columns") or schema.keys()) if str(c).strip()]
+    source = "finding"
 
-    schema = {str(k): str(v) for k, v in (info.get("schema") or {}).items()}
+    if not schema and is_same_declaration_narrow(evidence.get("breaking")):
+        schema = _flat_schema_map(getattr(sched, "source_schema", None) or {})
+        columns = list(schema.keys())
+        source = "unchanged-declaration"
+
+    if not schema:
+        src = _resolve_connector(sched.source_connector_id)
+        if not src:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Source connector is unavailable — cannot read the current "
+                    "schema. Open Map once the connector answers, or retry Accept."
+                ),
+            )
+        try:
+            endpoint = _endpoint_from_connector(src, sched.source_table)
+            _apply_callable_schedule_source(endpoint, sched)
+            info = _probe_source_schema_timed(endpoint)
+        except TimeoutError as exc:
+            raise HTTPException(status_code=504, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502, detail=f"Could not read the source schema: {exc}"
+            ) from exc
+        schema = _flat_schema_map(info.get("schema"))
+        columns = [str(c) for c in (info.get("columns") or schema.keys())]
+        source = "live-probe"
+
     if not schema:
         raise HTTPException(
             status_code=502,
             detail="Source returned no schema — nothing to record as a baseline.",
         )
-    columns = [str(c) for c in (info.get("columns") or schema.keys())]
-    fingerprint = fingerprint_source(columns, schema)
+    fingerprint = fingerprint_source(columns or list(schema.keys()), schema)
+    pk = [
+        str(p).strip()
+        for p in (evidence.get("current_primary_key") or getattr(sched, "source_primary_key", None) or [])
+        if str(p).strip()
+    ]
     updated = update_schedule(
         schedule_id,
         {
             "source_schema": schema,
             "source_schema_fingerprint": fingerprint,
             "source_schema_observed_at": datetime.now(timezone.utc).isoformat(),
+            "source_primary_key": pk,
         },
     )
     if not updated:
         raise HTTPException(status_code=404, detail="Schedule not found")
+
+    user = getattr(request.state, "user", None) or {}
+    actor = str(user.get("email") or user.get("name") or "").strip() or "operator"
+    closed = resolve_plan_change(
+        schedule_id,
+        actor=actor,
+        reason="Accepted the source's current shape as this schedule's baseline.",
+    )
+
     return {
         "success": True,
         "schedule_id": schedule_id,
         "source_schema_fingerprint": fingerprint,
         "columns": len(schema),
+        "recorded_from": source,
+        "approval_closed": bool(closed),
         "message": (
             f"Baseline updated to the source's current shape ({len(schema)} columns). "
-            "The next run compares against this."
+            + (
+                "The parked finding is closed — the next run compares against this."
+                if closed
+                else "The next run compares against this."
+            )
         ),
     }
 

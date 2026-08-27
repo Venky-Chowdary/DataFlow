@@ -619,6 +619,20 @@ def test_propagate_policy_synonym_target_fp_does_not_require_ack():
     assert not any(g.get("id") == "schema_drift" and g.get("status") == "block" for g in result["gates"])
 
 
+def test_same_spelling_timestamp_ntz_is_not_a_narrow():
+    """Dest-floor FSP must not accuse TIMESTAMP_NTZ of narrowing itself."""
+    from services.schema_drift import _is_type_narrow, classify_schema_change
+
+    assert _is_type_narrow("TIMESTAMP_NTZ", "TIMESTAMP_NTZ", dest_db="mysql") is False
+    report = classify_schema_change(
+        {"joining_date": "TIMESTAMP_NTZ"},
+        {"joining_date": "TIMESTAMP_NTZ"},
+        dest_db="mysql",
+    )
+    assert report["breaking"] == []
+    assert report["severity"] == "none"
+
+
 def test_classify_no_change():
     schema = {
         "columns": {"id": "INTEGER", "name": "VARCHAR"},

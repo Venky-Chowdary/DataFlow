@@ -394,6 +394,86 @@ def reject_request(
     return {"schedule": updated, "approval": patch["approval_request"]}
 
 
+def resolve_plan_change(
+    schedule_id: str,
+    *,
+    actor: str,
+    reason: str,
+) -> dict[str, Any] | None:
+    """Close a non-approvable finding after the operator changed the plan.
+
+    Source-schema Accept is the instrument for ``SOURCE_SCHEMA_DRIFT``: a
+    signature would only refuse again, so the inbox must not leave the schedule
+    parked after the baseline has been recorded.
+    """
+    sched = get_schedule(schedule_id)
+    if not sched:
+        return None
+    request = sched.approval_request if isinstance(sched.approval_request, dict) else {}
+    if not request or str(request.get("status") or STATUS_OPEN) != STATUS_OPEN:
+        return None
+    patch = {
+        "approval_request": _resolved(
+            request, status=STATUS_APPROVED, actor=actor, reason=reason
+        ),
+        "next_run_at": datetime.now(timezone.utc).isoformat(),
+        "retry_at": None,
+        "retry_attempt": 0,
+        "last_status": "approved",
+    }
+    updated = update_schedule(schedule_id, patch)
+    _audit(
+        action="schedule.approval.plan_changed",
+        schedule_id=schedule_id,
+        actor=actor,
+        details={
+            "approval_id": request.get("id"),
+            "code": request.get("code"),
+            "reason": reason,
+        },
+    )
+    return {
+        "schedule": updated,
+        "approval": patch["approval_request"],
+    }
+
+
+def release_same_declaration_source_drift(workspace_id: str = "") -> int:
+    """Unpark schedules whose only finding is a type-narrow of itself.
+
+    ``joining_date: TIMESTAMP_NTZ → TIMESTAMP_NTZ (narrow_type)`` is dest-floor
+    invent, not a plan change. Leaving it in the inbox after the kernel stopped
+    classifying it would keep the hourly beat suppressed forever.
+    """
+    from services.schema_drift import is_same_declaration_narrow
+    from services.schedule_store import has_open_approval, list_schedules
+
+    released = 0
+    for sched in list_schedules():
+        if workspace_id and (sched.workspace_id or "") != workspace_id:
+            continue
+        if not has_open_approval(sched):
+            continue
+        request = sched.approval_request if isinstance(sched.approval_request, dict) else {}
+        if str(request.get("code") or "") != "SOURCE_SCHEMA_DRIFT":
+            continue
+        evidence = request.get("evidence") if isinstance(request.get("evidence"), dict) else {}
+        breaking = list(evidence.get("breaking") or [])
+        if not is_same_declaration_narrow(breaking):
+            continue
+        resolve_plan_change(
+            sched.id,
+            actor="system:source-schema-kernel",
+            reason=(
+                "Released: the parked finding named a type-narrow of an unchanged "
+                "declaration (same spelling both sides). That is dest-floor invent, "
+                "not a source change."
+            ),
+        )
+        released += 1
+    return released
+
+
 def record_authorization_use(
     schedule_id: str,
     *,
@@ -552,6 +632,8 @@ __all__ = [
     "open_approvals",
     "record_authorization_use",
     "reject_request",
+    "release_same_declaration_source_drift",
+    "resolve_plan_change",
     "revoke_standing_authorization",
     "set_standing_authorization",
 ]
