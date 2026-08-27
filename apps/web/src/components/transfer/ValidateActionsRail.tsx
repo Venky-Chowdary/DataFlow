@@ -16,6 +16,11 @@ interface ValidateActionsRailProps {
   rowCount?: number;
   transferLaunch?: { jobId: string; rows: number } | null;
   savingContract?: boolean;
+  /**
+   * Last Validate attempt failed before a verdict (504 / hung control plane).
+   * Status is Failed — never leave the rail on Not run after an operator click.
+   */
+  preflightError?: string;
   /** Extra execute block (e.g. non-CDC multi-stream). */
   executeBlocked?: boolean;
   executeBlockedReason?: string;
@@ -57,6 +62,7 @@ export function ValidateActionsRail({
   riskAckPendingCount = 0,
   rowCount,
   transferLaunch,
+  preflightError = "",
   savingContract,
   executeBlocked = false,
   executeBlockedReason,
@@ -77,6 +83,7 @@ export function ValidateActionsRail({
 }: ValidateActionsRailProps) {
   const passed = preflight?.passed;
   const blocked = preflight && !preflight.passed && !preflighting;
+  const transportFailed = Boolean(preflightError) && !preflight && !preflighting;
   const mappingBlocked = preflight?.blockers.some((b) => b.id.includes("mapping"));
   const decision = preflight?.proof_bundle?.transfer_decision?.decision
     ?? (preflight ? "review" : "pending");
@@ -107,22 +114,26 @@ export function ValidateActionsRail({
     ? "Validating…"
     : transferLaunch
       ? "Transfer started"
-      : !preflight
-        ? "Not run"
-        : reviewGrade
-          ? "Review-grade"
-          : passed
-            ? "Ready"
-            : "Blocked";
+      : transportFailed
+        ? "Failed"
+        : !preflight
+          ? "Not run"
+          : reviewGrade
+            ? "Review-grade"
+            : passed
+              ? "Ready"
+              : "Blocked";
 
   const statusDetail = transferLaunch
     ? `Job queued · ${transferLaunch.rows.toLocaleString()} rows`
     : preflighting
       ? "Gates running"
-      : preflight
-        ? (executiveSummary?.railLine
-          ?? `${preflight.passed_count}/${preflight.total_gates} gates · ${preflight.readiness_score}%`)
-        : "Run preflight to unlock Execute";
+      : transportFailed
+        ? preflightError
+        : preflight
+          ? (executiveSummary?.railLine
+            ?? `${preflight.passed_count}/${preflight.total_gates} gates · ${preflight.readiness_score}%`)
+          : "Run preflight to unlock Execute";
 
   return (
     <>
@@ -143,7 +154,7 @@ export function ValidateActionsRail({
         </Button>
 
         <div className="df2-validate-footer-status" aria-live="polite">
-          <span className={passed && !reviewGrade ? "is-ok" : blocked || reviewGrade ? "is-warn" : undefined}>
+          <span className={passed && !reviewGrade ? "is-ok" : blocked || reviewGrade || transportFailed ? "is-warn" : undefined}>
             <strong>Validate</strong> {statusLabel}
           </span>
           <span title={firstBlockerMessage || undefined}>{statusDetail}</span>
@@ -187,10 +198,12 @@ export function ValidateActionsRail({
                 title={
                   preflight
                     ? "Discard this verdict and re-run the same API gates — acknowledgments and Risk Contracts still apply"
-                    : "Run API preflight gates"
+                    : transportFailed
+                      ? "Last Validate did not finish — re-run the same API gates"
+                      : "Run API preflight gates"
                 }
               >
-                {!preflight ? "Run preflight" : "Re-run Validate"}
+                {!preflight && !transportFailed ? "Run preflight" : "Re-run Validate"}
               </Button>
 
               {blocked && onPrimaryFix && primaryFixLabel && (

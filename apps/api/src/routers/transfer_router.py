@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -399,10 +400,16 @@ async def introspect_endpoint_route(request: AnalyzeRequest):
     # Role-tag so missing-table copy is correct (source ≠ create-on-write).
     src.extra = {**(src.extra or {}), "introspect_purpose": "source"}
     dst.extra = {**(dst.extra or {}), "introspect_purpose": "destination"}
-    return {
-        "source": introspect_endpoint(src),
-        "destination": introspect_endpoint(dst),
-    }
+
+    def _probe() -> dict[str, Any]:
+        return {
+            "source": introspect_endpoint(src),
+            "destination": introspect_endpoint(dst),
+        }
+
+    # Snowflake / warehouse introspect is seconds of network. Running it on the
+    # event loop freezes /health (nginx 504) while Destination is still open.
+    return await asyncio.to_thread(_probe)
 
 
 @router.post("/map")
@@ -645,6 +652,19 @@ class PlanPreflightRequest(BaseModel):
     # Approved pre-load transform recipe. Execute shapes rows on the read, so the
     # gates have to judge the transformed image, not the raw source.
     shape_recipe: dict[str, Any] | None = None
+    # Studio Validate of a stored 1M-row upload must not occupy the HTTP
+    # worker. When true the handler returns 202 and GET /preflight polls.
+    async_run: bool = False
+
+
+@router.get("/plans/{plan_id}/preflight")
+async def get_plan_preflight(plan_id: str, run_id: str = ""):
+    from services.plan_preflight_job import get_plan_preflight_job
+
+    job = get_plan_preflight_job(plan_id, run_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="No Validate run for this plan")
+    return job
 
 
 @router.post("/plans/{plan_id}/preflight")
@@ -652,10 +672,13 @@ async def preflight_transfer_plan(
     plan_id: str,
     body: PlanPreflightRequest | None = None,
 ):
+    from fastapi.responses import JSONResponse
+
     from services.acknowledgment_contract import (
         AcknowledgmentRefused,
         resolve_acknowledgments,
     )
+    from services.plan_preflight_job import start_plan_preflight_job
     from services.transfer_plan_service import run_plan_preflight
 
     payload = body or PlanPreflightRequest()
@@ -670,8 +693,19 @@ async def preflight_transfer_plan(
     except AcknowledgmentRefused as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
+    if payload.async_run:
+        job = start_plan_preflight_job(
+            plan_id,
+            acknowledgments=ack,
+            shape_recipe=payload.shape_recipe,
+        )
+        return JSONResponse(status_code=202, content=job)
+
     try:
-        return run_plan_preflight(
+        # Even the sync path leaves the event loop — /health must answer while
+        # a warehouse probe or file walk runs.
+        return await asyncio.to_thread(
+            run_plan_preflight,
             plan_id,
             acknowledgments=ack,
             shape_recipe=payload.shape_recipe,

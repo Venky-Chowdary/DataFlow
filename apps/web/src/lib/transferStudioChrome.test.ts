@@ -280,6 +280,49 @@ describe("Transfer Studio chrome contracts", () => {
     assert.match(src, /onClick=\{onRunPreflight\}/);
   });
 
+  it("Validate rail shows Failed + Re-run after a transport timeout, not Not run", () => {
+    const rail = readFileSync(join(webRoot, "components/transfer/ValidateActionsRail.tsx"), "utf8");
+    const dash = readFileSync(join(webRoot, "components/transfer/ValidateDashboard.tsx"), "utf8");
+    const page = readFileSync(join(webRoot, "pages/TransferPage.tsx"), "utf8");
+    assert.match(rail, /preflightError/);
+    assert.match(rail, /transportFailed/);
+    assert.match(rail, /\? "Failed"/);
+    assert.match(rail, /!preflight && !transportFailed \? "Run preflight" : "Re-run Validate"/);
+    assert.match(dash, /preflightError = ""/);
+    assert.match(dash, /transportFailed/);
+    assert.match(dash, /"FAILED"/);
+    assert.match(dash, /Validate did not finish — Re-run from the rail/);
+    // Dashboard diagnoses; rail owns the teal Re-run.
+    assert.doesNotMatch(
+      dash,
+      /transportFailed[\s\S]{0,400}variant="primary"/,
+    );
+    assert.match(page, /preflightError=\{preflightError\}/);
+    assert.match(page, /setPreflightError\(message\)/);
+    assert.match(page, /validateTransportMessage/);
+  });
+
+  it("Studio Validate posts async_run and polls GET /preflight off the event loop", () => {
+    const api = readFileSync(join(webRoot, "lib/api.ts"), "utf8");
+    const router = readFileSync(join(webRoot, "../../api/src/routers/transfer_router.py"), "utf8");
+    const job = readFileSync(join(webRoot, "../../api/services/plan_preflight_job.py"), "utf8");
+    const nginx = readFileSync(join(webRoot, "../../../deploy/nginx.conf"), "utf8");
+    assert.match(api, /async_run:\s*true/);
+    assert.match(api, /pollPlanPreflight/);
+    assert.match(api, /\/transfer\/plans\/\$\{planId\}\/preflight/);
+    assert.match(api, /isTransportFailure/);
+    assert.match(api, /Control plane timed out \(HTTP \$\{res\.status\}\)/);
+    assert.match(router, /async_run:\s*bool\s*=\s*False/);
+    assert.match(router, /status_code=202/);
+    assert.match(router, /await asyncio\.to_thread/);
+    assert.match(job, /run_plan_preflight/);
+    assert.match(job, /threading\.Thread/);
+    assert.match(job, /accepted = job_public_view\(job\)/);
+    // Health fails fast; transfer /api/ stays at 300s for the 1M scan.
+    assert.match(nginx, /location \/health-api \{[\s\S]*proxy_read_timeout 8s/);
+    assert.match(nginx, /location \/api\/ \{[\s\S]*proxy_read_timeout 300s/);
+  });
+
   it("ValidateDashboard surfaces review subtitle when passed", () => {
     const src = readFileSync(join(webRoot, "components/transfer/ValidateDashboard.tsx"), "utf8");
     assert.match(src, /decision === "review"[\s\S]*executiveSummary\?\.subtitle/);

@@ -115,38 +115,67 @@ describe("preflightTransferPlan", () => {
     const hadWindow = "window" in globalThis;
     if (!hadWindow) {
       (globalThis as { window?: unknown }).window = {
-        setTimeout: (fn: () => void, ms: number) => setTimeout(fn, ms),
-        clearTimeout: (id: number) => clearTimeout(id),
+        setTimeout: (fn: () => void) => {
+          fn();
+          return 0;
+        },
+        clearTimeout: () => {},
         localStorage: { getItem: () => null, setItem: () => {}, removeItem: () => {} },
         location: { origin: "http://localhost" },
         addEventListener: () => {},
         dispatchEvent: () => true,
       };
     }
-    globalThis.fetch = (async (url: string, init: RequestInit) => {
+    globalThis.fetch = (async (url: string, init: RequestInit = {}) => {
       calls.push({ url: String(url), init });
+      const method = String(init.method || "GET").toUpperCase();
+      if (method === "POST") {
+        return {
+          ok: true,
+          status: 202,
+          json: async () => ({ plan_id: "plan-1", run_id: "pf_job1", status: "running" }),
+        } as unknown as Response;
+      }
       return {
         ok: true,
         status: 200,
-        json: async () => ({ passed: true }),
+        json: async () => ({ passed: true, status: "complete", run_id: "pf_ssot" }),
       } as unknown as Response;
     }) as unknown as typeof fetch;
     try {
       const { preflightTransferPlan } = await import("./api.ts");
-      await preflightTransferPlan("plan-1", {
+      const result = await preflightTransferPlan("plan-1", {
         compliance_acknowledged: true,
         acknowledgment_actor: "operator@dataflow.test",
         acknowledgment_reason: "Governance approved for this window",
       });
+      assert.equal((result as { passed?: boolean }).passed, true);
     } finally {
       globalThis.fetch = originalFetch;
       if (!hadWindow) delete (globalThis as { window?: unknown }).window;
     }
-    assert.equal(calls.length, 1);
+    assert.equal(calls.length, 2);
+    assert.match(calls[0].url, /\/transfer\/plans\/plan-1\/preflight$/);
+    assert.equal(String(calls[0].init.method || "POST").toUpperCase(), "POST");
     const body = JSON.parse(String(calls[0].init.body));
     assert.equal(body.compliance_acknowledged, true);
     assert.equal(body.acknowledgment_actor, "operator@dataflow.test");
     assert.equal(body.acknowledgment_reason, "Governance approved for this window");
     assert.equal(body.schema_drift_acknowledged, false);
+    assert.equal(body.async_run, true);
+    assert.match(calls[1].url, /\/transfer\/plans\/plan-1\/preflight\?run_id=pf_job1/);
+  });
+});
+
+describe("validate transport honesty", () => {
+  it("names a 504 HTML fallback as a control-plane timeout, not a recipe refusal", async () => {
+    const { isTransportFailure, validateTransportMessage } = await import("./api.ts");
+    assert.equal(isTransportFailure("Plan preflight failed", 504), true);
+    assert.equal(isTransportFailure("upstream timed out", 200), true);
+    assert.equal(isTransportFailure("Target DDL cannot accept NUMBER(9,6)", 400), false);
+    const msg = validateTransportMessage("upstream timed out", 1_000_000);
+    assert.match(msg, /1,000,000 row/);
+    assert.match(msg, /Re-run Validate/);
+    assert.match(msg, /Execute stays locked/);
   });
 });
