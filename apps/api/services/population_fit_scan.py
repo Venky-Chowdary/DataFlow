@@ -10,8 +10,8 @@ zero rows committed for a defect that was decidable before a single row moved.
 
 This module names the columns whose fit is *decidable but unproven*, scans rows
 with the **same** writer predicates (``fits_decimal`` / ``fits_varchar`` /
-``fits_integer`` — never a second numeric rule set), and reports evidence
-honestly.
+``fits_integer`` / ``coerce_enum_wire`` / ``is_interval_wire`` — never a
+second numeric or domain rule set), and reports evidence honestly.
 
 Asymmetry is deliberate and load-bearing:
 
@@ -51,6 +51,10 @@ CARRIER_INTEGER = "integer"
 #: the write's own coercion (``apply_transform``), so Validate speaks for them
 #: instead of leaving them to fail at row 1.
 CARRIER_TYPED = "typed"
+#: Closed ENUM/SET membership. Not a width — a *domain* bound. MySQL
+#: non-strict ENUM stores an invalid label as ``''`` (silent wipe). The
+#: write already refuses via ``coerce_enum_wire`` / ``coerce_set_wire``.
+CARRIER_DOMAIN = "domain"
 
 #: Transforms whose parse is cheap, deterministic and row-local enough to run
 #: over a population. JSON/vector/binary payloads are deliberately excluded:
@@ -234,9 +238,18 @@ def _carrier_for(target_type: str, *, dest_db: str) -> str:
 
     if sql_type_is_temporal(typ):
         return CARRIER_TYPED
-    from services.type_system import normalize_logical_type
+    from services.type_system import (
+        interval_family,
+        normalize_logical_type,
+        parse_enum_or_set_ordered_members,
+    )
 
     if normalize_logical_type(typ) in {"boolean", "uuid"}:
+        return CARRIER_TYPED
+    parsed_domain = parse_enum_or_set_ordered_members(typ)
+    if parsed_domain and parsed_domain[1]:
+        return CARRIER_DOMAIN
+    if interval_family(typ) or normalize_logical_type(typ) == "interval":
         return CARRIER_TYPED
     return ""
 
@@ -253,6 +266,31 @@ def _calendar_parse_required(transform: str, target_type: str) -> bool:
     from connectors.sql_temporal import sql_type_is_temporal
 
     return sql_type_is_temporal(target_type)
+
+
+def _is_interval_carrier(type_str: str) -> bool:
+    from services.type_system import interval_family, normalize_logical_type
+
+    typ = str(type_str or "").strip()
+    if not typ:
+        return False
+    if interval_family(typ):
+        return True
+    return normalize_logical_type(typ) == "interval"
+
+
+def _interval_parse_required(target_type: str, source_type: str) -> bool:
+    """True when dest INTERVAL cannot be vouched by a non-interval source.
+
+    Warehouse INTERVAL→INTERVAL wires parse by construction. VARCHAR→INTERVAL
+    still holds ``not-an-interval`` past the preview — same class as
+    ``maybe`` → BOOLEAN.
+    """
+    if not _is_interval_carrier(target_type):
+        return False
+    from services.type_system import normalize_logical_type
+
+    return normalize_logical_type(source_type) != "interval"
 
 
 def _parse_in_doubt(source_type: str) -> bool:
@@ -341,6 +379,13 @@ def _source_cannot_exceed(
             src_bounds[0] >= tgt_bounds[0] and src_bounds[1] <= tgt_bounds[1]
         )
 
+    if target.carrier == CARRIER_DOMAIN:
+        from services.type_system import enum_set_domain_would_reject
+
+        # Same membership rule the Map gate uses — dest members must cover
+        # every declared source member. Open VARCHAR → ENUM is never safe.
+        return not enum_set_domain_would_reject(src, target.target_type)
+
     return False
 
 
@@ -406,15 +451,18 @@ def bounded_targets(
         )
         parse_in_doubt = bool(transform) and _parse_in_doubt(declared_source)
         calendar = _calendar_parse_required(transform, target_type)
+        interval = _interval_parse_required(target_type, declared_source)
         if (
             carrier == CARRIER_TYPED
             and declared_domain
             and not parse_in_doubt
             and not calendar
+            and not interval
         ):
-            # Warehouse BOOLEAN/UUID wires parse by construction. File peek
-            # inferred BOOLEAN is not a domain — ``maybe`` still lives past
-            # the sample. Calendar types never skip: ``2024-02-31`` is DATE.
+            # Warehouse BOOLEAN/UUID/INTERVAL wires parse by construction.
+            # File peek inferred BOOLEAN is not a domain — ``maybe`` still
+            # lives past the sample. Calendar types never skip:
+            # ``2024-02-31`` is DATE. VARCHAR→INTERVAL still scans.
             safe.append(target)
             continue
         action, exec_pol, risk_id = _resolve_action(m, job_error_policy)
@@ -516,6 +564,27 @@ def _fit_predicate(
     if target.carrier == CARRIER_INTEGER:
         type_str = target.target_type
         return lambda value: integer_fit_failure(value, type_str, dest_db=dest_db)
+    if target.carrier == CARRIER_DOMAIN:
+        from connectors.sql_bind import coerce_enum_wire, coerce_set_wire
+        from services.type_system import parse_enum_or_set_ordered_members
+
+        parsed = parse_enum_or_set_ordered_members(target.target_type)
+        if not parsed or not parsed[1]:
+            return lambda _value: None
+        kind, _members = parsed
+        type_str = target.target_type
+
+        def _domain_reason(value: Any) -> str | None:
+            try:
+                if kind == "ENUM":
+                    coerce_enum_wire(value, ddl_type=type_str)
+                else:
+                    coerce_set_wire(value, ddl_type=type_str)
+            except ValueError as exc:
+                return str(exc) or f"value not in {kind} domain"
+            return None
+
+        return _domain_reason
     return lambda _value: None
 
 
@@ -550,6 +619,24 @@ def _temporal_bind_reason(value: Any, target_type: str, dest_db: str) -> str | N
     return None
 
 
+def _interval_bind_reason(value: Any, target_type: str) -> str | None:
+    """Ask the write's interval quarantine, not a second family table."""
+    from services.schema_inference import interval_wire_family, is_interval_wire
+    from services.type_system import interval_family
+
+    if not is_interval_wire(value):
+        shown = value if isinstance(value, str) else str(value)
+        return f"value is not a valid interval wire payload: {shown!r}"
+    dest_fam = interval_family(target_type)
+    wire_fam = interval_wire_family(value)
+    if dest_fam and wire_fam and dest_fam != wire_fam:
+        return (
+            f"interval family mismatch wire={wire_fam} dest={dest_fam} "
+            "— YEAR-MONTH ↔ DAY-SECOND collapse"
+        )
+    return None
+
+
 def _typed_predicate(
     transform: str,
     target_type: str,
@@ -560,7 +647,8 @@ def _typed_predicate(
     from services.transform_engine import apply_transform
 
     temporal = sql_type_is_temporal(target_type)
-    if not transform and not temporal:
+    interval = _is_interval_carrier(target_type)
+    if not transform and not temporal and not interval:
         return None
 
     def _typed_reason(value: Any) -> str | None:
@@ -577,6 +665,8 @@ def _typed_predicate(
             bound = out
         if temporal:
             return _temporal_bind_reason(bound, target_type, dest_db)
+        if interval:
+            return _interval_bind_reason(bound, target_type)
         return None
 
     return _typed_reason
@@ -681,7 +771,16 @@ def scan_rows(
             if source not in row:
                 continue
             value = row.get(source)
-            if _skip_value(value, is_missing_sentinel):
+            if value is None or is_missing_sentinel(value):
+                continue
+            # Blank strings are a nullability question for width/typed
+            # carriers. ENUM/SET treat '' as the MySQL error member — the
+            # write refuses it, so Validate must name it.
+            if (
+                isinstance(value, str)
+                and not value.strip()
+                and bounded[idx].carrier != CARRIER_DOMAIN
+            ):
                 continue
             why = fit_reason(value)
             if why is None:
@@ -793,11 +892,35 @@ def scan_rows(
                     "or fix the source time value → re-Validate. "
                     "Do not silently coerce an invalid time."
                 )
+            elif _is_interval_carrier(target.target_type) or "interval" in why_l:
+                suggested_fix = (
+                    f"Open Map → remap {target.target} off {target.target_type} "
+                    "or fix the source interval → re-Validate. "
+                    "Do not silently coerce YEAR-MONTH into DAY-SECOND."
+                )
             else:
                 suggested_fix = (
                     f"Open Map → remap {target.target} off {target.target_type} "
                     "or fix the source calendar value → re-Validate. "
                     "Do not silently coerce an invalid date."
+                )
+        elif target.carrier == CARRIER_DOMAIN:
+            from services.type_system import enum_domain_union_carrier
+
+            suggested_type = enum_domain_union_carrier(
+                target.target_type, examples
+            )
+            if suggested_type:
+                suggested_fix = (
+                    f"Open Map → widen {target.target} to {suggested_type} "
+                    "(or ALTER the destination) → re-Validate. "
+                    "Do not silently store '' / drop SET members."
+                )
+            else:
+                suggested_fix = (
+                    f"Open Map → remap {target.target} off {target.target_type} "
+                    "or fix the source label → re-Validate. "
+                    "Do not silently store '' / drop SET members."
                 )
         findings_list.append(
             ColumnFitFinding(

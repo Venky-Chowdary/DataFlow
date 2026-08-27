@@ -314,3 +314,55 @@ def test_merge_prefers_population_fit_widen_over_preview_coercion():
     assert len(merged) == 1
     assert merged[0]["suggested_target_type"] == "NUMBER(10,7)"
     assert merged[0]["failure_class"] == FailureClass.OVERFLOW.value
+
+
+def test_enum_domain_do_not_fit_classifies_as_cast_not_overflow():
+    assert (
+        classify_transform_failure(
+            "1 value(s) in 'status' do not fit status ENUM('active','inactive') "
+            "(first at row 3) — value not in ENUM domain — refuse invent: 'late'",
+            target_type="ENUM('active','inactive')",
+            source_value="late",
+        )
+        is FailureClass.TYPE_CAST_FAILURE
+    )
+    report = {
+        "evidence": "exact",
+        "findings": [
+            {
+                "source": "status",
+                "target": "status",
+                "target_type": "ENUM('active','inactive')",
+                "unfit_rows": 1,
+                "example_rows": [3],
+                "example_values": ["late"],
+                "reason": (
+                    "1 value(s) in 'status' do not fit status "
+                    "ENUM('active','inactive') (first at row 3) — "
+                    "value not in ENUM domain — refuse invent: 'late'"
+                ),
+                "suggested_target_type": "ENUM('active','inactive','late')",
+                "suggested_fix": (
+                    "Open Map → widen status to ENUM('active','inactive','late') "
+                    "(or ALTER the destination) → re-Validate. "
+                    "Do not silently store '' / drop SET members."
+                ),
+            }
+        ],
+    }
+    findings = findings_from_population_fit(report, dest_db="mysql")
+    assert findings[0]["failure_class"] == FailureClass.TYPE_CAST_FAILURE.value
+    assert findings[0]["suggested_target_type"] == "ENUM('active','inactive','late')"
+    assert "VARCHAR" not in findings[0]["suggested_target_type"]
+    assert "silently store" in findings[0]["recommended_action"]
+
+
+def test_interval_family_mismatch_classifies_as_cast():
+    assert (
+        classify_transform_failure(
+            "interval family mismatch wire=ym dest=ds — YEAR-MONTH ↔ DAY-SECOND collapse",
+            target_type="INTERVAL DAY TO SECOND",
+            source_value="P1Y2M",
+        )
+        is FailureClass.TYPE_CAST_FAILURE
+    )

@@ -566,6 +566,54 @@ def test_table_walk_applies_round_recipe_before_fit(
     assert shaped["population_fit"]["findings"] == []
 
 
+def test_source_filter_table_walk_still_sees_late_enum_member(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Preview of status=active is clean. Row 431 ``late`` is the write refuse."""
+    from services.preflight_service import run_file_preflight
+
+    rows = [
+        {
+            "id": i,
+            "status": "late" if i == 431 else "active",
+            "arr_time": "12.34567890",
+            "flight_no": f"DL{i}",
+        }
+        for i in range(1, 451)
+    ]
+    _fake_reader(monkeypatch, rows, calls=[], page=100)
+    mappings = [
+        {
+            "source": "status",
+            "target": "status",
+            "confidence": 0.93,
+            "target_type": "ENUM('active','inactive')",
+        }
+    ]
+
+    result = run_file_preflight(
+        columns=["status"],
+        column_types={"status": "VARCHAR"},
+        row_count=450,
+        mappings=mappings,
+        destination_connected=True,
+        destination_column_types={"status": "ENUM('active','inactive')"},
+        destination_db_type="mysql",
+        source_kind="database",
+        source_format="mysql",
+        source_table="flights",
+        source_config={"kind": "database", "format": "mysql", "table": "flights"},
+        sample_rows=rows[:25],
+    )
+
+    assert result["passed"] is False
+    assert result["population_fit"]["evidence"] == "exact"
+    findings = result["population_fit"]["findings"]
+    assert findings
+    assert findings[0]["example_rows"] == [431]
+    assert findings[0]["suggested_target_type"] == "ENUM('active','inactive','late')"
+
+
 def test_row_limit_stops_the_pass(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[dict[str, Any]] = []
     _fake_reader(monkeypatch, _table_rows(450, unfit_at=(431,)), calls=calls, page=100)

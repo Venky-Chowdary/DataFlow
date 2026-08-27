@@ -139,6 +139,23 @@ def classify_transform_failure(
         r"\b(tiny|small|big|byte)?int(eger)?\b", f"{msg} {tgt_l}"
     ):
         return FailureClass.OVERFLOW
+    if any(
+        k in msg
+        for k in (
+            "not in enum",
+            "not in set",
+            "enum domain",
+            "enum ordinal",
+            "enum index 0",
+            "set domain",
+            "interval family",
+            "interval wire",
+        )
+    ) or (
+        ("does not fit" in msg or "do not fit" in msg)
+        and re.search(r"\b(enum|set|interval)\b", f"{msg} {tgt_l}")
+    ):
+        return FailureClass.TYPE_CAST_FAILURE
     if "empty value cannot coerce" in msg or (
         "empty" in msg and ("cannot coerce" in msg or "cannot cast" in msg)
     ):

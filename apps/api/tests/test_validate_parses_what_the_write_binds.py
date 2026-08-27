@@ -16,6 +16,7 @@ import pytest
 
 from connectors.writer_common import integer_fit_failure
 from services.population_fit_scan import (
+    CARRIER_DOMAIN,
     CARRIER_INTEGER,
     CARRIER_TYPED,
     bounded_targets,
@@ -294,3 +295,144 @@ def test_slash_dates_without_a_date_transform_match_the_write(dest_db: str) -> N
     assert unfit.findings[0].unfit_rows == 1
     reason = unfit.findings[0].unfit_reason
     assert "01/02/2024" in reason or "Invalid date" in reason
+
+
+def test_late_enum_member_blocks_at_validate_and_stamps_dest_widen() -> None:
+    """MySQL non-strict ENUM stores an unknown label as '' — silent wipe.
+
+    Preview of ``active``/``inactive`` is clean. Row 3 ``late`` is the write
+    refuse. Validate must name it and offer dest-spelled ENUM, never VARCHAR.
+    """
+    targets, undecidable, safe, report = _scan(
+        "ENUM('active','inactive')",
+        "VARCHAR",
+        ["active", "inactive", "late"],
+        dest_db="mysql",
+    )
+
+    assert [t.carrier for t in targets] == [CARRIER_DOMAIN]
+    assert undecidable == ()
+    assert safe == ()
+    assert report.findings[0].unfit_rows == 1
+    assert report.findings[0].example_rows == (3,)
+    assert "late" in report.findings[0].unfit_reason
+    assert report.findings[0].suggested_target_type == "ENUM('active','inactive','late')"
+    assert "VARCHAR" not in (report.findings[0].suggested_target_type or "")
+    assert "silently store" in report.findings[0].suggested_fix
+
+
+def test_empty_enum_cell_is_the_mysql_error_member() -> None:
+    """Blank is a nullability skip for NUMBER. ENUM treats '' as index 0."""
+    _targets, _und, _safe, report = _scan(
+        "ENUM('a','b')", "VARCHAR", [""], dest_db="mysql"
+    )
+    assert report.findings[0].unfit_rows == 1
+    assert "empty string" in report.findings[0].unfit_reason.lower() or "error member" in (
+        report.findings[0].unfit_reason.lower()
+    )
+
+
+def test_warehouse_enum_subset_skips_the_scan() -> None:
+    targets, _und, safe, report = _scan(
+        "ENUM('a','b','c')",
+        "ENUM('a','b')",
+        ["a", "b"],
+        dest_db="mysql",
+        source_kind="database",
+        source_format="mysql",
+    )
+    assert targets == ()
+    assert safe == ("c",)
+    assert report.findings == ()
+
+
+def test_warehouse_varchar_into_enum_still_scans() -> None:
+    targets, _und, safe, _report = _scan(
+        "ENUM('a','b')",
+        "VARCHAR",
+        ["a", "late"],
+        dest_db="mysql",
+        source_kind="database",
+        source_format="mysql",
+    )
+    assert [t.carrier for t in targets] == [CARRIER_DOMAIN]
+    assert safe == ()
+
+
+def test_file_inferred_enum_still_scans_late_member() -> None:
+    targets, _und, safe, report = _scan(
+        "ENUM('a','b')",
+        "ENUM('a','b')",
+        ["a", "late"],
+        dest_db="mysql",
+        source_kind="file",
+        source_format="csv",
+    )
+    assert [t.carrier for t in targets] == [CARRIER_DOMAIN]
+    assert safe == ()
+    assert report.findings[0].unfit_rows == 1
+
+
+def test_set_member_drop_blocks_at_validate() -> None:
+    """MySQL IGNORE drops unknown SET members silently. Fail closed."""
+    targets, _und, _safe, report = _scan(
+        "SET('read','write')",
+        "VARCHAR",
+        ["read", "read,admin"],
+        dest_db="mysql",
+    )
+    assert [t.carrier for t in targets] == [CARRIER_DOMAIN]
+    assert report.findings[0].unfit_rows == 1
+    assert report.findings[0].example_rows == (2,)
+    assert "SET(" in (report.findings[0].suggested_target_type or "")
+    assert "admin" in (report.findings[0].suggested_target_type or "")
+
+
+def test_interval_family_mismatch_blocks_and_does_not_invent_varchar() -> None:
+    targets, _und, safe, report = _scan(
+        "INTERVAL DAY TO SECOND",
+        "VARCHAR",
+        ["P1DT2H", "P1Y2M"],
+        dest_db="oracle",
+    )
+    assert [t.carrier for t in targets] == [CARRIER_TYPED]
+    assert safe == ()
+    assert report.findings[0].unfit_rows == 1
+    assert report.findings[0].example_rows == (2,)
+    assert "interval family" in report.findings[0].unfit_reason.lower()
+    assert not report.findings[0].suggested_target_type
+    assert "varchar" not in (report.findings[0].suggested_fix or "").lower()
+
+
+def test_invalid_interval_text_blocks_at_validate() -> None:
+    _targets, _und, _safe, report = _scan(
+        "INTERVAL", "VARCHAR", ["not-an-interval", "1 day"], dest_db="postgresql"
+    )
+    assert report.findings[0].unfit_rows == 1
+    assert report.findings[0].example_rows == (1,)
+    assert "interval" in report.findings[0].unfit_reason.lower()
+
+
+def test_warehouse_interval_wire_is_not_rescanned() -> None:
+    targets, _und, safe, report = _scan(
+        "INTERVAL DAY TO SECOND",
+        "INTERVAL DAY TO SECOND",
+        ["P1DT2H"],
+        dest_db="oracle",
+        source_kind="database",
+        source_format="oracle",
+    )
+    assert targets == ()
+    assert safe == ("c",)
+    assert report.findings == ()
+
+
+def test_json_and_variant_stay_undecidable() -> None:
+    """JSON/VARIANT cost is unbounded in the cell — other probes own them."""
+    for dest_type in ("JSON", "JSONB", "VARIANT"):
+        targets, undecidable, safe, _report = _scan(
+            dest_type, "VARCHAR", ['{"a":1}', "not-json"], dest_db="snowflake"
+        )
+        assert targets == (), dest_type
+        assert undecidable == ("c",), dest_type
+        assert safe == (), dest_type
