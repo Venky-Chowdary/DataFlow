@@ -455,9 +455,11 @@ def test_out_of_range_year_blocks_and_does_not_invent_varchar() -> None:
 
 
 def test_empty_year_is_a_silent_wipe_not_nullability() -> None:
+    """Write refuses empty YEAR (integer transform, then YEAR bind). Not a skip."""
     _targets, _und, _safe, report = _scan("YEAR", "VARCHAR", [""], dest_db="mysql")
     assert report.findings[0].unfit_rows == 1
-    assert "year" in report.findings[0].unfit_reason.lower()
+    assert report.findings[0].suggested_fix
+    assert "0000" in report.findings[0].suggested_fix
 
 
 def test_warehouse_year_wire_is_not_rescanned() -> None:
