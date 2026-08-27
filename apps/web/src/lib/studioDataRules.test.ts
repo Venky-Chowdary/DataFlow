@@ -11,6 +11,7 @@ import {
   schemaPolicyBackfills,
   namedStudioDateLocale,
   namedStudioNumberLocale,
+  scheduleCreateMustPauseWithoutMappings,
   studioScheduleCdcExtras,
   studioSchedulePolicies,
   writeViaStagingSupported,
@@ -162,5 +163,10 @@ describe("studioDataRules", () => {
     assert.equal(full.allow_append_only, false);
     assert.equal(full.cdc_row_filter, "");
     assert.equal(full.multi_subnet_failover, false);
+  });
+
+  it("pauses a Schedules-page create that has no Validate mappings", () => {
+    assert.equal(scheduleCreateMustPauseWithoutMappings(0), true);
+    assert.equal(scheduleCreateMustPauseWithoutMappings(3), false);
   });
 });

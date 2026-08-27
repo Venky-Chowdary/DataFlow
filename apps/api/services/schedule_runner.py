@@ -343,7 +343,9 @@ def build_schedule_request(sched, src: dict, dst: dict):
 
     from services.batch_progress import effective_backfill_new_fields
 
-    mappings = list(sched.mappings or [])
+    from services.schedule_mapping_contract import assert_schedule_mappings_replayable
+
+    mappings = assert_schedule_mappings_replayable(sched.mappings)
     schema_policy = sched.schema_policy or "manual_review"
     # Autopilot: a scheduled run has nobody at the keyboard, so it carries the
     # attestations a named human signed in advance — and only while the plan they

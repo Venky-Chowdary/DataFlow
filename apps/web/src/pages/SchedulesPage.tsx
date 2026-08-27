@@ -259,7 +259,14 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
         toast({ title: "Schedule updated", message: `"${input.name ?? editing.name}" saved.`, tone: "success" });
       } else {
         await createSchedule(input as ScheduleInput);
-        toast({ title: "Schedule created", message: `"${input.name}" is scheduled.`, tone: "success" });
+        toast({
+          title: input.enabled === false ? "Schedule saved paused" : "Schedule created",
+          message:
+            input.enabled === false
+              ? `"${input.name}" has no Validate mappings — the beat will not invent an auto-map. Create from Transfer Studio after Validate.`
+              : `"${input.name}" is scheduled.`,
+          tone: "success",
+        });
       }
       closeForm();
       await load();
@@ -283,7 +290,11 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
       void onSchedulesChange?.();
       toast({ title: sched.enabled ? "Schedule paused" : "Schedule activated", tone: "success" });
     } catch (e) {
-      toast({ title: "Update failed", tone: "error" });
+      toast({
+        title: "Update failed",
+        message: e instanceof Error ? e.message : undefined,
+        tone: "error",
+      });
       console.error(e);
     }
   };

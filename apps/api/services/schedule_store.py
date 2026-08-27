@@ -656,6 +656,12 @@ def create_schedule(data: dict[str, Any]) -> PipelineSchedule:
     if contract_id or require_signed:
         assert_signed_contract(contract_id, require_signed=require_signed)
     _assert_callable_schedule_sync(data, sync_mode)
+    from services.schedule_mapping_contract import persisted_mapping_rows
+
+    enabled = bool(data.get("enabled", True))
+    if enabled and not persisted_mapping_rows(data.get("mappings")):
+        # Draft is allowed. Enabling an empty-mapping schedule invents _auto_map.
+        enabled = False
     sched = PipelineSchedule.from_dict({
         **data,
         "id": str(uuid.uuid4()),
@@ -665,7 +671,7 @@ def create_schedule(data: dict[str, Any]) -> PipelineSchedule:
         "sync_mode": sync_mode,
         "contract_id": contract_id,
         "require_signed_contract": require_signed,
-        "enabled": bool(data.get("enabled", True)),
+        "enabled": enabled,
     })
     sched.next_run_at = next_run_for(sched)
     schedules.append(sched)
@@ -696,6 +702,13 @@ def update_schedule(schedule_id: str, data: dict[str, Any]) -> PipelineSchedule 
         if (enabling or contract_changed) and (contract_id or require_signed):
             assert_signed_contract(contract_id, require_signed=require_signed)
         _assert_callable_schedule_sync(merged, sync_mode)
+        from services.schedule_mapping_contract import (
+            EMPTY_MAPPING_REFUSAL,
+            persisted_mapping_rows,
+        )
+
+        if enabling and not persisted_mapping_rows(merged.get("mappings")):
+            raise ValueError(EMPTY_MAPPING_REFUSAL)
         merged["contract_id"] = contract_id
         merged["require_signed_contract"] = require_signed
         updated = PipelineSchedule.from_dict(merged)
@@ -989,10 +1002,14 @@ def has_open_approval(sched: Any) -> bool:
 
 
 def due_schedules(now: datetime | None = None) -> list[PipelineSchedule]:
+    from services.schedule_mapping_contract import persisted_mapping_rows
+
     current = now or datetime.now(timezone.utc)
     due: list[PipelineSchedule] = []
     for s in _load_all():
         if not s.enabled:
+            continue
+        if not persisted_mapping_rows(s.mappings):
             continue
         if s.running and not _is_running_stale(s):
             continue

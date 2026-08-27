@@ -23,6 +23,7 @@ import {
   namedStudioDateLocale,
   namedStudioNumberLocale,
   schemaPolicyBackfills,
+  scheduleCreateMustPauseWithoutMappings,
   studioScheduleCdcExtras,
   studioSchedulePolicies,
   writeViaStagingSupported,
@@ -85,6 +86,8 @@ function formatWhen(iso: string | null | undefined): string {
 
 export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit, onCancel }: ScheduleFormProps) {
   const isEdit = Boolean(initial);
+  const mappingCount = initial?.mapping_count ?? (Array.isArray(initial?.mappings) ? initial.mappings.length : 0);
+  const missingValidateMappings = scheduleCreateMustPauseWithoutMappings(mappingCount);
   const [name, setName] = useState(initial?.name ?? "");
   const [sourceId, setSourceId] = useState(initial?.source_connector_id ?? connectors[0]?.id ?? "");
   const [sourceTable, setSourceTable] = useState(initial?.source_table ?? "");
@@ -277,6 +280,7 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
       notify_on_success: notifySuccess,
       contract_id: contractId.trim(),
       require_signed_contract: requireSigned && Boolean(contractId.trim()),
+      ...(isEdit || !missingValidateMappings ? {} : { enabled: false }),
     });
   };
 
@@ -286,6 +290,13 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
         <label className="df2-label" htmlFor="sched-name">Schedule name</label>
         <input id="sched-name" className="df2-input" value={name} onChange={(e) => setName(e.target.value)} placeholder="Nightly orders sync" required />
       </div>
+      {missingValidateMappings && (
+        <p className="df2-field-hint" role="status">
+          {isEdit
+            ? "This pipeline has no persisted Validate mappings. Activate stays blocked — the hourly beat will not invent an auto-map. Create from Transfer Studio after Validate, or PATCH mappings."
+            : "This form does not store a mapping contract. Save creates a paused draft. Create from Transfer Studio after Validate so the beat replays signed column names — not _auto_map."}
+        </p>
+      )}
 
       <div className="df2-form-row">
         <ConnectorSelect

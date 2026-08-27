@@ -193,3 +193,8 @@ export function studioScheduleCdcExtras(input: {
     multi_subnet_failover: Boolean(input.multiSubnetFailover),
   };
 }
+
+/** Operations → Pipelines create has no Validate contract — do not enable the beat. */
+export function scheduleCreateMustPauseWithoutMappings(mappingCount: number): boolean {
+  return mappingCount <= 0;
+}
