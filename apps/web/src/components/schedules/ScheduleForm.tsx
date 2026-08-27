@@ -6,14 +6,24 @@ import { SqlEditor } from "../ui/SqlEditor";
 import { CadenceTiles } from "../ui/CadenceTiles";
 import { ContractBindField } from "../contracts/ContractBindField";
 import {
+  DATE_LOCALES,
   DEFAULT_SYNC_MODE_IDS,
+  NUMBER_LOCALES,
   SCHEMA_POLICIES,
   SYNC_MODE_META,
   VALIDATION_MODES,
   availableSyncModes,
   schemaPolicyHonestyLine,
+  type DateLocaleId,
+  type NumberLocaleId,
 } from "../../lib/transferConstants";
-import { schemaPolicyBackfills, studioSchedulePolicies, writeViaStagingSupported } from "../../lib/studioDataRules";
+import {
+  namedStudioDateLocale,
+  namedStudioNumberLocale,
+  schemaPolicyBackfills,
+  studioSchedulePolicies,
+  writeViaStagingSupported,
+} from "../../lib/studioDataRules";
 import type {
   Connector,
   PipelineSchedule,
@@ -106,6 +116,10 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
     initial?.priority_direction === "asc" ? "asc" : "desc",
   );
   const [rowLimit, setRowLimit] = useState(Math.max(0, Number(initial?.row_limit || 0) || 0));
+  const [dateLocale, setDateLocale] = useState<DateLocaleId>(namedStudioDateLocale(initial?.date_locale));
+  const [numberLocale, setNumberLocale] = useState<NumberLocaleId>(
+    namedStudioNumberLocale(initial?.number_locale),
+  );
 
   // Retry & notifications
   const [maxRetries, setMaxRetries] = useState(initial?.max_retries ?? 2);
@@ -204,6 +218,8 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
       priorityColumn,
       priorityDirection,
       rowLimit,
+      dateLocale,
+      numberLocale,
       syncMode,
       snapshotMode,
     });
@@ -224,6 +240,8 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
       priority_column: writeKnobs.priority_column,
       priority_direction: writeKnobs.priority_direction,
       row_limit: writeKnobs.row_limit,
+      date_locale: writeKnobs.date_locale,
+      number_locale: writeKnobs.number_locale,
       delivery_guarantee: studioDeliveryGuarantee({
         syncMode,
         deliveryGuarantee,
@@ -568,6 +586,40 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
                 onChange={(e) => setRowLimit(Math.max(0, Number(e.target.value) || 0))}
               />
               <span className="df2-field-hint">0 means all rows. Validate names this cap as G17 — it is not silent truncation.</span>
+            </div>
+          </div>
+          <div className="df2-form-row">
+            <div className="df2-field">
+              <label className="df2-label" htmlFor="sched-date-locale">Date locale</label>
+              <select
+                id="sched-date-locale"
+                className="df2-input"
+                value={dateLocale}
+                onChange={(e) => setDateLocale(namedStudioDateLocale(e.target.value))}
+              >
+                {DATE_LOCALES.map((loc) => (
+                  <option key={loc.id || "auto"} value={loc.id}>{loc.label}</option>
+                ))}
+              </select>
+              <span className="df2-field-hint">
+                Same as Destination Advanced. Auto infers from unambiguous rows. Set DMY or MDY when 5/8/1967 is all-ambiguous.
+              </span>
+            </div>
+            <div className="df2-field">
+              <label className="df2-label" htmlFor="sched-number-locale">Number locale</label>
+              <select
+                id="sched-number-locale"
+                className="df2-input"
+                value={numberLocale}
+                onChange={(e) => setNumberLocale(namedStudioNumberLocale(e.target.value))}
+              >
+                {NUMBER_LOCALES.map((loc) => (
+                  <option key={loc.id || "auto"} value={loc.id}>{loc.label}</option>
+                ))}
+              </select>
+              <span className="df2-field-hint">
+                Auto will not guess a lone 1,234. Set US or EU so the hourly beat parses the same way as Validate.
+              </span>
             </div>
           </div>
         </div>

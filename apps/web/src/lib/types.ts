@@ -1479,6 +1479,8 @@ export interface PipelineSchedule {
   priority_column?: string;
   priority_direction?: "asc" | "desc" | string;
   row_limit?: number;
+  date_locale?: string;
+  number_locale?: string;
   delivery_guarantee?: string;
   snapshot_mode?: string;
   cursor_column: string;

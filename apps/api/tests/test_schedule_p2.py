@@ -928,12 +928,16 @@ def test_list_summary_exposes_advanced_write_knobs():
         "priority_column": "updated_at",
         "priority_direction": "asc",
         "row_limit": 2500,
+        "date_locale": "DMY",
+        "number_locale": "EU",
     })
     summary = ScheduleSummaryResponse.from_schedule(sched)
     assert summary.write_via_staging is True
     assert summary.priority_column == "updated_at"
     assert summary.priority_direction == "asc"
     assert summary.row_limit == 2500
+    assert summary.date_locale == "DMY"
+    assert summary.number_locale == "EU"
 
 
 def test_update_omitting_write_knobs_preserves_them(temp_store):
@@ -980,3 +984,39 @@ def test_update_explicit_false_clears_write_knobs(temp_store):
     assert cleared.write_via_staging is False
     assert cleared.priority_column == ""
     assert cleared.row_limit == 0
+
+
+def test_create_schedule_persists_studio_locales(temp_store):
+    sched = store.create_schedule({
+        "name": "EU dates",
+        "source_connector_id": "src-1",
+        "source_table": "orders",
+        "dest_connector_id": "dst-1",
+        "dest_table": "orders_wh",
+        "interval": "daily",
+        "date_locale": "DMY",
+        "number_locale": "EU",
+    })
+    reloaded = store.get_schedule(sched.id)
+    assert reloaded.date_locale == "DMY"
+    assert reloaded.number_locale == "EU"
+    req = runner.build_schedule_request(reloaded, _SRC_CONN, _DST_CONN)
+    assert req.date_locale == "DMY"
+    assert req.number_locale == "EU"
+
+
+def test_update_explicit_empty_clears_locales(temp_store):
+    sched = store.create_schedule({
+        "name": "EU dates",
+        "source_connector_id": "src-1",
+        "source_table": "orders",
+        "dest_connector_id": "dst-1",
+        "dest_table": "orders_wh",
+        "interval": "daily",
+        "date_locale": "DMY",
+        "number_locale": "EU",
+    })
+    cleared = store.update_schedule(sched.id, {"date_locale": "", "number_locale": ""})
+    assert cleared is not None
+    assert cleared.date_locale == ""
+    assert cleared.number_locale == ""

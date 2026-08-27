@@ -7,8 +7,12 @@
  */
 
 import {
+  DATE_LOCALES,
+  NUMBER_LOCALES,
   SCHEMA_POLICIES,
   VALIDATION_MODES,
+  type DateLocaleId,
+  type NumberLocaleId,
   type SchemaPolicyId,
   type ValidationModeId,
 } from "./transferConstants";
@@ -62,6 +66,21 @@ export function writeViaStagingSupported(destType?: string | null): boolean {
   return STAGING_SUPPORTED_DESTS.has(dest);
 }
 
+const DATE_LOCALE_IDS = new Set<string>(DATE_LOCALES.map((l) => l.id));
+const NUMBER_LOCALE_IDS = new Set<string>(NUMBER_LOCALES.map((l) => l.id));
+
+export function namedStudioDateLocale(raw?: string | null): DateLocaleId {
+  const value = String(raw || "").trim().toUpperCase();
+  if (value === "DMY" || value === "MDY") return value;
+  return DATE_LOCALE_IDS.has(value) ? (value as DateLocaleId) : "";
+}
+
+export function namedStudioNumberLocale(raw?: string | null): NumberLocaleId {
+  const value = String(raw || "").trim().toUpperCase();
+  if (value === "US" || value === "EU") return value;
+  return NUMBER_LOCALE_IDS.has(value) ? (value as NumberLocaleId) : "";
+}
+
 export function jobStudioDataRules(job: {
   validation_mode?: string;
   schema_policy?: string;
@@ -83,6 +102,8 @@ export function studioSchedulePolicies(input: {
   priorityColumn?: string;
   priorityDirection?: "asc" | "desc" | string;
   rowLimit?: number;
+  dateLocale?: string;
+  numberLocale?: string;
   syncMode?: string;
   snapshotMode?: string;
 }): {
@@ -93,6 +114,8 @@ export function studioSchedulePolicies(input: {
   priority_column: string;
   priority_direction: "asc" | "desc";
   row_limit: number;
+  date_locale: DateLocaleId;
+  number_locale: NumberLocaleId;
   snapshot_mode?: string;
 } {
   const validationMode = namedStudioValidationMode(input.validationMode);
@@ -107,6 +130,8 @@ export function studioSchedulePolicies(input: {
     priority_column: string;
     priority_direction: "asc" | "desc";
     row_limit: number;
+    date_locale: DateLocaleId;
+    number_locale: NumberLocaleId;
     snapshot_mode?: string;
   } = {
     backfill_new_fields: Boolean(input.backfillNewFields) && schemaPolicyBackfills(schemaPolicy),
@@ -114,6 +139,8 @@ export function studioSchedulePolicies(input: {
     priority_column: String(input.priorityColumn || "").trim(),
     priority_direction: direction,
     row_limit: limit,
+    date_locale: namedStudioDateLocale(input.dateLocale),
+    number_locale: namedStudioNumberLocale(input.numberLocale),
   };
   if (validationMode) out.validation_mode = validationMode;
   if (schemaPolicy) out.schema_policy = schemaPolicy;

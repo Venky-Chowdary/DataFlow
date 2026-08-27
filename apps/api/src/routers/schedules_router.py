@@ -248,6 +248,8 @@ class ScheduleSummaryResponse(BaseModel):
     priority_column: str = ""
     priority_direction: str = "desc"
     row_limit: int = 0
+    date_locale: str = ""
+    number_locale: str = ""
     delivery_guarantee: str = "at_least_once"
     snapshot_mode: str = ""
     cursor_column: str = ""

@@ -504,6 +504,8 @@ export function PipelineDetailDrawer({
                 </div>
               ) : null}
               {sched.row_limit ? <div><dt>Row limit</dt><dd>{sched.row_limit.toLocaleString()}</dd></div> : null}
+              <div><dt>Date locale</dt><dd>{sched.date_locale || "Auto"}</dd></div>
+              <div><dt>Number locale</dt><dd>{sched.number_locale || "Auto"}</dd></div>
               <div><dt>Runs</dt><dd>{sched.run_count.toLocaleString()}</dd></div>
               {sched.contract_id && (
                 <div>
@@ -591,6 +593,8 @@ export function PipelineDetailDrawer({
                 </dd>
               </div>
               <div><dt>Row limit</dt><dd>{sched.row_limit ? sched.row_limit.toLocaleString() : "None"}</dd></div>
+              <div><dt>Date locale</dt><dd>{sched.date_locale || "Auto"}</dd></div>
+              <div><dt>Number locale</dt><dd>{sched.number_locale || "Auto"}</dd></div>
             </dl>
             {mappings.length > 0 ? (
               <ul className="df2-drawer-map-list" aria-label="Column mappings">
@@ -644,6 +648,8 @@ export function PipelineDetailDrawer({
                 </dd>
               </div>
               <div><dt>Row limit</dt><dd>{sched.row_limit ? sched.row_limit.toLocaleString() : "None"}</dd></div>
+              <div><dt>Date locale</dt><dd>{sched.date_locale || "Auto"}</dd></div>
+              <div><dt>Number locale</dt><dd>{sched.number_locale || "Auto"}</dd></div>
               <div><dt>Created</dt><dd>{formatWhen(sched.created_at)}</dd></div>
             </dl>
             <p className="df2-drawer-empty-line">

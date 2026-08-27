@@ -743,8 +743,8 @@ describe("Transfer Studio chrome contracts", () => {
     const chunk = page.slice(start, start + 3500);
     assert.match(chunk, /stream_contracts: streamContracts/);
     assert.match(chunk, /shape_recipe: recipePayload\(shapeSteps\)/);
-    assert.match(chunk, /date_locale: dateLocale/);
-    assert.match(chunk, /number_locale: numberLocale/);
+    assert.match(chunk, /dateLocale,/);
+    assert.match(chunk, /numberLocale,/);
     assert.match(chunk, /approved_shape_recipe_hash/);
     assert.match(chunk, /approved_decision_artifact_hash/);
     assert.match(chunk, /mergeSignedRiskContracts/);
@@ -752,6 +752,8 @@ describe("Transfer Studio chrome contracts", () => {
     assert.match(chunk, /writeViaStaging/);
     assert.match(chunk, /priorityColumn/);
     assert.match(chunk, /rowLimit/);
+    assert.match(chunk, /dateLocale/);
+    assert.match(chunk, /numberLocale/);
   });
 
   it("Schedules form submits Studio Advanced write knobs so an edit cannot drop them", () => {
@@ -766,6 +768,9 @@ describe("Transfer Studio chrome contracts", () => {
     assert.match(form, /row_limit: writeKnobs.row_limit/);
     assert.match(form, /id="sched-priority-col"/);
     assert.match(form, /id="sched-row-limit"/);
+    assert.match(form, /id="sched-date-locale"/);
+    assert.match(form, /id="sched-number-locale"/);
+    assert.match(form, /date_locale: writeKnobs.date_locale/);
     assert.match(form, /Write via staging/);
     assert.match(drawer, /Write via staging/);
     assert.match(drawer, /sched.row_limit/);

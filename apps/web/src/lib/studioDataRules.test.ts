@@ -9,6 +9,8 @@ import {
   namedStudioSchemaPolicy,
   namedStudioValidationMode,
   schemaPolicyBackfills,
+  namedStudioDateLocale,
+  namedStudioNumberLocale,
   studioSchedulePolicies,
   writeViaStagingSupported,
 } from "./studioDataRules.ts";
@@ -109,6 +111,22 @@ describe("studioDataRules", () => {
     assert.equal(writeViaStagingSupported("csv"), false);
     assert.equal(writeViaStagingSupported("s3"), false);
     assert.equal(writeViaStagingSupported(""), false);
+  });
+
+  it("copies Studio date/number locales onto a scheduled pipeline and refuses unknown values", () => {
+    assert.equal(namedStudioDateLocale("dmy"), "DMY");
+    assert.equal(namedStudioDateLocale("bogus"), "");
+    assert.equal(namedStudioNumberLocale("eu"), "EU");
+    assert.equal(namedStudioNumberLocale("UK"), "");
+    const payload = studioSchedulePolicies({
+      dateLocale: "DMY",
+      numberLocale: "EU",
+    });
+    assert.equal(payload.date_locale, "DMY");
+    assert.equal(payload.number_locale, "EU");
+    const empty = studioSchedulePolicies({});
+    assert.equal(empty.date_locale, "");
+    assert.equal(empty.number_locale, "");
   });
 
   it("stamps CDC snapshot_mode onto a scheduled pipeline and omits it on full refresh", () => {
