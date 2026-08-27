@@ -98,6 +98,19 @@ _WORKSPACE_MARKERS = re.compile(
 )
 
 
+def turn_text(msg: dict | None) -> str:
+    """One owner for a chat turn's spoken text.
+
+    The Pilot page stores display rows as ``text`` and API history as
+    ``content``. Clients and tests mix both. Every reader must use this
+    helper — ``content``-only lookups silently drop a turn and break
+    coreference / recap.
+    """
+    if not isinstance(msg, dict):
+        return ""
+    return str(msg.get("content") or msg.get("text") or "").strip()
+
+
 def classify_dialogue_act(message: str, *, history: list[dict] | None = None) -> DialogueAct:
     text = (message or "").strip()
     if not text:
@@ -120,9 +133,14 @@ def classify_dialogue_act(message: str, *, history: list[dict] | None = None) ->
         return "workspace"
     if _WORKSPACE_MARKERS.search(text):
         return "workspace"
-    # Short follow-ups after a live turn stay in workspace (followup.py owns slots).
+    # Short follow-ups stay in-workspace only when they are elliptical edits
+    # ("and by region?", "only paid"). Off-topic shorts with history stay
+    # general — otherwise "capital of France" after a job list skipped refusal.
     if history and len(text.split()) <= 8:
-        return "workspace"
+        from .followup import looks_like_elliptical_edit
+
+        if looks_like_elliptical_edit(text):
+            return "workspace"
     return "general"
 
 
@@ -132,7 +150,7 @@ def last_assistant_text(history: list[dict] | None) -> str:
             continue
         if str(item.get("role") or "").lower() != "assistant":
             continue
-        text = str(item.get("content") or item.get("text") or "").strip()
+        text = turn_text(item)
         if text:
             return text
     return ""
@@ -144,7 +162,7 @@ def last_user_text(history: list[dict] | None) -> str:
             continue
         if str(item.get("role") or "").lower() != "user":
             continue
-        text = str(item.get("content") or item.get("text") or "").strip()
+        text = turn_text(item)
         if text:
             return text
     return ""

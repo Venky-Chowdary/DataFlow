@@ -844,6 +844,11 @@ class DataPilotAgent:
         ):
             return _with_llm_footnote(polished, engine)
 
+        # A local refusal is the knowledge answer. Racing a cloud model here
+        # invented general-web prose after "how do I cook rice".
+        if not carries_evidence(local) and float(local.confidence or 0) <= 0.25:
+            return _with_llm_footnote(polished, engine)
+
         # Local had nothing grounded — allow a single native LLM tool loop for hard paraphrases.
         import time as _time
         from concurrent.futures import wait, FIRST_COMPLETED
@@ -1255,11 +1260,15 @@ class DataPilotAgent:
         system: str,
         data_context: dict | None = None,
     ) -> CopilotResponse | None:
+        from .dialogue_acts import turn_text
+
         messages: list[dict] = []
         for msg in history[-12:]:
             role = msg.get("role", "user")
             if role in ("user", "assistant"):
-                messages.append({"role": role, "content": msg.get("content", "")})
+                text = turn_text(msg)
+                if text:
+                    messages.append({"role": role, "content": text})
         messages.append({"role": "user", "content": message})
 
         turn = PilotTurn()
@@ -1390,10 +1399,12 @@ class DataPilotAgent:
             tool_bits.append(
                 f"- {t.get('name')}: {'ok' if t.get('success') else 'fail'} — {t.get('summary')}"
             )
+        from .dialogue_acts import turn_text
+
         history_text = "\n".join(
-            f"{m.get('role', 'user').capitalize()}: {m.get('content', '')}"
+            f"{m.get('role', 'user').capitalize()}: {turn_text(m)}"
             for m in (history or [])[-6:]
-            if (m.get("content") or "").strip()
+            if turn_text(m)
         )
         prompt = f"""Rewrite the Datawrap Pilot answer below in clear, natural product language.
 
@@ -1645,12 +1656,14 @@ Draft answer:
 
         intent = self._detect_intent(message)
         turn = PilotTurn()
+        from .dialogue_acts import turn_text
+
         messages: list[dict] = []
         for m in history[-10:]:
             role = m.get("role", "user")
             if role not in ("user", "assistant"):
                 continue
-            content = (m.get("content") or "").strip()
+            content = turn_text(m)
             if content:
                 messages.append({"role": role, "content": content})
         messages.append({"role": "user", "content": message})
@@ -1759,9 +1772,12 @@ Draft answer:
         self._run_local_recovery(turn, message, data_context)
 
         tool_context = format_tool_results_for_llm(turn.tool_results)
+        from .dialogue_acts import turn_text
+
         history_text = "\n".join(
-            f"{m.get('role', 'user').capitalize()}: {m.get('content', '')}"
+            f"{m.get('role', 'user').capitalize()}: {turn_text(m)}"
             for m in history[-8:]
+            if turn_text(m)
         )
         prompt = f"""{system}
 
@@ -1814,9 +1830,12 @@ Respond as Datawrap Pilot in natural language. Ground your answer in tool result
         self._run_local_recovery(turn, message, data_context)
 
         tool_context = format_tool_results_for_llm(turn.tool_results)
+        from .dialogue_acts import turn_text
+
         history_text = "\n".join(
-            f"{m.get('role', 'user').capitalize()}: {m.get('content', '')}"
+            f"{m.get('role', 'user').capitalize()}: {turn_text(m)}"
             for m in history[-6:]
+            if turn_text(m)
         )
         prompt = f"""{system}
 
@@ -2613,18 +2632,12 @@ Respond as Datawrap Pilot — grounded in tool results."""
                             "label": label,
                         })
             elif tr.name == "search_knowledge" and tr.success:
-                hits = tr.output.get("hits", [])
                 documented = (tr.output.get("answer") or "").strip()
+                # Cited Help page or the single refusal owner. Vector shards
+                # are never the spoken answer, even if an older payload still
+                # carries uncited hits.
                 if documented:
-                    # A cited documentation answer, not stitched-together fragments.
                     parts.append(documented)
-                elif hits:
-                    lines = ["Here's what matches your question:"]
-                    for h in hits[:3]:
-                        summary = (h.get("summary") or h.get("text") or "").strip()
-                        if summary:
-                            lines.append(f"• {summary[:400]}")
-                    parts.append("\n".join(lines))
                 else:
                     hint = (tr.output.get("hint") or "").strip()
                     parts.append(

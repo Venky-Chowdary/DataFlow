@@ -24,7 +24,10 @@ HELP_CORPUS_PATH = Path(__file__).with_name("help_corpus.json")
 # A passage must cover this share of the question's informative terms before it is
 # offered as evidence. Below it, the honest answer is "the documentation does not
 # cover this" — never a fluent paragraph built from the best of the noise.
-GROUNDING_FLOOR = 0.34
+# 0.34 admitted "capital of France" → Redis destination keys (grounding 0.50).
+# Real documented asks in the Help corpus land at ≥ 0.9. 0.55 is the fail-closed
+# floor: a passing mention is not evidence.
+GROUNDING_FLOOR = 0.55
 
 # BM25 alone ranks a passing mention in a short FAQ above the section written about
 # the feature, because length normalization rewards brevity. A heading that names the

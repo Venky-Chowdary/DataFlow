@@ -21,6 +21,24 @@ from src.ai.copilot.tools import TOOL_DEFINITIONS, infer_tools_from_message
 from src.ai.copilot.workspace_briefing import collect_workspace_briefing
 
 
+def test_short_history_does_not_force_workspace_for_off_topic():
+    hist = [{"role": "assistant", "content": "You have **2** jobs."}]
+    assert classify_dialogue_act("what is the capital of France", history=hist) == "general"
+    assert classify_dialogue_act("and by region", history=hist) == "workspace"
+    assert classify_dialogue_act("only paid ones", history=hist) == "workspace"
+
+
+def test_turn_text_accepts_content_or_text():
+    from src.ai.copilot.dialogue_acts import last_assistant_text, turn_text
+    from src.ai.copilot.followup import last_assistant_content
+
+    assert turn_text({"role": "assistant", "text": "You have **2** jobs."}) == "You have **2** jobs."
+    assert turn_text({"role": "assistant", "content": "ok"}) == "ok"
+    hist = [{"role": "assistant", "text": "Job `abc` failed."}]
+    assert last_assistant_text(hist) == "Job `abc` failed."
+    assert last_assistant_content(hist) == "Job `abc` failed."
+
+
 def test_dialogue_acts_cover_copilot_turns():
     assert classify_dialogue_act("hi") == "greeting"
     assert classify_dialogue_act("hello there") == "greeting"

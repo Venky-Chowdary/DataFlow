@@ -1490,11 +1490,7 @@ class DataPilotTools:
 
     def _explain_product(self, query: str = "") -> ToolResult:
         """Curated Datawrap product answers — independent of cloud LLMs and RAG noise."""
-        from ..knowledge.copilot_knowledge import (
-            CONVERSATION_TEMPLATES,
-            INTENT_PATTERNS,
-            PRODUCT_CAPABILITIES,
-        )
+        from ..knowledge.copilot_knowledge import PRODUCT_CAPABILITIES
 
         lower = (query or "").lower().strip()
 
@@ -1623,6 +1619,8 @@ class DataPilotTools:
                 success=True,
                 output={
                     "intent": curated[0] if curated else "documentation",
+                    # Curated regex is the lead definition; Help citations follow
+                    # so every sentence sits next to a page the operator can open.
                     "answer": f"{curated[1]}\n\n{documented}" if curated else documented,
                     "capabilities": PRODUCT_CAPABILITIES[:6],
                     # No navigate action: the citations below are the control that
@@ -1649,59 +1647,12 @@ class DataPilotTools:
                 },
             )
 
-        scores: dict[str, int] = {}
-        for intent, keywords in INTENT_PATTERNS.items():
-            score = sum(1 for kw in keywords if kw in lower)
-            if score:
-                scores[intent] = score
-        # Boost common product how-tos
-        if re.search(r"\b(?:transfer|move|migrate|sync|copy)\b", lower):
-            scores["transfer_help"] = scores.get("transfer_help", 0) + 3
-        if re.search(r"\b(?:map|mapping|column|schema)\b", lower):
-            scores["mapping_help"] = scores.get("mapping_help", 0) + 2
-        if re.search(r"\b(?:preflight|gate|validate|validation)\b", lower):
-            scores["preflight_help"] = scores.get("preflight_help", 0) + 3
-        if re.search(r"\b(?:connector|mongodb|postgres|snowflake|connect)\b", lower):
-            scores["connector_help"] = scores.get("connector_help", 0) + 2
-        if re.search(r"\b(?:pii|gdpr|hipaa|compliance)\b", lower):
-            scores["pii_compliance"] = scores.get("pii_compliance", 0) + 2
-        if re.search(r"\b(?:fail|error|broke|troubleshoot|job)\b", lower):
-            scores["troubleshooting"] = scores.get("troubleshooting", 0) + 2
-        if re.search(
-            r"\b(?:dataflow|datawrap|datatransfer|what is|what'?s different|airbyte|fivetran)\b",
-            lower,
-        ):
-            scores["product_help"] = scores.get("product_help", 0) + 3
-        if re.search(r"\b(?:count|aggregate|analy[sz]e|how many|sql)\b", lower):
-            scores["analytics_help"] = scores.get("analytics_help", 0) + 2
-
-        if not scores or not names_product_subject(query):
-            # Nothing in the documentation and no product keyword: say so. Falling
-            # through to the highest-scoring template answered "how do I cook rice"
-            # with a transfer blurb at full confidence.
-            return ToolResult(
-                name="explain_product",
-                success=True,
-                output=unsupported_question_output(query),
-            )
-
-        intent = max(scores, key=scores.get)
-        matched = next((t for t in CONVERSATION_TEMPLATES if t.get("intent") == intent), None)
-        if not matched:
-            matched = CONVERSATION_TEMPLATES[0]
-        actions = list(matched.get("actions") or [])
+        # No Help hit and no explicit FAQ regex: refuse. Keyword-bucket
+        # CONVERSATION_TEMPLATES are not evidence.
         return ToolResult(
             name="explain_product",
             success=True,
-            output={
-                "intent": intent,
-                "answer": matched.get("assistant") or "",
-                "capabilities": PRODUCT_CAPABILITIES[:6],
-                "actions": actions,
-                "sources": [],
-                "grounded": False,
-                "source": "local_product_faq",
-            },
+            output=unsupported_question_output(query),
         )
 
     def _search_knowledge(self, query: str = "") -> ToolResult:
@@ -1748,76 +1699,20 @@ class DataPilotTools:
                 },
             )
 
-        try:
-            from ..rag.pipeline import get_rag_pipeline
-            rag = get_rag_pipeline()
-            rag.ingestion.ensure_knowledge_loaded()
-            result = rag.retriever.retrieve(query, n_results=8)
-            hits = []
-            for d in result.documents:
-                text = (d.text or "").strip()
-                score = float(d.score or 0)
-                # Drop low-score noise and raw ontology shards that read like debug dumps.
-                if score < 0.28:
-                    continue
-                meta_type = str(d.metadata.get("type") or "").lower()
-                # Prefer real product/docs hits over synthetic catalog training docs.
-                if meta_type in {
-                    "synthetic_catalog",
-                    "catalog_schema",
-                    "generated_qna",
-                    "training",
-                    "ontology",
-                    "embedding_shard",
-                } and score < 0.62:
-                    continue
-                if "650+" in text or "620+" in text:
-                    # Catalog marketing counts are not transfer-ready evidence.
-                    continue
-                if _is_raw_knowledge_shard(text) and not _query_targets_semantic_type(query, text):
-                    continue
-                # Synonym / industry catalog dumps are never answers to "get users
-                # from postgres" — only keep them when the operator asked about
-                # synonyms / PII / semantic types explicitly.
-                qlow = query.lower()
-                wants_ontology = any(
-                    w in qlow
-                    for w in ("synonym", "semantic type", "pii", "column pattern", "canonical")
-                )
-                if _is_noise_knowledge_hit(text) and not wants_ontology:
-                    continue
-                hits.append({
-                    "text": text[:600],
-                    "score": round(score, 3),
-                    "type": d.metadata.get("type", ""),
-                    "summary": _summarize_knowledge_hit(text),
-                })
-                if len(hits) >= 4:
-                    break
-            return ToolResult(
-                name="search_knowledge",
-                success=True,
-                output={
-                    "query": query,
-                    "hits": hits,
-                    "count": len(hits),
-                    "empty": len(hits) == 0,
-                    "sources": [],
-                    "grounded": False,
-                    "source": "vector_knowledge" if hits else "unsupported_question",
-                    "hint": (
-                        None
-                        if hits
-                        else (
-                            "No grounded product knowledge matched. Ask about a saved "
-                            "connector, table, job ID, or pf_ validation run — or say "
-                            "what can you do."
-                        )
-                    ),
-                },
-            )
-        except Exception as e:
-            return ToolResult(name="search_knowledge", success=False, output=None, error=str(e))
+        # On-vocabulary but no citable Help page: refuse. Embedding nearest
+        # neighbours are not an answer — they narrated ontology shards as
+        # product knowledge (subscriber_id → telecom synonym dump).
+        refused = unsupported_question_output(query)
+        refused["hint"] = (
+            "No grounded product knowledge matched. Ask about a saved "
+            "connector, table, job ID, or pf_ validation run — or say "
+            "what can you do."
+        )
+        return ToolResult(
+            name="search_knowledge",
+            success=True,
+            output=refused,
+        )
 
     def _plan_transfer_route(
         self,
@@ -2683,7 +2578,7 @@ def _looks_like_product_howto(lower: str) -> bool:
             r"schema types?|semantic types?|type system|logical types?|"
             r"transfers?|pilot|openai|anthropic|"
             r"ollama|confirm|upsert|append|cdc|sync mode|full refresh|merge|"
-            r"api key|accurate)\b",
+            r"api key|accurate|mcp|contracts?|reconcile)\b",
             text,
         )
     )
@@ -4025,8 +3920,16 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
             planned.append(("navigate", {"screen": "schedules"}))
             planned = [(n, a) for n, a in planned if n != "sample_connector_object"]
 
-    if any(w in lower for w in ("contracts", "data contract")) and any(w in lower for w in ("list", "show", "what")):
-        # "show contracts" may also navigate — prefer list when asking for contents.
+    # Inventory of signed contracts — not "what is a data contract" (definition).
+    if (
+        re.search(
+            r"\b(?:list|show|my)\s+(?:data\s+)?contracts?\b"
+            r"|\b(?:what|which)\s+(?:data\s+)?contracts?\s+(?:do\s+i|do\s+we|are\s+(?:there|mine|signed))\b"
+            r"|\b(?:data\s+)?contracts?\s+(?:i\s+have|we\s+have|in\s+(?:the|this)\s+workspace)\b",
+            lower,
+        )
+        and not re.search(r"\bwhat\s+is\s+(?:a\s+)?data\s+contract\b", lower)
+    ):
         if not any(v in lower for v in ("go to", "take me", "navigate to", "open ")):
             planned.append(("list_contracts", {"limit": 50}))
             planned = [
@@ -5027,10 +4930,25 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
             and not (n == "introspect_connector_schema" and not _asks_for_schema(lower))
         ]
 
-    # Off-topic / general-web asks must not become product RAG. The composer
-    # refuses guesswork and points at Settings → AI for cloud chat.
+    # Off-topic / general-web asks must not become product RAG. Vocabulary
+    # overlap ("capital") is not evidence — only a Help hit, a pasted id, or
+    # an explicit knowledge search is.
     if _act == "general":
-        planned = [(n, a) for n, a in planned if n != "search_knowledge"]
+        from ..rag.evidence import names_identifier
+
+        explicit_knowledge = bool(
+            re.search(
+                r"\b(?:search\s+knowledge|knowledge\s+for|semantic\s+types?|ontology)\b",
+                lower,
+            )
+        )
+        keep_rag = (
+            explicit_knowledge
+            or names_identifier(message)
+            or bool(product_doc_search(message, limit=1))
+        )
+        if not keep_rag:
+            planned = [(n, a) for n, a in planned if n != "search_knowledge"]
 
     # Deduplicate while preserving order
     seen: set[str] = set()
