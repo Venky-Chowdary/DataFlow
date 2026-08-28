@@ -38,6 +38,7 @@ import {
   updateSchedule,
 } from "../lib/api";
 import { breakerBlocksRuns } from "../lib/contractBreakerUi";
+import { fleetExportBlockedReason } from "../lib/schedulesGitops";
 import {
   Connector,
   PipelineSchedule,
@@ -384,6 +385,15 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
   };
 
   const handleExportFleet = async () => {
+    const emptyReason = fleetExportBlockedReason(schedules.length);
+    if (emptyReason) {
+      toast({
+        title: "Nothing to export",
+        message: emptyReason,
+        tone: "info",
+      });
+      return;
+    }
     setGitopsBusy(true);
     try {
       const blob = await exportDatawrapManifest();
@@ -524,8 +534,12 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
                     size="sm"
                     variant="ghost"
                     loading={gitopsBusy}
+                    disabled={gitopsBusy || schedules.length === 0}
                     onClick={() => void handleExportFleet()}
-                    title="Export schedules + contracts as dataflow.yaml"
+                    title={
+                      fleetExportBlockedReason(schedules.length)
+                      || "Export schedules + contracts as dataflow.yaml"
+                    }
                   >
                     Export YAML
                   </Button>

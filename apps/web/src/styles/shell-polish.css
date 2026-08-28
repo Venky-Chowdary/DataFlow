@@ -1011,9 +1011,12 @@ select.df2-select {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: auto;
-  aspect-ratio: 1;
-  flex: 0 0 auto;
+  box-sizing: border-box;
+  width: var(--df-control-height, 36px);
+  height: var(--df-control-height, 36px);
+  min-width: var(--df-control-height, 36px);
+  min-height: var(--df-control-height, 36px);
+  flex: 0 0 var(--df-control-height, 36px);
   border: 1px solid var(--df-border, #e2e8f0);
   border-radius: var(--df-radius-md, 8px);
   background: #fff;

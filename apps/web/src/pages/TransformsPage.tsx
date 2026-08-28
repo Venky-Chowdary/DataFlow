@@ -504,7 +504,7 @@ export function TransformsPage({ connectors, onNavigate }: TransformsPageProps) 
                 }
                 action={
                   projects.length === 0 ? (
-                    <>
+                    <div className="df2-empty-actions-row">
                       <Button variant="primary" leadingIcon={<DtIcon name="plus" size={14} />} onClick={openCreate}>
                         New transform
                       </Button>
@@ -516,7 +516,7 @@ export function TransformsPage({ connectors, onNavigate }: TransformsPageProps) 
                           Run a transfer first
                         </Button>
                       )}
-                    </>
+                    </div>
                   ) : undefined
                 }
                 page

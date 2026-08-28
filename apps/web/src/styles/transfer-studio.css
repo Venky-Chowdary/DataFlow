@@ -195,11 +195,13 @@
 
 .df2-source-endpoint-fields .df2-input,
 .df2-source-endpoint-fields .df2-connector-select {
-  min-height: 40px;
+  min-height: var(--df-control-height, 36px);
+  height: var(--df-control-height, 36px);
 }
 
 .df2-source-endpoint-fields .df2-connector-select-row {
-  min-height: 40px;
+  min-height: var(--df-control-height, 36px);
+  align-items: center;
 }
 
 .df2-source-endpoint-fields .df2-label-hint {
@@ -213,15 +215,25 @@
 }
 
 .df2-source-endpoint-fields .df2-source-read-mode .df2-filter-tabs {
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   width: 100%;
+  box-sizing: border-box;
+  height: var(--df-control-height, 36px);
+  min-height: var(--df-control-height, 36px);
+  max-height: var(--df-control-height, 36px);
+  padding: 2px;
+  margin-bottom: 0;
+  align-items: stretch;
 }
 
 .df2-source-endpoint-fields .df2-source-read-mode .df2-tab {
   flex: 1 1 auto;
   justify-content: center;
+  align-items: center;
   min-width: 0;
-  padding: 4px 8px;
+  height: auto;
+  min-height: 0;
+  padding: 0 8px;
 }
 
 .df2-source-endpoint-fields .df2-textarea {
