@@ -149,7 +149,8 @@ def run_non_cdc_multi_stream_sequential(
         ddl_log.append(
             "FK dependency order: " + " -> ".join(fk_context.order)
             + (
-                f" (cycle, no valid order: {', '.join(fk_context.cycle)})"
+                f" (cycle {', '.join(fk_context.cycle)}: load any order, "
+                "recreate FKs with post-load ALTER)"
                 if fk_context.cycle
                 else ""
             )

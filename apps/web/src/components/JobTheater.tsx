@@ -566,6 +566,14 @@ export function JobTheaterView({
   const earlyFail = isFailed && processed === 0 && rejectedRows === 0;
   const warningCount = Array.isArray(destinationSummary.warnings) ? destinationSummary.warnings.length : 0;
   const checksum = typeof destinationSummary.checksum === "string" ? destinationSummary.checksum : "";
+  const fkSummary = (destinationSummary.foreign_keys ?? null) as {
+    cycle?: string[];
+    cycle_resolved?: boolean;
+    cycle_strategy?: string;
+    cycle_note?: string;
+    carried?: number;
+  } | null;
+  const fkCycle = Array.isArray(fkSummary?.cycle) ? fkSummary.cycle : [];
   const loadMethod = typeof destinationSummary.load_method === "string" ? destinationSummary.load_method : "";
   const callableNote = callableExtractNote(preflight, job);
   const batchSize = Number(job.chunk_size ?? destinationSummary.chunk_size ?? 0) || 0;
@@ -1513,6 +1521,18 @@ export function JobTheaterView({
               : "No destination warnings"}
           </small>
         </article>
+        {fkCycle.length > 0 && (
+        <article className={`df2-theater-v3-sla-card${fkSummary?.cycle_resolved ? "" : " is-warn"}`}>
+          <span>FK cycle</span>
+          <strong>{fkSummary?.cycle_resolved ? "Recreated" : "Not enforced"}</strong>
+          <small>
+            {fkSummary?.cycle_resolved
+              ? `Post-load ALTER on ${fkCycle.join(", ")} — destination validated the rows`
+              : fkSummary?.cycle_note
+                || `Cycle ${fkCycle.join(", ")} is not fully enforced on the destination`}
+          </small>
+        </article>
+        )}
         <article className="df2-theater-v3-sla-card">
           <span>Checksum evidence</span>
           <strong>
