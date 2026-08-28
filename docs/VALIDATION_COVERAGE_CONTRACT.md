@@ -62,3 +62,4 @@ counts do not pair — never a silent skip.
 - Full checksum match ≠ FK / constraint proof
 - Population orphan scan is **opt-in** (`run_population_orphan_scan=true`) — default Validate leaves `population_orphan_probe_ran=false` and `proven=false`
 - Composite FKs use MATCH SIMPLE tuple anti-join / tuple-IN (`services.fk_tuple_scan`). A failed scan or arity mismatch still leaves `population_orphan_count=null` (never invent proven)
+- Self-referential FKs alias the parent (`df_fk_parent`) so the anti-join is not `FROM emp JOIN emp` (ambiguous columns). Dest post-write RI uses the same helper.

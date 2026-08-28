@@ -138,17 +138,42 @@ def _resolve_source_column(
 
 
 def _fk_parts(fk: dict[str, Any]) -> tuple[list[str], str, list[str]]:
-    cols = fk.get("columns") or fk.get("column") or fk.get("fk_columns") or []
+    """Normalize source-catalog, dest-inspector, and Studio FK payloads.
+
+    Source probe uses ``columns`` / ``referenced_*``. Destination RI and some
+    engine extras use ``constrained_columns`` / ``referred_*``. One parser so
+    Validate does not treat a dest-shaped composite as incomplete.
+    """
+    cols = (
+        fk.get("columns")
+        or fk.get("column")
+        or fk.get("fk_columns")
+        or fk.get("constrained_columns")
+        or []
+    )
     if isinstance(cols, str):
         cols = [cols]
     cols = [str(c).strip() for c in cols if str(c).strip()]
     ref_table = str(
-        fk.get("referenced_table") or fk.get("ref_table") or ""
+        fk.get("referenced_table")
+        or fk.get("ref_table")
+        or fk.get("referred_table")
+        or ""
     ).strip()
-    ref_schema = str(fk.get("referenced_schema") or fk.get("ref_schema") or "").strip()
+    ref_schema = str(
+        fk.get("referenced_schema")
+        or fk.get("ref_schema")
+        or fk.get("referred_schema")
+        or ""
+    ).strip()
     if ref_schema and ref_table and "." not in ref_table:
         ref_table = f"{ref_schema}.{ref_table}"
-    ref_cols = fk.get("referenced_columns") or fk.get("ref_columns") or []
+    ref_cols = (
+        fk.get("referenced_columns")
+        or fk.get("ref_columns")
+        or fk.get("referred_columns")
+        or []
+    )
     if isinstance(ref_cols, str):
         ref_cols = [ref_cols]
     ref_cols = [str(c).strip() for c in ref_cols if str(c).strip()]

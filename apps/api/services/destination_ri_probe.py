@@ -26,6 +26,8 @@ from typing import Any
 
 import sqlalchemy as sa
 
+from services.fk_tuple_scan import _table_col, alias_parent_if_self_ref
+from services.fk_tuple_scan import orphan_example_text as _orphan_example_text  # noqa: F401
 from services.fk_tuple_scan import scan_orphan_anti_join
 from services.physical_state_diff import catalog_table_names, resolve_stored_name
 
@@ -47,8 +49,11 @@ def _orphan_scan(
     parent_columns: list[str],
 ) -> dict[str, Any]:
     """Anti-join via ``fk_tuple_scan`` — MATCH SIMPLE composite tuples."""
-    c_cols = [child.c.get(name) for name in child_columns]
-    p_cols = [parent.c.get(name) for name in parent_columns]
+    try:
+        c_cols = [_table_col(child, name) for name in child_columns]
+        p_cols = [_table_col(parent, name) for name in parent_columns]
+    except KeyError:
+        return {"available": False, "reason": "join column missing from catalog"}
     return scan_orphan_anti_join(
         conn,
         child=child,
@@ -160,7 +165,9 @@ def verify_destination_referential_integrity(
                 continue
             try:
                 child_tbl = _reflect(conn, meta, child_name, schema_arg)
-                parent_tbl = _reflect(conn, meta, stored_parent, schema_arg)
+                parent_tbl = alias_parent_if_self_ref(
+                    child_tbl, _reflect(conn, meta, stored_parent, schema_arg)
+                )
                 resolved_child = [
                     resolve_stored_name([c.name for c in child_tbl.columns], name)
                     for name in child_cols

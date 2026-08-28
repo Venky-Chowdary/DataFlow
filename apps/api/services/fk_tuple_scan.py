@@ -86,6 +86,58 @@ def _split_table(qualified: str, default_schema: str | None) -> tuple[str | None
     return split_qualified_table(qualified, default_schema)
 
 
+SELF_REF_PARENT_ALIAS = "df_fk_parent"
+
+
+def _quoted_table(name: str, columns: Sequence[str], schema: str | None):
+    """Bind columns to a table so same-named keys do not join a column to itself.
+
+    Identifiers are quoted so reserved names (``order``, ``user``) and mixed
+    case survive dialect folding.
+    """
+    import sqlalchemy as sa
+
+    def q(ident: str):
+        return sa.quoted_name(str(ident), quote=True)
+
+    schema_q = q(schema) if schema else None
+    return sa.table(q(name), *[sa.column(q(c)) for c in columns], schema=schema_q)
+
+
+def _table_col(table: Any, name: str) -> Any:
+    """Resolve a column by wire name after quoting / aliasing."""
+    cols = table.c
+    if name in cols:
+        return cols[name]
+    want = str(name)
+    for key in cols.keys():
+        if str(key) == want:
+            return cols[key]
+    raise KeyError(name)
+
+
+def alias_parent_if_self_ref(child: Any, parent: Any) -> Any:
+    """Self-referential FK: parent must be a distinct FROM alias.
+
+    MATCH SIMPLE is ``child LEFT JOIN parent ON … WHERE parent.key IS NULL``.
+    When both sides are the same relation, unaliased SQL is
+    ``FROM emp LEFT JOIN emp`` and every column is ambiguous (SQLite
+    OperationalError; Postgres/MySQL error). Dest post-write RI uses the
+    same helper so source preflight and dest scan cannot diverge.
+    """
+    if child is None or parent is None:
+        return parent
+    if child is parent:
+        return parent.alias(SELF_REF_PARENT_ALIAS)
+    child_name = str(getattr(child, "name", "") or "")
+    parent_name = str(getattr(parent, "name", "") or "")
+    child_schema = str(getattr(child, "schema", None) or "")
+    parent_schema = str(getattr(parent, "schema", None) or "")
+    if child_name and parent_name and child_name == parent_name and child_schema == parent_schema:
+        return parent.alias(SELF_REF_PARENT_ALIAS)
+    return parent
+
+
 def sql_population_orphan_scan(
     cfg: dict[str, Any],
     *,
@@ -95,9 +147,7 @@ def sql_population_orphan_scan(
     parent_columns: Sequence[str],
     max_examples: int = 25,
 ) -> dict[str, Any]:
-    """Full-table MATCH SIMPLE anti-join using unbound ``sa.table`` / ``sa.column``."""
-    import sqlalchemy as sa
-
+    """Full-table MATCH SIMPLE anti-join using bound, quoted identifiers."""
     from connectors.generic_sql import _engine
 
     child_cols = [str(c).strip() for c in child_columns if str(c).strip()]
@@ -111,18 +161,12 @@ def sql_population_orphan_scan(
     if not child_name or not parent_name:
         raise ValueError("incomplete table/column for population orphan scan")
 
-    child = sa.table(
-        child_name,
-        *[sa.column(c) for c in child_cols],
-        schema=child_schema,
+    child = _quoted_table(child_name, child_cols, child_schema)
+    parent = alias_parent_if_self_ref(
+        child, _quoted_table(parent_name, parent_cols, parent_schema)
     )
-    parent = sa.table(
-        parent_name,
-        *[sa.column(p) for p in parent_cols],
-        schema=parent_schema,
-    )
-    c_els = [child.c[c] for c in child_cols]
-    p_els = [parent.c[p] for p in parent_cols]
+    c_els = [_table_col(child, c) for c in child_cols]
+    p_els = [_table_col(parent, p) for p in parent_cols]
 
     engine = _engine(cfg)
     with engine.connect() as conn:
@@ -173,12 +217,8 @@ def sql_existing_parent_tuples(
     schema, table_name = _split_table(
         parent_table, (cfg.get("schema") or "").strip() or None
     )
-    tbl = sa.table(
-        table_name,
-        *[sa.column(c) for c in parent_cols],
-        schema=schema,
-    )
-    p_els = [tbl.c[c] for c in parent_cols]
+    tbl = _quoted_table(table_name, parent_cols, schema)
+    p_els = [_table_col(tbl, c) for c in parent_cols]
     found: list[tuple[Any, ...]] = []
     engine = _engine(cfg)
     with engine.connect() as conn:
