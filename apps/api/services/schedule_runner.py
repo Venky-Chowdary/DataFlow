@@ -25,6 +25,37 @@ from services.standing_authorization import (
 logger = logging.getLogger(__name__)
 
 _executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="schedule-runner")
+
+
+class ScheduleStartError(Exception):
+    """A manual Run now could not start — carry the operator-visible reason.
+
+    Cadence beats still return ``None`` and stay quiet. The HTTP / Pilot
+    trigger must not collapse every refusal into "check connectors".
+    """
+
+    def __init__(self, message: str, *, http_status: int = 400, code: str = ""):
+        super().__init__(message)
+        self.http_status = int(http_status)
+        self.code = str(code or "")
+
+
+def _manual_start_failure_detail(sched: Any) -> str:
+    """Prefer the parked finding or last run error over a connector guess."""
+    if sched is None:
+        return "Schedule not found."
+    hist = list(getattr(sched, "run_history", None) or [])
+    last_err = ""
+    if hist and isinstance(hist[-1], dict):
+        last_err = str(hist[-1].get("error") or "").strip()
+    req = getattr(sched, "approval_request", None) or {}
+    finding = ""
+    if isinstance(req, dict) and str(req.get("status") or "") == "open":
+        finding = str(req.get("finding") or req.get("corrective_action") or "").strip()
+    return finding or last_err or (
+        "Could not start this schedule. Open the schedule for the parked finding, "
+        "or confirm the source and destination connectors still resolve."
+    )
 CHECK_INTERVAL_SECONDS = 60
 LOCK_TTL_SECONDS = int(getenv_brand("SCHEDULER_LOCK_TTL", "300"))
 # Failed beats in a row before the cadence parks on a finding whatever the
@@ -1031,15 +1062,27 @@ def _record_authorization_use(schedule_id: str, *, rebind: bool = False) -> None
         logger.exception("Schedule %s authorization use not recorded", schedule_id)
 
 
-def _dispatch_transfer(schedule_id: str, attempt: int = 0) -> str | None:
-    """Build and submit the transfer for a schedule attempt (used for retries too)."""
+def _dispatch_transfer(
+    schedule_id: str,
+    attempt: int = 0,
+    *,
+    allow_paused: bool = False,
+) -> str | None:
+    """Build and submit the transfer for a schedule attempt (used for retries too).
+
+    ``enabled`` gates the cadence, not a one-shot Run now. A paused schedule
+    still has connectors and mappings — Fivetran/Airbyte let the operator fire
+    a paused connection without flipping it back to active.
+    """
     from src.transfer.background import run_transfer_async
     from src.transfer.engine import get_transfer_engine
 
     from services.schedule_store import get_schedule
 
     sched = get_schedule(schedule_id)
-    if not sched or not sched.enabled:
+    if not sched:
+        return None
+    if not sched.enabled and not allow_paused:
         return None
     src = _resolve_connector(sched.source_connector_id)
     dst = _resolve_connector(sched.dest_connector_id)
@@ -1090,7 +1133,7 @@ def _dispatch_transfer(schedule_id: str, attempt: int = 0) -> str | None:
     return job_id
 
 
-def _run_schedule(schedule_id: str) -> str | None:
+def _run_schedule(schedule_id: str, *, manual: bool = False) -> str | None:
     from services.schedule_store import (
         clear_schedule_running,
         get_schedule,
@@ -1098,22 +1141,42 @@ def _run_schedule(schedule_id: str) -> str | None:
     )
 
     sched = get_schedule(schedule_id)
-    if not sched or not sched.enabled:
+    if not sched:
+        if manual:
+            raise ScheduleStartError("Schedule not found.", http_status=404, code="not_found")
+        return None
+    if not sched.enabled and not manual:
         return None
 
     # Concurrency guard: refuse to start when this schedule (or another schedule
     # for the same source→dest connector pair) already has a live run in flight.
     if mark_schedule_running(schedule_id, _scheduler_instance_id()) is None:
         logger.info("Schedule %s skipped — a run is already in progress", schedule_id)
+        if manual:
+            raise ScheduleStartError(
+                "A run is already in progress for this schedule or the same "
+                "source→destination pair.",
+                http_status=409,
+                code="already_running",
+            )
         return None
 
     # A parked retry resumes its own attempt count; the budget is per run, not
     # per beat, or a schedule that fails every time retries forever.
-    job_id = _dispatch_transfer(schedule_id, attempt=sched.retry_attempt if sched.retry_at else 0)
+    job_id = _dispatch_transfer(
+        schedule_id,
+        attempt=sched.retry_attempt if sched.retry_at else 0,
+        allow_paused=manual,
+    )
     if job_id is None:
         # Fail-closed paths (missing connector / contract) already call
         # mark_schedule_run which clears ``running``. Belt-and-suspenders clear.
         clear_schedule_running(schedule_id)
+        if manual:
+            raise ScheduleStartError(
+                _manual_start_failure_detail(get_schedule(schedule_id)),
+                code="start_refused",
+            )
     return job_id
 
 

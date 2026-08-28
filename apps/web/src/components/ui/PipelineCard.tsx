@@ -277,6 +277,11 @@ export function PipelineCard({
               loading={running}
               loadingLabel="Running…"
               disabled={isRunning}
+              title={
+                sched.enabled
+                  ? undefined
+                  : "Runs once now. Does not activate the cadence — the schedule stays paused."
+              }
               onClick={onRun}
               leadingIcon={<DtIcon name="activity" size={14} />}
             >
