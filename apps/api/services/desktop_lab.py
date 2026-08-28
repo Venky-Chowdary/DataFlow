@@ -1,11 +1,13 @@
-"""Desktop lab: ≥80 catalog connectors, each as destination *and* source.
+"""Desktop lab: ≥80 catalog connectors, dest + source, no silent loss.
 
 Honesty
 -------
-* 80 is **catalog slots** exercised dest then source on this named fixture —
-  not 80 unique engines, not catalog tile count, not 650+ live.
+* 80 is **catalog slots** on this named fixture — not 80 unique engines,
+  not catalog tile count, not 650+ live.
 * Hosted twins share a parent driver. Unique engines are counted separately.
-* Each slot must write the fixture (2 rows) and read those 2 rows back.
+* Each slot must: Map SSOT → Validate (preflight) → dest write → source
+  read-back → payload reconcile of the 2 fixture rows. Rejected/coerced
+  rows fail the slot (silent loss / corruption).
 * A connector that cannot be stood up is ``skipped`` — never a fake green.
 * CDC default remains at-least-once upsert.
 * Source-only (pdf/docx/html/REST) and dest-only (pgvector) tiles are not
@@ -38,9 +40,14 @@ DESKTOP_LAB_MIN_DUPLEX = 80
 FIXTURE_ROWS = 2
 
 CSV_BYTES = b"id,amount\n1,1000.00\n2,2000.50\n"
+EXPECTED_PAYLOAD = (("1", "1000.00"), ("2", "2000.50"))
 MAPPINGS = [
     {"source": "id", "target": "id", "confidence": 0.99},
     {"source": "amount", "target": "amount", "confidence": 0.99},
+]
+SOURCE_SCHEMAS = [
+    {"name": "id", "inferred_type": "INTEGER", "samples": ["1", "2"]},
+    {"name": "amount", "inferred_type": "DECIMAL(18,2)", "samples": ["1000.00", "2000.50"]},
 ]
 PG = {
     "host": "127.0.0.1",
@@ -170,6 +177,16 @@ class ConnectorResult:
     source_error: str = ""
     dest_rows: int | None = None
     source_rows: int | None = None
+    map_status: str = "skipped"
+    map_error: str = ""
+    validate_status: str = "skipped"
+    integrity_status: str = "skipped"
+    integrity_error: str = ""
+    silent_loss: bool = False
+    dest_rejected: int = 0
+    dest_coerced: int = 0
+    dest_reconcile: bool | None = None
+    source_reconcile: bool | None = None
 
     @property
     def duplex(self) -> bool:
@@ -178,6 +195,16 @@ class ConnectorResult:
             and self.source_status == "passed"
             and self.dest_rows == FIXTURE_ROWS
             and self.source_rows == FIXTURE_ROWS
+        )
+
+    @property
+    def operations_ok(self) -> bool:
+        return (
+            self.duplex
+            and self.map_status == "passed"
+            and self.validate_status == "passed"
+            and self.integrity_status == "passed"
+            and not self.silent_loss
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -194,6 +221,17 @@ class ConnectorResult:
             "source_rows": self.source_rows,
             "fixture_rows": FIXTURE_ROWS,
             "duplex": self.duplex,
+            "map_status": self.map_status,
+            "map_error": self.map_error[:400],
+            "validate_status": self.validate_status,
+            "integrity_status": self.integrity_status,
+            "integrity_error": self.integrity_error[:400],
+            "silent_loss": self.silent_loss,
+            "dest_rejected": self.dest_rejected,
+            "dest_coerced": self.dest_coerced,
+            "dest_reconcile": self.dest_reconcile,
+            "source_reconcile": self.source_reconcile,
+            "operations_ok": self.operations_ok,
         }
 
 
@@ -396,6 +434,73 @@ def _run(req: TransferRequest):
     return UniversalTransferEngine().execute_tracked(req, uuid.uuid4().hex[:24])
 
 
+def _map_fixture(driver: str, family: str) -> tuple[bool, str]:
+    """Map SSOT — id/amount must land on id/amount. File tiles use sqlite types."""
+    from services.semantic_mapper import map_columns
+
+    dest_db = "sqlite" if family == "file" else driver
+    try:
+        mapped = map_columns(
+            ["id", "amount"],
+            ["id", "amount"],
+            source_schemas=list(SOURCE_SCHEMAS),
+            destination_db_type=dest_db,
+            destination_table_exists=False,
+        )
+    except Exception as exc:
+        return False, str(exc)
+    pairs = {
+        (str(row.get("source") or "").lower(), str(row.get("target") or "").lower())
+        for row in mapped
+    }
+    if ("id", "id") not in pairs or ("amount", "amount") not in pairs:
+        return False, f"map_columns missed identity: {sorted(pairs)}"
+    return True, ""
+
+
+def _norm_amount(value: Any) -> str:
+    from decimal import Decimal, InvalidOperation
+
+    text = str(value).strip().replace(",", "")
+    try:
+        return f"{Decimal(text).quantize(Decimal('0.01'))}"
+    except (InvalidOperation, ValueError):
+        return text
+
+
+def _read_payload(sqlite_path: Path, table: str) -> list[tuple[str, str]] | str:
+    import sqlite3
+
+    if not sqlite_path.is_file():
+        return f"sqlite artifact missing: {sqlite_path}"
+    con = sqlite3.connect(str(sqlite_path))
+    try:
+        cols = [str(row[1]) for row in con.execute(f'PRAGMA table_info("{table}")')]
+        folded = {c.lower(): c for c in cols}
+        if "id" not in folded or "amount" not in folded:
+            return f"payload columns {cols} missing id/amount"
+        idc, amtc = folded["id"], folded["amount"]
+        rows = con.execute(f'SELECT "{idc}", "{amtc}" FROM "{table}"').fetchall()
+    except Exception as exc:
+        return str(exc)
+    finally:
+        con.close()
+    return sorted((str(i).strip(), _norm_amount(a)) for i, a in rows)
+
+
+def _silent_loss(summary: dict[str, Any]) -> tuple[bool, int, int]:
+    rejected = int(summary.get("rejected_rows") or 0)
+    coerced = int(summary.get("coerced_null_rows") or 0)
+    return (rejected > 0 or coerced > 0), rejected, coerced
+
+
+def _reconcile_ok(res: Any) -> bool | None:
+    recon = getattr(res, "reconciliation", None) or {}
+    if not recon:
+        return None
+    return bool(recon.get("passed"))
+
+
 def _file_source_request(fmt: str, sqlite_path: Path, table: str) -> TransferRequest:
     return TransferRequest(
         source=EndpointConfig(kind="file", format=fmt),
@@ -410,8 +515,8 @@ def _file_source_request(fmt: str, sqlite_path: Path, table: str) -> TransferReq
         source_content=CSV_BYTES,
         mappings=list(MAPPINGS),
         sync_mode="full_refresh_overwrite",
-        skip_preflight=True,
-        validation_mode="balanced",
+        skip_preflight=False,
+        validation_mode="strict",
     )
 
 
@@ -445,6 +550,15 @@ def exercise_connector(spec: dict[str, str], lab: LabBackends) -> ConnectorResul
         dest_status="skipped",
         source_status="skipped",
     )
+    mapped, map_err = _map_fixture(driver, spec["family"])
+    result.map_status = "passed" if mapped else "failed"
+    result.map_error = map_err
+    if not mapped:
+        result.dest_status = "failed"
+        result.dest_error = f"map SSOT failed: {map_err}"
+        result.source_error = result.dest_error
+        return result
+
     table = _sid("lab")
     bound = _bind(spec, lab, table=table)
     if isinstance(bound, str):
@@ -459,37 +573,46 @@ def exercise_connector(spec: dict[str, str], lab: LabBackends) -> ConnectorResul
         source_content=CSV_BYTES,
         mappings=list(MAPPINGS),
         sync_mode="full_refresh_overwrite",
-        skip_preflight=True,
-        validation_mode="balanced",
+        skip_preflight=False,
+        validation_mode="strict",
     )
     dest_res = None
     try:
         dest_res = _run(dest_req)
     except Exception as exc:
         _mark_role(result, "dest", False, None, str(exc))
+        result.validate_status = "failed"
     else:
+        summary = dest_res.destination_summary or {}
+        lost, rejected, coerced = _silent_loss(summary)
+        result.dest_rejected = rejected
+        result.dest_coerced = coerced
+        result.dest_reconcile = _reconcile_ok(dest_res)
+        result.silent_loss = lost
+        result.validate_status = "passed" if dest_res.success else "failed"
+        dest_ok = bool(dest_res.success) and not lost and result.dest_reconcile is not False
+        dest_err = dest_res.error or "dest write failed"
+        if dest_res.success and lost:
+            dest_err = f"silent loss: rejected={rejected} coerced={coerced}"
+        elif dest_res.success and result.dest_reconcile is False:
+            dest_err = (dest_res.reconciliation or {}).get("message") or "dest reconcile failed"
         _mark_role(
             result,
             "dest",
-            bool(dest_res.success),
+            dest_ok,
             int(dest_res.records_transferred or 0) if dest_res.success else None,
-            dest_res.error or "dest write failed",
+            dest_err,
         )
 
     sqlite_path = lab.root / f"from_{table}.db"
+    src_table = f"from_{table}"
     if spec["family"] == "file" and result.dest_status != "passed":
         # CSV/TSV parsers can still prove source from the fixture. Other
         # formats must not be fed CSV bytes (that is corruption, not a skip).
         if driver in {"csv", "tsv"}:
             try:
-                src_res = _run(_file_source_request(driver, sqlite_path, f"from_{table}"))
-                _mark_role(
-                    result,
-                    "source",
-                    bool(src_res.success),
-                    int(src_res.records_transferred or 0) if src_res.success else None,
-                    src_res.error or "source read failed",
-                )
+                src_res = _run(_file_source_request(driver, sqlite_path, src_table))
+                _finish_source(result, src_res, sqlite_path, src_table)
             except Exception as exc:
                 _mark_role(result, "source", False, None, str(exc))
         return result
@@ -512,14 +635,14 @@ def exercise_connector(spec: dict[str, str], lab: LabBackends) -> ConnectorResul
                 format="sqlite",
                 database=str(sqlite_path),
                 connection_string=f"sqlite:///{sqlite_path}",
-                table=f"from_{table}",
+                table=src_table,
             ),
             source_filename=str(filename),
             source_content=content if content else CSV_BYTES,
             mappings=list(MAPPINGS),
             sync_mode="full_refresh_overwrite",
-            skip_preflight=True,
-            validation_mode="balanced",
+            skip_preflight=False,
+            validation_mode="strict",
         )
     else:
         src_req = TransferRequest(
@@ -529,26 +652,61 @@ def exercise_connector(spec: dict[str, str], lab: LabBackends) -> ConnectorResul
                 format="sqlite",
                 database=str(sqlite_path),
                 connection_string=f"sqlite:///{sqlite_path}",
-                table=f"from_{table}",
+                table=src_table,
             ),
             mappings=list(MAPPINGS),
             sync_mode="full_refresh_overwrite",
-            skip_preflight=True,
-            validation_mode="balanced",
+            skip_preflight=False,
+            validation_mode="strict",
         )
     try:
         src_res = _run(src_req)
     except Exception as exc:
         _mark_role(result, "source", False, None, str(exc))
         return result
+    _finish_source(result, src_res, sqlite_path, src_table)
+    return result
+
+
+def _finish_source(
+    result: ConnectorResult,
+    src_res: Any,
+    sqlite_path: Path,
+    src_table: str,
+) -> None:
+    src_lost, src_rej, src_coerced = _silent_loss(src_res.destination_summary or {})
+    result.source_reconcile = _reconcile_ok(src_res)
+    if src_lost:
+        result.silent_loss = True
+    src_ok = bool(src_res.success) and not src_lost and result.source_reconcile is not False
+    src_err = src_res.error or "source read failed"
+    if src_res.success and src_lost:
+        src_err = f"silent loss: rejected={src_rej} coerced={src_coerced}"
+    elif src_res.success and result.source_reconcile is False:
+        src_err = (src_res.reconciliation or {}).get("message") or "source reconcile failed"
     _mark_role(
         result,
         "source",
-        bool(src_res.success),
+        src_ok,
         int(src_res.records_transferred or 0) if src_res.success else None,
-        src_res.error or "source read failed",
+        src_err,
     )
-    return result
+    if result.source_status != "passed":
+        return
+    payload = _read_payload(sqlite_path, src_table)
+    if isinstance(payload, str):
+        result.integrity_status = "failed"
+        result.integrity_error = payload
+        result.source_status = "failed"
+        result.source_error = payload
+        return
+    if tuple(payload) != EXPECTED_PAYLOAD:
+        result.integrity_status = "failed"
+        result.integrity_error = f"corruption: got {payload} expected {list(EXPECTED_PAYLOAD)}"
+        result.source_status = "failed"
+        result.source_error = result.integrity_error
+        return
+    result.integrity_status = "passed"
 
 
 def run_desktop_lab(*, persist: bool = True) -> dict[str, Any]:
@@ -575,13 +733,18 @@ def run_desktop_lab(*, persist: bool = True) -> dict[str, Any]:
 def summarize(rows: list[ConnectorResult]) -> dict[str, Any]:
     items = [row.to_dict() for row in rows]
     duplex = [r for r in items if r["duplex"]]
+    ops = [r for r in items if r["operations_ok"]]
     unique_duplex = [r for r in duplex if r["role"] == "unique_engine"]
     dest_pass = sum(1 for r in items if r["dest_status"] == "passed")
     src_pass = sum(1 for r in items if r["source_status"] == "passed")
     failed = [
         r
         for r in items
-        if r["dest_status"] == "failed" or r["source_status"] == "failed"
+        if r["dest_status"] == "failed"
+        or r["source_status"] == "failed"
+        or r["map_status"] == "failed"
+        or r["integrity_status"] == "failed"
+        or r.get("silent_loss")
     ]
     skipped = [
         r
@@ -594,6 +757,7 @@ def summarize(rows: list[ConnectorResult]) -> dict[str, Any]:
         "measured_at": datetime.now(timezone.utc).isoformat(),
         "catalog_slots": slots,
         "catalog_slots_duplex_passed": len(duplex),
+        "catalog_slots_operations_passed": len(ops),
         "unique_engines_duplex_passed": len(unique_duplex),
         "dest_passed": dest_pass,
         "source_passed": src_pass,
@@ -601,14 +765,15 @@ def summarize(rows: list[ConnectorResult]) -> dict[str, Any]:
         "skipped": len(skipped),
         "one_hundred_percent": (
             slots >= DESKTOP_LAB_MIN_DUPLEX
-            and len(duplex) == slots
+            and len(ops) == slots
             and len(failed) == 0
             and len(skipped) == 0
         ),
         "honesty": {
             "one_hundred_percent": (
-                "this named desktop-lab fixture only — dest write and source "
-                f"read of {FIXTURE_ROWS} rows on every listed catalog slot"
+                "this named desktop-lab fixture only — Map SSOT, Validate, "
+                f"dest write, source read, and payload reconcile of {FIXTURE_ROWS} "
+                "rows with zero rejected/coerced on every listed catalog slot"
             ),
             "eighty": (
                 "80 is catalog slots this lab can bind on a desktop. "

@@ -820,3 +820,68 @@ def test_g2_blocks_redshift_staging_denied_via_run_file_preflight():
     assert g2["status"] == "block"
     assert "staging" in g2["message"].lower()
     assert pf["redshift_staging_probe"]["status"] == "denied"
+
+
+def test_generic_sql_sqlite_dsn_uses_filesystem_probe(tmp_path):
+    db = tmp_path / "lab.db"
+    db.write_bytes(b"")
+    result = probe_destination_privileges(
+        "generic_sql",
+        database=str(db),
+        connection_string=f"sqlite:///{db}",
+        table="orders",
+        table_exists=False,
+    )
+    assert result.status == "ok"
+    assert result.engine == "sqlite"
+    assert result.can_create_table is True
+    assert result.can_write is True
+
+
+def test_generic_sql_duckdb_dsn_uses_embedded_probe(tmp_path):
+    path = tmp_path / "lab.duckdb"
+    result = probe_destination_privileges(
+        "generic_sql",
+        database=str(path),
+        connection_string=f"duckdb:///{path}",
+        table="orders",
+        table_exists=False,
+    )
+    assert result.status == "ok"
+    assert result.engine == "duckdb"
+    assert result.can_create_table is True
+
+
+def test_dynamodb_list_tables_probe_never_writes():
+    import boto3
+    from moto.server import ThreadedMotoServer
+
+    server = ThreadedMotoServer(ip_address="127.0.0.1", port=0, verbose=False)
+    server.start()
+    try:
+        host, port = server.get_host_and_port()
+        url = f"http://{host}:{port}"
+        client = boto3.client(
+            "dynamodb",
+            endpoint_url=url,
+            aws_access_key_id="test",
+            aws_secret_access_key="test",
+            region_name="us-east-1",
+        )
+        assert client.list_tables()["TableNames"] == []
+        result = probe_destination_privileges(
+            "dynamodb",
+            host=host,
+            port=int(port),
+            connection_string=url,
+            table="lab_orders",
+            username="test",
+            password="test",
+            table_exists=False,
+        )
+        assert result.status == "ok"
+        assert result.method == "list_tables"
+        assert result.can_create_table is True
+        assert client.list_tables()["TableNames"] == []
+    finally:
+        server.stop()

@@ -250,9 +250,9 @@ export function BenchmarksPage() {
 
                     <div className="df2-page-benchmarks-toolbar">
                       <p className="df2-page-benchmarks-note" style={{ margin: 0, flex: 1 }}>
-                        Desktop lab option: bind 80 catalog connectors and run each as a destination
-                        then as a source (2-row fixture both ways). Hosted twins (Neon/RDS/CNPG/OpenShift
-                        PostgreSQL) share a driver — this is not 80 unique engines and not catalog tile count.
+                        Desktop lab option: bind 80 catalog connectors and run Map, Validate, dest write,
+                        source read, and payload reconcile (2-row fixture, zero rejected/coerced). Hosted
+                        twins share a driver — this is not 80 unique engines and not catalog tile count.
                       </p>
                       <Button
                         variant="primary"

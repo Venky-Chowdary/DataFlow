@@ -41,8 +41,16 @@ def test_desktop_lab_duplex_matrix():
         f"(unique engines {unique}); skipped={report['skipped']}"
     )
     assert report["one_hundred_percent"] is True
+    assert report["catalog_slots_operations_passed"] == report["catalog_slots"]
     for row in report["connectors"]:
         assert row["duplex"] is True, row
+        assert row["operations_ok"] is True, row
+        assert row["map_status"] == "passed", row
+        assert row["validate_status"] == "passed", row
+        assert row["integrity_status"] == "passed", row
+        assert row["silent_loss"] is False, row
+        assert row["dest_rejected"] == 0, row
+        assert row["dest_coerced"] == 0, row
         assert row["dest_rows"] == FIXTURE_ROWS, row
         assert row["source_rows"] == FIXTURE_ROWS, row
     artifact = Path("/opt/cursor/artifacts/desktop_lab_duplex.json")

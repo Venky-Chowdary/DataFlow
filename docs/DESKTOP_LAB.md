@@ -5,12 +5,16 @@ Operator option on **Proofs → Integrity ledger → Run desktop lab**.
 `POST /api/v1/workspace/proofs/desktop-lab` binds every id in
 `services.desktop_lab.DESKTOP_LAB_CONNECTORS` (≥80) and runs:
 
-1. **Dest role** — 2-row CSV fixture → that connector
-2. **Source role** — that object → SQLite (must read back the same 2 rows)
+1. **Map SSOT** — `semantic_mapper.map_columns` must land `id`/`amount`
+2. **Validate** — Execute with preflight (`skip_preflight=False`, strict)
+3. **Dest role** — 2-row CSV fixture → that connector
+4. **Source role** — that object → SQLite
+5. **Payload reconcile** — SQLite must contain exactly `(1, 1000.00)` and `(2, 2000.50)`
+6. **No silent loss** — `rejected_rows` and `coerced_null_rows` must be 0
 
-`100%` on this fixture means every listed slot passed both roles with
-row conservation. Source-only (PDF/DOCX/HTML/REST) and dest-only
-(pgvector) tiles are excluded — they cannot pass both ways.
+`100%` on this fixture means every listed slot passed Map + Validate + dest +
+source + payload with zero rejected/coerced rows. Source-only (PDF/DOCX/HTML/REST)
+and dest-only (pgvector) tiles are excluded — they cannot pass both ways.
 
 ## Honesty
 

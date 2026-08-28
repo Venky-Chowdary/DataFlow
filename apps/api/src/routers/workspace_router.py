@@ -948,9 +948,12 @@ async def run_desktop_lab_proof():
             status_code=500,
         )
     duplex = int(result.get("catalog_slots_duplex_passed") or 0)
+    ops = int(result.get("catalog_slots_operations_passed") or 0)
+    slots = int(result.get("catalog_slots") or 0)
     result["success"] = (
         duplex >= DESKTOP_LAB_MIN_DUPLEX
-        and duplex == int(result.get("catalog_slots") or 0)
+        and ops == slots
+        and duplex == slots
         and int(result.get("failed") or 0) == 0
     )
     status = 200 if result["success"] else 422
