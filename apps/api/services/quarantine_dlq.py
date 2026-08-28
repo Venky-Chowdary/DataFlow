@@ -431,7 +431,15 @@ def replay_row_identity(detail: dict[str, Any] | None) -> str:
 
     row = normalize_quarantine_row(detail if isinstance(detail, dict) else {})
     pk = row.get("source_pk")
-    if row.get("source_pk_proven") and pk is not None and str(pk) != "":
+    # Column-name lists are not an event id — two ages would share pk:['id'].
+    from services.quarantine_row_contract import _column_name_list
+
+    if (
+        row.get("source_pk_proven")
+        and pk is not None
+        and str(pk) != ""
+        and _column_name_list(pk) is None
+    ):
         return f"pk:{pk}"
     src_row = row.get("row")
     try:

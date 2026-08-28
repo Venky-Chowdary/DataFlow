@@ -1800,6 +1800,14 @@ def build_mapped_rows_with_details(
                         c: values.get(c) or values.get(str(c).lower(), "")
                         for c in pk_cols
                     }
+                    # Contract source_pk is the value, never the column-name list.
+                    # Stamping ["id"] made every finding share pk:['id'] and one
+                    # Promote closed the whole ledger.
+                    pk_vals = [detail["pk_value"].get(c) for c in pk_cols]
+                    if pk_vals and all(v is not None and str(v) != "" for v in pk_vals):
+                        detail["source_pk"] = (
+                            pk_vals[0] if len(pk_vals) == 1 else pk_vals
+                        )
                 rejected_details.append(detail)
                 if len(errors) < 10:
                     errors.append(f"row {row_number} {src_name}→{tgt_name}: {err}")
