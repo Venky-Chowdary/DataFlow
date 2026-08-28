@@ -7,6 +7,7 @@ import {
   linesToList,
   missingRequired,
   moveStep,
+  operationsByFamily,
   recipePayload,
   removeStep,
   sameRecipe,
@@ -127,6 +128,8 @@ test("the effect sentence carries the ledger terms, not just a row count", () =>
   assert.match(sentence, /100 row\(s\) in/);
   assert.match(sentence, /2 removed/);
   assert.match(sentence, /1 diverted/);
+  const expanded: ShapeEffect = { ...effect, rows_out: 103, rows_shaped_out: 0, rows_expanded: 3 };
+  assert.match(summarizeEffect(expanded), /3 added by unnest/);
   assert.match(sentence, /14 cell\(s\) changed/);
   assert.match(sentence, /3 null\(s\) introduced/);
   assert.equal(summarizeEffect(null), "");
@@ -155,6 +158,26 @@ test("recipe identity compares the program, so an approval survives a re-render"
   assert.ok(sameRecipe({ steps }, { steps: steps.slice() }));
   assert.ok(!sameRecipe({ steps }, { steps: moveStep(steps, 0, 1) }));
   assert.ok(sameRecipe(null, { steps: [] }));
+});
+
+test("the operation picker groups nested JSON ahead of row-count and value work", () => {
+  const grouped = operationsByFamily([
+    { ...TRIM, family: "cleanse" },
+    { ...FILTER, family: "rows" },
+    {
+      op: "unnest_json",
+      summary: "Explode a JSON array",
+      active: true,
+      expands: true,
+      family: "nested",
+      needs_column: true,
+      options: ["to"],
+      required: [],
+      expression_option: null,
+    },
+  ]);
+  assert.deepEqual(grouped.map((g) => g.family), ["nested", "rows", "cleanse"]);
+  assert.equal(grouped[0].label, "Nested JSON");
 });
 
 test("a blocking suggestion outranks a decision, and a decision outranks hygiene", () => {

@@ -77,6 +77,8 @@ class ColumnProfile:
     date_formats: list[str] = field(default_factory=list)
     ambiguous_date_order: bool = False
     max_length: int = 0
+    json_array_like: int = 0
+    json_object_like: int = 0
 
     @property
     def non_blank(self) -> int:
@@ -108,6 +110,8 @@ class ColumnProfile:
             "date_formats": list(self.date_formats),
             "ambiguous_date_order": self.ambiguous_date_order,
             "max_length": self.max_length,
+            "json_array_like": self.json_array_like,
+            "json_object_like": self.json_object_like,
         }
 
 
@@ -165,6 +169,11 @@ def profile_columns(
                 profile.sentinels[stripped] = profile.sentinels.get(stripped, 0) + 1
             if folded in CANONICAL_BOOLEAN_TOKENS:
                 profile.boolean_like += 1
+            json_kind = _json_kind(value)
+            if json_kind == "array":
+                profile.json_array_like += 1
+            elif json_kind == "object":
+                profile.json_object_like += 1
 
             number = _plain_decimal(value)
             if number is None:
@@ -337,6 +346,41 @@ def suggest_steps(
                 )
             )
 
+        if profile.json_array_like and profile.json_array_like == profile.non_blank:
+            out.append(
+                _suggestion(
+                    op="unnest_json",
+                    column=name,
+                    options={"to": f"{name}_item", "keep_parent": True},
+                    title=f"Unnest '{name}' — one row per array element",
+                    reason=(
+                        f"{profile.json_array_like} sampled value(s) are JSON arrays. "
+                        "Unnest is a declared expansion: dest COUNT becomes the child "
+                        "rows, which is a projection, not a surplus. Empty or over-cap "
+                        "arrays refuse rather than drop silently."
+                    ),
+                    rows_affected=profile.json_array_like,
+                    severity="decision",
+                )
+            )
+
+        if profile.json_object_like and profile.json_object_like == profile.non_blank:
+            out.append(
+                _suggestion(
+                    op="flatten_json",
+                    column=name,
+                    options={"depth": "top"},
+                    title=f"Flatten '{name}' — promote object keys to columns",
+                    reason=(
+                        f"{profile.json_object_like} sampled value(s) are JSON objects. "
+                        "Flatten keeps the parent blob and promotes keys so Map binds "
+                        "typed columns. This does not change the row count."
+                    ),
+                    rows_affected=profile.json_object_like,
+                    severity="decision",
+                )
+            )
+
         if profile.date_formats and profile.non_blank:
             if profile.ambiguous_date_order:
                 out.append(
@@ -506,6 +550,10 @@ def _is_ambiguous(formats: Sequence[str]) -> bool:
 def _logical_type(profile: ColumnProfile) -> str:
     if profile.non_blank == 0:
         return "empty"
+    if profile.json_array_like == profile.non_blank:
+        return "json_array"
+    if profile.json_object_like == profile.non_blank:
+        return "json_object"
     if profile.numeric_like == profile.non_blank:
         return "integer" if profile.integer_like == profile.non_blank else "decimal"
     if profile.boolean_like == profile.non_blank:
@@ -513,6 +561,17 @@ def _logical_type(profile: ColumnProfile) -> str:
     if profile.date_formats:
         return "date"
     return "text"
+
+
+def _json_kind(value: Any) -> str:
+    """array / object / '' — same parse as ShapeEngine unnest and flatten."""
+    from services.json_intelligence import parse_json_array, parse_json_object
+
+    if parse_json_array(value) is not None:
+        return "array"
+    if parse_json_object(value) is not None:
+        return "object"
+    return ""
 
 
 def _as_text(value: Any) -> str:

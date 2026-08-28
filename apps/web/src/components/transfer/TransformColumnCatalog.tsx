@@ -17,6 +17,7 @@ const FAMILY_LABEL: Record<ColumnKitchenFamily, string> = {
   text: "Text",
   datetime: "Datetime",
   boolean: "Boolean",
+  json: "JSON",
   empty: "Empty",
 };
 

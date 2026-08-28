@@ -29,6 +29,8 @@ export interface ShapeOperation {
   op: string;
   summary: string;
   active: boolean;
+  expands?: boolean;
+  family?: string;
   needs_column: boolean;
   options: string[];
   required: string[];
@@ -82,6 +84,8 @@ export interface ShapeColumnProfile {
   date_formats: string[];
   ambiguous_date_order: boolean;
   max_length: number;
+  json_array_like?: number;
+  json_object_like?: number;
 }
 
 export interface ShapeSuggestion {
@@ -137,6 +141,7 @@ export interface ShapeStepEffect {
   rows_in: number;
   rows_out: number;
   rows_removed: number;
+  rows_expanded?: number;
   rows_diverted: number;
   cells_changed: number;
   nulls_introduced: number;
@@ -148,6 +153,7 @@ export interface ShapeEffect {
   rows_in: number;
   rows_out: number;
   rows_shaped_out: number;
+  rows_expanded?: number;
   rows_diverted: number;
   cells_changed: number;
   nulls_introduced: number;
@@ -262,6 +268,10 @@ const FIELD_LABEL: Record<string, string> = {
   condition: "Condition",
   keep: "Keep matching rows",
   reason: "Quarantine reason",
+  index_to: "Index column",
+  keep_parent: "Keep the original JSON column",
+  depth: "Flatten depth",
+  keys: "Object keys to promote",
 };
 
 const FIELD_HINT: Record<string, string> = {
@@ -274,6 +284,10 @@ const FIELD_HINT: Record<string, string> = {
   expression: "A row-local expression over this row's columns.",
   keep: "Off keeps the rows the condition does not match.",
   reason: "Recorded on every diverted row.",
+  index_to: "Optional. 0-based position of the exploded element.",
+  keep_parent: "On keeps the JSON array so nothing is silently dropped.",
+  depth: "top promotes one level; deep walks further, still capped.",
+  keys: "One key per line. Leave blank to promote every key the sample holds.",
 };
 
 const FIELD_CHOICES: Record<string, string[]> = {
@@ -281,12 +295,13 @@ const FIELD_CHOICES: Record<string, string[]> = {
   mode: ["upper", "lower", "title"],
   side: ["left", "right"],
   form: ["NFC", "NFD", "NFKC", "NFKD"],
+  depth: ["top", "deep"],
 };
 
 const NUMBER_FIELDS = new Set(["places", "width", "limit", "min", "max"]);
-const BOOLEAN_FIELDS = new Set(["regex", "keep"]);
+const BOOLEAN_FIELDS = new Set(["regex", "keep", "keep_parent"]);
 const COLUMN_LIST_FIELDS = new Set(["columns"]);
-const LIST_FIELDS = new Set(["values", "into"]);
+const LIST_FIELDS = new Set(["values", "into", "keys"]);
 
 /** The fields to render for one operation, in the catalog's own order. */
 export function fieldsFor(operation: ShapeOperation): ShapeField[] {
@@ -347,6 +362,7 @@ export function summarizeEffect(effect: ShapeEffect | null): string {
   if (!effect) return "";
   const parts = [`${effect.rows_in.toLocaleString()} row(s) in`, `${effect.rows_out.toLocaleString()} out`];
   if (effect.rows_shaped_out) parts.push(`${effect.rows_shaped_out.toLocaleString()} removed`);
+  if (effect.rows_expanded) parts.push(`${effect.rows_expanded.toLocaleString()} added by unnest`);
   if (effect.rows_diverted) parts.push(`${effect.rows_diverted.toLocaleString()} diverted`);
   if (effect.cells_changed) parts.push(`${effect.cells_changed.toLocaleString()} cell(s) changed`);
   if (effect.nulls_introduced) parts.push(`${effect.nulls_introduced.toLocaleString()} null(s) introduced`);
@@ -374,6 +390,32 @@ export function suggestionRank(severity: string): number {
   if (severity === "blocking") return 0;
   if (severity === "decision") return 1;
   return 2;
+}
+
+const FAMILY_ORDER = ["nested", "rows", "structural", "cleanse"] as const;
+const FAMILY_LABEL: Record<string, string> = {
+  nested: "Nested JSON",
+  rows: "Row count",
+  structural: "Columns",
+  cleanse: "Values",
+};
+
+/** Group the catalog for the operation picker — one list, four families, no fourth surface. */
+export function operationsByFamily(operations: ShapeOperation[]): { family: string; label: string; operations: ShapeOperation[] }[] {
+  const buckets = new Map<string, ShapeOperation[]>();
+  for (const op of operations) {
+    const family = op.family && FAMILY_LABEL[op.family] ? op.family : "cleanse";
+    const list = buckets.get(family) ?? [];
+    list.push(op);
+    buckets.set(family, list);
+  }
+  return FAMILY_ORDER
+    .filter((family) => (buckets.get(family) ?? []).length > 0)
+    .map((family) => ({
+      family,
+      label: FAMILY_LABEL[family],
+      operations: buckets.get(family) ?? [],
+    }));
 }
 
 export function sortSuggestions(suggestions: ShapeSuggestion[]): ShapeSuggestion[] {

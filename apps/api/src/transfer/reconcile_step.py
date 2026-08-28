@@ -1289,6 +1289,7 @@ def run_reconciliation(
     # deliberately not at the destination, so conservation has to name them
     # instead of reading their absence as short delivery.
     rows_shaped_out = int(dest_summary.get("rows_shaped_out", 0) or 0)
+    rows_expanded = int(dest_summary.get("rows_expanded", 0) or 0)
     # Rows a declared source filter removed on the read. The source population
     # this run counted includes them (the source paged and counted them), so the
     # filter has to be stated here for the same reason a recipe does.
@@ -1351,6 +1352,7 @@ def run_reconciliation(
         source_rows += resumed_from
     expected_written = max(
         source_rows
+        + rows_expanded
         - dropped_rows
         - rows_skipped
         - rows_shaped_out
@@ -1740,6 +1742,7 @@ def run_reconciliation(
             rows_skipped=rows_skipped,
             rows_shaped_out=rows_shaped_out,
             rows_source_filtered=rows_source_filtered,
+            rows_expanded=rows_expanded,
         )
         return _finalize(report.to_dict())
 
@@ -2170,6 +2173,7 @@ def run_reconciliation(
             rows_skipped=rows_skipped,
             rows_shaped_out=rows_shaped_out,
             rows_source_filtered=rows_source_filtered,
+            rows_expanded=rows_expanded,
             sample_compare=sample_compare,
         )
         return _finalize(report.to_dict())
@@ -2188,6 +2192,7 @@ def run_reconciliation(
             rows_skipped=rows_skipped,
             rows_shaped_out=rows_shaped_out,
             rows_source_filtered=rows_source_filtered,
+            rows_expanded=rows_expanded,
         )
         return _finalize(report.to_dict())
 
@@ -2349,6 +2354,7 @@ def run_reconciliation(
         rows_skipped=rows_skipped,
         rows_shaped_out=rows_shaped_out,
         rows_source_filtered=rows_source_filtered,
+        rows_expanded=rows_expanded,
         target_rows_before=rows_before,
         checksum_scope=keyed_scope,
     )

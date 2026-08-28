@@ -14,9 +14,12 @@ at the screen:
    Transforms page, the way Informatica refuses transformations that its
    SQL-ELT pushdown mode cannot express.
 2. **Active steps are declared.** A step that changes the row count moves the
-   conservation ledger (``rows_read = rows_shaped_out + dest_count + held_out
-   + skipped``); a passive step must not. The classification lives on the step
-   definition so the ledger and the UI read the same source of truth.
+   conservation ledger. Removals close
+   ``rows_read = rows_shaped_out + dest_count + held_out + skipped``.
+   Expansions (unnest) close
+   ``rows_read + rows_expanded = dest_count + held_out + skipped + rows_shaped_out``.
+   A passive step must not move either term. The classification lives on the
+   step definition so the ledger and the UI read the same source of truth.
 3. **One identity.** ``recipe_hash`` is a canonical hash over the parsed steps,
    so Validate and Execute can be proved to have run the same recipe and a
    whitespace edit does not invalidate an approval.
@@ -86,6 +89,8 @@ class _StepDef:
     op: str
     summary: str
     active: bool = False          # may change the row count
+    expands: bool = False         # may add rows (unnest); still active
+    family: str = "cleanse"       # structural | cleanse | nested | rows
     needs_column: bool = True     # operates on an existing named column
     produces_column: bool = False # writes a new column name
     expression: str = ""          # name of the option carrying an expression
@@ -95,10 +100,11 @@ class _StepDef:
 
 _CATALOG_LIST: tuple[_StepDef, ...] = (
     # --- structural (Tier 2) -------------------------------------------------
-    _StepDef("drop_column", "Remove a column", needs_column=True),
+    _StepDef("drop_column", "Remove a column", family="structural", needs_column=True),
     _StepDef(
         "keep_columns",
         "Keep only the named columns, in this order",
+        family="structural",
         needs_column=False,
         options=("columns",),
         required=("columns",),
@@ -106,6 +112,7 @@ _CATALOG_LIST: tuple[_StepDef, ...] = (
     _StepDef(
         "rename_column",
         "Rename a column",
+        family="structural",
         options=("to",),
         required=("to",),
         produces_column=True,
@@ -113,12 +120,14 @@ _CATALOG_LIST: tuple[_StepDef, ...] = (
     _StepDef(
         "cast_column",
         "Declare a column's logical type explicitly",
+        family="structural",
         options=("to_type", "format"),
         required=("to_type",),
     ),
     _StepDef(
         "constant_column",
         "Add a column holding one literal value",
+        family="structural",
         needs_column=False,
         produces_column=True,
         options=("to", "value"),
@@ -127,6 +136,7 @@ _CATALOG_LIST: tuple[_StepDef, ...] = (
     _StepDef(
         "derive_column",
         "Add a column computed from this row",
+        family="structural",
         needs_column=False,
         produces_column=True,
         expression="expression",
@@ -136,6 +146,7 @@ _CATALOG_LIST: tuple[_StepDef, ...] = (
     _StepDef(
         "split_column",
         "Split one column into several by a separator",
+        family="structural",
         options=("separator", "into", "limit"),
         required=("separator", "into"),
         produces_column=True,
@@ -143,6 +154,7 @@ _CATALOG_LIST: tuple[_StepDef, ...] = (
     _StepDef(
         "concat_columns",
         "Join several columns into one",
+        family="structural",
         needs_column=False,
         produces_column=True,
         options=("to", "columns", "separator"),
@@ -151,15 +163,16 @@ _CATALOG_LIST: tuple[_StepDef, ...] = (
     _StepDef(
         "hash_identity",
         "Add a stable SHA-256 row key from selected columns so Gate-8 can align source and dest",
+        family="structural",
         needs_column=False,
         produces_column=True,
         options=("to", "columns"),
         required=("columns",),
     ),
     # --- value cleansing (Tier 3) -------------------------------------------
-    _StepDef("trim", "Remove leading and trailing whitespace"),
-    _StepDef("collapse_whitespace", "Squeeze runs of whitespace to one space"),
-    _StepDef("case", "Change letter case", options=("mode",), required=("mode",)),
+    _StepDef("trim", "Remove leading and trailing whitespace", family="cleanse"),
+    _StepDef("collapse_whitespace", "Squeeze runs of whitespace to one space", family="cleanse"),
+    _StepDef("case", "Change letter case", family="cleanse", options=("mode",), required=("mode",)),
     _StepDef(
         "strip_characters",
         "Remove a class of characters",
@@ -197,10 +210,26 @@ _CATALOG_LIST: tuple[_StepDef, ...] = (
         options=("expression",),
         required=("expression",),
     ),
+    # --- nested JSON (declared in-flight; Map explode is a different plane) --
+    _StepDef(
+        "unnest_json",
+        "Explode a JSON array into one row per element — dest COUNT is the expanded image, not a surplus",
+        family="nested",
+        active=True,
+        expands=True,
+        options=("to", "index_to", "keep_parent"),
+    ),
+    _StepDef(
+        "flatten_json",
+        "Promote JSON object keys into columns on this row — parent blob is kept unless you drop it",
+        family="nested",
+        options=("depth", "keys"),
+    ),
     # --- row shape (Tier 4, active) -----------------------------------------
     _StepDef(
         "filter_rows",
         "Keep only rows the condition matches",
+        family="rows",
         active=True,
         needs_column=False,
         expression="condition",
@@ -210,6 +239,7 @@ _CATALOG_LIST: tuple[_StepDef, ...] = (
     _StepDef(
         "divert_rows",
         "Send matching rows to quarantine with a stated reason",
+        family="rows",
         active=True,
         needs_column=False,
         expression="condition",
@@ -235,6 +265,8 @@ def describe_catalog() -> list[dict[str, Any]]:
             "op": d.op,
             "summary": d.summary,
             "active": d.active,
+            "expands": d.expands,
+            "family": d.family,
             "needs_column": d.needs_column,
             "options": list(d.options),
             "required": list(d.required),
@@ -290,6 +322,14 @@ class ShapeStep:
             return (target,) if target else ()
         if self.op == "split_column":
             return tuple(str(name) for name in options.get("into", []))
+        if self.op == "unnest_json":
+            names = [str(options.get("to") or "")]
+            index_to = str(options.get("index_to") or "")
+            if index_to:
+                names.append(index_to)
+            return tuple(name for name in names if name)
+        if self.op == "flatten_json":
+            return tuple(str(name) for name in options.get("keys", []) if name)
         return (self.column,) if self.column else ()
 
     def canonical(self) -> dict[str, Any]:
@@ -339,7 +379,7 @@ class ShapeRecipe:
 
     @property
     def has_active_step(self) -> bool:
-        """Whether any enabled step can remove rows — i.e. the ledger will move."""
+        """Whether any enabled step can change the row count — i.e. the ledger will move."""
         return any(s.active for s in self.enabled_steps)
 
     @property
@@ -538,7 +578,9 @@ def _parse_step(
                 + (" …" if len(columns) > 20 else "")
             )
 
-    normalized = _normalize_options(op, definition, options, where=where, columns=columns)
+    normalized = _normalize_options(
+        op, definition, options, where=where, columns=columns, column=column
+    )
 
     expression: Expression | None = None
     if definition.expression:
@@ -570,6 +612,7 @@ def _normalize_options(
     *,
     where: str,
     columns: list[str] | None,
+    column: str = "",
 ) -> dict[str, Any]:
     out = dict(options)
 
@@ -696,6 +739,40 @@ def _normalize_options(
         reason = str(out.get("reason") or "").strip()
         out["reason"] = reason or "diverted by a transform rule"
 
+    if op == "unnest_json":
+        target = out.get("to")
+        if target in (None, ""):
+            target = f"{column}_item" if column else "item"
+        out["to"] = _valid_name(str(target), where=where)
+        index_to = out.get("index_to")
+        if index_to in (None, ""):
+            out["index_to"] = ""
+        else:
+            out["index_to"] = _valid_name(str(index_to), where=where)
+        keep = out.get("keep_parent", True)
+        if isinstance(keep, str):
+            keep = keep.strip().casefold() not in ("false", "0", "no")
+        out["keep_parent"] = bool(keep)
+
+    if op == "flatten_json":
+        depth = str(out.get("depth") or "top").strip().casefold()
+        if depth in ("1", "top_level", "flatten_top_level_keys"):
+            depth = "top"
+        elif depth in ("2", "deep_flatten", "flatten_deep"):
+            depth = "deep"
+        if depth not in ("top", "deep"):
+            raise ShapeError(f"{where}: flatten_json depth must be top or deep")
+        out["depth"] = depth
+        keys = out.get("keys")
+        if keys in (None, ""):
+            out["keys"] = []
+        else:
+            if isinstance(keys, str):
+                keys = [part.strip() for part in keys.split(",") if part.strip()]
+            if not isinstance(keys, (list, tuple)):
+                raise ShapeError(f"{where}: flatten_json keys must be a list of names")
+            out["keys"] = [_valid_name(str(name), where=where) for name in keys]
+
     return out
 
 
@@ -724,6 +801,18 @@ def _apply_column_effect(step: ShapeStep, columns: list[str]) -> None:
     if op == "split_column":
         for name in options.get("into", []):
             if name not in columns:
+                columns.append(str(name))
+        return
+    if op == "unnest_json":
+        for name in (options.get("to"), options.get("index_to")):
+            if name and str(name) not in columns:
+                columns.append(str(name))
+        if options.get("keep_parent") is False and step.column in columns:
+            columns.remove(step.column)
+        return
+    if op == "flatten_json":
+        for name in options.get("keys", []):
+            if name and str(name) not in columns:
                 columns.append(str(name))
         return
 

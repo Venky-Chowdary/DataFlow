@@ -64,6 +64,22 @@ export function columnFindings(profile: ShapeColumnProfile): ColumnFinding[] {
       hint: "The same accented text in two encodings will not de-duplicate.",
     });
   }
+  if (profile.json_array_like) {
+    findings.push({
+      kind: "json-array",
+      label: "JSON array",
+      count: profile.json_array_like,
+      hint: "Unnest to one row per element. Empty or over-cap arrays refuse — they are not dropped.",
+    });
+  }
+  if (profile.json_object_like) {
+    findings.push({
+      kind: "json-object",
+      label: "JSON object",
+      count: profile.json_object_like,
+      hint: "Flatten promotes keys to columns. The parent blob is kept so nothing is silently dropped.",
+    });
+  }
   const sentinels = Object.entries(profile.sentinels);
   for (const [token, count] of sentinels) {
     if (!count) continue;
@@ -112,7 +128,7 @@ export function isNumericText(profile: ShapeColumnProfile): boolean {
 }
 
 /** DataKitchen-style family — the detail pane changes with this, not with a guess. */
-export type ColumnKitchenFamily = "numeric" | "text" | "datetime" | "boolean" | "empty";
+export type ColumnKitchenFamily = "numeric" | "text" | "datetime" | "boolean" | "json" | "empty";
 
 export function columnFamily(profile: ShapeColumnProfile): ColumnKitchenFamily {
   const type = (profile.logical_type || "").toLowerCase();
@@ -122,6 +138,9 @@ export function columnFamily(profile: ShapeColumnProfile): ColumnKitchenFamily {
   }
   if (type === "date" || type === "datetime" || type === "timestamp" || type === "timestamptz" || type === "time") {
     return "datetime";
+  }
+  if (type === "json_array" || type === "json_object" || type === "json") {
+    return "json";
   }
   if (
     type === "integer"

@@ -5,6 +5,7 @@ import {
   fieldsFor,
   linesToList,
   missingRequired,
+  operationsByFamily,
   type ShapeCatalog,
   type ShapeOperation,
   type ShapeStepWire,
@@ -154,14 +155,22 @@ export function TransformStepBuilder({
             onChange={(e) => { setOp(e.target.value); setOptions({}); setError(""); setExpressionError(""); }}
           >
             <option value="">Pick an operation…</option>
-            {(catalog?.operations ?? []).map((entry) => (
-              <option key={entry.op} value={entry.op}>{entry.summary}</option>
+            {operationsByFamily(catalog?.operations ?? []).map((group) => (
+              <optgroup key={group.family} label={group.label}>
+                {group.operations.map((entry) => (
+                  <option key={entry.op} value={entry.op}>{entry.summary}</option>
+                ))}
+              </optgroup>
             ))}
           </select>
           {operation && (
             <span className="df2-label-hint">
               <code>{operation.op}</code>
-              {operation.active ? " · changes the row count, so it moves the ledger" : " · value-only, the row count is unchanged"}
+              {operation.expands
+                ? " · adds rows (unnest) — dest COUNT is the expanded image, not a surplus"
+                : operation.active
+                  ? " · changes the row count, so it moves the ledger"
+                  : " · value-only, the row count is unchanged"}
             </span>
           )}
         </div>

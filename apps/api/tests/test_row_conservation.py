@@ -8468,6 +8468,65 @@ def test_a_shaped_run_that_removed_nothing_reads_exactly_as_before():
     assert shaped.shape_recipe_hash == ""
 
 
+def test_unnest_expansion_closes_dest_count_as_a_declared_projection():
+    """2 source rows + 1 unnest extra = dest COUNT 3. Not surplus."""
+    ledger = account_population(
+        rows_read=2,
+        dest_count=3,
+        dest_count_source=DEST_READBACK,
+        dest_count_before=0,
+        rejected_rows=0,
+        coerced_null_rows=0,
+        rows_skipped=0,
+        writer_ack=3,
+        sync_mode="overwrite",
+        rows_expanded=1,
+    )
+    assert ledger.unaccounted == 0
+    assert ledger.balanced is True
+    assert ledger.rows_expanded == 1
+    assert "declared projection" in ledger.note
+    assert "not a surplus" in ledger.note
+
+
+def test_unnest_expansion_does_not_excuse_a_real_surplus():
+    ledger = account_population(
+        rows_read=2,
+        dest_count=5,
+        dest_count_source=DEST_READBACK,
+        dest_count_before=0,
+        rejected_rows=0,
+        coerced_null_rows=0,
+        rows_skipped=0,
+        writer_ack=5,
+        sync_mode="overwrite",
+        rows_expanded=1,
+    )
+    assert ledger.unaccounted == -2
+    assert ledger.balanced is False
+
+
+def test_unnest_plus_filter_closes_both_ledger_terms():
+    """2 in + 1 expanded − 1 filtered = dest 2."""
+    ledger = account_population(
+        rows_read=2,
+        dest_count=2,
+        dest_count_source=DEST_READBACK,
+        dest_count_before=0,
+        rejected_rows=0,
+        coerced_null_rows=0,
+        rows_skipped=0,
+        writer_ack=2,
+        sync_mode="overwrite",
+        rows_shaped_out=1,
+        rows_expanded=1,
+    )
+    assert ledger.unaccounted == 0
+    assert ledger.balanced is True
+    assert ledger.rows_shaped_out == 1
+    assert ledger.rows_expanded == 1
+
+
 def test_quarantine_and_removal_are_separate_terms_in_one_close():
     ledger = account_population(
         rows_read=10,

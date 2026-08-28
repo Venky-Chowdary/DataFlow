@@ -36,10 +36,11 @@ export function TransformGuidePanel({ postLoadOnly }: { postLoadOnly: string[] }
         <li>
           <span className="df2-xform-guide-num">3</span>
           <div>
-            <strong>A row this step removes is counted as removed, not as loss.</strong>
+            <strong>A row this step removes is counted as removed; a row it adds is counted as expanded.</strong>
             <p>
-              Filtered and diverted rows land in the conservation ledger under their own terms,
-              so the run still proves every source row is accounted for.
+              Filtered and diverted rows land in the conservation ledger under their own terms.
+              Unnesting a JSON array adds child rows the same way — dest COUNT is the expanded
+              image, a declared projection, not a surplus. Every source row is still accounted for.
             </p>
           </div>
         </li>

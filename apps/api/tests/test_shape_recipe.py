@@ -449,3 +449,140 @@ def test_row_numbers_continue_across_batches_so_a_failure_names_the_real_row():
     with pytest.raises(ShapeRowError) as raised:
         engine.apply_batch([{"amount": "nope"}])
     assert raised.value.as_dict()["row"] == 3
+
+
+# --- nested JSON: unnest expands, flatten does not -------------------------
+
+
+NESTED_ROWS = [
+    {
+        "order_id": "1",
+        "customer": "ada",
+        "line_items": '[{"sku":"A","qty":2},{"sku":"B","qty":1}]',
+    },
+    {
+        "order_id": "2",
+        "customer": "grace",
+        "line_items": '[{"sku":"C","qty":4}]',
+    },
+]
+
+
+def test_unnest_json_expands_one_array_into_child_rows_and_the_ledger_balances():
+    """1 + 2 extra = 3 out. Dest COUNT of 3 is the expanded image, not surplus."""
+    plan = ShapeRecipe.parse(
+        {"steps": [{"op": "unnest_json", "column": "line_items"}]},
+        source_columns=["order_id", "customer", "line_items"],
+    )
+    assert plan.has_active_step
+    assert "line_items_item" in plan.output_columns
+    shaped, effect = shape_records(plan, NESTED_ROWS)
+    assert len(shaped) == 3
+    assert [row["order_id"] for row in shaped] == ["1", "1", "2"]
+    assert effect.rows_in == 2
+    assert effect.rows_expanded == 1
+    assert effect.rows_out == 3
+    assert effect.rows_shaped_out == 0
+    assert effect.balanced
+    assert effect.to_dict()["rows_expanded"] == 1
+
+
+def test_unnest_then_flatten_promotes_object_keys_without_a_second_parser():
+    plan = ShapeRecipe.parse(
+        {
+            "steps": [
+                {"op": "unnest_json", "column": "line_items", "options": {"to": "item"}},
+                {
+                    "op": "flatten_json",
+                    "column": "item",
+                    "options": {"keys": ["sku", "qty"]},
+                },
+            ]
+        },
+        source_columns=["order_id", "customer", "line_items"],
+    )
+    shaped, effect = shape_records(plan, NESTED_ROWS)
+    assert [row["sku"] for row in shaped] == ["A", "B", "C"]
+    assert [row["qty"] for row in shaped] == [2, 1, 4]
+    assert effect.balanced
+    assert effect.rows_expanded == 1
+
+
+def test_unnest_empty_array_refuses_rather_than_dropping_the_parent():
+    plan = ShapeRecipe.parse(
+        {"steps": [{"op": "unnest_json", "column": "line_items"}]},
+        source_columns=["order_id", "line_items"],
+    )
+    with pytest.raises(ShapeRowError, match="empty array"):
+        shape_records(plan, [{"order_id": "1", "line_items": "[]"}])
+
+
+def test_unnest_empty_array_null_policy_keeps_the_parent_with_a_null_item():
+    plan = ShapeRecipe.parse(
+        {
+            "steps": [
+                {"op": "unnest_json", "column": "line_items", "on_error": "null"}
+            ]
+        },
+        source_columns=["order_id", "line_items"],
+    )
+    shaped, effect = shape_records(plan, [{"order_id": "1", "line_items": "[]"}])
+    assert len(shaped) == 1
+    assert shaped[0]["line_items_item"] is None
+    assert effect.rows_expanded == 0
+    assert effect.balanced
+
+
+def test_unnest_over_cap_refuses_so_one_row_cannot_oom_the_transfer():
+    from services.json_intelligence import ARRAY_EXPLODE_MAX
+
+    huge = "[" + ",".join(["1"] * (ARRAY_EXPLODE_MAX + 1)) + "]"
+    plan = ShapeRecipe.parse(
+        {"steps": [{"op": "unnest_json", "column": "nums"}]},
+        source_columns=["nums"],
+    )
+    with pytest.raises(ShapeRowError, match="caps at"):
+        shape_records(plan, [{"nums": huge}])
+
+
+def test_unnest_then_filter_still_balances_removal_against_expansion():
+    """1 in + 2 added − 1 filtered = 2 out."""
+    plan = ShapeRecipe.parse(
+        {
+            "steps": [
+                {"op": "unnest_json", "column": "line_items", "options": {"to": "item"}},
+                {
+                    "op": "flatten_json",
+                    "column": "item",
+                    "options": {"keys": ["sku", "qty"]},
+                },
+                {"op": "filter_rows", "options": {"condition": "[sku] <> 'B'"}},
+            ]
+        },
+        source_columns=["order_id", "customer", "line_items"],
+    )
+    shaped, effect = shape_records(plan, NESTED_ROWS)
+    assert [row["sku"] for row in shaped] == ["A", "C"]
+    assert effect.rows_in == 2
+    assert effect.rows_expanded == 1
+    assert effect.rows_shaped_out == 1
+    assert effect.rows_out == 2
+    assert effect.balanced
+
+
+def test_apply_row_refuses_to_keep_only_the_first_exploded_child():
+    plan = ShapeRecipe.parse(
+        {"steps": [{"op": "unnest_json", "column": "line_items"}]},
+        source_columns=["order_id", "customer", "line_items"],
+    )
+    engine = ShapeEngine(plan)
+    with pytest.raises(ShapeRowError, match="use apply_batch"):
+        engine.apply_row(NESTED_ROWS[0])
+
+
+def test_unpivot_stays_refused_by_name_unnest_is_not_a_back_door():
+    with pytest.raises(ShapeError, match="post-load"):
+        ShapeRecipe.parse(
+            {"steps": [{"op": "unpivot", "column": "line_items"}]},
+            source_columns=["line_items"],
+        )

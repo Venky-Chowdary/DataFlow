@@ -115,6 +115,7 @@ export function TransferTransformStep({
   const [selectedColumn, setSelectedColumn] = useState("");
   const [showBuilder, setShowBuilder] = useState(false);
   const [previewRetry, setPreviewRetry] = useState(0);
+  const stepsListRef = useRef<HTMLOListElement | null>(null);
 
   const rowsKey = useMemo(() => JSON.stringify(sampleRows.slice(0, 200)), [sampleRows]);
   const stepsKey = useMemo(() => JSON.stringify(steps), [steps]);
@@ -205,6 +206,13 @@ export function TransferTransformStep({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [plan.allowed, rowsKey, stepsKey, schemaKey, sourceSchemaKey, sourceColumns.join("|"), previewRetry]);
 
+  useEffect(() => {
+    const step = preview?.refusal?.step;
+    if (!step || !stepsListRef.current) return;
+    const node = stepsListRef.current.querySelector<HTMLElement>(`#xform-step-${step}`);
+    node?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  }, [preview?.refusal?.step]);
+
   const operationsByName = useMemo(() => {
     const index = new Map<string, ShapeOperation>();
     for (const op of catalog?.operations ?? []) index.set(op.op, op);
@@ -241,7 +249,8 @@ export function TransferTransformStep({
   const catalogColumns = showAllColumns || attention === 0
     ? profiledColumns
     : profiledColumns.filter((column) => column.blanks || column.untrimmed || column.inner_whitespace
-      || column.non_printable || column.unnormalized_unicode || Object.keys(column.sentinels).length);
+      || column.non_printable || column.unnormalized_unicode || Object.keys(column.sentinels).length
+      || column.json_array_like || column.json_object_like);
   const visibleColumns = catalogColumns.length ? catalogColumns : profiledColumns;
   const selectedProfile = visibleColumns.find((column) => column.name === selectedColumn)
     ?? visibleColumns[0]
@@ -379,6 +388,16 @@ export function TransferTransformStep({
               This row stops the run. Change the step's error policy to divert or null if that is the
               decision you want, or repair the value at source.
             </p>
+            <button
+              type="button"
+              className="df2-btn df2-btn-sm"
+              onClick={() => {
+                const node = document.getElementById(`xform-step-${preview.refusal?.step}`);
+                node?.scrollIntoView({ block: "nearest", behavior: "smooth" });
+              }}
+            >
+              Jump to step {preview.refusal.step}
+            </button>
           </div>
         </div>
       )}
@@ -489,26 +508,38 @@ export function TransferTransformStep({
               No steps. The source passes through unchanged — exactly today's behaviour.
             </p>
           ) : (
-            <ol className="df2-xform-steps">
+            <ol className="df2-xform-steps" ref={stepsListRef}>
               {steps.map((step, index) => {
                 const stepEffect = effect?.steps?.[index];
                 const disabled = step.enabled === false;
+                const refused = preview?.refusal?.step === index + 1;
                 return (
-                  <li key={`${step.op}:${index}`} className={disabled ? "is-disabled" : ""}>
+                  <li
+                    key={`${step.op}:${index}`}
+                    id={`xform-step-${index + 1}`}
+                    className={`${disabled ? "is-disabled" : ""}${refused ? " is-refused" : ""}`.trim()}
+                  >
                     <div className="df2-xform-step-head">
                       <span className="df2-xform-step-index">{index + 1}</span>
                       <strong>{describeStep(step, operationsByName.get(step.op))}</strong>
                       {step.on_error && step.on_error !== "refuse" && (
                         <span className="df2-badge">on error: {step.on_error}</span>
                       )}
-                      {operationsByName.get(step.op)?.active && (
+                      {operationsByName.get(step.op)?.expands ? (
+                        <span
+                          className="df2-badge df2-badge-warn"
+                          title="Adds rows. Dest COUNT is the expanded image, not a surplus."
+                        >
+                          expands rows
+                        </span>
+                      ) : operationsByName.get(step.op)?.active ? (
                         <span
                           className="df2-badge df2-badge-warn"
                           title="Changes the row count, so it moves the conservation ledger"
                         >
                           moves the ledger
                         </span>
-                      )}
+                      ) : null}
                     </div>
                     <p className="df2-xform-step-effect">
                       {stepEffect
@@ -517,6 +548,7 @@ export function TransferTransformStep({
                             `${stepEffect.rows_out.toLocaleString()} out`,
                             stepEffect.cells_changed ? `${stepEffect.cells_changed.toLocaleString()} cell(s) changed` : "",
                             stepEffect.rows_removed ? `${stepEffect.rows_removed.toLocaleString()} removed` : "",
+                            stepEffect.rows_expanded ? `${stepEffect.rows_expanded.toLocaleString()} added` : "",
                             stepEffect.rows_diverted ? `${stepEffect.rows_diverted.toLocaleString()} diverted` : "",
                             stepEffect.nulls_introduced ? `${stepEffect.nulls_introduced.toLocaleString()} null(s) introduced` : "",
                           ].filter(Boolean).join(" · ")
