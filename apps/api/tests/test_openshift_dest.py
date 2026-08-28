@@ -61,6 +61,20 @@ def test_apply_fills_empty_host_from_service() -> None:
     assert cfg["port"] == 5432
 
 
+def test_unrelated_namespace_extra_does_not_rewrite_host() -> None:
+    cfg = apply_openshift_hosting(
+        {
+            "type": "snowflake",
+            "host": "xy123.snowflakecomputing.com",
+            "namespace": "ANALYTICS",
+            "service": "not-openshift",
+        }
+    )
+    assert cfg["host"] == "xy123.snowflakecomputing.com"
+    assert cfg["type"] == "snowflake"
+    assert "openshift_hosting" not in cfg
+
+
 def test_apply_does_not_clobber_port_forward_host() -> None:
     cfg = apply_openshift_hosting(
         {

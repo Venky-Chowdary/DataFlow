@@ -94,13 +94,13 @@ def apply_openshift_hosting(cfg: dict[str, Any]) -> dict[str, Any]:
     When host is empty and Service+namespace are present, fill cluster DNS.
     """
     extra = cfg if isinstance(cfg, dict) else {}
-    store = extra.get("openshift_store") or extra.get("store")
-    service = str(extra.get("openshift_service") or extra.get("service") or "").strip()
-    namespace = str(
-        extra.get("openshift_namespace") or extra.get("namespace") or ""
-    ).strip()
+    # Only the openshift_* keys — a Snowflake ``namespace`` / Kafka ``service``
+    # extra must not rewrite dest host.
+    store = extra.get("openshift_store")
+    service = str(extra.get("openshift_service") or "").strip()
+    namespace = str(extra.get("openshift_namespace") or "").strip()
     domain = str(
-        extra.get("openshift_cluster_domain") or extra.get("cluster_domain") or ""
+        extra.get("openshift_cluster_domain") or ""
     ).strip() or DEFAULT_CLUSTER_DOMAIN
 
     fmt = str(extra.get("type") or extra.get("format") or "").strip().lower()
