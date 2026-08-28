@@ -8,7 +8,7 @@ import { PageFrame } from "../components/ui/PageFrame";
 import { PageShell } from "../components/ui/PageShell";
 import { useToast } from "../components/Toast";
 import { useConfirm } from "../components/ui/ConfirmDialog";
-import { fetchAuditEvents, fetchAiProviderSettings, fetchModelCapabilities, fetchPilotEngineStatus, PilotEngineChoice, PilotEngineStatus, testAiProviderKey, updatePilotEngine, fetchSsoConfigs, fetchSecurityPosture, downloadSecurityReport, fetchWorkspaceApiKeys, fetchWorkspaceSettings, ModelCapabilities, createWorkspaceApiKey, resolveApiBase, revokeWorkspaceApiKey, SecurityPosture, SsoConfig, SsoType, testSsoConfig, updateAiProviderSettings, updateSsoConfig, updateWorkspaceSettings, WorkspaceApiKey } from "../lib/api";
+import { fetchAuditEvents, exportAuditLog, fetchAiProviderSettings, fetchModelCapabilities, fetchPilotEngineStatus, PilotEngineChoice, PilotEngineStatus, testAiProviderKey, updatePilotEngine, fetchSsoConfigs, fetchSecurityPosture, downloadSecurityReport, fetchWorkspaceApiKeys, fetchWorkspaceSettings, ModelCapabilities, createWorkspaceApiKey, resolveApiBase, revokeWorkspaceApiKey, SecurityPosture, SsoConfig, SsoType, testSsoConfig, updateAiProviderSettings, updateSsoConfig, updateWorkspaceSettings, WorkspaceApiKey } from "../lib/api";
 import { PERMISSIONS, useWriteGate } from "../lib/PermissionsContext";
 import { PermissionNotice } from "../components/PermissionNotice";
 import { NotificationSettings } from "./settings/NotificationSettings";
@@ -417,24 +417,27 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
     [auditEvents],
   );
 
-  const downloadAuditCsv = () => {
-    const headers = ["id", "time", "actor", "action", "resource", "level"];
-    const rows = filteredLogs.map((log) => [
-      log.id,
-      log.time,
-      log.actor,
-      log.action,
-      log.resource,
-      log.level,
-    ]);
-    const csv = [headers.join(","), ...rows.map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(","))].join("\n");
-    const blob = new Blob([csv], { type: "text/csv" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `dataflow-audit-${new Date().toISOString().slice(0, 10)}.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
+  const downloadAuditExport = async (format: "csv" | "json") => {
+    try {
+      const blob = await exportAuditLog(format);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `datawrap-audit-${new Date().toISOString().slice(0, 10)}.${format}`;
+      a.click();
+      URL.revokeObjectURL(url);
+      toast({
+        title: "Audit export ready",
+        message: `Workspace-scoped ${format.toUpperCase()} — not a SOC 2 letter.`,
+        tone: "success",
+      });
+    } catch (err) {
+      toast({
+        title: "Export failed",
+        message: err instanceof Error ? err.message : "Could not export audit log",
+        tone: "error",
+      });
+    }
   };
 
   return (
@@ -1005,16 +1008,24 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                 <div className="df2-settings-section-head">
                   <div>
                     <h2>Audit logs</h2>
-                    <p>Configuration changes, transfers, connector tests, and MCP activity.</p>
+                    <p>Workspace-scoped events. Export downloads the server log for this workspace — not a SOC 2 or HIPAA letter.</p>
                   </div>
-                  <button
-                    type="button"
-                    className="df2-btn df2-btn-secondary df2-btn-sm"
-                    onClick={downloadAuditCsv}
-                    disabled={filteredLogs.length === 0}
-                  >
-                    <DtIcon name="download" size={14} /> Export CSV
-                  </button>
+                  <div className="df2-settings-section-actions">
+                    <button
+                      type="button"
+                      className="df2-btn df2-btn-secondary df2-btn-sm"
+                      onClick={() => void downloadAuditExport("csv")}
+                    >
+                      <DtIcon name="download" size={14} /> Export CSV
+                    </button>
+                    <button
+                      type="button"
+                      className="df2-btn df2-btn-ghost df2-btn-sm"
+                      onClick={() => void downloadAuditExport("json")}
+                    >
+                      Export JSON
+                    </button>
+                  </div>
                 </div>
                 <div className="df2-settings-section-body">
                   <FilterTabs

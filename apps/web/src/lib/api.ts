@@ -3126,6 +3126,14 @@ export async function fetchAuditEvents(limit = 50, level?: string): Promise<Arra
   return data.events ?? [];
 }
 
+/** Server-side tenant-scoped audit download (not the last 100 table rows). */
+export async function exportAuditLog(format: "csv" | "json" = "csv"): Promise<Blob> {
+  const params = new URLSearchParams({ format, limit: "5000" });
+  const res = await apiFetch(`${API_BASE}/audit/export?${params}`);
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not export audit log"));
+  return res.blob();
+}
+
 export type SsoType = "saml" | "oidc" | "azure_ad";
 
 export type SsoConfig = {
@@ -3979,6 +3987,14 @@ export async function createByokKey(body: { label: string; provider: ByokKey["pr
     body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error(await parseApiError(res, "Could not create BYOK key"));
+  return res.json();
+}
+
+export async function rotateByokKey(keyId: string): Promise<ByokKey> {
+  const res = await apiFetch(`${API_BASE}/workspace/tenant/byok-keys/${encodeURIComponent(keyId)}/rotate`, {
+    method: "POST",
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not rotate BYOK key"));
   return res.json();
 }
 

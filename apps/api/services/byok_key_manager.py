@@ -263,18 +263,34 @@ def rotate_key(tenant_id: str, label: str | None = None, provider: str = "local"
     return create_key(tenant_id=tenant_id, label=new_label, provider=provider)
 
 
-def _resolve_key(tenant_id: str, key_id: str | None = None) -> BYOKKey:
+def _resolve_key(
+    tenant_id: str,
+    key_id: str | None = None,
+    *,
+    allow_rotated: bool = False,
+) -> BYOKKey:
     if key_id:
         key = get_key(key_id)
     else:
         key = get_active_key_for_tenant(tenant_id)
     if not key:
         raise ValueError(f"No BYOK key configured for tenant {tenant_id}")
-    if key.status != "active":
-        raise ValueError(f"BYOK key {key.id} is {key.status}")
     if key.tenant_id != tenant_id:
         raise ValueError("BYOK key does not belong to tenant")
+    if key.status == "revoked":
+        raise ValueError(f"BYOK key {key.id} is revoked")
+    if key.status != "active" and not (allow_rotated and key.status == "rotated"):
+        raise ValueError(f"BYOK key {key.id} is {key.status}")
     return key
+
+
+def public_key_dict(key: BYOKKey) -> dict[str, Any]:
+    """API view — never return wrapped key material or a KMS secret blob."""
+    data = key.to_dict()
+    ref = str(data.get("key_reference") or "")
+    if ref.startswith("enc:") or ref.startswith("sm:") or ref.startswith("byok:") or len(ref) > 16:
+        data["key_reference"] = "[wrapped]"
+    return data
 
 
 def _data_key_for_key(key: BYOKKey, context: str) -> bytes:
@@ -362,7 +378,7 @@ def tenant_decrypt(tenant_id: str, token: str, key_id: str | None = None, purpos
         if len(parts) != 5:
             raise ValueError("Malformed aws_kms BYOK token")
         _, stored_key_id, _kms, enc_b64, ciphertext = parts
-        key = _resolve_key(tenant_id, key_id or stored_key_id)
+        key = _resolve_key(tenant_id, key_id or stored_key_id, allow_rotated=True)
         if key.provider != "aws_kms":
             raise ValueError("Token is aws_kms envelope but key provider is not aws_kms")
         pad = "=" * (-len(enc_b64) % 4)
@@ -374,7 +390,7 @@ def tenant_decrypt(tenant_id: str, token: str, key_id: str | None = None, purpos
         key_id = key_id or stored_key_id
     else:
         ciphertext = token
-    key = _resolve_key(tenant_id, key_id)
+    key = _resolve_key(tenant_id, key_id, allow_rotated=True)
     data_key = _data_key_for_key(key, context)
     return _fernet_from_bytes(data_key).decrypt(ciphertext.encode("ascii")).decode("utf-8")
 

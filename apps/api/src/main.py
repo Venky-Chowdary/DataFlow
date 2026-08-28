@@ -409,6 +409,7 @@ async def add_timing_header(request: Request, call_next):
                 actor=actor,
                 level="error" if response.status_code >= 500 else "info",
                 correlation_id=correlation_id,
+                workspace_id=request.headers.get("X-Workspace-Id") or request.headers.get("x-workspace-id") or "",
                 details={"status": response.status_code, "ms": round(process_time * 1000, 1)},
             )
         except Exception as exc:

@@ -28,6 +28,9 @@ _logger = logging.getLogger(__name__)
 _PREFIX_V1 = "enc:v1:"
 _PREFIX_V0 = "enc:v0:"
 _PREFIX_SM = "sm:"
+_PREFIX_BYOK = "byok:"
+_BYOK_PURPOSE = "connector-secret"
+_BYOK_WRAP_LABEL = "byok-key"
 
 
 class SecretVaultError(RuntimeError):
@@ -300,12 +303,52 @@ def secrets_encryption_ready() -> bool:
     return _get_vault().secrets_encryption_ready()
 
 
+def tenant_id_from_workspace(workspace_id: str | None) -> str | None:
+    """Resolve the tenant that owns ``workspace_id``, if one exists."""
+    ws = (workspace_id or "").strip()
+    if not ws:
+        return None
+    try:
+        from services.tenant_store import get_tenant_for_workspace
+
+        tenant = get_tenant_for_workspace(ws)
+    except Exception:
+        return None
+    return str(tenant.id) if tenant and getattr(tenant, "id", None) else None
+
+
+def _byok_active_for_tenant(tenant_id: str | None) -> bool:
+    tid = (tenant_id or "").strip()
+    if not tid:
+        return False
+    try:
+        from services.byok_key_manager import get_active_key_for_tenant
+
+        return get_active_key_for_tenant(tid) is not None
+    except Exception:
+        return False
+
+
 def encrypt_secret(plain: str, *, tenant_id: str | None = None, label: str = "") -> str:
-    """Encrypt/store a secret and return an opaque reference."""
+    """Encrypt/store a secret and return an opaque reference.
+
+    When the tenant has an active BYOK key, connector secrets are wrapped with
+    that key (``byok:<key_id>:…``). Platform Fernet still wraps BYOK key
+    material itself (``label=byok-key``) so the envelope is not circular.
+    """
     if not plain or plain == "****" or plain.startswith("["):
         return plain
-    if plain.startswith(_PREFIX_V1) or plain.startswith(_PREFIX_V0) or plain.startswith(_PREFIX_SM):
+    if (
+        plain.startswith(_PREFIX_V1)
+        or plain.startswith(_PREFIX_V0)
+        or plain.startswith(_PREFIX_SM)
+        or plain.startswith(_PREFIX_BYOK)
+    ):
         return plain
+    if label != _BYOK_WRAP_LABEL and _byok_active_for_tenant(tenant_id):
+        from services.byok_key_manager import tenant_encrypt
+
+        return tenant_encrypt(str(tenant_id).strip(), plain, purpose=_BYOK_PURPOSE)
     return _get_vault().encrypt(plain, tenant_id=tenant_id, label=label)
 
 
@@ -313,6 +356,16 @@ def decrypt_secret(stored: str, *, tenant_id: str | None = None) -> str:
     """Retrieve/decrypt a stored secret reference."""
     if not stored:
         return stored
+    if stored.startswith(_PREFIX_BYOK):
+        tid = (tenant_id or "").strip()
+        if not tid:
+            raise SecretVaultError(
+                "BYOK-wrapped secret requires tenant_id to decrypt. "
+                "Re-open the connector from its workspace."
+            )
+        from services.byok_key_manager import tenant_decrypt
+
+        return tenant_decrypt(tid, stored, purpose=_BYOK_PURPOSE)
     return _get_vault().decrypt(stored, tenant_id=tenant_id)
 
 
