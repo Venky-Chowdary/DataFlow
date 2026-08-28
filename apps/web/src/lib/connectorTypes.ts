@@ -163,6 +163,13 @@ const CATALOG_ALIASES: Record<string, string> = {
   neon: "postgresql",
   timescaledb: "postgresql",
   cockroachdb: "postgresql",
+  openshift: "postgresql",
+  okd: "postgresql",
+  openshift_postgresql: "postgresql",
+  cloudnativepg: "postgresql",
+  cnpg: "postgresql",
+  crunchy_postgres: "postgresql",
+  crunchy_pgo: "postgresql",
   jsonl: "jsonl",
   ndjson: "ndjson",
 };

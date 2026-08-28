@@ -604,6 +604,11 @@ def resolve_connector_config(
     cfg["role"] = engine_login_role(cfg.get("auth_role"), cfg.get("role"))
     if cfg.get("auth_role"):
         cfg["auth_role"] = engine_login_role(cfg.get("auth_role"))
+    # OpenShift is a hosting plane — resolve Service DNS onto the real store.
+    # Never a Kubernetes API write. See services.openshift_dest.
+    from services.openshift_dest import apply_openshift_hosting
+
+    cfg = apply_openshift_hosting(cfg)
     return cfg
 
 

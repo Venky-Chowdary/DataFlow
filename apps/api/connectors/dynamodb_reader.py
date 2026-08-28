@@ -321,7 +321,17 @@ def read_table_batch(
     )
 
     client = boto3_client("dynamodb", cfg)
-    scan_kwargs: dict[str, Any] = {"TableName": table, "Limit": limit}
+    # Snapshot accuracy: AWS documents ConsistentRead=true for backup /
+    # replication Scans. Eventual reads can omit a just-written item and
+    # silently under-count. CDC is a separate Streams path (at-least-once).
+    consistent = cfg.get("consistent_read")
+    if consistent is None:
+        consistent = True
+    scan_kwargs: dict[str, Any] = {
+        "TableName": table,
+        "Limit": limit,
+        "ConsistentRead": bool(consistent),
+    }
     if exclusive_start_key:
         scan_kwargs["ExclusiveStartKey"] = exclusive_start_key
 
