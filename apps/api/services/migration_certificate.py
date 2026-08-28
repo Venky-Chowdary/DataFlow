@@ -261,12 +261,12 @@ def _foreign_key_carry_blockers(job: dict[str, Any]) -> list[str]:
             f"Foreign key carry did not complete ({detail}) - the destination is "
             "missing relationships the source enforced."
         )
-    if summary.get("cycle"):
+    if summary.get("cycle") and not summary.get("cycle_resolved"):
         out.append(
             "Foreign keys form a cycle ("
             + ", ".join(str(t) for t in summary.get("cycle") or [])
-            + ") - deferred-constraint creation is not supported, so the cycle was "
-            "not recreated."
+            + ") — post-load ALTER did not recreate every edge, so the cycle "
+            "is not enforced on the destination."
         )
     return out
 

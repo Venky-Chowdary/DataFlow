@@ -20,6 +20,7 @@ from typing import Any
 from services.foreign_key_carry import (
     ForeignKeyDecision,
     apply_foreign_keys,
+    classify_cycle_resolution,
     order_tables_by_dependency,
     plan_foreign_keys,
     verify_foreign_keys,
@@ -124,6 +125,7 @@ def carry_foreign_keys(
     table_map: dict[str, str],
     column_maps: dict[str, dict[str, str]],
     dest_columns: dict[str, list[str]],
+    cycle_tables: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Add and verify the constraints for every table of a finished load.
 
@@ -169,6 +171,7 @@ def carry_foreign_keys(
             table_map=table_map,
             dest_existing_tables=known,
             referenced_column_maps=column_maps,
+            cycle_tables=cycle_tables,
         )
         if plan.statements:
             def execute(sql: str) -> None:
@@ -191,27 +194,39 @@ def carry_foreign_keys(
     return [{"table": d.dest_table, **d.__dict__} for d in decisions]
 
 
-def summarize(decisions: list[dict[str, Any]]) -> dict[str, Any]:
+def summarize(
+    decisions: list[dict[str, Any]],
+    cycle: list[str] | None = None,
+) -> dict[str, Any]:
     """Counts plus the honest headline for the operator."""
     counts: dict[str, int] = {}
     for decision in decisions:
         status = str(decision.get("status") or "unknown")
         counts[status] = counts.get(status, 0) + 1
     violations = [d for d in decisions if d.get("integrity_violation")]
-    return {
+    resolution = classify_cycle_resolution(cycle, decisions)
+    verdict = (
+        "referential_integrity_violated"
+        if violations
+        else (
+            "carried"
+            if counts.get("carried")
+            and not counts.get("unsupported")
+            and not counts.get("unknown")
+            and resolution["resolved"]
+            else "partial"
+        )
+    )
+    out: dict[str, Any] = {
         "decisions": decisions,
         "counts": counts,
         "integrity_violations": len(violations),
         "carried": counts.get("carried", 0),
-        "verdict": (
-            "referential_integrity_violated"
-            if violations
-            else (
-                "carried"
-                if counts.get("carried")
-                and not counts.get("unsupported")
-                and not counts.get("unknown")
-                else "partial"
-            )
-        ),
+        "verdict": verdict,
     }
+    if resolution["cycle"]:
+        out["cycle"] = resolution["cycle"]
+        out["cycle_strategy"] = resolution["strategy"]
+        out["cycle_resolved"] = resolution["resolved"]
+        out["cycle_note"] = resolution["note"]
+    return out
