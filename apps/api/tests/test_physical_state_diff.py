@@ -223,7 +223,15 @@ def test_triggers_are_reported_but_never_block_the_verdict(tmp_path: Path) -> No
     triggers = result["aspects"]["triggers"]
     assert triggers["advisory"] is True
     assert triggers["status"] == "absent"
+    assert triggers["missing"] == ["trg_src (after insert)"]
     assert result["advisory"] == {"triggers": "absent"}
+    assert result["cutover_recreate"] == [
+        {
+            "kind": "trigger",
+            "name": "trg_src (after insert)",
+            "action": "recreate_before_cutover",
+        }
+    ]
     # Every blocking aspect carried, so the move is still verified.
     assert result["absent"] == []
     assert result["verified"] is True
@@ -240,6 +248,7 @@ def test_matching_triggers_are_carried(tmp_path: Path) -> None:
     result = _verify(cfg, "src", "dst")
     assert result["aspects"]["triggers"]["status"] == "carried"
     assert result["advisory"] == {}
+    assert result["cutover_recreate"] == []
 
 def test_trigger_body_events_do_not_shadow_the_declared_event(tmp_path: Path) -> None:
     """SQLite hands back the whole CREATE statement; the header event wins."""
@@ -252,8 +261,57 @@ def test_trigger_body_events_do_not_shadow_the_declared_event(tmp_path: Path) ->
         "CREATE TRIGGER trg_dst AFTER INSERT ON dst BEGIN SELECT 1; END",
     )
     state = read_physical_state(db_type="sqlite", cfg=cfg, table="src")
-    assert state.triggers == frozenset({("after", "insert")})
+    assert state.triggers == frozenset({("trg_src", "after", "insert")})
     assert _verify(cfg, "src", "dst")["aspects"]["triggers"]["status"] == "carried"
+
+
+def test_dependent_view_is_named_for_cutover_and_does_not_block(tmp_path: Path) -> None:
+    cfg = _db(
+        tmp_path,
+        UNCHECKED.format(name="src"),
+        UNCHECKED.format(name="dst"),
+        "CREATE VIEW v_src_open AS SELECT id, qty FROM src WHERE qty > 0",
+    )
+    result = _verify(cfg, "src", "dst")
+    views = result["aspects"]["views"]
+    assert views["advisory"] is True
+    assert views["status"] == "absent"
+    assert views["missing"] == ["v_src_open"]
+    assert result["verified"] is True
+    assert "views" not in result["absent"]
+    assert result["cutover_recreate"] == [
+        {
+            "kind": "view",
+            "name": "v_src_open",
+            "action": "recreate_before_cutover",
+        }
+    ]
+
+
+def test_same_named_dependent_view_is_present_not_a_body_claim(tmp_path: Path) -> None:
+    cfg = _db(
+        tmp_path,
+        UNCHECKED.format(name="src"),
+        UNCHECKED.format(name="dst"),
+        "CREATE VIEW v_open AS SELECT id, qty FROM src WHERE qty > 0",
+        "CREATE VIEW v_open_dst AS SELECT id, qty FROM dst WHERE qty > 0",
+    )
+    # Same SQLite file cannot reuse the view name; name presence is dest-side.
+    result = _verify(cfg, "src", "dst")
+    assert result["aspects"]["views"]["status"] == "absent"
+    assert "v_open" in result["aspects"]["views"]["missing"]
+
+
+def test_unrelated_view_is_not_attributed_to_the_table(tmp_path: Path) -> None:
+    cfg = _db(
+        tmp_path,
+        UNCHECKED.format(name="src"),
+        UNCHECKED.format(name="dst"),
+        "CREATE TABLE other (id INTEGER PRIMARY KEY, qty INTEGER)",
+        "CREATE VIEW v_other AS SELECT id FROM other",
+    )
+    src = read_physical_state("sqlite", cfg, table="src")
+    assert src.views == frozenset()
 
 
 # --- cross-engine catalog spelling ------------------------------------------

@@ -176,6 +176,7 @@ def physical_state_findings(recon: dict[str, Any]) -> dict[str, Any]:
             "unreadable": list(schema_objects.get("unreadable") or []),
             "aspects": _dict(schema_objects.get("aspects")),
             "advisory": _dict(schema_objects.get("advisory")),
+            "cutover_recreate": list(schema_objects.get("cutover_recreate") or []),
         },
         "referential_integrity": {
             "verified": bool(referential.get("verified")),
@@ -624,10 +625,40 @@ def render_certificate_markdown(cert: dict[str, Any]) -> str:
                     f"| {label} | {info.get('status', '')} | {missing} |"
                 )
             lines.append("")
+            recreate = list(objects.get("cutover_recreate") or [])
+            if not recreate:
+                for aspect, detail in aspects.items():
+                    info = _dict(detail)
+                    if info.get("advisory") and info.get("status") == "absent":
+                        for name in info.get("missing") or []:
+                            recreate.append(
+                                {
+                                    "kind": "view" if aspect == "views" else "trigger",
+                                    "name": name,
+                                    "action": "recreate_before_cutover",
+                                }
+                            )
+            if recreate:
+                lines += ["## Recreate before cutover", ""]
+                for item in recreate:
+                    info = _dict(item)
+                    kind = str(info.get("kind") or "object")
+                    name = str(info.get("name") or "")
+                    if info.get("action") == "catalog_unreadable":
+                        lines.append(
+                            f"- {kind} catalog could not be read — not proven absent."
+                        )
+                    else:
+                        lines.append(
+                            f"- Recreate {kind} `{name}` on the destination "
+                            "(body was not migrated)."
+                        )
+                lines.append("")
             for aspect, detail in aspects.items():
                 info = _dict(detail)
                 if info.get("advisory") and info.get("status") != "carried":
-                    lines += [f"- {info.get('note', '')}", ""]
+                    if info.get("note"):
+                        lines += [f"- {info.get('note', '')}", ""]
         else:
             lines += [
                 f"- Constraints and indexes not compared — {objects.get('reason', '')}",
