@@ -141,6 +141,8 @@ def append_audit_event(
     level: str = "info",
     correlation_id: str | None = None,
     details: dict[str, Any] | None = None,
+    workspace_id: str | None = None,
+    tenant_id: str | None = None,
 ) -> dict[str, Any]:
     """Record a redacted audit event to MongoDB (preferred) or a local JSONL file.
 
@@ -154,6 +156,12 @@ def append_audit_event(
     with _APPEND_LOCK:
         secret = _platform_hmac_secret()
         prev = latest_event_hash()
+        redacted = _redact(details or {})
+        ws = (workspace_id or "").strip()
+        tid = (tenant_id or "").strip()
+        if isinstance(redacted, dict):
+            ws = ws or str(redacted.get("workspace_id") or "").strip()
+            tid = tid or str(redacted.get("tenant_id") or "").strip()
         event = {
             "_id": str(uuid.uuid4()),
             "id": str(uuid.uuid4()),
@@ -163,7 +171,9 @@ def append_audit_event(
             "resource": resource,
             "level": canonical_level(level),
             "correlation_id": correlation_id,
-            "details": _redact(details or {}),
+            "workspace_id": ws,
+            "tenant_id": tid,
+            "details": redacted,
             "prev_hash": prev,
             "hash_alg": "HMAC-SHA256",
         }
@@ -225,13 +235,46 @@ def latest_event_hash() -> str | None:
     return str(h) if h else None
 
 
+def _event_in_scope(
+    ev: dict[str, Any],
+    *,
+    workspace_id: str | None,
+    tenant_id: str | None,
+    since: str | None,
+    until: str | None,
+) -> bool:
+    if workspace_id and str(ev.get("workspace_id") or "") != workspace_id:
+        return False
+    if tenant_id and str(ev.get("tenant_id") or "") != tenant_id:
+        return False
+    when = str(ev.get("time") or "")
+    if since and when and when < since:
+        return False
+    if until and when and when > until:
+        return False
+    return True
+
+
 def list_audit_events(
     *,
     limit: int = 100,
     level: str | None = None,
     actor: str | None = None,
+    workspace_id: str | None = None,
+    tenant_id: str | None = None,
+    since: str | None = None,
+    until: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Return the most recent audit events, newest first."""
+    """Return the most recent audit events, newest first.
+
+    ``workspace_id`` / ``tenant_id`` are exact matches. Unscoped historical
+    events (empty workspace) are excluded from a scoped query so one tenant
+    cannot export another tenant's rows — or the global leftovers.
+    """
+    ws = (workspace_id or "").strip() or None
+    tid = (tenant_id or "").strip() or None
+    since = (since or "").strip() or None
+    until = (until or "").strip() or None
     coll = _mongo_collection()
     if coll is not None:
         try:
@@ -240,6 +283,16 @@ def list_audit_events(
                 query["level"] = level
             if actor:
                 query["actor"] = actor
+            if ws:
+                query["workspace_id"] = ws
+            if tid:
+                query["tenant_id"] = tid
+            if since or until:
+                query["time"] = {}
+                if since:
+                    query["time"]["$gte"] = since
+                if until:
+                    query["time"]["$lte"] = until
             cursor = coll.find(query).sort("time", -1).limit(limit)
             return [{k: v for k, v in doc.items() if k != "_id"} for doc in cursor]
         except Exception as exc:
@@ -260,6 +313,8 @@ def list_audit_events(
             continue
         if actor and ev.get("actor") != actor:
             continue
+        if not _event_in_scope(ev, workspace_id=ws, tenant_id=tid, since=since, until=until):
+            continue
         events.append(ev)
         if len(events) >= limit:
             break
@@ -274,6 +329,19 @@ def _trim_if_needed() -> None:
         return
     trimmed = lines[-MAX_EVENTS:]
     STORE_PATH.write_text("\n".join(trimmed) + "\n", encoding="utf-8")
+
+
+def workspace_id_from_request(request: Any) -> str:
+    """Workspace the caller is looking at — header first, then request.state."""
+    if request is None:
+        return ""
+    try:
+        header = request.headers.get("X-Workspace-Id") or request.headers.get("x-workspace-id") or ""
+    except Exception:
+        header = ""
+    if str(header).strip():
+        return str(header).strip()
+    return str(getattr(request.state, "workspace_id", "") or "").strip()
 
 
 def actor_from_request(request: Any) -> str:
