@@ -166,7 +166,8 @@ def test_csv_to_sqlite_empty_cell_is_not_dropped(tmp_path: Path):
         rows = db.execute("SELECT id, name, note FROM people ORDER BY id").fetchall()
         assert len(rows) == 3
         assert rows[0][1] == "alice"
-        # Empty CSV field must land — never silently omit the row.
+        # Empty CSV field must land as a cell — never silently omit the row.
+        assert rows[0][2] in ("", None)
 
 
 def test_postgres_null_vs_empty_does_not_corrupt():
@@ -219,19 +220,15 @@ def test_postgres_null_vs_empty_does_not_corrupt():
         _assert_closed(result, dest_count=2)
         with conn.cursor() as cur:
             cur.execute(
-                f'SELECT note IS NULL, note = %s FROM public."{dest.table}" WHERE id = 1',
-                ("",),
+                f'SELECT note FROM public."{dest.table}" WHERE id = 1'
             )
-            is_null, is_empty = cur.fetchone()
-            assert is_null is True
-            assert is_empty is False
+            alice_note = cur.fetchone()[0]
+            assert alice_note is None, alice_note
             cur.execute(
-                f'SELECT note IS NULL, note = %s FROM public."{dest.table}" WHERE id = 2',
-                ("",),
+                f'SELECT note FROM public."{dest.table}" WHERE id = 2'
             )
-            is_null, is_empty = cur.fetchone()
-            assert is_null is False
-            assert is_empty is True
+            bob_note = cur.fetchone()[0]
+            assert bob_note == "", bob_note
     finally:
         try:
             with conn.cursor() as cur:
