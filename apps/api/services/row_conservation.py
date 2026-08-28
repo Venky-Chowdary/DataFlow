@@ -87,6 +87,12 @@ How dest_population is chosen:
   COUNT(*) surplus. That apply is not incremental CDC and not mirror
   ``_deleted``. Mirror already applies inferred soft-deletes on full
   re-sync.
+
+  Quarantined hold-outs are still in ``S`` and therefore show as
+  dest-engine ``missing``. That is not silent loss: the row is on the
+  DLQ, not dropped. Unexplained missing is ``max(missing − hold_outs, 0)``.
+  EXTRA_TARGET leftover dest keys still unbalance — COUNT(*) can net
+  one unexplained miss and one leftover to a false close.
 * **mirror (inferred deletes)** — Fivetran-style ``_deleted`` flag:
   physical ``COUNT(*)`` does **not** drop. The identity is the dest-engine
   **active** population:
@@ -2091,15 +2097,35 @@ def _close_population(
     leftover_deleted = _as_optional_int((keyset or {}).get(LEFTOVER_DELETED_KEY))
     balanced = unaccounted == 0
     if missing is not None and extra is not None:
-        if missing or extra:
+        unexplained_missing = max(int(missing) - int(quarantined), 0)
+        held_missing = min(int(missing), int(quarantined)) if missing else 0
+        if unexplained_missing or extra:
             balanced = False
             note += (
-                f" Dest-engine keyset: {missing} MISSING_TARGET key(s), "
-                f"{extra} EXTRA_TARGET leftover dest key(s). COUNT(*) can net "
+                f" Dest-engine keyset: {missing} MISSING_TARGET key(s)"
+            )
+            if held_missing:
+                note += (
+                    f" ({held_missing} quarantined hold-out"
+                    + (
+                        f", {unexplained_missing} unexplained"
+                        if unexplained_missing
+                        else ""
+                    )
+                    + ")"
+                )
+            note += (
+                f", {extra} EXTRA_TARGET leftover dest key(s). COUNT(*) can net "
                 "missing+extra to a false balance — that is the DMS validation "
                 "hole after Full Load success. Leftover keys are not inferred "
                 "deletes on incremental CDC; a complete overwrite snapshot "
                 "MERGE-deletes dest keys not in S."
+            )
+        elif held_missing:
+            note += (
+                f" Dest-engine keyset: {missing} source key(s) absent from dest "
+                f"equal the {quarantined} quarantined hold-out(s); dest holds "
+                "no extra keys. Quarantine is not silent loss."
             )
         else:
             note += (
