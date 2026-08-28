@@ -1607,6 +1607,7 @@ export const CONNECTOR_CATALOG = [
   // Document / NoSQL
   { id: "mongodb", label: "MongoDB", port: 27017 },
   { id: "dynamodb", label: "Amazon DynamoDB", port: 443 },
+  { id: "openshift", label: "OpenShift PostgreSQL (CNPG / Crunchy)", port: 5432 },
   { id: "cassandra", label: "Apache Cassandra", port: 9042 },
   { id: "couchbase", label: "Couchbase", port: 8091 },
   { id: "redis", label: "Redis", port: 6379 },

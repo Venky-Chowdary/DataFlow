@@ -251,6 +251,71 @@ def _persist_job_quarantine(
     assert_quarantine_durable_or_raise(dest_summary)
 
 
+def fail_closed_on_silent_loss(
+    *,
+    job_id: str,
+    request: Any,
+    dest_summary: dict[str, Any],
+    recon: dict[str, Any],
+    rows_written: int,
+    operation: str,
+) -> Any | None:
+    """Refuse terminal success when a measured dest population does not close.
+
+    Returns a failed ``TransferResult`` or ``None`` when the ledger is honest
+    (balanced, or dest unmeasured). Owner: ``services.row_conservation``.
+    """
+    from services.row_conservation import (
+        PopulationConservationError,
+        assert_population_conservation_closed,
+    )
+    from src.transfer.models import TransferResult
+
+    try:
+        ledger = assert_population_conservation_closed(
+            {
+                "records_processed": rows_written,
+                "sync_mode": str(getattr(request, "sync_mode", "") or ""),
+                "reconciliation": recon,
+                "destination_summary": dest_summary,
+                "rejected_rows": dest_summary.get("rejected_rows"),
+                "coerced_null_rows": dest_summary.get("coerced_null_rows"),
+            },
+            validation_mode=str(getattr(request, "validation_mode", "") or ""),
+        )
+    except PopulationConservationError as exc:
+        from services.mongodb_service import get_mongodb_service
+
+        note = str(exc)
+        dest_summary = dict(dest_summary)
+        dest_summary["silent_loss"] = True
+        dest_summary["conservation_error"] = note[:500]
+        get_mongodb_service().update_job_status(
+            job_id,
+            "failed",
+            error=note,
+            phase="failed",
+            progress_pct=99,
+            message=note,
+            reconciliation=recon,
+            destination_summary=dest_summary,
+            rejected_rows=int(dest_summary.get("rejected_rows", 0) or 0),
+            coerced_null_rows=int(dest_summary.get("coerced_null_rows", 0) or 0),
+        )
+        return TransferResult(
+            success=False,
+            error=note,
+            operation=operation,
+            job_id=job_id,
+            records_transferred=rows_written,
+            destination_summary=dest_summary,
+            reconciliation=recon,
+        )
+    dest_summary["row_accounting"] = ledger.to_dict()
+    recon["row_accounting"] = ledger.to_dict()
+    return None
+
+
 def _attach_job_rollback_plan(
     job_id: str, dest_summary: dict[str, Any], request: Any = None
 ) -> None:

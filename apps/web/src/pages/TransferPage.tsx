@@ -6955,6 +6955,13 @@ export function TransferPage({
               Table name is the DynamoDB table to read or write.
             </p>
           )}
+          {(destType === "openshift" || destType === "openshift_postgresql" || destType === "cnpg" || destType === "crunchy_pgo") && (
+            <p className="df2-label-hint df2-field-note">
+              OpenShift hosts PostgreSQL (CloudNativePG / Crunchy) — it is not a destination store.
+              Host is the Service DNS (<code>svc.cluster.local</code>), a Route, or a port-forward.
+              DynamoDB snapshot uses consistent Scan. Streams CDC is at-least-once upsert, not exactly-once.
+            </p>
+          )}
           {destDriverType === "bigquery" && (
             <p className="df2-label-hint df2-field-note">
               Set Database to GCP project ID. Optional: save service account JSON path as connection string in connector settings.

@@ -2232,6 +2232,46 @@ def account_job(job: Mapping[str, Any]) -> ConservationLedger:
     return replace(ledger, shape_recipe_hash=recipe_hash)
 
 
+class PopulationConservationError(RuntimeError):
+    """Independent dest population does not close the reader identity.
+
+    A measured shortfall is silent loss. An unmeasured dest is *not* this
+    error — that stays honestly unproven, never a fake green.
+    """
+
+
+def assert_population_conservation_closed(
+    job: Mapping[str, Any],
+    *,
+    validation_mode: str = "",
+) -> ConservationLedger:
+    """Fail closed when dest COUNT was measured and the ledger does not balance.
+
+    This is the Execute twin of the certificate's conservation veto — every
+    source × dest that can independently COUNT the destination. Writer ack
+    never closes. Strict mode also refuses coerced-NULL cells as corruption
+    (they landed; the value did not).
+    """
+    ledger = account_job(job)
+    measured = stream_dest_measured(ledger.to_dict())
+    mode = str(validation_mode or "").strip().lower()
+    if measured and not ledger.balanced:
+        raise PopulationConservationError(
+            ledger.note
+            or (
+                f"Row accounting did not balance "
+                f"(unaccounted={ledger.unaccounted}). Treat as silent loss."
+            )
+        )
+    coerced = int(ledger.rows_coerced_null or 0)
+    if mode == "strict" and coerced > 0:
+        raise PopulationConservationError(
+            f"{coerced} cell(s) coerced to NULL — refused as corruption in "
+            "strict mode. Quarantine the cell or widen the dest type."
+        )
+    return ledger
+
+
 def attach_conservation_to_updates(
     status: str,
     updates: dict[str, Any],
