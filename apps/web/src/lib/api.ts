@@ -3987,6 +3987,9 @@ export type ProofLedger = {
   headline: string;
   metrics: {
     unique_transfer_drivers: number;
+    desktop_lab_catalog_slots?: number;
+    desktop_lab_duplex_passed?: number;
+    desktop_lab_unique_engines?: number;
     transfer_live_drivers: string[];
     catalog_transfer_ready_aliases?: number;
     live_route_combinations?: number;
