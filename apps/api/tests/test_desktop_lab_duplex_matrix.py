@@ -48,6 +48,8 @@ def test_desktop_lab_duplex_matrix():
         assert row["map_status"] == "passed", row
         assert row["validate_status"] == "passed", row
         assert row["integrity_status"] == "passed", row
+        assert row["transform_status"] == "passed", row
+        assert row.get("shape_recipe_hash"), row
         assert row["silent_loss"] is False, row
         assert row["dest_rejected"] == 0, row
         assert row["dest_coerced"] == 0, row

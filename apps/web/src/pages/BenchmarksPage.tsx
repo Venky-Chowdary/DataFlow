@@ -250,9 +250,9 @@ export function BenchmarksPage() {
 
                     <div className="df2-page-benchmarks-toolbar">
                       <p className="df2-page-benchmarks-note" style={{ margin: 0, flex: 1 }}>
-                        Desktop lab option: bind 80 catalog connectors and run Map, Validate, dest write,
-                        source read, and payload reconcile (2-row fixture, zero rejected/coerced). Hosted
-                        twins share a driver — this is not 80 unique engines and not catalog tile count.
+                        Desktop lab option: bind 80 catalog connectors and run Map, cell transform,
+                        ShapeEngine (trim+upper), Validate, dest write, source read, and shaped payload
+                        reconcile. Hosted twins share a driver — this is not 80 unique engines.
                       </p>
                       <Button
                         variant="primary"

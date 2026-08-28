@@ -5,9 +5,13 @@ Honesty
 * 80 is **catalog slots** on this named fixture — not 80 unique engines,
   not catalog tile count, not 650+ live.
 * Hosted twins share a parent driver. Unique engines are counted separately.
-* Each slot must: Map SSOT → Validate (preflight) → dest write → source
-  read-back → payload reconcile of the 2 fixture rows. Rejected/coerced
-  rows fail the slot (silent loss / corruption).
+* Each slot must: Map SSOT → cell transform SSOT (apply_transform) →
+  ShapeEngine recipe (trim + upper on ``code``) → Validate → dest write →
+  source read-back → payload reconcile of the *shaped* 2 rows. Rejected/
+  coerced rows fail the slot (silent loss / corruption).
+* Transform owners: ``services.shape_engine.ShapeEngine`` (pre-load recipe)
+  and ``services.transform_engine.apply_transform`` (cell / mapping). Map
+  stays ``services.semantic_mapper.map_columns``.
 * A connector that cannot be stood up is ``skipped`` — never a fake green.
 * CDC default remains at-least-once upsert.
 * Source-only (pdf/docx/html/REST) and dest-only (pgvector) tiles are not
@@ -39,15 +43,45 @@ RoleKind = Literal["unique_engine", "hosted_twin", "format_alias"]
 DESKTOP_LAB_MIN_DUPLEX = 80
 FIXTURE_ROWS = 2
 
-CSV_BYTES = b"id,amount\n1,1000.00\n2,2000.50\n"
-EXPECTED_PAYLOAD = (("1", "1000.00"), ("2", "2000.50"))
+# Leading spaces + mixed case on ``code`` so a missing recipe is visible.
+CSV_BYTES = b"id,amount,code\n1,1000.00, usd\n2,2000.50, eur\n"
+EXPECTED_PAYLOAD = (("1", "1000.00", "USD"), ("2", "2000.50", "EUR"))
+SHAPE_RECIPE = {
+    "steps": [
+        {"op": "trim", "column": "code"},
+        {"op": "case", "column": "code", "options": {"mode": "upper"}},
+    ]
+}
 MAPPINGS = [
-    {"source": "id", "target": "id", "confidence": 0.99},
-    {"source": "amount", "target": "amount", "confidence": 0.99},
+    {
+        "source": "id",
+        "target": "id",
+        "confidence": 0.99,
+        "transform": "integer",
+        "target_type": "INTEGER",
+        "approved": True,
+    },
+    {
+        "source": "amount",
+        "target": "amount",
+        "confidence": 0.99,
+        "transform": "decimal",
+        "target_type": "DECIMAL(18,2)",
+        "approved": True,
+    },
+    {
+        "source": "code",
+        "target": "code",
+        "confidence": 0.99,
+        "transform": "none",
+        "target_type": "VARCHAR",
+        "approved": True,
+    },
 ]
 SOURCE_SCHEMAS = [
     {"name": "id", "inferred_type": "INTEGER", "samples": ["1", "2"]},
     {"name": "amount", "inferred_type": "DECIMAL(18,2)", "samples": ["1000.00", "2000.50"]},
+    {"name": "code", "inferred_type": "VARCHAR", "samples": [" usd", " eur"]},
 ]
 PG = {
     "host": "127.0.0.1",
@@ -187,6 +221,9 @@ class ConnectorResult:
     dest_coerced: int = 0
     dest_reconcile: bool | None = None
     source_reconcile: bool | None = None
+    transform_status: str = "skipped"
+    transform_error: str = ""
+    shape_recipe_hash: str = ""
 
     @property
     def duplex(self) -> bool:
@@ -204,6 +241,7 @@ class ConnectorResult:
             and self.map_status == "passed"
             and self.validate_status == "passed"
             and self.integrity_status == "passed"
+            and self.transform_status == "passed"
             and not self.silent_loss
         )
 
@@ -231,6 +269,9 @@ class ConnectorResult:
             "dest_coerced": self.dest_coerced,
             "dest_reconcile": self.dest_reconcile,
             "source_reconcile": self.source_reconcile,
+            "transform_status": self.transform_status,
+            "transform_error": self.transform_error[:400],
+            "shape_recipe_hash": self.shape_recipe_hash,
             "operations_ok": self.operations_ok,
         }
 
@@ -434,15 +475,56 @@ def _run(req: TransferRequest):
     return UniversalTransferEngine().execute_tracked(req, uuid.uuid4().hex[:24])
 
 
+_SHAPE_HASH = ""
+
+
+def _approved_shape_hash() -> str:
+    global _SHAPE_HASH
+    if _SHAPE_HASH:
+        return _SHAPE_HASH
+    from services.shape_models import ShapeRecipe
+
+    _SHAPE_HASH = ShapeRecipe.parse(
+        SHAPE_RECIPE, source_columns=["id", "amount", "code"]
+    ).recipe_hash
+    return _SHAPE_HASH
+
+
+def _cell_transforms_ok() -> tuple[bool, str]:
+    """Mapping-level SSOT: writer_common calls apply_transform per cell."""
+    from services.transform_engine import apply_transform
+
+    checks = (
+        ("1", "integer", "1"),
+        ("1000.00", "decimal", "1000.00"),
+        (" usd", "none", " usd"),
+    )
+    for raw, transform, expect in checks:
+        value, err = apply_transform(raw, transform)
+        if err:
+            return False, f"apply_transform({raw!r}, {transform}): {err}"
+        if transform == "decimal":
+            from decimal import Decimal
+
+            if Decimal(str(value)) != Decimal(expect):
+                return False, f"apply_transform decimal {value!r} != {expect}"
+        elif transform == "integer":
+            if int(value) != int(expect):
+                return False, f"apply_transform integer {value!r} != {expect}"
+        elif value != expect:
+            return False, f"apply_transform none {value!r} != {expect}"
+    return True, ""
+
+
 def _map_fixture(driver: str, family: str) -> tuple[bool, str]:
-    """Map SSOT — id/amount must land on id/amount. File tiles use sqlite types."""
+    """Map SSOT — id/amount/code must land on themselves. File tiles use sqlite types."""
     from services.semantic_mapper import map_columns
 
     dest_db = "sqlite" if family == "file" else driver
     try:
         mapped = map_columns(
-            ["id", "amount"],
-            ["id", "amount"],
+            ["id", "amount", "code"],
+            ["id", "amount", "code"],
             source_schemas=list(SOURCE_SCHEMAS),
             destination_db_type=dest_db,
             destination_table_exists=False,
@@ -453,7 +535,8 @@ def _map_fixture(driver: str, family: str) -> tuple[bool, str]:
         (str(row.get("source") or "").lower(), str(row.get("target") or "").lower())
         for row in mapped
     }
-    if ("id", "id") not in pairs or ("amount", "amount") not in pairs:
+    needed = {("id", "id"), ("amount", "amount"), ("code", "code")}
+    if not needed.issubset(pairs):
         return False, f"map_columns missed identity: {sorted(pairs)}"
     return True, ""
 
@@ -468,7 +551,7 @@ def _norm_amount(value: Any) -> str:
         return text
 
 
-def _read_payload(sqlite_path: Path, table: str) -> list[tuple[str, str]] | str:
+def _read_payload(sqlite_path: Path, table: str) -> list[tuple[str, str, str]] | str:
     import sqlite3
 
     if not sqlite_path.is_file():
@@ -477,15 +560,19 @@ def _read_payload(sqlite_path: Path, table: str) -> list[tuple[str, str]] | str:
     try:
         cols = [str(row[1]) for row in con.execute(f'PRAGMA table_info("{table}")')]
         folded = {c.lower(): c for c in cols}
-        if "id" not in folded or "amount" not in folded:
-            return f"payload columns {cols} missing id/amount"
-        idc, amtc = folded["id"], folded["amount"]
-        rows = con.execute(f'SELECT "{idc}", "{amtc}" FROM "{table}"').fetchall()
+        if "id" not in folded or "amount" not in folded or "code" not in folded:
+            return f"payload columns {cols} missing id/amount/code"
+        idc, amtc, codec = folded["id"], folded["amount"], folded["code"]
+        rows = con.execute(
+            f'SELECT "{idc}", "{amtc}", "{codec}" FROM "{table}"'
+        ).fetchall()
     except Exception as exc:
         return str(exc)
     finally:
         con.close()
-    return sorted((str(i).strip(), _norm_amount(a)) for i, a in rows)
+    return sorted(
+        (str(i).strip(), _norm_amount(a), str(c).strip()) for i, a, c in rows
+    )
 
 
 def _silent_loss(summary: dict[str, Any]) -> tuple[bool, int, int]:
@@ -558,6 +645,13 @@ def exercise_connector(spec: dict[str, str], lab: LabBackends) -> ConnectorResul
         result.dest_error = f"map SSOT failed: {map_err}"
         result.source_error = result.dest_error
         return result
+    cells_ok, cell_err = _cell_transforms_ok()
+    if not cells_ok:
+        result.transform_status = "failed"
+        result.transform_error = cell_err
+        result.dest_status = "failed"
+        result.dest_error = cell_err
+        return result
 
     table = _sid("lab")
     bound = _bind(spec, lab, table=table)
@@ -575,6 +669,8 @@ def exercise_connector(spec: dict[str, str], lab: LabBackends) -> ConnectorResul
         sync_mode="full_refresh_overwrite",
         skip_preflight=False,
         validation_mode="strict",
+        shape_recipe=dict(SHAPE_RECIPE),
+        approved_shape_recipe_hash=_approved_shape_hash(),
     )
     dest_res = None
     try:
@@ -590,12 +686,29 @@ def exercise_connector(spec: dict[str, str], lab: LabBackends) -> ConnectorResul
         result.dest_reconcile = _reconcile_ok(dest_res)
         result.silent_loss = lost
         result.validate_status = "passed" if dest_res.success else "failed"
-        dest_ok = bool(dest_res.success) and not lost and result.dest_reconcile is not False
+        expected_hash = _approved_shape_hash()
+        landed_hash = str(summary.get("shape_recipe_hash") or "")
+        result.shape_recipe_hash = landed_hash
+        if dest_res.success and landed_hash == expected_hash:
+            result.transform_status = "passed"
+        elif dest_res.success:
+            result.transform_status = "failed"
+            result.transform_error = (
+                f"shape hash {landed_hash or '(missing)'} != approved {expected_hash}"
+            )
+        dest_ok = (
+            bool(dest_res.success)
+            and not lost
+            and result.dest_reconcile is not False
+            and result.transform_status == "passed"
+        )
         dest_err = dest_res.error or "dest write failed"
         if dest_res.success and lost:
             dest_err = f"silent loss: rejected={rejected} coerced={coerced}"
         elif dest_res.success and result.dest_reconcile is False:
             dest_err = (dest_res.reconciliation or {}).get("message") or "dest reconcile failed"
+        elif dest_res.success and result.transform_status != "passed":
+            dest_err = result.transform_error or "transform recipe did not run"
         _mark_role(
             result,
             "dest",
@@ -771,10 +884,16 @@ def summarize(rows: list[ConnectorResult]) -> dict[str, Any]:
         ),
         "honesty": {
             "one_hundred_percent": (
-                "this named desktop-lab fixture only — Map SSOT, Validate, "
-                f"dest write, source read, and payload reconcile of {FIXTURE_ROWS} "
-                "rows with zero rejected/coerced on every listed catalog slot"
+                "this named desktop-lab fixture only — Map SSOT, apply_transform "
+                "cell SSOT, ShapeEngine trim+upper on code, Validate, dest write, "
+                f"source read, and shaped payload of {FIXTURE_ROWS} rows "
+                "(1/1000.00/USD, 2/2000.50/EUR) with zero rejected/coerced"
             ),
+            "transform_ssot": {
+                "pre_load": "services.shape_engine.ShapeEngine",
+                "cell": "services.transform_engine.apply_transform",
+                "map": "services.semantic_mapper.map_columns",
+            },
             "eighty": (
                 "80 is catalog slots this lab can bind on a desktop. "
                 "It is not 80 unique engines and not catalog tile count."
