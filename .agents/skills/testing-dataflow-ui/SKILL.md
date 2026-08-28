@@ -725,11 +725,14 @@ A CDC schedule saved without them fails its first beat with `Sync mode contract 
 (`rejected_rows`, `records_transferred: 0`), then parks. That is a fixture mistake, not a product
 bug - do not report it as one.
 
-### `tfid_src` carries a schema-drift blocker; `ttd_orders_ok` does not
-Any schedule reading `tfid_src` parks on `SOURCE_SCHEMA_DRIFT` with the self-contradictory finding
-`ts_plain: TIMESTAMP_NTZ -> TIMESTAMP_NTZ (narrow_type)` (identical old/new type reported as
-breaking) and `approvable: false`, so it can never fire twice. Use `ttd_orders_ok` (5 rows, sum
-`1367.875000`, no temporal columns) for cadence and duplication tests, and keep it pristine.
+### `tfid_src` is no longer a false schema-drift park
+A schedule reading `tfid_src` used to park on `SOURCE_SCHEMA_DRIFT` with
+`ts_plain: TIMESTAMP_NTZ -> TIMESTAMP_NTZ (narrow_type)` — dest MySQL FSP invent,
+not a column anyone changed. The kernel now compares source-vs-source on the
+source engine, and Accept records the finding's shape instead of re-probing.
+`ttd_orders_ok` (5 rows, sum `1367.875000`, no temporal columns) is still the
+cleaner fixture for cadence and duplication tests; keep it pristine. Do **not**
+treat a same-spelling NTZ "narrow" as expected product behavior.
 
 ### A parked schedule freezes its own cadence
 `last_status: "needs_approval"` suppresses further beats, so "it only ran once" is expected for a

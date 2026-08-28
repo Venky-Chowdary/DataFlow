@@ -454,7 +454,10 @@ def _guard_source_schema_drift(sched: Any, request: Any) -> bool:
         current_columns=list(info.get("columns") or current.keys()),
         mappings=list(getattr(request, "mappings", None) or []),
         schema_policy=str(getattr(sched, "schema_policy", "") or "manual_review"),
-        dest_db=str(getattr(request.destination, "format", "") or ""),
+        # Source-vs-source: MySQL FSP 0 must not classify a Snowflake
+        # TIMESTAMP_NTZ against itself as narrow_type.
+        source_db=str(getattr(request.source, "format", "") or ""),
+        dest_db="",
         previous_primary_key=previous_pk,
         current_primary_key=current_pk,
         cursor_fields=[cursor] if cursor else None,
@@ -495,6 +498,11 @@ def _guard_source_schema_drift(sched: Any, request: Any) -> bool:
                 "breaking": list(verdict.breaking or [])[:20],
                 "additive": list(verdict.additive or [])[:20],
                 "source_schema_fingerprint": verdict.fingerprint,
+                # The shape that was compared — Accept records this, it does
+                # not hang a second live introspect on a sleeping warehouse.
+                "current_schema": dict(current),
+                "current_columns": list(info.get("columns") or current.keys())[:200],
+                "current_primary_key": list(current_pk),
             },
         )
     _remember_source_schema(
@@ -1085,6 +1093,11 @@ def _run_due_schedules() -> int:
         logger.debug("Scheduler lock held by another instance; skipping this beat")
         return 0
     try:
+        from services.schedule_approvals import release_same_declaration_source_drift
+
+        # A parked TIMESTAMP_NTZ → TIMESTAMP_NTZ invent is not a decision.
+        # Release it so the cadence can fire; a real narrow stays parked.
+        release_same_declaration_source_drift()
         started = 0
         for sched in due_schedules():
             try:

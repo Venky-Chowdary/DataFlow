@@ -302,3 +302,106 @@ def test_delegating_authority_needs_more_than_permission_to_run_schedules(
         schedules_router._decider(_Req(), authorize=True)
     assert "403" in str(excinfo.value) or "denied" in str(excinfo.value).lower()
     assert sched.id and request["id"]
+
+
+def test_accept_records_finding_schema_without_a_live_probe(client, tmp_path, monkeypatch):
+    """Accept must not hang on Snowflake. The finding already has the shape."""
+    ntz = {"joining_date": "TIMESTAMP_NTZ", "emp_id": "NUMBER"}
+    sched = store.create_schedule({
+        "name": "venky_schedule1",
+        "source_connector_id": "src-sf",
+        "source_table": "EMPLOYEE_EXCELDATA",
+        "dest_connector_id": "dst-mysql",
+        "dest_table": "SUNDAY0816",
+        "interval": "hourly",
+        "mappings": [{"source": c, "target": c} for c in ntz],
+        "source_schema": ntz,
+    })
+    request = build_approval_request(
+        kind="source_drift",
+        code="SOURCE_SCHEMA_DRIFT",
+        finding=(
+            "Source schema changed since the last run in a way this transfer reads: "
+            "joining_date: TIMESTAMP_NTZ → TIMESTAMP_NTZ (narrow_type)"
+        ),
+        corrective_action="Accept the new source shape as the baseline.",
+        binding=binding_from_schedule(sched),
+        evidence={
+            "breaking": [{
+                "kind": "narrow_type",
+                "column": "joining_date",
+                "old_type": "TIMESTAMP_NTZ",
+                "new_type": "TIMESTAMP_NTZ",
+            }],
+            "current_schema": ntz,
+            "current_columns": list(ntz),
+        },
+    )
+    open_approval_request(sched.id, request)
+
+    def _boom(*_a, **_k):
+        raise AssertionError("Accept must not re-probe the warehouse")
+
+    monkeypatch.setattr(
+        "services.schedule_runner.probe_schedule_source_schema",
+        _boom,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "src.routers.schedules_router._probe_source_schema_timed",
+        _boom,
+        raising=False,
+    )
+
+    res = client.post(f"/api/v1/schedules/{sched.id}/accept-source-schema")
+    assert res.status_code == 200, res.text
+    body = res.json()
+    assert body["success"] is True
+    assert body["recorded_from"] == "finding"
+    assert body["approval_closed"] is True
+    reloaded = store.get_schedule(sched.id)
+    assert reloaded is not None
+    assert reloaded.approval_request["status"] == "approved"
+    assert reloaded.last_status != "needs_approval"
+    assert reloaded.source_schema["joining_date"] == "TIMESTAMP_NTZ"
+
+
+def test_same_declaration_park_is_released_for_the_next_beat(client):
+    """The hourly cadence must not stay suppressed after a false NTZ narrow."""
+    from datetime import datetime, timedelta, timezone
+
+    from services.schedule_approvals import release_same_declaration_source_drift
+
+    sched = store.create_schedule({
+        "name": "venky_schedule1",
+        "source_connector_id": "src-sf",
+        "source_table": "EMPLOYEE_EXCELDATA",
+        "dest_connector_id": "dst-mysql",
+        "dest_table": "SUNDAY0816",
+        "interval": "hourly",
+        "enabled": True,
+    })
+    past = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    store.update_schedule(sched.id, {"next_run_at": past, "enabled": True})
+    parked = open_approval_request(
+        sched.id,
+        build_approval_request(
+            kind="source_drift",
+            code="SOURCE_SCHEMA_DRIFT",
+            finding="joining_date: TIMESTAMP_NTZ → TIMESTAMP_NTZ (narrow_type)",
+            corrective_action="Accept the new source shape.",
+            binding=binding_from_schedule(sched),
+            evidence={
+                "breaking": [{
+                    "kind": "narrow_type",
+                    "column": "joining_date",
+                    "old_type": "TIMESTAMP_NTZ",
+                    "new_type": "TIMESTAMP_NTZ",
+                }],
+            },
+        ),
+    )
+    assert parked is not None
+    assert sched.id not in {s.id for s in store.due_schedules()}
+    assert release_same_declaration_source_drift() == 1
+    assert sched.id in {s.id for s in store.due_schedules()}
