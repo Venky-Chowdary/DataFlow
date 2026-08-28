@@ -61,9 +61,11 @@ from services.row_conservation import (
     KIND_OVERWRITE,
     KIND_SCD2,
     KIND_VECTOR,
+    PopulationConservationError,
     account_job,
     account_job_streams,
     account_population,
+    assert_population_conservation_closed,
     conservation_kind,
     dest_count_from_recon,
     hold_outs,
@@ -75,6 +77,123 @@ def test_hold_outs_exclude_coerced_null_rows_that_landed():
     assert hold_outs(rejected_rows=5, coerced_null_rows=2) == 3
     assert hold_outs(rejected_rows=2, coerced_null_rows=2) == 0
     assert hold_outs(rejected_rows=0, coerced_null_rows=3) == 0
+
+
+def test_measured_shortfall_is_silent_loss_not_a_green():
+    job = {
+        "sync_mode": "full_refresh_overwrite",
+        "records_processed": 4,
+        "reconciliation": {
+            "source_rows": 4,
+            "target_rows": 3,
+            "target_checksum": "abc",
+            "dest_count_source": DEST_READBACK,
+            "passed": True,
+        },
+        "destination_summary": {},
+    }
+    with pytest.raises(PopulationConservationError, match="silent loss|unaccounted|neither"):
+        assert_population_conservation_closed(job)
+
+
+def test_unmeasured_dest_is_honest_not_a_fake_green():
+    job = {
+        "sync_mode": "full_refresh_overwrite",
+        "records_processed": 4,
+        "reconciliation": {
+            "source_rows": 4,
+            "target_rows": 4,
+            "phase": "post_write_writer_ack",
+            "coverage": "writer_ack",
+        },
+        "destination_summary": {},
+    }
+    ledger = assert_population_conservation_closed(job)
+    assert ledger.balanced is False or ledger.rows_written_source == DEST_UNMEASURED
+    # Must not raise — unmeasured stays open, never invented closed.
+
+
+def test_strict_mode_refuses_coerced_null_as_corruption():
+    job = {
+        "sync_mode": "full_refresh_overwrite",
+        "records_processed": 2,
+        "coerced_null_rows": 1,
+        "reconciliation": {
+            "source_rows": 2,
+            "target_rows": 2,
+            "target_checksum": "abc",
+            "dest_count_source": DEST_READBACK,
+            "coerced_null_rows": 1,
+            "passed": True,
+        },
+        "destination_summary": {},
+    }
+    with pytest.raises(PopulationConservationError, match="coerced"):
+        assert_population_conservation_closed(job, validation_mode="strict")
+    # Balanced mode surfaces the cell; it is not silent loss of the row.
+    ledger = assert_population_conservation_closed(job, validation_mode="balanced")
+    assert ledger.rows_coerced_null == 1
+
+
+def test_append_delta_balanced_is_not_silent_loss():
+    """Append closes on dest delta, not whole-table COUNT — any dest."""
+    job = {
+        "sync_mode": "full_refresh_append",
+        "records_processed": 10,
+        "reconciliation": {
+            "source_rows": 10,
+            "target_rows": 40,
+            "target_checksum": "abc",
+            "dest_count_source": DEST_READBACK,
+            "target_rows_before": 30,
+            "passed": True,
+        },
+        "destination_summary": {"target_rows_before": 30},
+    }
+    ledger = assert_population_conservation_closed(job)
+    assert ledger.balanced is True
+    assert ledger.dest_delta == 10
+
+
+def test_keyed_dest_shortfall_fails_closed():
+    """Upsert/CDC into a non-empty dest: dest delta short of inserts is loss."""
+    job = {
+        "sync_mode": "upsert",
+        "records_processed": 4,
+        "reconciliation": {
+            "source_rows": 4,
+            "target_rows": 32,
+            "target_checksum": "abc",
+            "dest_count_source": DEST_READBACK,
+            "target_rows_before": 30,
+            "keyed_census": {"unique_batch_keys": 4, "dest_preexisting": 1},
+            "passed": True,
+        },
+        "destination_summary": {
+            "target_rows_before": 30,
+            "keyed_census": {"unique_batch_keys": 4, "dest_preexisting": 1},
+        },
+    }
+    with pytest.raises(PopulationConservationError, match="silent loss|unaccounted|neither"):
+        assert_population_conservation_closed(job)
+
+
+def test_file_export_writer_ack_stays_honestly_open():
+    """CSV/object dests without an artifact COUNT do not invent a closed ledger."""
+    job = {
+        "sync_mode": "full_refresh_overwrite",
+        "records_processed": 4,
+        "reconciliation": {
+            "source_rows": 4,
+            "target_rows": 4,
+            "skipped_readback": True,
+            "phase": "post_write_writer_ack",
+            "coverage": "writer_ack",
+        },
+        "destination_summary": {},
+    }
+    ledger = assert_population_conservation_closed(job)
+    assert ledger.balanced is False or ledger.rows_written_source == DEST_UNMEASURED
 
 
 def test_writer_ack_phase_without_dest_digest_is_not_a_dest_count():

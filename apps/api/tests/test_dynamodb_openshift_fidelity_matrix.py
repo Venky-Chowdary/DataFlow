@@ -186,6 +186,9 @@ def test_dynamodb_types_land_on_openshift_shaped_postgres():
         assert result.success is True, result.error
         assert result.records_transferred == 2
         assert result.reconciliation.get("passed") is True
+        accounting = result.row_accounting or {}
+        if accounting.get("rows_written_source") not in ("", "unmeasured", None):
+            assert accounting.get("balanced") is True, accounting
 
     import psycopg2
 
