@@ -15,6 +15,7 @@ import {
   EVIDENCE_AS_OF,
   MARKETING_STACK,
   PROVEN_EVIDENCE,
+  catalogHonestyLead,
 } from "../../lib/provenEvidence";
 import type { PublicRoute } from "../../lib/publicNavigation";
 
@@ -348,14 +349,15 @@ export function DocsPortal({ onNavigate, onGetStarted }: DocsPortalProps) {
             </li>
           ))}
         </ul>
-        <p className="docs-space-evidence-lead">
-          Warehouses, object stores, and applications share the same map, gates, and reconcile
-          report as the database engines above.
-        </p>
+      </section>
+
+      <section className="docs-space-algorithm" aria-label="Catalog families">
+        <h2>Catalog families — tiles are not transfer-live</h2>
+        <p className="docs-space-evidence-lead">{catalogHonestyLead()}</p>
         <ul className="docs-space-evidence-list">
           {MARKETING_STACK.map((row) => (
             <li key={row.family}>
-              <strong>{row.family}</strong>
+              <strong>{row.family} · {row.badge}</strong>
               <span>{row.items} — {row.note}</span>
             </li>
           ))}

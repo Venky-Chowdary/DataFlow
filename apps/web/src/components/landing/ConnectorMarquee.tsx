@@ -1,15 +1,13 @@
 import { ConnectorIcon } from "../../app/brand-icons";
+import { catalogHonestyLead } from "../../lib/provenEvidence";
 
+/** Certified duplex logos only — Planned brands (SAP, Workday, Netsuite) stay off this band. */
 const ROW_A = [
-  "postgresql", "snowflake", "mysql", "mongodb", "bigquery", "redshift",
-  "amazon_s3", "json", "csv___tsv", "dynamodb", "elasticsearch", "redis",
-  "oracle", "sql_server", "salesforce", "stripe",
+  "postgresql", "mysql", "mongodb", "redis", "kafka", "salesforce", "hubspot", "json",
 ];
 
 const ROW_B = [
-  "hubspot", "shopify", "kafka", "parquet", "excel", "azure_blob",
-  "google_cloud_storage", "teradata", "db2", "sap", "netsuite", "workday",
-  "snowflake", "postgresql", "bigquery", "mysql",
+  "postgresql", "mongodb", "kafka", "salesforce", "hubspot", "mysql", "redis", "json",
 ];
 
 function MarqueeRow({ ids, reverse }: { ids: string[]; reverse?: boolean }) {
@@ -29,8 +27,8 @@ function MarqueeRow({ ids, reverse }: { ids: string[]; reverse?: boolean }) {
 
 export function ConnectorMarquee() {
   return (
-    <section className="lp-marquee-band" aria-label="Supported integrations">
-      <p className="lp-marquee-eyebrow">Connector catalog · transfer-live drivers labeled in Studio</p>
+    <section className="lp-marquee-band" aria-label="Certified transfer-live connectors">
+      <p className="lp-marquee-eyebrow">{catalogHonestyLead()}</p>
       <MarqueeRow ids={ROW_A} />
       <MarqueeRow ids={ROW_B} reverse />
     </section>

@@ -178,7 +178,7 @@ export const PUBLIC_PAGE_META: Record<PublicRoute, PublicPageMeta> = {
   },
   "product-query": {
     title: "Query Playground",
-    description: "Ad-hoc SQL and document queries against live connectors with export paths.",
+    description: "Ad-hoc SQL and document queries against saved connectors with export paths.",
     keywords: "Query Playground, SQL against connectors, MongoDB query, data export",
     canonicalPath: "#/product/query",
   },

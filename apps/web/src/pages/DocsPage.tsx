@@ -448,8 +448,8 @@ export function DocsPage() {
     window.scrollTo({ top: 0, behavior: "smooth" });
   };
 
-  const transferLive = stats?.unique_drivers ?? stats?.transfer_live ?? stats?.live ?? 130;
-  const total = stats?.total ?? 734;
+  const transferLive = stats?.unique_drivers ?? stats?.transfer_live ?? stats?.live;
+  const total = stats?.catalog_tiles ?? stats?.total;
 
   return (
     <PageShell
@@ -483,11 +483,13 @@ export function DocsPage() {
                 transfer-live driver, so it never gets the dominant type. */}
             <StatCard
               label="Transfer-ready drivers"
-              value={statsError ? "—" : transferLive.toLocaleString()}
+              value={statsError || transferLive == null ? "—" : transferLive.toLocaleString()}
               sub={
                 statsError
                   ? "Catalog offline"
-                  : `of ${total.toLocaleString()} catalog tiles — tiles are not transfer-live`
+                  : transferLive == null || total == null
+                    ? "Loading catalog honesty…"
+                    : `of ${total.toLocaleString()} catalog tiles — tiles are not transfer-live`
               }
               icon="database"
               tone="blue"
