@@ -461,6 +461,11 @@ def test_certificate_names_views_and_triggers_to_recreate_without_blocking() -> 
                     "name": "trg_audit (after insert)",
                     "action": "recreate_before_cutover",
                 },
+                {
+                    "kind": "routine",
+                    "name": "sp_refresh_orders",
+                    "action": "recreate_before_cutover",
+                },
             ],
         }
     }
@@ -469,7 +474,12 @@ def test_certificate_names_views_and_triggers_to_recreate_without_blocking() -> 
     assert "Recreate before cutover" in md
     assert "v_orders_open" in md
     assert "trg_audit" in md
-    assert not any("view" in b.lower() or "trigger" in b.lower() for b in cert["verdict"]["blockers"])
+    assert "sp_refresh_orders" in md
+    assert not any(
+        token in b.lower()
+        for b in cert["verdict"]["blockers"]
+        for token in ("view", "trigger", "routine", "procedure")
+    )
 
 
 def test_certificate_page_of_a_plain_run_states_no_removals() -> None:

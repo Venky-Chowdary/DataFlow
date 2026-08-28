@@ -633,7 +633,11 @@ def render_certificate_markdown(cert: dict[str, Any]) -> str:
                         for name in info.get("missing") or []:
                             recreate.append(
                                 {
-                                    "kind": "view" if aspect == "views" else "trigger",
+                                    "kind": {
+                                        "views": "view",
+                                        "triggers": "trigger",
+                                        "routines": "routine",
+                                    }.get(aspect, aspect),
                                     "name": name,
                                     "action": "recreate_before_cutover",
                                 }
