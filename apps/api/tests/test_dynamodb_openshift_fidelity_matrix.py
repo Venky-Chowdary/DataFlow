@@ -20,12 +20,8 @@ _API_ROOT = Path(__file__).resolve().parents[1]
 if str(_API_ROOT) not in sys.path:
     sys.path.insert(0, str(_API_ROOT))
 
-try:
-    import moto  # noqa: F401
-except ImportError as exc:
-    pytest.skip(f"requires moto: {exc}", allow_module_level=True)
-
-import boto3  # noqa: E402
+boto3 = pytest.importorskip("boto3")
+moto = pytest.importorskip("moto")
 
 from connectors.dynamodb_reader import read_table_batch  # noqa: E402
 from src.transfer.engine import UniversalTransferEngine  # noqa: E402
@@ -241,7 +237,7 @@ def test_consistent_read_flag_is_sent_to_scan(monkeypatch):
             return {"Items": [{"pk": {"S": "1"}}], "LastEvaluatedKey": None}
 
     monkeypatch.setattr(
-        "connectors.aws_common.boto3_client", lambda *a, **k: _Fake()
+        "connectors.dynamodb_reader.boto3_client", lambda *a, **k: _Fake()
     )
     batch, _ = read_table_batch(cfg=CFG, table="t", limit=10)
     assert captured.get("ConsistentRead") is True
