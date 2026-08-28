@@ -19,6 +19,10 @@ from __future__ import annotations
 
 import json
 import os
+
+# Desktop lab / pytest must not block 5s per job on a missing Mongo.
+os.environ.setdefault("DATAFLOW_JOB_STORE", "memory")
+
 import tempfile
 import uuid
 from dataclasses import dataclass
@@ -81,34 +85,42 @@ DESKTOP_LAB_CONNECTORS: tuple[dict[str, str], ...] = (
     {"id": "postgresql", "role": "unique_engine", "family": "postgresql"},
     {"id": "mysql", "role": "unique_engine", "family": "mysql"},
     # PostgreSQL hosted twins — same live PG wire
-    {"id": "openshift", "role": "hosted_twin", "family": "postgresql"},
-    {"id": "cnpg", "role": "hosted_twin", "family": "postgresql"},
-    {"id": "crunchy_postgres", "role": "hosted_twin", "family": "postgresql"},
-    {"id": "crunchy_pgo", "role": "hosted_twin", "family": "postgresql"},
     {"id": "postgresql_neon", "role": "hosted_twin", "family": "postgresql"},
     {"id": "postgresql_supabase", "role": "hosted_twin", "family": "postgresql"},
     {"id": "postgresql_rds", "role": "hosted_twin", "family": "postgresql"},
     {"id": "postgresql_cloud_sql", "role": "hosted_twin", "family": "postgresql"},
     {"id": "postgresql_azure", "role": "hosted_twin", "family": "postgresql"},
-    {"id": "okd", "role": "hosted_twin", "family": "postgresql"},
-    {"id": "cloudnativepg", "role": "hosted_twin", "family": "postgresql"},
-    {"id": "openshift_postgresql", "role": "hosted_twin", "family": "postgresql"},
+    {"id": "timescaledb", "role": "hosted_twin", "family": "postgresql"},
+    {"id": "cockroachdb", "role": "hosted_twin", "family": "postgresql"},
+    {"id": "neon", "role": "hosted_twin", "family": "postgresql"},
+    {"id": "supabase", "role": "hosted_twin", "family": "postgresql"},
+    {"id": "amazon_rds_postgresql", "role": "hosted_twin", "family": "postgresql"},
+    {"id": "amazon_aurora_postgresql", "role": "hosted_twin", "family": "postgresql"},
+    {"id": "crunchy_postgres", "role": "hosted_twin", "family": "postgresql"},
     # MySQL twins
     {"id": "mysql_rds", "role": "hosted_twin", "family": "mysql"},
     {"id": "mysql_cloud_sql", "role": "hosted_twin", "family": "mysql"},
     {"id": "mysql_azure", "role": "hosted_twin", "family": "mysql"},
     {"id": "mariadb", "role": "hosted_twin", "family": "mysql"},
+    {"id": "planetscale", "role": "hosted_twin", "family": "mysql"},
+    {"id": "percona_mysql", "role": "hosted_twin", "family": "mysql"},
+    {"id": "amazon_rds_mysql", "role": "hosted_twin", "family": "mysql"},
+    {"id": "amazon_aurora_mysql", "role": "hosted_twin", "family": "mysql"},
     # Object / NoSQL / lake — unique + twins
     {"id": "dynamodb", "role": "unique_engine", "family": "dynamodb"},
     {"id": "amazon_dynamodb", "role": "hosted_twin", "family": "dynamodb"},
     {"id": "s3", "role": "unique_engine", "family": "s3"},
     {"id": "amazon_s3", "role": "hosted_twin", "family": "s3"},
     {"id": "s3_us_east_1", "role": "hosted_twin", "family": "s3"},
+    {"id": "s3_eu_west_1", "role": "hosted_twin", "family": "s3"},
     {"id": "minio", "role": "hosted_twin", "family": "s3"},
-    {"id": "iceberg", "role": "unique_engine", "family": "iceberg"},
-    {"id": "apache_iceberg", "role": "hosted_twin", "family": "iceberg"},
-    {"id": "sftp", "role": "unique_engine", "family": "sftp"},
+    {"id": "snowflake_aws", "role": "hosted_twin", "family": "snowflake"},
+    {"id": "csv___tsv", "role": "format_alias", "family": "file"},
     {"id": "snowflake", "role": "unique_engine", "family": "snowflake"},
+    {"id": "snowflake_standard", "role": "hosted_twin", "family": "snowflake"},
+    {"id": "snowflake_enterprise", "role": "hosted_twin", "family": "snowflake"},
+    {"id": "motherduck", "role": "hosted_twin", "family": "generic_sql"},
+    {"id": "amazon_emr", "role": "hosted_twin", "family": "generic_sql"},
 )
 
 
@@ -190,8 +202,9 @@ def _start_backends(root: Path) -> LabBackends:
             region_name="us-east-1",
         )
         client.create_bucket(Bucket=lab.bucket)
-    except Exception:
+    except Exception as exc:
         lab.moto_url = ""
+        lab.moto_error = str(exc)  # type: ignore[attr-defined]
     try:
         from tests.sftp_test_server import start_sftp_server
 
@@ -224,7 +237,7 @@ def _bind(
         path = lab.root / f"{table}.db"
         return EndpointConfig(
             kind="database",
-            format=catalog_id,
+            format=driver,
             database=str(path),
             connection_string=f"sqlite:///{path}",
             table=table,
@@ -246,8 +259,9 @@ def _bind(
         path = lab.root / f"{table}.duckdb"
         return EndpointConfig(
             kind="database",
-            format="duckdb",
+            format="generic_sql",
             database=str(path),
+            connection_string=f"duckdb:///{path}",
             table=table,
         )
     if family == "postgresql":
@@ -255,7 +269,7 @@ def _bind(
             return "PostgreSQL not reachable on 127.0.0.1:5432"
         return EndpointConfig(
             kind="database",
-            format=catalog_id,
+            format=driver,
             table=table,
             **PG,
         )
@@ -264,7 +278,7 @@ def _bind(
             return "MySQL not reachable on 127.0.0.1:3306"
         return EndpointConfig(
             kind="database",
-            format=catalog_id,
+            format=driver,
             table=table,
             **MYSQL,
         )
@@ -274,7 +288,7 @@ def _bind(
         parsed = urlparse(lab.moto_url)
         return EndpointConfig(
             kind="database",
-            format=catalog_id,
+            format=driver,
             host=parsed.hostname or "127.0.0.1",
             port=int(parsed.port or 0),
             database="test",
@@ -288,7 +302,7 @@ def _bind(
         parsed = urlparse(lab.moto_url)
         return EndpointConfig(
             kind="database",
-            format=catalog_id,
+            format=driver,
             host=parsed.hostname or "127.0.0.1",
             port=int(parsed.port or 0),
             database=lab.bucket,
@@ -304,8 +318,9 @@ def _bind(
         warehouse.mkdir(parents=True, exist_ok=True)
         return EndpointConfig(
             kind="database",
-            format=catalog_id,
+            format=driver,
             database=str(warehouse),
+            connection_string=str(warehouse),
             schema="default",
             table=table,
         )
@@ -316,7 +331,7 @@ def _bind(
         cfg = lab.sftp.endpoint_config(remote)
         return EndpointConfig(
             kind="database",
-            format=catalog_id,
+            format=driver,
             host=cfg["host"],
             port=cfg["port"],
             username=cfg["username"],
@@ -332,7 +347,7 @@ def _bind(
             return "fakesnow package not installed"
         return EndpointConfig(
             kind="database",
-            format=catalog_id,
+            format=driver,
             host="localhost",
             port=443,
             database="dataflow",
@@ -412,11 +427,6 @@ def exercise_connector(spec: dict[str, str], lab: LabBackends) -> ConnectorResul
         result.source_error = bound
         return result
 
-    if spec["family"] == "file":
-        out = lab.root / "exports" / f"{table}.{driver}"
-        out.parent.mkdir(parents=True, exist_ok=True)
-        bound.output_path = str(out)
-
     dest_req = TransferRequest(
         source=EndpointConfig(kind="file", format="csv"),
         destination=bound,
@@ -444,9 +454,9 @@ def exercise_connector(spec: dict[str, str], lab: LabBackends) -> ConnectorResul
     # Source role: read the object we just wrote, or parse the file format.
     sqlite_path = lab.root / f"from_{table}.db"
     if spec["family"] == "file" and result.dest_status != "passed":
-        # Still prove the source parser with the canonical CSV-shaped payload
-        # when the export path failed (text formats only).
-        if driver in {"csv", "tsv", "json", "jsonl", "ndjson", "xml"}:
+        # CSV/TSV parsers can still prove source from the fixture. Other
+        # formats must not be fed CSV bytes (that is corruption, not a skip).
+        if driver in {"csv", "tsv"}:
             try:
                 src_res = _run(_file_source_request(driver, sqlite_path, f"from_{table}"))
                 if src_res.success:
