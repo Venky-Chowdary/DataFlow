@@ -1,11 +1,13 @@
 """Population-scoped FK orphan probe — the only path to RI ``proven``.
 
 Sample Validate never sets ``population_proof``. This module runs full-table
-anti-joins (COUNT + examples) for single-column FKs on SQL sources.
+MATCH SIMPLE anti-joins (COUNT + examples) for single-column and composite
+FKs on SQL sources. The join algorithm is ``services.fk_tuple_scan`` — the
+same owner as destination post-write RI.
 
 Honesty:
 - Opt-in only (expensive). Never invent proven when the scan did not run.
-- Composite FKs → incomplete (``population_orphan_count=None`` ⇒ not proven).
+- Column-arity mismatch or failed scan → incomplete (``population_orphan_count=None``).
 - Partial / failed scan → fail-closed finding; never silent soft-pass.
 """
 
@@ -38,50 +40,25 @@ def _sql_population_orphan_scan(
     cfg: dict[str, Any],
     *,
     child_table: str,
-    child_column: str,
     parent_table: str,
-    parent_column: str,
+    child_column: str = "",
+    parent_column: str = "",
+    child_columns: list[str] | None = None,
+    parent_columns: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Full-table orphan COUNT + example values via LEFT JOIN anti-join."""
-    import sqlalchemy as sa
+    """Full-table orphan COUNT + examples via MATCH SIMPLE anti-join."""
+    from services.fk_tuple_scan import sql_population_orphan_scan
 
-    from connectors.generic_sql import _engine
-
-    from connectors.sql_identifiers import split_qualified_table
-
-    schema = (cfg.get("schema") or "").strip() or None
-    child_schema, child_name = split_qualified_table(child_table, schema)
-    parent_schema, parent_name = split_qualified_table(parent_table, schema)
-    if not child_name or not parent_name or not child_column or not parent_column:
-        raise ValueError("incomplete table/column for population orphan scan")
-
-    child = sa.table(child_name, schema=child_schema)
-    parent = sa.table(parent_name, schema=parent_schema)
-    c_col = sa.column(child_column)
-    p_col = sa.column(parent_column)
-
-    orphan_pred = sa.and_(c_col.is_not(None), p_col.is_(None))
-    count_stmt = (
-        sa.select(sa.func.count())
-        .select_from(child.outerjoin(parent, c_col == p_col))
-        .where(orphan_pred)
+    kids = list(child_columns or ([child_column] if child_column else []))
+    parents = list(parent_columns or ([parent_column] if parent_column else []))
+    return sql_population_orphan_scan(
+        cfg,
+        child_table=child_table,
+        parent_table=parent_table,
+        child_columns=kids,
+        parent_columns=parents,
+        max_examples=_MAX_ORPHAN_EXAMPLES,
     )
-    example_stmt = (
-        sa.select(c_col)
-        .select_from(child.outerjoin(parent, c_col == p_col))
-        .where(orphan_pred)
-        .limit(_MAX_ORPHAN_EXAMPLES)
-    )
-
-    engine = _engine(cfg)
-    with engine.connect() as conn:
-        orphan_count = int(conn.execute(count_stmt).scalar() or 0)
-        examples = [
-            r[0]
-            for r in conn.execute(example_stmt).fetchall()
-            if r and r[0] is not None
-        ]
-    return {"orphan_count": orphan_count, "examples": examples}
 
 
 def _unavailable_finding(
@@ -123,7 +100,7 @@ def probe_population_fk_orphans(
     validation_mode: str = "strict",
     fk_risk_acknowledged: bool = False,
 ) -> dict[str, Any]:
-    """Full-table FK orphan scan for single-column FKs.
+    """Full-table FK orphan scan for single-column and composite FKs.
 
     ``population_proof`` is True only when every FK was fully scanned and
     ``orphan_count == 0``. Incomplete scans set ``complete=False`` and leave
@@ -271,14 +248,15 @@ def probe_population_fk_orphans(
                 }
             )
             continue
-        if len(cols) != 1 or len(ref_cols) != 1:
+        if len(cols) != len(ref_cols):
             complete = False
             checks.append(
                 {
                     "skipped": True,
-                    "reason": "composite_fk_not_probed",
+                    "reason": "fk_column_pairing_incomplete",
                     "columns": cols,
                     "referenced_table": ref_table,
+                    "referenced_columns": ref_cols,
                     "coverage": "population_orphan_probe",
                     "population_proof": False,
                 }
@@ -293,29 +271,31 @@ def probe_population_fk_orphans(
                     "coverage": "population_orphan_probe",
                     "population_proof": False,
                     "message": (
-                        f"Composite FK {cols} → {ref_table}{ref_cols} was not scanned "
-                        "(tuple anti-join not implemented). Coverage=population_orphan_probe "
-                        "incomplete — RI not proven."
+                        f"FK {cols} → {ref_table}{ref_cols} has no usable column pairing "
+                        f"({len(cols)} child vs {len(ref_cols)} parent). "
+                        "Coverage=population_orphan_probe incomplete — RI not proven."
                     ),
                 }
             )
             continue
 
-        child_col = _resolve_source_column(maps, cols[0])
-        parent_col = ref_cols[0]
+        child_cols = [_resolve_source_column(maps, c) or c for c in cols]
+        parent_cols = list(ref_cols)
+        label = "+".join(child_cols)
+        parent_label = "+".join(parent_cols)
         try:
             result = _sql_population_orphan_scan(
                 cfg,
                 child_table=child,
-                child_column=child_col,
                 parent_table=ref_table,
-                parent_column=parent_col,
+                child_columns=child_cols,
+                parent_columns=parent_cols,
             )
         except Exception as exc:
             logger.warning(
                 "Population orphan scan failed for %s.%s: %s",
                 child,
-                child_col,
+                label,
                 exc,
                 exc_info=exc,
             )
@@ -324,19 +304,19 @@ def probe_population_fk_orphans(
                 {
                     "code": "population_orphan_probe_unavailable",
                     "severity": sev,
-                    "columns": [child_col],
+                    "columns": child_cols,
                     "referenced_table": ref_table,
                     "coverage": "population_orphan_probe",
                     "population_proof": False,
                     "message": (
-                        f"Population orphan scan failed for {child}.{child_col} → "
-                        f"{ref_table}.{parent_col}: {exc}. RI not proven."
+                        f"Population orphan scan failed for {child}.({label}) → "
+                        f"{ref_table}.({parent_label}): {exc}. RI not proven."
                     ),
                 }
             )
             checks.append(
                 {
-                    "column": child_col,
+                    "columns": child_cols,
                     "referenced_table": ref_table,
                     "error": str(exc),
                     "coverage": "population_orphan_probe",
@@ -350,13 +330,16 @@ def probe_population_fk_orphans(
         total_orphans += orphan_count
         checks.append(
             {
-                "column": child_col,
+                "column": child_cols[0] if len(child_cols) == 1 else label,
+                "columns": child_cols,
                 "referenced_table": ref_table,
-                "referenced_column": parent_col,
+                "referenced_column": parent_cols[0] if len(parent_cols) == 1 else parent_label,
+                "referenced_columns": parent_cols,
                 "orphan_count": orphan_count,
                 "examples": [_fk_display(v) for v in examples[:5]],
                 "coverage": "population_orphan_probe",
                 "population_proof": orphan_count == 0,
+                "match_simple": True,
             }
         )
         if orphan_count > 0:
@@ -367,15 +350,15 @@ def probe_population_fk_orphans(
                 {
                     "code": "fk_orphan_in_population",
                     "severity": sev,
-                    "columns": [child_col],
+                    "columns": child_cols,
                     "referenced_table": ref_table,
-                    "referenced_columns": [parent_col],
+                    "referenced_columns": parent_cols,
                     "orphan_count": orphan_count,
                     "coverage": "population_orphan_probe",
                     "population_proof": False,
                     "message": (
-                        f"Population orphan scan: {orphan_count} row(s) in {child}.{child_col} "
-                        f"missing from {ref_table}.{parent_col}"
+                        f"Population orphan scan: {orphan_count} row(s) in {child}.({label}) "
+                        f"missing from {ref_table}.({parent_label})"
                         + (f" (examples: {ex})" if ex else "")
                         + ". Coverage=population_orphan_probe — RI not proven."
                     ),

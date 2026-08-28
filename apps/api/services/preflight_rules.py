@@ -712,8 +712,9 @@ ISSUE_CATALOG: list[dict[str, Any]] = [
         ],
         "gate": "constraint_fk",
         "why": (
-            "Population orphan scan found missing parents or could not complete "
-            "(e.g. composite FK). Referential integrity is not proven."
+            "Population orphan scan found missing parents or could not complete. "
+            "Composite FKs are scanned as MATCH SIMPLE tuples — a pairing mismatch "
+            "or failed scan still leaves referential integrity unproven."
         ),
         "fix": (
             "Fix orphan rows at source, complete a full population scan for every "
@@ -721,6 +722,7 @@ ISSUE_CATALOG: list[dict[str, Any]] = [
         ),
         "examples": [
             "Population orphan scan: 12 rows in orders.customer_id missing from customers.id.",
+            "Population orphan scan: 1 row(s) in child.(tenant_id+order_no) missing from orders.(tenant_id+order_no).",
         ],
         "suggested_actions": [
             {
