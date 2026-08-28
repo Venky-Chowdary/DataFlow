@@ -5759,6 +5759,15 @@ th.df2-type-string .df2-type-badge {
   background: #ffffff;
 }
 
+.df2-theater-v3-sla-card.is-warn {
+  border-color: #f0d3a8;
+  background: #fffbeb;
+}
+
+.df2-theater-v3-sla-card.is-warn strong {
+  color: #b45309;
+}
+
 .df2-theater-v3-sla-card span {
   font-size: 10px;
   font-weight: 700;
