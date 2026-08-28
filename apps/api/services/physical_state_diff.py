@@ -54,7 +54,7 @@ ASPECTS: tuple[str, ...] = (
 # are dialect-specific and are not migrated. "Not carried" is the expected
 # outcome of a cross-engine move — the certificate must *name* the objects
 # so cutover recreates them, never pretend they were absent on the source.
-ADVISORY_ASPECTS: tuple[str, ...] = ("triggers", "views")
+ADVISORY_ASPECTS: tuple[str, ...] = ("triggers", "views", "routines")
 
 _DIALECT_ALIASES = {
     "postgres": "postgresql",
@@ -150,6 +150,61 @@ _VIEW_SQL: dict[str, str] = {
     ),
 }
 
+# Procedures / functions that depend on the transferred table. Name only —
+# body SQL is never compared and never emitted. Trigger functions are excluded
+# so the trigger already listed under ``triggers`` is not double-counted.
+#
+# PostgreSQL SQL-language functions record ``pg_depend``; PL/pgSQL usually
+# does not. Body identifier match (same algorithm as MySQL / SQLite views)
+# is therefore the primary scan; ``pg_depend`` is a second source so a
+# C-language or internal function that the catalog links still appears.
+_ROUTINE_SQL: dict[str, str] = {
+    "postgresql": (
+        "SELECT p.proname, p.prosrc "
+        "FROM pg_proc p "
+        "JOIN pg_namespace pn ON pn.oid = p.pronamespace "
+        "WHERE p.prorettype <> 'trigger'::regtype "
+        "AND p.prokind IN ('f', 'p') "
+        "AND (:s = '' OR lower(pn.nspname) = lower(:s))"
+    ),
+    "mysql": (
+        "SELECT routine_name, routine_definition, routine_type "
+        "FROM information_schema.routines "
+        "WHERE lower(routine_schema) = lower(IFNULL(NULLIF(:s, ''), DATABASE())) "
+        "AND routine_type IN ('PROCEDURE', 'FUNCTION')"
+    ),
+    "mssql": (
+        "SELECT DISTINCT o.name "
+        "FROM sys.sql_expression_dependencies d "
+        "JOIN sys.objects o ON o.object_id = d.referencing_id "
+        "WHERE o.type IN ('P', 'FN', 'IF', 'TF') "
+        "AND lower(OBJECT_NAME(d.referenced_id)) = lower(:t) "
+        "AND (:s = '' OR lower(OBJECT_SCHEMA_NAME(d.referenced_id)) = lower(:s))"
+    ),
+    "oracle": (
+        "SELECT DISTINCT name FROM all_dependencies "
+        "WHERE type IN ('PROCEDURE', 'FUNCTION', 'PACKAGE', 'PACKAGE BODY') "
+        "AND referenced_type = 'TABLE' "
+        "AND upper(referenced_name) = upper(:t) "
+        "AND (:s = '' OR upper(referenced_owner) = upper(:s))"
+    ),
+}
+
+_ROUTINE_DEPEND_SQL: dict[str, str] = {
+    "postgresql": (
+        "SELECT DISTINCT p.proname "
+        "FROM pg_proc p "
+        "JOIN pg_depend d ON d.classid = 'pg_proc'::regclass AND d.objid = p.oid "
+        "JOIN pg_class t ON t.oid = d.refobjid "
+        "JOIN pg_namespace n ON n.oid = t.relnamespace "
+        "WHERE t.relkind IN ('r', 'p', 'f') "
+        "AND lower(t.relname) = lower(:t) "
+        "AND (:s = '' OR lower(n.nspname) = lower(:s)) "
+        "AND p.prorettype <> 'trigger'::regtype "
+        "AND p.prokind IN ('f', 'p')"
+    ),
+}
+
 
 _CHECK_SQL: dict[str, str] = {
     "mssql": (
@@ -176,6 +231,7 @@ class PhysicalState:
     check_constraints: frozenset[str] = frozenset()
     triggers: frozenset[tuple[str, ...]] = frozenset()
     views: frozenset[str] = frozenset()
+    routines: frozenset[str] = frozenset()
     errors: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
@@ -192,6 +248,7 @@ class PhysicalState:
             "check_constraints": sorted(self.check_constraints),
             "triggers": sorted(_render_trigger(t) for t in self.triggers),
             "views": sorted(self.views),
+            "routines": sorted(self.routines),
             "errors": list(self.errors),
         }
 
@@ -293,6 +350,9 @@ def read_physical_state(
         views = collector.run(
             "views", lambda: _read_dependent_views(conn, db_type, name, schema)
         )
+        routines = collector.run(
+            "routines", lambda: _read_dependent_routines(conn, db_type, name, schema)
+        )
 
     not_null: set[str] = set()
     defaults: set[str] = set()
@@ -338,6 +398,7 @@ def read_physical_state(
         ),
         triggers=frozenset(triggers or ()),
         views=frozenset(views or ()),
+        routines=frozenset(routines or ()),
         errors=tuple(collector.errors),
     )
 
@@ -570,6 +631,46 @@ def _read_dependent_views(
     return names
 
 
+def _read_dependent_routines(
+    conn: Any, db_type: str, table: str, schema: str
+) -> list[str]:
+    """Procedure / function names that depend on ``table``. Body SQL is not compared.
+
+    SQLite has no stored routines — an empty list is measured absence, not
+    an unreadable catalog.
+    """
+    dialect = _catalog_dialect(db_type)
+    if dialect == "sqlite":
+        return []
+    sql = _ROUTINE_SQL.get(dialect)
+    if not sql:
+        raise NotImplementedError(f"no routine catalog query for {db_type}")
+    params = {"t": table, "s": schema or ""}
+    rows = conn.execute(sa.text(sql), params).fetchall()
+    names: list[str] = []
+    seen: set[str] = set()
+    body_match = dialect in {"mysql", "postgresql"}
+    for row in rows:
+        if body_match:
+            name, definition = row[0], row[1] if len(row) > 1 else ""
+            if not _sqlite_view_depends(str(definition or ""), table):
+                continue
+        else:
+            name = row[0]
+        folded = _fold(name)
+        if folded and folded not in seen:
+            seen.add(folded)
+            names.append(folded)
+    depend_sql = _ROUTINE_DEPEND_SQL.get(dialect)
+    if depend_sql:
+        for row in conn.execute(sa.text(depend_sql), params).fetchall():
+            folded = _fold(row[0])
+            if folded and folded not in seen:
+                seen.add(folded)
+                names.append(folded)
+    return names
+
+
 def _unique_constraints(inspector: Any, name: str, args: dict[str, Any]) -> list[dict]:
     """Unique constraints, falling back to unique indexes.
 
@@ -718,6 +819,15 @@ def compare_physical_state(
                 "Recreate them on the destination before cutover."
             ),
         },
+        "routines": {
+            **_diff_sets(source.routines, destination.routines),
+            "advisory": True,
+            "note": (
+                "Stored procedures and functions that depend on this table are "
+                "not migrated. Name presence only — body SQL is not compared. "
+                "Recreate them on the destination before cutover."
+            ),
+        },
     }
     # A partial read cannot certify the aspects it failed on.
     unreadable = sorted(
@@ -781,7 +891,11 @@ def _cutover_recreate(advisory: dict[str, Any]) -> list[dict[str, str]]:
     for aspect, info in advisory.items():
         if not isinstance(info, dict) or info.get("status") == "carried":
             continue
-        kind = "view" if aspect == "views" else "trigger" if aspect == "triggers" else aspect
+        kind = {
+            "views": "view",
+            "triggers": "trigger",
+            "routines": "routine",
+        }.get(aspect, aspect)
         for name in info.get("missing") or []:
             items.append(
                 {
