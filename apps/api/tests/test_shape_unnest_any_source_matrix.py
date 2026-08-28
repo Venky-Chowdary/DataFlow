@@ -38,7 +38,7 @@ pytestmark = pytest.mark.timeout(300)
 
 ARTIFACT = Path("/opt/cursor/artifacts/transform_unnest_any_source_results.json")
 
-HEADERS = ["order_id", "customer", "line_items"]
+HEADERS = ["order_no", "customer", "line_items"]
 ROWS = [
     ["1", "ada", '[{"sku":"A","qty":2},{"sku":"B","qty":1}]'],
     ["2", "grace", '[{"sku":"C","qty":4}]'],
@@ -49,16 +49,17 @@ UNNEST_RECIPE = {
         {
             "op": "unnest_json",
             "column": "line_items",
-            "options": {"to": "item", "index_to": "item_idx", "keep_parent": True},
+            "options": {"to": "item", "index_to": "item_idx", "keep_parent": False},
         },
         {
             "op": "flatten_json",
             "column": "item",
             "options": {"keys": ["sku", "qty"]},
         },
+        {"op": "drop_column", "column": "item"},
         {
             "op": "hash_identity",
-            "options": {"columns": ["order_id", "sku"], "to": "_df_row_key"},
+            "options": {"columns": ["order_no", "sku"], "to": "_df_row_key"},
         },
     ]
 }
@@ -83,10 +84,8 @@ def _mappings() -> list[dict[str, object]]:
             "confidence": 0.99,
         }
         for name, target_type in (
-            ("order_id", "TEXT"),
+            ("order_no", "TEXT"),
             ("customer", "TEXT"),
-            ("line_items", "TEXT"),
-            ("item", "TEXT"),
             ("item_idx", "INTEGER"),
             ("sku", "TEXT"),
             ("qty", "INTEGER"),
@@ -99,6 +98,14 @@ def _file_bytes(fmt: str) -> tuple[bytes, str]:
     content, _mime = convert_rows(HEADERS, ROWS, source_format="csv", target_format=fmt)
     name = {"csv": "orders.csv", "excel": "orders.xlsx", "jsonl": "orders.jsonl"}[fmt]
     return content, name
+
+
+def _with_identity(endpoint: EndpointConfig) -> EndpointConfig:
+    """After unnest, order_id repeats. Dest PK is the recipe's hash_identity."""
+    extra = dict(endpoint.extra or {})
+    extra["primary_key_columns"] = ["_df_row_key"]
+    endpoint.extra = extra
+    return endpoint
 
 
 def _pg_connect():
@@ -135,14 +142,14 @@ def _seed_pg(table: str) -> None:
             cur.execute(
                 f"""
                 CREATE TABLE public."{table}" (
-                  order_id TEXT NOT NULL,
+                  order_no TEXT NOT NULL,
                   customer TEXT NOT NULL,
                   line_items TEXT NOT NULL
                 )
                 """
             )
             cur.executemany(
-                f'INSERT INTO public."{table}" (order_id, customer, line_items) VALUES (%s, %s, %s)',
+                f'INSERT INTO public."{table}" (order_no, customer, line_items) VALUES (%s, %s, %s)',
                 [tuple(r) for r in ROWS],
             )
     finally:
@@ -157,14 +164,14 @@ def _seed_mysql(table: str) -> None:
             cur.execute(
                 f"""
                 CREATE TABLE `{table}` (
-                  order_id VARCHAR(32) NOT NULL,
+                  order_no VARCHAR(32) NOT NULL,
                   customer VARCHAR(64) NOT NULL,
                   line_items TEXT NOT NULL
                 )
                 """
             )
             cur.executemany(
-                f"INSERT INTO `{table}` (order_id, customer, line_items) VALUES (%s, %s, %s)",
+                f"INSERT INTO `{table}` (order_no, customer, line_items) VALUES (%s, %s, %s)",
                 [tuple(r) for r in ROWS],
             )
     finally:
@@ -195,7 +202,7 @@ def _landed_pg(table: str) -> list[tuple]:
     try:
         with conn.cursor() as cur:
             cur.execute(
-                f'SELECT order_id, sku, qty FROM public."{table}" ORDER BY order_id, sku'
+                f'SELECT order_no, sku, qty FROM public."{table}" ORDER BY order_no, sku'
             )
             return [tuple(r) for r in cur.fetchall()]
     finally:
@@ -207,7 +214,7 @@ def _landed_mysql(table: str) -> list[tuple]:
     try:
         with conn.cursor() as cur:
             cur.execute(
-                f"SELECT order_id, sku, qty FROM `{table}` ORDER BY order_id, sku"
+                f"SELECT order_no, sku, qty FROM `{table}` ORDER BY order_no, sku"
             )
             return [tuple(r) for r in cur.fetchall()]
     finally:
@@ -298,29 +305,33 @@ def test_unnest_recipe_is_the_same_program_on_every_measured_source(source_kind,
         if source_kind in {"csv", "excel", "jsonl"}:
             require_ports(5432)
             dest_table = uniq("unnest_dest")
-            request = _request_file(source_kind, pg_endpoint(dest_table))
+            request = _request_file(source_kind, _with_identity(pg_endpoint(dest_table)))
         elif source_kind == "postgresql":
             require_ports(5432)
             src_table = uniq("unnest_src")
             dest_table = uniq("unnest_dest")
             _seed_pg(src_table)
-            request = _request_sql(pg_endpoint(src_table), pg_endpoint(dest_table))
+            request = _request_sql(
+                pg_endpoint(src_table), _with_identity(pg_endpoint(dest_table))
+            )
         else:
             require_ports(3306)
             dest_engine = "mysql"
             src_table = uniq("unnest_src")
             dest_table = uniq("unnest_dest")
             _seed_mysql(src_table)
-            request = _request_sql(mysql_endpoint(src_table), mysql_endpoint(dest_table))
+            request = _request_sql(
+                mysql_endpoint(src_table), _with_identity(mysql_endpoint(dest_table))
+            )
 
         result = _execute(request)
+        assert result.success, result.error
         summary = result.destination_summary or {}
         if dest_engine == "mysql":
             landed = _normalize(_landed_mysql(dest_table))
         else:
             landed = _normalize(_landed_pg(dest_table))
 
-        assert result.success, result.error
         assert landed == EXPECTED_SKUS, landed
         assert summary.get("shape_recipe_hash") == _recipe_hash()
         assert summary.get("rows_shaped_in") == 2
