@@ -218,7 +218,7 @@ def build_proof_ledger() -> dict[str, Any]:
         "recent_proofs": proofs,
         "integrity_comparison": _competitive_integrity(),
         "how_to_verify": [
-            "Run POST /api/v1/workspace/proofs/desktop-lab to exercise 45 catalog slots as source and dest (hosted twins share a driver).",
+            "Run POST /api/v1/workspace/proofs/desktop-lab to exercise 80 catalog slots as source and dest (hosted twins share a driver).",
             "Run POST /api/v1/workspace/proofs/fidelity to execute the rich-type CSV→SQLite proof.",
             "Open Job Theater after a transfer — quarantine rows and Gate-8 checksum must match.",
             "Catalog badges: Certified = full transfer; Source-only = read path; Planned = roadmap.",

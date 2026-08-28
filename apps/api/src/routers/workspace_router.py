@@ -936,9 +936,9 @@ async def run_fidelity_proof():
 async def run_desktop_lab_proof():
     """Exercise the desktop-lab catalog slots as source and destination.
 
-    45 is catalog slots, not unique engines. Hosted twins share a driver.
+    80 is catalog slots, not unique engines. Hosted twins share a driver.
     """
-    from services.desktop_lab import run_desktop_lab
+    from services.desktop_lab import DESKTOP_LAB_MIN_DUPLEX, run_desktop_lab
 
     try:
         result = await asyncio.to_thread(run_desktop_lab, persist=True)
@@ -948,7 +948,11 @@ async def run_desktop_lab_proof():
             status_code=500,
         )
     duplex = int(result.get("catalog_slots_duplex_passed") or 0)
-    result["success"] = duplex >= 45 and int(result.get("failed") or 0) == 0
+    result["success"] = (
+        duplex >= DESKTOP_LAB_MIN_DUPLEX
+        and duplex == int(result.get("catalog_slots") or 0)
+        and int(result.get("failed") or 0) == 0
+    )
     status = 200 if result["success"] else 422
     return JSONResponse(result, status_code=status)
 

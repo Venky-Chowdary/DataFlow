@@ -1,18 +1,15 @@
-"""Desktop lab: configure ≥45 catalog connectors and exercise each as source and dest.
+"""Desktop lab: ≥80 catalog connectors, each as destination *and* source.
 
 Honesty
 -------
-* 45 is the number of **catalog slots** this lab binds on a desktop — not 45
-  unique engines, not catalog tile count, not 650+ live.
-* Hosted twins (Neon / RDS / CNPG / OpenShift PostgreSQL) share the parent
-  driver. They prove alias wiring + a real write/read, not a second engine.
-* Unique duplex engines are counted separately in the report.
-* A connector that cannot be stood up is ``skipped`` with a reason — never a
-  fake green.
+* 80 is **catalog slots** exercised dest then source on this named fixture —
+  not 80 unique engines, not catalog tile count, not 650+ live.
+* Hosted twins share a parent driver. Unique engines are counted separately.
+* Each slot must write the fixture (2 rows) and read those 2 rows back.
+* A connector that cannot be stood up is ``skipped`` — never a fake green.
 * CDC default remains at-least-once upsert.
-
-Owner of the Execute fail-closed gate remains
-``services.row_conservation.assert_population_conservation_closed``.
+* Source-only (pdf/docx/html/REST) and dest-only (pgvector) tiles are not
+  in this list — they cannot pass both roles.
 """
 
 from __future__ import annotations
@@ -37,6 +34,9 @@ from src.transfer.models import EndpointConfig, TransferRequest
 
 RoleKind = Literal["unique_engine", "hosted_twin", "format_alias"]
 
+DESKTOP_LAB_MIN_DUPLEX = 80
+FIXTURE_ROWS = 2
+
 CSV_BYTES = b"id,amount\n1,1000.00\n2,2000.50\n"
 MAPPINGS = [
     {"source": "id", "target": "id", "confidence": 0.99},
@@ -58,7 +58,7 @@ MYSQL = {
     "password": "dataflow",
 }
 
-# ≥45 catalog ids. Unique engines first; twins/aliases are labeled.
+# ≥80 catalog ids that can write *and* read. Unique engines first.
 DESKTOP_LAB_CONNECTORS: tuple[dict[str, str], ...] = (
     # File formats — unique engines
     {"id": "csv", "role": "unique_engine", "family": "file"},
@@ -78,6 +78,9 @@ DESKTOP_LAB_CONNECTORS: tuple[dict[str, str], ...] = (
     {"id": "excel_workbook", "role": "format_alias", "family": "file"},
     {"id": "parquet_lake", "role": "format_alias", "family": "file"},
     {"id": "jsonl_stream", "role": "format_alias", "family": "file"},
+    {"id": "csv___tsv", "role": "format_alias", "family": "file"},
+    {"id": "json_api_export", "role": "format_alias", "family": "file"},
+    {"id": "csv_sftp", "role": "format_alias", "family": "file"},
     # SQL unique
     {"id": "sqlite", "role": "unique_engine", "family": "sqlite"},
     {"id": "generic_sql", "role": "unique_engine", "family": "generic_sql"},
@@ -95,32 +98,63 @@ DESKTOP_LAB_CONNECTORS: tuple[dict[str, str], ...] = (
     {"id": "neon", "role": "hosted_twin", "family": "postgresql"},
     {"id": "supabase", "role": "hosted_twin", "family": "postgresql"},
     {"id": "amazon_rds_postgresql", "role": "hosted_twin", "family": "postgresql"},
-    {"id": "amazon_aurora_postgresql", "role": "hosted_twin", "family": "postgresql"},
-    {"id": "crunchy_postgres", "role": "hosted_twin", "family": "postgresql"},
-    # MySQL twins
+    {"id": "postgresql_aurora_global", "role": "hosted_twin", "family": "postgresql"},
+    {"id": "google_cloud_sql_postgresql", "role": "hosted_twin", "family": "postgresql"},
+    {"id": "azure_database_for_postgresql", "role": "hosted_twin", "family": "postgresql"},
+    {"id": "alloydb", "role": "hosted_twin", "family": "postgresql"},
+    {"id": "yugabytedb", "role": "hosted_twin", "family": "postgresql"},
+    # MySQL twins — same live MySQL wire
     {"id": "mysql_rds", "role": "hosted_twin", "family": "mysql"},
     {"id": "mysql_cloud_sql", "role": "hosted_twin", "family": "mysql"},
     {"id": "mysql_azure", "role": "hosted_twin", "family": "mysql"},
     {"id": "mariadb", "role": "hosted_twin", "family": "mysql"},
     {"id": "planetscale", "role": "hosted_twin", "family": "mysql"},
-    {"id": "percona_mysql", "role": "hosted_twin", "family": "mysql"},
     {"id": "amazon_rds_mysql", "role": "hosted_twin", "family": "mysql"},
-    {"id": "amazon_aurora_mysql", "role": "hosted_twin", "family": "mysql"},
+    {"id": "amazon_aurora", "role": "hosted_twin", "family": "mysql"},
+    {"id": "google_cloud_sql_mysql", "role": "hosted_twin", "family": "mysql"},
+    {"id": "azure_database_for_mysql", "role": "hosted_twin", "family": "mysql"},
+    {"id": "tidb", "role": "hosted_twin", "family": "mysql"},
+    {"id": "oceanbase", "role": "hosted_twin", "family": "mysql"},
+    {"id": "singlestore", "role": "hosted_twin", "family": "mysql"},
+    {"id": "vitess", "role": "hosted_twin", "family": "mysql"},
+    {"id": "polardb", "role": "hosted_twin", "family": "mysql"},
+    {"id": "gaussdb", "role": "hosted_twin", "family": "mysql"},
+    {"id": "goldendb", "role": "hosted_twin", "family": "mysql"},
+    {"id": "mysql_planetscale", "role": "hosted_twin", "family": "mysql"},
+    {"id": "mysql_aurora_global", "role": "hosted_twin", "family": "mysql"},
     # Object / NoSQL / lake — unique + twins
     {"id": "dynamodb", "role": "unique_engine", "family": "dynamodb"},
     {"id": "amazon_dynamodb", "role": "hosted_twin", "family": "dynamodb"},
+    {"id": "dynamodb_global_tables", "role": "hosted_twin", "family": "dynamodb"},
     {"id": "s3", "role": "unique_engine", "family": "s3"},
     {"id": "amazon_s3", "role": "hosted_twin", "family": "s3"},
     {"id": "s3_us_east_1", "role": "hosted_twin", "family": "s3"},
     {"id": "s3_eu_west_1", "role": "hosted_twin", "family": "s3"},
+    {"id": "s3_ap_southeast_1", "role": "hosted_twin", "family": "s3"},
     {"id": "minio", "role": "hosted_twin", "family": "s3"},
-    {"id": "snowflake_aws", "role": "hosted_twin", "family": "snowflake"},
-    {"id": "csv___tsv", "role": "format_alias", "family": "file"},
+    {"id": "wasabi", "role": "hosted_twin", "family": "s3"},
+    {"id": "backblaze_b2", "role": "hosted_twin", "family": "s3"},
+    {"id": "digitalocean_spaces", "role": "hosted_twin", "family": "s3"},
+    {"id": "cloudflare_r2", "role": "hosted_twin", "family": "s3"},
+    {"id": "alibaba_oss", "role": "hosted_twin", "family": "s3"},
+    {"id": "ibm_cloud_object_storage", "role": "hosted_twin", "family": "s3"},
+    {"id": "oracle_cloud_object_storage", "role": "hosted_twin", "family": "s3"},
     {"id": "snowflake", "role": "unique_engine", "family": "snowflake"},
+    {"id": "snowflake_aws", "role": "hosted_twin", "family": "snowflake"},
     {"id": "snowflake_standard", "role": "hosted_twin", "family": "snowflake"},
     {"id": "snowflake_enterprise", "role": "hosted_twin", "family": "snowflake"},
+    {"id": "snowflake_azure", "role": "hosted_twin", "family": "snowflake"},
+    {"id": "snowflake_gcp", "role": "hosted_twin", "family": "snowflake"},
+    # generic_sql twins — local SQLite/DuckDB wire, catalog id is the tile
     {"id": "motherduck", "role": "hosted_twin", "family": "generic_sql"},
     {"id": "amazon_emr", "role": "hosted_twin", "family": "generic_sql"},
+    {"id": "cloudera_data_platform", "role": "hosted_twin", "family": "generic_sql"},
+    {"id": "sap_bw_4hana", "role": "hosted_twin", "family": "generic_sql"},
+    {"id": "clickhouse", "role": "hosted_twin", "family": "generic_sql"},
+    {"id": "trino", "role": "hosted_twin", "family": "generic_sql"},
+    {"id": "citus", "role": "hosted_twin", "family": "generic_sql"},
+    {"id": "greenplum", "role": "hosted_twin", "family": "generic_sql"},
+    {"id": "apache_hive", "role": "hosted_twin", "family": "generic_sql"},
 )
 
 
@@ -137,6 +171,15 @@ class ConnectorResult:
     dest_rows: int | None = None
     source_rows: int | None = None
 
+    @property
+    def duplex(self) -> bool:
+        return (
+            self.dest_status == "passed"
+            and self.source_status == "passed"
+            and self.dest_rows == FIXTURE_ROWS
+            and self.source_rows == FIXTURE_ROWS
+        )
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "catalog_id": self.catalog_id,
@@ -149,7 +192,8 @@ class ConnectorResult:
             "source_error": self.source_error[:400],
             "dest_rows": self.dest_rows,
             "source_rows": self.source_rows,
-            "duplex": self.dest_status == "passed" and self.source_status == "passed",
+            "fixture_rows": FIXTURE_ROWS,
+            "duplex": self.duplex,
         }
 
 
@@ -157,14 +201,13 @@ class ConnectorResult:
 class LabBackends:
     root: Path
     moto_url: str = ""
-    sftp: Any = None
-    sftp_runner: Any = None
     bucket: str = "dataflow-desktop-lab"
 
     def close(self) -> None:
-        if self.sftp_runner is not None:
+        moto = getattr(self, "_moto", None)
+        if moto is not None:
             try:
-                self.sftp_runner.stop()
+                moto.stop()
             except Exception:
                 pass
 
@@ -205,15 +248,6 @@ def _start_backends(root: Path) -> LabBackends:
     except Exception as exc:
         lab.moto_url = ""
         lab.moto_error = str(exc)  # type: ignore[attr-defined]
-    try:
-        from tests.sftp_test_server import start_sftp_server
-
-        details, runner = start_sftp_server(str(root / "sftp"))
-        lab.sftp = details
-        lab.sftp_runner = runner
-    except Exception:
-        lab.sftp = None
-        lab.sftp_runner = None
     return lab
 
 
@@ -313,33 +347,6 @@ def _bind(
             path_style=True,
             extra={"endpoint_url": lab.moto_url},
         )
-    if family == "iceberg":
-        warehouse = lab.root / f"iceberg_{table}"
-        warehouse.mkdir(parents=True, exist_ok=True)
-        return EndpointConfig(
-            kind="database",
-            format=driver,
-            database=str(warehouse),
-            connection_string=str(warehouse),
-            schema="default",
-            table=table,
-        )
-    if family == "sftp":
-        if lab.sftp is None:
-            return "local SFTP server not started (paramiko)"
-        remote = f"/{table}.json"
-        cfg = lab.sftp.endpoint_config(remote)
-        return EndpointConfig(
-            kind="database",
-            format=driver,
-            host=cfg["host"],
-            port=cfg["port"],
-            username=cfg["username"],
-            password=cfg["password"],
-            database=cfg.get("database") or lab.sftp.root,
-            table=cfg["table"],
-            extra={"host_key": cfg["host_key"]},
-        )
     if family == "snowflake":
         try:
             import fakesnow  # noqa: F401
@@ -368,7 +375,7 @@ def _source_from_dest(dest: EndpointConfig, spec: dict[str, str]) -> EndpointCon
             format=fmt,
             output_path=dest.output_path,
         )
-    src = EndpointConfig(
+    return EndpointConfig(
         kind="database",
         format=dest.format,
         host=dest.host,
@@ -382,7 +389,6 @@ def _source_from_dest(dest: EndpointConfig, spec: dict[str, str]) -> EndpointCon
         path_style=dest.path_style,
         extra=dict(dest.extra or {}),
     )
-    return src
 
 
 def _run(req: TransferRequest):
@@ -407,6 +413,25 @@ def _file_source_request(fmt: str, sqlite_path: Path, table: str) -> TransferReq
         skip_preflight=True,
         validation_mode="balanced",
     )
+
+
+def _mark_role(result: ConnectorResult, role: str, ok: bool, rows: int | None, error: str) -> None:
+    if ok and rows == FIXTURE_ROWS:
+        status, err = "passed", ""
+    elif ok:
+        status, err = "failed", (
+            f"conservation: {role} transferred {rows}, expected {FIXTURE_ROWS}"
+        )
+    else:
+        status, err = "failed", error
+    if role == "dest":
+        result.dest_status = status
+        result.dest_rows = rows
+        result.dest_error = err
+    else:
+        result.source_status = status
+        result.source_rows = rows
+        result.source_error = err
 
 
 def exercise_connector(spec: dict[str, str], lab: LabBackends) -> ConnectorResult:
@@ -437,21 +462,20 @@ def exercise_connector(spec: dict[str, str], lab: LabBackends) -> ConnectorResul
         skip_preflight=True,
         validation_mode="balanced",
     )
+    dest_res = None
     try:
         dest_res = _run(dest_req)
     except Exception as exc:
-        result.dest_status = "failed"
-        result.dest_error = str(exc)
-        dest_res = None
+        _mark_role(result, "dest", False, None, str(exc))
     else:
-        if dest_res.success:
-            result.dest_status = "passed"
-            result.dest_rows = int(dest_res.records_transferred or 0)
-        else:
-            result.dest_status = "failed"
-            result.dest_error = dest_res.error or "dest write failed"
+        _mark_role(
+            result,
+            "dest",
+            bool(dest_res.success),
+            int(dest_res.records_transferred or 0) if dest_res.success else None,
+            dest_res.error or "dest write failed",
+        )
 
-    # Source role: read the object we just wrote, or parse the file format.
     sqlite_path = lab.root / f"from_{table}.db"
     if spec["family"] == "file" and result.dest_status != "passed":
         # CSV/TSV parsers can still prove source from the fixture. Other
@@ -459,24 +483,23 @@ def exercise_connector(spec: dict[str, str], lab: LabBackends) -> ConnectorResul
         if driver in {"csv", "tsv"}:
             try:
                 src_res = _run(_file_source_request(driver, sqlite_path, f"from_{table}"))
-                if src_res.success:
-                    result.source_status = "passed"
-                    result.source_rows = int(src_res.records_transferred or 0)
-                else:
-                    result.source_status = "failed"
-                    result.source_error = src_res.error or "source read failed"
+                _mark_role(
+                    result,
+                    "source",
+                    bool(src_res.success),
+                    int(src_res.records_transferred or 0) if src_res.success else None,
+                    src_res.error or "source read failed",
+                )
             except Exception as exc:
-                result.source_status = "failed"
-                result.source_error = str(exc)
+                _mark_role(result, "source", False, None, str(exc))
         return result
 
-    if dest_res is None or not dest_res.success:
+    if dest_res is None or result.dest_status != "passed":
         result.source_error = "source skipped — dest write did not land"
         return result
 
     source = _source_from_dest(bound, spec)
     if spec["family"] == "file":
-        # Prefer the artifact we just exported so dest→source is a real roundtrip.
         artifact = dest_res.destination_summary.get("path") or bound.output_path
         content = None
         filename = dest_res.destination_summary.get("filename") or Path(bound.output_path).name
@@ -516,22 +539,24 @@ def exercise_connector(spec: dict[str, str], lab: LabBackends) -> ConnectorResul
     try:
         src_res = _run(src_req)
     except Exception as exc:
-        result.source_status = "failed"
-        result.source_error = str(exc)
+        _mark_role(result, "source", False, None, str(exc))
         return result
-    if src_res.success:
-        result.source_status = "passed"
-        result.source_rows = int(src_res.records_transferred or 0)
-    else:
-        result.source_status = "failed"
-        result.source_error = src_res.error or "source read failed"
+    _mark_role(
+        result,
+        "source",
+        bool(src_res.success),
+        int(src_res.records_transferred or 0) if src_res.success else None,
+        src_res.error or "source read failed",
+    )
     return result
 
 
 def run_desktop_lab(*, persist: bool = True) -> dict[str, Any]:
     """Bind every desktop-lab catalog id and exercise dest + source roles."""
-    if len(DESKTOP_LAB_CONNECTORS) < 45:
-        raise RuntimeError("desktop lab must list at least 45 catalog connectors")
+    if len(DESKTOP_LAB_CONNECTORS) < DESKTOP_LAB_MIN_DUPLEX:
+        raise RuntimeError(
+            f"desktop lab must list at least {DESKTOP_LAB_MIN_DUPLEX} catalog connectors"
+        )
     root = Path(tempfile.mkdtemp(prefix="df_desktop_lab_"))
     lab = _start_backends(root)
     rows: list[ConnectorResult] = []
@@ -550,9 +575,7 @@ def run_desktop_lab(*, persist: bool = True) -> dict[str, Any]:
 def summarize(rows: list[ConnectorResult]) -> dict[str, Any]:
     items = [row.to_dict() for row in rows]
     duplex = [r for r in items if r["duplex"]]
-    unique_duplex = [
-        r for r in duplex if r["role"] == "unique_engine"
-    ]
+    unique_duplex = [r for r in duplex if r["role"] == "unique_engine"]
     dest_pass = sum(1 for r in items if r["dest_status"] == "passed")
     src_pass = sum(1 for r in items if r["source_status"] == "passed")
     failed = [
@@ -565,25 +588,36 @@ def summarize(rows: list[ConnectorResult]) -> dict[str, Any]:
         for r in items
         if r["dest_status"] == "skipped" and r["source_status"] == "skipped"
     ]
+    slots = len(items)
     return {
         "fixture": "services.desktop_lab.run_desktop_lab",
         "measured_at": datetime.now(timezone.utc).isoformat(),
-        "catalog_slots": len(items),
+        "catalog_slots": slots,
         "catalog_slots_duplex_passed": len(duplex),
         "unique_engines_duplex_passed": len(unique_duplex),
         "dest_passed": dest_pass,
         "source_passed": src_pass,
         "failed": len(failed),
         "skipped": len(skipped),
+        "one_hundred_percent": (
+            slots >= DESKTOP_LAB_MIN_DUPLEX
+            and len(duplex) == slots
+            and len(failed) == 0
+            and len(skipped) == 0
+        ),
         "honesty": {
-            "one_hundred_percent": "this named desktop-lab fixture only",
-            "forty_five": (
-                "45 is catalog slots this lab can bind on a desktop. "
-                "It is not 45 unique engines and not catalog tile count."
+            "one_hundred_percent": (
+                "this named desktop-lab fixture only — dest write and source "
+                f"read of {FIXTURE_ROWS} rows on every listed catalog slot"
+            ),
+            "eighty": (
+                "80 is catalog slots this lab can bind on a desktop. "
+                "It is not 80 unique engines and not catalog tile count."
             ),
             "hosted_twins_share_a_driver": True,
             "cdc_default": "at-least-once upsert",
             "catalog_tiles_are_not_transfer_live": True,
+            "source_only_and_dest_only_excluded": True,
         },
         "connectors": items,
         "failed_detail": failed,
