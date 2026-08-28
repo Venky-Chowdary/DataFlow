@@ -430,6 +430,48 @@ def test_certificate_page_names_each_removal_authority_and_the_recipe() -> None:
     assert "by instruction, not by loss or quarantine" in md
 
 
+def test_certificate_names_views_and_triggers_to_recreate_without_blocking() -> None:
+    job = _proven_job()
+    job["reconciliation"]["physical_state"] = {
+        "schema_objects": {
+            "verified": True,
+            "absent": [],
+            "aspects": {
+                "views": {
+                    "status": "absent",
+                    "missing": ["v_orders_open"],
+                    "advisory": True,
+                    "note": "Dependent views are not created by table transfer.",
+                },
+                "triggers": {
+                    "status": "absent",
+                    "missing": ["trg_audit (after insert)"],
+                    "advisory": True,
+                    "note": "Trigger bodies are not migrated.",
+                },
+            },
+            "cutover_recreate": [
+                {
+                    "kind": "view",
+                    "name": "v_orders_open",
+                    "action": "recreate_before_cutover",
+                },
+                {
+                    "kind": "trigger",
+                    "name": "trg_audit (after insert)",
+                    "action": "recreate_before_cutover",
+                },
+            ],
+        }
+    }
+    cert = build_migration_certificate(job)
+    md = render_certificate_markdown(cert)
+    assert "Recreate before cutover" in md
+    assert "v_orders_open" in md
+    assert "trg_audit" in md
+    assert not any("view" in b.lower() or "trigger" in b.lower() for b in cert["verdict"]["blockers"])
+
+
 def test_certificate_page_of_a_plain_run_states_no_removals() -> None:
     md = render_certificate_markdown(build_migration_certificate(_job()))
     assert "Removed by" not in md
