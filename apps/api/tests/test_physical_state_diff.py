@@ -14,6 +14,7 @@ from services.migration_certificate import physical_state_findings
 from services.physical_state_diff import (
     ADVISORY_ASPECTS,
     ASPECTS,
+    PhysicalState,
     compare_physical_state,
     _has_catalog_supplied_value,
     _normalize_predicate,
@@ -300,6 +301,43 @@ def test_same_named_dependent_view_is_present_not_a_body_claim(tmp_path: Path) -
     result = _verify(cfg, "src", "dst")
     assert result["aspects"]["views"]["status"] == "absent"
     assert "v_open" in result["aspects"]["views"]["missing"]
+
+
+def test_sqlite_has_no_routines_and_does_not_invent_unreadable(tmp_path: Path) -> None:
+    cfg = _db(tmp_path, UNCHECKED.format(name="src"), UNCHECKED.format(name="dst"))
+    src = read_physical_state("sqlite", cfg, table="src")
+    assert src.routines == frozenset()
+    result = _verify(cfg, "src", "dst")
+    assert result["aspects"]["routines"]["status"] == "carried"
+    assert result["aspects"]["routines"]["advisory"] is True
+    assert "routines" not in result.get("unreadable", [])
+
+
+def test_named_routine_is_advisory_cutover_and_never_blocks() -> None:
+    """Name presence only — missing dest routine must not veto verified."""
+    src = PhysicalState(found=True, readable=True, routines=frozenset({"sp_refresh"}))
+    dst = PhysicalState(found=True, readable=True)
+    result = compare_physical_state(src, dst)
+    assert result["verified"] is True
+    assert "routines" not in result["absent"]
+    assert result["aspects"]["routines"]["status"] == "absent"
+    assert result["aspects"]["routines"]["advisory"] is True
+    assert result["cutover_recreate"] == [
+        {
+            "kind": "routine",
+            "name": "sp_refresh",
+            "action": "recreate_before_cutover",
+        }
+    ]
+
+
+def test_same_named_routine_is_presence_not_a_body_claim() -> None:
+    src = PhysicalState(found=True, readable=True, routines=frozenset({"sp_refresh"}))
+    dst = PhysicalState(found=True, readable=True, routines=frozenset({"sp_refresh"}))
+    result = compare_physical_state(src, dst)
+    assert result["aspects"]["routines"]["status"] == "carried"
+    assert result["cutover_recreate"] == []
+    assert result["verified"] is True
 
 
 def test_unrelated_view_is_not_attributed_to_the_table(tmp_path: Path) -> None:
