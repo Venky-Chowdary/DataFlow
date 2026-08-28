@@ -21,9 +21,13 @@ PARENT_IN_CHUNK = 200
 
 def orphan_example_text(row: Any) -> str:
     """One orphan key on the reader wire. SQL NULL is not a customer token."""
-    if not isinstance(row, (list, tuple)):
+    if isinstance(row, (str, bytes)):
         return present_cell_text(row) or ""
-    return "+".join(present_cell_text(v) or "" for v in row)
+    try:
+        cells = list(row)
+    except TypeError:
+        return present_cell_text(row) or ""
+    return "+".join(present_cell_text(v) or "" for v in cells)
 
 
 def match_simple_predicates(c_cols: Sequence[Any], p_cols: Sequence[Any]) -> tuple[Any, Any]:
