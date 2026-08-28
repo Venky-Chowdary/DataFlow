@@ -4003,6 +4003,9 @@ export type ProofLedger = {
   headline: string;
   metrics: {
     unique_transfer_drivers: number;
+    desktop_lab_catalog_slots?: number;
+    desktop_lab_duplex_passed?: number;
+    desktop_lab_unique_engines?: number;
     transfer_live_drivers: string[];
     catalog_transfer_ready_aliases?: number;
     live_route_combinations?: number;
@@ -4074,6 +4077,50 @@ export async function runFidelityProof(): Promise<FidelityProofResult> {
     timeoutMs: 120_000,
   });
   if (!res.ok) throw new Error(await parseApiError(res, "Fidelity proof failed"));
+  return res.json();
+}
+
+export type DesktopLabConnector = {
+  catalog_id: string;
+  driver: string;
+  role: string;
+  family: string;
+  dest_status: string;
+  source_status: string;
+  dest_error?: string;
+  source_error?: string;
+  dest_rows?: number | null;
+  source_rows?: number | null;
+  duplex: boolean;
+};
+
+export type DesktopLabReport = {
+  success?: boolean;
+  available?: boolean;
+  catalog_slots: number;
+  catalog_slots_duplex_passed: number;
+  unique_engines_duplex_passed: number;
+  dest_passed?: number;
+  source_passed?: number;
+  failed?: number;
+  skipped?: number;
+  honesty?: Record<string, unknown>;
+  connectors?: DesktopLabConnector[];
+  error?: string;
+};
+
+export async function runDesktopLab(): Promise<DesktopLabReport> {
+  const res = await apiFetch(`${API_BASE}/workspace/proofs/desktop-lab`, {
+    method: "POST",
+    timeoutMs: 300_000,
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Desktop lab failed"));
+  return res.json();
+}
+
+export async function fetchDesktopLab(): Promise<DesktopLabReport> {
+  const res = await apiFetch(`${API_BASE}/workspace/proofs/desktop-lab`);
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not load desktop lab"));
   return res.json();
 }
 
