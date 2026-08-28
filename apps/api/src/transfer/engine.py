@@ -1244,6 +1244,7 @@ from .job_quarantine import (  # noqa: E402,F401 — re-export
     _persist_checkpoint_quarantine_delta,
     _persist_job_quarantine,
     checkpoint_quarantine_summary,
+    fail_closed_on_silent_loss,
 )
 from .engine_identity import (  # noqa: E402,F401 — re-export
     _enforce_ddl_identity,
@@ -1948,19 +1949,74 @@ class UniversalTransferEngine:
                 result.destination_summary["records_per_second"] = result.records_per_second
                 result.destination_summary["peak_memory_bytes"] = result.peak_memory_bytes
                 try:
-                    from services.row_conservation import ledger_from_transfer_result
+                    from services.row_conservation import (
+                        PopulationConservationError,
+                        assert_population_conservation_closed,
+                        ledger_from_transfer_result,
+                    )
 
                     result.row_accounting = ledger_from_transfer_result(
                         result,
                         sync_mode=str(getattr(request, "sync_mode", "") or ""),
                     )
+                    if result.success:
+                        ledger = assert_population_conservation_closed(
+                            {
+                                "records_processed": result.records_transferred,
+                                "sync_mode": str(
+                                    getattr(request, "sync_mode", "") or ""
+                                ),
+                                "reconciliation": dict(
+                                    result.reconciliation or {}
+                                ),
+                                "destination_summary": dict(
+                                    result.destination_summary or {}
+                                ),
+                                "rejected_rows": (
+                                    result.destination_summary or {}
+                                ).get("rejected_rows"),
+                                "coerced_null_rows": (
+                                    result.destination_summary or {}
+                                ).get("coerced_null_rows"),
+                            },
+                            validation_mode=str(
+                                getattr(request, "validation_mode", "") or ""
+                            ),
+                        )
+                        result.row_accounting = ledger.to_dict()
+                except PopulationConservationError as exc:
+                    # Must never fall through to the generic stamp handler —
+                    # that would wipe the ledger and leave a green job.
+                    result.success = False
+                    result.error = str(exc)
+                    dest_summary = dict(result.destination_summary or {})
+                    dest_summary["silent_loss"] = True
+                    dest_summary["conservation_error"] = str(exc)[:500]
+                    result.destination_summary = dest_summary
+                    try:
+                        get_mongodb_service().update_job_status(
+                            job_id,
+                            "failed",
+                            error=str(exc),
+                            phase="failed",
+                            message=str(exc),
+                            reconciliation=result.reconciliation,
+                            destination_summary=dest_summary,
+                        )
+                    except Exception:
+                        logger.warning(
+                            "silent-loss fail-closed persist failed for %s",
+                            job_id,
+                            exc_info=True,
+                        )
                 except Exception:
                     logger.warning(
                         "Conservation ledger stamp failed for job %s",
                         job_id,
                         exc_info=True,
                     )
-                    result.row_accounting = {}
+                    if not result.row_accounting:
+                        result.row_accounting = {}
                 if start_span is not None:
                     set_span_attribute(span, "dataflow.records_transferred", result.records_transferred)
                     set_span_attribute(span, "dataflow.elapsed_seconds", result.elapsed_seconds)
@@ -3209,6 +3265,16 @@ class UniversalTransferEngine:
                     destination_summary=dest_summary,
                     reconciliation=recon,
                 )
+            lost = fail_closed_on_silent_loss(
+                job_id=job_id,
+                request=request,
+                dest_summary=dest_summary,
+                recon=recon,
+                rows_written=rows_written,
+                operation=request.operation,
+            )
+            if lost is not None:
+                return lost
 
             # Reconciliation passed: the delta is at rest, so the watermark may
             # move. Persisting it earlier would skip these rows after a failed run.
@@ -4117,6 +4183,16 @@ class UniversalTransferEngine:
                     destination_summary=dest_summary,
                     reconciliation=recon,
                 )
+            lost = fail_closed_on_silent_loss(
+                job_id=job_id,
+                request=request,
+                dest_summary=dest_summary,
+                recon=recon,
+                rows_written=rows_written,
+                operation=request.operation,
+            )
+            if lost is not None:
+                return lost
 
             explanation = _build_explanation(
                 request,
@@ -4833,6 +4909,16 @@ class UniversalTransferEngine:
                     destination_summary=dest_summary,
                     reconciliation=recon,
                 )
+            lost = fail_closed_on_silent_loss(
+                job_id=job_id,
+                request=request,
+                dest_summary=dest_summary,
+                recon=recon,
+                rows_written=rows_written,
+                operation=request.operation,
+            )
+            if lost is not None:
+                return lost
 
             explanation = _build_explanation(
                 request,

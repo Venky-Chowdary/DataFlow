@@ -364,6 +364,25 @@ def test_foreign_key_cycle_is_named_as_a_blocker() -> None:
     verdict = build_migration_certificate(job)["verdict"]
     assert verdict["migration_proven"] is False
     assert any("cycle" in b and "orders" in b for b in verdict["blockers"])
+    assert any("not enforced" in b for b in verdict["blockers"])
+
+
+def test_resolved_fk_cycle_does_not_block_the_certificate() -> None:
+    """Post-load ALTER recreated every edge — detection is not a veto."""
+    job = _proven_job()
+    job["destination_summary"] = {
+        "rejected_details": [],
+        "foreign_keys": {
+            "counts": {"carried": 2},
+            "integrity_violations": 0,
+            "cycle": ["orders", "customers"],
+            "cycle_resolved": True,
+            "cycle_strategy": "post_load_alter",
+        },
+    }
+    verdict = build_migration_certificate(job)["verdict"]
+    assert not any("cycle" in b.lower() for b in verdict["blockers"])
+    assert not any("foreign key" in b.lower() for b in verdict["blockers"])
 
 
 def test_fully_carried_foreign_keys_do_not_block() -> None:
@@ -409,6 +428,48 @@ def test_certificate_page_names_each_removal_authority_and_the_recipe() -> None:
     assert "| Removed by the approved transform recipe | 2 |" in md
     assert "abc123def4567890" in md
     assert "by instruction, not by loss or quarantine" in md
+
+
+def test_certificate_names_views_and_triggers_to_recreate_without_blocking() -> None:
+    job = _proven_job()
+    job["reconciliation"]["physical_state"] = {
+        "schema_objects": {
+            "verified": True,
+            "absent": [],
+            "aspects": {
+                "views": {
+                    "status": "absent",
+                    "missing": ["v_orders_open"],
+                    "advisory": True,
+                    "note": "Dependent views are not created by table transfer.",
+                },
+                "triggers": {
+                    "status": "absent",
+                    "missing": ["trg_audit (after insert)"],
+                    "advisory": True,
+                    "note": "Trigger bodies are not migrated.",
+                },
+            },
+            "cutover_recreate": [
+                {
+                    "kind": "view",
+                    "name": "v_orders_open",
+                    "action": "recreate_before_cutover",
+                },
+                {
+                    "kind": "trigger",
+                    "name": "trg_audit (after insert)",
+                    "action": "recreate_before_cutover",
+                },
+            ],
+        }
+    }
+    cert = build_migration_certificate(job)
+    md = render_certificate_markdown(cert)
+    assert "Recreate before cutover" in md
+    assert "v_orders_open" in md
+    assert "trg_audit" in md
+    assert not any("view" in b.lower() or "trigger" in b.lower() for b in cert["verdict"]["blockers"])
 
 
 def test_certificate_page_of_a_plain_run_states_no_removals() -> None:

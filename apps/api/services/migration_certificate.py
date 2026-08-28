@@ -176,6 +176,7 @@ def physical_state_findings(recon: dict[str, Any]) -> dict[str, Any]:
             "unreadable": list(schema_objects.get("unreadable") or []),
             "aspects": _dict(schema_objects.get("aspects")),
             "advisory": _dict(schema_objects.get("advisory")),
+            "cutover_recreate": list(schema_objects.get("cutover_recreate") or []),
         },
         "referential_integrity": {
             "verified": bool(referential.get("verified")),
@@ -261,12 +262,12 @@ def _foreign_key_carry_blockers(job: dict[str, Any]) -> list[str]:
             f"Foreign key carry did not complete ({detail}) - the destination is "
             "missing relationships the source enforced."
         )
-    if summary.get("cycle"):
+    if summary.get("cycle") and not summary.get("cycle_resolved"):
         out.append(
             "Foreign keys form a cycle ("
             + ", ".join(str(t) for t in summary.get("cycle") or [])
-            + ") - deferred-constraint creation is not supported, so the cycle was "
-            "not recreated."
+            + ") — post-load ALTER did not recreate every edge, so the cycle "
+            "is not enforced on the destination."
         )
     return out
 
@@ -624,10 +625,40 @@ def render_certificate_markdown(cert: dict[str, Any]) -> str:
                     f"| {label} | {info.get('status', '')} | {missing} |"
                 )
             lines.append("")
+            recreate = list(objects.get("cutover_recreate") or [])
+            if not recreate:
+                for aspect, detail in aspects.items():
+                    info = _dict(detail)
+                    if info.get("advisory") and info.get("status") == "absent":
+                        for name in info.get("missing") or []:
+                            recreate.append(
+                                {
+                                    "kind": "view" if aspect == "views" else "trigger",
+                                    "name": name,
+                                    "action": "recreate_before_cutover",
+                                }
+                            )
+            if recreate:
+                lines += ["## Recreate before cutover", ""]
+                for item in recreate:
+                    info = _dict(item)
+                    kind = str(info.get("kind") or "object")
+                    name = str(info.get("name") or "")
+                    if info.get("action") == "catalog_unreadable":
+                        lines.append(
+                            f"- {kind} catalog could not be read — not proven absent."
+                        )
+                    else:
+                        lines.append(
+                            f"- Recreate {kind} `{name}` on the destination "
+                            "(body was not migrated)."
+                        )
+                lines.append("")
             for aspect, detail in aspects.items():
                 info = _dict(detail)
                 if info.get("advisory") and info.get("status") != "carried":
-                    lines += [f"- {info.get('note', '')}", ""]
+                    if info.get("note"):
+                        lines += [f"- {info.get('note', '')}", ""]
         else:
             lines += [
                 f"- Constraints and indexes not compared — {objects.get('reason', '')}",

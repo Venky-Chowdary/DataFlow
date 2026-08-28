@@ -9,6 +9,10 @@ constraints once every table has landed.
 Neither step may abort a transfer. A source whose catalog cannot be read reports
 its keys as ``unknown`` rather than absent, so the operator sees an unmeasured
 constraint instead of a silently dropped one.
+
+A detected FK cycle is loaded in declared order (no fake topo sort) and the
+edges are still added after every table lands. ``cycle_resolved`` is True only
+when every cycle edge re-reads as ``carried``.
 """
 
 from __future__ import annotations
@@ -95,10 +99,10 @@ def carry_foreign_keys_after_load(
                 dest_columns={
                     t: list(cols.values()) for t, cols in context.column_maps.items()
                 },
-            )
+                cycle_tables=list(context.cycle),
+            ),
+            cycle=list(context.cycle),
         )
-        if context.cycle:
-            summary["cycle"] = list(context.cycle)
         if context.order:
             summary["dependency_order"] = list(context.order)
         return summary

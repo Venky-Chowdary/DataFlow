@@ -15,6 +15,7 @@ os.environ.setdefault("DATAFLOW_DISABLE_OBJECT_STORE", "1")
 
 from services.foreign_key_carry import (
     apply_foreign_keys,
+    classify_cycle_resolution,
     order_tables_by_dependency,
     plan_foreign_keys,
     verify_foreign_keys,
@@ -267,6 +268,78 @@ def test_mutual_references_are_reported_rather_than_given_a_fake_order():
     assert set(ordered) == {"a", "b", "c"}
     assert ordered[0] == "c"
     assert cycle == ["a", "b"]
+
+
+def test_cycle_edge_on_postgres_is_deferrable():
+    plan = _plan(cycle_tables=["orders", "customers"])
+    decision = _only(plan)
+    assert decision.status == "planned"
+    assert "DEFERRABLE INITIALLY DEFERRED" in decision.dest_ddl
+
+
+def test_acyclic_postgres_edge_is_not_deferrable():
+    plan = _plan()
+    assert "DEFERRABLE" not in _only(plan).dest_ddl
+
+
+def test_mysql_cycle_uses_post_load_alter_not_deferrable():
+    plan = _plan(dest_dialect="mysql", dest_schema="", cycle_tables=["orders", "customers"])
+    assert "DEFERRABLE" not in _only(plan).dest_ddl
+    assert "ADD CONSTRAINT" in _only(plan).dest_ddl
+
+
+def test_self_ref_is_a_cycle_edge_even_without_cycle_list():
+    source = {
+        "status": "measured",
+        "items": [
+            {
+                "name": "emp_mgr",
+                "columns": ["mgr_id"],
+                "referenced_table": "emp",
+                "referenced_columns": ["id"],
+            }
+        ],
+    }
+    plan = _plan(
+        source_foreign_keys=source,
+        dest_table="emp",
+        dest_columns=["id", "mgr_id"],
+        column_map={"mgr_id": "mgr_id"},
+        table_map={"emp": "emp"},
+        dest_existing_tables={"emp"},
+    )
+    assert "DEFERRABLE INITIALLY DEFERRED" in _only(plan).dest_ddl
+
+
+def test_classify_cycle_resolved_when_every_edge_carried():
+    resolution = classify_cycle_resolution(
+        ["orders", "customers"],
+        [
+            {"dest_table": "orders", "referenced_table": "customers", "status": "carried"},
+            {"dest_table": "customers", "referenced_table": "orders", "status": "carried"},
+        ],
+    )
+    assert resolution["resolved"] is True
+    assert resolution["strategy"] == "post_load_alter"
+    assert resolution["edge_count"] == 2
+
+
+def test_classify_cycle_unresolved_when_an_edge_failed():
+    resolution = classify_cycle_resolution(
+        ["a", "b"],
+        [
+            {"dest_table": "a", "referenced_table": "b", "status": "carried"},
+            {"dest_table": "b", "referenced_table": "a", "status": "unsupported"},
+        ],
+    )
+    assert resolution["resolved"] is False
+    assert resolution["unresolved"][0]["dest_table"] == "b"
+
+
+def test_classify_cycle_unresolved_when_detected_but_no_edges():
+    resolution = classify_cycle_resolution(["a", "b"], [])
+    assert resolution["resolved"] is False
+    assert resolution["edge_count"] == 0
 
 
 def test_references_outside_the_job_do_not_affect_ordering():

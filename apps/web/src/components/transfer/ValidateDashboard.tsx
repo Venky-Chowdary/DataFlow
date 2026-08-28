@@ -1583,10 +1583,11 @@ export function ValidateDashboard({
       pendingVerifyRef.current = true;
       pushRemediation(
         action.label || "Run population orphan scan",
-        "Opt-in full-table anti-join — only path to RI proven. Sample Validate never claims referential integrity.",
+        "Opt-in full-table MATCH SIMPLE anti-join — only path to RI proven. Sample Validate never claims referential integrity.",
         "Running population orphan scan",
         [
           "Enables the same honesty checkbox as Run population orphan scan on next Validate.",
+          "Composite FKs are scanned as whole tuples (any NULL key component is unconstrained).",
           "Sample orphan probe is not population RI proof.",
           "Zero orphans on the population scan is required before RI proven.",
         ],
@@ -3263,7 +3264,7 @@ export function ValidateDashboard({
               />
               <span>
                 Run population orphan scan on next Validate
-                <em> (expensive full-table anti-join — only path to RI proven)</em>
+                <em> (expensive full-table MATCH SIMPLE anti-join, including composite FKs — only path to RI proven)</em>
               </span>
             </label>
           )}

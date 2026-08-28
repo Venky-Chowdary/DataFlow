@@ -68,6 +68,7 @@ def test_security_posture_report(client):
     assert posture["environment"] in ("production", "development")
     assert "encryption_at_rest" in posture
     assert "byok" in posture
+    assert posture.get("byok_encrypts_secrets") is False
     assert posture["cdc_delivery"] == "at-least-once"
     assert posture["cdc_exactly_once_claimed"] is False
     assert posture["cdc_at_most_once_claimed"] is False

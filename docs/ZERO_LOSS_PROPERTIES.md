@@ -4,6 +4,13 @@ Each property is either **PROVEN** (executable proof against real services or an
 exhaustive engine matrix attached below), **PARTIAL**, **UNPROVEN**, or
 **NOT_GUARANTEED**. There is no third option between proven and documented-absent.
 
+**Execute fail-closed (2026-08-28):** a measured dest COUNT that does not
+close `reader == dest + hold_outs + skipped` now fails the job
+(`assert_population_conservation_closed`). Writer ack never closes. Unmeasured
+dests stay honestly open. `100%` is the named fixture
+`tests/test_universal_silent_loss_matrix.py` — not every catalog tile, not CDC
+exactly-once.
+
 | # | Property | Status | Proof command | Engines covered | Engines NOT covered |
 |---|----------|--------|---------------|-----------------|---------------------|
 | 1 | Type identity is referentially transparent | **PROVEN** | `cd apps/api && python -m pytest tests/test_property1_type_identity_case_transparent.py -q` (424 passed) + live PG introspect when reachable | All `DDL_TYPES` destinations (case×logical matrix); live PostgreSQL introspect `integer`→`INT4` | Docker MySQL/ClickHouse/Iceberg not run on this host (no Docker); matrix covers their invent DDL |

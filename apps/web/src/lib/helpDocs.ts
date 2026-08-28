@@ -714,7 +714,7 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
       {
         id: "native",
         title: "Native drivers & SQLAlchemy",
-        body: "**PostgreSQL**, **MySQL**, and **MongoDB** are certified full transfer. **Snowflake**, **BigQuery**, **S3**, **CSV**, and **JSON** are TRANSFER_READY when their packages are installed. **Redshift** stays Planned until a named PRODUCTION_SKU matrix. Generic **SQLAlchemy** URLs extend reach with the same **Validate** preflight path used by native drivers. Catalog tiles are not transfer-live.",
+        body: "**PostgreSQL**, **MySQL**, and **MongoDB** are certified full transfer. **Snowflake**, **BigQuery**, **S3**, **CSV**, and **JSON** are TRANSFER_READY when their packages are installed. **Redshift** stays Planned until a named PRODUCTION_SKU matrix. Generic **SQLAlchemy** URLs extend reach with the same **Validate** preflight path used by native drivers. Catalog tiles are not transfer-live. Proofs → Integrity ledger has **Run desktop lab**: 80 catalog slots exercised as source and destination when the desktop backend is up. Hosted twins (Neon/RDS/CNPG/OpenShift PostgreSQL) share a driver — that option is real, it is not 80 unique engines.",
       },
     ],
   },

@@ -138,6 +138,20 @@
   color: #64748b;
 }
 
+.df2-settings-section-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.df2-settings-policy-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
 .df2-page-settings .df2-settings-section-body .df2-filter-tabs,
 .df2-page-settings .df2-settings-section-body > .df2-tabs {
   margin-bottom: 14px;

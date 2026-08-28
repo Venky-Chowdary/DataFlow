@@ -18,7 +18,20 @@ from pathlib import Path
 from typing import Any
 
 from services.platform_config import data_dir
-from services.secret_vault import decrypt_secret, encrypt_secret
+from services.secret_vault import decrypt_secret, encrypt_secret, tenant_id_from_workspace
+
+_CONNECTOR_SECRET_KEYS = (
+    "password",
+    "connection_string",
+    "api_key",
+    "service_account",
+    "private_key",
+    "secret_access_key",
+    "access_key_secret",
+    "token",
+    "refresh_token",
+    "client_secret",
+)
 from services.value_serializer import json_default
 
 STORE_PATH = data_dir() / "connectors.json"
@@ -117,8 +130,10 @@ class SavedConnector:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> SavedConnector:
-        password = decrypt_secret(data.get("password", "") or "")
-        conn_str = decrypt_secret(data.get("connection_string", "") or "")
+        workspace_id = data.get("workspace_id", "") or ""
+        tenant_id = tenant_id_from_workspace(workspace_id)
+        password = decrypt_secret(data.get("password", "") or "", tenant_id=tenant_id)
+        conn_str = decrypt_secret(data.get("connection_string", "") or "", tenant_id=tenant_id)
         conn_type = data["type"]
         return cls(
             id=data["id"],
@@ -136,9 +151,9 @@ class SavedConnector:
             warehouse=data.get("warehouse", ""),
             auth_mode=data.get("auth_mode", ""),
             auth_role=data.get("auth_role", ""),
-            api_key=data.get("api_key", ""),
-            service_account=data.get("service_account", ""),
-            private_key=decrypt_secret(data.get("private_key", "") or ""),
+            api_key=decrypt_secret(data.get("api_key", "") or "", tenant_id=tenant_id),
+            service_account=decrypt_secret(data.get("service_account", "") or "", tenant_id=tenant_id),
+            private_key=decrypt_secret(data.get("private_key", "") or "", tenant_id=tenant_id),
             endpoint_url=data.get("endpoint_url", ""),
             path_style=bool(data.get("path_style", False)),
             auth_source=data.get("auth_source", ""),
@@ -240,16 +255,20 @@ def _mongo_collection() -> Any:
     return svc.get_database()["connectors"]
 
 
+def _encrypt_connector_doc(d: dict[str, Any]) -> dict[str, Any]:
+    """Encrypt secret fields with tenant BYOK when an active key exists."""
+    tenant_id = tenant_id_from_workspace(d.get("workspace_id") or "")
+    for key in _CONNECTOR_SECRET_KEYS:
+        val = d.get(key)
+        if isinstance(val, str) and val and val != "****" and not val.startswith("["):
+            d[key] = encrypt_secret(val, tenant_id=tenant_id, label=f"connector-{key}")
+    return d
+
+
 def _connector_to_doc(c: SavedConnector) -> dict[str, Any]:
     d = c.to_dict()
     d["_id"] = d.pop("id")
-    if d.get("password"):
-        d["password"] = encrypt_secret(d["password"])
-    if d.get("connection_string"):
-        d["connection_string"] = encrypt_secret(d["connection_string"])
-    if d.get("private_key"):
-        d["private_key"] = encrypt_secret(d["private_key"])
-    return d
+    return _encrypt_connector_doc(d)
 
 
 def _doc_to_connector(doc: dict[str, Any]) -> SavedConnector:
@@ -288,14 +307,7 @@ def _save_all(connectors: list[SavedConnector]) -> None:
     store_path.parent.mkdir(parents=True, exist_ok=True)
     payload = []
     for c in connectors:
-        d = c.to_dict()
-        if d.get("password"):
-            d["password"] = encrypt_secret(d["password"])
-        if d.get("connection_string"):
-            d["connection_string"] = encrypt_secret(d["connection_string"])
-        if d.get("private_key"):
-            d["private_key"] = encrypt_secret(d["private_key"])
-        payload.append(d)
+        payload.append(_encrypt_connector_doc(c.to_dict()))
     text = json.dumps({"connectors": payload}, indent=2, default=json_default)
     # Atomic write so a crash mid-write cannot leave a half-written file.
     tmp = store_path.with_suffix(store_path.suffix + ".tmp")

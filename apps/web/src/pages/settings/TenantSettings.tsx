@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useToast } from "../../components/Toast";
-import { ByokKey, createByokKey, createTenant, fetchByokKeys, fetchSecurityPosture, fetchTenant, fetchWorkspaces, SecurityPosture, Tenant, updateTenant } from "../../lib/api";
+import { ByokKey, createByokKey, createTenant, fetchByokKeys, fetchSecurityPosture, fetchTenant, fetchWorkspaces, rotateByokKey, SecurityPosture, Tenant, updateTenant } from "../../lib/api";
 import { PermissionNotice } from "../../components/PermissionNotice";
 import { PERMISSIONS, useWriteGate } from "../../lib/PermissionsContext";
 import { WORKSPACE_CHANGED_EVENT, getActiveWorkspaceId } from "../../lib/workspace";
@@ -46,6 +46,7 @@ export function TenantSettings() {
   const [newKeyLabel, setNewKeyLabel] = useState("");
   const [newKeyProvider, setNewKeyProvider] = useState<ByokKey["provider"]>("local");
   const [newKeyMaterial, setNewKeyMaterial] = useState("");
+  const [rotatingKeyId, setRotatingKeyId] = useState<string | null>(null);
 
   // The workspace being viewed, re-read when the switcher moves: mounting before
   // the shell had named one read the tenant of no workspace and reported a saved
@@ -204,6 +205,26 @@ export function TenantSettings() {
     }
   };
 
+  const rotateActiveKey = async (keyId: string) => {
+    if (!allowManage() || !tenant) return;
+    setRotatingKeyId(keyId);
+    try {
+      const next = await rotateByokKey(keyId);
+      setKeys((prev) => [next, ...prev.map((k) => (k.id === keyId ? { ...k, status: "rotated" as const } : k))]);
+      const updated = await updateTenant(tenant.id, { byok_key_id: next.id });
+      setTenant(updated);
+      toast({
+        title: "BYOK key rotated",
+        message: "New connector secrets use the new key. Existing byok: ciphertext still decrypts with the rotated key. Not a SOC 2 letter.",
+        tone: "success",
+      });
+    } catch (err) {
+      toast({ title: "Rotate failed", message: err instanceof Error ? err.message : "Could not rotate key", tone: "error" });
+    } finally {
+      setRotatingKeyId(null);
+    }
+  };
+
   if (loading) return <p className="df2-cell-meta">Loading enterprise settings…</p>;
 
   return (
@@ -314,7 +335,7 @@ export function TenantSettings() {
           <div className="df2-settings-section-head">
             <div>
               <h2>Bring your own key (BYOK)</h2>
-              <p>Keys are stored here. Connector credentials still use the platform Fernet vault — BYOK does not wrap those secrets yet.</p>
+              <p>An Active key wraps newly saved connector secrets for this tenant. Existing platform-Fernet credentials stay readable until you re-save the connection. This is encryption evidence — not a SOC 2 or HIPAA letter.</p>
             </div>
           </div>
           <div className="df2-settings-section-body">
@@ -354,7 +375,20 @@ export function TenantSettings() {
                       <h3>{k.label}</h3>
                       <p>{k.provider} · {k.id.slice(0, 8)}… · {k.status}</p>
                     </div>
-                    {k.id === tenant.byok_key_id && <span className="df2-badge df2-badge-live">Active</span>}
+                    <div className="df2-settings-policy-actions">
+                      {k.id === tenant.byok_key_id && <span className="df2-badge df2-badge-live">Active</span>}
+                      {k.status === "active" && (
+                        <button
+                          type="button"
+                          className="df2-btn df2-btn-secondary df2-btn-sm"
+                          disabled={!manage.allowed || rotatingKeyId === k.id}
+                          title={manage.reason || "Mark this key rotated and mint a new active key. Existing secrets stay readable."}
+                          onClick={() => void rotateActiveKey(k.id)}
+                        >
+                          {rotatingKeyId === k.id ? "Rotating…" : "Rotate"}
+                        </button>
+                      )}
+                    </div>
                   </div>
                 ))}
               </div>

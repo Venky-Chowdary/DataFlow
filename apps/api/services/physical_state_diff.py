@@ -50,10 +50,18 @@ ASPECTS: tuple[str, ...] = (
     "check_constraints",
 )
 
-# Reported for the operator but never blocking: trigger bodies are procedural
-# code in a dialect the destination may not even speak, so "not carried" is the
-# expected outcome of a cross-engine move, not a defect the mover can fix.
-ADVISORY_ASPECTS: tuple[str, ...] = ("triggers",)
+# Reported for the operator but never blocking: trigger bodies and view SQL
+# are dialect-specific and are not migrated. "Not carried" is the expected
+# outcome of a cross-engine move — the certificate must *name* the objects
+# so cutover recreates them, never pretend they were absent on the source.
+ADVISORY_ASPECTS: tuple[str, ...] = ("triggers", "views")
+
+_DIALECT_ALIASES = {
+    "postgres": "postgresql",
+    "mariadb": "mysql",
+    "sqlserver": "mssql",
+    "oracledb": "oracle",
+}
 
 # Longest first: "instead of" also contains no other timing, but "before each
 # row" and "after insert" must not be reduced to the wrong token.
@@ -79,17 +87,20 @@ _CHARSET_INTRODUCER = re.compile(r"_[a-z0-9]+(?=')")
 # Oracle's stored CHK_SRC to chk_src), so every catalog lookup compares folded.
 _TRIGGER_SQL: dict[str, str] = {
     "postgresql": (
-        "SELECT action_timing, event_manipulation FROM information_schema.triggers "
+        "SELECT trigger_name, action_timing, event_manipulation "
+        "FROM information_schema.triggers "
         "WHERE lower(event_object_table) = lower(:t) "
         "AND (:s = '' OR lower(event_object_schema) = lower(:s))"
     ),
     "mysql": (
-        "SELECT action_timing, event_manipulation FROM information_schema.triggers "
+        "SELECT trigger_name, action_timing, event_manipulation "
+        "FROM information_schema.triggers "
         "WHERE lower(event_object_table) = lower(:t) "
         "AND (:s = '' OR lower(event_object_schema) = lower(:s))"
     ),
     "mssql": (
-        "SELECT CASE WHEN OBJECTPROPERTY(tr.object_id, 'ExecIsInsteadOfTrigger') = 1 "
+        "SELECT tr.name, "
+        "CASE WHEN OBJECTPROPERTY(tr.object_id, 'ExecIsInsteadOfTrigger') = 1 "
         "THEN 'INSTEAD OF' ELSE 'AFTER' END, te.type_desc "
         "FROM sys.triggers tr "
         "JOIN sys.trigger_events te ON te.object_id = tr.object_id "
@@ -97,13 +108,45 @@ _TRIGGER_SQL: dict[str, str] = {
         "AND (:s = '' OR lower(OBJECT_SCHEMA_NAME(tr.parent_id)) = lower(:s))"
     ),
     "oracle": (
-        "SELECT trigger_type, triggering_event FROM all_triggers "
+        "SELECT trigger_name, trigger_type, triggering_event FROM all_triggers "
         "WHERE upper(table_name) = upper(:t) "
         "AND (:s = '' OR upper(owner) = upper(:s))"
     ),
     "sqlite": (
-        "SELECT sql, '' FROM sqlite_master "
+        "SELECT name, sql, '' FROM sqlite_master "
         "WHERE type = 'trigger' AND lower(tbl_name) = lower(:t)"
+    ),
+}
+
+# Views / matviews that *depend on* the transferred table. Name presence only —
+# body SQL is never compared and never emitted.
+_VIEW_SQL: dict[str, str] = {
+    "postgresql": (
+        "SELECT DISTINCT view_name FROM information_schema.view_table_usage "
+        "WHERE lower(table_name) = lower(:t) "
+        "AND (:s = '' OR lower(table_schema) = lower(:s))"
+    ),
+    "mysql": (
+        "SELECT DISTINCT table_name FROM information_schema.view_table_usage "
+        "WHERE lower(table_name) = lower(:t) "
+        "AND lower(table_schema) = lower(IFNULL(NULLIF(:s, ''), DATABASE()))"
+    ),
+    "mssql": (
+        "SELECT DISTINCT v.name "
+        "FROM sys.sql_expression_dependencies d "
+        "JOIN sys.views v ON v.object_id = d.referencing_id "
+        "WHERE lower(OBJECT_NAME(d.referenced_id)) = lower(:t) "
+        "AND (:s = '' OR lower(OBJECT_SCHEMA_NAME(d.referenced_id)) = lower(:s))"
+    ),
+    "oracle": (
+        "SELECT DISTINCT name FROM all_dependencies "
+        "WHERE type IN ('VIEW', 'MATERIALIZED VIEW') "
+        "AND referenced_type = 'TABLE' "
+        "AND upper(referenced_name) = upper(:t) "
+        "AND (:s = '' OR upper(referenced_owner) = upper(:s))"
+    ),
+    "sqlite": (
+        "SELECT name, sql FROM sqlite_master WHERE type = 'view'"
     ),
 }
 
@@ -132,6 +175,7 @@ class PhysicalState:
     defaults: frozenset[str] = frozenset()
     check_constraints: frozenset[str] = frozenset()
     triggers: frozenset[tuple[str, ...]] = frozenset()
+    views: frozenset[str] = frozenset()
     errors: tuple[str, ...] = ()
 
     def to_dict(self) -> dict[str, Any]:
@@ -146,7 +190,8 @@ class PhysicalState:
             "not_null": sorted(self.not_null),
             "defaults": sorted(self.defaults),
             "check_constraints": sorted(self.check_constraints),
-            "triggers": sorted(" ".join(t) for t in self.triggers),
+            "triggers": sorted(_render_trigger(t) for t in self.triggers),
+            "views": sorted(self.views),
             "errors": list(self.errors),
         }
 
@@ -169,6 +214,11 @@ class _Collector:
 def _fold(name: Any) -> str:
     """Identifier key for cross-engine comparison (Oracle folds upper, PG lower)."""
     return str(name or "").strip().casefold()
+
+
+def _catalog_dialect(db_type: str) -> str:
+    key = str(db_type or "").strip().casefold()
+    return _DIALECT_ALIASES.get(key, key)
 
 
 def _has_catalog_supplied_value(col: Any) -> bool:
@@ -240,6 +290,9 @@ def read_physical_state(
         triggers = collector.run(
             "triggers", lambda: _read_triggers(conn, db_type, name, schema)
         )
+        views = collector.run(
+            "views", lambda: _read_dependent_views(conn, db_type, name, schema)
+        )
 
     not_null: set[str] = set()
     defaults: set[str] = set()
@@ -284,6 +337,7 @@ def read_physical_state(
             if _normalize_predicate(c.get("sqltext"))
         ),
         triggers=frozenset(triggers or ()),
+        views=frozenset(views or ()),
         errors=tuple(collector.errors),
     )
 
@@ -434,16 +488,86 @@ def _trigger_behaviour(timing: Any, event: Any) -> tuple[str, str]:
     return _first_token(text, _TRIGGER_TIMINGS), _first_token(text, _TRIGGER_EVENTS)
 
 
+def _render_trigger(value: tuple[str, ...]) -> str:
+    """``name (after insert)`` — the object the operator recreates."""
+    if not value:
+        return ""
+    if len(value) >= 3:
+        name, timing, event = value[0], value[1], value[2]
+        behave = " ".join(part for part in (timing, event) if part)
+        return f"{name} ({behave})" if behave else name
+    return " ".join(part for part in value if part)
+
+
 def _read_triggers(
     conn: Any, db_type: str, table: str, schema: str
 ) -> list[tuple[str, ...]]:
-    """Trigger timing/event pairs; names are never portable, behaviour is."""
-    sql = _TRIGGER_SQL.get(str(db_type or "").strip().casefold())
+    """Named trigger + portable (timing, event). Body SQL is not compared."""
+    sql = _TRIGGER_SQL.get(_catalog_dialect(db_type))
     if not sql:
         raise NotImplementedError(f"no trigger catalog query for {db_type}")
     params = {"t": table, "s": schema or ""}
     rows = conn.execute(sa.text(sql), params).fetchall()
-    return [_trigger_behaviour(row[0], row[1]) for row in rows]
+    out: list[tuple[str, ...]] = []
+    for row in rows:
+        name = _fold(row[0])
+        timing, event = _trigger_behaviour(row[1], row[2] if len(row) > 2 else "")
+        if name:
+            out.append((name, timing, event))
+    return out
+
+
+def _sqlite_view_depends(sql: str, table: str) -> bool:
+    """Identifier match, not a substring of another name."""
+    folded_sql = _fold(sql)
+    folded_table = _fold(table)
+    if not folded_table or not folded_sql:
+        return False
+    token = re.compile(rf"(?<![a-z0-9_]){re.escape(folded_table)}(?![a-z0-9_])")
+    return bool(token.search(folded_sql))
+
+
+def _read_dependent_views(
+    conn: Any, db_type: str, table: str, schema: str
+) -> list[str]:
+    """View / matview names that depend on ``table``. Body SQL is not read."""
+    dialect = _catalog_dialect(db_type)
+    sql = _VIEW_SQL.get(dialect)
+    if not sql:
+        raise NotImplementedError(f"no view catalog query for {db_type}")
+    params = {"t": table, "s": schema or ""}
+    try:
+        rows = conn.execute(sa.text(sql), params).fetchall()
+    except Exception:
+        if dialect != "mysql":
+            raise
+        rows = conn.execute(
+            sa.text(
+                "SELECT table_name, view_definition FROM information_schema.views "
+                "WHERE lower(table_schema) = lower(IFNULL(NULLIF(:s, ''), DATABASE()))"
+            ),
+            params,
+        ).fetchall()
+        names = []
+        for row in rows:
+            name, definition = row[0], row[1] if len(row) > 1 else ""
+            if _sqlite_view_depends(str(definition or ""), table):
+                folded = _fold(name)
+                if folded:
+                    names.append(folded)
+        return names
+    names: list[str] = []
+    for row in rows:
+        if dialect == "sqlite":
+            name, view_sql = row[0], row[1] if len(row) > 1 else ""
+            if not _sqlite_view_depends(str(view_sql or ""), table):
+                continue
+        else:
+            name = row[0]
+        folded = _fold(name)
+        if folded:
+            names.append(folded)
+    return names
 
 
 def _unique_constraints(inspector: Any, name: str, args: dict[str, Any]) -> list[dict]:
@@ -545,6 +669,10 @@ def _diff_sets(source: frozenset, dest: frozenset) -> dict[str, Any]:
 
 def _render(value: Any) -> str:
     if isinstance(value, tuple):
+        if len(value) == 3 and (
+            value[1] in _TRIGGER_TIMINGS or value[2] in _TRIGGER_EVENTS
+        ):
+            return _render_trigger(value)
         return "->".join(v for v in value if v) if len(value) == 3 else "+".join(value)
     return str(value)
 
@@ -580,14 +708,16 @@ def compare_physical_state(
         ),
     }
     advisory = {
-        "triggers": {
-            **_diff_sets(source.triggers, destination.triggers),
+        "triggers": _advisory_trigger_diff(source.triggers, destination.triggers),
+        "views": {
+            **_diff_sets(source.views, destination.views),
             "advisory": True,
             "note": (
-                "Trigger bodies are not migrated; recreate them on the "
-                "destination before cutover if the application relies on them."
+                "Dependent views / materialized views are not created by table "
+                "transfer. Name presence only — SQL body is not compared. "
+                "Recreate them on the destination before cutover."
             ),
-        }
+        },
     }
     # A partial read cannot certify the aspects it failed on.
     unreadable = sorted(
@@ -608,9 +738,67 @@ def compare_physical_state(
         "advisory": {
             a: v["status"] for a, v in advisory.items() if v["status"] != "carried"
         },
+        "cutover_recreate": _cutover_recreate(advisory),
         "source": source.to_dict(),
         "destination": destination.to_dict(),
     }
+
+
+def _trigger_behavior_key(value: tuple[str, ...]) -> tuple[str, ...]:
+    """Portable (timing, event) — names are per-table and not required to match."""
+    if len(value) >= 3:
+        return (value[1], value[2])
+    return tuple(value)
+
+
+def _advisory_trigger_diff(
+    source: frozenset[tuple[str, ...]],
+    destination: frozenset[tuple[str, ...]],
+) -> dict[str, Any]:
+    """Behaviour class decides status; names are what cutover recreates."""
+    src_behave = frozenset(_trigger_behavior_key(t) for t in source)
+    dst_behave = frozenset(_trigger_behavior_key(t) for t in destination)
+    diff = _diff_sets(src_behave, dst_behave)
+    src_names = sorted({t[0] for t in source if t})
+    dst_names = sorted({t[0] for t in destination if t})
+    if diff["status"] == "absent":
+        diff["missing"] = [_render_trigger(t) for t in sorted(source)]
+    return {
+        **diff,
+        "source_names": src_names,
+        "destination_names": dst_names,
+        "advisory": True,
+        "note": (
+            "Trigger bodies are not migrated; recreate the named triggers "
+            "on the destination before cutover if the application relies on them."
+        ),
+    }
+
+
+def _cutover_recreate(advisory: dict[str, Any]) -> list[dict[str, str]]:
+    """Named objects the mover did not create — recreate before cutover."""
+    items: list[dict[str, str]] = []
+    for aspect, info in advisory.items():
+        if not isinstance(info, dict) or info.get("status") == "carried":
+            continue
+        kind = "view" if aspect == "views" else "trigger" if aspect == "triggers" else aspect
+        for name in info.get("missing") or []:
+            items.append(
+                {
+                    "kind": kind,
+                    "name": str(name),
+                    "action": "recreate_before_cutover",
+                }
+            )
+        if not info.get("missing") and info.get("status") == "unreadable":
+            items.append(
+                {
+                    "kind": kind,
+                    "name": "*",
+                    "action": "catalog_unreadable",
+                }
+            )
+    return items
 
 
 def verify_physical_state(

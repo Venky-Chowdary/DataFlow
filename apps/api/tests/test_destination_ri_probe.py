@@ -161,6 +161,35 @@ def test_composite_fk_partial_null_is_unconstrained_not_orphan(tmp_path: Path) -
     assert result["orphan_rows"] == 0
 
 
+def test_self_referential_composite_is_aliased_and_scanned(tmp_path: Path) -> None:
+    """Hierarchy tables join the same relation twice — parent must be aliased."""
+    path = str(tmp_path / "self_ref.db")
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "CREATE TABLE emp (org INTEGER, emp_id INTEGER, mgr_org INTEGER, "
+            "mgr_id INTEGER, PRIMARY KEY (org, emp_id))"
+        )
+        conn.execute("INSERT INTO emp VALUES (1, 1, NULL, NULL)")
+        conn.execute("INSERT INTO emp VALUES (1, 2, 1, 1)")
+        conn.execute("INSERT INTO emp VALUES (1, 3, 1, 99)")
+    result = verify_destination_referential_integrity(
+        "sqlite",
+        {"type": "sqlite", "database": path},
+        table="emp",
+        foreign_keys=[
+            {
+                "constrained_columns": ["mgr_org", "mgr_id"],
+                "referred_table": "emp",
+                "referred_columns": ["org", "emp_id"],
+            }
+        ],
+    )
+    assert result["verified"] is False
+    assert result["relations"][0]["status"] == "scanned"
+    assert result["orphan_rows"] == 1
+    assert result["relations"][0]["examples"] == ["1+99"]
+
+
 def test_mismatched_column_counts_are_unavailable(tmp_path: Path) -> None:
     cfg = _db(
         tmp_path,

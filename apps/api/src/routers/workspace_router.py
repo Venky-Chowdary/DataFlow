@@ -10,7 +10,13 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 
-from services.byok_key_manager import create_key, get_key, list_keys, rotate_key
+from services.byok_key_manager import (
+    create_key,
+    get_key,
+    list_keys,
+    public_key_dict,
+    rotate_key,
+)
 from services.team_store import (
     can_read_workspace,
     can_write_workspace,
@@ -618,7 +624,7 @@ async def get_tenant_byok_keys(request: Request):
     tenant = _resolve_request_tenant(request)
     if not tenant:
         raise HTTPException(status_code=404, detail="No tenant configured")
-    return {"keys": [k.to_dict() for k in list_keys(tenant.id)]}
+    return {"keys": [public_key_dict(k) for k in list_keys(tenant.id)]}
 
 
 @router.post("/tenant/byok-keys")
@@ -640,7 +646,18 @@ async def post_tenant_byok_key(request: Request, body: BYOKKeyCreateBody):
             update_tenant(tenant.id, byok_key_id=key.id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return key.to_dict()
+    from services.audit_log import append_audit_event
+
+    append_audit_event(
+        action="workspace.byok.create",
+        resource=f"/workspace/tenant/byok-keys/{key.id}",
+        actor=_actor(request),
+        level="success",
+        workspace_id=tenant.workspace_id,
+        tenant_id=tenant.id,
+        details={"key_id": key.id, "provider": key.provider, "label": key.label},
+    )
+    return public_key_dict(key)
 
 
 @router.post("/tenant/byok-keys/{key_id}/rotate")
@@ -655,7 +672,18 @@ async def rotate_tenant_byok_key(key_id: str, request: Request):
         raise HTTPException(status_code=404, detail="Key not found")
     new_key = rotate_key(tenant.id, label=f"Rotated from {key.id[:8]}")
     update_tenant(tenant.id, byok_key_id=new_key.id)
-    return new_key.to_dict()
+    from services.audit_log import append_audit_event
+
+    append_audit_event(
+        action="workspace.byok.rotate",
+        resource=f"/workspace/tenant/byok-keys/{new_key.id}",
+        actor=_actor(request),
+        level="warn",
+        workspace_id=tenant.workspace_id,
+        tenant_id=tenant.id,
+        details={"previous_key_id": key.id, "new_key_id": new_key.id},
+    )
+    return public_key_dict(new_key)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -721,8 +749,9 @@ def _security_posture(tenant: Tenant | None = None) -> dict[str, Any]:
         "session_timeout_hours": tenant.session_timeout_hours if tenant else 8,
         # Token TTL is DATAFLOW_TOKEN_TTL_SEC, not tenant.session_timeout_hours.
         "session_timeout_enforced": False,
-        # BYOK keys may be stored; connector secrets still use platform Fernet.
-        "byok_encrypts_secrets": False,
+        # True when this tenant has an active BYOK key. New connector secrets
+        # are wrapped with that key; enc:v1 leftovers stay readable until re-saved.
+        "byok_encrypts_secrets": bool(tenant and byok.get("active_count")),
         "tls_version": "1.3",
         # Surfaced CDC posture — explicit EO/ALO/AMO; only ALO is claimed.
         "cdc_delivery": DELIVERY_DEFAULT,
@@ -823,6 +852,7 @@ async def get_security_report(request: Request):
         "",
         "## Key management",
         f"- BYOK configured: {'yes' if posture['byok']['configured'] else 'no'}",
+        f"- BYOK wraps new connector secrets: {'yes' if posture.get('byok_encrypts_secrets') else 'no — platform Fernet until an active key exists'}",
     ]
     if posture["byok"]["configured"]:
         lines.append(f"- Active keys: {posture['byok']['active_count']}")
@@ -930,6 +960,45 @@ async def run_fidelity_proof():
         )
     status = 200 if result.get("success") else 422
     return JSONResponse(result, status_code=status)
+
+
+@router.post("/proofs/desktop-lab")
+async def run_desktop_lab_proof():
+    """Exercise the desktop-lab catalog slots as source and destination.
+
+    80 is catalog slots, not unique engines. Hosted twins share a driver.
+    """
+    from services.desktop_lab import DESKTOP_LAB_MIN_DUPLEX, run_desktop_lab
+
+    try:
+        result = await asyncio.to_thread(run_desktop_lab, persist=True)
+    except Exception as exc:
+        return JSONResponse(
+            {"success": False, "error": str(exc), "tier": "desktop_lab"},
+            status_code=500,
+        )
+    duplex = int(result.get("catalog_slots_duplex_passed") or 0)
+    ops = int(result.get("catalog_slots_operations_passed") or 0)
+    slots = int(result.get("catalog_slots") or 0)
+    result["success"] = (
+        duplex >= DESKTOP_LAB_MIN_DUPLEX
+        and ops == slots
+        and duplex == slots
+        and int(result.get("failed") or 0) == 0
+    )
+    status = 200 if result["success"] else 422
+    return JSONResponse(result, status_code=status)
+
+
+@router.get("/proofs/desktop-lab")
+async def get_desktop_lab_proof():
+    """Last persisted desktop-lab duplex report, if any."""
+    from services.desktop_lab import last_desktop_lab_report
+
+    report = last_desktop_lab_report()
+    if report is None:
+        return JSONResponse({"available": False, "catalog_slots": 0})
+    return JSONResponse({"available": True, **report})
 
 
 @router.post("/benchmark")

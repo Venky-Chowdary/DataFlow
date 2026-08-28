@@ -30,10 +30,15 @@ NO_RELATIONAL_DDL_DESTS = frozenset({
     "file",
     "file_export",
     "csv",
+    "tsv",
     "json",
+    "jsonl",
+    "ndjson",
+    "excel",
     "parquet",
     "avro",
     "orc",
+    "xml",
 })
 
 
