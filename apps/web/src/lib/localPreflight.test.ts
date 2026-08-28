@@ -45,6 +45,7 @@ describe("runLocalPreflight file export honesty", () => {
     assert.equal(byId.g14_destination_requirements?.status, "skip");
     assert.equal(byId.constraint_fk?.status, "skip");
     assert.equal(byId.g15_dest_exists_shape?.status, "skip");
+    assert.equal(byId.g18_cdc_snapshot_mode?.status, "skip");
   });
 
   it("blocks SCD2 on a stored-procedure extract", () => {

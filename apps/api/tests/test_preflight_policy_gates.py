@@ -352,6 +352,94 @@ def test_row_cap_gate_names_execute_limit_without_blocking():
     assert "capped write" in g17["message"]
 
 
+def test_cdc_never_without_watermark_blocks_at_validate() -> None:
+    """Debezium never / no_data — fail at Validate, not after Approve."""
+    from services.sync_cursor import IncrementalReadScope
+
+    silent = run_transfer_policy_gates(
+        sync_mode="cdc",
+        schema_policy="manual_review",
+        validation_mode="strict",
+        stream_contracts=[
+            {
+                "name": "orders",
+                "selected": True,
+                "cursor_field": "id",
+                "primary_key": "id",
+                "snapshot_mode": "never",
+            }
+        ],
+        source_type="postgresql",
+        source_kind="database",
+        dest_type="postgresql",
+        source_columns=["id"],
+    )
+    g18 = next(g for g in silent if g["id"] == "g18_cdc_snapshot_mode")
+    assert g18["status"] == "block"
+    assert "never" in g18["message"]
+    assert g18["details"]["primary_action"] == "open_advanced"
+    from services.preflight_rules import explain_gate
+
+    guidance = explain_gate(g18["id"], g18["message"], g18["details"])
+    assert guidance["suggested_actions"][0]["kind"] == "open_advanced"
+
+    with_wm = run_transfer_policy_gates(
+        sync_mode="cdc",
+        schema_policy="manual_review",
+        validation_mode="strict",
+        stream_contracts=[
+            {
+                "name": "orders",
+                "selected": True,
+                "cursor_field": "id",
+                "primary_key": "id",
+                "snapshot_mode": "never",
+            }
+        ],
+        source_type="postgresql",
+        source_kind="database",
+        dest_type="postgresql",
+        source_columns=["id"],
+        read_scope=IncrementalReadScope(watermark="0/16B8A40"),
+    )
+    g18_ok = next(g for g in with_wm if g["id"] == "g18_cdc_snapshot_mode")
+    assert g18_ok["status"] == "pass"
+    assert g18_ok["details"]["watermark_present"] is True
+
+
+def test_cdc_initial_without_watermark_does_not_invent_never_block() -> None:
+    gates = run_transfer_policy_gates(
+        sync_mode="cdc",
+        schema_policy="manual_review",
+        validation_mode="strict",
+        stream_contracts=[
+            {
+                "name": "orders",
+                "selected": True,
+                "cursor_field": "id",
+                "primary_key": "id",
+                "snapshot_mode": "initial",
+            }
+        ],
+        source_type="postgresql",
+        source_kind="database",
+        dest_type="postgresql",
+        source_columns=["id"],
+    )
+    g18 = next(g for g in gates if g["id"] == "g18_cdc_snapshot_mode")
+    assert g18["status"] == "pass"
+    assert g18["details"]["run_snapshot"] is True
+
+
+def test_non_cdc_omits_snapshot_mode_gate() -> None:
+    gates = run_transfer_policy_gates(
+        sync_mode="full_refresh_append",
+        schema_policy="manual_review",
+        validation_mode="strict",
+    )
+    assert all(g["id"] != "g18_cdc_snapshot_mode" for g in gates)
+
+
 def test_incremental_deduped_blocks_an_undeclared_cursor():
     """Nothing about `updated_at` proves the source moves it when a row changes.
 

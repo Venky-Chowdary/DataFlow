@@ -79,6 +79,12 @@ export const GATE_CATALOG: GateCatalogEntry[] = [
     rule: "Existing-table shape is classified once (equal / source-superset / dest-superset / overlap). Writes are name-addressed — never source-positional. Dest-only columns stay off SET.",
   },
   {
+    id: "g18_cdc_snapshot_mode",
+    label: "CDC snapshot mode",
+    icon: "transfer",
+    rule: "snapshot_mode=never without a stored watermark blocks at Validate (same kernel Execute uses). initial / when_needed snapshot. CDC remains at-least-once upsert.",
+  },
+  {
     id: "g3f_population_fit",
     label: "Population fit",
     icon: "scan",

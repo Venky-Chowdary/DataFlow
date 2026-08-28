@@ -258,6 +258,10 @@ export function runLocalPreflight(input: LocalPreflightInput): PreflightResult {
     kind: "dest_exists_shape", coverage: "n/a",
     note: "Writes stay name-addressed on the API path — not a local invent",
   });
+  skip("g18_cdc_snapshot_mode", "Browser-only — CDC snapshot_mode=never requires API watermark.", {
+    kind: "cdc_snapshot_mode", coverage: "n/a",
+    note: "Execute uses the same should_run_snapshot kernel — at-least-once upsert",
+  });
 
   const passedCount = gates.filter((g) => g.status === "pass").length;
   const skippedCount = gates.filter((g) => g.status === "skip").length;

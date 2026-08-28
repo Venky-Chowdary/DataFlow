@@ -36,6 +36,7 @@ HARD_GATE_IDS = {
     "g13_source_coverage",
     "g14_destination_requirements",
     "g15_dest_exists_shape",
+    "g18_cdc_snapshot_mode",
     "g3f_population_fit",
 }
 
@@ -190,6 +191,27 @@ PREFLIGHT_GATE_RULES: dict[str, dict[str, Any]] = {
         ],
         "suggested_actions": [
             {"kind": "review_mappings", "label": "Open Map to remap extra columns"},
+        ],
+    },
+    "g18_cdc_snapshot_mode": {
+        "title": "CDC snapshot mode",
+        "category": "hard",
+        "why": (
+            "snapshot_mode=never forbids a snapshot. Without a stored watermark "
+            "Execute cannot stream and would fail after Approve. This is Debezium "
+            "never / no_data — not dest-owned exactly-once."
+        ),
+        "fix": (
+            "Open Advanced and set snapshot_mode=when_needed (or initial), or "
+            "restore a CDC resume token. Recovery is at-least-once upsert of "
+            "current source keys — not continuous CDC across a purged window."
+        ),
+        "examples": [
+            "First CDC run with never and no watermark — set when_needed, then Validate.",
+            "Watermark cleared after dest recreate — never stays refuse-closed until mode changes.",
+        ],
+        "suggested_actions": [
+            {"kind": "open_advanced", "label": "Open Advanced — set snapshot mode"},
         ],
     },
     "g4_mapping_confidence": {
@@ -895,6 +917,18 @@ def explain_gate(gate_id: str, message: str, details: dict[str, Any] | None = No
                 {"kind": "fix_orphans", "label": "Fix parent rows / load order"},
                 {"kind": "run_population_orphan_scan", "label": "Run population orphan scan"},
             ],
+        }
+    if gate_id == "g18_cdc_snapshot_mode":
+        rule = PREFLIGHT_GATE_RULES.get(gate_id) or {}
+        return {
+            "gate": gate_id,
+            "title": rule.get("title") or "CDC snapshot mode",
+            "category": rule.get("category", "hard"),
+            "why": rule.get("why", ""),
+            "fix": rule.get("fix", ""),
+            "examples": rule.get("examples", []),
+            "suggested_actions": rule.get("suggested_actions")
+            or [{"kind": "open_advanced", "label": "Open Advanced — set snapshot mode"}],
         }
     if gate_id == "g15_dest_exists_shape":
         rule = PREFLIGHT_GATE_RULES.get(gate_id) or {}
