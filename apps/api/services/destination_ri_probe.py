@@ -26,19 +26,12 @@ from typing import Any
 
 import sqlalchemy as sa
 
+from services.fk_tuple_scan import scan_orphan_anti_join
 from services.physical_state_diff import catalog_table_names, resolve_stored_name
-from services.value_serializer import present_cell_text
 
 logger = logging.getLogger(__name__)
 
 __all__ = ["verify_destination_referential_integrity"]
-
-MAX_EXAMPLES = 10
-
-
-def _orphan_example_text(row: Any) -> str:
-    """One orphan key on the reader wire. SQL NULL is not a customer token."""
-    return "+".join(present_cell_text(v) or "" for v in row)
 
 
 def _fold(name: Any) -> str:
@@ -53,38 +46,16 @@ def _orphan_scan(
     parent: Any,
     parent_columns: list[str],
 ) -> dict[str, Any]:
-    """Anti-join the child against the parent through the reflected columns.
-
-    Composite keys join on every column pair at once; MATCH SIMPLE means a key
-    with any NULL component imposes no constraint, so those rows are excluded
-    rather than counted as orphans.
-    """
+    """Anti-join via ``fk_tuple_scan`` — MATCH SIMPLE composite tuples."""
     c_cols = [child.c.get(name) for name in child_columns]
     p_cols = [parent.c.get(name) for name in parent_columns]
-    if any(c is None for c in c_cols) or any(p is None for p in p_cols):
-        return {"available": False, "reason": "join column missing from catalog"}
-
-    on_clause = sa.and_(*[c == p for c, p in zip(c_cols, p_cols)])
-    joined = child.outerjoin(parent, on_clause)
-    where = sa.and_(
-        *[c.is_not(None) for c in c_cols],
-        p_cols[0].is_(None),
+    return scan_orphan_anti_join(
+        conn,
+        child=child,
+        child_columns=c_cols,
+        parent=parent,
+        parent_columns=p_cols,
     )
-    count = int(
-        conn.execute(sa.select(sa.func.count()).select_from(joined).where(where)).scalar()
-        or 0
-    )
-    examples = [
-        _orphan_example_text(row)
-        for row in conn.execute(
-            sa.select(*c_cols).select_from(joined).where(where).limit(MAX_EXAMPLES)
-        ).fetchall()
-    ]
-    return {
-        "available": True,
-        "orphan_count": count,
-        "examples": examples,
-    }
 
 
 def _reflect(conn: Any, meta: sa.MetaData, name: str, schema: str | None) -> Any:

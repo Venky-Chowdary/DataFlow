@@ -34,7 +34,9 @@ When destination/source FK metadata exists but the sample orphan probe cannot ru
 - Emit `fk_orphan_probe_unavailable` (block in strict/maximum unless FK risk acknowledged)
 - Never silent soft-pass
 
-Composite FKs emit `composite_fk_not_probed` instead of a silent skip.
+Composite FKs are scanned as MATCH SIMPLE tuples (same algorithm as destination
+post-write RI). `composite_fk_not_probed` remains only when child/parent column
+counts do not pair — never a silent skip.
 
 ### G9 integrity
 
@@ -59,4 +61,4 @@ Composite FKs emit `composite_fk_not_probed` instead of a silent skip.
 - Sample orphan probe ≠ population RI
 - Full checksum match ≠ FK / constraint proof
 - Population orphan scan is **opt-in** (`run_population_orphan_scan=true`) — default Validate leaves `population_orphan_probe_ran=false` and `proven=false`
-- Composite FKs remain incomplete until tuple anti-join ships — incomplete scans leave `population_orphan_count=null` (never invent proven)
+- Composite FKs use MATCH SIMPLE tuple anti-join / tuple-IN (`services.fk_tuple_scan`). A failed scan or arity mismatch still leaves `population_orphan_count=null` (never invent proven)

@@ -135,13 +135,13 @@ def test_fk_probe_unavailable_emits_fail_closed_finding():
     assert findings[0]["population_proof"] is False
 
 
-def test_composite_fk_surfaces_not_probed_finding():
+def test_composite_fk_sample_probe_scans_the_tuple():
     with patch(
-        "services.sample_orphan_probe._sql_existing_parent_keys",
-        return_value=[],
-    ):
+        "services.sample_orphan_probe._sql_existing_parent_tuples",
+        return_value=[(1, 2)],
+    ) as lookup:
         report = probe_sample_fk_orphans(
-            sample_rows=[{"a": 1, "b": 2}],
+            sample_rows=[{"a": 1, "b": 2}, {"a": 9, "b": 9}],
             mappings=[
                 {"source": "a", "target": "a"},
                 {"source": "b", "target": "b"},
@@ -157,9 +157,31 @@ def test_composite_fk_surfaces_not_probed_finding():
             validation_mode="strict",
             fk_risk_acknowledged=False,
         )
+    assert lookup.called
     assert report["population_proof"] is False
+    assert report["orphan_count"] == 1
     codes = [f.get("code") for f in (report.get("findings") or [])]
-    assert "composite_fk_not_probed" in codes
-    finding = next(f for f in report["findings"] if f["code"] == "composite_fk_not_probed")
+    assert "fk_orphan_in_sample" in codes
+    assert "composite_fk_not_probed" not in codes
+    finding = next(f for f in report["findings"] if f["code"] == "fk_orphan_in_sample")
     assert finding["severity"] == "block"
     assert finding["coverage"] == "sample_orphan_probe"
+
+
+def test_composite_fk_arity_mismatch_still_not_probed():
+    report = probe_sample_fk_orphans(
+        sample_rows=[{"a": 1, "b": 2}],
+        mappings=[{"source": "a", "target": "a"}, {"source": "b", "target": "b"}],
+        foreign_keys=[
+            {
+                "columns": ["a", "b"],
+                "referenced_table": "parents",
+                "referenced_columns": ["id"],
+            }
+        ],
+        source_config={"type": "postgresql", "host": "localhost", "database": "t"},
+        validation_mode="strict",
+        fk_risk_acknowledged=False,
+    )
+    codes = [f.get("code") for f in (report.get("findings") or [])]
+    assert "composite_fk_not_probed" in codes
