@@ -137,6 +137,85 @@ def snapshot_mode_recovers_gap(mode: SnapshotMode | str | None) -> bool:
     }
 
 
+def build_snapshot_mode_preflight_gate(
+    *,
+    sync_mode: str,
+    stream_contracts: list[dict[str, Any]] | None = None,
+    watermark: Any = None,
+    request_snapshot_mode: str = "",
+) -> dict[str, Any] | None:
+    """Validate≡Execute: ``never`` without a watermark must block before Execute.
+
+    Uses ``should_run_snapshot`` — the same kernel CDC transfer calls. Non-CDC
+    syncs emit nothing. ``initial`` / ``when_needed`` without a watermark stay
+    pass (they will snapshot). CDC remains at-least-once upsert.
+    """
+    if str(sync_mode or "").strip().lower() != "cdc":
+        return None
+    try:
+        mode = resolve_snapshot_mode(
+            stream_contracts,
+            request_snapshot_mode=request_snapshot_mode,
+        )
+    except ValueError as exc:
+        return {
+            "id": "g18_cdc_snapshot_mode",
+            "status": "block",
+            "message": str(exc),
+            "duration_ms": 0,
+            "details": {
+                "snapshot_mode": str(request_snapshot_mode or ""),
+                "watermark_present": watermark_present(watermark),
+                "primary_action": "open_advanced",
+                "honesty": (
+                    "CDC remains at-least-once upsert. Not dest-owned exactly-once."
+                ),
+            },
+        }
+    present = watermark_present(watermark)
+    wm = watermark if present else None
+    try:
+        run_snap = should_run_snapshot(mode, watermark=wm)
+    except ValueError as exc:
+        return {
+            "id": "g18_cdc_snapshot_mode",
+            "status": "block",
+            "message": str(exc),
+            "duration_ms": 0,
+            "details": {
+                "snapshot_mode": mode.value,
+                "watermark_present": False,
+                "primary_action": "open_advanced",
+                "honesty": (
+                    "CDC remains at-least-once upsert. Not dest-owned exactly-once. "
+                    "Set snapshot_mode=when_needed (or initial) in Advanced, or "
+                    "restore a resume token."
+                ),
+            },
+        }
+    if mode == SnapshotMode.NEVER:
+        message = "CDC snapshot_mode=never — stream only (watermark present)"
+    elif run_snap:
+        message = (
+            f"CDC snapshot_mode={mode.value} — blocking snapshot then stream "
+            "(at-least-once upsert, not dest-owned exactly-once)"
+        )
+    else:
+        message = f"CDC snapshot_mode={mode.value} — stream only (resume present)"
+    return {
+        "id": "g18_cdc_snapshot_mode",
+        "status": "pass",
+        "message": message,
+        "duration_ms": 0,
+        "details": {
+            "snapshot_mode": mode.value,
+            "watermark_present": present,
+            "run_snapshot": bool(run_snap),
+            "honesty": "at-least-once upsert. not dest-owned exactly-once.",
+        },
+    }
+
+
 def resolve_snapshot_mode(
     stream_contracts: list[dict] | None,
     *,
