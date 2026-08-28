@@ -868,7 +868,7 @@ def test_dynamodb_list_tables_probe_never_writes():
             aws_secret_access_key="test",
             region_name="us-east-1",
         )
-        assert client.list_tables()["TableNames"] == []
+        before = list(client.list_tables().get("TableNames") or [])
         result = probe_destination_privileges(
             "dynamodb",
             host=host,
@@ -882,6 +882,7 @@ def test_dynamodb_list_tables_probe_never_writes():
         assert result.status == "ok"
         assert result.method == "list_tables"
         assert result.can_create_table is True
-        assert client.list_tables()["TableNames"] == []
+        after = list(client.list_tables().get("TableNames") or [])
+        assert after == before, "privilege probe must not CreateTable / PutItem"
     finally:
         server.stop()
