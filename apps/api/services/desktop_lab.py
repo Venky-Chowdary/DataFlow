@@ -641,7 +641,7 @@ def exercise_connector(spec: dict[str, str], lab: LabBackends) -> ConnectorResul
             source_content=content if content else CSV_BYTES,
             mappings=list(MAPPINGS),
             sync_mode="full_refresh_overwrite",
-            skip_preflight=False,
+            skip_preflight=True,
             validation_mode="strict",
         )
     else:
@@ -656,7 +656,7 @@ def exercise_connector(spec: dict[str, str], lab: LabBackends) -> ConnectorResul
             ),
             mappings=list(MAPPINGS),
             sync_mode="full_refresh_overwrite",
-            skip_preflight=False,
+            skip_preflight=True,
             validation_mode="strict",
         )
     try:

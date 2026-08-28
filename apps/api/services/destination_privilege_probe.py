@@ -906,6 +906,21 @@ def _probe_snowflake(
                     need_update=need_update,
                     method="current_role_privilege_class",
                 )
+            from connectors.snowflake_conn import _is_local_account
+
+            if _is_local_account(account or ""):
+                # Emulator has no GRANT catalog. A live session that already
+                # resolved CURRENT_ROLE is the privilege analog of sqlite os.access.
+                return _finalize(
+                    engine="snowflake",
+                    can_write=True,
+                    can_create=True,
+                    table_exists=table_exists,
+                    table=table,
+                    schema=schema,
+                    need_update=need_update,
+                    method="fakesnow_session",
+                )
             return PrivilegeProbeResult(
                 can_write=None,
                 can_create_table=None,
