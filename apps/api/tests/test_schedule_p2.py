@@ -639,6 +639,59 @@ def test_missing_connector_records_failed_history(temp_store, monkeypatch):
     assert reloaded.next_run_at is not None
 
 
+def test_paused_schedule_cadence_does_not_dispatch(temp_store, monkeypatch):
+    """Paused is a cadence switch — the hourly beat must not start a job."""
+    sched = _make(store, enabled=False)
+    called = {"n": 0}
+
+    def boom(*_a, **_k):
+        called["n"] += 1
+        return "job-should-not"
+
+    monkeypatch.setattr(runner, "_dispatch_transfer", boom)
+    assert runner._run_schedule(sched.id) is None
+    assert called["n"] == 0
+    assert store.get_schedule(sched.id).enabled is False
+
+
+def test_paused_schedule_manual_run_starts_without_activating(temp_store, monkeypatch):
+    """Run now on a paused schedule is a one-shot — cadence stays paused."""
+    sched = _make(store, enabled=False)
+    monkeypatch.setattr(runner, "_scheduler_instance_id", lambda: "test-instance")
+
+    def fake_dispatch(sid, attempt=0, allow_paused=False):
+        assert sid == sched.id
+        return "job-manual" if allow_paused else None
+
+    monkeypatch.setattr(runner, "_dispatch_transfer", fake_dispatch)
+    job_id = runner._run_schedule(sched.id, manual=True)
+    assert job_id == "job-manual"
+    assert store.get_schedule(sched.id).enabled is False
+
+
+def test_manual_run_missing_connector_raises_honest_error(temp_store, monkeypatch):
+    """Paused + missing connector must not collapse to 'check connectors'."""
+    sched = _make(store, enabled=False)
+    monkeypatch.setattr(runner, "_resolve_connector", lambda _id: None)
+    monkeypatch.setattr(runner, "_scheduler_instance_id", lambda: "test-instance")
+    with pytest.raises(runner.ScheduleStartError) as exc:
+        runner._run_schedule(sched.id, manual=True)
+    msg = str(exc.value).lower()
+    assert "connector" in msg
+    assert "check connectors" not in msg
+    assert exc.value.http_status == 400
+
+
+def test_manual_run_already_running_is_conflict(temp_store, monkeypatch):
+    sched = _make(store)
+    assert store.mark_schedule_running(sched.id, "inst-1") is not None
+    monkeypatch.setattr(runner, "_scheduler_instance_id", lambda: "inst-2")
+    with pytest.raises(runner.ScheduleStartError) as exc:
+        runner._run_schedule(sched.id, manual=True)
+    assert exc.value.http_status == 409
+    assert "already in progress" in str(exc.value).lower()
+
+
 def test_import_file_schedules_into_mongo_when_empty(tmp_path, monkeypatch):
     path = tmp_path / "schedules.json"
     migrated = tmp_path / "schedules.json.migrated"

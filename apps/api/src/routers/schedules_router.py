@@ -721,14 +721,33 @@ async def run_pipeline_now(
     request: Request,
     workspace_id: str = Header(default="", alias="X-Workspace-Id"),
 ):
-    """Trigger an immediate run (does not change the regular cadence)."""
-    from ..services.schedule_runner import _run_schedule
+    """Trigger an immediate run (does not change the regular cadence).
+
+    Paused / disabled is a cadence switch, not a Run now refusal. A paused
+    schedule still has connectors — collapsing that skip into "check
+    connectors" sent operators to Test on healthy Snowflake rows.
+    """
+    from services.schedule_store import assert_schedule_run_allowed
+    from ..services.schedule_runner import ScheduleStartError, _run_schedule
 
     resolve_write_workspace(request, workspace_id)
-    _bound_schedule(request, schedule_id)
-    job_id = _run_schedule(schedule_id)
+    sched = _bound_schedule(request, schedule_id)
+    try:
+        assert_schedule_run_allowed(sched)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    try:
+        job_id = _run_schedule(schedule_id, manual=True)
+    except ScheduleStartError as exc:
+        raise HTTPException(status_code=exc.http_status, detail=str(exc)) from exc
     if not job_id:
-        raise HTTPException(status_code=400, detail="Could not start pipeline — check connectors")
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Could not start this schedule. Open the schedule for the parked "
+                "finding, or confirm the source and destination connectors still resolve."
+            ),
+        )
     updated = get_schedule(schedule_id)
     return {"success": True, "job_id": job_id, "schedule": ScheduleResponse.from_schedule(updated)}
 

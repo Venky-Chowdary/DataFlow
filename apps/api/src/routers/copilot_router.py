@@ -310,7 +310,7 @@ async def copilot_confirm(request: ConfirmActionRequest, http_request: Request):
             raise HTTPException(status_code=400, detail="Approval is missing schedule_id")
         try:
             from services.schedule_store import get_schedule
-            from ..services.schedule_runner import _run_schedule
+            from ..services.schedule_runner import ScheduleStartError, _run_schedule
 
             sched = get_schedule(schedule_id)
             if not sched:
@@ -323,12 +323,20 @@ async def copilot_confirm(request: ConfirmActionRequest, http_request: Request):
             except ValueError as exc:
                 ledger.release_claim(ack_id)
                 raise HTTPException(status_code=400, detail=str(exc)) from exc
-            job_id = _run_schedule(schedule_id)
+            try:
+                job_id = _run_schedule(schedule_id, manual=True)
+            except ScheduleStartError as exc:
+                ledger.release_claim(ack_id)
+                raise HTTPException(status_code=exc.http_status, detail=str(exc)) from exc
             if not job_id:
                 ledger.release_claim(ack_id)
                 raise HTTPException(
                     status_code=400,
-                    detail="Could not start pipeline — check connectors",
+                    detail=(
+                        "Could not start this schedule. Open the schedule for the "
+                        "parked finding, or confirm the source and destination "
+                        "connectors still resolve."
+                    ),
                 )
         except HTTPException:
             raise

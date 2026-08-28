@@ -303,7 +303,13 @@ export function PipelineDetailDrawer({
             loading={running}
             loadingLabel="Running…"
             disabled={isRunning || breakerOpen || Boolean(runRefusal)}
-            title={runRefusal || (breakerOpen ? "Reset the contract breaker before running" : undefined)}
+            title={
+              runRefusal
+                || (breakerOpen ? "Reset the contract breaker before running" : undefined)
+                || (sched.enabled
+                  ? undefined
+                  : "Runs once now. Does not activate the cadence — the schedule stays paused.")
+            }
             onClick={onRun}
             leadingIcon={<DtIcon name="activity" size={14} />}
           >
