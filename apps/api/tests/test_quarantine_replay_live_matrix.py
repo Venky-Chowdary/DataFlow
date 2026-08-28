@@ -228,7 +228,7 @@ def test_live_engines_close_quarantine_ledger_after_replay():
             rejected = int(result.destination_summary.get("rejected_rows") or 0)
             written = int(
                 result.destination_summary.get("rows_written")
-                or result.records_processed
+                or result.records_transferred
                 or 0
             )
             assert result.success is True, result.destination_summary

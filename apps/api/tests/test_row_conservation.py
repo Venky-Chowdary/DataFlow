@@ -1793,6 +1793,80 @@ def test_true_quarantine_hold_outs_close_with_dest_count():
     assert ledger.balanced is True
 
 
+def test_keyset_missing_equal_to_quarantine_is_not_silent_loss():
+    """Dest-engine S includes hold-outs. missing==quarantine is the DLQ, not DMS."""
+    ledger = account_population(
+        rows_read=5,
+        dest_count=3,
+        dest_count_source=DEST_READBACK,
+        dest_count_before=0,
+        rejected_rows=2,
+        coerced_null_rows=0,
+        rows_skipped=0,
+        writer_ack=3,
+        sync_mode="full_refresh_overwrite",
+        keyset={MISSING_KEYS_KEY: 2, EXTRA_KEYS_KEY: 0},
+    )
+    assert ledger.unaccounted == 0
+    assert ledger.missing_keys == 2
+    assert ledger.extra_keys == 0
+    assert ledger.rows_quarantined == 2
+    assert ledger.balanced is True
+    assert "not silent loss" in ledger.note.lower()
+    assert_population_conservation_closed(
+        {
+            "sync_mode": "full_refresh_overwrite",
+            "records_processed": 3,
+            "rejected_rows": 2,
+            "reconciliation": {
+                "source_rows": 5,
+                "target_rows": 3,
+                "target_checksum": "ages",
+                "dest_count_source": DEST_READBACK,
+                MISSING_KEYS_KEY: 2,
+                EXTRA_KEYS_KEY: 0,
+            },
+        }
+    )
+
+
+def test_keyset_missing_above_quarantine_is_still_silent_loss():
+    """COUNT(*) can net one leftover + one unexplained miss. That stays red."""
+    ledger = account_population(
+        rows_read=5,
+        dest_count=4,
+        dest_count_source=DEST_READBACK,
+        dest_count_before=0,
+        rejected_rows=1,
+        coerced_null_rows=0,
+        rows_skipped=0,
+        writer_ack=4,
+        sync_mode="full_refresh_overwrite",
+        keyset={MISSING_KEYS_KEY: 2, EXTRA_KEYS_KEY: 1},
+    )
+    assert ledger.unaccounted == 0
+    assert ledger.missing_keys == 2
+    assert ledger.extra_keys == 1
+    assert ledger.balanced is False
+    assert "unexplained" in ledger.note.lower()
+    with pytest.raises(PopulationConservationError, match="MISSING_TARGET|unexplained"):
+        assert_population_conservation_closed(
+            {
+                "sync_mode": "full_refresh_overwrite",
+                "records_processed": 4,
+                "rejected_rows": 1,
+                "reconciliation": {
+                    "source_rows": 5,
+                    "target_rows": 4,
+                    "target_checksum": "ages",
+                    "dest_count_source": DEST_READBACK,
+                    MISSING_KEYS_KEY: 2,
+                    EXTRA_KEYS_KEY: 1,
+                },
+            }
+        )
+
+
 def test_append_uses_dest_delta_not_whole_table_count():
     ledger = account_population(
         rows_read=10,
