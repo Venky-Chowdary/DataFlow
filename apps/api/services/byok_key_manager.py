@@ -102,15 +102,24 @@ def _wrap_key_material(raw_bytes: bytes, tenant_id: str = "") -> str:
     return encrypt_secret(encoded, tenant_id=tenant_id or None, label="byok-key")
 
 
+def _b64_to_bytes(value: str | bytes) -> bytes:
+    """Decode urlsafe base64 that may be missing padding."""
+    if isinstance(value, bytes):
+        raw = value
+    else:
+        raw = str(value).encode("ascii")
+    return base64.urlsafe_b64decode(raw + b"==")
+
+
 def _unwrap_key_material(wrapped: str) -> bytes:
     """Return the raw key bytes from a platform-encrypted reference."""
     if _is_platform_encrypted(wrapped):
         plain = decrypt_secret(wrapped)
-        if not plain or plain.startswith("["):
+        if not plain or (isinstance(plain, str) and plain.startswith("[")):
             raise RuntimeError("Unable to decrypt BYOK key material")
-        return base64.urlsafe_b64decode(plain.encode("ascii") + "==")
+        return _b64_to_bytes(plain)
     # Plain base64 (legacy/dev fallback)
-    return base64.urlsafe_b64decode(wrapped.encode("ascii") + "==")
+    return _b64_to_bytes(wrapped)
 
 
 def _cryptography_available() -> bool:
