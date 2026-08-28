@@ -12,6 +12,7 @@ import {
   moveStep,
   removeStep,
   sortSuggestions,
+  previewSampleNote,
   summarizeEffect,
   toggleStep,
   type ShapeCatalog,
@@ -612,7 +613,7 @@ export function TransferTransformStep({
           <span className="df2-xform-note">
             {busy
               ? "Previewing…"
-              : `first ${Math.min(PREVIEW_ROWS, beforeRows.length)} sampled row(s) · changed cells are highlighted`}
+              : previewSampleNote(beforeRows.length, afterRows.length, PREVIEW_ROWS)}
           </span>
         </header>
         <div className="df2-xform-grids">

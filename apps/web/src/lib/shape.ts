@@ -357,6 +357,18 @@ export function linesToList(raw: string): string[] {
     .filter((line) => line.length > 0);
 }
 
+/**
+ * Caption for the before/after grids. Source-row language is a lie after
+ * unnest (2 parents become 3 children) or a filter; name both sides then.
+ */
+export function previewSampleNote(sourceRows: number, transformedRows: number, cap = 12): string {
+  if (sourceRows <= 0) return "no sampled rows yet";
+  if (transformedRows <= 0 || transformedRows === sourceRows) {
+    return `first ${Math.min(cap, sourceRows)} sampled row(s) · changed cells are highlighted`;
+  }
+  return `${sourceRows} source row(s) · ${transformedRows} transformed row(s) · changed cells are highlighted`;
+}
+
 /** One sentence stating what the recipe did to the sample, ledger terms included. */
 export function summarizeEffect(effect: ShapeEffect | null): string {
   if (!effect) return "";

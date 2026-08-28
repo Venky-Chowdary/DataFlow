@@ -8,6 +8,7 @@ import {
   missingRequired,
   moveStep,
   operationsByFamily,
+  previewSampleNote,
   recipePayload,
   removeStep,
   sameRecipe,
@@ -133,6 +134,21 @@ test("the effect sentence carries the ledger terms, not just a row count", () =>
   assert.match(sentence, /14 cell\(s\) changed/);
   assert.match(sentence, /3 null\(s\) introduced/);
   assert.equal(summarizeEffect(null), "");
+});
+
+test("the before/after caption names both sides when unnest expands the sample", () => {
+  assert.equal(
+    previewSampleNote(2, 3),
+    "2 source row(s) · 3 transformed row(s) · changed cells are highlighted",
+  );
+  assert.equal(
+    previewSampleNote(5, 5),
+    "first 5 sampled row(s) · changed cells are highlighted",
+  );
+  assert.equal(
+    previewSampleNote(8, 2),
+    "8 source row(s) · 2 transformed row(s) · changed cells are highlighted",
+  );
 });
 
 test("a removed cell is not highlighted as a change in the after grid", () => {
