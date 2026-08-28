@@ -4680,6 +4680,11 @@ export function TransferPage({
           onPrimaryFix: () => setBadDataFixOpen(true),
           primaryFixLabel: "Fix bad data…",
         };
+      case "open_advanced":
+        return {
+          onPrimaryFix: openIdentitySettings,
+          primaryFixLabel: action.label || "Open Advanced — set snapshot mode",
+        };
       case "check_connection":
         return {
           onPrimaryFix: () => {

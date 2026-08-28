@@ -662,6 +662,17 @@ def run_transfer_policy_gates(
     if eos_gate:
         gates.append(eos_gate)
 
+    from services.cdc_snapshot_mode import build_snapshot_mode_preflight_gate
+
+    snap_wm = getattr(read_scope, "watermark", None) if read_scope is not None else None
+    snap_gate = build_snapshot_mode_preflight_gate(
+        sync_mode=sync,
+        stream_contracts=contracts,
+        watermark=snap_wm,
+    )
+    if snap_gate:
+        gates.append(snap_gate)
+
     cap = max(0, int(row_limit or 0))
     priority = str(priority_column or "").strip()
     direction = "asc" if str(priority_direction or "").strip().lower() == "asc" else "desc"
