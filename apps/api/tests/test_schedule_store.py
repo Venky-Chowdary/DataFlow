@@ -23,9 +23,19 @@ def test_create_and_list(temp_store):
         "dest_table": "orders_wh",
         "interval": "daily",
     })
-    assert sched.enabled
+    assert sched.enabled is False
     assert sched.interval == "daily"
     assert len(store.list_schedules()) == 1
+    live = store.create_schedule({
+        "name": "Nightly mapped",
+        "source_connector_id": "src-1",
+        "source_table": "orders",
+        "dest_connector_id": "dst-1",
+        "dest_table": "orders_wh",
+        "interval": "daily",
+        "mappings": [{"source": "id", "target": "id"}],
+    })
+    assert live.enabled is True
 
 
 def test_assert_signed_contract_fail_closed(temp_store, monkeypatch):
@@ -107,6 +117,7 @@ def test_due_schedules(temp_store):
         "dest_connector_id": "b",
         "dest_table": "t2",
         "interval": "hourly",
+        "mappings": [{"source": "id", "target": "id"}],
     })
     past = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
     store.update_schedule(sched.id, {"next_run_at": past})

@@ -1374,6 +1374,10 @@ export interface ScheduleInput {
   priority_direction?: "asc" | "desc" | string;
   row_limit?: number;
   delivery_guarantee?: string;
+  snapshot_mode?: string;
+  allow_append_only?: boolean;
+  cdc_row_filter?: string;
+  multi_subnet_failover?: boolean;
   cursor_column: string;
   primary_key: string;
   source_read_mode?: string;
@@ -1474,7 +1478,17 @@ export interface PipelineSchedule {
   validation_mode: string;
   schema_policy: string;
   backfill_new_fields: boolean;
+  write_via_staging?: boolean;
+  priority_column?: string;
+  priority_direction?: "asc" | "desc" | string;
+  row_limit?: number;
+  date_locale?: string;
+  number_locale?: string;
   delivery_guarantee?: string;
+  snapshot_mode?: string;
+  allow_append_only?: boolean;
+  cdc_row_filter?: string;
+  multi_subnet_failover?: boolean;
   cursor_column: string;
   primary_key: string;
   cursor_value: string;
@@ -1511,6 +1525,11 @@ export interface PipelineSchedule {
   /** Present on GET /schedules/{id}; omitted from list summaries. */
   mappings?: { source: string; target: string; confidence?: number; transform?: string | null }[];
   mapping_count?: number;
+  /** Validate≡Execute stamps. On GET /schedules/{id}; hashes also on list summary. */
+  shape_recipe?: unknown;
+  approved_shape_recipe_hash?: string;
+  approved_decision_artifact_hash?: string;
+  approved_ddl_identity_hash?: string;
   /** Dual Run campaign (consecutive parallel-run cycles). Display-only. */
   fidelity_campaign?: {
     verdict?: string;

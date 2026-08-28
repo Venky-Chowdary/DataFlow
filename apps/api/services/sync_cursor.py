@@ -151,6 +151,26 @@ def is_append_sync(mode: str | None) -> bool:
 SCHEMALESS_DESTINATIONS = frozenset({"redis", "kafka"})
 
 
+def destination_exists_for_shape(
+    exists: bool | None,
+    *,
+    dest_format: str = "",
+) -> bool | None:
+    """Dest-exists boolean for Map / G15 / auto-map.
+
+    Never collapse ``exists=True`` + empty column catalog to missing. That
+    collapse is a *typing* concern (``destination_exists_for_typing``) and
+    invents create-new against a table the probe already listed.
+
+    Schemaless dests have no dest-exists contract — treat as create-new for
+    shape. Overwrite recreate is a separate branch; do not call this helper
+    to decide DROP.
+    """
+    if (dest_format or "").strip().lower() in SCHEMALESS_DESTINATIONS:
+        return False
+    return exists
+
+
 def destination_exists_for_typing(
     mode: str | None,
     exists: bool | None,
@@ -159,6 +179,9 @@ def destination_exists_for_typing(
     dest_format: str = "",
 ) -> bool | None:
     """Is there a live column shape for the write to bind its types to?
+
+    Not a dest-exists / create-new authority. Use
+    ``destination_exists_for_shape`` for Map / G15 / auto-map existence.
 
     Two situations answer no, and both used to be mistaken for "wait for a
     Studio stamp", which leaves every target type pending and makes the

@@ -6,6 +6,9 @@ import { describe, it } from "node:test";
 
 import {
   buildValidateContractKey,
+  formatValidateIdentitySummary,
+  shortHash,
+  studioScheduleValidateIdentity,
   validateContractStillHolds,
   type ValidateContractInput,
 } from "./studioValidateIdentity.ts";
@@ -86,5 +89,49 @@ describe("studioValidateIdentity", () => {
     );
     assert.match(key, /NUMBER\(9,6\)/);
     assert.doesNotMatch(key, /create-new/);
+  });
+
+  it("stamps Validate DDL identity onto a Studio schedule and does not invent hashes", () => {
+    const empty = studioScheduleValidateIdentity(undefined);
+    assert.equal(empty.approved_decision_artifact_hash, "");
+    assert.equal(empty.approved_ddl_identity_hash, "");
+    const stamped = studioScheduleValidateIdentity({
+      proof_bundle: {
+        decision_artifact_hash: "b".repeat(64),
+        decision_artifact: { content_hash: "legacy".repeat(8) },
+        ddl_identity: { ddl_identity_hash: "c".repeat(64) },
+      },
+    });
+    assert.equal(stamped.approved_decision_artifact_hash, "b".repeat(64));
+    assert.equal(stamped.approved_ddl_identity_hash, "c".repeat(64));
+    const legacy = studioScheduleValidateIdentity({
+      proof_bundle: { decision_artifact: { content_hash: "d".repeat(64) } },
+    });
+    assert.equal(legacy.approved_decision_artifact_hash, "d".repeat(64));
+    assert.equal(legacy.approved_ddl_identity_hash, "");
+  });
+
+  it("shortHash truncates without inventing a stamp", () => {
+    assert.equal(shortHash(""), "");
+    assert.equal(shortHash("   "), "");
+    assert.equal(shortHash("abc"), "abc");
+    assert.equal(shortHash("a".repeat(64)), `${"a".repeat(8)}…${"a".repeat(4)}`);
+  });
+
+  it("formatValidateIdentitySummary does not invent hashes or treat empty as pinned", () => {
+    const empty = formatValidateIdentitySummary(undefined);
+    assert.equal(empty.pinned, false);
+    assert.deepEqual(empty.missing, ["shape", "decision", "ddl"]);
+    assert.equal(empty.shapeSteps, 0);
+    const stamped = formatValidateIdentitySummary({
+      shape_recipe: { steps: [{ op: "trim", column: "name" }] },
+      approved_shape_recipe_hash: "a".repeat(64),
+      approved_decision_artifact_hash: "b".repeat(64),
+      approved_ddl_identity_hash: "c".repeat(64),
+    });
+    assert.equal(stamped.pinned, true);
+    assert.equal(stamped.shapeSteps, 1);
+    assert.deepEqual(stamped.missing, []);
+    assert.equal(stamped.shapeHash, "a".repeat(64));
   });
 });

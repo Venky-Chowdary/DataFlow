@@ -127,8 +127,12 @@ def build_artifact_from_mappings(
     return build_decision_artifact(
         tenant_id=tenant_id or "anonymous",
         route_id=route_id or f"execute:{dst_engine or 'unknown'}",
-        source_fingerprint=source_fingerprint or "map",
-        dest_fingerprint=dest_fingerprint or (dst_engine or "dest"),
+        # Empty is honest (file inference / unprobed). Do not substitute
+        # the literal "map" — that hid source DDL drift after Validate.
+        source_fingerprint=(source_fingerprint or "").strip(),
+        # Empty is honest (create-new / overwrite / unprobed). Do not
+        # substitute the engine name — that hid dest-exists DDL drift.
+        dest_fingerprint=(dest_fingerprint or "").strip(),
         source_columns=src_cols,
         dest_columns=dst_cols,
         mappings=map_decisions,
@@ -159,6 +163,8 @@ def enforce_decision_artifact(
     error_policy: str = "quarantine",
     tenant_id: str = "",
     route_id: str = "",
+    dest_fingerprint: str = "",
+    source_fingerprint: str = "",
 ) -> tuple[str | None, DecisionArtifact | None]:
     """Fail closed when Execute artifact authority is missing or drifts.
 
@@ -173,11 +179,15 @@ def enforce_decision_artifact(
             supplied = decision_artifact_from_dict(artifact_payload)
         except ValueError as exc:
             return (f"Decision Artifact refused: {exc}", None)
+        dest_fp = (dest_fingerprint or "").strip()
+        src_fp = (source_fingerprint or "").strip()
         current = build_artifact_from_mappings(
             mappings,
             dest_db=dest_db,
             tenant_id=tenant_id or supplied.tenant_id,
             route_id=route_id or supplied.route_id,
+            source_fingerprint=src_fp,
+            dest_fingerprint=dest_fp,
             sync_mode=sync_mode or supplied.sync_mode,
             error_policy=error_policy or supplied.error_policy,
             # Deterministic compare: rebuild without volatile ids
@@ -192,6 +202,18 @@ def enforce_decision_artifact(
             if supplied.ddl.ddl_identity_hash != current.ddl.ddl_identity_hash:
                 return (
                     "Decision Artifact DDL identity diverged from current Map — "
+                    "re-run Validate before Execute.",
+                    None,
+                )
+            if dest_fp and supplied.dest_fingerprint != dest_fp:
+                return (
+                    "Decision Artifact dest schema drifted since Validate — "
+                    "re-run Validate before Execute.",
+                    None,
+                )
+            if src_fp and supplied.source_fingerprint != src_fp:
+                return (
+                    "Decision Artifact source schema drifted since Validate — "
                     "re-run Validate before Execute.",
                     None,
                 )
@@ -215,6 +237,8 @@ def enforce_decision_artifact(
         dest_db=dest_db,
         tenant_id=tenant_id,
         route_id=route_id,
+        source_fingerprint=(source_fingerprint or "").strip(),
+        dest_fingerprint=(dest_fingerprint or "").strip(),
         sync_mode=sync_mode,
         error_policy=error_policy,
         artifact_id="da_inline",

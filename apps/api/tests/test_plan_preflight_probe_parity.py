@@ -197,3 +197,94 @@ def test_plan_preflight_passes_source_probe_and_policy_kwargs() -> None:
     assert pol["source_kind"] == "database"
     assert pol["source_type"] == "mysql"
     assert pol["dest_type"] == "postgresql"
+
+
+def test_plan_preflight_reconciles_live_source_types() -> None:
+    """Plan Validate must use live source types — Map-time VARCHAR is not Execute."""
+    captured: dict[str, Any] = {}
+
+    def _capture_pf(**kwargs):
+        captured["pf"] = kwargs
+        return {
+            "passed": True,
+            "passed_count": 1,
+            "total_gates": 1,
+            "readiness_score": 100,
+            "gates": [],
+            "blockers": [],
+            "warnings": [],
+        }
+
+    plan = MagicMock()
+    plan.source = {
+        "kind": "database",
+        "format": "mongodb",
+        "connector_id": "src-mongo",
+        "collection": "orders",
+    }
+    plan.destination = {
+        "kind": "database",
+        "format": "postgresql",
+        "connector_id": "dst-pg",
+        "table": "orders",
+    }
+    plan.source_columns = ["_id", "email"]
+    plan.source_schema = {"_id": "VARCHAR", "email": "VARCHAR"}
+    plan.target_columns = ["_id", "email"]
+    plan.target_schema = {}
+    plan.row_count_estimate = 10
+    plan.sample_rows = [{"_id": "abc", "email": "a@b.com"}]
+    plan.policies = {
+        "sync_mode": "full_refresh_append",
+        "schema_policy": "manual_review",
+        "validation_mode": "strict",
+        "stream_contracts": [],
+    }
+    rev = MagicMock()
+    rev.mappings = [
+        {"source": "_id", "target": "id", "source_type": "VARCHAR", "confidence": 0.99},
+        {"source": "email", "target": "email", "source_type": "VARCHAR", "confidence": 0.9},
+    ]
+    rev.source_columns = []
+    rev.source_schema = {}
+    rev.source_schema_hash = ""
+    rev.target_schema_hash = ""
+    rev.version = 1
+    rev.mapping_hash = "h"
+    plan.active_revision.return_value = rev
+
+    with (
+        patch("services.transfer_plan_service.get_plan", return_value=plan),
+        patch(
+            "services.transfer_plan_service._preflight",
+            return_value=(
+                lambda pf, gates, **kw: {**pf, "gates": list(gates)},
+                lambda _m: 0.85,
+                lambda **kw: {
+                    "connected": True,
+                    "table_exists": True,
+                    "db_type": "postgresql",
+                    "column_types": {"id": "text", "email": "text"},
+                },
+                _capture_pf,
+                lambda **kw: [],
+            ),
+        ),
+        patch(
+            "services.source_schema_authority.live_source_column_types",
+            return_value={"_id": "OBJECTID", "email": "VARCHAR"},
+        ),
+        patch("services.transfer_plan_service.add_preflight_run"),
+        patch("services.transfer_plan_service.append_audit_event"),
+    ):
+        from services.transfer_plan_service import run_plan_preflight
+
+        result = run_plan_preflight("plan-mongo")
+
+    pf = captured["pf"]
+    assert pf["column_types"]["_id"] == "OBJECTID"
+    maps = {m["source"]: m for m in pf["mappings"]}
+    assert maps["_id"]["source_type"] == "OBJECTID"
+    assert pf["declared_source_schema"]["_id"] == "VARCHAR"
+    drift = result.get("source_schema_drift") or []
+    assert any(d.get("column") == "_id" and d.get("live") == "OBJECTID" for d in drift)

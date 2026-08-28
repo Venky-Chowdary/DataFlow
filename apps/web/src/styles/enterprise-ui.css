@@ -10310,6 +10310,11 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   gap: 18px;
 }
 
+.df2-sched-validate-identity code {
+  font-family: var(--df-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 11.5px;
+}
+
 .df2-sched-panel {
   display: flex;
   flex-direction: column;
@@ -10449,6 +10454,11 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   font-size: 12.5px;
   color: #334155;
   cursor: pointer;
+}
+
+.df2-sched-check.is-disabled {
+  color: #94a3b8;
+  cursor: not-allowed;
 }
 
 .df2-sched-backoff-hint { margin-top: -4px; }

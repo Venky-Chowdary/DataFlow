@@ -2658,16 +2658,20 @@ th.df2-type-string .df2-type-badge {
 .df2-dest-mode-row {
   display: flex;
   flex-wrap: nowrap;
-  align-items: center;
+  align-items: stretch;
   gap: 8px;
   min-width: 0;
+  min-height: var(--df-btn-height, 36px);
 }
 
 .df2-dest-mode-toggle {
   display: inline-flex;
   flex: 1 1 auto;
   min-width: 0;
+  box-sizing: border-box;
   height: var(--df-btn-height, 36px);
+  min-height: var(--df-btn-height, 36px);
+  max-height: var(--df-btn-height, 36px);
   padding: 0;
   border: 1px solid #e2e8f0;
   border-radius: 8px;
@@ -2679,8 +2683,10 @@ th.df2-type-string .df2-type-badge {
 .df2-dest-mode-btn {
   flex: 1 1 0;
   min-width: 0;
-  height: var(--df-btn-height, 36px);
-  min-height: var(--df-btn-height, 36px);
+  box-sizing: border-box;
+  height: 100%;
+  min-height: 0;
+  max-height: none;
   padding: 0 10px;
   border: 0;
   border-radius: 6px;
@@ -2704,17 +2710,19 @@ th.df2-type-string .df2-type-badge {
   box-shadow: 0 1px 2px rgba(15, 23, 42, 0.06);
 }
 
-.df2-dest-toolbar .df2-dest-advanced-btn {
+.df2-dest-toolbar .df2-dest-advanced-btn,
+.df2-dest-toolbar .df2-dest-advanced-btn.df2-btn {
   flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: 6px;
+  box-sizing: border-box;
   height: var(--df-btn-height, 36px);
   min-height: var(--df-btn-height, 36px);
   max-height: var(--df-btn-height, 36px);
   padding: 0 12px;
-  align-self: center;
+  align-self: stretch;
   white-space: nowrap;
   box-sizing: border-box;
   border: 1px solid #e2e8f0;

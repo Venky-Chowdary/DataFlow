@@ -61,7 +61,7 @@ try:
         shaped_schema,
     )
     from services.sync_cursor import (
-        destination_exists_for_typing,
+        destination_exists_for_shape,
         is_overwrite_sync,
         map_source_to_target,
         requires_upsert,
@@ -108,7 +108,7 @@ except (
         shaped_schema,
     )
     from src.services.sync_cursor import (
-        destination_exists_for_typing,
+        destination_exists_for_shape,
         is_overwrite_sync,
         map_source_to_target,
         requires_upsert,
@@ -1042,6 +1042,11 @@ def _execute_policy_gates_for_request(
         # Best-effort here; the read side refuses authoritatively with the exact
         # cursor key. Both refuse a watermark measured on another column.
         read_scope=read_scope_for_transfer_request(request),
+        # Advanced write knobs — Validate already emits g17_row_cap. Execute
+        # must name the same cap/sort or Approve hides a leftover filter.
+        priority_column=str(getattr(request, "priority_column", "") or ""),
+        priority_direction=str(getattr(request, "priority_direction", "") or "desc"),
+        row_limit=max(0, int(getattr(request, "limit", 0) or 0)),
     )
 
 
@@ -1359,18 +1364,15 @@ def _auto_map(
                 request=request,
             )
         else:
-            target_schema, dest_exists = _destination_schema_probe(
+            target_schema, probe_exists = _destination_schema_probe(
                 request.destination,
                 sync_mode=sync_mode,
             )
-            # Overwrite recreates the table, and a keyspace store never has a
-            # column shape at all. Either way there is nothing to bind types to,
-            # so the mapper must invent rather than wait for a stamp that is
-            # never coming — see destination_exists_for_typing.
-            dest_exists = destination_exists_for_typing(
-                sync_mode,
-                dest_exists,
-                has_live_column_types=bool(target_schema),
+            # Shape/existence is the raw probe. Typing may collapse
+            # exists+empty-catalog to "no types to bind" — that must not
+            # invent create-new on a listed dest table (G15 pending).
+            dest_exists = destination_exists_for_shape(
+                probe_exists,
                 dest_format=str(getattr(request.destination, "format", "") or ""),
             )
             if not target_schema:
@@ -2526,6 +2528,11 @@ class UniversalTransferEngine:
                 skip_preflight=bool(getattr(request, "skip_preflight", False)),
                 sync_mode=str(getattr(request, "sync_mode", "") or ""),
                 error_policy="quarantine",
+                destination_column_types=dest_schema_types,
+                destination_table_exists=dest_table_exists_flag,
+                source_column_types=schema,
+                source_kind=str(getattr(request.source, "kind", "") or ""),
+                source_format=str(getattr(request.source, "format", None) or src_fmt or ""),
             )
             if art_err:
                 mongo.update_job_status(
@@ -3726,6 +3733,11 @@ class UniversalTransferEngine:
                 skip_preflight=bool(getattr(request, "skip_preflight", False)),
                 sync_mode=str(getattr(request, "sync_mode", "") or ""),
                 error_policy="quarantine",
+                destination_column_types=dest_schema_types,
+                destination_table_exists=dest_table_exists_flag,
+                source_column_types=schema,
+                source_kind=str(getattr(request.source, "kind", "") or ""),
+                source_format=str(getattr(request.source, "format", None) or src_fmt or ""),
             )
             if art_err:
                 mongo.update_job_status(
@@ -4539,6 +4551,11 @@ class UniversalTransferEngine:
                 skip_preflight=bool(getattr(request, "skip_preflight", False)),
                 sync_mode=str(getattr(request, "sync_mode", "") or ""),
                 error_policy="quarantine",
+                destination_column_types=dest_schema_types,
+                destination_table_exists=dest_table_exists_flag,
+                source_column_types=schema,
+                source_kind=str(getattr(request.source, "kind", "") or ""),
+                source_format=str(getattr(request.source, "format", None) or src_fmt or ""),
             )
             if art_err:
                 mongo.update_job_status(

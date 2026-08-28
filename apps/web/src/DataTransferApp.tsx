@@ -670,6 +670,7 @@ function AppShell({
                     onOpenPipeline={(scheduleId) =>
                       navigateFromSearch({ screen: "schedules", scheduleId })
                     }
+                    onOpenSchedules={() => setScreen("schedules")}
                   />
                 </PageErrorBoundary>
                 </div>

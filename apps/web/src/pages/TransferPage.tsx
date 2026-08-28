@@ -122,9 +122,14 @@ import {
   namedStudioSchemaPolicy,
   namedStudioValidationMode,
   schemaPolicyBackfills,
+  studioScheduleCdcExtras,
   studioSchedulePolicies,
+  writeViaStagingSupported as destSupportsWriteViaStaging,
 } from "../lib/studioDataRules";
-import { buildValidateContractKey as composeValidateContractKey } from "../lib/studioValidateIdentity";
+import {
+  buildValidateContractKey as composeValidateContractKey,
+  studioScheduleValidateIdentity,
+} from "../lib/studioValidateIdentity";
 import {
   CDC_DELIVERY_AT_LEAST_ONCE,
   exactlyOnceWiredDest,
@@ -677,10 +682,7 @@ export function TransferPage({
     destDriverType === "pinecone" ||
     destDriverType === "milvus";
 
-  const writeViaStagingSupported = [
-    "postgresql", "mysql", "sqlite", "sqlserver", "mssql", "oracle",
-    "snowflake", "redshift", "bigquery", "duckdb", "generic_sql",
-  ].includes(destDriverType);
+  const writeViaStagingSupported = destSupportsWriteViaStaging(destDriverType);
 
   useEffect(() => {
     if (!writeViaStagingSupported && writeViaStaging) {
@@ -5218,10 +5220,6 @@ export function TransferPage({
               confidence: m.confidence,
               transform: m.transform,
             }));
-      const decisionHash = String(
-        (preflight?.proof_bundle?.decision_artifact as { content_hash?: string } | undefined)
-          ?.content_hash || "",
-      );
       await createSchedule({
         name: `${sourceConnector?.name ?? "Source"} → ${targetCollection}`,
         source_connector_id: sourceConnectorId,
@@ -5239,11 +5237,9 @@ export function TransferPage({
         procedure_params: Object.keys(procedureParams).length ? procedureParams : {},
         mappings: transferMappings,
         stream_contracts: streamContracts,
-        date_locale: dateLocale,
-        number_locale: numberLocale,
         shape_recipe: recipePayload(shapeSteps),
         approved_shape_recipe_hash: shapeIdentity?.hash || "",
-        approved_decision_artifact_hash: decisionHash,
+        ...studioScheduleValidateIdentity(preflight),
         ...studioSchedulePolicies({
           validationMode,
           schemaPolicy,
@@ -5252,12 +5248,22 @@ export function TransferPage({
           priorityColumn,
           priorityDirection,
           rowLimit,
+          dateLocale,
+          numberLocale,
+          syncMode,
+          snapshotMode,
         }),
         delivery_guarantee: studioDeliveryGuarantee({
           syncMode,
           deliveryGuarantee,
           allowAppendOnly,
           callableSource: sourceReadMode === "procedure" || sourceReadMode === "query",
+        }),
+        ...studioScheduleCdcExtras({
+          syncMode,
+          allowAppendOnly,
+          cdcRowFilter,
+          multiSubnetFailover,
         }),
         contract_id: boundContractId.trim(),
         require_signed_contract: Boolean(boundContractId.trim() && requireSignedContract),

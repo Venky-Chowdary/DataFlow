@@ -9,7 +9,12 @@ import {
   namedStudioSchemaPolicy,
   namedStudioValidationMode,
   schemaPolicyBackfills,
+  namedStudioDateLocale,
+  namedStudioNumberLocale,
+  scheduleCreateMustPauseWithoutMappings,
+  studioScheduleCdcExtras,
   studioSchedulePolicies,
+  writeViaStagingSupported,
 } from "./studioDataRules.ts";
 
 describe("studioDataRules", () => {
@@ -96,5 +101,72 @@ describe("studioDataRules", () => {
     assert.equal(payload.priority_column, "updated_at");
     assert.equal(payload.priority_direction, "asc");
     assert.equal(payload.row_limit, 5000);
+  });
+
+  it("writeViaStagingSupported matches the SQL staging engine set", () => {
+    assert.equal(writeViaStagingSupported("postgresql"), true);
+    assert.equal(writeViaStagingSupported("postgres"), true);
+    assert.equal(writeViaStagingSupported("mysql"), true);
+    assert.equal(writeViaStagingSupported("snowflake"), true);
+    assert.equal(writeViaStagingSupported("bigquery"), true);
+    assert.equal(writeViaStagingSupported("mongodb"), false);
+    assert.equal(writeViaStagingSupported("csv"), false);
+    assert.equal(writeViaStagingSupported("s3"), false);
+    assert.equal(writeViaStagingSupported(""), false);
+  });
+
+  it("copies Studio date/number locales onto a scheduled pipeline and refuses unknown values", () => {
+    assert.equal(namedStudioDateLocale("dmy"), "DMY");
+    assert.equal(namedStudioDateLocale("bogus"), "");
+    assert.equal(namedStudioNumberLocale("eu"), "EU");
+    assert.equal(namedStudioNumberLocale("UK"), "");
+    const payload = studioSchedulePolicies({
+      dateLocale: "DMY",
+      numberLocale: "EU",
+    });
+    assert.equal(payload.date_locale, "DMY");
+    assert.equal(payload.number_locale, "EU");
+    const empty = studioSchedulePolicies({});
+    assert.equal(empty.date_locale, "");
+    assert.equal(empty.number_locale, "");
+  });
+
+  it("stamps CDC snapshot_mode onto a scheduled pipeline and omits it on full refresh", () => {
+    const cdc = studioSchedulePolicies({
+      syncMode: "cdc",
+      snapshotMode: "when_needed",
+    });
+    assert.equal(cdc.snapshot_mode, "when_needed");
+    const full = studioSchedulePolicies({
+      syncMode: "full_refresh_overwrite",
+      snapshotMode: "when_needed",
+    });
+    assert.equal(full.snapshot_mode, undefined);
+  });
+
+  it("stamps CDC Advanced extras onto a scheduled pipeline and clears them on full refresh", () => {
+    const cdc = studioScheduleCdcExtras({
+      syncMode: "cdc",
+      allowAppendOnly: true,
+      cdcRowFilter: "net",
+      multiSubnetFailover: true,
+    });
+    assert.equal(cdc.allow_append_only, true);
+    assert.equal(cdc.cdc_row_filter, "net");
+    assert.equal(cdc.multi_subnet_failover, true);
+    const full = studioScheduleCdcExtras({
+      syncMode: "full_refresh_overwrite",
+      allowAppendOnly: true,
+      cdcRowFilter: "net",
+      multiSubnetFailover: true,
+    });
+    assert.equal(full.allow_append_only, false);
+    assert.equal(full.cdc_row_filter, "");
+    assert.equal(full.multi_subnet_failover, false);
+  });
+
+  it("pauses a Schedules-page create that has no Validate mappings", () => {
+    assert.equal(scheduleCreateMustPauseWithoutMappings(0), true);
+    assert.equal(scheduleCreateMustPauseWithoutMappings(3), false);
   });
 });

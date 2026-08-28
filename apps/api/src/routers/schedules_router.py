@@ -80,6 +80,10 @@ class ScheduleCreate(BaseModel):
     priority_direction: str = "desc"
     row_limit: int = Field(default=0, ge=0)
     delivery_guarantee: str = "at_least_once"
+    snapshot_mode: str = ""
+    allow_append_only: bool = False
+    cdc_row_filter: str = ""
+    multi_subnet_failover: bool = False
     mappings: list[dict[str, Any]] = Field(default_factory=list)
     stream_contracts: list[dict[str, Any]] = Field(default_factory=list)
     cursor_column: str = ""
@@ -122,6 +126,10 @@ class ScheduleUpdate(BaseModel):
     priority_direction: Optional[str] = None
     row_limit: Optional[int] = Field(default=None, ge=0)
     delivery_guarantee: Optional[str] = None
+    snapshot_mode: Optional[str] = None
+    allow_append_only: Optional[bool] = None
+    cdc_row_filter: Optional[str] = None
+    multi_subnet_failover: Optional[bool] = None
     mappings: Optional[list[dict[str, Any]]] = None
     stream_contracts: Optional[list[dict[str, Any]]] = None
     cursor_column: Optional[str] = None
@@ -165,6 +173,10 @@ class ScheduleResponse(BaseModel):
     priority_direction: str = "desc"
     row_limit: int = 0
     delivery_guarantee: str = "at_least_once"
+    snapshot_mode: str = ""
+    allow_append_only: bool = False
+    cdc_row_filter: str = ""
+    multi_subnet_failover: bool = False
     cursor_column: str = ""
     primary_key: str = ""
     cursor_value: str = ""
@@ -241,7 +253,17 @@ class ScheduleSummaryResponse(BaseModel):
     validation_mode: str = "strict"
     schema_policy: str = "manual_review"
     backfill_new_fields: bool = False
+    write_via_staging: bool = False
+    priority_column: str = ""
+    priority_direction: str = "desc"
+    row_limit: int = 0
+    date_locale: str = ""
+    number_locale: str = ""
     delivery_guarantee: str = "at_least_once"
+    snapshot_mode: str = ""
+    allow_append_only: bool = False
+    cdc_row_filter: str = ""
+    multi_subnet_failover: bool = False
     cursor_column: str = ""
     primary_key: str = ""
     cursor_value: str = ""
@@ -266,6 +288,10 @@ class ScheduleSummaryResponse(BaseModel):
     running: bool = False
     created_at: str
     mapping_count: int = 0
+    # Validate≡Execute stamps. Hashes only — shape_recipe stays on GET /{id}.
+    approved_shape_recipe_hash: str = ""
+    approved_decision_artifact_hash: str = ""
+    approved_ddl_identity_hash: str = ""
     # A parked schedule reads as "off" from run_count and last_status alone. The
     # list row has to say a human owes it a decision, without the full finding.
     needs_approval: bool = False

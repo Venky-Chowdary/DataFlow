@@ -321,6 +321,14 @@ def test_signal_table_poll_tracks_processed_ids(tmp_path, monkeypatch) -> None:
     assert seen2 == seen
 
 
+def test_schedule_snapshot_mode_is_cdc_only() -> None:
+    from services.cdc_snapshot_mode import schedule_snapshot_mode
+
+    assert schedule_snapshot_mode("cdc", "when_needed") == "when_needed"
+    assert schedule_snapshot_mode("full_refresh_overwrite", "when_needed") == ""
+    assert schedule_snapshot_mode("cdc", "") == "initial"
+
+
 def test_snapshot_modes_debezium_compatible() -> None:
     assert parse_snapshot_mode("initial") == SnapshotMode.INITIAL
     assert should_run_snapshot(SnapshotMode.INITIAL, watermark=None) is True

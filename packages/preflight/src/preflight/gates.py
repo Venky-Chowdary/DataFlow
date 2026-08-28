@@ -2767,6 +2767,19 @@ def _host_gate_to_result(gate_id: GateId, payload: dict[str, Any], start: float)
     )
 
 
+def _live_dest_column_names(dest: Any) -> list[str]:
+    """Dest-exists name list: live types first, mapping targets only as fallback.
+
+    ``target_columns`` may be write mappings only. When the host stamped
+    ``column_types``, those keys are the dest table — G14 and G15 must share
+    this list or dest-only columns flip equal / source-superset / overlap.
+    """
+    type_keys = [str(k) for k in (getattr(dest, "column_types", None) or {}) if k]
+    if type_keys:
+        return type_keys
+    return [c.name for c in (dest.target_columns or []) if getattr(c, "name", None)]
+
+
 def _plan_mapping_dicts(ctx: PreflightContext) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for m in ctx.plan.mappings or []:
@@ -2863,6 +2876,7 @@ def gate_g14_destination_requirements(ctx: PreflightContext) -> GateResult:
             details={},
             duration_ms=(time.perf_counter() - start) * 1000,
         )
+    dest_columns = _live_dest_column_names(dest)
     gate = build_destination_requirements_gate(
         destination_table_exists=dest.table_exists,
         column_nullability=getattr(dest, "column_nullability", None) or {},
@@ -2870,6 +2884,7 @@ def gate_g14_destination_requirements(ctx: PreflightContext) -> GateResult:
         identity_columns=getattr(dest, "identity_columns", None) or [],
         generated_columns=getattr(dest, "generated_columns", None) or [],
         mappings=_plan_mapping_dicts(ctx),
+        dest_columns=dest_columns,
     )
     if not gate:
         return GateResult(
@@ -2895,7 +2910,7 @@ def gate_g15_dest_exists_shape(ctx: PreflightContext) -> GateResult:
             details={},
             duration_ms=(time.perf_counter() - start) * 1000,
         )
-    dest_cols = [c.name for c in (dest.target_columns or [])]
+    dest_cols = _live_dest_column_names(dest)
     contract = classify_dest_exists_shape(
         destination_table_exists=dest.table_exists,
         source_columns=[c.name for c in (ctx.plan.source.columns or [])],

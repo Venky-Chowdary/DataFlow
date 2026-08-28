@@ -148,6 +148,13 @@ def _enforce_decision_artifact(
     skip_preflight: bool = False,
     sync_mode: str = "full_refresh_overwrite",
     error_policy: str = "quarantine",
+    dest_fingerprint: str = "",
+    destination_column_types: dict | None = None,
+    destination_table_exists: bool | None = None,
+    source_fingerprint: str = "",
+    source_column_types: dict | None = None,
+    source_kind: str = "",
+    source_format: str = "",
 ) -> tuple[str | None, dict | None]:
     """Phase C11 — refuse Execute without Decision Artifact authority.
 
@@ -180,6 +187,21 @@ def _enforce_decision_artifact(
             "(re-run Validate to stamp decision_artifact.content_hash).",
             None,
         )
+    from services.data_profiler import source_types_are_authoritative
+    from services.schema_fingerprint import (
+        live_dest_schema_fingerprint,
+        live_source_schema_fingerprint,
+    )
+
+    dest_fp = (dest_fingerprint or "").strip() or live_dest_schema_fingerprint(
+        destination_column_types,
+        destination_table_exists=destination_table_exists,
+        sync_mode=sync_mode,
+    )
+    src_fp = (source_fingerprint or "").strip() or live_source_schema_fingerprint(
+        source_column_types,
+        authoritative=source_types_are_authoritative(source_kind, source_format),
+    )
     err, art = enforce_decision_artifact(
         mappings=list(mappings or []),
         dest_db=dest_db or "",
@@ -188,6 +210,8 @@ def _enforce_decision_artifact(
         skip_preflight=bool(skip_preflight),
         sync_mode=sync_mode,
         error_policy=error_policy,
+        dest_fingerprint=dest_fp,
+        source_fingerprint=src_fp,
     )
     return err, (art.to_dict() if art is not None else None)
 

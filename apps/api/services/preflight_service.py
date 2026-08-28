@@ -1307,6 +1307,7 @@ def run_file_preflight(
             column_defaults=dict(destination_column_defaults or {}),
             identity_columns=list(destination_identity_columns or []),
             generated_columns=list(destination_generated_columns or []),
+            column_types=dict(destination_column_types or {}),
         ),
         mappings=plan_mappings,
         dry_run_passed=False,
@@ -1480,11 +1481,28 @@ def run_file_preflight(
 
         dest_for_ddl = (destination_db_type or "").strip().lower()
         src_for_cap = (source_connector_id or "").strip().lower()
+        from services.schema_fingerprint import (
+            live_dest_schema_fingerprint,
+            live_source_schema_fingerprint,
+        )
+
+        dest_fp = live_dest_schema_fingerprint(
+            destination_column_types,
+            destination_table_exists=destination_table_exists,
+            sync_mode=str(sync_mode or ""),
+        )
+
+        src_fp = live_source_schema_fingerprint(
+            column_types,
+            authoritative=source_types_are_authoritative(source_kind, source_format),
+        )
         decision_art = build_artifact_from_mappings(
             list(mappings or []),
             dest_db=dest_for_ddl,
             source_db=src_for_cap,
             route_id=f"validate:{dest_for_ddl or 'unknown'}",
+            source_fingerprint=src_fp,
+            dest_fingerprint=dest_fp,
             sync_mode=str(sync_mode or "full_refresh_overwrite"),
         )
         conv_cols = [
@@ -2008,7 +2026,9 @@ def run_file_preflight(
         column_defaults=destination_column_defaults,
         identity_columns=destination_identity_columns,
         generated_columns=destination_generated_columns,
-        dest_columns=list((destination_column_types or destination_column_nullability or {}).keys()),
+        # Types keys are the live dest column list. Nullability keys are a
+        # tautology for the partial-catalog check — do not substitute them.
+        dest_columns=list((destination_column_types or {}).keys()),
     )
     out["source_coverage"] = src_coverage
     if isinstance(out.get("proof_bundle"), dict):

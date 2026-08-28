@@ -251,12 +251,31 @@ def build_schedule_request(sched, src: dict, dst: dict):
     source = _endpoint_from_connector(src, sched.source_table)
     destination = _endpoint_from_connector(dst, sched.dest_table)
     _apply_callable_schedule_source(source, sched)
+    from services.schedule_cdc_extras import apply_cdc_schedule_extras
+
+    apply_cdc_schedule_extras(source, destination, sched)
 
     effective_mode = _normalize_sync_mode(sched.sync_mode, sched.primary_key)
     from services.procedure_source import assert_callable_sync_allowed
 
     assert_callable_sync_allowed(effective_mode, source)
     stream_contracts = list(sched.stream_contracts or [])
+    snapshot_mode = ""
+    if effective_mode == "cdc":
+        from services.cdc_snapshot_mode import schedule_snapshot_mode
+
+        snapshot_mode = schedule_snapshot_mode(
+            "cdc",
+            getattr(sched, "snapshot_mode", "")
+            or next(
+                (
+                    str(c.get("snapshot_mode") or "")
+                    for c in stream_contracts
+                    if isinstance(c, dict) and c.get("snapshot_mode")
+                ),
+                "initial",
+            ),
+        )
     if not stream_contracts and effective_mode not in ("full_refresh_overwrite", "full_refresh_append"):
         stream_contracts = [{
             "selected": True,
@@ -267,7 +286,15 @@ def build_schedule_request(sched, src: dict, dst: dict):
             "primary_key": sched.primary_key,
             "schema_policy": sched.schema_policy,
             "validation_mode": sched.validation_mode,
+            **({"snapshot_mode": snapshot_mode} if snapshot_mode else {}),
         }]
+    elif snapshot_mode:
+        stamped: list[dict] = []
+        for raw in stream_contracts:
+            row = dict(raw) if isinstance(raw, dict) else {}
+            row.setdefault("snapshot_mode", snapshot_mode)
+            stamped.append(row)
+        stream_contracts = stamped
 
     from services.schedule_store import assert_schedule_run_allowed
 
@@ -316,7 +343,9 @@ def build_schedule_request(sched, src: dict, dst: dict):
 
     from services.batch_progress import effective_backfill_new_fields
 
-    mappings = list(sched.mappings or [])
+    from services.schedule_mapping_contract import assert_schedule_mappings_replayable
+
+    mappings = assert_schedule_mappings_replayable(sched.mappings)
     schema_policy = sched.schema_policy or "manual_review"
     # Autopilot: a scheduled run has nobody at the keyboard, so it carries the
     # attestations a named human signed in advance — and only while the plan they

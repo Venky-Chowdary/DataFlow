@@ -58,6 +58,18 @@ class SnapshotMode(str, Enum):
     WHEN_NEEDED = "when_needed"
 
 
+def schedule_snapshot_mode(sync_mode: str, raw: Any = "") -> str:
+    """Persist Debezium snapshot mode only for CDC. Empty on other sync modes.
+
+    Studio Advanced can set ``when_needed`` / ``never``; a schedule that drops
+    the field silently falls back to ``initial`` and will not snapshot a cursor
+    gap. Recurring CDC must replay the same mode Validate saw.
+    """
+    if str(sync_mode or "").strip().lower() != "cdc":
+        return ""
+    return parse_snapshot_mode(raw or "initial").value
+
+
 def parse_snapshot_mode(raw: Any) -> SnapshotMode:
     text = str(raw or "initial").strip().lower().replace("-", "_")
     aliases = {

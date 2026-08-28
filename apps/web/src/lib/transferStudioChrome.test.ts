@@ -448,9 +448,10 @@ describe("Transfer Studio chrome contracts", () => {
     const page = readFileSync(join(webRoot, "pages/TransferPage.tsx"), "utf8");
     const dash = readFileSync(join(webRoot, "components/transfer/ValidateDashboard.tsx"), "utf8");
     const constants = readFileSync(join(webRoot, "lib/transferConstants.ts"), "utf8");
-    assert.match(css, /\.df2-dest-toolbar \.df2-dest-advanced-btn \{[\s\S]*height:\s*var\(--df-btn-height/);
-    assert.match(css, /\.df2-dest-toolbar \.df2-dest-advanced-btn \{[\s\S]*max-height:\s*var\(--df-btn-height/);
-    assert.match(css, /\.df2-dest-mode-btn \{[\s\S]*height:\s*var\(--df-btn-height/);
+    assert.match(css, /\.df2-dest-toolbar \.df2-dest-advanced-btn[\s\S]*\{[\s\S]*height:\s*var\(--df-btn-height/);
+    assert.match(css, /\.df2-dest-toolbar \.df2-dest-advanced-btn[\s\S]*\{[\s\S]*max-height:\s*var\(--df-btn-height/);
+    assert.match(css, /\.df2-dest-mode-toggle \{[\s\S]*box-sizing:\s*border-box/);
+    assert.match(css, /\.df2-dest-toolbar \.df2-dest-advanced-btn[\s\S]*\{[\s\S]*box-sizing:\s*border-box/);
     assert.match(
       css,
       /\.df2-page-transfer-studio \.df2-dest-step > \.df2-wizard-footer \.df2-btn,[\s\S]*height:\s*var\(--df-btn-height/,
@@ -742,14 +743,83 @@ describe("Transfer Studio chrome contracts", () => {
     const chunk = page.slice(start, start + 3500);
     assert.match(chunk, /stream_contracts: streamContracts/);
     assert.match(chunk, /shape_recipe: recipePayload\(shapeSteps\)/);
-    assert.match(chunk, /date_locale: dateLocale/);
-    assert.match(chunk, /number_locale: numberLocale/);
+    assert.match(chunk, /dateLocale,/);
+    assert.match(chunk, /numberLocale,/);
     assert.match(chunk, /approved_shape_recipe_hash/);
-    assert.match(chunk, /approved_decision_artifact_hash/);
+    assert.match(chunk, /studioScheduleValidateIdentity\(preflight\)/);
     assert.match(chunk, /mergeSignedRiskContracts/);
     assert.match(chunk, /buildPreflightMappings/);
     assert.match(chunk, /writeViaStaging/);
     assert.match(chunk, /priorityColumn/);
     assert.match(chunk, /rowLimit/);
+    assert.match(chunk, /dateLocale/);
+    assert.match(chunk, /numberLocale/);
+  });
+
+  it("Schedules form submits Studio Advanced write knobs so an edit cannot drop them", () => {
+    const form = readFileSync(join(webRoot, "components/schedules/ScheduleForm.tsx"), "utf8");
+    const drawer = readFileSync(join(webRoot, "components/PipelineDetailDrawer.tsx"), "utf8");
+    const types = readFileSync(join(webRoot, "lib/types.ts"), "utf8");
+    const page = readFileSync(join(webRoot, "pages/TransferPage.tsx"), "utf8");
+    assert.match(form, /studioSchedulePolicies/);
+    assert.match(form, /writeViaStagingSupported/);
+    assert.match(form, /write_via_staging: writeKnobs.write_via_staging/);
+    assert.match(form, /priority_column: writeKnobs.priority_column/);
+    assert.match(form, /row_limit: writeKnobs.row_limit/);
+    assert.match(form, /id="sched-priority-col"/);
+    assert.match(form, /id="sched-row-limit"/);
+    assert.match(form, /id="sched-date-locale"/);
+    assert.match(form, /id="sched-number-locale"/);
+    assert.match(form, /date_locale: writeKnobs.date_locale/);
+    assert.match(form, /Write via staging/);
+    assert.match(drawer, /Write via staging/);
+    assert.match(drawer, /sched.row_limit/);
+    assert.match(drawer, /Validate identity/);
+    assert.match(drawer, /formatValidateIdentitySummary/);
+    assert.match(drawer, /formatSchemaPolicyLabel/);
+    assert.doesNotMatch(drawer, /Use Edit to set the schema map/);
+    assert.match(drawer, /create from Transfer Studio after Validate/);
+    assert.match(form, /formatValidateIdentitySummary/);
+    assert.match(form, /Save does not resubmit these hashes/);
+    assert.doesNotMatch(form, /approved_shape_recipe_hash:/);
+    assert.doesNotMatch(form, /approved_ddl_identity_hash:/);
+    assert.match(types, /interface PipelineSchedule \{[\s\S]*write_via_staging\?: boolean;/);
+    assert.match(types, /approved_ddl_identity_hash\?: string;/);
+    assert.match(page, /destSupportsWriteViaStaging\(destDriverType\)/);
+    assert.doesNotMatch(
+      page,
+      /const writeViaStagingSupported = \[\s*"postgresql", "mysql"/,
+    );
+  });
+});
+
+describe("GitOps Advanced allowlist", () => {
+  it("dataflow.yaml allowlists write knobs and strips observed source shape", () => {
+    const manifest = readFileSync(
+      join(webRoot, "..", "..", "api", "services", "gitops_manifest.py"),
+      "utf8",
+    );
+    assert.match(manifest, /_SCHEDULE_DECLARATIVE_KEYS/);
+    assert.match(manifest, /"write_via_staging"/);
+    assert.match(manifest, /"priority_column"/);
+    assert.match(manifest, /"row_limit"/);
+    assert.match(manifest, /"snapshot_mode"/);
+    assert.match(manifest, /_SCHEDULE_OBSERVED_KEYS/);
+    assert.match(manifest, /"source_schema"/);
+    assert.match(manifest, /def apply_schedule_spec/);
+    assert.match(manifest, /apply_spec = apply_schedule_spec\(spec\)/);
+  });
+});
+
+describe("Overview parked-decision attention", () => {
+  it("surfaces inbox parked count and does not treat parked as failed or paused", () => {
+    const dash = readFileSync(join(webRoot, "pages/DashboardPage.tsx"), "utf8");
+    const app = readFileSync(join(webRoot, "DataTransferApp.tsx"), "utf8");
+    assert.match(dash, /fetchOpenScheduleApprovals/);
+    assert.match(dash, /parked on a decision/);
+    assert.match(dash, /Open Pipelines inbox/);
+    assert.match(dash, /setParkedCount\(null\)/);
+    assert.doesNotMatch(dash, /parked on a failed/);
+    assert.match(app, /onOpenSchedules=\{\(\) => setScreen\("schedules"\)\}/);
   });
 });
