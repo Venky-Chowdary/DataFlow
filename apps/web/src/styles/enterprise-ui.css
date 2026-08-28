@@ -1089,6 +1089,13 @@
   border: 0;
 }
 
+.df2-jobs-detail-footer .df2-btn {
+  height: var(--df-btn-height, 36px) !important;
+  min-height: var(--df-btn-height, 36px) !important;
+  max-height: var(--df-btn-height, 36px) !important;
+  box-sizing: border-box;
+}
+
 .df2-jobs-detail-actions-hint {
   margin: 0;
   font-size: 12.5px;
@@ -1814,7 +1821,9 @@
   align-items: center;
   gap: 6px;
   max-width: 100%;
-  padding: 6px 10px;
+  min-height: var(--df-btn-height-sm, 30px);
+  height: var(--df-btn-height-sm, 30px);
+  padding: 0 10px;
   border: 1px solid #e2e8f0;
   border-radius: 999px;
   background: #fff;
@@ -1822,6 +1831,7 @@
   font-size: 12px;
   font-weight: 600;
   cursor: pointer;
+  box-sizing: border-box;
   transition: border-color 120ms ease, background 120ms ease;
 }
 
@@ -1835,6 +1845,10 @@
   font-weight: 500;
   color: #64748b;
   font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 14ch;
 }
 
 .df2-jobs-evidence-chip.tone-ok {
@@ -8939,6 +8953,14 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   gap: 0.45rem 0.65rem;
 }
 
+.df2-conservation-ledger-title h3 {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 650;
+  line-height: 1.3;
+  letter-spacing: 0;
+}
+
 .df2-conservation-ledger-kind {
   display: inline-flex;
   align-items: center;
@@ -10134,6 +10156,23 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 
 .df2-app .df2-empty-action {
   margin-top: 16px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  justify-content: center;
+  align-items: center;
+}
+
+.df2-app .df2-empty-action .df2-btn {
+  height: var(--df-btn-height, 36px);
+  min-height: var(--df-btn-height, 36px);
+  max-height: var(--df-btn-height, 36px);
+}
+
+.df2-app .df2-empty-action .dt-nav-icon,
+.df2-app .df2-empty-action svg {
+  display: block;
+  flex-shrink: 0;
 }
 
 .df2-app .df2-table {
@@ -12241,9 +12280,35 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 }
 
 .df2-page-jobs .df2-conservation-ledger-count {
-  min-width: 48px;
-  height: 40px;
-  border-width: 2px;
+  min-width: fit-content;
+  width: fit-content;
+  height: auto;
+  min-height: var(--df-btn-height, 36px);
+  padding: 4px 10px;
+  border-width: 1px;
+  align-content: center;
+}
+
+.df2-page-jobs .df2-conservation-ledger-count strong,
+.df2-page-jobs .df2-conservation-ledger-compare article strong {
+  font-size: 13px;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+
+.df2-page-jobs .df2-conservation-ledger-count span {
+  font-size: 10px;
+  line-height: 1.2;
+}
+
+.df2-page-jobs .df2-conservation-ledger-chips strong {
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.df2-page-jobs .df2-job-name-editor-title {
+  font-size: var(--df-fs-md, 14px);
+  font-weight: 650;
 }
 
 .df2-page-jobs .df2-trust-score-ring {

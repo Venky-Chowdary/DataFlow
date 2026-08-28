@@ -823,3 +823,32 @@ describe("Overview parked-decision attention", () => {
     assert.match(app, /onOpenSchedules=\{\(\) => setScreen\("schedules"\)\}/);
   });
 });
+
+describe("operator surface geometry and honest empty export", () => {
+  it("connector icon is a token-square, not a stretch rectangle", () => {
+    const css = readFileSync(join(webRoot, "styles/shell-polish.css"), "utf8");
+    const studio = readFileSync(join(webRoot, "styles/transfer-studio.css"), "utf8");
+    const icon = css.match(/\.df2-connector-select-icon \{([^}]+)\}/);
+    assert.ok(icon, ".df2-connector-select-icon rule missing");
+    assert.match(icon[1], /width:\s*var\(--df-control-height/);
+    assert.match(icon[1], /height:\s*var\(--df-control-height/);
+    assert.match(icon[1], /flex:\s*0 0 var\(--df-control-height/);
+    assert.doesNotMatch(icon[1], /width:\s*auto/);
+    assert.match(studio, /\.df2-source-endpoint-fields \.df2-source-read-mode \.df2-filter-tabs \{[\s\S]*?height:\s*var\(--df-control-height/);
+  });
+
+  it("jobs overview metrics and footer buttons share the control ladder", () => {
+    const css = readFileSync(join(webRoot, "styles/enterprise-ui.css"), "utf8");
+    assert.match(css, /\.df2-page-jobs \.df2-conservation-ledger-count strong[\s\S]*?font-size:\s*13px/);
+    assert.match(css, /\.df2-jobs-evidence-chip \{[\s\S]*?min-height:\s*var\(--df-btn-height-sm/);
+    assert.match(css, /\.df2-jobs-detail-footer \.df2-btn \{[\s\S]*?height:\s*var\(--df-btn-height/);
+    assert.match(css, /\.df2-app \.df2-empty-action \{[\s\S]*?display:\s*flex/);
+  });
+
+  it("empty YAML export is a named empty fleet, not an unexpected error", () => {
+    const page = readFileSync(join(webRoot, "pages/SchedulesPage.tsx"), "utf8");
+    assert.match(page, /fleetExportBlockedReason/);
+    assert.match(page, /Nothing to export/);
+    assert.match(page, /disabled=\{gitopsBusy \|\| schedules\.length === 0\}/);
+  });
+});

@@ -33,6 +33,8 @@ import { PageFrame } from "../components/ui/PageFrame";
 import { PageShell } from "../components/ui/PageShell";
 import {
   createEmptySession,
+  deletePilotSession,
+  isDeletedPilotSession,
   loadAsideOpen,
   loadPilotWorkspace,
   loadRailChat,
@@ -94,7 +96,7 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
     // Keep FAB/rail in sync when it shares this session id (wave 35 handoff).
     const active = sessions.find((s) => s.id === activeId);
     const rail = loadRailChat();
-    if (active && rail && rail.sessionId === activeId) {
+    if (active && rail && rail.sessionId === activeId && !isDeletedPilotSession(activeId)) {
       saveRailChat({
         messages: active.messages,
         history: active.history,
@@ -254,16 +256,9 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
       });
       if (!ok) return;
     }
-    setSessions((prev) => {
-      const next = prev.filter((s) => s.id !== id);
-      if (!next.length) {
-        const empty = createEmptySession();
-        setActiveId(empty.id);
-        return [empty];
-      }
-      if (id === activeId) setActiveId(next[0].id);
-      return next;
-    });
+    const next = deletePilotSession(sessions, id, activeId);
+    setSessions(next.sessions);
+    setActiveId(next.activeId);
   };
 
   const recentChats = sessions.filter((s) => s.messages.length > 0 || s.id === activeId);
