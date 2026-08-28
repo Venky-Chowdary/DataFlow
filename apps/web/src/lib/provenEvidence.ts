@@ -137,6 +137,12 @@ export const BACKEND_SUITE = {
 export const TRANSFER_READY_DRIVERS = 43;
 
 /**
+ * Catalog slots the desktop lab can bind and exercise as source + dest.
+ * This is an operator option, not 45 unique engines and not catalog tile count.
+ */
+export const DESKTOP_LAB_CATALOG_SLOTS = 45;
+
+/**
  * Operator-facing honesty line. Catalog tile count is never a live-driver count.
  * Hosts without optional warehouse/SaaS packages report fewer via capabilities.
  */

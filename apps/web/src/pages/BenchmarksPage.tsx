@@ -13,8 +13,10 @@ import {
   downloadBenchmarkReport,
   fetchProofLedger,
   runBenchmark,
+  runDesktopLab,
   runFidelityProof,
   type BenchmarkReport,
+  type DesktopLabReport,
   type FidelityProofResult,
   type ProofLedger,
 } from "../lib/api";
@@ -48,6 +50,8 @@ export function BenchmarksPage() {
   const [ledgerError, setLedgerError] = useState<string | null>(null);
   const [fidelityRunning, setFidelityRunning] = useState(false);
   const [fidelity, setFidelity] = useState<FidelityProofResult | null>(null);
+  const [labRunning, setLabRunning] = useState(false);
+  const [lab, setLab] = useState<DesktopLabReport | null>(null);
 
   const loadLedger = async () => {
     setLedgerLoading(true);
@@ -84,6 +88,24 @@ export function BenchmarksPage() {
       toast({ title: "Fidelity proof failed", message: String(e), tone: "error" });
     } finally {
       setFidelityRunning(false);
+    }
+  };
+
+  const handleDesktopLab = async () => {
+    setLabRunning(true);
+    try {
+      const result = await runDesktopLab();
+      setLab(result);
+      await loadLedger();
+      toast({
+        title: result.success ? "Desktop lab passed" : "Desktop lab incomplete",
+        message: `${result.catalog_slots_duplex_passed} of ${result.catalog_slots} catalog slots passed as source and dest. Unique engines: ${result.unique_engines_duplex_passed}. Hosted twins share a driver.`,
+        tone: result.success ? "success" : "error",
+      });
+    } catch (e) {
+      toast({ title: "Desktop lab failed", message: String(e), tone: "error" });
+    } finally {
+      setLabRunning(false);
     }
   };
 
@@ -222,6 +244,68 @@ export function BenchmarksPage() {
                           {fidelity.elapsed_ms != null ? ` in ${fidelity.elapsed_ms} ms` : ""}
                           {fidelity.checks?.length ? ` · checks: ${fidelity.checks.join(", ")}` : ""}
                           {fidelity.proof_file ? ` · artifact ${fidelity.proof_file}` : ""}
+                        </div>
+                      </div>
+                    )}
+
+                    <div className="df2-page-benchmarks-toolbar">
+                      <p className="df2-page-benchmarks-note" style={{ margin: 0, flex: 1 }}>
+                        Desktop lab option: bind 45 catalog connectors and run each as a destination
+                        then as a source. Hosted twins (Neon/RDS/CNPG/OpenShift PostgreSQL) share a
+                        driver — this is not 45 unique engines and not catalog tile count.
+                      </p>
+                      <Button
+                        variant="primary"
+                        onClick={() => void handleDesktopLab()}
+                        disabled={labRunning}
+                        loading={labRunning}
+                        loadingLabel="Running desktop lab…"
+                      >
+                        Run desktop lab
+                      </Button>
+                    </div>
+
+                    {lab && (
+                      <div className={`df2-alert ${lab.success ? "df2-alert-success" : "df2-alert-error"}`} role="status">
+                        <DtIcon name={lab.success ? "check" : "alert"} size={18} />
+                        <div>
+                          <strong>{lab.catalog_slots_duplex_passed} of {lab.catalog_slots} catalog slots</strong>
+                          {" "}passed as source and dest
+                          {lab.unique_engines_duplex_passed != null
+                            ? ` · unique engines ${lab.unique_engines_duplex_passed}`
+                            : ""}
+                          {lab.failed ? ` · failed ${lab.failed}` : ""}
+                          {lab.skipped ? ` · skipped ${lab.skipped}` : ""}
+                        </div>
+                      </div>
+                    )}
+
+                    {lab?.connectors && lab.connectors.length > 0 && (
+                      <div className="df2-page-benchmarks-section">
+                        <h3>Desktop lab — source and dest</h3>
+                        <div className="df2-page-benchmarks-table-wrap">
+                          <table className="df2-page-benchmarks-table">
+                            <thead>
+                              <tr>
+                                <th>Catalog</th>
+                                <th>Driver</th>
+                                <th>Kind</th>
+                                <th>Dest</th>
+                                <th>Source</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {lab.connectors.map((row) => (
+                                <tr key={row.catalog_id}>
+                                  <td><code>{row.catalog_id}</code></td>
+                                  <td>{row.driver}</td>
+                                  <td>{row.role === "unique_engine" ? "Unique engine" : row.role === "hosted_twin" ? "Hosted twin" : "Format alias"}</td>
+                                  <td>{row.dest_status}</td>
+                                  <td>{row.source_status}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
                         </div>
                       </div>
                     )}

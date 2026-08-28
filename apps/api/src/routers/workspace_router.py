@@ -932,6 +932,38 @@ async def run_fidelity_proof():
     return JSONResponse(result, status_code=status)
 
 
+@router.post("/proofs/desktop-lab")
+async def run_desktop_lab_proof():
+    """Exercise the desktop-lab catalog slots as source and destination.
+
+    45 is catalog slots, not unique engines. Hosted twins share a driver.
+    """
+    from services.desktop_lab import run_desktop_lab
+
+    try:
+        result = await asyncio.to_thread(run_desktop_lab, persist=True)
+    except Exception as exc:
+        return JSONResponse(
+            {"success": False, "error": str(exc), "tier": "desktop_lab"},
+            status_code=500,
+        )
+    duplex = int(result.get("catalog_slots_duplex_passed") or 0)
+    result["success"] = duplex >= 45 and int(result.get("failed") or 0) == 0
+    status = 200 if result["success"] else 422
+    return JSONResponse(result, status_code=status)
+
+
+@router.get("/proofs/desktop-lab")
+async def get_desktop_lab_proof():
+    """Last persisted desktop-lab duplex report, if any."""
+    from services.desktop_lab import last_desktop_lab_report
+
+    report = last_desktop_lab_report()
+    if report is None:
+        return JSONResponse({"available": False, "catalog_slots": 0})
+    return JSONResponse({"available": True, **report})
+
+
 @router.post("/benchmark")
 async def run_workspace_benchmark(body: BenchmarkRequest):
     """Run a reproducible local benchmark and return a standardized report.
