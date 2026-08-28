@@ -15,6 +15,7 @@ from typing import Any, Callable
 
 import pytest
 
+from services.destination_ri_probe import verify_destination_referential_integrity
 from services.population_orphan_probe import probe_population_fk_orphans
 from services.preflight_service import run_file_preflight
 from services.sample_orphan_probe import _fk_parts, probe_sample_fk_orphans
@@ -621,6 +622,33 @@ def test_live_engines_composite_matrix():
                     }
                 ],
             )
+            dest_fks = [
+                {
+                    "constrained_columns": ["tenant_id", "order_no"],
+                    "referred_table": parent,
+                    "referred_columns": ["tenant_id", "order_no"],
+                }
+            ]
+            dest = verify_destination_referential_integrity(
+                dialect,
+                cfg,
+                schema=str(cfg.get("schema") or ""),
+                table=child,
+                foreign_keys=dest_fks,
+            )
+            dest_self = verify_destination_referential_integrity(
+                dialect,
+                cfg,
+                schema=str(cfg.get("schema") or ""),
+                table=emp,
+                foreign_keys=[
+                    {
+                        "constrained_columns": ["mgr_org", "mgr_id"],
+                        "referred_table": emp,
+                        "referred_columns": ["org", "emp_id"],
+                    }
+                ],
+            )
             row: dict[str, Any] = {
                 "dialect": dialect,
                 "pop_orphans": pop.get("orphan_count"),
@@ -633,6 +661,10 @@ def test_live_engines_composite_matrix():
                 "self_ref_complete": self_ref.get("complete"),
                 "reserved_orphans": reserved.get("orphan_count"),
                 "reserved_complete": reserved.get("complete"),
+                "dest_orphan_rows": dest.get("orphan_rows"),
+                "dest_verified": dest.get("verified"),
+                "dest_self_orphan_rows": dest_self.get("orphan_rows"),
+                "dest_self_status": (dest_self.get("relations") or [{}])[0].get("status"),
                 "example": (pop.get("findings") or [{}])[0].get("message", ""),
             }
             assert pop["complete"] is True, pop
@@ -647,6 +679,13 @@ def test_live_engines_composite_matrix():
             assert "1+99" in self_ref["findings"][0]["message"]
             assert reserved["complete"] is True, reserved
             assert reserved["orphan_count"] == 1, reserved
+            assert dest["verified"] is False, dest
+            assert dest["orphan_rows"] == 1, dest
+            assert dest["relations"][0]["status"] == "scanned"
+            assert dest["relations"][0]["examples"] == ["2+101"]
+            assert dest_self["verified"] is False, dest_self
+            assert dest_self["orphan_rows"] == 1, dest_self
+            assert dest_self["relations"][0]["examples"] == ["1+99"]
 
             if dialect == "postgresql":
                 cross = _pop(
