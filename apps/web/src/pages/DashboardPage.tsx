@@ -28,7 +28,7 @@ import {
   type FreshnessAlert,
 } from "../components/overview/FreshnessSloPanel";
 import { dismissBanner, isBannerDismissed } from "../lib/dismissibleBanner";
-import { buildDataPlaneTopology } from "../lib/topologyUtils";
+import { buildDataPlaneTopology, countSavedConnectionRoutes } from "../lib/topologyUtils";
 import {
   connectorPassedProbe,
   connectorTestHealth,
@@ -165,7 +165,7 @@ export function DashboardPage({
     () => buildDataPlaneTopology(connectors, jobs, schedules),
     [connectors, jobs, schedules],
   );
-  const routeCount = topology.edges.length;
+  const routeCount = countSavedConnectionRoutes(topology);
 
   const healthScore = useMemo(() => {
     if (connectors.length === 0 && stats.total === 0) return null;
