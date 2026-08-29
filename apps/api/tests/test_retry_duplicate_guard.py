@@ -220,17 +220,17 @@ def _file_store(tmp_path, monkeypatch):
 
 
 def _new_schedule(store, **extra):
-    return store.create_schedule(
-        {
-            "name": f"sched-{len(store.list_schedules())}",
-            "source_connector_id": "a",
-            "source_table": "s",
-            "dest_connector_id": "b",
-            "dest_table": "d",
-            "interval": "hourly",
-            **extra,
-        }
-    )
+    payload = {
+        "name": f"sched-{len(store.list_schedules())}",
+        "source_connector_id": "a",
+        "source_table": "s",
+        "dest_connector_id": "b",
+        "dest_table": "d",
+        "interval": "hourly",
+        "mappings": [{"source": "id", "target": "id"}],
+    }
+    payload.update(extra)
+    return store.create_schedule(payload)
 
 
 def test_parked_retry_is_durable_and_releases_the_running_claim(tmp_path, monkeypatch):

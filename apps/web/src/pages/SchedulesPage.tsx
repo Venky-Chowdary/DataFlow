@@ -640,6 +640,7 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
             if (sched) openEdit(sched);
           }}
           onOpenStudio={openStudioFromSchedule}
+          onRunNow={(id) => void handleRunNow(id)}
         />
       )}
 

@@ -8,6 +8,7 @@ an inline artifact (same pattern as DDL identity inline stamp).
 
 from __future__ import annotations
 
+import re
 from typing import Any, Mapping
 
 from services.decision_kernel.ddl import approved_mapping_ddl_fingerprint
@@ -25,7 +26,17 @@ from services.decision_kernel.models import (
 )
 from services.decision_kernel.conversion import ConversionClass, classify_mapping
 from services.decision_kernel.risk import risk_level_for_conversion
-from services.mapping_constraints import is_intentional_omit
+from services.mapping_constraints import is_intentional_omit, write_mappings
+from services.shape_contract import (
+    SHAPE_CREATE_NEW,
+    SHAPE_PENDING,
+    SHAPE_UNKNOWN,
+    classify_dest_exists_shape,
+)
+
+
+def _norm_col(name: str) -> str:
+    return re.sub(r"[\s-]+", "_", str(name or "").strip().lower())
 
 
 def _canonical_from_type_stamp(stamp: str) -> CanonicalType:
@@ -152,6 +163,109 @@ def build_artifact_from_mappings(
     )
 
 
+def create_new_validate_holds_after_dest_exists(
+    *,
+    mappings: list[dict[str, Any]] | None,
+    dest_db: str,
+    approved_content_hash: str,
+    live_dest_fingerprint: str,
+    source_fingerprint: str = "",
+    source_db: str = "",
+    sync_mode: str = "",
+    error_policy: str = "quarantine",
+    destination_table_exists: bool | None = None,
+    dest_column_names: list[str] | None = None,
+    source_column_names: list[str] | None = None,
+    column_nullability: dict[str, bool] | None = None,
+    column_defaults: dict[str, str] | None = None,
+    identity_columns: list[str] | None = None,
+    generated_columns: list[str] | None = None,
+    tenant_id: str = "",
+    route_id: str = "",
+) -> tuple[bool, str]:
+    """True when a create-new Validate stamp remains the Map contract after dest exists.
+
+    Dest appearing after the operator's first write is not dest schema drift and
+    must not invent create-new. G13 (unaccounted source) and G14 (dest-only
+    NOT NULL) still refuse. A real Map/DDL edit still refuses.
+    """
+    approved = (approved_content_hash or "").strip().lower()
+    dest_fp = (live_dest_fingerprint or "").strip()
+    dests = [str(c) for c in (dest_column_names or []) if str(c).strip()]
+    if not approved or not dest_fp or destination_table_exists is not True or not dests:
+        return False, ""
+    maps = [m for m in (mappings or []) if isinstance(m, dict)]
+    dest_engine = (dest_db or "").strip().lower()
+    create_new = build_artifact_from_mappings(
+        maps,
+        dest_db=dest_engine,
+        source_db=(source_db or "").strip().lower(),
+        tenant_id=tenant_id or "anonymous",
+        route_id=route_id or f"validate:{dest_engine or 'unknown'}",
+        source_fingerprint=(source_fingerprint or "").strip(),
+        dest_fingerprint="",
+        sync_mode=sync_mode,
+        error_policy=error_policy,
+        artifact_id="da_inline",
+        created_at="1970-01-01T00:00:00+00:00",
+    )
+    if create_new.content_hash.lower() != approved:
+        return False, ""
+    dest_l = {_norm_col(c) for c in dests}
+    for m in write_mappings(maps):
+        tgt = str(m.get("target") or "").strip()
+        if tgt and _norm_col(tgt) not in dest_l:
+            return (
+                False,
+                "Decision Artifact dest schema drifted since Validate — "
+                "mapped column missing after dest exists. Re-run Validate before Execute.",
+            )
+    sources = [str(c) for c in (source_column_names or []) if str(c).strip()] or [
+        str(m.get("source") or "").strip()
+        for m in maps
+        if str(m.get("source") or "").strip()
+    ]
+    verdict = classify_dest_exists_shape(
+        destination_table_exists=True,
+        source_columns=sources,
+        dest_columns=dests,
+        mappings=maps,
+        column_nullability=column_nullability,
+        column_defaults=column_defaults,
+        identity_columns=identity_columns,
+        generated_columns=generated_columns,
+    )
+    shape = str(verdict.get("shape") or "")
+    if shape in {SHAPE_CREATE_NEW, SHAPE_UNKNOWN, SHAPE_PENDING}:
+        return (
+            False,
+            "Destination existence unproven — not treating as create-new. "
+            "Reload destination schema before Execute.",
+        )
+    unfilled = list(verdict.get("unfilled_required") or [])
+    if unfilled:
+        return (
+            False,
+            "Decision Artifact dest schema drifted since Validate — dest-only "
+            f"NOT NULL without a mapping: {', '.join(unfilled[:6])}. Re-run Validate.",
+        )
+    unaccounted = list(verdict.get("unaccounted_sources") or [])
+    if unaccounted:
+        return (
+            False,
+            "Decision Artifact dest schema drifted since Validate — extra source "
+            f"column(s) unaccounted: {', '.join(unaccounted[:6])}. Re-run Validate.",
+        )
+    false_friends = list(verdict.get("false_friend_sources") or [])
+    if false_friends:
+        return (
+            False,
+            "Decision Artifact dest schema drifted since Validate — false-friend "
+            f"column(s): {', '.join(false_friends[:6])}. Re-run Validate.",
+        )
+    return True, ""
+
+
 def enforce_decision_artifact(
     *,
     mappings: list[dict[str, Any]] | None,
@@ -165,14 +279,47 @@ def enforce_decision_artifact(
     route_id: str = "",
     dest_fingerprint: str = "",
     source_fingerprint: str = "",
+    source_db: str = "",
+    destination_table_exists: bool | None = None,
+    dest_column_names: list[str] | None = None,
+    source_column_names: list[str] | None = None,
+    column_nullability: dict[str, bool] | None = None,
+    column_defaults: dict[str, str] | None = None,
+    identity_columns: list[str] | None = None,
+    generated_columns: list[str] | None = None,
 ) -> tuple[str | None, DecisionArtifact | None]:
     """Fail closed when Execute artifact authority is missing or drifts.
 
     Returns ``(error_message, artifact)``. ``artifact`` is set when the gate
     allows the write (inline stamp or verified match).
+
+    A create-new Validate stamp (empty dest fingerprint) remains valid after
+    dest exists when the Map contract still holds — dest appearing after the
+    first write is not dest schema drift.
     """
     has_maps = bool(mappings)
     approved = (approved_content_hash or "").strip().lower()
+
+    def _dest_exists_hold(stamp: str) -> tuple[bool, str]:
+        return create_new_validate_holds_after_dest_exists(
+            mappings=mappings,
+            dest_db=dest_db,
+            approved_content_hash=stamp,
+            live_dest_fingerprint=dest_fingerprint,
+            source_fingerprint=source_fingerprint,
+            source_db=source_db,
+            sync_mode=sync_mode,
+            error_policy=error_policy,
+            destination_table_exists=destination_table_exists,
+            dest_column_names=dest_column_names,
+            source_column_names=source_column_names,
+            column_nullability=column_nullability,
+            column_defaults=column_defaults,
+            identity_columns=identity_columns,
+            generated_columns=generated_columns,
+            tenant_id=tenant_id,
+            route_id=route_id,
+        )
 
     if artifact_payload:
         try:
@@ -206,6 +353,12 @@ def enforce_decision_artifact(
                     None,
                 )
             if dest_fp and supplied.dest_fingerprint != dest_fp:
+                if not supplied.dest_fingerprint:
+                    holds, hold_err = _dest_exists_hold(supplied.content_hash)
+                    if holds:
+                        return (None, supplied)
+                    if hold_err:
+                        return (hold_err, None)
                 return (
                     "Decision Artifact dest schema drifted since Validate — "
                     "re-run Validate before Execute.",
@@ -247,6 +400,11 @@ def enforce_decision_artifact(
 
     if approved:
         if approved != current.content_hash.lower():
+            holds, hold_err = _dest_exists_hold(approved)
+            if holds:
+                return (None, current)
+            if hold_err:
+                return (hold_err, None)
             return (
                 "Decision Artifact content_hash mismatch — Map/DDL drifted "
                 "since Validate. Re-run Validate before Execute.",
@@ -273,5 +431,6 @@ def enforce_decision_artifact(
 
 __all__ = [
     "build_artifact_from_mappings",
+    "create_new_validate_holds_after_dest_exists",
     "enforce_decision_artifact",
 ]

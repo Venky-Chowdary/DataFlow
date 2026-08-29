@@ -1,8 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  DEST_EXISTS_AFTER_CREATE_NEW_CORRECTIVE,
   inboxCorrectiveAction,
+  inboxNeedsRunNow,
   inboxNeedsStudio,
+  isCreateNewDestExistsPark,
   isEmptyMappingFinding,
   persistedMappingRows,
   scheduleNeedsStudio,
@@ -106,6 +109,61 @@ test("a schedule Studio seed waits until connectors have loaded", () => {
   assert.equal(studioIntentConnectorsReady(intent, []), false);
   assert.equal(studioIntentConnectorsReady(intent, ["src"]), true);
   assert.equal(studioIntentConnectorsReady({}, []), true);
+});
+
+test("dest-exists after create-new is Run now, not a signature", () => {
+  const item = {
+    schedule_id: "s1",
+    schedule_name: "Crown → newtable",
+    workspace_id: "w",
+    source: "src:sample",
+    destination: "dst:newtable",
+    sync_mode: "full_refresh_append",
+    enabled: true,
+    approval: {
+      id: "a1",
+      status: "open",
+      kind: "run_refused",
+      code: "RUN_REFUSED",
+      finding: "Decision Artifact DDL identity diverged from current Map — re-run Validate before Execute.",
+      corrective_action: "Open Validate for this job and resolve the blocking check, then run the schedule again.",
+      approvable: false,
+      requested_scopes: [],
+      occurrences: 1,
+      created_at: "",
+    },
+  } as ScheduleApprovalInboxItem;
+  assert.equal(isCreateNewDestExistsPark(item.approval.code, item.approval.finding), true);
+  assert.equal(inboxNeedsRunNow(item), true);
+  assert.equal(inboxNeedsStudio(item), false);
+  assert.equal(inboxCorrectiveAction(item), DEST_EXISTS_AFTER_CREATE_NEW_CORRECTIVE);
+});
+
+test("zero-retry budget park still offers Run now", () => {
+  const item = {
+    schedule_id: "s1",
+    schedule_name: "Crown → newtable",
+    workspace_id: "w",
+    source: "src:sample",
+    destination: "dst:newtable",
+    sync_mode: "full_refresh_append",
+    enabled: true,
+    approval: {
+      id: "a1",
+      status: "open",
+      kind: "run_refused",
+      code: "RUN_REFUSED",
+      finding: "Retry budget exhausted after 0 attempt(s).",
+      corrective_action: "Open Validate for this job and resolve the blocking check, then run the schedule again.",
+      approvable: false,
+      requested_scopes: [],
+      occurrences: 1,
+      created_at: "",
+    },
+  } as ScheduleApprovalInboxItem;
+  assert.equal(inboxNeedsRunNow(item), true);
+  assert.match(inboxCorrectiveAction(item), /Run now/);
+  assert.equal(inboxCorrectiveAction(item).includes("Open Validate for this job"), false);
 });
 
 test("create without mappings opens Studio — the beat will not invent Map", () => {

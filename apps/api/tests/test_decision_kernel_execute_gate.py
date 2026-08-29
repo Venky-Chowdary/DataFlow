@@ -246,6 +246,137 @@ def test_approved_artifact_refuses_source_schema_fingerprint_drift():
     assert ok_art.source_fingerprint == fp_ok
 
 
+def test_create_new_validate_stamp_holds_after_dest_exists_append():
+    """Named fixture: create-new Validate + dest-exists Execute (append) must pass.
+
+    Measured on this fixture only — dest appearing after the first write is not
+    dest schema drift when Map still holds.
+    """
+    from services.schema_fingerprint import fingerprint_schema
+
+    maps = [
+        {
+            "source": "id",
+            "target": "id",
+            "source_type": "BIGINT",
+            "target_type": "BIGINT",
+            "create_new": True,
+        },
+        {
+            "source": "email",
+            "target": "email",
+            "source_type": "TEXT",
+            "target_type": "TEXT",
+            "create_new": True,
+        },
+    ]
+    stamped = build_artifact_from_mappings(
+        maps,
+        dest_db="snowflake",
+        dest_fingerprint="",
+        sync_mode="full_refresh_append",
+        route_id="validate:snowflake",
+        artifact_id="da_inline",
+        created_at="1970-01-01T00:00:00+00:00",
+    )
+    dest_types = {"ID": "NUMBER", "EMAIL": "VARCHAR"}
+    live = fingerprint_schema(list(dest_types.keys()), dest_types)
+    err, art = enforce_decision_artifact(
+        mappings=maps,
+        dest_db="snowflake",
+        approved_content_hash=stamped.content_hash,
+        dest_fingerprint=live,
+        destination_table_exists=True,
+        dest_column_names=list(dest_types.keys()),
+        sync_mode="full_refresh_append",
+        skip_preflight=False,
+    )
+    assert err is None
+    assert art is not None
+
+
+def test_create_new_stamp_still_refuses_real_map_edit():
+    maps = [
+        {
+            "source": "id",
+            "target": "id",
+            "source_type": "BIGINT",
+            "target_type": "BIGINT",
+        }
+    ]
+    stamped = build_artifact_from_mappings(
+        maps,
+        dest_db="postgresql",
+        dest_fingerprint="",
+        sync_mode="full_refresh_append",
+        route_id="validate:postgresql",
+        artifact_id="da_inline",
+        created_at="1970-01-01T00:00:00+00:00",
+    )
+    edited = [
+        {
+            "source": "id",
+            "target": "id",
+            "source_type": "BIGINT",
+            "target_type": "VARCHAR(8)",
+        }
+    ]
+    from services.schema_fingerprint import fingerprint_schema
+
+    dest_types = {"id": "BIGINT"}
+    live = fingerprint_schema(["id"], dest_types)
+    err, art = enforce_decision_artifact(
+        mappings=edited,
+        dest_db="postgresql",
+        approved_content_hash=stamped.content_hash,
+        dest_fingerprint=live,
+        destination_table_exists=True,
+        dest_column_names=["id"],
+        sync_mode="full_refresh_append",
+        skip_preflight=False,
+    )
+    assert err is not None
+    assert art is None
+
+
+def test_create_new_stamp_refuses_dest_only_not_null():
+    maps = [
+        {
+            "source": "id",
+            "target": "id",
+            "source_type": "BIGINT",
+            "target_type": "BIGINT",
+        }
+    ]
+    stamped = build_artifact_from_mappings(
+        maps,
+        dest_db="postgresql",
+        dest_fingerprint="",
+        sync_mode="full_refresh_append",
+        route_id="validate:postgresql",
+        artifact_id="da_inline",
+        created_at="1970-01-01T00:00:00+00:00",
+    )
+    from services.schema_fingerprint import fingerprint_schema
+
+    dest_types = {"id": "BIGINT", "audit_user": "TEXT"}
+    live = fingerprint_schema(list(dest_types.keys()), dest_types)
+    err, art = enforce_decision_artifact(
+        mappings=maps,
+        dest_db="postgresql",
+        approved_content_hash=stamped.content_hash,
+        dest_fingerprint=live,
+        destination_table_exists=True,
+        dest_column_names=list(dest_types.keys()),
+        column_nullability={"audit_user": False},
+        sync_mode="full_refresh_append",
+        skip_preflight=False,
+    )
+    assert err is not None
+    assert "NOT NULL" in err or "Validate" in err
+    assert art is None
+
+
 def test_live_source_schema_fingerprint_does_not_invent_map_columns():
     from services.schema_fingerprint import live_source_schema_fingerprint
 
