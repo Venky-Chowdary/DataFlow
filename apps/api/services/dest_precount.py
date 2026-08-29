@@ -1298,9 +1298,9 @@ def _bigquery_row_count(
 
 
 def _bigquery_no_retry():
-    from google.api_core import retry as retries
+    from connectors.google_emulator import google_emulator_retry
 
-    return retries.Retry(predicate=lambda _exc: False, deadline=8.0)
+    return google_emulator_retry()
 
 
 def _bigquery_run_job(client: Any, sql: str) -> Any:

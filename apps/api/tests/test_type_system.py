@@ -81,6 +81,10 @@ def test_decimal_precision_propagated_not_truncated():
     assert ddl_carrier_type("HALFVEC(3)") == "HALFVEC(3)"
     assert ddl_carrier_type("SPARSEVEC(16)") == "SPARSEVEC(16)"
     assert ddl_carrier_type("VECTOR(768)") == "VECTOR(768)"
+    assert ddl_carrier_type("INTEGER[]") == "INTEGER[]"
+    assert ddl_carrier_type("INT[]") == "INT[]"
+    assert ddl_carrier_type("ARRAY<INTEGER>") == "ARRAY<INTEGER>"
+    assert ddl_carrier_type("ARRAY") == "ARRAY"
     # Scale beyond MySQL cap (30) → lossless TEXT, never silent truncate
     assert ddl_type("mysql", "NUMBER(38,31)") == "TEXT"
     assert decimal_scale_would_truncate("NUMBER(38,31)", "mysql") is True

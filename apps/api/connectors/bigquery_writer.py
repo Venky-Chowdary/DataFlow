@@ -766,6 +766,34 @@ def _bq_scan_finished_bundles(**kwargs: Any) -> Any:
     return acc, source_row_count
 
 
+def _bq_get_table_schema(
+    client: Any,
+    table_id: str,
+    *,
+    host: str = "",
+    port: int = 0,
+    connection_string: str = "",
+) -> list[Any]:
+    """Physical schema probe. Emulator missing-table 500s must not retry-sleep."""
+    from connectors.google_emulator import (
+        google_emulator_retry,
+        google_emulator_timeout,
+        looks_like_google_emulator,
+    )
+
+    kw: dict[str, Any] = {}
+    if looks_like_google_emulator(
+        endpoint=str(connection_string or ""),
+        host=str(host or ""),
+        port=int(port or 0),
+    ):
+        kw = {
+            "retry": google_emulator_retry(),
+            "timeout": google_emulator_timeout(),
+        }
+    return list(client.get_table(table_id, **kw).schema)
+
+
 def write_mapped_rows(
     *,
     host: str,
@@ -906,7 +934,9 @@ def write_mapped_rows(
         table_existed = False
         physical_schema = None
         try:
-            physical_schema = list(client.get_table(table_id).schema)
+            physical_schema = _bq_get_table_schema(
+                client, table_id, host=host, port=port, connection_string=connection_string,
+            )
             table_existed = True
         except Exception as probe_exc:
             msg = str(probe_exc).lower()
@@ -978,7 +1008,9 @@ def write_mapped_rows(
             # Re-probe after exists_ok — concurrent/pre-existing tables must still
             # overlay live DDL (probe race must not invent Map VARCHAR bind).
             try:
-                physical_schema = list(client.get_table(table_id).schema)
+                physical_schema = _bq_get_table_schema(
+                client, table_id, host=host, port=port, connection_string=connection_string,
+            )
                 table_existed = True
             except Exception as post_exc:
                 return WriteResult(
@@ -1056,7 +1088,9 @@ def write_mapped_rows(
                 client.update_table(table, ["schema"])
                 # Refresh physical after additive evolve.
                 try:
-                    physical_schema = list(client.get_table(table_id).schema)
+                    physical_schema = _bq_get_table_schema(
+                client, table_id, host=host, port=port, connection_string=connection_string,
+            )
                     table_existed = True
                 except Exception as refresh_exc:
                     return WriteResult(
@@ -1079,7 +1113,9 @@ def write_mapped_rows(
 
             if physical_schema is None:
                 try:
-                    physical_schema = list(client.get_table(table_id).schema)
+                    physical_schema = _bq_get_table_schema(
+                client, table_id, host=host, port=port, connection_string=connection_string,
+            )
                 except Exception as schema_exc:
                     return WriteResult(
                         ok=False,
@@ -1203,7 +1239,9 @@ def write_mapped_rows(
         # Prefer physical table (p,s) so append into NUMERIC never silent-overflows.
         if physical_schema is None:
             try:
-                physical_schema = list(client.get_table(table_id).schema)
+                physical_schema = _bq_get_table_schema(
+                client, table_id, host=host, port=port, connection_string=connection_string,
+            )
             except Exception:
                 physical_schema = None
         decimal_target_types = resolve_bigquery_decimal_target_types(

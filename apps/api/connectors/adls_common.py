@@ -67,9 +67,12 @@ def blob_service_client(cfg: dict[str, Any]):
     from azure.storage.blob import BlobServiceClient
 
     conn_str = _connection_string(cfg)
-    connection_timeout = cfg.get("connection_timeout", 60)
-    read_timeout = cfg.get("read_timeout", 60)
-    retry_total = cfg.get("retry_total", 3)
+    azurite = _is_local(str(cfg.get("host") or ""), int(cfg.get("port") or 0)) or (
+        "devstoreaccount1" in str(conn_str or "").lower()
+    )
+    connection_timeout = cfg.get("connection_timeout", 5 if azurite else 60)
+    read_timeout = cfg.get("read_timeout", 5 if azurite else 60)
+    retry_total = cfg.get("retry_total", 0 if azurite else 3)
     client_kwargs = {
         "connection_timeout": connection_timeout,
         "read_timeout": read_timeout,

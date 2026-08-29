@@ -141,6 +141,8 @@ def test_e1_catalog_summary_prefers_unique_drivers() -> None:
     assert summary["unique_drivers"] <= summary.get("catalog_tile_total", summary["total"])
     assert "alias_tiles" in summary
     assert "honesty_note" in summary
+    assert summary.get("catalog_tiles_are_not_transfer_live") is True
+    assert "not transfer-live" in str(summary.get("honesty_note") or "")
 
 
 def test_redshift_is_planned_until_production_sku() -> None:

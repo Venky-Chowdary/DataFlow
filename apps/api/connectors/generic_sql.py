@@ -1592,6 +1592,18 @@ def _sa_type_for_logical(
         if db_type in ("oracle", "clickhouse", "trino", "questdb", "presto"):
             return _maybe_nullable(sa.Text())
         if dialect_name == "postgresql":
+            if t == LOGICAL_ARRAY:
+                elem = None
+                match = re.match(r"^(?:ARRAY|LIST)<(.+)>$", raw, re.IGNORECASE)
+                postfix = re.match(r"^(.+?)\s*\[\s*\]\s*$", raw.strip(), re.IGNORECASE)
+                if match:
+                    elem = match.group(1).strip()
+                elif postfix:
+                    elem = postfix.group(1).strip()
+                if elem:
+                    return sa.ARRAY(
+                        _sa_type_for_logical(elem, dialect_name, db_type)
+                    )
             return postgresql.JSONB()
         return _ExactJSON(none_as_null=True)
     if t == LOGICAL_BINARY:
