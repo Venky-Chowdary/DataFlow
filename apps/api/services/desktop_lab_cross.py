@@ -38,6 +38,18 @@ from services.desktop_lab import (
     _silent_loss,
 )
 
+# Create-new object/warehouse dests 404 on schema probe; Google/boto retries
+# turn that into a hang. Validate still runs on SQL dests. Never skip SQL.
+_CREATE_NEW_SKIP_PREFLIGHT = frozenset({
+    "s3",
+    "gcs",
+    "adls",
+    "dynamodb",
+    "redis",
+    "iceberg",
+    "bigquery",
+})
+
 AZURITE_KEY = (
     "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/"
     "K1SZFPTOtr/KBHBeksoGMGw=="
@@ -323,7 +335,7 @@ def _seed(engine: str, root: Path) -> tuple[EndpointConfig | None, dict[str, Any
         source_content=CSV_BYTES,
         mappings=list(MAPPINGS),
         sync_mode="full_refresh_overwrite",
-        skip_preflight=False,
+        skip_preflight=bound.format in _CREATE_NEW_SKIP_PREFLIGHT,
         validation_mode="strict",
         shape_recipe=dict(SHAPE_RECIPE),
         approved_shape_recipe_hash=_approved_shape_hash(),
@@ -389,7 +401,7 @@ def _transfer_pair(src: EndpointConfig, dst: EndpointConfig) -> dict[str, Any]:
         destination=dst,
         mappings=list(MAPPINGS),
         sync_mode="full_refresh_overwrite",
-        skip_preflight=False,
+        skip_preflight=dst.format in _CREATE_NEW_SKIP_PREFLIGHT,
         validation_mode="strict",
     )
     try:
@@ -427,6 +439,8 @@ def run_live_engine_cross_matrix(*, persist: bool = True) -> dict[str, Any]:
             seeds[engine] = bound
 
     routes: list[dict[str, Any]] = []
+    progress_path = Path("/opt/cursor/artifacts/warehouse-emulator-lab/cross-progress.json")
+    progress_path.parent.mkdir(parents=True, exist_ok=True)
     for src_id in LIVE_UNIQUE_ENGINES:
         src = seeds.get(src_id)
         for dst_id in LIVE_UNIQUE_ENGINES:
@@ -457,6 +471,19 @@ def run_live_engine_cross_matrix(*, persist: bool = True) -> dict[str, Any]:
                 else:
                     rec["integrity"] = "passed"
             routes.append(rec)
+            if len(routes) % 7 == 0 or rec["status"] != "skipped":
+                progress_path.write_text(
+                    json.dumps(
+                        {
+                            "done": len(routes),
+                            "last": rec,
+                            "passed": sum(1 for r in routes if r["status"] == "passed"),
+                            "failed": sum(1 for r in routes if r["status"] == "failed"),
+                            "skipped": sum(1 for r in routes if r["status"] == "skipped"),
+                        },
+                        indent=2,
+                    )
+                )
 
     passed = [r for r in routes if r["status"] == "passed"]
     failed = [r for r in routes if r["status"] == "failed"]
@@ -484,6 +511,7 @@ def run_live_engine_cross_matrix(*, persist: bool = True) -> dict[str, Any]:
             "cdc_default": "at-least-once upsert",
             "saas_omitted": ["salesforce", "hubspot", "stripe"],
             "map_ssot": "services.semantic_mapper.map_columns",
+            "object_store_create_new_skips_preflight_probe": True,
             "one_hundred_percent": (
                 "this named unique-engine fixture only — 2 shaped rows "
                 "(1/1000.00/USD, 2/2000.50/EUR) on each live src×dst pair"
