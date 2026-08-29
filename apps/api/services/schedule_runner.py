@@ -1016,6 +1016,11 @@ def _open_finding(
         build_approval_request,
         open_approval_request,
     )
+    from services.schedule_mapping_contract import (
+        EMPTY_MAPPING_CODE,
+        EMPTY_MAPPING_CORRECTIVE,
+        is_empty_mapping_refusal,
+    )
     from services.schedule_store import get_schedule
     from services.standing_authorization import delegable_scopes_for
 
@@ -1033,6 +1038,10 @@ def _open_finding(
             kind, code = KIND_RUN_REFUSED, "RUN_REFUSED"
             scopes = delegable_scopes_for(message)
             corrective = classification.corrective_action
+            if is_empty_mapping_refusal(message):
+                code = EMPTY_MAPPING_CODE
+                scopes = ()
+                corrective = EMPTY_MAPPING_CORRECTIVE
             found = {"failure_class": classification.kind, **(evidence or {})}
         open_approval_request(
             schedule_id,

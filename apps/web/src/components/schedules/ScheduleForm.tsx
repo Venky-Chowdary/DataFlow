@@ -55,6 +55,7 @@ interface ScheduleFormProps {
   saving?: boolean;
   onSubmit: (input: Partial<ScheduleInput>) => void;
   onCancel: () => void;
+  onOpenStudio?: () => void;
 }
 
 const COMMON_TIMEZONES = [
@@ -88,7 +89,7 @@ function formatWhen(iso: string | null | undefined): string {
   }
 }
 
-export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit, onCancel }: ScheduleFormProps) {
+export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit, onCancel, onOpenStudio }: ScheduleFormProps) {
   const isEdit = Boolean(initial);
   const mappingCount = initial?.mapping_count ?? (Array.isArray(initial?.mappings) ? initial.mappings.length : 0);
   const missingValidateMappings = scheduleCreateMustPauseWithoutMappings(mappingCount);
@@ -298,11 +299,18 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
         <input id="sched-name" className="df2-input" value={name} onChange={(e) => setName(e.target.value)} placeholder="Nightly orders sync" required />
       </div>
       {missingValidateMappings && (
-        <p className="df2-field-hint" role="status">
-          {isEdit
-            ? "This pipeline has no persisted Validate mappings. Activate stays blocked — the hourly beat will not invent an auto-map. Create from Transfer Studio after Validate, or PATCH mappings."
-            : "This form does not store a mapping contract. Save creates a paused draft. Create from Transfer Studio after Validate so the beat replays signed column names — not _auto_map."}
-        </p>
+        <div className="df2-sched-mapping-gap" role="status">
+          <p className="df2-field-hint">
+            {isEdit
+              ? "This pipeline has no persisted Validate mappings. Activate stays blocked — the hourly beat will not invent an auto-map."
+              : "This form does not store a mapping contract. Save creates a paused draft — not a live sync."}
+          </p>
+          {onOpenStudio && (
+            <Button type="button" size="sm" variant="primary" onClick={onOpenStudio}>
+              Open Transfer Studio
+            </Button>
+          )}
+        </div>
       )}
       {isEdit && (
         <p className="df2-field-hint df2-sched-validate-identity" role="status">

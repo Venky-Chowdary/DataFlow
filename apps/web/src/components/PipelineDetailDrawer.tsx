@@ -61,6 +61,8 @@ interface PipelineDetailDrawerProps {
   onOpenJob?: (jobId: string) => void;
   onResetBreaker?: (contractId: string) => void | Promise<void>;
   onExportYaml?: () => void;
+  /** Empty mapping contract — open Studio instead of pretending Run now will invent a map. */
+  onOpenStudio?: () => void;
 }
 
 const INTERVAL_LABEL: Record<string, string> = {
@@ -102,6 +104,7 @@ export function PipelineDetailDrawer({
   onOpenJob,
   onResetBreaker,
   onExportYaml,
+  onOpenStudio,
 }: PipelineDetailDrawerProps) {
   const [mappingCount, setMappingCount] = useState(0);
   const [mappings, setMappings] = useState<{ source: string; target: string }[]>([]);
@@ -297,9 +300,19 @@ export function PipelineDetailDrawer({
       }
       footer={
         <div className="df2-drawer-actions">
+          {onOpenStudio && (
+            <Button
+              size="sm"
+              variant="primary"
+              onClick={onOpenStudio}
+              leadingIcon={<DtIcon name="layers" size={14} />}
+            >
+              Open Transfer Studio
+            </Button>
+          )}
           <Button
             size="sm"
-            variant="primary"
+            variant={onOpenStudio ? "ghost" : "primary"}
             loading={running}
             loadingLabel="Running…"
             disabled={isRunning || breakerOpen || Boolean(runRefusal)}
