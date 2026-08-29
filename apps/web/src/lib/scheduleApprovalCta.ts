@@ -35,6 +35,8 @@ export function studioIntentConnectorsReady(
   return connectorIds.length > 0;
 }
 
+export { scheduleCreateOpensStudio } from "./sourceObjectPick";
+
 export function studioIntentFromSchedule(sched: PipelineSchedule): {
   step: "source";
   sourceConnectorId: string;

@@ -342,6 +342,7 @@ export function TransferPage({
   const [mappingPhase, setMappingPhase] = useState("Preparing schema context…");
   const [sourceIntrospecting, setSourceIntrospecting] = useState(false);
   const [sourceIntrospectError, setSourceIntrospectError] = useState<string | null>(null);
+  const [sourceObjectNames, setSourceObjectNames] = useState<string[]>([]);
   /** Per-stream schema previews for comma-separated multi-stream sources. */
   const [streamPreviews, setStreamPreviews] = useState<StreamSchemaPreview[]>([]);
   const [activeStreamTab, setActiveStreamTab] = useState("");
@@ -2843,10 +2844,15 @@ export function TransferPage({
       source: sourceEndpoint,
       destination: { kind: "file_export", format: "json" },
     });
+    const objects = (intro.objects ?? [])
+      .map((o) => (o.name || "").trim())
+      .filter(Boolean);
+    if (objects.length) setSourceObjectNames(objects);
     if (!intro.connected || !intro.columns?.length) {
       return {
         ok: false as const,
         error: intro.message || `“${streamName}” was not found or could not be read on this connector.`,
+        objects,
       };
     }
     const sampleRows = intro.data ?? intro.sample_data ?? [];
@@ -2861,7 +2867,7 @@ export function TransferPage({
         tone: "warning",
       });
     }
-    return { ok: true as const, intro };
+    return { ok: true as const, intro, objects };
   }, [sourceConnector, sourceConnectorId, toast, sourceReadMode, procedureCall]);
 
   const introspectConnectorSource = useCallback(async () => {
@@ -3158,6 +3164,36 @@ export function TransferPage({
     procedureCall,
     introspectConnectorSource,
   ]);
+
+  // List existing source objects so a missing name (sample) is a picker, not invented Map.
+  useEffect(() => {
+    if (sourceKind !== "database" || !sourceConnector || !sourceConnectorId) return;
+    if (isCallableSourceMode(sourceReadMode) && sourceConnector.type !== "mongodb") return;
+    let cancelled = false;
+    const sourceEndpoint: Record<string, unknown> = {
+      kind: "database",
+      format: sourceConnector.type,
+      connector_id: sourceConnectorId,
+      database: sourceConnector.database,
+    };
+    void introspectTransferEndpoints({
+      source: sourceEndpoint,
+      destination: { kind: "file_export", format: "json" },
+    })
+      .then(({ source: intro }) => {
+        if (cancelled) return;
+        const names = (intro.objects ?? [])
+          .map((o) => (o.name || "").trim())
+          .filter(Boolean);
+        setSourceObjectNames(names);
+      })
+      .catch(() => {
+        /* picker stays empty — typed name still introspects */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [sourceKind, sourceConnectorId, sourceConnector?.type, sourceConnector?.database, sourceReadMode]);
 
   const proceedToDestination = async () => {
     if (explainSourceGap()) return;
@@ -6328,31 +6364,31 @@ export function TransferPage({
                 </div>
                 ) : (
                 <div className="df2-field df2-source-stream-field">
-                  <label className="df2-label" htmlFor="source-stream-input">
-                    {sourceConnector?.type === "mongodb" ? "Collection(s)" : "Table(s)"}
-                  </label>
-                  <input
+                  <ObjectNameCombobox
                     id="source-stream-input"
-                    className="df2-input"
+                    label={sourceConnector?.type === "mongodb" ? "Collection(s)" : "Table(s)"}
                     value={sourceConnector?.type === "mongodb" ? sourceCollection : sourceTable}
-                    onChange={(e) => {
-                      if (sourceConnector?.type === "mongodb") setSourceCollection(e.target.value);
-                      else setSourceTable(e.target.value);
+                    onChange={(next) => {
+                      if (sourceConnector?.type === "mongodb") setSourceCollection(next);
+                      else setSourceTable(next);
                     }}
+                    options={sourceObjectNames}
+                    loading={sourceIntrospecting && sourceObjectNames.length === 0}
+                    allowCreate={false}
+                    objectNoun={sourceConnector?.type === "mongodb" ? "collection" : "table"}
                     placeholder={
                       sourceConnector?.type === "mongodb"
-                        ? "orders — or orders, customers"
+                        ? "Pick a collection that exists"
                         : sourceConnector?.type === "dynamodb"
                           ? sourceConnector.database || "orders"
-                          : "public.orders — or public.orders, public.items"
+                          : "Pick a table that exists"
                     }
-                    autoComplete="off"
-                    spellCheck={false}
+                    emptyHint="Studio will not invent a table that does not exist. Type an existing name or wait for the catalog."
                   />
                   <span className="df2-label-hint">
                     {sourceConnector?.type === "mongodb"
-                      ? "One collection, or several separated by commas."
-                      : "One table, or several separated by commas."}
+                      ? "One collection, or several separated by commas. Missing names refuse Map."
+                      : "One table, or several separated by commas. A name that is not on this source refuses Map."}
                   </span>
                 </div>
                 )}
@@ -6417,6 +6453,12 @@ export function TransferPage({
                 sourceIntrospecting={sourceIntrospecting}
                 sourceIntrospectError={sourceIntrospectError}
                 onRetrySourceIntrospect={retrySourceIntrospect}
+                sourceObjectNames={sourceObjectNames}
+                onPickSourceObject={(name) => {
+                  sourceIntrospectGateRef.current = { key: "", status: "idle" };
+                  if (sourceConnector?.type === "mongodb") setSourceCollection(name);
+                  else setSourceTable(name);
+                }}
                 sourceObjectLabel={
                   sourceKind === "cloud"
                     ? cloudPath.trim()
@@ -7123,6 +7165,7 @@ export function TransferPage({
           onIdentity={setShapeIdentity}
           onBack={() => setStep(STEP_DESTINATION)}
           onContinue={() => void goToMapping()}
+          syncMode={syncMode}
         />
         </div>
       )}

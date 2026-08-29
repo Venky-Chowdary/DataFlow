@@ -34,6 +34,9 @@ interface SourceStepAsideProps {
   sourceIntrospecting?: boolean;
   sourceIntrospectError?: string | null;
   onRetrySourceIntrospect?: () => void;
+  /** Existing tables/collections from the last source probe — pick, do not invent. */
+  sourceObjectNames?: string[];
+  onPickSourceObject?: (name: string) => void;
   sourceObjectLabel?: string;
   streamNames?: string[];
   streamPreviews?: StreamSchemaPreview[];
@@ -145,19 +148,51 @@ function SchemaAnalyzingPanel({ target }: { target?: string }) {
   );
 }
 
-function SchemaErrorPanel({ message, onRetry }: { message: string; onRetry?: () => void }) {
+function SchemaErrorPanel({
+  message,
+  onRetry,
+  suggestedObjects,
+  onPickObject,
+  objectNoun = "table",
+}: {
+  message: string;
+  onRetry?: () => void;
+  suggestedObjects?: string[];
+  onPickObject?: (name: string) => void;
+  objectNoun?: string;
+}) {
+  const missing = /was not found|could not be read|does not exist/i.test(message);
   return (
     <div className="df2-source-aside df2-source-aside-error">
       <div className="df2-source-aside-head">
         <div>
-          <h4>Couldn’t read the source</h4>
+          <h4>{missing ? "Table is not on this source" : "Couldn’t read the source"}</h4>
           <p>{message}</p>
         </div>
         <span className="df2-badge df2-badge-xs df2-badge-run">Error</span>
       </div>
       <div className="df2-source-aside-empty">
         <DtIcon name="alert" size={22} />
-        <p>Verify the table or collection name, credentials, and network access.</p>
+        <p>
+          {missing
+            ? `Studio will not invent a ${objectNoun} that does not exist. Pick one from the catalog, then Retry.`
+            : "Verify the table or collection name, credentials, and network access."}
+        </p>
+        {suggestedObjects && suggestedObjects.length > 0 && onPickObject && (
+          <ul className="df2-source-object-picks" aria-label={`Existing ${objectNoun}s`}>
+            {suggestedObjects.slice(0, 12).map((name) => (
+              <li key={name}>
+                <button
+                  type="button"
+                  className="df2-btn df2-btn-primary df2-btn-sm"
+                  onClick={() => onPickObject(name)}
+                >
+                  Use {name}
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
         {onRetry && (
           <button type="button" className="df2-btn df2-btn-secondary df2-btn-sm" onClick={onRetry}>
             Retry schema read
@@ -228,6 +263,8 @@ export function SourceStepAside({
   sourceIntrospecting,
   sourceIntrospectError,
   onRetrySourceIntrospect,
+  sourceObjectNames = [],
+  onPickSourceObject,
   sourceObjectLabel,
   streamNames,
   streamPreviews = [],
@@ -321,7 +358,15 @@ export function SourceStepAside({
   }
 
   if (sourceIntrospectError) {
-    return <SchemaErrorPanel message={sourceIntrospectError} onRetry={onRetrySourceIntrospect} />;
+    return (
+      <SchemaErrorPanel
+        message={sourceIntrospectError}
+        onRetry={onRetrySourceIntrospect}
+        suggestedObjects={sourceObjectNames}
+        onPickObject={onPickSourceObject}
+        objectNoun={sourceConnector?.type === "mongodb" ? "collection" : "table"}
+      />
+    );
   }
 
   if (sourceKind === "database") {

@@ -5,6 +5,7 @@ import {
   isEmptyMappingFinding,
   scheduleNeedsStudio,
   studioIntentConnectorsReady,
+  scheduleCreateOpensStudio,
   studioIntentFromSchedule,
 } from "./scheduleApprovalCta";
 import type { PipelineSchedule, ScheduleApprovalInboxItem } from "./types";
@@ -69,4 +70,9 @@ test("a schedule Studio seed waits until connectors have loaded", () => {
   assert.equal(studioIntentConnectorsReady(intent, []), false);
   assert.equal(studioIntentConnectorsReady(intent, ["src"]), true);
   assert.equal(studioIntentConnectorsReady({}, []), true);
+});
+
+test("create without mappings opens Studio — the beat will not invent Map", () => {
+  assert.equal(scheduleCreateOpensStudio({ mapping_count: 0 }), true);
+  assert.equal(scheduleCreateOpensStudio({ mapping_count: 2 }), false);
 });

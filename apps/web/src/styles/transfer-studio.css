@@ -6178,6 +6178,15 @@ th.df2-type-string .df2-type-badge {
   color: #b91c1c;
 }
 
+.df2-source-object-picks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 12px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
 .df2-source-aside-sample {
   flex: 1;
   min-height: 0;

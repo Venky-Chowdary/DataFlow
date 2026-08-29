@@ -13,6 +13,8 @@ import {
   removeStep,
   sortSuggestions,
   continueTransformState,
+  preloadTransformRefusalReason,
+  preloadTransformRefused,
   kitchenCatalogColumns,
   kitchenSampleValues,
   previewSampleNote,
@@ -51,6 +53,8 @@ interface TransferTransformStepProps {
   onIdentity: (identity: TransformImage | null) => void;
   onBack: () => void;
   onContinue: () => void;
+  /** CDC / SCD2 / mirror refuse pre-load — history was not written by this recipe. */
+  syncMode?: string;
 }
 
 const PREVIEW_ROWS = 12;
@@ -100,6 +104,7 @@ export function TransferTransformStep({
   onIdentity,
   onBack,
   onContinue,
+  syncMode,
 }: TransferTransformStepProps) {
   const plan = useWriteGate(PERMISSIONS.jobPlan);
   const [catalog, setCatalog] = useState<ShapeCatalog | null>(null);
@@ -228,12 +233,14 @@ export function TransferTransformStep({
   }, [catalog]);
 
   const addStep = useCallback((step: ShapeStepWire) => {
+    if (preloadTransformRefused(syncMode)) return;
     onChangeSteps([...steps, step]);
-  }, [onChangeSteps, steps]);
+  }, [onChangeSteps, steps, syncMode]);
 
   const applySuggestion = useCallback((suggestion: ShapeSuggestion) => {
+    if (preloadTransformRefused(syncMode)) return;
     onChangeSteps([...steps, suggestion.step]);
-  }, [onChangeSteps, steps]);
+  }, [onChangeSteps, steps, syncMode]);
 
   const suggestions = useMemo(
     () => sortSuggestions(preview?.suggestions?.length ? preview.suggestions : (profile?.suggestions ?? [])),
@@ -267,7 +274,9 @@ export function TransferTransformStep({
     previewError,
     busy,
     previewMatchesSteps: previewedStepsKey === stepsKey && preview !== null,
+    syncMode,
   });
+  const preloadRefused = preloadTransformRefused(syncMode);
   const catalogColumns = showAllColumns || attention === 0
     ? profiledColumns
     : profiledColumns.filter((column) => column.blanks || column.untrimmed || column.inner_whitespace
@@ -317,6 +326,16 @@ export function TransferTransformStep({
           </button>
         </div>
       </header>
+
+      {preloadRefused && (
+        <div className="df2-alert df2-alert-warn" role="status">
+          <DtIcon name="alert" size={16} />
+          <div>
+            <p>{preloadTransformRefusalReason(syncMode)}</p>
+            <p>CDC default stays at-least-once upsert. Continue without a recipe, or switch sync mode.</p>
+          </div>
+        </div>
+      )}
 
       {showGuide && (
         <TransformGuidePanel postLoadOnly={catalog?.post_load_only.operations ?? []} />
@@ -463,8 +482,8 @@ export function TransferTransformStep({
                 targetType={targetSchema[selectedProfile.name]}
                 sampleValues={selectedSamples}
                 suggestion={selectedSuggestion}
-                canApply={plan.allowed}
-                applyReason={plan.reason}
+                canApply={plan.allowed && !preloadRefused}
+                applyReason={preloadRefused ? preloadTransformRefusalReason(syncMode) : plan.reason}
                 onApplySuggestion={applySuggestion}
               />
             ) : (
@@ -629,8 +648,8 @@ export function TransferTransformStep({
             <TransformStepBuilder
               catalog={catalog}
               columns={columnsAfter}
-              canPlan={plan.allowed}
-              disabledReason={plan.reason}
+              canPlan={plan.allowed && !preloadRefused}
+              disabledReason={preloadRefused ? preloadTransformRefusalReason(syncMode) : plan.reason}
               onAdd={addStep}
             />
           )}

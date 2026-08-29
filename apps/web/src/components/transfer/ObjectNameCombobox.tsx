@@ -13,6 +13,8 @@ interface ObjectNameComboboxProps {
   loading?: boolean;
   emptyHint?: string;
   objectNoun?: string;
+  /** Destinations may create a missing name. Sources must pick an existing object. */
+  allowCreate?: boolean;
 }
 
 /**
@@ -30,6 +32,7 @@ export function ObjectNameCombobox({
   loading = false,
   emptyHint,
   objectNoun = "table",
+  allowCreate = true,
 }: ObjectNameComboboxProps) {
   const listId = useId();
   const rootRef = useRef<HTMLDivElement>(null);
@@ -125,7 +128,7 @@ export function ObjectNameCombobox({
   };
 
   const showCreateRow =
-    value.trim().length > 0 && !exactMatch;
+    allowCreate && value.trim().length > 0 && !exactMatch;
 
   // Always allow open — empty discovery must still show the create/empty hint
   // (previously options.length===0 hid the dropdown entirely → "sometimes not showing").
