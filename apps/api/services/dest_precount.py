@@ -1739,8 +1739,11 @@ def _iceberg_dest_layout(endpoint: dict[str, Any]) -> str | None:
     except Exception:
         return None
     catalog_type = str(parsed.get("catalog_type") or "filesystem").lower()
-    if catalog_type in {"filesystem", "hadoop"}:
+    if catalog_type == "filesystem":
         return "filesystem"
+    # REST / Glue / Hive / Hadoop / SQL: leftover MERGE lists the catalog
+    # snapshot. Hadoop is not a silent filesystem tree — that invented dest
+    # COUNT while writes fail-closed (pyiceberg 0.11 has no HadoopCatalog).
     return "catalog"
 
 

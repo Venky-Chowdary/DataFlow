@@ -201,7 +201,7 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
     };
   }
 
-  // Apache Iceberg — filesystem / mounted warehouse root (REST catalog later).
+  // Apache Iceberg — filesystem warehouse or REST catalog leftover MERGE.
   if (isIceberg) {
     authModes.push(
       auth(
@@ -210,7 +210,7 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
         [
           text("connection_string", "Warehouse root", {
             placeholder: "/data/iceberg-warehouse or file:///mnt/lake",
-            hint: "Local or mounted path where Iceberg metadata + data files are written. REST/Glue catalog committers are not required for this writer.",
+            hint: "Filesystem CoW writer. Overwrite leftover MERGE lists dest-engine file footers. Incremental leftover MERGE is a hard no-op.",
           }),
           text("database", "Default namespace (optional)", {
             optional: true,
@@ -219,6 +219,29 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
           }),
         ],
         (values) => required(values, "connection_string", "Warehouse root"),
+        "Local or mounted lakehouse root. No REST/Glue committer.",
+      ),
+      auth(
+        "connection_string",
+        "REST catalog",
+        [
+          text("connection_string", "REST catalog URI", {
+            placeholder: "http://127.0.0.1:8181",
+            hint: "Iceberg REST catalog. Leftover MERGE commits deletes through RestCatalog. Glue and Nessie stay Planned.",
+          }),
+          text("warehouse", "Warehouse", {
+            placeholder: "file:///mnt/lake or s3://bucket/wh",
+            hint: "Object-store or file warehouse the REST catalog commits into.",
+          }),
+          text("database", "Default namespace (optional)", {
+            optional: true,
+            placeholder: "analytics",
+          }),
+        ],
+        (values) =>
+          required(values, "connection_string", "REST catalog URI")
+          || required(values, "warehouse", "Warehouse"),
+        "REST catalog URI plus warehouse. Overwrite leftover MERGE is dest-engine catalog snapshot + delete.",
       ),
     );
     return {
