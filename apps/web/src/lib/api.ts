@@ -4124,6 +4124,42 @@ export async function fetchDesktopLab(): Promise<DesktopLabReport> {
   return res.json();
 }
 
+export type DesktopLabCrossReport = {
+  success?: boolean;
+  available?: boolean;
+  unique_engines?: string[];
+  unique_engines_seeded?: string[];
+  pairs: number;
+  passed: number;
+  failed: number;
+  skipped: number;
+  routes?: Array<{
+    source: string;
+    destination: string;
+    status: string;
+    error?: string;
+    dest_count?: number | null;
+    integrity?: string;
+  }>;
+  honesty?: Record<string, unknown>;
+  error?: string;
+};
+
+export async function runDesktopLabCross(): Promise<DesktopLabCrossReport> {
+  const res = await apiFetch(`${API_BASE}/workspace/proofs/desktop-lab-cross`, {
+    method: "POST",
+    timeoutMs: 900_000,
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Unique-engine matrix failed"));
+  return res.json();
+}
+
+export async function fetchDesktopLabCross(): Promise<DesktopLabCrossReport> {
+  const res = await apiFetch(`${API_BASE}/workspace/proofs/desktop-lab-cross`);
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not load unique-engine matrix"));
+  return res.json();
+}
+
 export async function runScheduleParallelCheck(
   scheduleId: string,
 ): Promise<{ passed?: boolean; message?: string; campaign?: PipelineSchedule["fidelity_campaign"] }> {

@@ -18,6 +18,23 @@ Operator option on **Proofs → Integrity ledger → Run desktop lab**.
 source + payload with zero rejected/coerced rows. Source-only (PDF/DOCX/HTML/REST)
 and dest-only (pgvector) tiles are excluded — they cannot pass both ways.
 
+## Unique-engine cartesian
+
+`POST /api/v1/workspace/proofs/desktop-lab-cross` (Proofs → **Run unique-engine matrix**)
+runs every *live unique engine* as source × every live unique engine as dest:
+
+PostgreSQL, MySQL, MongoDB, SQL Server, Oracle, SQLite, MinIO S3, fake-gcs,
+Azurite ADLS, DynamoDB Local, fakesnow, BigQuery emulator, Redis, Iceberg REST.
+
+That is **not** 80×80 catalog aliases (Neon/RDS share the Postgres wire). A
+backend that is down is `skipped`. Salesforce / HubSpot / Stripe stay omitted
+until a live backend exists. Emulators are not a customer-tenant SKU.
+
+```bash
+DATAFLOW_CROSS_MATRIX=1 PYTHONPATH=. python -m pytest \
+  tests/test_desktop_lab_cross_matrix.py -q
+```
+
 ## Honesty
 
 - **80 is catalog slots**, not unique engines, not catalog tile count, not 650+ live.

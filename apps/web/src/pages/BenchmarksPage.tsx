@@ -14,8 +14,10 @@ import {
   fetchProofLedger,
   runBenchmark,
   runDesktopLab,
+  runDesktopLabCross,
   runFidelityProof,
   type BenchmarkReport,
+  type DesktopLabCrossReport,
   type DesktopLabReport,
   type FidelityProofResult,
   type ProofLedger,
@@ -52,6 +54,8 @@ export function BenchmarksPage() {
   const [fidelity, setFidelity] = useState<FidelityProofResult | null>(null);
   const [labRunning, setLabRunning] = useState(false);
   const [lab, setLab] = useState<DesktopLabReport | null>(null);
+  const [crossRunning, setCrossRunning] = useState(false);
+  const [cross, setCross] = useState<DesktopLabCrossReport | null>(null);
 
   const loadLedger = async () => {
     setLedgerLoading(true);
@@ -106,6 +110,23 @@ export function BenchmarksPage() {
       toast({ title: "Desktop lab failed", message: String(e), tone: "error" });
     } finally {
       setLabRunning(false);
+    }
+  };
+
+  const handleDesktopLabCross = async () => {
+    setCrossRunning(true);
+    try {
+      const result = await runDesktopLabCross();
+      setCross(result);
+      toast({
+        title: result.success ? "Unique-engine matrix passed" : "Unique-engine matrix incomplete",
+        message: `${result.passed} of ${result.pairs} live src×dst pairs passed. Seeded ${result.unique_engines_seeded?.length ?? 0} unique engines. Not 80 catalog aliases.`,
+        tone: result.success ? "success" : "error",
+      });
+    } catch (e) {
+      toast({ title: "Unique-engine matrix failed", message: String(e), tone: "error" });
+    } finally {
+      setCrossRunning(false);
     }
   };
 
@@ -257,13 +278,72 @@ export function BenchmarksPage() {
                       <Button
                         variant="primary"
                         onClick={() => void handleDesktopLab()}
-                        disabled={labRunning}
+                        disabled={labRunning || crossRunning}
                         loading={labRunning}
                         loadingLabel="Running desktop lab…"
                       >
                         Run desktop lab
                       </Button>
                     </div>
+
+                    <div className="df2-page-benchmarks-toolbar">
+                      <p className="df2-page-benchmarks-note" style={{ margin: 0, flex: 1 }}>
+                        Unique-engine matrix: every live unique engine as source × every live unique
+                        engine as dest (Postgres, MySQL, Mongo, SQL Server, Oracle, S3/MinIO, GCS,
+                        ADLS, DynamoDB, Snowflake fakesnow, BigQuery emulator, Redis, Iceberg, SQLite).
+                        Not 80×80 catalog aliases. SaaS tiles without a desktop backend stay skipped.
+                      </p>
+                      <Button
+                        variant="secondary"
+                        onClick={() => void handleDesktopLabCross()}
+                        disabled={labRunning || crossRunning}
+                        loading={crossRunning}
+                        loadingLabel="Running unique-engine matrix…"
+                      >
+                        Run unique-engine matrix
+                      </Button>
+                    </div>
+
+                    {cross && (
+                      <div className={`df2-alert ${cross.success ? "df2-alert-success" : "df2-alert-error"}`} role="status">
+                        <DtIcon name={cross.success ? "check" : "alert"} size={18} />
+                        <div>
+                          <strong>{cross.passed} of {cross.pairs} unique-engine pairs</strong>
+                          {" "}passed
+                          {cross.failed ? ` · failed ${cross.failed}` : ""}
+                          {cross.skipped ? ` · skipped ${cross.skipped}` : ""}
+                          {cross.unique_engines_seeded?.length
+                            ? ` · seeded ${cross.unique_engines_seeded.join(", ")}`
+                            : ""}
+                        </div>
+                      </div>
+                    )}
+
+                    {cross?.routes && cross.routes.some((r) => r.status === "failed") && (
+                      <div className="df2-page-benchmarks-section">
+                        <h3>Unique-engine pairs that failed</h3>
+                        <div className="df2-page-benchmarks-table-wrap">
+                          <table className="df2-page-benchmarks-table">
+                            <thead>
+                              <tr>
+                                <th>Source</th>
+                                <th>Destination</th>
+                                <th>Error</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {cross.routes.filter((r) => r.status === "failed").map((row) => (
+                                <tr key={`${row.source}-${row.destination}`}>
+                                  <td><code>{row.source}</code></td>
+                                  <td><code>{row.destination}</code></td>
+                                  <td>{row.error || "failed"}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    )}
 
                     {lab && (
                       <div className={`df2-alert ${lab.success ? "df2-alert-success" : "df2-alert-error"}`} role="status">
