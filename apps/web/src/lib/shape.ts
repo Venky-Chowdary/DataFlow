@@ -397,6 +397,102 @@ export function recipePayload(steps: ShapeStepWire[]): ShapeRecipeWire | undefin
   return enabled.length ? { steps } : undefined;
 }
 
+export function enabledShapeSteps(steps: ShapeStepWire[]): ShapeStepWire[] {
+  return steps.filter((step) => step.enabled !== false);
+}
+
+/**
+ * Column catalog source of truth after a recipe runs.
+ *
+ * The source profile describes the file/table. After unnest/flatten the
+ * operator must see the transformed image — what Map will bind — not the
+ * parent JSON they already exploded.
+ */
+export function kitchenCatalogColumns(
+  sourceColumns: ShapeColumnProfile[],
+  shapedColumns: ShapeColumnProfile[] | undefined,
+  hasEnabledRecipe: boolean,
+): { columns: ShapeColumnProfile[]; from: "source" | "shaped" } {
+  if (hasEnabledRecipe && shapedColumns && shapedColumns.length > 0) {
+    return { columns: shapedColumns, from: "shaped" };
+  }
+  return { columns: sourceColumns, from: "source" };
+}
+
+export function kitchenSampleValues(
+  column: string,
+  sourceRows: Record<string, unknown>[],
+  afterRows: Record<string, unknown>[] | undefined,
+  from: "source" | "shaped",
+): unknown[] {
+  const rows = from === "shaped" ? (afterRows ?? []) : sourceRows;
+  return rows.map((row) => row[column]);
+}
+
+export interface ContinueTransformState {
+  enabled: boolean;
+  label: string;
+  reason: string;
+}
+
+/**
+ * Fail-closed Continue. A recipe without a matching, balanced preview has no
+ * identity for Map / Validate / Execute to be held to — advancing anyway is
+ * how a surplus or a stale hash reaches the writer.
+ */
+export function continueTransformState(input: {
+  steps: ShapeStepWire[];
+  preview: ShapePreviewResponse | null;
+  previewError: string;
+  busy: boolean;
+  previewMatchesSteps: boolean;
+}): ContinueTransformState {
+  const hasRecipe = enabledShapeSteps(input.steps).length > 0;
+  const label = hasRecipe ? "Continue with this transform" : "Continue without transforming";
+  if (hasRecipe && input.previewError) {
+    return {
+      enabled: false,
+      label,
+      reason: "Preview the recipe before Map — Retry, or remove the steps.",
+    };
+  }
+  if (hasRecipe && (input.busy || !input.previewMatchesSteps || !input.preview)) {
+    return {
+      enabled: false,
+      label,
+      reason: "Wait for the recipe identity before Map. The preview is still catching up.",
+    };
+  }
+  if (input.preview?.refusal) {
+    return {
+      enabled: false,
+      label,
+      reason: "A refused row must be decided before Map.",
+    };
+  }
+  if (hasRecipe && input.preview && !input.preview.effect.balanced && !input.preview.refusal) {
+    return {
+      enabled: false,
+      label,
+      reason: "Ledger does not balance — this is a defect, do not approve.",
+    };
+  }
+  if (hasRecipe && !input.preview?.recipe.recipe_hash) {
+    return {
+      enabled: false,
+      label,
+      reason: "The recipe has no identity yet.",
+    };
+  }
+  return {
+    enabled: true,
+    label,
+    reason: hasRecipe
+      ? "Continue to Map with this recipe identity."
+      : "Continue to Map. The source is unchanged.",
+  };
+}
+
 /** Severity ordering for the suggestion list: decisions before hygiene. */
 export function suggestionRank(severity: string): number {
   if (severity === "blocking") return 0;

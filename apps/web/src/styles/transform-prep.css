@@ -735,6 +735,8 @@
 .df2-xform-bar-fill.kind-control { background: #b91c1c; }
 .df2-xform-bar-fill.kind-unicode { background: #7c3aed; }
 .df2-xform-bar-fill.kind-sentinel { background: #d97706; }
+.df2-xform-bar-fill.kind-json-array { background: #0369a1; }
+.df2-xform-bar-fill.kind-json-object { background: #0284c7; }
 
 .df2-xform-bar-count {
   font-variant-numeric: tabular-nums;
@@ -776,6 +778,16 @@
   flex-wrap: wrap;
   font-size: 13px;
   color: var(--df-text-primary, #0f172a);
+}
+
+.df2-xform-step-op {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--df-text-secondary, #475569);
+  background: var(--df-surface-muted, #f8fafc);
+  border: 1px solid var(--df-border, #e4e8ee);
+  border-radius: 4px;
+  padding: 1px 6px;
 }
 
 .df2-xform-step-index {

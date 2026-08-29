@@ -12,7 +12,11 @@ import {
   moveStep,
   removeStep,
   sortSuggestions,
+  continueTransformState,
+  kitchenCatalogColumns,
+  kitchenSampleValues,
   previewSampleNote,
+  recipePayload,
   summarizeEffect,
   toggleStep,
   type ShapeCatalog,
@@ -116,6 +120,7 @@ export function TransferTransformStep({
   const [selectedColumn, setSelectedColumn] = useState("");
   const [showBuilder, setShowBuilder] = useState(false);
   const [previewRetry, setPreviewRetry] = useState(0);
+  const [previewedStepsKey, setPreviewedStepsKey] = useState("");
   const stepsListRef = useRef<HTMLOListElement | null>(null);
 
   const rowsKey = useMemo(() => JSON.stringify(sampleRows.slice(0, 200)), [sampleRows]);
@@ -183,6 +188,7 @@ export function TransferTransformStep({
           if (cancelled) return;
           setPreview(next);
           setPreviewError("");
+          setPreviewedStepsKey(stepsKey);
           onIdentity({
             hash: next.recipe.recipe_hash,
             columns: next.recipe.output_columns,
@@ -194,6 +200,7 @@ export function TransferTransformStep({
         .catch((err) => {
           if (cancelled) return;
           setPreview(null);
+          setPreviewedStepsKey("");
           setPreviewError(err instanceof Error ? err.message : String(err));
           // A recipe the engine refuses has no identity to approve.
           onIdentity(null);
@@ -245,8 +252,22 @@ export function TransferTransformStep({
   const columnsBefore = sourceColumns.length ? sourceColumns : Object.keys(beforeRows[0] ?? {});
   const columnsAfter = shapedColumns.length ? shapedColumns : columnsBefore;
 
-  const profiledColumns = profile?.columns ?? [];
+  const hasEnabledRecipe = Boolean(recipePayload(steps));
+  const kitchen = kitchenCatalogColumns(
+    profile?.columns ?? [],
+    preview?.shaped_profile,
+    hasEnabledRecipe,
+  );
+  const profiledColumns = kitchen.columns;
+  const kitchenRows = kitchen.from === "shaped" ? preview?.after : sampleRows;
   const attention = columnsNeedingAttention(profiledColumns);
+  const continueState = continueTransformState({
+    steps,
+    preview,
+    previewError,
+    busy,
+    previewMatchesSteps: previewedStepsKey === stepsKey && preview !== null,
+  });
   const catalogColumns = showAllColumns || attention === 0
     ? profiledColumns
     : profiledColumns.filter((column) => column.blanks || column.untrimmed || column.inner_whitespace
@@ -260,7 +281,7 @@ export function TransferTransformStep({
     ? openSuggestions.find((item) => item.step.column === selectedProfile.name) ?? null
     : null;
   const selectedSamples = selectedProfile
-    ? sampleRows.map((row) => row[selectedProfile.name])
+    ? kitchenSampleValues(selectedProfile.name, sampleRows, kitchenRows, kitchen.from)
     : [];
 
   return (
@@ -311,7 +332,10 @@ export function TransferTransformStep({
         </div>
         <div>
           <dt>Columns</dt>
-          <dd>{(profiledColumns.length || sourceColumns.length).toLocaleString()}</dd>
+          <dd>
+            {(profiledColumns.length || sourceColumns.length).toLocaleString()}
+            {kitchen.from === "shaped" ? <small> after transform</small> : null}
+          </dd>
         </div>
         <div className={attention ? "is-attention" : ""}>
           <dt>Columns with findings</dt>
@@ -419,7 +443,14 @@ export function TransferTransformStep({
                 : `All ${profiledColumns.length} columns`}
             </button>
           </header>
-          {profile?.sample_notice && <p className="df2-xform-note">{profile.sample_notice}</p>}
+          {kitchen.from === "shaped" ? (
+            <p className="df2-xform-note">
+              These columns are the transformed image — what Map and the writer will see, including
+              columns an unnest or flatten just produced.
+            </p>
+          ) : profile?.sample_notice ? (
+            <p className="df2-xform-note">{profile.sample_notice}</p>
+          ) : null}
           <div className="df2-xform-kitchen">
             <TransformColumnCatalog
               columns={visibleColumns}
@@ -523,6 +554,7 @@ export function TransferTransformStep({
                     <div className="df2-xform-step-head">
                       <span className="df2-xform-step-index">{index + 1}</span>
                       <strong>{describeStep(step, operationsByName.get(step.op))}</strong>
+                      <code className="df2-xform-step-op">{step.op}</code>
                       {step.on_error && step.on_error !== "refuse" && (
                         <span className="df2-badge">on error: {step.on_error}</span>
                       )}
@@ -684,22 +716,11 @@ export function TransferTransformStep({
         <button
           type="button"
           className="df2-btn df2-btn-primary"
-          disabled={
-            Boolean(preview?.refusal)
-            || (Boolean(previewError) && steps.length > 0)
-          }
-          title={
-            preview?.refusal
-              ? "A refused row must be decided before Map."
-              : previewError && steps.length > 0
-                ? "Preview the recipe before Map — Retry, or remove the steps."
-                : previewError && isTransportTimeout(previewError)
-                  ? "Continue without transforming. Validate still scans the population."
-                  : "Continue to Map"
-          }
+          disabled={!continueState.enabled}
+          title={continueState.reason}
           onClick={onContinue}
         >
-          {steps.length ? "Continue with this transform" : "Continue without transforming"}
+          {continueState.label}
         </button>
       </footer>
     </section>

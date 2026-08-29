@@ -9,14 +9,19 @@ import {
   moveStep,
   operationsByFamily,
   previewSampleNote,
+  continueTransformState,
+  kitchenCatalogColumns,
+  kitchenSampleValues,
   recipePayload,
   removeStep,
   sameRecipe,
   sortSuggestions,
   summarizeEffect,
   toggleStep,
+  type ShapeColumnProfile,
   type ShapeEffect,
   type ShapeOperation,
+  type ShapePreviewResponse,
   type ShapeStepWire,
   type ShapeSuggestion,
 } from "./shape";
@@ -134,6 +139,95 @@ test("the effect sentence carries the ledger terms, not just a row count", () =>
   assert.match(sentence, /14 cell\(s\) changed/);
   assert.match(sentence, /3 null\(s\) introduced/);
   assert.equal(summarizeEffect(null), "");
+});
+
+test("the column catalog switches to the shaped image after unnest", () => {
+  const source = [{ name: "line_items", rows: 2 } as ShapeColumnProfile];
+  const shaped = [
+    { name: "order_no", rows: 3 } as ShapeColumnProfile,
+    { name: "item", rows: 3 } as ShapeColumnProfile,
+  ];
+  assert.deepEqual(kitchenCatalogColumns(source, shaped, true).from, "shaped");
+  assert.deepEqual(kitchenCatalogColumns(source, shaped, true).columns.map((c) => c.name), ["order_no", "item"]);
+  assert.equal(kitchenCatalogColumns(source, shaped, false).from, "source");
+  assert.deepEqual(
+    kitchenSampleValues("item", [{ item: "parent" }], [{ item: "A" }, { item: "B" }], "shaped"),
+    ["A", "B"],
+  );
+});
+
+test("Continue waits for a matching balanced preview when a recipe is applied", () => {
+  const steps = [{ op: "unnest_json", column: "line_items" }];
+  const preview: ShapePreviewResponse = {
+    recipe: {
+      valid: true,
+      recipe_hash: "abc",
+      step_count: 1,
+      has_active_step: true,
+      input_columns: ["line_items"],
+      output_columns: ["item"],
+      summary: "",
+      steps,
+    },
+    sampled_rows: 2,
+    before: [],
+    after: [],
+    effect: {
+      rows_in: 2,
+      rows_out: 3,
+      rows_shaped_out: 0,
+      rows_expanded: 1,
+      rows_diverted: 0,
+      cells_changed: 0,
+      nulls_introduced: 0,
+      balanced: true,
+      steps: [],
+    },
+    changed_cells: [],
+    refusal: null,
+    shaped_profile: [],
+    suggestions: [],
+  };
+  assert.equal(
+    continueTransformState({
+      steps,
+      preview,
+      previewError: "",
+      busy: false,
+      previewMatchesSteps: true,
+    }).enabled,
+    true,
+  );
+  assert.equal(
+    continueTransformState({
+      steps,
+      preview,
+      previewError: "",
+      busy: true,
+      previewMatchesSteps: false,
+    }).enabled,
+    false,
+  );
+  assert.equal(
+    continueTransformState({
+      steps,
+      preview: { ...preview, effect: { ...preview.effect, balanced: false } },
+      previewError: "",
+      busy: false,
+      previewMatchesSteps: true,
+    }).enabled,
+    false,
+  );
+  assert.equal(
+    continueTransformState({
+      steps: [],
+      preview: null,
+      previewError: "",
+      busy: true,
+      previewMatchesSteps: false,
+    }).enabled,
+    true,
+  );
 });
 
 test("the before/after caption names both sides when unnest expands the sample", () => {
