@@ -82,6 +82,28 @@ def test_advance_offset_jumps_to_end_scn_when_window_exhausted():
     assert cdc.ssn == 0
 
 
+def test_advance_offset_empty_fetch_does_not_skip_unseen_scn() -> None:
+    """Empty LogMiner contents must not jump to end_scn — LGWR may still flush."""
+    cdc = OracleLogMinerCdc(
+        {"host": "localhost", "database": "ORCL", "username": "APP"},
+        table="orders",
+        primary_key="id",
+        schema="APP",
+        resume_token=encode_logminer_token(100, table="ORDERS", phase="streaming"),
+    )
+    cdc._advance_offset(
+        last_scn=0,
+        last_rs_id="",
+        last_ssn=0,
+        end_scn=999,
+        fetched=0,
+        limit=500,
+    )
+    assert cdc.scn == 100
+    assert cdc.rs_id == ""
+    assert cdc.ssn == 0
+
+
 def test_advance_offset_keeps_mid_scn_cursor_on_idle_empty_poll():
     """An empty poll at the current SCN must not wipe an active (rs_id, ssn)."""
     cdc = OracleLogMinerCdc(
@@ -170,7 +192,7 @@ def test_poll_truncated_window_does_not_skip_past_last_row():
     conn.cursor.return_value.__enter__ = MagicMock(return_value=cur)
     conn.cursor.return_value.__exit__ = MagicMock(return_value=False)
 
-    with patch.object(cdc, "_conn", return_value=conn):
+    with patch.object(cdc, "_mining_conn", return_value=conn):
         with patch.object(cdc, "_acquire_cdc_lease"):
             with patch(
                 "services.cdc_incremental_runner.interleave_incremental_snapshot",
@@ -238,7 +260,7 @@ def test_peek_continues_on_intra_scn_cursor() -> None:
     class _Sig:
         chunk_size = 50
 
-    with patch.object(cdc, "_conn", return_value=conn):
+    with patch.object(cdc, "_mining_conn", return_value=conn):
         events = cdc._peek_stream_events_during_chunk(_Sig())
 
     assert events, "intra-SCN peek must surface the mid-chunk UPDATE"

@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from datetime import datetime, timezone
 from typing import Any, Iterator
 
@@ -727,6 +728,62 @@ class OracleLogMinerCdc:
             parts.append(f"'{safe}'")
         return ", ".join(parts)
 
+    def _empty_window_retry_sec(self) -> float:
+        from services.brand_env import getenv_brand
+
+        try:
+            return max(0.0, float(getenv_brand("ORACLE_EMPTY_RETRY_SEC", "0.25") or 0.25))
+        except (TypeError, ValueError):
+            return 0.25
+
+    def _query_logminer_rows(self, cur: Any, *, table_predicate: str, limit: int) -> list[Any]:
+        cur.execute(
+            logminer_contents_sql(table_predicate=table_predicate),
+            {
+                "owner": self.schema,
+                "tbl": self.table,
+                "lim": int(limit),
+                **self._resume_binds(),
+            },
+        )
+        return list(cur.fetchall() or [])
+
+    def _fetch_logminer_rows_visible(
+        self,
+        cur: Any,
+        *,
+        start_scn: int,
+        end_scn: int,
+        table_predicate: str,
+        limit: int,
+    ) -> tuple[list[Any], int]:
+        """Start LogMiner and fetch rows, retrying once if LGWR has not flushed.
+
+        An empty first read with ``end_scn > start_scn`` used to advance the
+        watermark past not-yet-visible committed DML (silent dest leftover).
+        """
+        start_logminer_session(cur, start_scn=max(1, int(start_scn)), end_scn=int(end_scn))
+        rows = self._query_logminer_rows(cur, table_predicate=table_predicate, limit=limit)
+        if rows or int(end_scn) <= int(start_scn):
+            return rows, int(end_scn)
+        delay = self._empty_window_retry_sec()
+        if delay > 0:
+            try:
+                cur.execute("BEGIN DBMS_LOGMNR.END_LOGMNR; END;")
+            except Exception as exc:
+                logger.debug("Oracle END_LOGMNR before visibility retry: %s", exc)
+            time.sleep(delay)
+            cur.execute("SELECT current_scn FROM v$database")
+            head = cur.fetchone()
+            end_scn = max(int(end_scn), int(head[0] or end_scn) if head else int(end_scn))
+            start_logminer_session(
+                cur, start_scn=max(1, int(start_scn)), end_scn=int(end_scn)
+            )
+            rows = self._query_logminer_rows(
+                cur, table_predicate=table_predicate, limit=limit
+            )
+        return rows, int(end_scn)
+
     def is_available(self) -> bool:
         try:
             with self._conn() as conn:
@@ -997,16 +1054,10 @@ class OracleLogMinerCdc:
         ``(scn, rs_id, ssn)``. Only a short window may jump to ``end_scn``.
         """
         if fetched <= 0:
-            # An idle window with an active mid-SCN cursor must keep that
-            # cursor. Jumping to end_scn and clearing (rs_id, ssn) would
-            # pretend the remainder of the current SCN was consumed when we
-            # simply saw no rows yet (current_scn has not moved, or the
-            # table filter matched nothing in a still-open SCN).
-            if self.rs_id and int(end_scn or 0) <= int(self.scn or 0):
-                return
-            self.scn = max(int(self.scn or 0), int(end_scn or 0))
-            self.rs_id = ""
-            self.ssn = 0
+            # Empty contents are not proof the window is exhausted. LGWR can
+            # still be flushing committed DML — jumping to end_scn skipped
+            # those SCNs forever (dest leftover after resume delete).
+            # Keep the cursor so the next poll re-mines the same range.
             return
         if fetched >= int(limit):
             self.scn = int(last_scn or self.scn or 0)
@@ -1129,19 +1180,13 @@ class OracleLogMinerCdc:
                             table=self.table,
                         )
                         return
-                    start_logminer_session(
-                        cur, start_scn=max(1, self.scn), end_scn=end_scn
+                    rows, end_scn = self._fetch_logminer_rows_visible(
+                        cur,
+                        start_scn=self.scn,
+                        end_scn=end_scn,
+                        table_predicate="TABLE_NAME = :tbl",
+                        limit=self.batch_size,
                     )
-                    cur.execute(
-                        logminer_contents_sql(table_predicate="TABLE_NAME = :tbl"),
-                        {
-                            "owner": self.schema,
-                            "tbl": self.table,
-                            "lim": self.batch_size,
-                            **self._resume_binds(),
-                        },
-                    )
-                    rows = list(cur.fetchall() or [])
                     fetched = len(rows)
                     for row in rows:
                         scn = int(row[0] or 0)
