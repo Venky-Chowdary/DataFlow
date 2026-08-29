@@ -351,6 +351,38 @@ def is_interval_wire(value: Any) -> bool:
     return _looks_like_interval(text)
 
 
+def is_zero_duration_interval_bind(value: Any) -> bool:
+    """Dest-typed INTERVAL zero duration — not a global invent of INTERVAL.
+
+    ``is_interval_wire`` refuses raw numeric / TIME-shaped ``00:00:00`` so a
+    midnight TIME cell does not become INTERVAL. When the destination column
+    is already INTERVAL, PG ``INTERVAL '0'`` / ``timedelta(0)`` serializes as
+    ``0`` or ``00:00:00`` and must bind. Non-zero integers stay refused.
+    """
+    if is_reader_null_cell(value):
+        return False
+    if isinstance(value, bool):
+        return False
+    try:
+        from datetime import timedelta
+
+        if isinstance(value, timedelta):
+            return value.total_seconds() == 0
+    except Exception:
+        pass
+    if isinstance(value, (int, float)) and float(value) == 0:
+        return True
+    text = str(value).strip()
+    if not text:
+        return False
+    folded = text.lower()
+    if folded in {"0", "0.0", "+0", "-0", "pt0s", "p0d", "p0y", "p0dt0h0m0s"}:
+        return True
+    if folded in {"0 seconds", "0 second", "0 days", "0 day"}:
+        return True
+    return bool(re.fullmatch(r"[+-]?0+:0{2}:0{2}(?:\.0+)?", text))
+
+
 def interval_wire_family(value: Any) -> str | None:
     """Return ``ym`` / ``ds`` when the wire payload is family-specific, else None.
 

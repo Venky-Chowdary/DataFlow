@@ -37,5 +37,16 @@ def test_desktop_lab_type_sync_schema_dimensions():
     ]
     assert compatible and all(c["status"] == "passed" for c in compatible), compatible
 
-    # dest-exists DECIMAL→INT and extra source column are measured open
-    # gaps on this fixture — do not invent a pass. The artifact records them.
+    narrow = [
+        c for c in report["results"]
+        if c.get("name") == "dest_exists_narrow_decimal"
+    ]
+    assert narrow and all(c["status"] == "passed" for c in narrow), narrow
+
+    extra = [
+        c for c in report["results"]
+        if c.get("name") == "extra_source_unmapped"
+    ]
+    assert extra and all(c["status"] == "passed" for c in extra), extra
+
+    assert report["honesty"]["schema_block_cells_open"] == []

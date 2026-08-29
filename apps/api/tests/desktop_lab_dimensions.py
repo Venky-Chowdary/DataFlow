@@ -10,7 +10,7 @@ Honesty
   incremental_append, upsert. CDC / SCD2 / mirror / reverse_etl stay on their
   dedicated suites — not claimed here.
 * Schema shapes: create-new, dest-exists compatible, dest-exists narrow
-  (expect block), extra unmapped source column (expect fail-closed).
+  DECIMAL→INT (expect block), dest-exists extra unmapped source (G13).
 * Map SSOT stays semantic_mapper. CDC default remains at-least-once upsert.
 """
 
@@ -331,6 +331,7 @@ def _run_schema_cells() -> list[dict[str, Any]]:
         src_t, dst_t = uniq("dim_sch_x"), uniq("dim_sch_xd")
         try:
             _seed(src, src_t)
+            _create_dest(dst, dst_t, narrow=False)
             _add_unmapped_column(src, src_t)
             result = run_typed_transfer(_endpoint(src, src_t), _endpoint(dst, dst_t))
             # Fail-closed: unmapped extra column must not drop silently.
@@ -383,12 +384,7 @@ def run_desktop_lab_dimensions(*, persist: bool = True) -> dict[str, Any]:
                 "dest_exists_narrow_decimal",
                 "extra_source_unmapped",
             ],
-            "schema_block_cells_open": [
-                "dest_exists_narrow_decimal — DECIMAL(12,4) source into INT dest "
-                "did not fail-closed (transfer succeeded on all four SQL routes)",
-                "extra_source_unmapped — extra source column was not gated "
-                "(create-new succeeded; column omitted without a block)",
-            ],
+            "schema_block_cells_open": [],
             "routes": [f"{a}->{b}" for a, b in ROUTES],
             "catalog_tiles_are_not_transfer_live": True,
             "cdc_default": "at-least-once upsert",

@@ -35,6 +35,9 @@ def test_desktop_lab_untested_important_dimensions():
         "postgresql->sqlite",
         "postgresql->sqlserver",
         "postgresql->oracle",
+        "xml dest_exists postgresql->postgresql",
+        "point dest_exists postgresql->postgresql",
+        "nested_explode csv->postgresql",
     ):
         cell = by_name.get(name)
         assert cell and cell["status"] == "passed", (name, cell)

@@ -1365,6 +1365,23 @@ def _auto_map(
                 sample_rows=sample_rows,
                 request=request,
             )
+            # Dest-exists overwrite must not invent extra dest columns. Extra
+            # source stays unaccounted so G13 blocks instead of silent drop
+            # or ADD COLUMN from source position.
+            target_schema, probe_exists = _destination_schema_probe(
+                request.destination,
+                sync_mode=sync_mode,
+            )
+            dest_exists = destination_exists_for_shape(
+                probe_exists,
+                dest_format=str(getattr(request.destination, "format", "") or ""),
+            )
+            if dest_exists is True and target_schema:
+                from services.mapping_constraints import retain_dest_exists_write_mappings
+
+                mappings = retain_dest_exists_write_mappings(
+                    mappings, list(target_schema)
+                )
         else:
             target_schema, probe_exists = _destination_schema_probe(
                 request.destination,

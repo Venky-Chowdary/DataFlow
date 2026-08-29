@@ -794,9 +794,15 @@ def _temporal_bind_reason(value: Any, target_type: str, dest_db: str) -> str | N
 
 def _interval_bind_reason(value: Any, target_type: str) -> str | None:
     """Ask the write's interval quarantine, not a second family table."""
-    from services.schema_inference import interval_wire_family, is_interval_wire
+    from services.schema_inference import (
+        interval_wire_family,
+        is_interval_wire,
+        is_zero_duration_interval_bind,
+    )
     from services.type_system import interval_family
 
+    if is_zero_duration_interval_bind(value):
+        return None
     if not is_interval_wire(value):
         shown = value if isinstance(value, str) else str(value)
         return f"value is not a valid interval wire payload: {shown!r}"

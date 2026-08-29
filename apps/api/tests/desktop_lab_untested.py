@@ -9,8 +9,8 @@ Honesty
 * Sync modes here: incremental_deduped, mirror, scd2, reverse_etl (PG→MySQL
   warehouse→OLTP), CDC (MySQL binlog + PG logical). Salesforce reverse-ETL
   is omitted — no live SaaS backend.
-* Schema: dest-only NOT NULL (G14). DECIMAL→INT and extra-source remain
-  recorded open gaps from desktop_lab_dimensions.
+* Schema: dest-only NOT NULL (G14). DECIMAL→INT and extra-source G13 are
+  measured on desktop_lab_dimensions (dest-exists overwrite).
 * Extra engines: Mongo, SQLite, MinIO S3, SQL Server dest-exists, Oracle
   dest-exists. GCS/ADLS/BQ create-new probes are omitted (hang risk).
 * CDC default remains at-least-once upsert. Map SSOT stays semantic_mapper.
@@ -373,6 +373,10 @@ def _run_types() -> list[dict[str, Any]]:
                             f'FROM public."{dst_t}" WHERE id = 1'
                         )
                         row = cur.fetchone()
+                        cur.execute(
+                            f'SELECT span FROM public."{dst_t}" WHERE id = 2'
+                        )
+                        zero_row = cur.fetchone()
                 finally:
                     conn.close()
                 assert row is not None
@@ -384,6 +388,9 @@ def _run_types() -> list[dict[str, Any]]:
                 assert str(uid) == UID_1, uid
                 assert bytes(blob) == BLOB_1, blob
                 assert seconds == 93600, span
+                assert zero_row is not None
+                zero_seconds = getattr(zero_row[0], "total_seconds", lambda: None)()
+                assert zero_seconds == 0, zero_row[0]
                 cells.append(_cell(
                     "types_extended", "dest_exists_native postgresql->postgresql", "passed",
                     records=int(result.records_transferred or 0),
@@ -897,7 +904,7 @@ def _sqlserver_prepare(table: str) -> str | None:
             cur.execute(f"IF OBJECT_ID('dbo.[{table}]', 'U') IS NOT NULL DROP TABLE dbo.[{table}]")
             cur.execute(
                 f"CREATE TABLE dbo.[{table}] (id INT PRIMARY KEY, amount DECIMAL(12,2) NOT NULL, "
-                "code NVARCHAR(32) NOT NULL, updated_at DATETIME2 NOT NULL)"
+                "code NVARCHAR(4000) NOT NULL, updated_at DATETIMEOFFSET NOT NULL)"
             )
         conn.commit()
     finally:
@@ -936,7 +943,7 @@ def _oracle_prepare(table: str) -> str | None:
         )
         cur.execute(
             f"CREATE TABLE {table} (id NUMBER PRIMARY KEY, amount NUMBER(12,2) NOT NULL, "
-            "code VARCHAR2(32) NOT NULL)"
+            "code VARCHAR2(4000) NOT NULL)"
         )
         conn.commit()
     finally:
@@ -1252,11 +1259,11 @@ def run_desktop_lab_untested(*, persist: bool = True) -> dict[str, Any]:
             "engines_omitted_hang_risk": ["gcs", "adls", "bigquery"],
             "saas_omitted": ["salesforce", "hubspot", "stripe"],
             "open_gaps_this_fixture": [
-                "dest-exists INT[] invents JSONB (fail-closed)",
-                "dest-exists JSONB/UUID/BYTEA/INTERVAL hit PII/compliance review",
-                "G14 dest-only NOT NULL tenant_id did not block",
-                "SCD2 PG→SQLite first-load dest-before unmeasured",
-                "Oracle dest-exists writer CREATE TABLE IF NOT EXISTS → ORA-00922",
+                "dest-exists INT[] invents JSONB (fail-closed — measured)",
+                "geography/PostGIS skipped (extension absent)",
+                "Salesforce/HubSpot/Stripe skipped (no live SaaS backend)",
+                "GCS/ADLS/BQ create-new skipped (writer probe hang)",
+                "customer-tenant warehouse PRODUCTION_SKU not claimed",
             ],
             "map_ssot": "services.semantic_mapper.map_columns",
             "catalog_tiles_are_not_transfer_live": True,

@@ -81,3 +81,9 @@ def test_coerce_interval_reader_null_is_sql_null():
         coerce_interval_wire("", ddl_type="INTERVAL")
     with pytest.raises(ValueError, match="not ISO-8601"):
         coerce_interval_wire(False, ddl_type="INTERVAL")
+    from datetime import timedelta
+
+    assert coerce_interval_wire(0, ddl_type="INTERVAL") == timedelta(0)
+    assert coerce_interval_wire("00:00:00", ddl_type="INTERVAL") == timedelta(0)
+    with pytest.raises(ValueError, match="not ISO-8601"):
+        coerce_interval_wire(42, ddl_type="INTERVAL")
