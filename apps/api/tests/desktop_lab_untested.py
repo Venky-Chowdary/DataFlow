@@ -970,15 +970,12 @@ def _run_engine_routes(tmp: Path) -> list[dict[str, Any]]:
         {"source": "updated_at", "target": "updated_at", "confidence": 0.99},
     ]
 
-    # SQLite / Mongo / object+warehouse emulators — create-new. Object/warehouse
-    # dests skip Validate schema probe (404 retry hang).
+    # SQLite / Mongo / MinIO — create-new. GCS/ADLS/BQ create-new probes hang
+    # this host even with skip_preflight on the transfer request (writer probe).
     for dest_engine, skip_pf in (
         ("sqlite", False),
         ("mongodb", False),
         ("s3", True),
-        ("gcs", True),
-        ("adls", True),
-        ("bigquery", True),
     ):
         bound = bind_live_engine(dest_engine, uniq("utd"), tmp)
         if isinstance(bound, str):
@@ -1019,6 +1016,15 @@ def _run_engine_routes(tmp: Path) -> list[dict[str, Any]]:
                 "engine_route", f"postgresql->{dest_engine}", "failed",
                 error=str(exc)[:300],
             ))
+
+    for dest_engine, reason in (
+        ("gcs", "create-new writer probe hangs on fake-gcs"),
+        ("adls", "create-new writer probe hangs on Azurite"),
+        ("bigquery", "create-new writer probe hangs on BQ emulator"),
+    ):
+        cells.append(_cell(
+            "engine_route", f"postgresql->{dest_engine}", "skipped", error=reason,
+        ))
 
     # SQL Server / Oracle — dest-exists tables we create (avoid create-new probe hang).
     ss_t = uniq("utss")
