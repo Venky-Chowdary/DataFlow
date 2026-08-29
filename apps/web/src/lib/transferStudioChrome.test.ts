@@ -834,6 +834,7 @@ describe("Overview parked-decision attention", () => {
     assert.match(app, /WORKSPACE_CHANGED_EVENT/);
     assert.match(app, /getActiveWorkspaceId\(\)/);
     assert.match(app, /isStaleGeneration/);
+    assert.match(app, /if \(!getActiveWorkspaceId\(\)\) return;/);
   });
 });
 

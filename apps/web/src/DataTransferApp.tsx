@@ -340,9 +340,11 @@ function AppShell({
   }, [loadConnectors, loadJobs, loadSchedules]);
 
   useEffect(() => {
-    if (screen === "jobs" || screen === "dashboard") {
-      loadJobs(false);
-    }
+    if (screen !== "jobs" && screen !== "dashboard") return;
+    // Same race as boot: a dashboard mount used to list jobs before
+    // X-Workspace-Id existed, so Overview painted the unscoped page.
+    if (!getActiveWorkspaceId()) return;
+    loadJobs(false);
   }, [screen, loadJobs]);
 
   useEffect(() => {
