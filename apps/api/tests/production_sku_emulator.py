@@ -32,6 +32,9 @@ def run_production_sku_emulator_honesty(*, timeout_s: int = 1800) -> dict[str, A
             "tests/test_production_sku_matrix.py",
             "tests/test_production_sku_honesty.py",
             "-q", "--tb=line",
+            # Emulator Google/BQ retries nanosleep past operator patience.
+            # Per-test 90s is fail-closed, not invented green.
+            "--timeout=90",
         ],
         cwd=str(api_root),
         env=env,
