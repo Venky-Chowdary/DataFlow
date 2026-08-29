@@ -638,24 +638,12 @@ def _run_scd2() -> list[dict[str, Any]]:
             {"source": "id", "target": "id", "confidence": 1.0, "user_override": True},
             {"source": "name", "target": "name", "confidence": 1.0, "user_override": True},
         ]
-        # execute() is the dedicated SCD2 suite path. execute_tracked refuses
-        # first-load close when dest-before is unmeasured — recorded separately.
-        req = TransferRequest(
-            source=src, destination=dst, sync_mode="scd2",
-            skip_preflight=False, validation_mode="strict",
-            stream_contracts=[{
-                "name": src_t, "sync_mode": "scd2",
-                "primary_key": "id", "selected": True,
-            }],
-            mappings=mappings,
-        )
-        engine = UniversalTransferEngine()
-        first = engine.execute(req)
+        first = _xfer(src, dst, sync_mode="scd2", mappings=mappings)
         if not first.success:
             return [_cell("sync_extended", "scd2 postgresql->sqlite", "failed",
                           error=str(first.error or "")[:300])]
         _pg_exec(f'UPDATE public."{src_t}" SET name = %s WHERE id = 1', ("A-updated",))
-        second = engine.execute(req)
+        second = _xfer(src, dst, sync_mode="scd2", mappings=mappings)
         con = sqlite3.connect(str(dest_path))
         try:
             cols = [r[1] for r in con.execute("PRAGMA table_info(products)")]
@@ -982,8 +970,16 @@ def _run_engine_routes(tmp: Path) -> list[dict[str, Any]]:
         {"source": "updated_at", "target": "updated_at", "confidence": 0.99},
     ]
 
-    # SQLite / Mongo / S3 — create-new. Object store skips Validate probe.
-    for dest_engine, skip_pf in (("sqlite", False), ("mongodb", False), ("s3", True)):
+    # SQLite / Mongo / object+warehouse emulators — create-new. Object/warehouse
+    # dests skip Validate schema probe (404 retry hang).
+    for dest_engine, skip_pf in (
+        ("sqlite", False),
+        ("mongodb", False),
+        ("s3", True),
+        ("gcs", True),
+        ("adls", True),
+        ("bigquery", True),
+    ):
         bound = bind_live_engine(dest_engine, uniq("utd"), tmp)
         if isinstance(bound, str):
             cells.append(_cell("engine_route", f"postgresql->{dest_engine}", "skipped",
@@ -1094,6 +1090,119 @@ def _run_engine_routes(tmp: Path) -> list[dict[str, Any]]:
     return cells
 
 
+def _run_more_types() -> list[dict[str, Any]]:
+    """XML, native POINT (no PostGIS), and JSON-array unnest on this desktop."""
+    cells: list[dict[str, Any]] = []
+
+    src_t, dst_t = uniq("ut_xml_s"), uniq("ut_xml_d")
+    try:
+        _pg_exec(f'DROP TABLE IF EXISTS public."{src_t}"')
+        _pg_exec(
+            f'CREATE TABLE public."{src_t}" (id INT PRIMARY KEY, doc XML NOT NULL)'
+        )
+        _pg_exec(
+            f"INSERT INTO public.\"{src_t}\" (id, doc) VALUES (1, '<item sku=\"A\"/>')"
+        )
+        _pg_exec(f'DROP TABLE IF EXISTS public."{dst_t}"')
+        _pg_exec(
+            f'CREATE TABLE public."{dst_t}" (id INT PRIMARY KEY, doc XML NOT NULL)'
+        )
+        result = _xfer(pg_endpoint(src_t), pg_endpoint(dst_t))
+        landed = _pg_fetch(f'SELECT id, doc::text FROM public."{dst_t}" WHERE id = 1')
+        ok = bool(result.success and landed and "sku" in str(landed[0][1]))
+        cells.append(_cell(
+            "types_extended", "xml dest_exists postgresql->postgresql",
+            "passed" if ok else "failed",
+            error="" if ok else str(result.error or f"row={landed}")[:300],
+        ))
+    except Exception as exc:
+        cells.append(_cell(
+            "types_extended", "xml dest_exists postgresql->postgresql",
+            "failed", error=str(exc)[:300],
+        ))
+    finally:
+        drop_pg_table(src_t)
+        drop_pg_table(dst_t)
+
+    src_t, dst_t = uniq("ut_pt_s"), uniq("ut_pt_d")
+    try:
+        _pg_exec(f'DROP TABLE IF EXISTS public."{src_t}"')
+        _pg_exec(
+            f'CREATE TABLE public."{src_t}" (id INT PRIMARY KEY, loc POINT NOT NULL)'
+        )
+        _pg_exec(f"INSERT INTO public.\"{src_t}\" (id, loc) VALUES (1, '(1,2)')")
+        _pg_exec(f'DROP TABLE IF EXISTS public."{dst_t}"')
+        _pg_exec(
+            f'CREATE TABLE public."{dst_t}" (id INT PRIMARY KEY, loc POINT NOT NULL)'
+        )
+        result = _xfer(pg_endpoint(src_t), pg_endpoint(dst_t))
+        landed = _pg_fetch(f'SELECT loc::text FROM public."{dst_t}" WHERE id = 1')
+        ok = bool(result.success and landed and "1" in str(landed[0][0]))
+        cells.append(_cell(
+            "types_extended", "point dest_exists postgresql->postgresql",
+            "passed" if ok else "failed",
+            note="native POINT — PostGIS geography omitted (extension absent)",
+            error="" if ok else str(result.error or f"row={landed}")[:300],
+        ))
+    except Exception as exc:
+        cells.append(_cell(
+            "types_extended", "point dest_exists postgresql->postgresql",
+            "failed", error=str(exc)[:300],
+        ))
+    finally:
+        drop_pg_table(src_t)
+        drop_pg_table(dst_t)
+
+    try:
+        from tests.test_shape_unnest_any_source_matrix import (
+            EXPECTED_SKUS,
+            UNNEST_RECIPE,
+            _file_bytes,
+            _mappings,
+            _recipe_hash,
+        )
+
+        dst_t = uniq("ut_unnest_d")
+        content, filename = _file_bytes("csv")
+        request = TransferRequest(
+            source=EndpointConfig(kind="file", format="csv"),
+            destination=pg_endpoint(dst_t),
+            sync_mode="full_refresh_overwrite",
+            skip_preflight=False,
+            validation_mode="strict",
+            mappings=_mappings(),
+            source_filename=filename,
+            source_content=content,
+            shape_recipe=UNNEST_RECIPE,
+            approved_shape_recipe_hash=_recipe_hash(),
+        )
+        result = UniversalTransferEngine().execute_tracked(request, uuid.uuid4().hex[:24])
+        rows = _pg_fetch(
+            f'SELECT order_no::text, sku, qty::int FROM public."{dst_t}" ORDER BY sku'
+        ) if result.success else []
+        landed = [(str(r[0]), str(r[1]), int(r[2])) for r in rows]
+        ok = result.success and landed == list(EXPECTED_SKUS)
+        cells.append(_cell(
+            "types_extended", "nested_explode csv->postgresql",
+            "passed" if ok else "failed",
+            dest_rows=len(landed),
+            recipe_hash=_recipe_hash(),
+            error="" if ok else str(result.error or f"rows={landed}")[:300],
+        ))
+        drop_pg_table(dst_t)
+    except Exception as exc:
+        cells.append(_cell(
+            "types_extended", "nested_explode csv->postgresql",
+            "failed", error=str(exc)[:300],
+        ))
+
+    cells.append(_cell(
+        "saas", "salesforce/hubspot/stripe", "skipped",
+        error="No live SaaS backend on this desktop — not invented green",
+    ))
+    return cells
+
+
 def run_desktop_lab_untested(*, persist: bool = True) -> dict[str, Any]:
     require_ports(5432, 3306)
     tmp = Path(tempfile.mkdtemp(prefix="df-untested-"))
@@ -1106,6 +1215,7 @@ def run_desktop_lab_untested(*, persist: bool = True) -> dict[str, Any]:
     cells.append(_run_cdc_mysql())
     cells.append(_run_cdc_postgres())
     cells.extend(_run_g14())
+    cells.extend(_run_more_types())
     cells.extend(_run_engine_routes(tmp))
 
     passed = sum(1 for c in cells if c["status"] == "passed")
@@ -1121,8 +1231,10 @@ def run_desktop_lab_untested(*, persist: bool = True) -> dict[str, Any]:
         "results": cells,
         "honesty": {
             "not_every_sql_type": True,
-            "types_measured": ["JSONB", "UUID", "BYTEA", "INT[]", "INTERVAL"],
-            "types_not_claimed": ["geography/PostGIS", "XML", "nested object explode"],
+            "types_measured": [
+                "JSONB", "UUID", "BYTEA", "INT[]", "INTERVAL", "XML", "POINT",
+            ],
+            "types_not_claimed": ["geography/PostGIS"],
             "sync_modes_measured": [
                 "incremental_deduped", "mirror", "scd2", "reverse_etl", "cdc",
             ],

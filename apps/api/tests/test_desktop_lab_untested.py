@@ -24,13 +24,17 @@ def test_desktop_lab_untested_important_dimensions():
     invent = by_name.get("create_new_array_invent postgresql->postgresql")
     assert invent and invent["status"] == "passed", invent
     for name in (
+        "dest_exists_native postgresql->postgresql",
         "incremental_deduped postgresql->postgresql",
         "mirror postgresql->postgresql",
+        "scd2 postgresql->sqlite",
         "reverse_etl postgresql->mysql",
         "mysql_binlog->sqlite",
         "postgresql_logical->postgresql",
+        "dest_only_not_null postgresql->postgresql",
         "postgresql->sqlite",
         "postgresql->sqlserver",
+        "postgresql->oracle",
     ):
         cell = by_name.get(name)
         assert cell and cell["status"] == "passed", (name, cell)
