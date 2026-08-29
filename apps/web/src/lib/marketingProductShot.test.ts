@@ -25,6 +25,8 @@ describe("marketing product photography", () => {
     const css = readFileSync(join(webRoot, "styles/marketing-hero.css"), "utf8");
     assert.match(css, /\.lp-product-shot-route span \{[\s\S]*?text-overflow:\s*ellipsis/);
     assert.match(css, /\.lp-product-shot-viewport \{[\s\S]*?overflow:\s*hidden/);
+    assert.match(css, /\.lp-product-shot-viewport img \{[\s\S]*?object-fit:\s*contain/);
+    assert.match(css, /\.lp-sol-v2 \.lp-mkt-body[\s\S]*?1080px/);
   });
 
   it("product surface tabs use current workspace shots", () => {
