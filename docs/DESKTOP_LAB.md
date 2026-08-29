@@ -63,15 +63,18 @@ PYTHONPATH=. python -m pytest tests/test_desktop_lab_dimensions.py -q
 ## Previously untested dimensions (live desktop)
 
 `tests/desktop_lab_untested.py` covers what the 7-column overwrite fixture
-skipped, against services that are actually up:
+skipped, against services that are actually up.
 
-- Types: JSONB, UUID, BYTEA, INT[], INTERVAL (PG→PG; portable subset on MySQL)
-- Sync: incremental_deduped, mirror, SCD2, reverse_etl (PG→MySQL warehouse→OLTP),
-  CDC (MySQL ROW binlog → SQLite; PG logical → PG). Not Salesforce.
-- Schema: dest-only NOT NULL (G14)
-- Engines: SQLite, Mongo, MinIO S3, SQL Server dest-exists, Oracle dest-exists.
-  GCS/ADLS/BQ omitted (create-new probe hang). Geography/PostGIS omitted
-  (extension not installed).
+Measured on this host: **13 passed / 4 failed / 0 skipped** of 17 cells
+(`test_desktop_lab_untested_important_dimensions`, 23.57s).
+
+Passed: JSON/UUID/BLOB MySQL→PG; INT[] create-new invent fail-closed;
+incremental_deduped and mirror on PG and MySQL dest; reverse-ETL PG→MySQL;
+MySQL ROW binlog → SQLite CDC; PG logical → PG CDC; PG→SQLite/Mongo/S3/SQL Server.
+
+Failed (open, not invented green): dest-exists BYTEA PII review; G14 dest-only
+NOT NULL; SCD2 dest-before unmeasured; Oracle `CREATE TABLE IF NOT EXISTS`
+(ORA-00922). Geography/PostGIS, Salesforce, GCS/ADLS/BQ create-new omitted.
 
 ```bash
 PYTHONPATH=. python -m pytest tests/test_desktop_lab_untested.py -q
