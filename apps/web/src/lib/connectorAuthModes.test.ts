@@ -52,6 +52,25 @@ describe("connector auth modes", () => {
     );
   });
 
+  it("gives Iceberg a warehouse path and a REST catalog mode", () => {
+    assert.deepEqual(
+      getAuthModes("iceberg").map((m) => m.value),
+      ["file_path", "connection_string"],
+    );
+    assert.equal(
+      validateConnectorPayload("iceberg", { connection_string: "http://127.0.0.1:8181" }, "connection_string"),
+      "Warehouse is required.",
+    );
+    assert.equal(
+      validateConnectorPayload(
+        "iceberg",
+        { connection_string: "http://127.0.0.1:8181", warehouse: "file:///tmp/wh" },
+        "connection_string",
+      ),
+      null,
+    );
+  });
+
   it("gives file formats a file-path mode so Test cannot skip a path", () => {
     for (const type of ["csv", "parquet", "avro", "pdf", "docx", "html"]) {
       assert.equal(getAuthModes(type).some((m) => m.value === "file_path"), true, type);

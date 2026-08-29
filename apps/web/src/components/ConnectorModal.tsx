@@ -370,7 +370,7 @@ export function ConnectorModal({
       if (endpointUrl.trim()) payload.endpoint_url = endpointUrl || undefined;
       if (resolvedType === "s3" && pathStyle) payload.path_style = pathStyle;
     }
-    if (resolvedType === "snowflake") {
+    if (resolvedType === "snowflake" || resolvedType === "iceberg") {
       payload.warehouse = warehouse || undefined;
     }
     if (isGcpConnector(resolvedType) && !serviceAccount.trim() && connectionString.trim()) {

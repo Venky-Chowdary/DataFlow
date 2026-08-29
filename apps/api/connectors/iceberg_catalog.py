@@ -60,7 +60,7 @@ def _infer_catalog_type(
 ) -> str:
     """Return filesystem, sql, rest, or glue based on endpoint fields."""
     explicit = str(extra.get("catalog_type") or extra.get("catalog") or "").lower().strip()
-    if explicit in {"rest", "glue", "sql", "sqlite", "hadoop", "nessie", "filesystem"}:
+    if explicit in {"rest", "glue", "sql", "sqlite", "hadoop", "hive", "nessie", "filesystem"}:
         if explicit == "nessie":
             return "rest"
         return explicit
@@ -231,6 +231,10 @@ def parse_iceberg_catalog_config(endpoint: Any) -> dict[str, Any]:
 
     if catalog_type == "filesystem":
         properties["warehouse"] = str(_warehouse_root(connection_string or warehouse or "."))
+    elif catalog_type == "hadoop":
+        # Warehouse Hadoop catalog (Hive-style directory). pyiceberg 0.11 dropped
+        # HadoopCatalog — load_catalog fail-closes rather than inventing SqlCatalog.
+        properties["warehouse"] = str(_warehouse_root(connection_string or warehouse or "."))
     elif catalog_type == "sql":
         uri, sql_props = _sql_props(connection_string, warehouse, extra)
         properties["uri"] = uri
@@ -238,6 +242,12 @@ def parse_iceberg_catalog_config(endpoint: Any) -> dict[str, Any]:
     elif catalog_type == "rest":
         properties = _rest_props(connection_string, warehouse, endpoint, extra)
         catalog_type = "rest"
+    elif catalog_type == "hive":
+        cs = (connection_string or "").strip()
+        if cs:
+            properties["uri"] = cs
+        if warehouse:
+            properties["warehouse"] = warehouse
     elif catalog_type == "glue":
         properties = _glue_props(warehouse, endpoint, extra)
 
@@ -290,9 +300,19 @@ def load_catalog(endpoint: Any) -> Any:
 
         return GlueCatalog(name, **props)
     if catalog_type == "hadoop":
-        from pyiceberg.catalog.hadoop import HadoopCatalog
-
+        try:
+            from pyiceberg.catalog.hadoop import HadoopCatalog
+        except ImportError as exc:
+            raise RuntimeError(
+                "Iceberg Hadoop catalog is not available in this pyiceberg; "
+                "use REST, Hive, Glue, or SQL. Refusing SqlCatalog fallback "
+                "that would invent a second catalog for leftover MERGE."
+            ) from exc
         return HadoopCatalog(name, **props)
+    if catalog_type == "hive":
+        from pyiceberg.catalog.hive import HiveCatalog
+
+        return HiveCatalog(name, **props)
     # Default SQL catalog (SQLite, PostgreSQL, etc.).
     from pyiceberg.catalog.sql import SqlCatalog
 

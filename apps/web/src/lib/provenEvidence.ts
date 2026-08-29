@@ -210,7 +210,7 @@ export const NOT_PROVEN: UnprovenRow[] = [
     area: "Iceberg leftover MERGE",
     status: "unaudited",
     reason:
-      "SqlCatalog leftover MERGE is measured on test_iceberg_sql_catalog_leftover_merge_deletes_extra_and_count_is_snapshot_len (dest 4→3, incremental no-op, file-footer COUNT). REST/Glue/Nessie and warehouse leftover MERGE stay Planned.",
+      "SqlCatalog leftover MERGE is measured on test_iceberg_sql_catalog_leftover_merge_deletes_extra_and_count_is_snapshot_len (dest 4→3). REST warehouse leftover MERGE is measured on test_iceberg_rest_catalog_leftover_merge_deletes_extra_and_count_is_snapshot_len (dest 4→3, incremental no-op, file-footer COUNT) plus composite PK. Glue and Nessie stay Planned. Hadoop catalog is fail-closed in pyiceberg 0.11 (no SqlCatalog fallback).",
   },
   {
     area: "SOC 2 / ISO 27001 certification",

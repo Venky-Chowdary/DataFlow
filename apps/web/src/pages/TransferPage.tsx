@@ -79,6 +79,7 @@ import {
   foldSchemaForDriver,
 } from "../lib/dialectDefaults";
 import { defaultPortForType, getConnectorDefaults, getGenericSqlGroup, getGenericSqlPlaceholder, isGenericSql, isTransferLiveType, resolveDriverType, setTransferLiveDrivers } from "../lib/connectorTypes";
+import { icebergDestExtra, inferIcebergCatalogKind, type IcebergCatalogKind } from "../lib/icebergDestCatalog";
 import {
   bindNamesFromSql,
   callableSourceExtra,
@@ -403,6 +404,7 @@ export function TransferPage({
   const [destConnectionString, setDestConnectionString] = useState("");
   const [destOutputPath, setDestOutputPath] = useState("");
   const [destWarehouse, setDestWarehouse] = useState("");
+  const [destIcebergCatalogMode, setDestIcebergCatalogMode] = useState<IcebergCatalogKind>("filesystem");
   const [transferring, setTransferring] = useState(false);
   const [activeJobId, setActiveJobId] = useState<string | null>(null);
   const [result, setResult] = useState<TransferResult | null>(null);
@@ -599,7 +601,11 @@ export function TransferPage({
       connection_string: isIceberg
         ? (destConnectionString || undefined)
         : (destConnectionString || undefined),
-      warehouse: destDriverType === "snowflake" ? destWarehouse : undefined,
+      warehouse:
+        destDriverType === "snowflake"
+        || (destDriverType === "iceberg" && destIcebergCatalogMode === "rest")
+          ? destWarehouse || undefined
+          : undefined,
       auth_source: selectedDestConnector?.auth_source || undefined,
       auth_mode: selectedDestConnector?.auth_mode || undefined,
       auth_role: selectedDestConnector?.auth_role || undefined,
@@ -673,6 +679,9 @@ export function TransferPage({
           : {}),
         ...(destProcedureAfter.trim()
           ? { dest_procedure_after: destProcedureAfter.trim() }
+          : {}),
+        ...(destDriverType === "iceberg"
+          ? icebergDestExtra(destIcebergCatalogMode, destWarehouse)
           : {}),
       },
     };
@@ -1319,6 +1328,7 @@ export function TransferPage({
     destConnectionString,
     destOutputPath,
     destWarehouse,
+    destIcebergCatalogMode,
     targetCollection,
     destTableExists,
     destWriteMode,
@@ -2049,6 +2059,10 @@ export function TransferPage({
       setDestConnectionString(conn.connection_string || "");
       setDestSchema(conn.database || conn.schema || "");
       setTargetDb(conn.database || "");
+      setDestWarehouse(conn.warehouse || "");
+      setDestIcebergCatalogMode(
+        inferIcebergCatalogKind(conn.connection_string || "", conn.auth_mode === "connection_string" ? "rest" : ""),
+      );
     } else {
       setDestConnectionString(conn.connection_string || "");
     }
@@ -4397,7 +4411,11 @@ export function TransferPage({
           dest_schema: destKindMode === "database"
             ? (foldSchemaForDriver(destDriverType || destType, destSchema) || undefined)
             : undefined,
-          dest_warehouse: destKindMode === "database" && destDriverType === "snowflake" ? destWarehouse || undefined : undefined,
+          dest_warehouse: destKindMode === "database"
+            && (destDriverType === "snowflake"
+              || (destDriverType === "iceberg" && destIcebergCatalogMode === "rest"))
+            ? destWarehouse || undefined
+            : undefined,
           dest_auth_source: destKindMode === "database"
             ? (selectedDestConnector?.auth_source || undefined)
             : undefined,
@@ -4433,7 +4451,12 @@ export function TransferPage({
             allowAppendOnly,
             callableSource: sourceReadMode === "procedure" || sourceReadMode === "query",
           }),
-          dest_extra: { allow_append_only: allowAppendOnly },
+          dest_extra: {
+            allow_append_only: allowAppendOnly,
+            ...(destDriverType === "iceberg"
+              ? icebergDestExtra(destIcebergCatalogMode, destWarehouse)
+              : {}),
+          },
           schema_policy: schemaPolicy,
           validation_mode: validationOverride ?? validationMode,
           date_locale: dateLocale,
@@ -4947,7 +4970,11 @@ export function TransferPage({
         destPassword: !connectorId ? destPassword || undefined : undefined,
         destConnectionString: !connectorId ? destConnectionString || undefined : undefined,
         destOutputPath: destKindMode === "file_export" ? destOutputPath || undefined : undefined,
-        destWarehouse: destDriverType === "snowflake" ? destWarehouse : undefined,
+        destWarehouse:
+          destDriverType === "snowflake"
+          || (destDriverType === "iceberg" && destIcebergCatalogMode === "rest")
+            ? destWarehouse
+            : undefined,
         destAuthSource: selectedDestConnector?.auth_source,
         skipPreflight: !enforcePreflight,
         mappings: transferMappings,
@@ -5025,6 +5052,9 @@ export function TransferPage({
           }
           if (destProcedureBefore.trim()) extra.dest_procedure_before = destProcedureBefore.trim();
           if (destProcedureAfter.trim()) extra.dest_procedure_after = destProcedureAfter.trim();
+          if (destDriverType === "iceberg") {
+            Object.assign(extra, icebergDestExtra(destIcebergCatalogMode, destWarehouse));
+          }
           const isVectorDestRun =
             destDriverType === "pgvector" ||
             destDriverType === "qdrant" ||
@@ -6648,12 +6678,33 @@ export function TransferPage({
             <>
           {!connectorId && destType && destType !== "bigquery" && destDriverType === "iceberg" && (
           <div className="df2-dest-section df2-dest-manual-fields df2-dest-iceberg">
-            <label className="df2-label">Iceberg warehouse</label>
+            <label className="df2-label">Iceberg catalog</label>
             <p className="df2-label-hint" style={{ marginTop: 0 }}>
-              Filesystem / mounted lakehouse root. Writes Iceberg V2 metadata + Parquet/JSONL data files
-              with additive schema evolution and CoW upsert (<code>_df_lsn</code>). REST/Glue catalog
-              committers are not required for this writer — do not claim multi-engine catalog yet.
+              Overwrite leftover MERGE deletes dest keys not in a complete source snapshot
+              (file-footer COUNT). Incremental leftover MERGE is a hard no-op. REST commits
+              through RestCatalog. Glue and Nessie stay Planned.
             </p>
+            <div className="df2-form-row" role="radiogroup" aria-label="Iceberg catalog kind">
+              <label className="df2-label">
+                <input
+                  type="radio"
+                  name="dest-iceberg-catalog"
+                  checked={destIcebergCatalogMode === "filesystem"}
+                  onChange={() => setDestIcebergCatalogMode("filesystem")}
+                />
+                {" "}Warehouse path
+              </label>
+              <label className="df2-label">
+                <input
+                  type="radio"
+                  name="dest-iceberg-catalog"
+                  checked={destIcebergCatalogMode === "rest"}
+                  onChange={() => setDestIcebergCatalogMode("rest")}
+                />
+                {" "}REST catalog
+              </label>
+            </div>
+            {destIcebergCatalogMode === "filesystem" ? (
             <div className="df2-form-row">
               <div className="df2-field df2-field-flex">
                 <label className="df2-label" htmlFor="dest-iceberg-warehouse">Warehouse path</label>
@@ -6666,6 +6717,30 @@ export function TransferPage({
                 />
               </div>
             </div>
+            ) : (
+            <div className="df2-form-row">
+              <div className="df2-field df2-field-flex">
+                <label className="df2-label" htmlFor="dest-iceberg-rest-uri">REST catalog URI</label>
+                <input
+                  id="dest-iceberg-rest-uri"
+                  className="df2-input"
+                  value={destConnectionString}
+                  onChange={(e) => setDestConnectionString(e.target.value)}
+                  placeholder="http://127.0.0.1:8181"
+                />
+              </div>
+              <div className="df2-field df2-field-flex">
+                <label className="df2-label" htmlFor="dest-iceberg-rest-warehouse">Warehouse</label>
+                <input
+                  id="dest-iceberg-rest-warehouse"
+                  className="df2-input"
+                  value={destWarehouse}
+                  onChange={(e) => setDestWarehouse(e.target.value)}
+                  placeholder="file:///mnt/lake or s3://bucket/wh"
+                />
+              </div>
+            </div>
+            )}
           </div>
           )}
 
