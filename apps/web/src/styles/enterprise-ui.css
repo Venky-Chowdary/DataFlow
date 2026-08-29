@@ -5212,6 +5212,69 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   background: #fef2f2;
 }
 
+.df2-theater-pop-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+  margin: 0 0 10px;
+  padding: 8px 10px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #f8fafc;
+  font-size: 12px;
+  color: #334155;
+}
+
+.df2-theater-pop-strip span {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.df2-theater-pop-strip strong {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: #64748b;
+}
+
+.df2-theater-lineage {
+  margin: 0 0 10px;
+  padding: 8px 10px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.df2-theater-lineage summary {
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  color: #0f172a;
+}
+
+.df2-theater-lineage ol {
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 6px;
+}
+
+.df2-theater-lineage li {
+  display: grid;
+  grid-template-columns: minmax(0, 140px) 1fr auto;
+  gap: 8px;
+  font-size: 11px;
+  color: #475569;
+}
+
+.df2-theater-lineage code {
+  font-size: 11px;
+  color: #0f172a;
+}
+
 .df2-theater-v3-bar-legend .is-warn {
   color: #b45309;
   font-weight: 600;
@@ -12177,6 +12240,42 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   flex: 1 1 100%;
   font-style: normal;
   font-size: 11px;
+}
+
+.df2-xform-ledger {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 16px;
+  margin: 0 0 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--df-border, #e2e8f0);
+  border-radius: 8px;
+  background: var(--df-surface-muted, #f8fafc);
+  font-size: 12px;
+}
+
+.df2-xform-ledger span {
+  display: grid;
+  gap: 2px;
+}
+
+.df2-xform-ledger strong {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: var(--df-muted, #64748b);
+}
+
+.df2-xform-ledger .is-warn {
+  color: var(--df-warning, #b45309);
+}
+
+.df2-xform-quarantine-cta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 10px;
 }
 
 @media (max-width: 720px) {

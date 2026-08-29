@@ -852,3 +852,31 @@ describe("operator surface geometry and honest empty export", () => {
     assert.match(page, /disabled=\{gitopsBusy \|\| schedules\.length === 0\}/);
   });
 });
+
+describe("enterprise wedge proof surfaces", () => {
+  it("Theater shows dest COUNT, Validate run_id, and run lineage", () => {
+    const theater = readFileSync(join(webRoot, "components/JobTheater.tsx"), "utf8");
+    const gate8 = readFileSync(join(webRoot, "components/transfer/Gate8ProofCard.tsx"), "utf8");
+    assert.match(theater, /label="Validate"/);
+    assert.match(theater, /df2-theater-pop-strip/);
+    assert.match(theater, /Dest COUNT/);
+    assert.match(theater, /Run lineage/);
+    assert.match(theater, /readGate8Population/);
+    assert.doesNotMatch(theater, /population_proof:\s*true/);
+    assert.match(gate8, /Proof scope/);
+    assert.doesNotMatch(gate8, /population_proof:\s*true/);
+  });
+
+  it("Schedules Overview mounts LoadHistoryPanel from the last job", () => {
+    const drawer = readFileSync(join(webRoot, "components/PipelineDetailDrawer.tsx"), "utf8");
+    assert.match(drawer, /LoadHistoryPanel/);
+    assert.match(drawer, /lastJob\?\.load_history_report/);
+  });
+
+  it("Transform last-run ledger and quarantine CTA share the transfer DLQ", () => {
+    const drawer = readFileSync(join(webRoot, "components/TransformDetailDrawer.tsx"), "utf8");
+    assert.match(drawer, /df2-xform-ledger/);
+    assert.match(drawer, /View quarantine/);
+    assert.match(drawer, /writeJobsDeepLink\(`xform-\$\{project\.id\}`, "quarantine"\)/);
+  });
+});

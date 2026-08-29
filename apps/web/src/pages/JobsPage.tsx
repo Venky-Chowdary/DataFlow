@@ -323,6 +323,9 @@ export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJob
       setDetailTab("mapping");
       setEvidenceDrawer("mapping-proof");
       setMappingProofOpen(true);
+    } else if (initialPanel === "quarantine") {
+      setDetailTab("quarantine");
+      setEvidenceDrawer("quarantine");
     }
     window.requestAnimationFrame(() => {
       document.getElementById(`job-item-${initialJobId}`)?.scrollIntoView({

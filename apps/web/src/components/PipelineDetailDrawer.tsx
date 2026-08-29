@@ -23,6 +23,7 @@ import {
 import { computeJobTrustScore } from "../lib/jobTrustScore";
 import { PERMISSIONS, useWriteGate } from "../lib/PermissionsContext";
 import { destHeadline } from "../lib/conservationLedger";
+import { LoadHistoryPanel } from "./transfer/LoadHistoryPanel";
 import {
   formatSchemaPolicyLabel,
   formatSyncModeLabel,
@@ -609,6 +610,10 @@ export function PipelineDetailDrawer({
             >
               Run parallel-run check
             </Button>
+            <LoadHistoryPanel
+              report={lastJob?.load_history_report}
+              title="Compared to prior loads"
+            />
           </section>
         )}
 

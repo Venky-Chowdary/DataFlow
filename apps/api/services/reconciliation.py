@@ -200,6 +200,38 @@ class ReconciliationReport:
         return stamp_post_write_phase(asdict(self))
 
 
+def attach_dest_readback(report: dict[str, Any]) -> dict[str, Any]:
+    """Stamp dest-engine COUNT + checksum for Theater — never invent a count.
+
+    ``verify_target`` already produced these. The UI must not treat writer ack
+    as dest population. Sample Gate-8 stays a separate field.
+    """
+    out = dict(report or {})
+    raw = out.get("target_rows")
+    if raw is None:
+        return out
+    try:
+        dest_count = int(raw)
+    except (TypeError, ValueError):
+        return out
+    if dest_count < 0:
+        return out
+    before = out.get("target_rows_before")
+    try:
+        dest_before = int(before) if before is not None else None
+    except (TypeError, ValueError):
+        dest_before = None
+    out["dest_readback"] = {
+        "dest_count": dest_count,
+        "dest_count_before": dest_before,
+        "dest_checksum": str(out.get("target_checksum") or ""),
+        "source": "gate8_dest_readback",
+        "coverage": str(out.get("coverage") or ""),
+        "assurance_level": str(out.get("assurance_level") or ""),
+    }
+    return out
+
+
 def stamp_post_write_phase(report: dict[str, Any]) -> dict[str, Any]:
     """Stamp explicit post-write phase so UIs never confuse writer-ack with Verified.
 

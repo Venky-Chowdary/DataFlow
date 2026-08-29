@@ -23,6 +23,7 @@ import { Gate8ProofCard, gate8AppendIdentity, isGate8AppendDelta, isGate8KeyedBa
 import { JobTrustScoreCard } from "./transfer/JobTrustScoreCard";
 import { ConservationLedgerCard } from "./transfer/ConservationLedgerCard";
 import { destHeadline, destMetricCompact, destMetricToneClass, writerAckDisagrees, writerHeadline, conservationCompleteCopy } from "../lib/conservationLedger";
+import { formatProofScope, readGate8Population, readJobLineage } from "../lib/gate8Population";
 import { inferTransferFailureHint, isDestinationCapacityFailure } from "../lib/transferFailure";
 import { ringDasharray } from "../lib/progressRing";
 import { contractIdFromBreakerFailure } from "../lib/contractBreakerUi";
@@ -455,6 +456,12 @@ export function JobTheaterView({
   const isComplete = isJobSuccess(job.status);
   const isQuarantine = job.status === "completed_with_quarantine";
   const isRunning = !isFailed && !isComplete && !isCancelled;
+  const population = readGate8Population({
+    row_accounting: job.row_accounting,
+    reconciliation: job.reconciliation,
+    preflight,
+  });
+  const lineage = useMemo(() => readJobLineage(job.lineage_events), [job.lineage_events]);
   const reconciling = isRunning && isReconcilePhase(job);
   const currentPhase = reconciling
     ? PHASES.findIndex((p) => p.id === "reconcile")
@@ -708,6 +715,7 @@ export function JobTheaterView({
           </span>
           <span className={jobStatusBadgeClass(job.status)}>{jobStatusLabel(job.status)}</span>
           <CopyIdChip id={jobId} label="Job" compact />
+          {preflight?.run_id ? <CopyIdChip id={preflight.run_id} label="Validate" compact /> : null}
           {isRunning && onCancel && (
             <span className="df2-theater-v3-header-hint">Cancel is in the action bar below</span>
           )}
@@ -864,6 +872,28 @@ export function JobTheaterView({
 
       {!earlyFail && (isComplete || isFailed || isCancelled || isQuarantine) && (
         <>
+          {(population.destCount != null || population.validateRunId || population.coverage) && (
+              <div className="df2-theater-pop-strip" aria-label="Gate-8 population">
+                <span>
+                  <strong>Dest COUNT</strong>
+                  {population.destCount != null ? population.destCount.toLocaleString() : "—"}
+                </span>
+                <span>
+                  <strong>Checksum</strong>
+                  {population.destChecksum ? `${population.destChecksum.slice(0, 12)}${population.destChecksum.length > 12 ? "…" : ""}` : "—"}
+                </span>
+                <span>
+                  <strong>Proof scope</strong>
+                  {formatProofScope(population)}
+                </span>
+                {population.validateRunId ? (
+                  <span>
+                    <strong>Validate</strong>
+                    {population.validateRunId}
+                  </span>
+                ) : null}
+              </div>
+            )}
           <ConservationLedgerCard
             job={job}
             onOpenValidate={duplicateKeyFailure ? undefined : onBackToValidate}
@@ -877,6 +907,20 @@ export function JobTheaterView({
             onOpenMap={duplicateKeyFailure ? undefined : onBackToMap}
             onResume={duplicateKeyFailure ? undefined : onResume}
           />
+          {lineage.length > 0 && (
+            <details className="df2-theater-lineage">
+              <summary>Run lineage · {lineage.length}</summary>
+              <ol>
+                {lineage.map((ev, i) => (
+                  <li key={`${ev.eventType}-${ev.timestamp}-${i}`}>
+                    <code>{ev.eventType}</code>
+                    <span>{ev.summary}</span>
+                    {ev.timestamp ? <time dateTime={ev.timestamp}>{ev.timestamp}</time> : null}
+                  </li>
+                ))}
+              </ol>
+            </details>
+          )}
         </>
       )}
 

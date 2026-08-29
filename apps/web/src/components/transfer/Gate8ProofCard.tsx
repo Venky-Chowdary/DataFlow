@@ -713,6 +713,12 @@ export function Gate8ProofCard({
                   : "—"}
           </dd>
         </div>
+        <div>
+          <dt>Proof scope</dt>
+          <dd title="Coverage and source-digest provenance — never claimed as population_proof">
+            {[report.coverage || report.dest_readback?.coverage || "unmeasured", report.source_checksum_provenance || "—"].join(" · ")}
+          </dd>
+        </div>
         {report.sample_compare?.sample_seed?.method === "stratified" && (
           <p className="df2-muted" style={{ fontSize: 12, marginTop: 6 }}>
             Sample plan: <strong>stratified</strong>

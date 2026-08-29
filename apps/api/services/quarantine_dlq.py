@@ -301,7 +301,7 @@ def persist_rejected_rows(
                 "skipped_contract": skip_n,
             },
         )
-    return {
+    out = {
         **(last_event or {}),
         "rows": len(rows),
         "chunks": len(chunks),
@@ -310,6 +310,23 @@ def persist_rejected_rows(
         "total_rejected": len(rows),
         "skipped_contract": skip_n,
     }
+    try:
+        from services.lineage_telemetry import emit_quarantine, persist_event_on_job
+
+        reasons: dict[str, int] = {}
+        for row in rows:
+            key = str(row.get("failure_reason") or row.get("reason") or "quarantine")[:80]
+            reasons[key] = reasons.get(key, 0) + 1
+        event = emit_quarantine(
+            run_id=jid,
+            job_id=jid,
+            quarantine_count=len(rows),
+            reasons=reasons,
+        )
+        persist_event_on_job(jid, event)
+    except Exception:
+        logger.debug("quarantine lineage emit skipped", exc_info=True)
+    return out
 
 
 def quarantine_details_from_dlq(

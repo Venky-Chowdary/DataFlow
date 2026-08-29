@@ -160,6 +160,14 @@ export interface RuntimeEstimate {
   notes?: string[];
 }
 
+/** Bounded lineage event persisted on the job for Theater (engine ring is separate). */
+export interface LineageEvent {
+  event_type?: string;
+  event_id?: string;
+  timestamp?: string;
+  payload?: Record<string, unknown>;
+}
+
 export interface TransferJob {
   _id: string;
   /** User-editable display name (defaults to source → dest on create). */
@@ -322,6 +330,10 @@ export interface TransferJob {
    * Display only — never close dest with records_processed / writer ack.
    */
   row_accounting?: import("./conservationLedger").ConservationLedger | null;
+  /** Last-N dest profile vs prior loads of this route — schedule Overview reads this. */
+  load_history_report?: LoadHistoryReport;
+  /** Bounded OpenLineage-style events persisted on the job for Theater. */
+  lineage_events?: LineageEvent[];
   trust?: {
     score: number;
     grade: string;
@@ -418,6 +430,18 @@ export interface Gate8ReconciliationPayload {
   /** writer_ack | write_pass_fingerprints | remapped_source_rows | engine_population | independent_source_reread */
   source_checksum_provenance?: string;
   target_checksum?: string;
+  /**
+   * Dest-engine COUNT + checksum stamp from attach_dest_readback.
+   * Never invent a count — omitted when target_rows was unmeasured.
+   */
+  dest_readback?: {
+    dest_count?: number;
+    dest_count_before?: number | null;
+    dest_checksum?: string;
+    source?: string;
+    coverage?: string;
+    assurance_level?: string;
+  };
   missing_key_count?: number;
   extra_key_count?: number;
   matched_key_count?: number;

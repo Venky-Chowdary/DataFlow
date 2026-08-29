@@ -127,11 +127,13 @@ def emit_reconciliation(
     target_count: int,
     mismatched_keys: list[Any] | None = None,
     checksum_ok: bool | None = None,
+    job_id: str = "",
 ) -> dict[str, Any]:
     return _emit(
         "reconciliation",
         {
             "run_id": run_id,
+            "job_id": job_id,
             "source_count": source_count,
             "target_count": target_count,
             "mismatched_keys": mismatched_keys or [],
@@ -145,11 +147,13 @@ def emit_quarantine(
     run_id: str,
     quarantine_count: int,
     reasons: dict[str, int] | None = None,
+    job_id: str = "",
 ) -> dict[str, Any]:
     return _emit(
         "quarantine",
         {
             "run_id": run_id,
+            "job_id": job_id,
             "quarantine_count": quarantine_count,
             "reasons": reasons or {},
         },
@@ -182,16 +186,23 @@ def emit_run_completed(
     source_summary: dict[str, Any] | None = None,
     destination_summary: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    return _emit(
-        "run_completed",
-        {
-            "run_id": run_id,
-            "job_id": job_id,
-            "records_transferred": records_transferred,
-            "source_summary": source_summary or {},
-            "destination_summary": destination_summary or {},
-        },
-    )
+    dest = destination_summary if isinstance(destination_summary, dict) else {}
+    payload: dict[str, Any] = {
+        "run_id": run_id,
+        "job_id": job_id,
+        "records_transferred": records_transferred,
+        "source_summary": source_summary or {},
+        "destination_summary": dest,
+    }
+    # CDC lag already lives on the job; carry it on the lineage event when the
+    # writer stamped a proven basis — never invent seconds from heartbeat age.
+    if dest.get("cdc_lag_seconds") is not None:
+        payload["cdc_lag_seconds"] = dest.get("cdc_lag_seconds")
+    if dest.get("cdc_lag_basis"):
+        payload["cdc_lag_basis"] = dest.get("cdc_lag_basis")
+    event = _emit("run_completed", payload)
+    persist_event_on_job(job_id, event)
+    return event
 
 
 def emit_run_failed(
@@ -212,6 +223,51 @@ def emit_run_failed(
             "retriable": retriable,
         },
     )
+
+
+MAX_JOB_LINEAGE_EVENTS = 40
+
+
+def persist_event_on_job(job_id: str, event: dict[str, Any] | None) -> None:
+    """Append a bounded lineage event onto the job document for Theater.
+
+    The in-memory ring stays for tests/export. Theater reads ``lineage_events``
+    on the job — CDC lag stays on existing job fields, not here.
+    """
+    jid = str(job_id or "").strip()
+    if not jid or not isinstance(event, dict):
+        return
+    try:
+        from services.mongodb_service import get_mongodb_service
+
+        svc = get_mongodb_service()
+        job = svc.get_job(jid)
+        if not job:
+            return
+        payload = event.get("payload") if isinstance(event.get("payload"), dict) else {}
+        slim = {
+            k: v
+            for k, v in payload.items()
+            if k not in {
+                "mappings",
+                "validation_plan",
+                "source_summary",
+                "destination_summary",
+                "source",
+                "destination",
+            }
+        }
+        entry = {
+            "event_type": event.get("event_type"),
+            "event_id": event.get("event_id"),
+            "timestamp": event.get("timestamp"),
+            "payload": slim,
+        }
+        events = [e for e in (job.get("lineage_events") or []) if isinstance(e, dict)]
+        events.append(entry)
+        svc.update_job_fields(jid, {"lineage_events": events[-MAX_JOB_LINEAGE_EVENTS:]})
+    except Exception:
+        return
 
 
 def get_events(run_id: str | None = None) -> list[dict[str, Any]]:

@@ -67,6 +67,26 @@ def _finalize_reconcile(
             out[PRECOUNT_KEY] = raw_before
     if isinstance(snap, dict) and snap:
         out["source_snapshot"] = dict(snap)
+    from services.reconciliation import attach_dest_readback
+
+    out = attach_dest_readback(out)
+    job_id = ""
+    if isinstance(dest_summary, dict):
+        job_id = str(dest_summary.get("job_id") or dest_summary.get("_id") or "")
+    if job_id:
+        try:
+            from services.lineage_telemetry import emit_reconciliation, persist_event_on_job
+
+            event = emit_reconciliation(
+                run_id=str(out.get("run_id") or job_id),
+                job_id=job_id,
+                source_count=int(out.get("source_rows") or 0),
+                target_count=int(out.get("target_rows") or 0),
+                checksum_ok=out.get("checksum_match") if out.get("checksum_match") is not None else None,
+            )
+            persist_event_on_job(job_id, event)
+        except Exception:
+            pass
     return out
 
 
