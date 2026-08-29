@@ -740,7 +740,7 @@ describe("Transfer Studio chrome contracts", () => {
     const page = readFileSync(join(webRoot, "pages/TransferPage.tsx"), "utf8");
     const start = page.indexOf("const handleScheduleRoute");
     assert.ok(start >= 0, "handleScheduleRoute must exist");
-    const chunk = page.slice(start, start + 3500);
+    const chunk = page.slice(start, start + 5500);
     assert.match(chunk, /stream_contracts: streamContracts/);
     assert.match(chunk, /shape_recipe: recipePayload\(shapeSteps\)/);
     assert.match(chunk, /dateLocale,/);
@@ -754,6 +754,10 @@ describe("Transfer Studio chrome contracts", () => {
     assert.match(chunk, /rowLimit/);
     assert.match(chunk, /dateLocale/);
     assert.match(chunk, /numberLocale/);
+    assert.match(chunk, /persistedMappingRows/);
+    assert.match(chunk, /Validate a mapping first/);
+    assert.match(chunk, /seedStudioIntent\?\.scheduleId/);
+    assert.match(chunk, /updateSchedule\(replayId/);
   });
 
   it("Schedules form submits Studio Advanced write knobs so an edit cannot drop them", () => {

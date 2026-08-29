@@ -5,7 +5,7 @@ import { PageSection } from "../ui/PageSection";
 import { useToast } from "../Toast";
 import { acceptScheduleSourceSchema, approveScheduleFinding, rejectScheduleFinding } from "../../lib/api";
 import { PERMISSIONS, useWriteGate } from "../../lib/PermissionsContext";
-import { inboxNeedsStudio } from "../../lib/scheduleApprovalCta";
+import { inboxCorrectiveAction, inboxNeedsStudio } from "../../lib/scheduleApprovalCta";
 import type { ScheduleApprovalInboxItem } from "../../lib/types";
 
 const SCOPE_ACK: Record<string, "compliance" | "schema_drift" | "fk_risk"> = {
@@ -166,6 +166,7 @@ export function ApprovalInbox({ items, onDecided, onOpenSchedule, onReviewMappin
         {items.map((item) => {
           const appr = item.approval;
           const expanded = openId === appr.id;
+          const corrective = inboxCorrectiveAction(item);
           return (
             <li key={`${item.schedule_id}:${appr.id}`} className="df2-approval-row">
               <div className="df2-approval-head">
@@ -192,9 +193,9 @@ export function ApprovalInbox({ items, onDecided, onOpenSchedule, onReviewMappin
               </div>
 
               <p className="df2-approval-finding">{appr.finding}</p>
-              {appr.corrective_action && (
+              {corrective && (
                 <p className="df2-approval-action">
-                  <strong>To resolve:</strong> {appr.corrective_action}
+                  <strong>To resolve:</strong> {corrective}
                 </p>
               )}
 

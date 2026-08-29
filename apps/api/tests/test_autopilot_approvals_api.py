@@ -380,6 +380,7 @@ def test_same_declaration_park_is_released_for_the_next_beat(client):
         "dest_table": "SUNDAY0816",
         "interval": "hourly",
         "enabled": True,
+        "mappings": [{"source": "joining_date", "target": "joining_date"}],
     })
     past = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
     store.update_schedule(sched.id, {"next_run_at": past, "enabled": True})
