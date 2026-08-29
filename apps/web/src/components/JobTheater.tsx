@@ -1478,7 +1478,7 @@ export function JobTheaterView({
         </div>
       )}
 
-      {(job.cdc_shared_reader || job.snapshot_mode || job.cdc_row_filter) && (
+      {(job.cdc_shared_reader || job.snapshot_mode || job.cdc_row_filter || job.snapshot_plan || job.eos_window_id) && (
         <div className="df2-theater-v3-cdc-meta" aria-label="CDC topology">
           {job.cdc_shared_reader && (
             <span className="df2-theater-cdc-chip is-ok">Shared log reader · one slot / server_id</span>
@@ -1487,6 +1487,23 @@ export function JobTheaterView({
             <span className="df2-theater-cdc-chip">
               Snapshot · {job.snapshot_mode}
               {job.snapshot_plan?.lost_window ? " · lost window (not continuous CDC)" : ""}
+            </span>
+          )}
+          {job.snapshot_plan?.kind && (
+            <span
+              className="df2-theater-cdc-chip"
+              title={job.snapshot_plan.reason || "Named snapshot+LSN handoff plan — not platform exactly-once"}
+            >
+              Handoff · {job.snapshot_plan.kind}
+              {job.snapshot_plan.next_action ? ` · ${job.snapshot_plan.next_action}` : ""}
+            </span>
+          )}
+          {job.eos_window_id && (
+            <span
+              className="df2-theater-cdc-chip"
+              title="Dest-owned incremental-snapshot window (Debezium DDD-3) — route-scoped, not platform-wide"
+            >
+              Window · {job.eos_window_id}
             </span>
           )}
           {job.cdc_delivery && (

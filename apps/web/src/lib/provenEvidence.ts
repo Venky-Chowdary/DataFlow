@@ -197,7 +197,14 @@ export const NOT_PROVEN: UnprovenRow[] = [
   {
     area: "Contracts and Proofs surfaces",
     status: "unaudited",
-    reason: "Implemented and unit-tested, not yet examined at the live-matrix bar.",
+    reason:
+      "Named sqlite fixture test_contract_enforce_sqlite_fixture blocks missing required columns on a SIGNED file→sqlite contract. Shared-sandbox live-matrix certification is not claimed.",
+  },
+  {
+    area: "CDC snapshot+LSN live-matrix",
+    status: "planned",
+    reason:
+      "Postgres WAL handoff and sqlite PK+_df_lsn replay (test_sqlite_pk_df_lsn_replay_no_double_count) are unit-proven. MySQL binlog, SQL Server native, and Oracle LogMiner stay Planned until a named live matrix. CDC default remains at-least-once upsert.",
   },
   {
     area: "SOC 2 / ISO 27001 certification",

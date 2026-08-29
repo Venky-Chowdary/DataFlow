@@ -615,6 +615,40 @@ def schedule_bind_summary(sched: Any) -> dict[str, Any]:
     )
 
 
+def assert_schedule_mapping_matches_contract(sched: Any) -> None:
+    """Refuse a beat when the schedule mapping hash drifted from the signed contract.
+
+    Contracts with no stored mappings skip this bind — we do not invent a
+    fingerprint. Empty-mapping park stays a separate plan-change gate.
+    """
+    cid = (getattr(sched, "contract_id", None) or "").strip()
+    if not cid:
+        return
+    try:
+        from services.contract_store import get_contract_store
+        from services.schema_fingerprint import fingerprint_mappings
+    except ImportError:  # pragma: no cover
+        from src.services.contract_store import get_contract_store
+        from src.services.schema_fingerprint import fingerprint_mappings
+
+    contract = get_contract_store().get_contract(cid)
+    if contract is None:
+        return
+    contracted = [m for m in (getattr(contract, "mappings", None) or []) if isinstance(m, dict)]
+    if not contracted:
+        return
+    expected = fingerprint_mappings(contracted)
+    actual = fingerprint_mappings(
+        [m for m in (getattr(sched, "mappings", None) or []) if isinstance(m, dict)]
+    )
+    if expected != actual:
+        raise ValueError(
+            f"Schedule mappings do not match signed contract {cid} "
+            f"(contract {expected[:12]} vs schedule {actual[:12]}). "
+            "Open Validate and persist the approved mapping, or re-sign the contract."
+        )
+
+
 def assert_schedule_run_allowed(sched: Any) -> dict[str, Any]:
     """Fail-closed SIGNED + breaker for a scheduled run. Returns bind preview.
 
@@ -632,6 +666,7 @@ def assert_schedule_run_allowed(sched: Any) -> dict[str, Any]:
             from src.services.contract_store import assert_contract_breaker_allows
 
         assert_contract_breaker_allows(cid)
+        assert_schedule_mapping_matches_contract(sched)
     return schedule_bind_summary(sched)
 
 

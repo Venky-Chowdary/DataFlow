@@ -879,4 +879,13 @@ describe("enterprise wedge proof surfaces", () => {
     assert.match(drawer, /View quarantine/);
     assert.match(drawer, /writeJobsDeepLink\(`xform-\$\{project\.id\}`, "quarantine"\)/);
   });
+
+  it("Theater names snapshot+LSN handoff and dest-owned window without platform EOS", () => {
+    const theater = readFileSync(join(webRoot, "components/JobTheater.tsx"), "utf8");
+    assert.match(theater, /Handoff · \{job\.snapshot_plan\.kind\}/);
+    assert.match(theater, /Window · \{job\.eos_window_id\}/);
+    assert.match(theater, /not platform exactly-once/);
+    assert.match(theater, /not platform-wide/);
+    assert.doesNotMatch(theater, /exactly-once for every route/);
+  });
 });
