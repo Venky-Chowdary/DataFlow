@@ -29,6 +29,40 @@ def _risk_cleared(m: Any) -> bool:
     """Continue-policy Risk Contract only — boolean risk_acknowledged never clears."""
     return mapping_risk_cleared(m)
 
+
+def _dest_accepts_empty_string(dest_type: str) -> bool:
+    """True when ``''`` is a present NOT NULL value, not SQL NULL invent.
+
+    ``note_empty TEXT NOT NULL`` / ``VARCHAR(n) NOT NULL`` must keep empty
+    string identity. Numeric/date/bool empty string is still NULL invent.
+    """
+    try:
+        from services.type_system import LOGICAL_STRING, LOGICAL_TEXT, normalize_logical_type
+
+        return normalize_logical_type(dest_type) in {LOGICAL_STRING, LOGICAL_TEXT}
+    except ImportError:  # pragma: no cover — standalone package
+        text = (dest_type or "").upper().split("COLLATE", 1)[0]
+        return any(
+            tok in text
+            for tok in ("TEXT", "VARCHAR", "CHAR", "CLOB", "STRING", "NVARCHAR", "NTEXT")
+        ) and "INTERVAL" not in text
+
+
+def _sample_is_sql_null_for_not_null(val: Any, dest_type: str) -> bool:
+    """G3 NOT NULL: reader-null only. Empty string stays a string value."""
+    if val is None:
+        return True
+    try:
+        from services.value_serializer import is_reader_null_cell
+
+        if is_reader_null_cell(val):
+            return True
+    except ImportError:  # pragma: no cover — standalone package
+        pass
+    if isinstance(val, str) and val.strip() == "":
+        return not _dest_accepts_empty_string(dest_type)
+    return False
+
 # Offline fallback when apps.api type_system cannot be imported (package-only).
 # Hosted Validate must use is_lossy_coercion / is_precision_collapse_coercion.
 
@@ -1218,7 +1252,7 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
             if not isinstance(row, dict):
                 continue
             val = row.get(m.source)
-            if val is None or str(val).strip() == "":
+            if _sample_is_sql_null_for_not_null(val, target.inferred_type):
                 null_samples += 1
         if null_samples:
             label = (

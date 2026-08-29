@@ -86,11 +86,21 @@ def _drop(engine: str, table: str) -> None:
         drop_mysql_table(table)
 
 
-def _create_dest(engine: str, table: str, *, narrow: bool) -> None:
+def _create_dest(
+    engine: str, table: str, *, narrow: bool, source_engine: str = ""
+) -> None:
+    """Dest-exists DDL that matches the source carrier — not invent-create-new.
+
+    Cross-engine DATETIME vs TIMESTAMPTZ and TEXT vs VARCHAR(64) are real
+    polarity/width collapses. Compatible dest uses equal-or-wider types.
+    """
+    src = (source_engine or engine).strip().lower()
     amt = "INT" if narrow else "NUMERIC(12,4)" if engine == "postgresql" else "DECIMAL(12,4)"
     if engine == "postgresql":
         import psycopg2
 
+        note = "TEXT" if src == "postgresql" else "VARCHAR(64)"
+        ts = "TIMESTAMPTZ" if src == "postgresql" else "TIMESTAMP"
         conn = psycopg2.connect(
             host="localhost", port=5432, database="dataflow",
             user="dataflow", password="dataflow",
@@ -105,8 +115,8 @@ def _create_dest(engine: str, table: str, *, narrow: bool) -> None:
                   amt_dec {amt} NOT NULL,
                   amt_float DOUBLE PRECISION NOT NULL,
                   note_null TEXT,
-                  note_empty TEXT NOT NULL,
-                  ts_utc TIMESTAMPTZ NOT NULL,
+                  note_empty {note} NOT NULL,
+                  ts_utc {ts} NOT NULL,
                   flag BOOLEAN NOT NULL
                 )
                 """
@@ -116,6 +126,8 @@ def _create_dest(engine: str, table: str, *, narrow: bool) -> None:
     import pymysql
 
     amt_my = "INT" if narrow else "DECIMAL(12,4)"
+    note_my = "VARCHAR(64)" if src == "mysql" else "LONGTEXT"
+    ts_my = "DATETIME(6)" if src == "mysql" else "TIMESTAMP(6)"
     conn = pymysql.connect(
         host="localhost", port=3306, user="dataflow", password="dataflow",
         database="dataflow", autocommit=True,
@@ -129,8 +141,8 @@ def _create_dest(engine: str, table: str, *, narrow: bool) -> None:
               amt_dec {amt_my} NOT NULL,
               amt_float DOUBLE NOT NULL,
               note_null TEXT,
-              note_empty VARCHAR(64) NOT NULL,
-              ts_utc DATETIME(6) NOT NULL,
+              note_empty {note_my} NOT NULL,
+              ts_utc {ts_my} NOT NULL,
               flag TINYINT(1) NOT NULL
             )
             """
@@ -307,7 +319,7 @@ def _run_schema_cells() -> list[dict[str, Any]]:
             src_t, dst_t = uniq("dim_sch_s"), uniq("dim_sch_d")
             try:
                 _seed(src, src_t)
-                _create_dest(dst, dst_t, narrow=narrow)
+                _create_dest(dst, dst_t, narrow=narrow, source_engine=src)
                 result = run_typed_transfer(_endpoint(src, src_t), _endpoint(dst, dst_t))
                 if expect == "pass":
                     status = "passed" if result.success else "failed"
@@ -331,7 +343,7 @@ def _run_schema_cells() -> list[dict[str, Any]]:
         src_t, dst_t = uniq("dim_sch_x"), uniq("dim_sch_xd")
         try:
             _seed(src, src_t)
-            _create_dest(dst, dst_t, narrow=False)
+            _create_dest(dst, dst_t, narrow=False, source_engine=src)
             _add_unmapped_column(src, src_t)
             result = run_typed_transfer(_endpoint(src, src_t), _endpoint(dst, dst_t))
             # Fail-closed: unmapped extra column must not drop silently.
