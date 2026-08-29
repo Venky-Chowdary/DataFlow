@@ -243,6 +243,7 @@ import {
 } from "./transfer/studioConstants";
 import { TransferTransformStep } from "./transfer/TransferTransformStep";
 import { recipePayload, type ShapeStepWire, type TransformImage } from "../lib/shape";
+import { studioIntentConnectorsReady } from "../lib/scheduleApprovalCta";
 import {
   analysisFromPipeline,
   fileExtension,
@@ -2123,6 +2124,7 @@ export function TransferPage({
   useEffect(() => {
     if (!seedStudioIntent?.token) return;
     if (appliedStudioIntentTokenRef.current === seedStudioIntent.token) return;
+    if (!studioIntentConnectorsReady(seedStudioIntent, connectors.map((c) => c.id))) return;
     appliedStudioIntentTokenRef.current = seedStudioIntent.token;
 
     setCellPreview(null);
@@ -2203,9 +2205,25 @@ export function TransferPage({
       setSeedRepairProposalId(null);
     }
 
+    const seededSource = seedStudioIntent.sourceConnectorId
+      ? connectors.find((c) => c.id === seedStudioIntent.sourceConnectorId)
+      : undefined;
+    if (seededSource) {
+      if (CLOUD_SOURCE_TYPES.has(seededSource.type)) setSourceKind("cloud");
+      else if (!FILE_FORMAT_SOURCE_TYPES.has(seededSource.type)) setSourceKind("database");
+      setSourceConnectorId(seededSource.id);
+    }
+    if (seedStudioIntent.sourceTable) setSourceTable(seedStudioIntent.sourceTable);
+    if (seedStudioIntent.destConnectorId) {
+      applyConnectorSelection(seedStudioIntent.destConnectorId);
+    }
+    if (seedStudioIntent.destTable) setTargetCollection(seedStudioIntent.destTable);
+
+    const scheduleRoute = Boolean(seedStudioIntent.sourceConnectorId && seedStudioIntent.destConnectorId);
+
     if (seedStudioIntent.step === "map") {
       setStep(STEP_MAP);
-    } else if (seedStudioIntent.step === "source") {
+    } else if (seedStudioIntent.step === "source" || scheduleRoute) {
       setStep(STEP_SOURCE);
     } else {
       setStep(STEP_VALIDATE);
@@ -2215,15 +2233,17 @@ export function TransferPage({
       ? ` from job ${seedStudioIntent.jobId.slice(0, 8)}…`
       : "";
     toast({
-      title: "Opened Validate in Studio",
-      message: seedStudioIntent.repairProposalId
-        ? `Repair proposal ready${jobHint}. Review actions, then re-run Validate.`
-        : seedStudioIntent.preflight
-          ? `Job gates loaded${jobHint}. Review results — Re-run only if you changed mappings.`
-          : `Continue remediation${jobHint}. Job gates load when available; otherwise Re-run Validate.`,
+      title: scheduleRoute ? "Opened Transfer Studio from the schedule" : "Opened Validate in Studio",
+      message: scheduleRoute
+        ? "Source and destination are prefilled. Continue through Map and Validate, then Schedule from the footer so the beat has a mapping contract."
+        : seedStudioIntent.repairProposalId
+          ? `Repair proposal ready${jobHint}. Review actions, then re-run Validate.`
+          : seedStudioIntent.preflight
+            ? `Job gates loaded${jobHint}. Review results — Re-run only if you changed mappings.`
+            : `Continue remediation${jobHint}. Job gates load when available; otherwise Re-run Validate.`,
       tone: "info",
     });
-  }, [seedStudioIntent, toast]);
+  }, [seedStudioIntent, toast, connectors]);
 
   useEffect(() => {
     const content = document.querySelector(".df2-content");

@@ -39,6 +39,7 @@ import {
 } from "../lib/api";
 import { breakerBlocksRuns } from "../lib/contractBreakerUi";
 import { fleetExportBlockedReason } from "../lib/schedulesGitops";
+import { scheduleNeedsStudio, studioIntentFromSchedule } from "../lib/scheduleApprovalCta";
 import {
   Connector,
   PipelineSchedule,
@@ -46,6 +47,7 @@ import {
   ScheduleInput,
   ScheduleIntervals,
 } from "../lib/types";
+import type { JobsStudioIntent } from "./JobsPage";
 
 interface SchedulesPageProps {
   connectors: Connector[];
@@ -53,11 +55,13 @@ interface SchedulesPageProps {
   onOpenJob?: (jobId: string) => void;
   onSchedulesChange?: () => void | Promise<void>;
   highlightScheduleId?: string;
+  /** Open Transfer Studio with a schedule's route so Map can persist a contract. */
+  onStartTransfer?: (intent?: JobsStudioIntent) => void;
 }
 
 type ScheduleFilter = "all" | "active" | "paused";
 
-export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesChange, highlightScheduleId }: SchedulesPageProps) {
+export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesChange, highlightScheduleId, onStartTransfer }: SchedulesPageProps) {
   const { toast } = useToast();
   const scheduleManage = useWriteGate(PERMISSIONS.scheduleManage);
   const jobRun = useWriteGate(PERMISSIONS.jobRun);
@@ -208,6 +212,12 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
   };
 
   const closeDrawer = () => setDrawerOpen(false);
+
+  const openStudioFromSchedule = (id: string) => {
+    const sched = schedules.find((s) => s.id === id);
+    if (!sched || !onStartTransfer) return;
+    onStartTransfer(studioIntentFromSchedule(sched));
+  };
 
   const enabledCount = schedules.filter((s) => s.enabled).length;
   const pausedCount = schedules.length - enabledCount;
@@ -476,7 +486,7 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
       wide
       className="df2-page-pipelines"
       title="Schedules"
-      description="Recurring sync schedules (not ADF/Informatica DAG pipelines) — same Map→Validate→Execute engine."
+      description="Recurring syncs replay a Validate-approved mapping contract (not ADF/Informatica DAGs). Same Map → Validate → Execute engine as Transfer Studio."
     >
       <PageFrame className="df2-pipeline-page">
       <PermissionNotice
@@ -603,6 +613,11 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
               saving={saving}
               onSubmit={handleSubmit}
               onCancel={closeForm}
+              onOpenStudio={
+                editing
+                  ? () => openStudioFromSchedule(editing.id)
+                  : () => onStartTransfer?.()
+              }
             />
           </PageSection>
         </div>
@@ -620,6 +635,7 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
             const sched = schedules.find((s) => s.id === id);
             if (sched) openEdit(sched);
           }}
+          onOpenStudio={openStudioFromSchedule}
         />
       )}
 
@@ -645,17 +661,25 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
             page
             icon="activity"
             title="No schedules yet"
-            description="Create a recurring sync to keep source and destination in step — watermark incremental, upsert, and quarantine included."
+            description="Unattended runs replay a Validate-approved mapping contract. Open Transfer Studio, Map → Validate, then Schedule from the footer. New schedule here saves cadence only — it stays paused until mappings exist."
             action={
               !showForm ? (
-                <Button
-                  variant="primary"
-                  disabled={!scheduleManage.allowed}
-                  title={scheduleManage.reason || undefined}
-                  onClick={openCreate}
-                >
-                  Create schedule
-                </Button>
+                <>
+                  <Button
+                    variant="primary"
+                    onClick={() => onStartTransfer?.()}
+                  >
+                    Open Transfer Studio
+                  </Button>
+                  <Button
+                    variant="secondary"
+                    disabled={!scheduleManage.allowed}
+                    title={scheduleManage.reason || undefined}
+                    onClick={openCreate}
+                  >
+                    Draft cadence only
+                  </Button>
+                </>
               ) : undefined
             }
           />
@@ -742,6 +766,11 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
           closeDrawer();
           onOpenJob?.(jobId);
         }}
+        onOpenStudio={
+          selectedSchedule && scheduleNeedsStudio(selectedSchedule)
+            ? () => openStudioFromSchedule(selectedSchedule.id)
+            : undefined
+        }
       />
       </PageFrame>
     </PageShell>
