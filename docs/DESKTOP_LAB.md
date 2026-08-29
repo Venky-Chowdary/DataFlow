@@ -38,6 +38,28 @@ DATAFLOW_CROSS_MATRIX=1 PYTHONPATH=. python -m pytest \
   tests/test_desktop_lab_cross_matrix.py -q
 ```
 
+## Type × sync × schema (named fixture — not every type)
+
+`tests/desktop_lab_dimensions.py` is the live type × two-run sync × schema-shape
+matrix on PostgreSQL and MySQL only. It is **not** every SQL type, every
+canonical sync mode, or every dest-exists shape.
+
+Measured on this host (`desktop_lab_dimensions.json`): **16 passed / 8 failed /
+0 skipped** of 24 cells.
+
+- **Types:** the 7-column FIDELITY fixture (`id`, `amt_dec`, `amt_float`,
+  `note_null`, `note_empty`, `ts_utc`, `flag`). JSON / array / UUID / binary
+  are not in this fixture.
+- **Sync:** overwrite, append, incremental_append, upsert (two-run row counts).
+  CDC / SCD2 / mirror / reverse_etl / incremental_deduped are not claimed here.
+- **Schema:** create-new typed and dest-exists compatible passed on four SQL
+  routes. dest-exists DECIMAL→INT and extra unmapped source **did not
+  fail-closed** (8 failed cells).
+
+```bash
+PYTHONPATH=. python -m pytest tests/test_desktop_lab_dimensions.py -q
+```
+
 ## Honesty
 
 - **80 is catalog slots**, not unique engines, not catalog tile count, not 650+ live.
