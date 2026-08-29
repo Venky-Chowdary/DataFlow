@@ -620,7 +620,7 @@ function CustomersPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
               <h2>Warehouses, lakes, databases, and apps</h2>
               <p>
                 {catalogHonestyLead()} Same map, same gates, same reconcile report — every
-                destination that is actually transfer-live.
+                destination that is actually TRANSFER_READY.
               </p>
             </div>
             <div className="lp-mkt-evidence-grid">
@@ -985,7 +985,7 @@ function IntegrationsPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGet
     <div className="lp-mkt-page lp-int-v2">
       <MarketingInkHero
         kicker="Connection catalog"
-        title={<>Connect the systems you already run — {TRANSFER_READY_DRIVERS} transfer-live.</>}
+        title={<>Connect the systems you already run — {TRANSFER_READY_DRIVERS} TRANSFER_READY.</>}
         lead={
           <>
             Catalog tiles are not transfer-live. {TRANSFER_READY_DRIVERS} drivers are{" "}

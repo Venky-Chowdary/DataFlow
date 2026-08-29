@@ -27,7 +27,7 @@ function MarqueeRow({ ids, reverse }: { ids: string[]; reverse?: boolean }) {
 
 export function ConnectorMarquee() {
   return (
-    <section className="lp-marquee-band" aria-label="Certified transfer-live connectors">
+    <section className="lp-marquee-band" aria-label="TRANSFER_READY connectors — catalog tiles are not transfer-live">
       <p className="lp-marquee-eyebrow">{catalogHonestyLead()}</p>
       <MarqueeRow ids={ROW_A} />
       <MarqueeRow ids={ROW_B} reverse />
