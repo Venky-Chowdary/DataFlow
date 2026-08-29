@@ -19,9 +19,21 @@ def test_desktop_lab_untested_important_dimensions():
     assert "salesforce" in report["honesty"]["saas_omitted"]
 
     by_name = {c["name"]: c for c in report["results"]}
-    pg_types = by_name.get("dest_exists_native postgresql->postgresql")
-    assert pg_types and pg_types["kind"] == "types_extended"
-    assert pg_types["status"] == "passed", pg_types
+    portable = by_name.get("portable_json_uuid_blob mysql->postgresql")
+    assert portable and portable["status"] == "passed", portable
+    invent = by_name.get("create_new_array_invent postgresql->postgresql")
+    assert invent and invent["status"] == "passed", invent
+    for name in (
+        "incremental_deduped postgresql->postgresql",
+        "mirror postgresql->postgresql",
+        "reverse_etl postgresql->mysql",
+        "mysql_binlog->sqlite",
+        "postgresql_logical->postgresql",
+        "postgresql->sqlite",
+        "postgresql->sqlserver",
+    ):
+        cell = by_name.get(name)
+        assert cell and cell["status"] == "passed", (name, cell)
     cdc = [c for c in report["results"] if c["kind"] == "cdc" and c["status"] == "passed"]
     assert cdc, "at least one live CDC cell must pass when binlog/logical is up"
 

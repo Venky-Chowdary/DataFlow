@@ -1133,6 +1133,13 @@ def run_desktop_lab_untested(*, persist: bool = True) -> dict[str, Any]:
             ],
             "engines_omitted_hang_risk": ["gcs", "adls", "bigquery"],
             "saas_omitted": ["salesforce", "hubspot", "stripe"],
+            "open_gaps_this_fixture": [
+                "dest-exists INT[] invents JSONB (fail-closed)",
+                "dest-exists JSONB/UUID/BYTEA/INTERVAL hit PII/compliance review",
+                "G14 dest-only NOT NULL tenant_id did not block",
+                "SCD2 PG→SQLite first-load dest-before unmeasured",
+                "Oracle dest-exists writer CREATE TABLE IF NOT EXISTS → ORA-00922",
+            ],
             "map_ssot": "services.semantic_mapper.map_columns",
             "catalog_tiles_are_not_transfer_live": True,
         },
