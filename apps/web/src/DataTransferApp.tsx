@@ -18,7 +18,8 @@ import { StudioActionsProvider } from "./lib/StudioActionsContext";
 import { AUTH_REQUIRED_EVENT, deleteConnector, fetchConnectors, fetchJobs, fetchSchedules, fetchTransferCapabilities, noteApiSuccess, probeApiHealth, shouldMarkApiOffline } from "./lib/api";
 import { EMPTY_JOB_HISTORY, type JobHistory } from "./lib/jobHistory";
 import { clearSession, readSession, writeSession } from "./lib/session";
-import { clearActiveWorkspaceId } from "./lib/workspace";
+import { WORKSPACE_CHANGED_EVENT, clearActiveWorkspaceId, getActiveWorkspaceId } from "./lib/workspace";
+import { WORKSPACE_HYDRATE_FALLBACK_MS, isStaleGeneration } from "./lib/workspaceHydrate";
 import { loadSidebarNavCompact, saveSidebarNavCompact } from "./lib/pilotChatStore";
 import { loadTransferLiveCatalog, resolveCatalogIdToType } from "./lib/connectorTypes";
 import { Connector, PipelineSchedule, Screen, TransferJob } from "./lib/types";
@@ -138,6 +139,9 @@ function AppShell({
   const searchRef = useRef<HTMLInputElement>(null);
   /** Keep heavy workspaces mounted after first visit so wizard/query/pilot state is not wiped on nav. */
   const [mountedScreens, setMountedScreens] = useState<Set<Screen>>(() => new Set([screen]));
+  const connectorsGen = useRef(0);
+  const jobsGen = useRef(0);
+  const schedulesGen = useRef(0);
 
   const setScreen = useCallback((next: Screen) => {
     // Mount keep-alive screens synchronously so the first paint after navigate
@@ -208,11 +212,15 @@ function AppShell({
   }, []);
 
   const loadConnectors = useCallback(async (notifyOnError = true) => {
+    const gen = ++connectorsGen.current;
     try {
-      setConnectors(await fetchConnectors());
+      const rows = await fetchConnectors();
+      if (isStaleGeneration(gen, connectorsGen.current)) return;
+      setConnectors(rows);
       noteApiSuccess();
       setApiOnline(true);
     } catch (err) {
+      if (isStaleGeneration(gen, connectorsGen.current)) return;
       const msg = err instanceof Error ? err.message : "";
       const authOnly = /authentication required|sign in|401/i.test(msg);
       const timedOut = /timed out|abort/i.test(msg);
@@ -247,16 +255,20 @@ function AppShell({
       }
       // Below threshold: keep previous online state (no flicker).
     } finally {
-      setConnectorsReady(true);
+      if (!isStaleGeneration(gen, connectorsGen.current)) setConnectorsReady(true);
     }
   }, [toast]);
 
   const loadJobs = useCallback(async (notifyOnError = true) => {
+    const gen = ++jobsGen.current;
     try {
-      setJobHistory(await fetchJobs());
+      const next = await fetchJobs();
+      if (isStaleGeneration(gen, jobsGen.current)) return;
+      setJobHistory(next);
       noteApiSuccess();
       setApiOnline(true);
     } catch (err) {
+      if (isStaleGeneration(gen, jobsGen.current)) return;
       const msg = err instanceof Error ? err.message : "";
       const timedOut = /timed out|abort/i.test(msg);
       if (notifyOnError) {
@@ -277,19 +289,25 @@ function AppShell({
   }, [toast]);
 
   const loadSchedules = useCallback(async () => {
+    const gen = ++schedulesGen.current;
     try {
-      setSchedules(await fetchSchedules());
+      const rows = await fetchSchedules();
+      if (isStaleGeneration(gen, schedulesGen.current)) return;
+      setSchedules(rows);
       noteApiSuccess();
       setApiOnline(true);
     } catch {
+      if (isStaleGeneration(gen, schedulesGen.current)) return;
       setSchedules([]);
     }
   }, []);
 
   useEffect(() => {
     let cancelled = false;
-    (async () => {
-      setBootLoading(true);
+    let started = false;
+    const hydrate = async () => {
+      started = true;
+      if (!cancelled) setBootLoading(true);
       await Promise.allSettled([
         loadConnectors(false),
         loadJobs(false),
@@ -298,14 +316,35 @@ function AppShell({
         loadTransferLiveCatalog(fetchTransferCapabilities),
       ]);
       if (!cancelled) setBootLoading(false);
-    })();
-    return () => { cancelled = true; };
+    };
+
+    // First-load Overview undercount: Permissions names the workspace after
+    // paint. An immediate fetch has no X-Workspace-Id and counts only unscoped
+    // (legacy) jobs. Hard refresh already has the id in localStorage.
+    if (getActiveWorkspaceId()) {
+      void hydrate();
+    }
+    const onWorkspaceChanged = () => {
+      void hydrate();
+    };
+    window.addEventListener(WORKSPACE_CHANGED_EVENT, onWorkspaceChanged);
+    const fallback = window.setTimeout(() => {
+      if (!started) void hydrate();
+    }, WORKSPACE_HYDRATE_FALLBACK_MS);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(fallback);
+      window.removeEventListener(WORKSPACE_CHANGED_EVENT, onWorkspaceChanged);
+    };
   }, [loadConnectors, loadJobs, loadSchedules]);
 
   useEffect(() => {
-    if (screen === "jobs" || screen === "dashboard") {
-      loadJobs(false);
-    }
+    if (screen !== "jobs" && screen !== "dashboard") return;
+    // Same race as boot: a dashboard mount used to list jobs before
+    // X-Workspace-Id existed, so Overview painted the unscoped page.
+    if (!getActiveWorkspaceId()) return;
+    loadJobs(false);
   }, [screen, loadJobs]);
 
   useEffect(() => {
@@ -663,6 +702,8 @@ function AppShell({
                   <DashboardPage
                     connectors={connectors}
                     jobs={jobs}
+                    history={jobHistory}
+                    listsLoading={bootLoading}
                     schedules={schedules}
                     onOpenConnectors={() => setScreen("connectors")}
                     onOpenJobs={() => setScreen("jobs")}

@@ -826,6 +826,20 @@ describe("Overview parked-decision attention", () => {
     assert.doesNotMatch(dash, /parked on a failed/);
     assert.match(app, /onOpenSchedules=\{\(\) => setScreen\("schedules"\)\}/);
   });
+
+  it("counts whole-history totals and waits for the named workspace before the first read", () => {
+    const dash = readFileSync(join(webRoot, "pages/DashboardPage.tsx"), "utf8");
+    const app = readFileSync(join(webRoot, "DataTransferApp.tsx"), "utf8");
+    assert.match(dash, /buildOverviewJobStats/);
+    assert.match(dash, /buildStatusDistributionFromHistory/);
+    assert.match(dash, /stats\.total\.toLocaleString\(\)/);
+    assert.doesNotMatch(dash, /\{jobs\.length\} jobs/);
+    assert.match(app, /history=\{jobHistory\}/);
+    assert.match(app, /WORKSPACE_CHANGED_EVENT/);
+    assert.match(app, /getActiveWorkspaceId\(\)/);
+    assert.match(app, /isStaleGeneration/);
+    assert.match(app, /if \(!getActiveWorkspaceId\(\)\) return;/);
+  });
 });
 
 describe("operator surface geometry and honest empty export", () => {
