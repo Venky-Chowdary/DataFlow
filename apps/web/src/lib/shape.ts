@@ -269,7 +269,7 @@ const FIELD_LABEL: Record<string, string> = {
   keep: "Keep matching rows",
   reason: "Quarantine reason",
   index_to: "Index column",
-  keep_parent: "Keep the original JSON column",
+  keep_parent: "Keep the original JSON column (Validate then needs drop/flatten)"
   depth: "Flatten depth",
   keys: "Object keys to promote",
 };
@@ -285,7 +285,7 @@ const FIELD_HINT: Record<string, string> = {
   keep: "Off keeps the rows the condition does not match.",
   reason: "Recorded on every diverted row.",
   index_to: "Optional. 0-based position of the exploded element.",
-  keep_parent: "On keeps the JSON array so nothing is silently dropped.",
+  keep_parent: "Off drops the parent as a named step so Validate is not blocked on leftover ARRAY. On keeps the blob — drop or flatten it before Validate.",
   depth: "top promotes one level; deep walks further, still capped.",
   keys: "One key per line. Leave blank to promote every key the sample holds.",
 };
@@ -440,15 +440,39 @@ export interface ContinueTransformState {
  * identity for Map / Validate / Execute to be held to — advancing anyway is
  * how a surplus or a stale hash reaches the writer.
  */
+/** Sync modes whose dest history was not written by this recipe. */
+const PRELOAD_REFUSED_SYNCS = new Set(["cdc", "scd2", "full_refresh_mirror", "mirror"]);
+
+export function preloadTransformRefused(syncMode?: string): boolean {
+  return PRELOAD_REFUSED_SYNCS.has((syncMode || "").trim().toLowerCase());
+}
+
+export function preloadTransformRefusalReason(syncMode?: string): string {
+  const sync = (syncMode || "").trim().toLowerCase() || "this";
+  return (
+    `Transform (pre-load) is not applied on the ${sync} route: it merges each row ` +
+    "against history already stored on the destination, which was not written by this recipe. " +
+    "Remove the steps, or use full refresh / incremental append."
+  );
+}
+
 export function continueTransformState(input: {
   steps: ShapeStepWire[];
   preview: ShapePreviewResponse | null;
   previewError: string;
   busy: boolean;
   previewMatchesSteps: boolean;
+  syncMode?: string;
 }): ContinueTransformState {
   const hasRecipe = enabledShapeSteps(input.steps).length > 0;
   const label = hasRecipe ? "Continue with this transform" : "Continue without transforming";
+  if (hasRecipe && preloadTransformRefused(input.syncMode)) {
+    return {
+      enabled: false,
+      label,
+      reason: preloadTransformRefusalReason(input.syncMode),
+    };
+  }
   if (hasRecipe && input.previewError) {
     return {
       enabled: false,

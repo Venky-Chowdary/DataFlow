@@ -347,22 +347,46 @@ def suggest_steps(
             )
 
         if profile.json_array_like and profile.json_array_like == profile.non_blank:
-            out.append(
-                _suggestion(
-                    op="unnest_json",
-                    column=name,
-                    options={"to": f"{name}_item", "keep_parent": True},
-                    title=f"Unnest '{name}' — one row per array element",
-                    reason=(
-                        f"{profile.json_array_like} sampled value(s) are JSON arrays. "
-                        "Unnest is a declared expansion: dest COUNT becomes the child "
-                        "rows, which is a projection, not a surplus. Empty or over-cap "
-                        "arrays refuse rather than drop silently."
-                    ),
-                    rows_affected=profile.json_array_like,
-                    severity="decision",
+            item_name = f"{name}_item"
+            leftover = any(other.name == item_name for other in profiles)
+            if leftover:
+                # Unnest already ran with keep_parent. Suggesting unnest again
+                # would expand twice. The leftover ARRAY is what Validate
+                # refuses as ARRAY→TEXT until the operator drops or flattens it.
+                out.append(
+                    _suggestion(
+                        op="drop_column",
+                        column=name,
+                        options={},
+                        title=f"Drop leftover '{name}' JSON after unnest",
+                        reason=(
+                            f"'{item_name}' already exists — unnest kept the parent array. "
+                            "Validate refuses leftover ARRAY→TEXT until this blob is "
+                            "dropped or flattened. Drop is a named step, not a silent loss."
+                        ),
+                        rows_affected=profile.json_array_like,
+                        severity="blocking",
+                    )
                 )
-            )
+            else:
+                out.append(
+                    _suggestion(
+                        op="unnest_json",
+                        column=name,
+                        options={"to": item_name, "keep_parent": False},
+                        title=f"Unnest '{name}' — one row per array element",
+                        reason=(
+                            f"{profile.json_array_like} sampled value(s) are JSON arrays. "
+                            "Unnest is a declared expansion: dest COUNT becomes the child "
+                            "rows, which is a projection, not a surplus. The parent blob "
+                            "is dropped as a named step so Validate is not blocked on "
+                            "leftover ARRAY→TEXT. Empty or over-cap arrays refuse rather "
+                            "than drop silently."
+                        ),
+                        rows_affected=profile.json_array_like,
+                        severity="decision",
+                    )
+                )
 
         if profile.json_object_like and profile.json_object_like == profile.non_blank:
             out.append(
