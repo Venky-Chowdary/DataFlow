@@ -876,9 +876,9 @@ export function MigrationsSolutionPage({
       onSecondary={() => onNavigate("product-transfer")}
       heroVisual={
         <ProductShot
-          src={WORKSPACE_SHOT.transferValidate}
-          alt="Transfer Studio Validate — nine gates before a migration write"
-          surface="Migrations · Validate"
+          src={WORKSPACE_SHOT.transferSource}
+          alt="Transfer Studio source — profiled sample-orders before a migration write"
+          surface="Migrations · Transfer Studio"
           route={{ source: "PostgreSQL · public.orders", dest: "Snowflake · ANALYTICS.ORDERS" }}
         />
       }
