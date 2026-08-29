@@ -50,7 +50,7 @@ export const PRODUCT_FRAMES = {
     {
       src: "/docs/screenshots/app-pipelines.png",
       alt: "Schedules workspace",
-      caption: "Schedules — cadence, mode, and health for recurring sync (not ADF DAGs)",
+      caption: "Schedules — cadence, mode, and health for recurring sync",
     },
     {
       src: "/docs/screenshots/app-jobs.png",
@@ -184,9 +184,9 @@ export function LiveProductReel({
   return (
     <div className="lp-mkt-live-reel">
       <div className="lp-mkt-live-reel-head">
-        <span className="lp-mkt-live-pill">Live workspace</span>
+        <span className="lp-mkt-live-pill">Workspace</span>
         <h3>{title}</h3>
-        <p>Screenshots captured inside the signed-in application — not marketing mocks.</p>
+        <p>The same operator surfaces — framed, not redrawn as a second product.</p>
       </div>
       <DocsShotReel frames={[...frames]} className="docs-shot-reel--product" />
     </div>

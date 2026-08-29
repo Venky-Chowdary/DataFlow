@@ -7,7 +7,7 @@ import {
 } from "../components/landing/AlgorithmCinema";
 import { TrustSection } from "../components/landing/TrustSection";
 import { ProofEvidenceSection } from "../components/landing/ProofEvidenceSection";
-import { ProofLoopArt } from "../components/marketing/hero-art/solutionArt";
+import { ProductShot } from "../components/marketing/ProductShot";
 import { ObservabilityInAction } from "../components/landing/ObservabilityInAction";
 import { useRevealOnScroll } from "../hooks/useRevealOnScroll";
 import { BACKEND_SUITE, EVIDENCE_AS_OF, TRANSFER_READY_DRIVERS, catalogHonestyLead } from "../lib/provenEvidence";
@@ -121,6 +121,14 @@ function ConnectorMarquee({
   );
 }
 
+const SURFACE_SHOTS: Record<string, string> = {
+  studio: "/docs/screenshots/app-transfer-validate.png",
+  theater: "/docs/screenshots/app-jobs.png",
+  pipelines: "/docs/screenshots/app-pipelines.png",
+  mcp: "/docs/screenshots/app-mcp.png",
+  query: "/docs/screenshots/app-query.png",
+};
+
 const SURFACES: {
   id: string;
   label: string;
@@ -228,19 +236,12 @@ function SurfaceTabs({ onNavigate, onGetStarted }: Pick<LandingHomeProps, "onNav
               </button>
             </div>
           </div>
-          <div className="lp-home-tab-visual" aria-hidden>
-            <div className="lp-home-tab-card">
-              <header>
-                <span className="lp-home-tab-dot" />
-                {current.label}
-              </header>
-              <strong>{current.title}</strong>
-              <ul>
-                <li>Semantic map</li>
-                <li>G1–G9 preflight</li>
-                <li>Quarantine + checksum</li>
-              </ul>
-            </div>
+          <div className="lp-home-tab-visual">
+            <ProductShot
+              src={SURFACE_SHOTS[current.id] ?? "/docs/screenshots/app-overview.png"}
+              alt={`${current.title} in the Datawrap workspace`}
+              surface={current.label}
+            />
           </div>
         </div>
       </div>
@@ -294,7 +295,12 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
             </p>
           </div>
           <div className="lp-hero-visual lp-hero-visual--stage">
-            <ProofLoopArt />
+            <ProductShot
+              src="/docs/screenshots/app-jobs.png"
+              alt="Datawrap Job Theater — whole-history counts, destination population, and run proof"
+              surface="Job Theater · workspace"
+              route={{ source: "PostgreSQL · public.orders", dest: "Snowflake · ANALYTICS.ORDERS" }}
+            />
           </div>
         </div>
       </section>

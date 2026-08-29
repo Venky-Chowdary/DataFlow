@@ -363,32 +363,38 @@ export function ArtField({
    */
   const stacked = type !== undefined && inline < STACK_BELOW;
   const fit = stacked ? Math.min(1, (w - 28) / Math.max(nameNeed, typeNeed)) : inline;
+  const clipId = `af${useId().replace(/[^a-z0-9]+/gi, "")}`;
   return (
     <g>
+      <clipPath id={clipId}>
+        <rect x={x + 1} y={y + 1} width={w - 2} height="42" rx="8" />
+      </clipPath>
       <rect x={x} y={y} width={w} height="44" rx="9" fill={INK.field0} stroke={stroke} strokeWidth="1.5" />
-      <ArtText
-        x={x + 14}
-        y={stacked ? y + 18 : y + 29}
-        size={(stacked ? FIELD_NAME_SIZE - 1 : FIELD_NAME_SIZE) * fit}
-        mono
-        tone={tone === "amber" ? "amber" : "strong"}
-        weight={500}
-      >
-        {name}
-      </ArtText>
-      {type ? (
+      <g clipPath={`url(#${clipId})`}>
         <ArtText
-          x={x + w - 14}
-          y={stacked ? y + 39 : y + 29}
-          size={(stacked ? FIELD_TYPE_SIZE - 1 : FIELD_TYPE_SIZE) * fit}
-          anchor="end"
-          tone="muted"
+          x={x + 14}
+          y={stacked ? y + 18 : y + 29}
+          size={(stacked ? FIELD_NAME_SIZE - 1 : FIELD_NAME_SIZE) * fit}
           mono
+          tone={tone === "amber" ? "amber" : "strong"}
           weight={500}
         >
-          {type}
+          {name}
         </ArtText>
-      ) : null}
+        {type ? (
+          <ArtText
+            x={x + w - 14}
+            y={stacked ? y + 39 : y + 29}
+            size={(stacked ? FIELD_TYPE_SIZE - 1 : FIELD_TYPE_SIZE) * fit}
+            anchor="end"
+            tone="muted"
+            mono
+            weight={500}
+          >
+            {type}
+          </ArtText>
+        ) : null}
+      </g>
     </g>
   );
 }

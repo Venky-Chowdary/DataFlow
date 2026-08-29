@@ -1374,6 +1374,14 @@
   box-shadow: var(--lp-shadow-editorial);
 }
 
+.lp-home-tab-visual {
+  min-width: 0;
+}
+
+.lp-home-tab-visual .lp-product-shot-route {
+  color: #475569;
+}
+
 .lp-home-tab-copy h3 {
   font-family: var(--lp-font-display);
   font-size: clamp(1.4rem, 2.2vw, 1.85rem);
