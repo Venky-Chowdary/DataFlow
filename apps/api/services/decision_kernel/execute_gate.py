@@ -196,20 +196,41 @@ def create_new_validate_holds_after_dest_exists(
         return False, ""
     maps = [m for m in (mappings or []) if isinstance(m, dict)]
     dest_engine = (dest_db or "").strip().lower()
-    create_new = build_artifact_from_mappings(
-        maps,
-        dest_db=dest_engine,
-        source_db=(source_db or "").strip().lower(),
-        tenant_id=tenant_id or "anonymous",
-        route_id=route_id or f"validate:{dest_engine or 'unknown'}",
-        source_fingerprint=(source_fingerprint or "").strip(),
-        dest_fingerprint="",
-        sync_mode=sync_mode,
-        error_policy=error_policy,
-        artifact_id="da_inline",
-        created_at="1970-01-01T00:00:00+00:00",
-    )
-    if create_new.content_hash.lower() != approved:
+    src_engine = (source_db or "").strip().lower()
+    routes: list[str] = []
+    for rid in (
+        route_id,
+        f"validate:{dest_engine or 'unknown'}",
+        f"execute:{dest_engine or 'unknown'}",
+    ):
+        rid = str(rid or "").strip()
+        if rid and rid not in routes:
+            routes.append(rid)
+    source_dbs = [src_engine]
+    if "" not in source_dbs:
+        source_dbs.append("")
+    matched = False
+    for rid in routes:
+        for src in source_dbs:
+            create_new = build_artifact_from_mappings(
+                maps,
+                dest_db=dest_engine,
+                source_db=src,
+                tenant_id=tenant_id or "anonymous",
+                route_id=rid,
+                source_fingerprint=(source_fingerprint or "").strip(),
+                dest_fingerprint="",
+                sync_mode=sync_mode,
+                error_policy=error_policy,
+                artifact_id="da_inline",
+                created_at="1970-01-01T00:00:00+00:00",
+            )
+            if create_new.content_hash.lower() == approved:
+                matched = True
+                break
+        if matched:
+            break
+    if not matched:
         return False, ""
     dest_l = {_norm_col(c) for c in dests}
     for m in write_mappings(maps):
@@ -385,32 +406,51 @@ def enforce_decision_artifact(
     if not has_maps:
         return (None, None)
 
-    current = build_artifact_from_mappings(
-        mappings,
-        dest_db=dest_db,
-        tenant_id=tenant_id,
-        route_id=route_id,
-        source_fingerprint=(source_fingerprint or "").strip(),
-        dest_fingerprint=(dest_fingerprint or "").strip(),
-        sync_mode=sync_mode,
-        error_policy=error_policy,
-        artifact_id="da_inline",
-        created_at="1970-01-01T00:00:00+00:00",
-    )
+    dest_engine = (dest_db or "").strip().lower()
+    src_fp = (source_fingerprint or "").strip()
+    dest_fp_now = (dest_fingerprint or "").strip()
+    route_candidates: list[str] = []
+    for rid in (
+        route_id,
+        f"validate:{dest_engine or 'unknown'}",
+        f"execute:{dest_engine or 'unknown'}",
+    ):
+        rid = str(rid or "").strip()
+        if rid and rid not in route_candidates:
+            route_candidates.append(rid)
+
+    def _rebuild(rid: str, dest_fp: str):
+        return build_artifact_from_mappings(
+            mappings,
+            dest_db=dest_engine,
+            source_db=(source_db or "").strip().lower(),
+            tenant_id=tenant_id or "anonymous",
+            route_id=rid,
+            source_fingerprint=src_fp,
+            dest_fingerprint=dest_fp,
+            sync_mode=sync_mode,
+            error_policy=error_policy,
+            artifact_id="da_inline",
+            created_at="1970-01-01T00:00:00+00:00",
+        )
+
+    current = _rebuild(route_candidates[0], dest_fp_now)
 
     if approved:
-        if approved != current.content_hash.lower():
-            holds, hold_err = _dest_exists_hold(approved)
-            if holds:
-                return (None, current)
-            if hold_err:
-                return (hold_err, None)
-            return (
-                "Decision Artifact content_hash mismatch — Map/DDL drifted "
-                "since Validate. Re-run Validate before Execute.",
-                None,
-            )
-        return (None, current)
+        for rid in route_candidates:
+            candidate = _rebuild(rid, dest_fp_now)
+            if approved == candidate.content_hash.lower():
+                return (None, candidate)
+        holds, hold_err = _dest_exists_hold(approved)
+        if holds:
+            return (None, current)
+        if hold_err:
+            return (hold_err, None)
+        return (
+            "Decision Artifact content_hash mismatch — Map/DDL drifted "
+            "since Validate. Re-run Validate before Execute.",
+            None,
+        )
 
     if skip_preflight:
         # Inline stamp — same honesty as DDL identity for API/CLI/scheduler.

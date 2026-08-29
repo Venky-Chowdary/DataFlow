@@ -246,6 +246,40 @@ def test_approved_artifact_refuses_source_schema_fingerprint_drift():
     assert ok_art.source_fingerprint == fp_ok
 
 
+def test_hash_only_create_new_matches_validate_route_id():
+    """Studio stamps validate:{dest}; Execute must not require execute:{dest}."""
+    maps = [
+        {
+            "source": "id",
+            "target": "id",
+            "source_type": "BIGINT",
+            "target_type": "BIGINT",
+        }
+    ]
+    stamped = build_artifact_from_mappings(
+        maps,
+        dest_db="postgresql",
+        source_db="mysql",
+        dest_fingerprint="",
+        sync_mode="full_refresh_append",
+        route_id="validate:postgresql",
+        artifact_id="da_inline",
+        created_at="1970-01-01T00:00:00+00:00",
+    )
+    err, art = enforce_decision_artifact(
+        mappings=maps,
+        dest_db="postgresql",
+        source_db="mysql",
+        approved_content_hash=stamped.content_hash,
+        dest_fingerprint="",
+        destination_table_exists=False,
+        sync_mode="full_refresh_append",
+        skip_preflight=False,
+    )
+    assert err is None
+    assert art is not None
+
+
 def test_create_new_validate_stamp_holds_after_dest_exists_append():
     """Named fixture: create-new Validate + dest-exists Execute (append) must pass.
 
