@@ -1001,6 +1001,39 @@ async def get_desktop_lab_proof():
     return JSONResponse({"available": True, **report})
 
 
+@router.post("/proofs/desktop-lab-cross")
+async def run_desktop_lab_cross_proof():
+    """Unique-engine source × dest cartesian on live desktop backends.
+
+    Not 80×80 catalog aliases. Hosted twins stay on the duplex lab.
+    """
+    from services.desktop_lab_cross import run_live_engine_cross_matrix
+
+    try:
+        result = await asyncio.to_thread(run_live_engine_cross_matrix, persist=True)
+    except Exception as exc:
+        return JSONResponse(
+            {"success": False, "error": str(exc), "tier": "desktop_lab_cross"},
+            status_code=500,
+        )
+    passed = int(result.get("passed") or 0)
+    failed = int(result.get("failed") or 0)
+    result["success"] = passed > 0 and failed == 0
+    status = 200 if result["success"] else 422
+    return JSONResponse(result, status_code=status)
+
+
+@router.get("/proofs/desktop-lab-cross")
+async def get_desktop_lab_cross_proof():
+    """Last persisted unique-engine cartesian, if any."""
+    from services.desktop_lab_cross import last_cross_report
+
+    report = last_cross_report()
+    if report is None:
+        return JSONResponse({"available": False, "pairs": 0})
+    return JSONResponse({"available": True, **report})
+
+
 @router.post("/benchmark")
 async def run_workspace_benchmark(body: BenchmarkRequest):
     """Run a reproducible local benchmark and return a standardized report.

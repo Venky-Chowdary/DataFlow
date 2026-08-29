@@ -161,6 +161,32 @@ def classify_source_coverage(
     }
 
 
+def retain_dest_exists_write_mappings(
+    mappings: list[dict] | None,
+    dest_columns: list[str] | None,
+) -> list[dict]:
+    """Dest-exists overwrite writes dest columns only.
+
+    Extra source columns stay unaccounted so G13 can block. Inventing a
+    create-new dest column from source position is the dest-exists jumble
+    (write by dest name — never source position).
+    """
+    dest = {_norm(c) for c in (dest_columns or []) if str(c).strip()}
+    if not dest:
+        return list(mappings or [])
+    kept: list[dict] = []
+    for m in mappings or []:
+        if not isinstance(m, dict):
+            continue
+        if is_intentional_omit(m):
+            kept.append(m)
+            continue
+        tgt = str(m.get("target") or "").strip()
+        if tgt and _norm(tgt) in dest:
+            kept.append(m)
+    return kept
+
+
 def mapping_plan_summary(
     *,
     source_columns: list[str],

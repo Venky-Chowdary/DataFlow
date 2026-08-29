@@ -5199,11 +5199,21 @@ def write_mapped_rows(
                         ).replace("TIMESTAMP WITH TIME ZONE", "TIMESTAMP")
                         conn.execute(sa.text(ddl))
                     elif (
-                        (dialect_name or "").lower() == "mssql"
-                        or db_type in {"sqlserver", "mssql", "azure_sql"}
+                        (dialect_name or "").lower() in {"mssql", "oracle"}
+                        or db_type in {
+                            "sqlserver",
+                            "mssql",
+                            "azure_sql",
+                            "oracle",
+                            "oracledb",
+                            "oracle_db",
+                            "oracle_autonomous_warehouse",
+                            "amazon_rds_oracle",
+                        }
                     ):
-                        # T-SQL has no CREATE TABLE IF NOT EXISTS. Existence was
-                        # already probed via inspector — emit plain CREATE TABLE.
+                        # T-SQL has no CREATE TABLE IF NOT EXISTS. Oracle XE
+                        # (21c and earlier) rejects IF NOT EXISTS (ORA-00922);
+                        # existence was already probed via inspector.
                         conn.execute(
                             sa.text(
                                 _with_placement_suffix(

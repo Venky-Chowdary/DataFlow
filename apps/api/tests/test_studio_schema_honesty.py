@@ -128,7 +128,7 @@ def test_destination_schema_probe_stamps_exception_error():
 
 
 def test_destination_schema_probe_overwrite_keeps_existence_clears_types():
-    """Overwrite must not invent unknown existence — still probe, drop stale types."""
+    """Create-new overwrite must not invent unknown existence — still probe, drop stale types."""
     from src.transfer.engine import _destination_schema_probe
     from src.transfer.models import EndpointConfig
 
@@ -142,6 +142,26 @@ def test_destination_schema_probe_overwrite_keeps_existence_clears_types():
     assert exists is False
     assert intro.called
     assert (dest.extra or {}).get("schema_nullability") == {}
+
+
+def test_destination_schema_probe_overwrite_dest_exists_keeps_nullability():
+    """Dest-exists overwrite keeps live NOT NULL so G14 can block dest-only columns."""
+    from src.transfer.engine import _destination_schema_probe
+    from src.transfer.models import EndpointConfig
+
+    dest = EndpointConfig(kind="database", format="postgresql", table="users")
+    with patch(
+        "src.transfer.endpoint_intelligence.introspect_endpoint",
+        return_value={
+            "schema": {"id": "INTEGER", "tenant_id": "TEXT"},
+            "schema_nullability": {"id": False, "tenant_id": False},
+            "table_exists": True,
+        },
+    ):
+        schema, exists = _destination_schema_probe(dest, sync_mode="full_refresh_overwrite")
+    assert exists is True
+    assert schema["tenant_id"] == "TEXT"
+    assert (dest.extra or {}).get("schema_nullability") == {"id": False, "tenant_id": False}
 
 
 def test_destination_schema_probe_stamps_nullability_for_g3():

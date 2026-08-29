@@ -363,6 +363,7 @@ def quarantine_unfit_specialty_types(
         interval_wire_family,
         is_geography_wire,
         is_interval_wire,
+        is_zero_duration_interval_bind,
     )
     from services.type_system import (
         interval_family,
@@ -400,7 +401,9 @@ def quarantine_unfit_specialty_types(
                             "— quarantined (refuse silent reproject)"
                         )
             elif kind == "interval":
-                ok = is_interval_wire(cells[col_idx])
+                ok = is_interval_wire(cells[col_idx]) or is_zero_duration_interval_bind(
+                    cells[col_idx]
+                )
                 if ok:
                     dest_fam = interval_family(typ)
                     wire_fam = interval_wire_family(cells[col_idx])

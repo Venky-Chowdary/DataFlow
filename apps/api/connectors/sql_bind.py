@@ -2146,13 +2146,21 @@ def coerce_interval_wire(
     Family polarity (YM vs DS) must match destination DDL — never invent a cast
     across ANSI/Oracle/Snowflake families (Fivetran HVR Compare write-location).
     """
-    from services.schema_inference import is_interval_wire, interval_wire_family
+    from services.schema_inference import (
+        interval_wire_family,
+        is_interval_wire,
+        is_zero_duration_interval_bind,
+    )
     from services.type_system import interval_family
     from services.value_serializer import format_bigquery_interval
 
     handled, bound = _absent_sql_bind(value)
     if handled:
         return bound
+    if is_zero_duration_interval_bind(value):
+        from datetime import timedelta
+
+        return timedelta(0)
     if not is_interval_wire(value):
         raise ValueError(
             "interval wire is not ISO-8601/SQL duration — refuse invent into INTERVAL"

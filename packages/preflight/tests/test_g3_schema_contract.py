@@ -569,6 +569,36 @@ def test_g3_not_null_contract_warns_on_nullable_meta_without_null_samples():
     assert any("not null" in str(w).lower() for w in warns)
 
 
+def test_g3_not_null_keeps_empty_string_on_text_carriers():
+    """'' is a present value on TEXT/VARCHAR NOT NULL — not SQL NULL invent."""
+    plan = TransferPlan(
+        source=SourceConfig(
+            kind="database",
+            connected=True,
+            parseable=True,
+            columns=[ColumnSchema(name="note_empty", inferred_type="TEXT", nullable=False)],
+            row_count_estimate=2,
+        ),
+        destination=DestinationConfig(
+            kind="database",
+            connected=True,
+            can_write=True,
+            can_create_table=True,
+            target_columns=[
+                ColumnSchema(name="note_empty", inferred_type="TEXT", nullable=False)
+            ],
+        ),
+        mappings=[ColumnMapping(source="note_empty", target="note_empty", confidence=0.99)],
+    )
+    result = gate_g3_schema_contract(PreflightContext(
+        plan=plan,
+        sample_rows=[{"note_empty": ""}, {"note_empty": ""}],
+    ))
+    assert result.status.value == "pass"
+    issues = (result.details or {}).get("issues", []) or []
+    assert not any("not null" in str(i).lower() for i in issues)
+
+
 def test_g3_not_null_contract_blocks_when_samples_contain_nulls():
     plan = TransferPlan(
         source=SourceConfig(

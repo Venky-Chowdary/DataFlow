@@ -53,12 +53,11 @@ _NAME_PATTERN_GROUPS: dict[str, tuple[tuple[str, ...], float]] = {
         r"card_?(?:number|no|num)\b",
         r"credit_?card",
         r"debit_?card",
-        r"pan\b",
+        r"\bpan\b",
     ), 0.4),
     # High-signal regulated IDs only — bare ``id`` / ``*Id`` matches every CRM field.
+    # Technical UUID/GUID surrogate keys are not PCI/HIPAA identifiers.
     "identifier": ((
-        r"\buuid\b",
-        r"\bguid\b",
         r"policy_?(?:no|number|num)\b",
         r"member_?id\b",
         r"\bmrn\b",
