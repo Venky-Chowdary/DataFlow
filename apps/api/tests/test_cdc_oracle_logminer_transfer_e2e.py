@@ -236,6 +236,8 @@ def test_oracle_logminer_transfer_snapshot_resume_delete(tmp_path: Path) -> None
             "snapshot_rows": rows1,
             "resume_rows": rows2,
             "dest_ids": ids,
+            "dest_amounts": amounts,
+            "id_2_gone": 2 not in ids,
             "watermark": (summary2.get("cdc") or {}).get("watermark"),
             "note": "Not leftover MERGE. Not dest-owned exactly-once.",
         }
