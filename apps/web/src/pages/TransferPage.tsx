@@ -243,6 +243,7 @@ import {
 } from "./transfer/studioConstants";
 import { TransferTransformStep } from "./transfer/TransferTransformStep";
 import { recipePayload, type ShapeStepWire, type TransformImage } from "../lib/shape";
+import { studioIntentConnectorsReady } from "../lib/scheduleApprovalCta";
 import {
   analysisFromPipeline,
   fileExtension,
@@ -2123,6 +2124,7 @@ export function TransferPage({
   useEffect(() => {
     if (!seedStudioIntent?.token) return;
     if (appliedStudioIntentTokenRef.current === seedStudioIntent.token) return;
+    if (!studioIntentConnectorsReady(seedStudioIntent, connectors.map((c) => c.id))) return;
     appliedStudioIntentTokenRef.current = seedStudioIntent.token;
 
     setCellPreview(null);

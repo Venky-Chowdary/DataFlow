@@ -26,6 +26,15 @@ export function scheduleNeedsStudio(sched: PipelineSchedule): boolean {
   return false;
 }
 
+/** Wait for the connector list before consuming a schedule→Studio token. */
+export function studioIntentConnectorsReady(
+  intent: { sourceConnectorId?: string; destConnectorId?: string },
+  connectorIds: readonly string[],
+): boolean {
+  if (!intent.sourceConnectorId && !intent.destConnectorId) return true;
+  return connectorIds.length > 0;
+}
+
 export function studioIntentFromSchedule(sched: PipelineSchedule): {
   step: "source";
   sourceConnectorId: string;

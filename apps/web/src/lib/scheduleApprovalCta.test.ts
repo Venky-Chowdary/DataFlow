@@ -4,6 +4,7 @@ import {
   inboxNeedsStudio,
   isEmptyMappingFinding,
   scheduleNeedsStudio,
+  studioIntentConnectorsReady,
   studioIntentFromSchedule,
 } from "./scheduleApprovalCta";
 import type { PipelineSchedule, ScheduleApprovalInboxItem } from "./types";
@@ -61,4 +62,11 @@ test("a paused schedule with mapping_count 0 needs Studio, not Decide", () => {
     sourceTable: "orders",
     destTable: "orders_dw",
   });
+});
+
+test("a schedule Studio seed waits until connectors have loaded", () => {
+  const intent = { sourceConnectorId: "src", destConnectorId: "dst" };
+  assert.equal(studioIntentConnectorsReady(intent, []), false);
+  assert.equal(studioIntentConnectorsReady(intent, ["src"]), true);
+  assert.equal(studioIntentConnectorsReady({}, []), true);
 });
