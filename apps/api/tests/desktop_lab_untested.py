@@ -187,7 +187,7 @@ def _seed_pg_simple(table: str, *, rows: int = 2) -> None:
         CREATE TABLE public."{table}" (
           id INT PRIMARY KEY,
           amount NUMERIC(12,2) NOT NULL,
-          code TEXT NOT NULL,
+          code VARCHAR(64) NOT NULL,
           updated_at TIMESTAMPTZ NOT NULL
         )
         """
@@ -904,7 +904,7 @@ def _sqlserver_prepare(table: str) -> str | None:
             cur.execute(f"IF OBJECT_ID('dbo.[{table}]', 'U') IS NOT NULL DROP TABLE dbo.[{table}]")
             cur.execute(
                 f"CREATE TABLE dbo.[{table}] (id INT PRIMARY KEY, amount DECIMAL(12,2) NOT NULL, "
-                "code NVARCHAR(4000) NOT NULL, updated_at DATETIMEOFFSET NOT NULL)"
+                "code NVARCHAR(64) NOT NULL, updated_at DATETIMEOFFSET NOT NULL)"
             )
         conn.commit()
     finally:
@@ -943,7 +943,7 @@ def _oracle_prepare(table: str) -> str | None:
         )
         cur.execute(
             f"CREATE TABLE {table} (id NUMBER PRIMARY KEY, amount NUMBER(12,2) NOT NULL, "
-            "code VARCHAR2(4000) NOT NULL)"
+            "code VARCHAR2(64) NOT NULL)"
         )
         conn.commit()
     finally:
