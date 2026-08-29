@@ -577,7 +577,11 @@ def apply_inferred_leftover_deletes(
     listing + ``delete_by_primary_keys`` (filesystem v2 equality-delete
     writes). Filesystem and catalog MoR (v2 position/equality and v3
     deletion-vector-v1) is already applied in that listing (surviving
-    rows). Incremental leftover MERGE stays a hard no-op.
+    rows). Object-store leftover MERGE rewrites GET-stream artifacts
+    without leftover PKs (Airbyte generation-id wipe is not this path).
+    Snowflake / BigQuery leftover MERGE uses the same native client as
+    dest COUNT(*), never catalog stats. Incremental leftover MERGE
+    stays a hard no-op.
     """
     if not complete_snapshot:
         return None
