@@ -23,6 +23,8 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import subprocess
+import sys
 import tempfile
 import uuid
 from datetime import datetime, timezone
@@ -1238,61 +1240,120 @@ def _run_sqlserver_oracle_dest_exists(
             from tests.typed_fidelity_helpers import drop_sqlserver_table
             drop_sqlserver_table(ss_t)
 
-    ora_t = ("UT" + uuid.uuid4().hex[:10]).upper()
-    skip = _oracle_prepare(ora_t)
-    print("[untested] engine oracle dest_exists start", flush=True)
-    if skip:
-        cells.append(_cell("engine_route", "postgresql->oracle", "skipped", error=skip))
-    else:
-        dest = bind_live_engine("oracle", ora_t, tmp)
-        ora_map = [m for m in mappings if m["source"] != "updated_at"]
-        ora_map.append({
-            "source": "updated_at", "target": "",
-            "intentional_omit": True, "confidence": 1.0,
-        })
-        try:
-            result = (
-                _xfer_bounded(
-                    src, dest, mappings=ora_map, skip_preflight=True, timeout_s=25.0,
-                )
-                if not isinstance(dest, str) else None
-            )
-            dest_n = _oracle_count(ora_t) if result and result.success else None
-            ok = bool(result and result.success and dest_n == 2)
-            cells.append(_cell(
-                "engine_route", "postgresql->oracle",
-                "passed" if ok else "failed",
-                dest_rows=dest_n, dest_exists=True, skip_preflight=True,
-                error="" if ok else str((result.error if result else dest) or "")[:300],
-            ))
-            print(
-                f"[untested] engine oracle dest_exists "
-                f"{'passed' if ok else 'failed'} dest={dest_n}",
-                flush=True,
-            )
-        except Exception as exc:
-            cells.append(_cell(
-                "engine_route", "postgresql->oracle", "failed",
-                error=str(exc)[:300],
-            ))
-        finally:
-            try:
-                import oracledb
-                conn = oracledb.connect(
-                    user="dataflow", password=_oracle_password(),
-                    dsn="localhost:1521/XEPDB1",
-                )
-                try:
-                    conn.cursor().execute(
-                        f"BEGIN EXECUTE IMMEDIATE 'DROP TABLE {ora_t}'; "
-                        "EXCEPTION WHEN OTHERS THEN NULL; END;"
-                    )
-                    conn.commit()
-                finally:
-                    conn.close()
-            except Exception:
-                pass
+    cells.append(_run_oracle_dest_exists_isolated(tmp))
     return cells
+
+
+def _oracle_dest_exists_selfcontained(tmp: Path) -> dict[str, Any]:
+    """Fresh-process Oracle dest-exists. Combined pytest leaves thin-client hangs."""
+    src_t = uniq("ut_ora_s")
+    _seed_pg_simple(src_t, rows=2)
+    ora_t = ("UT" + uuid.uuid4().hex[:10]).upper()
+    print("[untested] engine oracle dest_exists start", flush=True)
+    skip = _oracle_prepare(ora_t)
+    if skip:
+        drop_pg_table(src_t)
+        return _cell("engine_route", "postgresql->oracle", "skipped", error=skip)
+    dest = bind_live_engine("oracle", ora_t, tmp)
+    ora_map = [
+        {"source": "id", "target": "id", "confidence": 0.99},
+        {"source": "amount", "target": "amount", "confidence": 0.99},
+        {"source": "code", "target": "code", "confidence": 0.99},
+        {"source": "updated_at", "target": "", "intentional_omit": True, "confidence": 1.0},
+    ]
+    try:
+        src = pg_endpoint(src_t)
+        result = (
+            _xfer(src, dest, mappings=ora_map, skip_preflight=True)
+            if not isinstance(dest, str) else None
+        )
+        dest_n = _oracle_count(ora_t) if result and result.success else None
+        ok = bool(result and result.success and dest_n == 2)
+        cell = _cell(
+            "engine_route", "postgresql->oracle",
+            "passed" if ok else "failed",
+            dest_rows=dest_n, dest_exists=True, skip_preflight=True,
+            isolated_process=True,
+            error="" if ok else str((result.error if result else dest) or "")[:300],
+        )
+        print(
+            f"[untested] engine oracle dest_exists "
+            f"{'passed' if ok else 'failed'} dest={dest_n}",
+            flush=True,
+        )
+        return cell
+    except Exception as exc:
+        return _cell("engine_route", "postgresql->oracle", "failed", error=str(exc)[:300])
+    finally:
+        drop_pg_table(src_t)
+        try:
+            import oracledb
+            conn = oracledb.connect(
+                user="dataflow", password=_oracle_password(),
+                dsn="localhost:1521/XEPDB1",
+            )
+            try:
+                conn.cursor().execute(
+                    f"BEGIN EXECUTE IMMEDIATE 'DROP TABLE {ora_t}'; "
+                    "EXCEPTION WHEN OTHERS THEN NULL; END;"
+                )
+                conn.commit()
+            finally:
+                conn.close()
+        except Exception:
+            pass
+
+
+def _run_oracle_dest_exists_isolated(tmp: Path, timeout_s: float = 40.0) -> dict[str, Any]:
+    api_root = Path(__file__).resolve().parents[1]
+    out_path = tmp / "oracle_dest_exists.json"
+    env = os.environ.copy()
+    env["PYTHONPATH"] = os.pathsep.join(
+        [
+            str(api_root),
+            str(api_root / "src"),
+            str(api_root.parent.parent / "packages" / "preflight" / "src"),
+            env.get("PYTHONPATH", ""),
+        ]
+    )
+    env["DF_UNTESTED_ENGINE_TMP"] = str(tmp)
+    env["DF_UNTESTED_ORACLE_OUT"] = str(out_path)
+    runner = (
+        "import json, os\n"
+        "from pathlib import Path\n"
+        "from tests.desktop_lab_untested import _oracle_dest_exists_selfcontained\n"
+        "cell = _oracle_dest_exists_selfcontained("
+        "Path(os.environ['DF_UNTESTED_ENGINE_TMP']))\n"
+        "Path(os.environ['DF_UNTESTED_ORACLE_OUT']).write_text("
+        "json.dumps(cell, default=str))\n"
+    )
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-c", runner],
+            cwd=str(api_root),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+        )
+    except subprocess.TimeoutExpired:
+        return _cell(
+            "engine_route", "postgresql->oracle", "failed",
+            error=f"oracle dest-exists exceeded {timeout_s:.0f}s (fail-closed, not skipped)",
+        )
+    if proc.returncode != 0 or not out_path.is_file():
+        tail = ((proc.stderr or "") + (proc.stdout or ""))[-300:]
+        return _cell(
+            "engine_route", "postgresql->oracle", "failed",
+            error=tail or f"oracle isolate exit {proc.returncode}",
+        )
+    loaded = json.loads(out_path.read_text())
+    if isinstance(loaded, dict) and loaded.get("name") == "postgresql->oracle":
+        return loaded
+    return _cell(
+        "engine_route", "postgresql->oracle", "failed",
+        error="oracle isolate wrote unexpected payload",
+    )
 
 
 def _run_engine_routes(tmp: Path) -> list[dict[str, Any]]:
