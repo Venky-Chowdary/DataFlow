@@ -329,6 +329,48 @@ def delete_by_primary_keys(
     # Single-column shorthand keeps the existing IN (...) fast path.
     pk_col = pk_cols[0] if len(pk_cols) == 1 else pk_cols
     dt = (db_type or "").lower().strip()
+    from services.dest_precount import _object_store_kind
+
+    store = _object_store_kind(dt)
+    if store in {"s3", "gcs", "adls"}:
+        from connectors.object_store_leftover import (
+            delete_by_primary_keys as _object_store_delete,
+        )
+
+        return _object_store_delete(
+            dt,
+            cfg,
+            table_name,
+            pk_cols,
+            list(keys),
+            schema=schema,
+        )
+    if dt == "snowflake":
+        from services.dest_precount import _snowflake_delete_keys
+
+        try:
+            return _snowflake_delete_keys(
+                cfg,
+                schema=str(schema or cfg.get("schema") or ""),
+                table_name=table_name,
+                cols=pk_cols,
+                keys=list(keys),
+            )
+        except Exception as exc:
+            raise DestinationDeleteError(table_name, exc) from exc
+    if dt == "bigquery":
+        from services.dest_precount import _bigquery_delete_keys
+
+        try:
+            return _bigquery_delete_keys(
+                cfg,
+                schema=str(schema or cfg.get("schema") or ""),
+                table_name=table_name,
+                cols=pk_cols,
+                keys=list(keys),
+            )
+        except Exception as exc:
+            raise DestinationDeleteError(table_name, exc) from exc
     # Iceberg owns scan + LSN filter + CoW overwrite (filesystem or pyiceberg).
     if dt in {"iceberg", "apache_iceberg"}:
         from connectors.iceberg_writer import delete_by_primary_keys as _iceberg_delete

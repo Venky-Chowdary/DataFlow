@@ -163,9 +163,9 @@ export type CatalogFamilyBadge = "Certified" | "Mixed" | "Planned";
 export const NOT_PROVEN: UnprovenRow[] = [
   {
     area: "Snowflake, BigQuery, S3 / ADLS / GCS",
-    status: "planned",
+    status: "unaudited",
     reason:
-      "Warehouse and object-store connectors ship in the catalog. Shared-sandbox live-matrix certification is completed on the customer tenant during onboarding.",
+      "Emulator leftover MERGE is measured on test_warehouse_emulator_leftover_merge_* (moto/MinIO/fake-gcs/Azurite dest 4→3, incremental no-op, dest-engine GET COUNT; fakesnow + BigQuery emulator dest-engine DELETE). Customer-tenant Snowflake/BQ/S3 PRODUCTION_SKU is not claimed.",
   },
   {
     area: "Salesforce, Stripe, Shopify, HubSpot",

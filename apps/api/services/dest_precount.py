@@ -676,6 +676,32 @@ def destination_key_hits(
         except Exception as exc:  # pragma: no cover
             logger.warning("Iceberg dest key census failed: %s", exc)
             return None
+    if _object_store_kind(db_type) in {"s3", "gcs", "adls"}:
+        try:
+            from connectors.object_store_leftover import object_store_key_hits
+
+            return object_store_key_hits(
+                db_type, cfg, table_name=table, cols=cols, keys=unique
+            )
+        except Exception as exc:
+            logger.warning("Object-store dest key census failed: %s", exc)
+            return None
+    if db_type == "snowflake":
+        try:
+            return _snowflake_key_hits(
+                cfg, schema=schema, table_name=table, cols=cols, keys=unique
+            )
+        except Exception as exc:
+            logger.warning("Snowflake dest key census failed: %s", exc)
+            return None
+    if db_type == "bigquery":
+        try:
+            return _bigquery_key_hits(
+                cfg, schema=schema, table_name=table, cols=cols, keys=unique
+            )
+        except Exception as exc:
+            logger.warning("BigQuery dest key census failed: %s", exc)
+            return None
     try:
         from services.dialect_profiles import warehouse_sql_quote_dialect
 
@@ -980,6 +1006,20 @@ def destination_key_list(
             rows = _iceberg_key_list(
                 cfg, schema=schema, table_name=table, cols=cols
             )
+        elif _object_store_kind(db_type) in {"s3", "gcs", "adls"}:
+            from connectors.object_store_leftover import object_store_key_list
+
+            rows = object_store_key_list(
+                db_type, cfg, table_name=table, cols=cols
+            )
+        elif db_type == "snowflake":
+            rows = _snowflake_key_list(
+                cfg, schema=schema, table_name=table, cols=cols
+            )
+        elif db_type == "bigquery":
+            rows = _bigquery_key_list(
+                cfg, schema=schema, table_name=table, cols=cols
+            )
         elif db_type == "clickhouse":
             rows = _clickhouse_key_list(
                 cfg, schema=schema, table_name=table, cols=cols
@@ -1054,7 +1094,7 @@ def _is_missing_warehouse_relation(exc: BaseException, dialect: str) -> bool:
     if dialect == "snowflake":
         return "does not exist" in combined and "250001" not in combined and "password" not in combined
     if dialect == "bigquery":
-        return "not found: table" in combined
+        return "not found: table" in combined or "table not found" in combined
     if dialect == "duckdb":
         return "catalog error" in combined and "does not exist" in combined
     if dialect == "databricks":
@@ -1246,7 +1286,7 @@ def _bigquery_row_count(
             port=int(cfg.get("port") or 0),
         )
         table_id = f"`{project}`.`{dataset}`.`{table_name}`"
-        rows = list(client.query(f"SELECT COUNT(*) AS n FROM {table_id}").result())  # nosec B608
+        rows = _bigquery_run_query(client, f"SELECT COUNT(*) AS n FROM {table_id}")  # nosec B608
         return int(rows[0][0]) if rows else 0
     except NotFound:
         return 0
@@ -1255,6 +1295,283 @@ def _bigquery_row_count(
             return 0
         logger.warning("BigQuery dest COUNT(*) failed: %s", exc)
         return None
+
+
+def _bigquery_no_retry():
+    from google.api_core import retry as retries
+
+    return retries.Retry(predicate=lambda _exc: False, deadline=8.0)
+
+
+def _bigquery_run_job(client: Any, sql: str) -> Any:
+    """One dest-engine job. Missing-table 500s must not retry-sleep.
+
+    goccy/bigquery-emulator answers ``Table not found`` as InternalServerError
+    500. The google client default retry would sleep until pytest/operator
+    timeout instead of treating dest-missing as 0.
+    """
+    no_retry = _bigquery_no_retry()
+    job = client.query(sql, retry=no_retry, timeout=8.0, job_retry=None)
+    job.result(retry=no_retry, timeout=8.0, job_retry=None)
+    return job
+
+
+def _bigquery_run_query(client: Any, sql: str) -> list[Any]:
+    return list(_bigquery_run_job(client, sql))
+
+
+def _snowflake_key_list(
+    cfg: Mapping[str, Any],
+    *,
+    schema: str,
+    table_name: str,
+    cols: list[str],
+) -> list[tuple[Any, ...]] | None:
+    """Dest-engine PK tuples through the native Snowflake driver.
+
+    Same connection and stored-name resolution as ``COUNT(*)``. Never
+    ``INFORMATION_SCHEMA`` row estimates. Missing table is ``[]``.
+    """
+    from connectors.snowflake_conn import (
+        _snowflake_object_missing,
+        get_connection,
+        normalize_account,
+        resolve_snowflake_table_name,
+        snowflake_qualified_table,
+    )
+    from connectors.sql_identifiers import quote_sql_identifier, require_safe_identifier
+
+    sch = str(schema or cfg.get("schema") or "").strip() or "PUBLIC"
+    warehouse = str(cfg.get("warehouse") or "")
+    conn = None
+    try:
+        conn = get_connection(
+            account=normalize_account(str(cfg.get("host") or "")),
+            username=str(cfg.get("username") or ""),
+            password=str(cfg.get("password") or ""),
+            database=str(cfg.get("database") or ""),
+            schema=sch,
+            warehouse=warehouse,
+            connection_string=str(cfg.get("connection_string") or ""),
+            role=str(cfg.get("role") or ""),
+            private_key=str(cfg.get("private_key") or ""),
+            private_key_passphrase=str(cfg.get("private_key_passphrase") or ""),
+        )
+        with conn.cursor() as cur:
+            if warehouse:
+                try:
+                    wh = require_safe_identifier(warehouse, preserve_case=True)
+                    cur.execute(f"USE WAREHOUSE {quote_sql_identifier(wh)}")
+                except Exception as exc:
+                    logger.warning("Snowflake USE WAREHOUSE failed: %s", exc)
+            resolved = resolve_snowflake_table_name(cur, sch, table_name)
+            if resolved is None:
+                return []
+            qualified = snowflake_qualified_table(sch, resolved)
+            col_sql = ", ".join(quote_sql_identifier(c) for c in cols)
+            cur.execute(f"SELECT {col_sql} FROM {qualified}")  # nosec B608
+            fetched = cur.fetchall() or []
+    except Exception as exc:
+        if _snowflake_object_missing(exc):
+            return []
+        logger.warning("Snowflake dest key list failed: %s", exc)
+        return None
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception as exc:
+                logger.debug("Snowflake close failed: %s", exc)
+    width = len(cols)
+    out: list[tuple[Any, ...]] = []
+    for row in fetched:
+        tup = tuple(row[:width])
+        if len(tup) != width or any(is_null_evidence(v) for v in tup):
+            continue
+        out.append(tup)
+    return out
+
+
+def _snowflake_key_hits(
+    cfg: Mapping[str, Any],
+    *,
+    schema: str,
+    table_name: str,
+    cols: list[str],
+    keys: list[tuple[Any, ...]],
+) -> int | None:
+    listed = _snowflake_key_list(cfg, schema=schema, table_name=table_name, cols=cols)
+    if listed is None:
+        return None
+    wanted = {norm for key in keys if (norm := _norm_dest_key(key)) is not None}
+    return sum(1 for tup in listed if _norm_dest_key(tup) in wanted)
+
+
+def _snowflake_delete_keys(
+    cfg: Mapping[str, Any],
+    *,
+    schema: str,
+    table_name: str,
+    cols: list[str],
+    keys: Sequence[str],
+) -> int:
+    """Hard-DELETE leftover PKs through the native Snowflake driver."""
+    from connectors.snowflake_conn import (
+        get_connection,
+        normalize_account,
+        resolve_snowflake_table_name,
+        snowflake_qualified_table,
+    )
+    from connectors.sql_identifiers import quote_sql_identifier, require_safe_identifier
+    from services.row_conservation import parse_delete_keys
+
+    leftover = parse_delete_keys(list(keys), len(cols))
+    if not leftover:
+        return 0
+    sch = str(schema or cfg.get("schema") or "").strip() or "PUBLIC"
+    warehouse = str(cfg.get("warehouse") or "")
+    conn = get_connection(
+        account=normalize_account(str(cfg.get("host") or "")),
+        username=str(cfg.get("username") or ""),
+        password=str(cfg.get("password") or ""),
+        database=str(cfg.get("database") or ""),
+        schema=sch,
+        warehouse=warehouse,
+        connection_string=str(cfg.get("connection_string") or ""),
+        role=str(cfg.get("role") or ""),
+        private_key=str(cfg.get("private_key") or ""),
+        private_key_passphrase=str(cfg.get("private_key_passphrase") or ""),
+    )
+    try:
+        with conn.cursor() as cur:
+            if warehouse:
+                try:
+                    wh = require_safe_identifier(warehouse, preserve_case=True)
+                    cur.execute(f"USE WAREHOUSE {quote_sql_identifier(wh)}")
+                except Exception as exc:
+                    logger.warning("Snowflake USE WAREHOUSE failed: %s", exc)
+            resolved = resolve_snowflake_table_name(cur, sch, table_name)
+            if resolved is None:
+                return 0
+            qualified = snowflake_qualified_table(sch, resolved)
+            qcols = [quote_sql_identifier(c) for c in cols]
+            deleted = 0
+            for tup in leftover:
+                clause = " AND ".join(f"{q} = %s" for q in qcols)
+                cur.execute(f"DELETE FROM {qualified} WHERE {clause}", list(tup))  # nosec B608
+                n = cur.rowcount
+                deleted += 1 if n is None or int(n) < 0 else int(n)
+            conn.commit()
+        return deleted
+    finally:
+        conn.close()
+
+
+def _bigquery_key_list(
+    cfg: Mapping[str, Any],
+    *,
+    schema: str,
+    table_name: str,
+    cols: list[str],
+) -> list[tuple[Any, ...]] | None:
+    """Dest-engine PK tuples through the native BigQuery client.
+
+    A query, not ``Table.num_rows`` / catalog stats. Missing table is ``[]``.
+    """
+    from google.api_core.exceptions import NotFound
+
+    from connectors.bigquery_conn import get_client
+    from connectors.sql_identifiers import quote_sql_identifier
+
+    project = str(cfg.get("database") or cfg.get("project_id") or "")
+    dataset = str(schema or cfg.get("schema") or cfg.get("dataset") or "")
+    if not project or not dataset:
+        return None
+    try:
+        client = get_client(
+            project_id=project,
+            credentials_path=str(cfg.get("connection_string") or ""),
+            service_account=str(cfg.get("service_account") or ""),
+            host=str(cfg.get("host") or ""),
+            port=int(cfg.get("port") or 0),
+        )
+        table_id = f"`{project}`.`{dataset}`.`{table_name}`"
+        col_sql = ", ".join(quote_sql_identifier(c, "`") for c in cols)
+        fetched = _bigquery_run_query(client, f"SELECT {col_sql} FROM {table_id}")  # nosec B608
+    except NotFound:
+        return []
+    except Exception as exc:
+        if _is_missing_warehouse_relation(exc, "bigquery"):
+            return []
+        logger.warning("BigQuery dest key list failed: %s", exc)
+        return None
+    width = len(cols)
+    out: list[tuple[Any, ...]] = []
+    for row in fetched:
+        try:
+            tup = tuple(row[c] for c in cols)
+        except Exception:
+            tup = tuple(row[i] for i in range(width))
+        if len(tup) != width or any(is_null_evidence(v) for v in tup):
+            continue
+        out.append(tup)
+    return out
+
+
+def _bigquery_key_hits(
+    cfg: Mapping[str, Any],
+    *,
+    schema: str,
+    table_name: str,
+    cols: list[str],
+    keys: list[tuple[Any, ...]],
+) -> int | None:
+    listed = _bigquery_key_list(cfg, schema=schema, table_name=table_name, cols=cols)
+    if listed is None:
+        return None
+    wanted = {norm for key in keys if (norm := _norm_dest_key(key)) is not None}
+    return sum(1 for tup in listed if _norm_dest_key(tup) in wanted)
+
+
+def _bigquery_delete_keys(
+    cfg: Mapping[str, Any],
+    *,
+    schema: str,
+    table_name: str,
+    cols: list[str],
+    keys: Sequence[str],
+) -> int:
+    """Hard-DELETE leftover PKs through the native BigQuery client."""
+    from connectors.bigquery_conn import get_client
+    from connectors.sql_identifiers import quote_sql_identifier
+    from services.row_conservation import parse_delete_keys
+
+    leftover = parse_delete_keys(list(keys), len(cols))
+    if not leftover:
+        return 0
+    project = str(cfg.get("database") or cfg.get("project_id") or "")
+    dataset = str(schema or cfg.get("schema") or cfg.get("dataset") or "")
+    if not project or not dataset:
+        raise RuntimeError("BigQuery leftover MERGE needs project and dataset")
+    client = get_client(
+        project_id=project,
+        credentials_path=str(cfg.get("connection_string") or ""),
+        service_account=str(cfg.get("service_account") or ""),
+        host=str(cfg.get("host") or ""),
+        port=int(cfg.get("port") or 0),
+    )
+    table_id = f"`{project}`.`{dataset}`.`{table_name}`"
+    qcols = [quote_sql_identifier(c, "`") for c in cols]
+    deleted = 0
+    for tup in leftover:
+        clause = " AND ".join(
+            f"CAST({q} AS STRING) = '{str(part).replace(chr(39), chr(39) + chr(39))}'"
+            for q, part in zip(qcols, tup)
+        )
+        job = _bigquery_run_job(client, f"DELETE FROM {table_id} WHERE {clause}")  # nosec B608
+        n = getattr(job, "num_dml_affected_rows", None)
+        deleted += 1 if n is None or int(n) < 0 else int(n)
+    return deleted
 
 
 def _clickhouse_row_count(
