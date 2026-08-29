@@ -74,6 +74,10 @@ def physical_column_types(
     wanted = {str(c).lower() for c in (columns or []) if c}
     out: dict[str, str] = {}
     for col in info.get("columns") or []:
+        # Name-only lists (strings) have no DDL. Crash here left Oracle
+        # dest-exists hanging inside the thin transport after AttributeError.
+        if not isinstance(col, dict):
+            continue
         name = str(col.get("name") or "")
         ddl = str(col.get("inferred_type") or "")
         if not name or not ddl:

@@ -258,3 +258,91 @@ def test_bigquery_cross_dataset_recovery():
     assert result["ok"] is True
     assert result["schema"] == "analytics"
     assert [c["name"] for c in result["columns"]] == ["id", "title"]
+
+
+def test_oracle_single_table_probe_skips_owner_catalog_list():
+    """Dest-exists must not SELECT every owner table — that hung Oracle XE."""
+    executed: list[str] = []
+
+    class FakeResult:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def fetchall(self):
+            return self._rows
+
+    def execute(stmt, params=None):
+        sql = str(stmt).upper().replace("\n", " ")
+        executed.append(sql)
+        if "FROM ALL_TAB_COL" in sql:
+            return FakeResult([
+                ("ID", "NUMBER", 10, 0, "N", None, None, "NO", "NO", None, None),
+            ])
+        if "FROM ALL_TABLES" in sql:
+            raise AssertionError(f"owner catalog listed on single-table probe: {sql}")
+        return FakeResult([])
+
+    conn = MagicMock()
+    conn.execute.side_effect = execute
+    conn_cm = MagicMock()
+    conn_cm.__enter__.return_value = conn
+    conn_cm.__exit__.return_value = False
+    engine = MagicMock()
+    engine.connect.return_value = conn_cm
+
+    with patch("connectors.generic_sql._engine", return_value=engine), patch(
+        "services.sql_object_identity.resolve_object_identity",
+        return_value=SimpleNamespace(exists=True, table="JOBS", schema="APP"),
+    ):
+        result = _introspect_oracle(
+            host="h", port=1521, database="ORCL", username="app", password="p",
+            schema="APP", connection_string="", table="JOBS",
+            strict_namespace=True,
+        )
+    assert result["ok"] is True
+    assert [c["name"] for c in result["columns"]] == ["ID"]
+    assert not any(
+        "SELECT TABLE_NAME FROM ALL_TABLES WHERE OWNER" in sql
+        or "SELECT TABLE_NAME FROM USER_TABLES" in sql
+        for sql in executed
+    )
+
+
+def test_sqlserver_single_table_probe_skips_schema_catalog_list():
+    executed: list[str] = []
+
+    class FakeResult:
+        def __init__(self, rows):
+            self._rows = rows
+
+        def fetchall(self):
+            return self._rows
+
+    def execute(stmt, params=None):
+        sql = str(stmt).upper().replace("\n", " ")
+        executed.append(sql)
+        if "INFORMATION_SCHEMA.COLUMNS" in sql:
+            return FakeResult([
+                ("id", "int", 10, 0, None, None, None, "NO", None),
+            ])
+        if "INFORMATION_SCHEMA.TABLES" in sql:
+            raise AssertionError("schema catalog listed on single-table probe")
+        return FakeResult([])
+
+    conn = MagicMock()
+    conn.execute.side_effect = execute
+    conn_cm = MagicMock()
+    conn_cm.__enter__.return_value = conn
+    conn_cm.__exit__.return_value = False
+    engine = MagicMock()
+    engine.connect.return_value = conn_cm
+
+    with patch("connectors.generic_sql._engine", return_value=engine):
+        result = _introspect_sqlserver(
+            host="h", port=1433, database="dataflow", username="sa", password="p",
+            schema="dbo", connection_string="", table="jobs",
+            strict_namespace=True,
+        )
+    assert result["ok"] is True
+    assert [c["name"] for c in result["columns"]] == ["id"]
+    assert not any("INFORMATION_SCHEMA.TABLES" in sql for sql in executed)

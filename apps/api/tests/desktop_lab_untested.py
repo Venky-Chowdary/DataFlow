@@ -23,6 +23,8 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import subprocess
+import sys
 import tempfile
 import uuid
 from datetime import datetime, timezone
@@ -1743,6 +1745,69 @@ def _run_sku_honesty() -> list[dict[str, Any]]:
     )]
 
 
+def _run_engine_routes_isolated(
+    tmp: Path,
+    timeout_s: float = 120.0,
+) -> list[dict[str, Any]]:
+    """Process-bound engine routes so Oracle thin / Google retries cannot hang pytest.
+
+    Fail-closed on timeout — never skip-as-green.
+    """
+    api_root = Path(__file__).resolve().parents[1]
+    out_path = tmp / "engine_routes.json"
+    env = os.environ.copy()
+    env["PYTHONPATH"] = os.pathsep.join(
+        [
+            str(api_root),
+            str(api_root / "src"),
+            str(api_root.parent.parent / "packages" / "preflight" / "src"),
+            env.get("PYTHONPATH", ""),
+        ]
+    )
+    env["DF_UNTESTED_ENGINE_TMP"] = str(tmp)
+    env["DF_UNTESTED_ENGINE_OUT"] = str(out_path)
+    runner = (
+        "import json, os\n"
+        "from pathlib import Path\n"
+        "from tests.desktop_lab_untested import _run_engine_routes\n"
+        "cells = _run_engine_routes(Path(os.environ['DF_UNTESTED_ENGINE_TMP']))\n"
+        "Path(os.environ['DF_UNTESTED_ENGINE_OUT']).write_text("
+        "json.dumps(cells, default=str))\n"
+    )
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-c", runner],
+            cwd=str(api_root),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+        )
+    except subprocess.TimeoutExpired:
+        return [_cell(
+            "engine_route", "engine_routes_isolated", "failed",
+            error=f"engine routes exceeded {timeout_s:.0f}s (fail-closed, not skipped)",
+        )]
+    if proc.returncode != 0:
+        tail = ((proc.stderr or "") + (proc.stdout or ""))[-400:]
+        return [_cell(
+            "engine_route", "engine_routes_isolated", "failed",
+            error=tail or f"exit {proc.returncode}",
+        )]
+    if not out_path.is_file():
+        return [_cell(
+            "engine_route", "engine_routes_isolated", "failed",
+            error="engine subprocess wrote no cell file",
+        )]
+    loaded = json.loads(out_path.read_text())
+    if not isinstance(loaded, list) or not loaded:
+        return [_cell(
+            "engine_route", "engine_routes_isolated", "failed",
+            error="engine subprocess returned empty cells",
+        )]
+    return loaded
+
+
 def run_desktop_lab_untested(*, persist: bool = True) -> dict[str, Any]:
     require_ports(5432, 3306)
     tmp = Path(tempfile.mkdtemp(prefix="df-untested-"))
@@ -1766,7 +1831,7 @@ def run_desktop_lab_untested(*, persist: bool = True) -> dict[str, Any]:
     _extend("cdc_pg", [_run_cdc_postgres()])
     _extend("g14", _run_g14())
     _extend("more_types", _run_more_types())
-    _extend("engines", _run_engine_routes(tmp))
+    _extend("engines", _run_engine_routes_isolated(tmp))
 
     passed = sum(1 for c in cells if c["status"] == "passed")
     failed = sum(1 for c in cells if c["status"] == "failed")
