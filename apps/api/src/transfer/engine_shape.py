@@ -66,7 +66,7 @@ def _stamp_shape_evidence(
     # earlier passes included, while this runner only shaped the tail. Taking
     # the runner's smaller tally would drop the earlier passes' removed rows
     # out of conservation and read a correct load as short delivery.
-    for key in ("rows_shaped_out", "rows_shaped_in", "rows_shape_filtered"):
+    for key in ("rows_shaped_out", "rows_shaped_in", "rows_shape_filtered", "rows_expanded"):
         prior = dest_summary.get(key)
         if isinstance(prior, int) and prior > int(terms.get(key, 0) or 0):
             terms[key] = prior
@@ -102,9 +102,7 @@ def _shaped_population_rows(
 
     def _iter() -> Iterator[dict[str, Any]]:
         for row in rows:
-            shaped = probe.records([row])
-            if shaped:
-                yield shaped[0]
+            yield from probe.records([row])
 
     return _iter()
 

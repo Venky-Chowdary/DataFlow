@@ -151,21 +151,19 @@ async def preview_recipe(body: _PreviewBody) -> dict[str, Any]:
     refusal: dict[str, Any] | None = None
     for row in rows:
         try:
-            result = engine.apply_row(row)
+            shaped.extend(engine.apply_records(row))
         except ShapeRowError as exc:
             # A refusal is the recipe's answer for this row, and the preview's job
             # is to show it now rather than let Execute discover it at scale.
             refusal = exc.as_dict()
             break
-        if result is not None:
-            shaped.append(result)
 
+    out_columns = list(engine.output_columns) or list(recipe.output_columns) or _columns_of(shaped or rows)
     profiles = (
-        profile_columns(shaped or rows, columns=list(recipe.output_columns) or None)
+        profile_columns(shaped or rows, columns=out_columns or None)
         if body.include_profile
         else []
     )
-    out_columns = list(recipe.output_columns) or _columns_of(shaped or rows)
     out_types, retyped = shaped_column_types(
         out_columns,
         declared_types=body.column_types,
@@ -173,7 +171,7 @@ async def preview_recipe(body: _PreviewBody) -> dict[str, Any]:
         rows=shaped,
     )
     return {
-        "recipe": _identity(recipe),
+        "recipe": _identity(recipe, output_columns=out_columns),
         "sampled_rows": len(rows),
         "column_types": out_types,
         "retyped_columns": retyped,
@@ -201,14 +199,18 @@ def _parse(payload: Any, columns: list[str]) -> ShapeRecipe:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-def _identity(recipe: ShapeRecipe) -> dict[str, Any]:
+def _identity(
+    recipe: ShapeRecipe,
+    *,
+    output_columns: list[str] | None = None,
+) -> dict[str, Any]:
     return {
         "valid": True,
         "recipe_hash": recipe.recipe_hash,
         "step_count": len(recipe.enabled_steps),
         "has_active_step": recipe.has_active_step,
         "input_columns": list(recipe.input_columns),
-        "output_columns": list(recipe.output_columns),
+        "output_columns": list(output_columns if output_columns is not None else recipe.output_columns),
         "summary": recipe.describe(),
         "steps": [s.to_wire() for s in recipe.steps],
     }

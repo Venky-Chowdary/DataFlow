@@ -53,6 +53,9 @@ class ShapeRunner:
 
     @property
     def output_columns(self) -> tuple[str, ...]:
+        live = getattr(self._engine, "output_columns", None)
+        if live:
+            return live
         return self.recipe.output_columns
 
     @property
@@ -86,14 +89,13 @@ class ShapeRunner:
         The recipe can add, drop and rename columns, so the header row it returns
         is the recipe's output order — the caller must use it, not the one it had.
         """
-        out_headers = list(self.recipe.output_columns or headers)
         shaped_rows: list[list[Any]] = []
         for row in rows:
             record = {h: (row[i] if i < len(row) else None) for i, h in enumerate(headers)}
-            shaped = self._engine.apply_row(record)
-            if shaped is None:
-                continue
-            shaped_rows.append([shaped.get(h) for h in out_headers])
+            for shaped in self._engine.apply_records(record):
+                out_headers = list(self.output_columns or headers)
+                shaped_rows.append([shaped.get(h) for h in out_headers])
+        out_headers = list(self.output_columns or headers)
         return out_headers, shaped_rows
 
     def report(self) -> dict[str, Any]:
@@ -305,6 +307,7 @@ def shape_ledger_terms(runner: ShapeRunner | None) -> dict[str, Any]:
         "rows_shaped_out": effect.rows_shaped_out + effect.rows_diverted,
         "rows_shape_filtered": effect.rows_shaped_out,
         "rows_shape_diverted": effect.rows_diverted,
+        "rows_expanded": effect.rows_expanded,
         "shape_cells_changed": effect.cells_changed,
         "shape_nulls_introduced": effect.nulls_introduced,
     }

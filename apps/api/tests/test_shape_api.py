@@ -45,6 +45,17 @@ def _suggestion(suggestions: list[dict], op: str, column: str) -> dict | None:
 # ---------------------------------------------------------------------------
 
 
+def test_a_json_array_column_suggests_unnest_as_a_decision():
+    rows = [
+        {"line_items": '[{"sku":"A"},{"sku":"B"}]'},
+        {"line_items": '[{"sku":"C"}]'},
+    ]
+    found = _suggestion(suggest_steps(profile_columns(rows)), "unnest_json", "line_items")
+    assert found is not None
+    assert found["severity"] == "decision"
+    assert found["step"]["options"]["to"] == "line_items_item"
+
+
 def test_a_narrowing_decimal_is_a_blocking_suggestion_with_the_carriers_scale():
     rows = [{"arr_time": "1.5"}, {"arr_time": "1.123456789"}, {"arr_time": "2.987654321"}]
     profiles = profile_columns(rows)
@@ -161,7 +172,7 @@ def test_blanks_and_declared_columns_survive_a_column_missing_from_every_row():
 def test_the_catalog_states_the_operations_the_engine_will_accept(client):
     body = client.get("/api/v1/shape/catalog").json()
     ops = {op["op"] for op in body["operations"]}
-    assert {"trim", "round_number", "derive_column", "filter_rows"} <= ops
+    assert {"trim", "round_number", "derive_column", "filter_rows", "unnest_json", "flatten_json"} <= ops
     assert "join" not in ops
     assert "join" in body["post_load_only"]["operations"]
     assert {p["value"] for p in body["error_policies"]} == {"refuse", "divert", "null"}
@@ -281,6 +292,29 @@ def test_a_filtered_row_is_reported_as_shaped_out_not_as_a_finding(client):
     assert body["after"] == [{"status": "ok"}]
     # Row counts moved, so cell highlighting is withheld rather than misaligned.
     assert body["changed_cells"] == []
+
+
+def test_preview_unnest_reports_expansion_as_a_ledger_term(client):
+    body = client.post(
+        "/api/v1/shape/preview",
+        json={
+            "sample_rows": [
+                {"order_id": "1", "line_items": '[{"sku":"A"},{"sku":"B"}]'},
+            ],
+            "source_columns": ["order_id", "line_items"],
+            "recipe": {
+                "steps": [
+                    {"op": "unnest_json", "column": "line_items", "options": {"to": "item"}},
+                ]
+            },
+        },
+    ).json()
+    assert body["effect"]["rows_in"] == 1
+    assert body["effect"]["rows_expanded"] == 1
+    assert body["effect"]["rows_out"] == 2
+    assert body["effect"]["balanced"] is True
+    assert len(body["after"]) == 2
+    assert "item" in body["recipe"]["output_columns"]
 
 
 def test_a_refusing_row_stops_the_preview_and_names_the_row(client):

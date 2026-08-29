@@ -88,6 +88,7 @@ test("column family follows the profile, not a stacked guess", () => {
   assert.equal(columnFamily(profile({ logical_type: "date" })), "datetime");
   assert.equal(columnFamily(profile({ logical_type: "boolean", boolean_like: 100, non_blank: 100 })), "boolean");
   assert.equal(columnFamily(profile({ logical_type: "string", non_blank: 10 })), "text");
+  assert.equal(columnFamily(profile({ logical_type: "json_array", non_blank: 10 })), "json");
   assert.equal(columnFamily(profile({ rows: 0, non_blank: 0 })), "empty");
 });
 

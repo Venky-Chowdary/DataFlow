@@ -1002,6 +1002,9 @@ class ConservationLedger:
     # destination, quarantined, nor skipped. Treat as potential silent loss",
     # which is a different sentence from "the recipe removed them".
     rows_shaped_out: int = 0
+    # Extra rows a declared unnest step added on the read. Dest COUNT is then
+    # larger than rows_read by instruction — a declared projection, not surplus.
+    rows_expanded: int = 0
     # The declared source filter's share of the rows removed on the read, kept
     # apart from the recipe's share so proof names the right authority: a filter
     # the operator wrote and a recipe the operator approved are two decisions.
@@ -1017,6 +1020,7 @@ class ConservationLedger:
             "rows_quarantined": self.rows_quarantined,
             "rows_skipped": self.rows_skipped,
             "rows_shaped_out": self.rows_shaped_out,
+            "rows_expanded": self.rows_expanded,
             "rows_source_filtered": self.rows_source_filtered,
             "shape_recipe_hash": self.shape_recipe_hash,
             "rows_coerced_null": self.rows_coerced_null,
@@ -1749,6 +1753,18 @@ def _removal_phrase(rows_shaped_out: int, rows_source_filtered: int) -> str:
     )
 
 
+def _expansion_phrase(rows_expanded: int) -> str:
+    """How extra rows an unnest step added are named in an operator-facing note."""
+    expanded = max(int(rows_expanded or 0), 0)
+    if not expanded:
+        return ""
+    return (
+        f" {expanded:,} row(s) were added by the approved transform recipe "
+        "(unnest): the destination holds the expanded image, which is a "
+        "declared projection, not a surplus."
+    )
+
+
 def account_population(
     *,
     rows_read: int | None,
@@ -1767,17 +1783,19 @@ def account_population(
     scd2: Mapping[str, Any] | None = None,
     rows_shaped_out: int = 0,
     rows_source_filtered: int = 0,
+    rows_expanded: int = 0,
 ) -> ConservationLedger:
-    """Close ``reader == dest_population + hold_outs + skipped + removed``, or say why not.
+    """Close ``reader + expanded == dest_population + hold_outs + skipped + removed``.
 
     Rows a declared source filter or an approved recipe removed on the read are
     counted by the reader and absent from the destination by instruction, so
-    they are stated on the accounted side. Every ledger carries them, including
-    the ones that refuse to balance, because "which program removed rows" is
-    part of reading why a run does not close.
+    they are stated on the accounted side. Rows an unnest step added are stated
+    on the read side so dest COUNT cannot be misread as surplus. Every ledger
+    carries both terms, including the ones that refuse to balance.
     """
     shaped_out = max(int(rows_shaped_out or 0), 0)
     source_filtered = max(int(rows_source_filtered or 0), 0)
+    expanded = max(int(rows_expanded or 0), 0)
     ledger = _close_population(
         rows_read=rows_read,
         dest_count=dest_count,
@@ -1795,13 +1813,16 @@ def account_population(
         scd2=scd2,
         removed=removed_on_read(shaped_out, source_filtered),
         removal_note=_removal_phrase(shaped_out, source_filtered),
+        expanded=expanded,
+        expansion_note=_expansion_phrase(expanded),
     )
-    if not (shaped_out or source_filtered):
+    if not (shaped_out or source_filtered or expanded):
         return ledger
     return replace(
         ledger,
         rows_shaped_out=shaped_out,
         rows_source_filtered=source_filtered,
+        rows_expanded=expanded,
     )
 
 
@@ -1823,6 +1844,8 @@ def _close_population(
     scd2: Mapping[str, Any] | None,
     removed: int,
     removal_note: str,
+    expanded: int = 0,
+    expansion_note: str = "",
 ) -> ConservationLedger:
     quarantined = hold_outs(rejected_rows, coerced_null_rows)
     skipped = int(rows_skipped or 0)
@@ -1924,6 +1947,7 @@ def _close_population(
         and quarantined == 0
         and skipped == 0
         and removed == 0
+        and expanded == 0
         and int(ack or 0) == 0
     ):
         return _empty_pass_ledger(
@@ -2038,7 +2062,7 @@ def _close_population(
     if kind == KIND_APPEND_DELTA:
         dest_short = "dest Δ"
 
-    unaccounted = read - (written + quarantined + skipped + removed)
+    unaccounted = (read + expanded) - (written + quarantined + skipped + removed)
     ack_delta = (written - ack) if ack is not None else None
     append_delta = written if kind == KIND_APPEND_DELTA else None
 
@@ -2086,6 +2110,7 @@ def _close_population(
             else f"Every source row is in the {dest_phrase}, quarantined, or skipped."
         )
     note += removal_note
+    note += expansion_note
     if ack_delta:
         sign = "more" if ack_delta > 0 else "fewer"
         note += (
@@ -2205,6 +2230,10 @@ def account_job(job: Mapping[str, Any]) -> ConservationLedger:
         recon.get("rows_shaped_out"),
         dest.get("rows_shaped_out"),
     )
+    expanded = _first_present_int(
+        recon.get("rows_expanded"),
+        dest.get("rows_expanded"),
+    )
     source_filtered = _first_present_int(
         recon.get("rows_source_filtered"),
         dest.get("rows_source_filtered"),
@@ -2228,6 +2257,7 @@ def account_job(job: Mapping[str, Any]) -> ConservationLedger:
     ledger = account_population(
         rows_shaped_out=shaped_out,
         rows_source_filtered=source_filtered,
+        rows_expanded=expanded,
         rows_read=_as_optional_int(recon.get("source_rows")),
         dest_count=dest_count,
         dest_count_source=dest_source,
@@ -2403,6 +2433,7 @@ def _compact_stream_ledger(
             "rows_quarantined": 0,
             "rows_skipped": 0,
             "rows_shaped_out": 0,
+            "rows_expanded": 0,
             "rows_source_filtered": 0,
             "shape_recipe_hash": "",
             "writer_ack": _as_optional_int(health.get("records_processed")),
@@ -2420,6 +2451,7 @@ def _compact_stream_ledger(
         "rows_quarantined": _first_present_int(raw.get("rows_quarantined")),
         "rows_skipped": _first_present_int(raw.get("rows_skipped")),
         "rows_shaped_out": _first_present_int(raw.get("rows_shaped_out")),
+        "rows_expanded": _first_present_int(raw.get("rows_expanded")),
         "rows_source_filtered": _first_present_int(raw.get("rows_source_filtered")),
         "shape_recipe_hash": str(raw.get("shape_recipe_hash") or ""),
         "writer_ack": _as_optional_int(raw.get("writer_ack")),
@@ -2447,6 +2479,7 @@ def account_job_streams(streams: Any) -> ConservationLedger | None:
     # includes each stream's removals; summing them is the only way the rolled
     # up balance closes on the same rows the stream ledgers closed on.
     shaped_out_total = sum(int(item["rows_shaped_out"] or 0) for item in per)
+    expanded_total = sum(int(item.get("rows_expanded") or 0) for item in per)
     source_filtered_total = sum(int(item["rows_source_filtered"] or 0) for item in per)
     removed_total = removed_on_read(shaped_out_total, source_filtered_total)
     hashes = {str(item["shape_recipe_hash"] or "") for item in per} - {""}
@@ -2467,7 +2500,7 @@ def account_job_streams(streams: Any) -> ConservationLedger | None:
         quarantined = sum(int(item["rows_quarantined"] or 0) for item in per)
         skipped = sum(int(item["rows_skipped"] or 0) for item in per)
         written_source = DEST_READBACK
-        unaccounted = rows_read - (rows_written + quarantined + skipped + removed_total)
+        unaccounted = (rows_read + expanded_total) - (rows_written + quarantined + skipped + removed_total)
     elif summable and only == KIND_MIRROR:
         active_count = sum(int(item["active_count"] or 0) for item in per)
         dest_count = (
@@ -2480,7 +2513,7 @@ def account_job_streams(streams: Any) -> ConservationLedger | None:
         quarantined = sum(int(item["rows_quarantined"] or 0) for item in per)
         skipped = sum(int(item["rows_skipped"] or 0) for item in per)
         written_source = DEST_ACTIVE_READBACK
-        unaccounted = rows_read - (rows_written + quarantined + skipped + removed_total)
+        unaccounted = (rows_read + expanded_total) - (rows_written + quarantined + skipped + removed_total)
     elif summable and only == KIND_VECTOR:
         dest_count = sum(int(item["dest_count"] or 0) for item in per)
         rows_written = dest_count
@@ -2488,7 +2521,7 @@ def account_job_streams(streams: Any) -> ConservationLedger | None:
         quarantined = sum(int(item["rows_quarantined"] or 0) for item in per)
         skipped = sum(int(item["rows_skipped"] or 0) for item in per)
         written_source = DEST_IDENTITY_READBACK
-        unaccounted = rows_read - (rows_written + quarantined + skipped + removed_total)
+        unaccounted = (rows_read + expanded_total) - (rows_written + quarantined + skipped + removed_total)
     elif summable and only == KIND_SCD2:
         dest_count = sum(int(item["dest_count"] or 0) for item in per)
         rows_written = dest_count
@@ -2496,7 +2529,7 @@ def account_job_streams(streams: Any) -> ConservationLedger | None:
         quarantined = sum(int(item["rows_quarantined"] or 0) for item in per)
         skipped = sum(int(item["rows_skipped"] or 0) for item in per)
         written_source = DEST_CURRENT_READBACK
-        unaccounted = rows_read - (rows_written + quarantined + skipped + removed_total)
+        unaccounted = (rows_read + expanded_total) - (rows_written + quarantined + skipped + removed_total)
     elif summable and only == KIND_EMPTY_PASS:
         dest_count = 0
         rows_written = 0
@@ -2530,7 +2563,7 @@ def account_job_streams(streams: Any) -> ConservationLedger | None:
             f"Job conservation closed across {len(per)} {only} stream(s). Dest "
             "population is the sum of dest-engine counts of the same kind. "
             "Writer ack is diagnostic."
-        ) + _removal_phrase(shaped_out_total, source_filtered_total)
+        ) + _removal_phrase(shaped_out_total, source_filtered_total) + _expansion_phrase(expanded_total)
     else:
         note = (
             f"Every stream ledger is closed ({', '.join(sorted(kinds))}). Dest "
@@ -2566,6 +2599,7 @@ def account_job_streams(streams: Any) -> ConservationLedger | None:
         summable=summable,
         per_stream=per,
         rows_shaped_out=shaped_out_total,
+        rows_expanded=expanded_total,
         rows_source_filtered=source_filtered_total,
         shape_recipe_hash=job_recipe_hash,
     )

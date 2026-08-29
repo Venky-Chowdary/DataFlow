@@ -2,14 +2,15 @@
 
 The engine is deliberately free of I/O: it takes rows and returns rows plus a
 `ShapeEffect` describing exactly what it did — rows in, rows out, rows removed,
-rows diverted, cells changed and nulls introduced, per step. That accounting is
-the point. Every competitor can apply a transformation; the reason this one
-records its own effect is that the ledger downstream must still balance:
+rows expanded, rows diverted, cells changed and nulls introduced, per step. That
+accounting is the point. Every competitor can apply a transformation; the reason
+this one records its own effect is that the ledger downstream must still balance:
 
-    rows_read = rows_shaped_out + dest_count + held_out + skipped
+    rows_read + rows_expanded = rows_shaped_out + dest_count + held_out + skipped
 
 A row a `filter_rows` step removed is a deliberate exclusion, not a data-quality
-finding, so it is counted separately from quarantine and never reported as one.
+finding. A row an `unnest_json` step added is a declared projection, not a
+surplus. Both are named so dest COUNT cannot be misread.
 
 Because every step is row-local, one row can be pushed through the whole recipe
 independently of its neighbours. That is what makes the same recipe safe in a
@@ -78,6 +79,7 @@ class StepEffect:
     rows_in: int = 0
     rows_out: int = 0
     rows_removed: int = 0
+    rows_expanded: int = 0
     rows_diverted: int = 0
     cells_changed: int = 0
     nulls_introduced: int = 0
@@ -93,6 +95,7 @@ class StepEffect:
             "rows_in": self.rows_in,
             "rows_out": self.rows_out,
             "rows_removed": self.rows_removed,
+            "rows_expanded": self.rows_expanded,
             "rows_diverted": self.rows_diverted,
             "cells_changed": self.cells_changed,
             "nulls_introduced": self.nulls_introduced,
@@ -128,6 +131,7 @@ class ShapeEffect:
     rows_in: int = 0
     rows_out: int = 0
     rows_shaped_out: int = 0
+    rows_expanded: int = 0
     rows_diverted: int = 0
     cells_changed: int = 0
     nulls_introduced: int = 0
@@ -136,14 +140,18 @@ class ShapeEffect:
 
     @property
     def balanced(self) -> bool:
-        """Every row read is accounted for: kept, filtered out, or diverted."""
-        return self.rows_in == self.rows_out + self.rows_shaped_out + self.rows_diverted
+        """Every row read, plus every row a step added, is kept, filtered, or diverted."""
+        return (
+            self.rows_in + self.rows_expanded
+            == self.rows_out + self.rows_shaped_out + self.rows_diverted
+        )
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "rows_in": self.rows_in,
             "rows_out": self.rows_out,
             "rows_shaped_out": self.rows_shaped_out,
+            "rows_expanded": self.rows_expanded,
             "rows_diverted": self.rows_diverted,
             "cells_changed": self.cells_changed,
             "nulls_introduced": self.nulls_introduced,
@@ -189,6 +197,12 @@ class ShapeEngine:
             ]
         )
         self._row_index = -1
+        self._output_columns: list[str] = list(recipe.output_columns or recipe.input_columns)
+
+    @property
+    def output_columns(self) -> tuple[str, ...]:
+        """Columns the recipe declared, plus any a flatten/unnest step discovered."""
+        return tuple(self._output_columns)
 
     # -- public API ---------------------------------------------------------
 
@@ -200,38 +214,72 @@ class ShapeEngine:
         """Shape a batch, continuing the row numbering from earlier batches."""
         out: list[dict[str, Any]] = []
         for record in records:
-            shaped = self.apply_row(record)
-            if shaped is not None:
-                out.append(shaped)
+            out.extend(self.apply_records(record))
         return out
 
-    def apply_row(self, record: Mapping[str, Any]) -> dict[str, Any] | None:
-        """Shape one row. ``None`` means the recipe removed or diverted it."""
+    def apply_records(self, record: Mapping[str, Any]) -> list[dict[str, Any]]:
+        """Shape one source row into zero or more output rows.
+
+        ``unnest_json`` is the only step that may return more than one row.
+        Filter and divert return zero. Every other step returns exactly one.
+        """
         self._row_index += 1
         self.effect.rows_in += 1
-        row: dict[str, Any] = dict(record)
+        current: list[dict[str, Any]] = [dict(record)]
         if not self.steps:
             self.effect.rows_out += 1
-            return row
+            self._discover(current[0])
+            return current
 
         for index, step in enumerate(self.steps):
             tally = self.effect.steps[index]
-            tally.rows_in += 1
-            try:
-                row = self._apply_step(step, index, row, tally)
-            except _Drop as drop:
-                if drop.diverted:
-                    tally.rows_diverted += 1
-                    self.effect.rows_diverted += 1
-                    self._sample_diverted(drop, row)
-                else:
-                    tally.rows_removed += 1
-                    self.effect.rows_shaped_out += 1
-                return None
-            tally.rows_out += 1
+            next_rows: list[dict[str, Any]] = []
+            for row in current:
+                tally.rows_in += 1
+                try:
+                    result = self._apply_step(step, index, row, tally)
+                except _Drop as drop:
+                    if drop.diverted:
+                        tally.rows_diverted += 1
+                        self.effect.rows_diverted += 1
+                        self._sample_diverted(drop, row)
+                    else:
+                        tally.rows_removed += 1
+                        self.effect.rows_shaped_out += 1
+                    continue
+                produced = result if isinstance(result, list) else [result]
+                extra = max(len(produced) - 1, 0)
+                if extra:
+                    tally.rows_expanded += extra
+                    self.effect.rows_expanded += extra
+                tally.rows_out += len(produced)
+                next_rows.extend(produced)
+            current = next_rows
 
-        self.effect.rows_out += 1
-        return row
+        for row in current:
+            self._discover(row)
+        self.effect.rows_out += len(current)
+        return current
+
+    def apply_row(self, record: Mapping[str, Any]) -> dict[str, Any] | None:
+        """Shape one row when the recipe does not expand.
+
+        ``None`` means the recipe removed or diverted it. A recipe that expands
+        this row raises so callers cannot silently keep only the first child.
+        Population paths use :meth:`apply_batch` / :meth:`apply_records`.
+        """
+        produced = self.apply_records(record)
+        if len(produced) <= 1:
+            return produced[0] if produced else None
+        step = next((s for s in self.steps if s.op == "unnest_json"), self.steps[0])
+        raise ShapeRowError(
+            f"transform recipe expanded source row {self._row_index + 1} into "
+            f"{len(produced)} rows; every produced row must be kept — use apply_batch",
+            step=step,
+            step_index=0,
+            row_index=self._row_index,
+            column=step.column,
+        )
 
     def rows_accounted_for(self) -> bool:
         return self.effect.balanced
@@ -327,6 +375,26 @@ class ShapeEngine:
                 )
             return row
 
+        if op == "unnest_json":
+            produced = self._guarded(
+                step, index, tally, row, lambda: self._explode_array(step, row)
+            )
+            if produced is None:
+                clone = dict(row)
+                target = str(options.get("to") or f"{step.column}_item")
+                self._record_write(
+                    tally, before=row.get(target), after=None, existed=target in row
+                )
+                clone[target] = None
+                return [clone]
+            return produced
+
+        if op == "flatten_json":
+            flattened = self._guarded(
+                step, index, tally, row, lambda: self._flatten_object(step, row, tally)
+            )
+            return [row if flattened is None else flattened]
+
         # Everything else is a single-cell value transform.
         before = row.get(step.column)
         after = self._guarded(
@@ -336,7 +404,102 @@ class ShapeEngine:
         row[step.column] = after
         return row
 
+    # -- nested JSON (json_intelligence SSOT — not a second parser) --------
+
+    def _explode_array(self, step: ShapeStep, row: dict[str, Any]) -> list[dict[str, Any]]:
+        """One parent row → N child rows. Cap and empty-array policy are fail-closed."""
+        from services.json_intelligence import (
+            ARRAY_EXPLODE_MAX,
+            json_cell_text,
+            parse_json_array,
+        )
+
+        raw = row.get(step.column)
+        arr = parse_json_array(raw)
+        if arr is None:
+            raise ValueError(
+                f"'{step.column}' is not a JSON array — unnest_json will not guess"
+            )
+        if len(arr) > ARRAY_EXPLODE_MAX:
+            raise ValueError(
+                f"'{step.column}' has {len(arr)} elements; unnest_json caps at "
+                f"{ARRAY_EXPLODE_MAX} so one row cannot explode the transfer"
+            )
+        if not arr:
+            raise ValueError(
+                f"'{step.column}' is an empty array; unnest_json will not invent a "
+                "row or drop this one silently"
+            )
+        target = str(step.options.get("to") or f"{step.column}_item")
+        index_to = str(step.options.get("index_to") or "")
+        keep_parent = bool(step.options.get("keep_parent", True))
+        out: list[dict[str, Any]] = []
+        for position, elem in enumerate(arr):
+            clone = dict(row)
+            clone[target] = json_cell_text(elem)
+            if index_to:
+                clone[index_to] = position
+            if not keep_parent:
+                clone.pop(step.column, None)
+            out.append(clone)
+        return out
+
+    def _flatten_object(
+        self,
+        step: ShapeStep,
+        row: dict[str, Any],
+        tally: StepEffect,
+    ) -> dict[str, Any]:
+        """Promote JSON object keys onto this row. Parent blob stays unless dropped."""
+        from services.json_intelligence import (
+            DEFAULT_FLATTEN_DEPTH,
+            STRUCT_FLATTEN_DEPTH,
+            flatten_struct_field,
+            json_cell_text,
+            parse_json_object,
+        )
+
+        raw = row.get(step.column)
+        obj = parse_json_object(raw)
+        if obj is None:
+            raise ValueError(
+                f"'{step.column}' is not a JSON object — flatten_json will not guess"
+            )
+        wanted = [str(name) for name in step.options.get("keys", []) if name]
+        clone = dict(row)
+        if wanted:
+            for name in wanted:
+                value = obj.get(name)
+                after = json_cell_text(value) if isinstance(value, (dict, list)) else value
+                self._record_write(
+                    tally, before=row.get(name), after=after, existed=name in row
+                )
+                clone[name] = after
+            return clone
+        depth = (
+            STRUCT_FLATTEN_DEPTH
+            if str(step.options.get("depth") or "top") == "top"
+            else DEFAULT_FLATTEN_DEPTH
+        )
+        flat = flatten_struct_field(raw, parent_key=step.column, max_depth=depth)
+        for key, value in flat.items():
+            if key == step.column or str(key).startswith("__flatten_"):
+                continue
+            after = json_cell_text(value) if isinstance(value, (dict, list)) else value
+            if key not in clone or clone.get(key) is None:
+                self._record_write(
+                    tally, before=row.get(key), after=after, existed=key in row
+                )
+                clone[key] = after
+        return clone
+
     # -- bookkeeping -------------------------------------------------------
+
+    def _discover(self, row: Mapping[str, Any]) -> None:
+        for key in row:
+            name = str(key)
+            if name and name not in self._output_columns:
+                self._output_columns.append(name)
 
     def _record_write(self, tally: StepEffect, *, before: Any, after: Any, existed: bool) -> None:
         if existed and _same_value(before, after):

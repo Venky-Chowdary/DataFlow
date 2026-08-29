@@ -650,6 +650,7 @@ def reconcile(
     rows_skipped: int = 0,
     rows_shaped_out: int = 0,
     rows_source_filtered: int = 0,
+    rows_expanded: int = 0,
     target_rows_before: int | None = None,
     checksum_scope: str = "",
 ) -> ReconciliationReport:
@@ -671,6 +672,7 @@ def reconcile(
     rows_skipped = max(int(rows_skipped or 0), 0)
     rows_shaped_out = max(int(rows_shaped_out or 0), 0)
     rows_source_filtered = max(int(rows_source_filtered or 0), 0)
+    rows_expanded = max(int(rows_expanded or 0), 0)
     # Coerced rows are KEPT in the destination (a cell became NULL), so they do
     # not lower the expected row count — only genuinely DROPPED / held-out rows do.
     # Under quarantine, bad rows are held out of the primary write (rejected >
@@ -688,6 +690,7 @@ def reconcile(
     dropped_rows = max(max(rejected_rows, 0) - coerced_null_rows, 0)
     expected_rows = max(
         source_rows
+        + rows_expanded
         - dropped_rows
         - rows_skipped
         - rows_shaped_out
@@ -724,7 +727,7 @@ def reconcile(
             message=(
                 f"Row count mismatch: source {source_rows}, rejected {rejected_rows}, "
                 f"skipped {rows_skipped}, removed by transform {rows_shaped_out}, "
-                f"filtered out {rows_source_filtered}, "
+                f"filtered out {rows_source_filtered}, expanded by transform {rows_expanded}, "
                 f"expected target {expected_rows} vs target {target_rows}{extra_note}"
             ),
             rejected_rows=rejected_rows,
