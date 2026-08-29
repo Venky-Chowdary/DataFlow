@@ -23,8 +23,9 @@
 .lp .lp-hero--home-ink {
   position: relative;
   isolation: isolate;
-  overflow: hidden;
-  padding: clamp(44px, 6.4vw, 92px) 0 clamp(48px, 6.4vw, 96px) !important;
+  overflow-x: clip;
+  overflow-y: visible;
+  padding: clamp(28px, 3.6vw, 48px) 0 clamp(28px, 3.6vw, 48px) !important;
   border-bottom: 1px solid var(--dw-hero-rule) !important;
   background:
     /* directional light — the source the drawings are lit against */
@@ -53,13 +54,13 @@
 .lp .lp-mkt-hero-band--ink .lp-mkt-hero-copy h1,
 .lp .lp-sol-hero--ink .lp-sol-hero-copy h1,
 .lp .lp-sales-hero--ink .lp-sales-hero-copy h1 {
-  max-width: 21ch;
-  margin: 14px 0 0;
+  max-width: 22ch;
+  margin: 10px 0 0;
   font-family: var(--df-font-display);
-  font-size: clamp(2.15rem, 1.35rem + 2.4vw, 3.5rem) !important;
-  font-weight: 760;
-  line-height: 1.04;
-  letter-spacing: -0.038em;
+  font-size: var(--lp-fs-h1, clamp(1.75rem, 2.2vw, 2.125rem)) !important;
+  font-weight: 650;
+  line-height: 1.18;
+  letter-spacing: -0.022em;
   color: #f7fbff !important;
   text-wrap: balance;
 }
@@ -111,7 +112,7 @@
 .lp .lp-mkt-hero-band--ink .lp-hero-cta,
 .lp .lp-sol-hero--ink .lp-hero-cta,
 .lp .lp-sales-hero--ink .lp-hero-cta {
-  margin-top: clamp(22px, 3vw, 32px);
+  margin-top: clamp(16px, 2vw, 22px);
 }
 
 /*
@@ -242,13 +243,17 @@
 
 .lp .lp-hero--home .lp-hero-title,
 .lp .lp-hero.lp-hero--home .lp-hero-title {
-  font-size: clamp(2.4rem, 1.3rem + 3.1vw, 4rem) !important;
-  max-width: 15ch !important;
+  font-size: var(--lp-fs-h1-home, clamp(2rem, 2.8vw, 2.625rem)) !important;
+  font-weight: 650 !important;
+  line-height: 1.16 !important;
+  letter-spacing: -0.024em !important;
+  max-width: 20ch !important;
 }
 
 .lp .lp-hero--home .lp-hero-sub {
-  max-width: 46ch !important;
-  font-size: clamp(1rem, 0.94rem + 0.24vw, 1.12rem) !important;
+  max-width: 48ch !important;
+  font-size: var(--lp-fs-lead, 15px) !important;
+  line-height: 1.55 !important;
 }
 
 .lp .lp-hero--home .lp-hero-visual--stage {
@@ -452,7 +457,9 @@
 .lp-product-shot-viewport {
   position: relative;
   overflow: hidden;
-  aspect-ratio: 16 / 10;
+  min-width: 0;
+  /* 1400×880 workspace shots — cover at 16/10 cropped the right rail. */
+  aspect-ratio: 1400 / 880;
   background: #0f172a;
 }
 
@@ -460,7 +467,9 @@
   display: block;
   width: 100%;
   height: 100%;
-  object-fit: cover;
+  min-width: 0;
+  max-width: 100%;
+  object-fit: contain;
   object-position: top left;
 }
 
@@ -510,8 +519,23 @@
 .lp .docs-shot-reel--product .docs-shot-reel-frame,
 .lp .docs-shot-reel--hero .docs-shot-reel-frame,
 .lp .docs-shot-reel .docs-shot-reel-frame {
-  object-fit: cover;
-  object-position: top left;
+  object-fit: contain;
+  object-position: top center;
+}
+
+/* Product + Solutions post-hero reels share one frame width. */
+.lp .lp-mkt-page-rich .lp-mkt-body,
+.lp .lp-sol-v2 .lp-mkt-body,
+.lp .lp-wh-v3 .lp-mkt-body {
+  width: min(1080px, var(--lp-shell)) !important;
+  max-width: 100% !important;
+  margin-inline: auto !important;
+}
+
+.lp .lp-mkt-live-reel {
+  width: 100%;
+  max-width: 1080px;
+  margin-inline: auto;
 }
 
 .lp .lp-mkt-hero-visual .lp-product-shot,
