@@ -113,6 +113,7 @@ def test_sqlserver_native_transfer_snapshot_resume_delete(tmp_path: Path) -> Non
         with conn.cursor() as cur:
             _enable_cdc_on_table(cur, table)
         conn.commit()
+    bootstrap.force_cdc_scan()
 
     src = EndpointConfig(
         kind="database", format="sqlserver", table=table, schema="dbo", **CFG
