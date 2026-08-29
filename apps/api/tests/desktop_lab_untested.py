@@ -1213,9 +1213,7 @@ def _run_sqlserver_oracle_dest_exists(
         dest = bind_live_engine("sqlserver", ss_t, tmp)
         try:
             result = (
-                _xfer_bounded(
-                    src, dest, mappings=mappings, skip_preflight=True, timeout_s=25.0,
-                )
+                _xfer(src, dest, mappings=mappings, skip_preflight=True)
                 if not isinstance(dest, str) else None
             )
             dest_n = _sqlserver_count(ss_t) if result and result.success else None
@@ -1240,7 +1238,6 @@ def _run_sqlserver_oracle_dest_exists(
             from tests.typed_fidelity_helpers import drop_sqlserver_table
             drop_sqlserver_table(ss_t)
 
-    cells.append(_run_oracle_dest_exists_isolated(tmp))
     return cells
 
 
@@ -1336,10 +1333,14 @@ def _run_oracle_dest_exists_isolated(tmp: Path, timeout_s: float = 40.0) -> dict
             text=True,
             timeout=timeout_s,
         )
-    except subprocess.TimeoutExpired:
+    except subprocess.TimeoutExpired as exc:
+        tail = ((exc.stderr or "") + (exc.stdout or ""))[-300:]
         return _cell(
             "engine_route", "postgresql->oracle", "failed",
-            error=f"oracle dest-exists exceeded {timeout_s:.0f}s (fail-closed, not skipped)",
+            error=(
+                f"oracle dest-exists exceeded {timeout_s:.0f}s "
+                f"(fail-closed, not skipped) {tail}"
+            ).strip(),
         )
     if proc.returncode != 0 or not out_path.is_file():
         tail = ((proc.stderr or "") + (proc.stdout or ""))[-300:]
@@ -1822,6 +1823,9 @@ def run_desktop_lab_untested(*, persist: bool = True) -> dict[str, Any]:
             flush=True,
         )
 
+    # Oracle dest-exists first, in a fresh process — combined pytest after
+    # earlier cells leaves oracledb thin hung (measured 40s isolate timeout).
+    _extend("oracle", [_run_oracle_dest_exists_isolated(tmp)])
     _extend("types", _run_types())
     _extend("incremental", _run_incremental_deduped())
     _extend("mirror", _run_mirror())
