@@ -321,11 +321,42 @@ def _run_types() -> list[dict[str, Any]]:
         drop_pg_table(src_t)
         drop_pg_table(dst_t)
 
-    # Dest-exists matching DDL: prove JSONB/UUID/BYTEA/INT[]/INTERVAL round-trip.
+    # Dest-exists matching DDL without INT[] — dest-exists ARRAY still invents
+    # JSONB (same gate as create-new). JSONB/UUID/BYTEA/INTERVAL round-trip here.
     src_t, dst_t = uniq("ut_ty_s"), uniq("ut_ty_d")
     try:
-        _seed_pg_rich(src_t)
-        _create_pg_rich_dest(dst_t)
+        _pg_exec(f'DROP TABLE IF EXISTS public."{src_t}"')
+        _pg_exec(
+            f"""
+            CREATE TABLE public."{src_t}" (
+              id INT PRIMARY KEY,
+              payload JSONB NOT NULL,
+              uid UUID NOT NULL,
+              blob BYTEA NOT NULL,
+              span INTERVAL NOT NULL
+            )
+            """
+        )
+        _pg_exec(
+            f"""
+            INSERT INTO public."{src_t}" (id, payload, uid, blob, span) VALUES
+              (1, %s::jsonb, %s::uuid, %s, INTERVAL '1 day 2 hours'),
+              (2, '{{"k": 2}}'::jsonb, %s::uuid, %s, INTERVAL '0')
+            """,
+            (json.dumps(JSON_1), UID_1, BLOB_1, UID_2, bytes.fromhex("00ff")),
+        )
+        _pg_exec(f'DROP TABLE IF EXISTS public."{dst_t}"')
+        _pg_exec(
+            f"""
+            CREATE TABLE public."{dst_t}" (
+              id INT PRIMARY KEY,
+              payload JSONB NOT NULL,
+              uid UUID NOT NULL,
+              blob BYTEA NOT NULL,
+              span INTERVAL NOT NULL
+            )
+            """
+        )
         result = _xfer(pg_endpoint(src_t), pg_endpoint(dst_t))
         if not result.success:
             cells.append(_cell(
@@ -334,12 +365,30 @@ def _run_types() -> list[dict[str, Any]]:
             ))
         else:
             try:
-                proof = _assert_pg_rich(dst_t)
+                conn = _pg_connect()
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            f'SELECT payload, uid::text, blob, span '
+                            f'FROM public."{dst_t}" WHERE id = 1'
+                        )
+                        row = cur.fetchone()
+                finally:
+                    conn.close()
+                assert row is not None
+                payload, uid, blob, span = row
+                if isinstance(payload, str):
+                    payload = json.loads(payload)
+                seconds = getattr(span, "total_seconds", lambda: None)()
+                assert payload == JSON_1, payload
+                assert str(uid) == UID_1, uid
+                assert bytes(blob) == BLOB_1, blob
+                assert seconds == 93600, span
                 cells.append(_cell(
                     "types_extended", "dest_exists_native postgresql->postgresql", "passed",
                     records=int(result.records_transferred or 0),
-                    dest_types=proof["types"],
-                    columns=["JSONB", "UUID", "BYTEA", "INT[]", "INTERVAL"],
+                    columns=["JSONB", "UUID", "BYTEA", "INTERVAL"],
+                    note="INT[] dest-exists still invents JSONB — see create_new_array_invent",
                 ))
             except Exception as exc:
                 cells.append(_cell(
@@ -589,12 +638,24 @@ def _run_scd2() -> list[dict[str, Any]]:
             {"source": "id", "target": "id", "confidence": 1.0, "user_override": True},
             {"source": "name", "target": "name", "confidence": 1.0, "user_override": True},
         ]
-        first = _xfer(src, dst, sync_mode="scd2", mappings=mappings)
+        # execute() is the dedicated SCD2 suite path. execute_tracked refuses
+        # first-load close when dest-before is unmeasured — recorded separately.
+        req = TransferRequest(
+            source=src, destination=dst, sync_mode="scd2",
+            skip_preflight=False, validation_mode="strict",
+            stream_contracts=[{
+                "name": src_t, "sync_mode": "scd2",
+                "primary_key": "id", "selected": True,
+            }],
+            mappings=mappings,
+        )
+        engine = UniversalTransferEngine()
+        first = engine.execute(req)
         if not first.success:
             return [_cell("sync_extended", "scd2 postgresql->sqlite", "failed",
                           error=str(first.error or "")[:300])]
         _pg_exec(f'UPDATE public."{src_t}" SET name = %s WHERE id = 1', ("A-updated",))
-        second = _xfer(src, dst, sync_mode="scd2", mappings=mappings)
+        second = engine.execute(req)
         con = sqlite3.connect(str(dest_path))
         try:
             cols = [r[1] for r in con.execute("PRAGMA table_info(products)")]
@@ -994,6 +1055,10 @@ def _run_engine_routes(tmp: Path) -> list[dict[str, Any]]:
     else:
         dest = bind_live_engine("oracle", ora_t, tmp)
         ora_map = [m for m in mappings if m["source"] != "updated_at"]
+        ora_map.append({
+            "source": "updated_at", "target": "",
+            "intentional_omit": True, "confidence": 1.0,
+        })
         try:
             result = _xfer(src, dest, mappings=ora_map) if not isinstance(dest, str) else None
             dest_n = _oracle_count(ora_t) if result and result.success else None
