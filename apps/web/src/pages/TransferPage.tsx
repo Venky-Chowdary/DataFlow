@@ -47,6 +47,7 @@ import {
   buildColumnSamples,
   createContractFromTransfer,
   createSchedule,
+  updateSchedule,
   createTransferPlan,
   fetchJob,
   fetchTransferCapabilities,
@@ -243,7 +244,7 @@ import {
 } from "./transfer/studioConstants";
 import { TransferTransformStep } from "./transfer/TransferTransformStep";
 import { recipePayload, type ShapeStepWire, type TransformImage } from "../lib/shape";
-import { studioIntentConnectorsReady } from "../lib/scheduleApprovalCta";
+import { persistedMappingRows, studioIntentConnectorsReady } from "../lib/scheduleApprovalCta";
 import {
   analysisFromPipeline,
   fileExtension,
@@ -5266,6 +5267,7 @@ export function TransferPage({
       toast({ title: "Route incomplete", message: "Source and destination table names are required.", tone: "warning" });
       return;
     }
+    const replayId = String(seedStudioIntent?.scheduleId || "").trim();
     try {
       const mappingsForSchedule = mergeSignedRiskContracts(
         mergeStampedTargetTypes(columnMappings, preflight?.stamped_mappings),
@@ -5281,7 +5283,16 @@ export function TransferPage({
               confidence: m.confidence,
               transform: m.transform,
             }));
-      await createSchedule({
+      if (!persistedMappingRows(transferMappings).length) {
+        toast({
+          title: "Validate a mapping first",
+          message:
+            "Unattended runs replay a Validate-approved contract. Map columns and run Validate, then Schedule from this footer — that persists mappings onto this schedule instead of creating another empty draft.",
+          tone: "warning",
+        });
+        return;
+      }
+      const payload = {
         name: `${sourceConnector?.name ?? "Source"} → ${targetCollection}`,
         source_connector_id: sourceConnectorId,
         source_table: sourceTableName,
@@ -5328,16 +5339,27 @@ export function TransferPage({
         }),
         contract_id: boundContractId.trim(),
         require_signed_contract: Boolean(boundContractId.trim() && requireSignedContract),
-      });
-      toast({
-        title: "Pipeline created",
-        message: "Daily sync enabled. Manage cadence in Schedules.",
-        tone: "success",
-      });
+      };
+      if (replayId) {
+        await updateSchedule(replayId, payload);
+        toast({
+          title: "Mapping contract persisted",
+          message:
+            "This schedule can run unattended. The empty-mapping park was a plan change — no signature was required.",
+          tone: "success",
+        });
+      } else {
+        await createSchedule(payload);
+        toast({
+          title: "Pipeline created",
+          message: "Daily sync enabled. Manage cadence in Schedules.",
+          tone: "success",
+        });
+      }
       onOpenSchedules?.();
     } catch (e) {
       toast({
-        title: "Could not create pipeline",
+        title: replayId ? "Could not persist mapping contract" : "Could not create pipeline",
         message: e instanceof Error ? e.message : "Schedule API failed",
         tone: "error",
       });

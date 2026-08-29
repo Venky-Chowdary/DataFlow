@@ -1402,6 +1402,8 @@ export interface ScheduleInput {
   contract_id?: string;
   /** When true (default if contract_id set), refuse to schedule/enable until SIGNED. */
   require_signed_contract?: boolean;
+  /** Persist mappings onto this parked draft instead of creating a second row. */
+  replay_schedule_id?: string;
 }
 
 /**

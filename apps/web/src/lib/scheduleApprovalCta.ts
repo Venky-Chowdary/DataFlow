@@ -8,6 +8,9 @@
 
 import type { PipelineSchedule, ScheduleApprovalInboxItem } from "./types";
 
+export const EMPTY_MAPPING_STUDIO_CORRECTIVE =
+  "Open Transfer Studio with this schedule's source and destination. Map the columns, run Validate, then Schedule from the Studio footer — that persists the mapping contract the beat can replay. A signature here cannot invent column names.";
+
 export function isEmptyMappingFinding(code?: string, finding?: string): boolean {
   if ((code || "").toUpperCase() === "EMPTY_MAPPING_CONTRACT") return true;
   return /no persisted column mappings/i.test(finding || "");
@@ -15,6 +18,26 @@ export function isEmptyMappingFinding(code?: string, finding?: string): boolean 
 
 export function inboxNeedsStudio(item: ScheduleApprovalInboxItem): boolean {
   return isEmptyMappingFinding(item.approval.code, item.approval.finding);
+}
+
+/** Prefer Studio copy when a stored finding still says "Open Validate for this job". */
+export function inboxCorrectiveAction(item: ScheduleApprovalInboxItem): string {
+  if (inboxNeedsStudio(item)) return EMPTY_MAPPING_STUDIO_CORRECTIVE;
+  return item.approval.corrective_action || "";
+}
+
+/** Rows a beat can replay — source or target present. Same rule as the engine. */
+export function persistedMappingRows(raw: unknown): Array<Record<string, unknown>> {
+  if (!Array.isArray(raw)) return [];
+  const rows: Array<Record<string, unknown>> = [];
+  for (const item of raw) {
+    if (!item || typeof item !== "object") continue;
+    const row = item as { source?: string; target?: string };
+    if (String(row.source || "").trim() || String(row.target || "").trim()) {
+      rows.push(item as Record<string, unknown>);
+    }
+  }
+  return rows;
 }
 
 export function scheduleNeedsStudio(sched: PipelineSchedule): boolean {
@@ -39,6 +62,7 @@ export { scheduleCreateOpensStudio } from "./sourceObjectPick";
 
 export function studioIntentFromSchedule(sched: PipelineSchedule): {
   step: "source";
+  scheduleId: string;
   sourceConnectorId: string;
   destConnectorId: string;
   sourceTable: string;
@@ -46,6 +70,7 @@ export function studioIntentFromSchedule(sched: PipelineSchedule): {
 } {
   return {
     step: "source",
+    scheduleId: sched.id,
     sourceConnectorId: sched.source_connector_id,
     destConnectorId: sched.dest_connector_id,
     sourceTable: sched.source_table,

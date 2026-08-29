@@ -83,6 +83,8 @@ export type JobsStudioIntent = {
   destConnectorId?: string;
   sourceTable?: string;
   destTable?: string;
+  /** Persist mappings onto this draft — do not POST a second empty schedule. */
+  scheduleId?: string;
 };
 
 function asMappingProof(raw: unknown): MappingProof | null {

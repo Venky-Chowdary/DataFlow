@@ -32,6 +32,13 @@ def is_empty_mapping_refusal(message: str) -> bool:
     return "no persisted column mappings" in text
 
 
+def is_empty_mapping_finding(code: str = "", finding: str = "") -> bool:
+    """True for the empty-mapping park — a plan change, not a signature."""
+    if str(code or "").strip().upper() == EMPTY_MAPPING_CODE:
+        return True
+    return is_empty_mapping_refusal(finding)
+
+
 def persisted_mapping_rows(raw: Any) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for item in raw or []:
