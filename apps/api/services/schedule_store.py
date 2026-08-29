@@ -644,26 +644,113 @@ def _assert_callable_schedule_sync(data: Mapping[str, Any] | None, sync_mode: st
         raise ValueError(reason)
 
 
+def find_studio_replay_target(
+    schedule_id: str | None,
+    source_connector_id: str,
+    dest_connector_id: str,
+    source_table: str,
+    dest_table: str,
+) -> PipelineSchedule | None:
+    """The parked draft Studio must persist mappings onto — not a new pipeline.
+
+    Prefer an explicit schedule id (inbox → Studio). Otherwise a unique
+    empty-mapping draft on the same route, then a unique empty draft on the
+    same connector pair (operator changed ``sample`` to a real table).
+    Ambiguous matches return None so we do not hijack a sibling draft.
+    """
+    from services.schedule_mapping_contract import (
+        is_empty_mapping_finding,
+        persisted_mapping_rows,
+    )
+
+    sid = str(schedule_id or "").strip()
+    if sid:
+        existing = get_schedule(sid)
+        if existing:
+            return existing
+    src = str(source_connector_id or "").strip()
+    dst = str(dest_connector_id or "").strip()
+    if not src or not dst:
+        return None
+    all_schedules = list_schedules()
+    same_route = [
+        s
+        for s in all_schedules
+        if str(s.source_connector_id or "") == src
+        and str(s.dest_connector_id or "") == dst
+        and str(s.source_table or "") == str(source_table or "")
+        and str(s.dest_table or "") == str(dest_table or "")
+        and not persisted_mapping_rows(s.mappings)
+    ]
+    if len(same_route) == 1:
+        return same_route[0]
+    if len(same_route) > 1:
+        return None
+    same_pair_empty = [
+        s
+        for s in all_schedules
+        if str(s.source_connector_id or "") == src
+        and str(s.dest_connector_id or "") == dst
+        and not persisted_mapping_rows(s.mappings)
+    ]
+    if len(same_pair_empty) != 1:
+        return None
+    candidate = same_pair_empty[0]
+    request = candidate.approval_request if isinstance(candidate.approval_request, dict) else {}
+    if request and is_empty_mapping_finding(
+        str(request.get("code") or ""),
+        str(request.get("finding") or ""),
+    ):
+        return candidate
+    # Never-run New schedule draft on this pair — Studio Schedule should
+    # persist onto it rather than leave a second paused empty row.
+    return candidate
+
+
 def create_schedule(data: dict[str, Any]) -> PipelineSchedule:
-    schedules = _load_all()
-    interval = data.get("interval", "daily")
-    cron = (data.get("cron") or "").strip()
-    tz = (data.get("timezone") or "UTC").strip() or "UTC"
-    sync_mode = data.get("sync_mode") or "full_refresh_overwrite"
+    payload = dict(data)
+    replay_id = str(payload.pop("replay_schedule_id", "") or "").strip()
+    interval = payload.get("interval", "daily")
+    cron = (payload.get("cron") or "").strip()
+    tz = (payload.get("timezone") or "UTC").strip() or "UTC"
+    sync_mode = payload.get("sync_mode") or "full_refresh_overwrite"
     _validate_cadence(interval, cron, tz, sync_mode)
-    contract_id = (data.get("contract_id") or "").strip()
-    require_signed = bool(data.get("require_signed_contract", bool(contract_id)))
+    contract_id = (payload.get("contract_id") or "").strip()
+    require_signed = bool(payload.get("require_signed_contract", bool(contract_id)))
     if contract_id or require_signed:
         assert_signed_contract(contract_id, require_signed=require_signed)
-    _assert_callable_schedule_sync(data, sync_mode)
+    _assert_callable_schedule_sync(payload, sync_mode)
     from services.schedule_mapping_contract import persisted_mapping_rows
 
-    enabled = bool(data.get("enabled", True))
-    if enabled and not persisted_mapping_rows(data.get("mappings")):
+    rows = persisted_mapping_rows(payload.get("mappings"))
+    if rows:
+        target = find_studio_replay_target(
+            replay_id,
+            str(payload.get("source_connector_id") or ""),
+            str(payload.get("dest_connector_id") or ""),
+            str(payload.get("source_table") or ""),
+            str(payload.get("dest_table") or ""),
+        )
+        if target:
+            patch = {k: v for k, v in payload.items() if k != "id"}
+            patch["interval"] = interval
+            patch["cron"] = cron
+            patch["timezone"] = tz
+            patch["sync_mode"] = sync_mode
+            patch["contract_id"] = contract_id
+            patch["require_signed_contract"] = require_signed
+            if "enabled" not in patch:
+                patch["enabled"] = True
+            updated = update_schedule(target.id, patch)
+            if updated:
+                return updated
+    enabled = bool(payload.get("enabled", True))
+    if enabled and not rows:
         # Draft is allowed. Enabling an empty-mapping schedule invents _auto_map.
         enabled = False
+    schedules = _load_all()
     sched = PipelineSchedule.from_dict({
-        **data,
+        **payload,
         "id": str(uuid.uuid4()),
         "interval": interval,
         "cron": cron,
@@ -741,8 +828,48 @@ def update_schedule(schedule_id: str, data: dict[str, Any]) -> PipelineSchedule 
             updated.next_run_at = next_run_for(updated)
         schedules[i] = updated
         _save_all(schedules)
+        if "approval_request" not in data:
+            released = _release_empty_mapping_if_mapped(updated)
+            if released:
+                return released
         return updated
     return None
+
+
+def _release_empty_mapping_if_mapped(sched: PipelineSchedule) -> PipelineSchedule | None:
+    """Close EMPTY_MAPPING after Studio persists a replayable contract.
+
+    A signature cannot invent column names. Persisting mappings is the plan
+    change the inbox asked for — leave the finding open and the card still
+    says Needs approval after the operator did the work.
+    """
+    from services.schedule_mapping_contract import (
+        is_empty_mapping_finding,
+        persisted_mapping_rows,
+    )
+
+    if not persisted_mapping_rows(sched.mappings):
+        return None
+    if not has_open_approval(sched):
+        return None
+    request = sched.approval_request if isinstance(sched.approval_request, dict) else {}
+    if not is_empty_mapping_finding(
+        str(request.get("code") or ""),
+        str(request.get("finding") or ""),
+    ):
+        return None
+    from services.schedule_approvals import resolve_plan_change
+
+    result = resolve_plan_change(
+        sched.id,
+        actor="transfer_studio",
+        reason=(
+            "Validate-approved mapping contract persisted — empty-mapping park "
+            "is a plan change, not a signature."
+        ),
+    )
+    released = result.get("schedule") if result else None
+    return released if isinstance(released, PipelineSchedule) else None
 
 
 def delete_schedule(schedule_id: str) -> bool:

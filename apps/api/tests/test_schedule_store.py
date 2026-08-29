@@ -36,6 +36,8 @@ def test_create_and_list(temp_store):
         "mappings": [{"source": "id", "target": "id"}],
     })
     assert live.enabled is True
+    assert live.id == sched.id
+    assert len(store.list_schedules()) == 1
 
 
 def test_assert_signed_contract_fail_closed(temp_store, monkeypatch):

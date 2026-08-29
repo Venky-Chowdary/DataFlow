@@ -574,6 +574,10 @@ def revoke_standing_authorization(
 
 def open_approvals(workspace_id: str = "") -> list[dict[str, Any]]:
     """The inbox: every schedule currently parked on a decision."""
+    from services.schedule_mapping_contract import (
+        is_empty_mapping_finding,
+        persisted_mapping_rows,
+    )
     from services.schedule_store import has_open_approval, list_schedules
 
     out: list[dict[str, Any]] = []
@@ -583,6 +587,14 @@ def open_approvals(workspace_id: str = "") -> list[dict[str, Any]]:
         if workspace_id and (sched.workspace_id or "") != workspace_id:
             continue
         request = dict(sched.approval_request or {})
+        # Stale EMPTY_MAPPING after Studio persisted a contract — hide it even
+        # if resolve_plan_change has not run yet. A signature still cannot
+        # invent names; the plan already changed.
+        if persisted_mapping_rows(sched.mappings) and is_empty_mapping_finding(
+            str(request.get("code") or ""),
+            str(request.get("finding") or ""),
+        ):
+            continue
         out.append({
             "schedule_id": sched.id,
             "schedule_name": sched.name,

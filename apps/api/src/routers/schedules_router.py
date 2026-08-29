@@ -106,6 +106,8 @@ class ScheduleCreate(BaseModel):
     notify_on_failure: bool = True
     notify_on_success: bool = False
     enabled: bool = True
+    #: Inbox → Studio footer: persist mappings onto this draft instead of a new row.
+    replay_schedule_id: str = ""
 
 
 class ScheduleUpdate(BaseModel):

@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  inboxCorrectiveAction,
   inboxNeedsStudio,
   isEmptyMappingFinding,
+  persistedMappingRows,
   scheduleNeedsStudio,
   studioIntentConnectorsReady,
   scheduleCreateOpensStudio,
@@ -58,11 +60,45 @@ test("a paused schedule with mapping_count 0 needs Studio, not Decide", () => {
   assert.equal(scheduleNeedsStudio(sched), true);
   assert.deepEqual(studioIntentFromSchedule(sched), {
     step: "source",
+    scheduleId: "s1",
     sourceConnectorId: "src",
     destConnectorId: "dst",
     sourceTable: "orders",
     destTable: "orders_dw",
   });
+});
+
+test("inbox copy names Studio even when the stored finding says Open Validate", () => {
+  const item = {
+    schedule_id: "s1",
+    schedule_name: "Crown → Snowflake",
+    workspace_id: "w",
+    source: "src:sample",
+    destination: "dst:newtable",
+    sync_mode: "full_refresh_append",
+    enabled: false,
+    approval: {
+      id: "a1",
+      status: "open",
+      kind: "run_refused",
+      code: "RUN_REFUSED",
+      finding: "Schedule has no persisted column mappings — unattended runs must replay",
+      corrective_action: "Open Validate for this job and resolve the blocking check, then run the schedule again.",
+      approvable: false,
+      requested_scopes: [],
+      occurrences: 1,
+      created_at: "",
+    },
+  } as ScheduleApprovalInboxItem;
+  const copy = inboxCorrectiveAction(item);
+  assert.match(copy, /Transfer Studio/);
+  assert.equal(copy.includes("Open Validate for this job"), false);
+});
+
+test("persisted mapping rows require a source or target", () => {
+  assert.equal(persistedMappingRows([{ source: "id", target: "id" }]).length, 1);
+  assert.equal(persistedMappingRows([{ confidence: 1 }]).length, 0);
+  assert.equal(persistedMappingRows(null).length, 0);
 });
 
 test("a schedule Studio seed waits until connectors have loaded", () => {

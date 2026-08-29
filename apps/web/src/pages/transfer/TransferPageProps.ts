@@ -36,5 +36,7 @@ export interface TransferPageProps {
     destConnectorId?: string;
     sourceTable?: string;
     destTable?: string;
+    /** Persist mappings onto this parked draft when the footer Schedules. */
+    scheduleId?: string;
   } | null;
 }
