@@ -204,7 +204,13 @@ export const NOT_PROVEN: UnprovenRow[] = [
     area: "CDC snapshot+LSN live-matrix",
     status: "planned",
     reason:
-      "Postgres WAL handoff and sqlite PK+_df_lsn replay (test_sqlite_pk_df_lsn_replay_no_double_count) are unit-proven. MySQL binlog, SQL Server native, and Oracle LogMiner stay Planned until a named live matrix. CDC default remains at-least-once upsert.",
+      "Postgres WAL, MySQL ROW binlog (test_cdc_mysql_binlog_transfer_e2e), and SQL Server native CDC (test_cdc_sqlserver_native_transfer_e2e) are measured snapshot+resume+delete on named tests. Oracle LogMiner live stays Planned — :1521 closed; unparsed SQL_REDO is quarantined (test_oracle_logminer_unparsed_quarantine). CDC default remains at-least-once upsert.",
+  },
+  {
+    area: "Iceberg leftover MERGE",
+    status: "unaudited",
+    reason:
+      "SqlCatalog leftover MERGE is measured on test_iceberg_sql_catalog_leftover_merge_deletes_extra_and_count_is_snapshot_len (dest 4→3, incremental no-op, file-footer COUNT). REST/Glue/Nessie and warehouse leftover MERGE stay Planned.",
   },
   {
     area: "SOC 2 / ISO 27001 certification",

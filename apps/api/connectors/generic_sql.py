@@ -374,19 +374,103 @@ def _drivername(db_type: str) -> str:
     return _DRIVERNAME_MAP.get(db_type, db_type)
 
 
-def _mssql_drivername() -> str:
-    """Pick an installed SQL Server DBAPI: pyodbc preferred, pymssql fallback."""
+def _mssql_odbc_driver() -> str | None:
+    """Return an installed Microsoft ODBC driver name, or None.
+
+    Importing ``pyodbc`` is not enough — the unixODBC driver manager still
+    fails when ``libmsodbcsql-17.so`` is absent. Probe ``pyodbc.drivers()``.
+    """
     try:
-        import pyodbc  # noqa: F401
-        return "mssql+pyodbc"
+        import pyodbc
     except Exception:
-        pass
+        return None
+    try:
+        installed = {str(d) for d in (pyodbc.drivers() or [])}
+    except Exception:
+        return None
+    for name in (
+        "ODBC Driver 18 for SQL Server",
+        "ODBC Driver 17 for SQL Server",
+        "ODBC Driver 13 for SQL Server",
+    ):
+        if name in installed:
+            return name
+    return None
+
+
+def _mssql_drivername() -> str:
+    """Pick an installed SQL Server DBAPI: pyodbc+driver preferred, pymssql fallback."""
+    if _mssql_odbc_driver():
+        return "mssql+pyodbc"
     try:
         import pymssql  # noqa: F401
         return "mssql+pymssql"
     except Exception:
         pass
     return "mssql+pyodbc"
+
+
+def adapt_mssql_sql(sql: str) -> str:
+    """Rewrite ``%s`` placeholders for the live SQL Server DBAPI.
+
+    Native CDC / CT SQL is written pymssql-style (``%s``). pyodbc is qmark
+    (``?``). Importing pyodbc without adapting SQL used to fail closed as
+    ``0 parameter markers`` and hide a live CDC capture.
+    """
+    if not isinstance(sql, str) or "%s" not in sql:
+        return sql
+    if _mssql_drivername() != "mssql+pyodbc":
+        return sql
+    return sql.replace("%s", "?")
+
+
+class _MssqlQmarkCursor:
+    def __init__(self, cur: Any):
+        self._cur = cur
+
+    def execute(self, sql, *args, **kwargs):
+        return self._cur.execute(adapt_mssql_sql(sql), *args, **kwargs)
+
+    def executemany(self, sql, *args, **kwargs):
+        return self._cur.executemany(adapt_mssql_sql(sql), *args, **kwargs)
+
+    def __enter__(self):
+        entered = self._cur.__enter__() if hasattr(self._cur, "__enter__") else self._cur
+        if entered is self._cur:
+            return self
+        return _MssqlQmarkCursor(entered)
+
+    def __exit__(self, *exc):
+        if hasattr(self._cur, "__exit__"):
+            return self._cur.__exit__(*exc)
+        return False
+
+    def __getattr__(self, name):
+        return getattr(self._cur, name)
+
+
+class _MssqlQmarkConnection:
+    """DBAPI connection whose cursors adapt ``%s`` → ``?`` for pyodbc."""
+
+    def __init__(self, conn: Any):
+        self._conn = conn
+
+    def cursor(self, *args, **kwargs):
+        return _MssqlQmarkCursor(self._conn.cursor(*args, **kwargs))
+
+    def __enter__(self):
+        entered = self._conn.__enter__() if hasattr(self._conn, "__enter__") else self._conn
+        if entered is self._conn:
+            return self
+        return _MssqlQmarkConnection(entered)
+
+    def __exit__(self, *exc):
+        if hasattr(self._conn, "__exit__"):
+            return self._conn.__exit__(*exc)
+        return False
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
 
 
 def _default_port(db_type: str) -> int:
@@ -532,7 +616,7 @@ def _build_url(cfg: dict[str, Any]) -> str | sa.URL:
         drivername = _mssql_drivername()
         query = {}
         if drivername == "mssql+pyodbc":
-            query["driver"] = "ODBC Driver 17 for SQL Server"
+            query["driver"] = _mssql_odbc_driver() or "ODBC Driver 17 for SQL Server"
         # Always On listener: MultiSubnetFailover speeds AG failover reconnect.
         multi = cfg.get("multi_subnet_failover")
         if multi is None:
@@ -737,7 +821,18 @@ def get_connection(
         "ssl": ssl,
         "type": db_type or kwargs.get("type") or "",
     }
-    return _engine(cfg).raw_connection()
+    conn = _engine(cfg).raw_connection()
+    db_type = (cfg.get("type") or "").lower()
+    if db_type in {
+        "sqlserver",
+        "mssql",
+        "microsoft_sql_server",
+        "azure_sql_database",
+        "amazon_rds_sql_server",
+        "google_cloud_sql_sql_server",
+    }:
+        return _MssqlQmarkConnection(conn)
+    return conn
 
 
 def _schema_name(cfg: dict[str, Any]) -> str | None:

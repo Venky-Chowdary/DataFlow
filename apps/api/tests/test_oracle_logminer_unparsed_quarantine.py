@@ -47,8 +47,14 @@ def test_apply_change_batch_refuses_unparsed_sql_redo(tmp_path: Path) -> None:
         kind="database", format="sqlite", database=str(dest_path), table="orders"
     )
     dest_cfg = {
+        "host": "",
+        "port": 0,
         "database": str(dest_path),
         "table": "orders",
+        "username": "",
+        "password": "",
+        "connection_string": "",
+        "ssl": False,
         "type": "sqlite",
         "schema": "",
     }
