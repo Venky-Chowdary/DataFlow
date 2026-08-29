@@ -30,7 +30,25 @@ describe("marketing product photography", () => {
   it("product surface tabs use current workspace shots", () => {
     const home = readFileSync(join(webRoot, "pages/LandingPage.tsx"), "utf8");
     assert.match(home, /SURFACE_SHOTS/);
-    assert.match(home, /app-transfer-validate\.png/);
+    assert.match(home, /app-transfer-source\.png/);
     assert.match(home, /app-pipelines\.png/);
+  });
+
+  it("product and solution heroes frame live workspace shots, not schematic SVGs", () => {
+    const surfaces = readFileSync(join(webRoot, "pages/marketing/ProductSurfaces.tsx"), "utf8");
+    assert.match(surfaces, /ProductShot/);
+    assert.match(surfaces, /WORKSPACE_SHOT\.jobs/);
+    assert.match(surfaces, /WORKSPACE_SHOT\.transferSource/);
+    assert.match(surfaces, /WORKSPACE_SHOT\.pipelines/);
+    assert.doesNotMatch(surfaces, /GateCombArt|RunSpineArt|CutoverArt|WarehouseLayersArt|WatermarkArt/);
+  });
+
+  it("docs and product reels share ProductShot chrome so labels cannot overflow", () => {
+    const reel = readFileSync(join(webRoot, "components/docs/DocsShotReel.tsx"), "utf8");
+    assert.match(reel, /lp-product-shot-chrome/);
+    assert.match(reel, /lp-product-shot-surface/);
+    const shared = readFileSync(join(webRoot, "pages/marketing/productPageShared.tsx"), "utf8");
+    assert.match(shared, /WORKSPACE_SHOT/);
+    assert.doesNotMatch(shared, /app-overview\.png/);
   });
 });

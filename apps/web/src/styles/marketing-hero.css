@@ -501,12 +501,46 @@
 }
 
 .lp .lp-mkt-live-reel .lp-product-shot-chrome,
-.lp .docs-shot-reel--product .docs-shot-reel-stage {
+.lp .docs-shot-reel--product .docs-shot-reel-stage,
+.lp .docs-shot-reel--hero .docs-shot-reel-stage {
   overflow: hidden;
-  border-radius: 16px;
+  border-radius: 0 0 16px 16px;
 }
 
-.lp .docs-shot-reel--product .docs-shot-reel-frame {
+.lp .docs-shot-reel--product .docs-shot-reel-frame,
+.lp .docs-shot-reel--hero .docs-shot-reel-frame,
+.lp .docs-shot-reel .docs-shot-reel-frame {
   object-fit: cover;
   object-position: top left;
+}
+
+.lp .lp-mkt-hero-visual .lp-product-shot,
+.lp .lp-sol-hero-visual .lp-product-shot {
+  width: 100%;
+  min-width: 0;
+}
+
+.lp .lp-mkt-hero-band--ink .lp-product-shot-route,
+.lp .lp-sol-hero--ink .lp-product-shot-route {
+  color: rgba(180, 199, 219, 0.82);
+}
+
+/* Route chips never paint past the frame — long FQDNs ellipsis. */
+.lp .lp-product-shot-route {
+  overflow: hidden;
+}
+
+.docs-shot-reel-caption {
+  min-width: 0;
+  margin: 12px 2px 0;
+  overflow: hidden;
+  color: #64748b;
+  font-size: 13px;
+  line-height: 1.45;
+  text-overflow: ellipsis;
+}
+
+.lp .lp-mkt-hero-band--ink .docs-shot-reel-caption,
+.lp .lp-sol-hero--ink .docs-shot-reel-caption {
+  color: rgba(180, 199, 219, 0.78);
 }

@@ -1,120 +1,141 @@
 import type { ReactNode } from "react";
 import { DocsShotReel, type DocsShotFrame } from "../../components/docs/DocsShotReel";
 
+/** Current workspace photography — never Overview (first-load count is a separate fix). */
+export const WORKSPACE_SHOT = {
+  jobs: "/docs/screenshots/app-jobs.png",
+  connectors: "/docs/screenshots/app-connectors.png",
+  pipelines: "/docs/screenshots/app-pipelines.png",
+  query: "/docs/screenshots/app-query.png",
+  pilot: "/docs/screenshots/app-pilot.png",
+  mcp: "/docs/screenshots/app-mcp.png",
+  transferSource: "/docs/screenshots/app-transfer-source.png",
+  transferDest: "/docs/screenshots/app-transfer-destination.png",
+  transferMap: "/docs/screenshots/app-transfer-map.png",
+  transferValidate: "/docs/screenshots/app-transfer-validate.png",
+  transferRun: "/docs/screenshots/app-transfer-run.png",
+} as const;
+
 export const PRODUCT_FRAMES = {
   transfer: [
     {
-      src: "/docs/screenshots/app-transfer-source.png",
-      alt: "Transfer Studio source step with sample-orders.csv typed columns",
-      caption: "1 · Source — Load sample-orders.csv and review Detected structure",
+      src: WORKSPACE_SHOT.transferSource,
+      alt: "Transfer Studio source step — File, Database, or Cloud storage",
+      caption: "1 · Source — File, Database, or Cloud. Profile before Dest.",
     },
     {
-      src: "/docs/screenshots/app-transfer-destination.png",
+      src: WORKSPACE_SHOT.transferDest,
       alt: "Transfer Studio destination File Export CSV",
-      caption: "2 · Destination — File Export CSV to exports/sample-orders.csv",
+      caption: "2 · Destination — File Export CSV or a saved warehouse",
     },
     {
-      src: "/docs/screenshots/app-transfer-map.png",
+      src: WORKSPACE_SHOT.transferMap,
       alt: "Transfer Studio Map columns for sample-orders",
-      caption: "3 · Map — Align five columns, Accept risk, continue",
+      caption: "3 · Map — Align columns, Accept risk, continue",
     },
     {
-      src: "/docs/screenshots/app-transfer-validate.png",
+      src: WORKSPACE_SHOT.transferValidate,
       alt: "Transfer Studio Validate gates dashboard",
       caption: "4 · Validate — Clear blocking gates before Execute unlocks",
     },
     {
-      src: "/docs/screenshots/app-transfer-run.png",
+      src: WORKSPACE_SHOT.transferRun,
       alt: "Transfer Studio Run step before Execute",
-      caption: "5 · Run — Execute Transfer when Preflight is approved",
+      caption: "5 · Run — Execute when Preflight is approved",
     },
   ],
   jobs: [
     {
-      src: "/docs/screenshots/app-jobs.png",
-      alt: "Job Theater reconcile timeline for e2e_customers",
+      src: WORKSPACE_SHOT.jobs,
+      alt: "Job Theater with whole-history counts and destination population",
       caption: "Job Theater — queue → preflight → extract → load → reconcile",
     },
     {
-      src: "/docs/screenshots/app-transfer-source.png",
-      alt: "Source that produced the job",
-      caption: "Upstream plan — the Studio source that fed this job",
+      src: WORKSPACE_SHOT.transferSource,
+      alt: "Transfer Studio source that produces jobs",
+      caption: "Upstream plan — the Studio source that feeds Theater",
     },
     {
-      src: "/docs/screenshots/app-connectors.png",
-      alt: "Connectors used by the job",
-      caption: "Connectors — Postgres / MySQL / Mongo with Test passed status",
+      src: WORKSPACE_SHOT.connectors,
+      alt: "Connectors catalog in the live workspace",
+      caption: "Connectors — saved drivers Jobs and Studio share",
     },
   ],
   pipelines: [
     {
-      src: "/docs/screenshots/app-pipelines.png",
+      src: WORKSPACE_SHOT.pipelines,
       alt: "Schedules workspace",
       caption: "Schedules — cadence, mode, and health for recurring sync",
     },
     {
-      src: "/docs/screenshots/app-jobs.png",
+      src: WORKSPACE_SHOT.jobs,
       alt: "Job created by a pipeline tick",
       caption: "Every tick is a real job — same Theater proof as Studio",
     },
     {
-      src: "/docs/screenshots/app-overview.png",
-      alt: "Overview of pipeline throughput",
-      caption: "Overview — throughput from scheduled and ad-hoc loads",
+      src: WORKSPACE_SHOT.connectors,
+      alt: "Connectors used by scheduled routes",
+      caption: "Same connectors — schedules never invent a second vault",
     },
   ],
   query: [
     {
-      src: "/docs/screenshots/app-query.png",
-      alt: "Query Playground SQL editor",
+      src: WORKSPACE_SHOT.query,
+      alt: "Query Playground in the live workspace",
       caption: "Query Playground — read-only SQL against saved connectors",
     },
     {
-      src: "/docs/screenshots/app-connectors.png",
+      src: WORKSPACE_SHOT.connectors,
       alt: "Connectors available to Query",
       caption: "Same connectors — Query never invents a second credential path",
     },
     {
-      src: "/docs/screenshots/app-transfer-source.png",
+      src: WORKSPACE_SHOT.transferSource,
       alt: "Handoff into Transfer Studio",
       caption: "Handoff — validated slices become Studio plans",
     },
   ],
   pilot: [
     {
-      src: "/docs/screenshots/app-pilot.png",
+      src: WORKSPACE_SHOT.pilot,
       alt: "Datawrap Pilot natural-language triage",
       caption: "Datawrap Pilot — NL triage on the governed engine",
     },
     {
-      src: "/docs/screenshots/app-jobs.png",
+      src: WORKSPACE_SHOT.jobs,
       alt: "Job Theater evidence Pilot references",
       caption: "Evidence — Pilot cites the same Theater artifacts humans see",
     },
     {
-      src: "/docs/screenshots/app-transfer-source.png",
+      src: WORKSPACE_SHOT.transferSource,
       alt: "Transfer Studio handoff from Pilot",
       caption: "Handoff — fixes still flow through Studio review + gates",
     },
   ],
   mcp: [
     {
-      src: "/docs/screenshots/app-pilot.png",
-      alt: "Agent-adjacent workspace surface",
+      src: WORKSPACE_SHOT.mcp,
+      alt: "MCP Server page in the live workspace",
       caption: "Agents share the workspace — MCP never returns raw passwords",
     },
     {
-      src: "/docs/screenshots/app-jobs.png",
+      src: WORKSPACE_SHOT.jobs,
       alt: "MCP-triggered job in Theater",
       caption: "Agent runs appear in Job Theater with full gate + proof audit",
     },
     {
-      src: "/docs/screenshots/app-overview.png",
-      alt: "Workspace overview for MCP operators",
-      caption: "Same Overview metrics whether the operator is human or agent",
+      src: WORKSPACE_SHOT.connectors,
+      alt: "Connectors agents inherit under RBAC",
+      caption: "Same connectors — agents never receive raw destination secrets",
     },
   ],
 } as const satisfies Record<string, DocsShotFrame[]>;
+
+export const SOLUTION_FRAMES = {
+  migrations: PRODUCT_FRAMES.transfer,
+  warehouse: [PRODUCT_FRAMES.jobs[0], PRODUCT_FRAMES.pipelines[0], PRODUCT_FRAMES.transfer[3]],
+  sync: PRODUCT_FRAMES.pipelines,
+} as const;
 
 /** Real preflight gates from packages/preflight (G1–G9). */
 export const REAL_PREFLIGHT_GATES: { id: string; title: string; algorithm: string }[] = [
@@ -177,18 +198,20 @@ export const REAL_PREFLIGHT_GATES: { id: string; title: string; algorithm: strin
 export function LiveProductReel({
   frames,
   title,
+  surface = "Workspace",
 }: {
   frames: readonly DocsShotFrame[];
   title: string;
+  surface?: string;
 }) {
   return (
     <div className="lp-mkt-live-reel">
       <div className="lp-mkt-live-reel-head">
-        <span className="lp-mkt-live-pill">Workspace</span>
+        <span className="lp-mkt-live-pill">Live workspace</span>
         <h3>{title}</h3>
-        <p>The same operator surfaces — framed, not redrawn as a second product.</p>
+        <p>The same operator surfaces — framed in product chrome, not redrawn as a second UI.</p>
       </div>
-      <DocsShotReel frames={[...frames]} className="docs-shot-reel--product" />
+      <DocsShotReel frames={[...frames]} className="docs-shot-reel--product" surface={surface} />
     </div>
   );
 }

@@ -122,7 +122,7 @@ function ConnectorMarquee({
 }
 
 const SURFACE_SHOTS: Record<string, string> = {
-  studio: "/docs/screenshots/app-transfer-validate.png",
+  studio: "/docs/screenshots/app-transfer-source.png",
   theater: "/docs/screenshots/app-jobs.png",
   pipelines: "/docs/screenshots/app-pipelines.png",
   mcp: "/docs/screenshots/app-mcp.png",
