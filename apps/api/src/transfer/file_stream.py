@@ -109,7 +109,9 @@ from .adapters import (
 )
 from .stream import _declared_destination_key_columns, _write_batch
 
-STREAMABLE_TYPES = {"csv", "tsv", "jsonl", "ndjson", "json", "excel", "parquet", "avro", "orc"}
+STREAMABLE_TYPES = {
+    "csv", "tsv", "jsonl", "ndjson", "json", "excel", "parquet", "avro", "orc", "xml",
+}
 STREAM_THRESHOLD = int(getenv_brand("STREAM_FILE_ROWS", "1"))
 FILE_SPILL_THRESHOLD = int(getenv_brand("FILE_SPILL_THRESHOLD", str(50 * 1024 * 1024)))
 SPILL_DIR = getenv_brand("SPILL_DIR") or None
@@ -510,6 +512,38 @@ def peek_file_source(
         schema = FileParser.infer_schema(sample_objs)
         return headers, schema, total, sample_objs[:100]
 
+    if file_type == "xml":
+        from services.dest_precount import UnmeasuredArtifact
+        from services.file_parser import count_xml_records, iter_xml_dicts
+
+        total = count_xml_records(content)
+        if total is None:
+            raise ValueError(
+                "XML document is unmeasured — sibling collections or document XML "
+                "cannot be streamed. Use a unique repeating list-of-object."
+            )
+        sample_objs: list[dict] = []
+        columns: dict[str, None] = {}
+        try:
+            for rec in iter_xml_dicts(content):
+                if not isinstance(rec, dict):
+                    continue
+                for key in rec:
+                    name = str(key).strip()
+                    if name and name not in columns:
+                        columns[name] = None
+                if len(sample_objs) < 100:
+                    sample_objs.append(_json_empty_to_none(rec))
+                if len(sample_objs) >= 100:
+                    break
+        except UnmeasuredArtifact as exc:
+            raise ValueError(f"XML document is unmeasured ({exc})") from exc
+        if total == 0:
+            raise ValueError("XML file has no record rows")
+        headers = list(columns.keys())
+        schema = FileParser.infer_schema(sample_objs)
+        return headers, schema, int(total), sample_objs[:100]
+
     raise ValueError(f"File type '{file_type}' does not support streaming ingest")
 
 
@@ -689,6 +723,22 @@ def _batch_iterator_for_type(
                 opener.close()
 
         return _avro_batches()
+    if file_type == "xml":
+        from services.file_parser import iter_xml_dicts
+
+        def _xml_batches():
+            batch: list[dict] = []
+            for rec in iter_xml_dicts(content):
+                if not isinstance(rec, dict):
+                    continue
+                batch.append(_json_empty_to_none(rec))
+                if len(batch) >= batch_size:
+                    yield batch
+                    batch = []
+            if batch:
+                yield batch
+
+        return _xml_batches()
     raise ValueError(f"File type '{file_type}' does not support streaming ingest")
 
 
