@@ -388,3 +388,159 @@
     font-size: 12.5px;
   }
 }
+
+/* ─── Product shot — live workspace, not a second invented UI ───── */
+
+.lp-product-shot {
+  margin: 0;
+  min-width: 0;
+  width: 100%;
+}
+
+.lp-product-shot-chrome {
+  min-width: 0;
+  overflow: hidden;
+  border-radius: 16px;
+  border: 1px solid rgba(148, 197, 214, 0.18);
+  background: #071018;
+  box-shadow:
+    0 1px 0 rgba(148, 197, 214, 0.12) inset,
+    0 28px 64px -28px rgba(3, 10, 20, 0.88);
+}
+
+.lp-product-shot-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  height: 36px;
+  padding: 0 12px;
+  border-bottom: 1px solid rgba(148, 197, 214, 0.1);
+  background: #0b1522;
+}
+
+.lp-product-shot-dots {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 5px;
+}
+
+.lp-product-shot-dots i {
+  display: block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #243246;
+}
+
+.lp-product-shot-dots i:nth-child(1) { background: #f87171; }
+.lp-product-shot-dots i:nth-child(2) { background: #fbbf24; }
+.lp-product-shot-dots i:nth-child(3) { background: #34d399; }
+
+.lp-product-shot-surface {
+  min-width: 0;
+  overflow: hidden;
+  color: #9fb4c9;
+  font-size: 12px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.lp-product-shot-viewport {
+  position: relative;
+  overflow: hidden;
+  aspect-ratio: 16 / 10;
+  background: #0f172a;
+}
+
+.lp-product-shot-viewport img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  object-position: top left;
+}
+
+.lp-product-shot-route {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  margin: 12px 2px 0;
+  color: rgba(180, 199, 219, 0.82);
+  font-family: var(--df-font-mono, "JetBrains Mono", ui-monospace, monospace);
+  font-size: 12.5px;
+  line-height: 1.4;
+}
+
+.lp-product-shot-route span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lp-product-shot-route em {
+  flex: 0 0 auto;
+  color: #2dd4bf;
+  font-style: normal;
+  font-weight: 700;
+}
+
+.lp-product-shot-stack {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+}
+
+.lp .lp-hero--home .lp-product-shot {
+  max-width: 100%;
+}
+
+.lp .lp-mkt-live-reel .lp-product-shot-chrome,
+.lp .docs-shot-reel--product .docs-shot-reel-stage,
+.lp .docs-shot-reel--hero .docs-shot-reel-stage {
+  overflow: hidden;
+  border-radius: 0 0 16px 16px;
+}
+
+.lp .docs-shot-reel--product .docs-shot-reel-frame,
+.lp .docs-shot-reel--hero .docs-shot-reel-frame,
+.lp .docs-shot-reel .docs-shot-reel-frame {
+  object-fit: cover;
+  object-position: top left;
+}
+
+.lp .lp-mkt-hero-visual .lp-product-shot,
+.lp .lp-sol-hero-visual .lp-product-shot {
+  width: 100%;
+  min-width: 0;
+}
+
+.lp .lp-mkt-hero-band--ink .lp-product-shot-route,
+.lp .lp-sol-hero--ink .lp-product-shot-route {
+  color: rgba(180, 199, 219, 0.82);
+}
+
+/* Route chips never paint past the frame — long FQDNs ellipsis. */
+.lp .lp-product-shot-route {
+  overflow: hidden;
+}
+
+.docs-shot-reel-caption {
+  min-width: 0;
+  margin: 12px 2px 0;
+  overflow: hidden;
+  color: #64748b;
+  font-size: 13px;
+  line-height: 1.45;
+  text-overflow: ellipsis;
+}
+
+.lp .lp-mkt-hero-band--ink .docs-shot-reel-caption,
+.lp .lp-sol-hero--ink .docs-shot-reel-caption {
+  color: rgba(180, 199, 219, 0.78);
+}

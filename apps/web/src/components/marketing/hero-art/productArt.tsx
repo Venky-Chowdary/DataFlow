@@ -304,7 +304,7 @@ export function IntentArt() {
       <ArtLabel x={92} y={300} tone="teal">
         resolved plan
       </ArtLabel>
-      <ArtField x={92} y={314} w={564} name="pg.public.orders → sf.ANALYTICS.ORDERS" type="upsert" />
+      <ArtField x={92} y={314} w={564} name="pg.public.orders → Snowflake" type="ANALYTICS.ORDERS" />
       <ArtField x={92} y={368} w={564} name="cron 30 1 * * *" type="tz refused: IST" tone="amber" />
       <ArtField x={92} y={422} w={564} name="preflight G1–G9" type="approve-grade" tone="teal" />
 

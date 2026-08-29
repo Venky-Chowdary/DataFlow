@@ -8,19 +8,7 @@ import {
   MappingCinema,
   ProofCinema,
 } from "../../components/landing/AlgorithmCinema";
-import {
-  CadenceDialArt,
-  GateCombArt,
-  IntentArt,
-  PolicyDoorArt,
-  ReadLensArt,
-  RunSpineArt,
-} from "../../components/marketing/hero-art/productArt";
-import {
-  CutoverArt,
-  WarehouseLayersArt,
-  WatermarkArt,
-} from "../../components/marketing/hero-art/solutionArt";
+import { ProductShot } from "../../components/marketing/ProductShot";
 import type { PublicRoute } from "../../lib/publicNavigation";
 import {
   AlgoBlock,
@@ -28,7 +16,8 @@ import {
   LiveProductReel,
   PRODUCT_FRAMES,
   ProofCallout,
-  REAL_PREFLIGHT_GATES,
+  SOLUTION_FRAMES,
+  WORKSPACE_SHOT,
 } from "./productPageShared";
 
 type Nav = (r: PublicRoute) => void;
@@ -82,6 +71,7 @@ function SurfaceShell({
   stats,
   liveFrames,
   liveTitle,
+  liveSurface,
   children,
   next,
   nextLabel,
@@ -98,6 +88,7 @@ function SurfaceShell({
   stats: { value: string; label: string }[];
   liveFrames?: readonly { src: string; alt: string; caption?: string }[];
   liveTitle?: string;
+  liveSurface?: string;
   children: ReactNode;
   next: PublicRoute;
   nextLabel: string;
@@ -128,7 +119,11 @@ function SurfaceShell({
       {liveFrames && liveFrames.length > 0 ? (
         <MarketingReveal>
           <section className="lp-mkt-body">
-            <LiveProductReel frames={liveFrames} title={liveTitle ?? "Inside the live workspace"} />
+            <LiveProductReel
+              frames={liveFrames}
+              title={liveTitle ?? "Inside the live workspace"}
+              surface={liveSurface ?? "Workspace"}
+            />
           </section>
         </MarketingReveal>
       ) : null}
@@ -189,9 +184,17 @@ export function TransferStudioPage({
       ctaSecondary="See Job Theater"
       onPrimary={onGetStarted}
       onSecondary={() => onNavigate("product-jobs")}
-      heroVisual={<GateCombArt />}
+      heroVisual={
+        <ProductShot
+          src={WORKSPACE_SHOT.transferSource}
+          alt="Transfer Studio source step in the live Datawrap workspace"
+          surface="Transfer Studio"
+          route={{ source: "sample-orders.csv", dest: "File export · CSV" }}
+        />
+      }
       liveFrames={PRODUCT_FRAMES.transfer}
       liveTitle="Transfer Studio in the live workspace"
+      liveSurface="Transfer Studio"
       stats={[
         { value: "G1–G9", label: "Real preflight gates" },
         { value: "Any→any", label: "Route coverage" },
@@ -346,9 +349,17 @@ export function JobTheaterPage({
       ctaSecondary="Transfer Studio"
       onPrimary={onGetStarted}
       onSecondary={() => onNavigate("product-transfer")}
-      heroVisual={<RunSpineArt />}
+      heroVisual={
+        <ProductShot
+          src={WORKSPACE_SHOT.jobs}
+          alt="Job Theater with whole-history counts and destination population"
+          surface="Job Theater"
+          route={{ source: "PostgreSQL · public.orders", dest: "Snowflake · ANALYTICS.ORDERS" }}
+        />
+      }
       liveFrames={PRODUCT_FRAMES.jobs}
       liveTitle="Job Theater with real reconcile evidence"
+      liveSurface="Job Theater"
       stats={[
         { value: "Live", label: "Batch progress" },
         { value: "Phases", label: "Queue → reconcile" },
@@ -460,9 +471,17 @@ export function PipelinesPage({
       ctaSecondary="Recurring sync guide"
       onPrimary={onGetStarted}
       onSecondary={() => onNavigate("solution-sync")}
-      heroVisual={<CadenceDialArt />}
+      heroVisual={
+        <ProductShot
+          src={WORKSPACE_SHOT.pipelines}
+          alt="Schedules workspace — cadence, mode, and health"
+          surface="Schedules"
+          route={{ source: "PostgreSQL · public.orders", dest: "BigQuery · analytics.orders" }}
+        />
+      }
       liveFrames={PRODUCT_FRAMES.pipelines}
-      liveTitle="Pipelines in the live workspace"
+      liveTitle="Schedules in the live workspace"
+      liveSurface="Schedules"
       stats={[
         { value: "Hourly+", label: "Cadences" },
         { value: "4", label: "Write modes" },
@@ -567,9 +586,16 @@ export function QueryPlaygroundPage({
       ctaSecondary="Connectors"
       onPrimary={onGetStarted}
       onSecondary={() => onNavigate("integrations")}
-      heroVisual={<ReadLensArt />}
+      heroVisual={
+        <ProductShot
+          src={WORKSPACE_SHOT.query}
+          alt="Query Playground in the live Datawrap workspace"
+          surface="Query Playground"
+        />
+      }
       liveFrames={PRODUCT_FRAMES.query}
       liveTitle="Query Playground in the live workspace"
+      liveSurface="Query Playground"
       stats={[
         { value: "SQL", label: "Relational drivers" },
         { value: "Docs", label: "Mongo-style queries" },
@@ -666,9 +692,16 @@ export function DataPilotPage({
       ctaSecondary="MCP Server"
       onPrimary={onGetStarted}
       onSecondary={() => onNavigate("product-mcp")}
-      heroVisual={<IntentArt />}
+      heroVisual={
+        <ProductShot
+          src={WORKSPACE_SHOT.pilot}
+          alt="Datawrap Pilot in the live workspace"
+          surface="Datawrap Pilot"
+        />
+      }
       liveFrames={PRODUCT_FRAMES.pilot}
       liveTitle="Datawrap Pilot in the live workspace"
+      liveSurface="Datawrap Pilot"
       stats={[
         { value: "NL", label: "Triage chat" },
         { value: "Gates", label: "Explain failures" },
@@ -734,9 +767,16 @@ export function McpServerPage({
       ctaSecondary="Security overview"
       onPrimary={onGetStarted}
       onSecondary={() => onNavigate("security")}
-      heroVisual={<PolicyDoorArt />}
+      heroVisual={
+        <ProductShot
+          src={WORKSPACE_SHOT.mcp}
+          alt="MCP Server page in the live workspace"
+          surface="MCP Server"
+        />
+      }
       liveFrames={PRODUCT_FRAMES.mcp}
       liveTitle="Agent runs still land in the real workspace"
+      liveSurface="MCP Server"
       stats={[
         { value: "MCP", label: "Tool surface" },
         { value: "RBAC", label: "On every call" },
@@ -834,7 +874,17 @@ export function MigrationsSolutionPage({
       ctaSecondary="Open Transfer Studio"
       onPrimary={onGetStarted}
       onSecondary={() => onNavigate("product-transfer")}
-      heroVisual={<CutoverArt />}
+      heroVisual={
+        <ProductShot
+          src={WORKSPACE_SHOT.transferSource}
+          alt="Transfer Studio source — profiled sample-orders before a migration write"
+          surface="Migrations · Transfer Studio"
+          route={{ source: "PostgreSQL · public.orders", dest: "Snowflake · ANALYTICS.ORDERS" }}
+        />
+      }
+      liveFrames={SOLUTION_FRAMES.migrations}
+      liveTitle="The same Transfer Studio path that proves a cutover"
+      liveSurface="Transfer Studio"
       outcomes={[
         {
           title: "Semantic column matching",
@@ -938,10 +988,25 @@ export function WarehouseSolutionPage({
             </div>
           </div>
           <div className="lp-sol-hero-visual">
-            <WarehouseLayersArt />
+            <ProductShot
+              src={WORKSPACE_SHOT.jobs}
+              alt="Job Theater destination population after a warehouse load"
+              surface="Warehouse · Job Theater"
+              route={{ source: "PostgreSQL · public.orders", dest: "Snowflake · ANALYTICS.ORDERS" }}
+            />
           </div>
         </div>
       </section>
+
+      <MarketingReveal>
+        <section className="lp-mkt-body">
+          <LiveProductReel
+            frames={SOLUTION_FRAMES.warehouse}
+            title="Warehouse loads in the live workspace"
+            surface="Job Theater"
+          />
+        </section>
+      </MarketingReveal>
 
       <section className="lp-wh-rail" aria-label="Destinations">
         <div className="lp-shell lp-wh-rail-inner">
@@ -1088,7 +1153,17 @@ export function SyncSolutionPage({
       ctaSecondary="Pipelines product"
       onPrimary={onGetStarted}
       onSecondary={() => onNavigate("product-pipelines")}
-      heroVisual={<WatermarkArt />}
+      heroVisual={
+        <ProductShot
+          src={WORKSPACE_SHOT.pipelines}
+          alt="Schedules workspace for recurring sync"
+          surface="Recurring sync · Schedules"
+          route={{ source: "PostgreSQL · public.orders", dest: "BigQuery · analytics.orders" }}
+        />
+      }
+      liveFrames={SOLUTION_FRAMES.sync}
+      liveTitle="Every tick is a real job in the live workspace"
+      liveSurface="Schedules"
       outcomes={[
         {
           title: "Cadence you choose",
@@ -1169,6 +1244,9 @@ function SolutionShell({
   onPrimary,
   onSecondary,
   heroVisual,
+  liveFrames,
+  liveTitle,
+  liveSurface,
   outcomes,
   steps,
   caps,
@@ -1185,6 +1263,9 @@ function SolutionShell({
   onPrimary: () => void;
   onSecondary: () => void;
   heroVisual: ReactNode;
+  liveFrames?: readonly { src: string; alt: string; caption?: string }[];
+  liveTitle?: string;
+  liveSurface?: string;
   outcomes: { title: string; body: string }[];
   steps: { n: string; title: string; body: string }[];
   caps: { title: string; body: string }[];
@@ -1216,6 +1297,18 @@ function SolutionShell({
           <div className="lp-sol-hero-visual">{heroVisual}</div>
         </div>
       </section>
+
+      {liveFrames && liveFrames.length > 0 ? (
+        <MarketingReveal>
+          <section className="lp-mkt-body">
+            <LiveProductReel
+              frames={liveFrames}
+              title={liveTitle ?? "Inside the live workspace"}
+              surface={liveSurface ?? "Workspace"}
+            />
+          </section>
+        </MarketingReveal>
+      ) : null}
 
       <MarketingReveal>
         <section className="lp-sol-outcomes" aria-label="What you get">
