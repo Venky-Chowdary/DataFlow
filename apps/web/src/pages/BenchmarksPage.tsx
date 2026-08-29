@@ -288,10 +288,10 @@ export function BenchmarksPage() {
 
                     <div className="df2-page-benchmarks-toolbar">
                       <p className="df2-page-benchmarks-note" style={{ margin: 0, flex: 1 }}>
-                        Unique-engine matrix: every live unique engine as source × every live unique
-                        engine as dest (Postgres, MySQL, Mongo, SQL Server, Oracle, S3/MinIO, GCS,
-                        ADLS, DynamoDB, Snowflake fakesnow, BigQuery emulator, Redis, Iceberg, SQLite).
-                        Not 80×80 catalog aliases. SaaS tiles without a desktop backend stay skipped.
+                        Unique-engine matrix: every live unique engine as source × dest. Default is
+                        Postgres, MySQL, Mongo, SQLite, MinIO S3 (25 pairs). Not 80×80 catalog aliases.
+                        SQL Server / warehouse emulators are opt-in — they have hung create-new probes.
+                        SaaS tiles without a desktop backend stay skipped.
                       </p>
                       <Button
                         variant="secondary"

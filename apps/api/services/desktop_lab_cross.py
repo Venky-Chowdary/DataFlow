@@ -56,14 +56,16 @@ AZURITE_KEY = (
 )
 
 # Unique engines we can bind on a desktop lab. Catalog twins are excluded.
-LIVE_UNIQUE_ENGINES: tuple[str, ...] = (
+CORE_UNIQUE_ENGINES: tuple[str, ...] = (
     "postgresql",
     "mysql",
     "mongodb",
-    "sqlserver",
-    "oracle",
     "sqlite",
     "s3",
+)
+EXTENDED_UNIQUE_ENGINES: tuple[str, ...] = (
+    "sqlserver",
+    "oracle",
     "gcs",
     "adls",
     "dynamodb",
@@ -72,6 +74,18 @@ LIVE_UNIQUE_ENGINES: tuple[str, ...] = (
     "redis",
     "iceberg",
 )
+LIVE_UNIQUE_ENGINES: tuple[str, ...] = CORE_UNIQUE_ENGINES + EXTENDED_UNIQUE_ENGINES
+
+
+def engines_for_run() -> tuple[str, ...]:
+    """Default is the 5-engine core that dest-COUNTs without probe-retry hangs.
+
+    SQL Server / GCS / BQ create-new probes have hung this host for minutes.
+    Set DATAFLOW_CROSS_EXTENDED=1 to include them — do not invent green if they skip.
+    """
+    if os.environ.get("DATAFLOW_CROSS_EXTENDED", "").strip() == "1":
+        return LIVE_UNIQUE_ENGINES
+    return CORE_UNIQUE_ENGINES
 
 
 def _reachable(host: str, port: int, timeout: float = 0.8) -> bool:
@@ -430,9 +444,10 @@ def _transfer_pair(src: EndpointConfig, dst: EndpointConfig) -> dict[str, Any]:
 def run_live_engine_cross_matrix(*, persist: bool = True) -> dict[str, Any]:
     """Every live unique engine as source × every live unique engine as dest."""
     root = Path(tempfile.mkdtemp(prefix="df_xmat_"))
+    engines = engines_for_run()
     seeds: dict[str, EndpointConfig] = {}
     seed_rows: list[dict[str, Any]] = []
-    for engine in LIVE_UNIQUE_ENGINES:
+    for engine in engines:
         bound, row = _seed(engine, root)
         seed_rows.append(row)
         if bound is not None:
@@ -442,9 +457,9 @@ def run_live_engine_cross_matrix(*, persist: bool = True) -> dict[str, Any]:
     payload_checked: set[str] = set()
     progress_path = Path("/opt/cursor/artifacts/warehouse-emulator-lab/cross-progress.json")
     progress_path.parent.mkdir(parents=True, exist_ok=True)
-    for src_id in LIVE_UNIQUE_ENGINES:
+    for src_id in engines:
         src = seeds.get(src_id)
-        for dst_id in LIVE_UNIQUE_ENGINES:
+        for dst_id in engines:
             rec: dict[str, Any] = {
                 "source": src_id,
                 "destination": dst_id,
@@ -496,7 +511,9 @@ def run_live_engine_cross_matrix(*, persist: bool = True) -> dict[str, Any]:
     payload = {
         "fixture": "services.desktop_lab_cross.run_live_engine_cross_matrix",
         "measured_at": datetime.now(timezone.utc).isoformat(),
-        "unique_engines": list(LIVE_UNIQUE_ENGINES),
+        "unique_engines": list(engines),
+        "unique_engines_catalog": list(LIVE_UNIQUE_ENGINES),
+        "extended_opt_in": os.environ.get("DATAFLOW_CROSS_EXTENDED", "").strip() == "1",
         "unique_engines_seeded": sorted(seeds),
         "unique_engines_seed_failed": [r for r in seed_rows if r["status"] == "failed"],
         "unique_engines_seed_skipped": [r for r in seed_rows if r["status"] == "skipped"],

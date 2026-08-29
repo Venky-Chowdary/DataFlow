@@ -23,8 +23,11 @@ and dest-only (pgvector) tiles are excluded — they cannot pass both ways.
 `POST /api/v1/workspace/proofs/desktop-lab-cross` (Proofs → **Run unique-engine matrix**)
 runs every *live unique engine* as source × every live unique engine as dest:
 
-PostgreSQL, MySQL, MongoDB, SQL Server, Oracle, SQLite, MinIO S3, fake-gcs,
-Azurite ADLS, DynamoDB Local, fakesnow, BigQuery emulator, Redis, Iceberg REST.
+Default unique engines (25 pairs): PostgreSQL, MySQL, MongoDB, SQLite, MinIO S3.
+
+`DATAFLOW_CROSS_EXTENDED=1` adds SQL Server, Oracle, fake-gcs, Azurite, DynamoDB
+Local, fakesnow, BigQuery emulator, Redis, Iceberg REST. Those dests have hung
+create-new probes on this host — they are opt-in, never fake green.
 
 That is **not** 80×80 catalog aliases (Neon/RDS share the Postgres wire). A
 backend that is down is `skipped`. Salesforce / HubSpot / Stripe stay omitted

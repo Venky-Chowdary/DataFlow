@@ -12,8 +12,10 @@ from pathlib import Path
 import pytest
 
 from services.desktop_lab_cross import (
+    CORE_UNIQUE_ENGINES,
     LIVE_UNIQUE_ENGINES,
     bind_live_engine,
+    engines_for_run,
     run_live_engine_cross_matrix,
 )
 
@@ -28,6 +30,7 @@ def test_cross_matrix_lists_unique_engines_not_saas_twins():
     assert "postgresql_rds" not in LIVE_UNIQUE_ENGINES
     assert len(LIVE_UNIQUE_ENGINES) == len(set(LIVE_UNIQUE_ENGINES))
     assert len(LIVE_UNIQUE_ENGINES) >= 10
+    assert engines_for_run() == CORE_UNIQUE_ENGINES
 
 
 def test_bind_skips_closed_port(tmp_path, monkeypatch):
@@ -67,7 +70,7 @@ def test_pg_mysql_minio_cross_smoke_when_reachable(tmp_path):
 )
 def test_live_engine_cross_matrix_writes_artifact():
     report = run_live_engine_cross_matrix(persist=True)
-    assert report["pairs"] == len(LIVE_UNIQUE_ENGINES) ** 2
+    assert report["pairs"] == len(engines_for_run()) ** 2
     assert report["passed"] + report["failed"] + report["skipped"] == report["pairs"]
     assert report["honesty"]["catalog_tiles_are_not_transfer_live"] is True
     assert report["honesty"]["not_catalog_alias_cartesian"] is True
