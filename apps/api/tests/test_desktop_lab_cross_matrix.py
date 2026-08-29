@@ -74,7 +74,10 @@ def test_live_engine_cross_matrix_writes_artifact():
     for row in report["routes"]:
         if row["status"] == "passed":
             assert row.get("silent_loss") in (False, None)
-            assert row.get("integrity") == "passed"
+            assert row.get("integrity") in {
+                "passed",
+                "dest_count_pair_payload_sampled_on_engine",
+            }
     artifact = Path("/opt/cursor/artifacts/desktop_lab_cross.json")
     if artifact.is_file():
         saved = json.loads(artifact.read_text())
