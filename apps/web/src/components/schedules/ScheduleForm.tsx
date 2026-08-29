@@ -1,4 +1,7 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
+import { introspectTransferEndpoints } from "../../lib/api";
+import { ObjectNameCombobox } from "../transfer/ObjectNameCombobox";
+import { sourceTableMissingFromCatalog } from "../../lib/sourceObjectPick";
 import { DtIcon } from "../DtIcon";
 import { Button } from "../ui/Button";
 import { ConnectorSelect } from "../ui/ConnectorSelect";
@@ -152,6 +155,10 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
     initial?.require_signed_contract ?? Boolean(initial?.contract_id),
   );
 
+  const [sourceObjectNames, setSourceObjectNames] = useState<string[]>([]);
+  const [destObjectNames, setDestObjectNames] = useState<string[]>([]);
+  const [listingSourceObjects, setListingSourceObjects] = useState(false);
+
   const sourceConnector = connectors.find((c) => c.id === sourceId);
   const destConnector = connectors.find((c) => c.id === destId);
   const stagingSupported = writeViaStagingSupported(destConnector?.type);
@@ -194,6 +201,68 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
       setWriteViaStaging(false);
     }
   }, [stagingSupported, writeViaStaging]);
+
+  useEffect(() => {
+    if (!sourceId || !sourceConnector || callable) {
+      setSourceObjectNames([]);
+      return;
+    }
+    let cancelled = false;
+    setListingSourceObjects(true);
+    void introspectTransferEndpoints({
+      source: {
+        kind: "database",
+        format: sourceConnector.type,
+        connector_id: sourceId,
+        database: sourceConnector.database,
+      },
+      destination: { kind: "file_export", format: "json" },
+    })
+      .then(({ source: intro }) => {
+        if (cancelled) return;
+        setSourceObjectNames(
+          (intro.objects ?? []).map((o) => (o.name || "").trim()).filter(Boolean),
+        );
+      })
+      .catch(() => {
+        if (!cancelled) setSourceObjectNames([]);
+      })
+      .finally(() => {
+        if (!cancelled) setListingSourceObjects(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [sourceId, sourceConnector, callable]);
+
+  useEffect(() => {
+    if (!destId || !destConnector) {
+      setDestObjectNames([]);
+      return;
+    }
+    let cancelled = false;
+    void introspectTransferEndpoints({
+      source: { kind: "file_export", format: "json" },
+      destination: {
+        kind: "database",
+        format: destConnector.type,
+        connector_id: destId,
+        database: destConnector.database,
+      },
+    })
+      .then(({ destination: intro }) => {
+        if (cancelled) return;
+        setDestObjectNames(
+          (intro.objects ?? []).map((o) => (o.name || "").trim()).filter(Boolean),
+        );
+      })
+      .catch(() => {
+        if (!cancelled) setDestObjectNames([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [destId, destConnector]);
 
   const [contractBlock, setContractBlock] = useState("");
 
@@ -303,7 +372,7 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
           <p className="df2-field-hint">
             {isEdit
               ? "This pipeline has no persisted Validate mappings. Activate stays blocked — the hourly beat will not invent an auto-map."
-              : "This form does not store a mapping contract. Save creates a paused draft — not a live sync."}
+              : "This form does not store a mapping contract. Save creates a paused draft, then opens Transfer Studio. The beat will not invent an auto-map. This is a recurring sync, not a DAG."}
           </p>
           {onOpenStudio && (
             <Button type="button" size="sm" variant="primary" onClick={onOpenStudio}>
@@ -348,8 +417,25 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
           disabled={connectors.length === 0}
         />
         <div className="df2-field">
-          <label className="df2-label" htmlFor="sched-src-table">Source {sourceStreamLabel}</label>
-          <input id="sched-src-table" className="df2-input" value={sourceTable} onChange={(e) => setSourceTable(e.target.value)} placeholder="orders" required />
+          <ObjectNameCombobox
+            id="sched-src-table"
+            label={`Source ${sourceStreamLabel}`}
+            value={sourceTable}
+            onChange={setSourceTable}
+            options={sourceObjectNames}
+            loading={listingSourceObjects}
+            allowCreate={false}
+            objectNoun={sourceStreamLabel}
+            placeholder="Pick a table that exists"
+            emptyHint="Studio will not map a table that does not exist."
+          />
+          {sourceTableMissingFromCatalog(sourceTable, sourceObjectNames) && (
+            <p className="df2-field-hint" role="status">
+              <code>{sourceTable}</code> is not in the discovered catalog. Save still
+              creates a paused draft — Transfer Studio will refuse Map until you pick
+              a table that exists.
+            </p>
+          )}
           <div className="df2-sched-seg" role="radiogroup" aria-label="Source read mode">
             {(["table", "query", "procedure"] as const).map((mode) => (
               <button
@@ -376,8 +462,15 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
           disabled={connectors.length === 0}
         />
         <div className="df2-field">
-          <label className="df2-label" htmlFor="sched-dst-table">Destination {destStreamLabel}</label>
-          <input id="sched-dst-table" className="df2-input" value={destTable} onChange={(e) => setDestTable(e.target.value)} placeholder="orders_warehouse" required />
+          <ObjectNameCombobox
+            id="sched-dst-table"
+            label={`Destination ${destStreamLabel}`}
+            value={destTable}
+            onChange={setDestTable}
+            options={destObjectNames}
+            objectNoun={destStreamLabel}
+            placeholder="Pick existing or type a new name"
+          />
         </div>
       </div>
 

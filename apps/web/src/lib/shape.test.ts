@@ -10,6 +10,8 @@ import {
   operationsByFamily,
   previewSampleNote,
   continueTransformState,
+  preloadTransformRefused,
+  preloadTransformRefusalReason,
   kitchenCatalogColumns,
   kitchenSampleValues,
   recipePayload,
@@ -225,6 +227,54 @@ test("Continue waits for a matching balanced preview when a recipe is applied", 
       previewError: "",
       busy: true,
       previewMatchesSteps: false,
+    }).enabled,
+    true,
+  );
+});
+
+test("CDC with a recipe cannot continue — history was not written by this recipe", () => {
+  assert.equal(preloadTransformRefused("cdc"), true);
+  assert.equal(preloadTransformRefused("full_refresh_append"), false);
+  assert.match(preloadTransformRefusalReason("cdc"), /at-least-once|history|cdc/i);
+  const preview = {
+    recipe: { recipe_hash: "abc", identity_columns: [], output_columns: ["id"] },
+    sampled_rows: 1,
+    before: [],
+    after: [],
+    effect: {
+      rows_in: 1,
+      rows_out: 1,
+      rows_removed: 0,
+      rows_expanded: 0,
+      rows_diverted: 0,
+      cells_changed: 0,
+      nulls_introduced: 0,
+      balanced: true,
+      steps: [],
+    },
+    changed_cells: [],
+    refusal: null,
+    shaped_profile: [],
+    suggestions: [],
+  };
+  const blocked = continueTransformState({
+    steps,
+    preview,
+    previewError: "",
+    busy: false,
+    previewMatchesSteps: true,
+    syncMode: "cdc",
+  });
+  assert.equal(blocked.enabled, false);
+  assert.match(blocked.reason, /cdc/i);
+  assert.equal(
+    continueTransformState({
+      steps: [],
+      preview: null,
+      previewError: "",
+      busy: false,
+      previewMatchesSteps: false,
+      syncMode: "cdc",
     }).enabled,
     true,
   );

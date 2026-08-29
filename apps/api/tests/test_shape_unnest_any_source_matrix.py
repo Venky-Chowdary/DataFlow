@@ -6,8 +6,8 @@ expands a JSON array on CSV, Excel, JSONL, PostgreSQL and MySQL, that Validate
 and Execute share one recipe hash, and that dest COUNT is the expanded image
 (declared projection), not a surplus.
 
-CDC / XML / multi-stream are refused or unstreamable today. Those rows are
-skip, not invented green.
+CDC / multi-stream stay refused (history was not written by this recipe).
+XML is streamable when the document is a unique repeating list-of-object.
 
 Fixture (2 parent rows → 3 child rows):
     1, ada,  [{"sku":"A","qty":2},{"sku":"B","qty":1}]
@@ -96,7 +96,12 @@ def _mappings() -> list[dict[str, object]]:
 
 def _file_bytes(fmt: str) -> tuple[bytes, str]:
     content, _mime = convert_rows(HEADERS, ROWS, source_format="csv", target_format=fmt)
-    name = {"csv": "orders.csv", "excel": "orders.xlsx", "jsonl": "orders.jsonl"}[fmt]
+    name = {
+        "csv": "orders.csv",
+        "excel": "orders.xlsx",
+        "jsonl": "orders.jsonl",
+        "xml": "orders.xml",
+    }[fmt]
     return content, name
 
 
@@ -269,8 +274,9 @@ def _write_artifact(rows: list[dict]) -> None:
         "skip": sum(1 for r in rows if r["status"] == "skip"),
         "cases": rows,
         "honesty": (
-            "100% on this named fixture only. CDC/XML are skip, not green. "
-            "Catalog tiles are not transfer-live."
+            "100% on this named fixture only. CDC stays skip — pre-load cannot "
+            "rewrite dest history. XML is measured when STREAMABLE. Catalog tiles "
+            "are not transfer-live. CDC default is at-least-once upsert."
         ),
     }
     ARTIFACT.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
@@ -285,7 +291,7 @@ def matrix_log():
 
 @pytest.mark.parametrize(
     "source_kind",
-    ["csv", "excel", "jsonl", "postgresql", "mysql"],
+    ["csv", "excel", "jsonl", "xml", "postgresql", "mysql"],
 )
 def test_unnest_recipe_is_the_same_program_on_every_measured_source(source_kind, matrix_log):
     """One recipe hash, one expanded population, files and live SQL."""
@@ -302,7 +308,7 @@ def test_unnest_recipe_is_the_same_program_on_every_measured_source(source_kind,
     src_table = dest_table = ""
     dest_engine = "postgresql"
     try:
-        if source_kind in {"csv", "excel", "jsonl"}:
+        if source_kind in {"csv", "excel", "jsonl", "xml"}:
             require_ports(5432)
             dest_table = uniq("unnest_dest")
             request = _request_file(source_kind, _with_identity(pg_endpoint(dest_table)))
@@ -371,27 +377,20 @@ def test_unnest_recipe_is_the_same_program_on_every_measured_source(source_kind,
                 _drop_pg(dest_table)
 
 
-def test_cdc_and_xml_stay_honest_skips_on_this_fixture(matrix_log):
-    """Do not invent green for routes the recipe cannot run."""
-    for source, reason in (
-        (
-            "cdc",
-            "Transform (pre-load) is refused on CDC: history was not written by this recipe.",
-        ),
-        (
-            "xml",
-            "XML is materialized-only today; STREAMABLE_TYPES does not include xml.",
-        ),
-    ):
-        matrix_log.append(
-            {
-                "source": source,
-                "status": "skip",
-                "reason": reason,
-                "recipe_hash": _recipe_hash(),
-                "dest_count": None,
-                "rows_expanded": None,
-                "balanced": None,
-            }
-        )
-    pytest.skip("CDC and XML are named skips on this fixture, not transfer-live")
+def test_cdc_stays_honest_skip_on_this_fixture(matrix_log):
+    """Do not invent green for a route whose dest history this recipe did not write."""
+    matrix_log.append(
+        {
+            "source": "cdc",
+            "status": "skip",
+            "reason": (
+                "Transform (pre-load) is refused on CDC: history was not written "
+                "by this recipe. Delivery stays at-least-once upsert."
+            ),
+            "recipe_hash": _recipe_hash(),
+            "dest_count": None,
+            "rows_expanded": None,
+            "balanced": None,
+        }
+    )
+    pytest.skip("CDC pre-load is a named skip on this fixture, not transfer-live")

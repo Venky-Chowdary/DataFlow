@@ -232,7 +232,7 @@ export function ConnectorCatalogPanel({
             {total > 0 && ` · ${total.toLocaleString()} in catalog`}
             {transferLive > 0 && (
               role === "all"
-                ? ` · ${transferLive.toLocaleString()} transfer-live drivers`
+                ? ` · ${transferLive.toLocaleString()} TRANSFER_READY drivers — tiles are not transfer-live`
                 : ` · ${transferLive.toLocaleString()} usable as ${role}`
             )}
             {sourceOnlyCount > 0 && ` · ${sourceOnlyCount.toLocaleString()} source-only`}

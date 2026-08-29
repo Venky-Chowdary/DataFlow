@@ -39,7 +39,7 @@ import {
 } from "../lib/api";
 import { breakerBlocksRuns } from "../lib/contractBreakerUi";
 import { fleetExportBlockedReason } from "../lib/schedulesGitops";
-import { scheduleNeedsStudio, studioIntentFromSchedule } from "../lib/scheduleApprovalCta";
+import { scheduleCreateOpensStudio, scheduleNeedsStudio, studioIntentFromSchedule } from "../lib/scheduleApprovalCta";
 import {
   Connector,
   PipelineSchedule,
@@ -265,16 +265,17 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
     if (!allowOrExplain(scheduleManage)) return;
     setSaving(true);
     try {
+      let created: PipelineSchedule | null = null;
       if (editing) {
         await updateSchedule(editing.id, input);
         toast({ title: "Schedule updated", message: `"${input.name ?? editing.name}" saved.`, tone: "success" });
       } else {
-        await createSchedule(input as ScheduleInput);
+        created = await createSchedule(input as ScheduleInput);
         toast({
           title: input.enabled === false ? "Schedule saved paused" : "Schedule created",
           message:
             input.enabled === false
-              ? `"${input.name}" has no Validate mappings — the beat will not invent an auto-map. Create from Transfer Studio after Validate.`
+              ? `"${input.name}" has no Validate mappings — opening Transfer Studio so the beat does not invent an auto-map.`
               : `"${input.name}" is scheduled.`,
           tone: "success",
         });
@@ -282,6 +283,9 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
       closeForm();
       await load();
       void onSchedulesChange?.();
+      if (created && scheduleCreateOpensStudio(created) && onStartTransfer) {
+        onStartTransfer(studioIntentFromSchedule(created));
+      }
     } catch (err) {
       toast({
         title: editing ? "Could not update schedule" : "Could not create schedule",
@@ -486,7 +490,7 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
       wide
       className="df2-page-pipelines"
       title="Schedules"
-      description="Recurring syncs replay a Validate-approved mapping contract (not ADF/Informatica DAGs). Same Map → Validate → Execute engine as Transfer Studio."
+      description="Recurring same-engine syncs — Map → Validate → Execute on a cadence. Not ADF/Informatica DAG orchestration. A draft without mappings stays paused until Transfer Studio persists a contract."
     >
       <PageFrame className="df2-pipeline-page">
       <PermissionNotice
@@ -597,7 +601,7 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
         <div className="df2-pipeline-form is-active">
           <PageSection
             title={editing ? "Edit schedule" : "Create recurring sync"}
-            subtitle={editing ? editing.name : "Schedule source → destination with your saved connectors"}
+            subtitle={editing ? editing.name : "Cadence only — Transfer Studio persists the mapping contract. This is not a DAG."}
             className="df2-pipeline-form-card"
             actions={
               <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" onClick={closeForm}>

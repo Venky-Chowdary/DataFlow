@@ -31,5 +31,10 @@ export interface TransferPageProps {
       transforms?: { type?: string }[];
       [key: string]: unknown;
     }>;
+    /** Schedules → Studio: preload the parked route so Map can persist a contract. */
+    sourceConnectorId?: string;
+    destConnectorId?: string;
+    sourceTable?: string;
+    destTable?: string;
   } | null;
 }

@@ -54,6 +54,27 @@ def test_a_json_array_column_suggests_unnest_as_a_decision():
     assert found is not None
     assert found["severity"] == "decision"
     assert found["step"]["options"]["to"] == "line_items_item"
+    assert found["step"]["options"]["keep_parent"] is False
+
+
+def test_leftover_parent_json_after_unnest_suggests_drop_not_unnest_again():
+    """keep_parent leftover is a named drop — Validate refuses ARRAY→TEXT until then."""
+    rows = [
+        {
+            "line_items": '[{"sku":"A"},{"sku":"B"}]',
+            "line_items_item": {"sku": "A"},
+        },
+        {
+            "line_items": '[{"sku":"C"}]',
+            "line_items_item": {"sku": "C"},
+        },
+    ]
+    suggestions = suggest_steps(profile_columns(rows))
+    assert _suggestion(suggestions, "unnest_json", "line_items") is None
+    drop = _suggestion(suggestions, "drop_column", "line_items")
+    assert drop is not None
+    assert drop["severity"] == "blocking"
+    assert "leftover" in drop["reason"].lower()
 
 
 def test_a_narrowing_decimal_is_a_blocking_suggestion_with_the_carriers_scale():
