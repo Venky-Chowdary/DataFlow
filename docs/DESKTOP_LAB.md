@@ -65,20 +65,27 @@ PYTHONPATH=. python -m pytest tests/test_desktop_lab_dimensions.py -q
 `tests/desktop_lab_untested.py` covers what the 7-column overwrite fixture
 skipped, against services that are actually up.
 
-Measured on this host: **20 passed / 0 failed / 4 skipped** of 24 cells
-(`test_desktop_lab_untested_important_dimensions`, 25.73s).
+Measured on this host: **29 passed / 0 failed / 1 skipped** of 30 cells
+(`test_desktop_lab_untested_important_dimensions`, 48.47s,
+`desktop_lab_untested.json`).
 
-Passed: dest-exists JSONB/UUID/BYTEA/INTERVAL (including INTERVAL `'0'`);
-INT[] create-new invent fail-closed; XML + native POINT dest-exists; nested
-explode CSV→PG; incremental_deduped and mirror on PG and MySQL dest; SCD2
-PG→SQLite dest-before measured; reverse-ETL PG→MySQL; MySQL ROW binlog →
-SQLite CDC; PG logical → PG CDC; G14 dest-only NOT NULL `tenant_id` blocks;
-PG→SQLite/Mongo/S3/SQL Server/Oracle dest-exists.
+Passed: dest-exists JSONB/UUID/BYTEA/INTERVAL; **INT[] create-new and
+dest-exists stay `bigint[]` (never invent JSONB)**; XML + native POINT;
+**PostGIS GEOGRAPHY** dest-exists (`geography(Point,4326)`); nested explode
+CSV→PG; incremental_deduped and mirror on PG and MySQL dest; SCD2 PG→SQLite;
+reverse-ETL PG→MySQL; **local SaaS HTTP stub** Salesforce / HubSpot / Stripe
+(not a customer org; Stripe Planned refuse measured); MySQL ROW binlog →
+SQLite CDC plus **redelivery replay** (`exactly_once_claimed=false`);
+PG logical → PG CDC; G14 dest-only NOT NULL; PG→SQLite/Mongo/S3/SQL Server
+dest-exists; **Oracle dest-exists** (fresh process); **GCS / ADLS create-new**
+on fake-gcs / Azurite (emulator, not customer-tenant);
+`production_sku_validate_honesty` (78 routes, 0 planned).
 
-Skipped (not invented green): GCS/ADLS/BQ create-new (writer probe hang);
-Salesforce/HubSpot/Stripe (no live SaaS). Geography/PostGIS omitted
-(extension absent). Customer-tenant warehouse PRODUCTION_SKU is not claimed.
-Catalog tiles are not transfer-live.
+Skipped (not invented green): **BQ create-new** — goccy emulator
+`sql: connection is already closed` (5s health probe). Create-new was
+measured on this host when the emulator was healthy; that is not a
+customer-tenant PRODUCTION_SKU. Catalog tiles are not transfer-live.
+CDC default remains **at-least-once upsert**.
 
 ```bash
 PYTHONPATH=. python -m pytest tests/test_desktop_lab_untested.py -q
