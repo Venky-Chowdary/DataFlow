@@ -44,7 +44,7 @@ DATAFLOW_CROSS_MATRIX=1 PYTHONPATH=. python -m pytest \
 matrix on PostgreSQL and MySQL only. It is **not** every SQL type, every
 canonical sync mode, or every dest-exists shape.
 
-Measured on this host (`desktop_lab_dimensions.json`): **16 passed / 8 failed /
+Measured on this host (`desktop_lab_dimensions.json`): **24 passed / 0 failed /
 0 skipped** of 24 cells.
 
 - **Types:** the 7-column FIDELITY fixture (`id`, `amt_dec`, `amt_float`,
@@ -52,9 +52,9 @@ Measured on this host (`desktop_lab_dimensions.json`): **16 passed / 8 failed /
   are not in this fixture.
 - **Sync:** overwrite, append, incremental_append, upsert (two-run row counts).
   CDC / SCD2 / mirror / reverse_etl / incremental_deduped are not claimed here.
-- **Schema:** create-new typed and dest-exists compatible passed on four SQL
-  routes. dest-exists DECIMAL→INT and extra unmapped source **did not
-  fail-closed** (8 failed cells).
+- **Schema:** create-new typed, dest-exists compatible, dest-exists DECIMAL→INT
+  (fail-closed), and dest-exists extra source G13 (fail-closed) on four SQL
+  routes. Dest-exists overwrite keeps live dest types/nullability.
 
 ```bash
 PYTHONPATH=. python -m pytest tests/test_desktop_lab_dimensions.py -q
@@ -65,16 +65,20 @@ PYTHONPATH=. python -m pytest tests/test_desktop_lab_dimensions.py -q
 `tests/desktop_lab_untested.py` covers what the 7-column overwrite fixture
 skipped, against services that are actually up.
 
-Measured on this host: **13 passed / 4 failed / 0 skipped** of 17 cells
-(`test_desktop_lab_untested_important_dimensions`, 23.57s).
+Measured on this host: **20 passed / 0 failed / 4 skipped** of 24 cells
+(`test_desktop_lab_untested_important_dimensions`, 25.73s).
 
-Passed: JSON/UUID/BLOB MySQL→PG; INT[] create-new invent fail-closed;
-incremental_deduped and mirror on PG and MySQL dest; reverse-ETL PG→MySQL;
-MySQL ROW binlog → SQLite CDC; PG logical → PG CDC; PG→SQLite/Mongo/S3/SQL Server.
+Passed: dest-exists JSONB/UUID/BYTEA/INTERVAL (including INTERVAL `'0'`);
+INT[] create-new invent fail-closed; XML + native POINT dest-exists; nested
+explode CSV→PG; incremental_deduped and mirror on PG and MySQL dest; SCD2
+PG→SQLite dest-before measured; reverse-ETL PG→MySQL; MySQL ROW binlog →
+SQLite CDC; PG logical → PG CDC; G14 dest-only NOT NULL `tenant_id` blocks;
+PG→SQLite/Mongo/S3/SQL Server/Oracle dest-exists.
 
-Failed (open, not invented green): dest-exists BYTEA PII review; G14 dest-only
-NOT NULL; SCD2 dest-before unmeasured; Oracle `CREATE TABLE IF NOT EXISTS`
-(ORA-00922). Geography/PostGIS, Salesforce, GCS/ADLS/BQ create-new omitted.
+Skipped (not invented green): GCS/ADLS/BQ create-new (writer probe hang);
+Salesforce/HubSpot/Stripe (no live SaaS). Geography/PostGIS omitted
+(extension absent). Customer-tenant warehouse PRODUCTION_SKU is not claimed.
+Catalog tiles are not transfer-live.
 
 ```bash
 PYTHONPATH=. python -m pytest tests/test_desktop_lab_untested.py -q
