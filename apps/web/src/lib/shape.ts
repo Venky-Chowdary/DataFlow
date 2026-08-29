@@ -269,7 +269,7 @@ const FIELD_LABEL: Record<string, string> = {
   keep: "Keep matching rows",
   reason: "Quarantine reason",
   index_to: "Index column",
-  keep_parent: "Keep the original JSON column (Validate then needs drop/flatten)"
+  keep_parent: "Keep the original JSON column (Validate then needs drop/flatten)",
   depth: "Flatten depth",
   keys: "Object keys to promote",
 };
