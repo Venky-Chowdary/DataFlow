@@ -22,6 +22,90 @@ from src.transfer.cdc_transfer import _apply_change_batch  # noqa: E402
 from src.transfer.models import EndpointConfig  # noqa: E402
 
 
+def test_logminer_where_and_predicates_parse_pk() -> None:
+    from connectors.oracle_logminer import _parse_sql_redo
+
+    sql = (
+        'update "DATAFLOW"."T" set "AMOUNT" = \'99\' '
+        "where \"ID\" = '1' and \"AMOUNT\" = '10' and ROWID = 'AAASjEAAMAAAADTAAA';"
+    )
+    row = _parse_sql_redo(sql, op="update")
+    assert row.get("ID") == "1"
+    assert row.get("AMOUNT") == "99"
+    delete_sql = (
+        'delete from "DATAFLOW"."T" where "ID" = \'2\' and ROWID = \'AAASjEAAMAAAADTAAA\';'
+    )
+    deleted = _parse_sql_redo(delete_sql, op="delete")
+    assert deleted.get("ID") == "2"
+
+
+def test_infer_cdb_service_for_xe_and_free() -> None:
+    from connectors.oracle_logminer import OracleLogMinerCdc
+
+    assert OracleLogMinerCdc.infer_cdb_service("XEPDB1") == "XE"
+    assert OracleLogMinerCdc.infer_cdb_service("FREEPDB1") == "FREE"
+    assert OracleLogMinerCdc.infer_cdb_service("ORCLPDB1") == "ORCLCDB"
+    assert OracleLogMinerCdc.infer_cdb_service("CUSTOM") == ""
+
+
+def test_decode_logminer_token_unwraps_double_encoded_json() -> None:
+    """Persist used to json.dumps(encode_logminer_token(...)) — decode must restore."""
+    import json
+
+    from connectors.oracle_logminer import decode_logminer_token, encode_logminer_token
+
+    token = encode_logminer_token(2981200, table="T", phase="streaming")
+    dumped = json.dumps(token)
+    assert dumped.startswith('"')
+    state = decode_logminer_token(dumped)
+    assert state["scn"] == 2981200
+    assert state["phase"] == "streaming"
+    assert state["table"] == "T"
+
+
+def test_serialize_resume_token_does_not_double_encode_json_string() -> None:
+    import json
+
+    from connectors.oracle_logminer import encode_logminer_token
+    from services.cdc_resume_tokens import serialize_resume_token, unwrap_resume_token
+
+    token = encode_logminer_token(2981200, table="T", phase="streaming")
+    once = serialize_resume_token(token)
+    twice = serialize_resume_token(once)
+    dumped = json.dumps(token)
+    from_dumped = serialize_resume_token(dumped)
+    assert once == token
+    assert twice == token
+    assert from_dumped == token
+    parsed = json.loads(once)
+    assert isinstance(parsed, dict)
+    assert parsed["kind"] == "oracle-logminer"
+    assert parsed["scn"] == 2981200
+    assert not once.startswith('"')
+    unwrapped = unwrap_resume_token(dumped)
+    assert isinstance(unwrapped, dict)
+    assert unwrapped["scn"] == 2981200
+
+
+def test_oracle_logminer_cdc_keeps_streaming_scn_from_dumped_watermark() -> None:
+    """A double-encoded watermark must not reset to phase=initial / scn=0."""
+    import json
+
+    from connectors.oracle_logminer import OracleLogMinerCdc, encode_logminer_token
+
+    token = encode_logminer_token(2981200, table="CDC_T", phase="streaming")
+    dumped = json.dumps(token)
+    cdc = OracleLogMinerCdc(
+        {"host": "localhost", "database": "XEPDB1", "username": "DATAFLOW"},
+        table="CDC_T",
+        primary_key="ID",
+        schema="DATAFLOW",
+        resume_token=dumped,
+    )
+    assert cdc.scn == 2981200
+    assert cdc.phase == "streaming"
+
+
 def test_mismatch_and_garbage_sql_redo_are_unparsed() -> None:
     mismatch = _parse_sql_redo('INSERT INTO T("A","B") VALUES(\'only-one\')', op="insert")
     assert mismatch.get(UNPARSED_SQL_REDO_FLAG) == "1"

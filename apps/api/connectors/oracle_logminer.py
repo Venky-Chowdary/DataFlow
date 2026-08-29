@@ -140,7 +140,12 @@ def decode_logminer_token(token: str | None) -> dict[str, Any]:
     if not token:
         return empty
     try:
-        data = json.loads(str(token))
+        from services.cdc_resume_tokens import unwrap_resume_token
+
+        data = unwrap_resume_token(token)
+        if not isinstance(data, dict):
+            parsed = json.loads(str(token))
+            data = unwrap_resume_token(parsed) if not isinstance(parsed, dict) else parsed
         if isinstance(data, dict) and data.get("kind") == "oracle-logminer":
             return {
                 "scn": int(data.get("scn") or 0),
@@ -426,6 +431,17 @@ def _split_sql_csv_aware(text: str) -> list[str]:
             buf = []
             i += 1
             continue
+        # LogMiner WHERE uses ``col = val AND col = val`` (not commas).
+        if (
+            depth == 0
+            and text[i : i + 3].upper() == "AND"
+            and (i == 0 or not text[i - 1].isalnum())
+            and (i + 3 >= len(text) or not text[i + 3].isalnum())
+        ):
+            parts.append("".join(buf).strip())
+            buf = []
+            i += 3
+            continue
         buf.append(ch)
         i += 1
     tail = "".join(buf).strip()
@@ -435,7 +451,7 @@ def _split_sql_csv_aware(text: str) -> list[str]:
 
 
 def _unquote_sql_literal(value: str) -> str:
-    v = (value or "").strip()
+    v = (value or "").strip().rstrip(";").strip()
     if not v or v.upper() == "NULL":
         return ""
     if len(v) >= 2 and v[0] == "'" and v[-1] == "'":
@@ -632,6 +648,64 @@ class OracleLogMinerCdc:
             db_type="oracle",
         )
 
+    @staticmethod
+    def infer_cdb_service(pdb_service: str) -> str:
+        """Map a common XE/Free PDB service to its CDB root service.
+
+        ``DBMS_LOGMNR.ADD_LOGFILE`` is illegal inside a PDB (ORA-65040).
+        Debezium mines from CDB$ROOT and filters SEG_OWNER for the PDB schema.
+        """
+        key = str(pdb_service or "").strip().upper()
+        return {
+            "XEPDB1": "XE",
+            "FREEPDB1": "FREE",
+            "ORCLPDB1": "ORCLCDB",
+        }.get(key, "")
+
+    def _mining_target(self) -> tuple[str, str]:
+        """Return ``(service, username)`` for ADD_LOGFILE / START_LOGMNR."""
+        cdb = str(
+            self.cfg.get("cdb_service")
+            or self.cfg.get("cdb_database")
+            or self.cfg.get("logminer_service")
+            or ""
+        ).strip()
+        pdb = str(self.cfg.get("database") or self.cfg.get("service_name") or "").strip()
+        if not cdb:
+            cdb = self.infer_cdb_service(pdb)
+        user = str(
+            self.cfg.get("logminer_username")
+            or self.cfg.get("cdb_username")
+            or ""
+        ).strip()
+        if not user:
+            local = str(self.cfg.get("username") or "")
+            if cdb and local and not local.upper().startswith("C##"):
+                user = f"C##{local}"
+            else:
+                user = local
+        service = cdb or pdb or "ORCL"
+        return service, user
+
+    def _mining_conn(self):
+        """CDB connection for LogMiner — PDB connections raise ORA-65040."""
+        from connectors.generic_sql import get_connection
+
+        service, user = self._mining_target()
+        return get_connection(
+            host=self.cfg.get("host") or "localhost",
+            port=self.cfg.get("port") or 1521,
+            database=service,
+            username=user,
+            password=self.cfg.get("logminer_password")
+            or self.cfg.get("cdb_password")
+            or self.cfg.get("password")
+            or "",
+            connection_string=self.cfg.get("connection_string") or "",
+            ssl=bool(self.cfg.get("ssl")),
+            db_type="oracle",
+        )
+
     def _qualified(self, table: str | None = None) -> str:
         tbl = quote_sql_identifier((table or self.table).upper())
         if self.schema:
@@ -663,7 +737,13 @@ class OracleLogMinerCdc:
                     # Privilege / dictionary probe
                     cur.execute("SELECT COUNT(*) FROM v$logmnr_contents WHERE ROWNUM < 1")
                     cur.fetchone()
-                    return True
+            # ADD_LOGFILE must succeed on the CDB mining session (ORA-65040 in PDB).
+            with self._mining_conn() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("SELECT current_scn FROM v$database")
+                    if not cur.fetchone():
+                        return False
+            return True
         except Exception as exc:
             logger.debug("Oracle LogMiner unavailable: %s", exc)
             return False
@@ -953,7 +1033,7 @@ class OracleLogMinerCdc:
             return events
         peek_limit = min(int(sig.chunk_size or self.batch_size), 200)
         try:
-            with self._conn() as conn:
+            with self._mining_conn() as conn:
                 with conn.cursor() as cur:
                     cur.execute("SELECT current_scn FROM v$database")
                     head = cur.fetchone()
@@ -1033,7 +1113,7 @@ class OracleLogMinerCdc:
         last_ssn = self.ssn
         fetched = 0
         try:
-            with self._conn() as conn:
+            with self._mining_conn() as conn:
                 with conn.cursor() as cur:
                     assert_resume_scn_in_redo(
                         self.scn,
@@ -1141,7 +1221,7 @@ class OracleLogMinerCdc:
         # (xid_key, scn, rs_id, ssn, table, op, row)
         end_scn = self.scn
         try:
-            with self._conn() as conn:
+            with self._mining_conn() as conn:
                 with conn.cursor() as cur:
                     assert_resume_scn_in_redo(
                         self.scn,

@@ -1647,9 +1647,12 @@ def _run_cdc_shared_multi_table(
             if is_side_channel_resume_token(change.resume_token):
                 skip_ack = True
             else:
-                token_s: str
+                from services.cdc_resume_tokens import serialize_resume_token
+
                 try:
-                    token_s = json.dumps(change.resume_token, default=json_util.default)
+                    token_s = serialize_resume_token(
+                        change.resume_token, default=json_util.default
+                    )
                 except TypeError:
                     token_s = str(change.resume_token)
                 # Stage, do not publish. Only a table that actually received a
@@ -2410,6 +2413,7 @@ def _run_cdc_single_stream(
             is_durable_log_resume_token,
             is_side_channel_resume_token,
             is_txn_held_token,
+            serialize_resume_token,
         )
 
         if (
@@ -2482,14 +2486,14 @@ def _run_cdc_single_stream(
                 skip_ack = True
             elif is_durable_log_resume_token(change.resume_token):
                 try:
-                    state.running_cursor = json.dumps(
+                    state.running_cursor = serialize_resume_token(
                         change.resume_token, default=json_util.default
                     )
                 except TypeError:
                     state.running_cursor = str(change.resume_token)
             else:
                 try:
-                    state.running_cursor = json.dumps(
+                    state.running_cursor = serialize_resume_token(
                         change.resume_token, default=json_util.default
                     )
                 except TypeError:
