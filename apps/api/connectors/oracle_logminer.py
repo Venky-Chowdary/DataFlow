@@ -26,6 +26,70 @@ _OP_MAP = {
     "DELETE": "delete",
 }
 
+UNPARSED_SQL_REDO_FLAG = "_df_unparsed_sql_redo"
+_UNPARSED_TRUTHY = frozenset({"1", "true", "yes"})
+
+
+def is_unparsed_sql_redo(row: Any) -> bool:
+    """True when LogMiner text could not be mapped to dest columns."""
+    if not isinstance(row, dict):
+        return False
+    return str(row.get(UNPARSED_SQL_REDO_FLAG) or "").strip().lower() in _UNPARSED_TRUTHY
+
+
+def sql_redo_reject_detail(
+    row: dict[str, Any] | None,
+    *,
+    op: str = "",
+    sql_redo: str = "",
+    table: str = "",
+) -> dict[str, Any]:
+    """Module-9-shaped quarantine payload — never a dest upsert."""
+    rec = dict(row or {})
+    reason = str(
+        rec.get("_df_parse_error")
+        or "Oracle LogMiner SQL_REDO could not be parsed — refuse destination write"
+    )
+    redo = str(rec.get("_df_sql_redo") or sql_redo or "")[:2000]
+    return {
+        "failure_reason": reason,
+        "reason": reason,
+        "original_value": {
+            "op": op,
+            "table": table,
+            "sql_redo": redo,
+            "parsed": {k: v for k, v in rec.items() if not str(k).startswith("_df_")},
+        },
+        "expected_type": "parsed_sql_redo_row",
+        "actual_type": "unparsed_sql_redo",
+        "transform_attempted": "logminer_sql_redo_parse",
+        "recovery_suggestion": (
+            "Inspect SQL_REDO in quarantine, confirm supplemental logging and "
+            "the LogMiner dictionary, then replay. Unparsed redo is never "
+            "written to the destination."
+        ),
+        "values": rec,
+        "connector": "oracle",
+        "source": "oracle_logminer",
+    }
+
+
+def classify_sql_redo(
+    sql_redo: str,
+    *,
+    op: str,
+    table: str = "",
+) -> tuple[str, dict[str, Any]]:
+    """Return ``('ok', row)`` or ``('unparsed', reject_detail)``."""
+    parsed = _parse_sql_redo(sql_redo or "", op=op)
+    if is_unparsed_sql_redo(parsed):
+        if sql_redo and not parsed.get("_df_sql_redo"):
+            parsed["_df_sql_redo"] = str(sql_redo)[:2000]
+        return "unparsed", sql_redo_reject_detail(
+            parsed, op=op, sql_redo=sql_redo, table=table
+        )
+    return "ok", parsed
+
 
 def encode_logminer_token(
     scn: int,
@@ -397,8 +461,9 @@ def _parse_sql_redo(sql_redo: str, *, op: str) -> dict[str, str]:
             if len(cols) != len(vals):
                 # Refuse to invent misaligned columns — surface as unparsed.
                 return {
-                    "_df_unparsed_sql_redo": "1",
+                    UNPARSED_SQL_REDO_FLAG: "1",
                     "_df_parse_error": f"insert col/val mismatch ({len(cols)} vs {len(vals)})",
+                    "_df_sql_redo": text[:2000],
                 }
             for c, v in zip(cols, vals):
                 if c:
@@ -428,6 +493,15 @@ def _parse_sql_redo(sql_redo: str, *, op: str) -> dict[str, str]:
         col = m.group(1).upper()
         val = m.group(2) if m.group(2) is not None else m.group(3)
         out[col] = "" if val is None or str(val).upper() == "NULL" else str(val)
+    if out:
+        return out
+    # Non-empty redo that yielded no columns is unparsed — never a dest upsert.
+    if text.strip():
+        return {
+            UNPARSED_SQL_REDO_FLAG: "1",
+            "_df_parse_error": f"unparsed {op} SQL_REDO",
+            "_df_sql_redo": text[:2000],
+        }
     return out
 
 
@@ -908,7 +982,12 @@ class OracleLogMinerCdc:
                         op = _OP_MAP.get(str(operation or "").upper())
                         if not op:
                             continue
-                        parsed = _parse_sql_redo(sql_redo or "", op=op)
+                        kind, parsed = classify_sql_redo(
+                            sql_redo or "", op=op, table=self.table
+                        )
+                        if kind == "unparsed":
+                            # Refuse stream-wins on unparsed redo — do not invent a row.
+                            continue
                         key = parsed.get(self.primary_key, "")
                         if op == "delete" and key:
                             events.append({"op": "d", "pk": key, "row": {self.primary_key: key}})
@@ -948,6 +1027,7 @@ class OracleLogMinerCdc:
         inserts: list[dict[str, Any]] = []
         updates: list[dict[str, Any]] = []
         deletes: list[str] = []
+        rejected: list[dict[str, Any]] = []
         last_scn = self.scn
         last_rs_id = self.rs_id
         last_ssn = self.ssn
@@ -994,7 +1074,14 @@ class OracleLogMinerCdc:
                         if not op:
                             continue
                         self._last_event_at = datetime.now(timezone.utc)
-                        parsed = _parse_sql_redo(sql_redo or "", op=op)
+                        kind, parsed = classify_sql_redo(
+                            sql_redo or "", op=op, table=self.table
+                        )
+                        if kind == "unparsed":
+                            # Consume the SCN so we do not replay forever, but
+                            # never upsert an unparsed row.
+                            rejected.append(parsed)
+                            continue
                         key = parsed.get(self.primary_key, "")
                         if op == "delete":
                             if key:
@@ -1030,13 +1117,14 @@ class OracleLogMinerCdc:
             raise RuntimeError(f"Oracle LogMiner poll failed: {exc}") from exc
 
         token = self._token()
-        if inserts or updates or deletes:
+        if inserts or updates or deletes or rejected:
             yield ChangeBatch(
                 inserts=inserts,
                 updates=updates,
                 deletes=deletes,
                 resume_token=token,
                 table=self.table,
+                rejected=rejected,
             )
         else:
             yield ChangeBatch(resume_token=token, table=self.table)
@@ -1101,10 +1189,13 @@ class OracleLogMinerCdc:
                         if not op or tbl_raw not in table_set:
                             continue
                         table_name = table_by_lower.get(tbl_raw.lower(), tbl_raw)
-                        parsed = _parse_sql_redo(sql_redo or "", op=op)
+                        kind, parsed = classify_sql_redo(
+                            sql_redo or "", op=op, table=table_name
+                        )
+                        tagged_op = "unparsed" if kind == "unparsed" else op
                         # (xid, scn, rs_id, ssn, table, op, row)
                         tagged.append(
-                            (xid_key, scn, rs_id, ssn, table_name, op, parsed)
+                            (xid_key, scn, rs_id, ssn, table_name, tagged_op, parsed)
                         )
                     try:
                         cur.execute("BEGIN DBMS_LOGMNR.END_LOGMNR; END;")
@@ -1146,12 +1237,18 @@ class OracleLogMinerCdc:
         last_scn = self.scn
         last_rs_id = self.rs_id
         last_ssn = self.ssn
+        shared_rejected: list[dict[str, Any]] = []
 
         for xid_key, group_iter in groupby(tagged, key=lambda x: x[0]):
             group = list(group_iter)
             group_scn = max(item[1] for item in group)
             buf.begin(xid_key, lsn=str(group_scn))
             for _xid, scn, rs_id, ssn, table_name, op, row in group:
+                last_scn, last_rs_id, last_ssn = scn, rs_id, ssn
+                if op == "unparsed":
+                    # Consume SCN; quarantine instead of dest upsert.
+                    shared_rejected.append(row)
+                    continue
                 pk = self.primary_keys.get(table_name, self.primary_key)
                 key = row.get(pk, "")
                 if op == "delete":
@@ -1161,7 +1258,6 @@ class OracleLogMinerCdc:
                     buf.insert(table_name, row, lsn=str(scn))
                 else:
                     buf.update(table_name, row, lsn=str(scn))
-                last_scn, last_rs_id, last_ssn = scn, rs_id, ssn
             self.scn = last_scn
             self.rs_id = last_rs_id
             self.ssn = last_ssn
@@ -1186,9 +1282,16 @@ class OracleLogMinerCdc:
                 fetched=len(tagged),
                 limit=look_ahead_lim,
             )
-        if not emitted:
+        token = self._token(table=self._token_table_label())
+        if shared_rejected:
             yield ChangeBatch(
-                resume_token=self._token(table=self._token_table_label()),
+                rejected=shared_rejected,
+                resume_token=token,
+                ack_barrier=True,
+            )
+        elif not emitted:
+            yield ChangeBatch(
+                resume_token=token,
                 ack_barrier=True,
             )
 

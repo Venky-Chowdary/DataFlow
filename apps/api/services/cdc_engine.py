@@ -195,6 +195,8 @@ class ChangeBatch:
     Default True so single-table / legacy batches keep peek→apply→ack semantics.
     """
     ack_barrier: bool = True
+    """Rows refused before dest write (e.g. unparsed Oracle SQL_REDO)."""
+    rejected: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def total_changes(self) -> int:

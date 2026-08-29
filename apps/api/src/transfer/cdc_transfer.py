@@ -32,7 +32,11 @@ from bson import json_util
 from connectors.mongodb_change_stream import MongodbChangeStreamCdc
 from connectors.mysql_change_stream import MySqlChangeStreamCdc
 from connectors.oracle_change_stream import OracleFlashbackCdc
-from connectors.oracle_logminer import OracleLogMinerCdc
+from connectors.oracle_logminer import (
+    OracleLogMinerCdc,
+    is_unparsed_sql_redo,
+    sql_redo_reject_detail,
+)
 from connectors.postgresql_change_stream import PostgreSqlChangeStreamCdc
 from connectors.sqlserver_cdc_native import SqlServerNativeCdc
 from connectors.sqlserver_change_stream import SqlServerChangeTrackingCdc
@@ -769,6 +773,35 @@ def _refuse_cdc_advance_on_abort(
         raise ValueError(abort)
 
 
+def _split_unparsed_sql_redo(
+    records: list[dict[str, Any]] | None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Hold unparsed LogMiner SQL_REDO out of dest upsert — quarantine only."""
+    keep: list[dict[str, Any]] = []
+    rejected: list[dict[str, Any]] = []
+    for rec in records or []:
+        if is_unparsed_sql_redo(rec):
+            rejected.append(sql_redo_reject_detail(rec))
+        else:
+            keep.append(rec)
+    return keep, rejected
+
+
+def _stamp_unparsed_sql_redo_summary(
+    dest_summary: dict[str, Any] | None,
+    rejected_details: list[dict[str, Any]],
+) -> dict[str, Any]:
+    out = dict(dest_summary or {})
+    if not rejected_details:
+        return out
+    out.setdefault("rejected_details", [])
+    out["rejected_details"] = list(out["rejected_details"]) + list(rejected_details)
+    out["rejected_rows"] = int(out.get("rejected_rows") or 0) + len(rejected_details)
+    out["error_policy"] = "quarantine"
+    out["cdc_unparsed_sql_redo"] = len(rejected_details)
+    return out
+
+
 def _apply_change_batch(
     dest_type: str,
     destination: Any,
@@ -794,10 +827,29 @@ def _apply_change_batch(
     from services.cdc_exactly_once import normalize_delivery_guarantee
     from services.cdc_snapshot_window import _pk_columns
 
+    clean_inserts, rej_inserts = _split_unparsed_sql_redo(change.inserts)
+    clean_updates, rej_updates = _split_unparsed_sql_redo(change.updates)
+    rejected_details = [
+        dict(d)
+        for d in (getattr(change, "rejected", None) or [])
+        if isinstance(d, dict)
+    ] + rej_inserts + rej_updates
+    if rej_inserts or rej_updates or rejected_details:
+        change = ChangeBatch(
+            inserts=clean_inserts,
+            updates=clean_updates,
+            deletes=list(change.deletes or []),
+            unchanged=change.unchanged,
+            resume_token=change.resume_token,
+            table=change.table,
+            ack_barrier=change.ack_barrier,
+            rejected=rejected_details,
+        )
+
     if normalize_delivery_guarantee(delivery_guarantee) == "exactly_once":
         from connectors.cdc_eos_sql import apply_change_batch_exactly_once
 
-        return apply_change_batch_exactly_once(
+        rows, checksum, dest_summary, deleted = apply_change_batch_exactly_once(
             dest_type=dest_type,
             dest_cfg=dest_cfg,
             dest_table=dest_table,
@@ -810,6 +862,9 @@ def _apply_change_batch(
             stream_name=stream_name,
             writer_fence=writer_fence,
         )
+        return rows, checksum, _stamp_unparsed_sql_redo_summary(
+            dest_summary, rejected_details
+        ), deleted
 
     # Normalize once so every writer and the delete path see a real column list.
     # A comma-joined string here used to survive into conflict_columns, where
@@ -990,6 +1045,7 @@ def _apply_change_batch(
         from services.row_conservation import CENSUS_KEY
 
         dest_summary[CENSUS_KEY] = census_payload
+    dest_summary = _stamp_unparsed_sql_redo_summary(dest_summary, rejected_details)
 
     return rows_written, last_checksum, dest_summary, deleted
 
@@ -2356,7 +2412,11 @@ def _run_cdc_single_stream(
             is_txn_held_token,
         )
 
-        if not change.total_changes and change.resume_token is None:
+        if (
+            not change.total_changes
+            and not getattr(change, "rejected", None)
+            and change.resume_token is None
+        ):
             return False
 
         # Mid-txn hold: no watermark/ack. Treat as non-progress so one open txn
