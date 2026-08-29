@@ -190,9 +190,9 @@ export const NOT_PROVEN: UnprovenRow[] = [
   },
   {
     area: "Transform row ledger and quarantine",
-    status: "planned",
+    status: "unaudited",
     reason:
-      "Transform loads are proven column-correct on three engines; a per-row read/written/quarantined account inside a transform does not exist yet.",
+      "Named sqlite fixture test_transform_quarantine_dlq_write_path persists failing not_null findings to the same DLQ and stamps row_accounting. Live warehouse transform-run quarantine is not yet matrix-measured.",
   },
   {
     area: "Contracts and Proofs surfaces",
