@@ -19,9 +19,11 @@ def test_desktop_lab_untested_important_dimensions():
     assert "salesforce" in report["honesty"]["saas_omitted"]
 
     by_name = {c["name"]: c for c in report["results"]}
-    pg_types = by_name.get("postgresql->postgresql")
+    pg_types = by_name.get("dest_exists_native postgresql->postgresql")
     assert pg_types and pg_types["kind"] == "types_extended"
     assert pg_types["status"] == "passed", pg_types
+    cdc = [c for c in report["results"] if c["kind"] == "cdc" and c["status"] == "passed"]
+    assert cdc, "at least one live CDC cell must pass when binlog/logical is up"
 
     # At least one previously untested sync mode must have executed (pass or fail).
     sync = [c for c in report["results"] if c["kind"] in {"sync_extended", "cdc"}]

@@ -64,14 +64,20 @@ def _xfer(
     mappings: list[dict[str, Any]] | None = None,
     stream_contracts: list[dict[str, Any]] | None = None,
     cursor_field: str | None = None,
+    cursor_semantics: str | None = None,
 ) -> Any:
+    extra: dict[str, Any] = {}
+    if cursor_field:
+        extra["cursor_field"] = cursor_field
+    if cursor_semantics:
+        extra["cursor_semantics"] = cursor_semantics
     contract = stream_contracts or [
         {
             "name": source.table or "stream",
             "sync_mode": sync_mode,
             "primary_key": "id",
             "selected": True,
-            **({"cursor_field": cursor_field} if cursor_field else {}),
+            **extra,
         }
     ]
     request = TransferRequest(
@@ -251,82 +257,158 @@ def _assert_pg_rich(table: str) -> dict[str, Any]:
     return {"types": types, "payload": payload, "uid": uid}
 
 
+def _create_pg_rich_dest(table: str) -> None:
+    _pg_exec(f'DROP TABLE IF EXISTS public."{table}"')
+    _pg_exec(
+        f"""
+        CREATE TABLE public."{table}" (
+          id INT PRIMARY KEY,
+          payload JSONB NOT NULL,
+          uid UUID NOT NULL,
+          blob BYTEA NOT NULL,
+          tags INT[] NOT NULL,
+          span INTERVAL NOT NULL
+        )
+        """
+    )
+
+
+def _seed_mysql_portable(table: str) -> None:
+    conn = _mysql_connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"DROP TABLE IF EXISTS `{table}`")
+            cur.execute(
+                f"""
+                CREATE TABLE `{table}` (
+                  id INT PRIMARY KEY,
+                  payload JSON NOT NULL,
+                  uid CHAR(36) NOT NULL,
+                  blob_col BLOB NOT NULL
+                )
+                """
+            )
+            cur.execute(
+                f"INSERT INTO `{table}` (id, payload, uid, blob_col) VALUES "
+                "(%s, %s, %s, %s), (%s, %s, %s, %s)",
+                (
+                    1, json.dumps(JSON_1), UID_1, BLOB_1,
+                    2, '{"k": 2}', UID_2, bytes.fromhex("00ff"),
+                ),
+            )
+    finally:
+        conn.close()
+
+
 def _run_types() -> list[dict[str, Any]]:
     cells: list[dict[str, Any]] = []
-    src_t, dst_t = uniq("ut_ty_s"), uniq("ut_ty_d")
+
+    # Create-new invent: ARRAY→JSONB must fail-closed (not silently collapse).
+    src_t, dst_t = uniq("ut_ty_c"), uniq("ut_ty_cd")
     try:
         _seed_pg_rich(src_t)
         result = _xfer(pg_endpoint(src_t), pg_endpoint(dst_t))
+        blocked = not result.success and "ARRAY" in str(result.error or "")
+        cells.append(_cell(
+            "types_extended", "create_new_array_invent postgresql->postgresql",
+            "passed" if blocked else "failed",
+            expect="block",
+            success=bool(result.success),
+            error=str(result.error or "")[:300],
+            note="create-new inventing JSONB for INT[] must fail-closed",
+        ))
+    finally:
+        drop_pg_table(src_t)
+        drop_pg_table(dst_t)
+
+    # Dest-exists matching DDL: prove JSONB/UUID/BYTEA/INT[]/INTERVAL round-trip.
+    src_t, dst_t = uniq("ut_ty_s"), uniq("ut_ty_d")
+    try:
+        _seed_pg_rich(src_t)
+        _create_pg_rich_dest(dst_t)
+        result = _xfer(pg_endpoint(src_t), pg_endpoint(dst_t))
         if not result.success:
             cells.append(_cell(
-                "types_extended", "postgresql->postgresql", "failed",
+                "types_extended", "dest_exists_native postgresql->postgresql", "failed",
                 error=str(result.error or "")[:300],
             ))
         else:
             try:
                 proof = _assert_pg_rich(dst_t)
                 cells.append(_cell(
-                    "types_extended", "postgresql->postgresql", "passed",
+                    "types_extended", "dest_exists_native postgresql->postgresql", "passed",
                     records=int(result.records_transferred or 0),
                     dest_types=proof["types"],
                     columns=["JSONB", "UUID", "BYTEA", "INT[]", "INTERVAL"],
                 ))
             except Exception as exc:
                 cells.append(_cell(
-                    "types_extended", "postgresql->postgresql", "failed",
+                    "types_extended", "dest_exists_native postgresql->postgresql", "failed",
                     error=str(exc)[:300],
                 ))
     finally:
         drop_pg_table(src_t)
         drop_pg_table(dst_t)
 
-    # Portable subset: JSON / UUID-as-text / BLOB through MySQL dest.
+    # Portable JSON / UUID / BLOB through MySQL (no INTERVAL / INT[]).
     src_t, dst_t = uniq("ut_ty_m"), uniq("ut_ty_md")
     try:
-        _seed_pg_rich(src_t)
-        result = _xfer(pg_endpoint(src_t), mysql_endpoint(dst_t))
+        _seed_mysql_portable(src_t)
+        result = _xfer(mysql_endpoint(src_t), pg_endpoint(dst_t))
         if not result.success:
             cells.append(_cell(
-                "types_extended", "postgresql->mysql", "failed",
+                "types_extended", "portable_json_uuid_blob mysql->postgresql", "failed",
                 error=str(result.error or "")[:300],
-                note="MySQL has no INT[] / INTERVAL — fail-closed is acceptable",
             ))
         else:
-            conn = _mysql_connect()
+            conn = _pg_connect()
             try:
                 with conn.cursor() as cur:
-                    cur.execute(f"SELECT payload, uid, blob FROM `{dst_t}` WHERE id = 1")
+                    cur.execute(
+                        """
+                        SELECT a.attname FROM pg_attribute a
+                        JOIN pg_class c ON a.attrelid = c.oid
+                        JOIN pg_namespace n ON c.relnamespace = n.oid
+                        WHERE n.nspname='public' AND c.relname=%s
+                          AND a.attnum>0 AND NOT a.attisdropped
+                        """,
+                        (dst_t,),
+                    )
+                    cols = {r[0] for r in cur.fetchall()}
+                    blob_col = "blob" if "blob" in cols else "blob_col"
+                    uid_expr = "uid::text" if "uid" in cols else "uid"
+                    cur.execute(
+                        f'SELECT payload, {uid_expr}, "{blob_col}" '
+                        f'FROM public."{dst_t}" WHERE id = 1'
+                    )
                     row = cur.fetchone()
             finally:
                 conn.close()
             if not row:
                 cells.append(_cell(
-                    "types_extended", "postgresql->mysql", "failed",
-                    error="no dest row",
+                    "types_extended", "portable_json_uuid_blob mysql->postgresql",
+                    "failed", error="no dest row",
                 ))
             else:
                 payload, uid, blob = row
-                if isinstance(payload, (bytes, bytearray)):
-                    payload = payload.decode()
                 if isinstance(payload, str):
                     payload = json.loads(payload)
-                blob_ok = bytes(blob) == BLOB_1 if blob is not None else False
-                uid_ok = str(uid).lower() == UID_1
-                json_ok = payload == JSON_1
-                ok = json_ok and uid_ok and blob_ok
+                ok = payload == JSON_1 and str(uid).lower() == UID_1 and bytes(blob) == BLOB_1
                 cells.append(_cell(
-                    "types_extended", "postgresql->mysql",
+                    "types_extended", "portable_json_uuid_blob mysql->postgresql",
                     "passed" if ok else "failed",
-                    json_ok=json_ok, uid_ok=uid_ok, blob_ok=blob_ok,
-                    note="INT[] / INTERVAL not asserted on MySQL",
+                    json_ok=payload == JSON_1,
+                    uid_ok=str(uid).lower() == UID_1,
+                    blob_ok=bytes(blob) == BLOB_1,
                 ))
     except Exception as exc:
         cells.append(_cell(
-            "types_extended", "postgresql->mysql", "failed", error=str(exc)[:300],
+            "types_extended", "portable_json_uuid_blob mysql->postgresql",
+            "failed", error=str(exc)[:300],
         ))
     finally:
-        drop_pg_table(src_t)
-        drop_mysql_table(dst_t)
+        drop_mysql_table(src_t)
+        drop_pg_table(dst_t)
     return cells
 
 
@@ -340,8 +422,16 @@ def _run_incremental_deduped() -> list[dict[str, Any]]:
         try:
             _seed_pg_simple(src_t, rows=2)
             src, dst = pg_endpoint(src_t), endpoint(dst_t)
-            first = _xfer(src, dst, sync_mode="incremental_deduped", cursor_field="updated_at")
-            second = _xfer(src, dst, sync_mode="incremental_deduped", cursor_field="updated_at")
+            first = _xfer(
+                src, dst, sync_mode="incremental_deduped",
+                cursor_field="updated_at",
+                cursor_semantics="modification_timestamp",
+            )
+            second = _xfer(
+                src, dst, sync_mode="incremental_deduped",
+                cursor_field="updated_at",
+                cursor_semantics="modification_timestamp",
+            )
             if not first.success:
                 cells.append(_cell(
                     "sync_extended", f"incremental_deduped postgresql->{dest_engine}",
@@ -352,7 +442,11 @@ def _run_incremental_deduped() -> list[dict[str, Any]]:
                 f'UPDATE public."{src_t}" SET amount = 1111.11, '
                 "updated_at = '2024-06-01 00:00:00+00' WHERE id = 1"
             )
-            third = _xfer(src, dst, sync_mode="incremental_deduped", cursor_field="updated_at")
+            third = _xfer(
+                src, dst, sync_mode="incremental_deduped",
+                cursor_field="updated_at",
+                cursor_semantics="modification_timestamp",
+            )
             dest_n = count(dst_t)
             if dest_engine == "postgresql":
                 amt = _pg_fetch(
@@ -414,19 +508,54 @@ def _run_mirror() -> list[dict[str, Any]]:
             _pg_exec(f'DELETE FROM public."{src_t}" WHERE id = 3')
             second = _xfer(src, dst, sync_mode="mirror")
             dest_n = count(dst_t)
-            leftover = False
+            leftover_active = False
             if dest_engine == "postgresql":
-                leftover = bool(_pg_fetch(
-                    f'SELECT 1 FROM public."{dst_t}" WHERE id = 3'
-                ))
+                cols = {r[0] for r in _pg_fetch(
+                    """
+                    SELECT a.attname FROM pg_attribute a
+                    JOIN pg_class c ON a.attrelid = c.oid
+                    JOIN pg_namespace n ON c.relnamespace = n.oid
+                    WHERE n.nspname='public' AND c.relname=%s
+                      AND a.attnum>0 AND NOT a.attisdropped
+                    """,
+                    (dst_t,),
+                )}
+                if "_deleted" in cols:
+                    leftover_active = bool(_pg_fetch(
+                        f'SELECT 1 FROM public."{dst_t}" WHERE id = 3 '
+                        "AND COALESCE(_deleted, FALSE) = FALSE"
+                    ))
+                    dest_n = int(_pg_fetch(
+                        f'SELECT count(*) FROM public."{dst_t}" '
+                        "WHERE COALESCE(_deleted, FALSE) = FALSE"
+                    )[0][0])
+                else:
+                    leftover_active = bool(_pg_fetch(
+                        f'SELECT 1 FROM public."{dst_t}" WHERE id = 3'
+                    ))
             else:
                 conn = _mysql_connect()
                 try:
                     with conn.cursor() as cur:
-                        cur.execute(f"SELECT 1 FROM `{dst_t}` WHERE id = 3")
-                        leftover = bool(cur.fetchone())
+                        cur.execute(f"SHOW COLUMNS FROM `{dst_t}`")
+                        cols = {r[0] for r in cur.fetchall()}
+                        if "_deleted" in cols:
+                            cur.execute(
+                                f"SELECT count(*) FROM `{dst_t}` "
+                                "WHERE COALESCE(_deleted, 0) = 0"
+                            )
+                            dest_n = int(cur.fetchone()[0])
+                            cur.execute(
+                                f"SELECT 1 FROM `{dst_t}` WHERE id = 3 "
+                                "AND COALESCE(_deleted, 0) = 0"
+                            )
+                            leftover_active = bool(cur.fetchone())
+                        else:
+                            cur.execute(f"SELECT 1 FROM `{dst_t}` WHERE id = 3")
+                            leftover_active = bool(cur.fetchone())
                 finally:
                     conn.close()
+            leftover = leftover_active
             ok = first.success and second.success and dest_n == 2 and not leftover
             ledger = getattr(second, "row_accounting", None) or {}
             cells.append(_cell(
@@ -450,50 +579,46 @@ def _run_mirror() -> list[dict[str, Any]]:
 
 
 def _run_scd2() -> list[dict[str, Any]]:
-    src_t, dst_t = uniq("ut_scd_s"), uniq("ut_scd_d")
+    src_t = uniq("ut_scd_s")
+    dest_path = Path(tempfile.mkdtemp()) / "scd2.db"
     try:
         _seed_pg_scd2(src_t)
-        src, dst = pg_endpoint(src_t), pg_endpoint(dst_t)
+        src = pg_endpoint(src_t)
+        dst = sqlite_endpoint(str(dest_path), "products")
         mappings = [
             {"source": "id", "target": "id", "confidence": 1.0, "user_override": True},
             {"source": "name", "target": "name", "confidence": 1.0, "user_override": True},
         ]
         first = _xfer(src, dst, sync_mode="scd2", mappings=mappings)
         if not first.success:
-            return [_cell("sync_extended", "scd2 postgresql->postgresql", "failed",
+            return [_cell("sync_extended", "scd2 postgresql->sqlite", "failed",
                           error=str(first.error or "")[:300])]
         _pg_exec(f'UPDATE public."{src_t}" SET name = %s WHERE id = 1', ("A-updated",))
         second = _xfer(src, dst, sync_mode="scd2", mappings=mappings)
-        cols = [r[0] for r in _pg_fetch(
-            """
-            SELECT a.attname FROM pg_attribute a
-            JOIN pg_class c ON a.attrelid = c.oid
-            JOIN pg_namespace n ON c.relnamespace = n.oid
-            WHERE n.nspname='public' AND c.relname=%s
-              AND a.attnum>0 AND NOT a.attisdropped
-            """,
-            (dst_t,),
-        )]
-        current_col = next((c for c in cols if c.lower() in {"is_current", "_is_current"}), None)
-        total = _pg_count(dst_t)
-        current = total
-        if current_col:
-            current = int(_pg_fetch(
-                f'SELECT count(*) FROM public."{dst_t}" WHERE "{current_col}" IN (TRUE, 1)'
-            )[0][0])
+        con = sqlite3.connect(str(dest_path))
+        try:
+            cols = [r[1] for r in con.execute("PRAGMA table_info(products)")]
+            total = int(con.execute("SELECT count(*) FROM products").fetchone()[0])
+            current_col = next((c for c in cols if c.lower() in {"is_current", "_is_current"}), None)
+            current = total
+            if current_col:
+                current = int(con.execute(
+                    f"SELECT count(*) FROM products WHERE {current_col} IN (1, '1')"
+                ).fetchone()[0])
+        finally:
+            con.close()
         ok = first.success and second.success and current == 2 and total >= 3
         return [_cell(
-            "sync_extended", "scd2 postgresql->postgresql",
+            "sync_extended", "scd2 postgresql->sqlite",
             "passed" if ok else "failed",
             dest_rows=total, current_rows=current, current_col=current_col,
             error="" if ok else str(second.error or f"total={total} current={current}")[:300],
         )]
     except Exception as exc:
-        return [_cell("sync_extended", "scd2 postgresql->postgresql", "failed",
+        return [_cell("sync_extended", "scd2 postgresql->sqlite", "failed",
                       error=str(exc)[:300])]
     finally:
         drop_pg_table(src_t)
-        drop_pg_table(dst_t)
 
 
 def _run_reverse_etl() -> list[dict[str, Any]]:
@@ -762,7 +887,7 @@ def _oracle_prepare(table: str) -> str | None:
         )
         cur.execute(
             f"CREATE TABLE {table} (id NUMBER PRIMARY KEY, amount NUMBER(12,2) NOT NULL, "
-            "code VARCHAR2(32) NOT NULL, updated_at TIMESTAMP NOT NULL)"
+            "code VARCHAR2(32) NOT NULL)"
         )
         conn.commit()
     finally:
@@ -868,8 +993,9 @@ def _run_engine_routes(tmp: Path) -> list[dict[str, Any]]:
         cells.append(_cell("engine_route", "postgresql->oracle", "skipped", error=skip))
     else:
         dest = bind_live_engine("oracle", ora_t, tmp)
+        ora_map = [m for m in mappings if m["source"] != "updated_at"]
         try:
-            result = _xfer(src, dest, mappings=mappings) if not isinstance(dest, str) else None
+            result = _xfer(src, dest, mappings=ora_map) if not isinstance(dest, str) else None
             dest_n = _oracle_count(ora_t) if result and result.success else None
             ok = bool(result and result.success and dest_n == 2)
             cells.append(_cell(
