@@ -17,6 +17,20 @@ EMPTY_MAPPING_REFUSAL = (
     "that includes mappings."
 )
 
+EMPTY_MAPPING_CODE = "EMPTY_MAPPING_CONTRACT"
+
+EMPTY_MAPPING_CORRECTIVE = (
+    "Open Transfer Studio with this schedule's source and destination. "
+    "Map the columns, run Validate, then Schedule from the Studio footer — "
+    "that persists the mapping contract the beat can replay. "
+    "A signature here cannot invent column names."
+)
+
+
+def is_empty_mapping_refusal(message: str) -> bool:
+    text = (message or "").lower()
+    return "no persisted column mappings" in text
+
 
 def persisted_mapping_rows(raw: Any) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []

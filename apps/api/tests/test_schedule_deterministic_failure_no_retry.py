@@ -46,6 +46,21 @@ def test_mapping_and_fidelity_blockers_are_deterministic():
     assert "Map" in result.corrective_action
 
 
+def test_empty_mapping_contract_names_studio_not_validate():
+    result = classify_failure(
+        error=(
+            "Schedule has no persisted column mappings — unattended runs must "
+            "replay a Validate-approved mapping contract."
+        ),
+        phase="validate",
+        rows_written=0,
+    )
+    assert result.kind == DETERMINISTIC
+    assert result.retryable is False
+    assert "Transfer Studio" in result.corrective_action
+    assert "Open Validate for this job" not in result.corrective_action
+
+
 def test_gate_phase_without_a_written_row_is_deterministic():
     result = classify_failure(
         error="Job stopped before completion", phase="validating", rows_written=0

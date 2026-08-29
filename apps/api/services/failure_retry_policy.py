@@ -64,6 +64,10 @@ _DETERMINISTIC_PATTERNS: tuple[tuple[str, str], ...] = (
      "the values, widen the destination type, or relax the policy."),
     (r"cannot resume a streaming insert without a primary key",
      "Re-run as Full refresh · Overwrite, or set a primary key."),
+    (r"no persisted column mappings",
+     "Open Transfer Studio with this schedule's source and destination. "
+     "Map the columns, run Validate, then Schedule from the Studio footer — "
+     "that persists the mapping contract the beat can replay."),
 )
 
 # Failures whose cause is the moment, not the configuration.

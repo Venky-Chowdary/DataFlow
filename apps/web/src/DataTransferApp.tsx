@@ -750,6 +750,14 @@ function AppShell({
                     highlightScheduleId={
                       searchFocus?.screen === "schedules" ? searchFocus.scheduleId : undefined
                     }
+                    onStartTransfer={(intent) => {
+                      if (intent && (intent.sourceConnectorId || intent.destConnectorId || intent.step)) {
+                        setTransferStudioIntent({ ...intent, token: Date.now() });
+                      } else {
+                        setTransferStudioIntent(null);
+                      }
+                      setScreen("transfer");
+                    }}
                   />
                 </PageErrorBoundary>
                 </div>

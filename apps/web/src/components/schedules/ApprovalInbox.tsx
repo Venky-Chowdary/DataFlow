@@ -5,6 +5,7 @@ import { PageSection } from "../ui/PageSection";
 import { useToast } from "../Toast";
 import { acceptScheduleSourceSchema, approveScheduleFinding, rejectScheduleFinding } from "../../lib/api";
 import { PERMISSIONS, useWriteGate } from "../../lib/PermissionsContext";
+import { inboxNeedsStudio } from "../../lib/scheduleApprovalCta";
 import type { ScheduleApprovalInboxItem } from "../../lib/types";
 
 const SCOPE_ACK: Record<string, "compliance" | "schema_drift" | "fk_risk"> = {
@@ -29,6 +30,8 @@ interface ApprovalInboxProps {
   onOpenSchedule?: (scheduleId: string) => void;
   /** Open the schedule editor / Map so a drift finding can be reviewed. */
   onReviewMapping?: (scheduleId: string) => void;
+  /** Open Transfer Studio with this schedule's route — empty-mapping plan change. */
+  onOpenStudio?: (scheduleId: string) => void;
 }
 
 /**
@@ -46,7 +49,7 @@ function isSourceSchemaDrift(item: ScheduleApprovalInboxItem): boolean {
   return code === "SOURCE_SCHEMA_DRIFT" || kind === "source_drift";
 }
 
-export function ApprovalInbox({ items, onDecided, onOpenSchedule, onReviewMapping }: ApprovalInboxProps) {
+export function ApprovalInbox({ items, onDecided, onOpenSchedule, onReviewMapping, onOpenStudio }: ApprovalInboxProps) {
   const { toast } = useToast();
   const authorize = useWriteGate(PERMISSIONS.scheduleAuthorize);
   const manage = useWriteGate(PERMISSIONS.scheduleManage);
@@ -201,6 +204,17 @@ export function ApprovalInbox({ items, onDecided, onOpenSchedule, onReviewMappin
                     No signature can clear this. It is a plan change, not a decision —
                     approving it would only refuse again on the next run.
                   </p>
+                  {inboxNeedsStudio(item) && onOpenStudio && (
+                    <div className="df2-approval-actions">
+                      <Button
+                        size="sm"
+                        variant="primary"
+                        onClick={() => onOpenStudio(item.schedule_id)}
+                      >
+                        Open Transfer Studio
+                      </Button>
+                    </div>
+                  )}
                   {isSourceSchemaDrift(item) && (
                     <div className="df2-approval-actions">
                       {onReviewMapping && (
