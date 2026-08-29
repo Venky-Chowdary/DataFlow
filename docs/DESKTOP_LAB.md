@@ -60,6 +60,23 @@ Measured on this host (`desktop_lab_dimensions.json`): **16 passed / 8 failed /
 PYTHONPATH=. python -m pytest tests/test_desktop_lab_dimensions.py -q
 ```
 
+## Previously untested dimensions (live desktop)
+
+`tests/desktop_lab_untested.py` covers what the 7-column overwrite fixture
+skipped, against services that are actually up:
+
+- Types: JSONB, UUID, BYTEA, INT[], INTERVAL (PG→PG; portable subset on MySQL)
+- Sync: incremental_deduped, mirror, SCD2, reverse_etl (PG→MySQL warehouse→OLTP),
+  CDC (MySQL ROW binlog → SQLite; PG logical → PG). Not Salesforce.
+- Schema: dest-only NOT NULL (G14)
+- Engines: SQLite, Mongo, MinIO S3, SQL Server dest-exists, Oracle dest-exists.
+  GCS/ADLS/BQ omitted (create-new probe hang). Geography/PostGIS omitted
+  (extension not installed).
+
+```bash
+PYTHONPATH=. python -m pytest tests/test_desktop_lab_untested.py -q
+```
+
 ## Honesty
 
 - **80 is catalog slots**, not unique engines, not catalog tile count, not 650+ live.
