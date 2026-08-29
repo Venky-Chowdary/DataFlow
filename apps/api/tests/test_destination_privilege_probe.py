@@ -153,6 +153,14 @@ def test_bigquery_deny_matrix(role, expect_write):
     assert can_c is expect_write
 
 
+def test_bigquery_empty_acl_is_cloud_deny_not_grant():
+    """Production BQ with no access_entries stays deny. Emulator is a separate path."""
+    can_w, can_c, matched = evaluate_bigquery_access_entries([])
+    assert can_w is False
+    assert can_c is False
+    assert matched == ""
+
+
 @pytest.mark.parametrize(
     "session,tab,exists,need_update,expect_write,expect_create",
     [

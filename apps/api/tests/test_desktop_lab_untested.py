@@ -45,6 +45,12 @@ def test_desktop_lab_untested_important_dimensions():
         "xml dest_exists postgresql->postgresql",
         "point dest_exists postgresql->postgresql",
         "nested_explode csv->postgresql",
+        "geography dest_exists postgresql->postgresql",
+        "reverse_etl_stub postgresql->salesforce",
+        "reverse_etl_stub postgresql->hubspot",
+        "reverse_etl_stub postgresql->stripe",
+        "postgresql->gcs",
+        "postgresql->adls",
         "production_sku_validate_honesty",
     ):
         cell = by_name.get(name)
@@ -53,6 +59,10 @@ def test_desktop_lab_untested_important_dimensions():
     assert cdc, "at least one live CDC cell must pass when binlog/logical is up"
     replay = by_name.get("mysql_binlog_replay_at_least_once")
     assert replay and replay.get("exactly_once_claimed") is False, replay
+    bq = by_name.get("postgresql->bigquery")
+    assert bq and bq["status"] in {"passed", "skipped"}, bq
+    if bq["status"] == "skipped":
+        assert bq.get("emulator_not_customer_tenant") is True, bq
 
     # At least one previously untested sync mode must have executed (pass or fail).
     sync = [c for c in report["results"] if c["kind"] in {"sync_extended", "cdc"}]

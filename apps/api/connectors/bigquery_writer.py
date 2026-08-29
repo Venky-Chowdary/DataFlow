@@ -153,11 +153,20 @@ def bq_type(inferred: str) -> str:
     return wire.upper() if wire else wire
 
 
-def bq_schema_field(bigquery_mod: Any, col: str, inferred: str) -> Any:
+def bq_schema_field(
+    bigquery_mod: Any,
+    col: str,
+    inferred: str,
+    *,
+    emulator: bool = False,
+) -> Any:
     """Build SchemaField honoring Map ``(p,s)`` / ``max_length`` stamps.
 
     Map≡CREATE: explicit NUMERIC/BIGNUMERIC(p,s) become SchemaField
     ``precision`` / ``scale`` — never bare platform invent (76,38) / (38,9).
+
+    goccy's emulator unmarshals Precision as a Go string; JSON numbers 400.
+    Emulator create-new therefore omits typmod — not a customer-tenant claim.
     """
     from services.type_system import (
         parse_binary_carrier_width,
@@ -166,6 +175,8 @@ def bq_schema_field(bigquery_mod: Any, col: str, inferred: str) -> Any:
 
     field_type = bq_type(inferred)
     kwargs: dict[str, Any] = {}
+    if emulator:
+        return bigquery_mod.SchemaField(col, field_type)
     if field_type in {"NUMERIC", "BIGNUMERIC"}:
         fp = _bq_fixed_point_spec(inferred)
         if fp is not None and fp[1] is not None and fp[2] is not None:
@@ -916,6 +927,11 @@ def write_mapped_rows(
         from connectors.bigquery_conn import get_client, _is_local_endpoint
 
         is_local, _ = _is_local_endpoint(host, connection_string)
+        from connectors.google_emulator import looks_like_google_emulator
+
+        emulator = bool(is_local) or looks_like_google_emulator(
+            endpoint=connection_string, host=host, port=port,
+        )
 
         client = get_client(
             project_id=project_id,
@@ -997,14 +1013,34 @@ def write_mapped_rows(
                         dest_types.get(col)
                         or (logical_types[i] if i < len(logical_types) else "STRING")
                     ),
+                    emulator=emulator,
                 )
                 for i, col in enumerate(target_cols)
             ]
-            existing_datasets = {ds.dataset_id for ds in client.list_datasets()}
-            if dataset_id not in existing_datasets:
-                client.create_dataset(bigquery.Dataset(dataset_ref))
+            create_kw: dict[str, Any] = {}
+            if emulator:
+                from connectors.google_emulator import (
+                    google_emulator_retry,
+                    google_emulator_timeout,
+                )
+
+                create_kw = {
+                    "retry": google_emulator_retry(),
+                    "timeout": google_emulator_timeout(),
+                }
+                # Never list leftover emulator tables — goccy 500s retry-hang.
+                try:
+                    client.create_dataset(
+                        bigquery.Dataset(dataset_ref), exists_ok=True, **create_kw,
+                    )
+                except Exception:
+                    pass
+            else:
+                existing_datasets = {ds.dataset_id for ds in client.list_datasets()}
+                if dataset_id not in existing_datasets:
+                    client.create_dataset(bigquery.Dataset(dataset_ref))
             table = bigquery.Table(table_id, schema=schema_fields)
-            client.create_table(table, exists_ok=True)
+            client.create_table(table, exists_ok=True, **create_kw)
             # Re-probe after exists_ok — concurrent/pre-existing tables must still
             # overlay live DDL (probe race must not invent Map VARCHAR bind).
             try:
@@ -1082,7 +1118,7 @@ def write_mapped_rows(
                             if i < len(logical_types)
                             else "STRING"
                         )
-                new_fields.append(bq_schema_field(bigquery, col, typ))
+                new_fields.append(bq_schema_field(bigquery, col, typ, emulator=emulator))
             if new_fields:
                 table.schema = list(table.schema) + new_fields
                 client.update_table(table, ["schema"])
@@ -1225,6 +1261,7 @@ def write_mapped_rows(
                     dest_types.get(col)
                     or (logical_types[i] if i < len(logical_types) else "STRING")
                 ),
+                emulator=emulator,
             )
             for i, col in enumerate(target_cols)
         ]

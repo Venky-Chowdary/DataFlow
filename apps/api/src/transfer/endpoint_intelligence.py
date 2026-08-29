@@ -65,7 +65,6 @@ def _is_absent_object_error(message: str) -> bool:
             "nosuchkey",
             "404",
         )
-        )
     )
 
 

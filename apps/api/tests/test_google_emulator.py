@@ -20,3 +20,23 @@ def test_emulator_retry_never_retries() -> None:
     assert retry.deadline == 8.0
     assert retry._predicate(RuntimeError("404")) is False
     assert google_emulator_timeout() == 8.0
+
+
+def test_drop_table_routes_bigquery_to_client_not_generic_sql(monkeypatch) -> None:
+    """goccy dialect is ``http`` — overwrite DROP must use the BQ client."""
+    from connectors import table_manager as tm
+
+    called: dict[str, object] = {}
+
+    def fake_drop(cfg, table_name, schema):
+        called["args"] = (cfg, table_name, schema)
+        return True
+
+    monkeypatch.setattr(tm, "_drop_bigquery", fake_drop)
+    monkeypatch.setattr(
+        tm,
+        "_drop_generic_sql",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("generic_sql BQ drop")),
+    )
+    assert tm.drop_table("bigquery", {"database": "p", "schema": "d"}, "t", "d") is True
+    assert called["args"][1] == "t"
