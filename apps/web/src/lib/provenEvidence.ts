@@ -204,7 +204,7 @@ export const NOT_PROVEN: UnprovenRow[] = [
     area: "CDC snapshot+LSN live-matrix",
     status: "planned",
     reason:
-      "Postgres WAL, MySQL ROW binlog (test_cdc_mysql_binlog_transfer_e2e), SQL Server native CDC (test_cdc_sqlserver_native_transfer_e2e), and Oracle LogMiner (test_oracle_logminer_transfer_snapshot_resume_delete; dest {1:99, 3:30}, id=2 gone) are measured snapshot+resume+delete on named tests. Unparsed SQL_REDO is quarantined (test_oracle_logminer_unparsed_quarantine). CDC default remains at-least-once upsert.",
+      "Postgres WAL, MySQL ROW binlog (test_cdc_mysql_binlog_transfer_e2e), SQL Server native CDC (test_cdc_sqlserver_native_transfer_e2e), and Oracle LogMiner (test_oracle_logminer_transfer_snapshot_resume_delete; dest {1:99, 3:30}, id=2 gone) are measured snapshot+resume+delete. MySQL→PostgreSQL dest-owned DELETE + replay is measured on test_mysql_binlog_postgres_dest_owned_delete_replay (dest {1:99, 3:30}, replay 0, stale LSN skipped). CDC default remains at-least-once upsert. Not dest-owned exactly-once.",
   },
   {
     area: "Iceberg leftover MERGE",
