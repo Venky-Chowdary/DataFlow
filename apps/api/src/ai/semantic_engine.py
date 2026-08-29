@@ -1022,91 +1022,13 @@ class SmartMapper:
         target_columns: list[str],
         source_samples: dict[str, list[str]] = None
     ) -> list[MappingSuggestion]:
+        """Map SSOT only — never a second confidence from this class.
+
+        A leftover pair-scorer here invented Date→ISO and user_id→customer_id
+        at high confidence. Transfer / Validate / RAG already use
+        ``services.semantic_mapper.map_columns``. This method must not diverge.
         """
-        Generate intelligent column mappings.
-
-        Uses order-independent global assignment: every source→target pair is
-        scored, then the highest-confidence pairs are assigned first so a weaker
-        earlier column can never claim a target that is a stronger match for a
-        later column (the classic greedy pitfall). Each target is used at most
-        once. Character-level similarity rescues typos and abbreviations that
-        exact/synonym/token matching miss.
-
-        Args:
-            source_columns: List of source column names
-            target_columns: List of target column names
-            source_samples: Optional sample data for source columns
-
-        Returns:
-            List of mapping suggestions with confidence scores
-        """
-        if source_samples is None:
-            source_samples = {}
-
-        source_analyses = {
-            col: self.analyzer.analyze_column(col, source_samples.get(col, []))
-            for col in source_columns
-        }
-        target_analyses = {
-            col: self.analyzer.analyze_column(col, [])
-            for col in target_columns
-        }
-
-        # Score every candidate pair once.
-        candidates: list[tuple[float, str, str]] = []
-        for src_col in source_columns:
-            for tgt_col in target_columns:
-                score, _reason = self._score_pair(
-                    src_col, tgt_col, source_analyses[src_col], target_analyses[tgt_col]
-                )
-                if score > 0.5:
-                    candidates.append((score, src_col, tgt_col))
-
-        # Assign globally: strongest pairs first, one target per source and
-        # one source per target. Deterministic tie-break keeps results stable.
-        candidates.sort(key=lambda c: (-c[0], c[1], c[2]))
-        assigned: dict[str, tuple[str, float]] = {}
-        used_targets: set[str] = set()
-        for score, src_col, tgt_col in candidates:
-            if src_col in assigned or tgt_col in used_targets:
-                continue
-            assigned[src_col] = (tgt_col, score)
-            used_targets.add(tgt_col)
-
-        mappings = []
-        for src_col in source_columns:
-            src_analysis = source_analyses[src_col]
-            match = assigned.get(src_col)
-            if match:
-                tgt_col, score = match
-                _score, reason = self._score_pair(
-                    src_col, tgt_col, src_analysis, target_analyses[tgt_col]
-                )
-                needs_transform = False
-                transform = None
-                if src_analysis.inferred_type != target_analyses[tgt_col].inferred_type:
-                    needs_transform = True
-                    transform = (
-                        f"Convert {src_analysis.inferred_type} to "
-                        f"{target_analyses[tgt_col].inferred_type}"
-                    )
-                mappings.append(MappingSuggestion(
-                    source_column=src_col,
-                    target_column=tgt_col,
-                    confidence=round(score, 3),
-                    reason=reason,
-                    transformation_needed=needs_transform,
-                    suggested_transformation=transform,
-                ))
-            else:
-                mappings.append(MappingSuggestion(
-                    source_column=src_col,
-                    target_column="<unmapped>",
-                    confidence=0.0,
-                    reason="No suitable match found",
-                ))
-
-        return sorted(mappings, key=lambda m: m.confidence, reverse=True)
+        return generate_mappings(source_columns, target_columns, source_samples)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

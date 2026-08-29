@@ -43,6 +43,18 @@ def test_retriever_mapping_confidence_matches_mapper() -> None:
     assert float(info["mapping_confidence"]) < 0.85
 
 
+def test_smart_mapper_map_columns_is_ssot_not_pair_scorer() -> None:
+    """Direct SmartMapper calls must hold the same false friends as Map SSOT."""
+    from src.ai.semantic_engine import SmartMapper, SemanticAnalyzer
+
+    mapper = SmartMapper(SemanticAnalyzer())
+    rows = mapper.map_columns(["user_id", "AMT"], ["customer_id", "amount"])
+    by = {m.source_column: m for m in rows}
+    assert by["AMT"].target_column == "amount"
+    assert by["AMT"].confidence >= 0.85
+    assert by["user_id"].confidence < 0.85
+
+
 def test_reasoning_chain_and_enhanced_mapper_hold_false_friends() -> None:
     from src.ai.enhanced_engine import generate_mappings_enhanced
     from src.ai.llm.chain import DataTransferReasoningChain
