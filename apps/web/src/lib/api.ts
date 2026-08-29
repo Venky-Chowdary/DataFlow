@@ -4656,6 +4656,13 @@ export interface TransformRunResult {
   model_count: number;
   failed_model_count: number;
   failed_test_count: number;
+  /** Count-proven ledger — failing error tests only; not a live-matrix claim. */
+  row_accounting?: {
+    models_run: number;
+    rows_written: number;
+    rows_quarantined: number;
+    tests_failed: number;
+  };
 }
 
 export async function runTransformProject(

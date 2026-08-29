@@ -605,7 +605,11 @@ def _run_entry(job_id: str, status: str, attempt: int, started_at: datetime, job
     doc = job_doc or {}
     finished = datetime.now(timezone.utc)
     ledger = doc.get("row_accounting") if isinstance(doc.get("row_accounting"), dict) else {}
-    return {
+    hist = doc.get("load_history_report")
+    if not isinstance(hist, dict):
+        dest = doc.get("destination_summary")
+        hist = dest.get("load_history_report") if isinstance(dest, dict) else None
+    entry = {
         "job_id": job_id,
         "status": status,
         "attempt": attempt,
@@ -618,6 +622,9 @@ def _run_entry(job_id: str, status: str, attempt: int, started_at: datetime, job
         "error": (doc.get("error") or "")[:500],
         "row_accounting": dict(ledger),
     }
+    if isinstance(hist, dict) and hist:
+        entry["load_history_report"] = hist
+    return entry
 
 
 def _notify_schedule(sched, job_id: str, status: str, job_doc: dict | None) -> None:

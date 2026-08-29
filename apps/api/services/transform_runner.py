@@ -196,6 +196,25 @@ class TransformRunResult:
             if not t.get("passed") and t.get("severity") == "error"
         ]
 
+    def row_accounting(self) -> dict[str, int]:
+        """Count-proven ledger — never invent per-row cells we did not read."""
+        written = sum(m.rows_affected for m in self.models if m.rows_affected >= 0)
+        quarantined = 0
+        for model in self.models:
+            for test in model.tests:
+                if test.get("passed") or test.get("severity") != "error":
+                    continue
+                try:
+                    quarantined += max(int(test.get("failing_rows") or 0), 0)
+                except (TypeError, ValueError):
+                    continue
+        return {
+            "models_run": len(self.models),
+            "rows_written": written,
+            "rows_quarantined": quarantined,
+            "tests_failed": len(self.failed_tests),
+        }
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "status": self.status,
@@ -207,6 +226,7 @@ class TransformRunResult:
             "model_count": len(self.models),
             "failed_model_count": len(self.failed_models),
             "failed_test_count": len(self.failed_tests),
+            "row_accounting": self.row_accounting(),
         }
 
 
@@ -221,6 +241,8 @@ class TransformRunner:
         schema: str = "",
         source_table: str = "",
         dry_run: bool = False,
+        project_id: str = "",
+        workspace_id: str = "",
     ) -> None:
         self.cfg = dest_cfg or {}
         self.dialect = normalize_driver(dialect or self.cfg.get("type") or "")
@@ -232,6 +254,12 @@ class TransformRunner:
         self.schema = resolved_schema if self.profile.uses_schema else ""
         self.source_table = source_table
         self.dry_run = dry_run
+        self.project_id = str(project_id or "").strip()
+        self.workspace_id = str(workspace_id or "").strip()
+
+    def transform_job_id(self) -> str:
+        """Stable DLQ / Inspect id — empty when this run has no project."""
+        return f"xform-{self.project_id}" if self.project_id else ""
 
     # ---------------------------------------------------------------- naming
 
@@ -694,7 +722,113 @@ class TransformRunner:
                 f"{first.get('model')}.{first.get('column')} "
                 f"{first.get('test_type')}"
             )
+        self._persist_transform_quarantine(result)
         return result
+
+    def _persist_transform_quarantine(self, result: TransformRunResult) -> None:
+        """Same DLQ as transfer — one finding per failing error-severity test.
+
+        Tests return COUNT(*), not cell bodies. We persist the count-proven
+        finding; we do not invent per-row payloads we did not read.
+        """
+        job_id = self.transform_job_id()
+        if not job_id or self.dry_run:
+            return
+        details: list[dict[str, Any]] = []
+        for model in result.models:
+            for test in model.tests:
+                if test.get("passed") or str(test.get("severity") or "error") != "error":
+                    continue
+                try:
+                    failing = max(int(test.get("failing_rows") or 0), 0)
+                except (TypeError, ValueError):
+                    failing = 0
+                message = str(test.get("message") or "") or (
+                    f"{test.get('test_type')} failed on {model.name}"
+                )
+                details.append(
+                    {
+                        "reason": message,
+                        "message": message,
+                        "column": test.get("column") or "",
+                        "failure_reason": message,
+                        "original_value": failing,
+                        "expected_type": str(test.get("test_type") or "test"),
+                        "actual_type": "violating_row",
+                        "job_id": job_id,
+                        "connector": self.dialect,
+                        "source": "transform",
+                        "model": model.name,
+                    }
+                )
+        if not details:
+            return
+        self._ensure_transform_inspect_job(job_id, result, details)
+        try:
+            from services.quarantine_dlq import persist_rejected_rows
+
+            persist_rejected_rows(
+                job_id=job_id,
+                rejected_details=details,
+                workspace_id=self.workspace_id,
+                source="transform",
+                connector=self.dialect,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Transform quarantine persist failed for %s: %s", job_id, exc
+            )
+            result.warnings.append(
+                f"Transform test findings could not be written to the quarantine DLQ: {exc}"
+            )
+
+    def _ensure_transform_inspect_job(
+        self,
+        job_id: str,
+        result: TransformRunResult,
+        details: list[dict[str, Any]],
+    ) -> None:
+        """Mint a lightweight job so Inspect Quarantine can open the same DLQ."""
+        try:
+            from services.mongodb_service import get_mongodb_service
+
+            svc = get_mongodb_service()
+            ledger = result.row_accounting()
+            quarantined = int(ledger.get("rows_quarantined") or 0)
+            status = (
+                "completed_with_quarantine"
+                if quarantined > 0
+                else "failed"
+                if result.status == "failed"
+                else "completed"
+            )
+            existing = svc.get_job(job_id)
+            if not existing:
+                svc.create_transfer_job(
+                    {
+                        "_id": job_id,
+                        "name": f"Transform · {self.project_id}",
+                        "source_type": "transform",
+                        "source_name": self.project_id,
+                        "destination_type": self.dialect or "sql",
+                        "destination_database": str(self.cfg.get("database") or ""),
+                        "destination_collection": "",
+                        "workspace_id": self.workspace_id,
+                        "operation": "transform",
+                        "triggered_by": "transform_run",
+                    }
+                )
+            svc.update_job_status(
+                job_id,
+                status,
+                rejected_rows=quarantined,
+                rejected_details=details[:200],
+                rejected_details_total=len(details),
+                row_accounting=ledger,
+                records_processed=int(ledger.get("rows_written") or 0),
+            )
+        except Exception as exc:
+            logger.debug("Transform inspect job not persisted: %s", exc, exc_info=exc)
 
     def _engine(self) -> Any:
         from connectors.generic_sql import get_sqlalchemy_engine

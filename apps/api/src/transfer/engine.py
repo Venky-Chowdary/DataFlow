@@ -3190,6 +3190,7 @@ class UniversalTransferEngine:
             ):
                 if isinstance(dest_summary, dict):
                     dest_summary.setdefault("sync_mode", effective_sync)
+                    dest_summary.setdefault("job_id", job_id)
                     # Gate-8 keyed upsert proof needs PK on the summary even when
                     # the writer omits written_ids (SQLite/PG historically did).
                     if conflict_columns:
@@ -4138,6 +4139,7 @@ class UniversalTransferEngine:
             ):
                 if isinstance(dest_summary, dict):
                     dest_summary.setdefault("sync_mode", effective_sync)
+                    dest_summary.setdefault("job_id", job_id)
                     dest_summary.setdefault("streaming", True)
                     # Stamped before reconciliation: the ladder and the ledger
                     # read the recipe identity and the rows it removed off this
@@ -4856,6 +4858,7 @@ class UniversalTransferEngine:
             ):
                 if isinstance(dest_summary, dict):
                     dest_summary.setdefault("sync_mode", effective_sync)
+                    dest_summary.setdefault("job_id", job_id)
                     dest_summary.setdefault("streaming", True)
                     # File-stream upsert needs PK stamps for keyed Gate-8.
                     file_pk: list[str] = []

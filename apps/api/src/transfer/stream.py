@@ -100,7 +100,7 @@ MAX_LOAD_METHODS = 16
 
 try:
     from services.checkpoint_service import Checkpoint, CheckpointService
-    from services.data_quality import run_integrity_audit
+    from services.data_quality import BatchDriftDetector, run_integrity_audit
     from services.error_handling import RetryBudget, with_retry
     from services.parallel_chunks import ChunkDispatcher
     from services.reconciliation import FingerprintAccumulator
@@ -110,7 +110,7 @@ try:
     from services.shape_apply import ShapeRunner
 except ImportError:  # pragma: no cover - tests with api root on path
     from src.services.checkpoint_service import Checkpoint, CheckpointService
-    from src.services.data_quality import run_integrity_audit
+    from src.services.data_quality import BatchDriftDetector, run_integrity_audit
     from src.services.error_handling import RetryBudget, with_retry
     from src.services.parallel_chunks import ChunkDispatcher
     from src.services.reconciliation import FingerprintAccumulator
@@ -2264,6 +2264,7 @@ def _stream_database_transfer_impl(
         first_page = probe
     batch = _filter_batch(first_page)
     batch_quality_enabled = validation_mode in ("strict", "maximum")
+    drift_detector = BatchDriftDetector()
     # Identity key for duplicate audit — NEVER reuse the CDC cursor column.
     # Cursor fields (updated_at, id) are not the uniqueness contract; Mongo→Redis
     # must audit `_id`, not a business `id` that legitimately repeats.
@@ -2461,6 +2462,13 @@ def _stream_database_transfer_impl(
                 local_warnings.extend(audit.warnings[:10])
             if not audit.passed:
                 raise ValueError(f"Batch {idx} failed data-quality audit: {'; '.join(audit.issues[:5])}")
+            drift_warnings = drift_detector.check(audit.stats or {})
+            if drift_warnings:
+                if validation_mode == "maximum":
+                    raise ValueError(
+                        f"Batch {idx} drift detected: {'; '.join(drift_warnings[:3])}"
+                    )
+                local_warnings.extend(drift_warnings[:3])
 
         # Both bookmarks describe the page as the source handed it over: a recipe
         # may have dropped the row carrying the page's highest key, and

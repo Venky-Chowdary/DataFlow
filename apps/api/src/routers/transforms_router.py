@@ -367,6 +367,8 @@ def run_project(
         dialect=resolve_driver_type(str(cfg.get("type") or "")),
         schema=project.schema or str(cfg.get("schema") or ""),
         dry_run=dry_run,
+        project_id=project_id,
+        workspace_id=ws or "",
     )
     result = runner.run(list(project.models))
     return result.to_dict()
