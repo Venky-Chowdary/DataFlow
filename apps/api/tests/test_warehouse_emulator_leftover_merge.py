@@ -244,6 +244,24 @@ def test_adls_leftover_merge_when_reachable() -> None:
     _assert_leftover_merge("adls", cfg, schema="", table=table)
 
 
+def test_bigquery_missing_table_count_is_zero_not_retry_hang() -> None:
+    """goccy emulator 500 'Table not found' is dest=0, not a retry sleep."""
+    if not _port_up("127.0.0.1", 9050):
+        pytest.skip("BigQuery emulator not listening on 9050")
+    cfg = {
+        "type": "bigquery",
+        "host": "127.0.0.1",
+        "port": 9050,
+        "database": "dataflow-test",
+        "schema": "dataflow",
+        "connection_string": "http://127.0.0.1:9050",
+    }
+    n = destination_row_count(
+        "bigquery", cfg, schema="dataflow", table_name="df_missing_" + uuid.uuid4().hex[:8]
+    )
+    assert n == 0
+
+
 def test_bigquery_emulator_leftover_merge_when_reachable() -> None:
     if not _port_up("127.0.0.1", 9050):
         pytest.skip("BigQuery emulator not listening on 9050")

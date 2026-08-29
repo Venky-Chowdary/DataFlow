@@ -1094,7 +1094,7 @@ def _is_missing_warehouse_relation(exc: BaseException, dialect: str) -> bool:
     if dialect == "snowflake":
         return "does not exist" in combined and "250001" not in combined and "password" not in combined
     if dialect == "bigquery":
-        return "not found: table" in combined
+        return "not found: table" in combined or "table not found" in combined
     if dialect == "duckdb":
         return "catalog error" in combined and "does not exist" in combined
     if dialect == "databricks":
@@ -1286,7 +1286,7 @@ def _bigquery_row_count(
             port=int(cfg.get("port") or 0),
         )
         table_id = f"`{project}`.`{dataset}`.`{table_name}`"
-        rows = list(client.query(f"SELECT COUNT(*) AS n FROM {table_id}").result())  # nosec B608
+        rows = _bigquery_run_query(client, f"SELECT COUNT(*) AS n FROM {table_id}")  # nosec B608
         return int(rows[0][0]) if rows else 0
     except NotFound:
         return 0
@@ -1295,6 +1295,29 @@ def _bigquery_row_count(
             return 0
         logger.warning("BigQuery dest COUNT(*) failed: %s", exc)
         return None
+
+
+def _bigquery_no_retry():
+    from google.api_core import retry as retries
+
+    return retries.Retry(predicate=lambda _exc: False, deadline=8.0)
+
+
+def _bigquery_run_job(client: Any, sql: str) -> Any:
+    """One dest-engine job. Missing-table 500s must not retry-sleep.
+
+    goccy/bigquery-emulator answers ``Table not found`` as InternalServerError
+    500. The google client default retry would sleep until pytest/operator
+    timeout instead of treating dest-missing as 0.
+    """
+    no_retry = _bigquery_no_retry()
+    job = client.query(sql, retry=no_retry, timeout=8.0, job_retry=None)
+    job.result(retry=no_retry, timeout=8.0, job_retry=None)
+    return job
+
+
+def _bigquery_run_query(client: Any, sql: str) -> list[Any]:
+    return list(_bigquery_run_job(client, sql))
 
 
 def _snowflake_key_list(
@@ -1474,7 +1497,7 @@ def _bigquery_key_list(
         )
         table_id = f"`{project}`.`{dataset}`.`{table_name}`"
         col_sql = ", ".join(quote_sql_identifier(c, "`") for c in cols)
-        fetched = list(client.query(f"SELECT {col_sql} FROM {table_id}").result())  # nosec B608
+        fetched = _bigquery_run_query(client, f"SELECT {col_sql} FROM {table_id}")  # nosec B608
     except NotFound:
         return []
     except Exception as exc:
@@ -1545,8 +1568,7 @@ def _bigquery_delete_keys(
             f"CAST({q} AS STRING) = '{str(part).replace(chr(39), chr(39) + chr(39))}'"
             for q, part in zip(qcols, tup)
         )
-        job = client.query(f"DELETE FROM {table_id} WHERE {clause}")  # nosec B608
-        job.result()
+        job = _bigquery_run_job(client, f"DELETE FROM {table_id} WHERE {clause}")  # nosec B608
         n = getattr(job, "num_dml_affected_rows", None)
         deleted += 1 if n is None or int(n) < 0 else int(n)
     return deleted
