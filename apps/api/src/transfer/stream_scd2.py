@@ -198,6 +198,14 @@ def stream_scd2_mirror_transfer(
             "staging_table": staging_qualified,
             "sync_mode": effective_sync,
         }
+        from services.dest_precount import PRECOUNT_KEY, precount_destination
+
+        try:
+            rows_before = precount_destination(destination, dest_cfg)
+        except Exception:
+            rows_before = None
+        if isinstance(rows_before, int):
+            dest_summary[PRECOUNT_KEY] = int(rows_before)
 
         if effective_sync == "scd2":
             from services.scd2_engine import apply_scd2, prepare_scd2_mapped_rows

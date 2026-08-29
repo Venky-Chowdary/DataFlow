@@ -127,3 +127,30 @@ def test_birth_date_name_gates_slash_samples() -> None:
     )
     assert "birth_date" in report["high_risk_fields"]
     assert report["requires_review"] is True
+
+
+def test_typed_uuid_bytea_interval_are_not_pci_review() -> None:
+    """Technical UUID / binary / interval columns are not regulated identifiers."""
+    report = score_compliance_risk(
+        ["id", "payload", "uid", "blob", "span"],
+        [
+            {
+                "id": 1,
+                "payload": '{"k": 1}',
+                "uid": "11111111-1111-4111-8111-111111111111",
+                "blob": "deadbeef",
+                "span": "1 day 02:00:00",
+            }
+        ],
+    )
+    assert report["requires_review"] is False
+    assert "uid" not in report["high_risk_fields"]
+    assert "span" not in report["sensitive_fields"]
+    assert "PCI-DSS" not in report["compliance_tags"]
+
+
+def test_span_interval_is_not_card_pan() -> None:
+    """``span`` must not match the card PAN token (word-boundary ``pan``)."""
+    report = score_compliance_risk(["span"], [{"span": "1 day 02:00:00"}])
+    assert report["requires_review"] is False
+    assert "span" not in report["sensitive_fields"]

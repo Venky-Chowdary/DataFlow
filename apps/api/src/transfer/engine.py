@@ -691,9 +691,10 @@ def _destination_schema_probe(
         extra["foreign_keys"] = list(
             info.get("foreign_keys") or info.get("destination_foreign_keys") or []
         )
-        # Overwrite recreates the table — do not type or NOT NULL against the
-        # stale shape. Append/upsert keep live nullability for G3 contracts.
-        if is_overwrite_sync(sync_mode):
+        # Create-new overwrite has no dest contract — clear stale types.
+        # Dest-exists overwrite keeps live types/nullability so G14/G15 write
+        # by dest column name and never invent create-new on a listed table.
+        if is_overwrite_sync(sync_mode) and exists is not True:
             extra["schema_nullability"] = {}
             extra["schema_defaults"] = {}
             extra["identity_columns"] = []
@@ -2890,6 +2891,16 @@ class UniversalTransferEngine:
                     )
 
                     dest_extra = getattr(request.destination, "extra", None)
+                    from services.dest_precount import PRECOUNT_KEY, precount_destination
+                    from src.transfer.adapters import resolve_connector_config
+
+                    try:
+                        scd2_rows_before = precount_destination(
+                            request.destination,
+                            resolve_connector_config(request.destination),
+                        )
+                    except Exception:
+                        scd2_rows_before = None
                     scd2_spill = spill_engine_write_records(
                         records,
                         columns,
@@ -2937,6 +2948,8 @@ class UniversalTransferEngine:
                         },
                         ENGINE_SPILL_SUMMARY_KEY: scd2_spill,
                     }
+                    if isinstance(scd2_rows_before, int):
+                        dest_summary[PRECOUNT_KEY] = int(scd2_rows_before)
                     if scd2_summary.get("ok") is False:
                         _fail_spill = dest_summary.pop(ENGINE_SPILL_SUMMARY_KEY, None)
                         if _fail_spill is not None:
