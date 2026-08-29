@@ -317,6 +317,11 @@ def extract_cdc_lsn(resume_token: Any) -> str | None:
     """
     if resume_token is None:
         return None
+    from services.cdc_resume_tokens import unwrap_resume_token
+
+    resume_token = unwrap_resume_token(resume_token)
+    if resume_token is None:
+        return None
     if isinstance(resume_token, dict):
         # Nested PG hold / incremental wrappers
         nested = resume_token.get("token")
