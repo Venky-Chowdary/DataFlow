@@ -188,8 +188,15 @@ def introspect_schema(
     auth_role: str = "",
     private_key: str = "",
     strict_namespace: bool = False,
+    **options: Any,
 ) -> dict[str, Any]:
     """Load tables/columns for ``table`` in the requested database/schema.
+
+    ``options`` carries the connection-affecting extras from the connector
+    config (``connectors.generic_sql.connection_options``): TLS material,
+    Oracle service name/SID, MSSQL driver and failover keywords. Introspection
+    must open the *same* connection the transfer will, otherwise a route whose
+    writer connects fine is reported unreachable (and vice versa).
 
     ``strict_namespace=True`` (destination probes): never steal columns from
     another database/schema. A missing object in the operator-chosen namespace
@@ -217,6 +224,7 @@ def introspect_schema(
             "connection_string": connection_string,
             "ssl": ssl,
             "type": catalog_type or db_type,
+            **options,
         }
         return introspect_table_schema(cfg, table or "")
     # A qualified name is resolved once, here, so every engine branch below asks
@@ -238,6 +246,7 @@ def introspect_schema(
             strict_namespace=strict_namespace,
             # Redshift constraints are informational — mark advisory like BQ.
             advisory_keys=(db_type == "redshift"),
+            **options,
         )
     if db_type == "snowflake":
         return _introspect_snowflake(
@@ -266,6 +275,7 @@ def introspect_schema(
             table=table,
             schema=schema,
             strict_namespace=strict_namespace,
+            **options,
         )
     if db_type in ("oracle", "oracle_db", "amazon_rds_oracle"):
         return _introspect_oracle(
@@ -279,6 +289,7 @@ def introspect_schema(
             ssl=ssl,
             table=table,
             strict_namespace=strict_namespace,
+            **options,
         )
     if db_type in ("sqlserver", "mssql", "sql_server", "azure_sql"):
         return _introspect_sqlserver(
@@ -292,6 +303,7 @@ def introspect_schema(
             ssl=ssl,
             table=table,
             strict_namespace=strict_namespace,
+            **options,
         )
     if db_type == "bigquery":
         return _introspect_bigquery(
@@ -2271,7 +2283,7 @@ def _introspect_oracle(**kwargs) -> dict[str, Any]:
     """Oracle ALL_TAB_COLUMNS introspect with NUMBER(p,s) / FLOAT honesty."""
     try:
         import sqlalchemy as sa
-        from connectors.generic_sql import _engine
+        from connectors.generic_sql import _engine, connection_options
     except Exception:
         return {
             "ok": False,
@@ -2283,6 +2295,9 @@ def _introspect_oracle(**kwargs) -> dict[str, Any]:
     table = (kwargs.get("table") or "").strip()
     schema = (kwargs.get("schema") or kwargs.get("username") or "").strip().upper()
     cfg = {
+        # Connection-affecting extras first: service name / SID / TLS decide
+        # which instance answers, and the explicit keys below stay authoritative.
+        **connection_options(kwargs),
         "type": "oracle",
         "host": kwargs.get("host") or "",
         "port": int(kwargs.get("port") or 1521),
@@ -2536,7 +2551,7 @@ def _introspect_sqlserver(**kwargs) -> dict[str, Any]:
     """SQL Server INFORMATION_SCHEMA introspect with FLOAT≠DECIMAL honesty."""
     try:
         import sqlalchemy as sa
-        from connectors.generic_sql import _engine
+        from connectors.generic_sql import _engine, connection_options
     except Exception:
         return {
             "ok": False,
@@ -2548,6 +2563,9 @@ def _introspect_sqlserver(**kwargs) -> dict[str, Any]:
     table = (kwargs.get("table") or "").strip()
     schema = (kwargs.get("schema") or "dbo").strip()
     cfg = {
+        # Carry TLS/driver keywords: Driver 18 verifies by default, so an
+        # operator-declared certificate or trust flag has to reach the probe.
+        **connection_options(kwargs),
         "type": "sqlserver",
         "host": kwargs.get("host") or "",
         "port": int(kwargs.get("port") or 1433),

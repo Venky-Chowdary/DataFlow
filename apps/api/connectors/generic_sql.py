@@ -16,7 +16,7 @@ import contextlib
 import json
 import logging
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import date, datetime, time, timezone
 from decimal import Decimal
@@ -534,6 +534,50 @@ def _normalize_sqlalchemy_url_string(url: str, db_type: str = "") -> str:
     return raw
 
 
+#: Keys outside the core host/port/user/password/database set that still decide
+#: *which* server is reached and whether the handshake succeeds. Any helper that
+#: rebuilds a driver config from explicit arguments (probe, introspect, drift)
+#: has to carry these, or it dials a different connection than the transfer —
+#: the shape behind "Validate passes, Run fails" (and its mirror, a Validate
+#: that fails a route the writer can open).
+CONNECTION_OPTION_KEYS: tuple[str, ...] = (
+    # TLS / certificate material
+    "server_certificate",
+    "hostname_in_certificate",
+    "trust_server_certificate",
+    "encrypt",
+    "sslmode",
+    "sslrootcert",
+    "sslcert",
+    "sslkey",
+    "ssl_ca",
+    "ssl_cert",
+    "ssl_key",
+    "ssl_verify_cert",
+    "ssl_disabled",
+    # Oracle addressing: a SID DSN reaches a different target than a service name
+    "service_name",
+    "sid",
+    # SQL Server topology / driver
+    "multi_subnet_failover",
+    "application_intent",
+    "driver",
+    "odbc_driver",
+    # generic
+    "connect_timeout",
+    "options",
+)
+
+
+def connection_options(cfg: Mapping[str, Any]) -> dict[str, Any]:
+    """The connection-affecting extras in ``cfg`` (see :data:`CONNECTION_OPTION_KEYS`)."""
+    return {
+        key: cfg[key]
+        for key in CONNECTION_OPTION_KEYS
+        if cfg.get(key) not in (None, "")
+    }
+
+
 def _build_url(cfg: dict[str, Any]) -> str | sa.URL:
     """Build a SQLAlchemy URL from host/port or use the explicit connection string."""
     connection_string = cfg.get("connection_string") or ""
@@ -629,6 +673,36 @@ def _build_url(cfg: dict[str, Any]) -> str | sa.URL:
         if intent:
             # ReadOnly routes to a readable secondary when the AG allows it.
             query["ApplicationIntent"] = intent
+        # TLS. ODBC Driver 18 encrypts by default and verifies the chain, so a
+        # server holding a self-signed or private-CA certificate (every default
+        # install, every container) fails the handshake with no way to say what
+        # to trust. These three keywords are the only honest exits, and each one
+        # has to be declared on the connector — the default stays verify-or-fail:
+        #   ``server_certificate``      pin the exact cert file (verify, no blanket trust)
+        #   ``hostname_in_certificate`` the CN/SAN to match when the host is an alias
+        #   ``trust_server_certificate`` skip chain verification (operator-declared)
+        cert = str(cfg.get("server_certificate") or cfg.get("ssl_ca") or "").strip()
+        if cert:
+            query["ServerCertificate"] = cert
+        host_in_cert = str(cfg.get("hostname_in_certificate") or "").strip()
+        if host_in_cert:
+            query["HostNameInCertificate"] = host_in_cert
+        if cfg.get("trust_server_certificate") in (
+            True,
+            1,
+            "1",
+            "true",
+            "True",
+            "yes",
+            "Yes",
+            "YES",
+        ):
+            query["TrustServerCertificate"] = "Yes"
+        encrypt = str(cfg.get("encrypt") or "").strip()
+        if encrypt:
+            # ``no`` only when the operator declares this server plaintext; the
+            # default is left to the driver (Driver 18: encrypt + verify).
+            query["Encrypt"] = encrypt
         if not query:
             query = None
 
@@ -812,6 +886,10 @@ def get_connection(
     callers (e.g. CDC readers) can execute raw SQL and parameterised queries.
     """
     cfg = {
+        # TLS / Oracle addressing / MSSQL driver keywords decide which server is
+        # reached and whether the handshake succeeds — a raw connection that
+        # drops them is not the same connection the transfer uses.
+        **connection_options(kwargs),
         "host": host,
         "port": port,
         "database": database,
@@ -970,6 +1048,13 @@ def _logical_type_from_sa(col_type: Any) -> str:
     if isinstance(col_type, (sa.DateTime,)):
         # Preserve TIMESTAMPTZ vs NTZ — collapsing both to "datetime" loses TZ polarity
         # on generic Postgres/Trino/warehouse reflection (Airbyte-class honesty gap).
+        # mssql.DATETIMEOFFSET subclasses DateTime and leaves ``timezone`` False,
+        # so the flag alone reads an offset-storing carrier as NTZ and the writer
+        # then quarantines every aware value the column exists to hold.
+        if "datetimeoffset" in (
+            f"{type(col_type).__name__} {col_type!r}".lower()
+        ):
+            return "timestamptz"
         tz = getattr(col_type, "timezone", None)
         if tz is True:
             return "timestamptz"
@@ -1587,6 +1672,15 @@ def _sa_type_for_logical(
             return _maybe_nullable(sa.String())
         if dialect_name == "postgresql":
             return postgresql.UUID()
+        # CREATE must land the carrier the canonical type map stamped on the
+        # mapping (``services.type_system.ddl_type``), because the bind route
+        # is compiled from that stamp: a UNIQUEIDENTIFIER stamp binds a native
+        # ``uuid.UUID``, and pyodbc silently truncates that to 16 characters
+        # when the column it lands in is VARCHAR(36).
+        if dialect_name == "mssql" and mssql is not None:
+            return _maybe_nullable(mssql.UNIQUEIDENTIFIER())
+        if dialect_name == "mysql":
+            return _maybe_nullable(sa.CHAR(36))
         return _maybe_nullable(sa.String(36))
     if t in (LOGICAL_JSON, LOGICAL_ARRAY):
         # DuckDB: use a custom JSON type that stores compact text and binds
@@ -1719,6 +1813,8 @@ def _sa_type_for_logical(
         if native_logical == LOGICAL_UUID:
             if dialect_name == "postgresql":
                 return postgresql.UUID()
+            if dialect_name == "mssql" and mssql is not None:
+                return _maybe_nullable(mssql.UNIQUEIDENTIFIER())
             return _maybe_nullable(sa.String(36))
         if native_logical == LOGICAL_JSON:
             if dialect_name == "postgresql":
@@ -2075,9 +2171,19 @@ def _cfg_from_params(
     connection_string: str,
     ssl: bool,
     type: str = "",
-    **_: Any,
+    **extra: Any,
 ) -> dict[str, Any]:
+    """Config for a connectivity probe.
+
+    Every remaining keyword is carried through: TLS material
+    (``server_certificate``, ``trust_server_certificate``, ``sslmode``),
+    Oracle ``service_name``/``sid``, MSSQL failover/intent and driver options
+    all change which server is reached and whether the handshake can succeed.
+    Dropping them made the probe dial a *different* connection than the
+    transfer, which is how Validate ends up disagreeing with Run.
+    """
     cfg = {
+        **extra,
         "host": host,
         "port": port,
         "database": database,
@@ -3156,8 +3262,15 @@ def read_table_batch(
     offset: int = 0,
     limit: int = 100_000,
     known_total_rows: int | None = None,
+    **extra: Any,
 ) -> ReadBatch:
-    """Read a batch of rows from any SQLAlchemy-supported database."""
+    """Read a batch of rows from any SQLAlchemy-supported database.
+
+    ``extra`` carries the connection-affecting keywords (TLS trust/pin, Oracle
+    ``service_name``/``sid``, MSSQL driver and failover): a reader that drops
+    them dials a different server than the writer, which is how a route the
+    destination accepts fails on the read side.
+    """
     if not SQLALCHEMY_AVAILABLE:
         raise RuntimeError("SQLAlchemy is not installed")
 
@@ -3171,6 +3284,7 @@ def read_table_batch(
         connection_string,
         ssl,
         type=type,
+        **extra,
     )
     engine = _engine(cfg)
     schema_name = _schema_name(cfg)
@@ -3258,6 +3372,7 @@ def read_table_scan_batch(
     limit: int = 100_000,
     known_total_rows: int | None = None,
     scan_state: dict[str, Any],
+    **extra: Any,
 ) -> ReadBatch:
     """Page one ``SELECT … ORDER BY`` with ``fetchmany`` — no OFFSET, one login.
 
@@ -3280,6 +3395,7 @@ def read_table_scan_batch(
             connection_string,
             ssl,
             type=type,
+            **extra,
         )
         engine = _engine(cfg)
         schema_name = _schema_name(cfg)
@@ -3420,6 +3536,7 @@ def read_table_cursor_batch(
     limit: int = 20_000,
     cursor_primary_key: str | None = None,
     cursor_key_columns: list[str] | None = None,
+    **extra: Any,
 ) -> ReadBatch:
     """Cursor/keyset pagination for incremental and streaming transfers.
 
@@ -3443,6 +3560,7 @@ def read_table_cursor_batch(
         connection_string,
         ssl,
         type=type,
+        **extra,
     )
     engine = _engine(cfg)
     schema_name = _schema_name(cfg)

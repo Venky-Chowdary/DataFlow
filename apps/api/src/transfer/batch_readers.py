@@ -38,6 +38,7 @@ def _read_batch_impl(
     cursor_key_columns: list[str] | None = None,
     scan_state: dict[str, Any] | None = None,
 ):
+    from connectors.generic_sql import connection_options
     from services.procedure_source import is_callable_source, read_callable_batch
 
     # Procedure / custom-SQL extract — one CALL, then page the spool.
@@ -81,6 +82,7 @@ def _read_batch_impl(
             limit=limit,
             cursor_primary_key=cursor_primary_key,
             cursor_key_columns=_key_cols,
+            **connection_options(cfg),
         )
 
     if src_type == "postgresql" or src_type == "redshift":
@@ -559,6 +561,7 @@ def _read_batch_impl(
                 known_total_rows=known_total_rows,
                 type=src_type,
                 scan_state=scan_state,
+                **connection_options(cfg),
             )
         if cursor_column or cursor_key_columns:
             if src_type == "sqlserver":
@@ -583,6 +586,7 @@ def _read_batch_impl(
                 cursor_primary_key=cursor_primary_key,
                 cursor_key_columns=cursor_key_columns,
                 type=src_type,
+                **connection_options(cfg),
             )
         from .connector_dispatch import read_via_registry
 
