@@ -1535,11 +1535,28 @@ def decfloat_domain_would_collapse(source_type: str, target_type: str) -> bool:
     return True
 
 
-def bignumeric_capacity_would_invent(source_type: str, target_type: str) -> bool:
-    """True when bare NUMBER/DECIMAL invents BigQuery BIGNUMERIC (76,38) class."""
+def bignumeric_capacity_would_invent(
+    source_type: str,
+    target_type: str,
+    *,
+    dest_db: str = "",
+    dest_table_exists: bool | None = None,
+) -> bool:
+    """True when bare NUMBER/DECIMAL invents BigQuery BIGNUMERIC (76,38) class.
+
+    Invent is a *create-new* verdict: stamping BIGNUMERIC claims 38 scale digits
+    the source never declared. Loading into a column that already carries that
+    declaration is a different question — the operator did not invent anything,
+    and BigQuery's own bare BIGNUMERIC (76,38) holds DECIMAL(24,6) exactly — so
+    a wider existing carrier must not read as a precision collapse.
+    """
     if normalize_logical_type(source_type) != LOGICAL_DECIMAL:
         return False
     if normalize_logical_type(target_type) != LOGICAL_DECIMAL:
+        return False
+    if dest_table_exists is True and decimal_capacity_is_equal_or_wider(
+        source_type, target_type, dest_db=dest_db
+    ):
         return False
     src_u = strip_identity_qualifier(source_type).upper().replace(" ", "")
     tgt_u = strip_identity_qualifier(target_type).upper().replace(" ", "")
@@ -6759,7 +6776,12 @@ def is_precision_collapse_coercion(
         return True
     if decfloat_domain_would_collapse(source_type, target_type):
         return True
-    if bignumeric_capacity_would_invent(source_type, target_type):
+    if bignumeric_capacity_would_invent(
+        source_type,
+        target_type,
+        dest_db=dest_db,
+        dest_table_exists=dest_table_exists,
+    ):
         return True
     if decimal_fixed_point_would_collapse_to_text(
         source_type, target_type, dest_db=dest_db
@@ -7269,7 +7291,12 @@ def is_lossy_coercion(
             return True
         if decfloat_domain_would_collapse(source_type, target_type):
             return True
-        if bignumeric_capacity_would_invent(source_type, target_type):
+        if bignumeric_capacity_would_invent(
+            source_type,
+            target_type,
+            dest_db=dest_db,
+            dest_table_exists=dest_table_exists,
+        ):
             return True
         if decimal_fixed_point_would_collapse_to_text(
             source_type, target_type, dest_db=dest_db
@@ -7434,7 +7461,12 @@ def is_lossy_coercion(
         return True
     if decfloat_domain_would_collapse(source_type, target_type):
         return True
-    if bignumeric_capacity_would_invent(source_type, target_type):
+    if bignumeric_capacity_would_invent(
+        source_type,
+        target_type,
+        dest_db=dest_db,
+        dest_table_exists=dest_table_exists,
+    ):
         return True
     if decimal_fixed_point_would_collapse_to_text(
         source_type, target_type, dest_db=dest_db
