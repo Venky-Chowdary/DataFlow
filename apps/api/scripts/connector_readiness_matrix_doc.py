@@ -94,6 +94,27 @@ DEFECTS_FIXED: list[tuple[str, str, str]] = [
         "(112 transfer-live tiles over 44 transfer-live drivers)",
     ),
     (
+        "A destination with no column DDL (MongoDB / Redis / Elasticsearch / S3 "
+        "prefix) had its *profiled* types bound as the live DDL contract, so the "
+        "second run of a route refused itself for a fidelity collapse "
+        "(`amount DECIMAL(12,2) -> DECIMAL(2,2)`) onto a sink that declares no "
+        "column types at all",
+        "services/db_type_utils.py `dest_declares_column_ddl()` (canonical "
+        "type-authority classification) consumed by services/preflight_service.py "
+        "and services/decision_kernel/invent.py",
+        "postgresql -> mongodb / redis / s3 / elasticsearch full_refresh_overwrite "
+        "all pass on the second run; no gate, floor or risk policy was relaxed",
+    ),
+    (
+        "`full_refresh_overwrite` into Elasticsearch never cleared the index, and "
+        "the bulk writer correctly refuses to clobber existing docs "
+        "(`op_type=create`), so every document came back a version conflict",
+        "connectors/table_manager.py `_drop_elasticsearch` (the canonical drop owner "
+        "returned `False` = no drop support for this driver)",
+        "postgresql -> elasticsearch overwrite passes; 2,000-row cell 2,000 rows "
+        "after two runs",
+    ),
+    (
         "Driver-level proof was attributed to every catalog alias sharing an adapter",
         "scripts/connector_readiness_audit.py endpoint-id role tracking",
         "only the connector ids actually measured carry `proven-live-here`",
