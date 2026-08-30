@@ -175,3 +175,89 @@ def test_mongodb_and_iceberg_classify_as_lsn_eligible():
             dest_type=brand, has_primary_key=True, write_mode="upsert"
         )
         assert posture["class"] == SINK_EFFECTIVELY_ONCE_ELIGIBLE, brand
+
+
+# --------------------------------------------------------------------------
+# Family precedence in the destination predicates
+#
+# The SQL guards restate the family rules of ``lsn_family`` in five dialects.
+# When a restatement drifts, a stamp is routed into the wrong compare: a Mongo
+# resume token entering the ``file:pos`` integer branch aborted the whole
+# executemany batch at a Postgres destination (``invalid input syntax for type
+# bigint: "826A9447…"``), which the engine then reported as 1000 quarantined
+# rows on a clean CDC resume.
+# --------------------------------------------------------------------------
+
+#: (older stamp, newer stamp, applies) — ``applies`` mirrors ``compare_lsn``.
+LSN_FAMILY_CASES = [
+    ("mongo:826A9447210000", "mongo:826A9447220000", True),
+    ("mongo:826A9447220000", "mongo:826A9447200000", False),
+    ("bin.000003:99", "bin.000003:100", True),
+    ("bin.000003:100", "bin.000003:99", False),
+    ("bin.000003:100", "bin.000004:5", True),
+    ("0/140E5260", "0/14F23958", True),
+    ("0/14F23958", "0/140E5260", False),
+    ("gtid:uuid:1-5", "mongo:FFFF", False),
+    ("mongo:FFFF", "gtid:uuid:1-5", False),
+    ("scn:99", "scn:100", True),
+    ("scn:100", "scn:99", False),
+    ("10", "20", True),
+    ("20", "10", False),
+]
+
+
+def test_compare_lsn_family_cases_are_the_contract():
+    for older, newer, applies in LSN_FAMILY_CASES:
+        assert (compare_lsn(newer, older) > 0) is applies, (older, newer)
+
+
+def test_sqlite_guard_matches_compare_lsn_on_every_family():
+    """The SQLite guard is the executable mirror of the same table."""
+    import sqlite3
+
+    conn = sqlite3.connect(":memory:")
+    try:
+        conn.execute(
+            f'CREATE TABLE orders (id INTEGER PRIMARY KEY, v TEXT, "{DF_LSN_COL}" TEXT)'
+        )
+        sql = (
+            f'INSERT INTO orders (id, v, "{DF_LSN_COL}") VALUES (?, ?, ?) '
+            f'ON CONFLICT(id) DO UPDATE SET v = excluded.v, '
+            f'"{DF_LSN_COL}" = excluded."{DF_LSN_COL}" '
+            f"WHERE {sqlite_lsn_update_guard_sql('orders')}"
+        )
+        for idx, (older, newer, applies) in enumerate(LSN_FAMILY_CASES):
+            conn.execute("DELETE FROM orders")
+            conn.execute(sql, (idx, "old", older))
+            conn.execute(sql, (idx, "new", newer))
+            got = conn.execute("SELECT v FROM orders WHERE id = ?", (idx,)).fetchone()[0]
+            assert (got == "new") is applies, (older, newer, got)
+    finally:
+        conn.close()
+
+
+def test_lsn_guards_carry_no_like_wildcard():
+    """A literal ``%`` breaks the ``%s`` paramstyle of psycopg2 / pymysql.
+
+    The statement is formatted against the bound row before it reaches the
+    server, so a ``LIKE '%:%'`` inside the guard raises ``TypeError: not enough
+    arguments for format string`` and fails the entire write batch.
+    """
+    for sql in (
+        postgres_lsn_update_guard_sql("orders"),
+        mysql_lsn_values_newer_sql(),
+    ):
+        assert "'%" not in sql and "%'" not in sql, sql
+
+
+def test_prefixed_stamps_never_reach_the_position_compare():
+    """A ``prefix:`` family is excluded from ``file:pos`` in every dialect."""
+    guards = [
+        postgres_lsn_update_guard_sql("orders"),
+        mysql_lsn_values_newer_sql(),
+        sqlite_lsn_update_guard_sql("orders"),
+        snowflake_lsn_match_predicate(),
+    ]
+    for sql in guards:
+        lowered = sql.lower()
+        assert "gtid" in lowered and "mongo" in lowered and "scn" in lowered, sql
