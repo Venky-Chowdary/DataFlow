@@ -756,6 +756,8 @@ def _security_posture(tenant: Tenant | None = None) -> dict[str, Any]:
         # Surfaced CDC posture — explicit EO/ALO/AMO; only ALO is claimed.
         "cdc_delivery": DELIVERY_DEFAULT,
         "cdc_exactly_once_claimed": EXACTLY_ONCE_CLAIMED,
+        "catalog_tiles_are_not_transfer_live": True,
+        "customer_tenant_warehouse_sku_claimed": False,
         "cdc_at_most_once_claimed": False,
         "cdc_honesty": cdc_honesty,
         # Recovery Integrity — refuse invent of one-click undo / restore product.
