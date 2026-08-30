@@ -216,3 +216,33 @@ Stated plainly rather than estimated:
   (read / transform / write / reconcile) breakdown has been captured yet.
 - Binary (`blob_bin`) round-trip is exercised only where the engine has a binary type;
   it has not been separately proven byte-for-byte at scale.
+
+## Addendum — after the collation / destination-invention fixes (200 rows)
+
+Two more root causes were fixed after the grid above was measured:
+
+| Defect | Root cause | Owner module changed |
+| --- | --- | --- |
+| A UUID carried as text lost its source collation, so a `CHAR(36) COLLATE utf8mb4_0900_bin` source landed in the destination's default `utf8mb4_0900_ai_ci` (case/accent-insensitive equality on hex text — two UUIDs differing in case collide), and the fidelity gate correctly refused the write | the exact-wire UUID branch of `ddl_type` returned the destination string spelling built from `strip_identity_qualifier(...)`, which drops `COLLATE`, bypassing the collation re-attacher | `services/decision_kernel/type_invent.py` (exact-wire spelling extracted to `_uuid_exact_wire_ddl`; `services.type_system._with_collation_clause` stays the single owner of destination-legal `COLLATE` spelling) |
+| SQL Server dest-exists shapes were created with `VARCHAR`, so every CJK/emoji row was (correctly) quarantined as `U+8A9E exceeds destination varchar capacity` | harness defect, not product: the dest-exists table was stamped with `ddl_type` (no source-engine context) instead of the canonical create-new stamp, which promotes to `NVARCHAR` when the source can emit any code point | `apps/api/tests/scale/{fixture,engines,matrix}.py` — now stamps with `decision_kernel.create_new_mapping_target_type(..., source_db=<source engine>)` |
+
+Focused re-runs after the fixes, real services, 200 rows, both directions, all four
+modes, all shapes:
+
+| Sub-grid | Before | After |
+| --- | --- | --- |
+| postgresql ↔ sqlserver | 9 fail | **pass=36 fail=0 skip=4** |
+| postgresql ↔ mysql | 6 fail (DDL 1064) + 3 fail (collation) | **pass=36 fail=0 skip=4** |
+| postgresql ↔ sqlite | 18 fail | **pass=38 fail=0 skip=2** |
+| oracle ↔ postgresql | — | **pass=36 fail=0 skip=0** |
+
+The 4 skips per sub-grid are the `domain_contract_unsigned` shape on routes where the
+destination declares every mapped domain natively, so no Migration Risk Contract is
+required to prove unsigned refusal; the exact reason is recorded per cell.
+
+The full 225-cell re-run was **stopped at 122 cells** (`pass=100 fail=12 skip=10`) when
+work was halted. Every one of the 12 failures in that partial run is a
+`mysql ↔ sqlserver` cell — the one cross pair whose fix had not been re-measured — and
+all 12 landed 0 destination rows (refused, not partially written). The complete
+225-cell grid has **not** been re-measured after these fixes; the numbers in the main
+table above are the last complete measurement.
