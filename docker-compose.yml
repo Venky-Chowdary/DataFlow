@@ -77,6 +77,26 @@ services:
       timeout: 5s
       retries: 10
 
+  # One-shot: grant the app user what binlog CDC actually needs. MySQL requires
+  # REPLICATION SLAVE to open a binlog stream and REPLICATION CLIENT to read
+  # SHOW MASTER STATUS; RELOAD lets the snapshot take FLUSH TABLES WITH READ
+  # LOCK instead of degrading to per-table locks. Without these, a CDC route
+  # fails at stream open with "Access denied ... REPLICATION SLAVE" — which is
+  # an environment gap, not a product defect, so the fleet grants them here.
+  mysql-init:
+    image: mysql:8.0
+    depends_on:
+      mysql:
+        condition: service_healthy
+    restart: "no"
+    entrypoint:
+      - bash
+      - -c
+      - |
+        mysql -h mysql -u root -pdataflow -e "
+          GRANT REPLICATION SLAVE, REPLICATION CLIENT, RELOAD ON *.* TO 'dataflow'@'%';
+          FLUSH PRIVILEGES;"
+
   mongodb:
     image: mongo:7
     # Single-node replica set so Mongo change-stream (CDC) tests have an oplog.

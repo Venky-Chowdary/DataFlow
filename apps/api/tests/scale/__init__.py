@@ -9,7 +9,9 @@ Env-gated so CI skips when the fleet is absent:
 
 * ``DATAFLOW_SCALE_MATRIX=1`` — SQL duplex matrix (Track A).
 * ``DATAFLOW_SCALE_NOSQL=1`` — NoSQL / analytical matrix (Track C).
+* ``DATAFLOW_SCALE_MODES=1`` — sync modes, CDC, crash and scheduler (Track D).
 * ``DATAFLOW_SCALE_ROWS`` — row count per route (default 100000).
 
-See ``docs/SCALE_MATRIX_SQL.md`` and the per-track evidence documents.
+See ``docs/SCALE_MATRIX_SQL.md``, ``docs/SCALE_MATRIX_MODES_SCHEDULES.md`` and
+the other per-track evidence documents.
 """

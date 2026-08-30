@@ -78,6 +78,28 @@ async def get_cdc_lease(cursor_key: str = Query(..., min_length=1, max_length=51
     }
 
 
+@router.get("/cdc-leases/list")
+async def list_cdc_leases(
+    resource: str = Query("", max_length=512),
+    job_id: str = Query("", max_length=128),
+    stale_only: bool = Query(False),
+) -> dict[str, Any]:
+    """Held CDC leases, newest heartbeat first.
+
+    A refused run names the resource it collided on; force-release needs the
+    cursor key. This is how an operator gets from one to the other.
+    """
+    from services.cdc_lease import lease_backend_name, list_lease_views
+
+    leases = list_lease_views(resource=resource, job_id=job_id, stale_only=stale_only)
+    return {
+        "leases": leases,
+        "count": len(leases),
+        "stale_count": sum(1 for lease in leases if lease.get("stale")),
+        "backend": lease_backend_name(),
+    }
+
+
 class ForceReleaseBody(BaseModel):
     cursor_key: str = Field(..., min_length=1, max_length=512)
     expected_generation: int | None = Field(None, ge=1)

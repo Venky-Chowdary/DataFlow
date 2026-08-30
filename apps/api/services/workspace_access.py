@@ -44,3 +44,10 @@ def assert_resource_workspace(request: Request, resource_workspace_id: str | Non
         return
     if not can_read_workspace(rid, actor_email(request)):
         raise HTTPException(status_code=404, detail="Not found")
+    # The request's declared scope is the tenant boundary, not just the actor's
+    # membership: a user who belongs to two workspaces must not see one
+    # workspace's resource while operating in the other. List endpoints already
+    # filter by scope, so an id-addressed read has to agree with them.
+    scope = (request.headers.get("X-Workspace-Id") or "").strip()
+    if scope and scope != rid:
+        raise HTTPException(status_code=404, detail="Not found")

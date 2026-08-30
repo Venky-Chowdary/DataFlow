@@ -3324,6 +3324,103 @@ def _finalize_mongodb_type_with_note(
     return best, mix_note
 
 
+_NUMERIC_LOGICAL_FAMILY = {
+    "INTEGER",
+    "BIGINT",
+    "SMALLINT",
+    "TINYINT",
+    "INT",
+    "FLOAT",
+    "DOUBLE",
+    "REAL",
+    "DECIMAL",
+    "NUMERIC",
+}
+
+# BSON carriers whose cells are binary floats / integers, so a fixed-point
+# stamp measured off stringified samples is invented rather than observed.
+_BSON_INEXACT_NUMERIC = {
+    "FLOAT",
+    "DOUBLE",
+    "REAL",
+    "INTEGER",
+    "BIGINT",
+    "SMALLINT",
+    "TINYINT",
+    "INT",
+}
+
+
+def _mongodb_types_with_notes(
+    documents: Any,
+) -> tuple[dict[str, str], dict[str, str]]:
+    """``({field: logical type}, {field: type-mix warning})`` from BSON cells."""
+    counts: dict[str, dict[str, int]] = {}
+    for doc in documents or []:
+        if not isinstance(doc, dict):
+            continue
+        for key, val in doc.items():
+            if val is None:
+                continue
+            observed = _sample_logical_type(val, str(key))
+            if not observed:
+                continue
+            per = counts.setdefault(str(key), {})
+            per[observed] = int(per.get(observed, 0)) + 1
+    types: dict[str, str] = {}
+    notes: dict[str, str] = {}
+    for key, per in counts.items():
+        resolved, note = _finalize_mongodb_type_with_note(per)
+        if resolved:
+            types[key] = resolved
+        if note:
+            notes[key] = note
+    return types, notes
+
+
+def mongodb_bson_column_types(documents: Any) -> dict[str, str]:
+    """Resolved logical type per top-level field, from BSON evidence alone.
+
+    Mongo has no catalog, but every cell carries its own BSON type, so a field's
+    carrier is evidence rather than a guess. Resolution is the canonical Mongo
+    one (:func:`_finalize_mongodb_type_with_note`), so a sentinel string among
+    typed cells still keeps the typed majority.
+    """
+    types, _notes = _mongodb_types_with_notes(documents)
+    return types
+
+
+def prefer_bson_numeric_carrier(
+    schema: dict[str, str] | None,
+    bson_types: dict[str, str] | None,
+) -> dict[str, str]:
+    """Replace a sample-sized numeric stamp with the stored BSON carrier.
+
+    A schemaless sample can bound the *values it saw* and nothing else. Profiling
+    100 stringified doubles that happen to start at ``0.01`` yields
+    ``DECIMAL(3,2)``, which then becomes the create-new destination column and
+    quarantines every later row at ``10.00`` — a 100k Mongo→PostgreSQL snapshot
+    landed 999 rows this way. The BSON type (``double``, ``int``) is the domain
+    the source actually declares per cell, so it wins for numeric fields;
+    text/temporal/semantic refinement from the sample is untouched.
+
+    ``Decimal128`` is exempt: those cells really are decimal, so sizing them from
+    observed digits refines the right family instead of inventing one.
+    """
+    merged = dict(schema or {})
+    for col, bson_type in (bson_types or {}).items():
+        stamped = str(merged.get(col) or "").strip()
+        if not stamped:
+            continue
+        base = stamped.split("(", 1)[0].strip().upper()
+        if base not in _NUMERIC_LOGICAL_FAMILY:
+            continue
+        if str(bson_type).strip().upper() not in _BSON_INEXACT_NUMERIC:
+            continue
+        merged[col] = str(bson_type)
+    return merged
+
+
 def _introspect_mongodb(**kwargs) -> dict[str, Any]:
     table = kwargs.get("table")
     try:
@@ -3346,40 +3443,35 @@ def _introspect_mongodb(**kwargs) -> dict[str, Any]:
         tables = db.list_collection_names()[:100]
         target = table or (tables[0] if tables else None)
         columns: dict[str, dict[str, Any]] = {}
-        if target:
-            for doc in db[target].find().limit(100):
-                # Sample BSON types BEFORE stringifying _id — otherwise ObjectId
-                # is erased to TEXT and create-new never stamps VARCHAR(24).
-                for key, val in list(doc.items()):
-                    inferred = _sample_logical_type(val, key)
-                    sample_text = "" if val is None else str(val)
-                    if key not in columns:
-                        # Null-first fields stay untyped until a non-null sample
-                        # votes — do not invent TEXT from BSON null alone.
-                        columns[key] = {
-                            "name": key,
-                            "inferred_type": inferred,
-                            "nullable": val is None,
-                            "samples": [sample_text] if sample_text else [],
-                            "type_counts": {},
-                        }
-                    else:
-                        if val is None:
-                            columns[key]["nullable"] = True
-                        samples = columns[key].setdefault("samples", [])
-                        if sample_text and len(samples) < 8 and sample_text not in samples:
-                            samples.append(sample_text)
-                    if inferred and val is not None:
-                        tc = columns[key].setdefault("type_counts", {})
-                        tc[inferred] = int(tc.get(inferred, 0)) + 1
+        # Sample BSON types BEFORE stringifying _id — otherwise ObjectId is
+        # erased to TEXT and create-new never stamps VARCHAR(24).
+        docs = list(db[target].find().limit(100)) if target else []
+        resolved, mix_notes = _mongodb_types_with_notes(docs)
+        for doc in docs:
+            for key, val in list(doc.items()):
+                sample_text = "" if val is None else str(val)
+                if key not in columns:
+                    # Null-first fields stay untyped until a non-null sample
+                    # votes — do not invent TEXT from BSON null alone.
+                    columns[key] = {
+                        "name": key,
+                        "inferred_type": _sample_logical_type(val, key),
+                        "nullable": val is None,
+                        "samples": [sample_text] if sample_text else [],
+                    }
+                else:
+                    if val is None:
+                        columns[key]["nullable"] = True
+                    samples = columns[key].setdefault("samples", [])
+                    if sample_text and len(samples) < 8 and sample_text not in samples:
+                        samples.append(sample_text)
         client.close()
         for col in columns.values():
-            counts = col.pop("type_counts", {}) or {}
-            if counts:
-                inferred, mix_note = _finalize_mongodb_type_with_note(counts)
-                col["inferred_type"] = inferred
-                if mix_note:
-                    col["type_mix_warning"] = mix_note
+            name = str(col.get("name") or "")
+            if resolved.get(name):
+                col["inferred_type"] = resolved[name]
+                if mix_notes.get(name):
+                    col["type_mix_warning"] = mix_notes[name]
             elif not col.get("inferred_type"):
                 col["inferred_type"] = "TEXT"
             # Re-infer from samples only when majority vote stayed textual / weak —

@@ -21,6 +21,10 @@ CAUSE_SLOT_QUOTA = "replication_slot_quota"
 CAUSE_PRIVILEGE = "insufficient_privilege"
 CAUSE_DRIVER_MISSING = "driver_missing"
 CAUSE_SOURCE_UNREACHABLE = "source_unreachable"
+# A MongoDB delete event carries only ``documentKey`` (``_id``). When the
+# pipeline's identity is a business key, the deleted row cannot be named without
+# the collection's pre-image, so the delete is unappliable — never droppable.
+CAUSE_MONGO_PREIMAGE_DISABLED = "mongo_pre_images_disabled"
 CAUSE_UNKNOWN = "unknown"
 
 # Causes that keep a log-capture stream unrepairable by DataFlow but are a
@@ -151,8 +155,35 @@ def classify_log_capture_failure(
     return LogCaptureRefusal(cause, text or "no detail reported", _remedy(dialect, cause))
 
 
-def _remedy(dialect: str, cause: str) -> str:
+def mongo_delete_key_refusal(
+    database: str, collection: str, primary_key: str
+) -> LogCaptureRefusal:
+    """Refusal for a Mongo delete whose business key needs a missing pre-image.
+
+    ``documentKey`` on a delete event is ``_id`` only. A pipeline keyed on a
+    business column therefore cannot address the destination row unless the
+    collection records pre-images, and applying nothing would leave the deleted
+    row at the destination forever — the exact divergence query CDC produces.
+    """
+    return LogCaptureRefusal(
+        CAUSE_MONGO_PREIMAGE_DISABLED,
+        f"delete on {database}.{collection} carries documentKey._id only and the "
+        f"pipeline is keyed on '{primary_key}', so the deleted row cannot be "
+        "identified at the destination",
+        _remedy("mongodb", CAUSE_MONGO_PREIMAGE_DISABLED, collection=collection),
+    )
+
+
+def _remedy(dialect: str, cause: str, *, collection: str = "") -> str:
     d = (dialect or "").strip().lower()
+    if cause == CAUSE_MONGO_PREIMAGE_DISABLED:
+        name = collection or "<collection>"
+        return (
+            "Enable change-stream pre-images on the collection "
+            f"(db.runCommand({{collMod: '{name}', "
+            "changeStreamPreAndPostImages: {enabled: true}})) so delete events "
+            "carry the business key, or key the pipeline on _id."
+        )
     if cause == CAUSE_SLOT_QUOTA:
         if d.startswith("postgres"):
             return (

@@ -296,17 +296,24 @@ class MySqlChangeStreamCdc:
         return kwargs
 
     def snapshot(self) -> Iterator[ChangeBatch]:
-        # Use a locked MySQL session for a consistent, gap-free snapshot handoff.
-        # LOCK TABLES blocks writers, SHOW MASTER STATUS captures the exact binlog
-        # position for the read view, then we read all tables on the same session.
-        # Poll() resumes after that position, so concurrent writes are delivered
-        # at-least-once; duplicates are acceptable, gaps are not.
+        # Debezium-class *minimal* locking: the global read lock is held only long
+        # enough to open a REPEATABLE READ consistent-snapshot transaction and read
+        # the binlog coordinates, then released. The dump itself runs inside that
+        # transaction's read view, so it is still gap-free while the server keeps
+        # accepting writes. Holding FLUSH TABLES WITH READ LOCK for the whole dump
+        # instead freezes every write on the instance for the duration — including
+        # this pipeline's own destination when it lives on the same server, which
+        # self-deadlocks into 'Lock wait timeout exceeded'.
+        # Poll() resumes after the captured position, so concurrent writes are
+        # delivered at-least-once; duplicates are acceptable, gaps are not.
         self._acquire_cdc_lease()
         self._ensure_decode_schema(resume_offset=self.resume_token)
         self.heartbeat()
 
         lock_conn = None
         locked = False
+        global_lock = False
+        snapshot_txn = False
         start_pos: dict[str, Any] = {
             "table": self.table,
             "tables": list(self.tables),
@@ -330,6 +337,7 @@ class MySqlChangeStreamCdc:
                 with lock_conn.cursor() as cur:
                     cur.execute("FLUSH TABLES WITH READ LOCK")
                 locked = True
+                global_lock = True
             except Exception as exc:
                 _logger.warning(
                     "FLUSH TABLES WITH READ LOCK unavailable (%s); falling back to per-table LOCK TABLES", exc
@@ -347,6 +355,15 @@ class MySqlChangeStreamCdc:
                     )
 
             if locked:
+                with lock_conn.cursor() as cur:
+                    # Freeze the read view while the lock still holds, so the dump
+                    # is consistent with the coordinates captured below even
+                    # after the lock is released.
+                    cur.execute(
+                        "SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ"
+                    )
+                    cur.execute("START TRANSACTION WITH CONSISTENT SNAPSHOT")
+                    snapshot_txn = True
                 with lock_conn.cursor() as cur:
                     # Capture GTID on the same locked session (Debezium-class
                     # handoff). File/pos alone is weaker when binlogs rotate or
@@ -370,6 +387,12 @@ class MySqlChangeStreamCdc:
                             _logger.debug("CDC binlog status query failed: %s", exc)
                     if gtid and not start_pos.get("gtid"):
                         start_pos["gtid"] = gtid
+            if global_lock and snapshot_txn:
+                # Coordinates captured and read view pinned: let writers run.
+                with lock_conn.cursor() as cur:
+                    cur.execute("UNLOCK TABLES")
+                global_lock = False
+                locked = False
         except Exception as exc:
             _logger.warning(
                 "Could not acquire MySQL lock connection for CDC snapshot: %s", exc
@@ -425,7 +448,7 @@ class MySqlChangeStreamCdc:
                     start_pos=start_pos,
                     table_offset=table_offset,
                     table_last_pk=table_last_pk,
-                    lock_conn=lock_conn if locked else None,
+                    lock_conn=lock_conn if (locked or snapshot_txn) else None,
                 )
             handoff = {
                 **start_pos,
@@ -447,6 +470,11 @@ class MySqlChangeStreamCdc:
                             cur.execute("UNLOCK TABLES")
                     except Exception as exc:
                         _logger.warning("UNLOCK TABLES failed: %s", exc)
+                if snapshot_txn:
+                    try:
+                        lock_conn.rollback()
+                    except Exception as exc:
+                        _logger.debug("snapshot transaction rollback failed: %s", exc)
                 try:
                     lock_conn.close()
                 except Exception as exc:
