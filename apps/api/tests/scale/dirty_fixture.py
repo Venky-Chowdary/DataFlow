@@ -758,18 +758,34 @@ def read_avro_file(path: Path) -> list[dict[str, Any]]:
         return list(fastavro.reader(f))
 
 
+def _excel_cell_value(cell: Any) -> Any:
+    """Recover ``''`` from a typed-but-textless cell.
+
+    xlsx does carry the distinction: an empty text cell is written as a typed
+    string cell with no run (``<c t="inlineStr"/>``) while an absent value has no
+    ``<c>`` at all. ``openpyxl`` reports both as ``None`` through ``.value``, so
+    reading values only would flatten a preserved ``''`` into NULL and accuse the
+    writer of a loss that is not in the file.
+    """
+    value = cell.value
+    if value is None and cell.data_type in {"s", "str", "inlineStr"}:
+        return ""
+    return value
+
+
 def read_excel_file(path: Path) -> list[dict[str, Any]]:
     from openpyxl import load_workbook
 
     wb = load_workbook(str(path), read_only=True, data_only=True)
     ws = wb[wb.sheetnames[0]]
-    rows = ws.iter_rows(values_only=True)
-    header = [str(c) if c is not None else "" for c in next(rows)]
+    rows = ws.iter_rows()
+    header = [str(c.value) if c.value is not None else "" for c in next(rows)]
     out: list[dict[str, Any]] = []
     for row in rows:
-        if all(c is None or c == "" for c in row):
+        values = [_excel_cell_value(c) for c in row]
+        if all(v is None for v in values):
             continue
-        out.append({h: v for h, v in zip(header, row) if h})
+        out.append({h: v for h, v in zip(header, values) if h})
     wb.close()
     return out
 

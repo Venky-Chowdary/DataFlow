@@ -61,10 +61,27 @@ class _PrefixedRaw(io.RawIOBase):
         return len(chunk)
 
 
+#: Byte-order marks, longest first — UTF-32 LE starts with the UTF-16 LE mark.
+_BOM_ENCODINGS: tuple[tuple[bytes, str], ...] = (
+    (b"\x00\x00\xfe\xff", "utf-32"),
+    (b"\xff\xfe\x00\x00", "utf-32"),
+    (b"\xef\xbb\xbf", "utf-8-sig"),
+    (b"\xfe\xff", "utf-16"),
+    (b"\xff\xfe", "utf-16"),
+)
+
+
 def detect_encoding(content: bytes) -> str:
-    """Return encoding without loading the whole file into a decoded string."""
-    if content.startswith(b"\xef\xbb\xbf"):
-        return "utf-8-sig"
+    """Return encoding without loading the whole file into a decoded string.
+
+    A declared BOM is authoritative. Without it, UTF-16/32 text would fail the
+    UTF-8 probe and fall through to latin-1, decoding every second byte as a NUL
+    character — the reader then dies on ``line contains NUL`` instead of reading
+    a file whose encoding the bytes state outright.
+    """
+    for bom, encoding in _BOM_ENCODINGS:
+        if content.startswith(bom):
+            return encoding
     sample = content[:_ENCODING_PREFIX]
     try:
         sample.decode("utf-8")

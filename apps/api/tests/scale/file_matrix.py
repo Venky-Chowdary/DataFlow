@@ -310,8 +310,23 @@ def _request(*, dialect: str = "", mode: str = QUARANTINE_MODE, **kwargs: Any):
     return TransferRequest(**kwargs)
 
 
+def _latin1_fixture(kind: str) -> bool:
+    """True when this fixture was written latin-1-safe (its text differs)."""
+    spec = fixture.STRUCTURAL_VARIANTS.get(kind)
+    if not spec:
+        return False
+    kwargs = spec.get("kwargs", {})
+    return bool(kwargs.get("latin1_safe")) or str(kwargs.get("encoding", "")).lower() in {
+        "latin-1",
+        "latin1",
+        "iso-8859-1",
+    }
+
+
 def _base_result(cell: Cell, rows: int) -> CellResult:
-    expected_checksum, expected_rows = fixture.expected_checksum(rows)
+    expected_checksum, expected_rows = fixture.expected_checksum(
+        rows, latin1_safe=_latin1_fixture(cell.source)
+    )
     return CellResult(
         name=cell.name,
         route=cell.route,
@@ -618,6 +633,28 @@ def run_file_to_file(cell: Cell, rows: int) -> CellResult:
     return res
 
 
+def _finish_refusal(res: CellResult, result: Any, table: str, subject: str) -> CellResult:
+    """Score a cell whose correct outcome is "refused, destination untouched"."""
+    res.engine_rows_claimed = int(getattr(result, "records_transferred", 0) or 0)
+    landed = 0
+    try:
+        landed = rb.pg_table_count(table)
+    except Exception as exc:  # noqa: BLE001 — "table absent" is the expected outcome
+        res.notes.append(f"destination probe: {type(exc).__name__}: {str(exc).splitlines()[0]}")
+    res.dest_rows_independent = landed
+    res.verification = f"independent COUNT(*) after refusal = {landed}"
+    if getattr(result, "success", False):
+        res.status = "fail"
+        res.notes.append(f"engine accepted {subject}")
+    elif landed:
+        res.status = "fail"
+        res.notes.append(f"partial write: {landed} rows survived a refused job ({subject})")
+    else:
+        res.status = "pass"
+        res.notes.append(f"refused: {str(getattr(result, 'error', ''))[:200]}")
+    return res
+
+
 def run_unsupported_carrier(cell: Cell, rows: int) -> CellResult:
     """An unreadable carrier must refuse, not misparse into a plausible table.
 
@@ -645,24 +682,38 @@ def run_unsupported_carrier(cell: Cell, rows: int) -> CellResult:
     result, run_id, elapsed = execute(request)
     res.run_id = run_id
     res.elapsed_seconds = round(elapsed, 2)
-    res.engine_rows_claimed = int(getattr(result, "records_transferred", 0) or 0)
-    landed = 0
-    try:
-        landed = rb.pg_table_count(table)
-    except Exception as exc:  # noqa: BLE001 — "table absent" is the expected outcome
-        res.notes.append(f"destination probe: {type(exc).__name__}: {str(exc).splitlines()[0]}")
-    res.dest_rows_independent = landed
-    res.verification = f"independent COUNT(*) after refusal = {landed}"
-    if getattr(result, "success", False):
-        res.status = "fail"
-        res.notes.append(f"engine accepted a .{carrier} payload it has no reader for")
-    elif landed:
-        res.status = "fail"
-        res.notes.append(f"partial write: {landed} rows survived a refused .{carrier} job")
-    else:
-        res.status = "pass"
-        res.notes.append(f"refused: {str(getattr(result, 'error', ''))[:200]}")
-    return res
+    return _finish_refusal(
+        res, result, table, f"a .{carrier} payload it has no reader for"
+    )
+
+
+def run_ragged_refusal(cell: Cell, rows: int) -> CellResult:
+    """A row with more fields than the header names must refuse the job.
+
+    Quarantine is the answer for a bad *cell*; a ragged row is a structural
+    disagreement about which column a value belongs to, so guessing would move
+    values into the wrong columns. The engine refuses (``refuse silent column
+    drop``) and this cell proves the destination stayed empty.
+    """
+    res = _base_result(cell, rows)
+    path = variant_path(cell.source, rows)
+    table = f"scale_{cell.route}_{cell.name}".replace("-", "_")[:60]
+    rb.pg_drop(table)
+    res.rows_expected = 0
+    res.checksum_expected = ""
+    source, filename = _file_source("csv", path)
+    request = _request(
+        source=source,
+        destination=_pg_dest(table),
+        source_path=str(path),
+        source_filename=filename,
+        dialect="postgres",
+        mode=cell.mode,
+    )
+    result, run_id, elapsed = execute(request)
+    res.run_id = run_id
+    res.elapsed_seconds = round(elapsed, 2)
+    return _finish_refusal(res, result, table, "a ragged row against a fixed header")
 
 
 def run_strict_refusal(cell: Cell, rows: int) -> CellResult:
@@ -1033,6 +1084,7 @@ def build_cells() -> list[Cell]:
             )
         )
     for variant in fixture.STRUCTURAL_VARIANTS:
+        ragged = variant == "csv_ragged"
         cells.append(
             Cell(
                 name=f"{variant}_to_postgres",
@@ -1040,8 +1092,12 @@ def build_cells() -> list[Cell]:
                 store="local",
                 source=variant,
                 destination="postgresql",
-                runner=run_file_to_db,
-                note="structural / encoding variant",
+                runner=run_ragged_refusal if ragged else run_file_to_db,
+                note=(
+                    "ragged rows must refuse the job, not shift values into the wrong columns"
+                    if ragged
+                    else "structural / encoding variant"
+                ),
             )
         )
     for export in EXPORT_FORMATS:
@@ -1191,8 +1247,17 @@ def _gate(cell: Cell, reach: dict[str, bool]) -> str:
     return ""
 
 
+def _carrier_formats(cell: Cell) -> set[str]:
+    """Underlying formats of a cell, resolving structural-variant names."""
+    out: set[str] = set()
+    for side in (cell.source, cell.destination):
+        spec = fixture.STRUCTURAL_VARIANTS.get(side)
+        out.add(str(spec["format"]) if spec else side)
+    return out
+
+
 def _empty_is_ambiguous(cell: Cell) -> bool:
-    return bool(DELIMITED_FORMATS & {cell.source, cell.destination})
+    return bool(DELIMITED_FORMATS & _carrier_formats(cell))
 
 
 #: The engine refuses combinations it has no live driver for. That refusal is
