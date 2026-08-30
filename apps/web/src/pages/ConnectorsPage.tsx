@@ -244,10 +244,16 @@ export function ConnectorsPage({
       });
       return;
     }
-    if (item.connect_only || tier === "source_only" || (!item.transfer_ready && item.effective_status === "live")) {
+    if (item.connect_only) {
+      toast({
+        title: "Connection test only",
+        message: `${item.name} can be saved and tested, but no transfer driver is registered — it cannot move data yet.`,
+        tone: "warning",
+      });
+    } else if (tier === "source_only" || (!item.transfer_ready && item.effective_status === "live")) {
       toast({
         title: "Source only",
-        message: `${item.name} can be saved and tested as a source — full R/W transfer may be limited.`,
+        message: `${item.name} is certified as a source only — it cannot be used as a transfer destination.`,
         tone: "warning",
       });
     }

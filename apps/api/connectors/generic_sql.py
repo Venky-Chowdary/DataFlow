@@ -174,6 +174,7 @@ from connectors.writer_common import (
     resolve_target_columns,
     row_checksum,
     split_dense_sparse_rows,
+    multi_row_insert_written,
     stamp_is_operator_ceiling,
     transform_error_policy,
 )
@@ -3911,7 +3912,15 @@ _EXECUTEMANY_ROWCOUNT_UNRELIABLE = {"mssql", "sqlserver", "azure_sql", "synapse"
 
 
 def _insert_rows_written(result: Any, batch_len: int, dialect_name: str) -> int:
-    """Rows an all-or-nothing INSERT committed, ignoring driver miscounts."""
+    """Rows an all-or-nothing INSERT committed, ignoring driver miscounts.
+
+    ``connectors.writer_common.multi_row_insert_written`` is the accounting
+    owner: it asks the dialect whether its multi-row ``rowcount`` is sane
+    instead of guessing from a name. The name list below only serves a result
+    that carries no SQLAlchemy execution context to ask.
+    """
+    if getattr(result, "context", None) is not None:
+        return multi_row_insert_written(result, batch_len)
     reported = getattr(result, "rowcount", None)
     if not isinstance(reported, int) or reported <= 0:
         return batch_len

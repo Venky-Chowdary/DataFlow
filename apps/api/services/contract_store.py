@@ -6,11 +6,23 @@ works in unit tests and local runs without a real database.
 
 from __future__ import annotations
 
+import json
 import logging
 from abc import ABC, abstractmethod
 from typing import Any
 
 from services.data_contract import CircuitBreaker, DataContract
+from services.value_serializer import json_default
+
+
+def _bson_safe(doc: dict[str, Any]) -> dict[str, Any]:
+    """Project a record through the canonical value serializer for BSON.
+
+    Contract documents carry constraint values taken from real column data, so
+    they can hold Decimal/date/UUID/bytes, none of which PyMongo encodes. The
+    same serializer the JSON surfaces use keeps one owner for the conversion.
+    """
+    return json.loads(json.dumps(doc, default=json_default))
 
 
 class ContractStore(ABC):
@@ -99,7 +111,7 @@ class MongoContractStore(ContractStore):
         try:
             db["contracts"].update_one(
                 {"id": contract.id},
-                {"$set": contract.to_dict()},
+                {"$set": _bson_safe(contract.to_dict())},
                 upsert=True,
             )
         except Exception as exc:
@@ -147,7 +159,7 @@ class MongoContractStore(ContractStore):
         try:
             db["contract_breakers"].update_one(
                 {"contract_id": breaker.contract_id},
-                {"$set": breaker.to_dict()},
+                {"$set": _bson_safe(breaker.to_dict())},
                 upsert=True,
             )
         except Exception as exc:

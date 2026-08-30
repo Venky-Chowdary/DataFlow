@@ -38,6 +38,24 @@ services:
       timeout: 3s
       retries: 5
 
+  # Search destination for the connector readiness matrix. Profile-gated because
+  # a JVM node is the heaviest service here and most suites do not need it:
+  # ``docker compose --profile search up -d elasticsearch``.
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.13.4
+    profiles: ["search"]
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      ES_JAVA_OPTS: "-Xms1g -Xmx1g"
+    ports:
+      - "9200:9200"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+
   minio:
     image: minio/minio:latest
     command: server /data --console-address ":9001"
@@ -124,9 +142,10 @@ services:
       - |
         mongosh --host mongodb:27017 --quiet --eval '
           // Dual-access: host clients use localhost; in-network also works on
-          // mapped 27017. Avoid hostname ``mongodb`` which breaks host→compose.
-          // Comments must be JS ("//"): a "#" line makes mongosh raise
-          // SyntaxError and the node never receives a replset config.
+          // mapped 27017. Avoid hostname "mongodb" which breaks host→compose.
+          // Comments must be JS: mongosh parses this string as JavaScript, and
+          // a shell-style # made the whole eval a SyntaxError, so the node
+          // stayed an uninitialised RSGhost and every Mongo route failed.
           try { rs.status(); }
           catch (e) {
             rs.initiate({
