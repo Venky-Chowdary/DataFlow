@@ -56,7 +56,7 @@ OBJECT_PAYLOAD_SOURCE_TYPES = frozenset({
 PROBED_SOURCE_TYPES = (
     SQLISH_SOURCE_TYPES
     | frozenset(
-        {"mongodb", "mongodb_atlas", "dynamodb", "amazon_dynamodb", "salesforce"}
+        {"mongodb", "mongodb_atlas", "dynamodb", "amazon_dynamodb", "salesforce", "stripe"}
     )
     | OBJECT_PAYLOAD_SOURCE_TYPES
 )
@@ -382,6 +382,41 @@ def _salesforce_duplicates(
     )
 
 
+def _stripe_duplicates(
+    cfg: dict[str, Any],
+    object_name: str,
+    pk_columns: list[str],
+    *,
+    limit: int = 5,
+) -> tuple[list[dict[str, Any]], ProbeStatus, str]:
+    """Prove identity uniqueness for a Stripe object.
+
+    Stripe assigns ``id`` (``cus_…``, ``ch_…``) and the platform guarantees it
+    is unique. That is the same class of evidence as Salesforce ``Id`` — stronger
+    than a sample, so the probe reports ``ran`` rather than skipped.
+
+    Any other identity is unproven: Stripe list APIs have no GROUP BY.
+    """
+    wanted = [c.strip().lower() for c in pk_columns]
+    if wanted == ["id"]:
+        return (
+            [],
+            "ran",
+            (
+                f"Stripe assigns id on {object_name or 'object'}; "
+                "uniqueness is guaranteed by the platform"
+            ),
+        )
+    return (
+        [],
+        "skipped_unsupported",
+        (
+            "Stripe uniqueness is proven only for platform id — "
+            f"({', '.join(pk_columns)}) is unproven"
+        ),
+    )
+
+
 def _dynamodb_duplicates(
     cfg: dict[str, Any],
     table: str,
@@ -585,6 +620,26 @@ def probe_source_duplicate_keys_result(
                 )
             findings, status, message = _salesforce_duplicates(
                 cfg, sobject, pk_columns, limit=limit
+            )
+            return SourceDuplicateProbeResult(
+                findings=findings,
+                status=status,
+                message=message,
+                db_type=db_type,
+                primary_key_columns=pk_columns,
+            )
+
+        if db_type == "stripe":
+            obj = source_table or source_collection
+            if not obj:
+                return SourceDuplicateProbeResult(
+                    status="skipped_no_source",
+                    message="Stripe source missing object for uniqueness probe",
+                    db_type=db_type,
+                    primary_key_columns=pk_columns,
+                )
+            findings, status, message = _stripe_duplicates(
+                cfg, obj, pk_columns, limit=limit
             )
             return SourceDuplicateProbeResult(
                 findings=findings,

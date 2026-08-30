@@ -98,6 +98,7 @@ def test_incremental_execute_does_not_delete_dest_leftovers(tmp_path: Path) -> N
                     "name": src_t,
                     "sync_mode": "incremental_deduped",
                     "cursor_field": "id",
+                    "cursor_semantics": "monotonic_sequence",
                     "primary_key": "id",
                     "selected": True,
                 }

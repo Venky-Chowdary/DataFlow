@@ -21,7 +21,6 @@ from __future__ import annotations
 from typing import Any
 
 from services.mapping_constraints import is_intentional_omit, write_mappings
-from services.type_system import ddl_type
 
 MONGO_OBJECT_ID_OMISSION: dict[str, Any] = {
     "source": "_id",
@@ -97,8 +96,12 @@ def leftover_column_mappings(
     if has_amount:
         if dst == "sqlite":
             amount_type = "TEXT"
-        elif dst in {"postgresql", "mysql"}:
-            amount_type = ddl_type(dst, "DECIMAL(18,2)") or "NUMERIC(18,2)"
+        elif dst == "postgresql":
+            # Unconstrained NUMERIC — inventing DECIMAL(18,2) from sqlite TEXT
+            # digits is the same capacity-invent the sqlite dest path refuses.
+            amount_type = "NUMERIC"
+        elif dst == "mysql":
+            amount_type = "DECIMAL(65,30)"
         else:
             amount_type = "TEXT"
         maps.append(

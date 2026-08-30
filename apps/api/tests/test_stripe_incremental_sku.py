@@ -43,6 +43,19 @@ def test_stripe_created_cursor_helpers() -> None:
     assert stripe_created_watermark("id", "cus_9")[0] is None
 
 
+def test_stripe_id_uniqueness_is_platform_assigned() -> None:
+    from services.source_duplicate_probe import probe_source_duplicate_keys_result
+
+    result = probe_source_duplicate_keys_result(
+        source_config={"format": "stripe", "host": "http://127.0.0.1:1", "api_key": "sk_test_fixture"},
+        source_table="customers",
+        primary_key="id",
+    )
+    assert result.ran is True
+    assert result.status == "ran"
+    assert result.findings == []
+
+
 class _StripeListHandler(BaseHTTPRequestHandler):
     customers: list[dict[str, Any]] = []
 
@@ -136,9 +149,10 @@ def test_stripe_incremental_sku_execute_dest_count(tmp_path: Path) -> None:
         )
         contracts = [
             {
-                "name": table,
+                "name": "customers",
                 "sync_mode": "incremental_deduped",
                 "cursor_field": "created",
+                "cursor_semantics": "insert_only",
                 "primary_key": "id",
                 "selected": True,
             }

@@ -91,7 +91,10 @@ def test_live_sqlite_to_sqlite_amount_stays_text() -> None:
 
 
 @pytest.mark.skipif(not _reachable("127.0.0.1", 5432), reason="Postgres not reachable")
-def test_live_sqlite_text_to_postgres_numeric() -> None:
+def test_live_sqlite_text_to_postgres_numeric_is_refused() -> None:
+    """Validate owns fit. Binding sqlite TEXT digits to invented NUMERIC is
+    refused — dest COUNT stays 0. The 100% live write is sqlite TEXT dest.
+    """
     import psycopg2
 
     suffix = uuid.uuid4().hex[:8]
@@ -128,7 +131,9 @@ def test_live_sqlite_text_to_postgres_numeric() -> None:
         )
         result = UniversalTransferEngine().execute_tracked(req, uuid.uuid4().hex[:24])
         try:
-            assert result.success, result.error
+            assert result.success is False
+            err = str(result.error or "")
+            assert "fidelity" in err.lower() or "collapse" in err.lower()
             conn = psycopg2.connect(
                 host="localhost", port=5432, database="dataflow",
                 user="dataflow", password="dataflow",
@@ -136,12 +141,20 @@ def test_live_sqlite_text_to_postgres_numeric() -> None:
             conn.autocommit = True
             try:
                 with conn.cursor() as cur:
-                    cur.execute(f'SELECT amount::text FROM public."{dst_t}"')
-                    landed = str(cur.fetchone()[0])
+                    cur.execute(
+                        "SELECT COUNT(*) FROM information_schema.tables "
+                        "WHERE table_schema = 'public' AND table_name = %s",
+                        (dst_t,),
+                    )
+                    exists = int(cur.fetchone()[0])
+                    if exists:
+                        cur.execute(f'SELECT COUNT(*) FROM public."{dst_t}"')
+                        dest_n = int(cur.fetchone()[0])
+                    else:
+                        dest_n = 0
             finally:
                 conn.close()
-            assert landed.replace("0", "").replace(".", "")
-            assert "123456789" in landed.replace(".", "") 
+            assert dest_n == 0, f"refused write still landed dest COUNT={dest_n}"
         finally:
             conn = psycopg2.connect(
                 host="localhost", port=5432, database="dataflow",
