@@ -166,7 +166,11 @@ def _enforce_decision_artifact(
 
     approved = (approved_decision_artifact_hash or "").strip()
     payload = decision_artifact if isinstance(decision_artifact, dict) and decision_artifact else None
-    if pf and not payload:
+    # Honor the operator Validate stamp. Execute re-preflight after dest exists
+    # overlays live dest types and a non-empty dest fingerprint. Adopting that
+    # artifact as "supplied" compared dest-exists DDL to the operator Map and
+    # refused every later schedule beat ("DDL identity diverged from current Map").
+    if pf and not payload and not approved:
         pb = (pf.get("proof_bundle") or {}).get("decision_artifact")
         if isinstance(pb, dict) and pb:
             payload = pb
@@ -202,6 +206,16 @@ def _enforce_decision_artifact(
         source_column_types,
         authoritative=source_types_are_authoritative(source_kind, source_format),
     )
+    dest_names: list[str] = []
+    if isinstance(destination_column_types, dict):
+        dest_names = [
+            str(k) for k in destination_column_types.keys() if str(k).strip()
+        ]
+    source_names: list[str] = []
+    if isinstance(source_column_types, dict):
+        source_names = [
+            str(k) for k in source_column_types.keys() if str(k).strip()
+        ]
     err, art = enforce_decision_artifact(
         mappings=list(mappings or []),
         dest_db=dest_db or "",
@@ -212,6 +226,10 @@ def _enforce_decision_artifact(
         error_policy=error_policy,
         dest_fingerprint=dest_fp,
         source_fingerprint=src_fp,
+        source_db=source_format,
+        destination_table_exists=destination_table_exists,
+        dest_column_names=dest_names,
+        source_column_names=source_names,
     )
     return err, (art.to_dict() if art is not None else None)
 

@@ -699,22 +699,22 @@ def _retry_decision(
     if _is_success(status):
         return {"retry": False, "reason": ""}
     classification = classify_job_failure(job_doc)
-    if attempt >= max_retries:
-        # The budget being gone does not make the verdict unclassified: a schedule
-        # with no retries at all still has to park a gate refusal rather than
-        # replay it on the next beat.
-        return {
-            "retry": False,
-            "reason": f"Retry budget exhausted after {max_retries} attempt(s).",
-            "failure_class": classification.to_dict(),
-        }
     if not classification.retryable:
+        # Name the gate before the budget. A schedule with max_retries=0 used
+        # to park as "Retry budget exhausted after 0 attempt(s)" even when the
+        # job error was a Decision Artifact refuse — that hid the next action.
         reason = classification.reason
         if classification.corrective_action:
             reason = f"{reason} {classification.corrective_action}"
         return {
             "retry": False,
             "reason": reason,
+            "failure_class": classification.to_dict(),
+        }
+    if attempt >= max_retries:
+        return {
+            "retry": False,
+            "reason": f"Retry budget exhausted after {max_retries} attempt(s).",
             "failure_class": classification.to_dict(),
         }
     decision = decide_retry_from_start(
@@ -940,6 +940,15 @@ def _finalize_run(schedule_id: str, job_id: str, attempt: int, started_at: datet
     )
     if _is_success(status):
         _observe_parallel_run(sched, job_doc)
+        try:
+            from services.schedule_approvals import close_dest_exists_park_after_success
+
+            close_dest_exists_park_after_success(schedule_id)
+        except Exception:
+            logger.exception(
+                "Schedule %s dest-exists park close after success skipped",
+                schedule_id,
+            )
     else:
         park = _park_reason(sched, decision, entry)
         if park:
@@ -1206,6 +1215,11 @@ def _run_due_schedules() -> int:
         # A parked TIMESTAMP_NTZ → TIMESTAMP_NTZ invent is not a decision.
         # Release it so the cadence can fire; a real narrow stays parked.
         release_same_declaration_source_drift()
+        from services.schedule_approvals import release_create_new_dest_exists_false_refuse
+
+        # Dest-exists after the first create-new write is not a plan change.
+        # Release only when the operator Map hash still matches.
+        release_create_new_dest_exists_false_refuse()
         started = 0
         for sched in due_schedules():
             try:

@@ -68,6 +68,9 @@ _DETERMINISTIC_PATTERNS: tuple[tuple[str, str], ...] = (
      "Open Transfer Studio with this schedule's source and destination. "
      "Map the columns, run Validate, then Schedule from the Studio footer — "
      "that persists the mapping contract the beat can replay."),
+    (r"decision artifact (ddl identity diverged|dest schema drifted|content_hash mismatch|content_hash does not match)",
+     "Re-run Validate only when Map or dest DDL actually changed. Dest existing "
+     "after the first write is not a plan change — Run now if the Map is unchanged."),
 )
 
 # Failures whose cause is the moment, not the configuration.

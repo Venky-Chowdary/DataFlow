@@ -406,3 +406,151 @@ def test_same_declaration_park_is_released_for_the_next_beat(client):
     assert sched.id not in {s.id for s in store.due_schedules()}
     assert release_same_declaration_source_drift() == 1
     assert sched.id in {s.id for s in store.due_schedules()}
+
+
+def _create_new_maps():
+    return [
+        {
+            "source": "id",
+            "target": "id",
+            "source_type": "BIGINT",
+            "target_type": "BIGINT",
+        }
+    ]
+
+
+def test_create_new_dest_exists_park_is_released_when_stamp_holds(client):
+    from services.decision_kernel import build_artifact_from_mappings
+    from services.schedule_approvals import release_create_new_dest_exists_false_refuse
+
+    maps = _create_new_maps()
+    stamped = build_artifact_from_mappings(
+        maps,
+        dest_db="snowflake",
+        dest_fingerprint="",
+        sync_mode="full_refresh_append",
+        route_id="validate:snowflake",
+        artifact_id="da_inline",
+        created_at="1970-01-01T00:00:00+00:00",
+    )
+    sched = store.create_schedule({
+        "name": "MySQL connectionCrown → newtable",
+        "source_connector_id": "src-mysql",
+        "source_table": "sample",
+        "dest_connector_id": "dst-snow",
+        "dest_table": "newtable",
+        "interval": "hourly",
+        "sync_mode": "full_refresh_append",
+        "enabled": True,
+        "mappings": maps,
+        "approved_decision_artifact_hash": stamped.content_hash,
+    })
+    from datetime import datetime, timedelta, timezone
+
+    past = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    store.update_schedule(sched.id, {"next_run_at": past, "enabled": True})
+    parked = open_approval_request(
+        sched.id,
+        build_approval_request(
+            kind="run_refused",
+            code="RUN_REFUSED",
+            finding=(
+                "Decision Artifact DDL identity diverged from current Map — "
+                "re-run Validate before Execute."
+            ),
+            corrective_action="Open Validate for this job.",
+            binding=binding_from_schedule(sched),
+        ),
+    )
+    assert parked is not None
+    assert sched.id not in {s.id for s in store.due_schedules()}
+    assert release_create_new_dest_exists_false_refuse(dest_db="snowflake") == 1
+    assert sched.id in {s.id for s in store.due_schedules()}
+
+
+def test_create_new_dest_exists_park_stays_when_map_edited(client):
+    from services.decision_kernel import build_artifact_from_mappings
+    from services.schedule_approvals import release_create_new_dest_exists_false_refuse
+
+    maps = _create_new_maps()
+    stamped = build_artifact_from_mappings(
+        maps,
+        dest_db="snowflake",
+        dest_fingerprint="",
+        sync_mode="full_refresh_overwrite",
+        route_id="validate:snowflake",
+        artifact_id="da_inline",
+        created_at="1970-01-01T00:00:00+00:00",
+    )
+    edited = [
+        {
+            "source": "id",
+            "target": "id",
+            "source_type": "BIGINT",
+            "target_type": "VARCHAR(8)",
+        }
+    ]
+    sched = store.create_schedule({
+        "name": "edited map",
+        "source_connector_id": "src-mysql",
+        "source_table": "sample",
+        "dest_connector_id": "dst-snow",
+        "dest_table": "newtable",
+        "interval": "hourly",
+        "enabled": True,
+        "mappings": edited,
+        "approved_decision_artifact_hash": stamped.content_hash,
+    })
+    open_approval_request(
+        sched.id,
+        build_approval_request(
+            kind="run_refused",
+            code="RUN_REFUSED",
+            finding=(
+                "Decision Artifact DDL identity diverged from current Map — "
+                "re-run Validate before Execute."
+            ),
+            corrective_action="Open Validate for this job.",
+            binding=binding_from_schedule(sched),
+        ),
+    )
+    assert release_create_new_dest_exists_false_refuse(dest_db="snowflake") == 0
+    assert store.has_open_approval(store.get_schedule(sched.id))
+
+
+def test_zero_retry_budget_park_releases_when_create_new_stamp_holds(client):
+    from services.decision_kernel import build_artifact_from_mappings
+    from services.schedule_approvals import release_create_new_dest_exists_false_refuse
+
+    maps = _create_new_maps()
+    stamped = build_artifact_from_mappings(
+        maps,
+        dest_db="snowflake",
+        dest_fingerprint="",
+        sync_mode="full_refresh_overwrite",
+        route_id="validate:snowflake",
+        artifact_id="da_inline",
+        created_at="1970-01-01T00:00:00+00:00",
+    )
+    sched = store.create_schedule({
+        "name": "budget mask",
+        "source_connector_id": "src-mysql",
+        "source_table": "sample",
+        "dest_connector_id": "dst-snow",
+        "dest_table": "newtable",
+        "interval": "hourly",
+        "enabled": True,
+        "mappings": maps,
+        "approved_decision_artifact_hash": stamped.content_hash,
+    })
+    open_approval_request(
+        sched.id,
+        build_approval_request(
+            kind="run_refused",
+            code="RUN_REFUSED",
+            finding="Retry budget exhausted after 0 attempt(s).",
+            corrective_action="Open Validate for this job and resolve the blocking check.",
+            binding=binding_from_schedule(sched),
+        ),
+    )
+    assert release_create_new_dest_exists_false_refuse(dest_db="snowflake") == 1

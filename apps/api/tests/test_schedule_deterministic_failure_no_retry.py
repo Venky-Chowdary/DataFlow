@@ -117,6 +117,27 @@ def test_schedule_still_retries_a_dropped_connection():
     assert decision["failure_class"]["kind"] == TRANSIENT
 
 
+def test_zero_retry_decision_artifact_names_validate_not_budget():
+    job = {
+        "status": "failed",
+        "phase": "failed",
+        "records_processed": 0,
+        "error": (
+            "Decision Artifact DDL identity diverged from current Map — "
+            "re-run Validate before Execute."
+        ),
+    }
+    result = classify_job_failure(job)
+    assert result.kind == DETERMINISTIC
+    assert result.retryable is False
+    decision = _retry_decision(
+        "failed", 0, 0, sync_mode="full_refresh_append", job_doc=job
+    )
+    assert decision["retry"] is False
+    assert "Retry budget exhausted" not in decision["reason"]
+    assert "Validate" in decision["reason"] or "Map" in decision["reason"]
+
+
 def test_missing_job_document_does_not_block_the_retry():
     decision = _retry_decision("failed", 0, 3, sync_mode="overwrite", job_doc=None)
     assert decision["retry"] is True

@@ -5,7 +5,7 @@ import { PageSection } from "../ui/PageSection";
 import { useToast } from "../Toast";
 import { acceptScheduleSourceSchema, approveScheduleFinding, rejectScheduleFinding } from "../../lib/api";
 import { PERMISSIONS, useWriteGate } from "../../lib/PermissionsContext";
-import { inboxCorrectiveAction, inboxNeedsStudio } from "../../lib/scheduleApprovalCta";
+import { inboxCorrectiveAction, inboxNeedsRunNow, inboxNeedsStudio } from "../../lib/scheduleApprovalCta";
 import type { ScheduleApprovalInboxItem } from "../../lib/types";
 
 const SCOPE_ACK: Record<string, "compliance" | "schema_drift" | "fk_risk"> = {
@@ -32,6 +32,8 @@ interface ApprovalInboxProps {
   onReviewMapping?: (scheduleId: string) => void;
   /** Open Transfer Studio with this schedule's route — empty-mapping plan change. */
   onOpenStudio?: (scheduleId: string) => void;
+  /** Run now — dest-exists after create-new is not a signature. */
+  onRunNow?: (scheduleId: string) => void | Promise<void>;
 }
 
 /**
@@ -49,7 +51,7 @@ function isSourceSchemaDrift(item: ScheduleApprovalInboxItem): boolean {
   return code === "SOURCE_SCHEMA_DRIFT" || kind === "source_drift";
 }
 
-export function ApprovalInbox({ items, onDecided, onOpenSchedule, onReviewMapping, onOpenStudio }: ApprovalInboxProps) {
+export function ApprovalInbox({ items, onDecided, onOpenSchedule, onReviewMapping, onOpenStudio, onRunNow }: ApprovalInboxProps) {
   const { toast } = useToast();
   const authorize = useWriteGate(PERMISSIONS.scheduleAuthorize);
   const manage = useWriteGate(PERMISSIONS.scheduleManage);
@@ -199,7 +201,25 @@ export function ApprovalInbox({ items, onDecided, onOpenSchedule, onReviewMappin
                 </p>
               )}
 
-              {!appr.approvable ? (
+              {!appr.approvable && inboxNeedsRunNow(item) ? (
+                <div className="df2-approval-plan-change">
+                  <p className="df2-approval-nonapprovable">
+                    Dest existing after the first write is not a plan change. A signature
+                    cannot help — Run now if Map is unchanged.
+                  </p>
+                  {onRunNow && (
+                    <div className="df2-approval-actions">
+                      <Button
+                        size="sm"
+                        variant="primary"
+                        onClick={() => void onRunNow(item.schedule_id)}
+                      >
+                        Run now
+                      </Button>
+                    </div>
+                  )}
+                </div>
+              ) : !appr.approvable ? (
                 <div className="df2-approval-plan-change">
                   <p className="df2-approval-nonapprovable">
                     No signature can clear this. It is a plan change, not a decision —

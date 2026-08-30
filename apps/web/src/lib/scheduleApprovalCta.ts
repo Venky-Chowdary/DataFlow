@@ -20,9 +20,44 @@ export function inboxNeedsStudio(item: ScheduleApprovalInboxItem): boolean {
   return isEmptyMappingFinding(item.approval.code, item.approval.finding);
 }
 
+export const DEST_EXISTS_AFTER_CREATE_NEW_CORRECTIVE =
+  "The destination table exists after the first write. The Map contract is unchanged — dest-exists is write-by-name, not a plan change. Run now, or wait for the next cadence after the park is released.";
+
+export const ZERO_RETRY_BUDGET_CORRECTIVE =
+  "The park named a retry budget, not a plan change. If Map is unchanged after the first write created the destination, Run now. A real Map or type-path refuse still needs Validate.";
+
+export function isCreateNewDestExistsPark(code?: string, finding?: string): boolean {
+  const text = `${finding || ""}`.toLowerCase();
+  if (isEmptyMappingFinding(code, finding)) return false;
+  return text.includes("decision artifact") && (
+    text.includes("diverged from current map")
+    || text.includes("dest schema drifted since validate")
+    || text.includes("content_hash mismatch")
+    || text.includes("content_hash does not match")
+  );
+}
+
+export function isZeroRetryBudgetPark(code?: string, finding?: string): boolean {
+  if (isEmptyMappingFinding(code, finding)) return false;
+  return /retry budget exhausted after 0 attempt/i.test(finding || "");
+}
+
+export function inboxNeedsRunNow(item: ScheduleApprovalInboxItem): boolean {
+  return (
+    isCreateNewDestExistsPark(item.approval.code, item.approval.finding)
+    || isZeroRetryBudgetPark(item.approval.code, item.approval.finding)
+  );
+}
+
 /** Prefer Studio copy when a stored finding still says "Open Validate for this job". */
 export function inboxCorrectiveAction(item: ScheduleApprovalInboxItem): string {
   if (inboxNeedsStudio(item)) return EMPTY_MAPPING_STUDIO_CORRECTIVE;
+  if (isCreateNewDestExistsPark(item.approval.code, item.approval.finding)) {
+    return DEST_EXISTS_AFTER_CREATE_NEW_CORRECTIVE;
+  }
+  if (isZeroRetryBudgetPark(item.approval.code, item.approval.finding)) {
+    return ZERO_RETRY_BUDGET_CORRECTIVE;
+  }
   return item.approval.corrective_action || "";
 }
 

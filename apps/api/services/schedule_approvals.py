@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from datetime import datetime, timezone
 from typing import Any
 
@@ -472,6 +473,139 @@ def release_same_declaration_source_drift(workspace_id: str = "") -> int:
         )
         released += 1
     return released
+
+
+def is_decision_artifact_park_finding(finding: str) -> bool:
+    """Parked copy that named a Decision Artifact refuse (or the old budget mask)."""
+    text = (finding or "").strip().lower()
+    if "decision artifact" in text and (
+        "diverged from current map" in text
+        or "dest schema drifted since validate" in text
+        or "content_hash mismatch" in text
+        or "content_hash does not match" in text
+    ):
+        return True
+    return bool(re.search(r"retry budget exhausted after 0 attempt", text))
+
+
+def dest_engine_from_schedule(sched: Any, dest_db: str = "") -> str:
+    """Dest dialect the Validate stamp was hashed with (connector type)."""
+    if dest_db:
+        return str(dest_db).strip().lower()
+    try:
+        from services.connector_store import get_connector
+
+        conn = get_connector(
+            getattr(sched, "dest_connector_id", "") or "",
+            workspace_id=getattr(sched, "workspace_id", None) or None,
+        )
+    except Exception:
+        return ""
+    if conn is None:
+        return ""
+    data = conn.to_dict() if hasattr(conn, "to_dict") else {}
+    return str(data.get("type") or data.get("format") or "").strip().lower()
+
+
+def create_new_stamp_matches_schedule(sched: Any, dest_db: str = "") -> bool:
+    """True when the schedule's create-new Validate hash still matches Map."""
+    from services.decision_kernel import build_artifact_from_mappings
+    from services.schedule_mapping_contract import persisted_mapping_rows
+
+    maps = persisted_mapping_rows(getattr(sched, "mappings", None))
+    approved = str(getattr(sched, "approved_decision_artifact_hash", "") or "").strip()
+    if not maps or len(approved) != 64:
+        return False
+    engine = dest_engine_from_schedule(sched, dest_db=dest_db)
+    if not engine:
+        return False
+    mode = str(getattr(sched, "sync_mode", "") or "").strip() or "full_refresh_overwrite"
+    source_engine = ""
+    try:
+        from services.connector_store import get_connector
+
+        src = get_connector(
+            getattr(sched, "source_connector_id", "") or "",
+            workspace_id=getattr(sched, "workspace_id", None) or None,
+        )
+        if src is not None:
+            data = src.to_dict() if hasattr(src, "to_dict") else {}
+            source_engine = str(data.get("type") or data.get("format") or "").strip().lower()
+    except Exception:
+        source_engine = ""
+    art = build_artifact_from_mappings(
+        maps,
+        dest_db=engine,
+        source_db=source_engine,
+        dest_fingerprint="",
+        sync_mode=mode,
+        route_id=f"validate:{engine or 'unknown'}",
+        tenant_id="anonymous",
+        artifact_id="da_inline",
+        created_at="1970-01-01T00:00:00+00:00",
+    )
+    return art.content_hash.lower() == approved.lower()
+
+
+def release_create_new_dest_exists_false_refuse(
+    workspace_id: str = "",
+    *,
+    dest_db: str = "",
+) -> int:
+    """Unpark schedules whose only finding was dest-exists after create-new Validate.
+
+    The first write created the table; later beats re-preflighted dest-exists and
+    refused "DDL identity diverged from current Map". That is not a plan change
+    when the operator Map hash still matches. A real Map edit stays parked.
+    """
+    from services.schedule_store import has_open_approval, list_schedules
+
+    released = 0
+    for sched in list_schedules():
+        if workspace_id and (sched.workspace_id or "") != workspace_id:
+            continue
+        if not has_open_approval(sched):
+            continue
+        request = sched.approval_request if isinstance(sched.approval_request, dict) else {}
+        code = str(request.get("code") or "").upper()
+        if code not in {"RUN_REFUSED", ""}:
+            continue
+        finding = str(request.get("finding") or request.get("corrective_action") or "")
+        if not is_decision_artifact_park_finding(finding):
+            continue
+        if not create_new_stamp_matches_schedule(sched, dest_db=dest_db):
+            continue
+        resolve_plan_change(
+            sched.id,
+            actor="system:decision-artifact-kernel",
+            reason=(
+                "Released: create-new Validate stamp still matches Map after dest "
+                "exists. Dest appearing after the first write is not a plan change."
+            ),
+        )
+        released += 1
+    return released
+
+
+def close_dest_exists_park_after_success(schedule_id: str) -> None:
+    """Close a stale DA dest-exists park after a write succeeded."""
+    from services.schedule_store import has_open_approval
+
+    sched = get_schedule(schedule_id)
+    if not sched or not has_open_approval(sched):
+        return
+    request = sched.approval_request if isinstance(sched.approval_request, dict) else {}
+    finding = str(request.get("finding") or "")
+    if not is_decision_artifact_park_finding(finding):
+        return
+    resolve_plan_change(
+        schedule_id,
+        actor="system:decision-artifact-kernel",
+        reason=(
+            "Scheduled write succeeded — create-new Validate stamp held after "
+            "dest exists. Cadence is re-armed."
+        ),
+    )
 
 
 def record_authorization_use(
