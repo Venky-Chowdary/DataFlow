@@ -1326,6 +1326,19 @@ def dest_decimal_is_decimal128(*, dest_db: str = "") -> bool:
     return (_normalize_dest_db(dest_db) if dest_db else "") in {"mongodb"}
 
 
+def dest_create_new_decimal_carrier(*, dest_db: str = "") -> str:
+    """The fixed-point carrier create-new authority invents on this dialect.
+
+    ``DDL_TYPES`` is the SSOT the Decision Kernel materializes from, so a bare
+    source decimal landing on MySQL becomes ``DECIMAL(38,15)``. Returns an empty
+    string for dialects with no fixed-point entry.
+    """
+    db = _normalize_dest_db(dest_db) if dest_db else ""
+    if not db:
+        return ""
+    return str((DDL_TYPES.get(db) or {}).get(LOGICAL_DECIMAL) or "")
+
+
 #: Stores whose numeric carrier is one fully specified exact-decimal type with
 #: no per-field width: BSON ``decimal`` (decimal128, 34 digits) and DynamoDB
 #: ``N`` (38 significant digits, exponent 10^-130..10^125, stored exactly).
@@ -1380,6 +1393,43 @@ def bare_decimal_platform_default(
     return None
 
 
+def bare_decimal_lands_dialect_floor(
+    source_type: str,
+    target_type: str,
+    *,
+    dest_db: str = "",
+) -> bool:
+    """True when an unbounded source decimal lands this dialect's create-new floor.
+
+    A DynamoDB ``N`` or an unconstrained ``NUMERIC`` carries no width, and MySQL
+    has no unbounded fixed-point carrier, so the Decision Kernel materializes
+    its floor (``DECIMAL(38,15)``). That capacity is equal or wider than the
+    source proved, so it is not a collapse — but it *is* a shape the source
+    never declared, which stays an operator-visible invent chip. Two verdicts,
+    one measurement.
+    """
+    if normalize_logical_type(source_type) != LOGICAL_DECIMAL:
+        return False
+    if normalize_logical_type(target_type) != LOGICAL_DECIMAL:
+        return False
+    sp, ss = parse_numeric_precision_scale(source_type)
+    if sp is not None or ss is not None:
+        return False
+    tp, ts = parse_numeric_precision_scale(target_type)
+    if tp is None and ts is None:
+        return False
+    carrier = dest_create_new_decimal_carrier(dest_db=dest_db)
+    if not carrier:
+        return False
+    cp, cs = parse_numeric_precision_scale(carrier)
+    return (
+        cp is not None
+        and tp is not None
+        and tp >= cp
+        and (ts if ts is not None else 0) >= (cs if cs is not None else 0)
+    )
+
+
 def decimal_params_would_narrow(
     source_type: str,
     target_type: str,
@@ -1414,8 +1464,18 @@ def decimal_params_would_narrow(
         # refused every real salary that followed.
         return (sp if sp is not None else 0) > single_capacity
     if sp is None and ss is None:
-        # Bare DECIMAL → DECIMAL(p,s) invents a capacity the source never proved.
+        # Bare DECIMAL → DECIMAL(p,s) invents a capacity the source never proved,
+        # except when (p,s) is the very carrier this dialect's create-new
+        # authority invents for an unbounded decimal. A DynamoDB ``N`` or an
+        # unconstrained NUMERIC has no bound to preserve and MySQL has no
+        # unbounded carrier, so grading the product's own ``DECIMAL(38,15)`` a
+        # collapse blocked every second run of a table Datawrap had just
+        # created. Narrower destination carriers still report.
         if tp is not None or ts is not None:
+            if bare_decimal_lands_dialect_floor(
+                source_type, target_type, dest_db=dest_db
+            ):
+                return False
             return True
         return False
     if tp is None and ts is None:
@@ -1445,6 +1505,44 @@ def decimal_params_would_narrow(
     return False
 
 
+def decimal_capacity_is_equal_or_wider(
+    source_type: str,
+    target_type: str,
+    *,
+    dest_db: str = "",
+) -> bool:
+    """True when the target decimal carrier holds every value the source proved.
+
+    Capacity and invention are two verdicts over one measurement. ``DECIMAL(24,6)
+    → BigQuery BIGNUMERIC`` invents a shape the source never declared (76,38) —
+    an operator-visible chip — but it cannot lose a digit, so drift must not
+    grade it ``narrow_type`` and pause the sync. Returns ``False`` whenever the
+    target capacity is unknown, so callers keep failing closed.
+    """
+    if normalize_logical_type(source_type) != LOGICAL_DECIMAL:
+        return False
+    if normalize_logical_type(target_type) != LOGICAL_DECIMAL:
+        return False
+    sp, ss = parse_numeric_precision_scale(source_type)
+    if sp is None:
+        # An unbounded source has no proven width to fit — the floor question is
+        # ``bare_decimal_lands_dialect_floor``'s, not this one's.
+        return False
+    tp, ts = parse_numeric_precision_scale(target_type)
+    if tp is None:
+        if bare_decimal_is_unbounded(dest_db=dest_db):
+            return True
+        if dest_decimal_is_decimal128(dest_db=dest_db):
+            return sp <= DECIMAL128_SIGNIFICANT_DIGITS
+        defaults = bare_decimal_platform_default(target_type, dest_db=dest_db)
+        if defaults is None:
+            return False
+        tp, ts = defaults
+    s_scale = ss if ss is not None else 0
+    t_scale = ts if ts is not None else 0
+    return t_scale >= s_scale and (tp - t_scale) >= (sp - s_scale)
+
+
 def is_decfloat_carrier(inferred: str | None) -> bool:
     """True for IBM ``DECFLOAT`` / ``DECFLOAT(16|34)`` IEEE decimal-float."""
     upper = strip_identity_qualifier(inferred).upper().replace(" ", "")
@@ -1460,11 +1558,28 @@ def decfloat_domain_would_collapse(source_type: str, target_type: str) -> bool:
     return True
 
 
-def bignumeric_capacity_would_invent(source_type: str, target_type: str) -> bool:
-    """True when bare NUMBER/DECIMAL invents BigQuery BIGNUMERIC (76,38) class."""
+def bignumeric_capacity_would_invent(
+    source_type: str,
+    target_type: str,
+    *,
+    dest_db: str = "",
+    dest_table_exists: bool | None = None,
+) -> bool:
+    """True when bare NUMBER/DECIMAL invents BigQuery BIGNUMERIC (76,38) class.
+
+    Invent is a *create-new* verdict: stamping BIGNUMERIC claims 38 scale digits
+    the source never declared. Loading into a column that already carries that
+    declaration is a different question — the operator did not invent anything,
+    and BigQuery's own bare BIGNUMERIC (76,38) holds DECIMAL(24,6) exactly — so
+    a wider existing carrier must not read as a precision collapse.
+    """
     if normalize_logical_type(source_type) != LOGICAL_DECIMAL:
         return False
     if normalize_logical_type(target_type) != LOGICAL_DECIMAL:
+        return False
+    if dest_table_exists is True and decimal_capacity_is_equal_or_wider(
+        source_type, target_type, dest_db=dest_db
+    ):
         return False
     src_u = strip_identity_qualifier(source_type).upper().replace(" ", "")
     tgt_u = strip_identity_qualifier(target_type).upper().replace(" ", "")
@@ -2182,6 +2297,60 @@ FILE_EXPORT_DESTS: Final[frozenset[str]] = frozenset(
 def destination_is_file_export(db_type: str | None) -> bool:
     """True when the destination is a file/object export with no DDL."""
     return _normalize_dest_db(db_type) in FILE_EXPORT_DESTS
+
+
+def destination_carriers_are_inferred(db_type: str | None) -> bool:
+    """True when a destination's "live schema" is sampled, not declared.
+
+    A document / keyspace store has no column DDL: introspection reads a page
+    of documents and reports the widest shape it happened to see. Treating that
+    like a relational catalog is a measured defect — a Mongo collection holding
+    ids 1..50 reports ``id INTEGER``, so the second run of the same transfer
+    binds ``BIGINT`` ids to a 32-bit carrier and re-spells the operator's BSON
+    stamp (``long``) in relational tokens, which also breaks Map→DDL identity
+    ("Validate passes, Run fails"). Names from such a probe are still fact —
+    the destination really holds those fields — only the *types* are a sample.
+    """
+    from connectors.header_union import SCHEMALESS_SOURCE_TYPES
+
+    return _normalize_dest_db(db_type) in SCHEMALESS_SOURCE_TYPES
+
+
+def unbound_sampled_numeric_carrier(inferred: str | None) -> str:
+    """Drop a sample-measured numeric bound from a schemaless store's probe.
+
+    A document / keyspace store declares no numeric width: the probe reads a
+    page and reports the widest value it happened to see. Carrying that page's
+    ``DECIMAL(8,6)`` forward as if the store declared it is the Airbyte-class
+    cliff — the first run creates a destination column sized to the sample, and
+    the next value that needs one more digit is refused (or rounded) for a
+    bound the source never had. Reporting the family without a bound lets the
+    create-new authority invent its platform floor instead, and keeps a later
+    wider page a widening of the profile rather than a ``narrow_type`` block.
+    Names and families from the probe are still fact; only the width is not.
+    """
+    raw = (inferred or "").strip()
+    if not raw or "(" not in raw:
+        return raw
+    logical = normalize_logical_type(raw)
+    if logical not in (LOGICAL_DECIMAL, LOGICAL_FLOAT):
+        return raw
+    return raw.split("(", 1)[0].strip().upper()
+
+
+def sampled_numeric_carriers_unbound(
+    column_types: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """``column_types`` with every sample-measured numeric bound removed."""
+    if not column_types:
+        return dict(column_types or {})
+    out: dict[str, Any] = {}
+    for name, declared in column_types.items():
+        if isinstance(declared, str):
+            out[name] = unbound_sampled_numeric_carrier(declared)
+        else:
+            out[name] = declared
+    return out
 
 
 def ddl_carrier_type(inferred: str | None) -> str:
@@ -6630,7 +6799,12 @@ def is_precision_collapse_coercion(
         return True
     if decfloat_domain_would_collapse(source_type, target_type):
         return True
-    if bignumeric_capacity_would_invent(source_type, target_type):
+    if bignumeric_capacity_would_invent(
+        source_type,
+        target_type,
+        dest_db=dest_db,
+        dest_table_exists=dest_table_exists,
+    ):
         return True
     if decimal_fixed_point_would_collapse_to_text(
         source_type, target_type, dest_db=dest_db
@@ -7140,7 +7314,12 @@ def is_lossy_coercion(
             return True
         if decfloat_domain_would_collapse(source_type, target_type):
             return True
-        if bignumeric_capacity_would_invent(source_type, target_type):
+        if bignumeric_capacity_would_invent(
+            source_type,
+            target_type,
+            dest_db=dest_db,
+            dest_table_exists=dest_table_exists,
+        ):
             return True
         if decimal_fixed_point_would_collapse_to_text(
             source_type, target_type, dest_db=dest_db
@@ -7305,7 +7484,12 @@ def is_lossy_coercion(
         return True
     if decfloat_domain_would_collapse(source_type, target_type):
         return True
-    if bignumeric_capacity_would_invent(source_type, target_type):
+    if bignumeric_capacity_would_invent(
+        source_type,
+        target_type,
+        dest_db=dest_db,
+        dest_table_exists=dest_table_exists,
+    ):
         return True
     if decimal_fixed_point_would_collapse_to_text(
         source_type, target_type, dest_db=dest_db

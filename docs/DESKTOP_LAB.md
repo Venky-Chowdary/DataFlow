@@ -106,3 +106,33 @@ PYTHONPATH=. python -m pytest tests/test_desktop_lab_untested.py -q
 cd apps/api
 PYTHONPATH=. python -m pytest tests/test_desktop_lab_duplex_matrix.py -q
 ```
+
+
+## Track C — NoSQL / analytics scale matrix (100K harness)
+
+`apps/api/tests/scale/nosql_matrix.py` extends this lab from
+per-route smoke checks to a scale sweep at `--rows 100000` over MongoDB,
+Redis, DynamoDB Local, the BigQuery emulator, DuckDB, and — when they can be
+proven on the box — Elasticsearch, ClickHouse and Iceberg, each paired with
+PostgreSQL and MySQL in both directions plus same-engine round trips, across
+all four sync modes.
+
+```bash
+cd apps/api
+DATAFLOW_SCALE_NOSQL=1 PYTHONPATH=. python -m tests.scale.nosql_matrix \
+    --rows 100000 --out /tmp/track_c.json
+```
+
+Two fleet notes learned by running it:
+
+- The compose `mongo-init` step used `#` comments inside the `mongosh --eval`
+  script, so the shell raised `SyntaxError` and `rs0` was never initiated —
+  every MongoDB route then failed on a node with no replica set. Comments in
+  that block must be JavaScript (`//`).
+- Elasticsearch, ClickHouse and Iceberg are **not** in the `amd64-sql` profile.
+  The harness records the driver's own error as the skip reason rather than
+  reporting a red engine; see `docs/SCALE_MATRIX_NOSQL.md` for the verbatim
+  strings.
+
+Measured results live in `docs/SCALE_MATRIX_NOSQL.md`, dated and attributed to
+this host — never quote them without that attribution.

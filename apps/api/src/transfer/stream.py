@@ -43,8 +43,10 @@ from services.source_reread import (
     reread_pagination_plan,
     should_reread_source,
 )
+from services.primary_key import dest_is_key_addressed
 from services.row_conservation import (
     CENSUS_KEY,
+    KEY_ADDRESSED_KEY,
     KeyCensusAccumulator,
     live_rows_for_digest,
     observe_keyed_batch,
@@ -68,6 +70,7 @@ from .job_quarantine import split_refused_unit
 from .stream_row_accounting import (
     _mark_raw_page,
     _raw_page_cursor,
+    _raw_page_cursor_bounded,
     _raw_page_filtered,
     _raw_page_keyset,
     _raw_page_marked,
@@ -894,11 +897,16 @@ def _stream_database_transfer_impl(
     Extract source table in CHUNK_SIZE batches and load to destination.
     Returns (rows_written, ddl_log, dest_summary, columns).
     """
-    from .connector_capabilities import resolve_driver_type
+    from .connector_capabilities import resolve_bind_dialect, resolve_driver_type
     src_type = resolve_driver_type(source.format)
     dest_type = resolve_driver_type(destination.format)
     src_cfg = resolve_connector_config(source)
     dest_cfg = resolve_connector_config(destination)
+    # Gate-8 fingerprints must name the dialect the writer binds against, not
+    # the driver family: generic_sql hides DuckDB/ClickHouse carrier rules.
+    dest_bind_dialect = resolve_bind_dialect(
+        destination.format, config_type=str(dest_cfg.get("type") or "")
+    )
     from services.procedure_source import is_callable_source, stamp_callable_job_id
 
     src_cfg = stamp_callable_job_id(src_cfg, job_id)
@@ -913,7 +921,9 @@ def _stream_database_transfer_impl(
         resolve_effective_sync_mode,
         resolve_incremental_read_scope,
         resolve_sync_contract,
+        row_after_watermark,
         set_watermark,
+        source_bounds_cursor_reads,
     )
 
     contract = resolve_sync_contract(stream_contracts)
@@ -1069,6 +1079,16 @@ def _stream_database_transfer_impl(
         refuse_unusable_cursor_state(
             scope, dest_type, dest_cfg, resolve_dest_table(dest_type, destination, table)
         )
+    # A source whose read call cannot carry the cursor bound (Redis SCAN, Dynamo
+    # Scan, an ES search) hands its whole population over, so the bound is
+    # applied to each page instead. Without it "incremental" degraded into a
+    # full re-read and the second run appended the population again.
+    client_cursor_bound = bool(
+        incremental
+        and cursor_source_col
+        and watermark
+        and not source_bounds_cursor_reads(src_type)
+    )
 
     src_db = source.database or src_cfg.get("database") or ("test" if src_type == "mongodb" else "")
 
@@ -1606,8 +1626,18 @@ def _stream_database_transfer_impl(
         # Resume: restore the first-pass dest-before. A live COUNT now includes
         # rows this job already wrote and is not a pre-write cardinality.
         dest_summary[PRECOUNT_KEY] = int(checkpoint.target_rows_before)
+    # A key-addressed destination replaces the value held at the key on every
+    # write, so even an append needs the dest-engine census (new keys vs
+    # replaced keys) to close conservation — COUNT(*) growth alone reads a
+    # correct re-write of the same keys as silent loss.
+    dest_key_addressed = dest_is_key_addressed(dest_type)
+    if dest_key_addressed:
+        dest_summary[KEY_ADDRESSED_KEY] = True
+    keyed_upsert_scope = write_mode == "upsert" and bool(pk_target_cols)
     keyed_census_acc = (
-        KeyCensusAccumulator() if write_mode == "upsert" and pk_target_cols else None
+        KeyCensusAccumulator()
+        if pk_target_cols and (keyed_upsert_scope or dest_key_addressed)
+        else None
     )
     overwrite_keys_acc = begin_overwrite_source_keys(
         effective_sync, pk_target_cols, resumed=resumed_pass
@@ -1648,6 +1678,12 @@ def _stream_database_transfer_impl(
     # authority removed a row: the operator's declared scope, or the recipe.
     filtered_on_read_total = (
         int(checkpoint.rows_source_filtered or 0) if resumed_pass else 0
+    )
+    # Rows the incremental cursor bound excluded after the read (a source that
+    # cannot push the bound down). Outside this run's read scope, so they are
+    # subtracted from the population instead of being charged to a removal.
+    cursor_bounded_total = (
+        int(getattr(checkpoint, "rows_cursor_bounded", 0) or 0) if resumed_pass else 0
     )
     # Strict/maximum FAIL-FAST on coercion errors; balanced quarantines them.
     # Threaded to every writer so the streaming path matches the buffered path.
@@ -2029,9 +2065,10 @@ def _stream_database_transfer_impl(
                 )
             )
             return batch
-        elif incremental and cursor_source_col and (
-            src_type in ("postgresql", "redshift", "mysql", "snowflake", "mongodb", "bigquery")
-            or resolve_driver_type(src_type) == "generic_sql"
+        elif (
+            incremental
+            and cursor_source_col
+            and source_bounds_cursor_reads(src_type)
         ):
             batch, _ = _unwrap_read(
                 _read_batch(
@@ -2158,6 +2195,46 @@ def _stream_database_transfer_impl(
         frozenset(shape_runner.recipe.input_columns) if shape_runner is not None else frozenset()
     )
 
+    def _rows_after_watermark_matrix(
+        headers: list[str], rows: list[list[str]]
+    ) -> tuple[list[list[str]], int]:
+        """Bound a read page to the delta past the watermark.
+
+        The comparison goes through the same typed comparator and composite
+        tie-break the SQL readers bound with, so a Redis or Dynamo delta means
+        the same thing a ``WHERE cursor > :watermark`` means. Returns the kept
+        rows and how many carried no cursor value at all.
+        """
+        try:
+            cursor_idx = headers.index(cursor_source_col)
+        except ValueError:
+            # The cursor column is not on the page: nothing here can be proven
+            # historical, and dropping the page would lose rows.
+            return list(rows), 0
+        pk_idx = (
+            headers.index(cursor_pk_source)
+            if cursor_pk_source and cursor_pk_source in headers
+            else -1
+        )
+        kept: list[list[str]] = []
+        unbounded = 0
+        for row in rows:
+            rec = {cursor_source_col: row[cursor_idx]}
+            if pk_idx >= 0:
+                rec[cursor_pk_source] = row[pk_idx]
+            verdict = row_after_watermark(
+                rec,
+                cursor_source_col,
+                watermark,
+                primary_key=cursor_pk_source if pk_idx >= 0 else "",
+            )
+            if verdict is None:
+                unbounded += 1
+                continue
+            if verdict:
+                kept.append(row)
+        return kept, unbounded
+
     def _filter_batch(batch):
         """Source filter, then the approved recipe — once per page.
 
@@ -2178,7 +2255,7 @@ def _stream_database_transfer_impl(
         if _raw_page_marked(batch):
             return batch
         raw_rows = len(batch.rows or [])
-        if raw_rows and (source_filter or shape_runner is not None):
+        if raw_rows and (source_filter or shape_runner is not None or client_cursor_bound):
             # Pagination bookmarks belong to the rows the source handed over. A
             # recipe that drops the page's highest key would otherwise bookmark a
             # lower one and the next read would hand those rows over again.
@@ -2208,6 +2285,38 @@ def _stream_database_transfer_impl(
                     "to it exactly once, nor the next page proven to resume where "
                     "this one ended — refusing rather than risk skipping source rows"
                 )
+        if client_cursor_bound and batch.rows:
+            # The source could not push the cursor bound into its read call, so
+            # it handed the whole keyspace over. Honouring the bound here is
+            # what makes "incremental" mean incremental for it: without this the
+            # second run re-offered every row and an append destination held 2N.
+            before = len(batch.rows)
+            kept, unbounded = _rows_after_watermark_matrix(
+                batch.headers, batch.rows
+            )
+            if unbounded:
+                # A row with no cursor value cannot be proven new or already at
+                # rest. Skipping it loses data and sending it duplicates data,
+                # so the run refuses instead of choosing silently.
+                raise ValueError(
+                    f"{unbounded} row(s) carry no value for cursor "
+                    f"'{cursor_source_col}' — an incremental read of "
+                    f"{src_type} cannot prove whether they already landed. "
+                    "Fill the cursor column at the source, or run this sync as "
+                    "full refresh."
+                )
+            batch.rows = kept
+            excluded = before - len(kept)
+            if excluded:
+                try:
+                    batch.raw_page_cursor_bounded = excluded
+                except AttributeError as exc:
+                    raise ValueError(
+                        "this source's read page cannot record how many rows the "
+                        "incremental cursor bound excluded, so the run's source "
+                        "population cannot be stated — refusing rather than "
+                        "counting rows this run was never asked to move"
+                    ) from exc
         if source_filter and batch.rows:
             before = len(batch.rows)
             batch.rows = apply_row_filter_to_matrix(
@@ -2423,8 +2532,12 @@ def _stream_database_transfer_impl(
                 "batch_keyset": _raw_page_keyset(batch) or None,
                 "batch_rows": _raw_page_rows(batch),
                 "filter_page_removed": _raw_page_filtered(batch),
+                "cursor_bounded_page": _raw_page_cursor_bounded(batch),
                 "shape_page_removed": max(
-                    0, _raw_page_rows(batch) - _raw_page_filtered(batch)
+                    0,
+                    _raw_page_rows(batch)
+                    - _raw_page_filtered(batch)
+                    - _raw_page_cursor_bounded(batch),
                 ),
                 "reconcile_sample_rows": [],
                 "fingerprints": [],
@@ -2554,14 +2667,14 @@ def _stream_database_transfer_impl(
                     error_policy=stream_error_policy,
                     dest_types=fingerprint_dest_types,
                     preserve_case=True,
-                    dest_kind=dest_type,
+                    dest_kind=dest_bind_dialect,
                     destination_pk_columns=list(pk_target_cols or []) or None,
                 )
                 if mapped_fp:
                     inline_fps = row_fingerprints(
                         mapped_fp,
                         target_cols,
-                        dest_db_type=dest_type,
+                        dest_db_type=dest_bind_dialect,
                         dest_types=digest_dest_types,
                     )
             except Exception as exc:
@@ -2614,9 +2727,13 @@ def _stream_database_transfer_impl(
             # population count them, including the ones a recipe removed.
             "batch_rows": _raw_page_rows(batch),
             "filter_page_removed": _raw_page_filtered(batch),
+            "cursor_bounded_page": _raw_page_cursor_bounded(batch),
             "shape_page_removed": max(
                 0,
-                _raw_page_rows(batch) - _raw_page_filtered(batch) - len(batch.rows),
+                _raw_page_rows(batch)
+                - _raw_page_filtered(batch)
+                - _raw_page_cursor_bounded(batch)
+                - len(batch.rows),
             ),
             "reconcile_sample_rows": sample_rows,
             "fingerprints": inline_fps,
@@ -2630,7 +2747,7 @@ def _stream_database_transfer_impl(
         }
 
     def _apply_result(idx: int, result: dict[str, Any]) -> None:
-        nonlocal written, rejected_total, coerced_null_total, removed_on_read_total, filtered_on_read_total, last_checksum, running_cursor, committed_offset, committed_keyset, dest_summary, batches_completed, kafka_cursor, reconcile_sample
+        nonlocal written, rejected_total, coerced_null_total, removed_on_read_total, filtered_on_read_total, cursor_bounded_total, last_checksum, running_cursor, committed_offset, committed_keyset, dest_summary, batches_completed, kafka_cursor, reconcile_sample
         if overwrite_keys_acc is not None:
             if "overwrite_keys" in result:
                 overwrite_keys_acc.observe_tuples(result.get("overwrite_keys"))
@@ -2641,6 +2758,7 @@ def _stream_database_transfer_impl(
         coerced_null_total += result.get("coerced_null", 0)
         filter_removed = int(result.get("filter_page_removed") or 0)
         filtered_on_read_total += filter_removed
+        cursor_bounded_total += int(result.get("cursor_bounded_page") or 0)
         removed_on_read_total += filter_removed + int(
             result.get("shape_page_removed") or 0
         )
@@ -2750,6 +2868,7 @@ def _stream_database_transfer_impl(
         checkpoint.coerced_null_rows = coerced_null_total
         checkpoint.rows_removed_on_read = removed_on_read_total
         checkpoint.rows_source_filtered = filtered_on_read_total
+        checkpoint.rows_cursor_bounded = cursor_bounded_total
         checkpoint.cursor_value = running_cursor or committed_keyset or ""
         checkpoint.cursor_column = cursor_source_col if incremental else keyset_col
         checkpoint.es_search_after = es_search_after
@@ -3037,7 +3156,7 @@ def _stream_database_transfer_impl(
                 # ``batch.rows`` stays intact — the keyset cursor advances on the
                 # last row actually read, not on the digest scope.
                 digest_rows = batch.rows
-                if keyed_census_acc is not None:
+                if keyed_upsert_scope:
                     digest_rows, _excluded_now = live_rows_for_digest(
                         batch.headers,
                         batch.rows,
@@ -3068,7 +3187,7 @@ def _stream_database_transfer_impl(
                     error_policy=stream_error_policy,
                     dest_types=fingerprint_dest_types,
                     preserve_case=True,
-                    dest_kind=dest_type,
+                    dest_kind=dest_bind_dialect,
                     destination_pk_columns=list(pk_target_cols or []) or None,
                 )
                 reread_holdouts.extend(reread_rejected or [])
@@ -3077,7 +3196,7 @@ def _stream_database_transfer_impl(
                         row_fingerprints(
                             mapped,
                             target_cols,
-                            dest_db_type=dest_type,
+                            dest_db_type=dest_bind_dialect,
                             dest_types=digest_dest_types,
                         )
                     )
@@ -3253,9 +3372,20 @@ def _stream_database_transfer_impl(
     # committed batch's source rows), so it overrides any per-batch writer stamp
     # that may have merged into the summary — the last batch's mapped-row count is
     # not the population.
+    # Rows the incremental cursor bound excluded are outside this run's read
+    # scope — a pushdown source would never have read them at all — so the
+    # population is the delta, not the whole keyspace the page arrived in.
+    reader_population = max(0, int(committed_offset or 0) - int(cursor_bounded_total or 0))
     stamp_source_row_count(
-        dest_summary, reader_count=int(committed_offset or 0), rows_written=int(written or 0)
+        dest_summary, reader_count=reader_population, rows_written=int(written or 0)
     )
+    if cursor_bounded_total:
+        dest_summary["rows_cursor_bounded"] = int(cursor_bounded_total)
+        ddl_log.append(
+            f"INCREMENTAL client-side cursor bound on {cursor_source_col} — "
+            f"{cursor_bounded_total:,} row(s) at or before the watermark were "
+            f"not in this run's read scope ({src_type} cannot push the bound down)"
+        )
     if removed_on_read_total:
         # committed_offset counts the rows the source handed over, so the rows a
         # declared filter or an approved recipe removed are inside that population

@@ -122,10 +122,11 @@ services:
       - |
         mongosh --host mongodb:27017 --quiet --eval '
           // Dual-access: host clients use localhost; in-network also works on
-          // mapped 27017. Avoid hostname "mongodb" which breaks host→compose.
-          // Comments must be JS: mongosh parses this string as JavaScript, and
-          // a shell-style # made the whole eval a SyntaxError, so the node
-          // stayed an uninitialised RSGhost and every Mongo route failed.
+          // mapped 27017. Avoid hostname "mongodb" which breaks host->compose.
+          // Comments must be JS ("//"): mongosh parses this string as
+          // JavaScript, and a shell-style # made the whole eval a SyntaxError,
+          // so the node stayed an uninitialised RSGhost and every Mongo route
+          // failed for want of a replset config.
           try { rs.status(); }
           catch (e) {
             rs.initiate({

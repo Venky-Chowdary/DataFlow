@@ -119,6 +119,13 @@ def _refine_columns_by_samples(
             str_values = [str(v) for v in values]
             inferred = _infer_logical_from_strings(str_values, field_name=c["name"])
             if inferred and inferred != "TEXT":
+                # Keep the catalog carrier: value inference describes the rows a
+                # source holds, not what a destination column will accept. A
+                # ``text`` sink that currently holds timestamps still accepts any
+                # string, and reading it back as DATETIME reports a fidelity
+                # collapse (VARCHAR → DATETIME) the physical column does not have.
+                c.setdefault("declared_type", c["inferred_type"])
+                c["sample_refined"] = True
                 c["inferred_type"] = inferred
     except Exception:
         logger.warning(
@@ -168,7 +175,38 @@ def split_object_namespace(
     return namespace, (catalog or database), leaf
 
 
-def introspect_schema(
+def introspect_schema(db_type: str, **kwargs: Any) -> dict[str, Any]:
+    """Introspect ``db_type``, with a schemaless store's sampled widths unbound.
+
+    A document / keyspace store has no column DDL, so its probe reports the
+    widest value the sampled page held. That width is not a declaration: the
+    first run would create a destination column sized to the page, and the next
+    wider value would be refused for a bound the source never had. One owner
+    for both roles — the same probe feeds Map's source profile and the
+    dest-exists shape.
+    """
+    from services.type_system import (
+        destination_carriers_are_inferred,
+        sampled_numeric_carriers_unbound,
+    )
+
+    result = _introspect_schema(db_type, **kwargs)
+    if not destination_carriers_are_inferred(db_type):
+        return result
+    types = result.get("column_types")
+    if isinstance(types, dict):
+        result["column_types"] = sampled_numeric_carriers_unbound(types)
+    cols = result.get("columns")
+    if isinstance(cols, list):
+        from services.type_system import unbound_sampled_numeric_carrier
+
+        for col in cols:
+            if isinstance(col, dict) and isinstance(col.get("type"), str):
+                col["type"] = unbound_sampled_numeric_carrier(col["type"])
+    return result
+
+
+def _introspect_schema(
     db_type: str,
     *,
     host: str = "",
@@ -1218,6 +1256,8 @@ def _introspect_bigquery(**kwargs) -> dict[str, Any]:
                     columns.append({
                         "name": field.name,
                         "inferred_type": _bq_field_to_logical(field),
+                        "declared_type": _bq_field_physical(field),
+                        "logical_translated": True,
                         "nullable": getattr(field, "mode", "NULLABLE") != "REQUIRED",
                     })
         else:
@@ -1408,6 +1448,47 @@ def _bq_to_logical(
             return f"STRING({int(max_length)})"
         return "TEXT"
     return "TEXT"
+
+
+def _bq_field_physical(field: Any) -> str:
+    """The BigQuery carrier as the catalog declares it (``DATETIME``, ``INT64``).
+
+    ``_bq_field_to_logical`` translates into DataFlow's neutral vocabulary, which
+    is what profiling wants. The destination role asks a different question — what
+    will this column accept — and the neutral label answers it wrong on this
+    dialect: ``DATETIME`` read back as ``TIMESTAMP_NTZ`` and ``BIGNUMERIC(24,6)``
+    read back as bare ``BIGNUMERIC`` are graded against BigQuery's own rules for
+    those spellings and invent a narrow/quarantine the column does not have.
+    """
+    ftype = str(getattr(field, "field_type", "") or "").strip().upper()
+    mode = str(getattr(field, "mode", "NULLABLE") or "NULLABLE").upper()
+    children = list(getattr(field, "fields", None) or [])
+    precision = getattr(field, "precision", None)
+    scale = getattr(field, "scale", None)
+    max_length = getattr(field, "max_length", None)
+
+    if ftype in {"RECORD", "STRUCT"} and children:
+        parts = []
+        for child in children:
+            child_mode = str(getattr(child, "mode", "NULLABLE") or "NULLABLE").upper()
+            child_t = _bq_field_physical(child)
+            if child_mode == "REPEATED" and not child_t.startswith("ARRAY<"):
+                child_t = f"ARRAY<{child_t}>"
+            parts.append(f"{child.name}:{child_t}")
+        base = f"STRUCT<{', '.join(parts)}>"
+    else:
+        base = ftype or "STRING"
+        if base in {"NUMERIC", "DECIMAL", "BIGNUMERIC", "BIGDECIMAL"}:
+            if isinstance(precision, int) and precision > 0:
+                if isinstance(scale, int):
+                    base = f"{base}({precision},{scale})"
+                else:
+                    base = f"{base}({precision})"
+        elif base == "STRING" and isinstance(max_length, int) and max_length > 0:
+            base = f"STRING({max_length})"
+    if mode == "REPEATED" and not base.startswith("ARRAY<"):
+        return f"ARRAY<{base}>"
+    return base
 
 
 def _bq_field_to_logical(field: Any) -> str:
