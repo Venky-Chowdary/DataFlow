@@ -1592,6 +1592,11 @@ def run_reconciliation(
                     key_columns=[str(c) for c in pk_cols],
                     keys=key_tuples,
                     complete_snapshot=True,
+                    sync_mode=str(
+                        dest_summary.get("sync_mode")
+                        or dest_summary.get("effective_sync_mode")
+                        or "full_refresh_overwrite"
+                    ),
                 )
                 if deleted:
                     dest_summary["leftover_deleted"] = int(deleted)

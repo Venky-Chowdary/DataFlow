@@ -82,10 +82,12 @@ def test_live_sqlite_to_sqlite_amount_stays_text() -> None:
             kind, stored = con.execute(
                 f'SELECT typeof(amount), amount FROM "{dst_t}"'
             ).fetchone()
+            dest_n = con.execute(f'SELECT COUNT(*) FROM "{dst_t}"').fetchone()[0]
         finally:
             con.close()
         assert kind == "text"
         assert stored == _HIGH
+        assert dest_n == 1
 
 
 @pytest.mark.skipif(not _reachable("127.0.0.1", 5432), reason="Postgres not reachable")

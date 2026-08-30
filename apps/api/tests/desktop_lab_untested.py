@@ -1678,52 +1678,6 @@ def _run_saas_stub() -> list[dict[str, Any]]:
             )
             name = f"reverse_etl_stub postgresql->{fmt}"
             try:
-                if fmt == "stripe":
-                    engine_res = _xfer_bounded(
-                        src, dest, sync_mode="reverse_etl", mappings=mappings,
-                        timeout_s=45.0,
-                    )
-                    planned_refused = (
-                        not engine_res.success
-                        and "planned" in str(engine_res.error or "").lower()
-                    )
-                    from connectors.stripe_writer import write_mapped_rows
-
-                    written = write_mapped_rows(
-                        host=url,
-                        password="stub-token",
-                        api_key="stub-token",
-                        table_name=table,
-                        headers=["id", "email", "name", "description"],
-                        data_rows=[
-                            ["1", "a@example.com", "Acme", "acct-1"],
-                            ["2", "b@example.com", "Beta", "acct-2"],
-                        ],
-                        mappings=mappings,
-                        write_mode="upsert",
-                        conflict_columns=["id"],
-                    )
-                    landed = list(STORE.rows.get(store_key) or [])
-                    writer_ok = bool(written.ok) and len(landed) >= 2
-                    ok = planned_refused and writer_ok
-                    cells.append(_cell(
-                        "saas", name,
-                        "passed" if ok else "failed",
-                        dest_rows=len(landed),
-                        local_stub_not_customer_org=True,
-                        planned_catalog=True,
-                        engine_refused_planned=planned_refused,
-                        writer_rows=int(getattr(written, "rows_written", 0) or 0),
-                        note=(
-                            "Stripe stays Planned — engine refuse measured; "
-                            "writer stub is not TRANSFER_READY"
-                        ),
-                        error="" if ok else str(
-                            engine_res.error or getattr(written, "error", "")
-                            or f"store={len(landed)}"
-                        )[:300],
-                    ))
-                    continue
                 first = _xfer_bounded(
                     src, dest, sync_mode="reverse_etl", mappings=mappings,
                     validation_mode="balanced", timeout_s=60.0,

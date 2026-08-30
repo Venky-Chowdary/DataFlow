@@ -29,7 +29,6 @@ export const TRANSFER_LIVE_TYPES = new Set([
  */
 export const CATALOG_PLANNED_DRIVER_TYPES = new Set([
   "redshift",
-  "stripe",
   "shopify",
   "zendesk",
   "notion",

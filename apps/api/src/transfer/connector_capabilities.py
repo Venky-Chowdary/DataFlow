@@ -42,7 +42,8 @@ _DRIVER_CAPS: dict[str, dict[str, bool]] = {
     # Reverse-ETL destinations: full read+write (warehouse → CRM activation).
     "salesforce": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
     "hubspot": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
-    "stripe": {"test": True, "read": True, "write": True, "introspect": False, "preflight": True, "certified": False},
+    # Stripe: incremental ``created`` cursor SKU (named fixture dest COUNT).
+    "stripe": {"test": True, "read": True, "write": True, "introspect": False, "preflight": True},
     "shopify": {"test": True, "read": True, "write": True, "introspect": False, "preflight": True, "certified": False},
     "zendesk": {"test": True, "read": True, "write": True, "introspect": False, "preflight": True, "certified": False},
     "notion": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True, "certified": False},
@@ -159,16 +160,18 @@ SUGGESTED_SOURCES = [
     "csv___tsv", "json", "jsonl", "excel", "parquet",
     "dynamodb", "amazon_s3", "gcs", "google_cloud_storage", "adls", "redis", "elasticsearch",
     "sftp",
-    "salesforce", "hubspot",
+    "salesforce", "hubspot", "stripe",
 ]
 
 # Catalog entry ids that map to implemented drivers — blocks false "Full transfer" on aliases.
 # Hosted twins (RDS/Neon/Atlas/…) share the same duplex driver and are transfer-ready
 # under the same evidence bar — counting them is honest; inventing rest_api SaaS is not.
 # Only SKU-proven / certified duplex brands. Uncertified SaaS writers
-# (stripe/shopify/airtable/zendesk/notion) stay out — certified:False in
-# _DRIVER_CAPS until they earn PRODUCTION_SKU. Redshift is declared RW but
-# not yet in PRODUCTION_SKU, so it is demoted from this frozenset.
+# (shopify/airtable/zendesk/notion) stay out — certified:False in
+# _DRIVER_CAPS until they earn PRODUCTION_SKU. Stripe earned a named
+# incremental-cursor SKU (created watermark → sqlite dest COUNT).
+# Redshift is declared RW but not yet in PRODUCTION_SKU, so it stays
+# demoted from this frozenset until execute + dest COUNT.
 _TRANSFER_READY_CORE = frozenset({
     "postgresql", "mysql", "mongodb", "sqlserver", "sql_server", "oracle",
     "snowflake", "bigquery",
@@ -176,7 +179,7 @@ _TRANSFER_READY_CORE = frozenset({
     "azure_blob_storage", "azure_data_lake", "azure_data_lake_storage",
     "redis", "elasticsearch", "sqlite", "generic_sql",
     "iceberg", "apache_iceberg", "kafka", "apache_kafka",
-    "salesforce", "hubspot",
+    "salesforce", "hubspot", "stripe",
     "csv___tsv", "json", "jsonl", "ndjson", "excel", "parquet",
     # SFTP earns this with introspect (typed schema off the remote payload),
     # Validate gates and a Gate-8 read-back, proven against a real SFTP server

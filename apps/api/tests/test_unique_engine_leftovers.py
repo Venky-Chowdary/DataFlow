@@ -1,7 +1,9 @@
 """Named fixture: Mongo _id leftover + SQLite TEXT→DECIMAL invent.
 
-Measured on this file only. Not a 5×5 cartesian claim. Not PRODUCTION_SKU
-tenant execute. CDC remains at-least-once upsert.
+Measured on this file only. ``100%`` here means every cell in this leftover
+mapping fixture plus the sqlite TEXT live write in
+``test_unique_engine_leftovers_live``. Not a 5×5 cartesian claim. Not
+PRODUCTION_SKU tenant execute. CDC remains at-least-once upsert.
 """
 
 from __future__ import annotations

@@ -96,7 +96,8 @@ test("marketing stack notes Planned names instead of inventing native MERGE", ()
   assert.match(warehouses.note, /Planned/);
   assert.match(warehouses.note, /Redshift/);
   assert.doesNotMatch(warehouses.note, /Native MERGE/i);
-  assert.match(apps.note, /Stripe and Shopify stay Planned/);
+  assert.match(apps.note, /Shopify stays Planned/);
+  assert.match(apps.note, /Stripe is a named incremental-cursor SKU/);
   assert.match(apps.note, /Salesforce and HubSpot are certified/);
 });
 
@@ -138,9 +139,10 @@ test("degraded transfer-live check does not greenwash certified:false brands", a
   assert.equal(isTransferLiveType("postgresql"), true);
   assert.equal(isTransferLiveType("salesforce"), true);
   assert.equal(isTransferLiveType("hubspot"), true);
-  assert.equal(isTransferLiveType("stripe"), false);
+  assert.equal(isTransferLiveType("stripe"), true);
   assert.equal(isTransferLiveType("redshift"), false);
   assert.ok(CATALOG_PLANNED_DRIVER_TYPES.has("shopify"));
+  assert.equal(CATALOG_PLANNED_DRIVER_TYPES.has("stripe"), false);
   setTransferLiveDrivers(null);
 });
 

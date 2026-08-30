@@ -10,7 +10,10 @@ Competitors still leave these implicit:
 
 DataFlow leftover MERGE is dest-key-addressed. Every source field is mapped or
 ``intentional_omit``. Dropping Mongo ``_id`` quietly is G13 silent loss.
-``100%`` means a named fixture, not marketing.
+``100%`` means a named fixture, not marketing. In this slice that fixture is
+the leftover mapping cartesian (``test_unique_engine_leftovers``) plus the
+sqlite TEXT live write dest COUNT (``test_unique_engine_leftovers_live``).
+Not a 5×5 live matrix. Not PRODUCTION_SKU tenant execute.
 """
 
 from __future__ import annotations

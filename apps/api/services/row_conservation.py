@@ -556,6 +556,7 @@ def apply_inferred_leftover_deletes(
     key_columns: Sequence[str],
     keys: Sequence[tuple[Any, ...]] | Sequence[Sequence[Any]],
     complete_snapshot: bool,
+    sync_mode: str = "",
 ) -> int | None:
     """Hard-DELETE dest keys not in complete source set ``S``. Overwrite only.
 
@@ -570,6 +571,9 @@ def apply_inferred_leftover_deletes(
 
     ``complete_snapshot=False`` (incremental CDC, resume tail, sample)
     is a hard no-op — that would false-delete almost every dest row.
+    Incremental / CDC ``sync_mode`` is also a hard no-op even when a caller
+    passes ``complete_snapshot=True`` — a changelog batch is not a proven
+    complete snapshot of ``S``.
     Dest without unique PKs, unsupported engines, or an oversized
     census stay ``None`` (unapplied); Gate-8 still *measures* extra.
     Vector destinations own identity COUNT, not this PK anti-join.
@@ -581,8 +585,19 @@ def apply_inferred_leftover_deletes(
     without leftover PKs (Airbyte generation-id wipe is not this path).
     Snowflake / BigQuery leftover MERGE uses the same native client as
     dest COUNT(*), never catalog stats. Incremental leftover MERGE
-    stays a hard no-op.
+    stays a hard no-op until overwrite proves a complete snapshot.
     """
+    if str(sync_mode or "").strip():
+        from services.sync_cursor import normalize_sync_mode
+
+        mode = normalize_sync_mode(sync_mode, default="")
+        # Changelog / cursor batches are not a proven complete S. Do not use
+        # requires_incremental() here — that set includes SCD2, which is a
+        # full current-image snapshot and may leftover-MERGE when complete.
+        # Mirror and overwrite leftover-MERGE only when complete_snapshot
+        # is also True.
+        if mode in {"incremental_append", "incremental_deduped", "cdc", "upsert"}:
+            return None
     if not complete_snapshot:
         return None
     engine = str(db_type or "").strip().lower()

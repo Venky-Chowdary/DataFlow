@@ -226,7 +226,7 @@ def _build_db_endpoint(
         )
     # SFTP, email, and Qdrant require external network services; the universal
     # matrix test cannot stand up a real server here, so these routes are skipped.
-    if driver in {"sftp", "email", "qdrant", "rest_api", "salesforce", "hubspot", "kafka"}:
+    if driver in {"sftp", "email", "qdrant", "rest_api", "salesforce", "hubspot", "kafka", "stripe"}:
         pytest.skip(f"No local emulator for {driver}")
     if driver == "oracle":
         pytest.skip("No local Oracle emulator on this runner")
