@@ -186,11 +186,15 @@ PREFLIGHT_GATE_RULES: dict[str, dict[str, Any]] = {
             "decision."
         ),
         "fix": (
-            "Open Map and give each omitted column a reduction reason. Use a "
-            "factual code (dropped_empty / dropped_constant) only when the data "
-            "supports it; otherwise use a judgement code (dropped_not_required, "
-            "dropped_redundant, dropped_obsolete, dropped_pii_minimization) with "
-            "a note. archive_only must name the archive that holds the field."
+            "Give each named column a reduction reason on its mapping row "
+            "(omit_reason, plus omit_reason_text and, for archive_only, "
+            "archive_reference). Map has no reduction-reason control yet, so "
+            "reasons are set through the mappings API — an omission declared in "
+            "Map alone is recorded as unexplained and warns rather than blocks. "
+            "Use a factual code (dropped_empty / dropped_constant) only when the "
+            "data supports it; otherwise use a judgement code "
+            "(dropped_not_required, dropped_redundant, dropped_obsolete, "
+            "dropped_pii_minimization) with a note."
         ),
         "examples": [
             "COBOL filler columns → dropped_obsolete with a note naming the copybook release.",
@@ -198,8 +202,11 @@ PREFLIGHT_GATE_RULES: dict[str, dict[str, Any]] = {
             "Legacy audit trail kept in the mainframe archive → archive_only + archive_reference.",
             "Column declared empty but 12 of 500 sampled rows hold a value → blocked as a false claim.",
         ],
+        # Deliberately not "record reduction reasons here": Map cannot express a
+        # reason code yet, and a CTA that promises a control the operator will
+        # not find is worse than no CTA.
         "suggested_actions": [
-            {"kind": "review_mappings", "label": "Open Map to record reduction reasons"},
+            {"kind": "review_mappings", "label": "Open Map to review the omitted columns"},
         ],
     },
     "g15_dest_exists_shape": {

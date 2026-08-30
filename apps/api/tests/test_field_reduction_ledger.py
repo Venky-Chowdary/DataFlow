@@ -275,6 +275,45 @@ def build_field_reduction_gate_status(ledger: dict[str, Any]) -> str:
     return str(build_field_reduction_gate(ledger)["status"])
 
 
+def test_blocker_message_counts_columns_not_issues_and_groups_codes():
+    # phone carries two blocking issues; it is one reduction, named once.
+    mappings = [
+        _omit("phone", omit_reason="archive_only"),
+        _omit("legacy_flag", omit_reason="dropped_empty"),
+    ]
+    gate = build_field_reduction_evidence(
+        source_columns=["phone", "legacy_flag"], mappings=mappings, sample_rows=SAMPLE_ROWS
+    )[1]
+
+    assert gate["status"] == "block"
+    assert gate["message"].startswith("2 field reduction(s)")
+    assert gate["message"].count("phone") == 1
+    assert "phone (reason_text_missing, archive_reference_missing)" in gate["message"]
+    assert gate["details"]["blocking_columns"] == 2
+
+
+def test_warn_message_says_execute_is_not_blocked():
+    mappings = [_omit("phone"), _omit("legacy_flag")]
+    gate = build_field_reduction_evidence(
+        source_columns=["phone", "legacy_flag"], mappings=mappings, sample_rows=SAMPLE_ROWS
+    )[1]
+
+    assert gate["status"] == "warn"
+    assert gate["message"].startswith("Execute is not blocked.")
+    assert gate["details"]["blocks_execute"] is False
+    assert gate["details"]["warning_columns"] == 2
+
+
+def test_gate_cta_does_not_promise_a_map_control_that_does_not_exist():
+    from services.preflight_rules import PREFLIGHT_GATE_RULES
+
+    rule = PREFLIGHT_GATE_RULES["g16_field_reduction"]
+    labels = [a["label"] for a in rule["suggested_actions"]]
+
+    assert labels == ["Open Map to review the omitted columns"]
+    assert "Map has no reduction-reason control yet" in rule["fix"]
+
+
 # ── Legacy omissions and strict mode ─────────────────────────────────────────
 def test_legacy_boolean_omission_warns_but_does_not_break_existing_jobs():
     mappings = _carried() + [_omit(c) for c in ("filler_1", "legacy_flag", "old_audit_trail", "phone", "never_used")]

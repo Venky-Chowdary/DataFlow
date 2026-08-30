@@ -622,6 +622,28 @@ def verify_field_reduction_ledger(
     return {"ok": not errors, "errors": errors, "content_sha256": actual}
 
 
+def _name_columns(issues: list[dict[str, Any]]) -> tuple[int, str]:
+    """Return ``(distinct column count, "col (code, code)" listing)``.
+
+    Counting issues instead of columns reported "3 field reduction(s)" for two
+    columns and printed the same column twice, which reads as a rendering bug.
+    A reduction is a column, so the count is columns and the codes group under
+    the column they belong to.
+    """
+    grouped: dict[str, list[str]] = {}
+    for issue in issues:
+        grouped.setdefault(str(issue.get("source") or ""), []).append(
+            str(issue.get("code") or "")
+        )
+    named = ", ".join(
+        f"{source} ({', '.join(dict.fromkeys(codes))})"
+        for source, codes in list(grouped.items())[:_NAMED_LIMIT]
+    )
+    if len(grouped) > _NAMED_LIMIT:
+        named += f" (+{len(grouped) - _NAMED_LIMIT} more)"
+    return len(grouped), named
+
+
 def build_field_reduction_gate(ledger: dict[str, Any]) -> dict[str, Any]:
     """Return the G16 gate for a ledger.
 
@@ -638,24 +660,18 @@ def build_field_reduction_gate(ledger: dict[str, Any]) -> dict[str, Any]:
     warnings = list(ledger.get("warnings") or [])
 
     if blocking:
-        named = ", ".join(
-            f"{issue.get('source')} ({issue.get('code')})" for issue in blocking[:_NAMED_LIMIT]
-        )
-        more = (
-            f" (+{len(blocking) - _NAMED_LIMIT} more)"
-            if len(blocking) > _NAMED_LIMIT
-            else ""
-        )
+        column_count, named = _name_columns(blocking)
         return {
             "id": GATE_ID,
             "status": "block",
             "message": (
-                f"{len(blocking)} field reduction(s) cannot be recorded as "
-                f"governed decisions: {named}{more}"
+                f"{column_count} field reduction(s) cannot be recorded as "
+                f"governed decisions: {named}"
             ),
             "duration_ms": 0,
             "details": {
                 "blocking_issues": blocking,
+                "blocking_columns": column_count,
                 "reduced_count": reduced,
                 "strict": bool(ledger.get("strict")),
                 "rule_id": f"{GATE_ID}.reduction_not_governed",
@@ -664,25 +680,21 @@ def build_field_reduction_gate(ledger: dict[str, Any]) -> dict[str, Any]:
         }
 
     if warnings:
-        named = ", ".join(
-            f"{issue.get('source')} ({issue.get('code')})" for issue in warnings[:_NAMED_LIMIT]
-        )
-        more = (
-            f" (+{len(warnings) - _NAMED_LIMIT} more)"
-            if len(warnings) > _NAMED_LIMIT
-            else ""
-        )
+        column_count, named = _name_columns(warnings)
         return {
             "id": GATE_ID,
             "status": "warn",
             "message": (
-                f"{len(warnings)} field reduction(s) are declared but not fully "
-                f"evidenced: {named}{more} — the drop is recorded as unexplained "
-                "in the proof pack"
+                f"Execute is not blocked. {column_count} field reduction(s) are "
+                f"declared but not fully evidenced: {named} — the drop is "
+                "recorded in the proof pack as unexplained rather than as a "
+                "governed decision"
             ),
             "duration_ms": 0,
             "details": {
                 "warnings": warnings,
+                "warning_columns": column_count,
+                "blocks_execute": False,
                 "reduced_count": reduced,
                 "strict": bool(ledger.get("strict")),
                 "rule_id": f"{GATE_ID}.reduction_unexplained",
