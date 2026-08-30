@@ -1,0 +1,20 @@
+{
+  "name": "DataFlow",
+  "user": "ubuntu",
+  "install": "bash .cursor/install.sh",
+  "start": "bash .cursor/start.sh",
+  "terminals": [
+    {
+      "name": "api",
+      "command": "source .venv/bin/activate && cd apps/api && PYTHONPATH=/workspace/apps/api:/workspace/apps/cli:/workspace/packages/preflight/src DATAFLOW_DATA_DIR=/workspace/.dataflow-data DATAFLOW_UPLOAD_DIR=/workspace/.dataflow-data/uploads DATAFLOW_VECTOR_STORE_DIR=/workspace/.dataflow-data/vector_store DATAFLOW_JOB_STORE=memory DATAFLOW_PII_HASH_KEY=dev-pii-key DATAFLOW_ALLOW_DEV_USER=1 PGHOST=127.0.0.1 PGPORT=5432 PGUSER=dataflow PGPASSWORD=dataflow PGDATABASE=dataflow python -m uvicorn src.main:app --reload --host 127.0.0.1 --port 8001"
+    },
+    {
+      "name": "web",
+      "command": "cd apps/web && npx vite --host 127.0.0.1 --port 5173"
+    }
+  ],
+  "ports": [
+    { "name": "web", "port": 5173 },
+    { "name": "api", "port": 8001 }
+  ]
+}
