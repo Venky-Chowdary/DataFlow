@@ -883,6 +883,7 @@ def write_mapped_rows(
         chunks = max(1, (total + mongo_batch_size - 1) // mongo_batch_size)
         written = 0
         skipped_total = 0
+        key_index_ready = False
 
         for chunk_idx in range(chunks):
             start = chunk_idx * mongo_batch_size
@@ -940,6 +941,23 @@ def write_mapped_rows(
                         rejected_details=list(rejected_details),
                         warnings=transform_errors,
                     )
+
+                if not key_index_ready:
+                    # Every upsert filters on the conflict key, and the CDC LSN
+                    # prefetch queries it too. Without an index on those fields
+                    # each one is a collection scan, so throughput decays as the
+                    # collection grows (measured: 598 rows/s at 3K down to ~31
+                    # rows/s at 60K). Creating it is idempotent server-side.
+                    try:
+                        coll.create_index([(c, pymongo.ASCENDING) for c in pk_cols])
+                    except pymongo.errors.PyMongoError as exc:
+                        logger.warning(
+                            "could not index Mongo conflict key %s on %s: %s",
+                            pk_cols,
+                            collection_name,
+                            exc,
+                        )
+                    key_index_ready = True
 
                 # Deduplicate within the batch on the conflict key, keeping the
                 # highest _df_lsn so ``bulk_write(ordered=False)`` does not apply

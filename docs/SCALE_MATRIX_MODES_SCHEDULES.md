@@ -36,18 +36,24 @@ destination windows (`poll_windows_to_drain` is recorded per cell).
 
 | Route | Capture | Snapshot→log handoff | INSERT/UPDATE/DELETE | Idle re-run (no dup) | Rows | Rows/s (snapshot) | Delete capture | Delivery |
 |---|---|---|---|---|---|---|---|---|
-| postgresql→postgresql | pgoutput logical slot | pass | pass | pass | 100000 → 101000 | 1667 | yes | at-least-once |
-| postgresql→mysql | pgoutput logical slot | pass | pass | pass | 100000 → 101000 | 1674 | yes | at-least-once |
-| mysql→postgresql | binlog ROW + GTID | pass | pass | pass | 100000 → 101000 | 1436–1674 | yes | at-least-once |
-| mongodb→postgresql | change stream + pre-images | pass | pass (3K rerun) | pass (3K rerun) | 100000 snapshot | 202 | yes | at-least-once |
-| postgresql→mongodb | pgoutput logical slot | pass (3K rerun) | pass (3K rerun) | pass (3K rerun) | 3000 → 4000 | 598 | yes | at-least-once |
-| mysql→mysql | binlog ROW + GTID | pass (3K rerun) | pass (3K rerun) | pass (3K rerun) | 3000 → 4000 | 1076 | yes | at-least-once |
+| postgresql→postgresql | pgoutput logical slot | pass | pass | pass | 100000 → 101000 | 1731 | yes | at-least-once |
+| postgresql→mysql | pgoutput logical slot | pass | pass | pass | 100000 → 101000 | 1950 | yes | at-least-once |
+| postgresql→mongodb | pgoutput logical slot | pass | pass | pass | 100000 → 101000 | 2017 | yes | at-least-once |
+| mysql→postgresql | binlog ROW + GTID | pass | pass | pass | 100000 → 101000 | 1944 | yes | at-least-once |
+| mysql→mysql | binlog ROW + GTID | pass | pass | pass | 100000 → 101000 | 1885 | yes | at-least-once |
+| mongodb→postgresql | change stream + pre-images | pass | pass | pass | 100000 → 101000 | 787 | yes | at-least-once |
+| mongodb→mysql | change stream + pre-images | pass | pass | not measured | 100000 → 101000 | 791 | yes | at-least-once |
 
-The three "3K rerun" routes are the routes whose defects were fixed last (see
-below). They are proven end-to-end on the live engines at 3,000 rows; the 100K
-re-measurement for those routes is still running at the time of writing and this
-table will be updated with the measured numbers rather than assumed ones. Do not
-read the 3K rows as a 100K claim.
+20 of the 21 CDC cells are measured at 100,000 snapshot rows plus the 2,000-row
+DML window on live engines; every one of those 20 passed with the destination
+count and checksum read back independently. The 21st cell (`mongodb→mysql` idle
+re-run) was not reached before the halt, so it is recorded as **not measured**,
+not as a pass. Destination counts are `101000` after the DML window (2,000
+inserts − 1,000 deletes over the 100,000 snapshot).
+
+MongoDB DML windows need 6 poll windows to drain versus 3 for the SQL sources,
+and the MongoDB-source snapshot runs at roughly 790 rows/s against ~1,900 rows/s
+for PostgreSQL/MySQL sources — that is the reader, not the writer.
 
 Every passing cell records the persisted watermark
 (`slot=…|phase=streaming|lsn=0/…` for PostgreSQL, `file:pos` + GTID for MySQL,
@@ -117,7 +123,18 @@ The 100K crash pass is not yet measured.
    enumerated, and cleanup releases only the leases the route owns (an operator
    `force_release_lease` exists for the rest). Nothing releases an unrelated
    lease.
-6. **Cross-workspace schedule read.** A user who belongs to two workspaces could
+6. **MongoDB upsert had no index on the conflict key, so throughput collapsed at
+   scale.** Every CDC/upsert batch filters on the conflict key and the CDC LSN
+   pre-fetch queries it too, but nothing ever created that index, so each
+   operation was a collection scan and write rate decayed as the collection
+   grew: measured 598 rows/s at 3,000 rows down to **~31 rows/s at 60,000**
+   (a 100K PostgreSQL→MongoDB snapshot would have taken about an hour). Owner:
+   `apps/api/connectors/mongodb_writer.py` — it now ensures an index on the
+   conflict-key columns once per write (idempotent server-side) before the
+   upsert loop. After the fix the same route measured **2017 rows/s** for the
+   100,000-row snapshot. This defect was invisible at fixture size and only
+   appeared because the matrix insists on 100K.
+7. **Cross-workspace schedule read.** A user who belongs to two workspaces could
    read a sibling workspace's schedule while declaring a different workspace in
    `X-Workspace-Id`. Owner: `apps/api/services/workspace_access.py` —
    `assert_resource_workspace` now enforces the declared scope, and an
@@ -146,8 +163,8 @@ Failing at that point, both since changed and **not yet re-measured**:
 
 ## Not proven yet
 
-- 100K re-measurement of `postgresql→mongodb`, `mysql→mysql` and the MongoDB DML
-  window (running; 3K is what is measured today).
+- `mongodb→mysql` idle re-run at 100K — the run was halted before that last
+  cell; the other 20 CDC cells are measured.
 - Crash injection at 100K (20K is what is measured).
 - The batch suite (`incremental_deduped` three-run idempotency, composite keys,
   late-arriving updates, NULL-in-key, SCD2 closure/no-churn, mirror delete
