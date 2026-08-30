@@ -123,6 +123,44 @@ def _cdc_span(name: str, **attrs: Any):
         return nullcontext()
 
 
+def _stamp_cdc_source_image(
+    summary: dict[str, Any],
+    *,
+    src_type: str,
+    src_cfg: dict[str, Any],
+    schema: str,
+    table_name: str,
+    events: int,
+) -> dict[str, Any]:
+    """Independent COUNT(*) of the live source table after catch-up.
+
+    Changelog ``inserts+updates+deletes`` is not dest population. Gate-8 must
+    not invent source_rows from writer ack (that fails closed today). This
+    stamp is the source image dest COUNT is compared against.
+    """
+    from services.dest_precount import destination_row_count
+
+    summary["cdc_events_applied"] = max(int(events or 0), 0)
+    summary["checksum_mode"] = "cdc_source_image"
+    try:
+        counted = destination_row_count(
+            src_type,
+            dict(src_cfg or {}),
+            schema=str(schema or ""),
+            table_name=str(table_name or ""),
+        )
+    except Exception as exc:
+        logger.warning(
+            "CDC source image COUNT failed: %s", exc, extra={"table": table_name}
+        )
+        counted = None
+    if counted is None:
+        return summary
+    summary["source_row_count"] = int(counted)
+    summary["source_row_count_source"] = "cdc_source_image_count"
+    return summary
+
+
 def _cdc_lag_fields(cdc: Any) -> dict[str, Any]:
     """Collect lag / heartbeat / last-DDL / plugin fields from a CDC reader.
 
@@ -2744,6 +2782,14 @@ def _run_cdc_single_stream(
         summary["snapshot_plan"] = stamp
     summary["watermark"] = final_watermark
     summary["checksum"] = state.last_checksum
+    _stamp_cdc_source_image(
+        summary,
+        src_type=src_type,
+        src_cfg=src_cfg,
+        schema=str(src_cfg.get("schema") or getattr(source, "schema", "") or ""),
+        table_name=table_name,
+        events=int(state.inserts or 0) + int(state.updates or 0) + int(state.deletes or 0),
+    )
     if capture_downgrade:
         summary.update(capture_downgrade)
     if hasattr(cdc, "close"):

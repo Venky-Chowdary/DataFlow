@@ -30,6 +30,7 @@ from services.decision_kernel.findings import (
 from services.readback_projection import project_readback
 from services.reconcile_sftp import verify_sftp_object
 from services.reconcile_coverage import (
+    CDC_SOURCE_IMAGE_COUNT,
     NO_OP_DEST_UNCHANGED,
     SOURCE_DIGEST_WRITE_PASS,
     SOURCE_DIGEST_WRITER_ACK,
@@ -788,6 +789,32 @@ def reconcile(
             coerced_null_rows=coerced_null_rows,
             rows_skipped=rows_skipped,
             sample_compare=sample_compare,
+        )
+
+    if checksum_scope == CDC_SOURCE_IMAGE_COUNT:
+        extra = extra_rows_note(target_rows, expected_rows) if target_rows > expected_rows else ""
+        return ReconciliationReport(
+            passed=True,
+            source_rows=source_rows,
+            target_rows=target_rows,
+            source_checksum=source_checksum,
+            target_checksum=target_checksum,
+            message=(
+                f"CDC catch-up dest COUNT={target_rows:,} vs source image "
+                f"COUNT={expected_rows:,}{extra}. Last-batch writer checksum is "
+                "diagnostic — not a source-image population digest. "
+                "Leftover MERGE is a no-op on CDC. At-least-once upsert. "
+                "Not platform exactly-once."
+            ),
+            rejected_rows=rejected_rows,
+            coerced_null_rows=coerced_null_rows,
+            rows_skipped=rows_skipped,
+            sample_compare=sample_compare,
+            checksum_match=False,
+            population_proof=False,
+            assurance_level=CDC_SOURCE_IMAGE_COUNT,
+            checksum_scope=CDC_SOURCE_IMAGE_COUNT,
+            target_rows_before=target_rows_before,
         )
 
     if source_checksum != target_checksum:

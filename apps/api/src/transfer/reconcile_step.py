@@ -21,6 +21,7 @@ from services.dest_precount import (
     stamp_vector_census,
 )
 from services.reconcile_coverage import (
+    CDC_SOURCE_IMAGE_COUNT,
     NO_OP_DEST_UNCHANGED,
     SOURCE_DIGEST_ENGINE_POPULATION,
     SOURCE_DIGEST_REMAPPED_ROWS,
@@ -1069,6 +1070,21 @@ def _engine_digest_enabled() -> bool:
     }
 
 
+def _cdc_source_image_gate(dest_summary: dict[str, Any] | None) -> bool:
+    """True when Gate-8 must compare dest COUNT to the live source table.
+
+    Changelog event count and last-batch writer checksum are not that
+    population. Leftover MERGE stays a no-op on this path.
+    """
+    summary = dest_summary if isinstance(dest_summary, dict) else {}
+    if str(summary.get("checksum_mode") or "") == "cdc_source_image":
+        return True
+    mode = str(
+        summary.get("sync_mode") or summary.get("effective_sync_mode") or ""
+    ).strip().lower()
+    return mode == "cdc"
+
+
 def _engine_population_digests(
     *,
     source_endpoint: EndpointConfig | None,
@@ -1689,6 +1705,11 @@ def run_reconciliation(
     source_checksum_provenance = ""
     if source_checksum_scope_note:
         source_checksum = ""
+    elif _cdc_source_image_gate(dest_summary):
+        # Changelog last-batch writer ack is not the live source table.
+        # Engine digest (below) is the comparable population digest.
+        source_checksum = ""
+        source_checksum_provenance = ""
     elif str(dest_summary.get("checksum_mode") or "") == "inline_write_pass" and writer_checksum:
         # Phase F1 fingerprints are remapped source rows hashed during the write,
         # not the destination writer's ack copied onto both sides.
@@ -1837,7 +1858,7 @@ def run_reconciliation(
     paired = _writer_supplied_engine_digests(dest_summary)
     if paired is not None and not source_checksum_scope_note:
         engine_digests = paired
-    elif _engine_digest_enabled() and not source_checksum_scope_note:
+    elif (_engine_digest_enabled() or _cdc_source_image_gate(dest_summary)) and not source_checksum_scope_note:
         engine_digests = _engine_population_digests(
             source_endpoint=source_endpoint,
             dest_cfg=cfg,
@@ -2365,6 +2386,15 @@ def run_reconciliation(
         if keyed_checksum and keys_identify_one_row:
             target_checksum = keyed_checksum
             keyed_scope = WRITTEN_BATCH_KEYS
+
+    if (
+        _cdc_source_image_gate(dest_summary)
+        and engine_digests is None
+        and not keyed_scope
+    ):
+        # Same-engine catch-up used engine digest above. Cross-engine (or
+        # digest unavailable) must not compare last-batch ack to full dest.
+        keyed_scope = CDC_SOURCE_IMAGE_COUNT
 
     report = reconcile(
         source_rows=source_rows,

@@ -995,6 +995,10 @@ def test_sqlite_overwrite_e2e_clears_preexisting_leftover_dest_keys(tmp_path: Pa
     assert ids == [1, 2, 3]
     stamped = result.row_accounting or {}
     assert stamped.get("dest_count") == 3, stamped
+    recon = result.reconciliation or {}
+    assert recon.get("passed") is True, recon
+    leftover = (result.destination_summary or {}).get("leftover_deleted")
+    assert leftover in {1, None} or int(leftover or 0) >= 1 or recon.get("leftover_deleted") == 1
 
 
 def test_iceberg_overwrite_e2e_merges_leftover_snapshot_keys(tmp_path: Path):

@@ -17,6 +17,10 @@ WHOLE_TABLE_NOT_COMPARABLE = "whole_table_not_comparable"
 # Target digest was re-read WHERE pk IN (written keys): per-cell proof of this
 # batch, deliberately silent about rows the job never wrote.
 WRITTEN_BATCH_KEYS = "written_batch_keys"
+# CDC catch-up: dest COUNT vs current source-table COUNT. Last-batch writer
+# checksum is not that population. Engine digest of source vs dest (same
+# engine) can still close full_checksum; this scope is COUNT-only honesty.
+CDC_SOURCE_IMAGE_COUNT = "cdc_source_image_count"
 # A quiet incremental poll: the reader found nothing past the watermark, so no
 # batch exists to compare and the proof is that the destination count did not
 # move. Population evidence must not be turned on such a report — comparing a
