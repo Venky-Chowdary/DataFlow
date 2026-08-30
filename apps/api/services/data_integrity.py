@@ -13,6 +13,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from services.db_type_utils import SCHEMALESS_DESTS, normalize_dest_kind
+from services.mapping_constraints import write_mappings
 from services.validation_coverage import stamp_validation_coverage
 from services.value_serializer import cell_to_string, project_row_cells
 
@@ -375,6 +376,11 @@ def _check_required_nulls(
     issues: list[str] = []
     schemaless = dest_kind in SCHEMALESS_DESTS
     _ = (validation_mode or "strict").strip().lower()
+
+    # A column the operator declared Omit is never written, so no destination
+    # nullability contract applies to it. Judging it would block Validate on a
+    # value the run will not carry (Mongo's implicit `_id` omitted by hand).
+    mappings = write_mappings(mappings)
 
     # Resolve the source column that maps to the primary key target.
     pk_source = ""

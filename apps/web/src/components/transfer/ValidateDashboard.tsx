@@ -16,9 +16,13 @@ import { isLocalPreflight } from "../../lib/localPreflight";
 import {
   CORE_ENGINE_GATE_IDS,
   GATE_CATALOG,
+  blockerTitle,
   gateCatalogEntry,
   gateLabel,
+  isInternalGateId,
 } from "../../lib/preflightGates";
+import { EngineStageTicker } from "../EngineStageTicker";
+import type { ValidateProgress } from "../../lib/engineProgress";
 import {
   buildDisplayBlockers,
   buildExecutiveSummary,
@@ -32,7 +36,8 @@ import {
   remapToTypeForMismatch,
 } from "../../lib/validateIssueGrouping";
 import { buildValidateDecisionPath } from "../../lib/validateDecisionPath";
-import { buildValidateHonestyControls, schemaDriftAllowsAcknowledge, schemaDriftCompatibilityHeadline, schemaDriftRequiresRemap } from "../../lib/validateHonestyControls";
+import { buildValidateHonestyControls, dateLocaleValidateAction, numberLocaleValidateAction, schemaDriftAllowsAcknowledge, schemaDriftCompatibilityHeadline, schemaDriftRequiresRemap } from "../../lib/validateHonestyControls";
+import { dashboardCtaVariant, type ValidateStudioPrimary } from "../../lib/validateStudioPrimary";
 import { isFkOrphanBlockerText, isFkOrphanCtaKind } from "../../lib/fkOrphanCta";
 import {
   callableExtractNote,
@@ -41,10 +46,12 @@ import {
   extraSourceColumnsFromContract,
   shapeContractFromPreflight,
 } from "../../lib/destExistsShape";
+import { createNewFitWidenActions, createNewFitWidenLabel, populationFitSummary } from "../../lib/populationFit";
 import { ringDasharray, validateRingPercent } from "../../lib/progressRing";
 import { BadDataFixDrawer, type BadDataIssue } from "./BadDataFixDrawer";
 import { Gate8ProofCard, type Gate8Reconciliation } from "./Gate8ProofCard";
 import { LoadHistoryPanel } from "./LoadHistoryPanel";
+import { DateLocalePanel, NumberLocalePanel } from "./NumberLocalePanel";
 import { RepairProposalDrawer } from "./RepairProposalDrawer";
 
 type GateMeta = {
@@ -60,6 +67,18 @@ const GATE_META: GateMeta[] = GATE_CATALOG.map((g) => ({
   icon: g.icon,
   rule: g.rule,
 }));
+
+/**
+ * Title for one assist / explain issue card. The assistant falls back to the
+ * blocker's internal id when a proof-bundle blocker has no gate catalog entry,
+ * so name the cause from its own text instead of showing `proof_0`.
+ */
+function explainIssueTitle(issue: { gate: string; title?: string; what?: string }): string {
+  if (isInternalGateId(issue.gate)) {
+    return blockerTitle(issue.gate, issue.what || issue.title);
+  }
+  return issue.title || gateLabel(issue.gate);
+}
 
 function metaForGate(id: string): GateMeta {
   const entry = gateCatalogEntry(id);
@@ -192,6 +211,8 @@ const STATUS_LABEL: Record<string, string> = {
 interface ValidateDashboardProps {
   preflight: PreflightResult | null;
   running?: boolean;
+  /** Live GET /preflight heartbeat — rows scanned, not a looping stage list. */
+  progress?: ValidateProgress | null;
   confidenceThreshold?: number;
   destType?: string;
   validationMode?: string;
@@ -201,6 +222,8 @@ interface ValidateDashboardProps {
   writeViaStaging?: boolean;
   /** Apply a one-click AI suggestion to the Studio (change type, add transform, navigate). */
   onApplyAction?: (action: ValidationSuggestedAction) => void;
+  /** Apply every proven create-new CREATE widen, then re-Validate. */
+  onApplyCreateNewWidens?: () => void;
   /** Apply strip_controls across mappings and re-run preflight. Returns what changed. */
   onStripControlChars?: () => void | Promise<RemediationOpResult | void>;
   /** True when text mappings already carry strip_controls (Execute will sanitize). */
@@ -217,6 +240,8 @@ interface ValidateDashboardProps {
    * Used for duplicate-identity blockers (Map alone cannot change the sync contract).
    */
   onOpenIdentitySettings?: () => void;
+  /** Open Destination → Advanced and scroll Date / Number locale into view. */
+  onOpenLocaleSettings?: (kind: "date" | "number") => void;
   /** Sample-unique key suggestions (honest: Validate sample only). */
   uniqueKeySuggestions?: Array<{
     column: string;
@@ -284,6 +309,16 @@ interface ValidateDashboardProps {
    */
   badDataFixOpen?: boolean;
   onBadDataFixOpenChange?: (open: boolean) => void;
+  /**
+   * Rail-owned studio primary. Dashboard remediations stay ghost/secondary
+   * so Validate never shows two teal buttons for the same root cause.
+   */
+  studioPrimary?: ValidateStudioPrimary | null;
+  /**
+   * Last Validate attempt failed in transport (504 / hung control plane) before
+   * a verdict arrived. Rail owns Re-run; this card must not invent a second teal.
+   */
+  preflightError?: string;
 }
 
 /** Plain-language report of what a Validate remediation button just did. */
@@ -708,12 +743,14 @@ function MetricChip({
 export function ValidateDashboard({
   preflight,
   running = false,
+  progress = null,
   confidenceThreshold = 0.85,
   destType,
   validationMode,
   syncMode,
   writeViaStaging = false,
   onApplyAction,
+  onApplyCreateNewWidens,
   onStripControlChars,
   stripControlsApplied = false,
   onQuarantineAndRerun,
@@ -721,6 +758,7 @@ export function ValidateDashboard({
   onReviewMappings,
   onReloadDestSchema,
   onOpenIdentitySettings,
+  onOpenLocaleSettings,
   uniqueKeySuggestions = [],
   onApplyPrimaryKey,
   compositeKeySuggestions = [],
@@ -739,7 +777,10 @@ export function ValidateDashboard({
   onSeedRepairConsumed,
   badDataFixOpen,
   onBadDataFixOpenChange,
+  studioPrimary: _studioPrimary,
+  preflightError = "",
 }: ValidateDashboardProps) {
+  const dashCta = dashboardCtaVariant;
   const [elapsedMs, setElapsedMs] = useState(0);
   const [revealCount, setRevealCount] = useState(0);
   const [explain, setExplain] = useState<ValidationExplanation | null>(null);
@@ -938,6 +979,11 @@ export function ValidateDashboard({
   const destShapeExtras = useMemo(() => extraSourceColumnsFromContract(destShape), [destShape]);
   const destShapePreserve = useMemo(() => destOnlyPreserveColumns(destShape), [destShape]);
   const destShapeCta = useMemo(() => destExistsPrimaryCta(destShape), [destShape]);
+  const createNewWidens = useMemo(() => createNewFitWidenActions(preflight), [preflight]);
+  const createNewWidenLabel = useMemo(
+    () => createNewFitWidenLabel(createNewWidens),
+    [createNewWidens],
+  );
   const callableNote = useMemo(() => callableExtractNote(preflight), [preflight]);
   const showDestShape = Boolean(
     destShape
@@ -1118,7 +1164,17 @@ export function ValidateDashboard({
       : decision === "pending"
         ? "pending"
         : "approve";
-  const heroTone = running ? "live" : preflight ? decisionTone : "idle";
+  const transportFailed = Boolean(preflightError) && !preflight && !running;
+  const heroTone = running ? "live" : preflight ? decisionTone : transportFailed ? "block" : "idle";
+
+  /**
+   * The transformed image the gates judged. Present only when an approved
+   * Transform (pre-load) recipe ran before them, so its absence is itself the
+   * truth: the gates read the source as declared.
+   */
+  const transformImage = preflight?.transform_image ?? null;
+  const transformRetyped = Object.entries(transformImage?.retyped_columns ?? {})
+    .sort(([a], [b]) => a.localeCompare(b));
 
   const semantic = proof?.semantic_mapping_score ?? 0;
   const qualityRaw = proof?.quality_score;
@@ -1134,7 +1190,12 @@ export function ValidateDashboard({
   const mismatches = sampleCompare?.mismatches ?? [];
   const dryGate = preflight?.gates?.find((g) => /dry_run|integrity/i.test(g.id));
   const sampleScanned = Number(dryGate?.details?.sample_rows_scanned ?? dryGate?.details?.sample_size ?? 0) || null;
-  const engineMsTotal = (preflight?.gates ?? []).reduce((sum, g) => sum + (Number(g.duration_ms) || 0), 0);
+  const populationRowsScanned = Number(preflight?.population_fit?.rows_scanned ?? 0);
+  const populationExact = preflight?.population_fit?.evidence === "exact";
+  const engineMsTotal = Math.max(
+    (preflight?.gates ?? []).reduce((sum, g) => sum + (Number(g.duration_ms) || 0), 0),
+    Number(preflight?.elapsed_ms) || 0,
+  );
   // Exact Studio sync ids — avoid /append/i matching accidental substrings.
   const appendLikeSync = [
     "full_refresh_append",
@@ -1187,6 +1248,42 @@ export function ValidateDashboard({
     () => findDuplicateKeyRoot(preflight, syncMode),
     [preflight, syncMode],
   );
+  const visibleExplainFixActions = useMemo(() => {
+    if (!explain?.suggested_actions?.length) return [];
+    return collapseEncodingSuggestedActions(
+      explain.suggested_actions.filter((action) => (
+        action.kind !== "open_mapping_proof"
+        && action.kind !== "mapping_proof"
+        && !(duplicateRoot && (
+          action.kind === "fix_source_keys"
+          || action.kind === "quarantine_and_rerun"
+          || action.kind === "review_mappings"
+        ))
+        && !(ENCODING_ACTION_KINDS.has(action.kind) && (showEncodingRemediation || isTypeMismatchBlock))
+        && !(isTypeMismatchBlock && (
+          action.kind === "review_mappings"
+          || action.kind === "change_target_type"
+          || action.kind === "open_mapping"
+        ))
+        && !(isFkOrphanBlock && (
+          action.kind === "fix_orphans"
+          || action.kind === "run_population_orphan_scan"
+          || action.kind === "review_mappings"
+        ))
+        && !(createNewWidens.length > 0 && (
+          action.kind === "review_mappings"
+          || action.kind === "change_target_type"
+        ))
+      )),
+    );
+  }, [
+    explain,
+    duplicateRoot,
+    showEncodingRemediation,
+    isTypeMismatchBlock,
+    isFkOrphanBlock,
+    createNewWidens.length,
+  ]);
   const displayBlockers = useMemo(
     () => (preflight ? buildDisplayBlockers(preflight, syncMode) : []),
     [preflight, syncMode],
@@ -1215,6 +1312,10 @@ export function ValidateDashboard({
       populationScanRequested: runPopulationOrphanScan,
     }),
     [preflight, runPopulationOrphanScan],
+  );
+  const populationFit = useMemo(
+    () => populationFitSummary(preflight?.population_fit),
+    [preflight],
   );
   const explainParts = useMemo(
     () => (explain?.issues?.length ? partitionExplainIssues(explain.issues) : null),
@@ -1409,6 +1510,14 @@ export function ValidateDashboard({
   };
 
   const handleSuggestedAction = (action: ValidationSuggestedAction) => {
+    if (
+      createNewWidens.length > 0
+      && action.kind === "change_target_type"
+      && onApplyCreateNewWidens
+    ) {
+      onApplyCreateNewWidens();
+      return;
+    }
     // Encoding remediations share one surface — BadDataFixDrawer — so Strip /
     // Quarantine are not duplicated next to every “Fix bad data…” opener.
     if (action.kind === "normalize_control_chars" || action.kind === "open_bad_data_fix") {
@@ -1474,10 +1583,11 @@ export function ValidateDashboard({
       pendingVerifyRef.current = true;
       pushRemediation(
         action.label || "Run population orphan scan",
-        "Opt-in full-table anti-join — only path to RI proven. Sample Validate never claims referential integrity.",
+        "Opt-in full-table MATCH SIMPLE anti-join — only path to RI proven. Sample Validate never claims referential integrity.",
         "Running population orphan scan",
         [
           "Enables the same honesty checkbox as Run population orphan scan on next Validate.",
+          "Composite FKs are scanned as whole tuples (any NULL key component is unconstrained).",
           "Sample orphan probe is not population RI proof.",
           "Zero orphans on the population scan is required before RI proven.",
         ],
@@ -1515,7 +1625,8 @@ export function ValidateDashboard({
 
   return (
     <section className={`df2-vd df2-vd-${heroTone}`} aria-label="Validation dashboard">
-      <header className="df2-vd-hero">
+      <header className={`df2-vd-hero${running ? " is-glass-live" : ""}`}>
+        {running ? <span className="df2-vd-hero-glow" aria-hidden /> : null}
         <div
           className={`df2-vd-hero-ring tone-${heroTone}${heroRing.indeterminate ? " is-indeterminate" : ""}${!heroRing.indeterminate && heroRing.pct >= 100 ? " is-complete" : ""}`}
           aria-hidden
@@ -1554,11 +1665,11 @@ export function ValidateDashboard({
                 }
                 size={13}
               />
-              {running ? "VALIDATING" : decision === "pending" ? "NOT RUN" : decision.toUpperCase()}
+              {running ? "VALIDATING" : transportFailed ? "FAILED" : decision === "pending" ? "NOT RUN" : decision.toUpperCase()}
             </span>
             <h3>
               {running
-                ? "Engine running G1–G9…"
+                ? "Validating route — live engine progress"
                 : preflight
                   ? executiveSummary?.title ?? (
                     decision === "approve" && preflight.passed
@@ -1567,8 +1678,11 @@ export function ValidateDashboard({
                         ? "Review before Execute"
                         : "Action needed before transfer"
                   )
-                  : "Run validation to check this route"}
+                  : transportFailed
+                    ? "Validate did not finish — Re-run from the rail"
+                    : "Run validation to check this route"}
             </h3>
+            {running && <EngineStageTicker running elapsedMs={elapsedMs} progress={progress} />}
           </div>
 
           <div className="df2-vd-hero-counts">
@@ -1593,6 +1707,61 @@ export function ValidateDashboard({
               <strong>{skippedCount}</strong> skipped
             </span>
           </div>
+
+          {!running && transformImage && (
+            <div className="df2-vd-xform" role="note" aria-label="Transform evidence">
+              <p className="df2-vd-xform-head">
+                <DtIcon name="layers" size={14} />
+                {" "}Gates judged the transformed rows, not the raw source
+                <code className="df2-vd-xform-hash" title="Recipe identity Execute is held to">
+                  recipe {transformImage.recipe_hash || "—"}
+                </code>
+              </p>
+              <ul className="df2-vd-xform-facts">
+                <li>
+                  <strong>{(transformImage.sample_rows_in ?? 0).toLocaleString()}</strong> sampled row(s)
+                  read · <strong>{(transformImage.sample_rows_out ?? 0).toLocaleString()}</strong> reached
+                  the gates
+                </li>
+                {Boolean(transformImage.sample_rows_removed) && (
+                  <li>
+                    <strong>{(transformImage.sample_rows_removed ?? 0).toLocaleString()}</strong> removed by
+                    transform — absent by instruction, not quarantined and not lost
+                  </li>
+                )}
+                {Boolean(transformImage.sample_rows_diverted) && (
+                  <li>
+                    <strong>{(transformImage.sample_rows_diverted ?? 0).toLocaleString()}</strong> diverted by
+                    transform to quarantine, with the rule's reason
+                  </li>
+                )}
+                {transformRetyped.length > 0 && (
+                  <li>
+                    Re-read carrier(s) after transform:{" "}
+                    {transformRetyped.map(([column, carrier]) => `${column} → ${carrier}`).join(", ")}
+                    {" — "}columns no step wrote keep their declared source type
+                  </li>
+                )}
+              </ul>
+              <p className="df2-vd-xform-limit">
+                Sample-scoped evidence: these counts describe the rows Validate held, never the whole
+                population. The source is not modified — the recipe runs on the read, and Execute is
+                refused if its identity changes.
+              </p>
+            </div>
+          )}
+
+          {transportFailed && (
+            <div className="df2-vd-exec-summary" role="alert">
+              <p className="df2-vd-exec-summary-sub">{preflightError}</p>
+              <div className="df2-vd-exec-until">
+                <span className="df2-vd-exec-until-label">Cannot execute until</span>
+                <ul>
+                  <li>The API returns a Validate verdict — Re-run Validate from the rail. Population scan is still required.</li>
+                </ul>
+              </div>
+            </div>
+          )}
 
           {!running && preflight && executiveSummary && !preflight.passed && (
             <div className="df2-vd-exec-summary" role="alert">
@@ -1677,9 +1846,14 @@ export function ValidateDashboard({
           {!running && preflight && engineMsTotal > 0 && (
             <p className="df2-vd-hero-engine-meta">
               {formatDuration(engineMsTotal)} · {preflight.gates.length} gates
+              {populationRowsScanned > 0
+                ? ` · ${populationRowsScanned.toLocaleString()} ${populationExact ? "population" : "scanned"} rows`
+                : ""}
               {sampleScanned != null && sampleScanned > 0
                 ? ` · ${sampleScanned.toLocaleString()} preview rows`
-                : " · preview sample"}
+                : populationRowsScanned > 0
+                  ? ""
+                  : " · preview sample"}
             </p>
           )}
           {!running && preflight?.passed && !stripControlsApplied && onStripControlChars && (
@@ -1743,7 +1917,7 @@ export function ValidateDashboard({
           {destShapeCta && (
             <Button
               size="sm"
-              variant="primary"
+              variant={dashCta("dest_shape")}
               leadingIcon={<DtIcon name={ACTION_ICON[destShapeCta.kind] ?? "layers"} size={14} />}
               onClick={() => handleSuggestedAction({
                 kind: destShapeCta.kind,
@@ -1759,7 +1933,11 @@ export function ValidateDashboard({
 
       {/* One root cause → real Button CTAs (no Mapping proof here — evidence lives on Column matches). */}
       {!running && preflight && !preflight.passed && (
-        <div className="df2-vd-assist-actions df2-vd-assist-remediate df2-vd-remediate-bar" aria-label="Suggested fixes">
+        <div
+          className="df2-vd-assist-actions df2-vd-assist-remediate df2-vd-remediate-bar"
+          aria-label="Suggested fixes"
+          data-studio-primary-kind={_studioPrimary?.kind ?? "none"}
+        >
           <span className="df2-vd-assist-actions-title">Suggested fixes</span>
           <div className="df2-vd-fix-actions">
             {duplicateRoot ? (
@@ -1767,7 +1945,7 @@ export function ValidateDashboard({
                 {onOpenIdentitySettings && (
                   <Button
                     size="sm"
-                    variant="primary"
+                    variant={dashCta("identity")}
                     disabled={remediating}
                     leadingIcon={<DtIcon name="settings" size={14} />}
                     onClick={onOpenIdentitySettings}
@@ -1831,7 +2009,7 @@ export function ValidateDashboard({
                 {isPrivilegeBlock && (
                   <Button
                     size="sm"
-                    variant="primary"
+                    variant={dashCta("privilege")}
                     disabled={remediating}
                     leadingIcon={<DtIcon name="shield" size={14} />}
                     onClick={() => {
@@ -1855,7 +2033,7 @@ export function ValidateDashboard({
                 {isConnectionBlock && (
                   <Button
                     size="sm"
-                    variant="primary"
+                    variant={dashCta("connection")}
                     disabled={remediating}
                     leadingIcon={<DtIcon name="server" size={14} />}
                     onClick={() => {
@@ -1884,11 +2062,11 @@ export function ValidateDashboard({
                       <Button
                         key="fidelity-open-map"
                         size="sm"
-                        variant="primary"
+                        variant={dashCta("map_open")}
                         disabled={remediating}
                         leadingIcon={<DtIcon name="layers" size={14} />}
                         onClick={() => onReviewMappings()}
-                        title={fidelityRoot.fix || "Open Map to remap or Accept risk"}
+                        title={fidelityRoot.fix || "Open Map to remap or Accept risk — same destination as the footer"}
                       >
                         Open Map · remap / Accept risk
                       </Button>
@@ -1915,11 +2093,11 @@ export function ValidateDashboard({
                       String(f.suggested_target_type),
                       String(f.target_type || ""),
                     ))
-                    .slice(0, 2);
+                    .slice(0, 8);
                   const coercionBlocks = (preflight?.coercion_report?.columns ?? [])
                     .filter((c) => c.severity === "block" && c.suggested_target_type)
                     .filter((c) => !isNoopTextRemap(String(c.suggested_target_type), String(c.target_type || "")))
-                    .slice(0, 2);
+                    .slice(0, 8);
                   const remapCols = kernelFindings.length > 0
                     ? kernelFindings.map((f) => ({
                       source: String(f.source_column || ""),
@@ -1934,7 +2112,7 @@ export function ValidateDashboard({
                     }))
                     : typeMismatchColumns
                       .filter((c) => !isNoopTextRemap(c.toType, c.targetType || ""))
-                      .slice(0, 2)
+                      .slice(0, 8)
                       .map((c) => ({
                       source: c.source,
                       target: c.target,
@@ -1944,7 +2122,7 @@ export function ValidateDashboard({
                     <Button
                       key={`${col.source}-${col.target}`}
                       size="sm"
-                      variant="primary"
+                      variant={dashCta("remap_column")}
                       disabled={remediating || !onApplyAction}
                       leadingIcon={<DtIcon name="layers" size={14} />}
                       title={`Remap ${col.source} off typed ${col.target} → ${col.toType}`}
@@ -1977,7 +2155,7 @@ export function ValidateDashboard({
                 {showEncodingRemediation && (
                   <Button
                     size="sm"
-                    variant="primary"
+                    variant={dashCta("bad_data")}
                     disabled={remediating}
                     leadingIcon={<DtIcon name="shield" size={14} />}
                     onClick={() => setBadDataOpen(true)}
@@ -1989,7 +2167,7 @@ export function ValidateDashboard({
                   <Button
                     key={`${action.kind}-${action.column ?? ""}-${i}`}
                     size="sm"
-                    variant={i === 0 ? "primary" : "secondary"}
+                    variant={i === 0 ? dashCta("orphan") : "ghost"}
                     disabled={remediating || (!onApplyAction && action.kind !== "fix_orphans")}
                     leadingIcon={<DtIcon name={ACTION_ICON[action.kind] ?? "alert"} size={14} />}
                     onClick={() => handleSuggestedAction(action)}
@@ -1998,7 +2176,20 @@ export function ValidateDashboard({
                     {action.label}
                   </Button>
                 ))}
-                {!isTypeMismatchBlock
+                {createNewWidens.length > 0 && onApplyCreateNewWidens && (
+                  <Button
+                    size="sm"
+                    variant={dashCta("other")}
+                    disabled={remediating}
+                    leadingIcon={<DtIcon name="layers" size={14} />}
+                    onClick={() => onApplyCreateNewWidens()}
+                    title="Applies every proven CREATE type, then re-Validates. Destination is not written yet."
+                  >
+                    {createNewWidenLabel}
+                  </Button>
+                )}
+                {!createNewWidens.length
+                  && !isTypeMismatchBlock
                   && !showEncodingRemediation
                   && !isPrivilegeBlock
                   && !isConnectionBlock
@@ -2006,10 +2197,11 @@ export function ValidateDashboard({
                   && onReviewMappings && (
                   <Button
                     size="sm"
-                    variant="primary"
+                    variant={dashCta("map_open")}
                     disabled={remediating}
                     leadingIcon={<DtIcon name="layers" size={14} />}
                     onClick={() => onReviewMappings()}
+                    title="Same destination as the footer primary — open Map to fix target DDL or mappings"
                   >
                     Open Map to fix
                   </Button>
@@ -2171,7 +2363,7 @@ export function ValidateDashboard({
               {onRunPreflight && !preflight && !running && (
                 <Button
                   size="sm"
-                  variant="primary"
+                  variant={dashCta("run_preflight")}
                   onClick={onRunPreflight}
                   leadingIcon={<DtIcon name="gate" size={14} />}
                 >
@@ -2385,7 +2577,7 @@ export function ValidateDashboard({
             <div className="df2-vd-assist-head-actions">
               <Button
                 size="sm"
-                variant={explain ? "secondary" : "primary"}
+                variant="secondary"
                 disabled={!preflight || explaining}
                 onClick={(e) => {
                   e.stopPropagation();
@@ -2470,11 +2662,13 @@ export function ValidateDashboard({
                           <ul>
                             {explainParts.blockers.map((issue, i) => (
                               <li key={`block-${issue.gate}-${issue.title}-${i}`} className="sev-block">
-                                <strong>{issue.title || gateLabel(issue.gate)}</strong>
-                                <span className="df2-vd-explain-gate is-muted" title={issue.gate}>
-                                  {gateLabel(issue.gate)}
-                                  <code>{issue.gate}</code>
-                                </span>
+                                <strong>{explainIssueTitle(issue)}</strong>
+                                {!isInternalGateId(issue.gate) && (
+                                  <span className="df2-vd-explain-gate is-muted" title={issue.gate}>
+                                    {gateLabel(issue.gate)}
+                                    <code>{issue.gate}</code>
+                                  </span>
+                                )}
                                 {issue.what && <p>{issue.what}</p>}
                                 {issue.why && <p className="df2-vd-explain-why"><em>Why:</em> {issue.why}</p>}
                                 {issue.fix && <p className="df2-vd-explain-fix"><em>Fix:</em> {issue.fix}</p>}
@@ -2510,11 +2704,13 @@ export function ValidateDashboard({
                             )}
                             {explainParts.warnings.map((issue, i) => (
                               <li key={`warn-${issue.gate}-${issue.title}-${i}`} className={`sev-${issue.severity}`}>
-                                <strong>{issue.title || gateLabel(issue.gate)}</strong>
-                                <span className="df2-vd-explain-gate is-muted" title={issue.gate}>
-                                  {gateLabel(issue.gate)}
-                                  <code>{issue.gate}</code>
-                                </span>
+                                <strong>{explainIssueTitle(issue)}</strong>
+                                {!isInternalGateId(issue.gate) && (
+                                  <span className="df2-vd-explain-gate is-muted" title={issue.gate}>
+                                    {gateLabel(issue.gate)}
+                                    <code>{issue.gate}</code>
+                                  </span>
+                                )}
                                 {issue.what && <p>{issue.what}</p>}
                                 {issue.why && <p className="df2-vd-explain-why"><em>Why:</em> {issue.why}</p>}
                                 {issue.fix && <p className="df2-vd-explain-fix"><em>Fix:</em> {issue.fix}</p>}
@@ -2605,8 +2801,13 @@ export function ValidateDashboard({
                                           label: fix.suggested_fix || `Fix ${fix.column}`,
                                         })
                                       }
+                                      title={
+                                        createNewWidens.length > 1
+                                          ? `Applies all ${createNewWidens.length} proven CREATE types, then re-Validates`
+                                          : undefined
+                                      }
                                     >
-                                      Apply
+                                      {createNewWidens.length > 1 ? "Apply all" : "Apply"}
                                     </button>
                                   ) : null}
                                 </td>
@@ -2619,40 +2820,22 @@ export function ValidateDashboard({
                     </div>
                     );
                   })()}
-                  {explain.suggested_actions.length > 0 && (
+                  {visibleExplainFixActions.length > 0 && (
                     <div className="df2-vd-assist-actions">
                       <span className="df2-vd-assist-actions-title">Suggested fixes</span>
                       <div className="df2-vd-fix-actions">
-                        {collapseEncodingSuggestedActions(
-                          explain.suggested_actions.filter((action) =>
-                            action.kind !== "open_mapping_proof"
-                            && action.kind !== "mapping_proof"
-                            // Identity CTAs already live in Suggested fixes bar + rail.
-                            && !(duplicateRoot && (
-                              action.kind === "fix_source_keys"
-                              || action.kind === "quarantine_and_rerun"
-                              || action.kind === "review_mappings"
-                            ))
-                            // Encoding / strip CTAs belong only when encoding is the root cause.
-                            && !(ENCODING_ACTION_KINDS.has(action.kind) && (showEncodingRemediation || isTypeMismatchBlock))
-                            // Type-mismatch Map CTA already lives in the top Suggested fixes bar.
-                            && !(isTypeMismatchBlock && (
-                              action.kind === "review_mappings"
-                              || action.kind === "change_target_type"
-                              || action.kind === "open_mapping"
-                            ))
-                            && !(isFkOrphanBlock && (
-                              action.kind === "fix_orphans"
-                              || action.kind === "run_population_orphan_scan"
-                              || action.kind === "review_mappings"
-                            )),
-                          ),
-                        )
+                        {visibleExplainFixActions
                           .map((action, i) => (
                           <Button
                             key={`${action.kind}-${action.column ?? ""}-${i}`}
                             size="sm"
-                            variant={i === 0 ? "primary" : "secondary"}
+                            variant={
+                              action.kind === "review_mappings"
+                              || action.kind === "change_target_type"
+                              || action.kind === "open_mapping"
+                                ? dashCta("map_open")
+                                : dashCta("other")
+                            }
                             onClick={() => handleSuggestedAction(action)}
                             disabled={
                               !onApplyAction
@@ -2717,6 +2900,28 @@ export function ValidateDashboard({
           report={preflight.load_history_report}
           title="Compared to prior loads"
           className="df2-vd-load-history"
+        />
+      ) : null}
+
+      {!running ? (
+        <NumberLocalePanel
+          action={numberLocaleValidateAction(preflight)}
+          onOpenAdvanced={
+            onOpenLocaleSettings
+              ? () => onOpenLocaleSettings("number")
+              : onOpenIdentitySettings
+          }
+        />
+      ) : null}
+
+      {!running ? (
+        <DateLocalePanel
+          action={dateLocaleValidateAction(preflight)}
+          onOpenAdvanced={
+            onOpenLocaleSettings
+              ? () => onOpenLocaleSettings("date")
+              : onOpenIdentitySettings
+          }
         />
       ) : null}
 
@@ -2985,9 +3190,49 @@ export function ValidateDashboard({
               <strong>ConversionClass</strong>
               <span>{honestyControls.conversionClasses.headline}</span>
             </li>
-            <li>
+            {populationFit ? (
+              <li>
+                <strong>Population fit</strong>
+                <span>
+                  {populationFit.headline}
+                  {populationFit.offenders.length > 0 ? (
+                    <em>
+                      {populationFit.offenders[0].exampleRows.length > 0
+                        ? ` · first at row ${populationFit.offenders[0].exampleRows.slice(0, 3).join(", ")}`
+                        : ""}
+                      {populationFit.offenders
+                        .filter((o) => o.suggestedTargetType)
+                        .slice(0, 6)
+                        .map((o) => ` · widen ${o.column} to ${o.suggestedTargetType}`)
+                        .join("")}
+                    </em>
+                  ) : null}
+                </span>
+              </li>
+            ) : null}
+            <li
+              className="df2-vd-hs-item"
+              data-historical-success-measured={honestyControls.historicalSuccess.measured ? "true" : "false"}
+              data-historical-success-has-percent={honestyControls.historicalSuccess.hasPercent ? "true" : "false"}
+            >
               <strong>Historical success</strong>
-              <span>{honestyControls.historicalSuccess.headline}</span>
+              <div
+                className={`df2-vd-hs-metric ${honestyControls.historicalSuccess.measured ? "is-measured" : "is-unmeasured"}`}
+                aria-label="Historical success process metric"
+              >
+                <span className="df2-vd-hs-badge">{honestyControls.historicalSuccess.badge}</span>
+                <span className="df2-vd-hs-headline">{honestyControls.historicalSuccess.headline}</span>
+                {honestyControls.historicalSuccess.measured ? (
+                  <span className="df2-vd-hs-counts">
+                    {honestyControls.historicalSuccess.runsObserved} load
+                    {honestyControls.historicalSuccess.runsObserved === 1 ? "" : "s"}
+                    {" · "}
+                    {honestyControls.historicalSuccess.keptLabel}
+                    {" · "}
+                    {honestyControls.historicalSuccess.rejectedLabel}
+                  </span>
+                ) : null}
+              </div>
             </li>
             <li>
               <strong>Decision Artifact</strong>
@@ -3019,7 +3264,7 @@ export function ValidateDashboard({
               />
               <span>
                 Run population orphan scan on next Validate
-                <em> (expensive full-table anti-join — only path to RI proven)</em>
+                <em> (expensive full-table MATCH SIMPLE anti-join, including composite FKs — only path to RI proven)</em>
               </span>
             </label>
           )}
@@ -3080,7 +3325,7 @@ export function ValidateDashboard({
                       {!isFidelity && onOpenIdentitySettings && (
                         <Button
                           size="sm"
-                          variant="primary"
+                          variant={dashCta("identity")}
                           leadingIcon={<DtIcon name="settings" size={14} />}
                           onClick={onOpenIdentitySettings}
                           title={item.fix || duplicateRoot?.fixHint}
@@ -3093,10 +3338,10 @@ export function ValidateDashboard({
                       {isFidelity && onReviewMappings && (
                         <Button
                           size="sm"
-                          variant="primary"
+                          variant={dashCta("map_open")}
                           leadingIcon={<DtIcon name="layers" size={14} />}
                           onClick={() => onReviewMappings()}
-                          title={item.fix || "Open Map to remap or Accept risk"}
+                          title={item.fix || "Open Map to remap or Accept risk — same destination as the footer"}
                         >
                           Open Map · remap / Accept risk
                         </Button>
@@ -3149,7 +3394,7 @@ export function ValidateDashboard({
                           <Button
                             key={`${col.source}-${col.target}`}
                             size="sm"
-                            variant="primary"
+                            variant={dashCta("remap_column")}
                             disabled={!onApplyAction || !col.suggested_target_type}
                             title={
                               col.suggested_fix
@@ -3183,14 +3428,22 @@ export function ValidateDashboard({
                       {schemaDriftCompatibilityHeadline(b.details)}
                     </p>
                   )}
-                  {(
-                    b.details?.compliance_ack_required === true
-                    || /pii\/compliance|compliance review/i.test(b.message)
-                  ) && onAcknowledgeCompliance && (
+                  {/* Only the API's own ack flag may offer an unlocking approval.
+                      A PII-shaped message with the flag false is a finding the
+                      operator cannot approve away — say so instead of a button
+                      that re-validates to the same block. */}
+                  {b.details?.compliance_ack_required === false
+                    && /pii\/compliance|compliance review/i.test(b.message) && (
+                    <p className="df2-vd-blocker-fix-note">
+                      PII approval does not clear this blocker — resolve the data or
+                      schema cause named above, then re-run Validate.
+                    </p>
+                  )}
+                  {b.details?.compliance_ack_required === true && onAcknowledgeCompliance && (
                     <div className="df2-vd-blocker-actions df2-vd-fix-actions">
                       <Button
                         size="sm"
-                        variant="primary"
+                        variant={dashCta("acknowledge_pii")}
                         leadingIcon={<DtIcon name="shield" size={14} />}
                         onClick={() => onAcknowledgeCompliance()}
                         disabled={running}
@@ -3213,7 +3466,7 @@ export function ValidateDashboard({
                     <div className="df2-vd-blocker-actions df2-vd-fix-actions">
                       <Button
                         size="sm"
-                        variant="primary"
+                        variant={dashCta("acknowledge_drift")}
                         leadingIcon={<DtIcon name="shield" size={14} />}
                         onClick={() => onAcknowledgeSchemaDrift()}
                         disabled={running}
@@ -3236,11 +3489,11 @@ export function ValidateDashboard({
                     <div className="df2-vd-blocker-actions df2-vd-fix-actions">
                       <Button
                         size="sm"
-                        variant="primary"
+                        variant={dashCta("map_open")}
                         leadingIcon={<DtIcon name="layers" size={14} />}
                         onClick={() => onReviewMappings()}
                         disabled={running}
-                        title="Hard-breaking schema change — remap or re-sign the contract. Acknowledge cannot green this gate."
+                        title="Hard-breaking schema change — remap or re-sign the contract. Same destination as the footer primary."
                       >
                         Open Map to fix breaking change
                       </Button>
@@ -3254,7 +3507,7 @@ export function ValidateDashboard({
                     <div className="df2-vd-blocker-actions df2-vd-fix-actions">
                       <Button
                         size="sm"
-                        variant="primary"
+                        variant={dashCta("acknowledge_fk")}
                         leadingIcon={<DtIcon name="shield" size={14} />}
                         onClick={() => onAcknowledgeFkRisk()}
                         disabled={running}
@@ -3284,7 +3537,7 @@ export function ValidateDashboard({
                           <Button
                             key={`block-${col.source}-${col.target}`}
                             size="sm"
-                            variant="primary"
+                            variant={dashCta("remap_column")}
                             disabled={!onApplyAction}
                             leadingIcon={<DtIcon name="layers" size={14} />}
                             onClick={() =>

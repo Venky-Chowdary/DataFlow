@@ -8,7 +8,6 @@ import json
 import logging
 import re
 import sys
-from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable
 
@@ -41,10 +40,12 @@ except (
     from src.services.value_serializer import cell_to_string, json_default
 
 from connectors.sql_dsn import is_masked_secret, sync_credentials_into_connection_string
+from services.read_options import ReadOptions
 
 from .connector_registry import run_probe
+from .job_quarantine import split_refused_unit
 from .models import EndpointConfig
-from .type_mapper import ddl_carrier_type, ddl_type, normalize_inferred
+from .type_mapper import ddl_carrier_type, ddl_type
 
 
 class FileExportMapBlocked(ValueError):
@@ -167,6 +168,7 @@ def raise_writer_failure(result: Any, label: str) -> None:
     details = list(getattr(result, "rejected_details", []) or [])
     rejected_rows = int(getattr(result, "rejected_rows", 0) or 0) or len(details)
     summary = _writer_diagnostics(result)
+    rejected_rows = split_refused_unit(details, rejected_rows, summary)
     try:
         from connectors.write_resilience import is_connection_lost
     except ImportError:
@@ -216,11 +218,21 @@ def parse_file_content(
     filename: str,
     *,
     enable_ocr: bool = False,
+    read_options: ReadOptions | None = None,
 ) -> tuple[list[dict], list[str], dict[str, str]]:
-    result = FileParser.parse(content, filename, enable_ocr=enable_ocr)
+    result = FileParser.parse(
+        content, filename, enable_ocr=enable_ocr, read_options=read_options
+    )
     if not result.success:
         raise ValueError(result.error or "File parse failed")
-    schema = FileParser.infer_schema(result.data)
+    # Avro / Parquet / ORC already carry the writer contract. Sample inference
+    # invented DECIMAL(38,18) as FLOAT after pandas (and still after to_pylist).
+    writer_schema = getattr(result, "schema_map", None)
+    schema = (
+        dict(writer_schema)
+        if writer_schema
+        else FileParser.infer_schema(result.data)
+    )
     return result.data, result.columns, schema
 
 
@@ -261,25 +273,25 @@ def parse_file_route_sample(
     if not result.success:
         raise ValueError(result.error or "File parse failed")
     sample = result.data[:preview_rows]
+    writer_schema = getattr(result, "schema_map", None)
     schema = (
-        FileParser.infer_schema(sample)
-        if sample
-        else {c: "string" for c in result.columns}
+        dict(writer_schema)
+        if writer_schema
+        else (
+            FileParser.infer_schema(sample)
+            if sample
+            else {c: "string" for c in result.columns}
+        )
     )
     return result.columns, schema, result.row_count
 
 
 def _matrix_cell(value: Any) -> Any:
-    # Preserve SQL NULL / missing distinctly from the literal empty string so
-    # downstream writers can tell the difference.
-    from services.value_serializer import DF_MISSING_SENTINEL, is_missing_sentinel
+    # One owner with ``matrix_cell_from_record``: Missing stays Missing,
+    # reader-null is None (not the extract wire token).
+    from connectors.source_row_spool import matrix_present_cell
 
-    if value is None:
-        return None
-    # STOP_COLUMN / sparse CDC — never collapse DF_MISSING to "" via cell_to_string.
-    if is_missing_sentinel(value):
-        return DF_MISSING_SENTINEL
-    return cell_to_string(value)
+    return matrix_present_cell(value)
 
 
 def records_to_matrix(
@@ -592,6 +604,11 @@ def resolve_connector_config(
     cfg["role"] = engine_login_role(cfg.get("auth_role"), cfg.get("role"))
     if cfg.get("auth_role"):
         cfg["auth_role"] = engine_login_role(cfg.get("auth_role"))
+    # OpenShift is a hosting plane — resolve Service DNS onto the real store.
+    # Never a Kubernetes API write. See services.openshift_dest.
+    from services.openshift_dest import apply_openshift_hosting
+
+    cfg = apply_openshift_hosting(cfg)
     return cfg
 
 
@@ -655,295 +672,6 @@ def _lookup_saved_connector(
         return None
 
 
-def _columns_type_and_nullability(
-    columns: list[dict[str, Any]],
-) -> tuple[dict[str, str], dict[str, bool]]:
-    """Split introspect column dicts into type map + nullable map."""
-    types, nulls, _defaults, _ident, _gen, _coll = _columns_schema_meta(columns)
-    return types, nulls
-
-
-def _columns_schema_meta(
-    columns: list[dict[str, Any]],
-) -> tuple[
-    dict[str, str],
-    dict[str, bool],
-    dict[str, str],
-    list[str],
-    list[str],
-    dict[str, str],
-]:
-    """Type / nullability / defaults / identity / generated / collation maps."""
-    types: dict[str, str] = {}
-    nulls: dict[str, bool] = {}
-    defaults: dict[str, str] = {}
-    identity: list[str] = []
-    generated: list[str] = []
-    collations: dict[str, str] = {}
-    for col in columns:
-        name = col.get("name")
-        if not name:
-            continue
-        key = str(name)
-        types[key] = str(col.get("inferred_type") or "TEXT")
-        if "nullable" in col:
-            nulls[key] = bool(col["nullable"])
-        dflt = col.get("default")
-        if dflt is not None and str(dflt).strip() != "":
-            defaults[key] = str(dflt)
-        if col.get("is_identity"):
-            identity.append(key)
-        inferred_u = str(col.get("inferred_type") or "").upper()
-        if "GENERATED ALWAYS" in inferred_u or str(col.get("generation") or "").lower() == "always":
-            if key not in generated:
-                generated.append(key)
-        coll = str(col.get("collation") or "").strip()
-        if coll:
-            collations[key] = coll
-    return types, nulls, defaults, identity, generated, collations
-
-
-def _introspect_table_schema_rich(
-    db_type: str,
-    cfg: dict[str, Any],
-    table: str,
-    headers: list[str],
-    records: list[dict] | None = None,
-    *,
-    strict_namespace: bool = False,
-) -> tuple[dict[str, str], dict[str, bool], dict[str, Any]]:
-    """Load column types + nullability + unique keys from INFORMATION_SCHEMA.
-
-    ``strict_namespace`` is required for destination probes so missing tables in
-    the chosen DB/schema are not "healed" from another namespace on the host.
-    Nullability feeds G3 NOT NULL contracts — never invent nullable=True when
-    the catalog says otherwise.
-    Third return value carries ``primary_key_columns`` / ``unique_keys`` when the
-    catalog exposes them (PG/MySQL today), plus Property 6 defaults/identity.
-    """
-    empty_keys: dict[str, Any] = {
-        "primary_key_columns": [],
-        "unique_keys": [],
-        "defaults": {},
-        "identity_columns": [],
-        "generated_columns": [],
-        "collations": {},
-        "charsets": {},
-        "physical_storage": None,
-        "check_constraints_meta": None,
-        "indexes_meta": None,
-        "warnings": [],
-    }
-
-    def _keys_from_info(
-        payload: dict[str, Any],
-        *,
-        defaults: dict[str, str] | None = None,
-        identity_columns: list[str] | None = None,
-        generated_columns: list[str] | None = None,
-        collations: dict[str, str] | None = None,
-    ) -> dict[str, Any]:
-        warnings = [str(w) for w in (payload.get("warnings") or []) if w]
-        # Catalog message often carries the advisory-key honesty note when
-        # ``warnings`` was folded into ``message`` by introspect.
-        msg = str(payload.get("message") or "").strip()
-        if msg and any(
-            token in msg.lower()
-            for token in ("not enforced", "informational", "advisory")
-        ):
-            if msg not in warnings:
-                warnings.append(msg)
-        charsets: dict[str, str] = {}
-        for col in payload.get("columns") or []:
-            if not isinstance(col, dict):
-                continue
-            name = str(col.get("name") or "").strip()
-            cs = str(col.get("charset") or "").strip()
-            if name and cs:
-                charsets[name] = cs
-        return {
-            "primary_key_columns": list(payload.get("primary_key_columns") or []),
-            "unique_keys": list(payload.get("unique_keys") or []),
-            "defaults": dict(defaults or {}),
-            "identity_columns": list(identity_columns or []),
-            "generated_columns": list(generated_columns or []),
-            "collations": dict(collations or {}),
-            "charsets": charsets,
-            "foreign_keys": list(payload.get("foreign_keys") or []),
-            "check_constraints": list(payload.get("check_constraints") or []),
-            # None when the dialect/probe never measured placement — the
-            # certificate reports "unknown", never "no partitioning".
-            "physical_storage": payload.get("physical_storage"),
-            # None when the CHECK catalog was never read — the certificate says
-            # "unmeasured", never "no CHECK constraints".
-            "check_constraints_meta": payload.get("check_constraints_meta"),
-            # None when the index catalog was never read — the certificate says
-            # "unmeasured", never "no secondary indexes".
-            "indexes_meta": payload.get("indexes_meta"),
-            "warnings": warnings,
-        }
-
-    if db_type == "generic_sql":
-        try:
-            from connectors.generic_sql import introspect_table_schema
-
-            info = introspect_table_schema(cfg, table)
-            if info.get("ok") and info.get("columns"):
-                types, nulls, defaults, ident, gen, coll = _columns_schema_meta(
-                    info["columns"]
-                )
-                return types, nulls, _keys_from_info(
-                    info,
-                    defaults=defaults,
-                    identity_columns=ident,
-                    generated_columns=gen,
-                    collations=coll,
-                )
-        except Exception as exc:
-            logger.debug("table schema introspection failed: %s", exc, exc_info=exc)
-
-    from services.dialect_profiles import schema_from_cfg
-    from services.schema_introspect import introspect_schema
-
-    info = introspect_schema(
-        db_type,
-        host=cfg.get("host", ""),
-        port=int(
-            cfg.get("port")
-            or (
-                3306
-                if db_type == "mysql"
-                else 1433
-                if db_type == "sqlserver"
-                else 1521
-                if db_type == "oracle"
-                else 5439
-                if db_type == "redshift"
-                else 5432
-            )
-        ),
-        database=cfg.get("database", ""),
-        username=cfg.get("username", ""),
-        password=cfg.get("password", ""),
-        schema=schema_from_cfg(db_type, cfg),
-        connection_string=cfg.get("connection_string", ""),
-        # Prefer connector ssl exactly as list/probe use it. Do not default True
-        # when the key is missing — that caused managed vs local mismatch where
-        # SHOW TABLES succeeded (ssl=False) but INFORMATION_SCHEMA failed (ssl=True),
-        # leaving Map with "destination schema unavailable" for an existing table.
-        ssl=bool(cfg.get("ssl", False)),
-        warehouse=cfg.get("warehouse", ""),
-        table=table,
-        catalog_type=cfg.get("type", ""),
-        auth_source=cfg.get("auth_source", ""),
-        api_key=cfg.get("api_key", ""),
-        role=str(cfg.get("role") or ""),
-        auth_role=str(cfg.get("auth_role") or ""),
-        private_key=str(cfg.get("private_key") or ""),
-        strict_namespace=strict_namespace,
-    )
-    if info.get("ok") and info.get("columns"):
-        types, nulls, defaults, ident, gen, coll = _columns_schema_meta(info["columns"])
-        return types, nulls, _keys_from_info(
-            info,
-            defaults=defaults,
-            identity_columns=ident,
-            generated_columns=gen,
-            collations=coll,
-        )
-
-    # Retry once with flipped SSL when the first probe failed (common when the
-    # connector ssl flag does not match the host's TLS requirement).
-    if not info.get("ok") and db_type in (
-        "postgresql",
-        "redshift",
-        "mysql",
-        "sqlserver",
-    ):
-        flipped = not bool(cfg.get("ssl", False))
-        info_retry = introspect_schema(
-            db_type,
-            host=cfg.get("host", ""),
-            port=int(
-                cfg.get("port")
-                or (
-                    3306
-                    if db_type == "mysql"
-                    else 1433
-                    if db_type == "sqlserver"
-                    else 1521
-                    if db_type == "oracle"
-                    else 5439
-                    if db_type == "redshift"
-                    else 5432
-                )
-            ),
-            database=cfg.get("database", ""),
-            username=cfg.get("username", ""),
-            password=cfg.get("password", ""),
-            schema=schema_from_cfg(db_type, cfg),
-            connection_string=cfg.get("connection_string", ""),
-            ssl=flipped,
-            warehouse=cfg.get("warehouse", ""),
-            table=table,
-            catalog_type=cfg.get("type", ""),
-            auth_source=cfg.get("auth_source", ""),
-            api_key=cfg.get("api_key", ""),
-            strict_namespace=strict_namespace,
-        )
-        if info_retry.get("ok") and info_retry.get("columns"):
-            types, nulls, defaults, ident, gen, coll = _columns_schema_meta(
-                info_retry["columns"]
-            )
-            return types, nulls, _keys_from_info(
-                info_retry,
-                defaults=defaults,
-                identity_columns=ident,
-                generated_columns=gen,
-                collations=coll,
-            )
-
-    # Fallback: infer logical types from the sample records we already have in hand.
-    # This is essential for schemaless sources (MongoDB, DynamoDB, Redis) whose
-    # stored values may be strings but whose content is numeric, boolean, JSON, etc.
-    keys = dict(empty_keys)
-    if not info.get("ok"):
-        err = str(info.get("error") or "").strip()
-        if err:
-            keys["probe_error"] = err
-    if records:
-        try:
-            from services.file_parser import FileParser
-
-            inferred = FileParser.infer_schema(records)
-            if inferred:
-                return {h: inferred.get(h, "TEXT") for h in headers}, {}, keys
-        except Exception as exc:
-            logger.debug("record schema inference failed: %s", exc, exc_info=exc)
-    if headers:
-        return {h: "TEXT" for h in headers}, {}, keys
-    return {}, {}, keys
-
-
-def _introspect_table_schema(
-    db_type: str,
-    cfg: dict[str, Any],
-    table: str,
-    headers: list[str],
-    records: list[dict] | None = None,
-    *,
-    strict_namespace: bool = False,
-) -> dict[str, str]:
-    """Load column types from INFORMATION_SCHEMA or infer from sample records."""
-    types, _nulls, _keys = _introspect_table_schema_rich(
-        db_type,
-        cfg,
-        table,
-        headers,
-        records=records,
-        strict_namespace=strict_namespace,
-    )
-    return types
 
 
 _NON_STREAMING_ROW_LIMIT = 100_000
@@ -1483,6 +1211,7 @@ def write_destination_database(
     the destination summary for ``reconcile()`` to check the delta against.
     Keyword options are forwarded verbatim to ``_write_destination_database``.
     """
+    from connectors.writer_common import active_quarantine_mappings
     from services.dest_precount import PRECOUNT_KEY, precount_destination
     from services.dialect_profiles import schema_from_cfg
     from services.row_conservation import CENSUS_KEY, prepare_keyed_upsert
@@ -1548,9 +1277,12 @@ def write_destination_database(
         )
         options["source_spool"] = spill.spool
     try:
-        rows_written, ddl_log, summary = _write_destination_database(
-            endpoint, records, columns, schema, mappings, **options
-        )
+        # The Map governs holdouts for the whole write, including the bind and
+        # salvage paths that stamp their own details.
+        with active_quarantine_mappings(mappings):
+            rows_written, ddl_log, summary = _write_destination_database(
+                endpoint, records, columns, schema, mappings, **options
+            )
         if dest_plan is not None and dest_plan.after_spec is not None:
             _run_dest_procedure_hook(endpoint, dest_plan.after_spec)
             ddl_log = list(ddl_log or [])
@@ -2383,28 +2115,10 @@ def write_destination_file(
             reject_on_strict_policy,
             transform_error_policy,
         )
-        from services.value_serializer import (
-            DF_MISSING_SENTINEL,
-            is_missing_sentinel,
-        )
+        from connectors.source_row_spool import matrix_row_from_record
 
         headers = columns
-        data_rows: list[list[Any]] = []
-        for rec in records:
-            row: list[Any] = []
-            for col in headers:
-                if col not in rec:
-                    # Absent key ≠ empty string — preserve omit semantics for Map.
-                    row.append(DF_MISSING_SENTINEL)
-                    continue
-                val = rec[col]
-                if is_missing_sentinel(val):
-                    row.append(val)
-                elif val is None:
-                    row.append(None)
-                else:
-                    row.append(cell_to_string(val))
-            data_rows.append(row)
+        data_rows = [matrix_row_from_record(rec, headers) for rec in records]
         target_cols, _ = resolve_target_columns(mappings, types)
         error_policy = transform_error_policy_for_validation_mode(validation_mode)
         mapped_rows, transform_errors, rejected_details = build_mapped_rows_with_details(
@@ -2450,7 +2164,7 @@ def write_destination_file(
                 mappings=list(mappings) or None,
             )
         # Keep DF_MISSING through export — JSON/JSONL omit keys; dense CSV/grid
-        # render empty via cell_to_string. Never force-null invent before serialize.
+        # render empty via to_delimited_value. Never force-null invent before serialize.
         abort = reject_on_strict_policy(error_policy, rejected_details, "file_export")
         if abort:
             raise FileExportMapBlocked(
@@ -2460,6 +2174,30 @@ def write_destination_file(
             )
         export_columns = target_cols
         export_records = [dict(zip(target_cols, row)) for row in mapped_rows]
+
+    if mappings:
+        export_dest_types = {
+            str(m.get("target") or ""): str(
+                m.get("target_type")
+                or m.get("dest_type")
+                or types.get(m.get("source") or "", "")
+            )
+            for m in mappings
+            if str(m.get("target") or "").strip()
+        }
+    else:
+        export_dest_types = dict(types)
+
+    from connectors.writer_common import to_delimited_value
+
+    def _export_grid_cell(val: Any, col: str) -> str:
+        """One CSV/grid cell — reader-null is empty, never the extract token."""
+        parsed = to_delimited_value(val, col, export_dest_types)
+        if parsed is None:
+            return ""
+        if isinstance(parsed, str):
+            return parsed
+        return cell_to_string(parsed)
 
     def _export_summary(
         filename: str,
@@ -2483,12 +2221,12 @@ def write_destination_file(
         return out
 
     grid = [
-        [cell_to_string(rec.get(col, "")) for col in export_columns]
+        [_export_grid_cell(rec.get(col), col) for col in export_columns]
         for rec in export_records
     ]
 
     # JSON/JSONL must use omit-aware serialization below — the grid convert path
-    # runs cell_to_string which collapses DF_MISSING to "" (false invent).
+    # renders DF_MISSING / reader-null as empty (never the extract token).
     if fmt not in {"json", "jsonl"} and can_convert(src_fmt, fmt) and grid:
         content, mime = convert_rows(
             export_columns, grid, source_format=src_fmt, target_format=fmt
@@ -2521,55 +2259,15 @@ def write_destination_file(
             ),
         )
 
-    def _to_json_value(value: Any, col: str) -> Any:
-        if value is None:
-            return None
-        if isinstance(value, str):
-            text = value.strip()
-            if not text:
-                return value
-            ctype = normalize_inferred(types.get(col, "string")).lower()
-            if ctype in {"json", "array", "object", "struct"}:
-                try:
-                    def _reject(name: str) -> None:
-                        raise ValueError(f"non-finite JSON constant: {name}")
-
-                    return json.loads(
-                        text, parse_float=Decimal, parse_constant=_reject
-                    )
-                except (json.JSONDecodeError, ValueError):
-                    return value
-            if ctype in {
-                "text",
-                "string",
-                "varchar",
-                "uuid",
-                "binary",
-                "date",
-                "datetime",
-                "time",
-            }:
-                return value
-            try:
-                def _reject(name: str) -> None:
-                    raise ValueError(f"non-finite JSON constant: {name}")
-
-                return json.loads(
-                    text, parse_float=Decimal, parse_constant=_reject
-                )
-            except (json.JSONDecodeError, ValueError):
-                return value
-        return value
-
     def _json_export_records(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        from services.value_serializer import is_missing_sentinel
+        from connectors.writer_common import present_field_bindings, to_json_value
 
         # Kafka/object-store class: omit STOP_COLUMN / sparse CDC keys entirely.
+        # Reader-null binds as None then JSON null — never the extract token.
         return [
             {
-                c: _to_json_value(v, c)
-                for c, v in r.items()
-                if not is_missing_sentinel(v)
+                c: to_json_value(v, c, export_dest_types)
+                for c, v in present_field_bindings(r).items()
             }
             for r in rows
         ]
@@ -2580,7 +2278,10 @@ def write_destination_file(
         writer = csv.DictWriter(buf, fieldnames=export_columns, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(
-            [{c: cell_to_string(v) for c, v in r.items()} for r in export_records]
+            [
+                {c: _export_grid_cell(r.get(c), c) for c in export_columns}
+                for r in export_records
+            ]
         )
         content = buf.getvalue().encode("utf-8")
         filename = "export.csv"
@@ -2592,7 +2293,10 @@ def write_destination_file(
         )
         writer.writeheader()
         writer.writerows(
-            [{c: cell_to_string(v) for c, v in r.items()} for r in export_records]
+            [
+                {c: _export_grid_cell(r.get(c), c) for c in export_columns}
+                for r in export_records
+            ]
         )
         content = buf.getvalue().encode("utf-8")
         filename = "export.tsv"
@@ -2630,6 +2334,49 @@ def write_destination_file(
     )
 
 
+#: Destinations whose catalog folds unquoted identifiers to one case.
+_CASE_FOLDING_DESTS = frozenset({"oracle", "snowflake", "db2"})
+
+
+def carry_dest_spelling_across_drop(
+    destination: Any,
+    db_type: str,
+    cfg: dict[str, Any],
+    table_name: str,
+    schema: str | None,
+) -> None:
+    """Remember the destination's stored spelling before an overwrite drops it.
+
+    On Oracle/Snowflake a table that does not exist is created under the folded
+    (upper-case) name, which is right for a first load and wrong for an
+    overwrite: a quoted lower-case destination came back as a *different* object
+    and everything reading the old identifier found nothing.
+
+    The probe is best-effort by contract: no prior spelling simply means "treat
+    this as a first load and fold". It must never fail the transfer — Snowflake
+    writes through the native driver, so its optional SQLAlchemy dialect being
+    absent is not a reason to refuse a route that never needed it.
+    """
+    import logging
+
+    if db_type.lower() not in _CASE_FOLDING_DESTS:
+        return
+    try:
+        from connectors.generic_sql import physical_table_spelling
+
+        prior = physical_table_spelling(cfg, table_name, schema)
+    except Exception as exc:  # noqa: BLE001 — advisory probe, never a run failure
+        logging.getLogger(__name__).debug(
+            "pre-drop spelling probe failed for %s: %s", table_name, exc
+        )
+        return
+    if prior:
+        destination.extra = {
+            **(getattr(destination, "extra", None) or {}),
+            "dest_table_prior_spelling": prior,
+        }
+
+
 def resolve_endpoint_dict(
     endpoint_dict: dict[str, Any], workspace_id: str | None = None
 ) -> dict[str, Any]:
@@ -2645,3 +2392,15 @@ def resolve_endpoint_dict(
         if key not in out and value is not None:
             out[key] = value
     return out
+
+
+# --------------------------------------------------------------------------- #
+# Schema introspection lives in its own module (Phase F8 size freeze) and is
+# re-exported here so every existing import keeps working.
+# --------------------------------------------------------------------------- #
+from src.transfer.adapters_introspect import (  # noqa: E402,F401
+    _columns_schema_meta,
+    _columns_type_and_nullability,
+    _introspect_table_schema,
+    _introspect_table_schema_rich,
+)

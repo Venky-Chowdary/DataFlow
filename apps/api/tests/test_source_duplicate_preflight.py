@@ -40,6 +40,32 @@ def sqlite_dupes_connector(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> t
     return str(saved.id), "jobs"
 
 
+def test_qualified_sql_table_from_clause_is_not_double_prefixed() -> None:
+    """``public.case_a_src`` + schema=public must compile to public.case_a_src."""
+    import sqlalchemy as sa
+    from sqlalchemy.dialects import postgresql
+
+    from connectors.sql_identifiers import split_qualified_table
+
+    schema, table = split_qualified_table("public.case_a_src", "public")
+    tbl = sa.table(table, schema=schema)
+    sql = str(
+        sa.select(sa.column("id")).select_from(tbl).compile(dialect=postgresql.dialect())
+    )
+    assert "public.public" not in sql
+    assert '"public.case_a_src"' not in sql
+    assert "case_a_src" in sql
+
+    bare_schema, bare_table = split_qualified_table("case_a_src", "public")
+    assert (bare_schema, bare_table) == (schema, table)
+
+    buggy = sa.table("public.case_a_src", schema="public")
+    buggy_sql = str(
+        sa.select(sa.column("id")).select_from(buggy).compile(dialect=postgresql.dialect())
+    )
+    assert '"public.case_a_src"' in buggy_sql
+
+
 def test_source_duplicate_probe_sqlite(sqlite_dupes_connector: tuple[str, str]) -> None:
     """The probe returns the duplicate keys and their counts."""
     connector_id, table = sqlite_dupes_connector

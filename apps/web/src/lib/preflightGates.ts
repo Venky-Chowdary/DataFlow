@@ -79,6 +79,18 @@ export const GATE_CATALOG: GateCatalogEntry[] = [
     rule: "Existing-table shape is classified once (equal / source-superset / dest-superset / overlap). Writes are name-addressed — never source-positional. Dest-only columns stay off SET.",
   },
   {
+    id: "g18_cdc_snapshot_mode",
+    label: "CDC snapshot mode",
+    icon: "transfer",
+    rule: "snapshot_mode=never without a stored watermark blocks at Validate (same kernel Execute uses). initial / when_needed snapshot. CDC remains at-least-once upsert.",
+  },
+  {
+    id: "g3f_population_fit",
+    label: "Population fit",
+    icon: "scan",
+    rule: "Bounded destination carriers (DECIMAL(p,s) / VARCHAR(n) / sized INTEGER) are decided on the rows this run actually holds, with the write path's own fit predicates. A finding proves those values cannot be written; a clean scan is population proof only when every source row was scanned.",
+  },
+  {
     id: "constraint_fk",
     label: "Foreign key coverage",
     icon: "shield",
@@ -97,6 +109,32 @@ export const CORE_ENGINE_GATE_IDS = [
   "g7_capacity",
   "g8_reconciliation",
 ] as const;
+
+/**
+ * What the engine is *doing* in each core stage, in the order it runs them.
+ *
+ * "Engine running G1–G9" told an operator nothing: a client watching a million
+ * rows migrate could not tell which internal id was inspecting their data, or
+ * that the wait was work rather than a hang. These remain the stage *names*.
+ * The running ticker must not walk them on a timer — that looped 1/9…9/9
+ * during a long 1M scan. Live progress is rows scanned + wall clock.
+ */
+export const ENGINE_STAGES: { id: string; stage: string; running: string }[] = [
+  { id: "g1_source", stage: "Source acquisition", running: "Reading source catalog and sample" },
+  { id: "g2_destination", stage: "Destination probe", running: "Probing destination privileges" },
+  { id: "g3_schema_contract", stage: "Schema contract diff", running: "Diffing source and destination schemas" },
+  { id: "g4_mapping_confidence", stage: "Semantic mapping", running: "Assigning columns by semantic score" },
+  { id: "g5_dry_run", stage: "Transform dry-run", running: "Running writer transforms on sample rows" },
+  { id: "g9_data_integrity", stage: "Integrity scan", running: "Scanning encoding, nulls, identity and precision" },
+  { id: "g6_target_ddl", stage: "DDL compilation", running: "Compiling destination CREATE / ALTER plan" },
+  { id: "g7_capacity", stage: "Capacity estimate", running: "Estimating destination headroom and runtime" },
+  { id: "g8_reconciliation", stage: "Reconciliation contract", running: "Binding the post-load checksum contract" },
+];
+
+export function engineStageLabel(id: string): string {
+  const canonical = canonicalizeGateId(id);
+  return ENGINE_STAGES.find((s) => s.id === canonical)?.stage ?? gateLabel(id);
+}
 
 const ALIAS_TO_CANONICAL: Record<string, string> = {};
 for (const entry of GATE_CATALOG) {
@@ -123,4 +161,24 @@ export function gateCatalogEntry(id: string): GateCatalogEntry {
 
 export function gateLabel(id: string): string {
   return gateCatalogEntry(id).label;
+}
+
+/**
+ * Title for one blocker card / rail line.
+ *
+ * Proof-bundle blockers are positionally numbered (`proof_0`), not gates, so the
+ * gate catalog can only spell their internal id back at the operator. Name the
+ * cause from its own message instead — an operator must never be told the reason
+ * they cannot execute is "proof 0".
+ */
+export function isInternalGateId(id: string): boolean {
+  return /^proof_\d+$/i.test(String(id || ""));
+}
+
+export function blockerTitle(id: string, message?: string): string {
+  if (!isInternalGateId(id)) return gateLabel(id);
+  const text = String(message || "").trim();
+  if (!text) return "Transfer proof blocker";
+  const clause = text.split(/[.;\n]|\s—\s/)[0].trim() || text;
+  return clause.length > 72 ? `${clause.slice(0, 69).trimEnd()}…` : clause;
 }

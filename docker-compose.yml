@@ -197,6 +197,34 @@ services:
       - "9050:9050"
       - "9060:9060"
 
+  # GCS-compatible emulator. Not a customer GCS tenant certificate.
+  fake-gcs:
+    image: fsouza/fake-gcs-server:latest
+    command:
+      - -scheme
+      - http
+      - -port
+      - "4443"
+      - -public-host
+      - localhost
+      - -external-url
+      - http://localhost:4443
+    ports:
+      - "4443:4443"
+
+  # Azure Blob / ADLS Gen2 emulator. Not a customer ADLS tenant certificate.
+  azurite:
+    image: mcr.microsoft.com/azure-storage/azurite:latest
+    command: azurite-blob --blobHost 0.0.0.0 --blobPort 10000 --loose --skipApiVersionCheck
+    ports:
+      - "10000:10000"
+
+  # DynamoDB Local for SKU routes that need a provisioned key schema.
+  dynamodb-local:
+    image: amazon/dynamodb-local:latest
+    ports:
+      - "8000:8000"
+
 volumes:
   pgdata:
   miniodata:

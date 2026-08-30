@@ -11,7 +11,8 @@ import logging
 import math
 import re
 from collections import Counter
-from datetime import datetime
+from datetime import date
+from decimal import Decimal
 from typing import Any
 
 from .schema_tools import AmbiguousConnectorError, _safe_connector, list_connector_objects
@@ -24,17 +25,6 @@ _MAX_QUERY_ROWS = 200
 # asks for far more than a chat reply would ever print. Enterprise schemas with
 # thousands of objects are ordinary.
 _RESOLVE_INVENTORY_LIMIT = 100_000
-_BOOL_TRUE = {"true", "t", "yes", "y", "1"}
-_BOOL_FALSE = {"false", "f", "no", "n", "0"}
-_DATE_HINTS = (
-    "%Y-%m-%d",
-    "%Y-%m-%d %H:%M:%S",
-    "%Y-%m-%dT%H:%M:%S",
-    "%Y-%m-%dT%H:%M:%S.%f",
-    "%Y-%m-%dT%H:%M:%SZ",
-    "%m/%d/%Y",
-    "%d/%m/%Y",
-)
 _MISSING_TABLE_RE = re.compile(
     r"(?:undefinedtable|does not exist|doesn't exist|unknown relation|"
     r"no such table|invalid object name|relation\s+[\"'].+[\"']\s+does not exist|"
@@ -139,60 +129,53 @@ def _is_nullish(v: Any) -> bool:
     return v is None or v == ""
 
 
-def _try_float(v: Any) -> float | None:
-    if isinstance(v, bool):
-        return None
-    if isinstance(v, (int, float)):
-        if isinstance(v, float) and (math.isnan(v) or math.isinf(v)):
-            return None
-        return float(v)
-    if isinstance(v, str):
-        s = v.strip().replace(",", "")
-        if not s:
-            return None
-        try:
-            return float(s)
-        except ValueError:
-            return None
-    return None
+def _try_float(v: Any) -> Decimal | None:
+    """Same decimal the write path would bind — never ``replace(",", "")``.
+
+    Locale money keeps exact scale. Auto ``1,234`` / ``1.234`` return None.
+    IEEE ``float(dec)`` collapsed 2**53+1 against 2**53 in Pilot compare.
+    """
+    from services.transform_engine import decimal_wire_value
+
+    return decimal_wire_value(v)
 
 
 def _try_bool(v: Any) -> bool | None:
+    """True/False when the write path would bind this cell as a boolean.
+
+    Informal ``yes``/``on``/``y`` invent truth the boolean transform refuses.
+    Native 0/1 integers stay numbers — they are not a boolean wire.
+    """
     if isinstance(v, bool):
         return v
-    if isinstance(v, (int, float)) and v in (0, 1):
-        return bool(v)
-    if isinstance(v, str):
-        s = v.strip().lower()
-        if s in _BOOL_TRUE:
-            return True
-        if s in _BOOL_FALSE:
-            return False
-    return None
+    if not isinstance(v, str):
+        return None
+    from services.transform_engine import apply_transform
+
+    parsed, err = apply_transform(v.strip(), "boolean")
+    if err or parsed is None:
+        return None
+    return bool(parsed)
 
 
 def _try_datetime(v: Any) -> bool:
-    if isinstance(v, datetime):
+    """True when the write path would bind this cell as a date/datetime.
+
+    Dual MDY+DMY strptime used to call ``01/02/2024`` a date. Auto cannot
+    bind that cell, so a Pilot profile that labeled the column datetime
+    invented a calendar the write refuses.
+    """
+    if isinstance(v, date):
         return True
     if not isinstance(v, str):
         return False
     s = v.strip()
     if len(s) < 8:
         return False
-    for fmt in _DATE_HINTS:
-        try:
-            datetime.strptime(s[:26].rstrip("Z"), fmt.rstrip("Z"))
-            return True
-        except ValueError:
-            continue
-    # ISO-ish
-    if "T" in s and len(s) >= 10:
-        try:
-            datetime.fromisoformat(s.replace("Z", "+00:00"))
-            return True
-        except ValueError:
-            return False
-    return False
+    from services.transform_engine import apply_transform
+
+    parsed, err = apply_transform(s, "datetime")
+    return parsed is not None and not err
 
 
 def _infer_kind(non_null: list[Any]) -> str:
@@ -203,7 +186,7 @@ def _infer_kind(non_null: list[Any]) -> str:
     ints = sum(
         1
         for v in non_null
-        if (f := _try_float(v)) is not None and float(f).is_integer()
+        if (f := _try_float(v)) is not None and f == f.to_integral_value()
     )
     bools = sum(1 for v in non_null if _try_bool(v) is not None)
     dates = sum(1 for v in non_null if _try_datetime(v))
@@ -219,7 +202,7 @@ def _infer_kind(non_null: list[Any]) -> str:
     return "string"
 
 
-def _numeric_stats(vals: list[float]) -> dict[str, Any]:
+def _numeric_stats(vals: list[Decimal]) -> dict[str, Any]:
     if not vals:
         return {}
     n = len(vals)
@@ -232,11 +215,12 @@ def _numeric_stats(vals: list[float]) -> dict[str, Any]:
         p50 = ordered[mid]
     else:
         p50 = (ordered[mid - 1] + ordered[mid]) / 2
+    stdev = var.sqrt() if isinstance(var, Decimal) else math.sqrt(var)
     return {
         "min": ordered[0],
         "max": ordered[-1],
         "mean": round(mean, 6),
-        "stdev": round(math.sqrt(var), 6),
+        "stdev": round(stdev, 6),
         "p50": p50,
     }
 
@@ -765,7 +749,14 @@ def filter_stored_result(
             ok = str(value).lower() in str(cell if cell is not None else "").lower()
         elif op_n == "in":
             parts = [p.strip() for p in str(value).split(",") if p.strip()]
-            ok = str(cell) in parts or (str(_try_float(cell)) in parts if _try_float(cell) is not None else False)
+            ok = str(cell) in parts
+            if not ok:
+                bound = _try_float(cell)
+                if bound is not None:
+                    ok = any(
+                        (p_bound := _try_float(p)) is not None and p_bound == bound
+                        for p in parts
+                    )
         else:
             ok = _cmp(cell, value, op_n)
         if ok:

@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 import math
 import re
-import sys
 from collections import Counter
 from difflib import SequenceMatcher
 from pathlib import Path
@@ -104,655 +103,7 @@ def _calibrated_confidence(
     return round(conf, 3)
 
 
-ABBREVIATIONS: dict[str, str] = {
-    # Amounts and quantities
-    "amt": "amount",
-    "amount": "amount",
-    "salary": "salary_amount",
-    "salary_amt": "salary_amount",
-    "salary_amount": "salary_amount",
-    "pay": "payment",
-    "pmt": "payment",
-    "pymt": "payment",
-    "pay_amt": "payment_amount",
-    "payment_amount": "payment_amount",
-    "tax": "tax",
-    "tax_amt": "tax_amount",
-    "tax_amount": "tax_amount",
-    "net": "net",
-    "net_amt": "net_amount",
-    "net_amount": "net_amount",
-    "gross": "gross",
-    "gross_amt": "gross_amount",
-    "gross_amount": "gross_amount",
-    "line": "line",
-    "line_amt": "line_amount",
-    "line_amount": "line_amount",
-    "bal": "balance",
-    "balance": "balance",
-    "tot": "total",
-    "total": "total",
-    "subtot": "subtotal",
-    "subtotal": "subtotal",
-    "disc": "discount",
-    "discount": "discount",
-    "qty": "quantity",
-    "quantity": "quantity",
-    "qty_ord": "quantity_ordered",
-    "quantity_ordered": "quantity_ordered",
-    "price": "price",
-    "prc": "price",
-    "unit_prc": "unit_price",
-    "unit_price": "unit_price",
-    "cost": "cost",
-    "unit_cost": "unit_cost",
-    # Dates and timestamps
-    "dt": "date",
-    "date": "date",
-    "ts": "timestamp",
-    "timestamp": "timestamp",
-    "created": "created",
-    "created_at": "created_at",
-    "created_dt": "created_at",
-    "created_date": "created_at",
-    "created_ts": "created_timestamp",
-    "created_timestamp": "created_timestamp",
-    "updated": "updated",
-    "updated_at": "updated_at",
-    "updated_dt": "updated_at",
-    "updated_date": "updated_at",
-    "updated_ts": "updated_timestamp",
-    "updated_timestamp": "updated_timestamp",
-    "mod": "modified",
-    "modified": "modified",
-    "modified_at": "modified_at",
-    "mod_at": "modified_at",
-    "mod_dt": "modified_at",
-    "modified_dt": "modified_at",
-    "modified_date": "modified_at",
-    "modified_ts": "modified_timestamp",
-    "modified_timestamp": "modified_timestamp",
-    "txn": "transaction",
-    "transaction": "transaction",
-    "txn_dt": "transaction_date",
-    "transaction_date": "transaction_date",
-    "txn_id": "transaction_id",
-    "transaction_id": "transaction_id",
-    "trans_dt": "transaction_date",
-    "trans_date": "transaction_date",
-    "hire_dt": "hire_date",
-    "hire_date": "hire_date",
-    "ship_dt": "ship_date",
-    "ship_date": "ship_date",
-    "del": "delivery",
-    "delivery": "delivery",
-    "del_dt": "delivery_date",
-    "delivery_date": "delivery_date",
-    "pay_dt": "payment_date",
-    "payment_dt": "payment_date",
-    "payment_date": "payment_date",
-    # Identifiers and customers
-    "no": "number",
-    "num": "number",
-    "nbr": "number",
-    "nr": "number",
-    "number": "number",
-    "ref": "reference",
-    "reference": "reference",
-    "ref_no": "reference_number",
-    "reference_number": "reference_number",
-    "inv": "invoice",
-    "invoice": "invoice",
-    "inv_no": "invoice_number",
-    "invoice_number": "invoice_number",
-    "ord": "order",
-    "order": "order",
-    "ord_id": "order_id",
-    "order_id": "order_id",
-    "order_no": "order_number",
-    "order_number": "order_number",
-    "cust": "customer",
-    "customer": "customer",
-    "cust_id": "customer_id",
-    "customer_id": "customer_id",
-    "cust_nm": "customer_name",
-    "customer_name": "customer_name",
-    "acct": "account",
-    "account": "account",
-    "acct_no": "account_number",
-    "acct_num": "account_number",
-    "account_number": "account_number",
-    "emp": "employee",
-    "employee": "employee",
-    "emp_id": "employee_id",
-    "employee_id": "employee_id",
-    "dept": "department",
-    "department": "department",
-    "dept_code": "department_code",
-    "dept_cd": "department_code",
-    "department_code": "department_code",
-    "ssn": "social_security_number",
-    "social_security_number": "social_security_number",
-    "ssn_num": "social_security_number",
-    "cc_num": "credit_card_number",
-    "cc_no": "credit_card_number",
-    "credit_card_number": "credit_card_number",
-    "card_num": "credit_card_number",
-    "gstin": "gst_number",
-    "gst_num": "gst_number",
-    "gst_number": "gst_number",
-    "pan_num": "pan_number",
-    "pan_number": "pan_number",
-    "iban": "iban",
-    "swift": "swift_code",
-    "swift_code": "swift_code",
-    # Warehouse / lake / object-store / CRM SaaS (demo-critical cloud routes)
-    "acct_id": "account_id",
-    "account_id": "account_id",
-    "org": "organization",
-    "org_id": "organization_id",
-    "organization_id": "organization_id",
-    "opp": "opportunity",
-    "opp_amt": "opportunity_amount",
-    "opportunity_amount": "opportunity_amount",
-    "lead_src": "lead_source",
-    "lead_source": "lead_source",
-    "close_dt": "close_date",
-    "close_date": "close_date",
-    "stage_nm": "stage_name",
-    "stage_name": "stage_name",
-    "rec_type": "record_type",
-    "record_type": "record_type",
-    "ext_id": "external_id",
-    "external_id": "external_id",
-    # Prefer compound abbreviations — bare wh/db/pk/fk/arr collide with
-    # unrelated columns (array payloads, key values, catalog shorthand).
-    "wh_id": "warehouse_id",
-    "warehouse_id": "warehouse_id",
-    "db_nm": "database_name",
-    "database_name": "database_name",
-    "sch_nm": "schema_name",
-    "schema_name": "schema_name",
-    "tbl_nm": "table_name",
-    "table_name": "table_name",
-    "col_nm": "column_name",
-    "column_name": "column_name",
-    "pk_col": "primary_key_column",
-    "primary_key_column": "primary_key_column",
-    "fk_col": "foreign_key_column",
-    "foreign_key_column": "foreign_key_column",
-    "row_cnt": "row_count",
-    "row_count": "row_count",
-    "byte_sz": "byte_size",
-    "byte_size": "byte_size",
-    "obj_key": "object_key",
-    "object_key": "object_key",
-    "bkt_nm": "bucket_name",
-    "bucket_name": "bucket_name",
-    "cont_nm": "container_name",
-    "container_name": "container_name",
-    "last_mod": "last_modified",
-    "last_modified": "last_modified",
-    "mrr": "monthly_recurring_revenue",
-    "monthly_recurring_revenue": "monthly_recurring_revenue",
-    "ann_rev": "annual_recurring_revenue",
-    "annual_recurring_revenue": "annual_recurring_revenue",
-    "tz_nm": "timezone_name",
-    "timezone_name": "timezone_name",
-    "churn_dt": "churn_date",
-    "churn_date": "churn_date",
-    "utm_src": "utm_source",
-    "utm_source": "utm_source",
-    "utm_med": "utm_medium",
-    "utm_medium": "utm_medium",
-    "utm_camp": "utm_campaign",
-    "utm_campaign": "utm_campaign",
-    "ip_addr": "ip_address",
-    "ip_address": "ip_address",
-    "mac_addr": "mac_address",
-    "mac_address": "mac_address",
-    "geo_cd": "geo_code",
-    "geo_code": "geo_code",
-    "reg_cd": "region_code",
-    "region_code": "region_code",
-    "lang_cd": "language_code",
-    "language_code": "language_code",
-    "locale_cd": "locale_code",
-    "locale_code": "locale_code",
-    "vat_num": "vat_number",
-    "vat_number": "vat_number",
-    "tin": "tax_identification_number",
-    "tax_identification_number": "tax_identification_number",
-    "ein": "employer_identification_number",
-    "employer_identification_number": "employer_identification_number",
-    "routing_num": "routing_number",
-    "routing_number": "routing_number",
-    "chk_num": "check_number",
-    "check_number": "check_number",
-    "wire_ref": "wire_reference",
-    "wire_reference": "wire_reference",
-    "fx_rate": "exchange_rate",
-    "exchange_rate": "exchange_rate",
-    "base_ccy": "base_currency",
-    "base_currency": "base_currency",
-    "quote_ccy": "quote_currency",
-    "quote_currency": "quote_currency",
-    "product": "product",
-    "prod": "product",
-    "prod_id": "product_id",
-    "product_id": "product_id",
-    "sku": "product_sku",
-    "product_sku": "product_sku",
-    "src": "source",
-    "source": "source",
-    "tgt": "target",
-    "target": "target",
-    "loc": "location",
-    "location": "location",
-    # Names and contact
-    "nm": "name",
-    "name": "name",
-    "fname": "first_name",
-    "first_name": "first_name",
-    "lname": "last_name",
-    "last_name": "last_name",
-    "full_name": "full_name",
-    "desc": "description",
-    "descr": "description",
-    "description": "description",
-    "addr": "address",
-    "address": "address",
-    "addr1": "address_line_1",
-    "addr_1": "address_line_1",
-    "address_line_1": "address_line_1",
-    "address1": "address_line_1",
-    "addr2": "address_line_2",
-    "addr_2": "address_line_2",
-    "address_line_2": "address_line_2",
-    "address2": "address_line_2",
-    "city_nm": "city_name",
-    "state_cd": "state_code",
-    "zip_cd": "postal_code",
-    "lat": "latitude",
-    "latitude": "latitude",
-    "lng": "longitude",
-    "lon": "longitude",
-    "longitude": "longitude",
-    "is_actv": "is_active",
-    "is_active": "is_active",
-    "amt_usd": "amount_usd",
-    "amount_usd": "amount_usd",
-    "disc_pct": "discount_percent",
-    "discount_percent": "discount_percent",
-    "discount_pct": "discount_percent",
-    "line_tot": "line_total",
-    "line_total": "line_total",
-    "cust_seg": "customer_segment",
-    "customer_segment": "customer_segment",
-    "po_num": "purchase_order_number",
-    "po_no": "purchase_order_number",
-    "purchase_order_number": "purchase_order_number",
-    "inv_num": "invoice_number",
-    "email": "email",
-    "e_mail": "email",
-    "email_addr": "email_address",
-    "email_address": "email_address",
-    "usr_email": "user_email",
-    "user_email": "user_email",
-    "usr": "user",
-    "user": "user",
-    "ship": "shipping",
-    "ship_addr": "shipping_address",
-    "ship_address": "shipping_address",
-    "shipping_addr": "shipping_address",
-    "shipping_address": "shipping_address",
-    "bill_addr": "billing_address",
-    "billing_addr": "billing_address",
-    "billing_address": "billing_address",
-    "mail_addr": "mailing_address",
-    "dob": "date_of_birth",
-    "date_of_birth": "date_of_birth",
-    "birth_date": "date_of_birth",
-    "birthdate": "date_of_birth",
-    "d_o_b": "date_of_birth",
-    "phone": "phone",
-    "tel": "phone",
-    "ph": "phone",
-    "ph_num": "phone",
-    "ph_no": "phone",
-    "ph_nbr": "phone",
-    "tel_num": "phone_number",
-    "tel_no": "phone_number",
-    "phone_number": "phone_number",
-    "phone_num": "phone_number",
-    "mobile": "mobile",
-    "mob": "mobile",
-    "cell": "mobile",
-    "mobile_phone": "mobile_phone",
-    "mobile_number": "mobile_number",
-    "mobile_num": "mobile_number",
-    "mob_num": "mobile_number",
-    "mob_phone": "mobile_phone",
-    "cell_phone": "mobile_phone",
-    "cell_num": "mobile_number",
-    # Status and location
-    "sts": "status",
-    "stat": "status",
-    "status": "status",
-    "zip": "postal_code",
-    "zipcode": "postal_code",
-    "postal": "postal_code",
-    "postal_code": "postal_code",
-    "country": "country",
-    "country_cd": "country_code",
-    "country_code": "country_code",
-    "cntry": "country",
-    "state": "state",
-    "state_code": "state_code",
-    "province": "province",
-    "province_code": "province_code",
-    "city": "city",
-    "city_name": "city_name",
-    "region": "region",
-    "region_code": "region_code",
-    "curr": "currency",
-    "currency": "currency",
-    "ccy": "currency_code",
-    "curr_cd": "currency_code",
-    "iso_curr": "currency_code",
-    "currency_code": "currency_code",
-    # --- Enterprise domain phrases (finance / healthcare / HR / logistics) ---
-    "status_cd": "order_status",
-    "order_status": "order_status",
-    "fx_rate": "exchange_rate",
-    "exchange_rate": "exchange_rate",
-    "value_dt": "value_date",
-    "value_date": "value_date",
-    "stmt_dt": "statement_date",
-    "statement_date": "statement_date",
-    "statement_dt": "statement_date",
-    "mrn": "medical_record_number",
-    "medical_record_number": "medical_record_number",
-    "admit_dt": "admission_date",
-    "admission_date": "admission_date",
-    "admission_dt": "admission_date",
-    "disch_dt": "discharge_date",
-    "discharge_date": "discharge_date",
-    "vitals_hr": "heart_rate",
-    "heart_rate": "heart_rate",
-    "vitals_bp_sys": "bp_systolic",
-    "bp_systolic": "bp_systolic",
-    "vitals_bp_dia": "bp_diastolic",
-    "bp_diastolic": "bp_diastolic",
-    "rx_norm": "rxnorm_code",
-    "rxnorm": "rxnorm_code",
-    "rxnorm_code": "rxnorm_code",
-    "pcp_id": "primary_care_provider_id",
-    "primary_care_provider_id": "primary_care_provider_id",
-    "mgr_id": "manager_id",
-    "manager_id": "manager_id",
-    "emp_status": "employment_status",
-    "employment_status": "employment_status",
-    "emp_type": "employment_type",
-    "employment_type": "employment_type",
-    "ship_id": "shipment_id",
-    "shipment_id": "shipment_id",
-    "eta_dt": "estimated_arrival_date",
-    "eta": "estimated_arrival_date",
-    "estimated_arrival_date": "estimated_arrival_date",
-    "dim_l": "dimension_length",
-    "dim_w": "dimension_width",
-    "dim_h": "dimension_height",
-    "dimension_length": "dimension_length",
-    "dimension_width": "dimension_width",
-    "dimension_height": "dimension_height",
-    "pkg_cnt": "package_count",
-    "package_count": "package_count",
-    "bol_no": "bill_of_lading_number",
-    "bol_num": "bill_of_lading_number",
-    "bill_of_lading_number": "bill_of_lading_number",
-    "po_no": "purchase_order_number",
-    "po_num": "purchase_order_number",
-    "purchase_order_number": "purchase_order_number",
-    "pat_id": "patient_id",
-    "patient_id": "patient_id",
-    "pat_dob": "date_of_birth",
-    "enc_id": "encounter_id",
-    "encounter_id": "encounter_id",
-    "diag_cd": "diagnosis_code",
-    "diagnosis_code": "diagnosis_code",
-    "proc_cd": "procedure_code",
-    "procedure_code": "procedure_code",
-    "prov_id": "provider_id",
-    "provider_id": "provider_id",
-    "npi": "npi_number",
-    "npi_number": "npi_number",
-    "ins_id": "insurance_id",
-    "insurance_id": "insurance_id",
-    "policy_no": "policy_number",
-    "policy_number": "policy_number",
-    "claim_amt": "claim_amount",
-    "claim_amount": "claim_amount",
-    "allowed_amt": "allowed_amount",
-    "paid_amt": "paid_amount",
-    "copay_amt": "copay_amount",
-    "deduct_amt": "deductible_amount",
-    "deductible_amount": "deductible_amount",
-    "icd10": "icd10_code",
-    "icd10_code": "icd10_code",
-    "cpt_cd": "cpt_code",
-    "cpt_code": "cpt_code",
-    "loinc": "loinc_code",
-    "loinc_code": "loinc_code",
-    "lab_result": "lab_result_value",
-    "lab_result_value": "lab_result_value",
-    "lab_unit": "lab_result_unit",
-    "lab_result_unit": "lab_result_unit",
-    "allergy_cd": "allergy_code",
-    "allergy_code": "allergy_code",
-    "med_name": "medication_name",
-    "medication_name": "medication_name",
-    "rx_norm_code": "rxnorm_code",
-    "emerg_contact": "emergency_contact_name",
-    "emergency_contact_name": "emergency_contact_name",
-    "emerg_phone": "emergency_contact_phone",
-    "emergency_contact_phone": "emergency_contact_phone",
-    "hipaa_flg": "hipaa_authorized",
-    "hipaa_authorized": "hipaa_authorized",
-    "consent_flg": "consent_flag",
-    "consent_flag": "consent_flag",
-    "emp_no": "employee_number",
-    "employee_number": "employee_number",
-    "dept_cd": "department_code",
-    "dept_nm": "department_name",
-    "department_name": "department_name",
-    "bonus_amt": "bonus_amount",
-    "comm_amt": "commission_amount",
-    "commission_amount": "commission_amount",
-    "work_email": "work_email",
-    "work_phone": "work_phone",
-    "loc_cd": "location_code",
-    "location_code": "location_code",
-    "fte": "fte_ratio",
-    "fte_ratio": "fte_ratio",
-    "bank_acct": "bank_account_number",
-    "bank_account_number": "bank_account_number",
-    "direct_dep_flg": "direct_deposit_flag",
-    "direct_deposit_flag": "direct_deposit_flag",
-    "pto_bal": "pto_balance",
-    "pto_balance": "pto_balance",
-    "sick_bal": "sick_balance",
-    "sick_balance": "sick_balance",
-    "perf_score": "performance_score",
-    "performance_score": "performance_score",
-    "last_review_dt": "last_review_date",
-    "last_review_date": "last_review_date",
-    "badge_no": "badge_number",
-    "badge_number": "badge_number",
-    "shift_cd": "shift_code",
-    "shift_code": "shift_code",
-    "union_flg": "union_member_flag",
-    "union_member_flag": "union_member_flag",
-    "remote_flg": "remote_worker_flag",
-    "remote_worker_flag": "remote_worker_flag",
-    "start_tm": "shift_start_time",
-    "shift_start_time": "shift_start_time",
-    "end_tm": "shift_end_time",
-    "shift_end_time": "shift_end_time",
-    "overtime_hrs": "overtime_hours",
-    "overtime_hours": "overtime_hours",
-    "regular_hrs": "regular_hours",
-    "regular_hours": "regular_hours",
-    "pay_period_end": "pay_period_end_date",
-    "pay_period_end_date": "pay_period_end_date",
-    "benefits_elig": "benefits_eligible",
-    "benefits_eligible": "benefits_eligible",
-    "rehire_flg": "rehire_eligible_flag",
-    "rehire_eligible_flag": "rehire_eligible_flag",
-    "tracking_no": "tracking_number",
-    "tracking_number": "tracking_number",
-    "carrier_cd": "carrier_code",
-    "carrier_code": "carrier_code",
-    "origin_zip": "origin_postal_code",
-    "origin_postal_code": "origin_postal_code",
-    "dest_zip": "destination_postal_code",
-    "destination_postal_code": "destination_postal_code",
-    "freight_amt": "freight_amount",
-    "freight_amount": "freight_amount",
-    "fuel_surcharge": "fuel_surcharge_amount",
-    "fuel_surcharge_amount": "fuel_surcharge_amount",
-    "bin_loc": "bin_location",
-    "bin_location": "bin_location",
-    "lot_no": "lot_number",
-    "lot_number": "lot_number",
-    "serial_no": "serial_number",
-    "serial_number": "serial_number",
-    "qty_shipped": "quantity_shipped",
-    "quantity_shipped": "quantity_shipped",
-    "qty_ordered": "quantity_ordered",
-    "qty_received": "quantity_received",
-    "quantity_received": "quantity_received",
-    "asn_id": "asn_id",
-    "trailer_no": "trailer_number",
-    "trailer_number": "trailer_number",
-    "seal_no": "seal_number",
-    "seal_number": "seal_number",
-    "hazmat_flg": "hazmat_flag",
-    "hazmat_flag": "hazmat_flag",
-    "temp_min": "temperature_min",
-    "temperature_min": "temperature_min",
-    "temp_max": "temperature_max",
-    "temperature_max": "temperature_max",
-    "stop_seq": "stop_sequence",
-    "stop_sequence": "stop_sequence",
-    "miles": "distance_miles",
-    "distance_miles": "distance_miles",
-    "delay_mins": "delay_minutes",
-    "delay_minutes": "delay_minutes",
-    "proof_del_flg": "proof_of_delivery_flag",
-    "proof_of_delivery_flag": "proof_of_delivery_flag",
-    "princ_amt": "principal_amount",
-    "principal_amount": "principal_amount",
-    "fee_amt": "fee_amount",
-    "fee_amount": "fee_amount",
-    "gl_cd": "gl_code",
-    "gl_code": "gl_code",
-    "cost_ctr": "cost_center",
-    "cost_center": "cost_center",
-    "debit_amt": "debit_amount",
-    "debit_amount": "debit_amount",
-    "credit_amt": "credit_amount",
-    "credit_amount": "credit_amount",
-    "posting_dt": "posting_date",
-    "posting_date": "posting_date",
-    "settlement_dt": "settlement_date",
-    "settlement_date": "settlement_date",
-    "bic": "bic_code",
-    "bic_code": "bic_code",
-    "routing_no": "routing_number",
-    "card_no": "card_number",
-    "card_number": "card_number",
-    "auth_cd": "auth_code",
-    "auth_code": "auth_code",
-    "ledger_bal": "ledger_balance",
-    "ledger_balance": "ledger_balance",
-    "avail_bal": "available_balance",
-    "available_balance": "available_balance",
-    "overdraft_lim": "overdraft_limit",
-    "overdraft_limit": "overdraft_limit",
-    "recon_flg": "reconciled_flag",
-    "reconciled_flag": "reconciled_flag",
-    "fiscal_yr": "fiscal_year",
-    "fiscal_year": "fiscal_year",
-    "fiscal_qtr": "fiscal_quarter",
-    "fiscal_quarter": "fiscal_quarter",
-    "aml_flg": "aml_flag",
-    "aml_flag": "aml_flag",
-    "wire_ref": "wire_reference",
-    "wire_reference": "wire_reference",
-    "ach_trace": "ach_trace_number",
-    "ach_trace_number": "ach_trace_number",
-    "vat_amt": "vat_amount",
-    "vat_amount": "vat_amount",
-    "invoice_amt": "invoice_amount",
-    "invoice_amount": "invoice_amount",
-    "int_rate": "interest_rate",
-    "disc_amt": "discount_amount",
-    "discount_amount": "discount_amount",
-    "promo_cd": "promo_code",
-    "promo_code": "promo_code",
-    "refund_amt": "refund_amount",
-    "refund_amount": "refund_amount",
-    "ship_method": "shipping_method",
-    "shipping_method": "shipping_method",
-    "gift_msg": "gift_message",
-    "gift_message": "gift_message",
-    "item_cnt": "item_count",
-    "item_count": "item_count",
-    "channel": "sales_channel",
-    "sales_channel": "sales_channel",
-    "gender_cd": "gender",
-    "ward_cd": "ward_code",
-    "ward_code": "ward_code",
-    "bed_no": "bed_number",
-    "bed_number": "bed_number",
-    # Evidence-grown from enterprise golden unresolved tokens (abbrev coverage CI).
-    "cd": "code",
-    "flg": "flag",
-    "flag": "flag",
-    "cnt": "count",
-    "count": "count",
-    "ctr": "center",
-    "msg": "message",
-    "message": "message",
-    "lim": "limit",
-    "limit": "limit",
-    "yr": "year",
-    "year": "year",
-    "qtr": "quarter",
-    "quarter": "quarter",
-    "hrs": "hours",
-    "hours": "hours",
-    "tm": "time",
-    "kg": "kilogram",
-    "kilogram": "kilogram",
-    "lb": "pound",
-    "pound": "pound",
-    "cvv": "card_verification_value",
-    "card_verification_value": "card_verification_value",
-    "bp": "blood_pressure",
-    "blood_pressure": "blood_pressure",
-    "vitals_hr": "vitals_heart_rate",
-    "vitals_heart_rate": "vitals_heart_rate",
-    "bill": "billing",
-    "billing": "billing",
-}
-try:
-    from services.domain_gazetteers import merge_abbreviations
-
-    ABBREVIATIONS = merge_abbreviations(ABBREVIATIONS)
-except Exception:  # pragma: no cover - gazetteer optional at import
-    pass
+from services.semantic_abbreviations import ABBREVIATIONS  # noqa: E402
 
 
 
@@ -765,8 +116,16 @@ def _normalize(name: str) -> str:
 
 
 def _folded_ident(name: str) -> str:
-    """Case- and underscore-insensitive identifier (UserID ≡ userid ≡ user_id)."""
-    return _normalize(name).replace("_", "")
+    """Case- and separator-insensitive identifier (UserID ≡ userid ≡ user_id).
+
+    A *leading* underscore is kept: MongoDB's reserved ``_id`` is a different
+    column from ``id``, not a separator variant of it, and folding the two onto
+    one slot made every re-run of a DataFlow-created collection ambiguous and
+    let the document key win the assignment over the literal name match.
+    """
+    norm = _normalize(name)
+    prefix = "_" if norm.startswith("_") else ""
+    return prefix + norm.replace("_", "")
 
 
 def _dest_fold_collisions(target_columns: list[str]) -> set[str]:
@@ -850,6 +209,27 @@ def _semantic_tokens(name: str) -> list[str]:
 
 def _semantic_form(name: str) -> str:
     return "_".join(_semantic_tokens(name))
+
+
+def create_new_target_name(source_column: str) -> str:
+    """Destination column name for a CREATE TABLE / ADD COLUMN proposal.
+
+    A migration must land the operator's own column names. Expanding the source
+    name to its canonical semantic form (``qty`` → ``quantity``) renamed columns
+    nobody asked to rename: downstream SQL and BI on the destination break, a
+    by-name reconcile disagrees with a transfer that moved every row correctly,
+    and the next run maps ``qty`` onto the ``quantity`` the product itself just
+    created — scored as a rename, held for review, and refused by Execute, so an
+    unchanged route can never be re-run.
+
+    The canonical form stays available as ``semantic_name`` for enrichment and
+    for an operator who chooses the rename explicitly. Only illegal characters
+    are repaired, by the single identifier owner.
+    """
+    from connectors.sql_identifiers import sanitize_identifier
+
+    raw = (source_column or "").strip()
+    return sanitize_identifier(raw, preserve_case=True) or _semantic_form(raw)
 
 
 def _canonical_form(name: str) -> str:
@@ -1375,6 +755,7 @@ def _score_pair(
     target_type: str = "VARCHAR",
     source_samples: list[str] | None = None,
     dest_db: str = "",
+    create_new_target: bool = False,
 ) -> tuple[float, str]:
     from services.semantic_analyzer import role_match_boost
     from services.training_lexicon import lexicon_boost
@@ -1384,8 +765,15 @@ def _score_pair(
     src_sem = _semantic_form(source)
     tgt_sem_raw = _semantic_form(target)
 
-    type_penalty = _type_compat_penalty(
-        source_type, target_type, source_name=source, dest_db=dest_db
+    # A column this run will CREATE carries the type the kernel invents for this
+    # very source, so there is no declared destination type to lose fidelity
+    # against; charging a cast there billed create-new for its own carrier.
+    type_penalty = (
+        0.0
+        if create_new_target
+        else _type_compat_penalty(
+            source_type, target_type, source_name=source, dest_db=dest_db
+        )
     )
     type_boost = _type_aware_boost(source_type, target_type, dest_db=dest_db)
     sample_boost = _sample_consistency_boost(source_samples, source_type, target_type)
@@ -1398,7 +786,13 @@ def _score_pair(
         sample_boost = -0.90
 
     def _finish(score: float, reason: str) -> tuple[float, str]:
-        adjusted = max(0.0, min(0.995, float(score) - type_penalty + type_boost + sample_boost))
+        # Only a literal name equality may reach the top of the band: type and
+        # sample boosts must never lift a near-name candidate (``_id``) into a
+        # tie with the column that carries the same name (``id``).
+        ceiling = 0.995 if src_norm == tgt_norm else 0.99
+        adjusted = max(
+            0.0, min(ceiling, float(score) - type_penalty + type_boost + sample_boost)
+        )
         review_bits: list[str] = []
         if _identity_leaf_mismatch(source, target):
             src_l = "/".join(sorted(_identity_kind_leaves(source)))
@@ -1787,6 +1181,7 @@ def map_columns(
     threshold: float = 0.85,
     destination_db_type: str = "",
     destination_table_exists: bool | None = None,
+    source_db_type: str = "",
 ) -> list[dict]:
     from services.semantic_analyzer import analyze_column
     from services.conversion_contract import classify_conversion, create_new_mapping_reason
@@ -1801,7 +1196,10 @@ def map_columns(
     src_types: dict[str, str] = {}
     tgt_types: dict[str, str] = {}
     src_samples: dict[str, list[str]] = {}
+    # target column name -> the source column whose create-new carrier it is.
+    create_new_pairs: dict[str, str] = {}
     dest_db = (destination_db_type or "").strip().lower()
+    src_db = (source_db_type or "").strip().lower()
 
     if source_schemas:
         for s in source_schemas:
@@ -1819,10 +1217,32 @@ def map_columns(
         # Names-only without typed introspect: never invent proven VARCHAR.
         # Existing tables must reload schema before create_compatible_new.
         names_only_existing = destination_table_exists is True
+        # A create-new column has no declared type yet: its carrier is the one
+        # this dialect will CREATE for the source column landing in it. Reading
+        # VARCHAR there billed every DECIMAL/DATE source for a cast to a string
+        # column the run never creates.
+        src_by_folded = {_folded_ident(s): s for s in source_columns}
         for t in target_columns:
             analyzed = analyze_column(t, "VARCHAR", [])
             tgt_roles[t] = analyzed["semantic_role"]
-            tgt_types[t] = "" if names_only_existing else "VARCHAR"
+            if names_only_existing:
+                tgt_types[t] = ""
+                continue
+            origin = src_by_folded.get(_folded_ident(t))
+            projected = ""
+            if origin and destination_table_exists is False and dest_db:
+                projected = str(
+                    create_new_mapping_target_type(
+                        src_types.get(origin, "VARCHAR"),
+                        dest_db,
+                        samples=src_samples.get(origin),
+                        source_db=src_db,
+                    )
+                    or ""
+                ).strip()
+                if projected:
+                    create_new_pairs[t] = origin
+            tgt_types[t] = projected or "VARCHAR"
 
     if not target_columns:
         # Empty targets are NOT automatically create-new. Only invent CREATE when
@@ -1831,10 +1251,11 @@ def map_columns(
         out: list[dict] = []
         confirmed_missing = destination_table_exists is False
         for src in source_columns:
+            new_name = create_new_target_name(src)
             src_type = src_types.get(src, "VARCHAR")
             dest_native = ddl_type(dest_db, src_type) if dest_db else src_type
             map_target_type = create_new_mapping_target_type(
-                src_type, dest_db, samples=src_samples.get(src)
+                src_type, dest_db, samples=src_samples.get(src), source_db=src_db
             )
             why_type = _create_new_physical_why_type(
                 src_type, map_target_type or dest_native, dest_db
@@ -1849,7 +1270,8 @@ def map_columns(
                 out.append(
                     {
                         "source": src,
-                        "target": _semantic_form(src),
+                        "target": new_name,
+                        "semantic_name": _semantic_form(src),
                         "confidence": IDENTITY_PASSTHROUGH_CONFIDENCE,
                         "reasoning": create_new_mapping_reason(
                             src_type, why_type, dest_db=dest_db
@@ -1873,7 +1295,8 @@ def map_columns(
                 out.append(
                     {
                         "source": src,
-                        "target": _semantic_form(src),
+                        "target": new_name,
+                        "semantic_name": _semantic_form(src),
                         "confidence": 0.55,
                         "reasoning": (
                             f"{exists_note}. Retry destination schema load before Map "
@@ -1891,7 +1314,9 @@ def map_columns(
                         "requires_review": True,
                     }
                 )
-        return _stamp_review_kinds(_apply_create_new_risk_stamps(out, dest_db))
+        return _stamp_review_kinds(
+            _apply_create_new_risk_stamps(out, dest_db, source_db_type=src_db)
+        )
 
     idf = _build_idf(source_columns + target_columns)
     all_doc_lens = [len(_tokenize(c)) for c in source_columns + target_columns]
@@ -1913,6 +1338,7 @@ def map_columns(
                 tgt_types.get(target, "VARCHAR"),
                 src_samples.get(source),
                 dest_db=dest_db,
+                create_new_target=create_new_pairs.get(target) == source,
             )
             pair_scores[(source, target)] = (score, reason)
 
@@ -1936,7 +1362,9 @@ def map_columns(
         try:
             from services.decision_kernel import is_lossy_coercion
 
-            lossy_pair = is_lossy_coercion(src_type, tgt_type, dest_db=dest_db)
+            lossy_pair = create_new_pairs.get(target) != source and is_lossy_coercion(
+                src_type, tgt_type, dest_db=dest_db
+            )
         except Exception:
             # Fail closed — unknown type authority must not green-path remaps.
             lossy_pair = True
@@ -1982,6 +1410,11 @@ def map_columns(
                 "requires_review": requires_review,
                 "source_type": src_type,
                 "target_type": tgt_type,
+                **(
+                    {"create_new": True}
+                    if create_new_pairs.get(target) == source
+                    else {}
+                ),
             }
         )
 
@@ -2009,6 +1442,7 @@ def map_columns(
                 tgt_types.get(target, "VARCHAR"),
                 src_samples.get(source),
                 dest_db=dest_db,
+                create_new_target=create_new_pairs.get(target) == source,
             )
             if score > best_score:
                 best_score, best_target, best_reason = score, target, reason
@@ -2095,7 +1529,8 @@ def map_columns(
                 mappings.append(
                     {
                         "source": source,
-                        "target": _semantic_form(source),
+                        "target": create_new_target_name(source),
+                        "semantic_name": _semantic_form(source),
                         "confidence": 0.55,
                         "reasoning": (
                             "Destination table exists but column types were not loaded — "
@@ -2152,7 +1587,7 @@ def map_columns(
             greedy_patched = True
             dest_native = ddl_type(dest_db, src_type) if dest_db else src_type
             map_target_type = create_new_mapping_target_type(
-                src_type, dest_db, samples=src_samples.get(source)
+                src_type, dest_db, samples=src_samples.get(source), source_db=src_db
             )
             # Prefer the original source name for ADD COLUMN (_id stays _id).
             # Semantic form alone collapses _id → id, then id_text — a name that
@@ -2193,7 +1628,7 @@ def map_columns(
             continue
         greedy_patched = True
         if not best_target:
-            best_target = _semantic_form(source)
+            best_target = create_new_target_name(source)
             best_score = 0.55
             best_reason = "No target match — inferred semantic name (no destination schema)"
             alternatives = []
@@ -2209,7 +1644,9 @@ def map_columns(
             from services.decision_kernel import is_lossy_coercion
 
             lossy_pair = bool(
-                best_target and is_lossy_coercion(src_type, tgt_type, dest_db=dest_db)
+                best_target
+                and create_new_pairs.get(best_target) != source
+                and is_lossy_coercion(src_type, tgt_type, dest_db=dest_db)
             )
         except Exception:
             lossy_pair = bool(best_target)
@@ -2258,7 +1695,7 @@ def map_columns(
     mappings.sort(key=lambda m: source_columns.index(m["source"]))
     return _stamp_review_kinds(
         _apply_create_new_risk_stamps(
-            mappings, dest_db, source_samples=src_samples
+            mappings, dest_db, source_samples=src_samples, source_db_type=src_db
         ),
         dest_collisions,
     )

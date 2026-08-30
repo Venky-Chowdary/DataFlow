@@ -3,7 +3,6 @@ from __future__ import annotations
 import base64
 import hashlib
 import logging
-import os
 from services.brand_env import getenv_brand
 import secrets
 from typing import Any
@@ -12,11 +11,16 @@ from urllib.parse import urlencode
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import RedirectResponse
 
-from services.platform_config import is_production, web_url
+from services.platform_config import web_url
 from pydantic import BaseModel, Field
+
+from services.user_store import get_user as get_stored_user
+from services.user_store import normalize_email, set_password
+from services.workspace_access import actor_email
 
 from ..services.auth_service import (
     auth_bootstrap_status,
+    auth_required,
     authenticate,
     create_token,
     lookup_user,
@@ -35,6 +39,11 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 class LoginRequest(BaseModel):
     email: str = Field(min_length=3, max_length=320)
     password: str = Field(min_length=8, max_length=256)
+
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str = Field(min_length=8, max_length=256)
+    new_password: str = Field(min_length=12, max_length=256)
 
 
 def _web_origin() -> str:
@@ -443,8 +452,14 @@ async def sso_callback(sso_type: str, code: str = "", state: str = "", error: st
         id_token = tokens.get("id_token", "")
         if id_token:
             state_info_for_id_token = dict(state_info.get("extra") or {})
-            # In tests, do not perform real network validation.
-            state_info_for_id_token["test_skip_signature"] = not is_production()
+            # Signature skip is pytest-only. Staging/Railway with ENV!=production
+            # must still verify JWKS — forged id_tokens are an auth bypass.
+            import os
+
+            state_info_for_id_token["test_skip_signature"] = (
+                os.getenv("DATAFLOW_TEST_SKIP_OIDC_SIGNATURE", "").strip().lower()
+                in ("1", "true", "yes")
+            )
             try:
                 email = _id_token_email(id_token, state_info_for_id_token)
             except HTTPException:
@@ -640,14 +655,12 @@ async def login(body: LoginRequest, request: Request):
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     if not user:
         record_login_failure(ip=ip, email=body.email)
-        raise HTTPException(
-            status_code=401,
-            detail=(
-                "Invalid email or password. If your password contains `$`, re-set "
-                "DATAFLOW_ADMIN_PASSWORD in Railway (escape as `$$` or wrap in quotes) "
-                "and redeploy the API."
-            ),
-        )
+        # What an anonymous caller is told is exactly what happened: the pair did
+        # not authenticate. Deployment advice (env var escaping) belongs to the
+        # operator configuring the service, not to an unauthenticated 401 — it
+        # leaks how identities are provisioned and, as the sign-in screen read it,
+        # turned a stale password into "control plane unreachable".
+        raise HTTPException(status_code=401, detail="Invalid email or password.")
     record_login_success(ip=ip, email=body.email)
     try:
         token, expires_at = create_token(user["email"])
@@ -664,8 +677,93 @@ async def login(body: LoginRequest, request: Request):
         )
     except Exception as exc:
         logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+    account = get_stored_user(user["email"])
     return {
         "token": token,
         "expires_at": expires_at,
         "user": public_user(user),
+        # An admin-issued one-time password is only temporary if the operator is
+        # told to rotate it; the client prompts on this flag.
+        "must_change_password": bool(account and account.get("must_change_password")),
     }
+
+
+@router.get("/me")
+async def me(request: Request):
+    """Who the API decided you are, and what it will let you do here.
+
+    The client used to infer authority from the platform label it stashed at
+    login, which says nothing about the workspace being viewed — so it rendered
+    every write control for a viewer and let the button discover the refusal.
+    This is the single source the UI gates on: the same resolution the request
+    gate itself applies, for the workspace named by ``X-Workspace-Id``.
+    """
+    from services.effective_role import (
+        permission_summary,
+        resolved_workspace_id,
+        workspace_id_from_request_headers,
+    )
+
+    user = getattr(request.state, "user", None)
+    email = normalize_email(getattr(request.state, "user_email", "") or (user or {}).get("email", ""))
+    if not email:
+        raise HTTPException(status_code=401, detail="Authentication required")
+    named_workspace_id = workspace_id_from_request_headers(request.headers)
+    # The workspace the request named, or the single membership that answered it,
+    # so the client can name that workspace explicitly from here on. The summary
+    # is resolved in that same workspace: a response whose permissions were
+    # decided somewhere other than the workspace it reports is not an answer.
+    workspace_id = resolved_workspace_id(user, named_workspace_id)
+    summary = permission_summary(user, workspace_id)
+    account = get_stored_user(email)
+    workspace_role = ""
+    if workspace_id:
+        try:
+            from services.team_store import get_workspace_role
+
+            workspace_role = get_workspace_role(workspace_id=workspace_id, email=email)
+        except Exception as exc:
+            logging.getLogger(__name__).warning("workspace role lookup failed: %s", exc)
+    display_name = str((user or {}).get("name") or "").strip()
+    if not display_name and account:
+        display_name = str(account.get("name") or "").strip()
+    return {
+        "email": email,
+        "name": display_name or email,
+        "platform_role": str((user or {}).get("role") or "member"),
+        "workspace_id": workspace_id,
+        "workspace_role": workspace_role,
+        "must_change_password": bool(account and account.get("must_change_password")),
+        "auth_required": auth_required(),
+        **summary,
+    }
+
+
+@router.post("/change-password")
+async def change_password(body: ChangePasswordRequest, request: Request):
+    """Rotate your own password — how an admin-issued one-time password is retired."""
+    actor = normalize_email(actor_email(request))
+    if actor in ("", "anonymous"):
+        raise HTTPException(status_code=401, detail="Sign in before changing your password")
+    if get_stored_user(actor) is None:
+        raise HTTPException(
+            status_code=400,
+            detail="This account is provisioned by the deployment environment — change it there",
+        )
+    if not authenticate(actor, body.current_password):
+        raise HTTPException(status_code=403, detail="Current password is incorrect")
+    if body.new_password == body.current_password:
+        raise HTTPException(status_code=400, detail="Choose a password you have not used")
+    set_password(email=actor, password=body.new_password)
+    try:
+        from services.audit_log import append_audit_event
+
+        append_audit_event(
+            action="auth.password_change",
+            resource="/auth/change-password",
+            actor=actor,
+            level="warn",
+        )
+    except Exception as exc:
+        logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+    return {"ok": True}

@@ -2,7 +2,9 @@ import { DtIcon } from "./DtIcon";
 import { Spinner } from "./LoadingState";
 import { PreflightResult } from "../lib/types";
 import { useEffect, useState } from "react";
-import { CORE_ENGINE_GATE_IDS, gateLabel } from "../lib/preflightGates";
+import { CORE_ENGINE_GATE_IDS, blockerTitle, gateLabel } from "../lib/preflightGates";
+import { EngineStageTicker } from "./EngineStageTicker";
+import type { ValidateProgress } from "../lib/engineProgress";
 import { ringDasharray, validateRingPercent } from "../lib/progressRing";
 
 const CORE_GATE_ORDER = [...CORE_ENGINE_GATE_IDS];
@@ -22,6 +24,7 @@ function formatDuration(ms: number | undefined): string {
 interface PreflightTimelineProps {
   result: PreflightResult;
   running?: boolean;
+  progress?: ValidateProgress | null;
   confidenceThreshold?: number;
   compact?: boolean;
   hideActions?: boolean;
@@ -33,6 +36,7 @@ interface PreflightTimelineProps {
 export function PreflightTimeline({
   result,
   running,
+  progress = null,
   confidenceThreshold = 0.85,
   compact = false,
   hideActions = false,
@@ -107,7 +111,7 @@ export function PreflightTimeline({
     .find((g) => g.id === "g9_data_integrity")?.message || "";
   const sampleUniqueness = /population uniqueness not proven/i.test(g9Msg);
   const headline = running
-    ? "Engine running G1–G9…"
+    ? "Validating route — live engine progress"
     : decision === "approve" && result.passed && sampleUniqueness
       ? "Execute-ready · uniqueness sample-only"
       : decision === "approve" && result.passed
@@ -163,7 +167,7 @@ export function PreflightTimeline({
           </h3>
           <p className="df2-preflight-sub">
             {running
-              ? `Wall-clock ${formatElapsed(elapsedMs)} · real gates, not a fake step animation`
+              ? `Wall-clock ${formatElapsed(elapsedMs)} · live row scan, not a repeating stage list`
               : `${passCount} passed · ${blockCount} blocked · ${skipCount} skipped · ${result.total_gates} total`}
             {subExtra}
           </p>
@@ -291,7 +295,9 @@ export function PreflightTimeline({
           <div className="df2-validate-stage-core">
             <Spinner size="sm" label="" />
             <h3>Validating route</h3>
-            <p>Engine evaluating G1–G9 · {formatElapsed(elapsedMs)} elapsed</p>
+            <p>
+              <EngineStageTicker running elapsedMs={elapsedMs} progress={progress} />
+            </p>
             <div className="df2-preflight-progress is-indeterminate" role="status">
               <div className="df2-mapping-progress-meta">
                 <strong>{formatElapsed(elapsedMs)}</strong>
@@ -346,7 +352,7 @@ export function PreflightTimeline({
           <ul className="df2-preflight-diagnostics-list">
             {result.blockers.map((b) => (
               <li key={b.id}>
-                <strong>{gateLabel(b.id)}:</strong> {b.message}
+                <strong>{blockerTitle(b.id, b.message)}:</strong> {b.message}
                 {b.guidance && (
                   <div className="df2-preflight-diagnostics-guidance">
                     {b.guidance.why && <p><strong>Why:</strong> {b.guidance.why}</p>}

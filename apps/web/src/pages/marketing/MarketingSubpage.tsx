@@ -6,6 +6,15 @@ import {
   ProofCinema,
 } from "../../components/landing/AlgorithmCinema";
 import { MarketingInkHero } from "../../components/marketing/MarketingInkHero";
+import {
+  EvidencePlatesArt,
+  PlanLadderArt,
+} from "../../components/marketing/hero-art/companyArt";
+import {
+  LatticeArt,
+  PerimeterArt,
+  VaultArt,
+} from "../../components/marketing/hero-art/enterpriseArt";
 import { MarketingReveal } from "../../components/marketing/MarketingReveal";
 import { MarketingSectionFooter } from "../../components/marketing/MarketingSectionFooter";
 import { isHelpDocRoute } from "../../lib/helpDocs";
@@ -14,6 +23,7 @@ import {
   MARKETING_PROOF_HIGHLIGHTS,
   MARKETING_STACK,
   TRANSFER_READY_DRIVERS,
+  catalogHonestyLead,
 } from "../../lib/provenEvidence";
 import type { PublicRoute } from "../../lib/publicNavigation";
 import { DocArticlePage, DocsPortal } from "./DocsPortal";
@@ -142,7 +152,7 @@ function PricingPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetStart
       price: "Custom",
       period: "usage-aligned",
       blurb: "Pipelines, Pilot, and shared connectors — priced to cadence, never seats-first.",
-      cta: "Talk to sales",
+      cta: "Contact sales",
       action: () => onNavigate("contact"),
       tone: "team" as const,
       featured: true,
@@ -194,7 +204,7 @@ function PricingPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetStart
               className="lp-btn lp-btn--outline lp-btn--lg lp-btn--on-ink"
               onClick={() => onNavigate("contact")}
             >
-              Talk to sales
+              Contact sales
             </button>
           </div>
         }
@@ -204,6 +214,11 @@ function PricingPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetStart
           { value: String(TRANSFER_READY_DRIVERS), label: "TRANSFER_READY drivers" },
           { value: "Custom", label: "Team & Enterprise" },
         ]}
+        aside={
+          <div className="lp-sales-hero-art">
+            <PlanLadderArt />
+          </div>
+        }
       />
 
       <MarketingReveal>
@@ -430,6 +445,11 @@ function EnterprisePage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetSt
           { value: "9 / 9", label: "Preflight required" },
           { value: "MATCH", label: "Dest-engine checksum" },
         ]}
+        aside={
+          <div className="lp-sales-hero-art">
+            <PerimeterArt />
+          </div>
+        }
       />
 
       <MarketingReveal>
@@ -499,7 +519,7 @@ function EnterprisePage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetSt
             </div>
             <div className="lp-ent-cta-actions">
               <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={() => onNavigate("contact")}>
-                Talk to sales
+                Contact sales
               </button>
               <button type="button" className="lp-btn lp-btn--outline lp-btn--lg lp-btn--on-ink" onClick={() => onNavigate("security")}>
                 Security overview
@@ -541,6 +561,11 @@ function CustomersPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
           { value: String(TRANSFER_READY_DRIVERS), label: "TRANSFER_READY drivers" },
           { value: "0", label: "Silent drops by design" },
         ]}
+        aside={
+          <div className="lp-sales-hero-art">
+            <EvidencePlatesArt />
+          </div>
+        }
       />
 
       <section className="lp-cust3-metrics" aria-label="Who this is for">
@@ -575,7 +600,7 @@ function CustomersPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
               {MARKETING_PROOF_HIGHLIGHTS.map((row) => (
                 <article key={row.title} className="lp-mkt-evidence-card">
                   <span className="lp-cust-industry">{row.stat}</span>
-                  <p><strong>{row.title}</strong> {row.body}</p>
+                  <p><strong>{row.title}.</strong> {row.body}</p>
                   <footer>
                     <strong>Measured {EVIDENCE_AS_OF}</strong>
                     <span>Live engines · destination re-read</span>
@@ -594,15 +619,15 @@ function CustomersPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
               <p className="lp-mkt-kicker">Your stack</p>
               <h2>Warehouses, lakes, databases, and apps</h2>
               <p>
-                Connect Snowflake, BigQuery, S3, ADLS, GCS, and the applications your revenue
-                team already runs. Same map, same gates, same reconcile report — every destination.
+                {catalogHonestyLead()} Same map, same gates, same reconcile report — every
+                destination that is actually TRANSFER_READY.
               </p>
             </div>
             <div className="lp-mkt-evidence-grid">
               {MARKETING_STACK.map((row) => (
                 <article key={row.family} className="lp-mkt-evidence-card">
                   <span className="lp-cust-industry">{row.family}</span>
-                  <p><strong>{row.items}</strong> {row.note}</p>
+                  <p><strong>{row.items}.</strong> {row.note}</p>
                 </article>
               ))}
             </div>
@@ -621,7 +646,7 @@ function CustomersPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
           </div>
           <div className="lp-hero-cta">
             <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={() => onNavigate("contact")}>
-              Talk to sales
+              Contact sales
             </button>
             <button type="button" className="lp-btn lp-btn--outline lp-btn--lg lp-btn--on-ink" onClick={() => onNavigate("pricing")}>
               See pricing
@@ -871,6 +896,11 @@ function SecurityPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
           { value: "9 / 9", label: "Gates before write" },
           { value: "RBAC", label: "Studio · Pilot · MCP" },
         ]}
+        aside={
+          <div className="lp-sales-hero-art">
+            <VaultArt />
+          </div>
+        }
       />
 
       <MarketingReveal>
@@ -942,39 +972,20 @@ function SecurityPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
   );
 }
 
+const INTEGRATION_FAMILY_ICONS: Record<string, string[]> = {
+  Warehouses: ["snowflake", "bigquery", "redshift"],
+  "Object storage": ["s3"],
+  Databases: ["postgresql", "mysql", "mongodb"],
+  Applications: ["salesforce", "hubspot"],
+};
+
 function IntegrationsPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetStarted" | "onNavigate">) {
-  const families = [
-    {
-      title: "Warehouses",
-      body: "Load Snowflake, BigQuery, Redshift, and Databricks with native MERGE, capacity checks, and a reconcile report finance can archive.",
-      ids: ["snowflake", "bigquery", "redshift"],
-      badge: "Native",
-    },
-    {
-      title: "Object storage",
-      body: "Land files and open-table paths on Amazon S3, Azure Data Lake, and Google Cloud Storage with write accounting.",
-      ids: ["s3"],
-      badge: "Native",
-    },
-    {
-      title: "Databases",
-      body: "PostgreSQL, MySQL, SQL Server, Oracle, and MongoDB — upsert, watermark incremental, and checksum proof.",
-      ids: ["postgresql", "mysql", "mongodb"],
-      badge: "Native",
-    },
-    {
-      title: "Applications",
-      body: "Salesforce, Stripe, Shopify, and HubSpot — connect with your integration user.",
-      ids: ["salesforce"],
-      badge: "Native",
-    },
-  ];
 
   return (
     <div className="lp-mkt-page lp-int-v2">
       <MarketingInkHero
         kicker="Connection catalog"
-        title={<>Connect the systems you already run — {TRANSFER_READY_DRIVERS} transfer-live.</>}
+        title={<>Connect the systems you already run — {TRANSFER_READY_DRIVERS} TRANSFER_READY.</>}
         lead={
           <>
             Catalog tiles are not transfer-live. {TRANSFER_READY_DRIVERS} drivers are{" "}
@@ -995,16 +1006,21 @@ function IntegrationsPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGet
         }
         slas={[
           { value: String(TRANSFER_READY_DRIVERS), label: "TRANSFER_READY" },
-          { value: "Native", label: "Warehouse MERGE" },
+          { value: "Mixed", label: "Warehouse tiles" },
           { value: "SQLA", label: "Generic SQL drivers" },
           { value: "DLQ", label: "Quarantine replay" },
         ]}
+        aside={
+          <div className="lp-sales-hero-art">
+            <LatticeArt readyCount={TRANSFER_READY_DRIVERS} />
+          </div>
+        }
       />
 
       <MarketingReveal>
         <section className="lp-int-strip" aria-label="Capability labels">
           <div><strong>DLQ</strong><span>Quarantine replay</span></div>
-          <div><strong>Native</strong><span>Warehouse paths</span></div>
+          <div><strong>Mixed</strong><span>Warehouse tiles — not all live</span></div>
           <div><strong>SQLA</strong><span>Generic drivers</span></div>
           <div><strong>Files</strong><span>CSV · JSON · Parquet</span></div>
         </section>
@@ -1015,18 +1031,21 @@ function IntegrationsPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGet
           <div className="lp-int-section-head">
             <p className="lp-mkt-kicker">Catalog families</p>
             <h2>What you can connect</h2>
-            <p>Grouped the way teams plan loads — warehouses first, then lakes, databases, and apps.</p>
+            <p>
+              Grouped the way teams plan loads — warehouses first, then lakes, databases, and apps.
+              Family badges match Studio: Certified, Mixed, or Planned. Tiles are not transfer-live.
+            </p>
           </div>
           <div className="lp-int-family-grid">
-            {families.map((f) => (
-              <article key={f.title} className="lp-int-family-card">
+            {MARKETING_STACK.map((f) => (
+              <article key={f.family} className="lp-int-family-card">
                 <header>
-                  <h3>{f.title}</h3>
+                  <h3>{f.family}</h3>
                   <span>{f.badge}</span>
                 </header>
-                <p>{f.body}</p>
+                <p>{f.note}</p>
                 <div className="lp-int-family-icons">
-                  {f.ids.map((id) => (
+                  {(INTEGRATION_FAMILY_ICONS[f.family] || []).map((id) => (
                     <span key={id} title={id}>
                       <ConnectorIcon id={id} size={24} />
                     </span>
@@ -1066,8 +1085,11 @@ function IntegrationsPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGet
       <MarketingReveal>
         <section className="lp-int-cta">
           <div>
-            <h2>Browse the live catalog</h2>
-            <p>Open Transfer Studio and pick a source and destination — same engine as production.</p>
+            <h2>Browse the connector catalog</h2>
+            <p>
+              Open Transfer Studio and pick a source and destination. Certified filters show
+              TRANSFER_READY drivers only — the same engine as production.
+            </p>
           </div>
           <div className="lp-int-cta-actions">
             <button type="button" className="lp-btn lp-btn--brand" onClick={onGetStarted}>

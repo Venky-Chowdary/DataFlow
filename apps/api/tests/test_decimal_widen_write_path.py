@@ -1,0 +1,450 @@
+"""Dest NUMBER/DECIMAL widen from the cell the writer refused — one owner.
+
+flights-1m.csv → Snowflake NUMBER(9,6): ``7.9166665`` (float32 of 7+55/60)
+and ``0.016666668`` (1/60) overflow dest scale. Write stays fail-closed.
+Suggested fix names the dest-spelled carrier that would hold the cell.
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from connectors.writer_common import (  # noqa: E402
+    fits_decimal,
+    quarantine_unfit_decimals,
+)
+from services.decimal_observe import (  # noqa: E402
+    decimal_scale_overflow_fix,
+    decimal_widen_carrier,
+    decimal_widen_from_envelope,
+    decimal_widen_precision_scale,
+    proven_decimal_widen,
+)
+from services.population_fit_scan import (  # noqa: E402
+    apply_suggested_widens_and_rescan,
+    applyable_widen_actions,
+    bounded_targets,
+    build_population_fit_gate,
+    scan_population_fit,
+)
+
+
+def test_flights_clock_residue_does_not_fit_existing_number():
+    assert fits_decimal("7.9166665", 9, 6, dest_db="snowflake") is False
+    assert fits_decimal("0.016666668", 9, 6, dest_db="snowflake") is False
+    assert fits_decimal("0.76666665", 10, 7, dest_db="snowflake") is False
+    assert fits_decimal("7.916667", 9, 6, dest_db="snowflake") is True
+
+
+def test_widen_keeps_dest_int_width_and_spells_dialect():
+    assert decimal_widen_precision_scale(
+        "7.9166665", dest_db="snowflake", current_type="NUMBER(9,6)"
+    ) == (10, 7)
+    assert (
+        decimal_widen_carrier(
+            "7.9166665", dest_db="snowflake", current_type="NUMBER(9,6)"
+        )
+        == "NUMBER(10,7)"
+    )
+    assert (
+        decimal_widen_carrier(
+            "0.76666665", dest_db="snowflake", current_type="NUMBER(10,7)"
+        )
+        == "NUMBER(11,8)"
+    )
+    assert (
+        decimal_widen_carrier("1.2345", dest_db="mysql", current_type="DECIMAL(10,2)")
+        == "DECIMAL(12,4)"
+    )
+    assert (
+        decimal_widen_carrier(
+            "1.2345", dest_db="postgresql", current_type="NUMERIC(10,2)"
+        )
+        == "NUMERIC(12,4)"
+    )
+    assert (
+        decimal_widen_carrier(
+            "1.2345678901", dest_db="bigquery", current_type="NUMERIC(5,2)"
+        )
+        == "BIGNUMERIC(13,10)"
+    )
+
+
+def test_suggested_fix_names_widen_not_truncate():
+    fix = decimal_scale_overflow_fix(
+        "7.9166665",
+        dest_db="snowflake",
+        current_type="NUMBER(9,6)",
+        column="DEP_TIME",
+    )
+    assert "NUMBER(10,7)" in fix
+    assert "DEP_TIME" in fix
+    assert "truncate" in fix.lower()
+
+
+def test_file_inferred_typmod_is_not_a_declared_domain():
+    targets, _, safe = bounded_targets(
+        [{"source": "DEP_TIME", "target": "DEP_TIME", "target_type": "NUMBER(9,6)"}],
+        source_types={"DEP_TIME": "NUMBER(9,6)"},
+        dest_db="snowflake",
+        source_kind="file",
+        source_format="csv",
+    )
+    assert safe == ()
+    assert [t.target for t in targets] == ["DEP_TIME"]
+
+    warehouse, _, warehouse_safe = bounded_targets(
+        [{"source": "DEP_TIME", "target": "DEP_TIME", "target_type": "NUMBER(9,6)"}],
+        source_types={"DEP_TIME": "NUMBER(9,6)"},
+        dest_db="snowflake",
+        source_kind="database",
+        source_format="snowflake",
+    )
+    assert warehouse == ()
+    assert warehouse_safe == ("DEP_TIME",)
+
+    omitted, _, omitted_safe = bounded_targets(
+        [{"source": "DEP_TIME", "target": "DEP_TIME", "target_type": "NUMBER(9,6)"}],
+        source_types={"DEP_TIME": "NUMBER(9,6)"},
+        dest_db="snowflake",
+    )
+    assert omitted_safe == ()
+    assert [t.target for t in omitted] == ["DEP_TIME"]
+
+
+def test_population_scan_widens_from_all_unfit_cells_not_the_first():
+    """flights-1m: first overflow suggested (11,8); a later cell still needed (12,9).
+
+    One Approve must stamp the envelope of every unfit value so Validate
+    does not play stepwise NUMBER(9,6) → (11,8) → (12,9).
+    """
+    assert (
+        decimal_widen_from_envelope(
+            max_int_digits=1,
+            max_scale=9,
+            dest_db="snowflake",
+            current_type="NUMBER(9,6)",
+        )
+        == "NUMBER(12,9)"
+    )
+    rows = (
+        [{"DEP_TIME": "7.5"}] * 292
+        + [{"DEP_TIME": "0.23333333"}]
+        + [{"DEP_TIME": "7.5"}] * 44
+        + [{"DEP_TIME": "0.016666668"}]
+    )
+    report = scan_population_fit(
+        rows,
+        [{"source": "DEP_TIME", "target": "DEP_TIME", "target_type": "NUMBER(9,6)"}],
+        source_types={"DEP_TIME": "NUMBER(9,6)"},
+        dest_db="snowflake",
+        dialect_label="snowflake",
+        job_error_policy="fail",
+        rows_are_population=True,
+        source_kind="file",
+        source_format="csv",
+        dest_table_exists=False,
+    )
+    assert report.findings
+    assert report.findings[0].suggested_target_type == "NUMBER(12,9)"
+    assert "CREATE" in report.findings[0].suggested_fix
+    assert "Source values are not modified" in report.findings[0].suggested_fix
+    gate = build_population_fit_gate(report)
+    assert gate["details"]["create_new_table"] is True
+    actions = gate["details"]["suggested_actions"]
+    assert actions[0]["to_type"] == "NUMBER(12,9)"
+    assert actions[0]["requires_ddl"] is False
+
+    widened = scan_population_fit(
+        rows,
+        [{"source": "DEP_TIME", "target": "DEP_TIME", "target_type": "NUMBER(12,9)"}],
+        source_types={"DEP_TIME": "NUMBER(9,6)"},
+        dest_db="snowflake",
+        dialect_label="snowflake",
+        job_error_policy="fail",
+        rows_are_population=True,
+        source_kind="file",
+        source_format="csv",
+        dest_table_exists=False,
+    )
+    assert widened.findings == ()
+    assert widened.evidence == "exact"
+
+
+def test_population_scan_blocks_file_clock_residue_and_stamps_widen():
+    rows = [{"DEP_TIME": "7.5"}] * 292 + [{"DEP_TIME": "7.9166665"}]
+    report = scan_population_fit(
+        rows,
+        [{"source": "DEP_TIME", "target": "DEP_TIME", "target_type": "NUMBER(9,6)"}],
+        source_types={"DEP_TIME": "NUMBER(9,6)"},
+        dest_db="snowflake",
+        dialect_label="snowflake",
+        job_error_policy="fail",
+        rows_are_population=True,
+        source_kind="file",
+        source_format="csv",
+    )
+    assert report.findings
+    assert report.findings[0].example_rows == (293,)
+    assert report.findings[0].suggested_target_type == "NUMBER(10,7)"
+
+
+def test_quarantine_stamps_suggested_fix_on_snowflake_number():
+    details: list[dict] = []
+    out = quarantine_unfit_decimals(
+        [("7.9166665",)],
+        ["DEP_TIME"],
+        ["NUMBER(9,6)"],
+        details,
+        policy="fail",
+        dialect_label="Snowflake NUMBER",
+        dest_db="snowflake",
+    )
+    assert out == []
+    assert details
+    assert "NUMBER(9,6)" in details[0]["reason"]
+    assert details[0]["suggested_target_type"] == "NUMBER(10,7)"
+    assert "NUMBER(10,7)" in details[0]["suggested_fix"]
+    assert fits_decimal(
+        "7.9166665", 10, 7, dest_db="snowflake"
+    ), "widen must be the carrier that actually fits"
+
+
+def test_remap_on_existing_dest_still_scans_live_ddl():
+    """Map NUMBER(10,7) does not ALTER live Snowflake NUMBER(9,6).
+
+    That remap used to green Validate and fail Execute on the same 7.9166665
+    cells — the errors-every-Run loop. Validate must keep judging live DDL.
+    """
+    rows = [{"DEP_TIME": "7.5"}] * 292 + [{"DEP_TIME": "7.9166665"}]
+    report = scan_population_fit(
+        rows,
+        [{"source": "DEP_TIME", "target": "DEP_TIME", "target_type": "NUMBER(10,7)"}],
+        dest_types={"DEP_TIME": "NUMBER(9,6)"},
+        source_types={"DEP_TIME": "NUMBER(9,6)"},
+        dest_db="snowflake",
+        dialect_label="snowflake",
+        job_error_policy="fail",
+        rows_are_population=True,
+        source_kind="file",
+        source_format="csv",
+        sync_mode="full_refresh_append",
+        dest_table_exists=True,
+    )
+    assert report.findings
+    assert report.findings[0].target.target_type == "NUMBER(9,6)"
+    assert report.findings[0].target.binds_live_ddl is True
+    assert report.findings[0].suggested_target_type == "NUMBER(10,7)"
+    assert "does not ALTER" in report.findings[0].suggested_fix
+    assert "Resume" in report.findings[0].suggested_fix
+
+
+def test_overwrite_judges_mapping_type_not_dropped_live_ddl():
+    """Overwrite recreates the object — mapping NUMBER(10,7) is the write bind."""
+    rows = [{"DEP_TIME": "7.9166665"}]
+    report = scan_population_fit(
+        rows,
+        [{"source": "DEP_TIME", "target": "DEP_TIME", "target_type": "NUMBER(10,7)"}],
+        dest_types={"DEP_TIME": "NUMBER(9,6)"},
+        dest_db="snowflake",
+        dialect_label="snowflake",
+        job_error_policy="fail",
+        rows_are_population=True,
+        source_kind="file",
+        source_format="csv",
+        sync_mode="full_refresh_overwrite",
+        dest_table_exists=True,
+    )
+    assert report.findings == ()
+    assert report.targets[0].target_type == "NUMBER(10,7)"
+    assert report.targets[0].binds_live_ddl is False
+
+
+def test_create_new_uses_mapping_even_when_projected_types_are_narrow():
+    targets, _, _ = bounded_targets(
+        [{"source": "DEP_TIME", "target": "DEP_TIME", "target_type": "NUMBER(10,7)"}],
+        dest_types={"DEP_TIME": "NUMBER(9,6)"},
+        dest_db="snowflake",
+        source_kind="file",
+        source_format="csv",
+        dest_table_exists=False,
+    )
+    assert [t.target_type for t in targets] == ["NUMBER(10,7)"]
+    assert targets[0].binds_live_ddl is False
+
+
+def test_proven_widen_matches_write_path_fits_decimal():
+    """Suggestion SSOT is fits_decimal, not digit math alone."""
+    widened = proven_decimal_widen(
+        values=("0.23333333", "0.016666668"),
+        dest_db="snowflake",
+        current_type="NUMBER(9,6)",
+        max_int_digits=1,
+        max_scale=9,
+    )
+    assert widened == "NUMBER(12,9)"
+    parsed = (12, 9)
+    assert fits_decimal("0.23333333", *parsed, dest_db="snowflake")
+    assert fits_decimal("0.016666668", *parsed, dest_db="snowflake")
+    assert fits_decimal("7.9166665", *parsed, dest_db="snowflake")
+
+
+def test_proven_widen_refuses_a_type_past_snowflake_cap():
+    too_small = "0." + ("0" * 39) + "1"
+    assert (
+        proven_decimal_widen(
+            values=(too_small,),
+            dest_db="snowflake",
+            current_type="NUMBER(9,6)",
+        )
+        == ""
+    )
+
+
+def test_apply_then_rescan_clears_flights_clock_overflows():
+    """Named flights fixture: Approve of the suggested type must re-Validate clean.
+
+    The production loop was NUMBER(9,6) → Apply (11,8) → still BLOCK → (12,9).
+    Apply of the emitted action on the same rows must leave findings == ().
+    """
+    rows = (
+        [{"DEP_TIME": "7.5"}] * 292
+        + [{"DEP_TIME": "0.23333333"}]
+        + [{"DEP_TIME": "7.5"}] * 44
+        + [{"DEP_TIME": "0.016666668"}]
+    )
+    mappings = [
+        {"source": "DEP_TIME", "target": "DEP_TIME", "target_type": "NUMBER(9,6)"}
+    ]
+    scan_kw = dict(
+        source_types={"DEP_TIME": "NUMBER(9,6)"},
+        dest_db="snowflake",
+        dialect_label="snowflake",
+        job_error_policy="fail",
+        rows_are_population=True,
+        source_kind="file",
+        source_format="csv",
+        dest_table_exists=False,
+    )
+    report = scan_population_fit(rows, mappings, **scan_kw)
+    assert report.findings
+    assert report.findings[0].apply_proven is True
+    assert report.findings[0].suggested_target_type == "NUMBER(12,9)"
+    actions = applyable_widen_actions(report)
+    assert actions[0]["to_type"] == "NUMBER(12,9)"
+    assert actions[0]["mapping_applyable"] is True
+    assert actions[0]["requires_ddl"] is False
+
+    updated, after = apply_suggested_widens_and_rescan(
+        rows, mappings, report, **scan_kw
+    )
+    assert updated[0]["target_type"] == "NUMBER(12,9)"
+    assert updated[0]["destType"] == "NUMBER(12,9)"
+    assert after.findings == ()
+    assert after.evidence == "exact"
+    assert applyable_widen_actions(after) == []
+
+
+def test_envelope_continue_after_budget_uses_later_overflow_not_first():
+    """Row budget cuts the full walk; first overflow still starts envelope continue.
+
+    Prefix-only would suggest NUMBER(11,8) from 0.23333333; the later
+    0.016666668 needs NUMBER(12,9). Apply of that type must scan clean.
+    """
+    rows = (
+        [{"DEP_TIME": "0.23333333"}]
+        + [{"DEP_TIME": "7.5"}] * 8
+        + [{"DEP_TIME": "0.016666668"}]
+    )
+    mappings = [
+        {"source": "DEP_TIME", "target": "DEP_TIME", "target_type": "NUMBER(9,6)"}
+    ]
+    scan_kw = dict(
+        source_types={"DEP_TIME": "NUMBER(9,6)"},
+        dest_db="snowflake",
+        dialect_label="snowflake",
+        job_error_policy="fail",
+        rows_are_population=True,
+        source_kind="file",
+        source_format="csv",
+        dest_table_exists=False,
+        budget=3,
+    )
+    report = scan_population_fit(rows, mappings, **scan_kw)
+    assert report.evidence == "partial"
+    assert report.rows_scanned == 3
+    assert report.envelope_rows_scanned >= 1
+    assert report.envelope_complete is True
+    assert report.findings[0].suggested_target_type == "NUMBER(12,9)"
+    assert report.findings[0].apply_proven is True
+
+    _updated, after = apply_suggested_widens_and_rescan(
+        rows, mappings, report, **{**scan_kw, "budget": 5_000_000}
+    )
+    assert after.findings == ()
+
+
+def test_live_ddl_widen_is_not_mapping_applyable():
+    """Apply must not stamp Map destType as if it ALTERed Snowflake."""
+    rows = [{"DEP_TIME": "7.5"}] * 292 + [{"DEP_TIME": "7.9166665"}]
+    mappings = [
+        {"source": "DEP_TIME", "target": "DEP_TIME", "target_type": "NUMBER(10,7)"}
+    ]
+    report = scan_population_fit(
+        rows,
+        mappings,
+        dest_types={"DEP_TIME": "NUMBER(9,6)"},
+        source_types={"DEP_TIME": "NUMBER(9,6)"},
+        dest_db="snowflake",
+        dialect_label="snowflake",
+        job_error_policy="fail",
+        rows_are_population=True,
+        source_kind="file",
+        source_format="csv",
+        sync_mode="full_refresh_append",
+        dest_table_exists=True,
+    )
+    assert report.findings[0].target.binds_live_ddl is True
+    assert report.findings[0].suggested_target_type == "NUMBER(10,7)"
+    assert applyable_widen_actions(report) == []
+
+
+def test_integer_fractional_proposes_decimal_never_float():
+    """INTEGER dest + clock fraction → exact NUMBER/DECIMAL, never FLOAT Apply.
+
+    Snowflake INTEGER is NUMBER(38,0) (typed parse), Postgres INTEGER is INT32.
+    Both must propose a proven decimal — not calendar copy, not FLOAT.
+    """
+    rows = [{"DEP_TIME": "9"}, {"DEP_TIME": "9.083333"}]
+    for dest in ("snowflake", "postgresql"):
+        report = scan_population_fit(
+            rows,
+            [{"source": "DEP_TIME", "target": "DEP_TIME", "target_type": "INTEGER"}],
+            source_types={"DEP_TIME": "NUMBER"},
+            dest_db=dest,
+            dialect_label=dest,
+            job_error_policy="fail",
+            rows_are_population=True,
+            source_kind="file",
+            source_format="csv",
+            dest_table_exists=False,
+        )
+        assert report.findings, dest
+        suggested = str(report.findings[0].suggested_target_type or "").upper()
+        assert suggested.startswith("NUMBER(") or suggested.startswith(
+            ("DECIMAL(", "NUMERIC(")
+        ), (dest, suggested, report.findings[0].unfit_reason)
+        assert "FLOAT" not in suggested and "DOUBLE" not in suggested
+        assert report.findings[0].apply_proven is True
+        assert "calendar" not in report.findings[0].suggested_fix.lower()
+        p_s = suggested.split("(")[1].rstrip(")").split(",")
+        precision, scale = int(p_s[0]), int(p_s[1])
+        assert all(
+            fits_decimal(row["DEP_TIME"], precision, scale, dest_db=dest)
+            for row in rows
+        )

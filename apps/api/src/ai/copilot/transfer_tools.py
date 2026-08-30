@@ -342,20 +342,17 @@ def _type_conversions(mappings: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return out
 
 
-def _declare_source_timezone(
-    mappings: list[dict],
+def _declare_zone_on_schema(
+    src_rows: list[dict],
     zone: str,
-    *,
-    source_types: dict,
-) -> tuple[list[dict], dict]:
-    """Stamp an operator-declared zone onto the zoneless temporal columns.
+) -> tuple[list[dict], set[str]]:
+    """Apply an operator-declared zone to the zoneless temporal source columns.
 
-    Returns the mappings and the source types as they are *after* the
-    declaration. Both matter: the transform changes the value the writer sends,
-    and the type changes what every gate downstream understands the column to
-    carry. Updating only the first leaves the transfer blocked for a problem the
-    declaration already answered — the value would be written correctly by a
-    path nothing allowed to run.
+    A declared zone is a fact about the source schema, so it has to be true
+    *before* mapping runs: the mapper, its proof, and every gate read the source
+    type, and a declaration applied afterwards would change the value the writer
+    sends while leaving the run blocked for the zoneless problem the operator
+    just answered.
 
     Only zoneless columns are touched. A column that already carries an offset
     has an instant the source was explicit about, and overriding it would move a
@@ -365,29 +362,45 @@ def _declare_source_timezone(
     from services.transform_engine import ASSUME_TIMEZONE_PREFIX
     from services.type_system import datetime_timezone_polarity
 
+    declared: set[str] = set()
     out: list[dict] = []
-    declared_types: dict = dict(source_types or {})
+    for row in src_rows:
+        entry = dict(row)
+        src_type = str(entry.get("inferred_type") or "")
+        if src_type and datetime_timezone_polarity(src_type) == "ntz":
+            entry["inferred_type"] = effective_source_type(
+                src_type, f"{ASSUME_TIMEZONE_PREFIX}{zone}"
+            )
+            declared.add(str(entry.get("name") or ""))
+        out.append(entry)
+    return out, declared
+
+
+def _stamp_zone_transform(
+    mappings: list[dict],
+    zone: str,
+    columns: set[str],
+) -> list[dict]:
+    """Carry the declaration to the writer as the transform that applies it.
+
+    The type says what the column means; the transform is what attaches the zone
+    to each value. Both are required — a declared type with no transform would
+    write the naive wall clock under an instant contract.
+    """
+    from services.transform_engine import ASSUME_TIMEZONE_PREFIX
+
+    out: list[dict] = []
     for m in mappings:
         entry = dict(m)
-        src_type = str(
-            entry.get("source_type") or source_types.get(entry.get("source") or "") or ""
-        )
         existing = str(entry.get("transform") or "").strip().lower()
         # A plain temporal transform is the mapper parsing the value, not a
         # decision about its zone — the declaration refines it. Anything else is
         # an operator choice and is left alone.
         already_typed = existing not in {"", "none", "identity", "datetime", "date", "timestamp"}
-        if (
-            src_type
-            and datetime_timezone_polarity(src_type) == "ntz"
-            and not already_typed
-        ):
+        if str(entry.get("source") or "") in columns and not already_typed:
             entry["transform"] = f"{ASSUME_TIMEZONE_PREFIX}{zone}"
-            declared = effective_source_type(src_type, entry["transform"])
-            entry["source_type"] = declared
-            declared_types[str(entry.get("source") or "")] = declared
         out.append(entry)
-    return out, declared_types
+    return out
 
 
 def plan_transfer(
@@ -408,6 +421,13 @@ def plan_transfer(
     procedure_params: Any = None,
     contract_id: str = "",
     require_signed_contract: Any = None,
+    source_filter: dict[str, Any] | None = None,
+    upsert_key: str = "",
+    dedupe_key: str = "",
+    rule_questions: list[str] | None = None,
+    applied_rules: list[str] | None = None,
+    cadence: str = "",
+    all_tables: bool = False,
 ):
     """Plan a real transfer: live schemas, real mapping, real preflight gates.
 
@@ -419,6 +439,19 @@ def plan_transfer(
     """
     tool = "plan_transfer"
     src_table = (source_table or "").strip()
+    unapplied = [str(q) for q in (rule_questions or []) if str(q or "").strip()]
+    if unapplied:
+        return _tool_result(tool, success=False, error=_unapplied_rules_error(unapplied))
+    if all_tables and not src_table:
+        return _tool_result(
+            tool,
+            success=False,
+            error=(
+                "I move one table per run, so “all tables” needs a list I can prove — "
+                "ask me to “list tables on <source>” and name the ones to move, or use "
+                "Transfer Studio for a multi-table migration."
+            ),
+        )
     from services.procedure_source import ProcedureSourceError
 
     try:
@@ -526,8 +559,36 @@ def plan_transfer(
         sample_rows = _sample_rows(src_conn, src_table)
 
     src_names = [str(c.get("name")) for c in src_info["columns"] if c.get("name")]
+
+    row_rules, rules_error = _ground_data_rules(
+        source_filter=source_filter,
+        upsert_key=upsert_key,
+        dedupe_key=dedupe_key,
+        source_columns=src_names,
+        source_label=f"{src_conn.get('name')}.{src_table}",
+        mode=mode,
+    )
+    if rules_error:
+        return _tool_result(tool, success=False, error=rules_error)
+    mode = row_rules["sync_mode"]
+    # A filter narrows what the run must move, so every gate that reasons about
+    # "the rows about to be written" has to see the filtered sample.
+    if row_rules["source_filter"]:
+        from services.row_filter import apply_row_filter
+
+        sample_rows = apply_row_filter(sample_rows, row_rules["source_filter"])
+
     samples = _column_samples(sample_rows, src_names)
     src_rows = _schema_rows(src_info["columns"], samples)
+    zone_columns: set[str] = set()
+    if source_timezone:
+        src_rows, zone_columns = _declare_zone_on_schema(src_rows, source_timezone)
+        # The declaration is a fact about the source, so it travels with the
+        # schema every gate reads — not just with the mapping.
+        src_info["schema"] = {
+            **(src_info.get("schema") or {}),
+            **{r["name"]: r["inferred_type"] for r in src_rows if r["name"] in zone_columns},
+        }
     dst_rows = _schema_rows(dst_info.get("columns") or [])
 
     from services.mapping_pipeline import run_mapping_pipeline
@@ -548,15 +609,8 @@ def plan_transfer(
         use_llm=False,
     )
     mappings = list(mapping.get("mappings") or [])
-    if source_timezone:
-        mappings, declared_source_types = _declare_source_timezone(
-            mappings,
-            source_timezone,
-            source_types=src_info.get("schema") or {},
-        )
-        # The declaration is a fact about the source, so it travels with the
-        # schema every gate reads — not just with the mapping.
-        src_info["schema"] = declared_source_types
+    if zone_columns:
+        mappings = _stamp_zone_transform(mappings, source_timezone, zone_columns)
 
     preflight = _run_preflight(
         src_conn=src_conn,
@@ -579,6 +633,8 @@ def plan_transfer(
         source_primary_key=_source_primary_key(src_info),
         write_via_staging=bool(write_via_staging),
         source_read_mode=str((callable_plan or {}).get("mode") or ""),
+        source_filter=row_rules["source_filter"] or None,
+        stream_contracts=row_rules["stream_contracts"] or None,
     )
 
     conversions = _type_conversions(mappings)
@@ -631,6 +687,16 @@ def plan_transfer(
             "sync_mode": mode,
             "schema_policy": schema_policy,
             "validation_mode": validation_mode,
+            "source_filter": row_rules["source_filter"],
+            "stream_contracts": row_rules["stream_contracts"],
+            "data_rules": {
+                "applied": [str(r) for r in (applied_rules or [])],
+                "upsert_key": row_rules["upsert_key"],
+                "row_filter": row_rules["filter_description"],
+                # Chat stages one run; a cadence is a Schedules object, so it is
+                # echoed back as an unmet request rather than silently honoured.
+                "cadence_not_scheduled": str(cadence or ""),
+            },
             "mapped_count": len(mappings),
             "unmapped_source_columns": unmapped[:20],
             "type_conversions": conversions[:_MAX_PREVIEW_MAPPINGS],
@@ -657,6 +723,122 @@ def plan_transfer(
             **_preview_bound_contract(contract_id, require_signed_contract),
         },
     )
+
+
+def _unapplied_rules_error(questions: list[str]) -> str:
+    """Refuse the run and hand back the exact missing detail.
+
+    Staging a transfer that ignores a stated rule would move rows the operator
+    excluded, and it would look like success. So the run is refused, not
+    degraded.
+    """
+    head = (
+        "I can set up this transfer, but I will not run it while part of what you "
+        "asked for would be dropped:"
+    )
+    return head + "\n" + "\n".join(f"• {q}" for q in questions[:4])
+
+
+def _ground_data_rules(
+    *,
+    source_filter: dict[str, Any] | None,
+    upsert_key: str,
+    dedupe_key: str,
+    source_columns: list[str],
+    source_label: str,
+    mode: str,
+) -> tuple[dict[str, Any], str]:
+    """Bind spoken row rules to real source columns, or refuse.
+
+    Every column named in a filter or a key must exist in the introspected
+    source. An unknown column cannot be silently ignored: the run would move
+    more rows than the operator asked for, and reconcile green while doing it.
+    """
+    from .transfer_rules import filter_columns
+
+    spec = dict(source_filter or {})
+    known = {c.lower(): c for c in source_columns}
+    out: dict[str, Any] = {
+        "source_filter": {},
+        "stream_contracts": [],
+        "upsert_key": "",
+        "filter_description": "",
+        "sync_mode": mode,
+    }
+
+    def resolve(column: str, role: str) -> tuple[str, str]:
+        actual = known.get(column.strip().lower(), "")
+        if actual:
+            return actual, ""
+        listed = ", ".join(source_columns[:12]) or "none readable"
+        return "", (
+            f"{source_label} has no column `{column}`, so I cannot apply the {role} "
+            f"you asked for — running without it would move rows you excluded. "
+            f"Columns I can see: {listed}."
+        )
+
+    if spec:
+        for column in filter_columns(spec):
+            _, err = resolve(column, "row filter")
+            if err:
+                return out, err
+        # Bind to the source's own spelling: the filter runs against read rows,
+        # whose keys carry the DDL's case.
+        spec = _rebind_filter_columns(spec, known)
+        out["source_filter"] = spec
+        out["filter_description"] = _describe_row_filter(spec)
+
+    key = (upsert_key or dedupe_key or "").strip()
+    if key:
+        actual, err = resolve(key, "upsert key")
+        if err:
+            return out, err
+        out["upsert_key"] = actual
+        out["sync_mode"] = normalize_sync_mode("upsert")
+        # The engine takes its merge keys from the stream contract, so an upsert
+        # on a named column has to be declared there or the write falls back to
+        # insert and duplicates the key.
+        out["stream_contracts"] = [{"name": "stream", "primary_key": actual, "selected": True}]
+    return out, ""
+
+
+def _rebind_filter_columns(
+    spec: dict[str, Any],
+    known: dict[str, str],
+) -> dict[str, Any]:
+    """Rewrite filter column names to the source's own spelling."""
+    node = dict(spec)
+    for joiner in ("and", "or"):
+        if joiner in node:
+            node[joiner] = [
+                _rebind_filter_columns(child, known)
+                for child in (node.get(joiner) or [])
+                if isinstance(child, dict)
+            ]
+            return node
+    for field in ("column", "field"):
+        raw = str(node.get(field) or "").strip()
+        if raw:
+            node[field] = known.get(raw.lower(), raw)
+    return node
+
+
+def _describe_row_filter(spec: dict[str, Any] | None) -> str:
+    """One-line echo of the filter for the confirm preview."""
+    node = spec or {}
+    for joiner in ("and", "or"):
+        if joiner in node:
+            parts = [_describe_row_filter(c) for c in (node.get(joiner) or []) if c]
+            return f" {joiner} ".join(p for p in parts if p)
+    column = node.get("column") or node.get("field") or ""
+    if not column:
+        return ""
+    op = str(node.get("operator") or node.get("op") or "eq")
+    if op in {"is_null", "is_not_null"}:
+        return f"{column} {op.replace('_', ' ')}"
+    value = node.get("value")
+    shown = ", ".join(str(v) for v in value) if isinstance(value, list) else str(value)
+    return f"{column} {op} {shown}"
 
 
 def _source_primary_key(src_info: dict[str, Any]) -> str:
@@ -690,6 +872,8 @@ def _run_preflight(
     source_primary_key: str = "",
     write_via_staging: bool = False,
     source_read_mode: str = "",
+    source_filter: dict[str, Any] | None = None,
+    stream_contracts: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Run the real 9 gates and persist the run so the operator can cite it."""
     from services.preflight_run_store import save_preflight_run
@@ -730,7 +914,7 @@ def _run_preflight(
             sync_mode=mode,
             schema_policy=schema_policy,
             validation_mode=validation_mode,
-            stream_contracts=[],
+            stream_contracts=list(stream_contracts or []),
             backfill_new_fields=False,
             source_columns=columns,
             dest_type=dest_db_type,
@@ -778,6 +962,8 @@ def _run_preflight(
             # this the gate asked the operator to set a key the source catalog
             # had already declared.
             contract_primary_key=source_primary_key or None,
+            source_filter=source_filter or None,
+            stream_contracts=list(stream_contracts or []),
         )
         result = apply_policy_gates(
             result,
@@ -825,7 +1011,15 @@ def _run_preflight(
             for g in (result.get("gates") or [])
         ],
         "blockers": [
-            {"id": b.get("id") or b.get("gate_id"), "message": b.get("message")}
+            {
+                "id": b.get("id") or b.get("gate_id"),
+                "message": b.get("message"),
+                # Only the fix travels from the details blob: without it the chat
+                # refusal names a problem and no way out of it.
+                "details": {
+                    "recommended_fix": ((b.get("details") or {}).get("recommended_fix") or "")
+                },
+            }
             for b in (result.get("blockers") or [])
         ][:10],
         "warnings": (result.get("warnings") or [])[:10],
@@ -1036,6 +1230,13 @@ def start_transfer(
     procedure_params: Any = None,
     contract_id: str = "",
     require_signed_contract: Any = None,
+    source_filter: dict[str, Any] | None = None,
+    upsert_key: str = "",
+    dedupe_key: str = "",
+    rule_questions: list[str] | None = None,
+    applied_rules: list[str] | None = None,
+    cadence: str = "",
+    all_tables: bool = False,
 ):
     """Stage a transfer for explicit Confirm. This never moves data by itself."""
     tool = "start_transfer"
@@ -1054,6 +1255,13 @@ def start_transfer(
         procedure_call=procedure_call,
         source_query=source_query,
         procedure_params=procedure_params,
+        source_filter=source_filter,
+        upsert_key=upsert_key,
+        dedupe_key=dedupe_key,
+        rule_questions=rule_questions,
+        applied_rules=applied_rules,
+        cadence=cadence,
+        all_tables=all_tables,
     )
     if not planned.success:
         return _tool_result(tool, success=False, error=planned.error)
@@ -1067,10 +1275,22 @@ def start_transfer(
             f"{b.get('id')}: {b.get('message')}" for b in blockers[:4] if b.get("message")
         )
         if not preflight.get("passed"):
+            # A refusal without the exit is the dead end operators write in about:
+            # the engine already resolved the fix per root cause, so it travels
+            # with the refusal instead of staying in a payload nobody reads.
+            fixes = "; ".join(
+                fix
+                for fix in (
+                    str((b.get("details") or {}).get("recommended_fix") or "").strip()
+                    for b in blockers[:4]
+                )
+                if fix
+            )
             err = (
                 "Preflight blocked this transfer, so I won't start it"
                 + (f" — {listed}" if listed else "")
                 + (f" (run {preflight.get('run_id')})." if preflight.get("run_id") else ".")
+                + (f" To proceed: {fixes}" if fixes else "")
             )
         elif str(preflight.get("run_id") or "").startswith("pf_local_"):
             err = (
@@ -1126,6 +1346,10 @@ def start_transfer(
         "schema_policy": plan.get("schema_policy"),
         "validation_mode": plan.get("validation_mode"),
         "limit": max(0, int(limit or 0)),
+        # Row rules the operator stated: the run must carry them, or the rows it
+        # writes are not the rows that were asked for.
+        "source_filter": plan.get("source_filter") or {},
+        "stream_contracts": plan.get("stream_contracts") or [],
         # Chat can never turn the gates off.
         "skip_preflight": False,
         "preflight_run_id": preflight.get("run_id"),
@@ -1153,6 +1377,17 @@ def start_transfer(
         "validation_mode": plan.get("validation_mode"),
         "schema_policy": plan.get("schema_policy"),
     }
+    rules_preview = plan.get("data_rules") or {}
+    if rules_preview.get("row_filter"):
+        preview["row_filter"] = rules_preview["row_filter"]
+    if rules_preview.get("upsert_key"):
+        preview["upsert_key"] = rules_preview["upsert_key"]
+    if payload.get("limit"):
+        preview["row_limit"] = payload["limit"]
+    if rules_preview.get("cadence_not_scheduled"):
+        # Said plainly in the confirm preview: this run is one-off. Nothing here
+        # creates the schedule the operator asked for.
+        preview["cadence_not_scheduled"] = rules_preview["cadence_not_scheduled"]
     if bound.get("contract_id"):
         preview["contract_id"] = bound["contract_id"]
         preview["require_signed_contract"] = bound["require_signed_contract"]

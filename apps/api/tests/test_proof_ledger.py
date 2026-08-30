@@ -20,6 +20,13 @@ def test_build_proof_ledger_has_honest_metrics():
     assert metrics["unique_transfer_drivers"] >= 1
     assert metrics["production_sku_routes"] >= 1
     assert len(ledger["production_sku"]) == metrics["production_sku_routes"]
+    assert metrics["production_sku_sold"] + metrics["production_sku_driver_missing"] + metrics["production_sku_refused"] == metrics["production_sku_routes"]
+    assert metrics["production_sku_sold"] >= 1
+    statuses = {row["status"] for row in ledger["production_sku"]}
+    assert "sold" in statuses
+    assert all(row["status"] in {"sold", "driver_missing", "refused"} for row in ledger["production_sku"])
+    sold_rows = [row for row in ledger["production_sku"] if row["status"] == "sold"]
+    assert all(row["sold"] is True and row["validate_ok"] is True for row in sold_rows)
     assert len(ledger["integrity_comparison"]) >= 4
     assert any("Silent data loss" in row["dimension"] for row in ledger["integrity_comparison"])
     assert all("industry_elt" in row for row in ledger["integrity_comparison"])

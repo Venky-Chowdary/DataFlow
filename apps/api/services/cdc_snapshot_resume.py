@@ -64,11 +64,22 @@ def last_pk_from_records(
 
 
 def quoted_pk_columns(pk_columns: Sequence[str], quote_char: str) -> list[str]:
-    """Quote declared PK columns for a keyset predicate / ORDER BY."""
+    """Quote declared PK columns for a keyset predicate / ORDER BY.
+
+    A source PK name is data the customer controls. Sanitizing it to underscores
+    (``id" --`` → ``id___``) built an ``ORDER BY`` against a column that does not
+    exist, and — worse for a hostile name carrying the dialect's own closing
+    quote — could terminate the identifier early. The real object name is kept
+    verbatim (``allow_raw=True`` still refuses ``;``/NUL/newline) and made safe
+    by doubling the closing quote in :func:`quote_sql_identifier`, never by
+    rewriting it.
+    """
     from connectors.sql_identifiers import quote_sql_identifier, require_safe_identifier
 
     return [
-        quote_sql_identifier(require_safe_identifier(str(c), preserve_case=True), quote_char)
+        quote_sql_identifier(
+            require_safe_identifier(str(c), allow_raw=True, max_len=128), quote_char
+        )
         for c in pk_columns
         if str(c).strip()
     ]

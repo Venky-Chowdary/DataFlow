@@ -159,6 +159,11 @@ def run_transfer(
         "success": bool(res.success),
         "rows_written": int(res.records_transferred or 0),
         "error": str(res.error or "")[:400],
+        # Post-load attestation lives on the reconciliation payload: a scenario
+        # that only reads success/rows cannot tell a row-perfect load from one
+        # that left the destination without its constraints.
+        "reconciliation": dict(res.reconciliation or {}),
+        "destination_summary": dict(res.destination_summary or {}),
     }
 
 
@@ -473,6 +478,43 @@ def case_sensitive_destination(engine: str) -> dict[str, Any]:
     return out
 
 
+def _sync_mode_rerun(engine: str, sync_mode: str, expected_second_run_rows: int) -> dict[str, Any]:
+    """Run the same clean batch twice and report what the destination holds.
+
+    The sync mode is the contract: overwrite and deduped/upsert must converge on
+    the source cardinality however many times they run, append must grow by the
+    batch. Re-running is the only way to catch a mode that silently behaves like
+    another one.
+    """
+    pg_exec([f"DROP TABLE IF EXISTS {SRC}",
+             f"CREATE TABLE {SRC} (id BIGINT PRIMARY KEY, email VARCHAR(255))"])
+    pg_exec([f"INSERT INTO {SRC} VALUES ({i}, 'u{i}@x.com')" for i in range(1, 4)])
+    ref = dest_table_ref(engine)
+    if engine == "oracle":
+        ddl = f"CREATE TABLE {ref} (id NUMBER(19) PRIMARY KEY, email VARCHAR2(255))"
+        dst, idtype = "VARCHAR2(255)", "NUMBER(19)"
+    else:
+        ddl = f"CREATE TABLE {ref} (id BIGINT PRIMARY KEY, email VARCHAR(255))"
+        dst, idtype = "VARCHAR(255)", "BIGINT"
+    dest_exec(engine, [f"DROP TABLE {ref}", ddl])
+    maps = [m("id", "id", "BIGINT", idtype, primary_key=True),
+            m("email", "email", "VARCHAR(255)", dst)]
+    first = run_transfer(engine, maps, sync_mode=sync_mode)
+    first_rows = dest_count(engine)
+    second = run_transfer(engine, maps, sync_mode=sync_mode)
+    second_rows = dest_count(engine)
+    return {
+        "success": bool(first["success"] and second["success"]),
+        "rows_written": int(first["rows_written"]) + int(second["rows_written"]),
+        "error": first["error"] or second["error"],
+        "source_rows": 3,
+        "dest_rows_after_first": first_rows,
+        "dest_rows": second_rows,
+        "expected_dest_rows_after_second": expected_second_run_rows,
+        "converges_as_declared": second_rows == expected_second_run_rows,
+    }
+
+
 SCENARIOS: dict[str, Callable[[str], dict[str, Any]]] = {
     "wide_source_narrow_dest_unmapped": lambda e: wide_source_narrow_dest(e, omit_marked=False),
     "wide_source_narrow_dest_omissions_declared": lambda e: wide_source_narrow_dest(e, omit_marked=True),
@@ -486,6 +528,12 @@ SCENARIOS: dict[str, Callable[[str], dict[str, Any]]] = {
     "timestamp_timezone": timestamp_timezone,
     "unicode_and_control_chars": unicode_and_control_chars,
     "case_sensitive_destination": case_sensitive_destination,
+    # Sync-mode dimension — same batch twice, destination counted both times.
+    "sync_full_refresh_overwrite_rerun": lambda e: _sync_mode_rerun(e, "full_refresh_overwrite", 3),
+    "sync_incremental_deduped_rerun": lambda e: _sync_mode_rerun(e, "incremental_deduped", 3),
+    # Append of the same keys into a keyed destination must be refused before the
+    # write, not half-applied and then aborted by the database.
+    "sync_full_refresh_append_rerun": lambda e: _sync_mode_rerun(e, "full_refresh_append", 3),
 }
 
 

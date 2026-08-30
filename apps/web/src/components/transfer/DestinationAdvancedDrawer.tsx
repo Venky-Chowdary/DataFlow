@@ -1,4 +1,9 @@
+import { useEffect } from "react";
 import { Drawer } from "../ui/Drawer";
+import {
+  type AdvancedLocaleKind,
+  scrollAdvancedLocaleIntoView,
+} from "../../lib/validateHonestyControls";
 import { Button } from "../ui/Button";
 import { FilterBar } from "../ui/FilterBar";
 import { FilterTabs } from "../ui/FilterTabs";
@@ -35,6 +40,7 @@ export type DestValidationMode =
   | "discovery"
   | "audit";
 export type DestDateLocale = "" | "DMY" | "MDY";
+export type DestNumberLocale = "" | "US" | "EU";
 
 export interface SyncModeOption {
   id: DestSyncMode;
@@ -61,6 +67,12 @@ export interface DateLocaleOption {
   detail: string;
 }
 
+export interface NumberLocaleOption {
+  id: DestNumberLocale;
+  label: string;
+  detail: string;
+}
+
 interface DestinationAdvancedDrawerProps {
   open: boolean;
   onClose: () => void;
@@ -68,10 +80,12 @@ interface DestinationAdvancedDrawerProps {
   schemaPolicies: SchemaPolicyOption[];
   validationModes: ValidationModeOption[];
   dateLocales: DateLocaleOption[];
+  numberLocales: NumberLocaleOption[];
   syncMode: DestSyncMode;
   schemaPolicy: DestSchemaPolicy;
   validationMode: DestValidationMode;
   dateLocale: DestDateLocale;
+  numberLocale: DestNumberLocale;
   backfillNewFields: boolean;
   /** Stream names (one row each when multi-stream). */
   streamNames: string[];
@@ -96,6 +110,7 @@ interface DestinationAdvancedDrawerProps {
   onSchemaPolicyChange: (policy: DestSchemaPolicy) => void;
   onValidationModeChange: (mode: DestValidationMode) => void;
   onDateLocaleChange: (locale: DestDateLocale) => void;
+  onNumberLocaleChange: (locale: DestNumberLocale) => void;
   onBackfillChange: (value: boolean) => void;
   onStreamCursorChange: (stream: string, value: string) => void;
   onStreamCursorSemanticsChange: (stream: string, value: string) => void;
@@ -137,6 +152,13 @@ interface DestinationAdvancedDrawerProps {
   /** Stage into `{table}_df_staging`, promote only clean rows to primary. */
   writeViaStaging?: boolean;
   onWriteViaStagingChange?: (value: boolean) => void;
+  /**
+   * Destination-aware sync caption (SSOT: syncModeHonestyLine).
+   * Full append into a leftover empty table must not read as CREATE.
+   */
+  syncHonestyLine?: string;
+  /** Schema-policy caption (SSOT: schemaPolicyHonestyLine). */
+  schemaHonestyLine?: string;
   /** False for Mongo/files/SaaS — hide/disable staging toggle so Execute cannot fail after Validate. */
   writeViaStagingSupported?: boolean;
   /** Show vector destination embedding controls (pgvector / Qdrant / Weaviate / Pinecone / Milvus). */
@@ -179,6 +201,8 @@ interface DestinationAdvancedDrawerProps {
   embeddingCacheBusy?: boolean;
   onRefreshEmbeddingCache?: () => void;
   onClearEmbeddingCache?: () => void;
+  /** Validate Set date/number locale — scroll that control into view after open. */
+  localeFocus?: AdvancedLocaleKind | null;
 }
 
 /**
@@ -192,10 +216,12 @@ export function DestinationAdvancedDrawer({
   schemaPolicies,
   validationModes,
   dateLocales,
+  numberLocales,
   syncMode,
   schemaPolicy,
   validationMode,
   dateLocale,
+  numberLocale,
   backfillNewFields,
   streamNames,
   streamFields,
@@ -215,6 +241,7 @@ export function DestinationAdvancedDrawer({
   onSchemaPolicyChange,
   onValidationModeChange,
   onDateLocaleChange,
+  onNumberLocaleChange,
   onBackfillChange,
   onStreamCursorChange,
   onStreamCursorSemanticsChange,
@@ -245,6 +272,8 @@ export function DestinationAdvancedDrawer({
   writeViaStaging = false,
   onWriteViaStagingChange,
   writeViaStagingSupported = true,
+  syncHonestyLine = "",
+  schemaHonestyLine = "",
   showVectorOptions = false,
   vectorContentColumn = "",
   vectorEmbeddingColumn = "",
@@ -268,9 +297,18 @@ export function DestinationAdvancedDrawer({
   embeddingCacheBusy = false,
   onRefreshEmbeddingCache,
   onClearEmbeddingCache,
+  localeFocus = null,
 }: DestinationAdvancedDrawerProps) {
   const names = streamNames.length > 0 ? streamNames : ["source_stream"];
   const activeMode = syncModes.find((m) => m.id === syncMode);
+
+  useEffect(() => {
+    if (!open || !localeFocus) return;
+    const timer = window.setTimeout(() => {
+      scrollAdvancedLocaleIntoView(localeFocus);
+    }, 80);
+    return () => window.clearTimeout(timer);
+  }, [open, localeFocus]);
 
   return (
     <Drawer
@@ -311,10 +349,10 @@ export function DestinationAdvancedDrawer({
             )}
             {syncMode === "full_refresh_append" && (
               <p>
-                <strong>Load more into an existing table:</strong> keeps every destination row and
-                inserts the full source snapshot again (100k existing + 100k file → 200k). Duplicate
-                primary keys will fail or quarantine — use Incremental deduped / Upsert when keys
-                may collide.
+                <strong>Full append:</strong>{" "}
+                {syncHonestyLine
+                  || "Keep existing rows; insert the full snapshot again. Leftover empty tables still exist."}
+                {" "}Duplicate primary keys will fail or quarantine — use Incremental deduped when keys may collide.
               </p>
             )}
             {syncMode === "incremental_append" && (
@@ -377,6 +415,9 @@ export function DestinationAdvancedDrawer({
                 </button>
               ))}
             </div>
+            {schemaHonestyLine ? (
+              <p className="df2-label-hint" role="status">{schemaHonestyLine}</p>
+            ) : null}
           </div>
         </div>
 
@@ -459,7 +500,9 @@ export function DestinationAdvancedDrawer({
               className="df2-input df2-select"
               value={deliveryGuarantee}
               onChange={(e) => {
-                const next = e.target.value === "exactly_once" ? "exactly_once" : "at_least_once";
+                const next = e.target.value === "exactly_once" && exactlyOnceWired
+                  ? "exactly_once"
+                  : "at_least_once";
                 onDeliveryGuaranteeChange?.(next);
                 if (next === "exactly_once" && allowAppendOnly) {
                   onAllowAppendOnlyChange?.(false);
@@ -468,8 +511,10 @@ export function DestinationAdvancedDrawer({
               disabled={!onDeliveryGuaranteeChange}
             >
               <option value="at_least_once">at_least_once — default upsert (PK + _df_lsn)</option>
-              <option value="exactly_once">
-                exactly_once — dest-owned watermark + shared-log bundle (opt-in)
+              <option value="exactly_once" disabled={!exactlyOnceWired}>
+                {exactlyOnceWired
+                  ? "exactly_once — dest-owned watermark + shared-log bundle (opt-in)"
+                  : "exactly_once — not available (this destination is not transactional)"}
               </option>
             </select>
             <small className="df2-label-hint">
@@ -545,8 +590,9 @@ export function DestinationAdvancedDrawer({
 
         <div className="df2-policy-toolbar">
           <div className="df2-field">
-            <label className="df2-label">Date locale</label>
+            <label className="df2-label" htmlFor="df2-adv-date-locale">Date locale</label>
             <select
+              id="df2-adv-date-locale"
               className="df2-select"
               value={dateLocale}
               onChange={(e) => onDateLocaleChange(e.target.value as DestDateLocale)}
@@ -559,6 +605,23 @@ export function DestinationAdvancedDrawer({
               ))}
             </select>
             <small className="df2-label-hint">Auto infers from unambiguous rows. Set DMY or MDY for all-ambiguous samples.</small>
+          </div>
+          <div className="df2-field">
+            <label className="df2-label" htmlFor="df2-adv-number-locale">Number locale</label>
+            <select
+              id="df2-adv-number-locale"
+              className="df2-select"
+              value={numberLocale}
+              onChange={(e) => onNumberLocaleChange(e.target.value as DestNumberLocale)}
+              title="How to interpret 1,234 versus 1.234"
+            >
+              {numberLocales.map((loc) => (
+                <option key={loc.id || "auto"} value={loc.id} title={loc.detail}>
+                  {loc.label}
+                </option>
+              ))}
+            </select>
+            <small className="df2-label-hint">Auto will not guess a lone 1,234. Set US or EU, or use $ / € on the cell.</small>
           </div>
           <div className="df2-field">
             <label className="df2-label">Validation</label>

@@ -36,6 +36,8 @@ HARD_GATE_IDS = {
     "g13_source_coverage",
     "g14_destination_requirements",
     "g15_dest_exists_shape",
+    "g18_cdc_snapshot_mode",
+    "g3f_population_fit",
 }
 
 SOFT_GATE_IDS = {
@@ -90,6 +92,25 @@ PREFLIGHT_GATE_RULES: dict[str, dict[str, Any]] = {
         "suggested_actions": [
             {"kind": "check_connection", "label": "Check destination privileges"},
         ],
+    },
+    "g3f_population_fit": {
+        "title": "Population fit",
+        "category": "hard",
+        "why": (
+            "The Map type came from a preview peek. Values later in the source do not "
+            "fit that destination NUMBER/DECIMAL/VARCHAR/integer carrier. On a new "
+            "table that peeked type is the CREATE type — the source is not broken. "
+            "Widening Map changes CREATE. On an existing table, Map cannot ALTER live DDL."
+        ),
+        "fix": (
+            "For a new table: Approve the CREATE-type widen, then re-Validate. "
+            "Nothing is written to the destination until Execute. Do not silently truncate. "
+            "For an existing table: ALTER the column or map to a new *_wide column."
+        ),
+        "examples": [
+            "flights-1m.csv DEP_TIME 0.23333333 at row 293 does not fit peeked NUMBER(9,6).",
+        ],
+        "suggested_actions": [],
     },
     "g3_schema_contract": {
         "title": "Schema contract / type coercion",
@@ -170,6 +191,27 @@ PREFLIGHT_GATE_RULES: dict[str, dict[str, Any]] = {
         ],
         "suggested_actions": [
             {"kind": "review_mappings", "label": "Open Map to remap extra columns"},
+        ],
+    },
+    "g18_cdc_snapshot_mode": {
+        "title": "CDC snapshot mode",
+        "category": "hard",
+        "why": (
+            "snapshot_mode=never forbids a snapshot. Without a stored watermark "
+            "Execute cannot stream and would fail after Approve. This is Debezium "
+            "never / no_data — not dest-owned exactly-once."
+        ),
+        "fix": (
+            "Open Advanced and set snapshot_mode=when_needed (or initial), or "
+            "restore a CDC resume token. Recovery is at-least-once upsert of "
+            "current source keys — not continuous CDC across a purged window."
+        ),
+        "examples": [
+            "First CDC run with never and no watermark — set when_needed, then Validate.",
+            "Watermark cleared after dest recreate — never stays refuse-closed until mode changes.",
+        ],
+        "suggested_actions": [
+            {"kind": "open_advanced", "label": "Open Advanced — set snapshot mode"},
         ],
     },
     "g4_mapping_confidence": {
@@ -670,8 +712,9 @@ ISSUE_CATALOG: list[dict[str, Any]] = [
         ],
         "gate": "constraint_fk",
         "why": (
-            "Population orphan scan found missing parents or could not complete "
-            "(e.g. composite FK). Referential integrity is not proven."
+            "Population orphan scan found missing parents or could not complete. "
+            "Composite FKs are scanned as MATCH SIMPLE tuples — a pairing mismatch "
+            "or failed scan still leaves referential integrity unproven."
         ),
         "fix": (
             "Fix orphan rows at source, complete a full population scan for every "
@@ -679,6 +722,7 @@ ISSUE_CATALOG: list[dict[str, Any]] = [
         ),
         "examples": [
             "Population orphan scan: 12 rows in orders.customer_id missing from customers.id.",
+            "Population orphan scan: 1 row(s) in child.(tenant_id+order_no) missing from orders.(tenant_id+order_no).",
         ],
         "suggested_actions": [
             {
@@ -876,6 +920,18 @@ def explain_gate(gate_id: str, message: str, details: dict[str, Any] | None = No
                 {"kind": "run_population_orphan_scan", "label": "Run population orphan scan"},
             ],
         }
+    if gate_id == "g18_cdc_snapshot_mode":
+        rule = PREFLIGHT_GATE_RULES.get(gate_id) or {}
+        return {
+            "gate": gate_id,
+            "title": rule.get("title") or "CDC snapshot mode",
+            "category": rule.get("category", "hard"),
+            "why": rule.get("why", ""),
+            "fix": rule.get("fix", ""),
+            "examples": rule.get("examples", []),
+            "suggested_actions": rule.get("suggested_actions")
+            or [{"kind": "open_advanced", "label": "Open Advanced — set snapshot mode"}],
+        }
     if gate_id == "g15_dest_exists_shape":
         rule = PREFLIGHT_GATE_RULES.get(gate_id) or {}
         action = str(details.get("primary_action") or details.get("remediation_kind") or "review_map")
@@ -949,6 +1005,15 @@ def enrich_blockers(
                     nested_bits.append(text)
         message_blob = " ".join([str(b.get("message") or ""), *nested_bits]).strip()
         guidance = explain_gate(gate_id, message_blob or str(b.get("message") or ""), details)
+        owned_actions = b.get("suggested_actions") or details.get("suggested_actions")
+        if isinstance(owned_actions, list) and owned_actions:
+            guidance["suggested_actions"] = list(owned_actions)
+        if details.get("create_new_table") and details.get("corrective_action"):
+            guidance["fix"] = str(details.get("corrective_action"))
+            guidance["why"] = (
+                "Map peeked 25 rows and stamped a NUMBER that is too small for the file. "
+                "This is a new table — widening Map changes CREATE, not the CSV."
+            )
         nested = details.get("issues") or details.get("errors") or []
         if nested and isinstance(nested, list):
             guidance["details"] = [

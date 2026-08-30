@@ -215,6 +215,7 @@ def _make(store_mod, **overrides):
     data = {
         "name": "sched", "source_connector_id": "src", "source_table": "t",
         "dest_connector_id": "dst", "dest_table": "u", "interval": "hourly",
+        "mappings": [{"source": "id", "target": "id"}],
     }
     data.update(overrides)
     return store_mod.create_schedule(data)
@@ -265,12 +266,14 @@ _SRC_CONN = {"_id": "src", "id": "src", "type": "postgresql", "host": "h", "port
              "database": "db", "schema": "public", "username": "u", "password": "p"}
 _DST_CONN = {"_id": "dst", "id": "dst", "type": "snowflake", "host": "h2", "database": "wh",
              "username": "u", "password": "p", "warehouse": "W"}
+_MAPPINGS = [{"source": "id", "target": "id"}]
 
 
 def test_build_request_full_refresh_default():
     sched = store.PipelineSchedule.from_dict({
         "id": "s1", "name": "n", "source_connector_id": "src", "source_table": "orders",
         "dest_connector_id": "dst", "dest_table": "orders_wh", "interval": "daily",
+        "mappings": _MAPPINGS,
     })
     req = runner.build_schedule_request(sched, _SRC_CONN, _DST_CONN)
     assert req.sync_mode == "full_refresh_overwrite"
@@ -285,7 +288,7 @@ def test_build_request_incremental_with_primary_key():
         "id": "s2", "name": "n", "source_connector_id": "src", "source_table": "orders",
         "dest_connector_id": "dst", "dest_table": "orders_wh", "interval": "daily",
         "sync_mode": "incremental", "cursor_column": "updated_at", "primary_key": "id",
-        "validation_mode": "balanced",
+        "validation_mode": "balanced", "mappings": _MAPPINGS,
     })
     req = runner.build_schedule_request(sched, _SRC_CONN, _DST_CONN)
     assert req.sync_mode == "incremental_deduped"
@@ -307,7 +310,7 @@ def test_build_request_incremental_append_without_pk():
     sched = store.PipelineSchedule.from_dict({
         "id": "s3", "name": "n", "source_connector_id": "src", "source_table": "events",
         "dest_connector_id": "dst", "dest_table": "events_wh", "interval": "hourly",
-        "sync_mode": "incremental", "cursor_column": "ts",
+        "sync_mode": "incremental", "cursor_column": "ts", "mappings": _MAPPINGS,
     })
     req = runner.build_schedule_request(sched, _SRC_CONN, _DST_CONN)
     assert req.sync_mode == "incremental_append"
@@ -322,6 +325,7 @@ def test_build_request_procedure_stamps_extra_and_refuses_cdc():
         "procedure_call": "CALL get_orders(:since)",
         "procedure_params": {"since": "2024-01-01"},
         "sync_mode": "full_refresh_append",
+        "mappings": _MAPPINGS,
     })
     req = runner.build_schedule_request(sched, _SRC_CONN, _DST_CONN)
     assert req.source.extra.get("source_read_mode") == "procedure"
@@ -360,11 +364,12 @@ def test_build_request_cdc():
     sched = store.PipelineSchedule.from_dict({
         "id": "s4", "name": "n", "source_connector_id": "src", "source_table": "orders",
         "dest_connector_id": "dst", "dest_table": "orders_wh", "interval": "hourly",
-        "sync_mode": "cdc", "primary_key": "id",
+        "sync_mode": "cdc", "primary_key": "id", "mappings": _MAPPINGS,
     })
     req = runner.build_schedule_request(sched, _SRC_CONN, _DST_CONN)
     assert req.sync_mode == "cdc"
     assert req.stream_contracts[0]["sync_mode"] == "cdc"
+    assert req.stream_contracts[0]["snapshot_mode"] == "initial"
 
 
 def test_build_request_explicit_contracts_preserved():
@@ -372,10 +377,12 @@ def test_build_request_explicit_contracts_preserved():
     sched = store.PipelineSchedule.from_dict({
         "id": "s5", "name": "n", "source_connector_id": "src", "source_table": "orders",
         "dest_connector_id": "dst", "dest_table": "orders_wh", "interval": "hourly",
-        "sync_mode": "cdc", "stream_contracts": explicit,
+        "sync_mode": "cdc", "stream_contracts": explicit, "mappings": _MAPPINGS,
     })
     req = runner.build_schedule_request(sched, _SRC_CONN, _DST_CONN)
-    assert req.stream_contracts == explicit
+    assert req.stream_contracts[0]["name"] == "orders"
+    assert req.stream_contracts[0]["sync_mode"] == "cdc"
+    assert req.stream_contracts[0]["snapshot_mode"] == "initial"
 
 
 # --------------------------------------------------------------------------- #
@@ -437,6 +444,155 @@ def test_finalize_run_success_records_and_notifies(temp_store, monkeypatch):
     assert notified["status"] == "completed"
 
 
+def test_committed_append_that_cannot_be_replayed_parks_the_cadence(temp_store, monkeypatch):
+    """The append that grew a destination 5 → 25 across four identical beats.
+
+    The attempt committed rows, the retry was refused because a from-zero run
+    would duplicate them — and the cadence, which also starts from zero, has to
+    be held on a decision rather than left to append the same rows again.
+    """
+    sched = _make(store, max_retries=2, retry_backoff_seconds=0, sync_mode="full_refresh_append")
+    monkeypatch.setattr(runner, "_notify_schedule", lambda *a, **k: None)
+    monkeypatch.setattr(
+        runner,
+        "_job_doc",
+        lambda jid: {
+            "status": "failed",
+            "error": "checksum mismatch after load",
+            "records_processed": 5,
+            "row_accounting": {"writer_ack": 5, "dest_count": 5},
+        },
+    )
+
+    runner._finalize_run(sched.id, "job-0", attempt=0, started_at=datetime.now(timezone.utc))
+
+    reloaded = store.get_schedule(sched.id)
+    assert reloaded.run_history[-1].get("retry_refused")
+    assert store.has_open_approval(reloaded)
+    assert sched.id not in {s.id for s in store.due_schedules()}
+
+
+def test_deterministic_gate_refusal_parks_on_the_first_beat(temp_store, monkeypatch):
+    """A gate verdict is not a cadence event: it parks at once, retry budget or not."""
+    sched = _make(store, max_retries=2, retry_backoff_seconds=0)
+    monkeypatch.setattr(runner, "_notify_schedule", lambda *a, **k: None)
+    monkeypatch.setattr(
+        runner,
+        "_job_doc",
+        lambda jid: {
+            "status": "failed",
+            "phase": "validate",
+            "error": "schema drift requires manual review: column dep_time narrowed",
+            "records_processed": 0,
+        },
+    )
+
+    runner._finalize_run(sched.id, "job-0", attempt=0, started_at=datetime.now(timezone.utc))
+
+    reloaded = store.get_schedule(sched.id)
+    assert store.has_open_approval(reloaded)
+    assert reloaded.approval_request["evidence"]["park_reason"] == "deterministic_refusal"
+    assert sched.id not in {s.id for s in store.due_schedules()}
+
+
+def test_zero_retry_schedule_still_parks_a_gate_refusal(temp_store, monkeypatch):
+    """An exhausted budget is not an unclassified verdict — the gate refusal parks."""
+    sched = _make(store, max_retries=0)
+    monkeypatch.setattr(runner, "_notify_schedule", lambda *a, **k: None)
+    monkeypatch.setattr(
+        runner,
+        "_job_doc",
+        lambda jid: {
+            "status": "failed",
+            "phase": "validate",
+            "error": "schema drift requires manual review: column dep_time narrowed",
+            "records_processed": 0,
+        },
+    )
+
+    runner._finalize_run(sched.id, "job-0", attempt=0, started_at=datetime.now(timezone.utc))
+
+    reloaded = store.get_schedule(sched.id)
+    assert reloaded.approval_request["evidence"]["park_reason"] == "deterministic_refusal"
+    assert sched.id not in {s.id for s in store.due_schedules()}
+
+
+def test_parked_schedule_does_not_open_a_second_finding(temp_store, monkeypatch):
+    """One unresolved decision per schedule — a repeat must not fan out the inbox."""
+    sched = _make(store, max_retries=2)
+    monkeypatch.setattr(runner, "_notify_schedule", lambda *a, **k: None)
+    monkeypatch.setattr(
+        runner,
+        "_job_doc",
+        lambda jid: {
+            "status": "failed",
+            "phase": "validate",
+            "error": "schema drift requires manual review: column dep_time narrowed",
+            "records_processed": 0,
+        },
+    )
+
+    runner._finalize_run(sched.id, "job-0", attempt=0, started_at=datetime.now(timezone.utc))
+    first = store.get_schedule(sched.id).approval_request
+    runner._finalize_run(sched.id, "job-1", attempt=0, started_at=datetime.now(timezone.utc))
+    again = store.get_schedule(sched.id).approval_request
+
+    assert first["id"] and first["id"] == again["id"]
+    assert int(again.get("occurrences") or 1) == 2
+    assert store.has_open_approval(store.get_schedule(sched.id))
+
+
+def test_second_identical_unrecognised_failure_parks_instead_of_repeating(temp_store, monkeypatch):
+    """One beat is the benefit of the doubt; the same verdict twice is evidence."""
+    sched = _make(store, max_retries=0, retry_backoff_seconds=0, sync_mode="full_refresh_overwrite")
+    monkeypatch.setattr(runner, "_notify_schedule", lambda *a, **k: None)
+    monkeypatch.setattr(
+        runner,
+        "_job_doc",
+        lambda jid: {
+            "status": "failed",
+            "error": "source schema altered: column dep_time",
+            "records_processed": 0,
+        },
+    )
+
+    runner._finalize_run(sched.id, "job-0", attempt=0, started_at=datetime.now(timezone.utc))
+    assert not store.has_open_approval(store.get_schedule(sched.id))
+
+    runner._finalize_run(sched.id, "job-1", attempt=1, started_at=datetime.now(timezone.utc))
+    reloaded = store.get_schedule(sched.id)
+    assert store.has_open_approval(reloaded)
+    assert reloaded.approval_request["evidence"]["park_reason"] == "identical_failure_repeated"
+    assert sched.id not in {s.id for s in store.due_schedules()}
+
+
+def test_transient_failure_is_still_retried_not_parked(temp_store, monkeypatch):
+    sched = _make(store, max_retries=2, retry_backoff_seconds=0)
+    monkeypatch.setattr(runner, "_notify_schedule", lambda *a, **k: None)
+    monkeypatch.setattr(
+        runner,
+        "_job_doc",
+        lambda jid: {
+            "status": "failed",
+            "error": "connection reset by peer",
+            "records_processed": 0,
+        },
+    )
+
+    runner._finalize_run(sched.id, "job-0", attempt=0, started_at=datetime.now(timezone.utc))
+    reloaded = store.get_schedule(sched.id)
+    assert not store.has_open_approval(reloaded)
+    assert reloaded.retry_attempt == 1
+
+
+def test_failure_signature_ignores_row_numbers_and_ids():
+    a = {"error": "Snowflake rejected 27 cell finding(s) — arr_time (row 431) does not fit"}
+    b = {"error": "Snowflake rejected 31 cell finding(s) — arr_time (row 902) does not fit"}
+    assert runner._failure_signature(a) == runner._failure_signature(b)
+    other = {"error": "connection reset by peer"}
+    assert runner._failure_signature(a) != runner._failure_signature(other)
+
+
 def test_run_entry_copies_dest_count_ledger_not_only_writer_ack():
     started = datetime.now(timezone.utc)
     entry = runner._run_entry(
@@ -472,10 +628,68 @@ def test_missing_connector_records_failed_history(temp_store, monkeypatch):
     assert job_id is None
     reloaded = store.get_schedule(sched.id)
     assert reloaded.run_count == before + 1
-    assert reloaded.last_status == "failed"
+    # The beat is recorded failed, and the schedule now additionally parks on a
+    # finding: a connector that no longer resolves does not come back on its own,
+    # and every later beat only added another identical failed row.
+    assert reloaded.run_history[-1].get("status") == "failed"
+    assert reloaded.last_status == "needs_approval"
+    assert (reloaded.approval_request or {}).get("status") == "open"
     assert reloaded.running is False
     assert "connector" in (reloaded.run_history[-1].get("error") or "").lower()
     assert reloaded.next_run_at is not None
+
+
+def test_paused_schedule_cadence_does_not_dispatch(temp_store, monkeypatch):
+    """Paused is a cadence switch — the hourly beat must not start a job."""
+    sched = _make(store, enabled=False)
+    called = {"n": 0}
+
+    def boom(*_a, **_k):
+        called["n"] += 1
+        return "job-should-not"
+
+    monkeypatch.setattr(runner, "_dispatch_transfer", boom)
+    assert runner._run_schedule(sched.id) is None
+    assert called["n"] == 0
+    assert store.get_schedule(sched.id).enabled is False
+
+
+def test_paused_schedule_manual_run_starts_without_activating(temp_store, monkeypatch):
+    """Run now on a paused schedule is a one-shot — cadence stays paused."""
+    sched = _make(store, enabled=False)
+    monkeypatch.setattr(runner, "_scheduler_instance_id", lambda: "test-instance")
+
+    def fake_dispatch(sid, attempt=0, allow_paused=False):
+        assert sid == sched.id
+        return "job-manual" if allow_paused else None
+
+    monkeypatch.setattr(runner, "_dispatch_transfer", fake_dispatch)
+    job_id = runner._run_schedule(sched.id, manual=True)
+    assert job_id == "job-manual"
+    assert store.get_schedule(sched.id).enabled is False
+
+
+def test_manual_run_missing_connector_raises_honest_error(temp_store, monkeypatch):
+    """Paused + missing connector must not collapse to 'check connectors'."""
+    sched = _make(store, enabled=False)
+    monkeypatch.setattr(runner, "_resolve_connector", lambda _id: None)
+    monkeypatch.setattr(runner, "_scheduler_instance_id", lambda: "test-instance")
+    with pytest.raises(runner.ScheduleStartError) as exc:
+        runner._run_schedule(sched.id, manual=True)
+    msg = str(exc.value).lower()
+    assert "connector" in msg
+    assert "check connectors" not in msg
+    assert exc.value.http_status == 400
+
+
+def test_manual_run_already_running_is_conflict(temp_store, monkeypatch):
+    sched = _make(store)
+    assert store.mark_schedule_running(sched.id, "inst-1") is not None
+    monkeypatch.setattr(runner, "_scheduler_instance_id", lambda: "inst-2")
+    with pytest.raises(runner.ScheduleStartError) as exc:
+        runner._run_schedule(sched.id, manual=True)
+    assert exc.value.http_status == 409
+    assert "already in progress" in str(exc.value).lower()
 
 
 def test_import_file_schedules_into_mongo_when_empty(tmp_path, monkeypatch):
@@ -524,6 +738,13 @@ def test_import_file_schedules_into_mongo_when_empty(tmp_path, monkeypatch):
             for k in list(mem):
                 if k not in keep:
                     del mem[k]
+
+        def update_one(self, filt, update, upsert=False):
+            doc = mem.get(filt.get("_id"))
+            if doc is None:
+                return None
+            doc.update(dict(update.get("$set") or {}))
+            return doc
 
     class FakeDB:
         def __getitem__(self, name):
@@ -576,6 +797,13 @@ def test_save_mongo_never_sets_id_path(monkeypatch):
                 if k not in keep:
                     del mem[k]
 
+        def update_one(self, filt, update, upsert=False):
+            doc = mem.get(filt.get("_id"))
+            if doc is None:
+                return None
+            doc.update(dict(update.get("$set") or {}))
+            return doc
+
         def find(self, *_a, **_k):
             return list(mem.values())
 
@@ -615,3 +843,446 @@ def test_save_mongo_never_sets_id_path(monkeypatch):
     assert "_id" not in (updates[0].get("$setOnInsert") or {})
     assert mem[sched.id]["running"] is True
     assert mem[sched.id]["id"] == sched.id
+
+
+def test_build_request_replays_studio_validate_identity():
+    """A scheduled run must carry the same recipe/locales/hashes as Studio Execute."""
+    sched = store.PipelineSchedule.from_dict({
+        "id": "s-studio",
+        "name": "n",
+        "source_connector_id": "src",
+        "source_table": "orders",
+        "dest_connector_id": "dst",
+        "dest_table": "orders_wh",
+        "interval": "daily",
+        "date_locale": "DMY",
+        "number_locale": "EU",
+        "shape_recipe": {"version": 1, "steps": [{"op": "trim", "column": "name"}]},
+        "approved_shape_recipe_hash": "a" * 64,
+        "approved_decision_artifact_hash": "b" * 64,
+        "approved_ddl_identity_hash": "c" * 64,
+        "stream_contracts": [{"stream": "orders", "primary_key": "id"}],
+        "mappings": [
+            {
+                "source": "amt",
+                "target": "amt",
+                "target_type": "DECIMAL(18,4)",
+                "risk_contract": {"status": "signed"},
+            }
+        ],
+    })
+    req = runner.build_schedule_request(sched, _SRC_CONN, _DST_CONN)
+    assert req.date_locale == "DMY"
+    assert req.number_locale == "EU"
+    assert req.shape_recipe.get("version") == 1
+    assert req.approved_shape_recipe_hash == "a" * 64
+    assert req.approved_decision_artifact_hash == "b" * 64
+    assert req.approved_ddl_identity_hash == "c" * 64
+    assert req.mappings[0]["risk_contract"]["status"] == "signed"
+    assert req.stream_contracts[0]["primary_key"] == "id"
+    assert req.skip_preflight is False
+
+
+def test_create_schedule_persists_advanced_write_knobs(temp_store):
+    sched = store.create_schedule({
+        "name": "Stage then promote",
+        "source_connector_id": "src-1",
+        "source_table": "orders",
+        "dest_connector_id": "dst-1",
+        "dest_table": "orders_wh",
+        "interval": "daily",
+        "sync_mode": "full_refresh_append",
+        "write_via_staging": True,
+        "priority_column": "updated_at",
+        "priority_direction": "asc",
+        "row_limit": 2500,
+    })
+    reloaded = store.get_schedule(sched.id)
+    assert reloaded.write_via_staging is True
+    assert reloaded.priority_column == "updated_at"
+    assert reloaded.priority_direction == "asc"
+    assert reloaded.row_limit == 2500
+    legacy = store.PipelineSchedule.from_dict({
+        "id": "legacy-adv",
+        "name": "old",
+        "source_connector_id": "a",
+        "source_table": "t",
+        "dest_connector_id": "b",
+        "dest_table": "u",
+        "interval": "daily",
+    })
+    assert legacy.write_via_staging is False
+    assert legacy.priority_column == ""
+    assert legacy.priority_direction == "desc"
+    assert legacy.row_limit == 0
+
+
+def test_build_request_replays_advanced_write_knobs():
+    sched = store.PipelineSchedule.from_dict({
+        "id": "s-adv",
+        "name": "n",
+        "source_connector_id": "src",
+        "source_table": "orders",
+        "dest_connector_id": "dst",
+        "dest_table": "orders_wh",
+        "interval": "daily",
+        "write_via_staging": True,
+        "priority_column": "updated_at",
+        "priority_direction": "asc",
+        "row_limit": 2500,
+        "mappings": _MAPPINGS,
+    })
+    req = runner.build_schedule_request(sched, _SRC_CONN, _DST_CONN)
+    assert req.write_via_staging is True
+    assert req.priority_column == "updated_at"
+    assert req.priority_direction == "asc"
+    assert req.limit == 2500
+    assert req.skip_preflight is False
+
+
+def test_create_schedule_persists_cdc_snapshot_mode(temp_store):
+    """Studio Advanced when_needed must survive onto the hourly beat."""
+    sched = store.create_schedule({
+        "name": "CDC when_needed orders",
+        "source_connector_id": "src-1",
+        "source_table": "orders",
+        "dest_connector_id": "dst-1",
+        "dest_table": "orders_wh",
+        "interval": "hourly",
+        "sync_mode": "cdc",
+        "primary_key": "id",
+        "snapshot_mode": "when_needed",
+        "mappings": _MAPPINGS,
+    })
+    reloaded = store.get_schedule(sched.id)
+    assert reloaded.snapshot_mode == "when_needed"
+    req = runner.build_schedule_request(reloaded, _SRC_CONN, _DST_CONN)
+    assert req.stream_contracts[0]["snapshot_mode"] == "when_needed"
+    overwrite = store.create_schedule({
+        "name": "Full overwrite",
+        "source_connector_id": "src-1",
+        "source_table": "orders",
+        "dest_connector_id": "dst-1",
+        "dest_table": "orders_wh",
+        "interval": "daily",
+        "sync_mode": "full_refresh_overwrite",
+        "snapshot_mode": "when_needed",
+    })
+    assert overwrite.snapshot_mode == ""
+
+
+def test_create_schedule_persists_cdc_advanced_extras(temp_store):
+    """Studio allow_append_only / row filter / MultiSubnetFailover survive the beat."""
+    sched = store.create_schedule({
+        "name": "CDC append-only orders",
+        "source_connector_id": "src-1",
+        "source_table": "orders",
+        "dest_connector_id": "dst-1",
+        "dest_table": "orders_wh",
+        "interval": "hourly",
+        "sync_mode": "cdc",
+        "primary_key": "id",
+        "allow_append_only": True,
+        "cdc_row_filter": "net",
+        "multi_subnet_failover": True,
+        "mappings": _MAPPINGS,
+    })
+    reloaded = store.get_schedule(sched.id)
+    assert reloaded.allow_append_only is True
+    assert reloaded.cdc_row_filter == "net"
+    assert reloaded.multi_subnet_failover is True
+    sql_src = {**_SRC_CONN, "type": "sqlserver"}
+    req = runner.build_schedule_request(reloaded, sql_src, _DST_CONN)
+    assert req.destination.extra.get("allow_append_only") is True
+    assert req.source.extra.get("cdc_row_filter") == "net"
+    assert req.source.extra.get("multi_subnet_failover") is True
+    overwrite = store.create_schedule({
+        "name": "Full overwrite",
+        "source_connector_id": "src-1",
+        "source_table": "orders",
+        "dest_connector_id": "dst-1",
+        "dest_table": "orders_wh",
+        "interval": "daily",
+        "sync_mode": "full_refresh_overwrite",
+        "allow_append_only": True,
+        "cdc_row_filter": "net",
+        "multi_subnet_failover": True,
+    })
+    assert overwrite.allow_append_only is False
+    assert overwrite.cdc_row_filter == ""
+    assert overwrite.multi_subnet_failover is False
+
+
+def test_build_request_replays_cdc_advanced_extras():
+    sched = store.PipelineSchedule.from_dict({
+        "id": "s-cdc-x",
+        "name": "n",
+        "source_connector_id": "src",
+        "source_table": "orders",
+        "dest_connector_id": "dst",
+        "dest_table": "orders_wh",
+        "interval": "hourly",
+        "sync_mode": "cdc",
+        "primary_key": "id",
+        "allow_append_only": True,
+        "cdc_row_filter": "all update old",
+        "multi_subnet_failover": True,
+        "mappings": _MAPPINGS,
+    })
+    req = runner.build_schedule_request(sched, {**_SRC_CONN, "type": "sqlserver"}, _DST_CONN)
+    assert req.destination.extra.get("allow_append_only") is True
+    assert req.source.extra.get("cdc_row_filter") == "all update old"
+    assert req.source.extra.get("multi_subnet_failover") is True
+    assert req.skip_preflight is False
+
+
+def test_list_summary_exposes_cdc_advanced_extras():
+    from src.routers.schedules_router import ScheduleSummaryResponse
+
+    sched = store.PipelineSchedule.from_dict({
+        "id": "s-cdc-sum",
+        "name": "n",
+        "source_connector_id": "src",
+        "source_table": "orders",
+        "dest_connector_id": "dst",
+        "dest_table": "orders_wh",
+        "interval": "hourly",
+        "sync_mode": "cdc",
+        "allow_append_only": True,
+        "cdc_row_filter": "net",
+        "multi_subnet_failover": True,
+    })
+    summary = ScheduleSummaryResponse.from_schedule(sched)
+    assert summary.allow_append_only is True
+    assert summary.cdc_row_filter == "net"
+    assert summary.multi_subnet_failover is True
+
+
+def test_list_summary_exposes_validate_identity():
+    """List/drawer must see Studio hashes. Omitting them hid Validate≡Execute."""
+    from src.routers.schedules_router import ScheduleSummaryResponse
+
+    sched = store.PipelineSchedule.from_dict({
+        "id": "s-ident",
+        "name": "n",
+        "source_connector_id": "src",
+        "source_table": "orders",
+        "dest_connector_id": "dst",
+        "dest_table": "orders_wh",
+        "interval": "daily",
+        "shape_recipe": {"steps": [{"op": "trim", "column": "name"}]},
+        "approved_shape_recipe_hash": "a" * 64,
+        "approved_decision_artifact_hash": "b" * 64,
+        "approved_ddl_identity_hash": "c" * 64,
+    })
+    summary = ScheduleSummaryResponse.from_schedule(sched)
+    assert summary.approved_shape_recipe_hash == "a" * 64
+    assert summary.approved_decision_artifact_hash == "b" * 64
+    assert summary.approved_ddl_identity_hash == "c" * 64
+    dumped = summary.model_dump()
+    assert "shape_recipe" not in dumped
+
+
+def test_list_summary_exposes_advanced_write_knobs():
+    """List/edit/drawer read the summary. Omitting knobs made Save wipe Studio values."""
+    from src.routers.schedules_router import ScheduleSummaryResponse
+
+    sched = store.PipelineSchedule.from_dict({
+        "id": "s-sum",
+        "name": "n",
+        "source_connector_id": "src",
+        "source_table": "orders",
+        "dest_connector_id": "dst",
+        "dest_table": "orders_wh",
+        "interval": "daily",
+        "write_via_staging": True,
+        "priority_column": "updated_at",
+        "priority_direction": "asc",
+        "row_limit": 2500,
+        "date_locale": "DMY",
+        "number_locale": "EU",
+    })
+    summary = ScheduleSummaryResponse.from_schedule(sched)
+    assert summary.write_via_staging is True
+    assert summary.priority_column == "updated_at"
+    assert summary.priority_direction == "asc"
+    assert summary.row_limit == 2500
+    assert summary.date_locale == "DMY"
+    assert summary.number_locale == "EU"
+
+
+def test_patch_empty_preserves_validate_identity_hashes(temp_store):
+    """Blank identity on PATCH is omit — not a wipe of Studio Validate stamps."""
+    sched = store.create_schedule({
+        "name": "Stamped",
+        "source_connector_id": "src-1",
+        "source_table": "orders",
+        "dest_connector_id": "dst-1",
+        "dest_table": "orders_wh",
+        "interval": "daily",
+        "mappings": _MAPPINGS,
+        "shape_recipe": {"steps": [{"op": "trim", "column": "name"}]},
+        "approved_shape_recipe_hash": "a" * 64,
+        "approved_decision_artifact_hash": "b" * 64,
+        "approved_ddl_identity_hash": "c" * 64,
+    })
+    updated = store.update_schedule(sched.id, {
+        "name": "renamed only",
+        "shape_recipe": {},
+        "approved_shape_recipe_hash": "",
+        "approved_decision_artifact_hash": "  ",
+        "approved_ddl_identity_hash": "",
+    })
+    assert updated is not None
+    assert updated.name == "renamed only"
+    assert updated.shape_recipe == {"steps": [{"op": "trim", "column": "name"}]}
+    assert updated.approved_shape_recipe_hash == "a" * 64
+    assert updated.approved_decision_artifact_hash == "b" * 64
+    assert updated.approved_ddl_identity_hash == "c" * 64
+
+
+def test_update_omitting_write_knobs_preserves_them(temp_store):
+    sched = store.create_schedule({
+        "name": "Stage then promote",
+        "source_connector_id": "src-1",
+        "source_table": "orders",
+        "dest_connector_id": "dst-1",
+        "dest_table": "orders_wh",
+        "interval": "daily",
+        "write_via_staging": True,
+        "priority_column": "updated_at",
+        "priority_direction": "asc",
+        "row_limit": 2500,
+    })
+    renamed = store.update_schedule(sched.id, {"name": "renamed only"})
+    assert renamed is not None
+    assert renamed.write_via_staging is True
+    assert renamed.priority_column == "updated_at"
+    assert renamed.priority_direction == "asc"
+    assert renamed.row_limit == 2500
+
+
+def test_update_explicit_false_clears_write_knobs(temp_store):
+    sched = store.create_schedule({
+        "name": "Stage then promote",
+        "source_connector_id": "src-1",
+        "source_table": "orders",
+        "dest_connector_id": "dst-1",
+        "dest_table": "orders_wh",
+        "interval": "daily",
+        "write_via_staging": True,
+        "priority_column": "updated_at",
+        "priority_direction": "asc",
+        "row_limit": 2500,
+    })
+    cleared = store.update_schedule(sched.id, {
+        "write_via_staging": False,
+        "priority_column": "",
+        "priority_direction": "desc",
+        "row_limit": 0,
+    })
+    assert cleared is not None
+    assert cleared.write_via_staging is False
+    assert cleared.priority_column == ""
+    assert cleared.row_limit == 0
+
+
+def test_create_schedule_persists_studio_locales(temp_store):
+    sched = store.create_schedule({
+        "name": "EU dates",
+        "source_connector_id": "src-1",
+        "source_table": "orders",
+        "dest_connector_id": "dst-1",
+        "dest_table": "orders_wh",
+        "interval": "daily",
+        "date_locale": "DMY",
+        "number_locale": "EU",
+        "mappings": _MAPPINGS,
+    })
+    reloaded = store.get_schedule(sched.id)
+    assert reloaded.date_locale == "DMY"
+    assert reloaded.number_locale == "EU"
+    req = runner.build_schedule_request(reloaded, _SRC_CONN, _DST_CONN)
+    assert req.date_locale == "DMY"
+    assert req.number_locale == "EU"
+
+
+def test_update_explicit_empty_clears_locales(temp_store):
+    sched = store.create_schedule({
+        "name": "EU dates",
+        "source_connector_id": "src-1",
+        "source_table": "orders",
+        "dest_connector_id": "dst-1",
+        "dest_table": "orders_wh",
+        "interval": "daily",
+        "date_locale": "DMY",
+        "number_locale": "EU",
+    })
+    cleared = store.update_schedule(sched.id, {"date_locale": "", "number_locale": ""})
+    assert cleared is not None
+    assert cleared.date_locale == ""
+    assert cleared.number_locale == ""
+
+
+def test_build_schedule_request_refuses_empty_mappings():
+    """Unattended runs must not invent _auto_map when ScheduleForm omitted mappings."""
+    sched = store.PipelineSchedule.from_dict({
+        "id": "s-empty",
+        "name": "n",
+        "source_connector_id": "src",
+        "source_table": "orders",
+        "dest_connector_id": "dst",
+        "dest_table": "orders_wh",
+        "interval": "hourly",
+    })
+    with pytest.raises(ValueError, match="no persisted column mappings"):
+        runner.build_schedule_request(sched, _SRC_CONN, _DST_CONN)
+
+
+def test_create_schedule_pauses_when_mappings_empty(temp_store):
+    sched = store.create_schedule({
+        "name": "No map",
+        "source_connector_id": "src-1",
+        "source_table": "orders",
+        "dest_connector_id": "dst-1",
+        "dest_table": "orders_wh",
+        "interval": "hourly",
+        "enabled": True,
+    })
+    assert sched.enabled is False
+    with pytest.raises(ValueError, match="no persisted column mappings"):
+        store.update_schedule(sched.id, {"enabled": True})
+
+
+def test_create_schedule_stays_enabled_when_mappings_present(temp_store):
+    sched = store.create_schedule({
+        "name": "Mapped",
+        "source_connector_id": "src-1",
+        "source_table": "orders",
+        "dest_connector_id": "dst-1",
+        "dest_table": "orders_wh",
+        "interval": "hourly",
+        "enabled": True,
+        "mappings": _MAPPINGS,
+    })
+    assert sched.enabled is True
+    req = runner.build_schedule_request(sched, _SRC_CONN, _DST_CONN)
+    assert req.mappings[0]["source"] == "id"
+
+
+def test_due_schedules_skips_enabled_legacy_without_mappings(temp_store):
+    """A hand-edited enabled row still must not enter the due set."""
+    leaked = store.PipelineSchedule.from_dict({
+        "id": "legacy-empty",
+        "name": "legacy empty",
+        "source_connector_id": "src-1",
+        "source_table": "orders",
+        "dest_connector_id": "dst-1",
+        "dest_table": "orders_wh",
+        "interval": "hourly",
+        "enabled": True,
+        "mappings": [],
+        "next_run_at": "2000-01-01T00:00:00+00:00",
+    })
+    store._save_all([leaked])
+    assert leaked.id not in {s.id for s in store.due_schedules()}

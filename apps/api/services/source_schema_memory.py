@@ -136,6 +136,7 @@ def evaluate_source_drift(
     mappings: list[dict[str, Any]] | None = None,
     schema_policy: str = "manual_review",
     dest_db: str = "",
+    source_db: str = "",
     previous_primary_key: list[str] | None = None,
     current_primary_key: list[str] | None = None,
     cursor_fields: list[str] | None = None,
@@ -149,6 +150,11 @@ def evaluate_source_drift(
     ``unattended`` (schedules, default True) uses the same evolution kernel as
     Validate, then refuses mapped drop/rename unless the operator opted into
     ``propagate_*``. Interactive Validate still shows those as review.
+
+    Dialect defaults belong to the *source* engine. Passing the destination
+    (Snowflake ``TIMESTAMP_NTZ`` compared through MySQL FSP 0) invents
+    ``TIMESTAMP_NTZ → TIMESTAMP_NTZ (narrow_type)`` on a column nobody changed.
+    ``source_db`` wins; ``dest_db`` remains as a legacy alias for the same slot.
     """
     from services.schema_drift import (
         PROPAGATE_POLICIES,
@@ -168,6 +174,7 @@ def evaluate_source_drift(
 
     prev_pk = list(previous_primary_key or _nested_pk(previous_schema))
     live_pk = list(current_primary_key or _nested_pk(current_schema))
+    dialect = (source_db or dest_db or "").strip()
     change = classify_from_column_maps(
         list(prev_types.keys()),
         prev_types,
@@ -176,7 +183,7 @@ def evaluate_source_drift(
         old_pk=prev_pk or None,
         new_pk=live_pk or None,
         cursor_fields=cursor_fields,
-        dest_db=dest_db,
+        dest_db=dialect,
     )
     read = mapped_source_columns(mappings)
 

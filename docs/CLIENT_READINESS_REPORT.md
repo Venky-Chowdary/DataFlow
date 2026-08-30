@@ -1,5 +1,11 @@
 # Datawrap — Client Readiness Report
 
+> **2026-08-27 Validate≡Execute wave:** use
+> [`docs/CLIENT_HANDOVER_VALIDATE_EXECUTE.md`](CLIENT_HANDOVER_VALIDATE_EXECUTE.md)
+> for the `flights-1m.csv` → Snowflake incident, operator runbook, and measured
+> population-fit proof. This file remains the prior relational-assurance pack.
+> Do not mix those live-engine counts with the 2026-08-27 scan matrices.
+
 Measured state of the product for a client handover decision. Every claim below
 is backed by a named artifact (live run JSON, pytest node ids, or a file in this
 repository). Where something is unproven or unmeasured it says so; there are no
@@ -223,9 +229,19 @@ know; not examined at this bar. **Blocked** = cannot be proven here.
    (`ORA-00054`). The refused writer fails loudly with the lock named and
    nothing is written, so no column is silently lost, but two writers evolving
    the same table concurrently need a retry policy.
-4. **FK cycles are refused, not resolved.** No deferred-constraint strategy.
-5. **Triggers, stored procedures and views are not migrated.** Reported as
-   advisory in the physical-state section; recreate them before cutover.
+4. **FK cycles are recreated after load**, not refused. PostgreSQL and Oracle
+   emit `DEFERRABLE INITIALLY DEFERRED` on cycle and self-referential edges;
+   the certificate blocks only when a cycle is present and `cycle_resolved`
+   is not true. Proven on the named live matrix in
+   `apps/api/tests/test_fk_cycle_post_load.py` (PR #94). SQL Server / MySQL
+   use the portable post-load `ALTER` path without deferred constraints.
+5. **Triggers, stored procedures and views are not migrated.** They are named
+   on the certificate as advisory physical-state aspects
+   (`cutover_recreate`) so cutover recreates them. Name presence is not a
+   body-carried claim; advisory never vetoes `migration_proven`. Views and
+   named triggers: PR #95. Dependent procedures / functions: this wave
+   (`apps/api/tests/test_routine_cutover_matrix.py`). SQL Server and Oracle
+   catalog queries exist; they are not live-proven on this VM.
 6. **SQL Server partition functions/schemes, Oracle partitioned tables and
    PostgreSQL CLUSTER ordering are not carried** — refused honestly rather than
    invented.
@@ -309,7 +325,7 @@ credentials.
 | 5 | UI/UX audit against the engine: one primary action per root cause, no claim the engine does not support. Cursor contract done (cursor + declared meaning + verdict in Studio, `cursor_semantics_live_results.json` 18/18); remaining: the other panels | 1 | — |
 | 6 | Warehouse certification (Snowflake, BigQuery, S3) | 1–2 | credentials |
 | 7 | SaaS certification starting with Salesforce | 1–2 | integration user / Connected App |
-| 8 | FK cycles via deferred constraints, plus trigger/view reporting in the certificate | 1 | — |
+| 8 | ~~FK cycles via deferred constraints, plus trigger/view/routine reporting in the certificate~~ — done: cycles post-load (PR #94), views+triggers named (PR #95), dependent routines named (this wave). SQL Server / Oracle routine catalogs are not live here | — | SQL Server / Oracle credentials for a live routine matrix |
 | 9 | Final handover pack: signed proof bundle per certified route, runbook, rollback plan | 1 | items 1–8 |
 
 The critical path to a defensible client handover of the **relational** product

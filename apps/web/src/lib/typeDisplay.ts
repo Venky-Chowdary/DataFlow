@@ -342,6 +342,72 @@ export function typeBadgeClass(rawType: string | undefined): string {
   return `df2-type-${typeFamily(rawType)}`;
 }
 
+/**
+ * How the destination engine itself spells a type Datawrap carries canonically.
+ *
+ * Introspection normalizes every dialect's instant types onto one lattice, so a
+ * MySQL `datetime(6)` column comes back as `TIMESTAMP_NTZ(6)`. Printing that to
+ * an operator names a type MySQL does not have — the destination catalog's own
+ * DDL is the only honest label for an existing column. Only the tokens absent
+ * from the dialect are rewritten; everything else prints as read.
+ */
+export function destPhysicalTypeLabel(type: string, destType?: string): string {
+  const raw = (type || "").trim();
+  if (!raw) return raw;
+  const m = raw
+    .toUpperCase()
+    .match(/^TIMESTAMP(_NTZ|_LTZ|_TZ|TZ)?\s*(?:\(\s*(\d+)\s*\))?$/);
+  if (!m) return raw;
+  const zone = (m[1] || "").replace(/^_/, "");
+  const fsp = m[2] ? `(${m[2]})` : "";
+  const tzAware = zone === "TZ" || zone === "LTZ";
+  const d = (destType || "").toLowerCase();
+  if (d.includes("mysql") || d.includes("mariadb")) {
+    return tzAware ? `TIMESTAMP${fsp}` : `DATETIME${fsp}`;
+  }
+  if (d.includes("postgres") || d === "pg" || d.includes("redshift")) {
+    return tzAware ? `TIMESTAMPTZ${fsp}` : `TIMESTAMP${fsp}`;
+  }
+  if (d.includes("sqlserver") || d.includes("mssql") || d.includes("azure_sql")) {
+    return tzAware ? `DATETIMEOFFSET${fsp}` : `DATETIME2${fsp}`;
+  }
+  if (d.includes("oracle")) {
+    return tzAware ? `TIMESTAMP${fsp} WITH TIME ZONE` : `TIMESTAMP${fsp}`;
+  }
+  if (d.includes("bigquery")) return tzAware ? "TIMESTAMP" : "DATETIME";
+  if (d.includes("databricks") || d.includes("spark") || d.includes("delta")) {
+    return "TIMESTAMP";
+  }
+  return raw;
+}
+
+/** Postgres catalog aliases that are the same type as a Map select option. */
+function destSelectAlias(upper: string, destType?: string): string | undefined {
+  const d = (destType || "").toLowerCase();
+  if (!(d.includes("postgres") || d === "pg")) return undefined;
+  const aliases: Record<string, string> = {
+    INT: "INTEGER",
+    INT4: "INTEGER",
+    INT8: "BIGINT",
+    INT2: "SMALLINT",
+    FLOAT4: "REAL",
+    FLOAT8: "DOUBLE PRECISION",
+    BOOL: "BOOLEAN",
+  };
+  return aliases[upper];
+}
+
+function matchDestSelectOption<T extends { value: string }>(
+  options: T[],
+  upper: string,
+  destType?: string,
+): T | undefined {
+  return (
+    options.find((o) => o.value.toUpperCase() === upper)
+    || options.find((o) => destSelectAlias(upper, destType) === o.value.toUpperCase())
+  );
+}
+
 /** Options for a select, always including the current value if custom. */
 export function destTypeSelectOptions(
   current?: string,
@@ -351,8 +417,9 @@ export function destTypeSelectOptions(
   const base = options.map(({ value, label }) => ({ value, label }));
   const cur = (current || "").trim();
   if (!cur) return base;
-  const upper = cur.toUpperCase();
-  const matched = base.find((o) => o.value.toUpperCase() === upper);
+  const physical = destPhysicalTypeLabel(cur, destType);
+  const upper = physical.toUpperCase();
+  const matched = matchDestSelectOption(base, upper, destType);
   if (matched) return base;
   // Map generic INTEGER → Snowflake NUMBER(38,0) label when selecting for snowflake.
   if ((destType || "").toLowerCase().includes("snowflake")) {
@@ -363,16 +430,17 @@ export function destTypeSelectOptions(
       return base;
     }
   }
-  return [{ value: cur, label: `${cur} — current` }, ...base];
+  return [{ value: cur, label: `${physical} — current` }, ...base];
 }
 
 /** Normalize a type string to a select option value when possible. */
 export function normalizeDestTypeValue(current?: string, destType?: string): string {
   const cur = (current || "").trim();
   if (!cur) return "VARCHAR";
-  const upper = cur.toUpperCase();
+  const physical = destPhysicalTypeLabel(cur, destType);
+  const upper = physical.toUpperCase();
   const options = typeOptionsForDest(destType);
-  const matched = options.find((o) => o.value.toUpperCase() === upper);
+  const matched = matchDestSelectOption(options, upper, destType);
   if (matched) return matched.value;
   if ((destType || "").toLowerCase().includes("snowflake")) {
     // Width-preserving invent — never collapse SMALLINT/INTEGER into NUMBER(38,0).

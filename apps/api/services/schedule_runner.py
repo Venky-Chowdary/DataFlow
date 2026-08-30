@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 from services.brand_env import getenv_brand
 import socket
 from concurrent.futures import ThreadPoolExecutor
@@ -12,12 +13,55 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from services.schedule_store import due_schedules
+from services.failure_retry_policy import DETERMINISTIC
+from services.standing_authorization import (
+    CODE_NO_AUTHORIZATION,
+    SCOPE_NET_ADDITIVE_DRIFT,
+    AuthorizationDecision,
+    binding_from_schedule,
+    evaluate_authorization,
+)
 
 logger = logging.getLogger(__name__)
 
 _executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="schedule-runner")
+
+
+class ScheduleStartError(Exception):
+    """A manual Run now could not start — carry the operator-visible reason.
+
+    Cadence beats still return ``None`` and stay quiet. The HTTP / Pilot
+    trigger must not collapse every refusal into "check connectors".
+    """
+
+    def __init__(self, message: str, *, http_status: int = 400, code: str = ""):
+        super().__init__(message)
+        self.http_status = int(http_status)
+        self.code = str(code or "")
+
+
+def _manual_start_failure_detail(sched: Any) -> str:
+    """Prefer the parked finding or last run error over a connector guess."""
+    if sched is None:
+        return "Schedule not found."
+    hist = list(getattr(sched, "run_history", None) or [])
+    last_err = ""
+    if hist and isinstance(hist[-1], dict):
+        last_err = str(hist[-1].get("error") or "").strip()
+    req = getattr(sched, "approval_request", None) or {}
+    finding = ""
+    if isinstance(req, dict) and str(req.get("status") or "") == "open":
+        finding = str(req.get("finding") or req.get("corrective_action") or "").strip()
+    return finding or last_err or (
+        "Could not start this schedule. Open the schedule for the parked finding, "
+        "or confirm the source and destination connectors still resolve."
+    )
 CHECK_INTERVAL_SECONDS = 60
 LOCK_TTL_SECONDS = int(getenv_brand("SCHEDULER_LOCK_TTL", "300"))
+# Failed beats in a row before the cadence parks on a finding whatever the
+# failure was classified as. Two is the benefit of the doubt; the third is a
+# pattern, and every beat after it only costs the operator another identical row.
+_CONSECUTIVE_FAILURE_PARK = 3
 
 
 def _scheduler_instance_id() -> str:
@@ -238,12 +282,31 @@ def build_schedule_request(sched, src: dict, dst: dict):
     source = _endpoint_from_connector(src, sched.source_table)
     destination = _endpoint_from_connector(dst, sched.dest_table)
     _apply_callable_schedule_source(source, sched)
+    from services.schedule_cdc_extras import apply_cdc_schedule_extras
+
+    apply_cdc_schedule_extras(source, destination, sched)
 
     effective_mode = _normalize_sync_mode(sched.sync_mode, sched.primary_key)
     from services.procedure_source import assert_callable_sync_allowed
 
     assert_callable_sync_allowed(effective_mode, source)
     stream_contracts = list(sched.stream_contracts or [])
+    snapshot_mode = ""
+    if effective_mode == "cdc":
+        from services.cdc_snapshot_mode import schedule_snapshot_mode
+
+        snapshot_mode = schedule_snapshot_mode(
+            "cdc",
+            getattr(sched, "snapshot_mode", "")
+            or next(
+                (
+                    str(c.get("snapshot_mode") or "")
+                    for c in stream_contracts
+                    if isinstance(c, dict) and c.get("snapshot_mode")
+                ),
+                "initial",
+            ),
+        )
     if not stream_contracts and effective_mode not in ("full_refresh_overwrite", "full_refresh_append"):
         stream_contracts = [{
             "selected": True,
@@ -254,7 +317,15 @@ def build_schedule_request(sched, src: dict, dst: dict):
             "primary_key": sched.primary_key,
             "schema_policy": sched.schema_policy,
             "validation_mode": sched.validation_mode,
+            **({"snapshot_mode": snapshot_mode} if snapshot_mode else {}),
         }]
+    elif snapshot_mode:
+        stamped: list[dict] = []
+        for raw in stream_contracts:
+            row = dict(raw) if isinstance(raw, dict) else {}
+            row.setdefault("snapshot_mode", snapshot_mode)
+            stamped.append(row)
+        stream_contracts = stamped
 
     from services.schedule_store import assert_schedule_run_allowed
 
@@ -303,8 +374,16 @@ def build_schedule_request(sched, src: dict, dst: dict):
 
     from services.batch_progress import effective_backfill_new_fields
 
-    mappings = list(sched.mappings or [])
+    from services.schedule_mapping_contract import assert_schedule_mappings_replayable
+
+    mappings = assert_schedule_mappings_replayable(sched.mappings)
     schema_policy = sched.schema_policy or "manual_review"
+    # Autopilot: a scheduled run has nobody at the keyboard, so it carries the
+    # attestations a named human signed in advance — and only while the plan they
+    # signed is still the plan being run. With no valid grant these stay False and
+    # every gate decides exactly as it did before.
+    decision = authorization_for(sched)
+    acks = decision.acknowledgments
     return TransferRequest(
         source=source,
         destination=destination,
@@ -320,19 +399,75 @@ def build_schedule_request(sched, src: dict, dst: dict):
             schema_policy=schema_policy,
             mappings=mappings,
         ),
+        write_via_staging=bool(getattr(sched, "write_via_staging", False)),
+        priority_column=str(getattr(sched, "priority_column", "") or ""),
+        priority_direction=(
+            "asc"
+            if str(getattr(sched, "priority_direction", "") or "").strip().lower() == "asc"
+            else "desc"
+        ),
+        limit=max(0, int(getattr(sched, "row_limit", 0) or 0)),
         stream_contracts=stream_contracts,
+        date_locale=str(getattr(sched, "date_locale", "") or ""),
+        number_locale=str(getattr(sched, "number_locale", "") or ""),
+        shape_recipe=dict(getattr(sched, "shape_recipe", None) or {})
+        if isinstance(getattr(sched, "shape_recipe", None), dict)
+        else {},
+        approved_shape_recipe_hash=str(
+            getattr(sched, "approved_shape_recipe_hash", "") or ""
+        ),
+        approved_decision_artifact_hash=str(
+            getattr(sched, "approved_decision_artifact_hash", "") or ""
+        ),
+        approved_ddl_identity_hash=str(
+            getattr(sched, "approved_ddl_identity_hash", "") or ""
+        ),
         workspace_id=sched.workspace_id or "",
         contract_id=contract_id,
         enforce_contract=bool(contract_id),
         require_signed_contract=require_signed,
+        compliance_acknowledged=acks.compliance,
+        schema_drift_acknowledged=acks.schema_drift,
+        fk_risk_acknowledged=acks.fk_risk,
+        acknowledgment_actor=acks.actor if acks.any_claimed else "",
+        acknowledgment_reason=acks.reason if acks.any_claimed else "",
     )
 
 
-def _guard_source_schema_drift(sched: Any, request: Any) -> None:
+def authorization_for(sched: Any) -> AuthorizationDecision:
+    """What this schedule's standing authorization permits for the run at hand.
+
+    Recomputes the binding from the schedule as it stands now, so a grant signed
+    against a different mapping, source shape or policy authorizes nothing. Never
+    raises: an unreadable grant is no authority, not an outage.
+    """
+    try:
+        return evaluate_authorization(
+            getattr(sched, "standing_authorization", None),
+            binding_now=binding_from_schedule(sched),
+        )
+    except Exception as exc:  # noqa: BLE001 - unreadable authority is no authority
+        logger.warning(
+            "Schedule %s standing authorization unreadable — treating as absent: %s",
+            getattr(sched, "id", ""),
+            exc,
+        )
+        return AuthorizationDecision(
+            applies=False,
+            code=CODE_NO_AUTHORIZATION,
+            reason="The standing authorization could not be read.",
+            corrective_action="Re-grant the authorization.",
+        )
+
+
+def _guard_source_schema_drift(sched: Any, request: Any) -> bool:
     """Refuse a scheduled run whose source changed shape since the last one.
 
-    Raises ``ValueError`` so the caller records it the same way it records a
-    contract refusal — before a row moves. The damaging drift is the kind that
+    Returns whether the run proceeded *on delegated authority* rather than because
+    nothing changed, so the caller can record the authority as exercised.
+
+    Raises ``ApprovalRequired`` (a ``ValueError``) so the caller records it the way
+    it records a contract refusal — before a row moves. The damaging drift is the kind that
     would otherwise succeed: a column that keeps its name and changes type loads
     cleanly and writes wrong values, and nothing downstream reports an error.
 
@@ -340,7 +475,9 @@ def _guard_source_schema_drift(sched: Any, request: Any) -> None:
     because a probe timed out is the false alarm that gets the check switched
     off, and an unread schema is not evidence of a change.
     """
+    from services.schedule_approvals import KIND_SOURCE_DRIFT, ApprovalRequired
     from services.source_schema_memory import evaluate_source_drift
+    from services.standing_authorization import scopes_for_drift_kinds
 
     previous = dict(getattr(sched, "source_schema", None) or {})
     previous_pk = [
@@ -356,14 +493,14 @@ def _guard_source_schema_drift(sched: Any, request: Any) -> None:
             getattr(sched, "id", ""),
             exc,
         )
-        return
+        return False
     current = {
         str(k): str(v)
         for k, v in dict(info.get("schema") or {}).items()
         if not isinstance(v, (dict, list))
     }
     if not current:
-        return
+        return False
     current_pk = [
         str(p).strip()
         for p in (info.get("primary_key_columns") or [])
@@ -377,19 +514,61 @@ def _guard_source_schema_drift(sched: Any, request: Any) -> None:
         current_columns=list(info.get("columns") or current.keys()),
         mappings=list(getattr(request, "mappings", None) or []),
         schema_policy=str(getattr(sched, "schema_policy", "") or "manual_review"),
-        dest_db=str(getattr(request.destination, "format", "") or ""),
+        # Source-vs-source: MySQL FSP 0 must not classify a Snowflake
+        # TIMESTAMP_NTZ against itself as narrow_type.
+        source_db=str(getattr(request.source, "format", "") or ""),
+        dest_db="",
         previous_primary_key=previous_pk,
         current_primary_key=current_pk,
         cursor_fields=[cursor] if cursor else None,
     )
     if verdict.blocks:
-        raise ValueError(
+        kinds = [str(e.get("kind") or "") for e in (verdict.breaking or [])]
+        scopes = scopes_for_drift_kinds(kinds)
+        decision = authorization_for(sched)
+        if SCOPE_NET_ADDITIVE_DRIFT in scopes and decision.allows(SCOPE_NET_ADDITIVE_DRIFT):
+            # A mapped drop or rename is destination-safe (nothing is dropped
+            # there) and the named granter accepted it in advance for exactly this
+            # plan. Proceeding is authorized; it is still recorded as authority
+            # exercised, never as a check that passed.
+            logger.info(
+                "Schedule %s net-additive source drift proceeding under "
+                "authorization %s: %s",
+                getattr(sched, "id", ""),
+                decision.grant_id,
+                verdict.summary,
+            )
+            _remember_source_schema(
+                sched, current, verdict.fingerprint, primary_key=current_pk
+            )
+            return True
+        raise ApprovalRequired(
             f"{verdict.summary} Review the mapping and re-approve, or set "
-            "schema_policy to propagate the change deliberately."
+            "schema_policy to propagate the change deliberately.",
+            kind=KIND_SOURCE_DRIFT,
+            code="SOURCE_SCHEMA_DRIFT",
+            corrective_action=(
+                "Open the schedule's Map, confirm the mapping still holds, then "
+                "accept the new source shape as the baseline."
+            ),
+            scopes=scopes,
+            evidence={
+                "summary": verdict.summary,
+                "compatibility": verdict.compatibility,
+                "breaking": list(verdict.breaking or [])[:20],
+                "additive": list(verdict.additive or [])[:20],
+                "source_schema_fingerprint": verdict.fingerprint,
+                # The shape that was compared — Accept records this, it does
+                # not hang a second live introspect on a sleeping warehouse.
+                "current_schema": dict(current),
+                "current_columns": list(info.get("columns") or current.keys())[:200],
+                "current_primary_key": list(current_pk),
+            },
         )
     _remember_source_schema(
         sched, current, verdict.fingerprint, primary_key=current_pk
     )
+    return False
 
 
 def _remember_source_schema(
@@ -426,7 +605,11 @@ def _run_entry(job_id: str, status: str, attempt: int, started_at: datetime, job
     doc = job_doc or {}
     finished = datetime.now(timezone.utc)
     ledger = doc.get("row_accounting") if isinstance(doc.get("row_accounting"), dict) else {}
-    return {
+    hist = doc.get("load_history_report")
+    if not isinstance(hist, dict):
+        dest = doc.get("destination_summary")
+        hist = dest.get("load_history_report") if isinstance(dest, dict) else None
+    entry = {
         "job_id": job_id,
         "status": status,
         "attempt": attempt,
@@ -439,6 +622,9 @@ def _run_entry(job_id: str, status: str, attempt: int, started_at: datetime, job
         "error": (doc.get("error") or "")[:500],
         "row_accounting": dict(ledger),
     }
+    if isinstance(hist, dict) and hist:
+        entry["load_history_report"] = hist
+    return entry
 
 
 def _notify_schedule(sched, job_id: str, status: str, job_doc: dict | None) -> None:
@@ -492,6 +678,7 @@ def _retry_decision(
     sync_mode: str | None = None,
     rows_committed: int = 0,
     rows_committed_known: bool = True,
+    job_doc: dict | None = None,
 ) -> dict:
     """Whether to start attempt ``attempt + 1``, and why not when refusing.
 
@@ -500,15 +687,35 @@ def _retry_decision(
     for an attempt that committed nothing — but re-running an append that
     already landed rows writes every one of them again, unattended and at the
     schedule's cadence, so it is refused with the operator pointed at Resume.
+
+    Safe to retry is not the same as worth retrying. A run refused by a
+    validation gate wrote nothing, so the duplicate check waves it through, and
+    the schedule then replays an identical deterministic verdict until the
+    budget is gone. Those are refused here with the corrective action named.
     """
     from services.execution_engine_contract import decide_retry_from_start
+    from services.failure_retry_policy import classify_job_failure
 
     if _is_success(status):
         return {"retry": False, "reason": ""}
+    classification = classify_job_failure(job_doc)
+    if not classification.retryable:
+        # Name the gate before the budget. A schedule with max_retries=0 used
+        # to park as "Retry budget exhausted after 0 attempt(s)" even when the
+        # job error was a Decision Artifact refuse — that hid the next action.
+        reason = classification.reason
+        if classification.corrective_action:
+            reason = f"{reason} {classification.corrective_action}"
+        return {
+            "retry": False,
+            "reason": reason,
+            "failure_class": classification.to_dict(),
+        }
     if attempt >= max_retries:
         return {
             "retry": False,
             "reason": f"Retry budget exhausted after {max_retries} attempt(s).",
+            "failure_class": classification.to_dict(),
         }
     decision = decide_retry_from_start(
         status=status,
@@ -517,8 +724,18 @@ def _retry_decision(
         rows_committed_known=rows_committed_known,
     )
     if not decision["allowed"]:
-        return {"retry": False, "reason": decision["reason"], "decision": decision}
-    return {"retry": True, "reason": "", "decision": decision}
+        return {
+            "retry": False,
+            "reason": decision["reason"],
+            "decision": decision,
+            "failure_class": classification.to_dict(),
+        }
+    return {
+        "retry": True,
+        "reason": "",
+        "decision": decision,
+        "failure_class": classification.to_dict(),
+    }
 
 
 def _should_retry(
@@ -529,6 +746,7 @@ def _should_retry(
     sync_mode: str | None = None,
     rows_committed: int = 0,
     rows_committed_known: bool = True,
+    job_doc: dict | None = None,
 ) -> bool:
     return bool(
         _retry_decision(
@@ -538,6 +756,7 @@ def _should_retry(
             sync_mode=sync_mode,
             rows_committed=rows_committed,
             rows_committed_known=rows_committed_known,
+            job_doc=job_doc,
         )["retry"]
     )
 
@@ -614,6 +833,55 @@ def _observe_parallel_run(sched: Any, job_doc: dict | None = None) -> None:
         )
 
 
+def _failure_signature(entry: dict[str, Any] | None) -> str:
+    """A comparable identity for *why* a run failed, free of ids and counts."""
+    text = str((entry or {}).get("error") or "").strip().lower()
+    # Row numbers, job ids and timestamps differ between two identical verdicts.
+    text = re.sub(r"\b[0-9a-f]{16,}\b", "", text)
+    text = re.sub(r"\d+", "#", text)
+    return re.sub(r"\s+", " ", text)[:300]
+
+
+def _park_reason(sched: Any, decision: dict[str, Any], entry: dict[str, Any]) -> str:
+    """Why this failed beat must park instead of waiting for the next cadence.
+
+    Three cases, all of which repeat forever on their own:
+
+    - a gate refused the run (``deterministic``): the same inputs get the same
+      verdict on every beat;
+    - the retry was refused because the attempt already committed rows a
+      from-zero re-run cannot collapse — the *cadence* re-runs from zero too, so
+      every later beat appends the same rows again (this is how one failing
+      append grew a destination 5 → 25 rows across four beats);
+    - an unrecognised failure that has now produced the identical verdict twice
+      in a row: one retry was the benefit of the doubt, a second identical
+      verdict is evidence.
+    """
+    failure_class = decision.get("failure_class") or {}
+    kind = str(failure_class.get("kind") or "") if isinstance(failure_class, dict) else str(failure_class)
+    if kind == DETERMINISTIC:
+        return "deterministic_refusal"
+    if not decision.get("retry") and (decision.get("decision") or {}).get("allowed") is False:
+        return "committed_rows_cannot_be_replayed"
+    history = list(getattr(sched, "run_history", None) or [])
+    signature = _failure_signature(entry)
+    if signature:
+        previous = [r for r in history if not _is_success(r.get("status"))]
+        if previous and _failure_signature(previous[-1]) == signature:
+            return "identical_failure_repeated"
+    # A ceiling that does not depend on the wording matching. Two verdicts whose
+    # text differs — a connection error naming a different replica, a gate that
+    # names a different column each beat — used to grind on the cadence forever.
+    consecutive = 1
+    for run in reversed(history):
+        if _is_success(run.get("status")):
+            break
+        consecutive += 1
+    if consecutive >= _CONSECUTIVE_FAILURE_PARK:
+        return "consecutive_failures"
+    return ""
+
+
 def _finalize_run(schedule_id: str, job_id: str, attempt: int, started_at: datetime) -> None:
     """Handle a finished scheduled run: retry on failure, else record + notify."""
     from services.schedule_store import (
@@ -639,9 +907,13 @@ def _finalize_run(schedule_id: str, job_id: str, attempt: int, started_at: datet
         sync_mode=_normalize_sync_mode(sched.sync_mode, sched.primary_key),
         rows_committed=rows_committed,
         rows_committed_known=rows_known,
+        job_doc=job_doc,
     )
     if not decision["retry"] and decision["reason"] and not _is_success(status):
         entry["retry_refused"] = decision["reason"]
+    failure_class = decision.get("failure_class")
+    if failure_class and not _is_success(status):
+        entry["failure_class"] = failure_class
 
     if decision["retry"]:
         delay = max(0, sched.retry_backoff_seconds) * (attempt + 1)
@@ -668,65 +940,202 @@ def _finalize_run(schedule_id: str, job_id: str, attempt: int, started_at: datet
     )
     if _is_success(status):
         _observe_parallel_run(sched, job_doc)
+        try:
+            from services.schedule_approvals import close_dest_exists_park_after_success
+
+            close_dest_exists_park_after_success(schedule_id)
+        except Exception:
+            logger.exception(
+                "Schedule %s dest-exists park close after success skipped",
+                schedule_id,
+            )
+    else:
+        park = _park_reason(sched, decision, entry)
+        if park:
+            # This beat's verdict will not change by itself, and the next beat
+            # would either replay it or — on an append with nothing to collapse
+            # a second copy — land the same rows again. Park on one finding.
+            _open_finding(
+                schedule_id,
+                str((job_doc or {}).get("error") or decision.get("reason") or "")
+                or "The run was refused by a validation gate.",
+                attempt=attempt,
+                job_id=job_id,
+                evidence={
+                    "failure_class": failure_class,
+                    "phase": (job_doc or {}).get("phase", ""),
+                    "park_reason": park,
+                },
+            )
     _notify_schedule(sched, job_id, status, job_doc)
 
 
-def _dispatch_transfer(schedule_id: str, attempt: int = 0) -> str | None:
-    """Build and submit the transfer for a schedule attempt (used for retries too)."""
+def _park_on_decision(
+    schedule_id: str,
+    exc: BaseException,
+    *,
+    attempt: int,
+    job_id: str = "",
+) -> None:
+    """Turn a pre-run refusal into a decision a human can act on.
+
+    The run is still recorded as failed — nothing here pretends a refused run
+    succeeded — but the schedule is additionally parked on one durable finding, so
+    the cadence stops replaying an answer that cannot change by itself.
+
+    Best effort: if the inbox write fails, the failed run is already recorded and
+    the schedule behaves exactly as it did before this existed.
+    """
+    from services.schedule_store import mark_schedule_run
+
+    message = str(exc)
+    now = datetime.now(timezone.utc).isoformat()
+    mark_schedule_run(
+        schedule_id,
+        job_id,
+        status="failed",
+        run_entry={
+            "job_id": job_id,
+            "status": "failed",
+            "attempt": attempt,
+            "started_at": now,
+            "finished_at": now,
+            "duration_seconds": 0,
+            "records_transferred": 0,
+            "rejected_rows": 0,
+            "coerced_null_rows": 0,
+            "error": message[:500],
+        },
+    )
+    _open_finding(schedule_id, exc, attempt=attempt, job_id=job_id)
+
+
+def _open_finding(
+    schedule_id: str,
+    exc: BaseException | str,
+    *,
+    attempt: int,
+    job_id: str = "",
+    evidence: dict[str, Any] | None = None,
+) -> None:
+    """Park the schedule on one finding, describing it in the operator's terms.
+
+    A structured ``ApprovalRequired`` already knows its code, scopes and corrective
+    action. Anything else is classified from its message, and only findings an
+    attestation could actually clear are offered as approvable — the rest name the
+    configuration change that has to happen instead.
+    """
+    from services.failure_retry_policy import classify_failure
+    from services.schedule_approvals import (
+        ApprovalRequired,
+        KIND_RUN_REFUSED,
+        build_approval_request,
+        open_approval_request,
+    )
+    from services.schedule_mapping_contract import (
+        EMPTY_MAPPING_CODE,
+        EMPTY_MAPPING_CORRECTIVE,
+        is_empty_mapping_refusal,
+    )
+    from services.schedule_store import get_schedule
+    from services.standing_authorization import delegable_scopes_for
+
+    message = str(exc)
+    try:
+        sched = get_schedule(schedule_id)
+        if not sched:
+            return
+        if isinstance(exc, ApprovalRequired):
+            kind, code, scopes = exc.kind, exc.code, exc.scopes
+            corrective = exc.corrective_action
+            found = {**exc.evidence, **(evidence or {})}
+        else:
+            classification = classify_failure(error=message, phase="validate")
+            kind, code = KIND_RUN_REFUSED, "RUN_REFUSED"
+            scopes = delegable_scopes_for(message)
+            corrective = classification.corrective_action
+            if is_empty_mapping_refusal(message):
+                code = EMPTY_MAPPING_CODE
+                scopes = ()
+                corrective = EMPTY_MAPPING_CORRECTIVE
+            found = {"failure_class": classification.kind, **(evidence or {})}
+        open_approval_request(
+            schedule_id,
+            build_approval_request(
+                kind=kind,
+                code=code,
+                finding=message[:1000],
+                corrective_action=corrective,
+                binding=binding_from_schedule(sched),
+                requested_scopes=scopes,
+                job_id=job_id,
+                run_attempt=attempt,
+                evidence=found,
+            ),
+        )
+    except Exception:
+        logger.exception("Schedule %s could not be parked on a decision", schedule_id)
+
+
+def _record_authorization_use(schedule_id: str, *, rebind: bool = False) -> None:
+    from services.schedule_approvals import record_authorization_use
+
+    try:
+        record_authorization_use(schedule_id, rebind=rebind)
+    except Exception:
+        # Bookkeeping must never fail an authorized run.
+        logger.exception("Schedule %s authorization use not recorded", schedule_id)
+
+
+def _dispatch_transfer(
+    schedule_id: str,
+    attempt: int = 0,
+    *,
+    allow_paused: bool = False,
+) -> str | None:
+    """Build and submit the transfer for a schedule attempt (used for retries too).
+
+    ``enabled`` gates the cadence, not a one-shot Run now. A paused schedule
+    still has connectors and mappings — Fivetran/Airbyte let the operator fire
+    a paused connection without flipping it back to active.
+    """
     from src.transfer.background import run_transfer_async
     from src.transfer.engine import get_transfer_engine
 
-    from services.schedule_store import get_schedule, mark_schedule_run
+    from services.schedule_store import get_schedule
 
     sched = get_schedule(schedule_id)
-    if not sched or not sched.enabled:
+    if not sched:
+        return None
+    if not sched.enabled and not allow_paused:
         return None
     src = _resolve_connector(sched.source_connector_id)
     dst = _resolve_connector(sched.dest_connector_id)
     if not src or not dst:
+        # A connector this schedule cannot resolve does not come back on its own:
+        # someone has to re-point the schedule or restore the connection. Every
+        # later beat produced another identical failed row — 48 of them in one
+        # customer's Jobs list — so this parks on one finding instead.
         logger.warning("Schedule %s skipped — connector missing", schedule_id)
-        now = datetime.now(timezone.utc)
-        mark_schedule_run(
+        missing = "source" if not src else "destination"
+        _park_on_decision(
             schedule_id,
-            "",
-            status="failed",
-            run_entry={
-                "job_id": "",
-                "status": "failed",
-                "attempt": attempt,
-                "started_at": now.isoformat(),
-                "finished_at": now.isoformat(),
-                "duration_seconds": 0,
-                "records_transferred": 0,
-                "rejected_rows": 0,
-                "coerced_null_rows": 0,
-                "error": "Schedule skipped — source or destination connector is missing or unavailable",
-            },
+            RuntimeError(
+                f"Schedule cannot run — its {missing} connector is missing or "
+                "unavailable. Re-select the connection on this schedule, or "
+                "restore the deleted connector, then resume."
+            ),
+            attempt=attempt,
         )
         return None
 
+    authorized_drift = False
     try:
         request = build_schedule_request(sched, src, dst)
-        _guard_source_schema_drift(sched, request)
+        authorized_drift = _guard_source_schema_drift(sched, request)
     except ValueError as exc:
-        logger.error("Schedule %s blocked by contract policy: %s", schedule_id, exc)
-        mark_schedule_run(
-            schedule_id,
-            "",
-            status="failed",
-            run_entry={
-                "job_id": "",
-                "status": "failed",
-                "attempt": attempt,
-                "started_at": datetime.now(timezone.utc).isoformat(),
-                "finished_at": datetime.now(timezone.utc).isoformat(),
-                "duration_seconds": 0,
-                "records_transferred": 0,
-                "rejected_rows": 0,
-                "coerced_null_rows": 0,
-                "error": str(exc)[:500],
-            },
-        )
+        logger.error("Schedule %s refused before any row moved: %s", schedule_id, exc)
+        _park_on_decision(schedule_id, exc, attempt=attempt)
         return None
     engine = get_transfer_engine()
     job_id = engine._create_pending_job(request)
@@ -736,6 +1145,11 @@ def _dispatch_transfer(schedule_id: str, attempt: int = 0) -> str | None:
     # Bind the claim to this job so a long migration keeps it and a crashed one
     # gives it back, instead of both being judged by the same wall clock.
     set_running_job(schedule_id, job_id)
+    if request.acknowledgment_actor or authorized_drift:
+        # Delegated authority was exercised, and only now that a run actually
+        # exists to exercise it: counting earlier would spend a single-use
+        # approval on a job that never started.
+        _record_authorization_use(schedule_id, rebind=authorized_drift)
     future = run_transfer_async(job_id, request)
     future.add_done_callback(
         lambda _f, sid=schedule_id, jid=job_id, a=attempt, ts=started_at: _finalize_run(sid, jid, a, ts)
@@ -744,7 +1158,7 @@ def _dispatch_transfer(schedule_id: str, attempt: int = 0) -> str | None:
     return job_id
 
 
-def _run_schedule(schedule_id: str) -> str | None:
+def _run_schedule(schedule_id: str, *, manual: bool = False) -> str | None:
     from services.schedule_store import (
         clear_schedule_running,
         get_schedule,
@@ -752,22 +1166,42 @@ def _run_schedule(schedule_id: str) -> str | None:
     )
 
     sched = get_schedule(schedule_id)
-    if not sched or not sched.enabled:
+    if not sched:
+        if manual:
+            raise ScheduleStartError("Schedule not found.", http_status=404, code="not_found")
+        return None
+    if not sched.enabled and not manual:
         return None
 
     # Concurrency guard: refuse to start when this schedule (or another schedule
     # for the same source→dest connector pair) already has a live run in flight.
     if mark_schedule_running(schedule_id, _scheduler_instance_id()) is None:
         logger.info("Schedule %s skipped — a run is already in progress", schedule_id)
+        if manual:
+            raise ScheduleStartError(
+                "A run is already in progress for this schedule or the same "
+                "source→destination pair.",
+                http_status=409,
+                code="already_running",
+            )
         return None
 
     # A parked retry resumes its own attempt count; the budget is per run, not
     # per beat, or a schedule that fails every time retries forever.
-    job_id = _dispatch_transfer(schedule_id, attempt=sched.retry_attempt if sched.retry_at else 0)
+    job_id = _dispatch_transfer(
+        schedule_id,
+        attempt=sched.retry_attempt if sched.retry_at else 0,
+        allow_paused=manual,
+    )
     if job_id is None:
         # Fail-closed paths (missing connector / contract) already call
         # mark_schedule_run which clears ``running``. Belt-and-suspenders clear.
         clear_schedule_running(schedule_id)
+        if manual:
+            raise ScheduleStartError(
+                _manual_start_failure_detail(get_schedule(schedule_id)),
+                code="start_refused",
+            )
     return job_id
 
 
@@ -776,6 +1210,16 @@ def _run_due_schedules() -> int:
         logger.debug("Scheduler lock held by another instance; skipping this beat")
         return 0
     try:
+        from services.schedule_approvals import release_same_declaration_source_drift
+
+        # A parked TIMESTAMP_NTZ → TIMESTAMP_NTZ invent is not a decision.
+        # Release it so the cadence can fire; a real narrow stays parked.
+        release_same_declaration_source_drift()
+        from services.schedule_approvals import release_create_new_dest_exists_false_refuse
+
+        # Dest-exists after the first create-new write is not a plan change.
+        # Release only when the operator Map hash still matches.
+        release_create_new_dest_exists_false_refuse()
         started = 0
         for sched in due_schedules():
             try:
@@ -815,11 +1259,11 @@ def _clear_stale_running_schedules() -> None:
 async def run_schedule_loop() -> None:
     """Poll for due schedules and enqueue transfers."""
     logger.info("Pipeline scheduler started (interval=%ss)", CHECK_INTERVAL_SECONDS)
-    await asyncio.get_event_loop().run_in_executor(_executor, _clear_stale_running_schedules)
+    await asyncio.get_running_loop().run_in_executor(_executor, _clear_stale_running_schedules)
     try:
         from services.schedule_store import import_file_schedules_into_mongo
 
-        imported = await asyncio.get_event_loop().run_in_executor(
+        imported = await asyncio.get_running_loop().run_in_executor(
             _executor, import_file_schedules_into_mongo
         )
         if imported:
@@ -828,7 +1272,7 @@ async def run_schedule_loop() -> None:
         logger.exception("Schedule file→Mongo import failed")
     while True:
         try:
-            count = await asyncio.get_event_loop().run_in_executor(_executor, _run_due_schedules)
+            count = await asyncio.get_running_loop().run_in_executor(_executor, _run_due_schedules)
             if count:
                 logger.info("Scheduler started %s pipeline run(s)", count)
         except Exception:

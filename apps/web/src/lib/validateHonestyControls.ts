@@ -4,6 +4,7 @@
  * Surfaces what Validate actually proved (sample vs population RI, ConversionClass)
  * so operators never confuse sample gates with migration_proven / RI proven.
  */
+import { buildHistoricalSuccessMetric, type HistoricalSuccessMetric } from "./historicalSuccessMetric.js";
 import type { PreflightResult } from "./types.js";
 
 export interface ReferentialIntegrityHonesty {
@@ -51,12 +52,7 @@ export interface ValidateHonestyControls {
   migrationProven: boolean;
   ddlIdentityHash: string | null;
   /** Module 17 — measured route success or explicitly unmeasured. */
-  historicalSuccess: {
-    measured: boolean;
-    successRate: number | null;
-    runsObserved: number;
-    headline: string;
-  };
+  historicalSuccess: HistoricalSuccessMetric;
   note: string;
 }
 
@@ -178,24 +174,17 @@ export function buildValidateHonestyControls(
   const hsRaw =
     (preflight?.proof_bundle as Record<string, unknown> | undefined)?.historical_success
     ?? (preflight as Record<string, unknown> | null | undefined)?.historical_success;
-  const hs = (hsRaw && typeof hsRaw === "object")
-    ? (hsRaw as {
-      measured?: boolean;
-      success_rate?: number | null;
-      runs_observed?: number;
-    })
-    : undefined;
-  const hsMeasured = Boolean(hs?.measured);
-  const hsRate = typeof hs?.success_rate === "number" ? hs.success_rate : null;
-  const hsRuns = typeof hs?.runs_observed === "number" ? hs.runs_observed : 0;
-  const historicalSuccess = {
-    measured: hsMeasured,
-    successRate: hsMeasured ? hsRate : null,
-    runsObserved: hsRuns,
-    headline: hsMeasured && hsRate != null
-      ? `Historical success measured: ${(hsRate * 100).toFixed(1)}% over ${hsRuns} load(s)`
-      : "Historical success unmeasured — no invented rate",
-  };
+  const historicalSuccess = buildHistoricalSuccessMetric(
+    hsRaw && typeof hsRaw === "object"
+      ? (hsRaw as {
+        measured?: boolean;
+        success_rate?: number | null;
+        runs_observed?: number;
+        rows_written_total?: number;
+        rows_rejected_total?: number;
+      })
+      : undefined,
+  );
 
   return {
     referentialIntegrity: ri,
@@ -266,6 +255,77 @@ export function schemaDriftCompatibilityHeadline(
   if (!compat) return "";
   if (evo.compatibility_note) return `Compatibility ${compat} — ${evo.compatibility_note}`;
   return `Compatibility ${compat}`;
+}
+
+export interface NumberLocaleValidateAction {
+  decision: "set_locale";
+  columns: string[];
+  message: string;
+}
+
+/** Validate next action when Auto cannot parse 1,234 vs 1.234. */
+export function numberLocaleValidateAction(
+  preflight: PreflightResult | null | undefined,
+): NumberLocaleValidateAction | null {
+  const report = preflight?.number_locale_report;
+  if (!report || typeof report !== "object") return null;
+  if (String(report.decision || "") !== "set_locale") return null;
+  const columns = (report.ambiguous_columns || [])
+    .map((row) => String(row?.column || "").trim())
+    .filter(Boolean);
+  const named = columns.slice(0, 6).join(", ") || "amount";
+  return {
+    decision: "set_locale",
+    columns,
+    message:
+      `${named}: grouping is ambiguous (1,234 vs 1.234). ` +
+      "Set number locale US or EU in Destination → Advanced — Auto will not guess.",
+  };
+}
+
+export type DateLocaleValidateAction = NumberLocaleValidateAction;
+
+export type AdvancedLocaleKind = "date" | "number";
+
+/** Stable ids for Destination → Advanced locale selects. One owner. */
+export const ADVANCED_LOCALE_FIELD_ID: Record<AdvancedLocaleKind, string> = {
+  date: "df2-adv-date-locale",
+  number: "df2-adv-number-locale",
+};
+
+export function advancedLocaleFieldId(kind: AdvancedLocaleKind): string {
+  return ADVANCED_LOCALE_FIELD_ID[kind];
+}
+
+/** Scroll + focus the locale control after Advanced mounts. Returns whether it was found. */
+export function scrollAdvancedLocaleIntoView(kind: AdvancedLocaleKind): boolean {
+  const el = document.getElementById(advancedLocaleFieldId(kind));
+  if (!el) return false;
+  el.scrollIntoView({ behavior: "smooth", block: "center" });
+  if ("focus" in el && typeof el.focus === "function") {
+    el.focus();
+  }
+  return true;
+}
+
+/** Validate next action when Auto cannot tell Jan 2 from Feb 1. */
+export function dateLocaleValidateAction(
+  preflight: PreflightResult | null | undefined,
+): DateLocaleValidateAction | null {
+  const report = preflight?.date_locale_report;
+  if (!report || typeof report !== "object") return null;
+  if (String(report.decision || "") !== "set_locale") return null;
+  const columns = (report.ambiguous_columns || [])
+    .map((row) => String(row?.column || "").trim())
+    .filter(Boolean);
+  const named = columns.slice(0, 6).join(", ") || "event_date";
+  return {
+    decision: "set_locale",
+    columns,
+    message:
+      `${named}: day/month order is ambiguous (01/02/2024 is Jan 2 or Feb 1). ` +
+      "Set date locale DMY or MDY in Destination → Advanced — Auto will not guess.",
+  };
 }
 
 /** Hard-breaking drift (Confluent NONE) — remap / re-sign, never acknowledge. */

@@ -13,7 +13,10 @@ from typing import Any
 EMAIL_RE = re.compile(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
 PHONE_RE = re.compile(r"^\+?[0-9][0-9\s().-]{6,18}[0-9]$")
 SSN_RE = re.compile(r"^\d{3}-\d{2}-\d{4}$")
-DOB_RE = re.compile(r"^(?:\d{4}-\d{2}-\d{2}|\d{2}/\d{2}/\d{4})$")
+# Calendar shapes (ISO / slash) are not PII by themselves. DOB is name-gated
+# in ``_NAME_PATTERN_GROUPS`` — Fivetran / Airbyte / Collibra classifiers treat
+# date-of-birth as a semantic class, not "any 01/02/2024". Value-only matching
+# invented a HIPAA hold on ``event_date`` / ``created_at``.
 ACCOUNT_RE = re.compile(r"^(?:\d{8,19}|[A-Z]{2}\d{12,30})$")
 
 _NAME_PATTERN_GROUPS: dict[str, tuple[tuple[str, ...], float]] = {
@@ -50,12 +53,11 @@ _NAME_PATTERN_GROUPS: dict[str, tuple[tuple[str, ...], float]] = {
         r"card_?(?:number|no|num)\b",
         r"credit_?card",
         r"debit_?card",
-        r"pan\b",
+        r"\bpan\b",
     ), 0.4),
     # High-signal regulated IDs only — bare ``id`` / ``*Id`` matches every CRM field.
+    # Technical UUID/GUID surrogate keys are not PCI/HIPAA identifiers.
     "identifier": ((
-        r"\buuid\b",
-        r"\bguid\b",
         r"policy_?(?:no|number|num)\b",
         r"member_?id\b",
         r"\bmrn\b",
@@ -86,8 +88,6 @@ def _value_hits(values: list[str]) -> list[str]:
             hits.append("phone")
         elif SSN_RE.match(text):
             hits.append("ssn")
-        elif DOB_RE.match(text):
-            hits.append("dob")
         elif ACCOUNT_RE.match(text):
             hits.append("account")
     return list(dict.fromkeys(hits))

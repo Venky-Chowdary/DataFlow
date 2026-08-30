@@ -6,7 +6,7 @@ import json
 from dataclasses import dataclass
 from typing import Any
 
-from services.value_serializer import cell_to_string, json_default
+from services.value_serializer import cell_to_string, json_default, json_loads_exact
 
 from connectors.base import ReadBatch
 
@@ -85,6 +85,65 @@ def _redis_client(cfg: dict[str, Any]):
     )
 
 
+def redis_zset_score_carrier(score: Any) -> float:
+    """Bind a Redis zset score through the write-path float carrier.
+
+    Redis scores are IEEE doubles. ``float(text)`` invented Auto ``1.234``
+    and collapsed ``2**53+1``. Native Python floats pass through (already
+    IEEE). Locale money the write path stores still binds.
+    """
+    from connectors.sql_bind import coerce_float_wire
+
+    try:
+        bound = coerce_float_wire(score, ddl_type="FLOAT")
+    except (ValueError, TypeError) as exc:
+        raise ValueError(
+            f"Redis zset score cannot bind {score!r} — refuse invent"
+        ) from exc
+    if not isinstance(bound, float):
+        raise ValueError(
+            f"Redis zset score cannot bind {score!r} — refuse invent"
+        )
+    return bound
+
+
+def redis_json_row(raw: Any) -> dict[str, Any]:
+    """One Redis value as a sample / Gate-8 row.
+
+    JSON objects keep ``json_loads_exact`` numbers. Invalid or non-object
+    values stay under ``value`` — never invent an empty object.
+    """
+    parsed = load_redis_json_doc(raw)
+    if isinstance(parsed, dict):
+        return parsed
+    if isinstance(raw, (bytes, bytearray)):
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            text = _decode(raw)
+    else:
+        text = "" if raw is None else str(raw)
+    if parsed is None:
+        return {"value": text}
+    return {"value": parsed}
+
+
+def load_redis_json_doc(raw: Any) -> Any:
+    """Parse a Redis JSON document. Numbers match ``json_loads_exact``.
+
+    Invalid UTF-8, non-JSON, or non-text payloads return ``None`` — callers
+    must not invent an empty object.
+    """
+    try:
+        if isinstance(raw, (bytes, bytearray)):
+            raw = raw.decode("utf-8")
+        if not isinstance(raw, str):
+            return None
+        return json_loads_exact(raw)
+    except (TypeError, ValueError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+
+
 def _decode(value: Any) -> str:
     """Decode Redis bytes — binary payloads become a typed base64 envelope."""
     from services.value_serializer import json_default
@@ -123,8 +182,10 @@ def redis_key_for(prefix: str, identity: Any) -> str:
     the moment either side changed.
     """
     from connectors.sql_identifiers import sanitize_identifier
+    from services.value_serializer import present_cell_text
 
-    return f"{prefix}:{sanitize_identifier(str(identity), preserve_case=True)}"
+    text = present_cell_text(identity)
+    return f"{prefix}:{sanitize_identifier(text or '', preserve_case=True)}"
 
 
 def resolve_key_pattern(name: str | None) -> str:
@@ -174,7 +235,7 @@ def _read_redis_value(client: Any, key: str, ktype: str) -> str:
                 f"{_REDIS_COLLECTION_CAP} cap; refuse silent truncation"
             )
         pairs = client.zrange(key, 0, _REDIS_COLLECTION_CAP - 1, withscores=True)
-        vals = [[_decode(m), float(s)] for m, s in pairs]
+        vals = [[_decode(m), redis_zset_score_carrier(s)] for m, s in pairs]
         return json.dumps(vals, default=json_default)
     if ktype == "stream":
         xlen = int(client.xlen(key) or 0)
@@ -245,10 +306,7 @@ def read_keys_batch(
         # redis_type so upsert identity is never silently dropped.
         object_values: list[dict] = []
         for row in rows:
-            try:
-                parsed = json.loads(row[1])
-            except Exception:
-                parsed = None
+            parsed = load_redis_json_doc(row[1])
             if not isinstance(parsed, dict):
                 object_values = []
                 break

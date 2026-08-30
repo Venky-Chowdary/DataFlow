@@ -18,6 +18,7 @@ STORE_PATH = data_dir() / "integrations.json"
 _SSO_TYPES = ("saml", "oidc", "azure_ad")
 _CLOUD_PROVIDERS = ("openai", "anthropic")
 _MASK = "••••••••"
+_PILOT_ENGINES = ("auto", "local", "hybrid", "cloud")
 
 
 def _now() -> str:
@@ -59,15 +60,28 @@ def _default_ai() -> dict[str, dict[str, Any]]:
     }
 
 
+def _default_pilot() -> dict[str, Any]:
+    return {"engine": "auto"}
+
+
+def _empty_store() -> dict[str, Any]:
+    return {
+        "sso": _default_sso(),
+        "ai_providers": _default_ai(),
+        "pilot": _default_pilot(),
+        "api_keys": [],
+    }
+
+
 def _load_raw() -> dict[str, Any]:
     if not STORE_PATH.exists():
-        return {"sso": _default_sso(), "ai_providers": _default_ai(), "api_keys": []}
+        return _empty_store()
     try:
         raw = json.loads(STORE_PATH.read_text(encoding="utf-8"))
         if not isinstance(raw, dict):
             raise ValueError("invalid store")
     except Exception:
-        return {"sso": _default_sso(), "ai_providers": _default_ai(), "api_keys": []}
+        return _empty_store()
 
     sso = _default_sso()
     for key in _SSO_TYPES:
@@ -83,7 +97,13 @@ def _load_raw() -> dict[str, Any]:
     if not isinstance(api_keys, list):
         api_keys = []
 
-    return {"sso": sso, "ai_providers": ai, "api_keys": api_keys}
+    pilot = _default_pilot()
+    if isinstance(raw.get("pilot"), dict):
+        pilot.update(raw["pilot"])
+    if str(pilot.get("engine", "auto")).strip().lower() not in _PILOT_ENGINES:
+        pilot["engine"] = "auto"
+
+    return {"sso": sso, "ai_providers": ai, "pilot": pilot, "api_keys": api_keys}
 
 
 def _save(data: dict[str, Any]) -> None:
@@ -229,7 +249,9 @@ def get_ai_provider_configs() -> dict[str, dict[str, Any]]:
     for provider, cfg in data["ai_providers"].items():
         row = dict(cfg)
         key = row.get("api_key", "")
-        row["configured"] = bool(key) or provider == "ollama"
+        # Configured means a key we can actually use (env or store), not merely
+        # a byte string sitting in the file.
+        row["configured"] = bool(resolve_provider_api_key(provider)) or provider == "ollama"
         row["api_key"] = _mask_secret(key) if key else ""
         out[provider] = row
     return out
@@ -255,8 +277,57 @@ def update_ai_provider(provider: str, patch: dict[str, Any]) -> dict[str, Any]:
     return get_ai_provider_configs()[provider]
 
 
+def configured_ai_providers() -> tuple[str, ...]:
+    """Cloud providers the operator has actually configured with a usable key.
+
+    Membership means: enabled, and a key resolves from env or the encrypted
+    store. Masked, sentinel and undecryptable values do not count. Ollama is
+    excluded — its default base URL is pre-seeded, so reachability alone is not
+    an operator decision.
+    """
+    return tuple(
+        p for p in _CLOUD_PROVIDERS if ai_provider_enabled(p) and resolve_provider_api_key(p)
+    )
+
+
+def get_pilot_engine_preference() -> str:
+    """Operator's saved Pilot engine choice — ``auto`` until they pick one."""
+    data = _load_raw()
+    return str(data["pilot"].get("engine") or "auto").strip().lower()
+
+
+def set_pilot_engine_preference(engine: str) -> str:
+    normalized = str(engine or "").strip().lower()
+    if normalized not in _PILOT_ENGINES:
+        raise ValueError(
+            f"Unknown Pilot engine: {engine!r} (expected one of {', '.join(_PILOT_ENGINES)})"
+        )
+    data = _load_raw()
+    data["pilot"]["engine"] = normalized
+    data["updated_at"] = _now()
+    _save(data)
+    return normalized
+
+
+def ai_provider_enabled(provider: str) -> bool:
+    """Operator's on/off switch for a provider — an env key cannot override it."""
+    data = _load_raw()
+    cfg = data["ai_providers"].get(provider)
+    if cfg is None:
+        return False
+    return bool(cfg.get("enabled", True))
+
+
 def resolve_provider_api_key(provider: str) -> str:
+    """The usable key for a provider, or "" — env wins over the encrypted store.
+
+    Turning a provider off in Settings withholds the key even when the process
+    env carries one: disabling is a decision, not a missing value.
+    """
     import os
+
+    if not ai_provider_enabled(provider):
+        return ""
 
     env_map = {"openai": "OPENAI_API_KEY", "anthropic": "ANTHROPIC_API_KEY"}
     env_key = env_map.get(provider)
@@ -267,8 +338,6 @@ def resolve_provider_api_key(provider: str) -> str:
 
     data = _load_raw()
     cfg = data["ai_providers"].get(provider, {})
-    if not cfg.get("enabled", True):
-        return ""
     stored = cfg.get("api_key", "")
     if not stored:
         return ""

@@ -9,6 +9,7 @@ import {
   buildExecutiveSummary,
   findDuplicateKeyRoot,
   findFidelityCollapseRoot,
+  isFidelityCollapseSignal,
   groupIsoNormalizeIssues,
   isDeclaredFidelityCollapse,
   isEncodingIntegritySignal,
@@ -390,6 +391,27 @@ describe("isEncodingIntegritySignal", () => {
 });
 
 describe("findFidelityCollapseRoot", () => {
+  it("does not treat a uniqueness-probe error as fidelity collapse", () => {
+    const msg =
+      'Data integrity failed: id: source uniqueness probe unavailable (relation public."public.case_a_src" does not exist)';
+    assert.equal(isFidelityCollapseSignal(msg, { status: "error" }, "g9_data_integrity"), false);
+    const root = findFidelityCollapseRoot(
+      basePreflight({
+        gates: [
+          {
+            id: "g9_data_integrity",
+            name: "Integrity",
+            status: "block",
+            message: msg,
+            details: { status: "error" },
+          },
+        ],
+        blockers: [{ id: "g9_data_integrity", message: msg, details: { status: "error" } }],
+      }),
+    );
+    assert.equal(root, null);
+  });
+
   it("collapses multi-gate fidelity blockers into one root", () => {
     const pf = basePreflight({
       gates: [

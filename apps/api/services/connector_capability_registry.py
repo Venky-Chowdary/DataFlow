@@ -475,6 +475,29 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
         ],
         "recommended_batch_size": 10000,
     },
+    # TSV is tab-delimited CSV — identical capability profile, distinct driver
+    # key. Missing this row made F7 flag 'tsv' as a transfer-ready driver with
+    # no static capability entry (catalog count ≠ proven live).
+    "tsv": {
+        "transfer_ready": True,
+        "tier": TIER_HIGHEST,
+        "pattern": "batch",
+        "supports_cdc": False,
+        "supports_streaming": False,
+        "supports_upsert": False,
+        "supports_append": True,
+        "supports_overwrite": True,
+        "supports_merge": False,
+        "requires_schema": False,
+        "supports_binary": False,
+        "supports_unstructured": False,
+        "common_issues": [
+            "TSV has no type metadata; Datawrap infers types from sample values.",
+            "Embedded tabs or newlines inside unquoted fields can break parsing.",
+            "Different locale decimal separators may misclassify numbers.",
+        ],
+        "recommended_batch_size": 10000,
+    },
     "json": {
         "transfer_ready": True,
         "tier": TIER_HIGHEST,

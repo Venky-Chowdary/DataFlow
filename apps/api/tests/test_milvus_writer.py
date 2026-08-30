@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -84,12 +85,12 @@ def test_milvus_write_unreachable_fail_closed():
 class _FakeResp:
     def __init__(self, status: int, payload: dict):
         self.status_code = status
-        self.content = b"{}"
-        self.text = ""
         self._payload = payload
+        self.text = json.dumps(payload)
+        self.content = self.text.encode("utf-8")
 
     def json(self):
-        return self._payload
+        return json.loads(self.text) if self.text else {}
 
 
 class _MilvusSession:

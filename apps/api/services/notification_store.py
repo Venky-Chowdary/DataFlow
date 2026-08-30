@@ -88,7 +88,14 @@ def _channels(data: dict[str, Any]) -> list[NotificationChannel]:
 def _encrypt_config(config: dict[str, Any]) -> dict[str, Any]:
     """Encrypt sensitive string values in a channel config."""
     out = dict(config)
-    for key in ("token", "password", "api_key", "client_secret", "webhook_url"):
+    for key in (
+        "token",
+        "password",
+        "smtp_password",
+        "api_key",
+        "client_secret",
+        "webhook_url",
+    ):
         if key in out and isinstance(out[key], str) and out[key]:
             out[key] = encrypt_secret(out[key])
     return out
@@ -96,7 +103,14 @@ def _encrypt_config(config: dict[str, Any]) -> dict[str, Any]:
 
 def _decrypt_config(config: dict[str, Any]) -> dict[str, Any]:
     out = dict(config)
-    for key in ("token", "password", "api_key", "client_secret", "webhook_url"):
+    for key in (
+        "token",
+        "password",
+        "smtp_password",
+        "api_key",
+        "client_secret",
+        "webhook_url",
+    ):
         if key in out and isinstance(out[key], str) and out[key]:
             out[key] = decrypt_secret(out[key])
     return out

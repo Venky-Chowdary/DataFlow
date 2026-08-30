@@ -171,23 +171,72 @@ def layer_l1_row_balance(
     )
 
 
+def _cell_wire(value: Any) -> str:
+    """One ladder population cell. Same wire as SQL extract."""
+    from services.value_serializer import cell_to_string
+
+    return cell_to_string(value, preserve_sql_null=True)
+
+
+def _row_cells(row: dict[str, Any], columns: list[str] | None = None) -> dict[str, str]:
+    keys = columns if columns else list(row.keys())
+    return {c: _cell_wire(row.get(c)) for c in keys}
+
+
 def _cell_text(value: Any) -> str | None:
-    if value is None:
+    """One L2 cell. Same wire as SQL readers; NULL is absence, not a string.
+
+    ``str(value)`` invented ``True`` / ``1E+2`` / a Python ``b'...'`` repr.
+    ``SQL_NULL_SENTINEL`` was counted as a non-null string, so L2 under-counted
+    NULLs after PostgreSQL / Iceberg / procedure extract. Empty string stays a
+    value. Gate-8 leftover ``\\x00NULL\\x00`` stays null.
+    """
+    from services.value_serializer import (
+        NULL_WIRE_SENTINELS,
+        is_missing_sentinel,
+    )
+
+    if value is None or is_missing_sentinel(value):
         return None
-    if isinstance(value, str) and value in {"", "\x00NULL\x00"}:
-        # Empty string is a value; SQL NULL sentinel from writers → null.
-        if value == "\x00NULL\x00":
+    if isinstance(value, str):
+        if value in NULL_WIRE_SENTINELS or value == "\x00NULL\x00":
             return None
-    return str(value)
+        return value
+    text = _cell_wire(value)
+    if text in NULL_WIRE_SENTINELS or text == "\x00NULL\x00":
+        return None
+    return text
 
 
 def _try_decimal(text: str | None) -> Decimal | None:
     if text is None:
         return None
-    try:
-        return Decimal(str(text).replace(",", "").strip())
-    except (InvalidOperation, ValueError):
-        return None
+    from services.transform_engine import decimal_wire_value
+
+    return decimal_wire_value(text)
+
+
+def _wire_less(left: str, right: str) -> bool:
+    """True when ``left`` is smaller than ``right`` for L2 min/max.
+
+    Dest-canonical numbers compare as Decimal (``9`` before ``10``). Mixed
+    or unparseable cells stay wire-lexicographic — Auto ``1,234`` still
+    refuses numeric invent.
+    """
+    left_n = _try_decimal(left)
+    right_n = _try_decimal(right)
+    if left_n is not None and right_n is not None:
+        return left_n < right_n
+    return left < right
+
+
+def compare_present_wires(left: str, right: str) -> int:
+    """``-1`` / ``0`` / ``1`` using the same order as L2 min/max."""
+    if _wire_less(left, right):
+        return -1
+    if _wire_less(right, left):
+        return 1
+    return 0
 
 
 def compute_column_aggregates(
@@ -214,9 +263,9 @@ def compute_column_aggregates(
                 continue
             non_null[col] += 1
             distinct[col].add(text)
-            if mins[col] is None or text < mins[col]:
+            if mins[col] is None or _wire_less(text, mins[col]):
                 mins[col] = text
-            if maxs[col] is None or text > maxs[col]:
+            if maxs[col] is None or _wire_less(maxs[col], text):
                 maxs[col] = text
             if sum_ok[col]:
                 d = _try_decimal(text)
@@ -428,8 +477,8 @@ def binary_search_row_diff(
                         "pk_column": pk_column,
                         "pk": pk,
                         "column": col,
-                        "source_value": srec.get(col),
-                        "target_value": trec.get(col),
+                        "source_value": _cell_text(srec.get(col)),
+                        "target_value": _cell_text(trec.get(col)),
                         "source_fingerprint": sfp,
                         "target_fingerprint": tfp,
                     }
@@ -481,6 +530,23 @@ def binary_search_row_diff(
     )
 
 
+def _pk_key(value: Any) -> str | None:
+    """Address one ladder row. Same wire as extract; NULL is not a key.
+
+    ``str(True)`` / ``str(Decimal('1E+2'))`` invented a second PK spelling, so
+    L5 reported missing_side against dest text ``true`` / ``100``. Reader-wired
+    ``SQL_NULL_SENTINEL`` looked like a present key.
+    """
+    from services.value_serializer import is_null_evidence
+
+    if is_null_evidence(value):
+        return None
+    text = _cell_wire(value) if not isinstance(value, str) else value
+    if is_null_evidence(text):
+        return None
+    return text
+
+
 def _index_by_pk(
     rows: Iterable[dict[str, Any]],
     pk_column: str,
@@ -489,10 +555,10 @@ def _index_by_pk(
     for rec in rows:
         if not isinstance(rec, dict):
             continue
-        pk = rec.get(pk_column)
-        if pk is None or pk == "":
+        key = _pk_key(rec.get(pk_column))
+        if key is None:
             continue
-        out[str(pk)] = rec
+        out[key] = rec
     return out
 
 
@@ -525,8 +591,7 @@ def read_sqlite_rows(
             if not batch:
                 return rows
             for r in batch:
-                row = dict(r)
-                rows.append({c: row.get(c) for c in columns} if columns else row)
+                rows.append(_row_cells(dict(r), columns))
             if max_rows and len(rows) > max_rows:
                 raise PopulationTooLarge(len(rows), max_rows)
     finally:
@@ -592,7 +657,7 @@ def read_postgres_rows(
                     return rows
                 if not names:
                     names = [d[0] for d in cur.description] if cur.description else []
-                rows.extend(dict(zip(names, row)) for row in batch)
+                rows.extend(_row_cells(dict(zip(names, rec))) for rec in batch)
                 if max_rows and len(rows) > max_rows:
                     raise PopulationTooLarge(len(rows), max_rows)
     finally:

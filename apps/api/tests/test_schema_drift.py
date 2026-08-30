@@ -525,6 +525,64 @@ def test_pg_bare_decimal_is_widen_not_narrow_type_drift():
     assert any(b.get("kind") == "narrow_type" for b in mysql["schema_evolution"]["hard_breaking"])
 
 
+def test_a_transformed_carrier_is_graded_and_the_declared_one_fingerprinted():
+    """A rounded column is not a precision collapse, and not source drift either.
+
+    The two source questions have two answers: the revision fingerprinted the
+    declared ``DECIMAL(11,8)``, while the writer will bind the transformed
+    ``INTEGER``. Grading the carrier on the declared type blocked the run as
+    ``narrow_type`` (``source_changed:false, target_changed:false``, no operator
+    remedy); fingerprinting the transformed image reported the operator's own
+    approved recipe as "source schema changed".
+    """
+    from services.schema_fingerprint import fingerprint_schema
+
+    declared_cols = ["name", "arr_time"]
+    declared_schema = {"name": "VARCHAR(64)", "arr_time": "DECIMAL(11,8)"}
+    mappings = [
+        {"source": "name", "target": "name", "confidence": 0.99, "transform": "none"},
+        {"source": "arr_time", "target": "arr_time", "confidence": 0.99, "transform": "none"},
+    ]
+    report = detect_schema_drift(
+        # The transformed image the gates judge and the writer receives.
+        source_columns=declared_cols,
+        source_schema={"name": "VARCHAR(64)", "arr_time": "INTEGER"},
+        declared_source_columns=declared_cols,
+        declared_source_schema=declared_schema,
+        target_columns=declared_cols,
+        target_schema={"name": "VARCHAR(64)", "arr_time": "INT4"},
+        mappings=mappings,
+        destination_db_type="postgresql",
+        table_exists=True,
+        schema_policy="manual_review",
+        stored_source_fp=fingerprint_schema(declared_cols, declared_schema),
+        sample_rows=[{"name": "ACME", "arr_time": "22"}],
+    )
+    assert report["type_mismatches"] == []
+    assert report["schema_evolution"]["hard_breaking"] == []
+    assert not report["source_changed"]
+    assert not report["drift_detected"]
+
+
+def test_an_unshaped_narrowing_is_still_blocked():
+    """The default path is unchanged: no transform means declared is the image."""
+    report = detect_schema_drift(
+        source_columns=["arr_time"],
+        source_schema={"arr_time": "DECIMAL(11,8)"},
+        target_columns=["arr_time"],
+        target_schema={"arr_time": "INT4"},
+        mappings=[{"source": "arr_time", "target": "arr_time", "confidence": 0.99}],
+        destination_db_type="postgresql",
+        table_exists=True,
+        schema_policy="manual_review",
+    )
+    assert report["type_mismatches"]
+    assert any(
+        b.get("kind") == "narrow_type"
+        for b in report["schema_evolution"]["hard_breaking"]
+    )
+
+
 def test_propagate_policy_synonym_target_fp_does_not_require_ack():
     from services.preflight_service import run_file_preflight
     from services.schema_fingerprint import fingerprint_schema_legacy
@@ -559,6 +617,20 @@ def test_propagate_policy_synonym_target_fp_does_not_require_ack():
     )
     assert result["passed"] is True, result.get("blockers")
     assert not any(g.get("id") == "schema_drift" and g.get("status") == "block" for g in result["gates"])
+
+
+def test_same_spelling_timestamp_ntz_is_not_a_narrow():
+    """Dest-floor FSP must not accuse TIMESTAMP_NTZ of narrowing itself."""
+    from services.schema_drift import _is_type_narrow, classify_schema_change
+
+    assert _is_type_narrow("TIMESTAMP_NTZ", "TIMESTAMP_NTZ", dest_db="mysql") is False
+    report = classify_schema_change(
+        {"joining_date": "TIMESTAMP_NTZ"},
+        {"joining_date": "TIMESTAMP_NTZ"},
+        dest_db="mysql",
+    )
+    assert report["breaking"] == []
+    assert report["severity"] == "none"
 
 
 def test_classify_no_change():
@@ -770,3 +842,31 @@ def test_compatibility_lattice_matches_confluent_roles_for_sql():
     assert report["compatibility"] == COMPAT_FORWARD
     assert report["schema_evolution"]["should_propagate"] is True
     assert report["summary"]
+
+
+def test_schema_policy_honesty_line_matches_evolution_kernel():
+    from services.preflight_service import run_transfer_policy_gates
+    from services.schema_drift import schema_policy_honesty_line
+
+    manual = schema_policy_honesty_line("manual_review")
+    assert "does not ADD COLUMN" in manual
+    assert "type-narrow always pauses" in manual
+
+    prop = schema_policy_honesty_line("propagate_columns")
+    assert "ADD COLUMN" in prop
+    assert "silent rewrite" in prop
+
+    pause = schema_policy_honesty_line("pause_on_change")
+    assert "including additive" in pause
+
+    locked = schema_policy_honesty_line("type_locked")
+    assert "silent-cast" in locked
+
+    prop_all = schema_policy_honesty_line("propagate_all")
+    assert "ADD COLUMN kernel" in prop_all
+    assert "every selected stream" in prop_all
+
+    gates = run_transfer_policy_gates(schema_policy="manual_review")
+    g10 = next(g for g in gates if g["id"] == "g10_schema_policy")
+    assert g10["status"] == "pass"
+    assert g10["details"]["honesty_line"] == manual

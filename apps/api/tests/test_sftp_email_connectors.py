@@ -218,7 +218,9 @@ class TestEmailConnector:
         )
         expected, mime = serialize_object_store_body(
             key="export.csv",
-            mapped_rows=[(1, 1000.0)],
+            # Same cells the connector mapped: a source decimal stays textual so
+            # the CSV keeps its declared scale (1000.00, not a float's 1000.0).
+            mapped_rows=[("1", "1000.00")],
             target_cols=["id", "amount"],
             dest_types={"id": "INTEGER", "amount": "DECIMAL"},
         )

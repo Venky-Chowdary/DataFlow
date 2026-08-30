@@ -20,10 +20,89 @@ from typing import Any
 from services.reconciliation import (
     TargetSampleUnavailable,
 )
+from services.value_serializer import load_http_json
 
 logger = logging.getLogger(__name__)
 
 from services.keyed_read import execute_keyed_read  # noqa: E402
+
+
+def numeric_sample_key_variants(key: Any) -> set[Any]:
+    """Widen one Gate-8 sample key the way the writer may have stored it.
+
+    Always includes the original. Write-path integer/decimal bind locale
+    money (``$1,234`` → 1234). Dest-canonical ``1.234`` stays identity.
+    Auto ``1,234`` stays the original token only. IEEE-lossy ``2**53+1``
+    does not add ``float(2**53)``. Bool is not a magnitude.
+    """
+    from decimal import Decimal, InvalidOperation
+
+    from connectors.sql_bind import coerce_integer_wire
+    from services.transform_engine import decimal_wire_value, float_carrier_or_refuse
+
+    if isinstance(key, bool):
+        return {key}
+
+    out: set[Any] = {key}
+    try:
+        parsed_int = coerce_integer_wire(key, ddl_type="INTEGER")
+        if parsed_int is not None and not isinstance(parsed_int, bool):
+            out.add(int(parsed_int))
+    except (ValueError, TypeError, OverflowError):
+        pass
+
+    parsed_dec: Decimal | None = None
+    if isinstance(key, Decimal):
+        parsed_dec = key if key.is_finite() else None
+    elif isinstance(key, int):
+        parsed_dec = Decimal(key)
+    elif isinstance(key, float):
+        if key == key and key not in (float("inf"), float("-inf")):
+            try:
+                parsed_dec = Decimal(str(key))
+            except (InvalidOperation, ValueError, OverflowError):
+                parsed_dec = None
+    else:
+        text = str(key).strip()
+        if text:
+            try:
+                dest = Decimal(text)
+                if dest.is_finite():
+                    parsed_dec = dest
+            except (InvalidOperation, ValueError, ArithmeticError):
+                parsed_dec = None
+            if parsed_dec is None:
+                parsed_dec = decimal_wire_value(text)
+    if parsed_dec is not None and parsed_dec.is_finite():
+        out.add(parsed_dec)
+        try:
+            out.add(float_carrier_or_refuse(parsed_dec))
+        except ValueError:
+            pass
+    return out
+
+
+def mongo_query_key_variants(key: Any) -> set[Any]:
+    """Mongo ``$in`` variants: write-path numbers plus ObjectId hex.
+
+    LSN fetch and Gate-8 dest-sample share this. ``isdigit()`` missed
+    locale money and did not refuse Auto grouping.
+    """
+    out = set(numeric_sample_key_variants(key))
+    try:
+        from bson import ObjectId
+
+        if (
+            isinstance(key, str)
+            and len(key) == 24
+            and all(c in "0123456789abcdefABCDEF" for c in key)
+        ):
+            out.add(ObjectId(key))
+    except Exception:
+        pass
+    return out
+
+
 from services.target_sample_vector import (  # noqa: E402
     read_pgvector_target_sample,
 )
@@ -388,28 +467,7 @@ def read_target_sample(
                     # integers, and decimals that the writer may have produced.
                     widened: set[Any] = set()
                     for k in keys:
-                        widened.add(k)
-                        try:
-                            if str(k).isdigit():
-                                widened.add(int(k))
-                        except Exception as exc:
-                            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
-                        try:
-                            widened.add(float(k))
-                        except Exception as exc:
-                            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
-                        # ObjectId keys from schemaless sources are serialized as hex strings.
-                        try:
-                            from bson import ObjectId
-
-                            if (
-                                isinstance(k, str)
-                                and len(k) == 24
-                                and all(c in "0123456789abcdefABCDEF" for c in k)
-                            ):
-                                widened.add(ObjectId(k))
-                        except Exception as exc:
-                            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+                        widened.update(mongo_query_key_variants(k))
                     query_filter = {sort_key: {"$in": list(widened)}}
                 cursor = coll.find(query_filter)
                 if sort_key:
@@ -497,7 +555,7 @@ def read_target_sample(
                 conn.close()
 
         if db_type == "redis":
-            from connectors.redis_reader import _decode, _redis_client
+            from connectors.redis_reader import _decode, _redis_client, redis_json_row
             from connectors.sql_identifiers import sanitize_identifier
 
             prefix = table_name or "dataflow"
@@ -523,14 +581,7 @@ def read_target_sample(
                         text = _decode(raw)
                         if not text:
                             continue
-                        try:
-                            payload = json.loads(text)
-                        except (json.JSONDecodeError, TypeError):
-                            payload = {"value": text}
-                        if isinstance(payload, dict):
-                            rows_out.append(payload)
-                        else:
-                            rows_out.append({"value": payload})
+                        rows_out.append(redis_json_row(text))
                         if len(rows_out) >= limit:
                             break
                 else:
@@ -548,18 +599,7 @@ def read_target_sample(
                             )
                             raw = client.get(key)
                             text = _decode(raw)
-                            try:
-                                payload = (
-                                    json.loads(text)
-                                    if text.startswith("{")
-                                    else {"value": text}
-                                )
-                            except (json.JSONDecodeError, TypeError):
-                                payload = {"value": text}
-                            if isinstance(payload, dict):
-                                rows_out.append(payload)
-                            else:
-                                rows_out.append({"value": payload})
+                            rows_out.append(redis_json_row(text))
                             if len(rows_out) >= limit:
                                 break
                         if cursor == 0 or len(rows_out) >= limit:
@@ -679,19 +719,10 @@ def read_target_sample(
                         key_col = quote_sql_identifier(
                             require_safe_identifier(sort_key, preserve_case=True)
                         )
-                        # Snowflake IN is type-sensitive; widen strings to ints/floats.
+                        # Snowflake IN is type-sensitive; widen via write-path variants.
                         widened: set[Any] = set()
                         for k in keys:
-                            widened.add(k)
-                            try:
-                                if str(k).isdigit():
-                                    widened.add(int(k))
-                            except Exception as exc:
-                                logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
-                            try:
-                                widened.add(float(k))
-                            except Exception as exc:
-                                logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+                            widened.update(numeric_sample_key_variants(k))
                         placeholders = ",".join(["%s"] * len(widened))
                         cur.execute(
                             f"SELECT {sf_col_sql} FROM {qualified_name} "  # nosec B608
@@ -741,16 +772,7 @@ def read_target_sample(
                     widened = set()
                     if keys and sort_key:
                         for k in keys:
-                            widened.add(k)
-                            try:
-                                if str(k).isdigit():
-                                    widened.add(int(k))
-                            except Exception as exc:
-                                logger.debug("Could not widen key %r to int: %s", k, exc)
-                            try:
-                                widened.add(float(k))
-                            except Exception as exc:
-                                logger.debug("Could not widen key %r to float: %s", k, exc)
+                            widened.update(numeric_sample_key_variants(k))
                     for row in client.list_rows(table_id, max_results=scan_limit):
                         d = dict(row.items()) if hasattr(row, "items") else {k: v for k, v in zip(cols, row)}
                         if cols and cols != ["*"]:
@@ -1141,7 +1163,7 @@ def read_target_sample(
                     f"Could not read destination sample from {db_type!r}.{table_name!r}: "
                     f"pinecone fetch HTTP {fetch.status_code}"
                 )
-            vectors = (fetch.json() or {}).get("vectors") or {}
+            vectors = (load_http_json(fetch) or {}).get("vectors") or {}
             out_rows = []
             for vid, payload in vectors.items():
                 meta = payload.get("metadata") if isinstance(payload, dict) else {}
@@ -1184,7 +1206,7 @@ def read_target_sample(
                     timeout=30,
                 )
                 points = (
-                    (retrieve.json() or {}).get("result") or []
+                    (load_http_json(retrieve) or {}).get("result") or []
                     if retrieve.status_code in {200, 201}
                     else []
                 )
@@ -1200,7 +1222,7 @@ def read_target_sample(
                     timeout=30,
                 )
                 points = (
-                    ((scroll.json() or {}).get("result") or {}).get("points") or []
+                    ((load_http_json(scroll) or {}).get("result") or {}).get("points") or []
                     if scroll.status_code in {200, 201}
                     else []
                 )
@@ -1252,7 +1274,7 @@ def read_target_sample(
                         )
                     if resp.status_code not in {200, 201}:
                         continue
-                    obj = resp.json() or {}
+                    obj = load_http_json(resp) or {}
                     if not isinstance(obj, dict):
                         continue
                     props = (
@@ -1272,7 +1294,7 @@ def read_target_sample(
                     timeout=30,
                 )
                 if agg.status_code in {200, 201}:
-                    for obj in (agg.json() or {}).get("objects") or []:
+                    for obj in (load_http_json(agg) or {}).get("objects") or []:
                         if not isinstance(obj, dict):
                             continue
                         props = (
@@ -1333,7 +1355,7 @@ def read_target_sample(
                 headers=hdrs,
                 timeout=30,
             )
-            qbody = query.json() if query.content else {}
+            qbody = load_http_json(query) if query.content else {}
             out_rows = []
             if _ok_response(qbody if isinstance(qbody, dict) else {}, query.status_code):
                 for row in (qbody.get("data") if isinstance(qbody, dict) else []) or []:

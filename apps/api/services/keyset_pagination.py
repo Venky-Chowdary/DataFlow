@@ -10,8 +10,11 @@ OR/AND expansion produced by :func:`keyset_successor_predicate`.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any, Sequence
+
+from services.value_serializer import present_cell_text
 
 # Unit separator — stable for composite bookmarks (CDC + transfer).
 KEYSET_SEP = "\x1f"
@@ -49,13 +52,30 @@ def keyset_successor_predicate(
 
 
 def encode_keyset_bookmark(parts: Sequence[Any]) -> str:
-    """Encode ordered key parts into a bookmark string."""
-    vals = ["" if p is None else str(p) for p in parts]
+    """Encode ordered key parts into a bookmark string.
+
+    Each part uses :func:`present_cell_text` so ``True`` and dest ``"true"``
+    share one token and reader-null cells become empty parts, not the
+    ``SQL_NULL_SENTINEL`` spelling. Callers that skip missing rows must do
+    so before encode — this function preserves arity.
+    """
+    vals = [present_cell_text(p) or "" for p in parts]
     if not vals:
         raise ValueError("keyset bookmark requires at least one part")
     if len(vals) == 1:
         return vals[0]
     return KEYSET_SEP.join(vals)
+
+
+def present_cursor_bookmark(value: Any) -> str | None:
+    """Keyset resume token, or None when the cell is absent (first page).
+
+    ``if cursor_after`` dropped integer ``0``. Reader-null sentinels are
+    truthy and became ``WHERE col > '__DF_SQL_NULL__'``. Composite
+    ``KEYSET_SEP`` bookmarks stay intact. Incremental empty-string
+    watermarks are a different polarity — do not use this in CDC coalesce.
+    """
+    return present_cell_text(value)
 
 
 def decode_keyset_bookmark(bookmark: str, *, expected_parts: int) -> list[str]:
@@ -119,6 +139,29 @@ def split_cursor_bookmark(
     return raw, ""
 
 
+def _numeric_order_key(value: str) -> Decimal | None:
+    """Bind one bookmark part as a number, or ``None`` when it cannot.
+
+    Dest-canonical storage text (``1.234``, ``1.2300``) uses ``Decimal(text)``
+    first so Auto wire does not refuse a resolved dest value. Locale money the
+    write path stores (``$1,234`` / ``€1.234``) falls through to
+    ``decimal_wire_value``. Auto ``1,234`` stays unbound — the column then
+    orders as text rather than inventing thousands.
+    """
+    text = "" if value is None else str(value).strip()
+    if not text:
+        return None
+    try:
+        parsed = Decimal(text)
+        if parsed.is_finite():
+            return parsed
+    except (ArithmeticError, InvalidOperation, ValueError):
+        pass
+    from services.transform_engine import decimal_wire_value
+
+    return decimal_wire_value(text)
+
+
 def _column_order_keys(values: list[str]) -> list[Any]:
     """Sort keys that order ``values`` the way the source database orders them.
 
@@ -127,11 +170,16 @@ def _column_order_keys(values: list[str]) -> list[Any]:
     ``'99'`` the maximum of an integer page ending at ``200``: the next page
     seeked from 99, re-read rows already transferred, and — because re-read rows
     are charged against the same row budget — the scan ran out before the tail.
+
+    ``Decimal(v)`` on the whole page also failed closed into text when one cell
+    was locale money (``$1,234``), so ``'99'`` beat ``'200'`` again. Bind each
+    part the write path would store; if any part cannot bind, keep text for the
+    whole column — do not invent a numeric max from Auto ``1,234``.
     """
-    try:
-        return [Decimal(v) for v in values]
-    except (ArithmeticError, InvalidOperation, ValueError):
-        return list(values)
+    keys = [_numeric_order_key(v) for v in values]
+    if keys and all(k is not None for k in keys):
+        return keys
+    return list(values)
 
 
 def compare_keyset_bookmark(left: str, right: str) -> int | None:
@@ -177,10 +225,14 @@ def max_keyset_bookmark(
         parts: list[str] = []
         skip = False
         for i in idxs:
-            if i >= len(row) or row[i] is None or str(row[i]) == "":
+            if i >= len(row):
                 skip = True
                 break
-            parts.append(str(row[i]))
+            text = present_cell_text(row[i])
+            if text is None:
+                skip = True
+                break
+            parts.append(text)
         if skip:
             continue
         candidates.append(parts)
@@ -271,3 +323,56 @@ def safe_keyset_unique_columns(
             continue
         return uk_cols
     return []
+
+
+@dataclass(frozen=True)
+class KeysetDecision:
+    """How a stream will page, and the ordered columns it will seek on."""
+
+    use_keyset: bool
+    order_cols: list[str]
+    pagination_mode: str
+    resume_fallback: bool
+
+
+def decide_keyset_pagination(
+    *,
+    src_type: str,
+    keyset_order_cols: Sequence[str],
+    keyset_col: str,
+    keyset_tiebreak: str,
+    incremental: bool,
+    offset: int,
+    chunk_index: int,
+    cursor_after: Any,
+    snapshot_scan: bool,
+) -> KeysetDecision:
+    """Choose seek vs scan vs OFFSET paging — one owner for the whole engine.
+
+    Seeking needs unique evidence: without a declared key a strict ``>`` on a
+    tied bookmark skips the peers sharing that value, so no evidence means
+    scan (one SELECT + fetchmany) when a snapshot is held, else OFFSET
+    (quadratic, but it cannot lose rows). An incremental run may seek on
+    its declared cursor plus a tie-break instead. A resume that carries a row
+    offset but no bookmark also refuses to seek, or the seek would restart at
+    the top of the table and re-read rows already committed — the stream then
+    drains the held scan past that offset instead of OFFSET-paging.
+    """
+    order_cols = [c for c in keyset_order_cols if c]
+    capable = str(src_type or "") in KEYSET_CAPABLE_SOURCES
+    use_keyset = bool(order_cols) and capable
+    if not use_keyset and incremental and keyset_col and capable:
+        use_keyset = True
+        if keyset_col not in order_cols:
+            order_cols = [keyset_col] + ([keyset_tiebreak] if keyset_tiebreak else [])
+    resume_fallback = False
+    if use_keyset and (offset > 0 or chunk_index > 0) and cursor_after in (None, ""):
+        use_keyset = False
+        resume_fallback = True
+    mode = "keyset" if use_keyset else ("scan" if snapshot_scan else "offset")
+    return KeysetDecision(
+        use_keyset=use_keyset,
+        order_cols=order_cols,
+        pagination_mode=mode,
+        resume_fallback=resume_fallback,
+    )

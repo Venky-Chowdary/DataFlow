@@ -13,8 +13,12 @@ import {
   downloadBenchmarkReport,
   fetchProofLedger,
   runBenchmark,
+  runDesktopLab,
+  runDesktopLabCross,
   runFidelityProof,
   type BenchmarkReport,
+  type DesktopLabCrossReport,
+  type DesktopLabReport,
   type FidelityProofResult,
   type ProofLedger,
 } from "../lib/api";
@@ -48,6 +52,10 @@ export function BenchmarksPage() {
   const [ledgerError, setLedgerError] = useState<string | null>(null);
   const [fidelityRunning, setFidelityRunning] = useState(false);
   const [fidelity, setFidelity] = useState<FidelityProofResult | null>(null);
+  const [labRunning, setLabRunning] = useState(false);
+  const [lab, setLab] = useState<DesktopLabReport | null>(null);
+  const [crossRunning, setCrossRunning] = useState(false);
+  const [cross, setCross] = useState<DesktopLabCrossReport | null>(null);
 
   const loadLedger = async () => {
     setLedgerLoading(true);
@@ -84,6 +92,41 @@ export function BenchmarksPage() {
       toast({ title: "Fidelity proof failed", message: String(e), tone: "error" });
     } finally {
       setFidelityRunning(false);
+    }
+  };
+
+  const handleDesktopLab = async () => {
+    setLabRunning(true);
+    try {
+      const result = await runDesktopLab();
+      setLab(result);
+      await loadLedger();
+      toast({
+        title: result.success ? "Desktop lab passed" : "Desktop lab incomplete",
+        message: `${result.catalog_slots_duplex_passed} of ${result.catalog_slots} catalog slots passed as source and dest. Unique engines: ${result.unique_engines_duplex_passed}. Hosted twins share a driver.`,
+        tone: result.success ? "success" : "error",
+      });
+    } catch (e) {
+      toast({ title: "Desktop lab failed", message: String(e), tone: "error" });
+    } finally {
+      setLabRunning(false);
+    }
+  };
+
+  const handleDesktopLabCross = async () => {
+    setCrossRunning(true);
+    try {
+      const result = await runDesktopLabCross();
+      setCross(result);
+      toast({
+        title: result.success ? "Unique-engine matrix passed" : "Unique-engine matrix incomplete",
+        message: `${result.passed} of ${result.pairs} live src×dst pairs passed. Seeded ${result.unique_engines_seeded?.length ?? 0} unique engines. Not 80 catalog aliases.`,
+        tone: result.success ? "success" : "error",
+      });
+    } catch (e) {
+      toast({ title: "Unique-engine matrix failed", message: String(e), tone: "error" });
+    } finally {
+      setCrossRunning(false);
     }
   };
 
@@ -142,7 +185,7 @@ export function BenchmarksPage() {
         <div className="df2-page-benchmarks-content">
           <FilterTabs
             items={[
-              { id: "integrity", label: "Integrity ledger", count: metrics?.production_sku_routes },
+              { id: "integrity", label: "Integrity ledger", count: metrics?.production_sku_sold ?? metrics?.production_sku_routes },
               { id: "scale", label: "Scale throughput" },
             ]}
             value={tab}
@@ -184,10 +227,10 @@ export function BenchmarksPage() {
                         sub="Honest alias count over those drivers"
                       />
                       <StatCard
-                        label="PRODUCTION_SKU routes"
-                        value={formatNumber(metrics?.production_sku_routes ?? 0)}
+                        label="SKU sold on this host"
+                        value={formatNumber(metrics?.production_sku_sold ?? 0)}
                         icon="gate"
-                        sub="Routes committed in CI when emulators are up"
+                        sub={`${metrics?.production_sku_sold ?? 0} of ${metrics?.production_sku_routes ?? 0} claimed — validate_transfer + driver present`}
                       />
                       <StatCard
                         label="Fidelity proofs passed"
@@ -226,10 +269,131 @@ export function BenchmarksPage() {
                       </div>
                     )}
 
+                    <div className="df2-page-benchmarks-toolbar">
+                      <p className="df2-page-benchmarks-note" style={{ margin: 0, flex: 1 }}>
+                        Desktop lab option: bind 80 catalog connectors and run Map, cell transform,
+                        ShapeEngine (trim+upper), Validate, dest write, source read, and shaped payload
+                        reconcile. Hosted twins share a driver — this is not 80 unique engines.
+                      </p>
+                      <Button
+                        variant="primary"
+                        onClick={() => void handleDesktopLab()}
+                        disabled={labRunning || crossRunning}
+                        loading={labRunning}
+                        loadingLabel="Running desktop lab…"
+                      >
+                        Run desktop lab
+                      </Button>
+                    </div>
+
+                    <div className="df2-page-benchmarks-toolbar">
+                      <p className="df2-page-benchmarks-note" style={{ margin: 0, flex: 1 }}>
+                        Unique-engine matrix: every live unique engine as source × dest. Default is
+                        Postgres, MySQL, Mongo, SQLite, MinIO S3 (25 pairs). Not 80×80 catalog aliases.
+                        SQL Server / warehouse emulators are opt-in — they have hung create-new probes.
+                        SaaS tiles without a desktop backend stay skipped.
+                      </p>
+                      <Button
+                        variant="secondary"
+                        onClick={() => void handleDesktopLabCross()}
+                        disabled={labRunning || crossRunning}
+                        loading={crossRunning}
+                        loadingLabel="Running unique-engine matrix…"
+                      >
+                        Run unique-engine matrix
+                      </Button>
+                    </div>
+
+                    {cross && (
+                      <div className={`df2-alert ${cross.success ? "df2-alert-success" : "df2-alert-error"}`} role="status">
+                        <DtIcon name={cross.success ? "check" : "alert"} size={18} />
+                        <div>
+                          <strong>{cross.passed} of {cross.pairs} unique-engine pairs</strong>
+                          {" "}passed
+                          {cross.failed ? ` · failed ${cross.failed}` : ""}
+                          {cross.skipped ? ` · skipped ${cross.skipped}` : ""}
+                          {cross.unique_engines_seeded?.length
+                            ? ` · seeded ${cross.unique_engines_seeded.join(", ")}`
+                            : ""}
+                        </div>
+                      </div>
+                    )}
+
+                    {cross?.routes && cross.routes.some((r) => r.status === "failed") && (
+                      <div className="df2-page-benchmarks-section">
+                        <h3>Unique-engine pairs that failed</h3>
+                        <div className="df2-page-benchmarks-table-wrap">
+                          <table className="df2-page-benchmarks-table">
+                            <thead>
+                              <tr>
+                                <th>Source</th>
+                                <th>Destination</th>
+                                <th>Error</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {cross.routes.filter((r) => r.status === "failed").map((row) => (
+                                <tr key={`${row.source}-${row.destination}`}>
+                                  <td><code>{row.source}</code></td>
+                                  <td><code>{row.destination}</code></td>
+                                  <td>{row.error || "failed"}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    )}
+
+                    {lab && (
+                      <div className={`df2-alert ${lab.success ? "df2-alert-success" : "df2-alert-error"}`} role="status">
+                        <DtIcon name={lab.success ? "check" : "alert"} size={18} />
+                        <div>
+                          <strong>{lab.catalog_slots_duplex_passed} of {lab.catalog_slots} catalog slots</strong>
+                          {" "}passed as source and dest
+                          {lab.unique_engines_duplex_passed != null
+                            ? ` · unique engines ${lab.unique_engines_duplex_passed}`
+                            : ""}
+                          {lab.failed ? ` · failed ${lab.failed}` : ""}
+                          {lab.skipped ? ` · skipped ${lab.skipped}` : ""}
+                        </div>
+                      </div>
+                    )}
+
+                    {lab?.connectors && lab.connectors.length > 0 && (
+                      <div className="df2-page-benchmarks-section">
+                        <h3>Desktop lab — source and dest</h3>
+                        <div className="df2-page-benchmarks-table-wrap">
+                          <table className="df2-page-benchmarks-table">
+                            <thead>
+                              <tr>
+                                <th>Catalog</th>
+                                <th>Driver</th>
+                                <th>Kind</th>
+                                <th>Dest</th>
+                                <th>Source</th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {lab.connectors.map((row) => (
+                                <tr key={row.catalog_id}>
+                                  <td><code>{row.catalog_id}</code></td>
+                                  <td>{row.driver}</td>
+                                  <td>{row.role === "unique_engine" ? "Unique engine" : row.role === "hosted_twin" ? "Hosted twin" : "Format alias"}</td>
+                                  <td>{row.dest_status}</td>
+                                  <td>{row.source_status}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+                    )}
+
                     <div className="df2-page-benchmarks-section">
                       <h3>Integrity dimensions vs industry ELT baselines</h3>
                       <div className="df2-page-benchmarks-table-wrap">
-                        <table className="df2-page-benchmarks-table">
+                        <table className="df2-page-benchmarks-table df2-page-benchmarks-table--prose">
                           <thead>
                             <tr>
                               <th>Dimension</th>
@@ -253,10 +417,10 @@ export function BenchmarksPage() {
                     </div>
 
                     <div className="df2-page-benchmarks-section">
-                      <h3>PRODUCTION_SKU — committed migration routes</h3>
+                      <h3>PRODUCTION_SKU — sold vs claimed</h3>
                       <p className="df2-page-benchmarks-note">
-                        These {ledger.production_sku.length} routes are the CI-committed set. Capability math
-                        ({metrics?.live_route_combinations ?? "—"} combinations) is larger; SKU is what we prove.
+                        {metrics?.production_sku_note
+                          || `Sold ${metrics?.production_sku_sold ?? 0} of ${ledger.production_sku.length} claimed routes on this host. Catalog tiles are not this list.`}
                       </p>
                       <div className="df2-page-benchmarks-table-wrap">
                         <table className="df2-page-benchmarks-table">
@@ -274,7 +438,24 @@ export function BenchmarksPage() {
                                 <td>{r.route}</td>
                                 <td>{r.source_kind}/{r.source_format}</td>
                                 <td>{r.dest_kind}/{r.dest_format}</td>
-                                <td><span className="df2-badge df2-badge-success">{r.status}</span></td>
+                                <td>
+                                  <span
+                                    className={
+                                      r.status === "sold"
+                                        ? "df2-badge df2-badge-success"
+                                        : r.status === "driver_missing"
+                                          ? "df2-badge df2-badge-warning"
+                                          : "df2-badge df2-badge-error"
+                                    }
+                                    title={r.driver_gap || undefined}
+                                  >
+                                    {r.status === "sold"
+                                      ? "sold now"
+                                      : r.status === "driver_missing"
+                                        ? "driver missing"
+                                        : "refused"}
+                                  </span>
+                                </td>
                               </tr>
                             ))}
                           </tbody>
@@ -309,14 +490,14 @@ export function BenchmarksPage() {
                                 <tr key={p.id}>
                                   <td>{new Date(p.mtime).toLocaleString()}</td>
                                   <td>{p.tier || "—"}</td>
-                                  <td>{p.route || "—"}</td>
+                                  <td className="df2-page-benchmarks-cell-wrap">{p.route || "—"}</td>
                                   <td>{p.rows != null ? formatNumber(p.rows) : "—"}</td>
                                   <td>
                                     <span className={`df2-badge ${p.success ? "df2-badge-success" : "df2-badge-warning"}`}>
                                       {p.success ? "pass" : "fail"}
                                     </span>
                                   </td>
-                                  <td>{(p.checks || []).join(", ") || "—"}</td>
+                                  <td className="df2-page-benchmarks-cell-wrap">{(p.checks || []).join(", ") || "—"}</td>
                                 </tr>
                               ))}
                             </tbody>

@@ -1,0 +1,570 @@
+/**
+ * Marketing hero system — loaded last, so it is the authority for the public
+ * hero band and for every hero drawing (components/marketing/hero-art).
+ *
+ * One ink field, one engineering grid, one light direction, one fluid type
+ * scale. Concepts and rules: docs/MARKETING_HERO_DESIGN_SYSTEM.md.
+ */
+
+.lp {
+  --dw-hero-field-0: #060e1a;
+  --dw-hero-field-1: #0c1728;
+  --dw-hero-grid: rgba(148, 197, 214, 0.07);
+  --dw-hero-rule: rgba(148, 197, 214, 0.14);
+  --dw-hero-light: rgba(45, 212, 191, 0.16);
+}
+
+/* ─── The ink field ─────────────────────────────────────────────── */
+
+.lp .lp-mkt-hero-band--ink,
+.lp.lp-subpage .lp-mkt-hero-band.lp-mkt-hero-band--ink,
+.lp .lp-sol-hero--ink,
+.lp .lp-sales-hero--ink,
+.lp .lp-hero--home-ink {
+  position: relative;
+  isolation: isolate;
+  overflow-x: clip;
+  overflow-y: visible;
+  padding: clamp(28px, 3.6vw, 48px) 0 clamp(28px, 3.6vw, 48px) !important;
+  border-bottom: 1px solid var(--dw-hero-rule) !important;
+  background:
+    /* directional light — the source the drawings are lit against */
+    radial-gradient(1180px 520px at 12% -18%, var(--dw-hero-light), transparent 62%),
+    /* engineering grid, 32px, aligned to the art canvas rhythm */
+    linear-gradient(var(--dw-hero-grid) 1px, transparent 1px) 0 0 / 32px 32px,
+    linear-gradient(90deg, var(--dw-hero-grid) 1px, transparent 1px) 0 0 / 32px 32px,
+    linear-gradient(168deg, var(--dw-hero-field-1) 0%, var(--dw-hero-field-0) 100%) !important;
+}
+
+/* A single hairline horizon instead of floating blobs. */
+.lp .lp-mkt-hero-band--ink::after,
+.lp .lp-sol-hero--ink::after,
+.lp .lp-sales-hero--ink::after,
+.lp .lp-hero--home-ink::after {
+  content: "";
+  position: absolute;
+  inset: auto 0 0;
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(45, 212, 191, 0.45), transparent);
+  pointer-events: none;
+}
+
+/* ─── Hero typography ──────────────────────────────────────────── */
+
+.lp .lp-mkt-hero-band--ink .lp-mkt-hero-copy h1,
+.lp .lp-sol-hero--ink .lp-sol-hero-copy h1,
+.lp .lp-sales-hero--ink .lp-sales-hero-copy h1 {
+  max-width: 22ch;
+  margin: 10px 0 0;
+  font-family: var(--df-font-display);
+  font-size: var(--lp-fs-h1, clamp(1.75rem, 2.2vw, 2.125rem)) !important;
+  font-weight: 650;
+  line-height: 1.18;
+  letter-spacing: -0.022em;
+  color: #f7fbff !important;
+  text-wrap: balance;
+}
+
+.lp .lp-mkt-hero-band--ink .lp-mkt-lead,
+.lp .lp-mkt-hero-band--ink .lp-mkt-hero-copy p.lp-mkt-lead,
+.lp .lp-sol-hero--ink .lp-sol-hero-lead,
+.lp .lp-sales-hero--ink .lp-sales-hero-lead {
+  max-width: 62ch;
+  margin-top: 18px;
+  font-size: clamp(0.98rem, 0.92rem + 0.22vw, 1.12rem) !important;
+  line-height: 1.62;
+  color: rgba(203, 219, 236, 0.86) !important;
+}
+
+.lp .lp-mkt-hero-band--ink .lp-mkt-kicker,
+.lp .lp-sol-hero--ink .lp-pricing-hero-kicker,
+.lp .lp-sales-hero--ink .lp-sales-kicker {
+  /* A grid/flex child would otherwise stretch the pill across the column. */
+  display: inline-flex;
+  align-self: start;
+  justify-self: start;
+  width: fit-content;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 13px;
+  border: 1px solid rgba(45, 212, 191, 0.32) !important;
+  border-radius: 999px;
+  background: rgba(45, 212, 191, 0.1) !important;
+  color: #5eead4 !important;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+/**
+ * A pill is a label, not a band: as a grid or flex child it would otherwise be
+ * stretched to the full column width on every public surface.
+ */
+.lp .lp-mkt-kicker,
+.lp .lp-pricing-hero-kicker,
+.lp .lp-sales-kicker {
+  align-self: start;
+  justify-self: start;
+  width: fit-content;
+}
+
+.lp .lp-mkt-hero-band--ink .lp-hero-cta,
+.lp .lp-sol-hero--ink .lp-hero-cta,
+.lp .lp-sales-hero--ink .lp-hero-cta {
+  margin-top: clamp(16px, 2vw, 22px);
+}
+
+/*
+ * Copy column and drawing share one baseline, and the hero shares the body's
+ * content shell: one left edge and one right edge from the headline to the
+ * footer. The wider hero band bought drawing width at the price of a 100px jog
+ * under every hero, which is the misalignment a reader actually notices.
+ */
+.lp .lp-mkt-hero-band--ink .lp-mkt-hero-grid,
+.lp .lp-sol-hero--ink .lp-sol-hero-inner,
+.lp .lp-sales-hero--ink .lp-sales-hero-inner {
+  width: var(--lp-shell) !important;
+  max-width: 100%;
+  margin-inline: auto;
+}
+
+.lp .lp-mkt-hero-band--ink .lp-mkt-hero-grid {
+  /* The drawing carries the argument, so it takes the larger share. */
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.24fr) !important;
+  gap: clamp(28px, 4vw, 64px) !important;
+  align-items: center;
+}
+
+.lp .lp-sales-hero--ink.lp-sales-hero--split .lp-sales-hero-inner,
+.lp .lp-sol-hero--ink .lp-sol-hero-inner {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.24fr) !important;
+  gap: clamp(28px, 4vw, 64px) !important;
+  align-items: center;
+}
+
+.lp .lp-sol-hero--ink .lp-sol-hero-visual {
+  min-width: 0;
+}
+
+/* ─── The drawing frame ────────────────────────────────────────── */
+
+/*
+ * The frame fills its column. `width: 100%` matters on the figure as well:
+ * inside a flex column (the home hero stage) a figure would otherwise size to
+ * the svg's intrinsic ratio and collapse the drawing to a fraction of the slot.
+ */
+.dw-hero-art {
+  display: block;
+  margin: 0;
+  min-width: 0;
+  width: 100%;
+  flex: 1 1 auto;
+  align-self: stretch;
+}
+
+.dw-hero-art-svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  border-radius: 20px;
+  background: transparent;
+  box-shadow:
+    0 1px 0 rgba(148, 197, 214, 0.16) inset,
+    0 26px 60px -30px rgba(3, 10, 20, 0.9);
+}
+
+/* Caption sits on whatever field the hero uses — dark heroes override below. */
+.dw-hero-art-caption {
+  margin: 14px 2px 0;
+  color: var(--lp-muted, #475569);
+  font-size: 13.5px;
+  line-height: 1.5;
+  letter-spacing: 0.01em;
+}
+
+.lp .lp-mkt-hero-band--ink .dw-hero-art-caption,
+.lp .lp-sol-hero--ink .dw-hero-art-caption,
+.lp .lp-sales-hero--ink .dw-hero-art-caption {
+  color: rgba(180, 199, 219, 0.78);
+}
+
+/* Motion: direction only, and it stops for reduced-motion. */
+.dw-hero-art-sweep {
+  animation: dw-hero-sweep 9s linear infinite;
+}
+
+@keyframes dw-hero-sweep {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dw-hero-art-sweep {
+    animation: none;
+  }
+
+  .dw-hero-art-packet {
+    display: none;
+  }
+}
+
+/* ─── Home hero: the same ink field, one mounted schematic ──────── */
+
+/* The grid comes from the shared ink field, so the decorative layer is idle. */
+.lp .lp-hero--home-ink .lp-hero-home-bg {
+  display: none;
+}
+
+.lp .lp-hero--home-ink .lp-hero-eyebrow {
+  border-color: rgba(45, 212, 191, 0.32) !important;
+  background: rgba(45, 212, 191, 0.1) !important;
+  color: #5eead4 !important;
+}
+
+.lp .lp-hero--home-ink .lp-hero-title-a {
+  color: #f7fbff !important;
+}
+
+.lp .lp-hero--home-ink .lp-hero-title-b {
+  color: #5eead4 !important;
+  -webkit-text-fill-color: #5eead4 !important;
+  background: none !important;
+}
+
+.lp .lp-hero--home-ink .lp-hero-sub {
+  color: rgba(203, 219, 236, 0.86) !important;
+}
+
+.lp .lp-hero--home-ink .lp-hero-meta {
+  color: rgba(160, 183, 205, 0.82) !important;
+}
+
+.lp .lp-hero--home .lp-hero-title,
+.lp .lp-hero.lp-hero--home .lp-hero-title {
+  font-size: var(--lp-fs-h1-home, clamp(2rem, 2.8vw, 2.625rem)) !important;
+  font-weight: 650 !important;
+  line-height: 1.16 !important;
+  letter-spacing: -0.024em !important;
+  max-width: 20ch !important;
+}
+
+.lp .lp-hero--home .lp-hero-sub {
+  max-width: 48ch !important;
+  font-size: var(--lp-fs-lead, 15px) !important;
+  line-height: 1.55 !important;
+}
+
+.lp .lp-hero--home .lp-hero-visual--stage {
+  box-shadow: none !important;
+  background: none !important;
+  border: 0 !important;
+  padding: 0 !important;
+  align-self: center;
+}
+
+.lp .lp-hero--home .lp-hero-home-grid {
+  width: var(--lp-shell) !important;
+  max-width: 100%;
+  margin-inline: auto;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr) !important;
+  gap: clamp(28px, 4vw, 64px) !important;
+  align-items: center;
+}
+
+/* Sales-hero (Enterprise / Security / Integrations) art column */
+.lp .lp-sales-hero--split .lp-sales-hero-art {
+  min-width: 0;
+  width: 100%;
+}
+
+.lp .lp-sales-hero--ink .lp-sales-hero-inner {
+  align-items: center;
+}
+
+/* ─── Contact: the route runs the full band, under copy and form ── */
+
+/*
+ * The route drawing is the argument the form is asking for, so it spans both
+ * columns rather than competing with the form for the right column.
+ */
+.lp .lp-sales-hero--ink .lp-sales-hero-route {
+  grid-column: 1 / -1;
+  min-width: 0;
+  margin-top: clamp(2px, 0.6vw, 10px);
+}
+
+/*
+ * The wide band canvas would set its labels near 6px on a phone, so below the
+ * hero's stacking width the same three steps are carried by the step list.
+ */
+.lp .lp-sales-hero--ink .lp-sales-hero-steps--narrow {
+  display: none;
+}
+
+.lp .lp-sales-hero--ink .lp-sales-hero-mail span,
+.lp .lp-sales-hero--ink .lp-sales-hero-steps p {
+  color: rgba(180, 199, 219, 0.78) !important;
+}
+
+.lp .lp-sales-hero--ink .lp-sales-hero-steps strong {
+  color: #f2f7fc !important;
+}
+
+.lp .lp-sales-hero--ink .lp-sales-hero-steps li > span {
+  border-color: rgba(45, 212, 191, 0.34) !important;
+  background: rgba(45, 212, 191, 0.1) !important;
+  color: #5eead4 !important;
+}
+
+@media (max-width: 960px) {
+  .lp .lp-sales-hero--ink .lp-sales-hero-route {
+    display: none;
+  }
+
+  .lp .lp-sales-hero--ink .lp-sales-hero-steps--narrow {
+    display: grid;
+  }
+}
+
+/* ─── Responsive: art keeps its aspect, never its own breakpoints ─ */
+
+/*
+ * Copy is set left, so its buttons are too. The shared CTA row centres itself,
+ * which only reads as centred once the column widens — a stacked hero would
+ * otherwise put the headline on the left edge and its actions in the middle.
+ */
+.lp .lp-mkt-hero-band--ink .lp-hero-cta,
+.lp .lp-sol-hero--ink .lp-hero-cta,
+.lp .lp-sales-hero--ink .lp-hero-cta {
+  justify-content: flex-start !important;
+}
+
+/*
+ * A tablet cannot hold a two-column hero and still leave the drawing readable:
+ * at 1024 a split column gave the art ~466px, which set its smallest type near
+ * 5px. Below this width the hero stacks and the drawing takes the whole shell.
+ */
+@media (max-width: 1100px) {
+  .lp .lp-hero--home .lp-hero-home-grid,
+  .lp .lp-sol-hero--ink .lp-sol-hero-inner,
+  .lp .lp-mkt-hero-band--ink .lp-mkt-hero-grid,
+  .lp .lp-sales-hero--ink.lp-sales-hero--split .lp-sales-hero-inner,
+  .lp .lp-sales-hero--split .lp-sales-hero-inner {
+    grid-template-columns: minmax(0, 1fr) !important;
+  }
+}
+
+@media (max-width: 960px) {
+  .lp .lp-mkt-hero-band--ink .lp-mkt-hero-copy h1,
+  .lp .lp-sol-hero--ink .lp-sol-hero-copy h1,
+  .lp .lp-sales-hero--ink .lp-sales-hero-copy h1 {
+    max-width: 26ch;
+  }
+
+  .lp .lp-hero--home-ink {
+    padding-top: clamp(36px, 5vw, 64px) !important;
+  }
+
+  .dw-hero-art {
+    margin-top: 8px;
+  }
+}
+
+@media (max-width: 560px) {
+  .lp .lp-mkt-hero-band--ink,
+  .lp .lp-sol-hero--ink,
+  .lp .lp-sales-hero--ink,
+  .lp .lp-hero--home-ink {
+    padding: 32px 0 40px !important;
+    background-size:
+      auto,
+      24px 24px,
+      24px 24px,
+      auto !important;
+  }
+
+  .dw-hero-art-svg {
+    border-radius: 14px;
+  }
+
+  .dw-hero-art-caption {
+    font-size: 12.5px;
+  }
+}
+
+/* ─── Product shot — live workspace, not a second invented UI ───── */
+
+.lp-product-shot {
+  margin: 0;
+  min-width: 0;
+  width: 100%;
+}
+
+.lp-product-shot-chrome {
+  min-width: 0;
+  overflow: hidden;
+  border-radius: 16px;
+  border: 1px solid rgba(148, 197, 214, 0.18);
+  background: #071018;
+  box-shadow:
+    0 1px 0 rgba(148, 197, 214, 0.12) inset,
+    0 28px 64px -28px rgba(3, 10, 20, 0.88);
+}
+
+.lp-product-shot-bar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  height: 36px;
+  padding: 0 12px;
+  border-bottom: 1px solid rgba(148, 197, 214, 0.1);
+  background: #0b1522;
+}
+
+.lp-product-shot-dots {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 5px;
+}
+
+.lp-product-shot-dots i {
+  display: block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #243246;
+}
+
+.lp-product-shot-dots i:nth-child(1) { background: #f87171; }
+.lp-product-shot-dots i:nth-child(2) { background: #fbbf24; }
+.lp-product-shot-dots i:nth-child(3) { background: #34d399; }
+
+.lp-product-shot-surface {
+  min-width: 0;
+  overflow: hidden;
+  color: #9fb4c9;
+  font-size: 12px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.lp-product-shot-viewport {
+  position: relative;
+  overflow: hidden;
+  min-width: 0;
+  /* 1400×880 workspace shots — cover at 16/10 cropped the right rail. */
+  aspect-ratio: 1400 / 880;
+  background: #0f172a;
+}
+
+.lp-product-shot-viewport img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  max-width: 100%;
+  object-fit: contain;
+  object-position: top left;
+}
+
+.lp-product-shot-route {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  margin: 12px 2px 0;
+  color: rgba(180, 199, 219, 0.82);
+  font-family: var(--df-font-mono, "JetBrains Mono", ui-monospace, monospace);
+  font-size: 12.5px;
+  line-height: 1.4;
+}
+
+.lp-product-shot-route span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lp-product-shot-route em {
+  flex: 0 0 auto;
+  color: #2dd4bf;
+  font-style: normal;
+  font-weight: 700;
+}
+
+.lp-product-shot-stack {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+}
+
+.lp .lp-hero--home .lp-product-shot {
+  max-width: 100%;
+}
+
+.lp .lp-mkt-live-reel .lp-product-shot-chrome,
+.lp .docs-shot-reel--product .docs-shot-reel-stage,
+.lp .docs-shot-reel--hero .docs-shot-reel-stage {
+  overflow: hidden;
+  border-radius: 0 0 16px 16px;
+}
+
+.lp .docs-shot-reel--product .docs-shot-reel-frame,
+.lp .docs-shot-reel--hero .docs-shot-reel-frame,
+.lp .docs-shot-reel .docs-shot-reel-frame {
+  object-fit: contain;
+  object-position: top center;
+}
+
+/* Product + Solutions post-hero reels share one frame width. */
+.lp .lp-mkt-page-rich .lp-mkt-body,
+.lp .lp-sol-v2 .lp-mkt-body,
+.lp .lp-wh-v3 .lp-mkt-body {
+  width: min(1080px, var(--lp-shell)) !important;
+  max-width: 100% !important;
+  margin-inline: auto !important;
+}
+
+.lp .lp-mkt-live-reel {
+  width: 100%;
+  max-width: 1080px;
+  margin-inline: auto;
+}
+
+.lp .lp-mkt-hero-visual .lp-product-shot,
+.lp .lp-sol-hero-visual .lp-product-shot {
+  width: 100%;
+  min-width: 0;
+}
+
+.lp .lp-mkt-hero-band--ink .lp-product-shot-route,
+.lp .lp-sol-hero--ink .lp-product-shot-route {
+  color: rgba(180, 199, 219, 0.82);
+}
+
+/* Route chips never paint past the frame — long FQDNs ellipsis. */
+.lp .lp-product-shot-route {
+  overflow: hidden;
+}
+
+.docs-shot-reel-caption {
+  min-width: 0;
+  margin: 12px 2px 0;
+  overflow: hidden;
+  color: #64748b;
+  font-size: 13px;
+  line-height: 1.45;
+  text-overflow: ellipsis;
+}
+
+.lp .lp-mkt-hero-band--ink .docs-shot-reel-caption,
+.lp .lp-sol-hero--ink .docs-shot-reel-caption {
+  color: rgba(180, 199, 219, 0.78);
+}

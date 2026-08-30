@@ -48,15 +48,24 @@ def _now() -> str:
 
 
 def _load_raw() -> dict[str, Any]:
+    """The store as a dict that always carries a ``tenants`` list.
+
+    Callers append to ``data["tenants"]`` directly, so a file written by an
+    older shape — or one missing the key — must not turn a tenant write into a
+    KeyError the caller reports as a server fault.
+    """
     if not STORE_PATH.exists():
         return {"tenants": []}
     try:
         raw = json.loads(STORE_PATH.read_text(encoding="utf-8"))
-        if not isinstance(raw, dict):
-            return {"tenants": []}
-        return raw
     except Exception:
+        logger.warning("Tenant store at %s is unreadable; starting from empty", STORE_PATH)
         return {"tenants": []}
+    if not isinstance(raw, dict):
+        return {"tenants": []}
+    if not isinstance(raw.get("tenants"), list):
+        raw["tenants"] = []
+    return raw
 
 
 def _save(data: dict[str, Any]) -> None:
@@ -71,7 +80,7 @@ def _normalize_domain(domain: str) -> str:
     d = re.sub(r"^https?://", "", d)
     d = d.split("/")[0]
     d = d.split(":")[0]
-    d = re.sub(r"^www\\.", "", d)
+    d = re.sub(r"^www\.", "", d)
     return d
 
 
@@ -171,7 +180,10 @@ def get_tenant_by_domain(domain: str) -> Tenant | None:
     if not target:
         return None
     for t in _tenants():
-        if t.normalized_domain == target:
+        # A record written before tenants were workspace-scoped belongs to no
+        # workspace, so host routing cannot decide what data it would serve:
+        # resolving it would answer a client domain out of an empty scope.
+        if t.normalized_domain == target and t.workspace_id:
             return t
     return None
 

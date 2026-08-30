@@ -13,7 +13,7 @@ import json
 from typing import Any
 
 import requests
-from services.value_serializer import cell_to_string, json_default
+from services.value_serializer import cell_to_string, json_default, load_http_json
 
 from connectors.saas_common import ReadBatch, humanize_http_error
 
@@ -39,7 +39,7 @@ def _run_cypher(url: str, username: str, password: str, statement: str, timeout:
     auth = (username, password) if username and password else None
     resp = requests.post(url, json=payload, auth=auth, timeout=timeout)
     resp.raise_for_status()
-    body = resp.json()
+    body = load_http_json(resp)
     errors = body.get("errors") or []
     if errors:
         raise RuntimeError(errors[0].get("message", "Neo4j Cypher error"))

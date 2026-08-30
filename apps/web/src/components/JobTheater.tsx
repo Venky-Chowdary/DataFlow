@@ -23,6 +23,7 @@ import { Gate8ProofCard, gate8AppendIdentity, isGate8AppendDelta, isGate8KeyedBa
 import { JobTrustScoreCard } from "./transfer/JobTrustScoreCard";
 import { ConservationLedgerCard } from "./transfer/ConservationLedgerCard";
 import { destHeadline, destMetricCompact, destMetricToneClass, writerAckDisagrees, writerHeadline, conservationCompleteCopy } from "../lib/conservationLedger";
+import { formatProofScope, readGate8Population, readJobLineage } from "../lib/gate8Population";
 import { inferTransferFailureHint, isDestinationCapacityFailure } from "../lib/transferFailure";
 import { ringDasharray } from "../lib/progressRing";
 import { contractIdFromBreakerFailure } from "../lib/contractBreakerUi";
@@ -31,12 +32,17 @@ import { CdcCursorGapPanel } from "./transfer/CdcCursorGapPanel";
 import { CdcRetentionPanel } from "./transfer/CdcRetentionPanel";
 import { CdcIncrementalSnapshotPanel } from "./transfer/CdcIncrementalSnapshotPanel";
 import { LiveEventLog, type LiveLogEntry } from "./ui/LiveEventLog";
-import { writeJobEventLog } from "../lib/jobEventLog";
+import { mergeEventLogLines, readJobEventLog, writeJobEventLog } from "../lib/jobEventLog";
 import { useToast } from "./Toast";
 import { MappingProofDrawer, type MappingProof } from "./MappingProofDrawer";
 import { hashForScreen } from "../lib/appNavigation";
 import { callableExtractNote } from "../lib/destExistsShape";
 import { cdcDeliveryResultCopy } from "../lib/cdcExactlyOnce";
+import {
+  earliestJobStartMs,
+  jobAverageRowsPerSecond,
+  theaterProgressPct,
+} from "../lib/jobTheaterProgress";
 
 function asMappingProof(raw: unknown): MappingProof | null {
   if (!raw || typeof raw !== "object") return null;
@@ -202,18 +208,18 @@ export function JobTheater({
       const stamped = `${new Date().toLocaleTimeString()} — ${line}`;
       setLog((l) => {
         const entry: LiveLogEntry = { id: ++logSeqRef.current, text: stamped };
-        // Trim oldest only — stable ids on remaining lines prevent remount flicker.
-        const next = l.length >= 400 ? [...l.slice(-(399)), entry] : [...l, entry];
+        const next = [...l, entry];
         writeJobEventLog(jobId, next.map((e) => e.text));
         return next;
       });
     };
-    const boot: LiveLogEntry = {
-      id: ++logSeqRef.current,
-      text: `${new Date().toLocaleTimeString()} — Connecting to live job stream…`,
-    };
-    setLog([boot]);
-    writeJobEventLog(jobId, [boot.text]);
+    const persisted = readJobEventLog(jobId);
+    const bootText = `${new Date().toLocaleTimeString()} — Connecting to live job stream…`;
+    const initial: LiveLogEntry[] = persisted.length
+      ? persisted.map((text) => ({ id: ++logSeqRef.current, text }))
+      : [{ id: ++logSeqRef.current, text: bootText }];
+    setLog(initial);
+    if (!persisted.length) writeJobEventLog(jobId, [bootText]);
     const stop = streamJobProgress(
       jobId,
       (update) => {
@@ -252,23 +258,45 @@ export function JobTheater({
         }
 
         setJob(update);
-        // Recent-window RPS (last ~25s) — start-averaged RPS under-reads after
-        // DDL/first batch and invents multi-hour ETAs on healthy loads.
+        if (update.event_log?.length) {
+          setLog((current) => {
+            const merged = mergeEventLogLines(
+              current.map((e) => e.text),
+              update.event_log!,
+            );
+            const used = new Map(current.map((e) => [e.text, e]));
+            const next = merged.map((text) => {
+              const existing = used.get(text);
+              if (existing) return existing;
+              return { id: ++logSeqRef.current, text };
+            });
+            writeJobEventLog(jobId, next.map((e) => e.text));
+            return next;
+          });
+        }
+        // Recent-window RPS when rows actually advance. Reconnect must not
+        // divide 460k by 0.5s. Fall back to job-average from the earliest clock.
         const now = Date.now();
         const samples = rateSamplesRef.current;
         samples.push({ t: now, rows: processed });
         while (samples.length > 1 && now - samples[0].t > 25_000) samples.shift();
+        const jobElapsedMs = now - earliestJobStartMs({
+          startedAt: update.started_at,
+          createdAt: update.created_at,
+          fallbackMs: startRef.current,
+          nowMs: now,
+        });
+        const averageRps = jobAverageRowsPerSecond(processed, jobElapsedMs);
         if (samples.length >= 2) {
           const dr = samples[samples.length - 1].rows - samples[0].rows;
           const dt = (samples[samples.length - 1].t - samples[0].t) / 1000;
-          if (dt >= 0.75 && dr >= 0) {
+          if (dt >= 0.75 && dr > 0) {
             setThroughput(Math.round(dr / dt));
+          } else if (averageRps > 0) {
+            setThroughput(averageRps);
           }
-        } else {
-          const elapsed = (now - startRef.current) / 1000;
-          if (elapsed > 0.5 && processed > 0) {
-            setThroughput(Math.round(processed / elapsed));
-          }
+        } else if (averageRps > 0) {
+          setThroughput(averageRps);
         }
         if (!doneRef.current && isJobSuccess(update.status)) {
           doneRef.current = true;
@@ -428,6 +456,12 @@ export function JobTheaterView({
   const isComplete = isJobSuccess(job.status);
   const isQuarantine = job.status === "completed_with_quarantine";
   const isRunning = !isFailed && !isComplete && !isCancelled;
+  const population = readGate8Population({
+    row_accounting: job.row_accounting,
+    reconciliation: job.reconciliation,
+    preflight,
+  });
+  const lineage = useMemo(() => readJobLineage(job.lineage_events), [job.lineage_events]);
   const reconciling = isRunning && isReconcilePhase(job);
   const currentPhase = reconciling
     ? PHASES.findIndex((p) => p.id === "reconcile")
@@ -478,20 +512,21 @@ export function JobTheaterView({
 
   // Prefer row-derived progress while writing. Once reconcile starts (or all rows
   // are written), hold 99% — never imply "done" until status is terminal success.
-  const reportedPct = job.progress_pct ?? 0;
-  const derivedPct = total > 0 ? (processed / Math.max(total, 1)) * 100 : null;
-  const indeterminate = Boolean((job as { progress_indeterminate?: boolean }).progress_indeterminate) && !(total > 0);
-  let rawProgress: number;
-  if (reconciling) {
-    rawProgress = Math.max(reportedPct || 99, 99);
-  } else if (derivedPct != null) {
-    rawProgress = derivedPct;
-  } else {
-    rawProgress = indeterminate ? Math.min(reportedPct || 5, 5) : reportedPct;
-  }
-  const progress = isComplete
-    ? 100
-    : Math.min(99, Math.max(isRunning ? 1 : 0, Math.round(rawProgress)));
+  // Before the first write, use the engine phase % — 0/1M must not floor to 1%
+  // and bounce against reading/preflight heartbeats (5% → 1% → 5%).
+  const progress = theaterProgressPct({
+    phase: job.phase,
+    status: job.status,
+    progress_pct: job.progress_pct,
+    total_rows: total,
+    records_processed: processed,
+    progress_indeterminate: Boolean(job.progress_indeterminate),
+    reconciling,
+    isComplete,
+    isRunning,
+  });
+  /** Continuous CDC / no finite denominator — pulse the ring, do not invent %. */
+  const indeterminate = Boolean(job.progress_indeterminate) && !(total > 0);
 
   // Detect a stalled bar: same progress value for a few seconds while running.
   const [stalled, setStalled] = useState(false);
@@ -510,9 +545,14 @@ export function JobTheaterView({
     return () => window.clearTimeout(timer);
   }, [progress, isRunning]);
 
-  const startMs = toEpochMs(job.started_at) ?? startedAtFallback ?? Date.now();
+  const startMs = earliestJobStartMs({
+    startedAt: job.started_at,
+    createdAt: job.created_at,
+    fallbackMs: startedAtFallback,
+  });
   const endMs = toEpochMs(job.completed_at) ?? Date.now();
   const elapsed = Math.max(0, endMs - startMs);
+  const averageRps = jobAverageRowsPerSecond(processed, elapsed);
 
   const destinationSummary = (job.destination_summary ?? {}) as Record<string, unknown>;
   const rollbackPlan = (destinationSummary.rollback_plan ?? null) as {
@@ -533,11 +573,23 @@ export function JobTheaterView({
   const earlyFail = isFailed && processed === 0 && rejectedRows === 0;
   const warningCount = Array.isArray(destinationSummary.warnings) ? destinationSummary.warnings.length : 0;
   const checksum = typeof destinationSummary.checksum === "string" ? destinationSummary.checksum : "";
+  const fkSummary = (destinationSummary.foreign_keys ?? null) as {
+    cycle?: string[];
+    cycle_resolved?: boolean;
+    cycle_strategy?: string;
+    cycle_note?: string;
+    carried?: number;
+  } | null;
+  const fkCycle = Array.isArray(fkSummary?.cycle) ? fkSummary.cycle : [];
   const loadMethod = typeof destinationSummary.load_method === "string" ? destinationSummary.load_method : "";
   const callableNote = callableExtractNote(preflight, job);
   const batchSize = Number(job.chunk_size ?? destinationSummary.chunk_size ?? 0) || 0;
   const jobRps = Number(job.records_per_second ?? destinationSummary.records_per_second ?? 0) || 0;
-  const displayRps = isComplete && jobRps > 0 ? Math.round(jobRps) : throughput;
+  const displayRps = isComplete && jobRps > 0
+    ? Math.round(jobRps)
+    : throughput > 0
+      ? throughput
+      : averageRps;
   const routeLabel = [sourceType, destType].filter(Boolean).join(" → ") || "this job";
 
   const timelinePhases = useMemo(() => {
@@ -663,6 +715,7 @@ export function JobTheaterView({
           </span>
           <span className={jobStatusBadgeClass(job.status)}>{jobStatusLabel(job.status)}</span>
           <CopyIdChip id={jobId} label="Job" compact />
+          {preflight?.run_id ? <CopyIdChip id={preflight.run_id} label="Validate" compact /> : null}
           {isRunning && onCancel && (
             <span className="df2-theater-v3-header-hint">Cancel is in the action bar below</span>
           )}
@@ -819,6 +872,28 @@ export function JobTheaterView({
 
       {!earlyFail && (isComplete || isFailed || isCancelled || isQuarantine) && (
         <>
+          {(population.destCount != null || population.validateRunId || population.coverage) && (
+              <div className="df2-theater-pop-strip" aria-label="Gate-8 population">
+                <span>
+                  <strong>Dest COUNT</strong>
+                  {population.destCount != null ? population.destCount.toLocaleString() : "—"}
+                </span>
+                <span>
+                  <strong>Checksum</strong>
+                  {population.destChecksum ? `${population.destChecksum.slice(0, 12)}${population.destChecksum.length > 12 ? "…" : ""}` : "—"}
+                </span>
+                <span>
+                  <strong>Proof scope</strong>
+                  {formatProofScope(population)}
+                </span>
+                {population.validateRunId ? (
+                  <span>
+                    <strong>Validate</strong>
+                    {population.validateRunId}
+                  </span>
+                ) : null}
+              </div>
+            )}
           <ConservationLedgerCard
             job={job}
             onOpenValidate={duplicateKeyFailure ? undefined : onBackToValidate}
@@ -832,6 +907,20 @@ export function JobTheaterView({
             onOpenMap={duplicateKeyFailure ? undefined : onBackToMap}
             onResume={duplicateKeyFailure ? undefined : onResume}
           />
+          {lineage.length > 0 && (
+            <details className="df2-theater-lineage">
+              <summary>Run lineage · {lineage.length}</summary>
+              <ol>
+                {lineage.map((ev, i) => (
+                  <li key={`${ev.eventType}-${ev.timestamp}-${i}`}>
+                    <code>{ev.eventType}</code>
+                    <span>{ev.summary}</span>
+                    {ev.timestamp ? <time dateTime={ev.timestamp}>{ev.timestamp}</time> : null}
+                  </li>
+                ))}
+              </ol>
+            </details>
+          )}
         </>
       )}
 
@@ -1389,7 +1478,7 @@ export function JobTheaterView({
         </div>
       )}
 
-      {(job.cdc_shared_reader || job.snapshot_mode || job.cdc_row_filter) && (
+      {(job.cdc_shared_reader || job.snapshot_mode || job.cdc_row_filter || job.snapshot_plan || job.eos_window_id) && (
         <div className="df2-theater-v3-cdc-meta" aria-label="CDC topology">
           {job.cdc_shared_reader && (
             <span className="df2-theater-cdc-chip is-ok">Shared log reader · one slot / server_id</span>
@@ -1398,6 +1487,23 @@ export function JobTheaterView({
             <span className="df2-theater-cdc-chip">
               Snapshot · {job.snapshot_mode}
               {job.snapshot_plan?.lost_window ? " · lost window (not continuous CDC)" : ""}
+            </span>
+          )}
+          {job.snapshot_plan?.kind && (
+            <span
+              className="df2-theater-cdc-chip"
+              title={job.snapshot_plan.reason || "Named snapshot+LSN handoff plan — not platform exactly-once"}
+            >
+              Handoff · {job.snapshot_plan.kind}
+              {job.snapshot_plan.next_action ? ` · ${job.snapshot_plan.next_action}` : ""}
+            </span>
+          )}
+          {job.eos_window_id && (
+            <span
+              className="df2-theater-cdc-chip"
+              title="Dest-owned incremental-snapshot window (Debezium DDD-3) — route-scoped, not platform-wide"
+            >
+              Window · {job.eos_window_id}
             </span>
           )}
           {job.cdc_delivery && (
@@ -1476,6 +1582,18 @@ export function JobTheaterView({
               : "No destination warnings"}
           </small>
         </article>
+        {fkCycle.length > 0 && (
+        <article className={`df2-theater-v3-sla-card${fkSummary?.cycle_resolved ? "" : " is-warn"}`}>
+          <span>FK cycle</span>
+          <strong>{fkSummary?.cycle_resolved ? "Recreated" : "Not enforced"}</strong>
+          <small>
+            {fkSummary?.cycle_resolved
+              ? `Post-load ALTER on ${fkCycle.join(", ")} — destination validated the rows`
+              : fkSummary?.cycle_note
+                || `Cycle ${fkCycle.join(", ")} is not fully enforced on the destination`}
+          </small>
+        </article>
+        )}
         <article className="df2-theater-v3-sla-card">
           <span>Checksum evidence</span>
           <strong>

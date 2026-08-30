@@ -1,6 +1,9 @@
 import type { EditableMapping } from "./mapping";
 import { mappingRequiresRiskAck } from "./mapping";
+import { applyLocalTransform } from "./localTransform";
 import { GATE_CATALOG } from "./preflightGates";
+import type { NumberLocale } from "./numberLocale";
+import { ambiguousDateColumns, type DateLocale } from "./dateLocale";
 import type { PreflightGate, PreflightResult } from "./types";
 
 /** Canonical local gate order — matches GATE_CATALOG (unique IDs). */
@@ -8,41 +11,6 @@ const GATE_IDS = GATE_CATALOG
   .map((g) => g.id)
   .filter((id) => id !== "schema_drift") as string[];
 
-function applyTransform(value: unknown, transform?: string): unknown {
-  if (value == null || value === "") return value;
-  const s = String(value);
-  switch (transform) {
-    case "trim":
-      return s.trim();
-    case "upper":
-      return s.toUpperCase();
-    case "lower":
-      return s.toLowerCase();
-    case "hash_pii": {
-      let h = 5381;
-      for (let i = 0; i < s.length; i += 1) h = (h * 33) ^ s.charCodeAt(i);
-      return `sha256:${(h >>> 0).toString(16).padStart(8, "0")}`;
-    }
-    case "datetime":
-    case "date_iso":
-      return s;
-    case "decimal":
-    case "cast_number": {
-      const n = Number(s.replace(/,/g, ""));
-      return Number.isFinite(n) ? n : value;
-    }
-    case "boolean":
-    case "cast_boolean": {
-      // Strict wire only — match transform_engine._STRICT_BOOL_* (no yes/y invent).
-      const t = s.toLowerCase();
-      if (["true", "t", "1"].includes(t)) return true;
-      if (["false", "f", "0"].includes(t)) return false;
-      return value;
-    }
-    default:
-      return value;
-  }
-}
 
 export interface LocalPreflightInput {
   columns: string[];
@@ -54,11 +22,25 @@ export interface LocalPreflightInput {
   sourceReadMode?: string;
   destWriteMode?: string;
   syncMode?: string;
+  numberLocale?: NumberLocale | string;
+  dateLocale?: DateLocale | string;
 }
 
 /** True when this preflight was produced entirely in the browser (no API gates). */
 export function isLocalPreflight(preflight: { run_id?: string } | null | undefined): boolean {
   return Boolean(preflight?.run_id?.startsWith("pf_local_"));
+}
+
+/**
+ * True only for a result the API identified with a run id.
+ *
+ * `!isLocalPreflight(pf)` is not the same test: a result with no run id at all
+ * passes it vacuously, so an unidentifiable verdict would unlock Execute. An
+ * unknown run is not an API run.
+ */
+export function isApiPreflight(preflight: { run_id?: string } | null | undefined): boolean {
+  const runId = String(preflight?.run_id || "").trim();
+  return runId.length > 0 && !runId.startsWith("pf_local_");
 }
 
 /** Client-side preflight for file → file export when the API is unavailable. */
@@ -194,7 +176,11 @@ export function runLocalPreflight(input: LocalPreflightInput): PreflightResult {
   for (const m of input.mappings) {
     for (const row of rows.slice(0, 20)) {
       try {
-        applyTransform(row[m.source], m.transform === "none" ? undefined : m.transform);
+        applyLocalTransform(
+          row[m.source],
+          m.transform === "none" ? undefined : m.transform,
+          input.numberLocale,
+        );
       } catch {
         transformOk = false;
         break;
@@ -272,6 +258,10 @@ export function runLocalPreflight(input: LocalPreflightInput): PreflightResult {
     kind: "dest_exists_shape", coverage: "n/a",
     note: "Writes stay name-addressed on the API path — not a local invent",
   });
+  skip("g18_cdc_snapshot_mode", "Browser-only — CDC snapshot_mode=never requires API watermark.", {
+    kind: "cdc_snapshot_mode", coverage: "n/a",
+    note: "Execute uses the same should_run_snapshot kernel — at-least-once upsert",
+  });
 
   const passedCount = gates.filter((g) => g.status === "pass").length;
   const skippedCount = gates.filter((g) => g.status === "skip").length;
@@ -302,11 +292,20 @@ export function runLocalPreflight(input: LocalPreflightInput): PreflightResult {
       ]
     : ["Database destinations require API preflight — local checks cannot approve remote writes."];
 
+  const dateFindings = ambiguousDateColumns(rows, input.columns, input.dateLocale);
+  const dateLocaleReport = {
+    date_locale: String(input.dateLocale || ""),
+    ambiguous_columns: dateFindings,
+    decision: dateFindings.length ? "set_locale" as const : "ok" as const,
+  };
+
   return {
     passed,
     passed_count: passedCount,
     total_gates: totalGates,
     readiness_score: readinessScore,
+    date_locale: String(input.dateLocale || ""),
+    date_locale_report: dateLocaleReport,
     run_id: `pf_local_${Math.random().toString(16).slice(2, 10)}`,
     gates,
     blockers,

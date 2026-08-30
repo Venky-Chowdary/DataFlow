@@ -27,6 +27,7 @@ from services.identity_carry import plan_identity_carry
 from services.offset_label import plan_offset_label_carry
 from services.physical_placement_ddl import plan_physical_placement, verify_placement
 from services.unicode_form import plan_unicode_form_carry
+from services.value_serializer import present_cell_text
 
 logger = logging.getLogger(__name__)
 
@@ -72,10 +73,12 @@ _SAFE_DEFAULT_RE = re.compile(
     r"'(?:[^']|'')*'"
     r"(?:::(?:text|character varying|varchar|bpchar|char|name|cstring))?"
     r"|"
-    r"current_timestamp|current_date|current_time|"
+    # MariaDB renders clock defaults as functions (``current_timestamp()``),
+    # MySQL as bare keywords, SQLite as ``datetime('now')``.
+    r"current_timestamp(?:\(\))?|current_date(?:\(\))?|current_time(?:\(\))?|"
+    r"localtime(?:\(\))?|localtimestamp(?:\(\))?|"
     r"\(datetime\('now'\)\)|datetime\('now'\)|"
-    r"now\(\)|"
-    r"CURRENT_TIMESTAMP|CURRENT_DATE|CURRENT_TIME"
+    r"now\(\)|curdate\(\)|curtime\(\)"
     r")$",
     re.IGNORECASE,
 )
@@ -358,9 +361,9 @@ def build_catalog_from_introspect(
         if cols:
             unique_keys.append(cols)
     merged_defaults = {
-        str(k): str(v)
+        str(k): text
         for k, v in (defaults or keys.get("defaults") or {}).items()
-        if v is not None and str(v).strip()
+        if (text := present_cell_text(v)) is not None
     }
     return SourceSchemaCatalog(
         dialect=(dialect or "").strip().lower(),
@@ -442,7 +445,11 @@ def catalog_from_payload(payload: Any) -> SourceSchemaCatalog | None:
             columns=list(payload.get("columns") or []),
             column_types=dict(payload.get("column_types") or {}),
             nullable={str(k): bool(v) for k, v in (payload.get("nullable") or {}).items()},
-            defaults={str(k): str(v) for k, v in (payload.get("defaults") or {}).items()},
+            defaults={
+                str(k): text
+                for k, v in (payload.get("defaults") or {}).items()
+                if (text := present_cell_text(v)) is not None
+            },
             primary_key=[str(c) for c in (payload.get("primary_key") or []) if c],
             unique_keys=[
                 [str(c) for c in uk if c]
@@ -1581,9 +1588,17 @@ def _default_exprs_equivalent(a: str, b: str) -> bool:
     if a in _FALSE_DEFAULTS and b in _FALSE_DEFAULTS:
         return True
     try:
-        return float(a) == float(b)
-    except (TypeError, ValueError):
+        from decimal import Decimal
+
+        from services.decimal_identity import extract_decimal_identity
+
+        ia = extract_decimal_identity(a)
+        ib = extract_decimal_identity(b)
+    except ValueError:
         return False
+    if ia is None or ib is None:
+        return False
+    return +Decimal(ia.to_canonical_text()) == +Decimal(ib.to_canonical_text())
 
 
 def _claimed_default_literal(item: Any) -> str:
@@ -2248,11 +2263,20 @@ def _normalize_default_sql(expr: str, dest_dialect: str) -> str:
     )
     if cast_m:
         text = cast_m.group(1)
-    if text.lower() in {"current_timestamp", "now()"}:
+    lowered = text.lower()
+    if lowered in {
+        "current_timestamp",
+        "current_timestamp()",
+        "now()",
+        "localtime",
+        "localtime()",
+        "localtimestamp",
+        "localtimestamp()",
+    }:
         return "CURRENT_TIMESTAMP"
-    if text.lower() in {"current_date"}:
+    if lowered in {"current_date", "current_date()", "curdate()"}:
         return "CURRENT_DATE"
-    if text.lower() in {"current_time"}:
+    if lowered in {"current_time", "current_time()", "curtime()"}:
         return "CURRENT_TIME"
     if text.lower() in {"datetime('now')", "(datetime('now'))"}:
         if (dest_dialect or "").lower() == "sqlite":

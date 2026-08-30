@@ -5,9 +5,16 @@
 
 /* ??? Tokens (single source for marketing density) ??? */
 .lp {
+  /*
+   * One content width for the hero band and for every body section, so a page
+   * has a single left and right edge from the headline to the footer. It is
+   * also what a hero drawing gets to be wide in: at 1120 a 1000-unit canvas
+   * rendered near 560px and set its smallest annotations under 7px.
+   */
+  --lp-shell-max: 1280px;
   /* Single content width for landing + every marketing page */
-  --lp-shell: min(1120px, calc(100% - clamp(28px, 5vw, 64px)));
-  --lp-shell-wide: min(1120px, calc(100% - clamp(28px, 5vw, 64px)));
+  --lp-shell: min(var(--lp-shell-max), calc(100% - clamp(28px, 5vw, 64px)));
+  --lp-shell-wide: min(var(--lp-shell-max), calc(100% - clamp(28px, 5vw, 64px)));
   --lp-gutter: clamp(14px, 3vw, 24px);
   --lp-section-y: clamp(40px, 6vh, 72px);
   --lp-section-y-sm: clamp(28px, 4vh, 48px);
@@ -434,10 +441,11 @@
 }
 
 .lp-mkt-hero-copy h1 {
-  max-width: 16ch;
-  font-size: clamp(2rem, 3.2vw, 2.75rem) !important;
-  letter-spacing: -0.035em;
-  line-height: 1.05;
+  max-width: 22ch;
+  font-size: var(--lp-fs-h1, clamp(1.75rem, 2.2vw, 2.125rem)) !important;
+  font-weight: 650;
+  letter-spacing: -0.022em;
+  line-height: 1.18;
   color: var(--lp-ink);
 }
 
@@ -824,8 +832,22 @@
   display: none !important; /* legacy */
 }
 
+/* A pill is a label, not a banner: it takes its text width, not the card's. */
+.lp .lp-testimonial-row > .lp-cust-industry {
+  justify-self: start;
+}
+
+/*
+ * A fourth card in a 3-up grid leaves one item alone on its own row, which
+ * reads as a mistake next to a full row above it. Four cards balance 2x2.
+ */
+.lp .lp-testimonial-stack:has(> :nth-child(4):last-child) {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
 @media (max-width: 960px) {
-  .lp-testimonial-stack {
+  .lp-testimonial-stack,
+  .lp .lp-testimonial-stack:has(> :nth-child(4):last-child) {
     grid-template-columns: 1fr;
   }
 }

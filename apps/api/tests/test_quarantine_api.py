@@ -57,6 +57,7 @@ def test_quarantine_holds_bad_row_out_of_primary_and_surfaces_it():
     # Identity stamp so replay can upsert the row back.
     assert detail["primary_key"] == ["id"]
     assert detail["pk_value"] == {"id": "2"}
+    assert detail["source_pk"] == "2"
     assert any("not-a-number" in e for e in errors)
 
 

@@ -50,6 +50,13 @@ if _xdist_worker:
         "FAKESNOW_DB_PATH",
         str(_api_root / "data" / f"fakesnow_data_{_xdist_worker}"),
     )
+    # Load-history JSON must not share apps/api/data/quality_profiles across
+    # workers — leftover 1M / prior-pytest runs inflate rows_written_total.
+    # Do not rewrite DATAFLOW_DATA_DIR here (connectors/tenants live there).
+    os.environ.setdefault(
+        "DATAFLOW_QUALITY_PROFILES_DIR",
+        str(_api_root / "data" / f"quality_profiles_{_xdist_worker}"),
+    )
 
 # Slim CI images omit sentence-transformers; use a deterministic hash embedder
 # so vector destination matrices still exercise the write path.
@@ -63,8 +70,41 @@ except ImportError:
 LOCAL_OBJECT_STORE_BUCKET = "dataflow-matrix"
 
 
+@pytest.fixture()
+def local_object_store(_local_object_store_server: str) -> str:
+    """Session endpoint with the matrix bucket guaranteed to exist *now*.
+
+    ``moto.mock_aws()`` resets moto's in-process backends, so any test that opens
+    that context manager wipes the bucket this server was started with. The
+    object-store routes then failed with ``NoSuchBucket`` in a full-suite run and
+    passed in isolation — a harness artefact that looks exactly like a product
+    defect, which is worse than a skip. Re-assert the bucket per test.
+    """
+    if not _local_object_store_server:
+        return ""
+    import boto3
+    from botocore.exceptions import ClientError
+
+    client = boto3.client(
+        "s3",
+        endpoint_url=_local_object_store_server,
+        aws_access_key_id="test",
+        aws_secret_access_key="test",
+        region_name="us-east-1",
+    )
+    try:
+        client.head_bucket(Bucket=LOCAL_OBJECT_STORE_BUCKET)
+    except ClientError:
+        try:
+            client.create_bucket(Bucket=LOCAL_OBJECT_STORE_BUCKET)
+        except ClientError as exc:
+            logging.getLogger(__name__).info("bucket re-create failed: %s", exc)
+            return ""
+    return _local_object_store_server
+
+
 @pytest.fixture(scope="session")
-def local_object_store() -> str:
+def _local_object_store_server() -> str:
     """Endpoint URL of a local S3, or ``""`` when one cannot be started.
 
     Object-store routes were the largest block of never-executed transfers —
@@ -280,3 +320,26 @@ def pytest_collection_modifyitems(config, items):
             )
             if live_pg:
                 item.add_marker(skip_pg)
+
+
+def spend_pilot_ack(ack_id: str, actor: str) -> dict:
+    """Consume a Pilot approval the way the HTTP route does.
+
+    ``/copilot/confirm`` re-checks permission from the request object, so a test
+    calling it with the ack alone exercises a signature production does not have.
+    One helper keeps every confirm test on the real call shape.
+    """
+    import asyncio
+
+    from src.routers.copilot_router import ConfirmActionRequest, copilot_confirm
+
+    class _State:
+        pass
+
+    class _HttpRequest:
+        state = _State()
+        headers: dict[str, str] = {}
+
+    return asyncio.run(
+        copilot_confirm(ConfirmActionRequest(ack_id=ack_id, actor=actor), _HttpRequest())
+    )

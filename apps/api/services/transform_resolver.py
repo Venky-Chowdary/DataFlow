@@ -95,6 +95,34 @@ def _declares_zone(raw: str) -> bool:
     return str(raw or "").lower().startswith(ASSUME_TIMEZONE_PREFIX)
 
 
+# Typed numeric carriers and the transform that validates their wire.
+_NUMERIC_WIRE_GUARD: dict[str, str] = {
+    "integer": "integer",
+    "decimal": "decimal",
+    "float": "decimal",
+}
+
+
+def numeric_wire_guard(inferred: str, target_type: str) -> str:
+    """Re-arm cell validation when inference calls a numeric mapping identity.
+
+    Map answers a presentation question — a native numeric source widening into
+    a numeric destination is not an invented parse, so it infers ``none`` and
+    the operator is not shown a cast that changes nothing. The write path answers
+    a different one: the row still arrives as untyped wire, and a declared-INTEGER
+    file/SaaS column carrying ``'bad'`` handed straight to the driver fails the
+    whole batch instead of quarantining the one row that caused it. Identity into
+    a typed numeric carrier therefore still parses on the way in; a value that is
+    already numeric round-trips unchanged.
+
+    Callers that bind or probe cells pass ``for_write=True`` to
+    :func:`resolve_transform`; callers that render Map do not.
+    """
+    if str(inferred or "none").strip().lower() not in {"", "none", "identity"}:
+        return inferred
+    return _NUMERIC_WIRE_GUARD.get(normalize_logical_type(target_type), inferred)
+
+
 def _type_compatible_transform(target_type: str, raw: str) -> bool:
     """Return True if raw transform is compatible with the target logical type."""
     t = normalize_logical_type(target_type)
@@ -128,12 +156,19 @@ def resolve_transform(
     *,
     column_types: dict[str, str] | None = None,
     dest_types: dict[str, str] | None = None,
+    for_write: bool = True,
 ) -> str:
     """Pick engine transform for a mapping dict.
 
     Respects explicit transforms when they are compatible with the target type;
     otherwise falls back to a type-correct transform derived from source/target
     logical types.
+
+    ``for_write`` distinguishes the two questions this function is asked. The
+    write and coercion-probe paths bind real cells and must validate the wire
+    (:func:`numeric_wire_guard`); Map rendering must not show a cast it does not
+    need. It defaults to the safe answer — a caller that forgets it validates
+    one cell too many rather than one too few.
     """
     column_types = column_types or {}
     dest_types = dest_types or {}
@@ -221,7 +256,7 @@ def resolve_transform(
         # same argument as a projection, so only proven-live carriers qualify.
         if typed_cast_incompatible_with_text_sink(inferred, target_type):
             return "none"
-    return inferred
+    return numeric_wire_guard(inferred, target_type) if for_write else inferred
 
 
 def attach_transforms_to_mappings(
@@ -229,12 +264,18 @@ def attach_transforms_to_mappings(
     *,
     column_types: dict[str, str] | None = None,
     dest_types: dict[str, str] | None = None,
+    for_write: bool = True,
 ) -> list[dict]:
     """Ensure every mapping carries a resolved engine transform."""
     out: list[dict] = []
     for m in mappings:
         enriched = dict(m)
-        enriched["transform"] = resolve_transform(enriched, column_types=column_types, dest_types=dest_types)
+        enriched["transform"] = resolve_transform(
+            enriched,
+            column_types=column_types,
+            dest_types=dest_types,
+            for_write=for_write,
+        )
         out.append(enriched)
     return out
 

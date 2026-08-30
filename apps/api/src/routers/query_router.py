@@ -148,7 +148,10 @@ class QueryExportRequest(QueryExecuteRequest):
     output_path: str = Field("", description="Optional server-local path; empty uses exports folder")
     destination_connector_id: str = Field("", description="Optional saved connector to write results to instead of a file")
     destination: str = Field("", description="Target table, collection, or object name for destination_connector_id")
-    sync_mode: str = Field("append", description="append, upsert, or overwrite (only used when writing to a connector)")
+    sync_mode: str = Field(
+        "append",
+        description="append only when writing to a connector; overwrite/upsert must go through Transfer Studio",
+    )
     conflict_columns: list[str] = Field(default_factory=list, description="Columns to use for upsert conflict resolution")
 
 
@@ -508,13 +511,30 @@ def _export_to_connector(
     )
 
     mappings = [{"source": c, "target": c, "confidence": 0.95} for c in columns]
-    # Map aliases before the allow-list so overwrite → replace (not insert).
+    # Query export is a playground side door. Overwrite/upsert skip Validate,
+    # population-fit, and quarantine — Transfer Studio is the write path that
+    # proves those gates. Append/insert only.
     write_mode = (body.sync_mode or "insert").strip().lower()
-    if write_mode in {"overwrite", "full_refresh_overwrite", "truncate", "full_overwrite"}:
-        write_mode = "replace"
-    elif write_mode in {"append", "full_refresh_append", "full_append"}:
+    if write_mode in {"overwrite", "full_refresh_overwrite", "truncate", "full_overwrite", "replace"}:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Query export cannot overwrite a destination table. "
+                "Use Transfer Studio Validate → Execute so population-fit and "
+                "quarantine run before any replace."
+            ),
+        )
+    if write_mode in {"upsert", "incremental", "incremental_deduped", "cdc", "merge"}:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Query export cannot upsert. Use Transfer Studio for MERGE/"
+                "conflict writes so the primary key and preflight gates apply."
+            ),
+        )
+    if write_mode in {"append", "full_refresh_append", "full_append"}:
         write_mode = "insert"
-    if write_mode not in ("insert", "upsert", "replace"):
+    if write_mode != "insert":
         write_mode = "insert"
 
     try:
@@ -584,22 +604,32 @@ def _run_mongodb_query(connector, body):
 def _parse_mongodb_json(raw: str) -> Any:
     """Parse a Mongo filter/pipeline, honouring Extended JSON type wrappers.
 
-    Plain ``json.loads`` turns ``{"$date": "..."}`` into a dict, so a date
-    predicate silently matches nothing against a real BSON Date. ``json_util``
-    reconstructs the typed values ($date, $oid, $regex) the server expects.
+    ``json_util.loads`` rebuilds ``$date`` / ``$oid`` / ``$numberDecimal``, but
+    it still calls stdlib ``json.loads``, so a long fraction in a predicate
+    collapses to IEEE before ``find()``. ``parse_float=Decimal`` plus
+    ``demote_exact_json`` keeps digits; ``object_hook`` still rebuilds BSON.
     """
+    from decimal import Decimal
+
+    from services.value_serializer import demote_exact_json, json_loads_exact
+
     try:
         from bson import json_util
-
-        return json_util.loads(raw)
     except ImportError:
-        return json.loads(raw)
+        return json_loads_exact(raw)
+    try:
+        parsed = json.loads(
+            raw,
+            parse_float=Decimal,
+            object_hook=json_util.object_hook,
+        )
     except json.JSONDecodeError:
         raise
     except Exception as exc:
         raise HTTPException(
             status_code=400, detail=f"Invalid MongoDB query: {exc}"
         ) from exc
+    return demote_exact_json(parsed)
 
 
 def _normalize_rows(rows: list[dict]) -> tuple[list[dict], list[str], dict[str, str], bool]:

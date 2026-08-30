@@ -14,7 +14,13 @@ from preflight.models import (
     GateStatus,
     PreflightContext,
 )
-from preflight.risk_contract import is_safe_normalize_mapping, mapping_risk_cleared
+from preflight.risk_contract import (
+    is_safe_normalize_mapping,
+    mapping_is_lossy,
+    mapping_is_structural_review,
+    mapping_requires_risk_contract,
+    mapping_risk_cleared,
+)
 
 GateFn = Callable[[PreflightContext], GateResult]
 
@@ -22,6 +28,40 @@ GateFn = Callable[[PreflightContext], GateResult]
 def _risk_cleared(m: Any) -> bool:
     """Continue-policy Risk Contract only — boolean risk_acknowledged never clears."""
     return mapping_risk_cleared(m)
+
+
+def _dest_accepts_empty_string(dest_type: str) -> bool:
+    """True when ``''`` is a present NOT NULL value, not SQL NULL invent.
+
+    ``note_empty TEXT NOT NULL`` / ``VARCHAR(n) NOT NULL`` must keep empty
+    string identity. Numeric/date/bool empty string is still NULL invent.
+    """
+    try:
+        from services.type_system import LOGICAL_STRING, LOGICAL_TEXT, normalize_logical_type
+
+        return normalize_logical_type(dest_type) in {LOGICAL_STRING, LOGICAL_TEXT}
+    except ImportError:  # pragma: no cover — standalone package
+        text = (dest_type or "").upper().split("COLLATE", 1)[0]
+        return any(
+            tok in text
+            for tok in ("TEXT", "VARCHAR", "CHAR", "CLOB", "STRING", "NVARCHAR", "NTEXT")
+        ) and "INTERVAL" not in text
+
+
+def _sample_is_sql_null_for_not_null(val: Any, dest_type: str) -> bool:
+    """G3 NOT NULL: reader-null only. Empty string stays a string value."""
+    if val is None:
+        return True
+    try:
+        from services.value_serializer import is_reader_null_cell
+
+        if is_reader_null_cell(val):
+            return True
+    except ImportError:  # pragma: no cover — standalone package
+        pass
+    if isinstance(val, str) and val.strip() == "":
+        return not _dest_accepts_empty_string(dest_type)
+    return False
 
 # Offline fallback when apps.api type_system cannot be imported (package-only).
 # Hosted Validate must use is_lossy_coercion / is_precision_collapse_coercion.
@@ -1212,7 +1252,7 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
             if not isinstance(row, dict):
                 continue
             val = row.get(m.source)
-            if val is None or str(val).strip() == "":
+            if _sample_is_sql_null_for_not_null(val, target.inferred_type):
                 null_samples += 1
         if null_samples:
             label = (
@@ -1337,35 +1377,17 @@ def _is_intentional_omit_mapping(m: Any) -> bool:
 
 
 def _is_lossy_mapping(m: Any) -> bool:
-    fidelity = str(getattr(m, "fidelity", None) or "").strip().lower()
-    if fidelity == "lossy_cast":
-        return True
-    return bool(getattr(m, "type_narrowing", False))
+    return mapping_is_lossy(m)
 
 
 def _requires_risk_ack(m: Any) -> bool:
-    """Lossy casts, type narrowing, and value-mutating transforms need a contract.
-
-    Safe normalize (trim / trim_id / email / phone / case) is Map-Ready — not a
-    Migration Risk Contract path. Must stay aligned with Map ``isSafeNormalizeMapping``.
-    """
-    if is_safe_normalize_mapping(m):
-        return False
-    if _is_lossy_mapping(m):
-        return True
-    fidelity = str(getattr(m, "fidelity", None) or "").strip().lower()
-    return fidelity == "mutate"
+    """Lossy casts, type narrowing, and value-mutating transforms need a contract."""
+    return mapping_requires_risk_contract(m)
 
 
 def _is_structural_review_mapping(m: Any) -> bool:
     """STRUCT flatten / specialty identity cannot clear via bare user_override."""
-    if getattr(m, "struct_derived", False):
-        return True
-    policy = str(getattr(m, "struct_policy", None) or "").strip().lower()
-    if policy in {"flatten_top_level_keys", "flatten_deep", "explode_rows"}:
-        return True
-    xf = str(getattr(m, "transform", None) or "").strip().lower()
-    return xf in {"identity_specialty", "specialty"}
+    return mapping_is_structural_review(m)
 
 
 def gate_g4_mapping_confidence(ctx: PreflightContext) -> GateResult:
@@ -1790,6 +1812,29 @@ def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
     # first stored key, so the verdict belongs here, not in a duplicate-key error
     # after Execute has started.
     collision = getattr(ctx, "destination_collision", None)
+    collision_proven = ""
+    collision_unproven = ""
+    collision_evidence: dict[str, Any] = {}
+    if collision is not None:
+        collision_evidence = {
+            "status": str(getattr(collision, "status", "") or ""),
+            "key_column": getattr(collision, "key_column", "") or "",
+            "values_probed": int(getattr(collision, "values_probed", 0) or 0),
+        }
+        if not getattr(collision, "findings", None):
+            key = collision_evidence["key_column"] or "identity key"
+            if collision_evidence["status"] == "ran":
+                collision_proven = (
+                    f"Target DDL compatible — append batch probed against stored "
+                    f"{key} values, no collision"
+                )
+            else:
+                collision_unproven = (
+                    f"Append key collision on {key} was not probed "
+                    f"({getattr(collision, 'message', '') or collision_evidence['status']}) "
+                    "— the destination enforces this key, so Execute re-probes it "
+                    "and refuses the run if a stored key repeats."
+                )
     if collision is not None and getattr(collision, "findings", None):
         found = list(collision.findings)
         key = getattr(collision, "key_column", "") or "identity key"
@@ -1910,11 +1955,32 @@ def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
                     note="Sample uniqueness probe on identity key",
                 ),
             )
+    if collision_unproven:
+        # The probe that Execute will run could not run here. Claiming "Target DDL
+        # compatible" turns that gap into a green Validate the run then refuses,
+        # so say what is unknown instead of implying it was checked.
+        return _warn(
+            GateId.G6_TARGET_DDL,
+            collision_unproven,
+            start,
+            _scope(
+                {
+                    "scrubbed_drift_issues": scrubbed,
+                    "rule_id": "g6_target_ddl.append_collision_unproven",
+                    "collision_probe": collision_evidence,
+                },
+                coverage="none",
+                note="Destination key collision probe did not run",
+            ),
+        )
     return _pass(
         GateId.G6_TARGET_DDL,
-        "Target DDL compatible",
+        collision_proven or "Target DDL compatible",
         start,
-        _scope({"scrubbed_drift_issues": scrubbed}),
+        _scope(
+            {"scrubbed_drift_issues": scrubbed}
+            | ({"collision_probe": collision_evidence} if collision_evidence else {})
+        ),
     )
 
 
@@ -2005,11 +2071,20 @@ def _dry_run_transform(value: str, transform: str | None) -> str | None:
         return "".join(ch for ch in value if ch == "\t" or ch == "\n" or ch == "\r" or ord(ch) >= 32)
     if t in {"integer", "int", "number", "decimal", "float", "double", "numeric", "currency", "percentage"}:
         try:
-            cleaned = value.replace(",", "").replace("$", "").replace("€", "").replace("%", "").strip()
+            from decimal import Decimal, InvalidOperation
+
+            cleaned = value.replace("%", "").strip()
+            for mark in "$€£¥₹":
+                cleaned = cleaned.replace(mark, "")
+            cleaned = cleaned.strip()
+            # Standalone fallback — never invent a locale. Plain Decimal only.
+            parsed = Decimal(cleaned)
+            if not parsed.is_finite():
+                return value
             if "." in cleaned or "e" in cleaned.lower():
-                return str(float(cleaned))
-            return str(int(cleaned))
-        except Exception:
+                return str(parsed)
+            return str(int(parsed))
+        except (InvalidOperation, ValueError, OverflowError, Exception):
             return value
     if t in {"boolean", "bool"}:
         return "true" if value and value.lower() not in {"false", "0", "", "no", "off"} else "false"
@@ -2726,6 +2801,19 @@ def _host_gate_to_result(gate_id: GateId, payload: dict[str, Any], start: float)
     )
 
 
+def _live_dest_column_names(dest: Any) -> list[str]:
+    """Dest-exists name list: live types first, mapping targets only as fallback.
+
+    ``target_columns`` may be write mappings only. When the host stamped
+    ``column_types``, those keys are the dest table — G14 and G15 must share
+    this list or dest-only columns flip equal / source-superset / overlap.
+    """
+    type_keys = [str(k) for k in (getattr(dest, "column_types", None) or {}) if k]
+    if type_keys:
+        return type_keys
+    return [c.name for c in (dest.target_columns or []) if getattr(c, "name", None)]
+
+
 def _plan_mapping_dicts(ctx: PreflightContext) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for m in ctx.plan.mappings or []:
@@ -2822,6 +2910,7 @@ def gate_g14_destination_requirements(ctx: PreflightContext) -> GateResult:
             details={},
             duration_ms=(time.perf_counter() - start) * 1000,
         )
+    dest_columns = _live_dest_column_names(dest)
     gate = build_destination_requirements_gate(
         destination_table_exists=dest.table_exists,
         column_nullability=getattr(dest, "column_nullability", None) or {},
@@ -2829,6 +2918,7 @@ def gate_g14_destination_requirements(ctx: PreflightContext) -> GateResult:
         identity_columns=getattr(dest, "identity_columns", None) or [],
         generated_columns=getattr(dest, "generated_columns", None) or [],
         mappings=_plan_mapping_dicts(ctx),
+        dest_columns=dest_columns,
     )
     if not gate:
         return GateResult(
@@ -2854,7 +2944,7 @@ def gate_g15_dest_exists_shape(ctx: PreflightContext) -> GateResult:
             details={},
             duration_ms=(time.perf_counter() - start) * 1000,
         )
-    dest_cols = [c.name for c in (dest.target_columns or [])]
+    dest_cols = _live_dest_column_names(dest)
     contract = classify_dest_exists_shape(
         destination_table_exists=dest.table_exists,
         source_columns=[c.name for c in (ctx.plan.source.columns or [])],
@@ -2891,6 +2981,17 @@ def _pass(gate_id: GateId, message: str, start: float, details: dict | None = No
     return GateResult(
         gate_id=gate_id,
         status=GateStatus.PASS,
+        message=message,
+        details=details or {},
+        duration_ms=(time.perf_counter() - start) * 1000,
+    )
+
+
+def _warn(gate_id: GateId, message: str, start: float, details: dict | None = None) -> GateResult:
+    """Gate ran but could not prove its claim — surfaced, never silently green."""
+    return GateResult(
+        gate_id=gate_id,
+        status=GateStatus.WARN,
         message=message,
         details=details or {},
         duration_ms=(time.perf_counter() - start) * 1000,

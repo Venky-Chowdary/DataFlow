@@ -91,12 +91,24 @@ def _enable_cdc_on_table(cur, table: str) -> None:
 
 
 def _wait_capture(cdc: SqlServerNativeCdc, table: str, timeout: float = 20.0) -> None:
+    """Wait for the capture instance. Agent-less hosts need ``sp_cdc_scan``."""
     deadline = time.time() + timeout
+    last_min = ""
     while time.time() < deadline:
         if cdc.is_available():
-            return
+            try:
+                cdc.force_cdc_scan()
+            except Exception:
+                pass
+            with cdc._conn() as conn:
+                with conn.cursor() as cur:
+                    last_min = cdc._min_lsn(cur)
+            if last_min:
+                return
         time.sleep(0.5)
-    raise AssertionError(f"capture instance for {table} not ready")
+    raise AssertionError(
+        f"capture instance for {table} not ready (min_lsn={last_min!r})"
+    )
 
 
 def test_sqlserver_native_snapshot_poll_ack_and_df_lsn():
@@ -205,7 +217,13 @@ def test_sqlserver_retention_probe_gap_and_clear():
     table = "cdc_ret_" + uuid.uuid4().hex[:8]
     holder = f"it-ret-{table}"
     ck = f"it:retention:{table}"
-    cfg = {**CFG, "lease_holder_id": holder, "job_id": holder, "type": "sqlserver"}
+    cfg = {
+        **CFG,
+        "lease_holder_id": holder,
+        "job_id": holder,
+        "type": "sqlserver",
+        "primary_key": "id",
+    }
     bootstrap = SqlServerNativeCdc(
         cfg, table="cdc_native_orders", primary_key="id", schema="dbo"
     )

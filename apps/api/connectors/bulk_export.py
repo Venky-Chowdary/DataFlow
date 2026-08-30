@@ -94,7 +94,9 @@ def iter_postgresql_copy_batches(
     from psycopg2 import sql
 
     from connectors.postgresql_conn import get_connection
+    from connectors.sql_identifiers import split_qualified_table
 
+    schema, table = split_qualified_table(table, schema or "public")
     schema = schema or "public"
     if batch_rows < 1:
         raise ValueError("batch_rows must be >= 1")

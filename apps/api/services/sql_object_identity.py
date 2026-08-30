@@ -126,8 +126,9 @@ def resolve_object_identity(
     """Resolve ``schema.table`` (and optionally columns) against the catalog."""
     import sqlalchemy as sa
 
-    want_table = str(table or "")
-    want_schema = str(schema).strip() if schema else None
+    from connectors.sql_identifiers import split_qualified_table
+
+    want_schema, want_table = split_qualified_table(str(table or ""), schema)
     if not want_table:
         return ObjectIdentity(want_schema, want_table, False)
 

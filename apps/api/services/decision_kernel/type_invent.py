@@ -12,87 +12,78 @@ import re
 from functools import lru_cache
 from typing import Final
 
-# Helpers / tables still owned by type_system (shared core). Import the module
-# object so circular init stays safe: type_system shims lazy-import this module.
-from services import type_system as _ts
 from services.decision_kernel.logical_type import LogicalType, NativeType
 from services.source_engine_scope import active_source_engine
 
-# Bind shared helpers/tables from type_system into this module namespace.
-# Invent bodies below expect unqualified names (historical type_system style).
-def _bind_from_type_system() -> None:
-    g = globals()
-    for _name in (
-        'CANONICAL_TYPES',
-        'DDL_TYPES',
-        'DEFAULT_DDL',
-        'LOGICAL_ARRAY',
-        'LOGICAL_BINARY',
-        'LOGICAL_BOOLEAN',
-        'LOGICAL_DATETIME',
-        'LOGICAL_DECIMAL',
-        'LOGICAL_FLOAT',
-        'LOGICAL_GEOGRAPHY',
-        'LOGICAL_INTEGER',
-        'LOGICAL_INTERVAL',
-        'LOGICAL_JSON',
-        'LOGICAL_MAP',
-        'LOGICAL_OBJECTID',
-        'LOGICAL_STRING',
-        'LOGICAL_STRUCT',
-        'LOGICAL_TEXT',
-        'LOGICAL_TIME',
-        'LOGICAL_UUID',
-        'LOGICAL_VECTOR',
-        '_DECIMAL_PARAM_TEMPLATES',
-        '_DYNAMODB_ATTR_LOGICAL',
-        '_DYNAMODB_ONLY_ATTR_CODES',
-        '_NO_TEMPORAL_TYPMOD_ENGINES',
-        '_OBJECTID_DDL_DEFAULTS',
-        '_apply_temporal_fsp',
-        '_binary_ddl_for_dest',
-        '_bitstring_ddl_for_dest',
-        '_clickhouse_native_datetime_ddl',
-        '_datetime_ddl_for_dest',
-        '_decimal_ddl_for_dest',
-        '_enum_set_ddl_for_dest',
-        '_float_ddl_for_dest',
-        '_geography_ddl_for_dest',
-        '_integer_ddl_for_dest',
-        '_interval_ddl_for_dest',
-        '_is_unsigned_integer_decimal_carrier',
-        '_nested_ddl_for_dest',
-        '_normalize_dest_db',
-        '_range_ddl_for_dest',
-        '_string_ddl_for_dest',
-        '_time_ddl_for_dest',
-        '_vector_ddl_for_dest',
-        '_with_collation_clause',
-        'arrow_dtype_to_carrier',
-        'avro_logical_token_to_carrier',
-        'create_new_decimal_carrier',
-        'float_mantissa_bits',
-        'integer_bit_width',
-        'is_bitstring_carrier',
-        'is_fixed_width_char_carrier',
-        'is_national_string_carrier',
-        'is_unlimited_string_carrier',
-        'observe_numeric_samples',
-        'parse_array_element',
-        'parse_numeric_precision_scale',
-        'parse_string_carrier_width',
-        'parse_temporal_fractional_precision',
-        'specialty_carrier_base',
-        'specialty_wire_preserves_value',
-        'strip_identity_qualifier',
-        'uuid_exact_wire_carrier',
-        'zero_scale_fits_signed_bigint',
-    ):
-        if _name in g:
-            continue
-        if hasattr(_ts, _name):
-            g[_name] = getattr(_ts, _name)
-_bind_from_type_system()
+# Shared carriers/tables owned by ``type_system``. Imported by name so a rename
+# there fails at import here, not as a NameError mid-load: ``type_system``
+# reaches this module only through function-local shims, so the cycle stays open.
+from services.type_system import (
+    CANONICAL_TYPES,
+    DDL_TYPES,
+    DEFAULT_DDL,
+    LOGICAL_ARRAY,
+    LOGICAL_BINARY,
+    LOGICAL_BOOLEAN,
+    LOGICAL_DATETIME,
+    LOGICAL_DECIMAL,
+    LOGICAL_FLOAT,
+    LOGICAL_GEOGRAPHY,
+    LOGICAL_INTEGER,
+    LOGICAL_INTERVAL,
+    LOGICAL_JSON,
+    LOGICAL_MAP,
+    LOGICAL_OBJECTID,
+    LOGICAL_STRING,
+    LOGICAL_STRUCT,
+    LOGICAL_TEXT,
+    LOGICAL_TIME,
+    LOGICAL_UUID,
+    LOGICAL_VECTOR,
+    _DECIMAL_PARAM_TEMPLATES,
+    _DYNAMODB_ATTR_LOGICAL,
+    _DYNAMODB_ONLY_ATTR_CODES,
+    _NO_TEMPORAL_TYPMOD_ENGINES,
+    _OBJECTID_DDL_DEFAULTS,
+    _apply_temporal_fsp,
+    _binary_ddl_for_dest,
+    _bitstring_ddl_for_dest,
+    _clickhouse_native_datetime_ddl,
+    _datetime_ddl_for_dest,
+    _decimal_ddl_for_dest,
+    _enum_set_ddl_for_dest,
+    _float_ddl_for_dest,
+    _geography_ddl_for_dest,
+    _integer_ddl_for_dest,
+    _interval_ddl_for_dest,
+    _is_unsigned_integer_decimal_carrier,
+    _nested_ddl_for_dest,
+    _normalize_dest_db,
+    _range_ddl_for_dest,
+    _string_ddl_for_dest,
+    _time_ddl_for_dest,
+    _vector_ddl_for_dest,
+    _with_collation_clause,
+    arrow_dtype_to_carrier,
+    avro_logical_token_to_carrier,
+    ddl_carrier_type,
+    destination_is_file_export,
+    float_mantissa_bits,
+    integer_bit_width,
+    is_bitstring_carrier,
+    is_fixed_width_char_carrier,
+    is_national_string_carrier,
+    is_unlimited_string_carrier,
+    parse_array_element,
+    parse_numeric_precision_scale,
+    parse_string_carrier_width,
+    parse_temporal_fractional_precision,
+    specialty_carrier_base,
+    specialty_wire_preserves_value,
+    strip_identity_qualifier,
+    uuid_exact_wire_carrier,
+    zero_scale_fits_signed_bigint,
+)
 
 
 
@@ -240,6 +231,37 @@ def normalize_logical_type(inferred: str | None) -> str:
 
 
 
+_FILE_EXPORT_DECIMAL_PRECISION: Final[int] = 38
+
+
+def _file_export_ddl(inferred: str | None) -> str:
+    """Type carried by a file/object export — class kept, declared width dropped.
+
+    An object export has no DDL, so the type comes from the format itself: JSON
+    numbers, Parquet/Avro typed columns. Collapsing to the TEXT default quotes
+    every integer, decimal and date, and downstream Athena/Spark then read a
+    typed source back as strings.
+
+    Widths are a different matter: a file has no column width to overflow, and
+    a source width inferred from a sample would quarantine every later row that
+    exceeds it. Keep the scale (it is the value's own precision) and widen the
+    precision to the decimal128 maximum the export formats carry.
+    """
+    carrier = ddl_carrier_type(inferred)
+    logical = normalize_logical_type(carrier)
+    if logical == LOGICAL_DECIMAL:
+        _, scale = parse_numeric_precision_scale(carrier)
+        if scale is None:
+            return carrier
+        return f"DECIMAL({_FILE_EXPORT_DECIMAL_PRECISION},{min(int(scale), _FILE_EXPORT_DECIMAL_PRECISION)})"
+    # Warehouse LOB ceilings (VARCHAR(16777216), VARCHAR(65535), TEXT) parse as
+    # unbounded, so a width check would keep the source spelling. A file has
+    # no column width — the class is VARCHAR, not an unread Snowflake sink.
+    if logical in {LOGICAL_STRING, LOGICAL_TEXT}:
+        return "VARCHAR"
+    return carrier
+
+
 def ddl_type(db_type: str, inferred: str | LogicalType | NativeType | None) -> str:
     """Map a logical source type to a destination-native DDL type.
 
@@ -286,6 +308,8 @@ def ddl_type(db_type: str, inferred: str | LogicalType | NativeType | None) -> s
         if t == LOGICAL_UUID:
             return "VARCHAR"
         # Fall through for other logicals via generic_sql mapping.
+    if destination_is_file_export(db_type):
+        return _file_export_ddl(inferred)
     db = _normalize_dest_db(db_type)
     nested = _nested_ddl_for_dest(db, inferred)
     if nested:
@@ -340,7 +364,24 @@ def ddl_type(db_type: str, inferred: str | LogicalType | NativeType | None) -> s
             return native_uuid
         return "VARCHAR(36)"
     if uuid_exact_wire_carrier(inferred):
-        return strip_identity_qualifier(inferred).strip()
+        # Keep the 36-char contract, but spell it the way this destination
+        # spells a string: ``STRING(36)`` is BigQuery/Databricks wire and a
+        # syntax error on PostgreSQL / MySQL / Oracle CREATE.
+        exact_wire = strip_identity_qualifier(inferred).strip()
+        bounded = _string_ddl_for_dest(db, exact_wire)
+        if bounded:
+            return bounded
+        # No bounded string wire on this engine (SQLite / DuckDB / ClickHouse /
+        # Iceberg): keep the foreign token only when its base is what this
+        # engine already spells, else fall back to the native unbounded wire
+        # (wider, never narrower — width is not the UUID contract here).
+        native_string = DDL_TYPES.get(db, {}).get(LOGICAL_STRING) or DEFAULT_DDL.get(db, "")
+        exact_base = exact_wire.upper().split("(", 1)[0].strip()
+        native_base = native_string.upper().split("(", 1)[0].strip()
+        widthless_native = "(" in exact_wire and "(" not in native_string
+        if native_string and (exact_base != native_base or widthless_native):
+            return native_string
+        return exact_wire
     # MongoDB ObjectId — dialect-native wire (never invent BigQuery VARCHAR).
     if base_early in {"OBJECTID", "OBJECT_ID"} or normalize_logical_type(inferred) == LOGICAL_OBJECTID:
         types_oid = DDL_TYPES.get(db) or {}
@@ -929,6 +970,66 @@ def promote_create_new_temporal_stamp(src_type: str, stamped: str, dest_db_type:
 
 
 
+# Families whose create-new stamp is a pure *width* projection, so a wider
+# source declaration can only mean the earlier sample was too small. Temporal
+# carriers are excluded on purpose: MySQL ``TIMESTAMP`` → ``DATETIME(6)`` also
+# moves the 1970–2038 range, which is a semantic change an operator must see
+# (``promote_create_new_temporal_stamp`` owns the temporal question).
+_CAPACITY_PROMOTABLE_LOGICALS: Final[frozenset[str]] = frozenset(
+    {LOGICAL_STRING, LOGICAL_TEXT, LOGICAL_INTEGER, LOGICAL_DECIMAL, LOGICAL_BINARY}
+)
+
+
+def promote_create_new_capacity_stamp(
+    src_type: str,
+    stamped: str,
+    dest_db_type: str = "",
+) -> str:
+    """Widen a projected create-new stamp that can no longer hold the source.
+
+    A create-new stamp is a *projection* of the source type, not an operator
+    decision: on a sampled source (CSV/Excel/document store) Map projects it
+    from the first rows, and the full read then declares a wider type —
+    ``DECIMAL(6,4)`` from eight rows becomes ``DECIMAL(8,4)`` over the file
+    because later cells actually used more digits, not because invent added
+    a +2 scale pad.
+    Enforcing the earlier projection makes Datawrap block its own CREATE TABLE
+    for a fidelity collapse it invented, which is the worst kind of refusal:
+    there is no destination DDL to protect yet, and no remap the operator can
+    make that is more correct than the one we would write ourselves.
+
+    So the stamp is re-projected from the current source type, and only ever
+    widened *inside the carrier family the stamp already chose*: a
+    ``NUMBER(6,4)`` that can no longer hold ``DECIMAL(9,4)`` grows its
+    precision, but a ``VARCHAR(64)`` stamped on a decimal column is a
+    deliberate representation change — nobody projects a string carrier for a
+    numeric source — and stands as written. Landing a value the stamp cannot
+    hold is then a real cast failure the writer must quarantine, not a width
+    Datawrap may silently re-choose. An operator-chosen narrowing
+    (``user_override`` / ``risk_acknowledged``) never reaches here.
+    """
+    from services.type_system import is_lossy_coercion, normalize_logical_type
+
+    stamp = (stamped or "").strip()
+    src = (src_type or "").strip()
+    db = (dest_db_type or "").strip()
+    if not stamp or not src:
+        return stamp
+    logical = normalize_logical_type(src)
+    if logical != normalize_logical_type(stamp):
+        return stamp
+    if logical not in _CAPACITY_PROMOTABLE_LOGICALS:
+        return stamp
+    if not is_lossy_coercion(src, stamp, dest_db=db):
+        return stamp
+    reprojected = create_new_mapping_target_type(src, db)
+    if not reprojected or reprojected.strip().upper() == stamp.upper():
+        return stamp
+    if is_lossy_coercion(src, reprojected, dest_db=db):
+        return stamp
+    return reprojected
+
+
 def create_new_mapping_target_type(
     src_type: str,
     dest_db_type: str = "",
@@ -950,6 +1051,11 @@ def create_new_mapping_target_type(
         stamp, dest_db=dest_db_type, source_db=source_db
     )
     stamp = refuse_create_new_numeric_collapse(src_type, stamp, dest_db_type)
+    # A file has no column width. Re-inheriting VARCHAR(16777216) from a
+    # warehouse source would make Map look like an unread Snowflake sink and
+    # would quarantine later rows that exceed a sample-sized width.
+    if destination_is_file_export(dest_db_type):
+        return _file_export_ddl(stamp)
     inherited = inherit_measured_string_width(
         stamp, src_type, dest_db=dest_db_type
     )
@@ -986,12 +1092,47 @@ def refuse_create_new_numeric_collapse(
         src, dest, dest_db=db, dest_table_exists=False
     ):
         return stamp
+    if _unsigned_polarity_only_collapse(src, dest, db):
+        return stamp
     recovered = ddl_type(db, src) if db else src
     if recovered and not is_precision_collapse_coercion(
         src, recovered, dest_db=db, dest_table_exists=False
     ):
         return recovered
+    # Falling back to the source token is only honest when the destination
+    # engine is unknown. With a destination in hand it hands CREATE a token
+    # from the *source* dialect (ClickHouse ``UInt8`` into PostgreSQL), which
+    # the engine rejects at DDL time — keep the widest legal stamp instead.
+    if db:
+        return recovered or stamp
     return src
+
+
+def _unsigned_polarity_only_collapse(src: str, dest: str, db: str) -> bool:
+    """True when the sole collapse is losing UNSIGNED polarity, not capacity.
+
+    ``UInt8 → SMALLINT`` keeps every source value; what it drops is the
+    declaration that negatives are impossible, which is an Accept-risk finding
+    for the operator — not a reason to re-invent a narrower-or-foreign stamp.
+    """
+    from services.type_system import (
+        decimal_params_would_narrow,
+        float_mantissa_would_narrow,
+        integer_width_would_narrow,
+        string_width_would_narrow,
+        unsigned_integer_would_overflow,
+        unsigned_signed_polarity_invent,
+    )
+
+    if not unsigned_signed_polarity_invent(src, dest):
+        return False
+    return not (
+        unsigned_integer_would_overflow(src, dest)
+        or integer_width_would_narrow(src, dest, dest_db=db)
+        or decimal_params_would_narrow(src, dest, dest_db=db)
+        or float_mantissa_would_narrow(src, dest, dest_db=db)
+        or string_width_would_narrow(src, dest)
+    )
 
 
 def _create_new_mapping_target_type(
@@ -1464,6 +1605,21 @@ _PASS_THROUGH_REJECT_ON_DEST: Final[dict[str, frozenset[str]]] = {
 
 
 
+def _dest_spells_string_as_string(db: str) -> bool:
+    """True when ``STRING`` is the destination's own create-new string wire.
+
+    ``STRING`` is a physical type on BigQuery / Databricks / Spanner / Hive-class
+    engines and a logical alias everywhere else. Passing the alias through as
+    CREATE DDL emitted ``"_df_lsn" string`` on PostgreSQL, which aborted the
+    transaction and failed the whole CDC run. Asked of the dialect table rather
+    than a hand-kept engine list so a new destination cannot regress it.
+    """
+    if not db:
+        return True
+    wire = ddl_type(db, LOGICAL_STRING) or ""
+    return wire.strip().upper().split("(", 1)[0].strip() == "STRING"
+
+
 def _is_explicit_physical_stamp(carrier: str, dest_db: str = "") -> bool:
     """True when carrier is already dest DDL (Map stamp) — do not re-ddl invent."""
     raw = strip_identity_qualifier(carrier).strip()
@@ -1543,6 +1699,8 @@ def _is_explicit_physical_stamp(carrier: str, dest_db: str = "") -> bool:
         # spell wall-clock that way) and still rematerializes to DATETIME(6).
         if bare_typmod == "TIMESTAMP" and db in {"mysql", "mariadb", "tidb"}:
             return True
+        if bare_typmod == "STRING" and not _dest_spells_string_as_string(db):
+            return False
         if bare_typmod in reject:
             return False
         return True
@@ -1572,6 +1730,8 @@ def _is_explicit_physical_stamp(carrier: str, dest_db: str = "") -> bool:
         # SQL keywords are INT32 on PG/MySQL while ddl_type invents BIGINT.
         # Unambiguous INT4/INT32 keep integer_bit_width==32 and stay physical.
         if bare in {"INTEGER", "INT", "SIGNED"} and integer_bit_width(raw) is None:
+            return False
+        if bare == "STRING" and not _dest_spells_string_as_string(db):
             return False
         return True
     # Bare FLOAT (mantissa unknown) rematerializes via ddl_type → IEEE-64.
@@ -1727,16 +1887,21 @@ def inherit_measured_string_width(
     base_raw, qualifiers = _split_string_qualifiers(raw_stamp)
     stamp = strip_identity_qualifier(base_raw).strip()
     src = strip_identity_qualifier(source_type).strip() if source_type else ""
+    # ``stamp`` is the identity/charset-stripped form used only to decide
+    # whether a width can be inherited. Every path that inherits nothing hands
+    # back the stamp as given: returning the stripped form dropped
+    # ``GENERATED BY DEFAULT AS IDENTITY`` off a create-new integer column, so
+    # the destination was created without the key generator.
     if not stamp:
-        return stamp
+        return raw_stamp
     if parse_string_carrier_width(stamp) is not None:
         return raw_stamp
     folded = _fold_widthless_string_stamp(stamp)
     if folded not in _WIDTHLESS_VARCHAR_STAMPS:
-        return stamp
+        return raw_stamp
     width = parse_string_carrier_width(src)
     if width is None:
-        return stamp
+        return raw_stamp
     family = _family_for_inherited_width(folded, src)
     unit = _length_semantics_unit(src)
     if unit and family in _ORACLE_LENGTH_FAMILIES:
@@ -1986,3 +2151,91 @@ __all__ = [
     'ddl_invent_never_narrower_than_table',
     'promote_create_new_temporal_stamp',
 ]
+
+
+def temporal_precision_would_narrow(
+    source_type: str,
+    target_type: str,
+    *,
+    dest_db: str = "",
+) -> bool:
+    """True when source fractional seconds exceed destination TIME/TIMESTAMP(p).
+
+    ``TIME(6)→TIME(0)`` / ``DATETIME2(7)→DATETIME2(0)`` silently truncates
+    unless G3 blocks and write paths refuse inventing lower precision.
+
+    ``SMALLDATETIME`` is one-minute accuracy — any second/fraction datetime
+    source into SMALLDATETIME is a silent round (Microsoft / UGO class).
+
+    Bare ``TIMESTAMP`` defaults are dialect-aware when ``dest_db`` is set:
+    MySQL/Maria → FSP 0; PostgreSQL-family / Redshift → 6; SQL Server
+    DATETIME2 bare → 7. Without ``dest_db``, bare TIMESTAMP stays fail-closed
+    at 0 (MySQL) so truncation cannot silent-green.
+    """
+    from services.type_system import (
+        DOCUMENT_INSTANT_FRACTIONAL_DIGITS,
+        SNOWFLAKE_DEFAULT_TIMESTAMP_FRACTIONAL_DIGITS,
+        SNOWFLAKE_UNAVOIDABLE_FSP_FLOOR,
+        _SNOWFLAKE_BARE_TIMESTAMP_SPELLINGS,
+        destination_temporal_fractional_digits,
+        is_document_instant_token,
+    )
+
+    src_l = normalize_logical_type(source_type)
+    tgt_l = normalize_logical_type(target_type)
+    if is_document_instant_token(dest_db, target_type):
+        # Millisecond carrier spelled ``date``. Restate it as a datetime of that
+        # precision so the comparison below reports the truncation that actually
+        # happens instead of stopping at the date-family mismatch.
+        target_type = f"DATETIME({DOCUMENT_INSTANT_FRACTIONAL_DIGITS})"
+        tgt_l = LOGICAL_DATETIME
+    if src_l not in {LOGICAL_TIME, LOGICAL_DATETIME} or tgt_l not in {
+        LOGICAL_TIME,
+        LOGICAL_DATETIME,
+    }:
+        return False
+    tgt_u = strip_identity_qualifier(target_type).upper().strip()
+    src_u = strip_identity_qualifier(source_type).upper().strip()
+    if tgt_u == "SMALLDATETIME" and src_u != "SMALLDATETIME" and src_l == LOGICAL_DATETIME:
+        return True
+    tgt_p = destination_temporal_fractional_digits(target_type, dest_db=dest_db)
+    src_p = parse_temporal_fractional_precision(source_type)
+    if tgt_p is None:
+        return False
+    if src_p is None:
+        # SQL Server bare DATETIME2 defaults to precision 7 — never treat as
+        # unknown and soft-pass DATETIME2→DATETIME (≈3.33ms round).
+        bare_src = re.sub(r"\s*\(\s*\d+\s*\)", "", src_u).strip()
+        if bare_src in {"DATETIME2", "DATETIMEOFFSET"}:
+            src_p = 7
+        elif bare_src in _SNOWFLAKE_BARE_TIMESTAMP_SPELLINGS:
+            if bare_src == re.sub(r"\s*\(\s*\d+\s*\)", "", tgt_u).strip():
+                # Both sides carry the same unparameterized declaration, so the
+                # column keeps whatever that carrier keeps — it cannot truncate
+                # itself. The underscore spellings are also how introspection
+                # reports a zoneless carrier on MySQL/PostgreSQL, so reading the
+                # source as Snowflake's nanosecond ceiling while the destination
+                # resolves through ``dest_db`` invented a fidelity collapse
+                # (``TIMESTAMP_NTZ → TIMESTAMP_NTZ``) on routes that never
+                # touched Snowflake. One declaration, one precision rule.
+                return False
+            # Snowflake declares TIMESTAMP_NTZ/LTZ/TZ with no typmod in its
+            # catalog but stores nanoseconds (default scale 9). Reading the
+            # absent typmod as "unknown" green-lit Snowflake→MySQL DATETIME
+            # (FSP 0), which drops every fractional second on write. These
+            # spellings exist in no other dialect, so the default is safe to
+            # apply without knowing the source engine.
+            #
+            # It is a declared ceiling rather than observed nanoseconds, so it
+            # accuses only loss an operator can act on. Every mainstream
+            # destination clamps at microseconds or better, so sub-microsecond
+            # narrowing is unavoidable and reporting it would put a Risk
+            # Contract on every Snowflake timestamp column and teach operators
+            # to sign unread. Landing at millisecond or whole-second FSP is the
+            # fixable case: widen the destination column.
+            if tgt_p >= SNOWFLAKE_UNAVOIDABLE_FSP_FLOOR:
+                return False
+            src_p = SNOWFLAKE_DEFAULT_TIMESTAMP_FRACTIONAL_DIGITS
+        else:
+            return False
+    return src_p > tgt_p

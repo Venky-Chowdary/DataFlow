@@ -51,6 +51,7 @@ from connectors.writer_common import (
 from connectors.writer_common import (
     WriteResult as _WriteResult,
 )
+from connectors.writer_common import writer_meta_with_source_rows
 
 logger = logging.getLogger(__name__)
 
@@ -493,9 +494,10 @@ def _parse_number_type(sf_type_str: str) -> tuple[int, int] | None:
 
 
 def _decimal_scale_and_int_digits(value: Any) -> tuple[int, int]:
-    from connectors.writer_common import decimal_int_digits_and_scale
+    # Create-new NUMBER(p,s) invent — keep money scale (1000.00 → 2).
+    from services.decimal_observe import cell_int_digits_and_scale
 
-    return decimal_int_digits_and_scale(value)
+    return cell_int_digits_and_scale(value)
 
 
 def _fits_snowflake_number(value: Any, precision: int, scale: int) -> bool:
@@ -508,9 +510,12 @@ def _fits_snowflake_number(value: Any, precision: int, scale: int) -> bool:
 def _snowflake_decimal_type(col_idx: int, mapped_rows: list[tuple]) -> str:
     """Pick a NUMBER(p,s) type wide enough for the actual data in this batch.
 
-    Snowflake requires p <= 38 and p >= s. Prefer preserving integer magnitude
-    over fractional digits when the value would otherwise overflow NUMBER(38,*).
+    Exact observed envelope — no +2 scale / +1 int. Extra dest scale is
+    what printed ``9.083333000000`` in Snowsight. Snowflake requires
+    p <= 38 and p >= s; prefer integer magnitude when the cap binds.
     """
+    from services.decimal_observe import exact_create_decimal_ps
+
     max_int = 0
     max_scale = 0
     for row in mapped_rows:
@@ -523,16 +528,15 @@ def _snowflake_decimal_type(col_idx: int, mapped_rows: list[tuple]) -> str:
     if max_scale == 0 and max_int == 0:
         return "NUMBER(38,10)"
 
-    # Prefer observed scale; keep a small buffer when data is modest.
-    scale = min(38, max_scale + (2 if max_scale > 0 else 0))
-    int_digits = max(1, max_int + (1 if max_int > 0 else 0))
-    if int_digits + scale > 38:
-        scale = max(0, 38 - int_digits)
-    if int_digits + scale > 38:
-        int_digits = 38 - scale
-    precision = max(scale, min(38, int_digits + scale))
+    precision, scale = exact_create_decimal_ps(max_int, max_scale, max_precision=38)
     if precision < 1:
         return "NUMBER(38,10)"
+    if precision > 38:
+        int_digits = max(1, max_int) if max_int else 0
+        scale = min(scale, max(0, 38 - max(int_digits, 0)))
+        precision = max(scale, min(38, int_digits + scale))
+        if precision < 1:
+            return "NUMBER(38,10)"
     return f"NUMBER({precision},{scale})"
 
 
@@ -1909,6 +1913,7 @@ def write_mapped_rows(
             coerced_null_rows=coerced_null_rows,
             load_method=load_method,
             rows_skipped=rows_skipped,
+            meta=writer_meta_with_source_rows(None, source_row_count),
         )
     except Exception as exc:
         cleanup = locals().get("_cleanup_spool")

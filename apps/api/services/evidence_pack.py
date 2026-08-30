@@ -168,7 +168,7 @@ CLAIM_REGISTRY: list[dict[str, Any]] = [
         "claim": "Create-new precision/width/TZ risks stamped before Validate",
         "buyer_line": (
             "TIMESTAMPTZ create-new onto MySQL stamps create_new_risks "
-            "(timezone / precision) visible to Map UI."
+            "(epoch range ceiling on the TIMESTAMP carrier) visible to Map UI."
         ),
         "floors": {
             "create_new_risks_present": 1,

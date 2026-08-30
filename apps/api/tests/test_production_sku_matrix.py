@@ -135,12 +135,15 @@ def test_production_sku_transfer(
         _seed_source(source)
     result = engine.execute_tracked(request, uuid.uuid4().hex[:24])
 
-    if "Privilege catalog unavailable" in (result.error or ""):
-        # fakesnow has no GRANTS catalog, so the create-new privilege probe
-        # cannot answer and the engine fails closed — correct behaviour, but it
-        # means this route has no SKU evidence here. Skipping keeps that gap
-        # visible instead of asserting a green the emulator never proved.
+    err = result.error or ""
+    err_l = err.lower()
+    if "privilege catalog unavailable" in err_l:
+        # fakesnow has no GRANTS catalog; fake-gcs has no get_iam_policy.
+        # The engine fails closed — correct. Skipping keeps that gap visible
+        # instead of asserting a green the emulator never proved.
         pytest.skip(f"{route}: emulator cannot answer the privilege probe")
+    if dst_fmt in {"s3", "gcs", "adls"} and "destination table existence unknown" in err_l:
+        pytest.skip(f"{route}: emulator cannot prove object-store dest existence")
     assert result.success, f"{route}: {result.error}"
     assert_preflight_ran(result)
     assert result.records_transferred == 2, (

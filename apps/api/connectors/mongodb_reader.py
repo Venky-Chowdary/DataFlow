@@ -19,9 +19,33 @@ from services.value_serializer import cell_to_string
 from .mongodb_common import _mongo_client
 
 
+def _cursor_boolean(value: str) -> bool | None:
+    """Write-path boolean tokens only — informal yes/y/2 are not TRUE."""
+    from services.transform_engine import apply_transform
+
+    parsed, err = apply_transform(value, "boolean")
+    if parsed is None or err:
+        return None
+    return bool(parsed)
+
+
+def _cursor_datetime(value: str) -> Any:
+    """Write-path datetime bind — ISO, epoch, unambiguous calendars. Auto slash refuses."""
+    from datetime import datetime
+
+    from services.transform_engine import apply_transform
+
+    parsed, err = apply_transform(value, "datetime")
+    if parsed is None or err:
+        return None
+    try:
+        return datetime.fromisoformat(str(parsed).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
 def _cast_cursor_value(value: str, cursor_type: str | None = None) -> Any:
     """Convert a string cursor value into a BSON-native type for MongoDB queries."""
-    from datetime import datetime
     from decimal import InvalidOperation, Overflow
 
     from bson.decimal128 import Decimal128
@@ -32,44 +56,167 @@ def _cast_cursor_value(value: str, cursor_type: str | None = None) -> Any:
 
     ctype = (cursor_type or "").upper()
     if ctype in {"INTEGER", "INT", "BIGINT", "SMALLINT", "TINYINT", "SERIAL", "BIGSERIAL"}:
-        try:
-            return int(value.replace(",", ""))
-        except ValueError:
-            return value
+        from services.transform_engine import integer_wire_value
+
+        parsed = integer_wire_value(value)
+        return parsed if parsed is not None else value
     if ctype in {"DECIMAL", "NUMERIC", "NUMBER", "MONEY", "SMALLMONEY"}:
+        from services.transform_engine import decimal_wire_value
+
+        parsed = decimal_wire_value(value)
+        if parsed is None:
+            return value
         try:
-            return Decimal128(value.replace(",", ""))
+            return Decimal128(str(parsed))
         except (InvalidOperation, Overflow, ValueError):
             return value
     if ctype in {"BOOLEAN", "BOOL"}:
-        return value.strip().lower() in {"true", "t", "yes", "y", "1"}
+        parsed_bool = _cursor_boolean(value)
+        return parsed_bool if parsed_bool is not None else value
     if ctype in {"DATETIME", "TIMESTAMP", "TIMESTAMPTZ", "TIMESTAMP_TZ", "TIMESTAMP_LTZ", "DATE"}:
-        text = value.strip().replace("Z", "+00:00")
-        try:
-            return datetime.fromisoformat(text)
-        except ValueError:
-            return value
+        parsed_dt = _cursor_datetime(value)
+        return parsed_dt if parsed_dt is not None else value
     if ctype in {"STRING", "VARCHAR", "TEXT", "CHAR"}:
         return value
 
     wm_type = infer_watermark_type([value])
     if wm_type == WatermarkType.INTEGER:
-        try:
-            return int(value.replace(",", ""))
-        except ValueError:
-            return value
+        from services.transform_engine import integer_wire_value
+
+        parsed = integer_wire_value(value)
+        return parsed if parsed is not None else value
     if wm_type == WatermarkType.FLOAT:
+        from services.transform_engine import decimal_wire_value
+
+        parsed = decimal_wire_value(value)
+        if parsed is None:
+            return value
         try:
-            return Decimal128(value.replace(",", ""))
+            return Decimal128(str(parsed))
         except (InvalidOperation, Overflow, ValueError):
             return value
     if wm_type == WatermarkType.DATETIME:
-        text = value.strip().replace("Z", "+00:00")
-        try:
-            return datetime.fromisoformat(text)
-        except ValueError:
-            return value
+        parsed_dt = _cursor_datetime(value)
+        return parsed_dt if parsed_dt is not None else value
     return value
+
+
+# BSON compares across types by type order, never by value: a `$gt` on a
+# datetime can never match a field whose cells hold ISO strings. A watermark
+# cast from the *declared* logical type therefore matches nothing and the sync
+# reports "no new rows" forever. The cursor value is aligned to the type the
+# collection actually stores instead.
+_BSON_KIND_OF_TYPE = {
+    "string": "string",
+    "date": "date",
+    "timestamp": "date",
+    "int": "number",
+    "long": "number",
+    "double": "number",
+    "decimal": "number",
+    "bool": "bool",
+    "objectId": "objectid",
+}
+
+
+def stored_cursor_bson_kind(
+    coll: Any, field: str, *, sample_limit: int = 5000
+) -> str:
+    """The BSON type family the collection actually stores in ``field``.
+
+    Returns ``""`` when nothing is stored (empty collection / absent field), and
+    raises when the field mixes families — a mixed cursor field cannot bound an
+    incremental read, and guessing one family would silently skip the others.
+    """
+    if not field:
+        return ""
+    pipeline = [
+        {"$match": {field: {"$exists": True, "$ne": None}}},
+        {"$limit": int(sample_limit)},
+        {"$group": {"_id": {"$type": f"${field}"}}},
+    ]
+    try:
+        types = {str(d.get("_id") or "") for d in coll.aggregate(pipeline)}
+    except Exception:
+        return ""
+    kinds = {_BSON_KIND_OF_TYPE.get(t, "") for t in types if t}
+    kinds.discard("")
+    if not kinds:
+        return ""
+    if len(kinds) > 1:
+        raise ValueError(
+            f"Cursor field '{field}' stores more than one BSON type "
+            f"({', '.join(sorted(types))}) in this collection. MongoDB orders "
+            "values by type before value, so no single watermark can bound an "
+            "incremental read across them — normalise the field to one type at "
+            "the source, or run this sync as full refresh."
+        )
+    return kinds.pop()
+
+
+def _align_cursor_to_stored_kind(raw: str, casted: Any, kind: str) -> Any:
+    """Re-cast a watermark into the BSON family the collection stores."""
+    import datetime as _dt
+    from decimal import InvalidOperation
+
+    from bson.decimal128 import Decimal128
+    from bson.objectid import ObjectId
+
+    if not kind:
+        return casted
+    if kind == "string":
+        return raw if isinstance(casted, (_dt.datetime, _dt.date, bool, int, float)) else casted
+    if kind == "date":
+        if isinstance(casted, _dt.datetime):
+            return casted
+        parsed = _cast_cursor_value(raw, "TIMESTAMP")
+        if isinstance(parsed, _dt.datetime):
+            return parsed
+        raise ValueError(
+            f"Watermark '{raw}' is not a timestamp, but this collection stores "
+            "BSON dates in the cursor field — the incremental bound cannot be "
+            "compared. Reset the cursor for this stream."
+        )
+    if kind == "number":
+        if isinstance(casted, (int, float, Decimal128)) and not isinstance(casted, bool):
+            return casted
+        from services.transform_engine import decimal_wire_value, integer_wire_value
+
+        as_int = integer_wire_value(str(raw))
+        if as_int is not None:
+            return as_int
+        parsed = decimal_wire_value(raw)
+        if parsed is not None:
+            try:
+                return Decimal128(str(parsed))
+            except (InvalidOperation, ValueError, TypeError):
+                pass
+        raise ValueError(
+            f"Watermark '{raw}' is not numeric, but this collection stores "
+            "numbers in the cursor field. Reset the cursor for this stream."
+        )
+    if kind == "bool":
+        if isinstance(casted, bool):
+            return casted
+        parsed_bool = _cursor_boolean(str(raw))
+        if parsed_bool is not None:
+            return parsed_bool
+        raise ValueError(
+            f"Watermark '{raw}' is not a canonical boolean "
+            "(true/false/t/f/1/0), but this collection stores booleans in "
+            "the cursor field. Reset the cursor for this stream."
+        )
+    if kind == "objectid":
+        if isinstance(casted, ObjectId):
+            return casted
+        text = str(raw).strip()
+        if ObjectId.is_valid(text):
+            return ObjectId(text)
+        raise ValueError(
+            f"Watermark '{raw}' is not an ObjectId, but this collection stores "
+            "ObjectIds in the cursor field. Reset the cursor for this stream."
+        )
+    return casted
 
 
 def _connection_string(cfg: dict[str, Any]) -> str:
@@ -180,7 +327,7 @@ def read_collection_cursor_batch(
     """
     from bson.objectid import ObjectId
 
-    from services.keyset_pagination import split_cursor_bookmark
+    from services.keyset_pagination import present_cursor_bookmark, split_cursor_bookmark
 
     client = _mongo_client(_connection_string(cfg))
     coll = client[database][collection]
@@ -188,6 +335,9 @@ def read_collection_cursor_batch(
     sort_spec: list[tuple[str, int]] = [(cursor_column, 1)]
     pk = (cursor_primary_key or "").strip()
     use_composite = bool(pk and pk != cursor_column)
+    # The stored family, not the declared one, decides the comparison.
+    cursor_kind = stored_cursor_bson_kind(coll, cursor_column)
+    pk_kind = stored_cursor_bson_kind(coll, pk) if use_composite else ""
 
     def _as_mongo_cursor(raw: str, *, as_id: bool = False) -> Any:
         casted = _cast_cursor_value(raw, cursor_type if not as_id else "STRING")
@@ -206,11 +356,14 @@ def read_collection_cursor_batch(
             and ObjectId.is_valid(casted)
         ):
             return ObjectId(casted)
-        return casted
+        return _align_cursor_to_stored_kind(
+            raw, casted, pk_kind if as_id else cursor_kind
+        )
 
-    if cursor_after is not None and cursor_after != "":
+    bookmark = present_cursor_bookmark(cursor_after)
+    if bookmark is not None:
         cur_raw, pk_raw = split_cursor_bookmark(
-            cursor_after, has_tiebreak=use_composite
+            bookmark, has_tiebreak=use_composite
         )
         if use_composite and pk_raw != "":
             casted = _as_mongo_cursor(cur_raw)

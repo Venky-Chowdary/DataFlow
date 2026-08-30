@@ -81,10 +81,30 @@ def test_decimal_precision_propagated_not_truncated():
     assert ddl_carrier_type("HALFVEC(3)") == "HALFVEC(3)"
     assert ddl_carrier_type("SPARSEVEC(16)") == "SPARSEVEC(16)"
     assert ddl_carrier_type("VECTOR(768)") == "VECTOR(768)"
+    assert ddl_carrier_type("INTEGER[]") == "INTEGER[]"
+    assert ddl_carrier_type("INT[]") == "INT[]"
+    assert ddl_carrier_type("ARRAY<INTEGER>") == "ARRAY<INTEGER>"
+    assert ddl_carrier_type("ARRAY") == "ARRAY"
     # Scale beyond MySQL cap (30) → lossless TEXT, never silent truncate
     assert ddl_type("mysql", "NUMBER(38,31)") == "TEXT"
     assert decimal_scale_would_truncate("NUMBER(38,31)", "mysql") is True
     assert decimal_scale_would_truncate("NUMBER(38,18)", "mysql") is False
+
+
+def test_studio_file_export_formats_keep_the_source_class():
+    """``json`` / ``csv`` are Studio dest ids, not unknown dialects that invent TEXT."""
+    from services.type_system import destination_is_file_export
+
+    for dest in ("json", "csv", "parquet", "file_export", "jsonl", "xlsx", "s3"):
+        assert destination_is_file_export(dest) is True, dest
+        # Ambiguous INTEGER invents 64-bit on every dest — file export included.
+        assert ddl_type(dest, "INTEGER") == "BIGINT", dest
+        assert ddl_type(dest, "BIGINT") == "BIGINT", dest
+        assert ddl_type(dest, "DATE") == "DATE", dest
+        assert ddl_type(dest, "DECIMAL(10,2)") == "DECIMAL(38,2)", dest
+        assert ddl_type(dest, "VARCHAR(50)") == "VARCHAR", dest
+    assert destination_is_file_export("mysql") is False
+    assert destination_is_file_export("postgresql") is False
 
 
 def test_vector_dimension_propagated_never_invented():

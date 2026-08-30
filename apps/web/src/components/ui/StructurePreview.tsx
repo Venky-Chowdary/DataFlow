@@ -155,9 +155,12 @@ function PreviewBody({
             <span>Expand field chips — sample rows stay visible below</span>
           </summary>
           <div className="df2-structure-field-strip" aria-label="Detected fields">
-            {stripCols.map((col) => (
+            {/* Columns are positional: a name can repeat or be blank (a header row
+                with an empty cell), and keying by name left a stale chip from the
+                previous profile on screen — four chips under a "3 fields" label. */}
+            {stripCols.map((col, i) => (
               <span
-                key={col}
+                key={`${i}:${col}`}
                 className={`df2-structure-field-chip ${typeBadgeClass(schema[col])}`}
                 title={`${col} · ${schema[col] || "string"}`}
               >
@@ -200,8 +203,8 @@ function PreviewBody({
           <table className="df2-structure-table" style={{ "--cols": previewCols.length } as React.CSSProperties}>
             <thead>
               <tr>
-                {previewCols.map((col) => (
-                  <th key={col} className={typeBadgeClass(schema[col])}>
+                {previewCols.map((col, i) => (
+                  <th key={`${i}:${col}`} className={typeBadgeClass(schema[col])}>
                     <span>{col}</span>
                     <small className="df2-type-badge">{schema[col] || "string"}</small>
                   </th>
@@ -211,11 +214,11 @@ function PreviewBody({
             <tbody>
               {previewRows.map((row, i) => (
                 <tr key={i}>
-                  {previewCols.map((col) => {
+                  {previewCols.map((col, ci) => {
                     const raw = row[col];
                     const text = formatPreviewCell(raw);
                     return (
-                      <td key={col} title={text} className={typeBadgeClass(schema[col])}>
+                      <td key={`${ci}:${col}`} title={text} className={typeBadgeClass(schema[col])}>
                         {text.length > 48 ? `${text.slice(0, 48)}…` : text}
                       </td>
                     );

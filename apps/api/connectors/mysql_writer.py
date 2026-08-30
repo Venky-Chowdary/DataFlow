@@ -61,6 +61,7 @@ from connectors.writer_common import (
 from connectors.writer_common import (
     WriteResult as _WriteResult,
 )
+from connectors.writer_common import writer_meta_with_source_rows
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +72,13 @@ class WriteResult(_WriteResult):
 
 
 def mysql_type(inferred: str) -> str:
-    return materialize_dest_ddl("mysql", inferred)
+    raw = materialize_dest_ddl("mysql", inferred)
+    # MySQL 1064: bare VARCHAR/CHAR/BINARY need a width. LOGICAL_STRING is TEXT.
+    # Do not invent VARCHAR(255) — that is a different uniqueness/prefix rule.
+    compact = "".join((raw or "").split()).upper()
+    if compact in {"VARCHAR", "CHAR", "VARBINARY", "BINARY"}:
+        return materialize_dest_ddl("mysql", "string")
+    return raw
 
 
 def _fetch_mysql_column_types(
@@ -960,7 +967,11 @@ def write_mapped_rows(
                 create_sql = f"CREATE TABLE IF NOT EXISTS {table_q} ({col_defs})"
                 if suffix:
                     create_sql = f"{create_sql} {suffix}"
-                cursor.execute(create_sql)
+                # Dest-exists must not invent create-new. MySQL still *parses*
+                # IF NOT EXISTS, so a bare VARCHAR Map stamp 1064s on replay
+                # into a live table (``near ' `age` BIGINT)'``).
+                if not table_existed:
+                    cursor.execute(create_sql)
                 _kwargs["_schema_fidelity_report"] = settle_create_new_on_destination(
                     fidelity_plan,
                     dest_dialect="mysql",
@@ -988,7 +999,8 @@ def write_mapped_rows(
                         col_defs += (
                             f", UNIQUE KEY {quote_sql_identifier(index_name, '`')} ({cols})"
                         )
-                cursor.execute(f"CREATE TABLE IF NOT EXISTS {table_q} ({col_defs})")
+                if not table_existed:
+                    cursor.execute(f"CREATE TABLE IF NOT EXISTS {table_q} ({col_defs})")
                 _kwargs.setdefault(
                     "_schema_fidelity_report",
                     empty_unsupported_report(
@@ -1594,10 +1606,11 @@ def write_mapped_rows(
             coerced_null_rows=coerced_null_rows,
             rows_skipped=rows_skipped,
             warnings=transform_errors,
-            meta=(
+            meta=writer_meta_with_source_rows(
                 {"schema_fidelity": _kwargs["_schema_fidelity_report"]}
                 if isinstance(_kwargs.get("_schema_fidelity_report"), dict)
-                else {}
+                else {},
+                source_row_count,
             ),
         )
     except Exception as exc:

@@ -23,10 +23,11 @@ import os
 import re
 import time
 import uuid
+from decimal import Decimal
 from pathlib import Path
 from typing import Any, Callable, Sequence
 
-from services.value_serializer import json_default
+from services.value_serializer import json_default, json_loads_exact
 
 from connectors.writer_common import (
     WriteResult,
@@ -654,7 +655,7 @@ def _read_snapshot_data_file(
                 if not line:
                     continue
                 try:
-                    obj = json.loads(line)
+                    obj = json_loads_exact(line)
                 except Exception as exc:
                     raise ValueError(
                         f"Iceberg JSONL data-file corrupt at {rel}:{line_no}: {exc}"
@@ -715,17 +716,19 @@ def _load_existing_rows(table_dir: Path, columns: list[str], current_meta: dict[
 
 
 def _upsert_pk_key(row: dict[str, Any], pk_cols: Sequence[str]) -> tuple:
-    """Comparable PK tuple. Never stringify None → ``\"None\"``."""
-    from connectors.writer_common import _is_nullish_conflict_key
+    """Leftover merge key on the same dest cell wire as ``_pk_lookup_part``.
 
-    out: list[str] = []
-    for col in pk_cols:
-        val = row.get(col)
-        if _is_nullish_conflict_key(val):
-            out.append("")
-        else:
-            out.append(str(val))
-    return tuple(out)
+    ``str(True)`` is ``True`` and would miss dest ``true``. Reader-null /
+    blank stay empty so a sentinel is not a second identity.
+    """
+    return tuple(_pk_lookup_part(row.get(col)) for col in pk_cols)
+
+
+def _iceberg_present_fields(row: dict[str, Any]) -> dict[str, Any]:
+    """Sparse omit Missing; bind reader-null as None, not the extract token."""
+    from connectors.writer_common import present_field_bindings
+
+    return present_field_bindings(row)
 
 
 def _merge_upsert_rows(
@@ -743,9 +746,6 @@ def _merge_upsert_rows(
     from connectors.writer_common import compare_lsn, _is_nullish_conflict_key
     from services.value_serializer import is_missing_sentinel
 
-    def _present(row: dict[str, Any]) -> dict[str, Any]:
-        return {k: v for k, v in row.items() if not is_missing_sentinel(v)}
-
     best: dict[tuple, dict[str, Any]] = {}
     for row in existing:
         key = _upsert_pk_key(row, pk_cols)
@@ -753,7 +753,7 @@ def _merge_upsert_rows(
             continue
         best[key] = dict(row)
     for row in incoming:
-        clean = _present(row)
+        clean = _iceberg_present_fields(row)
         # Sparse/empty PK must quarantine upstream — refuse invent duplicates here.
         from connectors.writer_common import assert_sparse_upsert_has_pk
 
@@ -832,9 +832,7 @@ def _mor_upsert_delta(
         if applied is None:
             continue
         prev = existing_by.get(key)
-        clean = {
-            k: v for k, v in row.items() if not is_missing_sentinel(v)
-        }
+        clean = _iceberg_present_fields(row)
         if prev is None:
             new_rows.append(applied)
             continue
@@ -870,6 +868,30 @@ def _coerce_arrow_cell(value: Any, arrow_type: Any, pa: Any) -> Any:
     from services.arrow_write import coerce_arrow_cell
 
     return coerce_arrow_cell(value, arrow_type, pa, dialect="iceberg")
+
+
+def _iceberg_jsonl_payload(
+    row: dict[str, Any],
+    column_types: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """JSONL fallback cell bind — reader-null is JSON null, never the extract token.
+
+    Residual ``DF_MISSING`` still raises: overlay must expand first, same as
+    the Parquet path. Empty string / 0 / false stay present.
+    """
+    from connectors.writer_common import to_json_value
+    from services.value_serializer import is_missing_sentinel
+
+    types = column_types or {}
+    out: dict[str, Any] = {}
+    for key, val in row.items():
+        if is_missing_sentinel(val):
+            raise ValueError(
+                f"Iceberg JSONL write refused residual DF_MISSING on column {key!r} "
+                "— would serialize the sentinel literally into the data file"
+            )
+        out[key] = to_json_value(val, key, types)
+    return out
 
 
 def _write_data_file(
@@ -919,22 +941,15 @@ def _write_data_file(
                 f"Iceberg Parquet type conversion failed; refusing JSONL type downgrade: {exc}"
             ) from exc
 
-    from services.value_serializer import is_missing_sentinel
-
-    for row in dict_rows:
-        for k, v in row.items():
-            if is_missing_sentinel(v):
-                raise ValueError(
-                    f"Iceberg JSONL write refused residual DF_MISSING on column {k!r} "
-                    "— would serialize the sentinel literally into the data file"
-                )
-
     rel = f"data/{file_id}.jsonl"
     path = data_dir.parent / rel
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as fh:
         for row in dict_rows:
-            line = json.dumps(row, default=json_default)
+            line = json.dumps(
+                _iceberg_jsonl_payload(row, types),
+                default=json_default,
+            )
             fh.write(line + "\n")
             digest.update(line.encode())
     return rel, len(dict_rows), digest.hexdigest()[:16], warnings
@@ -1003,15 +1018,24 @@ def _pk_predicate_variants(value: Any) -> list[Any]:
     column is typed as ``long``/``int``. A strict ``In``/``EqualTo`` then
     returns zero rows, the overlay treats the destination as empty, and a
     sparse CDC update invents NULLs (or the LSN guard sees nothing to compare).
-    Including every lossless coercion keeps the pushdown honest without a full
-    table scan on every batch.
+    Including every lossless write-path coercion keeps the pushdown honest
+    without a full table scan on every batch. ``float(text)`` is not lossless
+    — Auto ``1.000`` became ``1``.
     """
+    from services.value_serializer import (
+        is_missing_sentinel,
+        is_reader_null_cell,
+        present_cell_text,
+    )
+
+    if is_missing_sentinel(value):
+        return [value]
+    if is_reader_null_cell(value):
+        return [None]
     variants: list[Any] = [value]
-    if value is None:
-        return variants
-    as_str = str(value)
-    if as_str not in variants:
-        variants.append(as_str)
+    text = present_cell_text(value)
+    if text is not None and text not in variants:
+        variants.append(text)
     if isinstance(value, bool):
         return variants
     if isinstance(value, int):
@@ -1021,19 +1045,31 @@ def _pk_predicate_variants(value: Any) -> list[Any]:
         return variants
     if isinstance(value, str):
         text = value.strip()
-        if text.isdigit() or (text.startswith("-") and text[1:].isdigit()):
-            try:
-                variants.append(int(text))
-            except Exception:
-                pass
-        else:
-            try:
-                as_float = float(text)
-            except Exception:
-                as_float = None
-            if as_float is not None and as_float.is_integer():
-                variants.append(int(as_float))
+        from services.transform_engine import integer_wire_value
+
+        # Write-path integers only. float(text) invented Auto 1.000 → 1
+        # and missed $1,234 the leftover long column actually stores.
+        whole = integer_wire_value(text)
+        if whole is not None:
+            as_int = int(whole)
+            if as_int not in variants:
+                variants.append(as_int)
     return variants
+
+
+def _pk_lookup_part(value: Any) -> str:
+    """One Iceberg leftover PK part on the dest cell wire.
+
+    ``str(True)`` is ``True``; dest and source ``true`` share one token.
+    Reader-null / blank stay empty so a sentinel is not probed as a key.
+    """
+    from connectors.writer_common import _is_nullish_conflict_key
+    from services.value_serializer import present_cell_text
+
+    if _is_nullish_conflict_key(value):
+        return ""
+    text = present_cell_text(value)
+    return "" if text is None else text
 
 
 def _pk_row_filter(pk_cols: list[str], key_tuples: list[tuple]) -> Any:
@@ -1099,16 +1135,11 @@ def _scan_existing_by_pk(
             row = {name: columns[name][idx] for name in names}
             if any(_is_nullish_conflict_key(row.get(c)) for c in pk_cols):
                 continue
-            key = tuple(
-                "" if _is_nullish_conflict_key(row.get(c)) else str(row.get(c))
-                for c in pk_cols
-            )
+            key = tuple(_pk_lookup_part(row.get(c)) for c in pk_cols)
             existing[key] = row
 
     unique_keys = list(dict.fromkeys(key_tuples))
-    wanted = {
-        tuple("" if v is None else str(v) for v in tup) for tup in unique_keys
-    }
+    wanted = {tuple(_pk_lookup_part(v) for v in tup) for tup in unique_keys}
     try:
         for start in range(0, len(unique_keys), _PK_SCAN_SLICE):
             chunk = unique_keys[start : start + _PK_SCAN_SLICE]
@@ -1735,7 +1766,7 @@ def _write_mapped_rows_pyiceberg(
                         continue
                     existing_by_pk[key] = {
                         **(base or {}),
-                        **{k: v for k, v in row_dict.items() if not is_missing_sentinel(v)},
+                        **_iceberg_present_fields(row_dict),
                     }
                     fold_kept.append(raw)
             _fold_abort = reject_on_strict_policy(policy, rejected_details, "Iceberg")
@@ -2704,56 +2735,67 @@ def _iceberg_split_key(key: str, width: int) -> list[str]:
     return parts
 
 
+def _iceberg_float_carrier(parsed: Decimal) -> float:
+    """Iceberg Float/Double carrier after a successful write-path bind."""
+    from services.transform_engine import float_carrier_or_refuse
+
+    return float_carrier_or_refuse(parsed)
+
+
 def _iceberg_typed_literal(tbl: Any, column: str, raw: Any) -> Any:
     """Bind a leftover/CDC key part to the Iceberg field type.
 
     Digit strings on a string PK must stay strings (LongLiteral cannot
-    convert into string). Integer/long fields take int. Decimal/date/
-    timestamp/uuid bind to the field type. Fail closed on a missing
-    field or a value that cannot convert — never guess.
+    convert into string). Numbers, calendars, and booleans use the same
+    write-path parsers as ``coerce_arrow_cell`` — ``Decimal(text)`` /
+    ``fromisoformat`` / informal ``yes`` invented deletes the writer
+    would not store. Fail closed on a missing field or a refused cell.
     """
-    from datetime import date, datetime
-    from decimal import Decimal
-
-    from pyiceberg.types import (
-        BooleanType,
-        DateType,
-        DecimalType,
-        DoubleType,
-        FloatType,
-        IntegerType,
-        LongType,
-        TimestampType,
-        TimestamptzType,
-        UUIDType,
-    )
+    from services.arrow_write import _date_from_write_path, _datetime_from_write_path
+    from services.transform_engine import apply_transform, decimal_wire_value, integer_wire_value
 
     field = tbl.schema().find_field(column, case_sensitive=False)
     ftype = getattr(field, "field_type", None)
     if ftype is None:
         raise ValueError(f"Iceberg delete: unknown field {column!r}")
+    kind = type(ftype).__name__
     text = str(raw)
     try:
-        if isinstance(ftype, (IntegerType, LongType)):
-            return int(text)
-        if isinstance(ftype, BooleanType):
-            return text.strip().lower() in {"1", "true", "t", "yes"}
-        if isinstance(ftype, (DoubleType, FloatType)):
-            return float(text)
-        if isinstance(ftype, DecimalType):
-            return Decimal(text)
-        if isinstance(ftype, DateType):
-            return date.fromisoformat(text[:10])
-        if isinstance(ftype, (TimestampType, TimestamptzType)):
-            return datetime.fromisoformat(text.replace("Z", "+00:00"))
-        if isinstance(ftype, UUIDType):
+        if kind in {"IntegerType", "LongType"}:
+            parsed_int = integer_wire_value(text)
+            if parsed_int is None:
+                raise ValueError("integer write path refused")
+            return parsed_int
+        if kind == "BooleanType":
+            parsed_bool, err = apply_transform(text, "boolean")
+            if parsed_bool is None or err:
+                raise ValueError("boolean write path refused")
+            return bool(parsed_bool)
+        if kind in {"DoubleType", "FloatType"}:
+            parsed_num = decimal_wire_value(text)
+            if parsed_num is None:
+                raise ValueError("float write path refused")
+            return _iceberg_float_carrier(parsed_num)
+        if kind == "DecimalType":
+            parsed_dec = decimal_wire_value(text)
+            if parsed_dec is None:
+                raise ValueError("decimal write path refused")
+            return parsed_dec
+        if kind == "DateType":
+            return _date_from_write_path(text)
+        if kind == "TimestampType":
+            parsed_ts = _datetime_from_write_path(text)
+            return parsed_ts.replace(tzinfo=None) if parsed_ts.tzinfo is not None else parsed_ts
+        if kind == "TimestamptzType":
+            return _datetime_from_write_path(text)
+        if kind == "UUIDType":
             import uuid as _uuid
 
             return _uuid.UUID(text)
     except (TypeError, ValueError) as exc:
         raise ValueError(
             f"Iceberg delete: {column!r} value {text!r} does not bind "
-            f"to {type(ftype).__name__}"
+            f"to {kind}"
         ) from exc
     return text
 

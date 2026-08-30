@@ -22,7 +22,21 @@ from typing import Any, Iterator
 # Runtime registry of SDK-loaded connectors (name -> cls)
 _SDK_REGISTRY: dict[str, type["BaseConnector"]] = {}
 
+from services.value_serializer import json_loads_exact
+
 logger = logging.getLogger(__name__)
+
+
+def load_sdk_protocol_message(line: str) -> dict[str, Any] | None:
+    """One Singer / Airbyte protocol line. Numbers match ``json_loads_exact``.
+
+    Invalid JSON or a non-object line is skipped — never invent a record.
+    """
+    try:
+        msg = json_loads_exact(line)
+    except (json.JSONDecodeError, ValueError, TypeError):
+        return None
+    return msg if isinstance(msg, dict) else None
 
 
 @dataclass
@@ -187,9 +201,8 @@ class SingerTapBridge(BaseConnector):
             line = line.strip()
             if not line:
                 continue
-            try:
-                msg = json.loads(line)
-            except json.JSONDecodeError:
+            msg = load_sdk_protocol_message(line)
+            if msg is None:
                 continue
             if msg.get("type") == "SCHEMA":
                 props = {
@@ -260,9 +273,8 @@ class SingerTapBridge(BaseConnector):
                 line = line.strip()
                 if not line:
                     continue
-                try:
-                    msg = json.loads(line)
-                except json.JSONDecodeError:
+                msg = load_sdk_protocol_message(line)
+                if msg is None:
                     continue
                 mtype = msg.get("type")
                 if mtype == "SCHEMA" and (not stream or msg.get("stream") == stream):

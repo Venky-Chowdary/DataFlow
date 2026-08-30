@@ -5,6 +5,7 @@ fastapi>=0.104.0
 uvicorn[standard]>=0.24.0
 python-multipart>=0.0.31
 pydantic>=2.5.0
+pydantic-settings>=2.0.0  # services.config BaseSettings — required for app boot
 eval_type_backport>=0.2.0
 
 # Dataframe / numeric helpers (heavy embedding models are optional — see requirements-rag.txt)
@@ -27,7 +28,7 @@ boto3>=1.34.0
 redis>=5.0.0
 elasticsearch>=8.0.0,<9.0.0
 sqlalchemy>=2.0.0
-sqlparse>=0.4.4  # Query playground read-only SQL validation
+sqlparse>=0.6.0  # Query playground read-only SQL validation (0.5.x: CVE-2026-54284/59893/59894/71491)
 duckdb>=0.9.0  # DuckDB engine (DBAPI) for local / generic_sql proofs
 duckdb-sqlalchemy>=0.5.0  # DuckDB via SQLAlchemy / generic_sql
 clickhouse-sqlalchemy>=0.3.0  # ClickHouse via SQLAlchemy / generic_sql

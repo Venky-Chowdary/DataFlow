@@ -4,7 +4,12 @@
  * Secrets (passwords, connection URLs with credentials) are redacted before write.
  */
 
-import type { CopilotAction, CopilotChatMessage, CopilotPendingAction } from "./api";
+import type {
+  CopilotAction,
+  CopilotChatMessage,
+  CopilotPendingAction,
+  CopilotSource,
+} from "./api";
 
 export interface PilotMessage {
   role: "user" | "assistant";
@@ -14,6 +19,8 @@ export interface PilotMessage {
   pending_actions?: CopilotPendingAction[];
   suggested_prompts?: string[];
   tools_used?: { name: string; success: boolean; summary: string }[];
+  /** Citations the turn actually retrieved — absent means the answer is uncited. */
+  sources?: CopilotSource[];
 }
 
 export interface PilotToolLogEntry {
@@ -73,7 +80,9 @@ const SESSIONS_KEY = "df2.pilot.sessions.v1";
 const ACTIVE_KEY = "df2.pilot.activeId.v1";
 const ASIDE_KEY = "df2.pilot.asideOpen.v1";
 const RAIL_KEY = "df2.pilot.rail.v1";
+const DELETED_KEY = "df2.pilot.deletedIds.v1";
 const SIDEBAR_COMPACT_KEY = "df2.sidebar.navCompact.v1";
+const MAX_DELETED = 80;
 
 const MAX_SESSIONS = 40;
 const MAX_MESSAGES = 120;
@@ -220,9 +229,27 @@ export function loadRailChat(): PilotRailState | null {
   };
 }
 
+export function loadDeletedSessionIds(): string[] {
+  const raw = readJson<string[]>(DELETED_KEY);
+  return Array.isArray(raw) ? raw.filter((id) => typeof id === "string" && id.trim()) : [];
+}
+
+export function isDeletedPilotSession(id: string): boolean {
+  const key = String(id || "").trim();
+  return Boolean(key) && loadDeletedSessionIds().includes(key);
+}
+
+export function rememberDeletedSession(id: string) {
+  const key = String(id || "").trim();
+  if (!key) return;
+  const next = [...new Set([...loadDeletedSessionIds(), key])].slice(-MAX_DELETED);
+  writeJson(DELETED_KEY, next);
+}
+
 export function saveRailChat(
   state: Pick<PilotRailState, "messages" | "history" | "sessionId" | "lastResultId">,
 ) {
+  if (isDeletedPilotSession(state.sessionId)) return;
   writeJson(RAIL_KEY, {
     messages: state.messages.map(redactMessage).slice(-MAX_MESSAGES),
     history: redactHistory(state.history).slice(-MAX_HISTORY),
@@ -243,6 +270,10 @@ export function promoteRailChatToPilotSession(): {
 } | null {
   const rail = loadRailChat();
   if (!rail) return null;
+  if (isDeletedPilotSession(rail.sessionId)) {
+    clearRailChat();
+    return null;
+  }
   const meaningful = (rail.messages || []).filter(
     (m) => m.role === "user" || (m.role === "assistant" && (m.text || "").length > 80),
   );
@@ -279,6 +310,27 @@ export function promoteRailChatToPilotSession(): {
   const next = [promoted, ...sessions.filter((s) => s.messages.length > 0 || s.id === activeId)];
   savePilotWorkspace(next, promoted.id);
   return { sessions: next, activeId: promoted.id };
+}
+
+export function deletePilotSession(
+  sessions: PilotSession[],
+  id: string,
+  activeId: string,
+): { sessions: PilotSession[]; activeId: string } {
+  rememberDeletedSession(id);
+  const rail = loadRailChat();
+  if (rail?.sessionId === id) clearRailChat();
+  let next = sessions.filter((s) => s.id !== id);
+  let nextActive = activeId;
+  if (!next.length) {
+    const empty = createEmptySession();
+    next = [empty];
+    nextActive = empty.id;
+  } else if (id === activeId) {
+    nextActive = next[0].id;
+  }
+  savePilotWorkspace(next, nextActive);
+  return { sessions: next, activeId: nextActive };
 }
 
 export function clearRailChat() {

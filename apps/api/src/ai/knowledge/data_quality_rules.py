@@ -9,6 +9,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from services.transform_engine import CANONICAL_BOOLEAN_SAMPLE_PATTERN, apply_transform
+
 DATA_QUALITY_RULES: dict[str, dict] = {
     "completeness": {
         "name": "Completeness",
@@ -45,13 +47,35 @@ FORMAT_VALIDATORS: dict[str, list[str]] = {
     "Credit Card Number": [r"^\d{4}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}$", r"^\d{16}$"],
     "Postal Code": [r"^\d{5}(-\d{4})?$", r"^[A-Z]\d[A-Z]\s?\d[A-Z]\d$"],
     "Currency Amount": [r"^\$?\d+\.?\d{0,2}$", r"^-?\d+\.?\d{0,2}$"],
-    "Date": [r"^\d{4}-\d{2}-\d{2}$", r"^\d{2}/\d{2}/\d{4}$"],
+    # ISO catalog only. Slash dates (01/02/2024) must go through apply_transform.
+    "Date": [r"^\d{4}-\d{2}-\d{2}$"],
     "Timestamp": [r"^\d{4}-\d{2}-\d{2}[T\s]\d{2}:\d{2}:\d{2}"],
     "URL": [r"^https?://"],
     "IP Address": [r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$", r"^[0-9a-fA-F:]+$"],
     "Currency Code": [r"^[A-Z]{3}$"],
-    "Boolean Flag": [r"^(true|false|1|0|yes|no|y|n)$"],
+    "Boolean Flag": [CANONICAL_BOOLEAN_SAMPLE_PATTERN],
 }
+
+# Date / Timestamp / Boolean Flag / Currency Amount validity is the write
+# path — regex alone called Auto-ambiguous 01/02/2024, informal yes, and
+# grouped $1,000.00 invalid (or 1,234 valid).
+WRITE_BIND_SEMANTIC_TYPES: dict[str, str] = {
+    "Date": "date",
+    "Timestamp": "datetime",
+    "Boolean Flag": "boolean",
+    "Currency Amount": "decimal",
+}
+
+
+def _value_matches_semantic_type(value: str, semantic_type: str) -> bool:
+    transform = WRITE_BIND_SEMANTIC_TYPES.get(semantic_type)
+    if transform:
+        parsed, err = apply_transform(value, transform)
+        return parsed is not None and not err
+    return any(
+        re.match(pattern, value, re.IGNORECASE)
+        for pattern in FORMAT_VALIDATORS.get(semantic_type) or []
+    )
 
 
 def validate_column_quality(
@@ -76,12 +100,12 @@ def validate_column_quality(
 
     validity = 100.0
     validity_issues = []
-    if semantic_type and semantic_type in FORMAT_VALIDATORS:
-        patterns = FORMAT_VALIDATORS[semantic_type]
+    if semantic_type and (
+        semantic_type in WRITE_BIND_SEMANTIC_TYPES or semantic_type in FORMAT_VALIDATORS
+    ):
         valid_count = 0
         for val in non_empty[:100]:
-            val_str = str(val).strip()
-            if any(re.match(p, val_str, re.IGNORECASE) for p in patterns):
+            if _value_matches_semantic_type(str(val).strip(), semantic_type):
                 valid_count += 1
         sample_size = min(len(non_empty), 100)
         validity = (valid_count / sample_size * 100) if sample_size > 0 else 100

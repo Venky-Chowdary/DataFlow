@@ -5,7 +5,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from services.ddl_compatibility import evaluate_ddl_compatibility
+from services.ddl_compatibility import (
+    _decimal_overflow_issue,
+    evaluate_ddl_compatibility,
+)
 from services.preflight_rules import explain_issue
 from services.type_coercion_validator import validate_mapping_coercions
 
@@ -78,6 +81,48 @@ def test_decimal_capacity_overflow_blocks_at_validate():
     )
     assert not ok
     assert any("Decimal capacity overflow" in i for i in issues)
+
+
+def test_padded_trailing_zeros_do_not_invent_an_overflow():
+    """'1.50000000' is 1.5 — the writer stores it in (9,2), so Validate must too."""
+    assert _decimal_overflow_issue(["1.50000000"], "amount", "NUMBER(9,2)") is None
+
+
+def test_significant_scale_beyond_the_target_still_blocks():
+    issue = _decimal_overflow_issue(["12.123456789012"], "arr_time", "NUMBER(11,8)")
+    assert issue and "Decimal capacity overflow" in issue
+
+
+def test_integer_digits_are_measured_after_padding_is_stripped():
+    """Stripping the pad must not hide a genuine integer-width overflow."""
+    issue = _decimal_overflow_issue(["12345678901.50000000"], "amount", "NUMBER(9,2)")
+    assert issue and "Decimal capacity overflow" in issue
+
+
+def test_money_scale_within_the_target_is_not_an_overflow():
+    assert _decimal_overflow_issue(["1000.00"], "amount", "NUMBER(9,2)") is None
+
+
+def test_gate_and_writer_agree_on_every_decimal_sample():
+    """The Validate forecast and the write-time predicate are one rule."""
+    from connectors.writer_common import fits_decimal
+
+    for sample in (
+        "1.50000000",
+        "12.123456789012",
+        "12345678901.50000000",
+        "1000.00",
+        "0.000000001",
+        "-9.87654321",
+        "99999999.99",
+    ):
+        for dest_type, precision, scale in (
+            ("NUMBER(9,2)", 9, 2),
+            ("NUMBER(11,8)", 11, 8),
+        ):
+            gate_ok = _decimal_overflow_issue([sample], "amount", dest_type) is None
+            writer_ok = fits_decimal(sample, precision, scale, dest_db="snowflake")
+            assert gate_ok == writer_ok, (sample, dest_type, gate_ok, writer_ok)
 
 
 def test_create_new_metadata_allows_missing_column():

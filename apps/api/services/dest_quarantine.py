@@ -17,9 +17,12 @@ import json
 import logging
 import re
 import uuid
+from contextlib import closing
 from dataclasses import replace
 from datetime import datetime, timezone
 from typing import Any
+
+from services.type_system import materialize_dest_ddl
 
 logger = logging.getLogger(__name__)
 
@@ -156,7 +159,15 @@ def write_dest_quarantine(
     endpoint = dlq_endpoint(destination)
     columns = list(META_COLUMNS)
     schema = {c: "string" for c in columns}
-    mappings = [{"source": c, "target": c, "confidence": 1.0} for c in columns]
+    # Unstamped mappings fell back to the Map default carrier `VARCHAR`, which
+    # MySQL rejects outright (1064: a width is mandatory) — so the DLQ table
+    # could never be created and no destination copy of the evidence existed.
+    # The carrier is materialized for the destination dialect instead.
+    dlq_carrier = materialize_dest_ddl(dest_type, "string")
+    mappings = [
+        {"source": c, "target": c, "target_type": dlq_carrier, "confidence": 1.0}
+        for c in columns
+    ]
 
     rows_written, ddl_log, summary = write_destination_database(
         endpoint,
@@ -169,10 +180,19 @@ def write_dest_quarantine(
         job_id=f"{job_id}_dlq" if job_id else None,
     )
     table = endpoint.table or dlq_table_name("import")
+    written = int(rows_written or 0)
+    # A short write is not a durable destination copy: report it as such rather
+    # than claiming `ok` beside a table holding fewer rows than the findings.
+    ok = written >= len(records)
     return {
-        "ok": True,
+        "ok": ok,
+        "error": (
+            ""
+            if ok
+            else f"destination DLQ wrote {written} of {len(records)} finding(s)"
+        ),
         "skipped": False,
-        "rows_written": int(rows_written or 0),
+        "rows_written": written,
         "table": table,
         "ddl": list(ddl_log or [])[:20],
         "writer_summary": {
@@ -193,14 +213,30 @@ def _sqlite_db_path(destination: Any) -> str:
     )
 
 
-def _qualified_dlq_table(cfg: dict[str, Any], table: str) -> str:
-    from connectors.generic_sql import get_sql_schema
-    from connectors.writer_common import quote_sql_identifier
+def _quote_ident(name: str, dest_type: str = "") -> str:
+    """Quote a DLQ identifier in the destination dialect.
 
+    MySQL without ANSI_QUOTES treats ``"col"`` as a string literal, so
+    ``WHERE "_df_promoted_at" = ''`` is always false and open_rows stays 0
+    even when the dest DLQ holds unpromoted findings.
+    """
+    from connectors.writer_common import quote_sql_identifier
+    from services.dialect_profiles import quote_char_for
+
+    quote = quote_char_for(dest_type)
+    if not quote:
+        return str(name)
+    return quote_sql_identifier(name, quote)
+
+
+def _qualified_dlq_table(cfg: dict[str, Any], table: str, dest_type: str = "") -> str:
+    from connectors.generic_sql import get_sql_schema
+
+    dialect = dest_type or str(cfg.get("type") or "")
     schema_name = get_sql_schema(cfg) or ""
-    table_q = quote_sql_identifier(table)
+    table_q = _quote_ident(table, dialect)
     if schema_name:
-        return f"{quote_sql_identifier(schema_name)}.{table_q}"
+        return f"{_quote_ident(schema_name, dialect)}.{table_q}"
     return table_q
 
 
@@ -217,7 +253,6 @@ def mark_dlq_promoted(
     """
     from src.transfer.adapters import resolve_connector_config
     from src.transfer.connector_capabilities import resolve_driver_type
-    from connectors.writer_common import quote_sql_identifier
 
     dest_type = resolve_driver_type(getattr(destination, "format", "") or "")
     if not dest_supports_dlq_table(dest_type):
@@ -265,7 +300,7 @@ def mark_dlq_promoted(
                 if job_id:
                     sql += ' AND "_df_job_id" = ?'
                     params.append(job_id)
-            with sqlite3.connect(path, timeout=8) as conn:
+            with closing(sqlite3.connect(path, timeout=8)) as conn:
                 cur = conn.execute(sql, params)
                 updated = int(cur.rowcount or 0)
                 conn.commit()
@@ -275,26 +310,27 @@ def mark_dlq_promoted(
         from connectors.generic_sql import get_sqlalchemy_engine
 
         cfg = resolve_connector_config(destination)
-        qualified = _qualified_dlq_table(cfg, table)
+        qualified = _qualified_dlq_table(cfg, table, dest_type)
         engine = get_sqlalchemy_engine(cfg)
+        q = lambda name: _quote_ident(name, dest_type)
         params_sa: dict[str, Any] = {"promoted_at": promoted_at}
         if by_job:
             sql = (
-                f"UPDATE {qualified} SET {quote_sql_identifier('_df_promoted_at')} = :promoted_at "  # nosec B608
-                f"WHERE {quote_sql_identifier('_df_job_id')} = :job_id "
-                f"AND ({quote_sql_identifier('_df_promoted_at')} IS NULL "
-                f"OR {quote_sql_identifier('_df_promoted_at')} = '')"
+                f"UPDATE {qualified} SET {q('_df_promoted_at')} = :promoted_at "  # nosec B608
+                f"WHERE {q('_df_job_id')} = :job_id "
+                f"AND ({q('_df_promoted_at')} IS NULL "
+                f"OR {q('_df_promoted_at')} = '')"
             )
             params_sa["job_id"] = job_id
         else:
             placeholders = ", ".join(f":id{i}" for i in range(len(ids)))
             params_sa.update({f"id{i}": ids[i] for i in range(len(ids))})
             sql = (
-                f"UPDATE {qualified} SET {quote_sql_identifier('_df_promoted_at')} = :promoted_at "  # nosec B608
-                f"WHERE {quote_sql_identifier('_df_qid')} IN ({placeholders})"
+                f"UPDATE {qualified} SET {q('_df_promoted_at')} = :promoted_at "  # nosec B608
+                f"WHERE {q('_df_qid')} IN ({placeholders})"
             )
             if job_id:
-                sql += f" AND {quote_sql_identifier('_df_job_id')} = :job_id"
+                sql += f" AND {q('_df_job_id')} = :job_id"
                 params_sa["job_id"] = job_id
         with engine.begin() as conn:
             result = conn.execute(sa.text(sql), params_sa)
@@ -362,7 +398,6 @@ def count_open_dlq_rows(destination: Any, *, job_id: str = "") -> dict[str, Any]
     """Count unpromoted DLQ rows (optional job filter) for Studio badges."""
     from src.transfer.adapters import resolve_connector_config
     from src.transfer.connector_capabilities import resolve_driver_type
-    from connectors.writer_common import quote_sql_identifier
 
     dest_type = resolve_driver_type(getattr(destination, "format", "") or "")
     if not dest_supports_dlq_table(dest_type):
@@ -414,7 +449,7 @@ def count_open_dlq_rows(destination: Any, *, job_id: str = "") -> dict[str, Any]
             if job_id:
                 sql += ' AND "_df_job_id" = ?'
                 params.append(job_id)
-            with sqlite3.connect(path, timeout=8) as conn:
+            with closing(sqlite3.connect(path, timeout=8)) as conn:
                 row = conn.execute(sql, params).fetchone()
                 n = int(row[0] or 0) if row else 0
             return {"supported": True, "open_rows": n, "table": table}
@@ -423,16 +458,17 @@ def count_open_dlq_rows(destination: Any, *, job_id: str = "") -> dict[str, Any]
         from connectors.generic_sql import get_sqlalchemy_engine
 
         cfg = resolve_connector_config(destination)
-        qualified = _qualified_dlq_table(cfg, table)
+        qualified = _qualified_dlq_table(cfg, table, dest_type)
         engine = get_sqlalchemy_engine(cfg)
+        q = lambda name: _quote_ident(name, dest_type)
         sql = (
             f"SELECT COUNT(*) FROM {qualified} "  # nosec B608
-            f"WHERE ({quote_sql_identifier('_df_promoted_at')} IS NULL "
-            f"OR {quote_sql_identifier('_df_promoted_at')} = '')"
+            f"WHERE ({q('_df_promoted_at')} IS NULL "
+            f"OR {q('_df_promoted_at')} = '')"
         )
         params_sa: dict[str, Any] = {}
         if job_id:
-            sql += f" AND {quote_sql_identifier('_df_job_id')} = :job_id"
+            sql += f" AND {q('_df_job_id')} = :job_id"
             params_sa["job_id"] = job_id
         with engine.connect() as conn:
             row = conn.execute(sa.text(sql), params_sa).fetchone()

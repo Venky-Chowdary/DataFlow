@@ -17,9 +17,12 @@ from typing import Any
 
 from services.value_serializer import json_default
 from ..knowledge.copilot_knowledge import DATA_PILOT_PERSONA, SUGGESTED_PROMPTS
+from ..rag.evidence import keeps_draft_facts
 from .agent import CopilotResponse
 from .context_builder import get_context_builder
 from .data_analyst import get_data_analyst
+from .job_narration import narrate_jobs
+from .tool_permissions import bind_current_context, is_permission_denial
 from .tools import (
     TOOL_DEFINITIONS,
     ToolResult,
@@ -71,8 +74,16 @@ def _tool_summary(tr: ToolResult) -> str:
         return f"{o.get('filtered', 0)} connectors"
     if tr.name == "search_knowledge":
         return f"{o.get('count', 0)} knowledge hits"
+    if tr.name == "brief_workspace":
+        facts = o.get("facts") if isinstance(o.get("facts"), dict) else o
+        return (
+            f"{int(facts.get('connector_count') or 0)} connectors, "
+            f"{int(facts.get('job_count') or 0)} jobs"
+        )
     if tr.name == "list_jobs":
-        return f"{o.get('count', 0)} jobs"
+        total = int(o.get("total") or 0) or int(o.get("count") or 0)
+        window = int(o.get("count") or 0)
+        return f"{total} jobs (latest {window})" if window < total else f"{total} jobs"
     if tr.name == "list_schedules":
         return f"{o.get('count', 0)} schedules"
     if tr.name == "list_contracts":
@@ -498,8 +509,9 @@ def _unmapped_intent_reply(message: str, ctx: dict[str, Any]) -> str:
         )
     if any(w in lower for w in ("schedule", "pipeline", "cron", "every hour", "daily", "nightly")):
         suggestions.append(
-            'I can list and trigger existing pipelines: "show my pipelines" or '
-            '"run schedule <name> now". Creating a new schedule still needs the UI.'
+            'I can create, list and trigger pipelines: "schedule users from '
+            'Local PG to Warehouse daily at 02:00 UTC", "show my pipelines", or '
+            '"run schedule <name> now".'
         )
     if any(w in lower for w in ("fix", "repair", "heal", "remediate", "quarantine")):
         suggestions.append(
@@ -539,10 +551,10 @@ def _unmapped_intent_reply(message: str, ctx: dict[str, Any]) -> str:
 
 
 def _llm_unavailable_footnote(engine: str, method: str) -> str:
-    """Only when operator explicitly opted into hybrid/cloud polish."""
+    """Hybrid footnote only on greeting — never after every workspace answer."""
     if engine not in {"hybrid", "cloud"}:
         return ""
-    if method not in {"pilot_local_engine", "greeting"}:
+    if method != "greeting":
         return ""
     try:
         from ..llm.provider import _AUTH_FAILED_PROVIDERS, pick_narration_provider
@@ -630,6 +642,67 @@ def _resolve_pilot_engine() -> str:
     return resolve_pilot_engine()
 
 
+_UNEVIDENCED_PRODUCT_TOOLS = frozenset({"explain_product", "describe_pilot", "search_knowledge"})
+
+
+def carries_evidence(response: CopilotResponse) -> bool:
+    """Whether an answer rests on something read: a citation or a live tool read.
+
+    Canonical for both the API's `grounded` flag and the narration gate — authored
+    prose and refusals must not be reported as grounded, and must not be handed to
+    an LLM to rewrite, because there is no evidence for it to restate.
+    """
+    if response.sources:
+        return True
+    return any(
+        tool.get("success") and str(tool.get("name") or "") not in _UNEVIDENCED_PRODUCT_TOOLS
+        for tool in response.tools_used or []
+    )
+
+
+def _sources_from_turn(turn: "PilotTurn") -> list[dict]:
+    """Citations the tools actually retrieved, de-duplicated by href."""
+    collected: list[dict] = []
+    seen: set[str] = set()
+    for tr in turn.tool_results:
+        if not tr.success or not isinstance(tr.output, dict):
+            continue
+        for src in tr.output.get("sources") or []:
+            if not isinstance(src, dict):
+                continue
+            key = str(src.get("href") or src.get("title") or "")
+            if key and key in seen:
+                continue
+            seen.add(key)
+            collected.append(src)
+    return collected
+
+
+def _evidence_ceiling(turn: "PilotTurn") -> float:
+    """Highest confidence the evidence in this turn can carry.
+
+    A product answer with no citation is authored prose or a refusal, not a
+    measured result — reporting it at 0.96 next to a live count is what made the
+    assistant sound equally sure of everything.
+    """
+    successes = [tr for tr in turn.tool_results if tr.success]
+    if not successes:
+        # Nothing was read, nothing was retrieved: this is a clarify or a refusal.
+        return 0.4
+    if any(tr.name not in _UNEVIDENCED_PRODUCT_TOOLS for tr in successes):
+        return 1.0
+    if _sources_from_turn(turn):
+        return 1.0
+    bases = {
+        str(tr.output.get("source") or "")
+        for tr in successes
+        if isinstance(tr.output, dict)
+    }
+    if bases and bases <= {"unsupported_question"}:
+        return 0.2
+    return 0.7
+
+
 @dataclass
 class PilotTurn:
     tool_results: list[ToolResult] = field(default_factory=list)
@@ -680,31 +753,46 @@ class DataPilotAgent:
         lower_msg = message.lower()
         history = history or []
         data_context = self._ensure_data_context(data_context, history)
-        if not message or lower_msg in {
-            "hi",
-            "hello",
-            "hey",
-            "help",
-            "yo",
-            "good morning",
-            "good afternoon",
-            "good evening",
-        }:
-            return CopilotResponse(
-                answer=(
-                    "I'm **Datawrap Pilot** — ask me anything about your workspace. "
-                    "I can count and aggregate live tables, sample and profile rows, "
-                    "inspect schemas, plan or stage transfers (**Confirm** before anything moves), "
-                    "triage jobs, and open Fix bad data in Transfer Studio. "
-                    'Try: "how many rows in airports on Local Postgres", '
-                    '"plan transfer of orders from Local Postgres to Warehouse", '
-                    'or "fix bad data".'
-                ),
-                intent="greeting",
-                confidence=1.0,
-                method="greeting",
-                suggested_prompts=self._starter_prompts()[:4],
-            )
+        from .dialogue_acts import classify_dialogue_act
+        from .conversation_composer import compose_greeting_response
+
+        if not message or classify_dialogue_act(message) == "greeting":
+            ctx = self.context_builder.build(data_context, message or "hi")
+            greet = compose_greeting_response(ctx)
+            if not greet.suggested_prompts:
+                greet.suggested_prompts = self._starter_prompts()[:4]
+            return greet
+
+        # Recap / thanks / next-step over the last spoken answer — do this before
+        # tool routing so "summarize that" after a job list does not re-hit Mongo.
+        # A stored sample still wins: "summarize that" then profiles the result.
+        _hist_act = classify_dialogue_act(message, history=history)
+        if _hist_act in {"summarize_last", "explain_simpler", "thanks", "next_action"}:
+            sid = str((data_context or {}).get("pilot_session_id") or "").strip()
+            focus = None
+            if sid:
+                try:
+                    from .working_memory import get_working_memory
+
+                    focus = get_working_memory().get_focus(sid)
+                except Exception:
+                    focus = None
+            if not (_hist_act == "summarize_last" and focus and focus.result_id):
+                from .conversation_composer import compose_history_turn
+
+                ctx = self.context_builder.build(data_context, message)
+                pending_labels = [
+                    str(a.get("label") or "")
+                    for a in (data_context or {}).get("pending_actions") or []
+                    if isinstance(a, dict) and a.get("label")
+                ]
+                return compose_history_turn(
+                    _hist_act,
+                    history=history,
+                    message=message,
+                    ctx=ctx,
+                    pending_labels=pending_labels or None,
+                )
 
         # Meta questions stay on the local agent — never RAG-dump ontology shards
         # and never race cloud LLMs for a "who are you" answer.
@@ -756,38 +844,26 @@ class DataPilotAgent:
         ):
             return _with_llm_footnote(polished, engine)
 
+        # A local refusal is the knowledge answer. Racing a cloud model here
+        # invented general-web prose after "how do I cook rice".
+        if not carries_evidence(local) and float(local.confidence or 0) <= 0.25:
+            return _with_llm_footnote(polished, engine)
+
         # Local had nothing grounded — allow a single native LLM tool loop for hard paraphrases.
         import time as _time
         from concurrent.futures import wait, FIRST_COMPLETED
 
         llm_futs: list = []
-        # Self-hosted Ollama first, then cloud — OpenAI is optional.
-        if self._ollama_available_quick():
+        # A provider the operator configured in Settings goes first — that is the
+        # one they asked us to use; a self-hosted Ollama is the fallback.
+        native = self._first_available_native_agent()
+        if native is not None:
             llm_futs.append(
                 _executor.submit(
-                    self._ollama_agent, message, history or [], system, data_context
+                    bind_current_context(native),
+                    message, history or [], system, data_context,
                 )
             )
-        elif self.anthropic.is_available():
-            llm_futs.append(
-                _executor.submit(
-                    self._anthropic_agent_loop, message, history or [], system, data_context
-                )
-            )
-        else:
-            openai_ready = False
-            try:
-                from ..llm.provider import DataTransferOpenAIProvider
-
-                openai_ready = DataTransferOpenAIProvider().is_available()
-            except Exception:
-                openai_ready = False
-            if openai_ready:
-                llm_futs.append(
-                    _executor.submit(
-                        self._openai_agent, message, history or [], system, data_context
-                    )
-                )
 
         if not llm_futs:
             return _with_llm_footnote(polished, engine)
@@ -929,13 +1005,17 @@ class DataPilotAgent:
             break
 
         # Suggestions with no active dataset → list uploads so the operator can pick.
+        # Skip when a Help FAQ already answered (gates / quarantine / append).
         for tr in list(turn.tool_results):
             if tr.name != "profile_quality_rules" or not tr.success:
                 continue
             cols = int((tr.output or {}).get("column_count") or 0)
             if cols > 0:
                 continue
-            if "list_datasets" not in {t.name for t in turn.tool_results}:
+            names = {t.name for t in turn.tool_results}
+            if "explain_product" in names:
+                continue
+            if "list_datasets" not in names:
                 ds = self.tools.execute("list_datasets", {})
                 turn.tool_results.append(ds)
                 self._append_tool_actions(turn, ds)
@@ -1012,12 +1092,43 @@ class DataPilotAgent:
         except Exception:
             return False
 
+    def _first_available_native_agent(self):
+        """The native tool-loop runner to use, honouring the operator's choice.
+
+        Providers configured with a key in Settings (or via env) are tried in the
+        order the store reports them; a reachable self-hosted Ollama is the last
+        resort. ``None`` means Pilot answers from the local engine alone.
+        """
+        try:
+            from services.integrations_store import configured_ai_providers
+
+            configured = list(configured_ai_providers())
+        except Exception:
+            configured = []
+
+        for name in configured:
+            if name == "openai":
+                try:
+                    from ..llm.provider import DataTransferOpenAIProvider
+
+                    if DataTransferOpenAIProvider().is_available():
+                        return self._openai_agent
+                except Exception:
+                    continue
+            elif name == "anthropic" and self.anthropic.is_available():
+                return self._anthropic_agent_loop
+
+        if self._ollama_available_quick():
+            return self._ollama_agent
+        return None
+
     @staticmethod
     def _append_tool_actions(turn: PilotTurn, tr: ToolResult) -> None:
         if not tr.success or not isinstance(tr.output, dict):
             err = (tr.error or "").strip()
             if err and (
-                err.startswith("Which ")
+                is_permission_denial(err)
+                or err.startswith("Which ")
                 or "did you mean" in err.lower()
                 or "no connector matched" in err.lower()
                 or "which connector" in err.lower()
@@ -1153,11 +1264,15 @@ class DataPilotAgent:
         system: str,
         data_context: dict | None = None,
     ) -> CopilotResponse | None:
+        from .dialogue_acts import turn_text
+
         messages: list[dict] = []
         for msg in history[-12:]:
             role = msg.get("role", "user")
             if role in ("user", "assistant"):
-                messages.append({"role": role, "content": msg.get("content", "")})
+                text = turn_text(msg)
+                if text:
+                    messages.append({"role": role, "content": text})
         messages.append({"role": "user", "content": message})
 
         turn = PilotTurn()
@@ -1194,6 +1309,7 @@ class DataPilotAgent:
                         needs_clarification=turn.needs_clarification,
                         suggested_prompts=self._follow_ups(message, turn),
                         data_insight=self._data_insight_from_turn(turn),
+                        sources=_sources_from_turn(turn),
                         tools_used=_tools_used(turn),
                     )
                 break
@@ -1266,6 +1382,10 @@ class DataPilotAgent:
         ok = sum(1 for t in tools if t.get("success"))
         if ok == 0 and not local.pending_actions:
             return local
+        # Refusals and uncited prose have no evidence to restate, so a rewrite can
+        # only add invention — that is how "how do I cook rice" came back narrated.
+        if not carries_evidence(local) and not local.pending_actions:
+            return local
 
         provider = None
         method = "llm_polish"
@@ -1283,10 +1403,12 @@ class DataPilotAgent:
             tool_bits.append(
                 f"- {t.get('name')}: {'ok' if t.get('success') else 'fail'} — {t.get('summary')}"
             )
+        from .dialogue_acts import turn_text
+
         history_text = "\n".join(
-            f"{m.get('role', 'user').capitalize()}: {m.get('content', '')}"
+            f"{m.get('role', 'user').capitalize()}: {turn_text(m)}"
             for m in (history or [])[-6:]
-            if (m.get("content") or "").strip()
+            if turn_text(m)
         )
         prompt = f"""Rewrite the Datawrap Pilot answer below in clear, natural product language.
 
@@ -1318,16 +1440,26 @@ Draft answer:
         # Guardrail: empty or tiny polish is useless; keep local.
         if len(polished) < 20:
             return local
+        # A rewrite that dropped the draft's counts, IDs or subject is not a polish
+        # of a grounded answer — a provider ignoring the prompt must not replace it.
+        if not keeps_draft_facts(local.answer, polished):
+            logger.warning(
+                "%s narration dropped the draft's evidence — keeping the local answer",
+                method,
+            )
+            return local
         return CopilotResponse(
             answer=polished,
             intent=local.intent,
-            confidence=min(0.96, float(local.confidence or 0.9) + 0.03),
+            # Narration never adds evidence, so it never adds confidence.
+            confidence=float(local.confidence or 0.9),
             method=method,
             reasoning=f"Local tools + {method.split('_')[0].title()} narration",
             suggested_actions=local.suggested_actions,
             pending_actions=local.pending_actions,
             needs_clarification=local.needs_clarification,
             suggested_prompts=local.suggested_prompts,
+            sources=local.sources,
             data_insight=local.data_insight,
             tools_used=local.tools_used,
         )
@@ -1508,6 +1640,10 @@ Draft answer:
             out.setdefault("session_id", session_id)
         if last_result_id and name in ("analyze_result", "filter_result"):
             out.setdefault("result_id", last_result_id)
+        if name == "brief_workspace":
+            ws = str(ctx.get("workspace_id") or "").strip()
+            if ws:
+                out.setdefault("workspace_id", ws)
         return out
 
     def _openai_agent(
@@ -1524,12 +1660,14 @@ Draft answer:
 
         intent = self._detect_intent(message)
         turn = PilotTurn()
+        from .dialogue_acts import turn_text
+
         messages: list[dict] = []
         for m in history[-10:]:
             role = m.get("role", "user")
             if role not in ("user", "assistant"):
                 continue
-            content = (m.get("content") or "").strip()
+            content = turn_text(m)
             if content:
                 messages.append({"role": role, "content": content})
         messages.append({"role": "user", "content": message})
@@ -1567,6 +1705,7 @@ Draft answer:
                         needs_clarification=turn.needs_clarification,
                         suggested_prompts=self._follow_ups(message, turn),
                         data_insight=self._data_insight_from_turn(turn),
+                        sources=_sources_from_turn(turn),
                         tools_used=_tools_used(turn),
                     )
                 break
@@ -1622,6 +1761,7 @@ Draft answer:
                 needs_clarification=turn.needs_clarification,
                 suggested_prompts=self._follow_ups(message, turn),
                 data_insight=insight,
+                sources=_sources_from_turn(turn),
                 tools_used=_tools_used(turn),
             )
 
@@ -1636,9 +1776,12 @@ Draft answer:
         self._run_local_recovery(turn, message, data_context)
 
         tool_context = format_tool_results_for_llm(turn.tool_results)
+        from .dialogue_acts import turn_text
+
         history_text = "\n".join(
-            f"{m.get('role', 'user').capitalize()}: {m.get('content', '')}"
+            f"{m.get('role', 'user').capitalize()}: {turn_text(m)}"
             for m in history[-8:]
+            if turn_text(m)
         )
         prompt = f"""{system}
 
@@ -1665,6 +1808,7 @@ Respond as Datawrap Pilot in natural language. Ground your answer in tool result
             needs_clarification=turn.needs_clarification,
             suggested_prompts=self._follow_ups(message, turn),
             data_insight=self._data_insight_from_turn(turn),
+            sources=_sources_from_turn(turn),
             tools_used=_tools_used(turn),
         )
 
@@ -1690,9 +1834,12 @@ Respond as Datawrap Pilot in natural language. Ground your answer in tool result
         self._run_local_recovery(turn, message, data_context)
 
         tool_context = format_tool_results_for_llm(turn.tool_results)
+        from .dialogue_acts import turn_text
+
         history_text = "\n".join(
-            f"{m.get('role', 'user').capitalize()}: {m.get('content', '')}"
+            f"{m.get('role', 'user').capitalize()}: {turn_text(m)}"
             for m in history[-6:]
+            if turn_text(m)
         )
         prompt = f"""{system}
 
@@ -1719,6 +1866,7 @@ Respond as Datawrap Pilot — grounded in tool results."""
             needs_clarification=turn.needs_clarification,
             suggested_prompts=self._follow_ups(message, turn),
             data_insight=self._data_insight_from_turn(turn),
+            sources=_sources_from_turn(turn),
             tools_used=_tools_used(turn),
         )
 
@@ -1756,6 +1904,45 @@ Respond as Datawrap Pilot — grounded in tool results."""
                         suggested_prompts=list(pending.candidates or [])[:4] or self._starter_prompts()[:3],
                         tools_used=[],
                     )
+
+            from .conversation_composer import (
+                compose_general,
+                compose_greeting_response,
+                compose_history_turn,
+            )
+            from .dialogue_acts import classify_dialogue_act
+
+            act = classify_dialogue_act(message, history=history)
+            if act in {"summarize_last", "explain_simpler", "thanks", "next_action"}:
+                pending_labels = [
+                    str(a.get("label") or "")
+                    for a in (data_context or {}).get("pending_actions") or []
+                    if isinstance(a, dict) and a.get("label")
+                ]
+                return compose_history_turn(
+                    act,
+                    history=history,
+                    message=message,
+                    ctx=ctx,
+                    pending_labels=pending_labels or None,
+                )
+            if act == "greeting":
+                return compose_greeting_response(ctx)
+            if act == "briefing":
+                planned = [("brief_workspace", {})]
+            elif act == "general":
+                return CopilotResponse(
+                    answer=compose_general(message, ctx),
+                    intent="product_help",
+                    confidence=0.2,
+                    method="pilot_conversation",
+                    reasoning="General ask — no workspace evidence; refused guesswork",
+                    suggested_prompts=[
+                        "Give me a workspace briefing",
+                        "Show my transfer jobs",
+                        "What can you do?",
+                    ],
+                )
 
         for name, args in planned:
             tr = self.tools.execute(name, self._with_result_context(name, args, data_context))
@@ -1845,12 +2032,14 @@ Respond as Datawrap Pilot — grounded in tool results."""
             if labels and "Confirm" not in answer:
                 answer = f"{answer}\n\nConfirm to proceed: {labels}.".strip()
         ok_tools = sum(1 for tr in turn.tool_results if tr.success)
+        sources = _sources_from_turn(turn)
         if ok_tools:
             confidence = 0.96
         elif turn.needs_clarification:
             confidence = 0.78
         else:
             confidence = 0.84
+        confidence = min(confidence, _evidence_ceiling(turn))
         return CopilotResponse(
             answer=answer,
             intent=intent,
@@ -1861,6 +2050,7 @@ Respond as Datawrap Pilot — grounded in tool results."""
             pending_actions=turn.pending_actions,
             needs_clarification=turn.needs_clarification,
             suggested_prompts=self._follow_ups(message, turn),
+            sources=sources,
             data_insight=self._data_insight_from_turn(turn) or (
                 {
                     "dataset": insight.dataset_name,
@@ -1932,7 +2122,13 @@ Respond as Datawrap Pilot — grounded in tool results."""
                 else:
                     parts.append("No data contracts yet. Open **Contracts** to define one.")
             elif tr.name == "list_datasets" and tr.success:
-                datasets = tr.output.get("datasets", [])
+                from .tools import looks_like_index_dump_name
+
+                datasets = [
+                    ds
+                    for ds in (tr.output.get("datasets") or [])
+                    if ds.get("name") and not looks_like_index_dump_name(str(ds.get("name")))
+                ]
                 if datasets:
                     lines = [f"I have **{len(datasets)} datasets** indexed:"]
                     for ds in datasets[:6]:
@@ -1942,55 +2138,15 @@ Respond as Datawrap Pilot — grounded in tool results."""
                             + f" ({ds['source']})"
                         )
                     parts.append("\n".join(lines))
+            elif tr.name == "brief_workspace" and tr.success:
+                from .conversation_composer import compose_briefing
+
+                facts = (tr.output or {}).get("facts")
+                if not isinstance(facts, dict):
+                    facts = tr.output or {}
+                parts.append(compose_briefing(facts))
             elif tr.name == "list_jobs" and tr.success:
-                jobs = tr.output.get("jobs", [])
-                want_failures = any(
-                    w in (message or "").lower()
-                    for w in ("fail", "failed", "failure", "error", "broken")
-                )
-                failed = [
-                    j
-                    for j in jobs
-                    if str(j.get("status") or "").lower()
-                    in {"failed", "cancelled", "error"}
-                ]
-                if jobs:
-                    if want_failures:
-                        if failed:
-                            lines = [
-                                f"**{len(failed)}** of your last **{len(jobs)}** job(s) failed:"
-                            ]
-                            show = failed[:5]
-                        else:
-                            lines = [
-                                f"None of your last **{len(jobs)}** job(s) failed "
-                                "(in this window):"
-                            ]
-                            show = jobs[:5]
-                        for j in show:
-                            lines.append(
-                                f"• `{j.get('id', '?')}` · {j.get('source', '?')} -> "
-                                f"{j.get('destination', '?')}: "
-                                f"**{j.get('status')}** ({j.get('records', 0):,} records)"
-                            )
-                        if not failed:
-                            lines.append(
-                                "Open **Jobs** for full history, or paste a job id."
-                            )
-                    else:
-                        lines = ["Here are your **recent transfer jobs**:"]
-                        for j in jobs[:5]:
-                            lines.append(
-                                f"• `{j.get('id', '?')}` · {j.get('source', '?')} -> "
-                                f"{j.get('destination', '?')}: "
-                                f"**{j.get('status')}** ({j.get('records', 0):,} records)"
-                            )
-                    parts.append("\n".join(lines))
-                else:
-                    parts.append(
-                        "No transfer jobs yet. Ask me to **plan** or **start** a transfer "
-                        "(Confirm required), or open **Transfer Studio**."
-                    )
+                parts.append(narrate_jobs(tr.output or {}, message))
             elif tr.name == "get_job" and tr.success:
                 job = tr.output or {}
                 lines = [
@@ -2110,6 +2266,12 @@ Respond as Datawrap Pilot — grounded in tool results."""
                 o = tr.output or {}
                 rules = o.get("rules") or []
                 cols = int(o.get("column_count") or 0)
+                sibling_docs = any(
+                    t.name == "explain_product" and t.success
+                    for t in turn.tool_results
+                )
+                if sibling_docs and cols <= 0:
+                    continue
                 if cols <= 0:
                     gates = o.get("preflight_gates") or []
                     gate_line = (
@@ -2442,7 +2604,13 @@ Respond as Datawrap Pilot — grounded in tool results."""
                     lines.append("**Not yet from chat:**")
                     for item in cannot[:3]:
                         lines.append(f"• {item}")
-                ds = o.get("datasets") or []
+                from .tools import looks_like_index_dump_name
+
+                ds = [
+                    d
+                    for d in (o.get("datasets") or [])
+                    if d.get("name") and not looks_like_index_dump_name(str(d.get("name")))
+                ]
                 if ds:
                     lines.append(
                         "**Indexed datasets:** "
@@ -2450,7 +2618,8 @@ Respond as Datawrap Pilot — grounded in tool results."""
                     )
                 else:
                     lines.append(
-                        "**Indexed datasets:** none yet — upload in **New Transfer** and I can profile them."
+                        "**Indexed datasets:** none named yet — upload in **New Transfer** "
+                        "and I can profile them."
                     )
                 conns = o.get("connectors") or []
                 if conns:
@@ -2486,14 +2655,12 @@ Respond as Datawrap Pilot — grounded in tool results."""
                             "label": label,
                         })
             elif tr.name == "search_knowledge" and tr.success:
-                hits = tr.output.get("hits", [])
-                if hits:
-                    lines = ["Here's what matches your question:"]
-                    for h in hits[:3]:
-                        summary = (h.get("summary") or h.get("text") or "").strip()
-                        if summary:
-                            lines.append(f"• {summary[:400]}")
-                    parts.append("\n".join(lines))
+                documented = (tr.output.get("answer") or "").strip()
+                # Cited Help page or the single refusal owner. Vector shards
+                # are never the spoken answer, even if an older payload still
+                # carries uncited hits.
+                if documented:
+                    parts.append(documented)
                 else:
                     hint = (tr.output.get("hint") or "").strip()
                     parts.append(
@@ -2551,9 +2718,23 @@ Respond as Datawrap Pilot — grounded in tool results."""
             parts.insert(0, turn.needs_clarification)
 
         if not parts:
-            parts.append(_unmapped_intent_reply(message, ctx))
+            from .dialogue_acts import classify_dialogue_act
+            from .conversation_composer import compose_general
 
-        return "\n\n".join(parts)
+            if classify_dialogue_act(message, history=None) == "general":
+                parts.append(compose_general(message, ctx))
+            else:
+                parts.append(_unmapped_intent_reply(message, ctx))
+
+        from .dialogue_acts import classify_dialogue_act
+        from .conversation_composer import weave_tool_answer
+
+        woven = weave_tool_answer(
+            message,
+            parts,
+            act=classify_dialogue_act(message),
+        )
+        return woven or "\n\n".join(parts)
 
     def _format_analysis(self, output: dict) -> str:
         name = output.get("dataset", "dataset").replace("sample_", "").replace("_", " ")
@@ -2720,6 +2901,9 @@ Navigate to any screen when asked (including schedules/pipelines, contracts, que
                         prompts.append(f"Tell me about {label}")
                         break
         prompts.extend([
+            "Give me a workspace briefing",
+            "Summarize that",
+            "What should I do next?",
             "Show my pipelines",
             "Show my transfer jobs",
         ])
@@ -2749,15 +2933,11 @@ Navigate to any screen when asked (including schedules/pipelines, contracts, que
     def _starter_prompts(self) -> list[str]:
         datasets = self.analyst.list_datasets()
         prompts = []
-        for d in datasets[:4]:
+        from .tools import looks_like_index_dump_name
+
+        for d in datasets[:8]:
             name = str(d.get("name") or "")
-            # Skip RAG/catalog junk that looks like hash ids or synonym dumps.
-            low = name.lower()
-            if (
-                "synonym" in low
-                or "industry schema" in low
-                or len(name) >= 20 and all(c in "0123456789abcdef" for c in name.replace("-", "").replace("_", "")[:16])
-            ):
+            if looks_like_index_dump_name(name):
                 continue
             label = name.replace("sample_", "").replace("_", " ")
             if label and len(label) < 40:
@@ -2784,6 +2964,7 @@ Navigate to any screen when asked (including schedules/pipelines, contracts, que
                 "Show my recent jobs",
             ])
         prompts.extend([
+            "Give me a workspace briefing",
             "Show my recent jobs",
             "What can you do?",
         ])

@@ -38,13 +38,64 @@ def fetch_scan_page(cur: Any, batch_size: int) -> list[Any]:
 
     Production DBAPI cursors return a list from ``fetchmany``. Unit-test
     doubles that only stub ``fetchall`` return a non-sequence from
-    ``fetchmany`` — fall back so those fixtures keep proving handoff.
+    ``fetchmany`` — or omit ``fetchmany`` entirely — so fall back in both
+    cases (a valid minimal-DBAPI cursor need not implement ``fetchmany``).
     """
-    raw = cur.fetchmany(max(1, int(batch_size)))
+    try:
+        raw = cur.fetchmany(max(1, int(batch_size)))
+    except AttributeError:
+        raw = None
     if isinstance(raw, (list, tuple)):
         return list(raw)
     raw = cur.fetchall()
     return list(raw or [])
+
+
+def drop_batch_prefix(batch: Any, drop: int) -> Any:
+    """Keep the tail of a scan page after a bookmark-less resume skip.
+
+    The remaining rows are this pass's source consumption, so the raw-page
+    mark is cleared and restamped by the write loop.
+    """
+    cut = max(0, int(drop or 0))
+    rows = list(getattr(batch, "rows", None) or [])
+    if cut <= 0 or batch is None:
+        return batch
+    batch.rows = rows[cut:]
+    try:
+        batch.offset = int(getattr(batch, "offset", 0) or 0) + cut
+    except (TypeError, ValueError, AttributeError):
+        pass
+    if hasattr(batch, "raw_page_rows"):
+        batch.raw_page_rows = None
+        batch.raw_page_cursor = ""
+        batch.raw_page_keyset = ""
+        batch.raw_page_filtered = 0
+    return batch
+
+
+def align_snapshot_resume(probe: Any, skip_rows: int, read_next: Any) -> Any:
+    """Advance a held snapshot past rows the checkpoint already committed.
+
+    One SELECT + fetchmany, then discard the prefix. OFFSET pages would be
+    O(n²) and can skip/duplicate under concurrent inserts — the same cliff
+    the first-run scan exists to avoid. Seeking from the top of a keyed
+    table is the other owner (keyset); this path is for a resume that
+    carries a row count but no bookmark.
+    """
+    skip = max(0, int(skip_rows or 0))
+    if skip <= 0 or probe is None:
+        return probe
+    skipped = 0
+    batch = probe
+    while batch is not None and getattr(batch, "rows", None):
+        n = len(batch.rows)
+        if skipped + n <= skip:
+            skipped += n
+            batch = read_next()
+            continue
+        return drop_batch_prefix(batch, skip - skipped)
+    return batch
 
 
 def close_table_scan(scan_state: dict[str, Any] | None) -> None:

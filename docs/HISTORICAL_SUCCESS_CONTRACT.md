@@ -22,9 +22,23 @@ Never invent `0.99` / greenwash when no load history exists.
 - Legacy bare float `historical_success` is discarded
 - Zero / missing history → `measured=false`, `success_rate=null`
 
+## Operator UI
+
+Validate Coverage honesty renders a process metric:
+
+- **Measured** — rate, `runs_observed`, kept / rejected. A `%` appears only here.
+- **Unmeasured** — badge `Unmeasured`. Headline never contains `%`.
+
+Owner: `apps/web/src/lib/historicalSuccessMetric.ts`.
+
+Validate looks up history with the same host/port/database/schema identity
+Execute persist writes (`resolve_history_endpoints`). Table-only keys do not
+invent a match.
+
 ## Code SSOT
 
 - `apps/api/services/historical_success_contract.py`
+- `apps/api/services/data_quality_history.py` (`resolve_history_endpoints`)
 - Wired: Validate `proof_bundle.historical_success`, mapping evidence stamp
 
 ## Related

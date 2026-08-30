@@ -14,19 +14,18 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import math
 import os
 from services.brand_env import getenv_brand
 from collections import Counter
 from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from services.atomic_file import write_json_atomic
 from services.platform_config import data_dir
-from services.value_serializer import cell_to_string
+from services.value_serializer import cell_to_string, is_null_evidence
 
 # Keep enough history to answer "what changed across the last ~10 loads".
 DEFAULT_HISTORY_LIMIT = max(5, min(50, int(getenv_brand("QUALITY_HISTORY_LIMIT", "20"))))
@@ -41,8 +40,8 @@ class ColumnProfile:
     distinct_count: int = 0
     min_value: str | None = None
     max_value: str | None = None
-    mean: float | None = None
-    std: float | None = None
+    mean: Decimal | float | None = None
+    std: Decimal | float | None = None
     min_length: int | None = None
     max_length: int | None = None
     avg_length: float | None = None
@@ -75,44 +74,48 @@ def _to_sortable(value: Any) -> Any:
     if isinstance(value, (date, datetime)):
         return value.isoformat()
     if isinstance(value, Decimal):
-        return float(value)
+        return value
     if isinstance(value, (int, float)):
         return value
     return cell_to_string(value)
 
 
-def _coerce_number(value: Any) -> float | None:
-    if value is None:
+def _coerce_number(value: Any) -> Decimal | None:
+    """Bind history min/max/mean through the write-path decimal parser.
+
+    Locale money (``$1,234.56``, ``€2.000,00``) keeps exact Decimal scale.
+    Auto-ambiguous grouping (``1,234``, ``1.000``, ``1.234``) returns None —
+    never invent a US/EU magnitude for a load comparison.
+    """
+    if is_null_evidence(value):
         return None
-    try:
-        return float(Decimal(str(value).replace(",", "")))
-    except Exception:
-        return None
+    from services.transform_engine import decimal_wire_value
+
+    return decimal_wire_value(value)
 
 
 def _coerce_datetime(value: Any) -> datetime | None:
-    if value is None:
+    """Bind history min/max through the write-path datetime parser.
+
+    ISO, 10-digit seconds, 13-digit millis, and unambiguous calendars
+    (``31/12/2024``) profile as instants. Auto-ambiguous ``01/02/2024``
+    returns None — never invent MDY/DMY for a load comparison.
+    """
+    if is_null_evidence(value):
         return None
     if isinstance(value, datetime):
         return value
     if isinstance(value, date):
         return datetime(value.year, value.month, value.day)
-    text = str(value).strip()
-    text = text.replace("Z", "+0000")
-    if text.endswith(("+00:00", "+0000")):
-        text = text[:-6].replace("T", " ")
-    for fmt in (
-        "%Y-%m-%dT%H:%M:%S.%f",
-        "%Y-%m-%dT%H:%M:%S",
-        "%Y-%m-%d %H:%M:%S.%f",
-        "%Y-%m-%d %H:%M:%S",
-        "%Y-%m-%d",
-    ):
-        try:
-            return datetime.strptime(text, fmt)
-        except ValueError:
-            continue
-    return None
+    from services.transform_engine import apply_transform
+
+    parsed, err = apply_transform(str(value).strip(), "datetime")
+    if parsed is None or err:
+        return None
+    try:
+        return datetime.fromisoformat(str(parsed).replace("Z", "+00:00"))
+    except ValueError:
+        return None
 
 
 def profile_column(values: list[Any], column: str, dtype: str = "string") -> ColumnProfile:
@@ -121,7 +124,8 @@ def profile_column(values: list[Any], column: str, dtype: str = "string") -> Col
     non_null = [
         v
         for v in values
-        if v is not None and cell_to_string(v).strip().lower() not in {"", "null", "none"}
+        if not is_null_evidence(v)
+        and cell_to_string(v).strip().lower() not in {"null", "none"}
     ]
     profile.null_count = profile.count - len(non_null)
 
@@ -147,14 +151,24 @@ def profile_column(values: list[Any], column: str, dtype: str = "string") -> Col
                 profile.mean = sum(nums) / len(nums)
                 if len(nums) > 1:
                     variance = sum((x - profile.mean) ** 2 for x in nums) / (len(nums) - 1)
-                    profile.std = math.sqrt(variance)
+                    profile.std = variance.sqrt()
         elif dtype in {"date", "datetime", "timestamp"}:
             dts = [d for v in non_null if (d := _coerce_datetime(v)) is not None]
             if dts:
-                profile.min_value = min(dts).isoformat()
-                profile.max_value = max(dts).isoformat()
+                try:
+                    lo, hi = min(dts), max(dts)
+                except TypeError:
+                    # Naive calendar vs aware instant — compare as timestamps.
+                    ordered = sorted(dts, key=lambda d: d.timestamp())
+                    lo, hi = ordered[0], ordered[-1]
+                profile.min_value = lo.isoformat()
+                profile.max_value = hi.isoformat()
         else:
-            sorted_vals = sorted(as_text)
+            from functools import cmp_to_key
+
+            from services.verification_ladder import compare_present_wires
+
+            sorted_vals = sorted(as_text, key=cmp_to_key(compare_present_wires))
             profile.min_value = sorted_vals[0]
             profile.max_value = sorted_vals[-1]
 
@@ -192,6 +206,100 @@ def quarantine_histogram(rejected_details: list[dict[str, Any]] | None) -> dict[
         key = f"{col}|{reason[:80]}"
         hist[key] += 1
     return dict(hist.most_common(50))
+
+
+def history_endpoint_from_config(
+    config: Mapping[str, Any] | None,
+    *,
+    kind: str,
+    format: str = "",
+    table: str = "",
+) -> dict[str, Any]:
+    """Build the endpoint identity persist and Validate both use.
+
+    Table-only keys collapse distinct hosts onto one history file. Host, port,
+    database, schema, and connection_string come from the live config when
+    present — the same fields ``save_profile`` / Execute persist.
+    """
+    cfg = dict(config or {})
+    extra = cfg.get("extra") if isinstance(cfg.get("extra"), dict) else {}
+    fmt = format or str(
+        cfg.get("format") or cfg.get("type") or cfg.get("db_type") or extra.get("type") or ""
+    )
+    tbl = table or str(cfg.get("table") or cfg.get("collection") or extra.get("table") or "")
+    host = cfg.get("host")
+    if host in (None, ""):
+        host = extra.get("host") or ""
+    port = cfg.get("port")
+    if port in (None, ""):
+        port = extra.get("port") or ""
+    return {
+        "kind": kind or str(cfg.get("kind") or ""),
+        "format": fmt,
+        "host": str(host or ""),
+        "port": str(port or ""),
+        "database": str(cfg.get("database") or extra.get("database") or ""),
+        "schema": str(cfg.get("schema") or extra.get("schema") or ""),
+        "table": tbl,
+        "collection": tbl,
+        "connection_string": str(
+            cfg.get("connection_string") or extra.get("connection_string") or ""
+        ),
+    }
+
+
+def resolve_history_endpoints(
+    *,
+    source_kind: str,
+    source_format: str = "",
+    source_table: str = "",
+    source_config: Mapping[str, Any] | None = None,
+    source_connector_id: str = "",
+    dest_kind: str = "database",
+    dest_format: str = "",
+    dest_table: str = "",
+    dest_config: Mapping[str, Any] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Hydrate persist-grade identities for Validate historical success.
+
+    A thin Studio ``source_config`` (type only) cannot find a load Execute
+    stored with host/port. When a saved connector id is present and the
+    config has no host, resolve the connector so the key matches persist.
+    """
+    src_cfg: dict[str, Any] = dict(source_config or {})
+    if (
+        source_connector_id
+        and not src_cfg.get("host")
+        and not src_cfg.get("connection_string")
+    ):
+        try:
+            from services.connector_probe import endpoint_from_saved_connector
+            from src.transfer.models import endpoint_to_dict
+
+            ep = endpoint_from_saved_connector(
+                source_connector_id,
+                table=source_table or "",
+                collection=source_table or "",
+            )
+            if ep:
+                src_cfg = {**endpoint_to_dict(ep), **src_cfg}
+        except Exception as exc:
+            logging.getLogger(__name__).warning(
+                "history source connector hydrate skipped: %s", exc, exc_info=exc
+            )
+    src = history_endpoint_from_config(
+        src_cfg,
+        kind=source_kind,
+        format=source_format,
+        table=source_table,
+    )
+    dst = history_endpoint_from_config(
+        dest_config,
+        kind=dest_kind or "database",
+        format=dest_format,
+        table=dest_table,
+    )
+    return src, dst
 
 
 def _endpoint_identity(endpoint: dict[str, Any]) -> str:
@@ -236,14 +344,57 @@ def _profile_collection():
     return None
 
 
-def _profile_path(key: str) -> Path:
-    base = data_dir() / "quality_profiles"
+def quality_profiles_dir() -> Path:
+    """JSON fallback store for last-N load profiles.
+
+    Override with ``QUALITY_PROFILES_DIR`` so a pytest worker can isolate
+    history without rewriting ``DATAFLOW_DATA_DIR`` (that path also holds
+    connectors and tenants).
+    """
+    raw = (getenv_brand("QUALITY_PROFILES_DIR") or "").strip()
+    base = Path(raw) if raw else data_dir() / "quality_profiles"
     base.mkdir(parents=True, exist_ok=True)
-    return base / f"{key}.json"
+    return base
+
+
+def _profile_path(key: str) -> Path:
+    return quality_profiles_dir() / f"{key}.json"
 
 
 def _serialize_profile(profile: dict[str, ColumnProfile]) -> dict[str, Any]:
     return {name: asdict(col) for name, col in profile.items()}
+
+
+def _rehydrate_stat(value: Any) -> Decimal | None:
+    """Reload persisted mean/std as dest-canonical Decimal, not Auto locale.
+
+    ``json_default`` writes Decimal as exact text. ``Decimal(text)`` first keeps
+    storage identity (``1.234`` stays 1.234). Auto locale must not re-parse
+    stored stats — that would refuse dest-canonical ``1.234`` or invent 1234.
+    """
+    if is_null_evidence(value):
+        return None
+    if isinstance(value, Decimal):
+        return value if value.is_finite() else None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return Decimal(value)
+    if isinstance(value, float):
+        if value != value or value in (float("inf"), float("-inf")):
+            return None
+        try:
+            parsed = Decimal(str(value))
+        except (InvalidOperation, ValueError, OverflowError):
+            return None
+        return parsed if parsed.is_finite() else None
+    if isinstance(value, str):
+        try:
+            parsed = Decimal(value.strip())
+        except (InvalidOperation, ValueError):
+            return None
+        return parsed if parsed.is_finite() else None
+    return None
 
 
 def _deserialize_profile(data: dict[str, Any]) -> dict[str, ColumnProfile]:
@@ -261,6 +412,10 @@ def _deserialize_profile(data: dict[str, Any]) -> dict[str, ColumnProfile]:
             if isinstance(item, (list, tuple)) and len(item) >= 2:
                 fixed.append((str(item[0]), int(item[1])))
         payload = {**col, "top_values": fixed, "column": col.get("column", name)}
+        if "mean" in payload:
+            payload["mean"] = _rehydrate_stat(payload.get("mean"))
+        if "std" in payload:
+            payload["std"] = _rehydrate_stat(payload.get("std"))
         out[name] = ColumnProfile(**{
             k: payload[k]
             for k in ColumnProfile.__dataclass_fields__
@@ -363,14 +518,22 @@ def save_profile(
     rejected_rows: int = 0,
     row_count: int | None = None,
 ) -> None:
-    """Append a profile to the route ring buffer (does not overwrite history)."""
+    """Append a profile to the route ring buffer.
+
+    Distinct ``job_id`` values stay as separate loads (last-N). The same
+    ``job_id`` replaces its prior run — Execute retry / re-persist must not
+    invent a second load and double ``rows_written_total``.
+    """
     store = _load_store(source, destination)
     runs = list(store.get("runs") or [])
     columns = _serialize_profile(profile)
     rc = row_count if row_count is not None else max((c.count for c in profile.values()), default=0)
+    jid = str(job_id or "").strip()
+    if jid:
+        runs = [r for r in runs if str((r or {}).get("job_id") or "") != jid]
     runs.append({
         "captured_at": datetime.now(timezone.utc).isoformat(),
-        "job_id": job_id,
+        "job_id": jid or None,
         "row_count": rc,
         "columns": columns,
         "quarantine_histogram": quarantine_histogram(rejected_details),
@@ -379,7 +542,7 @@ def save_profile(
     _save_store(source, destination, {"runs": runs})
 
 
-def _median(values: list[float]) -> float | None:
+def _median(values: list[Any]) -> Any:
     if not values:
         return None
     s = sorted(values)
@@ -387,10 +550,11 @@ def _median(values: list[float]) -> float | None:
     mid = n // 2
     if n % 2:
         return s[mid]
-    return (s[mid - 1] + s[mid]) / 2.0
+    # ``/ 2`` keeps Decimal series Decimal. ``/ 2.0`` raises on Decimal.
+    return (s[mid - 1] + s[mid]) / 2
 
 
-def _mad(values: list[float], med: float | None = None) -> float | None:
+def _mad(values: list[Any], med: Any = None) -> Any:
     """Median absolute deviation (robust scale)."""
     if not values:
         return None
@@ -400,19 +564,27 @@ def _mad(values: list[float], med: float | None = None) -> float | None:
     return _median([abs(v - m) for v in values])
 
 
-def _robust_z(value: float, series: list[float]) -> float | None:
-    """Modified z-score using MAD; None when series too short / zero scale."""
-    if len(series) < 2:
+def _robust_z(value: Any, series: list[Any]) -> Decimal | None:
+    """Modified z-score using MAD on write-path Decimals.
+
+    None when the series is too short or a cell cannot bind. IEEE
+    ``float(mean)`` invented a second magnitude on scale-20 money.
+    """
+    bound = _rehydrate_stat(value)
+    nums = [d for v in series if (d := _rehydrate_stat(v)) is not None]
+    if bound is None or len(nums) < 2:
         return None
-    med = _median(series)
-    mad = _mad(series, med)
+    med = _median(nums)
+    mad = _mad(nums, med)
     if med is None or mad is None:
         return None
-    if mad == 0.0:
+    if mad == 0:
         # All identical historically — any material delta is noteworthy.
-        return abs(value - med) / max(abs(med) * 0.01, 1e-9) if value != med else 0.0
+        if bound == med:
+            return Decimal("0")
+        return abs(bound - med) / max(abs(med) * Decimal("0.01"), Decimal("1e-9"))
     # 0.6745 makes MAD comparable to std for normal data.
-    return 0.6745 * (value - med) / mad
+    return Decimal("0.6745") * (bound - med) / mad
 
 
 def detect_anomalies(
@@ -485,7 +657,7 @@ def build_load_history_report(
     column_findings: list[dict[str, Any]] = []
 
     # Build per-column series from history.
-    col_series: dict[str, dict[str, list[float]]] = {}
+    col_series: dict[str, dict[str, list[Any]]] = {}
     for run in history:
         cols = _deserialize_profile(run.get("columns") or {})
         for name, prof in cols.items():
@@ -493,8 +665,9 @@ def build_load_history_report(
             bucket["null_rate"].append(prof.null_rate)
             bucket["count"].append(float(prof.count))
             bucket["distinct_rate"].append(prof.distinct_rate)
-            if prof.mean is not None:
-                bucket["mean"].append(float(prof.mean))
+            bound = _rehydrate_stat(prof.mean)
+            if bound is not None:
+                bucket["mean"].append(bound)
 
     # If no ring history, fall back to single baseline dict.
     if not history and fallback_baseline:
@@ -503,8 +676,9 @@ def build_load_history_report(
             bucket["null_rate"].append(prof.null_rate)
             bucket["count"].append(float(prof.count))
             bucket["distinct_rate"].append(prof.distinct_rate)
-            if prof.mean is not None:
-                bucket["mean"].append(float(prof.mean))
+            bound = _rehydrate_stat(prof.mean)
+            if bound is not None:
+                bucket["mean"].append(bound)
 
     z_cut = 3.5
     null_abs_cut = 0.10
@@ -539,17 +713,16 @@ def build_load_history_report(
                     finding["signals"].append({"kind": "count_drop", "message": msg})
 
         if cur.mean is not None and series["mean"]:
-            z = _robust_z(float(cur.mean), series["mean"])
+            z = _robust_z(cur.mean, series["mean"])
             # Single prior observation: fall back to classic z vs that mean's std
             # when available on the fallback baseline profile.
             if z is None and len(series["mean"]) == 1 and fallback_baseline:
                 hist_prof = fallback_baseline.get(col)
-                if (
-                    hist_prof
-                    and hist_prof.mean is not None
-                    and hist_prof.std not in (None, 0.0)
-                ):
-                    z = abs(float(cur.mean) - float(hist_prof.mean)) / float(hist_prof.std)
+                cur_d = _rehydrate_stat(cur.mean)
+                hist_d = _rehydrate_stat(hist_prof.mean) if hist_prof else None
+                std_d = _rehydrate_stat(hist_prof.std) if hist_prof else None
+                if cur_d is not None and hist_d is not None and std_d not in (None, 0):
+                    z = abs(cur_d - hist_d) / std_d
             if z is not None and abs(z) > z_cut:
                 med = _median(series["mean"])
                 msg = (

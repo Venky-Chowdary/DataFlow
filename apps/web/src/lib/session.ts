@@ -52,3 +52,16 @@ export function clearSession() {
 export function getAuthToken(): string | null {
   return readSession()?.token ?? null;
 }
+
+/**
+ * The signed-in operator's name for an audit trail, or `null`.
+ *
+ * Sent as `X-Actor` on decision calls. The API prefers the identity it verified
+ * itself and only falls back to this header when enforcement is off, so it can
+ * name the operator of a single-operator deployment but never impersonate one.
+ */
+export function getSessionActor(): string | null {
+  const s = readSession();
+  const actor = (s?.email || s?.name || "").trim();
+  return actor.length >= 2 ? actor : null;
+}

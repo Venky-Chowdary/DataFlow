@@ -682,6 +682,9 @@ def _run_probe_impl(db_type: str, cfg: dict[str, Any]) -> tuple[bool, str]:
         "service_account": cfg.get("service_account", ""),
         "private_key": cfg.get("private_key", ""),
         "region": cfg.get("region", ""),
+        # False when the caller is probing a *write* target: the object the run is
+        # about to create must not be demanded before the run creates it.
+        "require_object": bool(cfg.get("require_object", True)),
     }
 
     if resolved == "generic_sql":

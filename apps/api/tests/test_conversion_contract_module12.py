@@ -172,3 +172,53 @@ def test_ai_type_matrix_is_non_authoritative():
     if hasattr(tc, "suggest_type_conversion_non_authoritative"):
         wrapped = tc.suggest_type_conversion_non_authoritative("string", "integer")
         assert wrapped.get("authoritative") is False
+    date_hint = tc.suggest_type_conversion("string", "date")
+    assert date_hint is not None
+    assert date_hint.get("lossy") is True
+    assert "%m/%d/%Y" not in (date_hint.get("formats") or [])
+    assert "01/02/2024" in (date_hint.get("note") or "")
+    bool_hint = tc.suggest_type_conversion("string", "boolean")
+    assert bool_hint is not None
+    assert "yes" not in (bool_hint.get("mapping") or {})
+    assert "no" not in (bool_hint.get("mapping") or {})
+    int_hint = tc.suggest_type_conversion("string", "integer")
+    assert int_hint is not None
+    assert int_hint.get("lossy") is True
+    assert "1,234" in (int_hint.get("note") or "")
+    dec_hint = tc.suggest_type_conversion("string", "decimal")
+    assert dec_hint is not None
+    assert dec_hint.get("lossy") is True
+    assert "1,234" in (dec_hint.get("note") or "")
+    assert dec_hint.get("validation") is None
+    int_bool = tc.suggest_type_conversion("integer", "boolean")
+    assert int_bool is not None
+    assert int_bool.get("lossy") is True
+    assert int_bool.get("mapping") == {"0": False, "1": True}
+    assert "non-zero" not in (int_bool.get("note") or "").lower() or "not TRUE" in (int_bool.get("note") or "")
+    assert "2" in (int_bool.get("note") or "")
+    dec_bool = tc.suggest_type_conversion("decimal", "boolean")
+    assert dec_bool is not None
+    assert dec_bool.get("lossy") is True
+    assert dec_bool.get("method") == "parse_bool"
+    assert "non-zero=true" not in (dec_bool.get("note") or "").lower()
+    int_dt = tc.suggest_type_conversion("integer", "datetime")
+    assert int_dt is not None
+    assert int_dt.get("lossy") is True
+    assert int_dt.get("method") == "unix_timestamp"
+    assert "2" in (int_dt.get("note") or "")
+    assert "millis" in (int_dt.get("note") or "").lower()
+    dt_int = tc.suggest_type_conversion("datetime", "integer")
+    assert dt_int is not None
+    assert dt_int.get("lossy") is True
+    assert dt_int.get("method") == "unix_timestamp"
+    assert "millis" in (dt_int.get("note") or "").lower()
+    dt_str = tc.suggest_type_conversion("datetime", "string")
+    assert dt_str is not None
+    assert dt_str.get("lossy") is False
+    assert dt_str.get("format") == "%Y-%m-%dT%H:%M:%S"
+    assert not str(dt_str.get("format") or "").endswith("Z")
+    assert "no Z invent" in (dt_str.get("note") or "")
+    date_dt = tc.suggest_type_conversion("date", "datetime")
+    assert date_dt is not None
+    assert date_dt.get("lossy") is False
+    assert date_dt.get("method") == "add_midnight"

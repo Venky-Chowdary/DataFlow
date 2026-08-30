@@ -13,6 +13,8 @@ import type { ColumnFilter } from "../../lib/columnWorkbench";
 import { countByFilter, needsMappingReview } from "../../lib/columnWorkbench";
 import type { EditableMapping } from "../../lib/mapping";
 import { mappingHealthSummary } from "../../lib/mapping";
+import { destCatalogExists } from "../../lib/destSchemaIdentity";
+import { mapBlockerSummary } from "../../lib/mapBlockers";
 import type { UniqueKeySuggestion } from "../../lib/uniqueKeySuggestions";
 
 interface TransferMapStepProps {
@@ -75,6 +77,8 @@ interface TransferMapStepProps {
   /** Dest-exists extras the operator must remap or omit — never silent drop. */
   extraSourceColumns?: string[];
   destShapeHeadline?: string;
+  /** Re-probe the destination catalog and re-map — the only exit from an unread dest schema. */
+  onReloadDestSchema?: () => void | Promise<void>;
 }
 
 
@@ -128,12 +132,16 @@ export function TransferMapStep({
   onApplyPrimaryKey,
   extraSourceColumns = [],
   destShapeHeadline = "",
+  onReloadDestSchema,
 }: TransferMapStepProps) {
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState<ColumnFilter>("review");
   const [userPickedFilter, setUserPickedFilter] = useState(false);
   const [focusSource, setFocusSource] = useState<string | null>(null);
   const [mapDialogOpen, setMapDialogOpen] = useState(false);
+  // Collapsed by default: the headline plus one primary control is the whole
+  // decision. Ten expanded reasons buried the mapping grid below the fold.
+  const [blockerDetailOpen, setBlockerDetailOpen] = useState(false);
   const [proofOpenLocal, setProofOpenLocal] = useState(false);
   const proofOpen = proofOpenProp ?? proofOpenLocal;
   const setProofOpen = onProofOpenChange ?? setProofOpenLocal;
@@ -172,7 +180,7 @@ export function TransferMapStep({
     onIdentityFixConsumed?.();
   }, [initialFocusSource]);
 
-  const destDisplayType = destKindMode === "database" ? destType : "file";
+  const destDisplayType = destType || (destKindMode === "database" ? "" : "file");
 
   const filterCounts = useMemo(
     () => countByFilter(columnMappings, confidenceThreshold),
@@ -186,12 +194,18 @@ export function TransferMapStep({
     [columnMappings, confidenceThreshold],
   );
 
+  // Same predicate as the Continue gate — the reason shown is the reason enforced.
+  const blockerSummary = useMemo(
+    () => mapBlockerSummary(columnMappings, confidenceThreshold),
+    [columnMappings, confidenceThreshold],
+  );
+
   /** Prefer API proof; refresh pair list from live edits so operators see current transforms. */
   const effectiveProof = useMemo(
     () => mergeMappingProof(mappingProof, columnMappings, {
       destColumns,
       destType: destDisplayType,
-      destTableExists: destKindMode === "database" ? destTableExists : false,
+      destTableExists: destCatalogExists(destKindMode, destTableExists),
     }),
     [mappingProof, columnMappings, destColumns, destDisplayType, destKindMode, destTableExists],
   );
@@ -223,10 +237,8 @@ export function TransferMapStep({
       onClick={onContinue}
       disabled={mappingReviewCount > 0}
       title={
-        mappingReviewCount > 0
-          ? (health.falseFriendCount > 0
-            ? health.detail
-            : `${mappingReviewCount} column(s) need Approve or Accept risk before Validate`)
+        blockerSummary.blockers.length > 0
+          ? `${blockerSummary.headline}\n${blockerSummary.detail}`
           : "Continue to Validate"
       }
     >
@@ -335,6 +347,42 @@ export function TransferMapStep({
       )}
 
       <div className="df2-card-body df2-map-step-body">
+        {blockerSummary.blockers.length > 0 && (
+          <div className="df2-map-blocker-bar" role="status">
+            <div className="df2-map-blocker-bar-head">
+              <DtIcon name="alert" size={16} />
+              <strong>{blockerSummary.headline}</strong>
+              {blockerSummary.destSchemaUnloadedOnly && onReloadDestSchema && (
+                <Button
+                  size="sm"
+                  variant="primary"
+                  disabled={destSchemaLoading}
+                  onClick={() => void onReloadDestSchema()}
+                >
+                  {destSchemaLoading ? "Reading destination…" : "Reload destination schema"}
+                </Button>
+              )}
+              <button
+                type="button"
+                className="df2-btn df2-btn-sm df2-btn-ghost"
+                aria-expanded={blockerDetailOpen}
+                onClick={() => setBlockerDetailOpen((v) => !v)}
+              >
+                {blockerDetailOpen ? "Hide detail" : `Why (${blockerSummary.groups.length})`}
+              </button>
+            </div>
+            {blockerDetailOpen && (
+              <ul className="df2-map-blocker-list">
+                {blockerSummary.groups.map((g) => (
+                  <li key={g.code}>
+                    <strong>{g.title}</strong>
+                    <span> — {g.action}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        )}
         {identityFixBanner && (
           <div className="df2-map-identity-banner is-compact" role="status">
             <DtIcon name="alert" size={16} />

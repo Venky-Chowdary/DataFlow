@@ -7,10 +7,57 @@ mid-transaction holds. Doing so under load causes silent gaps or slot storms.
 
 from __future__ import annotations
 
+import json
 import re
 from typing import Any
 
 _PG_LSN_RE = re.compile(r"^[0-9A-Fa-f]+/[0-9A-Fa-f]+$")
+
+
+def unwrap_resume_token(token: Any) -> Any:
+    """Undo ``json.dumps`` wrapping of an already-serialized JSON token.
+
+    Oracle LogMiner and SQL Server native encode a JSON **string**. Persist
+    used to ``json.dumps`` that string again, so the stored watermark became
+    ``"{\\"kind\\":...}"``. Decode then saw a Python ``str``, reset SCN/LSN
+    to 0, and re-snapshotted the live table — CDC deletes that had already
+    committed never applied (silent destination leftover).
+    """
+    if token is None:
+        return None
+    cur: Any = token
+    for _ in range(4):
+        if isinstance(cur, (bytes, bytearray)):
+            cur = cur.decode("utf-8", errors="replace")
+        if not isinstance(cur, str):
+            return cur
+        text = cur.strip()
+        if not text:
+            return cur
+        if not (text.startswith("{") or text.startswith("[") or text.startswith('"')):
+            return cur
+        try:
+            nxt = json.loads(text)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return cur
+        if nxt == cur:
+            return cur
+        cur = nxt
+    return cur
+
+
+def serialize_resume_token(token: Any, *, default: Any = None) -> str:
+    """Persist a resume token once — never wrap an already-serialized JSON object."""
+    unwrapped = unwrap_resume_token(token)
+    if unwrapped is None:
+        return ""
+    if isinstance(unwrapped, (dict, list)):
+        return json.dumps(
+            unwrapped,
+            default=default or str,
+            separators=(",", ":"),
+        )
+    return str(unwrapped)
 
 
 def looks_like_pg_lsn(value: Any) -> bool:

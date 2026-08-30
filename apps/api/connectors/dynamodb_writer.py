@@ -229,8 +229,11 @@ def _pick_hash_key(columns: list[str], mappings: list[dict]) -> str:
 
 def _to_dynamo_value(value: Any, source_type: str) -> Any:
     """Convert transform-engine values to DynamoDB-serializable native types."""
-    if value is None:
-        return None
+    from services.value_serializer import absent_sql_bind
+
+    handled, bound = absent_sql_bind(value)
+    if handled:
+        return bound
     # Reader envelopes: {"_df_ddb_set": "SS"|"NS"|"BS", "v": [...]} (also accept "items").
     if isinstance(value, dict) and value.get("_df_ddb_set") in {"SS", "NS", "BS"}:
         kind = value["_df_ddb_set"]
@@ -240,7 +243,17 @@ def _to_dynamo_value(value: Any, source_type: str) -> Any:
         if kind == "SS":
             return {str(x) for x in items}
         if kind == "NS":
-            return {Decimal(str(x)) for x in items}
+            from connectors.sql_bind import coerce_decimal_wire
+
+            out = set()
+            for x in items:
+                parsed = coerce_decimal_wire(x, ddl_type="DECIMAL")
+                if parsed is None:
+                    raise ValueError(
+                        f"DynamoDB NS refused {x!r} — refuse silent Decimal invent"
+                    )
+                out.add(parsed)
+            return out
         if kind == "BS":
             from connectors.sql_bind import coerce_binary_wire
 
@@ -339,27 +352,45 @@ def _coerce_dynamo_cell(
     """Apply Dynamo key-type / binary wire coercion before AttributeValue encode."""
     attr_type = key_types.get(col)
     if attr_type == "S":
-        if value is None or (
+        from services.value_serializer import is_reader_null_cell, present_cell_text
+
+        if is_reader_null_cell(value) or (
             isinstance(value, str) and value.strip() == ""
         ):
             raise ValueError(
                 f"DynamoDB key type S refused {value!r} for {col!r} — "
                 "refuse silent empty-string invent (HASH/RANGE identity)"
             )
-        return str(value)
+        token = present_cell_text(value)
+        if token is None:
+            raise ValueError(
+                f"DynamoDB key type S refused {value!r} for {col!r} — "
+                "refuse silent empty-string invent (HASH/RANGE identity)"
+            )
+        return token
     if attr_type == "N":
-        if value is None or (isinstance(value, str) and value.strip() == ""):
+        from services.value_serializer import is_reader_null_cell
+
+        if is_reader_null_cell(value) or (isinstance(value, str) and value.strip() == ""):
             raise ValueError(
                 f"DynamoDB key type N refused {value!r} for {col!r} — "
                 "refuse silent null invent (HASH/RANGE identity)"
             )
+        from connectors.sql_bind import coerce_decimal_wire
+
         try:
-            return Decimal(value)
+            parsed = coerce_decimal_wire(value, ddl_type="DECIMAL")
         except Exception as exc:
             raise ValueError(
                 f"DynamoDB key type N refused {value!r} "
                 "(refuse silent pass-through invent)"
             ) from exc
+        if parsed is None:
+            raise ValueError(
+                f"DynamoDB key type N refused {value!r} "
+                "(refuse silent pass-through invent)"
+            )
+        return parsed
     if attr_type == "B":
         from connectors.sql_bind import coerce_binary_wire
 

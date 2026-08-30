@@ -18,6 +18,7 @@ import urllib.parse
 import urllib.request
 from typing import Any
 
+from services.egress_guard import egress_url_allowed, host_is_blocked
 from services.notification_store import (
     NotificationChannel,
     get_channel_decrypted,
@@ -27,13 +28,9 @@ from services.value_serializer import json_default
 
 logger = logging.getLogger(__name__)
 
-# Only HTTP(S) webhook/mail APIs are allowed — never file:/ or arbitrary schemes.
-_ALLOWED_SCHEMES = frozenset({"http", "https"})
-
 
 def _allowed_url(url: str) -> bool:
-    parsed = urllib.parse.urlparse(url)
-    return parsed.scheme in _ALLOWED_SCHEMES
+    return egress_url_allowed(url)
 
 
 def _env_smtp() -> dict[str, Any]:
@@ -47,9 +44,16 @@ def _env_smtp() -> dict[str, Any]:
     }
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Refuse redirect follow — a public URL must not bounce onto link-local."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001
+        return None
+
+
 def _http_post(url: str, payload: dict[str, Any], headers: dict[str, str] | None = None) -> dict[str, Any]:
     if not _allowed_url(url):
-        return {"ok": False, "error": f"URL scheme not allowed: {url}"}
+        return {"ok": False, "error": "Webhook URL is not allowed (private, loopback, or non-http(s))"}
     try:
         data = json.dumps(payload, default=json_default).encode("utf-8")
         req = urllib.request.Request(
@@ -58,7 +62,8 @@ def _http_post(url: str, payload: dict[str, Any], headers: dict[str, str] | None
             headers={"Content-Type": "application/json", **(headers or {})},
             method="POST",
         )
-        with urllib.request.urlopen(req, timeout=30) as resp:  # nosec: B310 — scheme is restricted to http(s) above
+        opener = urllib.request.build_opener(_NoRedirect)
+        with opener.open(req, timeout=30) as resp:  # nosec: B310 — scheme + host gated by egress_guard
             body = resp.read().decode("utf-8", errors="ignore")
         return {"ok": True, "status": resp.status, "body": body[:500]}
     except Exception as exc:
@@ -124,6 +129,8 @@ def _smpt_send(recipients: list[str], subject: str, body: str, smtp_cfg: dict[st
 
     if not host:
         return {"ok": False, "error": "SMTP host not configured"}
+    if host_is_blocked(str(host)):
+        return {"ok": False, "error": "SMTP host is not allowed (private, loopback, or metadata)"}
 
     try:
         import smtplib
@@ -147,12 +154,58 @@ def _smpt_send(recipients: list[str], subject: str, body: str, smtp_cfg: dict[st
         return {"ok": False, "error": str(exc)}
 
 
+def _slack_acknowledged(result: dict[str, Any]) -> dict[str, Any]:
+    """Slack's own acknowledgement, not merely "the host answered 200".
+
+    Any endpoint that returns 2xx used to be reported as *Test message sent*, so
+    a webhook pointed at the wrong host — or at an intranet page — read as a
+    working alert route until the day an incident went unnoticed. An incoming
+    webhook answers ``200`` with the body ``ok``; the Web API answers JSON with
+    ``"ok": true``. Anything else is a delivery we cannot claim.
+    """
+    if not result.get("ok"):
+        return result
+    body = str(result.get("body", "")).strip()
+    if body.lower() == "ok":
+        return result
+    try:
+        if json.loads(body).get("ok") is True:
+            return result
+    except (ValueError, AttributeError):
+        pass
+    return {
+        "ok": False,
+        "status": result.get("status"),
+        "error": (
+            f"Endpoint answered HTTP {result.get('status')} but did not acknowledge as Slack "
+            f"(expected body 'ok', got {body[:120]!r}) — check the webhook URL"
+        ),
+    }
+
+
+def _teams_acknowledged(result: dict[str, Any]) -> dict[str, Any]:
+    """Teams' own acknowledgement: ``1`` from a connector, ``202`` from a workflow."""
+    if not result.get("ok"):
+        return result
+    body = str(result.get("body", "")).strip()
+    if body == "1" or (result.get("status") == 202 and not body):
+        return result
+    return {
+        "ok": False,
+        "status": result.get("status"),
+        "error": (
+            f"Endpoint answered HTTP {result.get('status')} but did not acknowledge as Microsoft "
+            f"Teams (expected '1' or 202 Accepted, got {body[:120]!r}) — check the webhook URL"
+        ),
+    }
+
+
 def _send_slack(channel: NotificationChannel, payload: dict[str, Any]) -> dict[str, Any]:
     url = channel.config.get("webhook_url") or channel.config.get("url", "")
     if not url:
         return {"ok": False, "error": "Slack webhook URL missing"}
     text = payload.get("text") or _payload_text(payload)
-    return _http_post(url, {"text": text})
+    return _slack_acknowledged(_http_post(url, {"text": text}))
 
 
 def _send_teams(channel: NotificationChannel, payload: dict[str, Any]) -> dict[str, Any]:
@@ -160,7 +213,7 @@ def _send_teams(channel: NotificationChannel, payload: dict[str, Any]) -> dict[s
     if not url:
         return {"ok": False, "error": "Teams webhook URL missing"}
     text = payload.get("text") or _payload_text(payload)
-    return _http_post(
+    return _teams_acknowledged(_http_post(
         url,
         {
             "@type": "MessageCard",
@@ -169,7 +222,7 @@ def _send_teams(channel: NotificationChannel, payload: dict[str, Any]) -> dict[s
             "summary": payload.get("title", "Datawrap alert"),
             "sections": [{"activityTitle": payload.get("title", ""), "text": text}],
         },
-    )
+    ))
 
 
 def _send_email(channel: NotificationChannel, payload: dict[str, Any]) -> dict[str, Any]:

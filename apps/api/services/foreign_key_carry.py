@@ -24,6 +24,14 @@ So this module:
 
 Ordering lives here too (:func:`order_tables_by_dependency`): parents before
 children, so a destination that *already* enforces the keys accepts the load.
+
+Cycles (A↔B, A→B→C→A) have no parents-first order. That is not a reason to
+drop the keys. Create-new already lands tables without FKs; post-load
+``ALTER`` is the portable deferred strategy (MySQL / SQL Server / PG / Oracle).
+PostgreSQL and Oracle also emit ``DEFERRABLE INITIALLY DEFERRED`` on cycle
+edges so a later same-transaction upsert can insert both sides. A cycle
+blocks the certificate only when an edge was not ``carried`` — never because
+a cycle was detected.
 """
 
 from __future__ import annotations
@@ -54,6 +62,10 @@ ALTER_CAPABLE = frozenset({
     "mssql",
     "oracle",
 })
+
+# True deferred constraints (checked at COMMIT). MySQL / SQL Server have none —
+# their deferred strategy is the same post-load ALTER as everyone else.
+DEFERRABLE_DIALECTS = frozenset({"postgresql", "oracle"})
 
 # Referential actions each dialect accepts in DDL. MySQL parses SET DEFAULT and
 # then ignores it under InnoDB, and Oracle has no ON UPDATE clause at all, so
@@ -184,9 +196,98 @@ def _constraint_name(dest_table: str, fk: ForeignKey, index: int) -> str:
     # safe common denominator across every engine we emit to. Truncation can
     # collide, so a digest of the full name replaces the tail.
     if len(base) > 30:
-        digest = hashlib.sha1(base.encode("utf-8")).hexdigest()[:6]
+        # Non-security: 6-hex suffix that disambiguates a truncated identifier.
+        # usedforsecurity=False documents intent and clears the weak-hash gate
+        # without changing the digest value.
+        digest = hashlib.sha1(  # nosec B324 - identifier shortening, not security
+            base.encode("utf-8"), usedforsecurity=False
+        ).hexdigest()[:6]
         base = f"{base[:23]}_{digest}"
     return base
+
+
+def _is_cycle_edge(dest_table: str, referenced_table: str, cycle_tables: set[str]) -> bool:
+    """Self-ref or both ends in the detected cycle → deferred / post-load edge."""
+    dest = (dest_table or "").strip().lower()
+    ref = (referenced_table or "").strip().lower()
+    if dest and ref and dest == ref:
+        return True
+    return bool(dest and ref and dest in cycle_tables and ref in cycle_tables)
+
+
+def classify_cycle_resolution(
+    cycle: list[str] | None,
+    decisions: list[Any],
+) -> dict[str, Any]:
+    """Did post-load ALTER recreate every cycle edge?
+
+    Detection alone is not a blocker. ``resolved`` is True only when every
+    planned edge whose both ends sit in ``cycle`` settled ``carried``.
+    Missing ``cycle_resolved`` on an old job stays fail-closed at the
+    certificate (treated as unresolved).
+    """
+    names = [str(t).strip() for t in (cycle or []) if str(t).strip()]
+    empty = {
+        "cycle": names,
+        "strategy": "n/a" if not names else "post_load_alter",
+        "resolved": True,
+        "unresolved": [],
+        "edge_count": 0,
+        "note": "No FK cycle in the selected streams.",
+    }
+    if not names:
+        return empty
+    cycle_l = {t.lower() for t in names}
+    edges: list[dict[str, Any]] = []
+    unresolved: list[dict[str, Any]] = []
+    for raw in decisions or []:
+        d = raw if isinstance(raw, dict) else getattr(raw, "__dict__", {})
+        if not isinstance(d, dict):
+            continue
+        dest = str(d.get("dest_table") or "").strip()
+        ref = str(d.get("referenced_table") or "").strip()
+        if not dest or not ref:
+            continue
+        if dest.lower() not in cycle_l or ref.lower() not in cycle_l:
+            continue
+        edge = {
+            "dest_table": dest,
+            "referenced_table": ref,
+            "status": str(d.get("status") or ""),
+            "name": d.get("name") or "",
+        }
+        edges.append(edge)
+        if edge["status"] != "carried":
+            unresolved.append(edge)
+    if not edges:
+        return {
+            "cycle": names,
+            "strategy": "post_load_alter",
+            "resolved": False,
+            "unresolved": [{"reason": "no cycle edges were planned or carried"}],
+            "edge_count": 0,
+            "note": (
+                "A cycle was detected but no cycle-edge constraint was planned — "
+                "the destination does not enforce the cycle."
+            ),
+        }
+    resolved = not unresolved
+    return {
+        "cycle": names,
+        "strategy": "post_load_alter",
+        "resolved": resolved,
+        "unresolved": unresolved,
+        "edge_count": len(edges),
+        "note": (
+            "Post-load ALTER recreated every cycle edge; the destination engine "
+            "validated the loaded rows."
+            if resolved
+            else (
+                "Post-load ALTER did not recreate every cycle edge — "
+                "the cycle is not fully enforced on the destination."
+            )
+        ),
+    }
 
 
 def _action_clause(dialect: str, fk: ForeignKey) -> tuple[str, str]:
@@ -228,6 +329,7 @@ def plan_foreign_keys(
     table_map: dict[str, str] | None = None,
     dest_existing_tables: set[str] | None = None,
     referenced_column_maps: dict[str, dict[str, str]] | None = None,
+    cycle_tables: list[str] | set[str] | None = None,
 ) -> ForeignKeyPlan:
     """Plan the destination constraints for one child table.
 
@@ -239,6 +341,9 @@ def plan_foreign_keys(
     destination (lower-cased), used when the parent is not part of the job.
     ``None`` means the destination catalog could not be listed, which is
     ``unknown`` — never "the parent is missing".
+    ``cycle_tables`` are members of a detected FK cycle (and self-refs are
+    treated as cycle edges even when omitted): PostgreSQL/Oracle emit
+    DEFERRABLE INITIALLY DEFERRED on those edges.
     """
     plan = ForeignKeyPlan()
     dial = _dialect(dest_dialect)
@@ -298,6 +403,7 @@ def plan_foreign_keys(
     known_tables = (
         None if dest_existing_tables is None else {t.lower() for t in dest_existing_tables}
     )
+    cycle_set = {str(t).lower() for t in (cycle_tables or []) if str(t).strip()}
 
     for index, fk in enumerate(keys):
         detail = _describe(fk)
@@ -423,12 +529,18 @@ def plan_foreign_keys(
             continue
 
         name = _constraint_name(dest_table, fk, index)
+        defer = (
+            " DEFERRABLE INITIALLY DEFERRED"
+            if dial in DEFERRABLE_DIALECTS
+            and _is_cycle_edge(dest_table, ref_dest, cycle_set)
+            else ""
+        )
         statement = (
             f"ALTER TABLE {_qualified(dial, dest_schema, dest_table)} "
             f"ADD CONSTRAINT {_quote(dial, name)} FOREIGN KEY "
             f"({', '.join(_quote(dial, c) for c in child_cols)}) "
             f"REFERENCES {_qualified(dial, dest_schema, ref_dest)} "
-            f"({', '.join(_quote(dial, c) for c in ref_cols)}){clause}"
+            f"({', '.join(_quote(dial, c) for c in ref_cols)}){clause}{defer}"
         )
         plan.statements.append(statement)
         plan.decisions.append(

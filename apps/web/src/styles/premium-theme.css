@@ -86,7 +86,7 @@
 
 .df2-breadcrumb strong {
   font-size: 14px;
-  font-weight: 650;
+  font-weight: 600;
   color: var(--df-ink-primary);
 }
 
@@ -285,7 +285,7 @@
 .df2-dashboard-next h2 {
   margin: 6px 0 8px;
   font-size: 18px;
-  font-weight: 650;
+  font-weight: 600;
   letter-spacing: -0.02em;
   color: var(--df-ink-primary);
 }
@@ -902,7 +902,7 @@
 
 .df2-empty-title {
   font-size: 16px;
-  font-weight: 650;
+  font-weight: 600;
   color: var(--df-ink-primary);
   margin: 8px 0 4px;
 }
@@ -1238,4 +1238,65 @@
   .df2-pilot {
     grid-template-columns: 1fr;
   }
+}
+
+/* Gate-8 "what was compared": the denominators behind a verdict, and the
+   ordered next moves when it failed. Same visual family as the honesty grid so
+   it reads as evidence, not as a callout. */
+.df2-gate8-match {
+  margin: 0 0 12px;
+  padding: 10px 12px;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  background: #f8fafc;
+  font-size: 12px;
+}
+
+.df2-gate8-match > strong {
+  display: block;
+  margin-bottom: 8px;
+  color: #0f172a;
+}
+
+.df2-gate8-match dl {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 8px 12px;
+  margin: 0;
+}
+
+.df2-gate8-match dt {
+  color: #64748b;
+  font-weight: 500;
+  margin: 0 0 2px;
+}
+
+.df2-gate8-match dd {
+  margin: 0;
+  font-weight: 600;
+  color: #0f172a;
+}
+
+.df2-gate8-match dd.is-warn {
+  color: #b45309;
+}
+
+.df2-gate8-match dd.is-ok {
+  color: #15803d;
+}
+
+.df2-gate8-match-fix {
+  margin: 10px 0 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 6px;
+}
+
+.df2-gate8-match-fix li strong {
+  display: block;
+  color: #0f172a;
+}
+
+.df2-gate8-match-fix li span {
+  color: #475569;
 }

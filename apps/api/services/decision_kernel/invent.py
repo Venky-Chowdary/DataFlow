@@ -197,6 +197,42 @@ def _kernel_invent_is_stale(row: dict[str, Any], src: str) -> bool:
     return changed
 
 
+def _capacity_promoted_stamp(
+    row: dict[str, Any],
+    stamped: str,
+    src_types: dict[str, str],
+    dest_db: str,
+) -> str:
+    """A wider create-new stamp when the judged source no longer fits it, else "".
+
+    A file/document source has no declared DDL, so its type is *profiled*, and
+    every stage profiles a different amount of it: Map sees eight sample rows
+    and projects ``DECIMAL(6,4)``, Validate profiles fifty and calls the source
+    ``DECIMAL(7,4)``, Execute reads the whole file and calls it ``DECIMAL(8,4)``.
+    The stamp is frozen at Map, so the gates then compare the source against a
+    carrier Dataflow itself projected too narrow and refuse the run for a
+    fidelity collapse of its own making — with no destination DDL to protect
+    (the table does not exist yet) and no remap the operator could make that is
+    more correct than the one we would write.
+
+    So the stamp is re-projected from the type this stage is judging against and
+    only ever widened: a fresh projection that is itself lossy leaves the stamp
+    alone, and an operator-chosen carrier is never touched.
+    """
+    if row.get("user_override") or row.get("risk_acknowledged"):
+        return ""
+    judged = (
+        column_type_or_none(src_types, str(row.get("source") or ""))
+        or str(row.get("source_type") or "").strip()
+    )
+    if not judged:
+        return ""
+    from services.decision_kernel.type_invent import promote_create_new_capacity_stamp
+
+    promoted = promote_create_new_capacity_stamp(judged, stamped, dest_db)
+    return promoted if promoted and promoted.upper() != stamped.upper() else ""
+
+
 def _backfill_widened_type(
     live_type: str,
     row: dict[str, Any],
@@ -228,14 +264,16 @@ def _backfill_widened_type(
     )
     if not source_type:
         return ""
+    # Function-local: connectors.schema_drift imports the type layer, so a
+    # module-level import here would close an import cycle.
     try:
         from connectors.schema_drift import is_wider_type
-    except Exception:
+    except ImportError:
         return ""
     try:
         if is_wider_type(str(live_type), source_type, dest_db=dest_db):
             return source_type
-    except Exception:
+    except (ValueError, TypeError, KeyError):
         return ""
     return ""
 
@@ -341,6 +379,10 @@ def stamp_additive_mapping_types(
         if stamped and not (is_create and (source_identity_stamp or stale_invent)):
             if is_create and not row.get("create_new"):
                 row["create_new"] = True
+            if is_create:
+                promoted = _capacity_promoted_stamp(row, stamped, src_types, db)
+                if promoted:
+                    row["target_type"] = promoted
             continue
         if not is_create:
             # No invent authority — leave blank; do not report as stamp failure.

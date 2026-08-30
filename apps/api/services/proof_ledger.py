@@ -153,7 +153,7 @@ def _competitive_integrity() -> list[dict[str, Any]]:
 def build_proof_ledger() -> dict[str, Any]:
     """Assemble the customer-facing proof ledger (no long-running transfers)."""
     from src.transfer.connector_capabilities import manifest_summary, transfer_live_driver_types
-    from src.transfer.registry import PRODUCTION_SKU, get_capabilities
+    from src.transfer.registry import get_capabilities
 
     summary = manifest_summary()
     drivers = transfer_live_driver_types()
@@ -165,21 +165,34 @@ def build_proof_ledger() -> dict[str, Any]:
     except Exception:
         catalog = {}
 
+    from services.sku_honesty import classify_production_sku, sku_honesty_summary
+
+    sku_classified = classify_production_sku()
+    sku_summary = sku_honesty_summary(sku_classified)
     sku_routes = [
         {
-            "source_kind": sk,
-            "source_format": sf,
-            "dest_kind": dk,
-            "dest_format": df,
-            "route": f"{sk}/{sf} → {dk}/{df}",
-            "status": "sku_committed",
+            "source_kind": row["source_kind"],
+            "source_format": row["source_format"],
+            "dest_kind": row["dest_kind"],
+            "dest_format": row["dest_format"],
+            "route": row["route"],
+            "status": row["status"],
+            "validate_ok": row["validate_ok"],
+            "driver_gap": row["driver_gap"],
+            "sold": row["sold"],
         }
-        for sk, sf, dk, df in PRODUCTION_SKU
+        for row in sku_classified
     ]
 
     proofs = _list_proof_files()
     fidelity_proofs = [p for p in proofs if p.get("tier") == "fidelity"]
     fidelity_ok = sum(1 for p in fidelity_proofs if p.get("success"))
+    try:
+        from services.desktop_lab import last_desktop_lab_report
+
+        desktop_lab = last_desktop_lab_report() or {}
+    except Exception:
+        desktop_lab = {}
 
     return {
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -189,18 +202,27 @@ def build_proof_ledger() -> dict[str, Any]:
             "transfer_live_drivers": drivers,
             "catalog_transfer_ready_aliases": catalog.get("live") or catalog.get("transfer_live") or summary.get("transfer_live_count"),
             "live_route_combinations": summary.get("live_route_combinations") or caps.get("live_route_combinations"),
-            "production_sku_routes": len(PRODUCTION_SKU),
+            "production_sku_routes": sku_summary["production_sku_claimed"],
+            "production_sku_sold": sku_summary["production_sku_sold"],
+            "production_sku_driver_missing": sku_summary["production_sku_driver_missing"],
+            "production_sku_refused": sku_summary["production_sku_refused"],
+            "production_sku_note": sku_summary["note"],
             "fidelity_proofs_on_disk": len(fidelity_proofs),
             "fidelity_proofs_passed": fidelity_ok,
             "planned_catalog_entries": catalog.get("planned"),
+            "desktop_lab_catalog_slots": desktop_lab.get("catalog_slots") or 0,
+            "desktop_lab_duplex_passed": desktop_lab.get("catalog_slots_duplex_passed") or 0,
+            "desktop_lab_unique_engines": desktop_lab.get("unique_engines_duplex_passed") or 0,
         },
         "production_sku": sku_routes,
         "recent_proofs": proofs,
         "integrity_comparison": _competitive_integrity(),
         "how_to_verify": [
+            "Run POST /api/v1/workspace/proofs/desktop-lab to exercise 80 catalog slots as source and dest (hosted twins share a driver).",
             "Run POST /api/v1/workspace/proofs/fidelity to execute the rich-type CSV→SQLite proof.",
             "Open Job Theater after a transfer — quarantine rows and Gate-8 checksum must match.",
             "Catalog badges: Certified = full transfer; Source-only = read path; Planned = roadmap.",
+            "Sell only routes with status=sold (validate_transfer + driver present). driver_missing is an environment gap, not Planned.",
             "CI exercises PRODUCTION_SKU when local emulators are up (test_production_sku_matrix).",
         ],
     }

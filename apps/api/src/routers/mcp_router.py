@@ -174,10 +174,20 @@ async def call_mcp_tool(request: ToolCallRequest, http_request: Request):
     _require_mcp_tool_auth(http_request)
     from services.mcp_invocation_log import log_mcp_invocation
     from services.mcp_rate_limit import check_mcp_rate_limit
+    from src.services.auth_service import auth_required as mcp_auth_required
 
+    from ..ai.copilot.tool_permissions import caller_role
     from ..ai.copilot.tools import get_pilot_tools
 
     client = http_request.headers.get("X-MCP-Client", "unknown")
+    # MCP is a second door into the same tools, so it carries the same role gate:
+    # an API key issued as viewer cannot start a transfer through an agent either.
+    # An enforced deployment with an unknown role falls back to viewer, never to
+    # the open posture — a token we cannot place must not get write reach.
+    mcp_role = ""
+    if mcp_auth_required():
+        mcp_user = getattr(http_request.state, "user", None) or {}
+        mcp_role = str(mcp_user.get("role") or "viewer")
     actor = getattr(getattr(http_request, "state", None), "user_email", None) or client
     correlation_id = getattr(http_request.state, "correlation_id", None)
     limit = check_mcp_rate_limit(str(actor or client))
@@ -193,7 +203,8 @@ async def call_mcp_tool(request: ToolCallRequest, http_request: Request):
         )
     start = time.perf_counter()
     try:
-        result = get_pilot_tools().execute(request.name, request.arguments)
+        with caller_role(mcp_role):
+            result = get_pilot_tools().execute(request.name, request.arguments)
     except Exception as exc:
         receipt = log_mcp_invocation(
             tool=request.name,

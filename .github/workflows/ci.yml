@@ -831,6 +831,7 @@ jobs:
           services/decision_kernel
           services/auth_rate_limit.py
           services/auto_create_lifecycle.py
+          services/staging_reaper.py
           src/services/auth_service.py
           connectors/elasticsearch_writer.py
           connectors/sqlite_writer.py
@@ -839,8 +840,10 @@ jobs:
         # Strict on services.decision_kernel; type_system follows as a skip-import smoke.
         working-directory: apps/api
         run: |
-          python -m mypy --config-file mypy.ini --follow-imports=skip services/decision_kernel
-          python -m mypy --config-file mypy.ini --follow-imports=skip services/type_system.py
+          # One invocation: with --follow-imports=skip, anything not named here
+          # resolves to Any, so checking type_system apart from the modules it
+          # delegates to left every invent path unchecked in both directions.
+          python -m mypy --config-file mypy.ini --follow-imports=skip services/decision_kernel services/type_system.py services/type_ddl_specialty.py
 
       - name: Assert optional RAG deps are not in default install
         run: |
@@ -860,7 +863,9 @@ jobs:
       - name: bandit high-severity gate (production code)
         # Fail on High only — Medium SQL f-string debt is tracked separately;
         # key identifier paths are hardened via connectors/sql_identifiers.py.
+        # Posture + false-positive catalogue: docs/SECURITY_SCANNING.md
         run: >
-          bandit -r apps/api/connectors apps/api/services apps/api/src
+          bandit -c bandit.yaml
+          -r apps/api/connectors apps/api/services apps/api/src
           -lll
           -q

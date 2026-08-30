@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import Any
 
 import requests
-from services.value_serializer import cell_to_string
+from services.value_serializer import cell_to_string, load_http_json
 
 from connectors.saas_common import ReadBatch, humanize_http_error
 
@@ -38,7 +38,7 @@ def _n1ql(url: str, username: str, password: str, statement: str, timeout: float
         timeout=timeout,
     )
     resp.raise_for_status()
-    body = resp.json()
+    body = load_http_json(resp)
     errors = body.get("errors") or []
     if errors:
         msg = errors[0].get("msg", "Couchbase N1QL error")

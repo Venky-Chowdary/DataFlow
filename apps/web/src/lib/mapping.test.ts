@@ -7,7 +7,11 @@ import {
   acknowledgeMappingRisk,
   applyDestTypeChange,
   applyStructPolicyChange,
+  applyDeclaredSourceZone,
   applyTransformChange,
+  assumeTimezoneAwaitingZone,
+  declaredSourceZone,
+  suggestedSourceZones,
   approveMappingHonestly,
   approveMappingsHonestly,
   buildPreflightMappings,
@@ -31,6 +35,7 @@ import {
   widenMappingToVarchar,
   type EditableMapping,
 } from "./mapping.js";
+import { needsMappingReview } from "./columnWorkbench.js";
 import { typeFamily } from "./typeDisplay.js";
 
 describe("transform SSOT round-trip", () => {
@@ -83,6 +88,73 @@ describe("transform SSOT round-trip", () => {
     assert.equal(next.transform, "cast_number");
     assert.equal(next.engineTransform, "decimal");
     assert.equal(next.approved, false);
+  });
+});
+
+describe("declared source zone", () => {
+  const zoneless: EditableMapping = {
+    source: "created_at",
+    target: "created_at",
+    confidence: 0.95,
+    approved: false,
+    sourceType: "TIMESTAMP",
+    targetType: "date",
+    transform: "none",
+  };
+
+  it("serializes the named zone as the engine transform", () => {
+    const declared = applyDeclaredSourceZone(zoneless, "Europe/Berlin");
+    assert.equal(declared.transform, "assume_timezone");
+    assert.equal(declared.engineTransform, "assume_timezone:Europe/Berlin");
+    assert.equal(declaredSourceZone(declared), "Europe/Berlin");
+    assert.equal(assumeTimezoneAwaitingZone(declared), false);
+    assert.equal(uiTransformToEngine("assume_timezone", "assume_timezone:Europe/Berlin"), "assume_timezone:Europe/Berlin");
+    assert.equal(buildPreflightMappings([], [declared])[0].transform, "assume_timezone:Europe/Berlin");
+  });
+
+  it("never lets an unnamed zone reach the engine", () => {
+    const chosen = applyTransformChange(zoneless, "assume_timezone");
+    assert.equal(assumeTimezoneAwaitingZone(chosen), true);
+    assert.equal(chosen.engineTransform, undefined);
+    assert.equal(uiTransformToEngine("assume_timezone", chosen.engineTransform), undefined);
+
+    const cleared = applyDeclaredSourceZone(applyDeclaredSourceZone(zoneless, "UTC"), "  ");
+    assert.equal(assumeTimezoneAwaitingZone(cleared), true);
+    assert.equal(cleared.engineTransform, undefined);
+  });
+
+  it("round-trips an engine declaration back onto the control", () => {
+    assert.equal(engineTransformToUi("assume_timezone:Asia/Kolkata"), "assume_timezone");
+    const editable = editableFromPipelineMappings(
+      [
+        {
+          source: "created_at",
+          target: "created_at",
+          confidence: 0.95,
+          transform: "assume_timezone:Asia/Kolkata",
+          source_type: "TIMESTAMP",
+          target_type: "date",
+        },
+      ],
+      [],
+      ["created_at"],
+      0.75,
+      { created_at: "date" },
+    );
+    assert.equal(editable[0].transform, "assume_timezone");
+    assert.equal(declaredSourceZone(editable[0]), "Asia/Kolkata");
+  });
+
+  it("keeps the zone when the operator reselects the control", () => {
+    const declared = applyDeclaredSourceZone(zoneless, "UTC");
+    assert.equal(declaredSourceZone(applyTransformChange(declared, "assume_timezone")), "UTC");
+  });
+
+  it("suggests UTC first and offers real zone names", () => {
+    const zones = suggestedSourceZones();
+    assert.equal(zones[0], "UTC");
+    assert.ok(zones.includes("Asia/Kolkata"));
+    assert.equal(new Set(zones).size, zones.length);
   });
 });
 
@@ -683,6 +755,27 @@ describe("destination schema honesty", () => {
     assert.notEqual(rows[0].confidence, rows[1].confidence);
   });
 
+  it("create-new Approve destType is the target_type Validate reads", () => {
+    const pf = buildPreflightMappings([], [
+      {
+        source: "DEP_TIME",
+        target: "DEP_TIME",
+        confidence: 0.9,
+        transform: "none",
+        approved: true,
+        requiresReview: false,
+        isPii: false,
+        createNew: true,
+        existsInDestination: false,
+        assignmentStrategy: "create_compatible_new",
+        destType: "NUMBER(12,9)",
+        inferredType: "NUMBER(9,6)",
+      },
+    ]);
+    assert.equal(pf[0].target_type, "NUMBER(12,9)");
+    assert.equal(pf[0].create_new, true);
+  });
+
   it("caps create-new confidence in buildPreflightMappings before preflight", () => {
     const fromEditable = buildPreflightMappings([], [
       {
@@ -833,6 +926,33 @@ describe("destination schema honesty", () => {
     assert.ok(engineStampedRiskChip(editable[0])?.label === "TZ risk");
   });
 
+  it("shows the epoch ceiling of a MySQL TIMESTAMP as a review, not a contract", () => {
+    const editable = editableFromPipelineMappings(
+      [{
+        source: "created_at",
+        target: "created_at",
+        confidence: 0.92,
+        source_type: "TIMESTAMPTZ",
+        target_type: "TIMESTAMP(6)",
+        create_new: true,
+        assignment_strategy: "identity_passthrough",
+        create_new_risks: [{
+          kind: "instant_range_cap",
+          severity: "warn",
+          message:
+            "Create-new TIMESTAMPTZ → TIMESTAMP(6) keeps the instant but caps its "
+            + "range to 1970-01-01 00:00:01 UTC .. 2038-01-19 03:14:07 UTC.",
+        }],
+      }],
+      [],
+      [],
+      0.75,
+    );
+    assert.equal(createNewRiskChipLabel(editable[0]), "range risk");
+    assert.equal(engineStampedRiskChip(editable[0])?.severity, "warn");
+    assert.equal(mappingAckTier(editable[0]), "review");
+  });
+
   it("cast fidelity never auto-approves as Ready without Accept risk", () => {
     const editable = editableFromPipelineMappings(
       [{
@@ -871,6 +991,38 @@ describe("destination schema honesty", () => {
     );
     assert.equal(editable[0].approved, false);
     assert.equal(editable[0].requiresReview, false);
+  });
+
+  it("first Validate does not need Approve for INTEGER → existing INT4 after round", () => {
+    // Engine path after apply_shape_type_ceilings: rounded decimal is INTEGER,
+    // dest is the existing int4. Continue already treats preserve as not-Issues;
+    // the G4 wire must not re-invent requires_review from the missing click.
+    const dests = ["INT4", "INT", "INTEGER"] as const;
+    for (const dest of dests) {
+      const editable = editableFromPipelineMappings(
+        [{
+          source: "arr_time",
+          target: "arr_time",
+          confidence: 0.99,
+          source_type: "INTEGER",
+          target_type: dest,
+          fidelity: "preserve",
+          requires_review: false,
+          transform: "none",
+        }],
+        [],
+        ["arr_time"],
+        0.85,
+        { arr_time: dest },
+      );
+      assert.equal(editable[0].approved, false, dest);
+      assert.equal(editable[0].requiresReview, false, dest);
+      assert.equal(needsMappingReview(editable[0], 0.85), false, dest);
+      const wire = buildPreflightMappings([], editable);
+      assert.equal(wire[0].requires_review, false, dest);
+      assert.equal(wire[0].user_override, false, dest);
+      assert.equal(wire[0].source_type, "INTEGER", dest);
+    }
   });
 
   it("does not treat pending dest schema as create-new Widen", () => {

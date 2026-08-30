@@ -1,6 +1,7 @@
 /** Gate-8 reconciliation proof — source vs destination rows + checksums. */
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
+import { HiddenFileInput } from "../ui/HiddenFileInput";
 import type { Gate8ReconciliationPayload } from "../../lib/types";
 
 /**
@@ -363,7 +364,6 @@ export function Gate8ProofCard({
   onRerun,
   onRerunLabel = "Re-run transfer",
 }: Gate8ProofCardProps) {
-  const verifyInputRef = useRef<HTMLInputElement>(null);
   const [verifyState, setVerifyState] = useState<
     | { status: "idle" }
     | { status: "working" }
@@ -713,6 +713,12 @@ export function Gate8ProofCard({
                   : "—"}
           </dd>
         </div>
+        <div>
+          <dt>Proof scope</dt>
+          <dd title="Coverage and source-digest provenance — never claimed as population_proof">
+            {[report.coverage || report.dest_readback?.coverage || "unmeasured", report.source_checksum_provenance || "—"].join(" · ")}
+          </dd>
+        </div>
         {report.sample_compare?.sample_seed?.method === "stratified" && (
           <p className="df2-muted" style={{ fontSize: 12, marginTop: 6 }}>
             Sample plan: <strong>stratified</strong>
@@ -757,6 +763,50 @@ export function Gate8ProofCard({
           </ul>
           {mismatches.length > 8 && (
             <p className="df2-gate8-proof-more">+{mismatches.length - 8} more in exported proof</p>
+          )}
+        </div>
+      )}
+
+      {report.match_summary && (
+        <div className="df2-gate8-match" aria-label="What was compared">
+          <strong>What was compared</strong>
+          <dl>
+            <div>
+              <dt>Populations</dt>
+              <dd>
+                source {(report.match_summary.source_rows ?? 0).toLocaleString()} ·
+                {" "}destination {(report.match_summary.dest_rows ?? 0).toLocaleString()}
+                {report.match_summary.dest_rows_before != null
+                  ? ` (held ${report.match_summary.dest_rows_before.toLocaleString()} before this run)`
+                  : ""}
+              </dd>
+            </div>
+            <div>
+              <dt>Cells agreeing</dt>
+              {/* Null percent is "not measured", never 0% — an unmeasured
+                  comparison must not read as total disagreement. */}
+              <dd className={report.match_summary.sample_match_percent == null
+                ? "is-warn"
+                : report.match_summary.sample_match_percent === 100 ? "is-ok" : "is-warn"}>
+                {report.match_summary.sample_match_percent == null
+                  ? "not measured"
+                  : `${report.match_summary.sample_match_percent}%`}
+              </dd>
+            </div>
+            <div>
+              <dt>Of</dt>
+              <dd>{report.match_summary.denominator}</dd>
+            </div>
+          </dl>
+          {(report.remediation?.length ?? 0) > 0 && (
+            <ol className="df2-gate8-match-fix">
+              {report.remediation!.slice(0, 4).map((r, i) => (
+                <li key={`${r.action}-${i}`}>
+                  <strong>{r.label}</strong>
+                  <span>{r.why}</span>
+                </li>
+              ))}
+            </ol>
           )}
         </div>
       )}
@@ -849,11 +899,10 @@ export function Gate8ProofCard({
               Download Migration Certificate (PDF)
             </button>
           )}
-          <input
-            ref={verifyInputRef}
-            type="file"
+          <HiddenFileInput
+            id="df2-gate8-verify-proof"
             accept="application/json,.json"
-            hidden
+            disabled={verifyState.status === "working"}
             onChange={(e) => {
               const file = e.target.files?.[0];
               e.target.value = "";
@@ -878,15 +927,14 @@ export function Gate8ProofCard({
                 });
             }}
           />
-          <button
-            type="button"
+          <label
+            htmlFor="df2-gate8-verify-proof"
             className="df2-btn df2-btn-sm"
-            disabled={verifyState.status === "working"}
-            onClick={() => verifyInputRef.current?.click()}
+            aria-disabled={verifyState.status === "working"}
             title="Re-check an exported HMAC proof pack (buyer diligence)"
           >
             {verifyState.status === "working" ? "Verifying…" : "Verify proof pack"}
-          </button>
+          </label>
         </div>
         {verifyState.status === "ok" && (
           <p className="df2-gate8-proof-verify is-ok" role="status">

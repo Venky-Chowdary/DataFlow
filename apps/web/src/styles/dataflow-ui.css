@@ -96,7 +96,7 @@ body {
   margin: 12px 0 18px;
   color: #475569;
   font-size: 13px;
-  font-weight: 650;
+  font-weight: 600;
 }
 
 .dt-page-loader-skeleton {
@@ -319,7 +319,7 @@ body {
 .df2-breadcrumb strong {
   font-size: 13px;
   color: #111827;
-  font-weight: 650;
+  font-weight: 600;
 }
 
 .df2-command-search {
@@ -464,8 +464,8 @@ body {
 
 .df2-page-title {
   margin: 0;
-  font-size: 24px;
-  font-weight: 700;
+  font-size: var(--df-fs-page-title);
+  font-weight: var(--df-fw-bold);
   color: #0f172a;
   letter-spacing: 0;
   line-height: 1.2;
@@ -672,7 +672,7 @@ body {
   margin-bottom: 8px;
   color: #64748b;
   font-size: 11px;
-  font-weight: 750;
+  font-weight: 700;
   letter-spacing: 0.05em;
   text-transform: uppercase;
 }
@@ -681,7 +681,7 @@ body {
   display: block;
   color: #111827;
   font-size: 15px;
-  font-weight: 750;
+  font-weight: 700;
 }
 
 .df2-ops-card p {
@@ -1007,13 +1007,13 @@ body {
   align-items: flex-start;
   gap: 10px;
   padding: 16px;
-  border: 1px solid #e2e8f0;
-  border-radius: 8px;
-  background: #fff;
+  border: 1px solid var(--df-border, #e2e8f0);
+  border-radius: var(--df-radius-md, 8px);
+  background: var(--df-surface, #fff);
   cursor: pointer;
   text-align: left;
   transition: border-color 0.15s, box-shadow 0.15s;
-  min-height: 130px;
+  min-height: 132px;
   min-width: 0;
   overflow: hidden;
 }
@@ -1180,6 +1180,7 @@ body {
 
 .df2-health-dot.ok { background: #22c55e; }
 .df2-health-dot.err { background: #ef4444; }
+.df2-health-dot.warn { background: #d97706; }
 
 .df2-copilot-rail {
   width: 360px;
@@ -1973,7 +1974,7 @@ body {
   background: #f0fdfa;
   color: #0f766e !important;
   font-size: 11px !important;
-  font-weight: 750;
+  font-weight: 700;
 }
 
 .df2-pilot-main {
@@ -2013,7 +2014,7 @@ body {
   margin-bottom: 6px;
   color: #64748b;
   font-size: 11px;
-  font-weight: 750;
+  font-weight: 700;
   letter-spacing: 0.05em;
   text-transform: uppercase;
 }
@@ -2021,7 +2022,7 @@ body {
 .df2-pilot-console-strip strong {
   color: #111827;
   font-size: 21px;
-  font-weight: 750;
+  font-weight: 700;
   font-variant-numeric: tabular-nums;
 }
 
@@ -2165,7 +2166,7 @@ body {
 .df2-pilot-capability span {
   color: #64748b;
   font-size: 11px;
-  font-weight: 750;
+  font-weight: 700;
   letter-spacing: 0.05em;
   text-transform: uppercase;
 }
@@ -2173,7 +2174,7 @@ body {
 .df2-pilot-capability strong {
   color: #111827;
   font-size: 16px;
-  font-weight: 750;
+  font-weight: 700;
 }
 
 .df2-pilot-capability small {
@@ -2792,6 +2793,39 @@ body {
   background: #f1f5f9;
   color: #0f172a;
   max-width: 95%;
+}
+
+/* Citations behind a grounded answer (Pilot page + rail share this block). */
+.df2-copilot-sources {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  padding-top: 6px;
+  border-top: 1px solid rgba(100, 116, 139, 0.2);
+  font-size: 11px;
+}
+
+.df2-copilot-sources-label {
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: #64748b;
+}
+
+.df2-copilot-sources a,
+.df2-copilot-sources span:not(.df2-copilot-sources-label) {
+  padding: 2px 7px;
+  border: 1px solid #dbe3ee;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.8);
+  color: #0f766e;
+  text-decoration: none;
+}
+
+.df2-copilot-sources a:hover {
+  border-color: #0f766e;
+  text-decoration: underline;
 }
 
 .df2-copilot-evidence,
@@ -4088,7 +4122,7 @@ body {
   background: #fff;
   color: #26312a;
   font-size: 12px;
-  font-weight: 650;
+  font-weight: 600;
   cursor: pointer;
 }
 
@@ -4206,7 +4240,7 @@ body {
   max-width: 680px;
   font-size: clamp(36px, 5vw, 64px);
   line-height: 1.02;
-  font-weight: 780;
+  font-weight: 700;
 }
 
 .df2-login-copy p {
@@ -4238,7 +4272,7 @@ body {
 .df2-login-proof-grid span {
   color: rgba(255, 255, 255, 0.56);
   font-size: 10px;
-  font-weight: 760;
+  font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.06em;
 }
@@ -4315,7 +4349,7 @@ body {
   margin: 22px 0 12px;
   color: #66736b;
   font-size: 11px;
-  font-weight: 760;
+  font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.06em;
 }
@@ -4416,7 +4450,7 @@ body {
 .df2-dashboard-matrix span {
   color: #66736b;
   font-size: 11px;
-  font-weight: 760;
+  font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.05em;
 }
@@ -4504,7 +4538,7 @@ body {
 .df2-route-node span {
   color: #66736b;
   font-size: 11px;
-  font-weight: 760;
+  font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.05em;
 }
@@ -4634,7 +4668,7 @@ body {
 .df2-jobs-now span {
   color: rgba(255, 255, 255, 0.56);
   font-size: 11px;
-  font-weight: 760;
+  font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.05em;
 }
@@ -4714,14 +4748,14 @@ body {
   background: #f0fdfa;
   color: #0f766e;
   font-size: 11px;
-  font-weight: 750;
+  font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.06em;
 }
 
-.df2-page-title {
+.df2-page-hero .df2-page-title {
   font-size: clamp(28px, 3vw, 38px);
-  font-weight: 760;
+  font-weight: 700;
   color: #101412;
 }
 
@@ -4759,7 +4793,7 @@ body {
 .df2-page-signal span {
   color: #6a756d;
   font-size: 10px;
-  font-weight: 750;
+  font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.05em;
 }
@@ -4767,7 +4801,7 @@ body {
 .df2-page-signal strong {
   color: #101412;
   font-size: 12px;
-  font-weight: 760;
+  font-weight: 700;
 }
 
 .df2-page-actions {
@@ -4855,7 +4889,7 @@ body {
 
 .df2-card-title {
   color: #101412;
-  font-weight: 720;
+  font-weight: 700;
 }
 
 .df2-card-sub,
@@ -4865,11 +4899,10 @@ body {
 }
 
 .df2-btn {
-  height: 38px;
   border-color: #d7dfd8;
   background: rgba(255, 255, 255, 0.92);
   color: #26312a;
-  font-weight: 620;
+  font-weight: 600;
 }
 
 .df2-btn:hover {
@@ -4917,7 +4950,7 @@ body {
 .df2-stat-label {
   color: #66736b;
   font-size: 11px;
-  font-weight: 760;
+  font-weight: 700;
 }
 
 .df2-stat-value {
@@ -5179,7 +5212,7 @@ body {
   margin-bottom: 5px;
   color: #66736b;
   font-size: 10px;
-  font-weight: 760;
+  font-weight: 700;
   letter-spacing: 0.05em;
   text-transform: uppercase;
 }
@@ -5498,6 +5531,14 @@ body {
   margin-top: 12px;
 }
 
+.df2-model-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+}
+
 .df2-model-roles span,
 .df2-model-checks span {
   padding: 4px 7px;
@@ -5621,7 +5662,7 @@ body {
     padding: 18px;
     border-radius: 12px;
   }
-  .df2-page-title {
+  .df2-page-hero .df2-page-title {
     font-size: 28px;
   }
   .df2-page-signals {
@@ -5869,7 +5910,7 @@ html,
   color: #66736b;
   font-family: var(--df-font-sans);
   font-size: 10.5px;
-  font-weight: 650;
+  font-weight: 600;
 }
 
 .df2-command-search:focus-within kbd {
@@ -5894,7 +5935,8 @@ html,
 }
 
 .df2-btn:disabled,
-.df2-btn[disabled] {
+.df2-btn[disabled],
+.df2-btn[aria-disabled="true"] {
   opacity: 0.55;
   cursor: not-allowed;
   transform: none;
@@ -6212,15 +6254,23 @@ html,
 
 /* Toasts — notification system (authoritative styles; host rendered by ToastProvider) */
 
+/* Bottom-right, not under the topbar: a top-right stack landed on top of the
+   page header and the first field of every form (measured on Query and
+   Contracts), and it fought the Pilot edge tab for the same corner. Bottom
+   right also matches the small-screen placement below, so the notification
+   never moves house between widths. */
 .dt-toast-host {
   position: fixed;
-  top: calc(var(--df-header-height, 56px) + 12px);
+  bottom: 16px;
   right: 16px;
   z-index: var(--df-z-toast, 1100);
   display: flex;
-  flex-direction: column;
+  flex-direction: column-reverse;
   gap: 10px;
   width: var(--df-toast-width);
+  max-height: calc(100vh - var(--df-header-height, 56px) - 32px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
   pointer-events: none;
 }
 

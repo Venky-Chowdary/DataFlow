@@ -34,7 +34,108 @@ _TYPE_ALIASES = {
     "snowflake": "snowflake",
     "mysql": "mysql",
     "sqlite": "sqlite",
+    "sql server": "sqlserver",
+    "sqlserver": "sqlserver",
+    "mssql": "sqlserver",
+    "ms sql": "sqlserver",
+    "ms sql server": "sqlserver",
+    "azure sql": "sqlserver",
+    "maria": "mariadb",
+    "mariadb": "mariadb",
+    "oracle": "oracle",
+    "redshift": "redshift",
+    "databricks": "databricks",
+    "duckdb": "duckdb",
 }
+
+# A dialect name is not a connector: "Postgres" says *what kind*, never *which
+# instance*. Guessing an instance is how data lands in the wrong database, so
+# these resolve only when exactly one saved connector is of that type.
+_DIALECT_WORDS = frozenset({*_TYPE_ALIASES, *_TYPE_ALIASES.values()})
+# Words that name a *family* of databases and no dialect at all. "transfer to sql"
+# says even less than "to postgres", so it can never resolve to an instance.
+_FAMILY_WORDS = frozenset({"sql", "database", "db", "warehouse", "lake", "lakehouse"})
+_ENGINE_WORDS = _DIALECT_WORDS | _FAMILY_WORDS
+# Environment / role qualifiers carry no instance identity: "local", "prod" and
+# "primary" appear in most connector labels, so token overlap on them alone is
+# not evidence. Requiring one distinctive token keeps "local postgres" from
+# resolving to "Local Snowflake".
+_QUALIFIER_TOKENS = frozenset(
+    {
+        "local",
+        "localhost",
+        "prod",
+        "production",
+        "dev",
+        "development",
+        "test",
+        "testing",
+        "stage",
+        "staging",
+        "qa",
+        "uat",
+        "sandbox",
+        "demo",
+        "main",
+        "primary",
+        "replica",
+        "standby",
+        "secondary",
+        "new",
+        "old",
+        "temp",
+        "my",
+        "the",
+        "connector",
+        "connection",
+        "instance",
+        "server",
+        "cluster",
+        "source",
+        "target",
+        "destination",
+        *_FAMILY_WORDS,
+    }
+)
+
+
+def _normalize_needle(needle: str) -> str:
+    return (needle or "").strip().lower().removesuffix(" connector").strip()
+
+
+def _engine_word(needle: str) -> str:
+    """Return the canonical engine type a phrase names, or "" if it names none."""
+    n = _normalize_needle(needle)
+    if n not in _DIALECT_WORDS:
+        return ""
+    return _TYPE_ALIASES.get(n, n)
+
+
+def _is_family_word(needle: str) -> bool:
+    """True for "sql" / "database" / "warehouse" — a family, not even a dialect."""
+    return _normalize_needle(needle) in _FAMILY_WORDS
+
+
+def _tokens(text: str) -> set[str]:
+    return {t for t in (text or "").replace("-", " ").replace("_", " ").split() if t}
+
+
+def _named_engines(tokens: set[str]) -> set[str]:
+    """Canonical engine types a phrase's tokens name, e.g. {"postgresql"}."""
+    return {_TYPE_ALIASES.get(t, t) for t in tokens if t in _DIALECT_WORDS}
+
+
+def _engine_conflict(tokens: set[str], type_l: str) -> bool:
+    """True when the phrase names a dialect that the connector's type is not.
+
+    "orders on Local Postgres" must never resolve to a saved Snowflake
+    connector because both labels contain "Local": the phrase states the
+    engine, and a wrong engine means the answer describes another database.
+    """
+    named = _named_engines(tokens)
+    if not named or not type_l:
+        return False
+    return not any(e == type_l or e in type_l or type_l in e for e in named)
 
 
 def _match_score(needle: str, label: str, ctype: str = "") -> float:
@@ -46,6 +147,15 @@ def _match_score(needle: str, label: str, ctype: str = "") -> float:
         return 0.0
     if label_l == n:
         return 100.0
+    if _engine_conflict(_tokens(n), type_l):
+        # Only the exact-name match above may resolve a phrase whose dialect
+        # contradicts the saved connector's engine; anything weaker is a guess.
+        return 0.0
+    if _is_family_word(n):
+        # "sql" / "database" / "warehouse" name a family, not an instance. Matching
+        # one to a saved connector is a guess, and a guess writes to the wrong
+        # database — so only an exact name match (above) may resolve it.
+        return 0.0
     if label_l.startswith(n) or n.startswith(label_l):
         return 85.0 - abs(len(label_l) - len(n)) * 0.2
     if n in label_l:
@@ -54,12 +164,13 @@ def _match_score(needle: str, label: str, ctype: str = "") -> float:
     if alias and (alias == type_l or alias in type_l or n == type_l or n in type_l):
         return 35.0
     # Token overlap: "local postgres" vs "Local Postgres Prod"
-    n_toks = {t for t in n.replace("-", " ").split() if t}
-    l_toks = {t for t in label_l.replace("-", " ").split() if t}
+    n_toks = _tokens(n)
+    l_toks = _tokens(label_l)
     if n_toks and n_toks <= l_toks:
         return 70.0 + len(n_toks) * 2.0
-    if n_toks and l_toks:
-        overlap = len(n_toks & l_toks) / len(n_toks)
+    shared = n_toks & l_toks
+    if shared and (shared - _QUALIFIER_TOKENS):
+        overlap = len(shared) / len(n_toks)
         if overlap >= 0.5:
             return 45.0 + overlap * 20.0
     return 0.0
@@ -77,9 +188,7 @@ def _pick_connector(needle: str, candidates: list[dict[str, Any]]) -> dict[str, 
         if score > 0:
             scored.append((score, d))
     if not scored:
-        raise AmbiguousConnectorError(
-            f'No connector matched “{needle}”. Name a saved connector from Connectors.'
-        )
+        raise AmbiguousConnectorError(_no_match_message(needle, candidates))
     scored.sort(key=lambda x: (-x[0], str(x[1].get("name") or "").lower()))
     best_score, best = scored[0]
     # Exact / near-exact name wins alone
@@ -95,10 +204,52 @@ def _pick_connector(needle: str, candidates: list[dict[str, Any]]) -> dict[str, 
         if name and name not in names:
             names.append(name)
     listed = ", ".join(f"**{n}**" for n in names)
-    raise AmbiguousConnectorError(
-        f"Which connector did you mean? {listed}",
-        candidates=names,
+    engine = _engine_word(needle)
+    question = (
+        f"“{needle}” is a database type, so it names more than one saved {engine} "
+        f"connector. Which connector did you mean? {listed}"
+        if engine
+        else f"Which connector did you mean? {listed}"
     )
+    raise AmbiguousConnectorError(question, candidates=names)
+
+
+def _no_match_message(needle: str, candidates: list[dict[str, Any]]) -> str:
+    """Say precisely what is missing — a type with no instance, or an unknown name."""
+    engine = _engine_word(needle)
+    saved = [str(d.get("name") or "").strip() for d in candidates]
+    saved = [n for n in saved if n]
+    listed = ", ".join(f"**{n}**" for n in saved[:6]) or "none yet"
+    # Keep "no connector matched" in every branch: the agent's recovery step and
+    # the client both read it to offer the saved list instead of a dead end.
+    head = f"No connector matched “{needle}”"
+    tail = f"Name a saved connector from Connectors. Saved connectors: {listed}."
+    if engine:
+        return (
+            f"{head} — that is a database type, not a saved connector, and no "
+            f"{engine} connector is saved, so there is no instance to point this at. "
+            f"{tail}"
+        )
+    if _is_family_word(needle):
+        return (
+            f"{head} — that names a family of databases, not one instance, so there "
+            f"is nothing to point this at. {tail}"
+        )
+    named = _named_engines(_tokens(_normalize_needle(needle)))
+    saved_types = {str(d.get("type") or d.get("format") or "").strip().lower() for d in candidates}
+    absent = sorted(
+        e
+        for e in named
+        if not any(t and (e == t or e in t or t in e) for t in saved_types)
+    )
+    if absent:
+        engines = ", ".join(absent)
+        return (
+            f"{head} — no {engines} connector is saved, so there is no instance to "
+            f"point this at, and a connector of another engine is not the same "
+            f"database. {tail}"
+        )
+    return f"{head}, and I will not guess which database you meant. {tail}"
 
 
 def _connector_dict(connector_id: str = "", name: str = "") -> dict[str, Any] | None:

@@ -16,6 +16,7 @@ from connectors.lsn_guards import DF_LSN_COL
 from connectors.sql_identifiers import quote_sql_identifier, require_safe_identifier
 from services.cdc_exactly_once import (
     WATERMARK_TABLE,
+    WATERMARK_TABLE_ORACLE,
     DestWmView,
     EosApplyResult,
     EosBundleResult,
@@ -88,13 +89,39 @@ def normalize_eos_dialect(dest_type: str, dest_cfg: dict[str, Any] | None = None
     return dest
 
 
-def _q(name: str) -> str:
+def _quote_char(dialect: str) -> str:
+    """Identifier quote for this engine family.
+
+    MySQL rejects ANSI double quotes for identifiers unless ``ANSI_QUOTES`` is
+    set, and T-SQL wants brackets — quoting every identifier with ``"`` made the
+    dest-owned watermark protocol unusable on those engines even though they are
+    listed as wired.
+    """
+    if dialect in _MYSQL_LIKE:
+        return "`"
+    if dialect in _MSSQL_LIKE:
+        return "["
+    return '"'
+
+
+def _q(name: str, dialect: str = "") -> str:
     require_safe_identifier(name)
-    return quote_sql_identifier(name)
+    return quote_sql_identifier(name, _quote_char(dialect))
+
+
+def _wm_ref(dialect: str) -> str:
+    """Watermark table name for this dialect.
+
+    Oracle rejects an unquoted identifier starting with ``_`` (ORA-00911), so on
+    Oracle destinations the watermark DDL failed and with it every EOS apply on
+    the very first batch. Oracle gets the Oracle-legal spelling; every other
+    dialect keeps the historical name so existing tables keep working.
+    """
+    return WATERMARK_TABLE_ORACLE if dialect in _ORACLE_LIKE else WATERMARK_TABLE
 
 
 def _wm_ddl(dialect: str) -> str:
-    table = WATERMARK_TABLE
+    table = _wm_ref(dialect)
     if dialect in _MSSQL_LIKE:
         return (
             f"IF OBJECT_ID('{table}', 'U') IS NULL "
@@ -160,22 +187,26 @@ def _lock_watermark_sql(dialect: str, *, with_seq: bool = True) -> str:
         cols = f"{cols}, resume_blob, apply_seq, window_id, snapshot_signal_id, window_hi_pk"
     if dialect in _FOR_UPDATE_LIKE:
         return (
-            f"SELECT {cols} FROM {WATERMARK_TABLE} "
+            f"SELECT {cols} FROM {_wm_ref(dialect)} "
             f"WHERE stream_key = :k FOR UPDATE"
         )
     if dialect in _MSSQL_LIKE:
         return (
-            f"SELECT {cols} FROM {WATERMARK_TABLE} "
+            f"SELECT {cols} FROM {_wm_ref(dialect)} "
             f"WITH (UPDLOCK, ROWLOCK) WHERE stream_key = :k"
         )
-    return f"SELECT {cols} FROM {WATERMARK_TABLE} WHERE stream_key = :k"
+    return f"SELECT {cols} FROM {_wm_ref(dialect)} WHERE stream_key = :k"
 
 
 def _lock_watermark(conn: Any, dialect: str, stream_key: str) -> DestWmView:
+    # The narrow retry needs its own savepoint: on PostgreSQL a failed statement
+    # aborts the enclosing transaction, so without one the fallback SELECT — and
+    # the whole apply after it — would fail with InFailedSqlTransaction.
     try:
-        locked = conn.execute(
-            text(_lock_watermark_sql(dialect, with_seq=True)), {"k": stream_key}
-        ).fetchone()
+        with conn.begin_nested():
+            locked = conn.execute(
+                text(_lock_watermark_sql(dialect, with_seq=True)), {"k": stream_key}
+            ).fetchone()
     except Exception:
         locked = conn.execute(
             text(_lock_watermark_sql(dialect, with_seq=False)), {"k": stream_key}
@@ -207,7 +238,7 @@ def _upsert_watermark_sql(dialect: str) -> str:
     )
     if dialect in _MYSQL_LIKE:
         return (
-            f"INSERT INTO {WATERMARK_TABLE} ({cols}) "
+            f"INSERT INTO {_wm_ref(dialect)} ({cols}) "
             f"VALUES (:k, :lsn, :bid, :at, :obj, :ep, :fe, :prev, :ph, :ck) "
             f"ON DUPLICATE KEY UPDATE committed_lsn = VALUES(committed_lsn), "
             f"batch_id = VALUES(batch_id), committed_at = VALUES(committed_at), "
@@ -217,7 +248,7 @@ def _upsert_watermark_sql(dialect: str) -> str:
         )
     if dialect in _MSSQL_LIKE:
         return (
-            f"MERGE {WATERMARK_TABLE} WITH (HOLDLOCK) AS t "
+            f"MERGE {_wm_ref(dialect)} WITH (HOLDLOCK) AS t "
             f"USING (SELECT :k AS stream_key, :lsn AS committed_lsn, :bid AS batch_id, "
             f":at AS committed_at, :obj AS dest_object, :ep AS epoch, :fe AS fence_epoch, "
             f":prev AS prev_lsn, :ph AS phase, :ck AS apply_checksum) AS s "
@@ -234,7 +265,7 @@ def _upsert_watermark_sql(dialect: str) -> str:
         )
     if dialect in _ORACLE_LIKE:
         return (
-            f"MERGE INTO {WATERMARK_TABLE} t "
+            f"MERGE INTO {_wm_ref(dialect)} t "
             f"USING (SELECT :k AS stream_key, :lsn AS committed_lsn, :bid AS batch_id, "
             f":at AS committed_at, :obj AS dest_object, :ep AS epoch, :fe AS fence_epoch, "
             f":prev AS prev_lsn, :ph AS phase, :ck AS apply_checksum FROM dual) s "
@@ -251,7 +282,7 @@ def _upsert_watermark_sql(dialect: str) -> str:
         )
     if dialect in _SNOW_LIKE:
         return (
-            f"MERGE INTO {WATERMARK_TABLE} t "
+            f"MERGE INTO {_wm_ref(dialect)} t "
             f"USING (SELECT :k AS stream_key, :lsn AS committed_lsn, :bid AS batch_id, "
             f":at AS committed_at, :obj AS dest_object, :ep AS epoch, :fe AS fence_epoch, "
             f":prev AS prev_lsn, :ph AS phase, :ck AS apply_checksum) s "
@@ -267,7 +298,7 @@ def _upsert_watermark_sql(dialect: str) -> str:
             f"s.apply_checksum)"
         )
     return (
-        f"INSERT INTO {WATERMARK_TABLE} ({cols}) "
+        f"INSERT INTO {_wm_ref(dialect)} ({cols}) "
         f"VALUES (:k, :lsn, :bid, :at, :obj, :ep, :fe, :prev, :ph, :ck) "
         f"ON CONFLICT (stream_key) DO UPDATE SET "
         f"committed_lsn = excluded.committed_lsn, batch_id = excluded.batch_id, "
@@ -276,6 +307,35 @@ def _upsert_watermark_sql(dialect: str) -> str:
         f"prev_lsn = excluded.prev_lsn, phase = excluded.phase, "
         f"apply_checksum = excluded.apply_checksum"
     )
+
+
+def _existing_columns(conn: Any, table_name: str) -> set[str]:
+    """Column names the dest engine actually reports, lower-cased.
+
+    Read from the catalog rather than discovered by letting ``ALTER TABLE ADD
+    COLUMN`` fail: on PostgreSQL a failed statement aborts the whole
+    transaction, so the try/except-per-column style poisoned the apply
+    transaction and every following statement raised ``InFailedSqlTransaction``.
+    """
+    from sqlalchemy import inspect as sa_inspect
+    from sqlalchemy.exc import SQLAlchemyError
+    from sqlalchemy.sql import quoted_name
+
+    inspector = sa_inspect(conn)
+    try:
+        cols = inspector.get_columns(table_name)
+    except SQLAlchemyError:
+        cols = []
+    if not cols:
+        # Oracle (and any UPPER-case-default catalog) folds an unquoted lower-case
+        # name to upper case when it reads the dictionary, so a table we created
+        # as "eos_clean" reported no columns at all — and every column was then
+        # re-added, failing with ORA-01430 on the first CDC batch.
+        try:
+            cols = inspector.get_columns(quoted_name(table_name, True))
+        except SQLAlchemyError:
+            return set()
+    return {str(c.get("name") or "").lower() for c in cols}
 
 
 def _ensure_wm_columns(conn: Any, dialect: str) -> None:
@@ -323,17 +383,17 @@ def _ensure_wm_columns(conn: Any, dialect: str) -> None:
             )
         )),
     ]
-    table_q = WATERMARK_TABLE
+    table_q = _wm_ref(dialect)
+    present = _existing_columns(conn, table_q)
     for col, typ in adds:
-        try:
-            if dialect in _ORACLE_LIKE:
-                conn.execute(text(f"ALTER TABLE {table_q} ADD ({col} {typ})"))
-            elif dialect in _MSSQL_LIKE:
-                conn.execute(text(f"ALTER TABLE {table_q} ADD {col} {typ}"))
-            else:
-                conn.execute(text(f"ALTER TABLE {table_q} ADD COLUMN {col} {typ}"))
-        except Exception:
-            pass
+        if col.lower() in present:
+            continue
+        if dialect in _ORACLE_LIKE:
+            conn.execute(text(f"ALTER TABLE {table_q} ADD ({col} {typ})"))
+        elif dialect in _MSSQL_LIKE:
+            conn.execute(text(f"ALTER TABLE {table_q} ADD {col} {typ}"))
+        else:
+            conn.execute(text(f"ALTER TABLE {table_q} ADD COLUMN {col} {typ}"))
 
 
 def _col_sql_type(dialect: str, col: str, pk_cols: list[str]) -> str:
@@ -349,7 +409,7 @@ def _col_sql_type(dialect: str, col: str, pk_cols: list[str]) -> str:
 
 
 def _add_column_sql(dialect: str, table_q: str, col: str, typ: str) -> str:
-    col_q = _q(col)
+    col_q = _q(col, dialect)
     if dialect in _ORACLE_LIKE:
         return f"ALTER TABLE {table_q} ADD ({col_q} {typ})"
     if dialect in _MSSQL_LIKE:
@@ -358,14 +418,14 @@ def _add_column_sql(dialect: str, table_q: str, col: str, typ: str) -> str:
 
 
 def _ensure_dest_table(conn: Any, dialect: str, table_name: str, columns: list[str], pk_cols: list[str]) -> None:
-    table_q = _q(table_name)
+    table_q = _q(table_name, dialect)
     col_sql = []
     for col in columns:
         typ = _col_sql_type(dialect, col, pk_cols)
         suffix = " PRIMARY KEY" if pk_cols == [col] else ""
-        col_sql.append(f"{_q(col)} {typ}{suffix}")
+        col_sql.append(f"{_q(col, dialect)} {typ}{suffix}")
     if len(pk_cols) > 1:
-        pk_sql = ", ".join(_q(c) for c in pk_cols)
+        pk_sql = ", ".join(_q(c, dialect) for c in pk_cols)
         col_sql.append(f"PRIMARY KEY ({pk_sql})")
     ddl = f"CREATE TABLE IF NOT EXISTS {table_q} ({', '.join(col_sql)})"
     if dialect in _MSSQL_LIKE:
@@ -381,15 +441,15 @@ def _ensure_dest_table(conn: Any, dialect: str, table_name: str, columns: list[s
     else:
         conn.execute(text(ddl))
     # Additive columns when the dest table already existed (never invent PK).
+    present = _existing_columns(conn, table_name)
     for col in columns:
-        try:
-            conn.execute(text(
-                _add_column_sql(
-                    dialect, table_q, col, _col_sql_type(dialect, col, pk_cols)
-                )
-            ))
-        except Exception:
-            pass
+        if col.lower() in present:
+            continue
+        conn.execute(text(
+            _add_column_sql(
+                dialect, table_q, col, _col_sql_type(dialect, col, pk_cols)
+            )
+        ))
 
 
 def _sa_load_dest_rows(
@@ -398,6 +458,7 @@ def _sa_load_dest_rows(
     pk_cols: list[str],
     keys: list[str],
     columns: list[str],
+    dialect: str = "",
 ) -> dict[str, dict[str, Any]]:
     """Estuary Load — dest documents for batch PKs on the apply connection."""
     from services.cdc_snapshot_window import _pk_row_dict, _pk_value
@@ -405,11 +466,11 @@ def _sa_load_dest_rows(
     out: dict[str, dict[str, Any]] = {}
     if not keys or not pk_cols or not columns:
         return out
-    table_q = _q(dest_table)
-    col_sql = ", ".join(_q(c) for c in columns)
+    table_q = _q(dest_table, dialect)
+    col_sql = ", ".join(_q(c, dialect) for c in columns)
     for key in keys:
         parts = _pk_row_dict(pk_cols, key) if len(pk_cols) > 1 else {pk_cols[0]: key}
-        where = " AND ".join(f"{_q(c)} = :pk_{i}" for i, c in enumerate(pk_cols))
+        where = " AND ".join(f"{_q(c, dialect)} = :pk_{i}" for i, c in enumerate(pk_cols))
         binds = {f"pk_{i}": parts[c] for i, c in enumerate(pk_cols)}
         row = conn.execute(
             text(f"SELECT {col_sql} FROM {table_q} WHERE {where}"),
@@ -445,11 +506,12 @@ def _upsert_row(
     target_cols: list[str],
     pk_cols: list[str],
     values: dict[str, Any],
+    dialect: str = "",
 ) -> int:
-    where = " AND ".join(f"{_q(c)} = :pk_{i}" for i, c in enumerate(pk_cols))
+    where = " AND ".join(f"{_q(c, dialect)} = :pk_{i}" for i, c in enumerate(pk_cols))
     pk_binds = {f"pk_{i}": values.get(c) for i, c in enumerate(pk_cols)}
     existing = conn.execute(
-        text(f"SELECT {_q(DF_LSN_COL)} FROM {table_q} WHERE {where}"),
+        text(f"SELECT {_q(DF_LSN_COL, dialect)} FROM {table_q} WHERE {where}"),
         pk_binds,
     ).fetchone()
     prior = existing[0] if existing else None
@@ -459,14 +521,14 @@ def _upsert_row(
         return 0
     col_binds = {f"c_{i}": values.get(c) for i, c in enumerate(target_cols)}
     if existing is None:
-        cols = ", ".join(_q(c) for c in target_cols)
+        cols = ", ".join(_q(c, dialect) for c in target_cols)
         ph = ", ".join(f":c_{i}" for i in range(len(target_cols)))
         conn.execute(text(f"INSERT INTO {table_q} ({cols}) VALUES ({ph})"), col_binds)
         return 1
     set_cols = [c for c in target_cols if c not in pk_cols]
     if not set_cols:
         return 0
-    sets = ", ".join(f"{_q(c)} = :c_{target_cols.index(c)}" for c in set_cols)
+    sets = ", ".join(f"{_q(c, dialect)} = :c_{target_cols.index(c)}" for c in set_cols)
     conn.execute(text(f"UPDATE {table_q} SET {sets} WHERE {where}"), {**col_binds, **pk_binds})
     return 1
 
@@ -508,7 +570,7 @@ def _sa_write_watermark(
     if resume_blob or apply_seq or window_id or snapshot_signal_id or window_hi_pk:
         conn.execute(
             text(
-                f"UPDATE {WATERMARK_TABLE} SET resume_blob = :rb, apply_seq = :seq, "
+                f"UPDATE {_wm_ref(dialect)} SET resume_blob = :rb, apply_seq = :seq, "
                 f"window_id = :wid, snapshot_signal_id = :sid, window_hi_pk = :hi "
                 f"WHERE stream_key = :k"
             ),
@@ -521,6 +583,55 @@ def _sa_write_watermark(
                 "k": stream_key,
             },
         )
+
+
+def _eos_write_shape(
+    dialect: str,
+    mappings: list[dict[str, Any]],
+    column_types: dict[str, str],
+) -> tuple[list[dict[str, Any]], dict[str, str], list[str]]:
+    """Mappings, types and destination columns this apply will write.
+
+    Shared by the DDL preparation step and the apply itself so the table that
+    gets created is exactly the table that gets written.
+    """
+    from connectors.writer_common import resolve_target_columns
+
+    mappings = list(mappings)
+    column_types = dict(column_types)
+    if not any(m.get("source") == DF_LSN_COL for m in mappings):
+        mappings.append({"source": DF_LSN_COL, "target": DF_LSN_COL, "confidence": 1.0})
+    column_types.setdefault(DF_LSN_COL, "string")
+    target_cols, _logical = resolve_target_columns(
+        mappings,
+        column_types,
+        preserve_case=True,
+        table_exists=None,
+        dest_db=dialect if dialect != "generic_sql" else "generic_sql",
+    )
+    if DF_LSN_COL not in target_cols:
+        target_cols = list(target_cols) + [DF_LSN_COL]
+    return mappings, column_types, list(target_cols)
+
+
+def _prepare_eos_schema(
+    engine: Any,
+    dialect: str,
+    members: list[tuple[str, list[str], list[str]]],
+) -> None:
+    """Create/extend the watermark and dest tables *before* the apply txn.
+
+    MySQL commits implicitly on DDL, so a ``CREATE TABLE IF NOT EXISTS`` issued
+    inside the apply transaction committed whatever earlier bundle members had
+    already written: a crash mid-bundle then left one stream applied and the
+    rest rolled back, which is exactly the partial state the bundle exists to
+    prevent. DDL is therefore never emitted on the apply connection.
+    """
+    with engine.begin() as conn:
+        conn.execute(text(_wm_ddl(dialect)))
+        _ensure_wm_columns(conn, dialect)
+        for table, columns, pk_cols in members:
+            _ensure_dest_table(conn, dialect, table, columns, pk_cols)
 
 
 def _sa_apply_member(
@@ -538,23 +649,11 @@ def _sa_apply_member(
     writer_fence: int = 0,
     crash_after: str | None = None,
 ) -> EosApplyResult:
-    from connectors.writer_common import resolve_target_columns
     from services.cdc_snapshot_window import _pk_row_dict
 
-    mappings = list(mappings)
-    column_types = dict(column_types)
-    if not any(m.get("source") == DF_LSN_COL for m in mappings):
-        mappings.append({"source": DF_LSN_COL, "target": DF_LSN_COL, "confidence": 1.0})
-    column_types.setdefault(DF_LSN_COL, "string")
-    target_cols, _logical = resolve_target_columns(
-        mappings,
-        column_types,
-        preserve_case=True,
-        table_exists=None,
-        dest_db=dialect if dialect != "generic_sql" else "generic_sql",
+    mappings, column_types, target_cols = _eos_write_shape(
+        dialect, mappings, column_types
     )
-    if DF_LSN_COL not in target_cols:
-        target_cols = list(target_cols) + [DF_LSN_COL]
     if not pk_target_cols:
         raise ExactlyOnceRouteError(
             "exactly_once apply requires destination primary-key columns.",
@@ -571,7 +670,6 @@ def _sa_apply_member(
     incoming_checksum = batch_apply_checksum(
         change, incoming_lsn=incoming_lsn, pk_cols=pk_target_cols
     )
-    _ensure_dest_table(conn, dialect, dest_table, target_cols, pk_target_cols)
     dest = _lock_watermark(conn, dialect, stream_key)
     action, fence = decide_from_view(
         incoming_lsn=incoming_lsn,
@@ -648,7 +746,7 @@ def _sa_apply_member(
             snapshot_signal_id=signal_id,
             window_hi_pk=hi_pk,
         )
-    table_q = _q(dest_table)
+    table_q = _q(dest_table, dialect)
     rows_written = 0
     records = list(change.inserts or []) + list(change.updates or [])
     inc_sig = extract_snapshot_signal_id(change.resume_token)
@@ -669,6 +767,7 @@ def _sa_apply_member(
             pk_target_cols,
             incoming_pk_keys(records, pk_target_cols),
             target_cols,
+            dialect,
         )
         records = load_reduce_into_dest(
             incoming_rows=records,
@@ -678,7 +777,9 @@ def _sa_apply_member(
         )
     for rec in records:
         values = _row_values(rec, target_cols, tgt_to_src, incoming_lsn)
-        rows_written += _upsert_row(conn, table_q, target_cols, pk_target_cols, values)
+        rows_written += _upsert_row(
+            conn, table_q, target_cols, pk_target_cols, values, dialect
+        )
     deleted = 0
     for key in list(change.deletes or []):
         parts = (
@@ -687,11 +788,11 @@ def _sa_apply_member(
             else {pk_target_cols[0]: key}
         )
         where = " AND ".join(
-            f"{_q(c)} = :pk_{i}" for i, c in enumerate(pk_target_cols)
+            f"{_q(c, dialect)} = :pk_{i}" for i, c in enumerate(pk_target_cols)
         )
         binds = {f"pk_{i}": parts[c] for i, c in enumerate(pk_target_cols)}
         existing = conn.execute(
-            text(f"SELECT {_q(DF_LSN_COL)} FROM {table_q} WHERE {where}"),
+            text(f"SELECT {_q(DF_LSN_COL, dialect)} FROM {table_q} WHERE {where}"),
             binds,
         ).fetchone()
         prior = existing[0] if existing else None
@@ -764,9 +865,11 @@ def apply_eos_sqlalchemy(
     cfg.setdefault("type", dialect if dialect != "generic_sql" else (dest_cfg.get("type") or dest_type))
     engine = _engine(cfg)
     try:
+        _, _, target_cols = _eos_write_shape(dialect, mappings, column_types)
+        _prepare_eos_schema(
+            engine, dialect, [(dest_table, target_cols, pk_target_cols)]
+        )
         with engine.begin() as conn:
-            conn.execute(text(_wm_ddl(dialect)))
-            _ensure_wm_columns(conn, dialect)
             result = _sa_apply_member(
                 conn,
                 dialect,
@@ -823,9 +926,19 @@ def apply_eos_sa_bundle(
     members: list[EosApplyResult] = []
     member_keys: list[str] = []
     try:
+        _prepare_eos_schema(
+            engine,
+            dialect,
+            [
+                (
+                    s.dest_table,
+                    _eos_write_shape(dialect, s.mappings, s.column_types)[2],
+                    s.pk_target_cols,
+                )
+                for s in streams
+            ],
+        )
         with engine.begin() as conn:
-            conn.execute(text(_wm_ddl(dialect)))
-            _ensure_wm_columns(conn, dialect)
             for stream in sorted(streams, key=lambda s: s.stream_key):
                 member_lsn = incoming_lsn
                 try:
@@ -980,7 +1093,7 @@ def sa_dest_watermark_view(
                         f"SELECT committed_lsn, epoch, fence_epoch, phase, "
                         f"apply_checksum, resume_blob, apply_seq, window_id, "
                         f"snapshot_signal_id, window_hi_pk "
-                        f"FROM {WATERMARK_TABLE} WHERE stream_key = :k"
+                        f"FROM {_wm_ref(dialect)} WHERE stream_key = :k"
                     ),
                     {"k": stream_key},
                 ).fetchone()
@@ -1004,7 +1117,7 @@ def sa_dest_resume_blob(dest_cfg: dict[str, Any], stream_key: str, dest_type: st
             try:
                 row = conn.execute(
                     text(
-                        f"SELECT resume_blob FROM {WATERMARK_TABLE} WHERE stream_key = :k"
+                        f"SELECT resume_blob FROM {_wm_ref(dialect)} WHERE stream_key = :k"
                     ),
                     {"k": stream_key},
                 ).fetchone()
@@ -1028,7 +1141,7 @@ def sa_dest_watermark_lsn(dest_cfg: dict[str, Any], stream_key: str, dest_type: 
             try:
                 row = conn.execute(
                     text(
-                        f"SELECT committed_lsn FROM {WATERMARK_TABLE} WHERE stream_key = :k"
+                        f"SELECT committed_lsn FROM {_wm_ref(dialect)} WHERE stream_key = :k"
                     ),
                     {"k": stream_key},
                 ).fetchone()
@@ -1050,7 +1163,9 @@ def sa_dest_engine_count(dest_cfg: dict[str, Any], table_name: str, dest_type: s
     try:
         with engine.connect() as conn:
             try:
-                row = conn.execute(text(f"SELECT COUNT(*) FROM {_q(table_name)}")).fetchone()
+                row = conn.execute(
+                    text(f"SELECT COUNT(*) FROM {_q(table_name, dialect)}")
+                ).fetchone()
             except Exception:
                 return 0
             return int(row[0] or 0) if row else 0

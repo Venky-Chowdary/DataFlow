@@ -82,6 +82,47 @@ def test_replay_closure_gate8_failure_promotes_nothing():
     assert state["promoted_count"] == 0
 
 
+def test_partial_promote_distinct_when_primary_key_is_column_names():
+    """Stream-contract primary_key=['id'] must not collapse every finding to one id."""
+    findings = [
+        {
+            "row": 2,
+            "column": "age",
+            "value": "not-a-number",
+            "reason": "Invalid integer",
+            "primary_key": ["id"],
+            "pk_value": {"id": "2"},
+            "values": {"id": "2", "age": "not-a-number"},
+            "source_values": {"id": "2", "age": "not-a-number"},
+            "retry_status": "open",
+        },
+        {
+            "row": 4,
+            "column": "age",
+            "value": "also-bad",
+            "reason": "Invalid integer",
+            "primary_key": ["id"],
+            "pk_value": {"id": "4"},
+            "values": {"id": "4", "age": "also-bad"},
+            "source_values": {"id": "4", "age": "also-bad"},
+            "retry_status": "open",
+        },
+    ]
+    stamped = dlq.stamp_replay_attempt(
+        findings,
+        attempted=[findings[0]],
+        child_rejected=[],
+        gate8_passed=True,
+        child_job_id="child",
+    )
+    state = dlq.evaluate_replay_closure(
+        stamped, last_replay={"gate8_passed": True, "rejected": 0}
+    )
+    assert state["verdict"] == dlq.VERDICT_IN_PROGRESS
+    assert state["promoted_count"] == 1
+    assert state["open_count"] == 1
+
+
 def test_partial_promote_does_not_claim_closed():
     findings = [_finding(2, "bad"), _finding(3, "also-bad")]
     stamped = dlq.stamp_replay_attempt(

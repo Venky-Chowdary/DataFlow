@@ -3,7 +3,8 @@
 Permission model (enterprise-friendly):
 
 - viewer:  read jobs, connectors, schedules, audit, workspace.
-- editor:  viewer + run transfers, manage connectors, schedules, plans.
+- editor:  viewer + run transfers, manage connectors, schedules, plans, and
+           invite non-admin members to the workspace (granting admin is not).
 - admin:   editor + workspace administration, user management, settings.
 
 Unknown roles and the dev "Workspace tester" role map to editor so development
@@ -16,7 +17,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from services.auth_service import auth_required
+from src.services import auth_service as _auth_service
 
 
 class Permission:
@@ -29,11 +30,25 @@ class Permission:
     CONNECTOR_DELETE = "connector.delete"
     SCHEDULE_READ = "schedule.read"
     SCHEDULE_MANAGE = "schedule.manage"
+    # Minting standing authority for unattended runs is a separate, higher power
+    # than operating a schedule: approving one run is schedule.manage, while
+    # delegating a signature to every future run of that plan is admin-only.
+    SCHEDULE_AUTHORIZE = "schedule.authorize"
     AUDIT_READ = "audit.read"
     WORKSPACE_READ = "workspace.read"
     WORKSPACE_MANAGE = "workspace.manage"
+    # Bringing a peer into the workspace you already work in. Held by editor as
+    # well as admin, because ``services.team_store.add_workspace_member`` accepts
+    # an editor adding a non-admin member — a client gating membership on
+    # workspace.manage disabled the control the API would have honoured, and told
+    # an editor to ask for the role it already had.
+    MEMBER_INVITE = "member.invite"
     AI_USE = "ai.use"
     QUERY_USE = "query.use"
+    # Acting on your *own* credential (rotating a one-time password). Every role
+    # holds it: without it an admin-issued temporary password could never be
+    # retired by the person who received it.
+    ACCOUNT_SELF = "account.self"
 
 
 _ALL_PERMISSIONS = {
@@ -46,11 +61,14 @@ _ALL_PERMISSIONS = {
     Permission.CONNECTOR_DELETE,
     Permission.SCHEDULE_READ,
     Permission.SCHEDULE_MANAGE,
+    Permission.SCHEDULE_AUTHORIZE,
     Permission.AUDIT_READ,
     Permission.WORKSPACE_READ,
     Permission.WORKSPACE_MANAGE,
+    Permission.MEMBER_INVITE,
     Permission.AI_USE,
     Permission.QUERY_USE,
+    Permission.ACCOUNT_SELF,
 }
 
 
@@ -61,7 +79,12 @@ _ROLE_PERMISSIONS: dict[str, set[str]] = {
         Permission.SCHEDULE_READ,
         Permission.AUDIT_READ,
         Permission.WORKSPACE_READ,
+        Permission.ACCOUNT_SELF,
         Permission.QUERY_USE,
+        # Asking the assistant is a read: Pilot gates each tool it reaches by the
+        # same permission as the REST route that performs it, so ai.use lets a
+        # viewer ask "why did this job fail" without letting it run anything.
+        Permission.AI_USE,
     },
     "editor": {
         Permission.JOB_READ,
@@ -74,6 +97,8 @@ _ROLE_PERMISSIONS: dict[str, set[str]] = {
         Permission.SCHEDULE_MANAGE,
         Permission.AUDIT_READ,
         Permission.WORKSPACE_READ,
+        Permission.MEMBER_INVITE,
+        Permission.ACCOUNT_SELF,
         Permission.AI_USE,
         Permission.QUERY_USE,
     },
@@ -85,7 +110,9 @@ _ROLE_PERMISSIONS: dict[str, set[str]] = {
         Permission.SCHEDULE_READ,
         Permission.AUDIT_READ,
         Permission.WORKSPACE_READ,
+        Permission.ACCOUNT_SELF,
         Permission.QUERY_USE,
+        Permission.AI_USE,
     },
     "admin": _ALL_PERMISSIONS,
 }
@@ -118,21 +145,68 @@ _PUBLIC_PATHS = {
 # Method "*" matches any method.
 _PATH_RULES: list[tuple[str, str, str]] = [
     ("*", "/api/v1/admin/", Permission.WORKSPACE_MANAGE),
+    # Rotating your own password is not workspace administration.
+    ("POST", "/api/v1/auth/change-password", Permission.ACCOUNT_SELF),
+    ("POST", "/auth/change-password", Permission.ACCOUNT_SELF),
+    # Accounts are deployment-level administration. Membership changes inside a
+    # workspace are authorized by the *workspace* role in ``services.team_store``
+    # (a workspace admin need not be a platform admin), so the middleware only
+    # requires membership-level read here and lets the store refuse with a reason.
+    ("*", "/api/v1/team/users", Permission.WORKSPACE_MANAGE),
+    ("*", "/api/v1/team/workspaces/", Permission.WORKSPACE_READ),
+    ("GET", "/api/v1/team/workspaces", Permission.WORKSPACE_READ),
+    ("*", "/api/v1/team/workspaces", Permission.WORKSPACE_MANAGE),
+    # Comparing a live source against its destination is a *run* of that pipeline,
+    # not a change to a connector. Falling through to the mutation default gave it
+    # connector.write, which refused the operator whose whole role is to run and
+    # reconcile pipelines, while the UI control stayed enabled.
+    ("POST", "/api/v1/fidelity/", Permission.JOB_RUN),
     # Proof ledger is readable by any workspace member; fidelity runs need job.run.
     ("GET", "/api/v1/workspace/proofs/", Permission.WORKSPACE_READ),
     ("POST", "/api/v1/workspace/proofs/", Permission.JOB_RUN),
+    # Reading the workspace's own name, timezone and retention is not workspace
+    # administration: refusing it left a viewer on a Settings page with nothing
+    # honest to show, which the client papered over with invented defaults.
+    # Only the secret-bearing reads (SSO certificates, provider keys, API keys,
+    # notification targets, BYOK) and the engine choice stay with workspace
+    # administration — which engine answers is read behind the same gate that
+    # changes it (tests/test_byo_provider_keys.py).
+    ("GET", "/api/v1/workspace/settings", Permission.WORKSPACE_READ),
     ("*", "/api/v1/workspace/", Permission.WORKSPACE_MANAGE),
     ("*", "/api/v1/resource-acls", Permission.WORKSPACE_MANAGE),
     ("GET", "/api/v1/audit/", Permission.AUDIT_READ),
     ("POST", "/api/v1/audit/tip/", Permission.WORKSPACE_MANAGE),
     ("GET", "/api/v1/cdc/mapping-reviews", Permission.JOB_READ),
     ("POST", "/api/v1/cdc/mapping-reviews/", Permission.JOB_MANAGE),
+    # Transform (pre-load). Reading the vocabulary is a read every role holds, so
+    # a viewer's Transform step renders the real operations it cannot apply
+    # instead of an empty panel. Profiling is also a read: it only describes rows
+    # the caller sent, touches no route and composes no recipe, so a viewer sees
+    # the same findings it is being told it may inspect. Previewing and validating
+    # mint a recipe identity that Execute is held to — that is design work on a
+    # route, gated by the permission that plans a transfer (an operator runs
+    # approved plans, it does not author the recipe inside one).
+    ("GET", "/api/v1/shape/catalog", Permission.JOB_READ),
+    ("POST", "/api/v1/shape/profile", Permission.JOB_READ),
+    ("*", "/api/v1/shape/", Permission.JOB_PLAN),
     ("POST", "/api/v1/transfer/run", Permission.JOB_RUN),
     ("*", "/api/v1/transfer/plans/", Permission.JOB_PLAN),
     ("GET", "/api/v1/transfer/", Permission.JOB_READ),
+    # Reading a schedule is schedule.read — the permission every role already
+    # holds. Requiring schedule.manage to *list* them refused the viewer's own
+    # Schedules page, which the client then drew as "No schedules yet" while
+    # schedules existed. Creating, changing, running and deciding stay manage.
+    ("GET", "/api/v1/schedules/", Permission.SCHEDULE_READ),
     ("*", "/api/v1/schedules/", Permission.SCHEDULE_MANAGE),
     ("GET", "/api/v1/audit/", Permission.AUDIT_READ),
     ("*", "/api/v1/ai/", Permission.AI_USE),
+    # Pilot. Talking to the assistant is ai.use for every role; what the turn is
+    # allowed to *do* is decided per tool (src/ai/copilot/tool_permissions.py),
+    # so a viewer can ask questions but cannot reach a mutating tool. Confirm
+    # re-checks the permission of the specific staged mutation. Training rewrites
+    # workspace-wide knowledge, so it stays with workspace administration.
+    ("POST", "/api/v1/copilot/train", Permission.WORKSPACE_MANAGE),
+    ("*", "/api/v1/copilot/", Permission.AI_USE),
     # MCP tool execution is an AI surface — same permission as Pilot tools.
     ("POST", "/api/v1/mcp/tools/call", Permission.AI_USE),
     ("GET", "/api/v1/mcp/logs", Permission.AI_USE),
@@ -212,8 +286,10 @@ class RBACMiddleware(BaseHTTPMiddleware):
     """Enforce role-based permissions for authenticated API requests."""
 
     async def dispatch(self, request: Request, call_next):
-        # RBAC only matters when authentication is enforced.
-        if not auth_required():
+        # RBAC only matters when authentication is enforced. Read it off the
+        # auth module per request rather than copying the symbol at import
+        # time, so RBAC can never enforce against a stale view of the setting.
+        if not _auth_service.auth_required():
             return await call_next(request)
 
         path = request.url.path
@@ -225,10 +301,24 @@ class RBACMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         user = getattr(request.state, "user", None)
-        if has_permission(user, permission):
+        # Imported here, not at module import: the resolver reads this module's
+        # role table, so a module-level import would be circular.
+        from services.effective_role import (
+            resolve_effective_role,
+            workspace_id_from_request_headers,
+        )
+
+        workspace_id = workspace_id_from_request_headers(request.headers)
+        effective = resolve_effective_role(user, workspace_id)
+        request.state.effective_role = effective
+        if permission in role_permissions(effective):
             return await call_next(request)
 
         return JSONResponse(
             status_code=403,
-            content={"detail": f"Permission denied: {permission}"},
+            content={
+                "detail": f"Permission denied: {permission}",
+                "required_permission": permission,
+                "effective_role": effective,
+            },
         )

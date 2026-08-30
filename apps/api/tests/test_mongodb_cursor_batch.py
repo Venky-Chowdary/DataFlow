@@ -117,3 +117,74 @@ def test_mongodb_cursor_batch_infers_decimal_when_no_type():
         assert ids == [2]
     finally:
         client.drop_database(db_name)
+
+def test_string_stored_timestamp_cursor_is_not_silently_empty():
+    """A declared TIMESTAMP cursor over string-stored dates must still bound."""
+    db_name = f"test_cursor_{uuid.uuid4().hex}"
+    client = _client()
+    try:
+        coll = client[db_name]["events"]
+        for i, ts in enumerate(
+            ["2026-01-01 00:00:00", "2026-06-01 00:00:00", "2026-12-31 23:59:00"], 1
+        ):
+            coll.insert_one({"id": i, "updated_at": ts})
+
+        batch = read_collection_cursor_batch(
+            cfg={"host": "localhost", "port": 27017},
+            database=db_name,
+            collection="events",
+            cursor_column="updated_at",
+            cursor_after="2026-01-01 00:00:00\x1f1",
+            cursor_type="TIMESTAMP",
+            cursor_primary_key="id",
+            limit=100,
+        )
+        ids = sorted(int(r[batch.headers.index("id")]) for r in batch.rows)
+        assert ids == [2, 3]
+    finally:
+        client.drop_database(db_name)
+
+
+def test_date_stored_cursor_still_reads_with_string_watermark():
+    db_name = f"test_cursor_{uuid.uuid4().hex}"
+    client = _client()
+    try:
+        coll = client[db_name]["events"]
+        coll.insert_one({"id": 1, "updated_at": datetime(2026, 1, 1)})
+        coll.insert_one({"id": 2, "updated_at": datetime(2026, 6, 1)})
+
+        batch = read_collection_cursor_batch(
+            cfg={"host": "localhost", "port": 27017},
+            database=db_name,
+            collection="events",
+            cursor_column="updated_at",
+            cursor_after="2026-01-01 00:00:00",
+            cursor_type="VARCHAR",
+            limit=100,
+        )
+        ids = [int(r[batch.headers.index("id")]) for r in batch.rows]
+        assert ids == [2]
+    finally:
+        client.drop_database(db_name)
+
+
+def test_mixed_bson_cursor_field_is_refused_not_silently_skipped():
+    db_name = f"test_cursor_{uuid.uuid4().hex}"
+    client = _client()
+    try:
+        coll = client[db_name]["events"]
+        coll.insert_one({"id": 1, "updated_at": "2026-01-01 00:00:00"})
+        coll.insert_one({"id": 2, "updated_at": datetime(2026, 6, 1)})
+
+        with pytest.raises(ValueError, match="more than one BSON type"):
+            read_collection_cursor_batch(
+                cfg={"host": "localhost", "port": 27017},
+                database=db_name,
+                collection="events",
+                cursor_column="updated_at",
+                cursor_after="2026-01-01 00:00:00",
+                cursor_type="TIMESTAMP",
+                limit=100,
+            )
+    finally:
+        client.drop_database(db_name)

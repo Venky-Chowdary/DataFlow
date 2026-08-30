@@ -7,7 +7,7 @@
  * ``validation_assistant._remap_to_type_for_mismatch`` so one-click Fix CTAs
  * do not invent bare VARCHAR for UUID/ObjectId/DECIMAL/temporal blockers.
  */
-import { gateLabel } from "./preflightGates.js";
+import { blockerTitle, gateLabel } from "./preflightGates.js";
 import type {
   CoercionColumn,
   PreflightGate,
@@ -101,6 +101,16 @@ export interface ExecutiveSummary {
   aiPromptHint: string | null;
 }
 
+function suggestedActionsOf(
+  b: PreflightResult["blockers"][number],
+): ValidationSuggestedAction[] | undefined {
+  if (b.suggested_actions?.length) return b.suggested_actions;
+  const fromDetails = (b.details as { suggested_actions?: ValidationSuggestedAction[] } | undefined)
+    ?.suggested_actions;
+  if (Array.isArray(fromDetails) && fromDetails.length) return fromDetails;
+  return b.guidance?.suggested_actions;
+}
+
 export interface DisplayBlocker {
   key: string;
   kind: "duplicate_root" | "fidelity_root" | "blocker";
@@ -144,6 +154,11 @@ export function isFidelityCollapseSignal(
   gateId?: string,
 ): boolean {
   const blob = textBlob(message, details);
+  // A uniqueness-probe error is not a type-path. G9 still says
+  // "integrity failed", which must not become Accept risk on Map.
+  if (/uniqueness probe/i.test(blob) && details?.fidelity_collapse !== true) {
+    return false;
+  }
   if (FIDELITY_RE.test(blob)) return true;
   if (details?.fidelity_collapse === true) return true;
   const framing = asRecord(details?.framing);
@@ -535,14 +550,14 @@ export function buildDisplayBlockers(
       items.push({
         key: b.id,
         kind: "blocker",
-        title: gateLabel(b.id),
+        title: blockerTitle(b.id, b.message),
         message: b.message,
         issues: Array.isArray(b.details?.issue_texts)
           ? (b.details.issue_texts as string[])
           : undefined,
         fix: b.guidance?.fix,
         why: b.guidance?.why,
-        suggested_actions: b.guidance?.suggested_actions,
+        suggested_actions: suggestedActionsOf(b),
         source: b,
       });
     }
@@ -593,14 +608,14 @@ export function buildDisplayBlockers(
     items.push({
       key: b.id,
       kind: "blocker",
-      title: gateLabel(b.id),
+      title: blockerTitle(b.id, b.message),
       message: b.message,
       issues: Array.isArray(b.details?.issue_texts)
         ? (b.details.issue_texts as string[])
         : undefined,
       fix: b.guidance?.fix,
       why: b.guidance?.why,
-      suggested_actions: b.guidance?.suggested_actions,
+      suggested_actions: suggestedActionsOf(b),
       source: b,
     });
   }

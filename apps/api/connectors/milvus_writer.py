@@ -15,7 +15,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from services.value_serializer import cell_to_string, sanitize_json_value
+from services.value_serializer import cell_to_string, load_http_json, sanitize_json_value
 from services.vectorization import vectorize_records
 
 from connectors.writer_common import WriteResult as _WriteResult
@@ -128,6 +128,14 @@ def test_milvus(
         return False, str(exc)
 
 
+def _milvus_schema_text(value: Any, cap: int) -> str:
+    """Dest-canonical schema field text. ``or ''`` wiped integer 0 / False."""
+    from services.value_serializer import present_cell_text
+
+    text = present_cell_text(value)
+    return (text or "")[:cap]
+
+
 def build_milvus_entities(
     vector_rows: list[dict[str, Any]],
     *,
@@ -145,17 +153,24 @@ def build_milvus_entities(
         coerce_chunk_index,
         coerce_embedding,
         embedding_reject_reason,
+        vector_cell_token,
+        vector_fallback_material,
+        vector_reject_row_label,
     )
 
     entities: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = []
     for row in vector_rows:
-        meta = dict(sanitize_json_value(row.get("metadata") or {}) or {})
+        from connectors.writer_common import vector_prepare_metadata
+
+        meta = vector_prepare_metadata(
+            sanitize_json_value(row.get("metadata") or {}) or {}
+        )
         try:
             chunk = coerce_chunk_index(row.get("chunk_index"))
         except ValueError as exc:
             rejected.append({
-                "row": cell_to_string(row.get("id") or ""),
+                "row": vector_reject_row_label(row),
                 "column": "chunk_index",
                 "target": "chunk_index",
                 "value": cell_to_string(row.get("chunk_index")),
@@ -166,7 +181,7 @@ def build_milvus_entities(
         values, err = coerce_embedding(row.get("embedding"), expected_dimension=dimension)
         if err or values is None:
             rejected.append({
-                "row": cell_to_string(row.get("id") or ""),
+                "row": vector_reject_row_label(row),
                 "column": "embedding",
                 "target": "vector",
                 "value": "",
@@ -189,9 +204,8 @@ def build_milvus_entities(
             else:
                 entity_id = raw_s
         else:
-            source = cell_to_string(row.get("source_id", ""))
-            content = str(row.get("content") or "")
-            if not source and not content:
+            material = vector_fallback_material(row.get("source_id"), chunk, row.get("content"))
+            if material is None:
                 rejected.append({
                     "row": "",
                     "column": "id",
@@ -201,18 +215,21 @@ def build_milvus_entities(
                     "policy": "quarantine",
                 })
                 continue
-            digest = hashlib.sha256(f"{source}\0{chunk}\0{content}".encode("utf-8")).hexdigest()
+            digest = hashlib.sha256(material.encode("utf-8")).hexdigest()
             entity_id = str(uuid.UUID(digest[:32]))
         entity: dict[str, Any] = {
             "id": entity_id,
             "vector": sanitize_json_value(values),
-            "content": str(row.get("content") or "")[:65000],
-            "source_id": cell_to_string(row.get("source_id", ""))[:256],
+            "content": vector_cell_token(row.get("content"))[:65000],
+            "source_id": vector_cell_token(row.get("source_id"))[:256],
             "chunk_index": chunk,
-            "filename": str(meta.get("filename") or "")[:512],
-            "page": str(meta.get("page") or "")[:64],
-            "heading": str(meta.get("heading") or "")[:1024],
-            "element_type": str(meta.get("element_type") or row.get("element_type") or "")[:128],
+            "filename": _milvus_schema_text(meta.get("filename"), 512),
+            "page": _milvus_schema_text(meta.get("page"), 64),
+            "heading": _milvus_schema_text(meta.get("heading"), 1024),
+            "element_type": _milvus_schema_text(
+                meta["element_type"] if "element_type" in meta else row.get("element_type"),
+                128,
+            ),
         }
         entities.append(entity)
     return entities, rejected
@@ -579,7 +596,7 @@ def scan_source_ids(
             headers=hdrs,
             timeout=60,
         )
-        query_body = query_resp.json() if query_resp.content else {}
+        query_body = load_http_json(query_resp) if query_resp.content else {}
         if not _ok_response(
             query_body if isinstance(query_body, dict) else {}, query_resp.status_code
         ):

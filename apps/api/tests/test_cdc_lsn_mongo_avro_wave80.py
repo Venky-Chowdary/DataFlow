@@ -119,8 +119,11 @@ def test_mongo_bson_objectid_binary_timestamptz():
     assert _sample_logical_type(Decimal128("12.34")) == "DECIMAL"
     aware = datetime(2024, 1, 1, 12, 0, tzinfo=timezone.utc)
     assert _sample_logical_type(aware) == "TIMESTAMPTZ"
+    # BSON holds one temporal carrier: epoch millis, i.e. an instant. Whether
+    # the driver renders it aware is the client's ``tz_aware`` setting, so a
+    # naive render is still an instant and must not be sampled as zoneless.
     naive = datetime(2024, 1, 1, 12, 0)
-    assert _sample_logical_type(naive) == "TIMESTAMP_NTZ"
+    assert _sample_logical_type(naive) == "TIMESTAMPTZ"
 
 
 def test_avro_logical_tokens_enum_fixed_polarity():

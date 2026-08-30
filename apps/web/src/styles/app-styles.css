@@ -38,8 +38,12 @@
 @import "./responsive-shell-fixes.css";
 /* transfer-studio.css is exclusively namespaced; load before final layer. */
 @import "./transfer-studio.css";
+/* Transform (pre-load) step — sole authority for the .df2-xform namespace. */
+@import "./transform-prep.css";
 /* Canonical final component layer — extend this or tokens.css only. */
 @import "./enterprise-ui.css";
+/* Public hero system — authority for the marketing hero band + hero drawings. */
+@import "./marketing-hero.css";
 
 .df2-map-step-body {
   display: flex;
@@ -289,9 +293,9 @@
 .df2-app .df2-topbar-actions > button,
 .df2-app .df2-topbar-actions > .df2-system-pill,
 .df2-app .df2-topbar-actions .df2-btn {
-  height: 34px !important;
-  min-height: 34px !important;
-  max-height: 34px !important;
+  height: var(--df-btn-height) !important;
+  min-height: var(--df-btn-height) !important;
+  max-height: var(--df-btn-height) !important;
   box-sizing: border-box !important;
   border-radius: 9px !important;
   display: inline-flex !important;
@@ -301,7 +305,6 @@
   padding-top: 0 !important;
   padding-bottom: 0 !important;
   line-height: 1 !important;
-  font-size: 13px !important;
 }
 
 .df2-app .df2-topbar-actions > .df2-btn,
@@ -313,8 +316,8 @@
 
 .df2-app .df2-topbar-actions .df2-btn-primary {
   /* Match ghost/status height — brand fill only, not taller padding */
-  height: 34px !important;
-  min-height: 34px !important;
+  height: var(--df-btn-height) !important;
+  min-height: var(--df-btn-height) !important;
 }
 
 .df2-app .df2-topbar-actions .df2-btn-ghost.active {
@@ -501,7 +504,7 @@ html:has(.df2-app) #root {
 
 .df2-app .df2-context-stat-value {
   font-size: 17px;
-  font-weight: 750;
+  font-weight: 700;
   letter-spacing: -0.02em;
   line-height: 1.2;
   color: var(--df-text-primary, #0f172a);
@@ -511,7 +514,7 @@ html:has(.df2-app) #root {
 .df2-app .df2-context-stat-label {
   margin-top: 0;
   font-size: 10.5px;
-  font-weight: 650;
+  font-weight: 600;
   letter-spacing: 0.04em;
   text-transform: uppercase;
   line-height: 1.2;
@@ -708,6 +711,21 @@ html:has(.df2-app) #root {
 .df2-app .df2-settings-table,
 .df2-app table.df2-table {
   min-width: 0;
+}
+
+/* A multiline control is sized by its own text, never by the single-line control
+   or button height ladder — a fixed height clips every line after the first, and
+   a fixed row count clips the same text again once the column narrows. `rows`
+   stays the floor; `field-sizing` grows the box up to a readable ceiling. */
+.df2-app textarea.df2-input {
+  height: auto;
+  min-height: 0;
+  padding-top: 8px;
+  padding-bottom: 8px;
+  line-height: 1.45;
+  resize: vertical;
+  field-sizing: content;
+  max-height: 40vh;
 }
 
 /* Touch-friendly controls on small screens */
@@ -978,7 +996,7 @@ html:has(.df2-app) #root {
 
 .df2-app .df2-jobs-v3-summary-dest {
   font-size: 12px;
-  font-weight: 650;
+  font-weight: 600;
   color: var(--df-text-secondary, #475569);
   max-width: 16ch;
   overflow: hidden;
@@ -1039,7 +1057,7 @@ html:has(.df2-app) #root {
 
 .df2-app .df2-overview-v3 .df2-metric-glass-value {
   font-family: var(--df-font-display);
-  font-size: 1.55rem;
+  font-size: 24px;
   letter-spacing: -0.035em;
 }
 
@@ -1108,3 +1126,225 @@ html:has(.df2-app) #root {
   font-family: var(--df-font-sans);
   color: var(--df-text-secondary);
 }
+
+/* ── 12. Control geometry — one owner for every clickable surface ───────────
+   This is the last stylesheet the workspace loads, so the rungs of the ladder
+   declared in tokens.css resolve here regardless of what an earlier page-level
+   sheet asked for. Measured before this block, one Connectors screen rendered
+   .df2-btn-sm at 38px (a literal `height: 38px` in dataflow-ui.css outranked
+   the token), the topbar search input at 21.5px, and the Jobs copy-id control
+   at 18px. Equivalent controls now share a height; controls with a genuinely
+   different role (tab, icon-only, chip, inline text action) sit on their own
+   rung instead of drifting. Add a rung to tokens.css before adding a literal
+   here. */
+
+.df2-app :is(.df2-btn, button.df2-btn):not(.df2-btn-sm):not(.df2-btn-lg):not(.df2-btn-icon) {
+  height: var(--df-btn-height);
+  min-height: var(--df-btn-height);
+  padding-top: 0;
+  padding-bottom: 0;
+}
+
+.df2-app .df2-btn.df2-btn-sm {
+  height: var(--df-btn-height-sm);
+  min-height: var(--df-btn-height-sm);
+  padding-top: 0;
+  padding-bottom: 0;
+}
+
+.df2-app .df2-btn.df2-btn-lg {
+  height: var(--df-btn-height-lg);
+  min-height: var(--df-btn-height-lg);
+  padding-top: 0;
+  padding-bottom: 0;
+}
+
+.df2-app .df2-btn-icon {
+  width: var(--df-btn-height);
+  height: var(--df-btn-height);
+  min-height: var(--df-btn-height);
+}
+
+/* Fields — same rung as actions so a filter row never looks ragged. Textareas
+   and the SQL editor size to their content and keep out of this. */
+.df2-app :is(input.df2-input, select.df2-select, select.df2-input):not(.df2-input-sm):not(.df2-select-sm) {
+  height: var(--df-control-height);
+  min-height: var(--df-control-height);
+}
+
+.df2-app :is(input.df2-input, select.df2-select, select.df2-input):is(.df2-input-sm, .df2-select-sm) {
+  height: var(--df-control-height-sm);
+  min-height: var(--df-control-height-sm);
+}
+
+/* A fixed rung centres its own text — page-level vertical padding on top of it
+   pushes the value past the bottom edge and clips it. */
+.df2-app :is(input.df2-input, select.df2-select, select.df2-input) {
+  padding-block: 0;
+}
+
+/* Search shells own the height; the input fills them, so the whole shell is a
+   hit target rather than a 21.5px line of text inside a 36px box. */
+.df2-app :is(.df2-command-search, .df2-workspace-search, .df2-table-search, .df2-toolbar-search) {
+  height: var(--df-control-height);
+  min-height: var(--df-control-height);
+  box-sizing: border-box;
+}
+
+.df2-app :is(.df2-command-search, .df2-workspace-search, .df2-table-search, .df2-toolbar-search) input {
+  align-self: stretch;
+  height: auto;
+  min-height: 0;
+  padding-top: 0;
+  padding-bottom: 0;
+  background: transparent;
+}
+
+/* Tabs — one rung, shorter than an action button by design */
+.df2-app :is(.df2-tab, .df2-jobs-detail-tab, .df2-qw-tab-btn) {
+  min-height: var(--df-tab-height);
+}
+
+/* The Jobs detail tabs sized themselves from vertical padding, so they stood
+   6.8px taller than every other tab strip in the app. */
+.df2-app .df2-jobs-detail-tab {
+  height: var(--df-tab-height);
+  padding-top: 0;
+  padding-bottom: 0;
+}
+
+/* Icon-only controls — square, and never below the minimum hit target */
+.df2-app :is(.df2-qw-icon-btn, .df2-qw-tab-close, .df2-qw-tab-add) {
+  width: var(--df-icon-btn-size);
+  height: var(--df-icon-btn-size);
+  min-width: var(--df-icon-btn-size);
+  min-height: var(--df-icon-btn-size);
+  padding: 0;
+}
+
+.df2-app .df2-qw-chip {
+  min-height: var(--df-chip-height);
+}
+
+/* ── Type ladder ───────────────────────────────────────────────────────────
+   The height ladder above settles geometry; these settle type. A control's
+   size belongs to its role, not to the page that happens to host it, so each
+   role resolves here once and pages stop restating it. */
+.df2-app :is(.df2-btn, button.df2-btn):not(.df2-btn-sm):not(.df2-btn-lg) {
+  font-size: var(--df-fs-btn);
+}
+
+.df2-app .df2-btn.df2-btn-sm {
+  font-size: var(--df-fs-btn-sm);
+}
+
+.df2-app .df2-btn.df2-btn-lg {
+  font-size: var(--df-fs-btn-lg);
+}
+
+.df2-app
+  :is(input.df2-input, select.df2-select, select.df2-input, textarea.df2-input):not(.df2-input-sm):not(
+    .df2-select-sm
+  ) {
+  font-size: var(--df-fs-field);
+}
+
+.df2-app :is(input.df2-input, select.df2-select, select.df2-input):is(.df2-input-sm, .df2-select-sm) {
+  font-size: var(--df-fs-field-sm);
+}
+
+.df2-app :is(.df2-tab, .df2-jobs-detail-tab, .df2-qw-tab-btn) {
+  font-size: var(--df-fs-tab);
+}
+
+.df2-app :is(.df2-qw-chip, .df2-jobs-evidence-chip) {
+  font-size: var(--df-fs-chip);
+}
+
+.df2-app :is(label.df2-label, .df2-field-label) {
+  font-size: var(--df-fs-label);
+  font-weight: var(--df-fw-semibold);
+}
+
+/* Table headers read as one column band across every table in the app. */
+.df2-app :is(th, .df2-th):not([class*="type-badge"]) {
+  font-size: var(--df-fs-xs);
+  font-weight: var(--df-fw-bold);
+}
+
+.df2-app .df2-page-title {
+  font-family: var(--df-font-sans);
+  font-size: var(--df-fs-page-title);
+  font-weight: var(--df-fw-bold);
+  letter-spacing: -0.02em;
+}
+
+.df2-app :is(.df2-card-title, .dt-card-title) {
+  font-family: var(--df-font-sans);
+  font-size: var(--df-fs-card-title);
+  font-weight: var(--df-fw-semibold);
+}
+
+.df2-app :is(.df2-overview-v3-card-title, .df2-pipe-card-title) {
+  font-family: var(--df-font-sans);
+  font-size: var(--df-fs-card-title-dense);
+  font-weight: var(--df-fw-semibold);
+}
+
+/* Defaults for unclassed markup, at zero specificity so any real component
+   rule still wins: an unstyled heading, label or code span inherits the
+   workspace scale instead of the browser's. */
+:where(.df2-app) :where(h1) {
+  font-size: var(--df-fs-page-title);
+  font-weight: var(--df-fw-bold);
+  line-height: 1.25;
+}
+
+:where(.df2-app) :where(h2, h3, h4, h5, h6) {
+  font-size: var(--df-fs-card-title);
+  font-weight: var(--df-fw-semibold);
+  line-height: 1.3;
+}
+
+:where(.df2-app) :where(label) {
+  font-size: var(--df-fs-label);
+  font-weight: var(--df-fw-semibold);
+}
+
+:where(.df2-app) :where(code, kbd, samp, pre) {
+  font-family: var(--df-font-mono);
+}
+
+/* Inline text actions (copy id, "open" links) stay visually compact but
+   claim a real target: padding grows the box, the label keeps its size. */
+.df2-app :is(.df2-copy-id-btn, .df2-overview-v3-link) {
+  min-height: var(--df-inline-action-h);
+  display: inline-flex;
+  align-items: center;
+}
+
+/* Shell layering — read from the token scale instead of ad-hoc integers, so a
+   sticky toolbar can never be argued about against the sidebar or a toast. */
+.df2-app .df2-sidebar {
+  z-index: var(--df-z-sidebar);
+}
+
+.df2-app :is(.df2-toolbar, .df2-pilot-composer-sticky) {
+  z-index: var(--df-z-sticky);
+}
+
+/* The Pilot edge tab is fixed to the right edge. Reserve its width in the page
+   gutter while it is showing — measured overlap before this: the Query editor
+   textarea, the Benchmarks "Run fidelity proof" action, and the Contracts row
+   open control all sat underneath it at 1440px and below. The gutter is set by
+   an `!important` shorthand above, so the reservation has to out-specify it or
+   it is silently dropped. */
+@media (min-width: 1024px) {
+  .df2-app.df2-app-with-edge
+    .df2-content-inner:not(.df2-content-flush):not(.df2-content-studio),
+  .df2-app.df2-app-with-edge .df2-content-inner.df2-content-flush,
+  .df2-app.df2-app-with-edge .df2-content-inner.df2-content-studio {
+    padding-right: calc(var(--df-page-gutter, 24px) + var(--df-copilot-edge-w)) !important;
+  }
+}
+

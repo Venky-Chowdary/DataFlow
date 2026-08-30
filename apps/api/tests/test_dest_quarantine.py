@@ -80,6 +80,23 @@ def test_write_dest_quarantine_sqlite_and_promote(tmp_path: Path):
     assert open_after["open_rows"] == 0
 
 
+def test_mysql_dlq_idents_use_backticks_not_double_quotes():
+    """MySQL without ANSI_QUOTES treats "col" as a string — open_rows would stay 0."""
+    from services.dest_quarantine import _quote_ident
+
+    assert _quote_ident("_df_promoted_at", "mysql") == "`_df_promoted_at`"
+    assert _quote_ident("_df_promoted_at", "postgresql") == '"_df_promoted_at"'
+
+
+def test_mysql_type_never_emits_bare_varchar():
+    """CREATE TABLE (`id` VARCHAR, `age` BIGINT) is MariaDB 1064 near age."""
+    from connectors.mysql_writer import mysql_type
+
+    assert mysql_type("VARCHAR").upper() != "VARCHAR"
+    assert "(" in mysql_type("VARCHAR") or mysql_type("VARCHAR").upper() == "TEXT"
+    assert mysql_type("string").upper() == "TEXT"
+
+
 def test_engine_persists_dest_quarantine_on_transfer(tmp_path: Path):
     """Full transfer path: rejected cells land in users_df_quarantine."""
     from src.transfer.engine import UniversalTransferEngine

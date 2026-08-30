@@ -228,7 +228,13 @@ def merge_job_quarantine(
     if not details:
         details = list((dest or {}).get("rejected_details") or [])
 
-    job_id = str(job.get("id") or job.get("job_id") or "").strip()
+    # Job documents identify themselves with ``_id``; ``id``/``job_id`` are the
+    # API-shaped aliases. Reading only the aliases meant a raw Mongo document
+    # hydrated nothing, so Inspect showed "5,000 quarantined / 0 findings" while
+    # 2,500 durable findings sat in the DLQ under that very job.
+    job_id = str(
+        job.get("id") or job.get("job_id") or job.get("_id") or ""
+    ).strip()
     truncated = bool(
         job.get("rejected_details_truncated")
         or (dest or {}).get("rejected_details_truncated")

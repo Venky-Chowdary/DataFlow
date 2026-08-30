@@ -43,8 +43,10 @@ def test_verify_legacy_sha256_still_works(auth_env):
 
 def test_verify_legacy_sha256_rejected_in_production(auth_env, monkeypatch):
     import src.services.auth_service as auth_mod
+    from services import password_hash
 
-    monkeypatch.setattr(auth_mod, "is_production", lambda: True)
+    # Verification lives in the canonical password primitive; auth_service delegates.
+    monkeypatch.setattr(password_hash, "is_production", lambda: True)
     legacy_hash = "5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8"
     assert auth_mod.verify_password("password", legacy_hash) is False
 

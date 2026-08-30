@@ -266,11 +266,14 @@ def catalog_summary() -> dict:
         "dest_live": len({
             c.get("driver_type") for c in enriched if c.get("dest_ready") and c.get("driver_type")
         }),
+        "catalog_tiles_are_not_transfer_live": True,
+        "customer_tenant_warehouse_sku_claimed": False,
         "honesty_note": (
-            "Public live/certified counts are unique engines (unique_drivers). "
-            "source_live / dest_live are the per-side counts, which differ: a "
-            "vector store is a destination only and a REST feed a source only. "
-            "catalog_tile_total includes Planned roadmap and hosted aliases."
+            "Catalog tiles are not transfer-live. Public live/certified counts "
+            "are unique engines (unique_drivers). source_live / dest_live are "
+            "the per-side counts, which differ: a vector store is a destination "
+            "only and a REST feed a source only. catalog_tile_total includes "
+            "Planned roadmap and hosted aliases."
         ),
     }
 

@@ -160,6 +160,14 @@ export interface RuntimeEstimate {
   notes?: string[];
 }
 
+/** Bounded lineage event persisted on the job for Theater (engine ring is separate). */
+export interface LineageEvent {
+  event_type?: string;
+  event_id?: string;
+  timestamp?: string;
+  payload?: Record<string, unknown>;
+}
+
 export interface TransferJob {
   _id: string;
   /** User-editable display name (defaults to source → dest on create). */
@@ -193,8 +201,10 @@ export interface TransferJob {
   failed_at_phase?: string;
   rejected_rows?: number;
   coerced_null_rows?: number;
-  /** Quarantine evidence dropped past the sample cap (exact count still in rejected_rows). */
-  rejected_details_truncated?: number;
+  /** True when quarantine evidence was dropped past the sample cap. */
+  rejected_details_truncated?: boolean;
+  /** Findings the run recorded, whether or not the sample kept them all. */
+  rejected_details_total?: number;
   chunk_current?: number;
   chunk_total?: number;
   checkpoint?: TransferCheckpoint;
@@ -320,6 +330,10 @@ export interface TransferJob {
    * Display only — never close dest with records_processed / writer ack.
    */
   row_accounting?: import("./conservationLedger").ConservationLedger | null;
+  /** Last-N dest profile vs prior loads of this route — schedule Overview reads this. */
+  load_history_report?: LoadHistoryReport;
+  /** Bounded OpenLineage-style events persisted on the job for Theater. */
+  lineage_events?: LineageEvent[];
   trust?: {
     score: number;
     grade: string;
@@ -416,6 +430,18 @@ export interface Gate8ReconciliationPayload {
   /** writer_ack | write_pass_fingerprints | remapped_source_rows | engine_population | independent_source_reread */
   source_checksum_provenance?: string;
   target_checksum?: string;
+  /**
+   * Dest-engine COUNT + checksum stamp from attach_dest_readback.
+   * Never invent a count — omitted when target_rows was unmeasured.
+   */
+  dest_readback?: {
+    dest_count?: number;
+    dest_count_before?: number | null;
+    dest_checksum?: string;
+    source?: string;
+    coverage?: string;
+    assurance_level?: string;
+  };
   missing_key_count?: number;
   extra_key_count?: number;
   matched_key_count?: number;
@@ -457,7 +483,30 @@ export interface Gate8ReconciliationPayload {
       target_value?: string;
       column?: string;
     }[];
+    /** ``compared`` counts cells; these name each denominator explicitly. */
+    cells_compared?: number;
+    rows_compared?: number;
   };
+  /** Why two digests disagree when no sampled cell does. */
+  mismatch_class?: string;
+  digest_basis?: Record<string, unknown>;
+  /** What was compared, and how much of it agreed, with its denominator. */
+  match_summary?: {
+    source_rows?: number | null;
+    dest_rows?: number | null;
+    dest_rows_before?: number | null;
+    rows_moved_this_run?: number | null;
+    rejected_rows?: number | null;
+    sample_rows_compared?: number;
+    sample_cells_compared?: number;
+    sample_cells_differing?: number;
+    scope?: string;
+    /** Null when nothing comparable was drawn — never rendered as 0%. */
+    sample_match_percent?: number | null;
+    denominator?: string;
+  };
+  /** Ordered next moves for a failed reconcile; each maps to a real control. */
+  remediation?: { action?: string; label?: string; why?: string }[];
 }
 
 export interface JobProgress extends TransferJob {
@@ -510,10 +559,45 @@ export interface CsvValidationReport {
   issue_count: number;
 }
 
+/** The window a tabular source is read through — one declaration for preview,
+ *  source COUNT and the write, so Validate and Execute see the same rows. */
+export interface SourceReadOptions {
+  /** Worksheet name; empty means the workbook's active sheet. */
+  sheet?: string;
+  /** 0-based worksheet position; -1 means unset. A name wins over a position. */
+  sheet_index?: number;
+  /** 1-based physical row holding the column names; 0 means no header. */
+  header_row?: number;
+  /** Value-bearing data rows dropped from the head. */
+  skip_rows?: number;
+  /** Value-bearing data rows dropped from the tail (the totals row). */
+  skip_footer?: number;
+  /** Text codec for delimited files; empty means sniff. */
+  encoding?: string;
+  /** Single-character field separator for delimited files; empty means sniff. */
+  delimiter?: string;
+}
+
+export interface WorkbookSheet {
+  name: string;
+  index: number;
+  is_active?: boolean;
+  /** Used range, inflated by formatting — never a row count. */
+  used_rows?: number;
+  used_columns?: number;
+  first_row?: string[];
+}
+
 export interface ParsedUpload {
   row_count: number;
   columns: string[];
+  /** Persisted upload id — Validate scans this population, not just the preview. */
+  file_id?: string;
   file_type?: string;
+  /** Sheet inventory for workbooks, so a sheet is picked from the real names. */
+  sheets?: WorkbookSheet[];
+  /** The window the server actually applied (non-default fields only). */
+  read_options?: SourceReadOptions;
   sample_data?: Record<string, unknown>[];
   data?: Record<string, unknown>[];
   schema?: Record<string, string>;
@@ -875,6 +959,20 @@ export interface LoadHistoryReport {
   warning?: string;
 }
 
+/** Fail-closed grouping: lone 1,234 / 1.234 needs US or EU. */
+export interface NumberLocaleReport {
+  number_locale?: string;
+  decision?: "ok" | "set_locale" | string;
+  ambiguous_columns?: Array<{ column: string; samples?: string[]; reason?: string }>;
+}
+
+/** Fail-closed calendar: 01/02/2024 needs DMY or MDY. */
+export interface DateLocaleReport {
+  date_locale?: string;
+  decision?: "ok" | "set_locale" | string;
+  ambiguous_columns?: Array<{ column: string; samples?: string[]; reason?: string }>;
+}
+
 export interface PreflightResult {
   passed: boolean;
   passed_count: number;
@@ -882,8 +980,10 @@ export interface PreflightResult {
   readiness_score: number;
   /** Stable ID for this validation run — surface in UI and feed Datawrap Pilot. */
   run_id?: string;
+  /** Job wall-clock when Validate ran async — not a sum of sample-gate timings. */
+  elapsed_ms?: number;
   gates: PreflightGate[];
-  blockers: { id: string; message: string; details?: Record<string, unknown>; guidance?: { gate?: string; title?: string; category?: string; why?: string; fix?: string; examples?: string[]; suggested_actions?: ValidationSuggestedAction[] } }[];
+  blockers: { id: string; message: string; details?: Record<string, unknown>; suggested_actions?: ValidationSuggestedAction[]; guidance?: { gate?: string; title?: string; category?: string; why?: string; fix?: string; examples?: string[]; suggested_actions?: ValidationSuggestedAction[] } }[];
   /**
    * Engine-level Root Cause Engine output — one explainable problem, many gates.
    * Prefer this over client-side collapse when present.
@@ -929,6 +1029,10 @@ export interface PreflightResult {
   proof_bundle?: PreflightProofBundle;
   coercion_report?: CoercionReport;
   load_history_report?: LoadHistoryReport;
+  number_locale?: string;
+  number_locale_report?: NumberLocaleReport;
+  date_locale?: string;
+  date_locale_report?: DateLocaleReport;
   /** Soft FK / relational hints — structured findings; block via constraint_fk when severity=block. */
   constraint_hints?: Array<Record<string, unknown> | string>;
   /** Structured FK findings (same payloads as constraint_hints when present). */
@@ -944,6 +1048,20 @@ export interface PreflightResult {
     finding_count?: number;
     note?: string;
     fk_risk_acknowledged?: boolean;
+  };
+  /**
+   * The transformed image the gates judged, when an approved Transform
+   * (pre-load) recipe ran before them. Sample-scoped: counts describe the
+   * rows Validate held, never the population.
+   */
+  transform_image?: {
+    recipe_hash?: string;
+    columns?: string[];
+    sample_rows_in?: number;
+    sample_rows_out?: number;
+    sample_rows_removed?: number;
+    sample_rows_diverted?: number;
+    retyped_columns?: Record<string, string>;
   };
   /** Sample-scoped orphan probe report (never population proof). */
   sample_orphan_probe?: {
@@ -997,7 +1115,7 @@ export interface PreflightResult {
     create_new?: boolean;
     assignment_strategy?: string;
   }>;
-  /** Canonical Kernel ValidationFinding dicts (coercion → findings SSOT). */
+  /** Canonical Kernel ValidationFinding dicts (coercion + population-fit SSOT). */
   validation_findings?: Array<Record<string, unknown>>;
   /** G13/G14/G15 mapping contract — extras, dest-only, write_by=name. */
   source_coverage?: {
@@ -1022,6 +1140,45 @@ export interface PreflightResult {
     skipped?: boolean;
     reason?: string;
     note?: string;
+  };
+  /**
+   * Bounded destination carriers decided before the write (g3f_population_fit).
+   * `evidence` is the strength of the walk, never the wish: `exact` only when
+   * every source row was scanned, `sampled` for a preview, `partial` when a
+   * budget stopped it, `unmeasured` when no rows were available.
+   */
+  population_fit?: {
+    evidence?: "exact" | "partial" | "sampled" | "unmeasured";
+    rows_scanned?: number;
+    rows_total?: number;
+    scanned_population?: boolean;
+    unfit_rows?: number;
+    note?: string;
+    error?: string;
+    bounded_columns?: Array<{
+      source?: string;
+      target?: string;
+      target_type?: string;
+      carrier?: string;
+      write_action?: string;
+      execution_policy?: string;
+      aborts_job?: boolean;
+    }>;
+    findings?: Array<{
+      source?: string;
+      target?: string;
+      target_type?: string;
+      unfit_rows?: number;
+      example_rows?: number[];
+      example_values?: string[];
+      aborts_job?: boolean;
+      reason?: string;
+      unfit_reason?: string;
+      suggested_target_type?: string;
+      suggested_fix?: string;
+    }>;
+    undecidable_columns?: string[];
+    safe_by_declaration?: string[];
   };
   /** Procedure / SQL extract honesty — catalog probes skipped, CDC/SCD2/mirror refused. */
   callable_extract?: {
@@ -1063,6 +1220,11 @@ export interface ValidationSuggestedAction {
   label: string;
   /** True when mapping-only type change cannot ALTER existing destination DDL. */
   requires_ddl?: boolean;
+  /** False when Approve must not stamp Map (live DDL or unproven type). */
+  mapping_applyable?: boolean;
+  /** True when to_type was re-checked with the write-path fit predicate. */
+  apply_proven?: boolean;
+  apply_proven_scope?: string;
 }
 
 export interface ValidationIssue {
@@ -1119,8 +1281,10 @@ export interface TransferResult {
     rejected_rows?: number;
     coerced_null_rows?: number;
     rejected_details?: RejectedDetail[];
-    /** How many quarantine details were dropped past the sample cap. */
-    rejected_details_truncated?: number;
+    /** True when quarantine details were dropped past the sample cap. */
+    rejected_details_truncated?: boolean;
+    /** Findings the run recorded, whether or not the sample kept them all. */
+    rejected_details_total?: number;
     warnings?: string[];
     /** How many distinct warnings were suppressed past the display sample. */
     warnings_suppressed?: number;
@@ -1229,7 +1393,15 @@ export interface ScheduleInput {
   validation_mode: string;
   schema_policy: string;
   backfill_new_fields: boolean;
+  write_via_staging?: boolean;
+  priority_column?: string;
+  priority_direction?: "asc" | "desc" | string;
+  row_limit?: number;
   delivery_guarantee?: string;
+  snapshot_mode?: string;
+  allow_append_only?: boolean;
+  cdc_row_filter?: string;
+  multi_subnet_failover?: boolean;
   cursor_column: string;
   primary_key: string;
   source_read_mode?: string;
@@ -1238,6 +1410,12 @@ export interface ScheduleInput {
   procedure_params?: Record<string, string>;
   mappings: Record<string, unknown>[];
   stream_contracts: Record<string, unknown>[];
+  date_locale?: string;
+  number_locale?: string;
+  shape_recipe?: unknown;
+  approved_shape_recipe_hash?: string;
+  approved_decision_artifact_hash?: string;
+  approved_ddl_identity_hash?: string;
   workspace_id: string;
   max_retries: number;
   retry_backoff_seconds: number;
@@ -1248,6 +1426,67 @@ export interface ScheduleInput {
   contract_id?: string;
   /** When true (default if contract_id set), refuse to schedule/enable until SIGNED. */
   require_signed_contract?: boolean;
+  /** Persist mappings onto this parked draft instead of creating a second row. */
+  replay_schedule_id?: string;
+}
+
+/**
+ * One durable finding a scheduled run was parked on.
+ *
+ * A gate that refuses an unattended run refuses identically on every later beat,
+ * so the schedule stops re-running and waits for a named decision instead.
+ */
+export interface ScheduleApproval {
+  id: string;
+  status: "open" | "approved" | "rejected" | string;
+  kind: string;
+  /** Stable refusal code, e.g. SOURCE_SCHEMA_DRIFT. */
+  code: string;
+  finding: string;
+  corrective_action: string;
+  /** False when no signature can clear it — the plan has to change instead. */
+  approvable: boolean;
+  requested_scopes: string[];
+  occurrences: number;
+  created_at: string;
+  last_seen_at?: string;
+  resolved_at?: string;
+  resolved_by?: string;
+  resolution_reason?: string;
+  job_id?: string;
+  run_attempt?: number;
+  evidence?: Record<string, unknown>;
+  binding?: Record<string, unknown>;
+  differences?: string[];
+}
+
+/** A named human's advance signature, bound to the exact plan they signed. */
+export interface StandingAuthorization {
+  id: string;
+  actor: string;
+  reason: string;
+  granted_at: string;
+  expires_at: string;
+  scopes: string[];
+  /** 1 for approve-once, 0 for every later run of the identical plan. */
+  max_uses: number;
+  uses: number;
+  last_used_at?: string;
+  revoked_at?: string;
+  revoked_by?: string;
+  revoked_reason?: string;
+}
+
+/** An inbox row: the parked schedule, and the decision it is waiting on. */
+export interface ScheduleApprovalInboxItem {
+  schedule_id: string;
+  schedule_name: string;
+  workspace_id: string;
+  source: string;
+  destination: string;
+  sync_mode: string;
+  enabled: boolean;
+  approval: ScheduleApproval;
 }
 
 /** Full schedule record (list/detail) — config plus read-only run state. */
@@ -1265,7 +1504,17 @@ export interface PipelineSchedule {
   validation_mode: string;
   schema_policy: string;
   backfill_new_fields: boolean;
+  write_via_staging?: boolean;
+  priority_column?: string;
+  priority_direction?: "asc" | "desc" | string;
+  row_limit?: number;
+  date_locale?: string;
+  number_locale?: string;
   delivery_guarantee?: string;
+  snapshot_mode?: string;
+  allow_append_only?: boolean;
+  cdc_row_filter?: string;
+  multi_subnet_failover?: boolean;
   cursor_column: string;
   primary_key: string;
   cursor_value: string;
@@ -1289,9 +1538,24 @@ export interface PipelineSchedule {
   /** Data contract bound to this pipeline (enforced when require_signed_contract). */
   contract_id?: string;
   require_signed_contract?: boolean;
+  /** Autopilot, on list summaries: this schedule is waiting on a decision. */
+  needs_approval?: boolean;
+  approval_id?: string;
+  approval_code?: string;
+  approval_finding?: string;
+  approvable?: boolean;
+  authorized?: boolean;
+  /** Autopilot, on GET /schedules/{id}: the full records behind those flags. */
+  approval_request?: ScheduleApproval | Record<string, never>;
+  standing_authorization?: StandingAuthorization | Record<string, never>;
   /** Present on GET /schedules/{id}; omitted from list summaries. */
   mappings?: { source: string; target: string; confidence?: number; transform?: string | null }[];
   mapping_count?: number;
+  /** Validate≡Execute stamps. On GET /schedules/{id}; hashes also on list summary. */
+  shape_recipe?: unknown;
+  approved_shape_recipe_hash?: string;
+  approved_decision_artifact_hash?: string;
+  approved_ddl_identity_hash?: string;
   /** Dual Run campaign (consecutive parallel-run cycles). Display-only. */
   fidelity_campaign?: {
     verdict?: string;
@@ -1321,6 +1585,15 @@ export interface ScheduleRun {
   coerced_null_rows: number;
   error: string;
   retry_scheduled?: boolean;
+  /** Why no further attempt was queued after this failure. */
+  retry_refused?: string;
+  /** Whether this failure can change on a later attempt, and what fixes it. */
+  failure_class?: {
+    kind: "transient" | "deterministic" | "unknown";
+    reason: string;
+    corrective_action: string;
+    retryable: boolean;
+  } | null;
   /** Independent dest COUNT(*) ledger copied from the completed job. */
   row_accounting?: import("./conservationLedger").ConservationLedger | null;
 }
@@ -1360,6 +1633,7 @@ export const CONNECTOR_CATALOG = [
   // Document / NoSQL
   { id: "mongodb", label: "MongoDB", port: 27017 },
   { id: "dynamodb", label: "Amazon DynamoDB", port: 443 },
+  { id: "openshift", label: "OpenShift PostgreSQL (CNPG / Crunchy)", port: 5432 },
   { id: "cassandra", label: "Apache Cassandra", port: 9042 },
   { id: "couchbase", label: "Couchbase", port: 8091 },
   { id: "redis", label: "Redis", port: 6379 },

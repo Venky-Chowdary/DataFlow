@@ -59,8 +59,10 @@ class TestTombstoneDetectionIsConservative:
 
         assert _is_tombstone_set({"is_deleted": True}, "is_deleted") is True
         assert _is_tombstone_set({"is_deleted": False}, "is_deleted") is False
-        assert _is_tombstone_set({"is_deleted": "yes"}, "is_deleted") is True
+        assert _is_tombstone_set({"is_deleted": "true"}, "is_deleted") is True
         assert _is_tombstone_set({"is_deleted": "0"}, "is_deleted") is False
+        # Informal yes is not a write-path boolean — fail closed to present.
+        assert _is_tombstone_set({"is_deleted": "yes"}, "is_deleted") is False
 
     def test_deleted_at_null_means_alive(self) -> None:
         from src.transfer.cdc_transfer import _is_tombstone_set

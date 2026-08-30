@@ -24,17 +24,29 @@ from typing import Any, Final
 
 from connectors.base import ReadBatch
 from connectors.merge_dialects import (  # noqa: F401  (re-exported for callers)
+    _clickhouse_replacing_upsert,
     _db2_merge_upsert,
     _duckdb_merge_upsert,
+    _firebird_merge_upsert,
+    _firebird_qualified_table,
+    _firebird_quote,
+    _generic_apply_sparse_upsert,
     _hana_merge_upsert,
     _informix_merge_upsert,
+    _mssql_bracket,
+    _mssql_merge_upsert,
+    _mssql_qualified_table,
     _netezza_merge_upsert,
+    _oracle_merge_upsert,
+    _oracle_qualified_table,
+    _oracle_quote,
     _sybase_merge_upsert,
     _teradata_merge_on,
     _teradata_merge_upsert,
     _trino_merge_upsert,
     _trino_qualified_table,
     _vertica_merge_upsert,
+    clickhouse_final_table_sql,
 )
 from connectors.schema_drift import (
     _build_widen_ddl,
@@ -43,6 +55,7 @@ from connectors.schema_drift import (
     raise_widen_refusal,
 )
 from connectors.sql_temporal import (
+    bind_time_clock,
     coerce_sql_temporal,
     extract_column_from_sql_error,
     is_sql_data_error,
@@ -70,7 +83,7 @@ logger = logging.getLogger(__name__)
 try:
     import sqlalchemy as sa
     from sqlalchemy import create_engine, inspect
-    from sqlalchemy.dialects import mssql, oracle, postgresql
+    from sqlalchemy.dialects import mssql, mysql, oracle, postgresql
     from sqlalchemy.exc import NoSuchModuleError
 
     SQLALCHEMY_AVAILABLE = True
@@ -103,6 +116,7 @@ try:
 except (ImportError, AttributeError):  # pragma: no cover
     SQLALCHEMY_AVAILABLE = False
     mssql = None  # type: ignore[assignment]
+    mysql = None  # type: ignore[assignment]
     oracle = None  # type: ignore[assignment]
     ch_engines = None
     ChDateTime64 = None
@@ -114,6 +128,8 @@ from connectors.writer_common import (
     CHUNK_SIZE,
     DF_LSN_COL,
     _coerced_null_row_count,
+    _conflict_key_identity,
+    _is_nullish_conflict_key,
     _rejected_row_count,
     assert_sparse_upsert_has_pk,
     compare_lsn,
@@ -358,19 +374,103 @@ def _drivername(db_type: str) -> str:
     return _DRIVERNAME_MAP.get(db_type, db_type)
 
 
-def _mssql_drivername() -> str:
-    """Pick an installed SQL Server DBAPI: pyodbc preferred, pymssql fallback."""
+def _mssql_odbc_driver() -> str | None:
+    """Return an installed Microsoft ODBC driver name, or None.
+
+    Importing ``pyodbc`` is not enough — the unixODBC driver manager still
+    fails when ``libmsodbcsql-17.so`` is absent. Probe ``pyodbc.drivers()``.
+    """
     try:
-        import pyodbc  # noqa: F401
-        return "mssql+pyodbc"
+        import pyodbc
     except Exception:
-        pass
+        return None
+    try:
+        installed = {str(d) for d in (pyodbc.drivers() or [])}
+    except Exception:
+        return None
+    for name in (
+        "ODBC Driver 18 for SQL Server",
+        "ODBC Driver 17 for SQL Server",
+        "ODBC Driver 13 for SQL Server",
+    ):
+        if name in installed:
+            return name
+    return None
+
+
+def _mssql_drivername() -> str:
+    """Pick an installed SQL Server DBAPI: pyodbc+driver preferred, pymssql fallback."""
+    if _mssql_odbc_driver():
+        return "mssql+pyodbc"
     try:
         import pymssql  # noqa: F401
         return "mssql+pymssql"
     except Exception:
         pass
     return "mssql+pyodbc"
+
+
+def adapt_mssql_sql(sql: str) -> str:
+    """Rewrite ``%s`` placeholders for the live SQL Server DBAPI.
+
+    Native CDC / CT SQL is written pymssql-style (``%s``). pyodbc is qmark
+    (``?``). Importing pyodbc without adapting SQL used to fail closed as
+    ``0 parameter markers`` and hide a live CDC capture.
+    """
+    if not isinstance(sql, str) or "%s" not in sql:
+        return sql
+    if _mssql_drivername() != "mssql+pyodbc":
+        return sql
+    return sql.replace("%s", "?")
+
+
+class _MssqlQmarkCursor:
+    def __init__(self, cur: Any):
+        self._cur = cur
+
+    def execute(self, sql, *args, **kwargs):
+        return self._cur.execute(adapt_mssql_sql(sql), *args, **kwargs)
+
+    def executemany(self, sql, *args, **kwargs):
+        return self._cur.executemany(adapt_mssql_sql(sql), *args, **kwargs)
+
+    def __enter__(self):
+        entered = self._cur.__enter__() if hasattr(self._cur, "__enter__") else self._cur
+        if entered is self._cur:
+            return self
+        return _MssqlQmarkCursor(entered)
+
+    def __exit__(self, *exc):
+        if hasattr(self._cur, "__exit__"):
+            return self._cur.__exit__(*exc)
+        return False
+
+    def __getattr__(self, name):
+        return getattr(self._cur, name)
+
+
+class _MssqlQmarkConnection:
+    """DBAPI connection whose cursors adapt ``%s`` → ``?`` for pyodbc."""
+
+    def __init__(self, conn: Any):
+        self._conn = conn
+
+    def cursor(self, *args, **kwargs):
+        return _MssqlQmarkCursor(self._conn.cursor(*args, **kwargs))
+
+    def __enter__(self):
+        entered = self._conn.__enter__() if hasattr(self._conn, "__enter__") else self._conn
+        if entered is self._conn:
+            return self
+        return _MssqlQmarkConnection(entered)
+
+    def __exit__(self, *exc):
+        if hasattr(self._conn, "__exit__"):
+            return self._conn.__exit__(*exc)
+        return False
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
 
 
 def _default_port(db_type: str) -> int:
@@ -516,7 +616,7 @@ def _build_url(cfg: dict[str, Any]) -> str | sa.URL:
         drivername = _mssql_drivername()
         query = {}
         if drivername == "mssql+pyodbc":
-            query["driver"] = "ODBC Driver 17 for SQL Server"
+            query["driver"] = _mssql_odbc_driver() or "ODBC Driver 17 for SQL Server"
         # Always On listener: MultiSubnetFailover speeds AG failover reconnect.
         multi = cfg.get("multi_subnet_failover")
         if multi is None:
@@ -600,6 +700,13 @@ def _build_engine(cfg: dict[str, Any]) -> Any:
             # money/numeric fidelity.  Decimal is native in DuckDB, so enable it.
             if db_type == "duckdb" or "duckdb" in connection_string:
                 engine.dialect.supports_native_decimal = True
+            # SQLite has no Decimal affinity. Register dest-canonical text bind so
+            # SQLAlchemy/sqlite3 accept Python Decimal (apply_transform decimal
+            # wire) instead of ProgrammingError or IEEE float invent.
+            if db_type == "sqlite" or "sqlite://" in connection_string:
+                from connectors.sqlite_common import register_sqlite_decimal_adapter
+
+                register_sqlite_decimal_adapter()
             return engine
         from services.engine_pool import pool_settings
 
@@ -714,7 +821,18 @@ def get_connection(
         "ssl": ssl,
         "type": db_type or kwargs.get("type") or "",
     }
-    return _engine(cfg).raw_connection()
+    conn = _engine(cfg).raw_connection()
+    db_type = (cfg.get("type") or "").lower()
+    if db_type in {
+        "sqlserver",
+        "mssql",
+        "microsoft_sql_server",
+        "azure_sql_database",
+        "amazon_rds_sql_server",
+        "google_cloud_sql_sql_server",
+    }:
+        return _MssqlQmarkConnection(conn)
+    return conn
 
 
 def _schema_name(cfg: dict[str, Any]) -> str | None:
@@ -969,43 +1087,49 @@ def _logical_type_from_sa(col_type: Any) -> str:
     return normalize_logical_type(repr_)
 
 
-class _DuckDBJSON(sa.JSON):
-    """JSON type that stores compact, deterministic JSON text in DuckDB.
+class _ExactJSON(sa.JSON):
+    """JSON type that stores canonical JSON text (no stdlib re-parse).
 
-    SQLAlchemy's default ``sa.JSON`` re-serializes dict/list with spaces and
-    binds Python ``None`` as the JSON literal ``null``.  This subclass keeps
-    source JSON text compact and treats ``None`` as SQL NULL so round-trips are
-    exact and checksums line up.
+    SQLAlchemy's default ``sa.JSON`` re-parses with ``json.loads`` (IEEE invent)
+    and binds Python ``None`` as the JSON literal ``null``. This subclass uses
+    ``json_document_wire``: valid JSON text keeps its digits and polarity
+    (``\"1\"`` stays a string). Python trees dump compact. ``None`` is SQL NULL.
+    Used for DuckDB and every leftover generic-SQL JSON DDL site that would
+    otherwise emit bare ``sa.JSON()`` (MySQL / SQLite / MSSQL / …).
     """
 
     __visit_name__ = "JSON"
 
     def bind_processor(self, dialect: Any) -> Callable[[Any], Any] | None:
         def process(value: Any) -> Any:
-            if value is None:
-                return None
-            if isinstance(value, str):
-                try:
-                    value = json.loads(value)
-                except (json.JSONDecodeError, ValueError):
-                    return value
-            if isinstance(value, (dict, list, tuple, set, frozenset)):
-                return json.dumps(
-                    value,
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                    default=json_default,
-                )
-            return value
+            from services.value_serializer import (
+                absent_sql_bind,
+                is_missing_sentinel,
+            )
+
+            # Missing stays a raise in json_document_wire (omit upstream).
+            # Reader-null is SQL/JSON NULL — never the extract token as text.
+            if not is_missing_sentinel(value):
+                handled, bound = absent_sql_bind(value)
+                if handled:
+                    return bound
+            from services.json_polarity import json_document_wire
+
+            return json_document_wire(value)
 
         return process
 
     def result_processor(
         self, dialect: Any, coltype: Any
     ) -> Callable[[Any], Any] | None:
-        # DuckDB returns JSON values as text.  Keep them as text so the
-        # downstream value serializer can apply the same canonical compact JSON.
+        # Drivers that still return JSON as text stay text. A second
+        # ``json.loads`` here would IEEE-collapse long fractions before
+        # ``json_document_wire`` could keep the engine spelling.
         return lambda value: value
+
+
+# Backward name — DuckDB was the first engine on this wire.
+_DuckDBJSON = _ExactJSON
 
 
 #: Dialects whose catalogs fold unquoted identifiers to a single case.
@@ -1015,10 +1139,35 @@ _ORACLE_WIRES: Final = {"oracle", "oracledb", "oracle_autonomous", "oracle_adw",
 
 
 _MSSQL_WIRES: Final = {"sqlserver", "mssql", "azure_sql", "synapse", "azure_synapse"}
+_MYSQL_WIRES: Final = {"mysql", "mariadb", "tidb", "singlestore"}
+
+
+def physical_table_spelling(
+    cfg: dict[str, Any], table: str, schema: str | None = None
+) -> str:
+    """Spelling the catalog stores for ``table``, or ``""`` when it is absent.
+
+    Callers that are about to drop and recreate a destination need the spelling
+    *before* the drop: afterwards the table is gone and the recreate can only
+    guess the engine's folding convention.
+    """
+    if not SQLALCHEMY_AVAILABLE or not table:
+        return ""
+    from services.sql_object_identity import resolve_object_identity
+
+    engine = _engine(cfg)
+    try:
+        ident = resolve_object_identity(engine, table, schema or _schema_name(cfg))
+        return ident.table if (ident.resolved and ident.exists) else ""
+    except Exception as exc:  # noqa: BLE001 — unreadable catalog: caller decides
+        logger.debug("physical spelling probe failed for %s: %s", table, exc)
+        return ""
+    finally:
+        release_engine(engine)
 
 
 def _resolve_physical_table_ident(
-    engine: Any, table: str, schema: str | None
+    engine: Any, table: str, schema: str | None, prior_spelling: str = ""
 ) -> tuple[str, str | None]:
     """Physical spelling of a destination on case-folding engines.
 
@@ -1047,6 +1196,11 @@ def _resolve_physical_table_ident(
         return table, schema
     if ident.exists:
         return ident.table, ident.schema
+    if prior_spelling and prior_spelling.casefold() == table.casefold():
+        # full_refresh just dropped this table: recreating it folded would move
+        # the destination to a different identifier than the one the operator
+        # (and everything reading it) points at.
+        return prior_spelling, schema
     return folded, folded_schema
 
 
@@ -1096,11 +1250,24 @@ def _stored_column_spellings(
     does not exist. ``denormalize_name`` is the dialect's own inverse and keeps
     a deliberately quoted lower-case column quoted.
     """
+    from sqlalchemy.sql import quoted_name
+
+    inspector = inspect(bind)
     try:
-        cols = inspect(bind).get_columns(table, schema=schema)
+        cols = inspector.get_columns(table, schema=schema)
     except Exception as exc:  # noqa: BLE001 — unreadable catalog: keep Map names
         logger.debug("column spelling probe failed for %s: %s", table, exc)
-        return {}
+        cols = []
+    if not cols:
+        # The probe folds the *table* name too, so a deliberately quoted
+        # lower-case table (``"scn_dst"``) read as absent and every column kept
+        # its Map spelling: appending into it asked Oracle for ``"email"`` beside
+        # the stored ``EMAIL`` and failed with ORA-00904 on a column plainly there.
+        try:
+            cols = inspector.get_columns(quoted_name(table, True), schema=schema)
+        except Exception as exc:  # noqa: BLE001 — unreadable catalog: keep Map names
+            logger.debug("quoted column spelling probe failed for %s: %s", table, exc)
+            return {}
     denormalize = getattr(
         getattr(engine, "dialect", None), "denormalize_name", lambda n: n
     )
@@ -1123,10 +1290,14 @@ def _is_oracle_wire(dialect_name: str, db_type: str) -> bool:
 def _sub_second_naive_wire(dialect_name: str, db_type: str) -> Any:
     """Naive-datetime carrier that keeps sub-second precision, else ``None``.
 
-    ``sa.DateTime()`` compiles to Oracle ``DATE`` (whole seconds, no fraction)
-    and SQL Server ``DATETIME`` (rounded to 1/300 s), so a PostgreSQL
-    microsecond stamp lands altered and a row checksum can only match by luck.
-    ``None`` means the dialect's own default already carries fractions.
+    ``sa.DateTime()`` compiles to Oracle ``DATE`` (whole seconds, no fraction),
+    SQL Server ``DATETIME`` (rounded to 1/300 s) and MySQL ``DATETIME``
+    (fsp 0 — the fraction is dropped), so a PostgreSQL microsecond stamp lands
+    altered and a row checksum can only match by luck. On MySQL that also
+    collapsed SCD2 version boundaries: two versions written in the same second
+    got one instant, so ``valid_from == valid_to`` and no as-of query could see
+    the closed version. ``None`` means the dialect's own default already
+    carries fractions.
     """
     if _is_oracle_wire(dialect_name, db_type):
         return oracle.TIMESTAMP()
@@ -1134,6 +1305,10 @@ def _sub_second_naive_wire(dialect_name: str, db_type: str) -> Any:
         (dialect_name or "").lower() == "mssql" or (db_type or "").lower() in _MSSQL_WIRES
     ):
         return mssql.DATETIME2()
+    if mysql is not None and _MYSQL_WIRES & {
+        (dialect_name or "").lower(), (db_type or "").lower()
+    }:
+        return mysql.DATETIME(fsp=6)
     return None
 
 
@@ -1207,6 +1382,13 @@ def _sa_type_for_logical(
             return _maybe_nullable(
                 oracle.TIMESTAMP(timezone=not local, local_timezone=local)
             )
+        if mysql is not None and _MYSQL_WIRES & {
+            (dialect_name or "").lower(), (db_type or "").lower()
+        }:
+            # No MySQL carrier holds an offset, so the zone decision is made
+            # upstream. sa.DateTime(timezone=True) compiles to fsp-0 DATETIME,
+            # dropping the fraction too — a second loss for nothing.
+            return _maybe_nullable(mysql.DATETIME(fsp=6))
         return sa.DateTime(timezone=True)
     if (
         "timestamp_ntz" in raw_lower
@@ -1406,12 +1588,24 @@ def _sa_type_for_logical(
                     return sa.ARRAY(
                         _sa_type_for_logical(element, dialect_name, db_type)
                     )
-            return _DuckDBJSON(none_as_null=True)
+            return _ExactJSON(none_as_null=True)
         if db_type in ("oracle", "clickhouse", "trino", "questdb", "presto"):
             return _maybe_nullable(sa.Text())
         if dialect_name == "postgresql":
+            if t == LOGICAL_ARRAY:
+                elem = None
+                match = re.match(r"^(?:ARRAY|LIST)<(.+)>$", raw, re.IGNORECASE)
+                postfix = re.match(r"^(.+?)\s*\[\s*\]\s*$", raw.strip(), re.IGNORECASE)
+                if match:
+                    elem = match.group(1).strip()
+                elif postfix:
+                    elem = postfix.group(1).strip()
+                if elem:
+                    return sa.ARRAY(
+                        _sa_type_for_logical(elem, dialect_name, db_type)
+                    )
             return postgresql.JSONB()
-        return sa.JSON()
+        return _ExactJSON(none_as_null=True)
     if t == LOGICAL_BINARY:
         if db_type in ("clickhouse", "trino", "questdb", "presto"):
             return _maybe_nullable(sa.Text())
@@ -1517,7 +1711,7 @@ def _sa_type_for_logical(
         if native_logical == LOGICAL_JSON:
             if dialect_name == "postgresql":
                 return postgresql.JSONB()
-            return sa.JSON()
+            return _ExactJSON(none_as_null=True)
         if _DialectNativeType is None:
             return _maybe_nullable(sa.Text())
         return _maybe_nullable(_DialectNativeType(native))
@@ -1548,13 +1742,12 @@ def _to_sa_value(
     db_type: str = "",
 ) -> Any:
     """Convert transform-engine output values to Python objects SQLAlchemy accepts."""
-    if value is None:
-        return None
-    from services.value_serializer import is_missing_sentinel
+    from services.value_serializer import absent_sql_bind
 
-    # Sparse CDC: never coerce DF_MISSING → NULL (would wipe present destination cols).
-    if is_missing_sentinel(value):
-        return value
+    # Reader-null is SQL NULL. Missing stays Missing (sparse omit, never wipe).
+    handled, bound = absent_sql_bind(value)
+    if handled:
+        return bound
 
     # Specialty carriers (INET, PG_LSN, geometric, OID, snapshots, …) must use
     # the shared sql_bind SSOT before LOGICAL_* collapse invents string/int/geo.
@@ -1661,7 +1854,9 @@ def _to_sa_value(
         from connectors.sql_bind import coerce_json_wire
 
         # Empty JSON wire raises — quarantine upstream (never invent SQL NULL wipe).
-        as_text = _is_string_type(sa_type)
+        # _ExactJSON bind keeps engine text; parsing here then dumping would
+        # stringify non-IEEE Decimals (number → string polarity invent).
+        as_text = _is_string_type(sa_type) or isinstance(sa_type, _ExactJSON)
         bound = coerce_json_wire(value, as_text=as_text)
         if as_text:
             return bound
@@ -1745,6 +1940,8 @@ def _to_sa_value(
         base = str(coerce_ddl).upper()
 
         if base == "DATE":
+            if coerced is None:
+                return None
             if isinstance(coerced, datetime):
                 return coerced.date()
             if isinstance(coerced, date):
@@ -1752,22 +1949,16 @@ def _to_sa_value(
             return value
 
         if base == "TIME":
-            if _is_string_type(sa_type):
-                if isinstance(coerced, time):
-                    return coerced.isoformat()
-                if isinstance(coerced, datetime):
-                    return coerced.time().isoformat()
-                return value if isinstance(value, str) else str(value)
-            if isinstance(coerced, time):
-                if db_type == "presto" or dialect_name == "presto":
-                    return coerced.isoformat()
-                return coerced
-            if isinstance(coerced, datetime):
-                tm = coerced.time()
-                if db_type == "presto" or dialect_name == "presto":
-                    return tm.isoformat()
-                return tm
-            return value
+            clock = bind_time_clock(value)
+            if clock is None:
+                return None
+            if (
+                _is_string_type(sa_type)
+                or db_type == "presto"
+                or dialect_name == "presto"
+            ):
+                return clock.isoformat()
+            return clock
 
         # DATETIME2 (SQL Server) / QuestDB / Oracle TIMESTAMP / ClickHouse DateTime
         # are naive wall clocks. Never invent tzinfo=UTC on naive values — that
@@ -1785,6 +1976,8 @@ def _to_sa_value(
         if is_tz_aware:
             from services.offset_label import bind_aware_datetime
 
+            if coerced is None:
+                return None
             if isinstance(coerced, datetime):
                 if coerced.tzinfo is None:
                     raise ValueError(
@@ -1804,6 +1997,8 @@ def _to_sa_value(
                 )
             return value
         # NTZ / DATETIME: keep civil digits; strip offset without astimezone.
+        if coerced is None:
+            return None
         if isinstance(coerced, datetime):
             if coerced.tzinfo is not None:
                 return coerced.replace(tzinfo=None)
@@ -2591,6 +2786,42 @@ def introspect_table_schema(
         release_engine(engine)
 
 
+def _drop_table_sql(engine: Any, qualified: str, table: str) -> str:
+    """Conditional DROP in the dialect's own spelling.
+
+    ``DROP TABLE IF EXISTS`` is a syntax error on Oracle (ORA-00933) and did not
+    exist before SQL Server 2016, so the statement failed and the drop fell
+    through to a fallback that could no-op silently.
+    """
+    dialect = str(getattr(getattr(engine, "dialect", None), "name", "") or "").lower()
+    if dialect == "oracle":
+        return (
+            f"BEGIN EXECUTE IMMEDIATE 'DROP TABLE {qualified}'; "
+            "EXCEPTION WHEN OTHERS THEN IF SQLCODE != -942 THEN RAISE; END IF; END;"
+        )
+    if dialect == "mssql":
+        return f"IF OBJECT_ID('{table}', 'U') IS NOT NULL DROP TABLE {qualified}"
+    return f"DROP TABLE IF EXISTS {qualified}"
+
+
+def _require_table_gone(engine: Any, table: str, schema: str | None) -> None:
+    """Prove the drop happened; a no-op drop is silent data corruption.
+
+    ``full_refresh`` treats a successful drop as "the destination is empty" and
+    then loads. When the DROP addressed a name the engine folded differently it
+    reported success while every row stayed, so the refresh appended onto rows it
+    had declared cleared — duplicated keys at best, doubled data at worst.
+    """
+    from services.sql_object_identity import resolve_object_identity
+
+    ident = resolve_object_identity(engine, table, schema)
+    if ident.resolved and ident.exists:
+        raise RuntimeError(
+            f"DROP TABLE reported success but {schema or ''}.{table} is still in "
+            "the catalog — refusing to treat the destination as cleared."
+        )
+
+
 def drop_table(cfg: dict[str, Any], table: str, schema: str | None = None) -> bool:
     """Drop a table using SQLAlchemy dialect-aware DDL with a raw fallback.
 
@@ -2610,15 +2841,24 @@ def drop_table(cfg: dict[str, Any], table: str, schema: str | None = None) -> bo
         table, schema = _resolve_physical_table_ident(engine, table, schema)
         qualified = _qualified_table_ref(cfg, table, schema)
         with engine.connect() as conn:
-            conn.execute(sa.text(f"DROP TABLE IF EXISTS {qualified}"))
+            conn.execute(sa.text(_drop_table_sql(engine, qualified, table)))
             conn.commit()
+        _require_table_gone(engine, table, schema)
         return True
     except Exception as primary_exc:
         # Some dialects reject the raw IF EXISTS form; retry via dialect DDL
         # before giving up, but surface the original error if that also fails.
         try:
-            table_obj = sa.Table(table, sa.MetaData(), schema=schema)
+            from sqlalchemy.sql import quoted_name
+
+            # Quoted: an unquoted Table() name is case-insensitive, so on Oracle
+            # the fallback compiled ``DROP TABLE scn_dst``, checkfirst read the
+            # folded SCN_DST as absent, and the drop became a silent no-op.
+            table_obj = sa.Table(
+                quoted_name(table, True), sa.MetaData(), schema=schema
+            )
             table_obj.drop(engine, checkfirst=True)
+            _require_table_gone(engine, table, schema)
             return True
         except Exception as fallback_exc:
             logger.error(
@@ -2776,7 +3016,10 @@ def _is_json_sa(col: Any) -> bool:
     col_type = getattr(col, "type", None)
     if col_type is None:
         return False
-    return type(col_type).__name__.upper() in {"JSON", "JSONB"}
+    if isinstance(col_type, sa.JSON):
+        return True
+    name = type(col_type).__name__.upper()
+    return name in {"JSON", "JSONB"} or name.endswith("JSON") or name.endswith("JSONB")
 
 
 def _serialize_source_row(row: Any, cols: list[Any], dialect: str) -> list[str]:
@@ -3056,7 +3299,9 @@ def read_table_scan_batch(
                 stmt = sa.select(*_tz_safe_projection(cfg, selected_cols))
                 if order_cols:
                     stmt = stmt.order_by(*order_cols)
-                result = conn.execution_options(stream_results=True).execute(stmt)
+                # Statement-scoped: on the connection it leaks into later DDL,
+                # which then compiles as DECLARE CURSOR FOR <ddl> and fails.
+                result = conn.execute(stmt.execution_options(stream_results=True))
                 headers = [c.name for c in selected_cols]
                 serialize = True
             except Exception:
@@ -3174,7 +3419,7 @@ def read_table_cursor_batch(
     if not SQLALCHEMY_AVAILABLE:
         raise RuntimeError("SQLAlchemy is not installed")
 
-    from services.keyset_pagination import sqlalchemy_keyset_clause
+    from services.keyset_pagination import present_cursor_bookmark, sqlalchemy_keyset_clause
 
     cfg = _cfg_from_params(
         host,
@@ -3221,9 +3466,10 @@ def read_table_cursor_batch(
 
             key_cols = [table_obj.c[n] for n in key_names]
             stmt = sa.select(*_tz_safe_projection(cfg, selected_cols))
-            if cursor_after:
+            bookmark = present_cursor_bookmark(cursor_after)
+            if bookmark is not None:
                 stmt = stmt.where(
-                    sqlalchemy_keyset_clause(sa, key_cols, str(cursor_after))
+                    sqlalchemy_keyset_clause(sa, key_cols, bookmark)
                 )
             stmt = stmt.order_by(*key_cols).limit(limit)
 
@@ -3258,7 +3504,7 @@ def _delete_by_keys(
     for row in rows:
         for c in conflict_cols:
             val = row.get(c) if isinstance(row, dict) else None
-            if val is None or (isinstance(val, str) and str(val).strip() == ""):
+            if _is_nullish_conflict_key(val):
                 raise ValueError(
                     f"upsert delete-by-keys refused null/empty conflict key {c!r} — "
                     "IS NULL predicates would mass-delete destination rows"
@@ -3290,12 +3536,12 @@ def _prefetch_existing_lsn(
         return existing
     clauses = []
     for row in rows:
-        if any(row.get(c) in (None, "") for c in conflict_cols):
-            continue
         clauses.append(
             sa.and_(
                 *[
-                    table_obj.c[c].is_(None) if row[c] is None else table_obj.c[c] == row[c]
+                    table_obj.c[c].is_(None)
+                    if _is_nullish_conflict_key(row.get(c))
+                    else table_obj.c[c] == row[c]
                     for c in conflict_cols
                 ]
             )
@@ -3309,406 +3555,11 @@ def _prefetch_existing_lsn(
     for found in conn.execute(stmt):
         # Use positional indices because some dialects (DuckDB, SQLite raw) return
         # plain tuples rather than key-addressable Row objects.
-        key = tuple(found[i] for i in range(len(conflict_cols)))
+        key = tuple(_conflict_key_identity(found[i]) for i in range(len(conflict_cols)))
         existing[key] = found[len(conflict_cols)]
     return existing
 
 
-def _generic_apply_sparse_upsert(
-    conn: Any,
-    table_obj: sa.Table,
-    target_cols: list[str],
-    conflict_columns: list[str],
-    sparse_rows: list[dict[str, Any]],
-    *,
-    dialect_name: str = "",
-    rejected_details: list[dict[str, Any]] | None = None,
-    policy: str = "quarantine",
-) -> tuple[int, int, list[tuple]]:
-    """Per-row upsert omitting DF_MISSING — never SET col=NULL for absent CDC fields."""
-    from connectors.writer_common import run_sparse_cdc_upsert
-    from services.value_serializer import is_missing_sentinel
-
-    conflict = resolve_conflict_targets(conflict_columns, target_cols, strict=True)
-    if not conflict:
-        raise ValueError("sparse SQLAlchemy upsert requires conflict_columns")
-
-    # Normalize dict rows to target_cols tuples for the shared loop.
-    from services.value_serializer import DF_MISSING_SENTINEL
-
-    as_tuples: list[tuple] = []
-    for row in sparse_rows:
-        as_tuples.append(
-            tuple(
-                (
-                    row[c]
-                    if c in row and not is_missing_sentinel(row.get(c))
-                    else DF_MISSING_SENTINEL
-                )
-                for c in target_cols
-            )
-        )
-
-    is_clickhouse = dialect_name == "clickhouse" or str(dialect_name).startswith(
-        "clickhouse"
-    )
-
-    def fetch_existing(pk_vals: list[Any]) -> tuple | None:
-        pk_clause = sa.and_(
-            *[table_obj.c[c] == pk_vals[i] for i, c in enumerate(conflict)]
-        )
-        cols = [table_obj.c[c] for c in target_cols if c in table_obj.c]
-        if len(cols) != len(target_cols):
-            # Missing physical columns — return None so insert path can run.
-            return None
-        if is_clickhouse:
-            # ReplacingMergeTree without FINAL can miss the current version and
-            # fall through to a partial INSERT that NULL-wipes omitted attrs.
-            from connectors.writer_common import quote_sql_identifier
-
-            parts = []
-            if table_obj.schema:
-                parts.append(quote_sql_identifier(table_obj.schema))
-            parts.append(quote_sql_identifier(table_obj.name))
-            table_ref = clickhouse_final_table_sql(".".join(parts))
-            col_sql = ", ".join(quote_sql_identifier(c) for c in target_cols)
-            where_sql = " AND ".join(
-                f"{quote_sql_identifier(c)} = :p{i}" for i, c in enumerate(conflict)
-            )
-            params = {f"p{i}": pk_vals[i] for i in range(len(conflict))}
-            found = conn.execute(
-                sa.text(f"SELECT {col_sql} FROM {table_ref} WHERE {where_sql}"),  # nosec B608
-                params,
-            ).fetchone()
-            return tuple(found) if found is not None else None
-        found = conn.execute(sa.select(*cols).where(pk_clause)).fetchone()
-        return tuple(found) if found is not None else None
-
-    def update_non_pk(non_pk: dict[str, Any], pk_vals: list[Any]) -> int:
-        if is_clickhouse:
-            # Mutations are not Airbyte-class upsert; force versioned INSERT path.
-            return 0
-        pk_clause = sa.and_(
-            *[table_obj.c[c] == pk_vals[i] for i, c in enumerate(conflict)]
-        )
-        result = conn.execute(sa.update(table_obj).where(pk_clause).values(**non_pk))
-        return int(getattr(result, "rowcount", 0) or 0)
-
-    def insert_present(present: dict[str, Any]) -> None:
-        conn.execute(sa.insert(table_obj).values(**present))
-
-    return run_sparse_cdc_upsert(
-        target_cols=target_cols,
-        conflict_columns=conflict,
-        sparse_rows=as_tuples,
-        fetch_existing_row=fetch_existing,
-        update_non_pk=update_non_pk,
-        insert_present=insert_present,
-        hydrate_versioned_insert=is_clickhouse,
-        rejected_details=rejected_details,
-        policy=policy,
-    )
-
-
-def _mssql_bracket(ident: str) -> str:
-    """Bracket-quote a SQL Server identifier (escape ``]``)."""
-    return "[" + str(ident).replace("]", "]]") + "]"
-
-
-def _mssql_qualified_table(table_obj: sa.Table) -> str:
-    parts = []
-    if table_obj.schema:
-        parts.append(_mssql_bracket(table_obj.schema))
-    parts.append(_mssql_bracket(table_obj.name))
-    return ".".join(parts)
-
-
-def _mssql_merge_upsert(
-    conn: Any,
-    table_obj: sa.Table,
-    rows: list[dict[str, Any]],
-    conflict_cols: list[str],
-    target_cols: list[str],
-    update_cols: list[str],
-) -> int:
-    """Native T-SQL MERGE with HOLDLOCK + NULL-safe ON; staging temp table.
-
-    Matches Airbyte/Fivetran-class SQL Server upsert: stage → MERGE → drop.
-    Caller must fall back to delete+insert when this raises.
-    """
-    from connectors.writer_common import null_safe_merge_on
-
-    if not rows:
-        return 0
-    stage = f"#df_mrg_{abs(hash((table_obj.name, tuple(conflict_cols)))) % 10_000_000}"
-    target = _mssql_qualified_table(table_obj)
-    col_sql = ", ".join(_mssql_bracket(c) for c in target_cols)
-    # Clone column shapes from target — never invent VARCHAR widths.
-    conn.execute(
-        sa.text(f"SELECT TOP 0 {col_sql} INTO {stage} FROM {target}")  # nosec B608
-    )
-    try:
-        placeholders = ", ".join(f":{c}" for c in target_cols)
-        insert_sql = sa.text(
-            f"INSERT INTO {stage} ({col_sql}) VALUES ({placeholders})"  # nosec B608
-        )
-        for row in rows:
-            params = {c: row.get(c) for c in target_cols}
-            conn.execute(insert_sql, params)
-
-        on_sql = null_safe_merge_on(
-            conflict_cols,
-            left_alias=_mssql_bracket("t"),
-            right_alias=_mssql_bracket("s"),
-            quote_column=_mssql_bracket,
-        )
-        insert_cols = ", ".join(_mssql_bracket(c) for c in target_cols)
-        insert_vals = ", ".join(
-            f"{_mssql_bracket('s')}.{_mssql_bracket(c)}" for c in target_cols
-        )
-        if update_cols:
-            set_sql = ", ".join(
-                f"{_mssql_bracket('t')}.{_mssql_bracket(c)} = "
-                f"{_mssql_bracket('s')}.{_mssql_bracket(c)}"
-                for c in update_cols
-            )
-            merge_sql = (
-                f"MERGE {target} WITH (HOLDLOCK) AS {_mssql_bracket('t')} "
-                f"USING {stage} AS {_mssql_bracket('s')} "
-                f"ON {on_sql} "
-                f"WHEN MATCHED THEN UPDATE SET {set_sql} "
-                f"WHEN NOT MATCHED BY TARGET THEN "
-                f"INSERT ({insert_cols}) VALUES ({insert_vals});"
-            )
-        else:
-            # Conflict-key-only rows: insert missing; leave matched alone.
-            merge_sql = (
-                f"MERGE {target} WITH (HOLDLOCK) AS {_mssql_bracket('t')} "
-                f"USING {stage} AS {_mssql_bracket('s')} "
-                f"ON {on_sql} "
-                f"WHEN NOT MATCHED BY TARGET THEN "
-                f"INSERT ({insert_cols}) VALUES ({insert_vals});"
-            )
-        conn.execute(sa.text(merge_sql))  # nosec B608
-        return len(rows)
-    finally:
-        with contextlib.suppress(Exception):
-            conn.execute(sa.text(f"DROP TABLE {stage}"))  # nosec B608
-
-
-def _oracle_quote(ident: str) -> str:
-    """Double-quote an Oracle identifier (escape embedded quotes)."""
-    return '"' + str(ident).replace('"', '""') + '"'
-
-
-def _oracle_qualified_table(table_obj: sa.Table) -> str:
-    parts = []
-    if table_obj.schema:
-        parts.append(_oracle_quote(table_obj.schema))
-    parts.append(_oracle_quote(table_obj.name))
-    return ".".join(parts)
-
-
-def _oracle_merge_upsert(
-    conn: Any,
-    table_obj: sa.Table,
-    rows: list[dict[str, Any]],
-    conflict_cols: list[str],
-    target_cols: list[str],
-    update_cols: list[str],
-) -> int:
-    """Native Oracle MERGE with NULL-safe ON via session staging table.
-
-    Stage → MERGE INTO … WHEN MATCHED / WHEN NOT MATCHED (Oracle has no
-    ``BY TARGET`` keyword). Prefer PRIVATE TEMPORARY TABLE (18c+); fall back to
-    a session GLOBAL TEMPORARY TABLE. Caller falls back to delete+insert on error.
-    Still at-least-once — not exactly-once.
-    """
-    from connectors.writer_common import null_safe_merge_on
-
-    if not rows:
-        return 0
-    suffix = abs(hash((table_obj.name, tuple(conflict_cols)))) % 10_000_000
-    # Private temp tables require the ORA$PTT_ prefix (Oracle default).
-    ptt = f"ORA$PTT_DF_MRG_{suffix}"
-    gtt = f"DF_MRG_{suffix}"
-    target = _oracle_qualified_table(table_obj)
-    col_sql = ", ".join(_oracle_quote(c) for c in target_cols)
-    stage_ref = ""
-    created: str | None = None
-    try:
-        try:
-            stage_ref = _oracle_quote(ptt)
-            conn.execute(
-                sa.text(
-                    f"CREATE PRIVATE TEMPORARY TABLE {stage_ref} "
-                    f"ON COMMIT PRESERVE DEFINITION AS "
-                    f"SELECT {col_sql} FROM {target} WHERE 1=0"  # nosec B608
-                )
-            )
-            created = "ptt"
-        except (sa.exc.SQLAlchemyError, OSError, ValueError):
-            # Older Oracle / privilege gap — try session GTT (definition may persist).
-            with contextlib.suppress(Exception):
-                conn.rollback()
-            stage_ref = _oracle_quote(gtt)
-            conn.execute(
-                sa.text(
-                    f"CREATE GLOBAL TEMPORARY TABLE {stage_ref} "
-                    f"ON COMMIT PRESERVE ROWS AS "
-                    f"SELECT {col_sql} FROM {target} WHERE 1=0"  # nosec B608
-                )
-            )
-            created = "gtt"
-
-        placeholders = ", ".join(f":{c}" for c in target_cols)
-        insert_sql = sa.text(
-            f"INSERT INTO {stage_ref} ({col_sql}) VALUES ({placeholders})"  # nosec B608
-        )
-        for row in rows:
-            conn.execute(insert_sql, {c: row.get(c) for c in target_cols})
-
-        on_sql = null_safe_merge_on(
-            conflict_cols,
-            left_alias="t",
-            right_alias="s",
-            quote_column=_oracle_quote,
-        )
-        insert_cols = ", ".join(_oracle_quote(c) for c in target_cols)
-        insert_vals = ", ".join(f"s.{_oracle_quote(c)}" for c in target_cols)
-        if update_cols:
-            set_sql = ", ".join(
-                f"t.{_oracle_quote(c)} = s.{_oracle_quote(c)}" for c in update_cols
-            )
-            merge_sql = (
-                f"MERGE INTO {target} t "
-                f"USING {stage_ref} s "
-                f"ON ({on_sql}) "
-                f"WHEN MATCHED THEN UPDATE SET {set_sql} "
-                f"WHEN NOT MATCHED THEN INSERT ({insert_cols}) "
-                f"VALUES ({insert_vals})"
-            )
-        else:
-            merge_sql = (
-                f"MERGE INTO {target} t "
-                f"USING {stage_ref} s "
-                f"ON ({on_sql}) "
-                f"WHEN NOT MATCHED THEN INSERT ({insert_cols}) "
-                f"VALUES ({insert_vals})"
-            )
-        conn.execute(sa.text(merge_sql))  # nosec B608
-        return len(rows)
-    finally:
-        if created == "gtt" and stage_ref:
-            # PTT drops with session/definition; GTT definition may linger.
-            with contextlib.suppress(Exception):
-                conn.execute(sa.text(f"TRUNCATE TABLE {stage_ref}"))
-            with contextlib.suppress(Exception):
-                conn.execute(sa.text(f"DROP TABLE {stage_ref}"))
-
-
-def _clickhouse_replacing_upsert(
-    conn: Any,
-    table_obj: sa.Table,
-    rows: list[dict[str, Any]],
-    conflict_cols: list[str],
-    target_cols: list[str],
-    update_cols: list[str],
-) -> int:
-    """Airbyte-class ClickHouse upsert: INSERT only into ReplacingMergeTree.
-
-    Dedup is **engine-level and lazy** (background merge / ``SELECT … FINAL``).
-    Never DELETE+INSERT — ClickHouse mutations race merges and are not
-    Fivetran/Airbyte-class upsert semantics. Still at-least-once.
-    """
-    del conflict_cols, update_cols  # identity is table ORDER BY / version col
-    if not rows:
-        return 0
-    result = conn.execute(table_obj.insert(), rows)
-    return max(0, getattr(result, "rowcount", None) or 0) or len(rows)
-
-
-def clickhouse_final_table_sql(table_ref: str) -> str:
-    """``FROM <table> FINAL`` — Gate-8 must collapse ReplacingMergeTree duplicates.
-
-    Airbyte ClickHouse destination docs: without FINAL (or OPTIMIZE), queries
-    may see duplicate keys after at-least-once INSERT upserts.
-    """
-    ref = (table_ref or "").strip()
-    if not ref:
-        raise ValueError("clickhouse table ref required for FINAL select")
-    # Idempotent if caller already appended FINAL.
-    if re.search(r"\bFINAL\b", ref, flags=re.IGNORECASE):
-        return ref
-    return f"{ref} FINAL"
-
-
-def _firebird_quote(ident: str) -> str:
-    return '"' + str(ident).replace('"', '""') + '"'
-
-
-def _firebird_qualified_table(table_obj: sa.Table) -> str:
-    parts = []
-    if table_obj.schema:
-        parts.append(_firebird_quote(table_obj.schema))
-    parts.append(_firebird_quote(table_obj.name))
-    return ".".join(parts)
-
-
-def _firebird_merge_upsert(
-    conn: Any,
-    table_obj: sa.Table,
-    rows: list[dict[str, Any]],
-    conflict_cols: list[str],
-    target_cols: list[str],
-    update_cols: list[str],
-) -> int:
-    """Native Firebird ``MERGE INTO`` with NULL-safe ON via ``RDB$DATABASE``.
-
-    Firebird 2.1+ MERGE; staging each row from ``RDB$DATABASE`` avoids inventing
-    GTT DDL without typed columns (Firebird Language Reference). Still
-    at-least-once.
-    """
-    from connectors.writer_common import null_safe_merge_on
-
-    if not rows:
-        return 0
-    target = _firebird_qualified_table(table_obj)
-    on_sql = null_safe_merge_on(
-        conflict_cols,
-        left_alias="t",
-        right_alias="s",
-        quote_column=_firebird_quote,
-    )
-    insert_cols = ", ".join(_firebird_quote(c) for c in target_cols)
-    insert_vals = ", ".join(f"s.{_firebird_quote(c)}" for c in target_cols)
-    set_sql = ""
-    if update_cols:
-        set_sql = ", ".join(
-            f"t.{_firebird_quote(c)} = s.{_firebird_quote(c)}" for c in update_cols
-        )
-    select_list = ", ".join(f":{c} AS {_firebird_quote(c)}" for c in target_cols)
-    for row in rows:
-        params = {c: row.get(c) for c in target_cols}
-        if set_sql:
-            merge_sql = (
-                f"MERGE INTO {target} AS t "
-                f"USING (SELECT {select_list} FROM RDB$DATABASE) AS s "
-                f"ON ({on_sql}) "
-                f"WHEN MATCHED THEN UPDATE SET {set_sql} "
-                f"WHEN NOT MATCHED THEN INSERT ({insert_cols}) "
-                f"VALUES ({insert_vals})"
-            )
-        else:
-            merge_sql = (
-                f"MERGE INTO {target} AS t "
-                f"USING (SELECT {select_list} FROM RDB$DATABASE) AS s "
-                f"ON ({on_sql}) "
-                f"WHEN NOT MATCHED THEN INSERT ({insert_cols}) "
-                f"VALUES ({insert_vals})"
-            )
-        conn.execute(sa.text(merge_sql), params)  # nosec B608
-    return len(rows)
 
 
 def _upsert_batch(
@@ -3791,7 +3642,7 @@ def _upsert_batch(
     if lsn_guarded:
         best: dict[tuple[Any, ...], dict[str, Any]] = {}
         for row in batch:
-            key = tuple(row[c] for c in conflict_cols)
+            key = tuple(_conflict_key_identity(row[c]) for c in conflict_cols)
             prev = best.get(key)
             if prev is None or compare_lsn(row.get(DF_LSN_COL), prev.get(DF_LSN_COL)) >= 0:
                 best[key] = row
@@ -3801,7 +3652,7 @@ def _upsert_batch(
         existing_lsn = _prefetch_existing_lsn(conn, table_obj, rows, conflict_cols)
         filtered: list[dict[str, Any]] = []
         for row in rows:
-            key = tuple(row.get(c) for c in conflict_cols)
+            key = tuple(_conflict_key_identity(row.get(c)) for c in conflict_cols)
             prior = existing_lsn.get(key)
             incoming = row.get(DF_LSN_COL)
             if incoming is not None and compare_lsn(incoming, prior) <= 0:
@@ -3811,7 +3662,7 @@ def _upsert_batch(
     else:
         deduped: dict[tuple[Any, ...], dict[str, Any]] = {}
         for row in batch:
-            key = tuple(row[c] for c in conflict_cols)
+            key = tuple(_conflict_key_identity(row[c]) for c in conflict_cols)
             deduped[key] = row
         rows = list(deduped.values())
 
@@ -4537,7 +4388,14 @@ def write_mapped_rows(
     engine = _engine(cfg)
     schema_name = _schema_name(cfg)
     table_name, schema_name = _resolve_physical_table_ident(
-        engine, table_name, schema_name
+        engine,
+        table_name,
+        schema_name,
+        prior_spelling=str(
+            _kwargs.get("dest_table_prior_spelling")
+            or cfg.get("dest_table_prior_spelling")
+            or ""
+        ),
     )
 
     # SQL Server writes must fail closed on ANSI_WARNINGS — engine connect soft-applies
@@ -5353,11 +5211,21 @@ def write_mapped_rows(
                         ).replace("TIMESTAMP WITH TIME ZONE", "TIMESTAMP")
                         conn.execute(sa.text(ddl))
                     elif (
-                        (dialect_name or "").lower() == "mssql"
-                        or db_type in {"sqlserver", "mssql", "azure_sql"}
+                        (dialect_name or "").lower() in {"mssql", "oracle"}
+                        or db_type in {
+                            "sqlserver",
+                            "mssql",
+                            "azure_sql",
+                            "oracle",
+                            "oracledb",
+                            "oracle_db",
+                            "oracle_autonomous_warehouse",
+                            "amazon_rds_oracle",
+                        }
                     ):
-                        # T-SQL has no CREATE TABLE IF NOT EXISTS. Existence was
-                        # already probed via inspector — emit plain CREATE TABLE.
+                        # T-SQL has no CREATE TABLE IF NOT EXISTS. Oracle XE
+                        # (21c and earlier) rejects IF NOT EXISTS (ORA-00922);
+                        # existence was already probed via inspector.
                         conn.execute(
                             sa.text(
                                 _with_placement_suffix(

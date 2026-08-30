@@ -18,6 +18,7 @@ ETL contract (Informatica / Airbyte / Fivetran class)
 from __future__ import annotations
 
 import re
+from decimal import Decimal, InvalidOperation
 from functools import lru_cache
 from typing import Any, Final
 
@@ -1046,10 +1047,13 @@ def arrow_dtype_to_carrier(dtype: str | None) -> str | None:
     return None
 
 
-def normalize_logical_type(*args, **kwargs):
+# Shims below carry the real signature: an untyped ``*args`` delegate types as
+# ``Any``, which silently disabled type checking for every caller of the type
+# layer on both sides of the type_system / type_invent split.
+def normalize_logical_type(inferred: str | None) -> str:
     """Backward-compat shim — body in decision_kernel.type_invent."""
     from services.decision_kernel.type_invent import normalize_logical_type as _impl
-    return _impl(*args, **kwargs)
+    return _impl(inferred)
 
 
 
@@ -1586,6 +1590,12 @@ from services.document_instant import (  # noqa: E402
     is_document_instant_token,
 )
 
+# A keyspace store's only carrier is text, and its JSON wire keeps the offset.
+from services.keyspace_instant import (  # noqa: E402
+    INSTANT_TEXT_WIRE_ENGINES as _INSTANT_TEXT_WIRE_ENGINES,
+    keyspace_instant_text_wire_preserved,
+)
+
 
 def document_domain_would_collapse(
     source_type: str,
@@ -2108,6 +2118,49 @@ def _decimal_ddl_for_dest(db: str, inferred: str | None) -> str:
     return template.format(p=out_p, s=out_s)
 
 
+# Destinations that store files, not tables. They have no DDL and no catalog:
+# the export format carries the type (JSON numbers, Parquet/Avro typed columns).
+# Falling through to the TEXT default would quote every integer, decimal and
+# date, so Athena/Spark read strings back from a typed source.
+FILE_EXPORT_DESTS: Final[frozenset[str]] = frozenset(
+    {
+        "s3",
+        "amazon_s3",
+        "aws_s3",
+        "minio",
+        "s3_compatible",
+        "gcs",
+        "google_cloud_storage",
+        "adls",
+        "azure_blob",
+        "azure_data_lake",
+        "sftp",
+        "ftp",
+        # Studio file_export kind + format ids. Leaving these out sent
+        # ``ddl_type("json", "INTEGER")`` through the unknown-dialect TEXT
+        # default, so Map treated a typed export as an unread VARCHAR sink.
+        "file_export",
+        "csv",
+        "tsv",
+        "json",
+        "jsonl",
+        "ndjson",
+        "parquet",
+        "avro",
+        "orc",
+        "xlsx",
+        "xls",
+        "excel",
+        "feather",
+    }
+)
+
+
+def destination_is_file_export(db_type: str | None) -> bool:
+    """True when the destination is a file/object export with no DDL."""
+    return _normalize_dest_db(db_type) in FILE_EXPORT_DESTS
+
+
 def ddl_carrier_type(inferred: str | None) -> str:
     """Logical DDL carrier that keeps DECIMAL(p,s) / VECTOR(n) params.
 
@@ -2259,6 +2312,12 @@ def ddl_carrier_type(inferred: str | None) -> str:
     if logical == LOGICAL_JSON:
         return "JSON"
     if logical == LOGICAL_ARRAY:
+        # Typed T[] / ARRAY<T> must stay typed. Bare ARRAY is the document
+        # invent (JSONB on PG). Stripping INTEGER[] → ARRAY made dest-exists
+        # invent JSONB and fail-closed a native array bind.
+        stripped = strip_identity_qualifier(raw).strip() or raw
+        if parse_array_element(stripped):
+            return stripped
         return "ARRAY"
     if logical == LOGICAL_BINARY:
         return "BINARY"
@@ -2279,10 +2338,10 @@ def ddl_carrier_type(inferred: str | None) -> str:
     return logical.upper() if logical else "VARCHAR"
 
 
-def ddl_type(*args, **kwargs):
+def ddl_type(db_type: str, inferred: object) -> str:
     """Backward-compat shim — body in decision_kernel.type_invent."""
     from services.decision_kernel.type_invent import ddl_type as _impl
-    return _impl(*args, **kwargs)
+    return _impl(db_type, inferred)  # type: ignore[arg-type]
 
 
 
@@ -2950,6 +3009,27 @@ _TZ_OFFSET_DDL: Final[dict[str, str]] = {
 }
 
 
+# Snowflake stores TIMESTAMP_* at scale 9 and reports no typmod in its catalog,
+# so an absent precision on these spellings is nanoseconds, not "unknown". No
+# other dialect spells a timestamp this way, which is what makes the default
+# safe to apply without knowing the source engine.
+SNOWFLAKE_DEFAULT_TIMESTAMP_FRACTIONAL_DIGITS: Final[int] = 9
+# Microseconds: the best precision mainstream destinations carry, so narrowing
+# an undeclared Snowflake timestamp to it is unavoidable rather than a fault.
+SNOWFLAKE_UNAVOIDABLE_FSP_FLOOR: Final[int] = 6
+_SNOWFLAKE_BARE_TIMESTAMP_SPELLINGS: Final[frozenset[str]] = frozenset(
+    {
+        "TIMESTAMP_NTZ",
+        "TIMESTAMP_LTZ",
+        "TIMESTAMP_TZ",
+        # No un-underscored ``TIMESTAMPTZ``: that spelling is PostgreSQL's, and
+        # its default is microseconds.
+        "TIMESTAMPNTZ",
+        "TIMESTAMPLTZ",
+    }
+)
+
+
 # Max fractional-second digits each engine accepts as a TIMESTAMP/DATETIME
 # typmod. Engines absent from this map take no precision argument at all, so
 # appending one is a DDL syntax error rather than a narrower column:
@@ -3474,14 +3554,78 @@ def is_timezone_polarity_loss(
     return False
 
 
+def _bare_type_token(type_token: str) -> str:
+    """Upper-cased token without identity qualifier or precision parameters."""
+    raw = strip_identity_qualifier(type_token).upper().strip()
+    return re.sub(r"\s*\(\s*\d+\s*\)", "", raw).strip()
+
+
+def is_dest_instant_carrier_spelling(stamped: str, *, dest_db: str = "") -> bool:
+    """True when ``stamped`` is ``dest_db``'s own physical instant carrier.
+
+    Compares the bare token against what the dialect stamps for an aware source
+    (MySQL ``TIMESTAMP(6)``, SQL Server ``DATETIMEOFFSET``, PG ``TIMESTAMPTZ``),
+    so a *source* spelling that merely looks aware — ``TIMESTAMPTZ`` on the way
+    into SQL Server — is not mistaken for the destination's physical type.
+    """
+    db = _normalize_dest_db(dest_db) if dest_db else ""
+    if not db:
+        return False
+    bare = _bare_type_token(stamped)
+    if not bare:
+        return False
+    return any(
+        bare == _bare_type_token(ddl_type(db, logical))
+        for logical in ("TIMESTAMPTZ", "TIMESTAMP_TZ")
+    )
+
+
+def reinvent_would_drop_dest_instant_carrier(
+    stamped: str,
+    reinvented: str,
+    *,
+    dest_db: str = "",
+) -> bool:
+    """True when re-inventing the destination's own stamp drops its instant.
+
+    A stamp already spelled in the destination's dialect is a physical token, but
+    ``create_new_mapping_target_type`` reads its input as a *source* token with no
+    dialect. MySQL ``TIMESTAMP(6)`` is an instant carrier, yet fed back through
+    invent it returns ``DATETIME(6)`` — a wall-clock column — so a second pass
+    over its own stamp turns an instant-preserving route into a fidelity collapse
+    nothing in the mapping asked for.
+
+    Only the destination's own instant spelling is protected: re-inventing a
+    source token into the dialect's physical type is the stamp doing its job.
+    """
+    db = _normalize_dest_db(dest_db) if dest_db else ""
+    if not is_dest_instant_carrier_spelling(stamped, dest_db=db):
+        return False
+    before = datetime_timezone_polarity(stamped, dest_db=db)
+    if before not in {"tz", "ltz"}:
+        return False
+    return datetime_timezone_polarity(reinvented, dest_db=db) != before
+
+
 def timezone_aware_would_collapse_to_string(
-    source_type: str, target_type: str
+    source_type: str,
+    target_type: str,
+    *,
+    dest_db: str = "",
 ) -> bool:
     """True when offset-aware datetime/time collapses to open TEXT/STRING.
 
     ``TIMESTAMPTZ→TEXT`` / ``DATETIMEOFFSET→STRING`` / ``TIMETZ→STRING`` look
     like free serialization but drop the offset contract — Accept risk required.
+
+    ``dest_db`` names the destination whose wire will carry the value: a keyspace
+    store has no other carrier than text, and its JSON wire writes the offset, so
+    there the text *is* the instant.
     """
+    if keyspace_instant_text_wire_preserved(
+        source_type, target_type, dest_db=dest_db
+    ):
+        return False
     dt = datetime_timezone_polarity(source_type)
     tm = time_timezone_polarity(source_type)
     if dt not in {"tz", "ltz"} and tm != "tz":
@@ -4061,12 +4205,14 @@ def is_bitstring_carrier(inferred: str | None) -> bool:
     return bool(re.search(r"\b(?:VARBIT|BIT\s+VARYING|BIT)\b", text))
 
 
+@lru_cache(maxsize=8192)
 def is_varying_bitstring_carrier(inferred: str | None) -> bool:
     """True for BIT VARYING / VARBIT (variable length up to n)."""
     text = strip_identity_qualifier(inferred).upper()
     return "VARYING" in text or "VARBIT" in text
 
 
+@lru_cache(maxsize=8192)
 def parse_bitstring_width(inferred: str | None) -> int | None:
     """Return BIT/VARBIT bit-width, or None if unbounded/unknown."""
     text = strip_identity_qualifier(inferred)
@@ -4315,6 +4461,7 @@ def parse_enum_or_set_members(inferred: str | None) -> tuple[str, frozenset[str]
     return kind, frozenset(members)
 
 
+@lru_cache(maxsize=8192)
 def parse_enum_or_set_ordered_members(
     inferred: str | None,
 ) -> tuple[str, tuple[str, ...]] | None:
@@ -4356,6 +4503,44 @@ def format_set_domain_carrier(members: list[str] | tuple[str, ...]) -> str:
         text = text.replace("\\", "\\\\").replace("'", "\\'")
         parts.append(f"'{text}'")
     return "SET(" + ",".join(parts) + ")"
+
+
+def enum_domain_union_carrier(
+    current_type: str,
+    extra_values: list[str] | tuple[str, ...] | None = None,
+) -> str:
+    """Dest-spelled ENUM/SET that would hold the observed out-of-domain labels.
+
+    Keeps declaration order, then appends new members. Never invents VARCHAR —
+    MySQL non-strict ENUM would store '' and wipe the label.
+    """
+    parsed = parse_enum_or_set_ordered_members(current_type)
+    if parsed is None:
+        return ""
+    kind, members = parsed
+    if not members:
+        return ""
+    seen = set(members)
+    extras: list[str] = []
+    for raw in extra_values or ():
+        text = str(raw or "").strip()
+        if not text:
+            continue
+        tokens = (
+            [p.strip() for p in re.split(r"[,;]", text) if p.strip()]
+            if kind == "SET"
+            else [text]
+        )
+        for tok in tokens:
+            if tok not in seen:
+                seen.add(tok)
+                extras.append(tok)
+    if not extras:
+        return ""
+    widened = list(members) + extras
+    if kind == "ENUM":
+        return format_enum_domain_carrier(widened)
+    return format_set_domain_carrier(widened)
 
 
 def pg_enum_type_name(members: list[str] | tuple[str, ...]) -> str:
@@ -4843,6 +5028,7 @@ def rowversion_would_collapse_to_temporal(
     return tgt in {LOGICAL_DATETIME, LOGICAL_DATE, LOGICAL_TIME}
 
 
+@lru_cache(maxsize=8192)
 def specialty_carrier_base(inferred: str | None) -> str | None:
     """Return uppercase specialty base (INET, PG_LSN, …) or None."""
     upper = re.sub(r"\s+", " ", (inferred or "").upper().strip())
@@ -5088,7 +5274,15 @@ def resolve_mapping_target_type(
         )
         if stamped:
             # Upgrade legacy bare TIMESTAMP stamps when source declares FSP.
-            return promote_create_new_temporal_stamp(src, stamped, db)
+            promoted = promote_create_new_temporal_stamp(src, stamped, db)
+            if mapping.get("user_override") or mapping.get("risk_acknowledged"):
+                # Operator chose this carrier — a narrowing is their decision.
+                return promoted
+            from services.decision_kernel.type_invent import (
+                promote_create_new_capacity_stamp,
+            )
+
+            return promote_create_new_capacity_stamp(src, promoted, db)
         if live:
             return live
         # Empty stamp must not fall back to source identity (BQ UUID→UUID lie).
@@ -5104,18 +5298,23 @@ def resolve_mapping_target_type(
 
 
 
-def promote_create_new_temporal_stamp(*args, **kwargs):
+def promote_create_new_temporal_stamp(
+    src_type: str, stamped: str, dest_db_type: str = ""
+) -> str:
     """Backward-compat shim — body in decision_kernel.type_invent."""
     from services.decision_kernel.type_invent import promote_create_new_temporal_stamp as _impl
-    return _impl(*args, **kwargs)
+    return _impl(src_type, stamped, dest_db_type)
 
 
 
 
-def create_new_mapping_target_type(*args, **kwargs):
+def create_new_mapping_target_type(
+    src_type: str, dest_db_type: str = "", *,
+    samples: list[object] | None = None, source_db: str = "",
+) -> str:
     """Backward-compat shim — body in decision_kernel.type_invent."""
     from services.decision_kernel.type_invent import create_new_mapping_target_type as _impl
-    return _impl(*args, **kwargs)
+    return _impl(src_type, dest_db_type, samples=samples, source_db=source_db)
 
 
 
@@ -5129,17 +5328,21 @@ def create_new_mapping_target_type(*args, **kwargs):
 # _PASS_THROUGH_REJECT_ON_DEST moved to services.decision_kernel.type_invent (Phase C2 invent body).
 
 
-def _is_explicit_physical_stamp(*args, **kwargs):
+def _is_explicit_physical_stamp(carrier: str, dest_db: str = "") -> bool:
     """Backward-compat shim — body in decision_kernel.type_invent."""
     from services.decision_kernel.type_invent import _is_explicit_physical_stamp as _impl
-    return _impl(*args, **kwargs)
+    return _impl(carrier, dest_db)
 
 
 
-def materialize_dest_ddl(*args, **kwargs):
+def materialize_dest_ddl(
+    db_type: str,
+    carrier: str | None,
+    source_type: str | None = None,
+) -> str:
     """Backward-compat shim — body in decision_kernel.type_invent."""
     from services.decision_kernel.type_invent import materialize_dest_ddl as _impl
-    return _impl(*args, **kwargs)
+    return _impl(db_type, carrier, source_type)
 
 
 
@@ -5242,12 +5445,14 @@ def strip_collation_qualifier(inferred: str | None) -> str:
     return text.strip()
 
 
+@lru_cache(maxsize=8192)
 def parse_collation(inferred: str | None) -> str | None:
     """Return collation name from ``… COLLATE name`` carrier, else None."""
     m = re.search(r"\bCOLLATE\s+(\S+)", (inferred or ""), re.I)
     return m.group(1) if m else None
 
 
+@lru_cache(maxsize=8192)
 def is_case_insensitive_collation(inferred: str | None) -> bool:
     """True when destination collation equates ``A`` and ``a``.
 
@@ -5475,6 +5680,42 @@ _FILTER_EQ_BOOL_RE = re.compile(
 )
 
 
+def _unique_filter_decimal(value: Any) -> Decimal | None:
+    """Bind a unique-filter number as dest-canonical Decimal, then write path.
+
+    ``Decimal(text)`` first keeps stored ``1.234`` identity. Locale money
+    falls through to ``decimal_wire_value``. Auto ``1,234`` returns None —
+    never invent 1234 so a partial unique includes the wrong row. IEEE
+    ``float(val) == float(literal)`` collapsed 2**53+1 onto 2**53.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, Decimal):
+        return value if value.is_finite() else None
+    if isinstance(value, int):
+        return Decimal(value)
+    if isinstance(value, float):
+        if value != value or value in (float("inf"), float("-inf")):
+            return None
+        try:
+            parsed = Decimal(str(value))
+        except (InvalidOperation, ValueError, OverflowError):
+            return None
+        return parsed if parsed.is_finite() else None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        parsed = Decimal(text)
+        if parsed.is_finite():
+            return parsed
+    except (InvalidOperation, ValueError):
+        pass
+    from services.transform_engine import decimal_wire_value
+
+    return decimal_wire_value(text)
+
+
 def _split_top_level_and(predicate: str) -> list[str]:
     """Split ``a AND b AND c`` at top level (respecting quotes/parens)."""
     parts: list[str] = []
@@ -5565,20 +5806,30 @@ def row_matches_unique_filter(
 
     m = _FILTER_EQ_NUM_RE.match(pred)
     if m:
-        val = _cell(m.group(1))
-        try:
-            return float(val) == float(m.group(2))
-        except Exception:
+        cell_d = _unique_filter_decimal(_cell(m.group(1)))
+        lit_d = _unique_filter_decimal(m.group(2))
+        if cell_d is None or lit_d is None:
             return False
+        return +cell_d == +lit_d
 
     m = _FILTER_EQ_BOOL_RE.match(pred)
     if m:
-        raw_exp = m.group(2).lower()
-        expected = raw_exp in {"true", "1"}
+        from services.transform_engine import apply_transform
+
+        expected, err = apply_transform(str(m.group(2)).strip(), "boolean")
+        if err or expected is None:
+            return True
         val = _cell(m.group(1))
-        text = str(val if val is not None else "").strip().lower()
-        actual = text in {"true", "1", "t", "yes"}
-        return actual is expected
+        if isinstance(val, bool):
+            actual = val
+        else:
+            parsed, perr = apply_transform(
+                str(val).strip() if val is not None else "", "boolean"
+            )
+            if perr or parsed is None:
+                return False
+            actual = bool(parsed)
+        return actual is bool(expected)
 
     # Unevaluable filter — include row (prefer Validate block over silent 23505).
     return True
@@ -5765,116 +6016,145 @@ def parse_temporal_fractional_precision(inferred: str | None) -> int | None:
     return int(m.group(1))
 
 
+_MSSQL_TEMPORAL_ENGINES = frozenset(
+    {"sqlserver", "mssql", "azuresql", "azure_sql", "synapse"}
+)
+# Fractional-second digits each engine keeps when the DDL declares none. From
+# the engines' own documentation: MySQL/Maria default FSP 0, SQL Server
+# datetime2 defaults to 7, Snowflake TIMESTAMP defaults to 9, and the
+# PostgreSQL/lakehouse family stores microseconds.
+_BARE_TEMPORAL_DIGITS: dict[str, int] = {
+    **{e: 0 for e in ("mysql", "mariadb", "maria", "singlestore", "tidb", "vitess")},
+    **{e: 7 for e in _MSSQL_TEMPORAL_ENGINES},
+    "snowflake": 9,
+    **{
+        e: 6
+        for e in (
+            "postgresql", "postgres", "pg", "redshift", "cockroach", "cockroachdb",
+            "alloydb", "timescaledb", "yugabytedb", "citus", "supabase", "greenplum",
+            "oracle", "databricks", "spark", "delta", "delta_lake", "iceberg",
+            "duckdb", "bigquery", "bq", "clickhouse", "athena", "trino", "presto",
+        )
+    },
+}
+
+
+def _bare_temporal_digits(dest_db: str) -> int | None:
+    """Engine default fractional digits, or ``None`` for an unnamed engine."""
+    return _BARE_TEMPORAL_DIGITS.get((dest_db or "").strip().lower())
+
+
+def destination_temporal_fractional_digits(
+    target_type: str | None,
+    *,
+    dest_db: str = "",
+) -> int | None:
+    """Fractional-second digits a destination carrier actually keeps.
+
+    Single owner of the bare-spelling defaults: a column declared ``DATETIME``
+    on MySQL keeps whole seconds, the same spelling on BigQuery keeps
+    microseconds, and ``DATETIME2`` on SQL Server keeps seven digits. Callers
+    that resolve this themselves disagree with each other — the gate then
+    declares a narrowing the checksum does not model, or the reverse.
+
+    ``None`` means the carrier is not a temporal one, or its precision is not
+    knowable from the DDL; callers must treat that as unknown rather than as
+    "keeps everything".
+    """
+    text = strip_identity_qualifier(target_type)
+    if not text:
+        return None
+    explicit = parse_temporal_fractional_precision(text)
+    if explicit is not None:
+        return explicit
+    tgt_u = text.upper().strip()
+    bare = re.sub(r"\s*\(\s*\d+\s*\)", "", tgt_u).strip()
+    # Introspection reports MySQL ``datetime`` as the logical ``TIMESTAMP_NTZ``
+    # carrier, so the underscore spellings must resolve per engine too — reading
+    # them as the Snowflake default made a MySQL whole-second column look like it
+    # kept microseconds, and Gate-8 then hashed precision the column never held.
+    bare = bare.replace("_", " ")
+    db = (dest_db or "").strip().lower()
+    if bare in {
+        "TIME WITHOUT TIME ZONE",
+        "TIMESTAMP WITHOUT TIME ZONE",
+        "TIMESTAMP NTZ",
+        "TIMESTAMPTZ",
+        "TIMESTAMP TZ",
+        "TIMESTAMP LTZ",
+        "TIMESTAMP WITH TIME ZONE",
+        "TIMESTAMP WITH LOCAL TIME ZONE",
+        "TIMETZ",
+        "TIME WITH TIME ZONE",
+    }:
+        family = _bare_temporal_digits(db)
+        # ANSI/logical spellings belong to the microsecond family when the engine
+        # is unknown; MySQL is the engine that keeps whole seconds and it is
+        # always named on the paths that fingerprint.
+        return family if family is not None else 6
+    if bare == "TIMESTAMP":
+        # Bare TIMESTAMP is FSP 0 on MySQL and unknown engines stay fail-closed:
+        # claiming microseconds here would hide a narrowing.
+        return _bare_temporal_digits(db) or 0
+    if bare in {"DATETIME2", "DATETIMEOFFSET"}:
+        # SQL Server bare DATETIME2 / DATETIMEOFFSET default precision 7.
+        return 7
+    if bare == "TIME":
+        family = _bare_temporal_digits(db)
+        return family if family is not None else 0
+    if bare == "DATETIME" or bare.startswith("DATETIME"):
+        if db in {"bigquery", "bq"}:
+            # BigQuery DATETIME is microsecond.
+            return 6
+        if db in _MSSQL_TEMPORAL_ENGINES:
+            # SQL Server legacy ``datetime`` keeps 1/300 s — three digits, whose
+            # endings are .000/.003/.007 (services.carrier_instant rounds them).
+            return 3
+        # MySQL/Maria/unknown bare DATETIME is FSP 0 — fail closed.
+        return 0
+    return None
+
+
+def with_temporal_fractional_digits(ddl: str, digits: int) -> str:
+    """Restate a temporal DDL with an explicit fractional-second precision.
+
+    Used to teach a declared type what the physical column keeps without
+    touching its timezone polarity: ``TIMESTAMPTZ`` + 0 → ``TIMESTAMPTZ(0)``,
+    ``DATETIME(6)`` + 0 → ``DATETIME(0)``. Non-temporal DDL is returned as is.
+    """
+    text = (ddl or "").strip()
+    if not text or digits < 0:
+        return ddl
+    from connectors.sql_temporal import is_temporal_ddl
+
+    if not is_temporal_ddl(text):
+        return ddl
+    base_u = re.sub(r"\s*\(\s*\d+\s*\)", "", text.upper()).strip()
+    if base_u in {"DATE", "YEAR"}:
+        # No fractional second exists to restate.
+        return ddl
+    stripped = re.sub(r"\s*\(\s*\d+\s*\)", "", text, count=1)
+    # ``TIMESTAMP(3) WITH TIME ZONE`` must keep the trailing qualifier.
+    m = re.match(r"^(\s*[A-Za-z0-9_]+)(.*)$", stripped, flags=re.DOTALL)
+    if not m:
+        return ddl
+    return f"{m.group(1)}({digits}){m.group(2)}"
+
+
 def temporal_precision_would_narrow(
     source_type: str,
     target_type: str,
     *,
     dest_db: str = "",
 ) -> bool:
-    """True when source fractional seconds exceed destination TIME/TIMESTAMP(p).
+    """Backward-compat shim — body in decision_kernel.type_invent."""
+    from services.decision_kernel.type_invent import (
+        temporal_precision_would_narrow as _impl,
+    )
 
-    ``TIME(6)→TIME(0)`` / ``DATETIME2(7)→DATETIME2(0)`` silently truncates
-    unless G3 blocks and write paths refuse inventing lower precision.
+    return _impl(source_type, target_type, dest_db=dest_db)
 
-    ``SMALLDATETIME`` is one-minute accuracy — any second/fraction datetime
-    source into SMALLDATETIME is a silent round (Microsoft / UGO class).
 
-    Bare ``TIMESTAMP`` defaults are dialect-aware when ``dest_db`` is set:
-    MySQL/Maria → FSP 0; PostgreSQL-family / Redshift → 6; SQL Server
-    DATETIME2 bare → 7. Without ``dest_db``, bare TIMESTAMP stays fail-closed
-    at 0 (MySQL) so truncation cannot silent-green.
-    """
-    src_l = normalize_logical_type(source_type)
-    tgt_l = normalize_logical_type(target_type)
-    if is_document_instant_token(dest_db, target_type):
-        # Millisecond carrier spelled ``date``. Restate it as a datetime of that
-        # precision so the comparison below reports the truncation that actually
-        # happens instead of stopping at the date-family mismatch.
-        target_type = f"DATETIME({DOCUMENT_INSTANT_FRACTIONAL_DIGITS})"
-        tgt_l = LOGICAL_DATETIME
-    if src_l not in {LOGICAL_TIME, LOGICAL_DATETIME} or tgt_l not in {
-        LOGICAL_TIME,
-        LOGICAL_DATETIME,
-    }:
-        return False
-    tgt_u = strip_identity_qualifier(target_type).upper().strip()
-    src_u = strip_identity_qualifier(source_type).upper().strip()
-    if tgt_u == "SMALLDATETIME" and src_u != "SMALLDATETIME" and src_l == LOGICAL_DATETIME:
-        return True
-    tgt_p = parse_temporal_fractional_precision(target_type)
-    src_p = parse_temporal_fractional_precision(source_type)
-    if src_p is None:
-        # SQL Server bare DATETIME2 defaults to precision 7 — never treat as
-        # unknown and soft-pass DATETIME2→DATETIME (≈3.33ms round).
-        bare_src = re.sub(r"\s*\(\s*\d+\s*\)", "", src_u).strip()
-        if bare_src == "DATETIME2":
-            src_p = 7
-        elif bare_src == "DATETIMEOFFSET":
-            src_p = 7
-        else:
-            return False
-    if tgt_p is None:
-        # MySQL bare TIME/DATETIME/TIMESTAMP default FSP 0 — TIME(6)→TIME must
-        # not silent-green. PostgreSQL bare TIMESTAMP / TIMESTAMP WITHOUT TIME
-        # ZONE defaults to precision 6 — TIMESTAMP_NTZ(6)→TIMESTAMP is preserve
-        # on create-new PG, not a fractional collapse.
-        bare = re.sub(r"\s*\(\s*\d+\s*\)", "", tgt_u).strip()
-        if bare in {
-            "TIME WITHOUT TIME ZONE",
-            "TIMESTAMP WITHOUT TIME ZONE",
-            "TIMESTAMP NTZ",
-            "TIMESTAMPTZ",
-            "TIMESTAMP WITH TIME ZONE",
-            "TIMETZ",
-            "TIME WITH TIME ZONE",
-        }:
-            # PostgreSQL / ANSI spellings default to precision 6.
-            tgt_p = 6
-        elif bare == "TIMESTAMP":
-            db = (dest_db or "").strip().lower()
-            if db in {
-                "postgresql", "postgres", "pg", "redshift", "cockroach",
-                "cockroachdb", "alloydb", "timescaledb", "yugabytedb",
-                "citus", "supabase", "greenplum",
-                # Lakehouse bare TIMESTAMP is microsecond (no typmod engines).
-                "databricks", "spark", "delta", "delta_lake", "iceberg",
-                "duckdb", "bigquery", "bq",
-            }:
-                tgt_p = 6
-            elif db in {"sqlserver", "mssql"}:
-                tgt_p = 7
-            else:
-                # MySQL/Maria/unknown: bare TIMESTAMP is FSP 0 — fail closed.
-                tgt_p = 0
-        elif bare == "DATETIME" or (
-            bare.startswith("DATETIME") and bare not in {"DATETIME2", "DATETIMEOFFSET"}
-        ):
-            db = (dest_db or "").strip().lower()
-            # BigQuery DATETIME is microsecond; MySQL/Maria bare DATETIME is FSP 0.
-            if db in {"bigquery", "bq"}:
-                tgt_p = 6
-            else:
-                tgt_p = 0
-        elif bare in {"DATETIME2", "DATETIMEOFFSET"}:
-            # SQL Server bare DATETIME2 / DATETIMEOFFSET default precision 7.
-            tgt_p = 7
-        elif bare == "TIME":
-            db = (dest_db or "").strip().lower()
-            if db in {
-                "bigquery", "bq", "postgresql", "postgres", "pg", "redshift",
-                "duckdb", "databricks", "spark", "delta", "iceberg",
-                "cockroachdb", "alloydb", "timescaledb",
-            }:
-                tgt_p = 6
-            elif db in {"sqlserver", "mssql"}:
-                tgt_p = 7
-            else:
-                tgt_p = 0
-        elif bare.startswith("DATETIME"):
-            tgt_p = 0
-        else:
-            return False
-    return src_p > tgt_p
 
 @lru_cache(maxsize=8192)
 def strip_identity_qualifier(inferred: str | None) -> str:
@@ -5909,6 +6189,7 @@ def strip_identity_qualifier(inferred: str | None) -> str:
     return text.strip()
 
 
+@lru_cache(maxsize=8192)
 def is_year_carrier(inferred: str | None) -> bool:
     """True for MySQL YEAR / YEAR(4) carriers."""
     base = strip_identity_qualifier(inferred).upper()
@@ -6016,7 +6297,9 @@ def boolean_value_fits(value: Any) -> bool:
     MySQL TINYINT(1) and PG BOOLEAN accept a wider informal set; Airbyte-style
     silent ``'yes'→true`` invents truth. Fail closed — operator must transform.
     """
-    if value is None:
+    from services.value_serializer import is_reader_null_cell
+
+    if is_reader_null_cell(value):
         return True
     if isinstance(value, bool):
         return True
@@ -6098,6 +6381,7 @@ from services.identity_fit import (  # noqa: E402,F401 — re-export
 )
 
 
+@lru_cache(maxsize=8192)
 def integer_bit_width(inferred: str | None) -> int | None:
     """Signed bit width; UNSIGNED adds +1 so INT UNSIGNED is wider than INT.
 
@@ -6174,17 +6458,17 @@ def integer_bit_width(inferred: str | None) -> int | None:
     return base
 
 
-def integer_width_carrier(*args, **kwargs):
+def integer_width_carrier(native: str | None) -> str | None:
     """Backward-compat shim — body in decision_kernel.type_invent."""
     from services.decision_kernel.type_invent import integer_width_carrier as _impl
-    return _impl(*args, **kwargs)
+    return _impl(native)
 
 
 
-def float_width_carrier(*args, **kwargs):
+def float_width_carrier(native: str | None) -> str | None:
     """Backward-compat shim — body in decision_kernel.type_invent."""
     from services.decision_kernel.type_invent import float_width_carrier as _impl
-    return _impl(*args, **kwargs)
+    return _impl(native)
 
 
 
@@ -6260,242 +6544,26 @@ def ddl_invent_bit_width(dest_db: str, carrier_or_logical: str | None) -> int | 
     return integer_bit_width(physical)
 
 
-def ddl_invent_never_narrower_than_table(*args, **kwargs):
+def ddl_invent_never_narrower_than_table(dest_db: str, logical: str) -> bool:
     """Backward-compat shim — body in decision_kernel.type_invent."""
     from services.decision_kernel.type_invent import ddl_invent_never_narrower_than_table as _impl
-    return _impl(*args, **kwargs)
+    return _impl(dest_db, logical)
 
 
 
-def specialty_polarity_mismatch(source_type: str, target_type: str) -> bool:
-    """True when two distinct specialty carriers would rewrite domain polarity.
-
-    INET→CIDR invents network masking; MACADDR→MACADDR8 changes wire width;
-    HSTORE→LTREE is not identity. IP/INET/IPv4/IPv6 are host-address twins.
-    """
-    src = specialty_carrier_base(source_type)
-    tgt = specialty_carrier_base(target_type)
-    if src is None or tgt is None:
-        return False
-    if src in _IP_HOST_ADDRESS_TWINS and tgt in _IP_HOST_ADDRESS_TWINS:
-        return False
-    if src in _XML_DOCUMENT_TWINS and tgt in _XML_DOCUMENT_TWINS:
-        return False
-    return src != tgt
-
-
-def case_fold_polarity_invent(source_type: str, target_type: str) -> bool:
-    """True when mapping invents or drops case-fold equality polarity.
-
-    Covers TEXT→CITEXT / CS→CI invent and CITEXT→TEXT / explicit CS drop.
-    MySQL/SQL Server CI collation metadata → bare create-new TEXT/VARCHAR is
-    dialect normalization (values round-trip); uniqueness follows the destination
-    platform default and must not block every string column on Validate.
-    """
-    src_l = normalize_logical_type(source_type)
-    tgt_l = normalize_logical_type(target_type)
-    if src_l not in {LOGICAL_STRING, LOGICAL_TEXT} or tgt_l not in {
-        LOGICAL_STRING,
-        LOGICAL_TEXT,
-    }:
-        return False
-    tgt_ci = is_case_insensitive_collation(target_type) or (
-        specialty_carrier_base(target_type) == "CITEXT"
-    )
-    src_ci = is_case_insensitive_collation(source_type) or (
-        specialty_carrier_base(source_type) == "CITEXT"
-    )
-    # Only when at least one side declares CI/CS polarity (or CITEXT).
-    src_declares = bool(parse_collation(source_type)) or (
-        specialty_carrier_base(source_type) == "CITEXT"
-    )
-    tgt_declares = bool(parse_collation(target_type)) or (
-        specialty_carrier_base(target_type) == "CITEXT"
-    )
-    if not src_declares and not tgt_declares:
-        return False
-    # CITEXT invent from open text is always polarity invent.
-    if specialty_carrier_base(target_type) == "CITEXT" and not src_ci:
-        return True
-    # Inventing CI on the target from an *explicitly* CS-collated source.
-    # Uncollated source (Mongo/NoSQL VARCHAR) → dest platform CI is dialect
-    # default wire — not invent (mirrors CI→bare normalize above).
-    if tgt_ci and not src_ci and src_declares:
-        return True
-    # Dropping CITEXT specialty into bare CS text — real polarity loss.
-    if specialty_carrier_base(source_type) == "CITEXT" and not tgt_ci:
-        return True
-    # Explicit CS (or non-CI) collation on target vs CI source.
-    if src_ci and tgt_declares and not tgt_ci:
-        return True
-    # Source CI collation metadata + bare destination TEXT/VARCHAR: normalize.
-    return False
-
-def accent_polarity_invent(source_type: str, target_type: str) -> bool:
-    """True when mapping invents or explicitly drops accent-insensitive equality.
-
-    Source AI collation → bare create-new TEXT is dialect strip, not invent.
-    Uncollated source → dest AI collation is platform default wire, not invent.
-    """
-    src_l = normalize_logical_type(source_type)
-    tgt_l = normalize_logical_type(target_type)
-    if src_l not in {LOGICAL_STRING, LOGICAL_TEXT} or tgt_l not in {
-        LOGICAL_STRING,
-        LOGICAL_TEXT,
-    }:
-        return False
-    if not parse_collation(source_type) and not parse_collation(target_type):
-        return False
-    src_ai = is_accent_insensitive_collation(source_type)
-    tgt_ai = is_accent_insensitive_collation(target_type)
-    # Invent AI only when the source declared a non-AI (accent-sensitive) collation.
-    if tgt_ai and not src_ai:
-        if not parse_collation(source_type):
-            return False
-        return True
-    # Drop AI only when the target declares an accent-sensitive collation.
-    if src_ai and not tgt_ai and parse_collation(target_type):
-        return True
-    return False
-
-def width_fold_polarity_invent(source_type: str, target_type: str) -> bool:
-    """True when mapping invents/drops width-insensitive equality (WS omit).
-
-    SQL Server: ``_WS`` is width-sensitive; omitting ``_WS`` folds fullwidth/
-    halfwidth — unique keys can collide without Accept risk.
-    """
-    src_l = normalize_logical_type(source_type)
-    tgt_l = normalize_logical_type(target_type)
-    if src_l not in {LOGICAL_STRING, LOGICAL_TEXT} or tgt_l not in {
-        LOGICAL_STRING,
-        LOGICAL_TEXT,
-    }:
-        return False
-    if not parse_collation(source_type) or not parse_collation(target_type):
-        return False
-    src_name = (parse_collation(source_type) or "").upper()
-    tgt_name = (parse_collation(target_type) or "").upper()
-    if not _is_windows_style_collation(src_name) and not _is_windows_style_collation(
-        tgt_name
-    ):
-        return False
-    return is_width_insensitive_collation(source_type) != is_width_insensitive_collation(
-        target_type
-    )
-
-
-def kana_fold_polarity_invent(source_type: str, target_type: str) -> bool:
-    """True when mapping invents/drops kana-insensitive equality (KS omit)."""
-    src_l = normalize_logical_type(source_type)
-    tgt_l = normalize_logical_type(target_type)
-    if src_l not in {LOGICAL_STRING, LOGICAL_TEXT} or tgt_l not in {
-        LOGICAL_STRING,
-        LOGICAL_TEXT,
-    }:
-        return False
-    if not parse_collation(source_type) or not parse_collation(target_type):
-        return False
-    src_name = (parse_collation(source_type) or "").upper()
-    tgt_name = (parse_collation(target_type) or "").upper()
-    if not _is_windows_style_collation(src_name) and not _is_windows_style_collation(
-        tgt_name
-    ):
-        return False
-    return is_kana_insensitive_collation(source_type) != is_kana_insensitive_collation(
-        target_type
-    )
-
-
-def date_to_tz_aware_invent(source_type: str, target_type: str) -> bool:
-    """True when DATE widens into TZ-aware datetime (midnight instant invent)."""
-    if normalize_logical_type(source_type) != LOGICAL_DATE:
-        return False
-    if normalize_logical_type(target_type) != LOGICAL_DATETIME:
-        return False
-    return datetime_timezone_polarity(target_type) in {"tz", "ltz"}
-
-
-def unsigned_integer_would_overflow(source_type: str, target_type: str) -> bool:
-    """True when UNSIGNED source max can exceed a signed (or narrower) integer dest.
-
-    Fivetran/Airbyte class: BIGINT UNSIGNED → signed BIGINT is silent overflow
-    unless widened to DECIMAL/NUMBER. INT UNSIGNED → INT is the same class.
-    """
-    src_raw = (source_type or "").lower()
-    if "unsigned" not in src_raw and not re.search(r"\buint\d*\b", src_raw):
-        # ClickHouse UInt8/UInt32 — case-sensitive leading U.
-        raw = strip_identity_qualifier(source_type) or ""
-        if not re.match(r"^UInt(8|16|32|64)\b", raw):
-            return False
-    tgt_l = normalize_logical_type(target_type)
-    # Lossless sinks for unsigned range.
-    if tgt_l in {LOGICAL_DECIMAL, LOGICAL_STRING, LOGICAL_TEXT, LOGICAL_JSON}:
-        return False
-    if tgt_l == LOGICAL_FLOAT:
-        # IEEE cannot represent full UINT64 / large UINT32 exactly.
-        src_w = integer_bit_width(source_type)
-        return src_w is not None and src_w > 24
-    if tgt_l != LOGICAL_INTEGER:
-        return False
-    src_w = integer_bit_width(source_type)
-    tgt_w = integer_bit_width(target_type)
-    if src_w is None:
-        from services.numeric_fit import unsigned_bare_int_fits_signed_target
-
-        if unsigned_bare_int_fits_signed_target(source_type, target_type):
-            # Bare INT UNSIGNED (MySQL 32-bit) into a signed 64-bit sink.
-            return False
-        # Unknown unsigned width into signed integer — fail closed.
-        return "unsigned" not in (target_type or "").lower() and not re.match(
-            r"^UInt", strip_identity_qualifier(target_type) or ""
-        )
-    if tgt_w is None:
-        tgt_w = 32  # bare INTEGER / INT
-    return src_w > tgt_w
-
-
-def _is_unsigned_integer_carrier(inferred: str | None) -> bool:
-    """True for MySQL UNSIGNED / ClickHouse UInt* / UINT* integer carriers."""
-    raw = strip_identity_qualifier(inferred) or ""
-    if re.match(r"^UInt(8|16|32|64)\b", raw):
-        return True
-    lower = raw.lower()
-    return "unsigned" in lower or bool(re.search(r"\buint\d*\b", lower))
-
-
-def unsigned_signed_polarity_invent(source_type: str, target_type: str) -> bool:
-    """True when UNSIGNED/UInt invents a signed integer sink (or reverse).
-
-    Value-safe *clear* widens (``INT UNSIGNED → BIGINT``) do not invent
-    Accept-risk theater — the signed 64-bit sink holds the full unsigned 32-bit
-    range. Tighter signed sinks (``UInt8 → SMALLINT``) still drop unsigned
-    polarity and require Accept risk even when samples fit. Overflow stays
-    blocked by :func:`unsigned_integer_would_overflow`.
-    """
-    if normalize_logical_type(source_type) != LOGICAL_INTEGER:
-        return False
-    if normalize_logical_type(target_type) != LOGICAL_INTEGER:
-        return False
-    src_u = _is_unsigned_integer_carrier(source_type)
-    tgt_u = _is_unsigned_integer_carrier(target_type)
-    if src_u == tgt_u:
-        return False
-    # INT / INT UNSIGNED → BIGINT class: full range fits in signed 64-bit.
-    if src_u and not tgt_u and not unsigned_integer_would_overflow(source_type, target_type):
-        src_w = integer_bit_width(source_type)
-        tgt_w = integer_bit_width(target_type)
-        if src_w is not None and tgt_w is not None and tgt_w >= 64 and src_w <= 33:
-            return False
-        if src_w is None:
-            # ``INT UNSIGNED`` itself: the width-unknown keyword the sibling
-            # overflow check already resolves. Without this, the widest, most
-            # obviously safe unsigned widen in the product asked the operator
-            # to Accept risk on a MySQL→Postgres qty column.
-            from services.numeric_fit import unsigned_bare_int_fits_signed_target
-
-            if unsigned_bare_int_fits_signed_target(source_type, target_type):
-                return False
-    return True
+# Polarity / overflow invent checks live in ``type_polarity_invent``; re-exported
+# here for the historical import surface.
+from services.type_polarity_invent import (  # noqa: E402,F401 — re-export
+    _is_unsigned_integer_carrier,
+    accent_polarity_invent,
+    case_fold_polarity_invent,
+    date_to_tz_aware_invent,
+    kana_fold_polarity_invent,
+    specialty_polarity_mismatch,
+    unsigned_integer_would_overflow,
+    unsigned_signed_polarity_invent,
+    width_fold_polarity_invent,
+)
 
 
 def is_precision_collapse_coercion(
@@ -6531,7 +6599,9 @@ def is_precision_collapse_coercion(
         return True
     if time_timezone_polarity_loss(source_type, target_type):
         return True
-    if timezone_aware_would_collapse_to_string(source_type, target_type):
+    if timezone_aware_would_collapse_to_string(
+        source_type, target_type, dest_db=dest_db
+    ):
         return True
     if long_raw_locator_would_collapse(source_type, target_type):
         return True
@@ -6830,6 +6900,32 @@ def assess_create_new_type_risk(
         if ieee:
             risks.append(ieee)
 
+    from services.conversion_contract import invents_unproven_capacity
+
+    if invents_unproven_capacity(src, tgt, dest_db=db):
+        _sp, src_scale = parse_numeric_precision_scale(src)
+        _tp, dest_scale = parse_numeric_precision_scale(tgt)
+        declared_scale = 0 if src_scale is None else int(src_scale)
+        if (
+            dest_scale is not None
+            and int(dest_scale) > declared_scale
+            and not any(r.get("kind") == "invented_decimal_scale" for r in risks)
+        ):
+            # NUMBER(38,10) / DECIMAL(38,15) floors invent zeros after the
+            # decimal the source never declared. Trailing zeros do not change
+            # the value; CREATE still invented the shape.
+            risks.append({
+                "kind": "invented_decimal_scale",
+                "severity": "warn",
+                "message": (
+                    f"Create-new {src} → {tgt} invents destination scale "
+                    f"{int(dest_scale)} the source never declared. Zeros after "
+                    "the decimal do not change the value, but CREATE invented "
+                    "that scale. Use a declared typmod or observed samples — "
+                    "Accept · Risk Contract before Execute if this shape is intended."
+                ),
+            })
+
     if is_precision_collapse_coercion(src, tgt, dest_db=db):
         risks.append({
             "kind": "precision_collapse",
@@ -6893,6 +6989,33 @@ def assess_create_new_type_risk(
             "severity": "warn",
             "message": f"Create-new drops timezone polarity: {src} → {tgt}.",
         })
+    else:
+        from services.timezone_policy import (
+            MYSQL_TIMESTAMP_RANGE_TEXT,
+            instant_range_would_cap,
+            samples_outside_instant_range,
+        )
+
+        if instant_range_would_cap(src, tgt, dest_db=db):
+            # The carrier keeps the instant, so this is not a polarity loss and
+            # not a Risk Contract — but its domain is 68 years wide, and a row
+            # outside it is rejected at the write, not at Map.
+            outside = samples_outside_instant_range(samples)
+            risks.append({
+                "kind": "instant_range_cap",
+                "severity": "block" if outside else "warn",
+                "message": (
+                    f"Create-new {src} → {tgt} keeps the instant but caps its range "
+                    f"to {MYSQL_TIMESTAMP_RANGE_TEXT}"
+                    + (
+                        f"; sampled value(s) outside it: {', '.join(outside[:3])}. "
+                        if outside
+                        else ". "
+                    )
+                    + "Use DATETIME(6) with a UTC-normalize contract for the full "
+                    "1000..9999 range, or accept that out-of-range rows quarantine."
+                ),
+            })
     if uuid_would_collapse(src, tgt):
         risks.append({
             "kind": "uuid_domain",
@@ -6986,7 +7109,9 @@ def is_lossy_coercion(
             return True
         if time_timezone_polarity_loss(source_type, target_type):
             return True
-        if timezone_aware_would_collapse_to_string(source_type, target_type):
+        if timezone_aware_would_collapse_to_string(
+            source_type, target_type, dest_db=dest_db
+        ):
             return True
         if long_raw_locator_would_collapse(source_type, target_type):
             return True
@@ -7149,7 +7274,9 @@ def is_lossy_coercion(
     # (Airbyte V2) but is still a field-DDL collapse â€” treat as lossy so G3 surfaces it.
     if is_nested_document_collapse(source_type, target_type, dest_db=dest_db):
         return True
-    if timezone_aware_would_collapse_to_string(source_type, target_type):
+    if timezone_aware_would_collapse_to_string(
+        source_type, target_type, dest_db=dest_db
+    ):
         return True
     if long_raw_locator_would_collapse(source_type, target_type):
         return True

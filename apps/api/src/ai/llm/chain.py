@@ -10,7 +10,6 @@ from dataclasses import dataclass
 
 from ..knowledge.semantic_patterns import SEMANTIC_PATTERNS
 from ..knowledge.synonyms import resolve_canonical
-from ..knowledge.type_conversions import suggest_type_conversion
 from .provider import DataTransferLLMProvider, DataTransferLocalProvider
 
 
@@ -102,13 +101,27 @@ class DataTransferReasoningChain:
         data_confidence = 0.8
         if sample_values and matched_pattern and matched_pattern.sample_patterns:
             import re as regex
+            from services.transform_engine import apply_transform
+
             non_empty = [v for v in sample_values if v and str(v).strip()]
             if non_empty:
-                match_count = sum(
-                    1 for v in non_empty[:50]
-                    if any(regex.match(p, str(v).strip(), regex.IGNORECASE)
-                           for p in matched_pattern.sample_patterns)
+                from src.ai.knowledge.data_quality_rules import WRITE_BIND_SEMANTIC_TYPES
+
+                write_transform = WRITE_BIND_SEMANTIC_TYPES.get(
+                    getattr(matched_pattern, "name", "")
                 )
+                match_count = 0
+                for raw in non_empty[:50]:
+                    text = str(raw).strip()
+                    if write_transform:
+                        parsed, err = apply_transform(text, write_transform)
+                        if parsed is not None and not err:
+                            match_count += 1
+                    elif any(
+                        regex.match(p, text, regex.IGNORECASE)
+                        for p in matched_pattern.sample_patterns
+                    ):
+                        match_count += 1
                 data_confidence = match_count / min(len(non_empty), 50)
                 data_confidence = max(data_confidence, 0.3)
 
@@ -129,15 +142,38 @@ class DataTransferReasoningChain:
             final_confidence,
         ))
 
+        inferred = matched_pattern.data_type if matched_pattern else "string"
+        transforms = list(matched_pattern.transformations) if matched_pattern else []
+        if sample_values:
+            from services.transform_engine import apply_transform, samples_are_auto_ambiguous_dates
+
+            texts = [str(v) for v in sample_values if v is not None and str(v).strip()]
+            if samples_are_auto_ambiguous_dates(texts):
+                if inferred in {"date", "datetime"}:
+                    inferred = "string"
+                transforms = [t for t in transforms if t != "standardize_iso8601"]
+            from src.ai.knowledge.data_quality_rules import WRITE_BIND_SEMANTIC_TYPES
+
+            write_transform = WRITE_BIND_SEMANTIC_TYPES.get(
+                getattr(matched_pattern, "name", "") if matched_pattern else ""
+            )
+            if write_transform and texts:
+                if any(
+                    parsed is None or err
+                    for parsed, err in (apply_transform(t, write_transform) for t in texts)
+                ):
+                    if inferred in {"date", "datetime", "boolean", "decimal"}:
+                        inferred = "string"
+
         answer = {
             "column_name": column_name,
             "semantic_type": matched_pattern.name if matched_pattern else None,
             "category": matched_pattern.category.value if matched_pattern else None,
             "is_pii": matched_pattern.is_pii if matched_pattern else False,
             "compliance": matched_pattern.compliance if matched_pattern else [],
-            "transformations": matched_pattern.transformations if matched_pattern else [],
+            "transformations": transforms,
             "canonical_form": canonical,
-            "inferred_type": matched_pattern.data_type if matched_pattern else "string",
+            "inferred_type": inferred,
             "confidence": final_confidence,
         }
 
@@ -189,19 +225,13 @@ class DataTransferReasoningChain:
             tgt = str(row.get("target") or "")
             conf = float(row.get("confidence") or 0)
             if tgt and not row.get("create_new") and conf > 0.5:
-                src_analysis = self.analyze_column(
-                    src_col, (source_samples or {}).get(src_col, [])
+                from services.transform_engine import infer_transform_for_mapping
+
+                samples = list((source_samples or {}).get(src_col) or [])
+                inferred = infer_transform_for_mapping(
+                    src_col, tgt, "string", None, samples,
                 )
-                src_ans = src_analysis.answer if isinstance(src_analysis.answer, dict) else {}
-                tgt_analysis = self.analyze_column(tgt)
-                tgt_ans = tgt_analysis.answer if isinstance(tgt_analysis.answer, dict) else {}
-                transform = None
-                if src_ans.get("inferred_type") != tgt_ans.get("inferred_type"):
-                    conv = suggest_type_conversion(
-                        src_ans.get("inferred_type", "string"),
-                        tgt_ans.get("inferred_type", "string"),
-                    )
-                    transform = conv["method"] if conv else None
+                transform = inferred if inferred and inferred != "none" else None
                 mappings.append({
                     "source_column": src_col,
                     "target_column": tgt,

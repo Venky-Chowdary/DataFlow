@@ -1,43 +1,18 @@
 import type { EditableMapping } from "./mapping";
+import { applyLocalTransform } from "./localTransform";
+import type { NumberLocale } from "./numberLocale";
 import type { TransferResult } from "./types";
 
-function applyTransform(value: unknown, transform?: string): unknown {
-  if (value == null || value === "") return value;
-  const s = String(value);
-  switch (transform) {
-    case "trim":
-      return s.trim();
-    case "upper":
-      return s.toUpperCase();
-    case "lower":
-      return s.toLowerCase();
-    case "hash_pii": {
-      let h = 5381;
-      for (let i = 0; i < s.length; i += 1) h = (h * 33) ^ s.charCodeAt(i);
-      return `sha256:${(h >>> 0).toString(16).padStart(8, "0")}`;
-    }
-    case "datetime":
-    case "date_iso":
-      return s;
-    case "decimal":
-    case "cast_number": {
-      const n = Number(s.replace(/,/g, ""));
-      return Number.isFinite(n) ? n : value;
-    }
-    case "boolean":
-    case "cast_boolean":
-      return ["true", "1", "yes", "y"].includes(s.toLowerCase());
-    default:
-      return value;
-  }
-}
-
-function mapRow(row: Record<string, unknown>, mappings: EditableMapping[]): Record<string, unknown> {
+function mapRow(
+  row: Record<string, unknown>,
+  mappings: EditableMapping[],
+  numberLocale: NumberLocale | string = "",
+): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const m of mappings) {
     const raw = row[m.source];
     const transform = m.transform === "none" ? undefined : m.transform;
-    out[m.target] = applyTransform(raw, transform);
+    out[m.target] = applyLocalTransform(raw, transform, numberLocale);
   }
   return out;
 }
@@ -78,11 +53,12 @@ export interface LocalFileExportInput {
   mappings: EditableMapping[];
   format: string;
   outputBasename?: string;
+  numberLocale?: NumberLocale | string;
 }
 
 /** Export mapped rows in the browser when the transfer API is offline. */
 export function runLocalFileExport(input: LocalFileExportInput): TransferResult {
-  const mapped = input.rows.map((row) => mapRow(row, input.mappings));
+  const mapped = input.rows.map((row) => mapRow(row, input.mappings, input.numberLocale));
   const { blob, ext } = serializeRows(mapped, input.format);
   const base = (input.outputBasename || input.sourceFilename.replace(/\.[^/.]+$/, "") || "export").replace(/[^\w.-]+/g, "_");
   const filename = `${base}.${ext}`;

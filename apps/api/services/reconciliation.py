@@ -30,7 +30,9 @@ from services.decision_kernel.findings import (
 from services.readback_projection import project_readback
 from services.reconcile_sftp import verify_sftp_object
 from services.reconcile_coverage import (
+    NO_OP_DEST_UNCHANGED,
     SOURCE_DIGEST_WRITE_PASS,
+    SOURCE_DIGEST_WRITER_ACK,
     WRITTEN_BATCH_KEYS,
     append_row_count_report,
     extra_rows_note,
@@ -41,12 +43,28 @@ from services.reconcile_coverage import (
 )
 from services.transform_engine import (
     _DATE_LIKE_RE,
+    _STRICT_BOOL_FALSE,
+    _STRICT_BOOL_TRUE,
     _parse_date,
     _parse_datetime,
     apply_transform,
+    decimal_wire_value,
+    reset_active_number_locale,
+    set_active_number_locale,
 )
-from services.type_system import normalize_logical_type
-from services.value_serializer import json_default
+from services.type_system import instant_date_carrier, normalize_logical_type
+from services.value_serializer import (
+    cell_to_string,
+    is_missing_sentinel,
+    json_default,
+    json_loads_exact,
+    load_http_json,
+)
+
+# Fingerprinting runs once per cell on both the write and the read-back pass, so
+# resolving these names inside the function costs a module lookup per cell.
+from connectors.sql_bind import normalize_sql_bind_value
+from services.carrier_instant import quantize_instant_for_carrier
 
 logger = logging.getLogger(__name__)
 
@@ -54,9 +72,11 @@ SPILL_THRESHOLD = int(getenv_brand("FINGERPRINT_SPILL_THRESHOLD", "1000000"))
 
 # Quick pre-filter for the expensive Decimal / date normalization in
 # normalize_cell.  Most string columns (names, emails, codes) are clearly not
-# numbers or dates, so we can skip the exception-heavy Decimal constructor and
-# the date regex for them.
+# numbers or dates, so we can skip the write-path parser and the date regex.
 _NUMERIC_RE = re.compile(r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$")
+# Currency / grouping marks the write path may still bind (or Auto-refuse).
+_NUMERIC_WIRE_MARKS = ("$", "€", "£", "¥")
+_NUMERIC_WIRE_CODES = ("USD", "EUR", "GBP")
 _DATE_LIKE_CHARS = frozenset("-:/T ")
 # RFC 4122 UUID wire — engines differ on case (PG lower, some drivers upper).
 _UUID_RE = re.compile(
@@ -65,6 +85,73 @@ _UUID_RE = re.compile(
 _NULL_SENTINEL = "\x00NULL\x00"
 
 
+def _looks_like_numeric_wire(text: str) -> bool:
+    """True when ``text`` might be a number the write path binds or Auto-refuses.
+
+    ASCII scientific / plain decimals stay on the cheap ``_NUMERIC_RE`` path.
+    Locale money and grouped forms (``$1,234.56`` / ``1,234.56``) must also
+    reach ``decimal_wire_value`` so Gate-8 matches the dest DECIMAL, without
+    running the parser on every name or email.
+    """
+    if not text:
+        return False
+    if text[0] in "+-0123456789." and _NUMERIC_RE.match(text):
+        return True
+    if any(mark in text for mark in _NUMERIC_WIRE_MARKS):
+        return True
+    upper = text.upper()
+    if any(code in upper for code in _NUMERIC_WIRE_CODES):
+        return True
+    return text[0] in "+-0123456789(" and "," in text
+
+
+@dataclass(frozen=True, slots=True)
+class _TextFoldPlan:
+    """How a destination column's text is canonicalized for a checksum.
+
+    Every decision here follows from the column's DDL type alone, so it is
+    resolved once per type instead of once per cell — a 1M-row × 10-column
+    table asked the same eleven type questions 10M times.
+    """
+
+    keep_trailing_spaces: bool
+    rstrip_blank_pad: bool
+    fold_width: bool
+    fold_kana: bool
+    fold_variation: bool
+    fold_accent: bool
+    casefold: bool
+    uuid_carrier: bool
+
+
+@lru_cache(maxsize=8192)
+def _text_fold_plan(ddl_type: str) -> _TextFoldPlan:
+    """Compile the checksum text rules for one destination DDL type."""
+    from services.type_system import (
+        is_accent_insensitive_collation,
+        is_case_insensitive_collation,
+        is_fixed_width_char_carrier,
+        is_kana_insensitive_collation,
+        is_variation_insensitive_collation,
+        is_width_insensitive_collation,
+    )
+
+    fixed_width = is_fixed_width_char_carrier(ddl_type)
+    logical = normalize_logical_type(ddl_type)
+    return _TextFoldPlan(
+        keep_trailing_spaces=not fixed_width and logical in {"string", "text"},
+        rstrip_blank_pad=fixed_width,
+        fold_width=is_width_insensitive_collation(ddl_type),
+        fold_kana=is_kana_insensitive_collation(ddl_type),
+        fold_variation=is_variation_insensitive_collation(ddl_type),
+        fold_accent=is_accent_insensitive_collation(ddl_type),
+        casefold=is_case_insensitive_collation(ddl_type),
+        uuid_carrier=logical == "uuid"
+        or bool(re.search(r"\b(?:uuid|uniqueidentifier|guid)\b", ddl_type, re.I)),
+    )
+
+
+@lru_cache(maxsize=256)
 def destination_empty_string_is_null(engine: str | None) -> bool:
     """True when the write destination collapses '' → NULL (Oracle VARCHAR2).
 
@@ -113,6 +200,38 @@ class ReconciliationReport:
         return stamp_post_write_phase(asdict(self))
 
 
+def attach_dest_readback(report: dict[str, Any]) -> dict[str, Any]:
+    """Stamp dest-engine COUNT + checksum for Theater — never invent a count.
+
+    ``verify_target`` already produced these. The UI must not treat writer ack
+    as dest population. Sample Gate-8 stays a separate field.
+    """
+    out = dict(report or {})
+    raw = out.get("target_rows")
+    if raw is None:
+        return out
+    try:
+        dest_count = int(raw)
+    except (TypeError, ValueError):
+        return out
+    if dest_count < 0:
+        return out
+    before = out.get("target_rows_before")
+    try:
+        dest_before = int(before) if before is not None else None
+    except (TypeError, ValueError):
+        dest_before = None
+    out["dest_readback"] = {
+        "dest_count": dest_count,
+        "dest_count_before": dest_before,
+        "dest_checksum": str(out.get("target_checksum") or ""),
+        "source": "gate8_dest_readback",
+        "coverage": str(out.get("coverage") or ""),
+        "assurance_level": str(out.get("assurance_level") or ""),
+    }
+    return out
+
+
 def stamp_post_write_phase(report: dict[str, Any]) -> dict[str, Any]:
     """Stamp explicit post-write phase so UIs never confuse writer-ack with Verified.
 
@@ -143,14 +262,14 @@ def stamp_post_write_phase(report: dict[str, Any]) -> dict[str, Any]:
     out["checksum_match"] = independent_match if (src and tgt) else False
     out["population_proof"] = False
 
-    if str(out.get("assurance_level") or "") == "no_op_destination_unchanged":
+    if str(out.get("assurance_level") or "") == NO_OP_DEST_UNCHANGED:
         # Quiet incremental poll — dest-before equals dest-after. Digests from
         # a prior write-pass must not upgrade this to full_checksum.
         out["phase"] = "post_write_no_op"
         out["post_write_pending"] = False
         out["preview"] = False
-        out["coverage"] = "no_op_destination_unchanged"
-        out["assurance_level"] = "no_op_destination_unchanged"
+        out["coverage"] = NO_OP_DEST_UNCHANGED
+        out["assurance_level"] = NO_OP_DEST_UNCHANGED
         out["migration_proven"] = False
         out["population_proof"] = False
         out["checksum_match"] = False
@@ -214,7 +333,7 @@ def stamp_post_write_phase(report: dict[str, Any]) -> dict[str, Any]:
         # Write-pass fingerprints hash remapped cells in-process. Dest may be
         # independently SELECT'd, but the source warehouse was not re-read —
         # Fivetran/HVR Compare would not call that full_checksum / migration_proven.
-        if provenance == SOURCE_DIGEST_WRITE_PASS:
+        if provenance in {SOURCE_DIGEST_WRITE_PASS, SOURCE_DIGEST_WRITER_ACK}:
             rows = out.get("target_rows") or out.get("source_rows") or 0
             out["phase"] = "post_write_write_pass"
             out["post_write_pending"] = False
@@ -512,6 +631,12 @@ def canonical_checksum_from_iter(
     return acc.digest()
 
 
+# Digest every checksum path produces for a population with no rows. Both
+# sides fold zero fingerprints into SHA-256, so this value is a proof of
+# emptiness rather than the absence of a digest.
+EMPTY_POPULATION_DIGEST: Final[str] = hashlib.sha256().hexdigest()
+
+
 def checksum_rows(
     rows: list[Any],
     columns: list[str] | None = None,
@@ -555,6 +680,9 @@ def reconcile(
     sample_compare: dict[str, Any] | None = None,
     coerced_null_rows: int = 0,
     rows_skipped: int = 0,
+    rows_shaped_out: int = 0,
+    rows_source_filtered: int = 0,
+    rows_expanded: int = 0,
     target_rows_before: int | None = None,
     checksum_scope: str = "",
 ) -> ReconciliationReport:
@@ -574,6 +702,9 @@ def reconcile(
     """
     coerced_null_rows = max(int(coerced_null_rows or 0), 0)
     rows_skipped = max(int(rows_skipped or 0), 0)
+    rows_shaped_out = max(int(rows_shaped_out or 0), 0)
+    rows_source_filtered = max(int(rows_source_filtered or 0), 0)
+    rows_expanded = max(int(rows_expanded or 0), 0)
     # Coerced rows are KEPT in the destination (a cell became NULL), so they do
     # not lower the expected row count — only genuinely DROPPED / held-out rows do.
     # Under quarantine, bad rows are held out of the primary write (rejected >
@@ -581,8 +712,35 @@ def reconcile(
     # Under fail, coerced == 0 so dropped == rejected.
     # Skipped rows are neither dropped nor written (e.g. stale CDC LSN
     # redelivery) and must be excluded from the expected destination count.
+    # Rows an approved shaping recipe removed on the read (filtered or diverted)
+    # were read and are deliberately absent from the destination. They are a
+    # declared effect of the recipe, not a loss and not a quarantine finding, so
+    # they lower the expected count exactly like a hold-out does.
+    # A declared source row filter removes rows on the read for the same reason:
+    # they were counted in the source population and were never candidates for
+    # the destination.
     dropped_rows = max(max(rejected_rows, 0) - coerced_null_rows, 0)
-    expected_rows = max(source_rows - dropped_rows - rows_skipped, 0)
+    expected_rows = max(
+        source_rows
+        + rows_expanded
+        - dropped_rows
+        - rows_skipped
+        - rows_shaped_out
+        - rows_source_filtered,
+        0,
+    )
+    if (
+        not source_checksum
+        and expected_rows == 0
+        and target_rows == 0
+        and target_checksum in {"", EMPTY_POPULATION_DIGEST}
+    ):
+        # Every source row was held out, so this run's projection is the empty
+        # population — a digest that is defined, not missing. The writer had no
+        # rows to hash and returned "", which then read as a mismatch against
+        # the destination's empty digest and failed an all-quarantined run that
+        # behaved exactly as the policy asked.
+        source_checksum = target_checksum
     row_count_ok = target_rows == expected_rows or (
         allow_extra_rows and target_rows >= expected_rows
     )
@@ -600,7 +758,9 @@ def reconcile(
             target_checksum=target_checksum,
             message=(
                 f"Row count mismatch: source {source_rows}, rejected {rejected_rows}, "
-                f"skipped {rows_skipped}, expected target {expected_rows} vs target {target_rows}{extra_note}"
+                f"skipped {rows_skipped}, removed by transform {rows_shaped_out}, "
+                f"filtered out {rows_source_filtered}, expanded by transform {rows_expanded}, "
+                f"expected target {expected_rows} vs target {target_rows}{extra_note}"
             ),
             rejected_rows=rejected_rows,
             coerced_null_rows=coerced_null_rows,
@@ -645,8 +805,16 @@ def reconcile(
         extra_note = extra_rows_note(target_rows, expected_rows) if has_extra else ""
         sample_note = ""
         if sample_ok:
+            # ``compared`` is a count of cells; naming it rows over-stated the
+            # evidence by the column count of the projection.
+            sample_rows = int((sample_compare or {}).get("rows_compared") or 0)
+            scope = (
+                f"{sample_rows:,} row(s) / {compared:,} cell(s)"
+                if sample_rows
+                else f"{compared:,} cell(s)"
+            )
             sample_note = (
-                f" Key-aligned sample compared {compared} row(s) without value "
+                f" Key-aligned sample compared {scope} without value "
                 "mismatches — diagnostic only; does NOT override checksum failure."
             )
         elif sample_compare:
@@ -811,10 +979,21 @@ def sa_streaming_result(
     Drivers without server-side cursors ignore ``stream_results`` and buffer as
     before — no engine is made worse, and those that can stream stop paying for
     the whole table.
+
+    The option is set on the *statement*, not the connection:
+    ``Connection.execution_options()`` mutates the connection in place, so every
+    later statement on it inherited streaming. PostgreSQL then compiled a
+    following ``DROP TABLE`` as ``DECLARE ... CURSOR FOR DROP TABLE`` and raised
+    a syntax error — which is how mirror key-staging tables survived their own
+    cleanup and accumulated in the customer's schema.
     """
-    result = conn.execution_options(
-        stream_results=True, max_row_buffer=itersize
-    ).execute(statement)
+    try:
+        stmt = statement.execution_options(
+            stream_results=True, max_row_buffer=itersize
+        )
+    except AttributeError:  # a raw string has no execution_options
+        stmt = statement
+    result = conn.execute(stmt)
     names = [str(k) for k in result.keys()]
 
     def _rows() -> Iterator[Any]:
@@ -1104,14 +1283,9 @@ def verify_pgvector_table(
                 for raw in raw_rows:
                     rec = dict(zip(names, raw))
                     source_id = rec.get("source_id", "")
-                    metadata = rec.get("metadata") or {}
-                    if isinstance(metadata, str):
-                        try:
-                            metadata = json.loads(metadata)
-                        except Exception:
-                            metadata = {}
-                    if not isinstance(metadata, dict):
-                        metadata = {}
+                    from services.target_sample_vector import load_pgvector_metadata
+
+                    metadata = load_pgvector_metadata(rec.get("metadata"))
                     # Reconstruct a source-shaped row from metadata; fall back
                     # to source_id for 'id'.
                     row: dict[str, Any] = dict(metadata)
@@ -1193,7 +1367,7 @@ def verify_pinecone_namespace(
                 timeout=30,
             )
             if fetch.status_code in {200, 201}:
-                vectors = (fetch.json() or {}).get("vectors") or {}
+                vectors = (load_http_json(fetch) or {}).get("vectors") or {}
                 for vid, payload in vectors.items():
                     meta = payload.get("metadata") if isinstance(payload, dict) else {}
                     if not isinstance(meta, dict):
@@ -1261,7 +1435,7 @@ def verify_qdrant_collection(
                 timeout=30,
             )
             if retrieve.status_code in {200, 201}:
-                points = (retrieve.json() or {}).get("result") or []
+                points = (load_http_json(retrieve) or {}).get("result") or []
                 for pt in points:
                     if not isinstance(pt, dict):
                         continue
@@ -1279,7 +1453,7 @@ def verify_qdrant_collection(
                 timeout=30,
             )
             if scroll.status_code in {200, 201}:
-                points = ((scroll.json() or {}).get("result") or {}).get("points") or []
+                points = ((load_http_json(scroll) or {}).get("result") or {}).get("points") or []
                 for pt in points:
                     if not isinstance(pt, dict):
                         continue
@@ -1348,7 +1522,7 @@ def verify_weaviate_class(
                     )
                 if resp.status_code not in {200, 201}:
                     continue
-                obj = resp.json() or {}
+                obj = load_http_json(resp) or {}
                 if not isinstance(obj, dict):
                     continue
                 props = obj.get("properties") if isinstance(obj.get("properties"), dict) else {}
@@ -1362,7 +1536,7 @@ def verify_weaviate_class(
             )
             if agg.status_code not in {200, 201}:
                 return -1, ""
-            body = agg.json() or {}
+            body = load_http_json(agg) or {}
             objects = body.get("objects") or []
             count = int(body.get("totalResults") or len(objects))
             for obj in objects:
@@ -1474,7 +1648,7 @@ def verify_milvus_collection(
             headers=hdrs,
             timeout=30,
         )
-        qbody = query.json() if query.content else {}
+        qbody = load_http_json(query) if query.content else {}
         dict_rows: list[dict[str, Any]] = []
         if _ok_response(qbody if isinstance(qbody, dict) else {}, query.status_code):
             rows = qbody.get("data") if isinstance(qbody, dict) else []
@@ -1685,11 +1859,52 @@ def verify_bigquery_table(
             port=port,
         )
         table_id = f"{project_id}.{dataset_id}.{table_name}"
-        table = client.get_table(table_id)
-        count = table.num_rows or 0
+        from connectors.google_emulator import (
+            google_emulator_retry,
+            google_emulator_timeout,
+            looks_like_google_emulator,
+        )
+
+        probe_kw: dict[str, Any] = {}
+        if looks_like_google_emulator(
+            endpoint=connection_string, host=host, port=port,
+        ):
+            probe_kw = {
+                "retry": google_emulator_retry(),
+                "timeout": google_emulator_timeout(),
+            }
+        table = client.get_table(table_id, **probe_kw)
+        # Table.num_rows lags the streaming buffer and goccy reports 0.
+        # Dest-engine COUNT(*) is the Gate-8 SSOT (same as dest_precount).
+        from services.dest_precount import _bigquery_row_count
+
+        counted = _bigquery_row_count(
+            {
+                "database": project_id,
+                "schema": dataset_id,
+                "host": host,
+                "port": port,
+                "connection_string": connection_string,
+            },
+            schema=dataset_id,
+            table_name=table_name,
+        )
+        count = int(counted) if counted is not None else 0
         field_names = [field.name for field in table.schema] if table.schema else []
+
         def _row_iter():
             yielded = 0
+            if probe_kw:
+                # goccy list_rows retries until operator timeout. Query instead.
+                from services.dest_precount import _bigquery_run_query
+
+                qualified = f"`{project_id}`.`{dataset_id}`.`{table_name}`"
+                sql = f"SELECT * FROM {qualified}"
+                if limit:
+                    sql += f" LIMIT {int(limit)}"
+                for row in _bigquery_run_query(client, sql):
+                    yield list(row.values()) if hasattr(row, "values") else list(row)
+                return
             for row in client.list_rows(table_id):
                 if limit and yielded >= limit:
                     break
@@ -2706,7 +2921,7 @@ def verify_redis_prefix(
     rows the source never sent. Cardinality stays whole-prefix either way.
     """
     try:
-        from connectors.redis_reader import _decode, _redis_client
+        from connectors.redis_reader import _redis_client, redis_json_row
 
         client = _redis_client(
             {
@@ -2739,18 +2954,7 @@ def verify_redis_prefix(
 
         def _row_iter():
             for key in keys:
-                raw = client.get(key)
-                text = _decode(raw)
-                try:
-                    payload = (
-                        json.loads(text) if text.startswith("{") else {"value": text}
-                    )
-                except (json.JSONDecodeError, TypeError):
-                    payload = {"value": text}
-                if isinstance(payload, dict):
-                    yield payload
-                else:
-                    yield {"value": text}
+                yield redis_json_row(client.get(key))
 
         columns = target_columns or []
         if not columns and keys:
@@ -2890,13 +3094,18 @@ def verify_snowflake_table(
             cur.execute(f"SELECT COUNT(*) FROM {qualified_name}")  # nosec B608
             count = int(cur.fetchone()[0])
             ids, pk = keyed_readback_scope(written_ids, pk_column)
+            from connectors.sql_identifiers import quote_column_list
+
+            select_list = quote_column_list(target_columns)
             if ids:
                 where = keyed_readback_where(
                     pk, ids, dialect="snowflake", placeholders=["%s"] * len(ids)
                 )
-                cur.execute(f"SELECT * FROM {qualified_name} {where}", ids)  # nosec B608
+                cur.execute(
+                    f"SELECT {select_list} FROM {qualified_name} {where}", ids
+                )  # nosec B608
             else:
-                cur.execute(f"SELECT * FROM {qualified_name}")  # nosec B608
+                cur.execute(f"SELECT {select_list} FROM {qualified_name}")  # nosec B608
             names = [d[0] for d in cur.description] if cur.description else []
             columns, projected = project_readback(names, target_columns, _iter_fetchmany(cur))
             checksum = canonical_checksum_from_iter(
@@ -3587,10 +3796,6 @@ def fingerprint_for_reconcile(
     Source samples and destination read-back must share this path so Mongo
     ``\"true\"`` / MySQL ``0`` / Postgres ``False`` compare as equal.
     """
-    from services.transform_engine import apply_transform
-    from services.type_system import instant_date_carrier
-    from services.value_serializer import cell_to_string, is_missing_sentinel
-
     ddl_type = instant_date_carrier(engine, ddl_type)
     wire: Any = value
     if is_missing_sentinel(value):
@@ -3624,12 +3829,20 @@ def fingerprint_for_reconcile(
         wire = cell_to_string(value, preserve_sql_null=True)
 
     if ddl_type:
+        # Dest read-back is storage-canonical. Re-applying the transfer locale
+        # turns EU ``1.234`` (from ``1,234``) into 1234 and false-fails Gate-8.
+        token = set_active_number_locale("")
         try:
-            from connectors.sql_bind import normalize_sql_bind_value
-
-            wire = normalize_sql_bind_value(wire, ddl_type, engine=engine)
-        except Exception:
-            pass
+            try:
+                wire = normalize_sql_bind_value(wire, ddl_type, engine=engine)
+            except Exception:
+                pass
+        finally:
+            reset_active_number_locale(token)
+        # Fingerprint the instant at the granularity the carrier keeps, or a
+        # declared narrowing (Snowflake TIMESTAMP → MySQL DATETIME) reports as
+        # a whole-column checksum mismatch with no column named.
+        wire = quantize_instant_for_carrier(wire, ddl_type=ddl_type, engine=engine)
     return normalize_cell(wire, ddl_type=ddl_type, engine=engine)
 
 
@@ -3650,8 +3863,6 @@ def normalize_cell(value: Any, *, ddl_type: str = "", engine: str = "") -> str:
         return _NULL_SENTINEL
     # Dense write materializes absent schemaless fields as SQL NULL; fingerprint
     # must match. Sparse CDC sample_compare skips DF_MISSING columns (omit-from-SET).
-    from services.value_serializer import is_missing_sentinel
-
     if is_missing_sentinel(value):
         return _NULL_SENTINEL
     if isinstance(value, str) and value.strip().lower() in {
@@ -3702,57 +3913,45 @@ def normalize_cell(value: Any, *, ddl_type: str = "", engine: str = "") -> str:
     raw_text = str(value)
     if ddl_type:
         try:
-            from services.type_system import (
-                fold_diacritics,
-                fold_kana,
-                fold_variation_selectors,
-                fold_width_forms,
-                is_accent_insensitive_collation,
-                is_case_insensitive_collation,
-                is_fixed_width_char_carrier,
-                is_kana_insensitive_collation,
-                is_variation_insensitive_collation,
-                is_width_insensitive_collation,
-                normalize_logical_type,
-            )
-
-            if is_fixed_width_char_carrier(ddl_type):
+            plan = _text_fold_plan(ddl_type)
+            if plan.rstrip_blank_pad:
                 # Blank-pad only — do not strip leading spaces (rare but significant).
                 text = raw_text.rstrip(" ")
-            elif normalize_logical_type(ddl_type) in {"string", "text"}:
+            elif plan.keep_trailing_spaces:
                 # VARCHAR/TEXT: preserve trailing spaces (significant payload).
                 text = raw_text
             else:
                 text = raw_text.strip()
             # Collation equality must match the destination engine (CI/AI/WI/KI/VSS).
-            if is_width_insensitive_collation(ddl_type):
+            if plan.fold_width:
+                from services.type_system import fold_width_forms
+
                 text = fold_width_forms(text)
-            if is_kana_insensitive_collation(ddl_type):
+            if plan.fold_kana:
+                from services.type_system import fold_kana
+
                 text = fold_kana(text)
-            if is_variation_insensitive_collation(ddl_type):
+            if plan.fold_variation:
+                from services.type_system import fold_variation_selectors
+
                 text = fold_variation_selectors(text)
-            if is_accent_insensitive_collation(ddl_type):
+            if plan.fold_accent:
+                from services.type_system import fold_diacritics
+
                 text = fold_diacritics(text)
-            if is_case_insensitive_collation(ddl_type):
+            if plan.casefold:
                 text = text.casefold()
             # UUID / UNIQUEIDENTIFIER / CHAR(36) UUID carriers — canonicalize
             # braces / 32-hex / case so source wire and dest read-back match
             # (Fivetran HVR compare class: destination storage rules win).
-            try:
-                from services.type_system import normalize_logical_type
+            if plan.uuid_carrier:
+                try:
+                    from connectors.sql_bind import coerce_uuid_wire
 
-                if normalize_logical_type(ddl_type) == "uuid" or re.search(
-                    r"\b(?:uuid|uniqueidentifier|guid)\b", ddl_type, re.I
-                ):
-                    try:
-                        from connectors.sql_bind import coerce_uuid_wire
-
-                        text = coerce_uuid_wire(text) or text
-                    except ValueError:
-                        if _UUID_RE.match(text):
-                            text = text.lower()
-            except Exception:
-                pass
+                    text = coerce_uuid_wire(text) or text
+                except ValueError:
+                    if _UUID_RE.match(text):
+                        text = text.lower()
         except Exception:
             text = raw_text.strip()
     else:
@@ -3764,15 +3963,15 @@ def normalize_cell(value: Any, *, ddl_type: str = "", engine: str = "") -> str:
     # Align with transform_engine strict boolean tokens only. Status enums
     # ("active"/"enabled"/…) must NOT collide with true/false in checksums —
     # that falsely claimed 100% fidelity when status strings met bool columns.
-    from services.transform_engine import _STRICT_BOOL_FALSE, _STRICT_BOOL_TRUE
-
     if lowered in _STRICT_BOOL_TRUE:
         return "1"
     if lowered in _STRICT_BOOL_FALSE:
         return "0"
-    # Numeric fast path: only attempt Decimal normalization for strings that look
-    # like numbers, avoiding the expensive exception path for names, emails, codes.
-    if text[0] in "+-0123456789" and _NUMERIC_RE.match(text):
+    # Numeric fast path: write-path bind only. Auto-ambiguous ``1,234`` /
+    # ``1.234`` / ``1.000`` stay opaque text — ``Decimal(text)`` is a second
+    # algorithm and invented ``1.000`` → ``1``. Locale money the write path
+    # binds still folds so Gate-8 matches the dest DECIMAL.
+    if _looks_like_numeric_wire(text):
         canonical = _canonicalize_number(text)
         if canonical is not None:
             return canonical
@@ -3780,7 +3979,7 @@ def normalize_cell(value: Any, *, ddl_type: str = "", engine: str = "") -> str:
     # JSON payloads (e.g. jsonb).
     if text.startswith(("{", "[")):
         try:
-            parsed = json.loads(text)
+            parsed = json_loads_exact(text)
             if isinstance(parsed, (dict, list)):
                 return json.dumps(parsed, sort_keys=True, default=json_default)
         except (json.JSONDecodeError, TypeError):
@@ -3915,8 +4114,10 @@ def _is_exact_double(d: Decimal) -> bool:
 def _canonicalize_number(value: Any) -> str | None:
     """Return a canonical string for numeric values so 9.5 == 9.5000000000.
 
-    Also collapses IEEE float residue so Excel/JSON floats match DECIMAL sinks,
-    but only where that collapse is provably information-free.
+    Strings go through ``decimal_wire_value`` — the same parser the write path
+    binds. Auto-ambiguous ``1,234`` / ``1.234`` / ``1.000`` return ``None`` so
+    Gate-8 cannot invent ``1.000`` → ``1``. Locale money and both-separator
+    forms still fold. IEEE residue still collapses when information-free.
     """
     try:
         if isinstance(value, float):
@@ -3937,12 +4138,23 @@ def _canonicalize_number(value: Any) -> str | None:
                     except (OverflowError, ValueError):
                         pass
         else:
-            text = str(value).strip().replace(",", "")
+            text = str(value).strip()
             if not text:
                 return None
-            d = Decimal(text)
+            # Checksum dest text is already storage-canonical. Re-applying the
+            # transfer locale turns EU ``1.234`` (from ``1,234``) into 1234.
+            token = set_active_number_locale("")
+            try:
+                parsed = decimal_wire_value(text)
+            finally:
+                reset_active_number_locale(token)
+            if parsed is None:
+                # Write path refused (Auto ``1,234`` / ``1.234`` / ``1.000``).
+                # Decimal(text) invented a different number (``1.000`` → ``1``).
+                return None
+            d = parsed
             # String form of float residue (common from Excel/CSV readers).
-            if d.is_finite() and ("." in text or "e" in text.lower()):
+            if d.is_finite() and ("." in text or "e" in text.lower() or "," in text):
                 head = text.split("e")[0].split("E")[0]
                 frac = head.split(".")[-1] if "." in head else ""
                 if len(frac.rstrip("0")) > 12 and _is_exact_double(d):
@@ -4312,10 +4524,10 @@ def sample_compare_rows(
             except Exception:
                 return (1, str(value))
         text = str(value).strip()
-        try:
-            return (0, Decimal(text))
-        except Exception:
-            return (1, text.lower())
+        parsed = decimal_wire_value(text)
+        if parsed is not None:
+            return (0, parsed)
+        return (1, text.lower())
 
     import hashlib
 
@@ -4410,14 +4622,21 @@ def sample_compare_rows(
 
     mismatches: list[dict[str, str]] = []
     compared = 0
+    rows_compared = 0
     keyed = bool(sort_key and target_by_key)
     # Only reachable when the caller vouched for pairing; see ``rows_are_paired``.
     target_paired = list(target_dicts) if not keyed else []
 
     def _result(*, passed: bool) -> dict[str, Any]:
+        # ``compared`` counts *cells*, and every operator-facing line rendered it
+        # as "compared N row(s)" — a 500-cell, 50-row sample read as ten times
+        # the evidence it was. Both denominators are reported so a match
+        # percentage can name the population it is a percentage of.
         return {
             "passed": passed,
             "compared": compared,
+            "cells_compared": compared,
+            "rows_compared": rows_compared,
             "mismatches": mismatches,
             "sample_seed": sample_seed,
             "alignment": "keyed" if keyed else "paired_by_caller",
@@ -4441,6 +4660,7 @@ def sample_compare_rows(
 
         # Case-insensitive target lookup — MySQL/Snowflake cursors may fold names.
         tgt_keys = {str(k).lower(): k for k in tgt.keys()}
+        rows_compared += 1
 
         for m in mappings:
             src_col = str(m.get("source") or "")

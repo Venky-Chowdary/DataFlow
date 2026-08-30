@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from services.value_serializer import load_http_json
+
 from connectors.saas_common import (
     ReadBatch,
     base_url,
@@ -86,7 +88,7 @@ def read_object(
             params["starting_after"] = starting_after
         r = request(method="GET", url=url, token=secret_key, params=params, timeout=60)
         r.raise_for_status()
-        data = r.json()
+        data = load_http_json(r)
         page = data.get("data")
         if not isinstance(page, list):
             raise ValueError("Stripe list response missing data array")

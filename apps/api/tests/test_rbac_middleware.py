@@ -24,10 +24,8 @@ def rbac_env(monkeypatch):
 
     monkeypatch.setattr(auth_mod, "_REQUIRE_AUTH", True)
 
-    import services.rbac as rbac_mod
-
-    # Force re-evaluation of auth_required in the rbac module.
-    monkeypatch.setattr(rbac_mod, "auth_required", auth_mod.auth_required)
+    # RBAC reads auth_required off the auth module per request, so patching the
+    # canonical module is enough — there is no per-module copy to re-sync.
 
 
 def _token(email: str) -> str:

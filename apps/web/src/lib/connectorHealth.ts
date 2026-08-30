@@ -31,6 +31,11 @@ export function connectorLooksHealthy(c: ConnectorHealthFields): boolean {
   return connectorTestHealth(c) !== "failed";
 }
 
+/** True only after a probe passed — never-tested is not healthy. */
+export function connectorPassedProbe(c: ConnectorHealthFields): boolean {
+  return connectorTestHealth(c) === "passed";
+}
+
 export function connectorNeedsAttention(c: ConnectorHealthFields): boolean {
   return connectorTestHealth(c) === "failed";
 }

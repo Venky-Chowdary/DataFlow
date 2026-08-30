@@ -167,10 +167,10 @@ class ObjectStoreEncoder:
         return self._csv
 
     def _append_delimited(self, mapped_rows: Sequence[tuple]) -> None:
-        from connectors.writer_common import iter_mapped_json_records
+        from connectors.writer_common import iter_mapped_delimited_records
 
         writer = self._ensure_csv()
-        for record in iter_mapped_json_records(
+        for record in iter_mapped_delimited_records(
             list(mapped_rows), self.target_cols, self.dest_types
         ):
             writer.writerow({k: cell_to_string(v) for k, v in record.items()})
@@ -503,7 +503,10 @@ def materialize_object_store_export(
         export = encoder.finish()
         checksum = acc.digest()
         meta = gate8_writer_meta(sample_rows, target_cols)
-        meta["source_row_count"] = rows_written
+        # The spool is the reader's population. Reporting rows_written here would
+        # make conservation balance against the writer's own acknowledgement and
+        # hide quarantined rows from Gate-8.
+        meta["source_row_count"] = source_row_count
         return ObjectStoreMaterializeResult(
             export=export,
             rows_written=rows_written,

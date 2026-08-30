@@ -36,16 +36,29 @@ def test_parse_decimal_precision_scale_variants():
 def test_fits_decimal_integer_and_scale_overflow():
     assert fits_decimal("1.50", 10, 2) is True
     assert fits_decimal("99999999999999999999", 10, 2) is False  # int digits
-    assert fits_decimal("1.234", 10, 2) is False  # MySQL/SF fail-closed on scale
+    assert fits_decimal("1.2345", 10, 2) is False  # MySQL/SF fail-closed on scale
     assert fits_decimal(None, 10, 2) is True
     # Trailing wire zeros are not scale overflow (MySQL→PG airports lat cliff).
     assert fits_decimal("52.310500000000000", 38, 9) is True
     assert fits_decimal("-33.939900000000000", 38, 9) is True
     assert fits_decimal("1.2345000001", 10, 2) is False  # non-zero beyond scale
-    # PostgreSQL rounds fractional excess — match destination engine, don't invent block.
-    assert fits_decimal("1.234", 10, 2, dest_db="postgresql") is True
-    assert fits_decimal("1.2345000001", 10, 2, dest_db="postgresql") is True
+    # Auto 1.234 is US milli-scale or EU thousands — write path refuses.
+    assert fits_decimal("1.234", 10, 2) is False
+    assert fits_decimal("1.234", 10, 2, dest_db="postgresql") is False
+    # PostgreSQL would round at INSERT — identity maps quarantine instead.
+    assert fits_decimal("1.2345", 10, 2, dest_db="postgresql") is False
+    assert fits_decimal("1.2345000001", 10, 2, dest_db="postgresql") is False
     assert fits_decimal("99999999999999999999", 10, 2, dest_db="postgresql") is False
+    # Locale money the write path binds must fit a wide enough carrier.
+    assert fits_decimal("$1,234.56", 10, 2) is True
+    assert fits_decimal("€1.234,56", 10, 2) is True
+    assert fits_decimal("$1,234", 10, 2) is True
+    assert fits_decimal("1,234", 10, 2) is False
+    # Trailing zeros are write padding, not scale overflow (observe still
+    # keeps 2000.00 → scale 2 for create-new invent).
+    assert fits_decimal("2000.00", 38, 0, dest_db="snowflake") is True
+    assert fits_decimal("2000.10", 38, 0, dest_db="snowflake") is False
+    assert fits_decimal("$1,234.56", 38, 0, dest_db="snowflake") is False
 
 
 def test_quarantine_holds_out_unfit_row():
@@ -77,9 +90,10 @@ def test_quarantine_allows_airport_lat_trailing_zeros_on_pg_numeric():
         dialect_label="PostgreSQL NUMERIC",
         dest_db="postgresql",
     )
-    # PG rounds fractional excess — all three fit NUMERIC(38,9).
-    assert out == rows
-    assert details == []
+    # Trailing zeros after the decimal collapse (same value). Significant
+    # extra scale (1.23456789012 needs 11) fail-closes — PG must not round.
+    assert out == [("52.310500000000000",), ("33.640700000000000",)]
+    assert details and "1.23456789012" in str(details[0])
 
 
 def test_quarantine_still_blocks_pg_integer_overflow():

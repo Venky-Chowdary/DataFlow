@@ -17,6 +17,7 @@ these names, so a module-level import would be circular.
 from __future__ import annotations
 
 import re
+from functools import lru_cache
 
 # Storage width of the ambiguous ``INT``/``INTEGER`` keyword per engine.
 # ``None`` means the engine backs the keyword with a big-decimal carrier
@@ -46,6 +47,7 @@ _BARE_INT_STORAGE_WIDTH: dict[str, int | None] = {
 }
 
 
+@lru_cache(maxsize=8192)
 def integer_storage_bounds(
     inferred: str | None, *, dest_db: str = ""
 ) -> tuple[int, int] | None:

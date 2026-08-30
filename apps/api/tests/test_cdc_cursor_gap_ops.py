@@ -231,7 +231,7 @@ def test_change_stream_poll_raises_oplog_gap_before_watch():
     client.__getitem__ = MagicMock(return_value=db)
     client.local = local
     try:
-        with patch("connectors.mongodb_change_stream._mongo_client", return_value=client):
+        with patch("connectors.mongodb_change_stream._new_mongo_client", return_value=client):
             reader = MongodbChangeStreamCdc(
                 {
                     "host": "localhost",
@@ -276,7 +276,7 @@ def test_change_stream_invalidate_raises_gap():
     client = MagicMock()
     client.__getitem__ = MagicMock(return_value=db)
     try:
-        with patch("connectors.mongodb_change_stream._mongo_client", return_value=client):
+        with patch("connectors.mongodb_change_stream._new_mongo_client", return_value=client):
             reader = MongodbChangeStreamCdc(
                 {
                     "host": "localhost",
@@ -320,7 +320,7 @@ def test_change_stream_history_lost_raises_gap():
     client.__getitem__ = MagicMock(return_value=db)
     seconds = 1_700_000_000
     try:
-        with patch("connectors.mongodb_change_stream._mongo_client", return_value=client):
+        with patch("connectors.mongodb_change_stream._new_mongo_client", return_value=client):
             reader = MongodbChangeStreamCdc(
                 {
                     "host": "localhost",

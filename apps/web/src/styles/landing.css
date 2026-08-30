@@ -288,6 +288,13 @@ html:has(.lp) {
   font-weight: 500;
 }
 
+/* Menu-only CTA stack — shown by the collapsed-nav breakpoint below. Declared
+   here, ahead of the media queries, because the same-specificity reset used to
+   sit after them and switched the stack off at every width. */
+.lp-nav-mobile-ctas {
+  display: none;
+}
+
 .lp-nav-action-login {
   font-weight: 600;
 }
@@ -495,7 +502,7 @@ html:has(.lp) {
 }
 
 .lp-hero-mock {
-  width: min(1120px, 100%);
+  width: min(var(--lp-shell-max), 100%);
   margin: 52px auto 8px;
   border: 0;
   border-radius: 0;
@@ -863,7 +870,7 @@ html:has(.lp) {
 }
 
 .lp-section-head--left {
-  max-width: 1120px;
+  max-width: var(--lp-shell-max);
   text-align: left;
   margin-left: auto;
   margin-right: auto;
@@ -923,7 +930,7 @@ html:has(.lp) {
   align-items: center;
   justify-content: center;
   gap: 12px;
-  max-width: 1120px;
+  max-width: var(--lp-shell-max);
   margin: 28px auto 0;
   padding: 0 clamp(16px, 4vw, 40px);
   text-align: center;
@@ -954,7 +961,7 @@ html:has(.lp) {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 18px;
-  max-width: 1120px;
+  max-width: var(--lp-shell-max);
   margin: 0 auto;
 }
 
@@ -1007,7 +1014,7 @@ html:has(.lp) {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 16px;
-  max-width: 1120px;
+  max-width: var(--lp-shell-max);
   margin: 0 auto;
 }
 
@@ -1219,12 +1226,12 @@ html:has(.lp) {
 
 /* Tools */
 .lp-tools {
-  max-width: 1120px;
+  max-width: var(--lp-shell-max);
   margin: 0 auto;
 }
 
 .lp-marquee {
-  max-width: 1120px;
+  max-width: var(--lp-shell-max);
   margin: 0 auto 28px;
   display: grid;
   gap: 12px;
@@ -1331,7 +1338,7 @@ html:has(.lp) {
 
 .lp-enterprise {
   margin: 0 auto;
-  width: min(1120px, calc(100% - clamp(32px, 6vw, 80px)));
+  width: min(var(--lp-shell-max), calc(100% - clamp(32px, 6vw, 80px)));
   padding: clamp(36px, 5vw, 52px) 0;
   border-radius: 0;
   background: transparent;
@@ -2301,10 +2308,18 @@ html:has(.lp) {
   }
 }
 
-/* Design canvas breakpoints — hide CTAs before they collide with Pricing */
+/* Design canvas breakpoints — compact the CTAs before they collide with
+   Pricing. A laptop at 1280 is the most common buyer viewport, so the sales
+   route stays reachable there; below 1100 the whole nav collapses into the
+   menu, which carries Contact sales itself. */
 @media (max-width: 1280px) {
-  .lp-nav-action-secondary {
-    display: none !important;
+  .lp-nav-actions {
+    gap: 4px;
+  }
+
+  .lp-nav-actions .lp-btn {
+    padding-inline: 10px;
+    font-size: 13px;
   }
 }
 
@@ -2369,6 +2384,12 @@ html:has(.lp) {
     padding-top: 12px;
     border-top: 1px solid var(--lp-line);
   }
+
+  /* The menu owns the sales route once it opens, so the header does not
+     offer the same action twice. */
+  .lp-nav-actions .lp-nav-action-secondary {
+    display: none !important;
+  }
 }
 
 @media (max-width: 960px) {
@@ -2414,16 +2435,12 @@ html:has(.lp) {
   }
 }
 
-.lp-nav-mobile-ctas {
-  display: none;
-}
-
 /* ─── Product cards ─── */
 .lp-product-cards {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 12px;
-  max-width: 1120px;
+  max-width: var(--lp-shell-max);
   margin: 0 auto 20px;
   padding: 0 clamp(16px, 4vw, 40px);
 }
@@ -2468,7 +2485,7 @@ html:has(.lp) {
 }
 
 .lp-compare-wrap {
-  max-width: 1120px;
+  max-width: var(--lp-shell-max);
   margin: 0 auto;
   padding: 0 clamp(16px, 4vw, 40px) 48px;
   overflow-x: auto;
@@ -2529,7 +2546,7 @@ html:has(.lp) {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 12px;
-  max-width: 1120px;
+  max-width: var(--lp-shell-max);
   margin: 0 auto;
   padding: 0 clamp(16px, 4vw, 40px) 48px;
 }
@@ -2563,7 +2580,7 @@ html:has(.lp) {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 12px;
-  max-width: 1120px;
+  max-width: var(--lp-shell-max);
   margin: 0 auto;
   padding: 0 clamp(16px, 4vw, 40px) 48px;
 }
@@ -2603,7 +2620,7 @@ html:has(.lp) {
 /* ─── Marketing sub-pages ─── */
 .lp-mkt-page {
   padding: 32px clamp(16px, 4vw, 40px) 64px;
-  max-width: 1120px;
+  max-width: var(--lp-shell-max);
   margin: 0 auto;
 }
 
@@ -3032,7 +3049,7 @@ html:has(.lp) {
   grid-template-columns: minmax(0, 1.05fr) minmax(280px, 0.95fr);
   gap: clamp(24px, 4vw, 48px);
   align-items: center;
-  max-width: 1120px;
+  max-width: var(--lp-shell-max);
   margin: 0 auto;
 }
 
@@ -3140,7 +3157,7 @@ html:has(.lp) {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 14px;
-  max-width: 1120px;
+  max-width: var(--lp-shell-max);
   margin: 0 auto;
   padding: 36px clamp(16px, 4vw, 40px);
 }
@@ -3489,7 +3506,7 @@ html:has(.lp) {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 12px;
-  max-width: 1120px;
+  max-width: var(--lp-shell-max);
   margin: 0 auto;
   padding: 28px clamp(16px, 4vw, 40px) 8px;
 }
@@ -3524,7 +3541,7 @@ html:has(.lp) {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
-  max-width: 1120px;
+  max-width: var(--lp-shell-max);
   margin: 0 auto;
   padding: 20px clamp(16px, 4vw, 40px) 8px;
 }
@@ -4314,7 +4331,7 @@ html:has(.lp) {
 }
 
 .lp-outcomes-rail-inner {
-  max-width: 1120px;
+  max-width: var(--lp-shell-max);
   margin: 0 auto;
   padding: 22px 26px;
   border-top: 1px solid #e2e8f0;
@@ -4377,7 +4394,7 @@ html:has(.lp) {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 14px;
-  max-width: 1120px;
+  max-width: var(--lp-shell-max);
   margin: 0 auto;
 }
 
@@ -9181,9 +9198,12 @@ html:has(.lp) {
   gap: 4px;
 }
 
+/* Column names are the point of this card, so they never break mid-token: the
+   fixed grid tracks split `order_amt` into `order_a`/`mt`. The pair wraps as a
+   whole instead when the card is too narrow. */
 .lp-hero-flow-edges li {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 12px minmax(0, 1.15fr) auto;
+  display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 4px;
   padding: 5px 6px;
@@ -9195,12 +9215,17 @@ html:has(.lp) {
   font-family: var(--df-font-mono, "JetBrains Mono", ui-monospace, monospace);
 }
 
+.lp-hero-flow-edges li code {
+  white-space: nowrap;
+}
+
 .lp-hero-flow-edges li span {
   color: #94a3b8;
   text-align: center;
 }
 
 .lp-hero-flow-edges li em {
+  margin-left: auto;
   font-style: normal;
   font-size: 9px;
   font-weight: 720;
@@ -9439,7 +9464,7 @@ html:has(.lp) {
 }
 
 .docs-shot-reel--product .docs-shot-reel-stage {
-  aspect-ratio: 16 / 9.5;
+  aspect-ratio: 16 / 10;
 }
 
 .lp-mkt-algo {
@@ -10087,7 +10112,7 @@ html:has(.lp) {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 0;
-  max-width: 1120px;
+  max-width: var(--lp-shell-max);
   margin: -24px auto 8px;
   padding: 0;
   border: 1px solid #e2e8f0;
@@ -10126,7 +10151,7 @@ html:has(.lp) {
 
 .lp-cust-sectors,
 .lp-cust-stories {
-  max-width: 1120px;
+  max-width: var(--lp-shell-max);
   margin: 28px auto 0;
 }
 
@@ -10249,7 +10274,7 @@ html:has(.lp) {
 
 /* ── Contact sales layout ── */
 .lp-contact-stage {
-  max-width: 1120px;
+  max-width: var(--lp-shell-max);
   margin: -20px auto 48px;
   position: relative;
   z-index: 2;
@@ -10797,11 +10822,25 @@ html:has(.lp) {
   background: rgba(251, 191, 36, 0.16);
 }
 
+/*
+ * The chip sits under the column name, not beside it: at 167px a side-by-side
+ * chip forced `order_amt` to break mid-identifier, and a broken column name is
+ * the one thing this drawing must not show.
+ */
+.lp-cinema-field {
+  grid-template-columns: minmax(0, 1fr);
+  justify-items: start;
+  align-items: start;
+  gap: 6px;
+}
+
 .lp-cinema-field code {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   font-size: 13px;
   color: #f8fafc;
   font-weight: 600;
+  overflow-wrap: normal;
+  word-break: keep-all;
 }
 
 .lp-cinema-field em {
@@ -12077,14 +12116,15 @@ html:has(.lp) {
 
 /* Observability in Action — journey stage, token colors, WCAG body contrast */
 .lp-obs {
-  padding: 72px 24px 80px;
+  /* One vertical rhythm across the page: the section-y token, not a local pair. */
+  padding: var(--lp-section-y) 24px;
   background:
     linear-gradient(180deg, #ffffff 0%, #f3f5f7 48%, #eef2f5 100%);
   border-top: 1px solid var(--lp-line);
 }
 
 .lp-obs-inner {
-  max-width: 1120px;
+  max-width: var(--lp-shell-max);
   margin: 0 auto;
 }
 
@@ -12556,7 +12596,7 @@ html:has(.lp) {
 
 .lp-home-market,
 .lp-home-depth {
-  padding: clamp(64px, 8vw, 88px) 0;
+  padding: var(--lp-section-y) 0;
 }
 
 .lp-home-market { background: #fff; border-top: 1px solid var(--lp-line, #e4e8ee); }
@@ -12642,7 +12682,7 @@ html:has(.lp) {
 }
 
 .lp-home-measured {
-  padding: clamp(64px, 8vw, 88px) 0;
+  padding: var(--lp-section-y) 0;
   background: #0c1b2e;
   color: #fff;
 }
@@ -13252,4 +13292,40 @@ html:has(.lp) {
     max-width: none;
   }
   .lp-sales-form-foot { flex-direction: column; align-items: stretch; }
+}
+
+/* ---------------------------------------------------------------------------
+   Marketing cards — last owner. Copy wraps inside the card; long tokens
+   never paint past the border. Cinema identifiers keep their own keep-all.
+   --------------------------------------------------------------------------- */
+.lp .lp-usecase,
+.lp .lp-product-card,
+.lp .lp-platform-step,
+.lp .lp-together > *,
+.lp .lp-mkt-concept-card,
+.lp .lp-mkt-guide-card,
+.lp .lp-mkt-faq-card,
+.lp .lp-sales-faq,
+.lp [class*="lp-"][class*="-card"] {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.lp .lp-usecase h3,
+.lp .lp-usecase p,
+.lp .lp-usecase li,
+.lp .lp-product-card h3,
+.lp .lp-product-card p,
+.lp [class*="lp-"][class*="-card"] h3,
+.lp [class*="lp-"][class*="-card"] p,
+.lp [class*="lp-"][class*="-card"] li {
+  min-width: 0;
+  max-width: 100%;
+  overflow-wrap: anywhere;
+}
+
+.lp .lp-cinema-field code {
+  overflow-wrap: normal;
+  word-break: keep-all;
 }

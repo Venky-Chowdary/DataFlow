@@ -26,6 +26,7 @@ def test_catalog_summary():
     assert data.get("unique_drivers", data.get("transfer_live", 0)) >= 8
     assert data.get("unique_drivers", 999) < 80
     assert data["categories"] >= 8
+    assert data.get("catalog_tiles_are_not_transfer_live") is True
 
 
 def test_search_database_category():

@@ -11,6 +11,7 @@ if str(_API_ROOT) not in sys.path:
 
 from connectors.writer_common import (  # noqa: E402
     fits_integer,
+    integer_fit_failure,
     quarantine_unfit_integers,
 )
 from services.type_system import integer_storage_bounds  # noqa: E402
@@ -36,6 +37,62 @@ def test_fits_integer_overflow_cases():
     assert fits_integer("2147483648", "INTEGER") is False
 
 
+def test_a_fractional_value_never_fits_an_integer_carrier():
+    """The 1M-row MySQL abort: ``fits_integer`` said 22.433332 fits ``INT``.
+
+    It truncated to 22, found it in range, and let Validate promise a write the
+    writer refuses at row 1 with "Invalid integer". Fit and the write must agree.
+    """
+    for value in ("22.433332", "22.05", "21.833334", "-3.5", 22.5):
+        assert fits_integer(value, "INT", dest_db="mysql") is False, value
+        reason = integer_fit_failure(value, "INT", dest_db="mysql")
+        assert reason and "fractional" in reason
+
+    # Integral values — including scientific notation and integral decimals —
+    # are what the writer's _parse_integer accepts, so they still fit.
+    for value in ("22", "22.0", "1e3", "2.5e1", 22, True):
+        assert fits_integer(value, "INT", dest_db="mysql") is True, value
+
+
+def test_fit_and_writer_transform_agree_on_every_numeric_form():
+    """Same values through both rules — no third answer is possible."""
+    from services.transform_engine import apply_transform
+
+    for value in (
+        "22.433332",
+        "22.05",
+        "21.833334",
+        "-3.5",
+        "22",
+        "22.0",
+        "1e3",
+        "2.5e1",
+        "0",
+        "-7",
+    ):
+        parsed, error = apply_transform(value, "integer")
+        writer_accepts = error is None and parsed is not None
+        assert fits_integer(value, "BIGINT") is writer_accepts, value
+
+
+def test_quarantine_holds_out_a_fractional_cell_with_the_reason():
+    rows = [("22.433332", "ok"), ("22", "fine")]
+    details: list[dict] = []
+    out = quarantine_unfit_integers(
+        rows,
+        ["arr_time", "label"],
+        ["INT", "VARCHAR"],
+        details,
+        policy="quarantine",
+        dialect_label="MySQL INTEGER",
+        dest_db="mysql",
+    )
+    assert out == [("22", "fine")]
+    assert details and "fractional" in details[0]["reason"]
+    assert details[0].get("suggested_target_type") == "DOUBLE"
+    assert "DOUBLE" in (details[0].get("suggested_fix") or "")
+
+
 def test_quarantine_holds_out_overflow_integer():
     rows = [(2**31, "ok"), (1, "fine")]
     details: list[dict] = []
@@ -49,6 +106,7 @@ def test_quarantine_holds_out_overflow_integer():
     )
     assert out == [(1, "fine")]
     assert details and "does not fit" in details[0]["reason"]
+    assert details[0].get("suggested_target_type") == "BIGINT"
 
 
 def test_coerce_null_nulls_overflow_cell():

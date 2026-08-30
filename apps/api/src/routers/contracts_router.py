@@ -244,6 +244,12 @@ def sign_contract(contract_id: str, body: _SignRequest):
     )
     contract.status = ContractStatus.SIGNED
     contract.strict = body.strict
+    try:
+        from services.schema_fingerprint import fingerprint_mappings
+
+        meta["mapping_hash"] = fingerprint_mappings(list(contract.mappings or []))
+    except Exception:
+        meta.setdefault("mapping_hash", "")
     meta["revisions"] = revisions[-50:]
     contract.metadata = meta
     store.save_contract(contract)

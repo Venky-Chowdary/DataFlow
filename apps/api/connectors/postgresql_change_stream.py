@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from connectors.postgresql_conn import get_connection
+from services.cdc_capability import LogCaptureRefusal, classify_log_capture_failure
 from services.cdc_engine import ChangeBatch
 from services.cdc_schema_history import (
     connection_fingerprint,
@@ -33,6 +34,23 @@ _VALUE_RE = re.compile(r"^\s*(\w+)\[(\w+)\]:(.+)$")
 _logger = logging.getLogger(__name__)
 _OLD_KEY_PREFIX = "old-key:"
 _NEW_TUPLE_PREFIX = "new-tuple:"
+
+
+def _end_transaction(conn: Any) -> None:
+    """Roll back if a transaction block is still open on ``conn``.
+
+    Snapshot reads run in one REPEATABLE READ transaction, so nothing is lost
+    by rolling back — but leaving the block open means the connection cannot
+    take session-level settings and the source keeps an idle-in-transaction
+    xmin that blocks vacuum.
+    """
+    status = getattr(getattr(conn, "info", None), "transaction_status", None)
+    if status is not None and int(status) == 0:  # psycopg IDLE
+        return
+    try:
+        conn.rollback()
+    except Exception as exc:
+        _logger.warning("Exception suppressed: %s", exc, exc_info=exc)
 
 
 def _publication_name(database: str, table: str | list[str], cursor_key: str) -> str:
@@ -260,6 +278,9 @@ class PostgreSqlChangeStreamCdc:
     Falls back to ``test_decoding`` when pgoutput slot creation fails.
     Query CDC remains the outer fallback in ``cdc_transfer``.
     """
+
+    #: Why :meth:`is_available` said no, classified for the caller.
+    unavailable_reason: LogCaptureRefusal | None = None
 
     def __init__(
         self,
@@ -526,14 +547,27 @@ class PostgreSqlChangeStreamCdc:
         )
 
     def is_available(self) -> bool:
-        """Check logical replication is enabled and the user can create a slot."""
+        """Check logical replication is enabled and the user can create a slot.
+
+        A ``False`` answer also records :attr:`unavailable_reason` so the caller
+        can tell a server that never emits WAL logically (degrade, declared)
+        from an attach we could have made (slot quota, missing REPLICATION)
+        where degrading to cursor CDC would silently stop carrying DELETEs.
+        """
+        self.unavailable_reason = None
+        wal_logical: bool | None = None
         try:
             with self._conn() as conn:
                 with conn.cursor() as cur:
                     cur.execute("SHOW wal_level")
                     row = cur.fetchone()
                     if not row or row[0] != "logical":
-                        return False
+                        wal_logical = False
+                        raise RuntimeError(
+                            f"wal_level={(row[0] if row else 'unknown')} "
+                            "— logical decoding is off on this server"
+                        )
+                    wal_logical = True
                     cur.execute(
                         "SELECT 1 FROM pg_replication_slots WHERE slot_name = %s",
                         (self.slot_name,),
@@ -566,7 +600,16 @@ class PostgreSqlChangeStreamCdc:
                             raise
                 conn.commit()
             return True
-        except Exception:
+        except Exception as exc:
+            self.unavailable_reason = classify_log_capture_failure(
+                "postgresql", str(exc), server_log_enabled=wal_logical
+            )
+            _logger.warning(
+                "PostgreSQL logical decoding unavailable for slot %s: %s (%s)",
+                self.slot_name,
+                self.unavailable_reason.detail,
+                self.unavailable_reason.cause,
+            )
             return False
 
     def _resume_token(
@@ -1159,13 +1202,20 @@ class PostgreSqlChangeStreamCdc:
                             if len(fetched) < self.batch_size:
                                 break
                 conn.commit()
-            except Exception:
-                try:
-                    conn.rollback()
-                except Exception as exc:
-                    _logger.warning("Exception suppressed: %s", exc, exc_info=exc)
+            except BaseException:
+                # BaseException, not Exception: a consumer that stops iterating
+                # closes this generator with GeneratorExit while the REPEATABLE
+                # READ transaction is still open. An abandoned snapshot read
+                # must end that transaction, never leave it idle-in-transaction
+                # holding back vacuum on the source.
+                _end_transaction(conn)
                 raise
             finally:
+                # autocommit is a session-level setting: PostgreSQL rejects it
+                # inside a transaction block, so the transaction must be closed
+                # before restoring it (both on the happy path after commit and
+                # after the rollback above).
+                _end_transaction(conn)
                 try:
                     conn.autocommit = prev_autocommit
                 except Exception as exc:

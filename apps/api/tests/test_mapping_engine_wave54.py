@@ -63,7 +63,7 @@ def test_create_new_timezone_polarity_risk():
     assert "timezone_polarity" in kinds or "precision_collapse" in kinds or "lossy_coercion" in kinds
 
 
-def test_mapping_pipeline_stamps_create_new_type_risks():
+def _create_new_row(inferred_type: str) -> dict:
     from services.mapping_pipeline import run_mapping_pipeline
 
     result = run_mapping_pipeline(
@@ -72,7 +72,7 @@ def test_mapping_pipeline_stamps_create_new_type_risks():
         source_schemas=[
             {
                 "name": "created_at",
-                "inferred_type": "TIMESTAMPTZ",
+                "inferred_type": inferred_type,
                 "samples": ["2024-01-01T00:00:00Z"],
             },
         ],
@@ -82,9 +82,15 @@ def test_mapping_pipeline_stamps_create_new_type_risks():
     )
     row = result["mappings"][0]
     assert row.get("create_new") is True
+    return row
+
+
+def test_mapping_pipeline_stamps_create_new_type_risks():
+    # Nanosecond source into MySQL's 6-digit carrier — the truncation is real.
+    row = _create_new_row("TIMESTAMPTZ(9)")
     risks = row.get("create_new_risks") or []
     assert risks, (
-        f"expected create_new_risks for TIMESTAMPTZ→MySQL DATETIME, got {row}"
+        f"expected create_new_risks for TIMESTAMPTZ(9)→MySQL TIMESTAMP(6), got {row}"
     )
     assert row.get("requires_review") is True
     kinds = {r.get("kind") for r in risks}
@@ -93,3 +99,18 @@ def test_mapping_pipeline_stamps_create_new_type_risks():
         "lossy_coercion",
         "precision_collapse",
     }
+
+
+def test_mapping_pipeline_keeps_the_instant_carrier_without_a_contract():
+    """MySQL ``TIMESTAMP(6)`` keeps the instant — its 2038 ceiling is the only cost.
+
+    Polarity and precision survive, so no Risk Contract is demanded. The carrier
+    still holds only 1970..2038 of the source's range, which is a review chip
+    rather than the silence that let out-of-range rows fail at the write.
+    """
+    row = _create_new_row("TIMESTAMPTZ")
+    assert row["target_type"].upper().startswith("TIMESTAMP(6)"), row["target_type"]
+    assert {r.get("kind") for r in row.get("create_new_risks") or []} == {
+        "instant_range_cap"
+    }
+    assert row.get("requires_risk_contract") is False

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { DtIcon } from "../components/DtIcon";
 import { PilotConfirmCard } from "../components/pilot/PilotConfirmCard";
+import { PilotSources } from "../components/pilot/PilotSources";
 import {
   copilotChat,
   CopilotAction,
@@ -17,6 +18,7 @@ import { useActiveData } from "../lib/DataContext";
 import {
   applyPilotSafeActions,
   buildPilotDataContext,
+  isNavigableScreen,
   nextPilotResultId,
   pilotActionChipLabel,
   runPilotConfirm,
@@ -31,6 +33,8 @@ import { PageFrame } from "../components/ui/PageFrame";
 import { PageShell } from "../components/ui/PageShell";
 import {
   createEmptySession,
+  deletePilotSession,
+  isDeletedPilotSession,
   loadAsideOpen,
   loadPilotWorkspace,
   loadRailChat,
@@ -92,7 +96,7 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
     // Keep FAB/rail in sync when it shares this session id (wave 35 handoff).
     const active = sessions.find((s) => s.id === activeId);
     const rail = loadRailChat();
-    if (active && rail && rail.sessionId === activeId) {
+    if (active && rail && rail.sessionId === activeId && !isDeletedPilotSession(activeId)) {
       saveRailChat({
         messages: active.messages,
         history: active.history,
@@ -117,8 +121,11 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
 
   const ideas = AUTOMATION_IDEAS;
 
-  const applySafeActions = (actions?: CopilotAction[]) => {
-    applyPilotSafeActions(actions, onNavigate);
+  const applySafeActions = (
+    actions?: CopilotAction[],
+    toolsUsed?: { name: string; success: boolean }[],
+  ) => {
+    applyPilotSafeActions(actions, onNavigate, toolsUsed);
   };
 
   const clearPending = (msgIndex: number, actionId: string) => {
@@ -205,6 +212,7 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
             pending_actions: res.pending_actions,
             suggested_prompts: res.suggested_prompts,
             tools_used: res.tools_used,
+            sources: res.sources,
           },
         ],
       });
@@ -213,7 +221,7 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
       // exact bug that threw operators to Connectors/Studio and away from the
       // approval they were supposed to press for create_connector / start_transfer.
       if (!(res.pending_actions && res.pending_actions.length > 0)) {
-        applySafeActions(res.suggested_actions);
+        applySafeActions(res.suggested_actions, res.tools_used);
       }
       if (res.suggested_prompts?.length) setPrompts(res.suggested_prompts);
     } catch (error) {
@@ -248,16 +256,9 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
       });
       if (!ok) return;
     }
-    setSessions((prev) => {
-      const next = prev.filter((s) => s.id !== id);
-      if (!next.length) {
-        const empty = createEmptySession();
-        setActiveId(empty.id);
-        return [empty];
-      }
-      if (id === activeId) setActiveId(next[0].id);
-      return next;
-    });
+    const next = deletePilotSession(sessions, id, activeId);
+    setSessions(next.sessions);
+    setActiveId(next.activeId);
   };
 
   const recentChats = sessions.filter((s) => s.messages.length > 0 || s.id === activeId);
@@ -294,18 +295,8 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
       <PageFrame className={`df2-pilot-workspace df2-pilot-v2 ${asideOpen ? "" : "is-aside-collapsed"}`.trim()}>
         <div className="df2-pilot-status-bar" role="status">
           <div className="df2-pilot-status-brand">
-            {!asideOpen && (
-              <button
-                type="button"
-                className="df2-btn df2-btn-ghost df2-btn-sm df2-pilot-aside-reopen"
-                onClick={() => setAsideOpen(true)}
-                aria-label="Open recent chats"
-                title="Open recent chats"
-              >
-                <DtIcon name="menu" size={14} />
-                Chats
-              </button>
-            )}
+            {/* Opening the rail is the rail's own control (its menu icon);
+                the status bar used to repeat it. */}
             <span className={`df2-pilot-status-pill ${pilotStatusClass}`.trim()}>
               <span className="df2-pilot-status-dot" aria-hidden />
               {pilotInsightPill}
@@ -350,15 +341,8 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
                 Delete chat
               </button>
             )}
-            <button
-              type="button"
-              className="df2-btn df2-btn-ghost df2-btn-sm"
-              onClick={startNewChat}
-              title="Start a new chat"
-            >
-              <DtIcon name="plus" size={14} />
-              New chat
-            </button>
+            {/* New chat lives in the chat rail — expanded as a button, collapsed
+                as the rail's plus icon — so the header never repeats it. */}
           </div>
         </div>
       <div className="df2-pilot-body">
@@ -387,9 +371,10 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
             <div className="df2-pilot-aside-scroll">
               <div className="df2-pilot-section-label">
                 Recent chats
-                <span className="df2-pilot-session-count">
-                  {sessions.filter((s) => s.messages.length > 0).length}
-                </span>
+                {/* Count what the list shows — an unsent draft is listed, so
+                    counting only sent chats read as "Recent chats 0" above a
+                    visible row. */}
+                <span className="df2-pilot-session-count">{recentChats.length}</span>
               </div>
               <div className="df2-pilot-session-list">
                 {recentChats.length === 0 ? (
@@ -458,10 +443,12 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
             <div className="df2-pilot-main-inner">
               <div className="df2-pilot-hero">
                 <div className="df2-pilot-hero-icon"><DtIcon name="sparkle" size={28} /></div>
-                <h1 className="df2-pilot-title">Ask Datawrap Pilot to move, inspect, or govern data.</h1>
+                {/* PageShell already emits the page's only h1; this is the
+                    hero line under it. */}
+                <h2 className="df2-pilot-title">Talk to Datawrap Pilot like a colleague on the migration desk.</h2>
                 <p className="df2-pilot-subtitle">
-                  Natural-language data ops — schema, mappings, connectors, and jobs with the same governed engine as Transfer Studio.
-                  Chats are saved in this browser so a refresh does not wipe your thread.
+                  Ask in plain language — brief the workspace, summarize a finding, count a live table, or plan a transfer.
+                  Answers come from your connectors, jobs, and Validate proof. Nothing writes until you Confirm.
                 </p>
               </div>
 
@@ -491,6 +478,7 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
               {session.messages.map((msg, i) => (
                 <div key={i} className={`df2-pilot-msg ${msg.role}`}>
                   <div dangerouslySetInnerHTML={{ __html: renderSafeMarkdown(msg.text) }} />
+                  <PilotSources sources={msg.sources} />
                   {msg.pending_actions && msg.pending_actions.length > 0 && (
                     <div className="df2-pilot-pending">
                       {msg.pending_actions.map((pa) => (
@@ -506,8 +494,8 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
                   )}
                   {msg.actions?.map((a, j) => {
                     const screen = a.screen || a.route;
-                    return screen ? (
-                      <button key={j} type="button" className="df2-btn df2-btn-sm df2-mt-sm" onClick={() => onNavigate(screen as Screen)}>
+                    return isNavigableScreen(screen) ? (
+                      <button key={j} type="button" className="df2-btn df2-btn-sm df2-mt-sm" onClick={() => onNavigate(screen)}>
                         {pilotActionChipLabel(a)}
                       </button>
                     ) : null;
@@ -538,7 +526,7 @@ export function PilotPage({ onNavigate }: PilotPageProps) {
           <div className="df2-pilot-composer-bar">
             <textarea
               rows={started ? 2 : 3}
-              placeholder={started ? "Follow up…" : "Set up Postgres source, move Shopify orders to Snowflake, scan HR for PII…"}
+              placeholder={started ? "Follow up — summarize that, or ask what to do next…" : "Give me a workspace briefing, count airports, plan a transfer…"}
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={(e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); } }}

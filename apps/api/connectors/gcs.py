@@ -45,9 +45,25 @@ def test_gcs(
             "connection_string": connection_string or password,
             "password": password,
         })
+        from connectors.gcs_common import gcs_emulator_kwargs
+
+        probe_kw = gcs_emulator_kwargs({
+            "host": host,
+            "port": port,
+            "connection_string": connection_string or password,
+        })
         bucket_obj = client.bucket(bucket)
-        if not bucket_obj.exists():
-            return ConnectResult(ok=False, tables=[], error=f"GCS bucket `{bucket}` not found.")
+        if not bucket_obj.exists(**probe_kw):
+            # Create-new: a reachable emulator with no bucket is not "disconnected".
+            return ConnectResult(
+                ok=True,
+                tables=[],
+                message=(
+                    f"GCS endpoint reachable — bucket `{bucket}` is missing and "
+                    "will be created on first write."
+                ),
+                driver="google-cloud-storage",
+            )
         keys = [b.name for b in client.list_blobs(bucket, max_results=100)]
         return ConnectResult(
             ok=True,

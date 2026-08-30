@@ -46,6 +46,8 @@ def test_inline_write_pass_is_remapped_not_writer_ack(monkeypatch):
     }
     assert report.get("assurance_level") != "full_checksum"
     assert "row fidelity verified" not in str(report.get("message") or "").lower()
+    assert "not an independent dest read-back" not in str(report.get("message") or "").lower()
+    assert "write-pass" in str(report.get("message") or "").lower()
 
 
 def test_writer_ack_message_does_not_claim_row_fidelity(monkeypatch):

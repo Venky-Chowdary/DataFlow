@@ -10,7 +10,15 @@ from typing import Any, Callable
 
 from services.value_serializer import json_default
 
+from ..rag.product_docs import (
+    compose_documented_answer,
+    names_product_subject,
+    product_doc_search,
+)
 from .data_analyst import get_data_analyst
+from .tool_permissions import current_caller_role, denial_message, is_tool_allowed
+from .transfer_rules import parse_transfer_data_rules
+from .unsupported_question import is_answerable_subject, unsupported_question_output
 
 
 @dataclass
@@ -448,6 +456,44 @@ TOOL_DEFINITIONS: list[dict] = [
         },
     },
     {
+        "name": "create_schedule",
+        "description": (
+            "Stage a recurring pipeline (schedule) between two saved connectors for the "
+            "operator to Confirm. Grounds the route against live schemas, requires "
+            "preflight to clear, and stores the approved mapping on the schedule. "
+            "Cadence is the operator's own wording — “nightly at 2am in Asia/Kolkata”, "
+            "“every 15 minutes”, “weekly on Monday”, or a 5-field cron. This creates "
+            "nothing on its own: the schedule exists only after Confirm."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "source_connector_name": {"type": "string"},
+                "source_table": {"type": "string"},
+                "dest_connector_name": {"type": "string"},
+                "dest_table": {"type": "string"},
+                "cadence": {
+                    "type": "string",
+                    "description": "Cadence wording, with time/timezone when stated",
+                },
+                "sync_mode": {"type": "string"},
+                "cursor_column": {
+                    "type": "string",
+                    "description": "Watermark column — required for incremental modes",
+                },
+                "name": {"type": "string", "description": "Schedule display name"},
+                "validation_mode": {"type": "string", "enum": ["strict", "balanced", "lenient"]},
+                "schema_policy": {
+                    "type": "string",
+                    "enum": ["manual_review", "type_locked", "pause_on_change"],
+                },
+                "contract_id": {"type": "string"},
+                "require_signed_contract": {"type": "boolean"},
+            },
+            "required": ["cadence"],
+        },
+    },
+    {
         "name": "list_contracts",
         "description": "List data contracts available in the workspace.",
         "input_schema": {
@@ -678,13 +724,29 @@ TOOL_DEFINITIONS: list[dict] = [
             "required": ["source_table"],
         },
     },
+    {
+        "name": "brief_workspace",
+        "description": (
+            "Spoken sitrep of this workspace: connectors (tested/failed), recent "
+            "jobs, pipelines due or parked on approval, contracts. Use when the "
+            "operator asks what's going on, for a briefing, or to summarize the workspace."
+        ),
+        "input_schema": {"type": "object", "properties": {}, "required": []},
+    },
 ]
 
 TOOL_FAMILIES: list[dict] = [
     {
         "id": "discover",
         "label": "Discover",
-        "tools": ["list_datasets", "search_data", "search_connectors", "search_knowledge", "describe_pilot"],
+        "tools": [
+            "list_datasets",
+            "search_data",
+            "search_connectors",
+            "search_knowledge",
+            "describe_pilot",
+            "brief_workspace",
+        ],
     },
     {
         "id": "profile",
@@ -732,6 +794,7 @@ TOOL_FAMILIES: list[dict] = [
             "list_schedules",
             "get_schedule",
             "run_schedule_now",
+            "create_schedule",
             "list_contracts",
             "open_job",
             "open_schedule",
@@ -807,6 +870,7 @@ class DataPilotTools:
             "list_schedules": self._list_schedules,
             "get_schedule": self._get_schedule,
             "run_schedule_now": self._run_schedule_now,
+            "create_schedule": self._create_schedule,
             "list_contracts": self._list_contracts,
             "open_job": self._open_job,
             "open_schedule": self._open_schedule,
@@ -820,10 +884,23 @@ class DataPilotTools:
             "introspect_connector_schema": self._introspect_connector_schema,
             "diff_schemas": self._diff_schemas,
             "map_connector_schemas": self._map_connector_schemas,
+            "brief_workspace": self._brief_workspace,
         }
         handler = handlers.get(name)
         if not handler:
             return ToolResult(name=name, success=False, output=None, error=f"Unknown tool: {name}")
+        # One chokepoint for permissions: every path into a tool — the
+        # deterministic planner, an LLM tool loop, a recovery follow-up — comes
+        # through here, so none of them can reach a tool the caller's role does
+        # not hold.
+        role = current_caller_role()
+        if not is_tool_allowed(role, name):
+            return ToolResult(
+                name=name,
+                success=False,
+                output=None,
+                error=denial_message(role, name),
+            )
         try:
             return handler(**args)
         except TypeError as e:
@@ -1066,7 +1143,19 @@ class DataPilotTools:
             }
             for j in jobs
         ]
-        return ToolResult(name="list_jobs", success=True, output={"jobs": summary, "count": len(summary)})
+        # "How many jobs?" must be answered from the whole history — the page we
+        # read here is only the window we can show.
+        counts = mongo.count_jobs()
+        return ToolResult(
+            name="list_jobs",
+            success=True,
+            output={
+                "jobs": summary,
+                "count": len(summary),
+                "total": int(counts.get("total") or 0),
+                "status_counts": counts.get("by_status") or {},
+            },
+        )
 
     def _get_job(self, job_id: str = "") -> ToolResult:
         from services.quarantine_from_preflight import merge_job_quarantine
@@ -1328,6 +1417,7 @@ class DataPilotTools:
                     "List and run pipeline schedules (with confirmation)",
                     "Open Fix bad data / quarantine paths in Transfer Studio (Confirm required)",
                     "Open any app screen (Transfer, Jobs, Pipelines, Contracts, Query, …)",
+                    "Brief the live workspace (connectors, jobs, parked pipelines, contracts)",
                 ],
                 "cannot_yet": [
                     "Export a table to a downloadable file from chat "
@@ -1351,6 +1441,7 @@ class DataPilotTools:
                 "datasets": [
                     {"name": d.get("name"), "columns": d.get("column_count"), "rows": d.get("row_count")}
                     for d in datasets
+                    if d.get("name") and not looks_like_index_dump_name(str(d.get("name")))
                 ],
                 "connectors": [
                     {"name": c.get("name"), "type": c.get("type")}
@@ -1365,6 +1456,7 @@ class DataPilotTools:
                     f"Transfer orders from {ex_src} to {ex_dst} as upsert",
                     "Why did job <id> fail?",
                     "Show my pipelines",
+                    "Give me a workspace briefing",
                 ],
                 "remembers": [
                     "Last connector, table, metric, and grouping in this chat",
@@ -1377,13 +1469,29 @@ class DataPilotTools:
             },
         )
 
+    def _brief_workspace(self, workspace_id: str = "") -> ToolResult:
+        """Live sitrep — counts only from the same stores Jobs / Connectors use."""
+        from .workspace_briefing import collect_workspace_briefing
+
+        facts = collect_workspace_briefing(workspace_id=workspace_id or "")
+        attention = [str(a) for a in (facts.get("attention") or []) if a]
+        return ToolResult(
+            name="brief_workspace",
+            success=True,
+            output={
+                "facts": facts,
+                "connector_count": facts.get("connector_count", 0),
+                "job_count": facts.get("job_count", 0),
+                "schedule_count": facts.get("schedule_count", 0),
+                "contract_count": facts.get("contract_count", 0),
+                "attention": attention,
+                "empty_workspace": bool(facts.get("empty_workspace")),
+            },
+        )
+
     def _explain_product(self, query: str = "") -> ToolResult:
         """Curated Datawrap product answers — independent of cloud LLMs and RAG noise."""
-        from ..knowledge.copilot_knowledge import (
-            CONVERSATION_TEMPLATES,
-            INTENT_PATTERNS,
-            PRODUCT_CAPABILITIES,
-        )
+        from ..knowledge.copilot_knowledge import PRODUCT_CAPABILITIES
 
         lower = (query or "").lower().strip()
 
@@ -1495,133 +1603,117 @@ class DataPilotTools:
                 ),
             ),
         ]
-        for pattern, intent, answer in direct:
-            if pattern.search(lower):
-                return ToolResult(
-                    name="explain_product",
-                    success=True,
-                    output={
-                        "intent": intent,
-                        "answer": answer,
-                        "capabilities": PRODUCT_CAPABILITIES[:6],
-                        "actions": [],
-                        "source": "local_product_faq",
-                    },
-                )
+        curated = next(
+            ((intent, answer) for pattern, intent, answer in direct if pattern.search(lower)),
+            None,
+        )
 
-        scores: dict[str, int] = {}
-        for intent, keywords in INTENT_PATTERNS.items():
-            score = sum(1 for kw in keywords if kw in lower)
-            if score:
-                scores[intent] = score
-        # Boost common product how-tos
-        if re.search(r"\b(?:transfer|move|migrate|sync|copy)\b", lower):
-            scores["transfer_help"] = scores.get("transfer_help", 0) + 3
-        if re.search(r"\b(?:map|mapping|column|schema)\b", lower):
-            scores["mapping_help"] = scores.get("mapping_help", 0) + 2
-        if re.search(r"\b(?:preflight|gate|validate|validation)\b", lower):
-            scores["preflight_help"] = scores.get("preflight_help", 0) + 3
-        if re.search(r"\b(?:connector|mongodb|postgres|snowflake|connect)\b", lower):
-            scores["connector_help"] = scores.get("connector_help", 0) + 2
-        if re.search(r"\b(?:pii|gdpr|hipaa|compliance)\b", lower):
-            scores["pii_compliance"] = scores.get("pii_compliance", 0) + 2
-        if re.search(r"\b(?:fail|error|broke|troubleshoot|job)\b", lower):
-            scores["troubleshooting"] = scores.get("troubleshooting", 0) + 2
-        if re.search(
-            r"\b(?:dataflow|datawrap|datatransfer|what is|what'?s different|airbyte|fivetran)\b",
-            lower,
-        ):
-            scores["product_help"] = scores.get("product_help", 0) + 3
-        if re.search(r"\b(?:count|aggregate|analy[sz]e|how many|sql)\b", lower):
-            scores["analytics_help"] = scores.get("analytics_help", 0) + 2
+        # The shipped operator documentation, retrieved lexically with a grounding
+        # floor. Documentation leads even when a curated definition matched: the
+        # curated prose carries no citation, so answering from it alone gave the
+        # operator a confident paragraph they could not trace to any page.
+        doc_hits = product_doc_search(query, limit=3)
+        if doc_hits:
+            documented = compose_documented_answer(doc_hits)
+            return ToolResult(
+                name="explain_product",
+                success=True,
+                output={
+                    "intent": curated[0] if curated else "documentation",
+                    # Curated regex is the lead definition; Help citations follow
+                    # so every sentence sits next to a page the operator can open.
+                    "answer": f"{curated[1]}\n\n{documented}" if curated else documented,
+                    "capabilities": PRODUCT_CAPABILITIES[:6],
+                    # No navigate action: the citations below are the control that
+                    # opens the article, and a second one only competes with them.
+                    "actions": [],
+                    "sources": [hit.as_source() for hit in doc_hits],
+                    "grounded": True,
+                    "source": "product_documentation",
+                },
+            )
 
-        intent = max(scores, key=scores.get) if scores else "greeting"
-        matched = next((t for t in CONVERSATION_TEMPLATES if t.get("intent") == intent), None)
-        if not matched:
-            matched = CONVERSATION_TEMPLATES[0]
-        actions = list(matched.get("actions") or [])
+        if curated:
+            return ToolResult(
+                name="explain_product",
+                success=True,
+                output={
+                    "intent": curated[0],
+                    "answer": curated[1],
+                    "capabilities": PRODUCT_CAPABILITIES[:6],
+                    "actions": [],
+                    "sources": [],
+                    "grounded": False,
+                    "source": "local_product_faq",
+                },
+            )
+
+        # No Help hit and no explicit FAQ regex: refuse. Keyword-bucket
+        # CONVERSATION_TEMPLATES are not evidence.
         return ToolResult(
             name="explain_product",
             success=True,
-            output={
-                "intent": intent,
-                "answer": matched.get("assistant") or "",
-                "capabilities": PRODUCT_CAPABILITIES[:6],
-                "actions": actions,
-                "source": "local_product_faq",
-            },
+            output=unsupported_question_output(query),
         )
 
     def _search_knowledge(self, query: str = "") -> ToolResult:
         if not query.strip():
             return ToolResult(name="search_knowledge", success=False, output=None, error="query required")
-        try:
-            from ..rag.pipeline import get_rag_pipeline
-            rag = get_rag_pipeline()
-            rag.ingestion.ensure_knowledge_loaded()
-            result = rag.retriever.retrieve(query, n_results=8)
-            hits = []
-            for d in result.documents:
-                text = (d.text or "").strip()
-                score = float(d.score or 0)
-                # Drop low-score noise and raw ontology shards that read like debug dumps.
-                if score < 0.28:
-                    continue
-                meta_type = str(d.metadata.get("type") or "").lower()
-                # Prefer real product/docs hits over synthetic catalog training docs.
-                if meta_type in {
-                    "synthetic_catalog",
-                    "catalog_schema",
-                    "generated_qna",
-                    "training",
-                    "ontology",
-                    "embedding_shard",
-                } and score < 0.62:
-                    continue
-                if "650+" in text or "620+" in text:
-                    # Catalog marketing counts are not transfer-ready evidence.
-                    continue
-                if _is_raw_knowledge_shard(text) and not _query_targets_semantic_type(query, text):
-                    continue
-                # Synonym / industry catalog dumps are never answers to "get users
-                # from postgres" — only keep them when the operator asked about
-                # synonyms / PII / semantic types explicitly.
-                qlow = query.lower()
-                wants_ontology = any(
-                    w in qlow
-                    for w in ("synonym", "semantic type", "pii", "column pattern", "canonical")
-                )
-                if _is_noise_knowledge_hit(text) and not wants_ontology:
-                    continue
-                hits.append({
-                    "text": text[:600],
-                    "score": round(score, 3),
-                    "type": d.metadata.get("type", ""),
-                    "summary": _summarize_knowledge_hit(text),
-                })
-                if len(hits) >= 4:
-                    break
+
+        # Embedding search always returns its nearest neighbours, so a question about
+        # nothing this product does still came back with three confident-looking
+        # fragments ("how do I cook rice" → paste a job id, your dataset has 11
+        # columns). If the question names no documented subject, refuse before
+        # retrieval instead of narrating whatever the index happened to be closest to.
+        if not is_answerable_subject(query):
+            return ToolResult(
+                name="search_knowledge",
+                success=True,
+                output=unsupported_question_output(query),
+            )
+
+        # Shipped operator documentation answers first, with citations. Embedding
+        # similarity alone returned readable-looking fragments the operator could
+        # not trace back to any page, so a documented answer looked like a guess.
+        doc_hits = product_doc_search(query, limit=3)
+        if doc_hits:
             return ToolResult(
                 name="search_knowledge",
                 success=True,
                 output={
                     "query": query,
-                    "hits": hits,
-                    "count": len(hits),
-                    "empty": len(hits) == 0,
-                    "hint": (
-                        None
-                        if hits
-                        else (
-                            "No grounded product knowledge matched. Ask about a saved "
-                            "connector, table, job ID, or pf_ validation run — or say "
-                            "what can you do."
-                        )
-                    ),
+                    "answer": compose_documented_answer(doc_hits),
+                    "hits": [
+                        {
+                            "text": hit.chunk.text[:600],
+                            "score": round(hit.score, 3),
+                            "type": "product_doc",
+                            "summary": hit.chunk.citation,
+                        }
+                        for hit in doc_hits
+                    ],
+                    "count": len(doc_hits),
+                    "empty": False,
+                    "sources": [hit.as_source() for hit in doc_hits],
+                    "grounded": True,
+                    "source": "product_documentation",
                 },
             )
-        except Exception as e:
-            return ToolResult(name="search_knowledge", success=False, output=None, error=str(e))
+
+        # On-vocabulary but no citable Help page: refuse. Embedding nearest
+        # neighbours are not an answer — they narrated ontology shards as
+        # product knowledge (subscriber_id → telecom synonym dump).
+        refused = unsupported_question_output(query)
+        refused["hint"] = (
+            "No grounded product knowledge matched. Ask about a saved "
+            "connector, table, job ID, or pf_ validation run — or say "
+            "what can you do."
+        )
+        return ToolResult(
+            name="search_knowledge",
+            success=True,
+            output=refused,
+        )
 
     def _plan_transfer_route(
         self,
@@ -2134,6 +2226,14 @@ class DataPilotTools:
         procedure_params: Any = None,
         contract_id: str = "",
         require_signed_contract: Any = None,
+        source_filter: dict | None = None,
+        upsert_key: str = "",
+        dedupe_key: str = "",
+        rule_questions: list | None = None,
+        applied_rules: list | None = None,
+        cadence: str = "",
+        all_tables: bool = False,
+        limit: int = 0,
     ) -> ToolResult:
         from .transfer_tools import plan_transfer
 
@@ -2154,6 +2254,13 @@ class DataPilotTools:
             procedure_params=procedure_params,
             contract_id=contract_id,
             require_signed_contract=require_signed_contract,
+            source_filter=source_filter,
+            upsert_key=upsert_key,
+            dedupe_key=dedupe_key,
+            rule_questions=rule_questions,
+            applied_rules=applied_rules,
+            cadence=cadence,
+            all_tables=all_tables,
         )
 
     def _start_transfer(
@@ -2175,6 +2282,13 @@ class DataPilotTools:
         procedure_params: Any = None,
         contract_id: str = "",
         require_signed_contract: Any = None,
+        source_filter: dict | None = None,
+        upsert_key: str = "",
+        dedupe_key: str = "",
+        rule_questions: list | None = None,
+        applied_rules: list | None = None,
+        cadence: str = "",
+        all_tables: bool = False,
     ) -> ToolResult:
         from .transfer_tools import start_transfer
 
@@ -2196,6 +2310,71 @@ class DataPilotTools:
             procedure_params=procedure_params,
             contract_id=contract_id,
             require_signed_contract=require_signed_contract,
+            source_filter=source_filter,
+            upsert_key=upsert_key,
+            dedupe_key=dedupe_key,
+            rule_questions=rule_questions,
+            applied_rules=applied_rules,
+            cadence=cadence,
+            all_tables=all_tables,
+        )
+
+    def _create_schedule(
+        self,
+        source_connector_id: str = "",
+        source_connector_name: str = "",
+        source_table: str = "",
+        dest_connector_id: str = "",
+        dest_connector_name: str = "",
+        dest_table: str = "",
+        sync_mode: str = "",
+        schema_policy: str = "manual_review",
+        validation_mode: str = "balanced",
+        cadence: str = "",
+        name: str = "",
+        cursor_column: str = "",
+        source_timezone: str = "",
+        source_read_mode: str = "",
+        procedure_call: str = "",
+        source_query: str = "",
+        procedure_params: Any = None,
+        contract_id: str = "",
+        require_signed_contract: Any = None,
+        source_filter: dict | None = None,
+        upsert_key: str = "",
+        dedupe_key: str = "",
+        rule_questions: list | None = None,
+        applied_rules: list | None = None,
+        limit: int = 0,
+    ) -> ToolResult:
+        from .schedule_tools import create_schedule
+
+        return create_schedule(
+            source_connector_id=source_connector_id,
+            source_connector_name=source_connector_name,
+            source_table=source_table,
+            dest_connector_id=dest_connector_id,
+            dest_connector_name=dest_connector_name,
+            dest_table=dest_table,
+            sync_mode=sync_mode,
+            schema_policy=schema_policy,
+            validation_mode=validation_mode,
+            cadence=cadence,
+            name=name,
+            cursor_column=cursor_column,
+            source_timezone=source_timezone,
+            source_read_mode=source_read_mode,
+            procedure_call=procedure_call,
+            source_query=source_query,
+            procedure_params=procedure_params,
+            contract_id=contract_id,
+            require_signed_contract=require_signed_contract,
+            source_filter=source_filter,
+            upsert_key=upsert_key,
+            dedupe_key=dedupe_key,
+            rule_questions=rule_questions,
+            applied_rules=applied_rules,
+            limit=limit,
         )
 
     def _analyze_result(
@@ -2385,9 +2564,9 @@ def _looks_like_product_howto(lower: str) -> bool:
         return False
     howto = bool(
         re.search(
-            r"\b(?:what is|what'?s|what are|how do i|how does|how to|explain|"
+            r"\b(?:what is|what'?s|what are|what does|what do|how do i|how does|how to|explain|"
             r"tell me (?:everything |more )?about|where (?:do|can) i|can i|"
-            r"what makes|remind me|"
+            r"what makes|remind me|meaning of|"
             r"do i need|is .+ dangerous|how is)\b",
             text,
         )
@@ -2400,7 +2579,7 @@ def _looks_like_product_howto(lower: str) -> bool:
             r"schema types?|semantic types?|type system|logical types?|"
             r"transfers?|pilot|openai|anthropic|"
             r"ollama|confirm|upsert|append|cdc|sync mode|full refresh|merge|"
-            r"api key|accurate)\b",
+            r"api key|accurate|mcp|contracts?|reconcile)\b",
             text,
         )
     )
@@ -2747,6 +2926,8 @@ _TOOL_PRIORITY: dict[str, int] = {
     "list_connector_objects": 84,
     "create_connector": 82,
     "remediate_validation": 80,
+    # A cadence names a standing instruction, so it outranks a one-off run.
+    "create_schedule": 109,
     "run_schedule_now": 78,
     "get_job": 75,
     "get_preflight_run": 74,
@@ -2755,6 +2936,7 @@ _TOOL_PRIORITY: dict[str, int] = {
     "get_schedule": 70,
     "list_schedules": 60,
     "list_contracts": 58,
+    "brief_workspace": 56,
     "list_jobs": 55,
     "list_connectors": 52,
     "search_connectors": 50,
@@ -2774,6 +2956,18 @@ _TOOL_PRIORITY: dict[str, int] = {
     "describe_pilot": 5,
     "explain_product": 6,
 }
+
+def looks_like_index_dump_name(name: str) -> bool:
+    """Hash-prefixed upload / synonym shards — never speak these as dataset names."""
+    label = str(name or "").strip()
+    if not label:
+        return True
+    low = label.lower()
+    if "synonym" in low or "industry schema" in low:
+        return True
+    head = label.replace("-", "").replace("_", "")[:16]
+    return len(label) >= 16 and all(c in "0123456789abcdef" for c in head.lower())
+
 
 _LIVE_SCHEMA_TOOLS = frozenset({
     "map_connector_schemas",
@@ -2835,7 +3029,15 @@ def prune_planned_tools(planned: list[tuple[str, dict]]) -> list[tuple[str, dict
         names = {n for n, _ in planned}
     # A concrete transfer already contains the mapping, gates and route, so the
     # generic advice tools beside it are redundant noise.
-    if names & {"start_transfer", "plan_transfer"}:
+    # A product FAQ already answers from Help. Companion quality/dataset dumps
+    # (156 hashed uploads next to "what are the preflight gates") are noise.
+    if "explain_product" in names:
+        planned = [
+            (n, a) for n, a in planned
+            if n not in ("list_datasets", "analyze_dataset", "search_data", "compare_datasets")
+        ]
+        names = {n for n, _ in planned}
+    if names & {"start_transfer", "plan_transfer", "create_schedule"}:
         planned = [
             (n, a) for n, a in planned
             if n not in (
@@ -2850,7 +3052,7 @@ def prune_planned_tools(planned: list[tuple[str, dict]]) -> list[tuple[str, dict
     if "get_job" in names or "get_preflight_run" in names or "open_job" in names:
         planned = [(n, a) for n, a in planned if n != "list_jobs"]
     # Job / remediate: keep inventory lists for triage ("why did validate fail").
-    if "run_schedule_now" in names or "create_connector" in names:
+    if names & {"run_schedule_now", "create_connector", "create_schedule"}:
         planned = [
             (n, a) for n, a in planned
             if n not in (
@@ -2892,6 +3094,7 @@ def prune_planned_tools(planned: list[tuple[str, dict]]) -> list[tuple[str, dict
                 "navigate",
                 "start_transfer_studio",
                 "list_jobs",
+                "brief_workspace",
                 "list_datasets",
                 "describe_pilot",
                 "explain_product",
@@ -3118,9 +3321,105 @@ def parse_transfer_schema_posture(lowered: str) -> dict[str, Any]:
     return {}
 
 
+# An object named explicitly: "table users" / "the users table" / "collection events".
+_TABLE_PREFIX_RE = re.compile(
+    r"\b(?:from\s+|of\s+|in\s+|for\s+)?(?:the\s+)?(?:table|collection|dataset)\s+"
+    r"[`\"']?(?P<named>[A-Za-z_][\w.$]*)[`\"']?",
+    re.IGNORECASE,
+)
+_TABLE_SUFFIX_RE = re.compile(
+    r"\b(?:the\s+)?[`\"']?(?P<named>[A-Za-z_][\w.$]*)[`\"']?\s+(?:table|collection)\b",
+    re.IGNORECASE,
+)
+_ALL_TABLES_RE = re.compile(
+    r"\b(?:all|every|each)\s+(?:the\s+)?(?:tables?|collections?)\b"
+    r"|\b(?:whole|entire|full)\s+(?:database|schema|db)\b",
+    re.IGNORECASE,
+)
+_ROUTE_FROM_TO_RE = re.compile(
+    r"\b(?:from|out\s+of)\s+(?P<src>.+?)\s+(?:to|into|onto|over\s+to|->)\s+(?P<dst>.+?)"
+    r"(?=[,;?]|$)",
+    re.IGNORECASE,
+)
+_ROUTE_TO_FROM_RE = re.compile(
+    r"\b(?:to|into|onto)\s+(?P<dst>.+?)\s+(?:from|out\s+of)\s+(?P<src>.+?)(?=[,;?]|$)",
+    re.IGNORECASE,
+)
+_ROUTE_ARROW_RE = re.compile(
+    r"(?P<src>[A-Za-z0-9_][\w .\-]{0,48}?)\s*->\s*(?P<dst>[A-Za-z0-9_][\w .\-]{0,48})",
+    re.IGNORECASE,
+)
+_TRANSFER_VERB_RE = re.compile(rf"\b(?:{_TRANSFER_VERBS}|moving)\b", re.IGNORECASE)
+_BARE_OBJECT_WORDS = frozenset({
+    "data", "rows", "records", "everything", "all", "it", "them", "tables",
+    "table", "stuff", "things",
+})
+
+
+def _extract_named_table(text: str) -> tuple[str, str]:
+    """Pull an explicitly named object out of the route text.
+
+    "transfer data from sql to postgres from table users" states the table
+    after the destination — reading the tail as part of the destination's name
+    is why that phrasing used to resolve to nothing at all.
+    """
+    for pattern in (_TABLE_PREFIX_RE, _TABLE_SUFFIX_RE):
+        for match in pattern.finditer(text or ""):
+            name = match.group("named").strip()
+            # "transfer table users" — the verb is not the object being moved.
+            if name.lower() in _BARE_OBJECT_WORDS or _TRANSFER_VERB_RE.fullmatch(
+                name.lower()
+            ):
+                continue
+            stripped = f"{text[:match.start()]} {text[match.end():]}"
+            return name, re.sub(r"\s+", " ", stripped).strip().strip(",;").strip()
+    return "", (text or "").strip()
+
+
+def _extract_route_endpoints(text: str) -> tuple[str, str, str]:
+    """Return ``(source, destination, sync_mode)`` from route-only text."""
+    route = (
+        _ROUTE_FROM_TO_RE.search(text or "")
+        or _ROUTE_TO_FROM_RE.search(text or "")
+        or _ROUTE_ARROW_RE.search(text or "")
+    )
+    if not route:
+        return "", "", ""
+    src = _capture_connector_name(route.group("src"))
+    dst, mode = _strip_transfer_tail(route.group("dst").strip().strip("\"'"))
+    return src, _capture_connector_name(dst), mode
+
+
+def _asks_for_schema(lower: str) -> bool:
+    """True when the operator actually asked to see a schema, not just a transfer."""
+    return bool(
+        re.search(r"\b(?:schema|columns|column list|describe|ddl|data ?types)\b", lower)
+        and re.search(r"\b(?:show|list|what|describe|see|get|print|introspect)\b", lower)
+    )
+
+
+# Wording that turns a transfer request into a standing one. Only consulted when
+# a transfer route was already parsed, so "show my schedules" cannot reach it.
+_SCHEDULE_INTENT_RE = re.compile(
+    r"\b(?:schedule|scheduled|scheduling|automate|automated|recurring|"
+    r"repeat|repeatedly|on\s+a\s+schedule)\b",
+    re.IGNORECASE,
+)
+
+
 def parse_transfer_intent(message: str) -> dict | None:
-    """Extract source/destination/table from a transfer request, or None."""
-    cleaned, extras = parse_transfer_bind_and_rules(message)
+    """Extract source/destination/table/data rules from a transfer request.
+
+    Rule clauses are parsed and removed *before* the route is read, so
+    "…to Warehouse, only rows where status = active, upsert on id" resolves to
+    the connector **Warehouse** and a filter — not to a connector whose name is
+    the rest of the sentence. Rules the engine cannot apply come back as
+    questions on the intent; the caller must refuse rather than move data the
+    operator did not ask for.
+    """
+    cleaned, extras = parse_transfer_bind_and_rules(normalize_operator_typos(message))
+    cleaned, rules = parse_transfer_data_rules(cleaned)
+    extras.update(rules.as_intent_fields())
     text = cleaned.strip()
     if not text:
         return None
@@ -3129,7 +3428,45 @@ def parse_transfer_intent(message: str) -> dict | None:
         or _TRANSFER_TO_FROM_RE.search(text)
         or _TRANSFER_ARROW_RE.search(text)
     )
+    _matched_table = match.group("table").strip().lower() if match else ""
+    if match and (
+        _matched_table in _BARE_OBJECT_WORDS
+        or _TRANSFER_VERB_RE.fullmatch(_matched_table)
+    ):
+        # "transfer data from A to B from table users" — the object is named
+        # elsewhere in the sentence, so re-read the route without it.
+        match = None
     if not match:
+        named, route_text = _extract_named_table(text)
+        if named and _TRANSFER_VERB_RE.search(text):
+            src, dst, mode = _extract_route_endpoints(route_text)
+            if dst:
+                lowered = text.lower()
+                return {
+                    "source_table": named,
+                    "source_connector_name": src[:80],
+                    "dest_connector_name": dst[:80],
+                    "sync_mode": mode or normalize_sync_mode_for_message(lowered),
+                    # No source named, or a rule we could not apply: plan, never mutate.
+                    "plan_only": (
+                        not src
+                        or rules.blocking
+                        or any(w in lowered for w in _PLAN_ONLY_WORDS)
+                    ),
+                    **extras,
+                }
+        if _ALL_TABLES_RE.search(text) and _TRANSFER_VERB_RE.search(text):
+            src, dst, mode = _extract_route_endpoints(text)
+            if src or dst:
+                return {
+                    "source_table": "",
+                    "source_connector_name": src[:80],
+                    "dest_connector_name": dst[:80],
+                    "sync_mode": mode,
+                    "all_tables": True,
+                    "plan_only": True,
+                    **extras,
+                }
         # Table + destination only — still stage a plan so Confirm/clarify can ask source.
         soft = _TRANSFER_TO_ONLY_RE.search(text)
         if soft and not re.search(r"\bfrom\b|\bout\s+of\b", text, re.I):
@@ -3156,7 +3493,7 @@ def parse_transfer_intent(message: str) -> dict | None:
     if not table or not source or not dest:
         return None
     # Bare "data/rows/records" is not a real table — ask or plan the route instead.
-    if table.lower() in {"data", "rows", "records", "everything", "all", "it", "them"}:
+    if table.lower() in _BARE_OBJECT_WORDS:
         return None
     lowered = text.lower()
     if not mode:
@@ -3166,8 +3503,9 @@ def parse_transfer_intent(message: str) -> dict | None:
         "source_connector_name": source[:80],
         "dest_connector_name": dest[:80],
         "sync_mode": mode,
-        # Asking what a transfer *would* do must never stage a mutation.
-        "plan_only": any(w in lowered for w in _PLAN_ONLY_WORDS),
+        # Asking what a transfer *would* do must never stage a mutation, and
+        # neither may a request carrying a rule we could not apply.
+        "plan_only": rules.blocking or any(w in lowered for w in _PLAN_ONLY_WORDS),
         **extras,
     }
 
@@ -3181,16 +3519,34 @@ def normalize_sync_mode_for_message(lowered: str) -> str:
     return ""
 
 
+# High-frequency operator misspellings. A typo must not cost the operator the
+# whole intent: "tranfer" is still a transfer.
+_TYPO_FIXES: tuple[tuple[str, str], ...] = (
+    (r"\btra?ns?fe?r\b", "transfer"),
+    (r"\btrasfer\b", "transfer"),
+    (r"\bmigra?te?\b", "migrate"),
+    (r"\bschdule\b", "schedule"),
+    (r"\bmny\b", "many"),
+    (r"\btbls?\b", "tables"),
+    (r"\bcnt\b", "count"),
+    (r"\bconnectorz\b", "connectors"),
+    (r"\bdbs\b", "databases"),
+    (r"\bpostgress?ql\b", "postgresql"),
+    (r"\bposgres\b", "postgres"),
+)
+
+
+def normalize_operator_typos(message: str) -> str:
+    """Repair common misspellings before any intent parsing."""
+    text = message or ""
+    for pattern, replacement in _TYPO_FIXES:
+        text = re.sub(pattern, replacement, text, flags=re.I)
+    return text
+
+
 def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
     """Local tool routing when no LLM tool-use is available."""
-    # Light typo normalization for high-frequency operator misspellings.
-    message = re.sub(r"\btrasfer\b", "transfer", message or "", flags=re.I)
-    message = re.sub(r"\bschdule\b", "schedule", message or "", flags=re.I)
-    message = re.sub(r"\bmny\b", "many", message or "", flags=re.I)
-    message = re.sub(r"\btbls\b", "tables", message or "", flags=re.I)
-    message = re.sub(r"\bcnt\b", "count", message or "", flags=re.I)
-    message = re.sub(r"\bconnectorz\b", "connectors", message or "", flags=re.I)
-    message = re.sub(r"\bdbs\b", "databases", message or "", flags=re.I)
+    message = normalize_operator_typos(message)
     lower = message.lower()
     planned: list[tuple[str, dict]] = []
 
@@ -3201,6 +3557,21 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
 
     if _is_meta_pilot_question(lower):
         planned.append(("describe_pilot", {}))
+        return planned
+
+    from .dialogue_acts import classify_dialogue_act
+
+    _act = classify_dialogue_act(message)
+    # Sitrep asks own a dedicated tool. Inventory verbs ("show my jobs") and
+    # named objects (job_/pf_) keep their existing routers.
+    if _act == "briefing" and not re.search(
+        r"\b(?:job_|pf_)[a-z0-9]"
+        r"|(?:show|list|open)\s+(?:my\s+)?(?:jobs?|pipelines?|schedules?|connectors?)\b"
+        r"|(?:plan|start|stage)\s+transfer\b"
+        r"|\bsample\b|\bcount\s+rows\b|\bfix\s+(?:my\s+)?mapping\b",
+        lower,
+    ):
+        planned.append(("brief_workspace", {}))
         return planned
 
     nav_map = {
@@ -3570,8 +3941,16 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
             planned.append(("navigate", {"screen": "schedules"}))
             planned = [(n, a) for n, a in planned if n != "sample_connector_object"]
 
-    if any(w in lower for w in ("contracts", "data contract")) and any(w in lower for w in ("list", "show", "what")):
-        # "show contracts" may also navigate — prefer list when asking for contents.
+    # Inventory of signed contracts — not "what is a data contract" (definition).
+    if (
+        re.search(
+            r"\b(?:list|show|my)\s+(?:data\s+)?contracts?\b"
+            r"|\b(?:what|which)\s+(?:data\s+)?contracts?\s+(?:do\s+i|do\s+we|are\s+(?:there|mine|signed))\b"
+            r"|\b(?:data\s+)?contracts?\s+(?:i\s+have|we\s+have|in\s+(?:the|this)\s+workspace)\b",
+            lower,
+        )
+        and not re.search(r"\bwhat\s+is\s+(?:a\s+)?data\s+contract\b", lower)
+    ):
         if not any(v in lower for v in ("go to", "take me", "navigate to", "open ")):
             planned.append(("list_contracts", {"limit": 50}))
             planned = [
@@ -3733,7 +4112,19 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
     if transfer_intent:
         plan_only = transfer_intent.pop("plan_only", False)
         transfer_intent = {k: v for k, v in transfer_intent.items() if v}
-        planned.append(("plan_transfer" if plan_only else "start_transfer", transfer_intent))
+        # A cadence ("nightly at 2am") or an explicit "schedule this" is a
+        # standing instruction, not a single run — staging one run instead would
+        # move the data once and quietly never again.
+        recurring = bool(transfer_intent.get("cadence")) or (
+            bool(_SCHEDULE_INTENT_RE.search(lower))
+            and "run_schedule_now" not in {n for n, _ in planned}
+        )
+        if recurring and not plan_only:
+            planned.append(("create_schedule", {
+                k: v for k, v in transfer_intent.items() if k != "all_tables"
+            }))
+        else:
+            planned.append(("plan_transfer" if plan_only else "start_transfer", transfer_intent))
 
     if not transfer_intent and any(
         w in lower
@@ -4114,7 +4505,13 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
                 planned = [(n, a) for n, a in planned if n != "search_knowledge"]
 
     # Schedule tools always beat accidental sample parses ("details on schedule X").
-    if any(n in {"open_schedule", "get_schedule", "run_schedule_now", "list_schedules"} for n, _ in planned):
+    if any(
+        n in {
+            "open_schedule", "get_schedule", "run_schedule_now",
+            "list_schedules", "create_schedule",
+        }
+        for n, _ in planned
+    ):
         planned = [(n, a) for n, a in planned if n != "sample_connector_object"]
 
     # Explicit SQL — either "run this sql: …" or a genuinely pasted statement.
@@ -4165,7 +4562,16 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
         r"(?:of|for|on)\s+[\"']?([a-zA-Z_][a-zA-Z0-9_]*)[\"']?\s*$",
         lower,
     )
-    if analyze_follow and "analyze_result" not in [p[0] for p in planned]:
+    # Bare "summarize that" is a recap of the last answer, not a result profile.
+    _last_answer_recap = bool(
+        re.match(
+            r"^\s*(?:summarize\s+(?:that|this|it|what\s+you\s+(?:just\s+)?said)"
+            r"|tl;?dr|in\s+(?:a\s+)?(?:sentence|nutshell)|short\s+version|recap(?:\s+that)?)"
+            r"\s*[.!?]*$",
+            lower,
+        )
+    )
+    if analyze_follow and not _last_answer_recap and "analyze_result" not in [p[0] for p in planned]:
         # Don't steal fresh table sample intents
         if "sample_connector_object" not in [p[0] for p in planned]:
             args = {}
@@ -4480,7 +4886,7 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
     analyst = get_data_analyst()
     hint = analyst.extract_dataset_hint(message)
     data_signals = [
-        "analyze", "what's in", "what is in", "tell me about", "pii",
+        "analyze", "what's in", "what is in", "tell me about", "tell me everything about", "pii",
         "preview", "sample", "quality", "how many rows",
     ]
     # "columns"/"schema" alone often mean live DB — only analyze uploaded data
@@ -4505,10 +4911,11 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
             "profile_quality_rules", "describe_pilot", "explain_product",
             "explain_mapping_assurance", "remediate_validation", "navigate",
             "inspect_schema_policy", "get_transfer_capabilities", "list_jobs",
+            "brief_workspace",
             "list_connectors", "list_schedules", "aggregate_data",
             "list_connector_objects", "sample_connector_object", "plan_transfer",
             "start_transfer", "plan_transfer_route", "create_connector",
-            "run_schedule_now", "introspect_connector_schema",
+            "run_schedule_now", "create_schedule", "introspect_connector_schema",
         }
         names = {n for n, _ in planned}
         if planned and (names & keep):
@@ -4528,6 +4935,41 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
             planned = [(n, a) for n, a in planned if n != "explain_product"]
     elif not planned and _looks_like_domain_knowledge_query(lower):
         planned.append(("search_knowledge", {"query": message[:200]}))
+
+    # A stated transfer is the request; inventory/advice tools that merely share
+    # its vocabulary ("jobs", "upsert", "schema") must not answer in its place.
+    _staged = {n for n, _ in planned} & {
+        "start_transfer", "plan_transfer", "create_schedule"
+    }
+    if _staged:
+        planned = [
+            (n, a) for n, a in planned
+            if n not in {
+                "list_jobs", "recommend_sync_mode", "list_connectors",
+                "search_knowledge", "get_transfer_capabilities",
+            }
+            and not (n == "introspect_connector_schema" and not _asks_for_schema(lower))
+        ]
+
+    # Off-topic / general-web asks must not become product RAG. Vocabulary
+    # overlap ("capital") is not evidence — only a Help hit, a pasted id, or
+    # an explicit knowledge search is.
+    if _act == "general":
+        from ..rag.evidence import names_identifier
+
+        explicit_knowledge = bool(
+            re.search(
+                r"\b(?:search\s+knowledge|knowledge\s+for|semantic\s+types?|ontology)\b",
+                lower,
+            )
+        )
+        keep_rag = (
+            explicit_knowledge
+            or names_identifier(message)
+            or bool(product_doc_search(message, limit=1))
+        )
+        if not keep_rag:
+            planned = [(n, a) for n, a in planned if n != "search_knowledge"]
 
     # Deduplicate while preserving order
     seen: set[str] = set()

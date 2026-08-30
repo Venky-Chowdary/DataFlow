@@ -78,8 +78,8 @@
 }
 
 .df2-settings-nav button .df2-settings-nav-label {
-  font-size: 14px;
-  font-weight: 600;
+  font-size: var(--df-fs-md);
+  font-weight: var(--df-fw-semibold);
   color: #334155;
 }
 
@@ -128,7 +128,7 @@
 .df2-settings-section-head h2 {
   margin: 0;
   font-size: 16px;
-  font-weight: 650;
+  font-weight: 600;
   color: #0f172a;
 }
 
@@ -136,6 +136,20 @@
   margin: 4px 0 0;
   font-size: 13px;
   color: #64748b;
+}
+
+.df2-settings-section-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.df2-settings-policy-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
 }
 
 .df2-page-settings .df2-settings-section-body .df2-filter-tabs,
@@ -146,7 +160,7 @@
 .df2-settings-subhead {
   margin: 0 0 12px;
   font-size: 14px;
-  font-weight: 650;
+  font-weight: 600;
   color: var(--df-text-primary, #0f172a);
 }
 
@@ -268,8 +282,8 @@
 }
 
 .df2-settings-field label {
-  font-size: 13px;
-  font-weight: 600;
+  font-size: var(--df-fs-label);
+  font-weight: var(--df-fw-semibold);
   color: #334155;
 }
 
@@ -392,7 +406,7 @@
 .df2-settings-smtp-label {
   margin: 0 0 12px;
   font-size: 12px;
-  font-weight: 650;
+  font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.04em;
   color: #64748b;
@@ -546,4 +560,97 @@
   .df2-settings-grid {
     grid-template-columns: 1fr;
   }
+}
+
+/* ─── Team & access ────────────────────────────────────────────────────────
+   The workspace / member rows carry a variable number of controls (workspace
+   picker, create field, email, name, role, login checkbox, submit), so they
+   wrap on their own instead of borrowing the two-column API-key toolbar grid,
+   which pushed the submit button off a narrow viewport. */
+.df2-team-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 12px;
+  width: 100%;
+}
+
+.df2-team-toolbar .df2-settings-field {
+  flex: 1 1 220px;
+  min-width: 0;
+  width: auto !important;
+  max-width: none;
+}
+
+.df2-team-toolbar > .df2-btn {
+  flex: 0 0 auto;
+  white-space: nowrap;
+  height: 42px;
+}
+
+.df2-team-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 42px;
+  font-size: 13px;
+  color: var(--df-text-secondary, #475569);
+  white-space: nowrap;
+}
+
+.df2-team-secret {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  border-radius: 12px;
+  border: 1px solid #fcd34d;
+  background: #fffbeb;
+  font-size: 13px;
+  color: var(--df-text-secondary, #475569);
+}
+
+.df2-team-secret-value {
+  font-family: var(--df-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 13px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--df-border, #e2e8f0);
+  background: #fff;
+  user-select: all;
+}
+
+.df2-team-error {
+  padding: 10px 14px;
+  border-radius: 10px;
+  border: 1px solid #fecaca;
+  background: #fef2f2;
+  color: #b91c1c;
+  font-size: 13px;
+}
+
+.df2-team-role-select {
+  min-width: 108px;
+  padding: 4px 8px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.df2-team-subsection {
+  margin-top: 28px;
+  padding-top: 20px;
+  border-top: 1px solid var(--df-border, #e2e8f0);
+}
+
+.df2-team-subsection h3 {
+  margin: 0 0 4px;
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--df-text-primary, #0f172a);
+}
+
+.df2-team-subsection > p {
+  margin: 0 0 14px;
+  font-size: 13px;
 }

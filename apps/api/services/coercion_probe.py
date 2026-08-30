@@ -36,7 +36,9 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from services.decision_kernel.findings import FailureClass as _FailureClass
 from services.mapping_constraints import write_mappings
+from services.shape_contract import DEST_TYPE_UNREAD_REASON
 from services.transform_engine import apply_transform
 from services.transform_resolver import resolve_transform
 from services.decision_kernel import (
@@ -334,6 +336,7 @@ def analyze_coercion(
             "checked": 0,
             "sampled_rows": 0,
             "has_blocking_failures": False,
+            "dest_schema_unloaded_columns": [],
             "columns": [],
             "by_source": {},
         }
@@ -352,6 +355,9 @@ def analyze_coercion(
         tgt_type = _target_type_for(m, dest_types, source_types, dest_db_type=dest_db_type)
         if not str(tgt_type or "").strip():
             # Match-existing without live/Map stamp — refuse source invent green.
+            # Blocking, but classified as an unread destination schema rather than
+            # a fidelity collapse: nothing was compared, so no conversion verdict
+            # exists and no Risk Contract can clear it.
             entry = {
                 "source": src,
                 "target": str(m.get("target") or src),
@@ -362,12 +368,10 @@ def analyze_coercion(
                 "nulls": 0,
                 "failed": 0,
                 "severity": "block",
-                "fidelity_collapse": True,
-                "suggested_fix": (
-                    f"Column '{src}': destination type pending Studio/Map stamp — "
-                    "refuse source_type invent. Re-run destination introspect or "
-                    "stamp Map target_type."
-                ),
+                "fidelity_collapse": False,
+                "dest_schema_unloaded": True,
+                "failure_class": _FailureClass.DEST_SCHEMA_UNLOADED.value,
+                "suggested_fix": f"Column '{src}': {DEST_TYPE_UNREAD_REASON}",
             }
             columns.append(entry)
             by_source[src] = entry
@@ -775,7 +779,15 @@ def analyze_coercion(
             continue
 
         if failed:
-            severity = "block"
+            # A signed continue-policy contract is the operator's decision that
+            # unfit cells hold out to quarantine. Keeping the column at "block"
+            # left Validate green while the report it publishes still declared a
+            # blocking failure — two answers for one column.
+            from services.migration_risk_contract import (
+                mapping_has_clearing_risk_contract,
+            )
+
+            severity = "warn" if mapping_has_clearing_risk_contract(m) else "block"
         elif sentinel_nulls and strict_null_loss:
             # Non-null → NULL is potential data loss; never green-light under strict.
             severity = "block"
@@ -810,6 +822,28 @@ def analyze_coercion(
 
             risk_cleared = mapping_has_clearing_risk_contract(m)
             severity = "warn" if risk_cleared else "block"
+            if failure_class is None:
+                # A declared collapse blocks even when the sample coerces, so it
+                # must carry the same root cause a failing value would: without
+                # one the gate names no class and Studio has no primary action.
+                from services.decision_kernel import rank_suggested_target_type
+                from services.decision_kernel.findings import (
+                    FailureClass,
+                    classify_declared_collapse,
+                )
+
+                failure_class = classify_declared_collapse(src_type, tgt_type).value
+                if not suggested_type:
+                    suggested_type = (
+                        rank_suggested_target_type(
+                            source_type=src_type,
+                            target_type=tgt_type,
+                            dest_db=dest_db_type,
+                            failure_class=FailureClass(failure_class),
+                            failure_examples=raw_failure_values,
+                        )
+                        or None
+                    )
             if not fix:
                 fix = (
                     f"Column '{src}' → {tgt_type}: declared mapping collapses fidelity "
@@ -964,6 +998,11 @@ def analyze_coercion(
         "checked": len(columns),
         "sampled_rows": len(rows),
         "has_blocking_failures": any(c["severity"] == "block" for c in columns),
+        "dest_schema_unloaded_columns": [
+            str(c.get("source") or "")
+            for c in columns
+            if c.get("dest_schema_unloaded") is True
+        ],
         "columns": columns,
         "by_source": by_source,
     }

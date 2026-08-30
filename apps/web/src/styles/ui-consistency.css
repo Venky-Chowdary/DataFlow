@@ -23,12 +23,12 @@
     padding: 8px 10px;
   }
 
-  .df2-app .df2-xform-card {
+  .df2-app .df2-page-transforms .df2-xform-card {
     padding: 10px 12px;
     border-radius: var(--df-radius-card);
   }
 
-  .df2-app .df2-xform-card-head h3 {
+  .df2-app .df2-page-transforms .df2-xform-card-head h3 {
     font-size: 14px;
   }
 
@@ -380,7 +380,7 @@
 
 .df2-empty-page .df2-empty-title {
   font-size: 20px;
-  font-weight: 650;
+  font-weight: 600;
 }
 
 .df2-empty-page .df2-empty-desc {
@@ -398,12 +398,16 @@
   margin-top: 4px;
 }
 
-/* Form rows — wrap on narrow viewports, no overlap */
+/* Form rows — wrap on narrow viewports, no overlap.
+   Fields align at the top so every label and every input in the row sits on
+   one line; a field carrying an extra control (read-mode segment, hint) grows
+   downwards. Bottom alignment lifted such a field — and only that field —
+   above the rest of the row. */
 .df2-app .df2-form-row {
   display: flex;
   flex-wrap: wrap;
   gap: 12px 16px;
-  align-items: flex-end;
+  align-items: flex-start;
 }
 
 .df2-app .df2-form-row > .df2-field,
@@ -415,6 +419,48 @@
 
 .df2-app .df2-form-row > .df2-field-md {
   flex: 0 1 240px;
+}
+
+/* One close control for every overlay — drawer, modal, rail, detail popover.
+   Unprefixed because drawers and dialogs portal to <body>, outside `.df2-app`. */
+.df2-close-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--df-text-muted, #64748b);
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+
+.df2-close-btn:hover {
+  background: var(--df-surface-sunken, #f1f5f9);
+  border-color: var(--df-border, #e2e8f0);
+  color: var(--df-text-primary, #0f172a);
+}
+
+.df2-close-btn:focus-visible {
+  outline: none;
+  border-color: var(--df-brand, #0f766e);
+  box-shadow: 0 0 0 3px var(--df-focus, rgba(15, 118, 110, 0.18));
+}
+
+/* A field that carries our own clear must not also show Chrome's native search
+   ✕ — two clear controls, one of them unstyled, in the same input. */
+:is(label, div):has(> .df2-close-btn) > input[type="search"]::-webkit-search-cancel-button {
+  display: none;
+}
+
+.df2-close-btn-sm {
+  width: 26px;
+  height: 26px;
+  border-radius: 8px;
 }
 
 /* Respect reduced motion for UI polish */

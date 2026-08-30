@@ -45,11 +45,14 @@ def _encrypt_connector_secrets(data: dict) -> dict:
     """Encrypt secret fields before persisting a connector document."""
     from services.secret_vault import encrypt_secret
 
+    from services.secret_vault import tenant_id_from_workspace
+
     out = dict(data)
+    tenant_id = tenant_id_from_workspace(str(out.get("workspace_id") or ""))
     for key in _CONNECTOR_SECRET_KEYS:
         val = out.get(key)
         if isinstance(val, str) and val and val != "****" and not val.startswith("["):
-            out[key] = encrypt_secret(val, label=f"connector-{key}")
+            out[key] = encrypt_secret(val, tenant_id=tenant_id, label=f"connector-{key}")
     return out
 
 
@@ -57,14 +60,15 @@ def _decrypt_connector_secrets(data: dict | None) -> dict | None:
     """Decrypt secret fields after loading a connector for internal use."""
     if not data:
         return data
-    from services.secret_vault import decrypt_secret
+    from services.secret_vault import decrypt_secret, tenant_id_from_workspace
 
     out = dict(data)
+    tenant_id = tenant_id_from_workspace(str(out.get("workspace_id") or ""))
     for key in _CONNECTOR_SECRET_KEYS:
         val = out.get(key)
         if isinstance(val, str) and val and val != "****":
             try:
-                out[key] = decrypt_secret(val)
+                out[key] = decrypt_secret(val, tenant_id=tenant_id)
             except Exception as exc:
                 logger.warning("Failed to decrypt connector field %s: %s", key, exc)
     return out
@@ -475,6 +479,7 @@ class MongoDBService:
                     "message": 1,
                     "phase": 1,
                     "throughput_marks": 1,
+                    "started_at": 1,
                 },
             )
         except Exception:
@@ -516,7 +521,12 @@ class MongoDBService:
             logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
         if status == "running":
-            updates.setdefault("started_at", datetime.now(timezone.utc))
+            # Heartbeats must not $set started_at to now — Theater elapsed
+            # became 0s on every progress write / SSE reconnect.
+            if (prev_doc or {}).get("started_at") and "started_at" not in kwargs:
+                updates.pop("started_at", None)
+            else:
+                updates.setdefault("started_at", datetime.now(timezone.utc))
         elif status in ("completed", "completed_with_quarantine", "failed", "cancelled"):
             updates["completed_at"] = datetime.now(timezone.utc)
 
@@ -533,9 +543,11 @@ class MongoDBService:
         phase_label = kwargs.get("phase")
         message = kwargs.get("message", "")
 
-        # Durable operator event log (Jobs Log tab). Cap to last 200 lines.
+        # Durable operator event log (Jobs Log tab). Keep the run from start.
         try:
             if "event_log" not in updates:
+                from services.job_document_budget import JOB_EVENT_LOG_MAX
+
                 prev_log = list((prev_doc or {}).get("event_log") or [])
                 line_parts: list[str] = []
                 if phase_label and str(phase_label) != str((prev_doc or {}).get("phase") or ""):
@@ -559,7 +571,7 @@ class MongoDBService:
                     stamp = datetime.now(timezone.utc).strftime("%H:%M:%S")
                     for part in line_parts:
                         prev_log.append(f"{stamp} — {part}")
-                    updates["event_log"] = prev_log[-200:]
+                    updates["event_log"] = prev_log[-JOB_EVENT_LOG_MAX:]
         except Exception as exc:
             logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
@@ -953,6 +965,30 @@ class MongoDBService:
             result["_id"] = str(result["_id"])
         return result
 
+    @staticmethod
+    def _job_scope_query(workspace_id: str | None) -> dict[str, Any]:
+        """Job filter for a workspace scope. An empty id means global jobs only."""
+        if workspace_id is None:
+            return {}
+        allowed = ["", None] if workspace_id == "" else [workspace_id, "", None]
+        return {
+            "$or": [{"workspace_id": w} for w in allowed if w is not None]
+            + [{"workspace_id": {"$exists": False}}]
+        }
+
+    def count_jobs(self, workspace_id: str | None = None) -> dict[str, Any]:
+        """Job total and per-status breakdown over the whole history, not a page of it."""
+        db = self.get_database()
+        collection = db["transfer_jobs"]
+        query = self._job_scope_query(workspace_id)
+        by_status: dict[str, int] = {}
+        for row in collection.aggregate(
+            ([{"$match": query}] if query else [])
+            + [{"$group": {"_id": "$status", "n": {"$sum": 1}}}]
+        ):
+            by_status[str(row.get("_id") or "unknown")] = int(row.get("n") or 0)
+        return {"total": sum(by_status.values()), "by_status": by_status}
+
     def list_jobs(self, limit: int = 50, workspace_id: str | None = None) -> list[dict]:
         """List recent transfer jobs, optionally filtered to a workspace."""
         from services.job_list_view import slim_job_for_list
@@ -960,14 +996,7 @@ class MongoDBService:
         db = self.get_database()
         collection = db["transfer_jobs"]
 
-        query: dict[str, Any] = {}
-        if workspace_id is not None:
-            # An empty workspace id shows only global jobs; a non-empty id shows
-            # that workspace plus global shared jobs.
-            allowed = [workspace_id, "", None]
-            if workspace_id == "":
-                allowed = ["", None]
-            query["$or"] = [{"workspace_id": w} for w in allowed if w is not None] + [{"workspace_id": {"$exists": False}}]
+        query: dict[str, Any] = self._job_scope_query(workspace_id)
         jobs = []
         # Projection drops the heaviest arrays at the Mongo layer when possible.
         projection = {
@@ -1239,7 +1268,9 @@ class MemoryMongoDBService:
             if marks is not None:
                 rec["throughput_marks"] = marks
         if status == "running":
-            rec.setdefault("started_at", datetime.now(timezone.utc))
+            # create_transfer_job seeds started_at=None; setdefault would keep it.
+            if not rec.get("started_at"):
+                rec["started_at"] = datetime.now(timezone.utc)
         elif status in ("completed", "completed_with_quarantine", "failed", "cancelled"):
             rec["completed_at"] = datetime.now(timezone.utc)
 
@@ -1263,10 +1294,12 @@ class MemoryMongoDBService:
                     except Exception as exc:
                         logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
                 if line_parts:
+                    from services.job_document_budget import JOB_EVENT_LOG_MAX
+
                     stamp = datetime.now(timezone.utc).strftime("%H:%M:%S")
                     for part in line_parts:
                         prev_log.append(f"{stamp} — {part}")
-                    rec["event_log"] = prev_log[-200:]
+                    rec["event_log"] = prev_log[-JOB_EVENT_LOG_MAX:]
             except Exception as exc:
                 logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
@@ -1363,6 +1396,18 @@ class MemoryMongoDBService:
                     rec[key] = rec[key].isoformat()
             return rec
         return None
+
+    def count_jobs(self, workspace_id: str | None = None) -> dict[str, Any]:
+        """Job total and per-status breakdown over the whole history, not a page of it."""
+        by_status: dict[str, int] = {}
+        for job in self._jobs.values():
+            if workspace_id is not None:
+                allowed = {"", None} if workspace_id == "" else {workspace_id, "", None}
+                if job.get("workspace_id") not in allowed:
+                    continue
+            key = str(job.get("status") or "unknown")
+            by_status[key] = by_status.get(key, 0) + 1
+        return {"total": sum(by_status.values()), "by_status": by_status}
 
     def list_jobs(self, limit: int = 50, workspace_id: str | None = None) -> list[dict]:
         from services.job_list_view import slim_job_for_list

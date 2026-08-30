@@ -38,7 +38,8 @@ JOB_CHECKPOINT_REJECTED_PREVIEW = int(
     getenv_brand("JOB_CHECKPOINT_REJECTED_PREVIEW", "25") or 25
 )
 JOB_MESSAGE_CHARS = int(getenv_brand("JOB_MESSAGE_CHARS", "2000") or 2000)
-JOB_EVENT_LOG_MAX = int(getenv_brand("JOB_EVENT_LOG_MAX", "100") or 100)
+# Full Theater history (start → end). BSON budget still trims only as last resort.
+JOB_EVENT_LOG_MAX = int(getenv_brand("JOB_EVENT_LOG_MAX", "5000") or 5000)
 
 # Nested blobs that historically blew the update command.
 _HEAVY_TOP_KEYS = frozenset(
@@ -84,6 +85,10 @@ def slim_rejected_detail(detail: Any, *, cell_chars: int = JOB_REJECTED_CELL_CHA
         "row",
         "row_number",
         "index",
+        # The offending value is the finding: without it Inspect shows a reason
+        # for a cell it cannot name, and the export has an empty column.
+        "value",
+        "original_value",
         "reason",
         "message",
         "error",
@@ -271,7 +276,7 @@ def trim_job_update_payload(
         elif key == "checkpoint" and isinstance(out[key], dict):
             out[key] = _resume_tokens_only(out[key])
         elif key == "event_log":
-            out[key] = list(out.get("event_log") or [])[-20:]
+            out[key] = list(out.get("event_log") or [])[-min(JOB_EVENT_LOG_MAX, 500):]
         elif key == "phases":
             # Keep phase labels only — drop long messages.
             phases = out[key]

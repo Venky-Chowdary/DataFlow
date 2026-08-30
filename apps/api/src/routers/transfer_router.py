@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 import os
 from services.brand_env import getenv_brand
+from services.shape_preflight import ShapePreflightRefused
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import (
     APIRouter,
@@ -144,6 +147,48 @@ def _actor_email(request: Request) -> str:
     return getattr(request.state, "user_email", None) or "anonymous"
 
 
+def _validated_read_options(raw: dict | str | None) -> dict:
+    """Normalize the declared source read window, or 400 with the fix.
+
+    Accepts the JSON body dict and the multipart JSON string. Refusing here
+    means an unreadable sheet name is a rejected request, not a job that
+    quietly ingests the active sheet instead.
+    """
+    from services.read_options import ReadOptionsError, parse_read_options_payload
+
+    try:
+        return parse_read_options_payload(raw).to_wire()
+    except ReadOptionsError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def _validated_shape_recipe(raw: dict | str | None) -> dict:
+    """Normalize the declared shaping recipe, or 400 with the operation at fault.
+
+    A recipe the engine cannot run must be refused at the door: accepting it here
+    would only surface as a failed run after the source has been read.
+    """
+    from services.shape_models import ShapeError, ShapeRecipe
+
+    payload: Any = raw
+    if isinstance(raw, str):
+        text = raw.strip()
+        if not text:
+            return {}
+        try:
+            payload = json.loads(text)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=400, detail=f"shape_recipe is not valid JSON: {exc}"
+            ) from exc
+    if not payload:
+        return {}
+    try:
+        return ShapeRecipe.parse(payload).to_wire()
+    except ShapeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 def _resolve_write_workspace(request: Request, x_workspace_id: str = Header(default="", alias="X-Workspace-Id")) -> str:
     workspace_id = (x_workspace_id or "").strip()
     if workspace_id and not can_write_workspace(workspace_id, _actor_email(request)):
@@ -198,6 +243,8 @@ class ExecuteTransferRequest(BaseModel):
     backfill_new_fields: bool = False
     write_via_staging: bool = False
     source_filter: dict = Field(default_factory=dict)
+    # Tabular read window for a file source: sheet, header_row, skip_rows, skip_footer.
+    read_options: dict = Field(default_factory=dict)
     priority_column: str = ""
     priority_direction: str = "desc"
     limit: int = 0
@@ -209,6 +256,8 @@ class ExecuteTransferRequest(BaseModel):
     require_signed_contract: bool = False
     # Locale for ambiguous day/month dates: 'DMY' (European/Indian/Australian), 'MDY' (US), or ''.
     date_locale: str = ""
+    # Locale for ambiguous grouping: 'US' (1,234.56), 'EU' (1.234,56), or ''.
+    number_locale: str = ""
     # Delivery guarantee — default at_least_once; exactly_once is opt-in.
     delivery_guarantee: str = "at_least_once"
     # Validate→Execute ack trail (must match Studio Validate acknowledgments).
@@ -223,6 +272,10 @@ class ExecuteTransferRequest(BaseModel):
     # Map→DDL fingerprint the operator saw pass at Validate. Without it Execute
     # can only re-check its own derived stamps against themselves.
     approved_ddl_identity_hash: str = ""
+    # Ordered row-local shaping applied on the read, before mapping.
+    shape_recipe: dict = Field(default_factory=dict)
+    # The recipe identity Validate approved; a different recipe is refused.
+    approved_shape_recipe_hash: str = ""
 
 
 class MapColumnsRequest(BaseModel):
@@ -347,10 +400,16 @@ async def introspect_endpoint_route(request: AnalyzeRequest):
     # Role-tag so missing-table copy is correct (source ≠ create-on-write).
     src.extra = {**(src.extra or {}), "introspect_purpose": "source"}
     dst.extra = {**(dst.extra or {}), "introspect_purpose": "destination"}
-    return {
-        "source": introspect_endpoint(src),
-        "destination": introspect_endpoint(dst),
-    }
+
+    def _probe() -> dict[str, Any]:
+        return {
+            "source": introspect_endpoint(src),
+            "destination": introspect_endpoint(dst),
+        }
+
+    # Snowflake / warehouse introspect is seconds of network. Running it on the
+    # event loop freezes /health (nginx 504) while Destination is still open.
+    return await asyncio.to_thread(_probe)
 
 
 @router.post("/map")
@@ -379,10 +438,20 @@ async def map_columns_route(body: MapColumnsRequest):
         }
         for c in body.source_columns
     ]
-    target_schemas = [
-        {"name": c, "inferred_type": body.target_schema.get(c, "VARCHAR"), "samples": []}
-        for c in body.target_columns
-    ] if body.target_columns else None
+    # Only a destination type the probe actually read is a declared type. Filling
+    # the gap with "VARCHAR" made the mapper compare every DECIMAL/DATE source
+    # against a string column nothing declares, so faithful create-new carriers
+    # were billed as lossy casts; names-only lets the type kernel project the
+    # carrier the run will really CREATE.
+    target_schemas = (
+        [
+            {"name": c, "inferred_type": body.target_schema[c], "samples": []}
+            for c in body.target_columns
+        ]
+        if body.target_columns
+        and all(str(body.target_schema.get(c) or "").strip() for c in body.target_columns)
+        else None
+    )
 
     try:
         from services.tracing import get_correlation_id, start_span
@@ -568,12 +637,81 @@ async def map_transfer_plan(plan_id: str, body: PlanMapRequest):
         raise HTTPException(status_code=404, detail=str(e)) from e
 
 
+class PlanPreflightRequest(BaseModel):
+    """Operator attestations posted with a persisted-plan preflight run.
+
+    Validate is where a PII/drift/FK risk is accepted, so this transport must
+    carry the attestation — a body-less call cannot clear a compliance gate.
+    """
+
+    compliance_acknowledged: bool = False
+    schema_drift_acknowledged: bool = False
+    fk_risk_acknowledged: bool = False
+    acknowledgment_actor: str = ""
+    acknowledgment_reason: str = ""
+    # Approved pre-load transform recipe. Execute shapes rows on the read, so the
+    # gates have to judge the transformed image, not the raw source.
+    shape_recipe: dict[str, Any] | None = None
+    # Studio Validate of a stored 1M-row upload must not occupy the HTTP
+    # worker. When true the handler returns 202 and GET /preflight polls.
+    async_run: bool = False
+
+
+@router.get("/plans/{plan_id}/preflight")
+async def get_plan_preflight(plan_id: str, run_id: str = ""):
+    from services.plan_preflight_job import get_plan_preflight_job
+
+    job = get_plan_preflight_job(plan_id, run_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="No Validate run for this plan")
+    return job
+
+
 @router.post("/plans/{plan_id}/preflight")
-async def preflight_transfer_plan(plan_id: str):
+async def preflight_transfer_plan(
+    plan_id: str,
+    body: PlanPreflightRequest | None = None,
+):
+    from fastapi.responses import JSONResponse
+
+    from services.acknowledgment_contract import (
+        AcknowledgmentRefused,
+        resolve_acknowledgments,
+    )
+    from services.plan_preflight_job import start_plan_preflight_job
     from services.transfer_plan_service import run_plan_preflight
 
+    payload = body or PlanPreflightRequest()
     try:
-        return run_plan_preflight(plan_id)
+        ack = resolve_acknowledgments(
+            compliance=payload.compliance_acknowledged,
+            schema_drift=payload.schema_drift_acknowledged,
+            fk_risk=payload.fk_risk_acknowledged,
+            actor=payload.acknowledgment_actor,
+            reason=payload.acknowledgment_reason,
+        )
+    except AcknowledgmentRefused as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+
+    if payload.async_run:
+        job = start_plan_preflight_job(
+            plan_id,
+            acknowledgments=ack,
+            shape_recipe=payload.shape_recipe,
+        )
+        return JSONResponse(status_code=202, content=job)
+
+    try:
+        # Even the sync path leaves the event loop — /health must answer while
+        # a warehouse probe or file walk runs.
+        return await asyncio.to_thread(
+            run_plan_preflight,
+            plan_id,
+            acknowledgments=ack,
+            shape_recipe=payload.shape_recipe,
+        )
+    except ShapePreflightRefused as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
@@ -638,6 +776,16 @@ async def analyze_file_transfer(
         source_schema=schema,
     )
     plan["row_count_estimate"] = row_count
+    stored_file_id = ""
+    try:
+        from services.file_parser import store_upload
+
+        stored = store_upload(file.filename or "upload.csv", content)
+        stored_file_id = str(stored.get("file_id") or "")
+    except Exception:
+        stored_file_id = ""
+    if stored_file_id:
+        plan["file_id"] = stored_file_id
     return plan
 
 
@@ -700,6 +848,7 @@ async def execute_transfer_json(
         schema_policy=body.schema_policy or "manual_review",
         validation_mode=body.validation_mode or "strict",
         source_filter=dict(body.source_filter or {}),
+        read_options=_validated_read_options(body.read_options),
         priority_column=body.priority_column or "",
         priority_direction=body.priority_direction or "desc",
         limit=int(body.limit or 0),
@@ -712,6 +861,7 @@ async def execute_transfer_json(
         enforce_contract=bool(body.enforce_contract),
         require_signed_contract=bool(body.require_signed_contract),
         date_locale=body.date_locale,
+        number_locale=body.number_locale,
         triggered_by=_actor_email(request),
         idempotency_key=idempotency_key,
         delivery_guarantee=body.delivery_guarantee or "at_least_once",
@@ -725,6 +875,10 @@ async def execute_transfer_json(
         ).strip(),
         approved_ddl_identity_hash=str(body.approved_ddl_identity_hash or "").strip(),
         decision_artifact=dict(body.decision_artifact or {}),
+        shape_recipe=_validated_shape_recipe(body.shape_recipe),
+        approved_shape_recipe_hash=str(
+            body.approved_shape_recipe_hash or ""
+        ).strip(),
     )
     from services.batch_progress import effective_backfill_new_fields
 
@@ -906,6 +1060,9 @@ async def run_universal_transfer(
     schema_policy: str = Form("manual_review"),
     validation_mode: str = Form("balanced"),
     source_filter_json: str = Form(""),
+    read_options_json: str = Form(""),
+    shape_recipe_json: str = Form(""),
+    approved_shape_recipe_hash: str = Form(""),
     priority_column: str = Form(""),
     priority_direction: str = Form("desc"),
     limit: str = Form("0"),
@@ -914,9 +1071,11 @@ async def run_universal_transfer(
     enable_ocr: str = Form("false"),
     dest_extra_json: str = Form(""),
     source_extra_json: str = Form(""),
+    source_file_id: str = Form(""),
     stream_contracts_json: str = Form(""),
     data_region: str = Form(""),
     date_locale: str = Form(""),
+    number_locale: str = Form(""),
     delivery_guarantee: str = Form("at_least_once"),
     compliance_acknowledged: str = Form("false"),
     schema_drift_acknowledged: str = Form("false"),
@@ -976,6 +1135,17 @@ async def run_universal_transfer(
                 source_extra.update(parsed)
         except Exception as exc:
             logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+    stored_file_id = (source_file_id or "").strip() or str(source_extra.get("file_id") or "").strip()
+    if stored_file_id:
+        source_extra["file_id"] = stored_file_id
+        if not content:
+            from services.file_parser import get_file
+
+            stored = get_file(stored_file_id)
+            if stored:
+                filename = filename or str(stored.get("filename") or "upload.csv")
+                if not src_fmt:
+                    src_fmt = str(stored.get("format") or "")
     source = EndpointConfig(
         kind=source_kind,
         format=src_fmt,
@@ -1046,6 +1216,9 @@ async def run_universal_transfer(
         schema_policy=schema_policy,
         validation_mode=validation_mode,
         source_filter=source_filter,
+        read_options=_validated_read_options(read_options_json),
+        shape_recipe=_validated_shape_recipe(shape_recipe_json),
+        approved_shape_recipe_hash=(approved_shape_recipe_hash or "").strip(),
         priority_column=priority_column,
         priority_direction=priority_direction,
         limit=int(limit) if limit.isdigit() else 0,
@@ -1054,6 +1227,7 @@ async def run_universal_transfer(
         backfill_new_fields=backfill_new_fields.lower() in ("true", "1", "yes"),
         write_via_staging=write_via_staging.lower() in ("true", "1", "yes"),
         date_locale=date_locale,
+        number_locale=number_locale,
         triggered_by=_actor_email(request),
         idempotency_key=idempotency_key,
         delivery_guarantee=delivery_guarantee or "at_least_once",
@@ -1124,6 +1298,8 @@ async def run_universal_transfer(
                 request_obj.write_via_staging = True
             if not date_locale:
                 request_obj.date_locale = policies.get("date_locale", request_obj.date_locale)
+            if not number_locale:
+                request_obj.number_locale = policies.get("number_locale", request_obj.number_locale)
             if not stream_contracts_json.strip():
                 plan_contracts = payload.get("stream_contracts") or policies.get("stream_contracts")
                 if isinstance(plan_contracts, list) and plan_contracts:
@@ -1134,6 +1310,17 @@ async def run_universal_transfer(
                 request_obj.source.extra,
                 payload.get("source") or {},
             )
+            plan_src = payload.get("source") or {}
+            plan_fid = str(
+                plan_src.get("file_id")
+                or (plan_src.get("extra") or {}).get("file_id")
+                or ""
+            ).strip()
+            if plan_fid:
+                request_obj.source.extra = {
+                    **(request_obj.source.extra or {}),
+                    "file_id": plan_fid,
+                }
         except ValueError as e:
             raise HTTPException(status_code=400, detail=str(e)) from e
     if mappings_json.strip() and not (plan_id and plan_id.strip()):
@@ -1573,7 +1760,7 @@ async def execute_job_rollback(job_id: str, body: RollbackExecuteBody, request: 
             action="migration_rollback.executed",
             resource=f"job:{job_id}",
             actor=actor,
-            level="warning",
+            level="warn",
             details={
                 "rollback_id": result.get("rollback_id"),
                 "strategy": result.get("strategy"),

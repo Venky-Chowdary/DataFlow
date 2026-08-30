@@ -27,7 +27,15 @@ export type MappingTransform =
   | "percentage"
   | "strip_controls"
   | "identity_specialty"
+  | "assume_timezone"
   | "omit";
+
+/**
+ * Engine transform prefix for an operator-declared source zone — parameterised
+ * because the zone is data the source never recorded, not a mode. Must stay
+ * aligned with ``services.transform_engine.ASSUME_TIMEZONE_PREFIX``.
+ */
+export const ASSUME_TIMEZONE_PREFIX = "assume_timezone:";
 
 export const MAPPING_TRANSFORMS: { id: MappingTransform; label: string; detail: string }[] = [
   { id: "none", label: "None", detail: "Pass through as detected" },
@@ -48,6 +56,13 @@ export const MAPPING_TRANSFORMS: { id: MappingTransform; label: string; detail: 
   { id: "email", label: "Normalize email", detail: "Normalize email addresses" },
   { id: "currency", label: "Parse currency", detail: "Strip currency symbols → decimal" },
   { id: "percentage", label: "Parse percentage", detail: "Parse percent strings → decimal" },
+  {
+    id: "assume_timezone",
+    label: "Assume source zone…",
+    detail:
+      "Declare the zone a zoneless timestamp was recorded in, so an instant destination "
+      + "(BSON date, TIMESTAMPTZ) stores an asserted instant instead of a guessed UTC one",
+  },
   {
     id: "identity_specialty",
     label: "Identity (specialty)",
@@ -394,6 +409,10 @@ export const UI_TO_ENGINE_TRANSFORM: Record<MappingTransform, string> = {
   percentage: "percentage",
   strip_controls: "strip_controls",
   identity_specialty: "none",
+  // Carries no zone on its own: the engine transform is only complete once the
+  // operator names one, and an empty value must never reach the engine as a
+  // guessed default.
+  assume_timezone: "",
   omit: "omit",
 };
 
@@ -506,6 +525,7 @@ export function createNewRiskChipLabel(m: EditableMapping): string | null {
   if (!hasCreateNewTypeRisk(m)) return null;
   const kinds = new Set((m.createNewRisks || []).map((r) => (r.kind || "").toLowerCase()));
   if (kinds.has("timezone_polarity")) return "TZ risk";
+  if (kinds.has("instant_range_cap")) return "range risk";
   if (kinds.has("varchar_width_cap") || kinds.has("varchar_narrow")) return "width risk";
   if (kinds.has("precision_collapse")) return "precision";
   if (kinds.has("uuid_domain")) return "UUID domain";
@@ -529,6 +549,17 @@ export function engineStampedRiskChip(m: EditableMapping): {
 } | null {
   // Safe normalize (email/trim/case) is Approve-tier — do not scare with mutate/cast chips.
   if (isSafeNormalizeMapping(m)) return null;
+  // Unknown destination type outranks any cast verdict: there is nothing to cast
+  // into yet, and the row's only exit is reloading the destination schema.
+  if (isDestSchemaPending(m)) {
+    return {
+      label: "dest type not loaded",
+      detail:
+        "Destination column type has not been read from the destination yet — "
+        + "reload the destination schema.",
+      severity: "block",
+    };
+  }
   const fidelity = (m.fidelity || "").toLowerCase();
   if (fidelity === "lossy_cast" || fidelity === "mutate" || fidelity === "cast") {
     return {
@@ -631,6 +662,22 @@ export function mappingHasClearingRiskContract(m: EditableMapping): boolean {
   );
 }
 
+/**
+ * Where a risk row stands.
+ * - `open`: nothing signed yet
+ * - `accepted`: acknowledged with no policy on record that stops the write
+ * - `fail_closed`: a contract policy stops the write by design —
+ *   never call this "accepted", or Map claims clearance it does not have
+ */
+export type MappingRiskChipState = "open" | "accepted" | "fail_closed";
+
+export function mappingRiskChipState(m: EditableMapping): MappingRiskChipState {
+  if (!m.riskAcknowledged) return "open";
+  const policy = String(m.riskContract?.execution_policy || "").toUpperCase() as ExecutionPolicy;
+  if (policy && !CONTINUE_EXECUTION_POLICIES.has(policy)) return "fail_closed";
+  return "accepted";
+}
+
 export function mappingAckDoneLabel(m: EditableMapping): string {
   if (m.riskAcknowledged && mappingRequiresRiskAck(m)) {
     const policy = m.riskContract?.execution_policy;
@@ -641,9 +688,56 @@ export function mappingAckDoneLabel(m: EditableMapping): string {
   return "Ready";
 }
 
+/**
+ * True when the destination column type was never read from the destination.
+ *
+ * This is not a fidelity risk and no signature can clear it: until the
+ * destination catalog answers (or the table is proven absent, which is
+ * create-new), there is no destination type to compare against. Showing it as
+ * "loses fidelity (T \u2192 T)" with a Risk Contract sent operators round a loop.
+ */
+export function isDestSchemaPending(m: EditableMapping): boolean {
+  return m.assignmentStrategy === "pending_dest_schema";
+}
+
+/** Fidelity class for a destination type that was never read (mirrors the engine). */
+export const FIDELITY_DEST_TYPE_UNREAD = "dest_type_unread";
+
+export const DEST_TYPE_UNREAD_REASON =
+  "Destination column type has not been read from the destination yet — "
+  + "reload the destination schema. If the table does not exist the probe proves "
+  + "it absent and the column becomes a CREATE.";
+
+/**
+ * Single way to say "this row has no destination type yet".
+ *
+ * Every caller that loses (or never had) destination metadata must go through
+ * here: leaving the previous `reason` in place printed provenance the row no
+ * longer has — "Inferred from live connector schema" on a destination nothing
+ * had read — and leaving `destType` set showed the source type as the
+ * destination's own.
+ */
+export function markMappingDestUnread(m: EditableMapping): EditableMapping {
+  return {
+    ...m,
+    destType: "",
+    createNew: undefined,
+    existsInDestination: undefined,
+    assignmentStrategy: "pending_dest_schema",
+    requiresReview: true,
+    approved: false,
+    fidelity: FIDELITY_DEST_TYPE_UNREAD,
+    fidelityReason: DEST_TYPE_UNREAD_REASON,
+    reason: "Destination schema not read — no destination type to compare against",
+    confidence: Math.min(m.confidence, 0.55),
+  };
+}
+
 /** Lossy, mutate, cast (quarantine path), specialty, create-new risk, or STRUCT expand — G4 needs risk_acknowledged. */
 export function mappingRequiresRiskAck(m: EditableMapping): boolean {
   if (isIntentionalOmit(m)) return false;
+  // Unknown destination type is a reload, not a risk to accept.
+  if (isDestSchemaPending(m)) return false;
   // Safe normalize (email/trim/case) is not fidelity risk — Approve is enough.
   if (isSafeNormalizeMapping(m)) return false;
   const fidelity = (m.fidelity || "").toLowerCase();
@@ -671,6 +765,7 @@ export function mappingRequiresRiskAck(m: EditableMapping): boolean {
 /** True when Approve-all must leave this row for operator review. */
 export function mappingRequiresManualApproval(m: EditableMapping): boolean {
   if (isIntentionalOmit(m)) return false;
+  if (isDestSchemaPending(m)) return true;
   if (isExistingEnumBooleanConflict(m) || isExistingDestTypeOverride(m)) return true;
   if (mappingRequiresRiskAck(m) && !m.riskAcknowledged) return true;
   // Airbyte hole: Approve-all must not clear qty≠amt / user≠customer / dest fold.
@@ -907,6 +1002,21 @@ export function acknowledgeMappingRisk(
   if (!mappingRequiresRiskAck(m)) {
     return approveMappingHonestly(m);
   }
+  // A contract cannot green a dest-type request Map will not perform: mapping
+  // never ALTERs a physical column, so signing here would promise DDL work the
+  // write path does not do. Same refusal as approveMappingHonestly.
+  if (isExistingEnumBooleanConflict(m) || isExistingDestTypeOverride(m)) {
+    return {
+      ...m,
+      approved: false,
+      requiresReview: true,
+      riskAcknowledged: false,
+      reason: [
+        m.reason,
+        `Risk Contract cannot cover an ALTER — restore destination type ${m.destType || "as-is"}, remap to a compatible column, or ALTER the destination first`,
+      ].filter(Boolean).join(" · "),
+    };
+  }
   const policy = opts?.executionPolicy;
   if (!policy || !EXECUTION_POLICY_OPTIONS.some((p) => p.id === policy)) {
     return {
@@ -1108,6 +1218,11 @@ export function mergeSignedRiskContracts(
  * Risk rows require {@link acknowledgeMappingRisk}, not bare Approve.
  */
 export function approveMappingHonestly(m: EditableMapping): EditableMapping {
+  // Nothing to approve while the destination type is unread — approving it once
+  // unlocked Validate for a destination the engine had never inspected.
+  if (isDestSchemaPending(m)) {
+    return { ...m, approved: false, requiresReview: true };
+  }
   if (isExistingEnumBooleanConflict(m)) {
     return flagExistingEnumBooleanConflict(m);
   }
@@ -1505,11 +1620,47 @@ export function flagExistingTypeConflict(m: EditableMapping, destKind = "destina
   };
 }
 
+/** Reason tags stamped when Map refuses to change an existing physical column. */
+const EXISTING_DEST_OVERRIDE_TAGS: RegExp[] = [
+  /(?: · )?Existing [^·]*?cannot be changed from Map[^·]*/gu,
+  /(?: · )?Desired type [^·]*?requires ALTER or remap[^·]*/gu,
+  /(?: · )?Risk Contract cannot cover an ALTER[^·]*/gu,
+];
+
+/**
+ * Withdraw an ALTER request on an existing column.
+ *
+ * The override is detected from the reason tag, so a tag that outlives the
+ * operator's edit strands the row: bare Approve refuses it and a Risk Contract
+ * cannot cover it. Restoring the live physical type drops the tag; fidelity
+ * risk (narrowing, lossy cast) is untouched and still needs a contract.
+ */
+export function clearExistingDestTypeOverride(m: EditableMapping): EditableMapping {
+  const reason = EXISTING_DEST_OVERRIDE_TAGS
+    .reduce((acc, tag) => acc.replace(tag, ""), m.reason || "")
+    .replace(/^(?: · )+/u, "")
+    .trim();
+  return {
+    ...m,
+    reason,
+    approved: false,
+    requiresReview: mappingRequiresRiskAck(m),
+  };
+}
+
 /**
  * When the operator picks a new dest type on an existing column, keep the live
  * type in destType for preflight honesty and force review.
  */
 export function applyDestTypeChange(m: EditableMapping, nextDestType: string): EditableMapping {
+  if (
+    m.existsInDestination
+    && nextDestType
+    && nextDestType === m.destType
+    && isExistingDestTypeOverride(m)
+  ) {
+    return clearExistingDestTypeOverride(m);
+  }
   if (m.existsInDestination && nextDestType && nextDestType !== m.destType) {
     return {
       ...flagExistingTypeConflict(m, m.destType || "destination"),
@@ -1556,6 +1707,11 @@ export function applyTransformChange(m: EditableMapping, next: MappingTransform)
       riskAcknowledged: false,
       reason: "Intentionally omitted from transfer",
     };
+  }
+  if (next === "assume_timezone") {
+    // Keep a zone already declared on this row; selecting the control again is
+    // not a withdrawal.
+    return applyDeclaredSourceZone(m, declaredSourceZone(m));
   }
   const restoring = m.transform === "omit";
   return {
@@ -1694,6 +1850,12 @@ export function uiTransformToEngine(t?: MappingTransform, engineTransform?: stri
     }
   }
   if (!t || t === "none" || t === "identity_specialty") return undefined;
+  // An unnamed zone is not a transform — the row stays blocked instead of
+  // sending the engine a declaration with no zone in it.
+  if (t === "assume_timezone") {
+    const engine = String(engineTransform || "");
+    return engine.toLowerCase().startsWith(ASSUME_TIMEZONE_PREFIX) ? engine : undefined;
+  }
   return UI_TO_ENGINE_TRANSFORM[t];
 }
 
@@ -1794,7 +1956,77 @@ export function buildPreflightMappings(
 
 export function engineTransformToUi(engine?: string): MappingTransform {
   if (!engine || engine === "none" || engine === "identity") return "none";
+  if (engine.toLowerCase().startsWith(ASSUME_TIMEZONE_PREFIX)) return "assume_timezone";
   return ENGINE_TO_UI_TRANSFORM[engine] ?? "none";
+}
+
+/** The zone the operator declared for a zoneless source column, if any. */
+export function declaredSourceZone(m: EditableMapping): string {
+  const engine = String(m.engineTransform || "");
+  if (!engine.toLowerCase().startsWith(ASSUME_TIMEZONE_PREFIX)) return "";
+  return engine.slice(ASSUME_TIMEZONE_PREFIX.length).trim();
+}
+
+/**
+ * Record (or withdraw) the zone for a zoneless timestamp column.
+ *
+ * An empty zone leaves the row on the control with no engine transform: the
+ * declaration is incomplete, and half of it is a guess.
+ */
+export function applyDeclaredSourceZone(m: EditableMapping, zone: string): EditableMapping {
+  const named = zone.trim();
+  return {
+    ...m,
+    transform: "assume_timezone",
+    engineTransform: named ? `${ASSUME_TIMEZONE_PREFIX}${named}` : undefined,
+    approved: false,
+    riskAcknowledged: false,
+  };
+}
+
+/** True when the operator chose to declare a zone but has not named one yet. */
+export function assumeTimezoneAwaitingZone(m: EditableMapping): boolean {
+  return m.transform === "assume_timezone" && !declaredSourceZone(m);
+}
+
+/** Zones always offered, so the list does not depend on the runtime's ICU vintage. */
+const COMMON_IANA_ZONES: readonly string[] = [
+  "UTC",
+  "America/New_York",
+  "America/Chicago",
+  "America/Denver",
+  "America/Los_Angeles",
+  "America/Sao_Paulo",
+  "Europe/London",
+  "Europe/Berlin",
+  "Europe/Paris",
+  "Europe/Moscow",
+  "Asia/Dubai",
+  "Asia/Kolkata",
+  "Asia/Shanghai",
+  "Asia/Singapore",
+  "Asia/Tokyo",
+  "Australia/Sydney",
+];
+
+/**
+ * Zone names to suggest on the declaration control, UTC first.
+ *
+ * Suggestions only — the authoritative check is the engine's own zone database,
+ * so a zone this runtime has never heard of is still accepted here and refused
+ * (by name) at Validate rather than being hidden from the operator.
+ */
+export function suggestedSourceZones(): readonly string[] {
+  const supported =
+    typeof Intl.supportedValuesOf === "function" ? Intl.supportedValuesOf("timeZone") : [];
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const zone of ["UTC", ...COMMON_IANA_ZONES, ...supported]) {
+    if (seen.has(zone)) continue;
+    seen.add(zone);
+    out.push(zone);
+  }
+  return out;
 }
 
 export function editableFromPipelineMappings(
@@ -1862,7 +2094,11 @@ export function editableFromPipelineMappings(
     // destType from source_type (false-green Map before write fail-close).
     const destSchemaLoaded = Object.keys(destSchema || {}).length > 0;
     let destType = liveDestType || m.target_type || undefined;
-    if (!destType && (rowCreateNew || !destSchemaLoaded)) {
+    // Never echo the source type back as the destination type when the
+    // destination schema is pending: that produced "loses fidelity
+    // (VARCHAR(16777216) \u2192 VARCHAR(16777216))" on 10 columns whose destination
+    // type nobody had read yet. A proven create-new projection may show it.
+    if (!destType && !pendingDest && (rowCreateNew || !destSchemaLoaded)) {
       destType = m.source_type;
     }
     const destTypeGap = destSchemaLoaded && !destType && !rowCreateNew && !pendingDest;
@@ -2021,6 +2257,8 @@ export interface MappingHealthSummary {
   intentionalOmit: number;
   specialtyIdentity: number;
   existingTypeConflict: number;
+  /** Contracts signed with a policy that stops the write — Validate stays shut. */
+  failClosedContract: number;
   falseFriendCount: number;
   falseFriendKinds: Partial<Record<MappingReviewKind, number>>;
   weak: boolean;
@@ -2049,6 +2287,9 @@ export function mappingHealthSummary(
   ).length;
   const existingTypeConflict = active.filter(
     (m) => isExistingEnumBooleanConflict(m) || isExistingDestTypeOverride(m),
+  ).length;
+  const failClosedContract = active.filter(
+    (m) => mappingRiskChipState(m) === "fail_closed",
   ).length;
   const falseFriendKinds: Partial<Record<MappingReviewKind, number>> = {};
   for (const m of active) {
@@ -2093,6 +2334,9 @@ export function mappingHealthSummary(
       .map((k) => `${falseFriendKinds[k]} ${mappingReviewKindMeta(k).noun}`);
     headline = `${parts.join(" · ")} need confirm`;
     detail = "Approve eligible will not clear these. Remap the destination column, or Confirm this pair on the row.";
+  } else if (failClosedContract > 0) {
+    headline = `${failClosedContract} contract(s) signed with a fail-closed policy`;
+    detail = "FAIL_JOB / STOP_TABLE / ABORT_TRANSACTION / RETRY stop the write by design — re-sign with a continue policy (quarantine, skip, stop-column, cast-fail-quarantine) or fix the type path.";
   } else if (needsReview > 0 || lowConfidence > 0) {
     // One row can be both requiresReview and low-confidence — count unique mappings.
     const reviewCount = active.filter(
@@ -2117,6 +2361,7 @@ export function mappingHealthSummary(
     intentionalOmit,
     specialtyIdentity,
     existingTypeConflict,
+    failClosedContract,
     falseFriendCount,
     falseFriendKinds,
     weak,

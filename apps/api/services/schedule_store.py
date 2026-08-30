@@ -9,10 +9,11 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from services.cron_schedule import CronError, validate_cron
 from services.cron_schedule import next_run as _cron_next_run
@@ -46,6 +47,38 @@ SCHEMA_POLICIES = {
     "pause_on_change",
     "type_locked",
 }
+
+
+def _first_contract_snapshot(contracts: Any) -> str:
+    for row in contracts or []:
+        if not isinstance(row, dict):
+            continue
+        mode = str(row.get("snapshot_mode") or "").strip()
+        if mode:
+            return mode
+    return ""
+
+
+def _schedule_snapshot_mode(sync_mode: str, raw: Any) -> str:
+    from services.cdc_snapshot_mode import schedule_snapshot_mode
+
+    try:
+        return schedule_snapshot_mode(sync_mode, raw)
+    except ValueError:
+        return schedule_snapshot_mode(sync_mode, "initial") if str(sync_mode or "").strip().lower() == "cdc" else ""
+
+
+def _schedule_cdc_extras(data: Mapping[str, Any]) -> dict[str, Any]:
+    from services.schedule_cdc_extras import schedule_cdc_extras
+
+    return schedule_cdc_extras(
+        data.get("sync_mode") or "full_refresh_overwrite",
+        allow_append_only=data.get("allow_append_only", False),
+        cdc_row_filter=data.get("cdc_row_filter"),
+        multi_subnet_failover=data.get("multi_subnet_failover", False),
+    )
+
+
 # Keep only the most recent N runs per schedule so the history document stays small.
 RUN_HISTORY_LIMIT = 25
 # Window between taking a claim and its job becoming visible; a claim whose job
@@ -56,6 +89,8 @@ CLAIM_GRACE = timedelta(minutes=5)
 CLAIM_MAX_RUNTIME = timedelta(hours=4)
 
 _file_import_attempted = False
+# Same-process Run-now + beat must not both observe running=false.
+_CLAIM_LOCK = threading.Lock()
 
 
 def _load_schedules_from_file(path=STORE_PATH) -> list[PipelineSchedule]:
@@ -123,8 +158,20 @@ class PipelineSchedule:
     validation_mode: str = "strict"
     schema_policy: str = "manual_review"
     backfill_new_fields: bool = False
+    # Stage-then-promote. Default off so unattended runs match Studio unless set.
+    write_via_staging: bool = False
+    # Priority-first sync + optional row cap (0 = no limit).
+    priority_column: str = ""
+    priority_direction: str = "desc"
+    row_limit: int = 0
     # CDC dest-owned watermark EOS is opt-in; default stays at_least_once.
     delivery_guarantee: str = "at_least_once"
+    # Debezium snapshot mode (CDC only). Empty on full/incremental.
+    snapshot_mode: str = ""
+    # Destination Advanced CDC extras. Empty/false on full/incremental.
+    allow_append_only: bool = False
+    cdc_row_filter: str = ""
+    multi_subnet_failover: bool = False
     mappings: list[dict] = field(default_factory=list)
     stream_contracts: list[dict] = field(default_factory=list)
     cursor_column: str = ""  # watermark column for incremental syncs
@@ -139,6 +186,14 @@ class PipelineSchedule:
     # Data contract — when set, scheduled runs enforce the signed contract.
     contract_id: str = ""
     require_signed_contract: bool = False
+    # Validate≡Execute identity — scheduled runs must replay the same locales,
+    # pre-load recipe, and approved hashes the operator signed in Studio.
+    date_locale: str = ""
+    number_locale: str = ""
+    shape_recipe: dict[str, Any] = field(default_factory=dict)
+    approved_shape_recipe_hash: str = ""
+    approved_decision_artifact_hash: str = ""
+    approved_ddl_identity_hash: str = ""
     #: The source shape observed on the last successful run, so a later run can
     #: tell a renamed or retyped column from one that was always that way. A
     #: schedule that remembers only its cursor cannot notice that the column it
@@ -154,6 +209,15 @@ class PipelineSchedule:
     #: Dual Run campaign: consecutive parallel-run cycles on this route.
     #: ``evaluate_campaign`` is the kernel; this is durable memory for it.
     fidelity_campaign: dict[str, Any] = field(default_factory=dict)
+    #: Autopilot — a named human's advance signature for unattended runs, bound
+    #: by hash to the mapping and source shape it was granted against. Empty is
+    #: the safe default: with no grant the gates decide exactly as before.
+    #: ``services/standing_authorization.py`` owns its shape and its rules.
+    standing_authorization: dict[str, Any] = field(default_factory=dict)
+    #: An open finding waiting on a human. While this is set the cadence is
+    #: suppressed, because re-deciding an identical configuration against
+    #: identical catalogs produces an identical refusal — every night, forever.
+    approval_request: dict[str, Any] = field(default_factory=dict)
     # Retry policy applied on run failure.
     max_retries: int = 0
     retry_backoff_seconds: int = 60
@@ -188,6 +252,7 @@ class PipelineSchedule:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> PipelineSchedule:
+        cdc_extras = _schedule_cdc_extras(data)
         return cls(
             id=data["id"],
             name=data["name"],
@@ -203,6 +268,14 @@ class PipelineSchedule:
             validation_mode=data.get("validation_mode") or "strict",
             schema_policy=data.get("schema_policy") or "manual_review",
             backfill_new_fields=bool(data.get("backfill_new_fields", False)),
+            write_via_staging=bool(data.get("write_via_staging", False)),
+            priority_column=str(data.get("priority_column") or "").strip(),
+            priority_direction=(
+                "asc"
+                if str(data.get("priority_direction") or "").strip().lower() == "asc"
+                else "desc"
+            ),
+            row_limit=max(0, int(data.get("row_limit", 0) or 0)),
             delivery_guarantee=(
                 str(data.get("delivery_guarantee") or "at_least_once")
                 .strip()
@@ -210,6 +283,14 @@ class PipelineSchedule:
                 .replace("-", "_")
                 or "at_least_once"
             ),
+            snapshot_mode=_schedule_snapshot_mode(
+                data.get("sync_mode") or "full_refresh_overwrite",
+                data.get("snapshot_mode")
+                or _first_contract_snapshot(data.get("stream_contracts")),
+            ),
+            allow_append_only=bool(cdc_extras["allow_append_only"]),
+            cdc_row_filter=str(cdc_extras["cdc_row_filter"]),
+            multi_subnet_failover=bool(cdc_extras["multi_subnet_failover"]),
             mappings=list(data.get("mappings") or []),
             stream_contracts=list(data.get("stream_contracts") or []),
             cursor_column=(data.get("cursor_column") or "").strip(),
@@ -229,6 +310,16 @@ class PipelineSchedule:
                     bool((data.get("contract_id") or "").strip()),
                 )
             ),
+            date_locale=str(data.get("date_locale") or "").strip(),
+            number_locale=str(data.get("number_locale") or "").strip(),
+            shape_recipe=dict(data.get("shape_recipe") or {})
+            if isinstance(data.get("shape_recipe"), dict)
+            else {},
+            approved_shape_recipe_hash=str(data.get("approved_shape_recipe_hash") or "").strip(),
+            approved_decision_artifact_hash=str(
+                data.get("approved_decision_artifact_hash") or ""
+            ).strip(),
+            approved_ddl_identity_hash=str(data.get("approved_ddl_identity_hash") or "").strip(),
             source_schema={
                 str(k): str(v)
                 for k, v in (data.get("source_schema") or {}).items()
@@ -243,6 +334,12 @@ class PipelineSchedule:
             ],
             fidelity_campaign=dict(data.get("fidelity_campaign") or {})
             if isinstance(data.get("fidelity_campaign"), dict)
+            else {},
+            standing_authorization=dict(data.get("standing_authorization") or {})
+            if isinstance(data.get("standing_authorization"), dict)
+            else {},
+            approval_request=dict(data.get("approval_request") or {})
+            if isinstance(data.get("approval_request"), dict)
             else {},
             max_retries=max(0, int(data.get("max_retries", 0) or 0)),
             retry_backoff_seconds=max(0, int(data.get("retry_backoff_seconds", 60) or 0)),
@@ -370,11 +467,26 @@ def _load_mongo(svc) -> list[PipelineSchedule]:
     doc = db["schedule_store"].find_one({"_id": "primary"})
     if not doc:
         return []
+    # Once the per-schedule store has written, an empty per-schedule store means
+    # "no schedules", not "read the blob" — otherwise deleting the last schedule
+    # resurrects every schedule the blob still holds.
+    if doc.get("superseded_by"):
+        return []
     return [PipelineSchedule.from_dict(s) for s in doc.get("schedules", [])]
 
 
-def _save_mongo(svc, schedules: list[PipelineSchedule]) -> None:
-    """Persist schedules as individual docs with version CAS (no whole-blob races)."""
+def _save_mongo(
+    svc,
+    schedules: list[PipelineSchedule],
+    *,
+    removed_ids: Sequence[str] = (),
+) -> None:
+    """Persist schedules as individual docs with version CAS (no whole-blob races).
+
+    ``removed_ids`` names schedules this write deletes. It is what makes deleting
+    the *last* schedule land: an empty snapshot carries no id to compare against,
+    so the "not in the snapshot" sweep below has nothing to sweep.
+    """
     db = svc.get_database()
     coll = db["pipeline_schedules"]
     seen = set()
@@ -405,6 +517,16 @@ def _save_mongo(svc, schedules: list[PipelineSchedule]) -> None:
     # Remove schedules deleted from the in-memory snapshot.
     if seen:
         coll.delete_many({"_id": {"$nin": list(seen)}})
+    gone = [sid for sid in removed_ids if sid and sid not in seen]
+    if gone:
+        coll.delete_many({"_id": {"$in": gone}})
+    # The per-schedule store is authoritative from the first write on, so a legacy
+    # blob must never answer a later read (see ``_load_mongo``).
+    if seen or gone:
+        db["schedule_store"].update_one(
+            {"_id": "primary"},
+            {"$set": {"superseded_by": "pipeline_schedules"}},
+        )
 
 
 def _load_all() -> list[PipelineSchedule]:
@@ -414,10 +536,10 @@ def _load_all() -> list[PipelineSchedule]:
     return _load_schedules_from_file(STORE_PATH)
 
 
-def _save_all(schedules: list[PipelineSchedule]) -> None:
+def _save_all(schedules: list[PipelineSchedule], *, removed_ids: Sequence[str] = ()) -> None:
     svc = _mongo_backend()
     if svc:
-        _save_mongo(svc, schedules)
+        _save_mongo(svc, schedules, removed_ids=removed_ids)
         return
     STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
     STORE_PATH.write_text(
@@ -493,6 +615,40 @@ def schedule_bind_summary(sched: Any) -> dict[str, Any]:
     )
 
 
+def assert_schedule_mapping_matches_contract(sched: Any) -> None:
+    """Refuse a beat when the schedule mapping hash drifted from the signed contract.
+
+    Contracts with no stored mappings skip this bind — we do not invent a
+    fingerprint. Empty-mapping park stays a separate plan-change gate.
+    """
+    cid = (getattr(sched, "contract_id", None) or "").strip()
+    if not cid:
+        return
+    try:
+        from services.contract_store import get_contract_store
+        from services.schema_fingerprint import fingerprint_mappings
+    except ImportError:  # pragma: no cover
+        from src.services.contract_store import get_contract_store
+        from src.services.schema_fingerprint import fingerprint_mappings
+
+    contract = get_contract_store().get_contract(cid)
+    if contract is None:
+        return
+    contracted = [m for m in (getattr(contract, "mappings", None) or []) if isinstance(m, dict)]
+    if not contracted:
+        return
+    expected = fingerprint_mappings(contracted)
+    actual = fingerprint_mappings(
+        [m for m in (getattr(sched, "mappings", None) or []) if isinstance(m, dict)]
+    )
+    if expected != actual:
+        raise ValueError(
+            f"Schedule mappings do not match signed contract {cid} "
+            f"(contract {expected[:12]} vs schedule {actual[:12]}). "
+            "Open Validate and persist the approved mapping, or re-sign the contract."
+        )
+
+
 def assert_schedule_run_allowed(sched: Any) -> dict[str, Any]:
     """Fail-closed SIGNED + breaker for a scheduled run. Returns bind preview.
 
@@ -510,6 +666,7 @@ def assert_schedule_run_allowed(sched: Any) -> dict[str, Any]:
             from src.services.contract_store import assert_contract_breaker_allows
 
         assert_contract_breaker_allows(cid)
+        assert_schedule_mapping_matches_contract(sched)
     return schedule_bind_summary(sched)
 
 
@@ -522,20 +679,113 @@ def _assert_callable_schedule_sync(data: Mapping[str, Any] | None, sync_mode: st
         raise ValueError(reason)
 
 
+def find_studio_replay_target(
+    schedule_id: str | None,
+    source_connector_id: str,
+    dest_connector_id: str,
+    source_table: str,
+    dest_table: str,
+) -> PipelineSchedule | None:
+    """The parked draft Studio must persist mappings onto — not a new pipeline.
+
+    Prefer an explicit schedule id (inbox → Studio). Otherwise a unique
+    empty-mapping draft on the same route, then a unique empty draft on the
+    same connector pair (operator changed ``sample`` to a real table).
+    Ambiguous matches return None so we do not hijack a sibling draft.
+    """
+    from services.schedule_mapping_contract import (
+        is_empty_mapping_finding,
+        persisted_mapping_rows,
+    )
+
+    sid = str(schedule_id or "").strip()
+    if sid:
+        existing = get_schedule(sid)
+        if existing:
+            return existing
+    src = str(source_connector_id or "").strip()
+    dst = str(dest_connector_id or "").strip()
+    if not src or not dst:
+        return None
+    all_schedules = list_schedules()
+    same_route = [
+        s
+        for s in all_schedules
+        if str(s.source_connector_id or "") == src
+        and str(s.dest_connector_id or "") == dst
+        and str(s.source_table or "") == str(source_table or "")
+        and str(s.dest_table or "") == str(dest_table or "")
+        and not persisted_mapping_rows(s.mappings)
+    ]
+    if len(same_route) == 1:
+        return same_route[0]
+    if len(same_route) > 1:
+        return None
+    same_pair_empty = [
+        s
+        for s in all_schedules
+        if str(s.source_connector_id or "") == src
+        and str(s.dest_connector_id or "") == dst
+        and not persisted_mapping_rows(s.mappings)
+    ]
+    if len(same_pair_empty) != 1:
+        return None
+    candidate = same_pair_empty[0]
+    request = candidate.approval_request if isinstance(candidate.approval_request, dict) else {}
+    if request and is_empty_mapping_finding(
+        str(request.get("code") or ""),
+        str(request.get("finding") or ""),
+    ):
+        return candidate
+    # Never-run New schedule draft on this pair — Studio Schedule should
+    # persist onto it rather than leave a second paused empty row.
+    return candidate
+
+
 def create_schedule(data: dict[str, Any]) -> PipelineSchedule:
-    schedules = _load_all()
-    interval = data.get("interval", "daily")
-    cron = (data.get("cron") or "").strip()
-    tz = (data.get("timezone") or "UTC").strip() or "UTC"
-    sync_mode = data.get("sync_mode") or "full_refresh_overwrite"
+    payload = dict(data)
+    replay_id = str(payload.pop("replay_schedule_id", "") or "").strip()
+    interval = payload.get("interval", "daily")
+    cron = (payload.get("cron") or "").strip()
+    tz = (payload.get("timezone") or "UTC").strip() or "UTC"
+    sync_mode = payload.get("sync_mode") or "full_refresh_overwrite"
     _validate_cadence(interval, cron, tz, sync_mode)
-    contract_id = (data.get("contract_id") or "").strip()
-    require_signed = bool(data.get("require_signed_contract", bool(contract_id)))
+    contract_id = (payload.get("contract_id") or "").strip()
+    require_signed = bool(payload.get("require_signed_contract", bool(contract_id)))
     if contract_id or require_signed:
         assert_signed_contract(contract_id, require_signed=require_signed)
-    _assert_callable_schedule_sync(data, sync_mode)
+    _assert_callable_schedule_sync(payload, sync_mode)
+    from services.schedule_mapping_contract import persisted_mapping_rows
+
+    rows = persisted_mapping_rows(payload.get("mappings"))
+    if rows:
+        target = find_studio_replay_target(
+            replay_id,
+            str(payload.get("source_connector_id") or ""),
+            str(payload.get("dest_connector_id") or ""),
+            str(payload.get("source_table") or ""),
+            str(payload.get("dest_table") or ""),
+        )
+        if target:
+            patch = {k: v for k, v in payload.items() if k != "id"}
+            patch["interval"] = interval
+            patch["cron"] = cron
+            patch["timezone"] = tz
+            patch["sync_mode"] = sync_mode
+            patch["contract_id"] = contract_id
+            patch["require_signed_contract"] = require_signed
+            if "enabled" not in patch:
+                patch["enabled"] = True
+            updated = update_schedule(target.id, patch)
+            if updated:
+                return updated
+    enabled = bool(payload.get("enabled", True))
+    if enabled and not rows:
+        # Draft is allowed. Enabling an empty-mapping schedule invents _auto_map.
+        enabled = False
+    schedules = _load_all()
     sched = PipelineSchedule.from_dict({
-        **data,
+        **payload,
         "id": str(uuid.uuid4()),
         "interval": interval,
         "cron": cron,
@@ -543,7 +793,7 @@ def create_schedule(data: dict[str, Any]) -> PipelineSchedule:
         "sync_mode": sync_mode,
         "contract_id": contract_id,
         "require_signed_contract": require_signed,
-        "enabled": bool(data.get("enabled", True)),
+        "enabled": enabled,
     })
     sched.next_run_at = next_run_for(sched)
     schedules.append(sched)
@@ -551,7 +801,31 @@ def create_schedule(data: dict[str, Any]) -> PipelineSchedule:
     return sched
 
 
+_VALIDATE_IDENTITY_HASH_KEYS = (
+    "approved_shape_recipe_hash",
+    "approved_decision_artifact_hash",
+    "approved_ddl_identity_hash",
+)
+
+
+def drop_blank_validate_identity(data: dict[str, Any]) -> dict[str, Any]:
+    """Empty hash / empty recipe on PATCH is omit, not wipe.
+
+    FastAPI ``"" is not None`` would otherwise clear Studio stamps on an
+    unrelated edit. Re-Validate still overwrites with a non-empty hash.
+    """
+    out = dict(data)
+    for key in _VALIDATE_IDENTITY_HASH_KEYS:
+        if key in out and not str(out.get(key) or "").strip():
+            out.pop(key)
+    recipe = out.get("shape_recipe")
+    if recipe is not None and not (isinstance(recipe, dict) and recipe):
+        out.pop("shape_recipe")
+    return out
+
+
 def update_schedule(schedule_id: str, data: dict[str, Any]) -> PipelineSchedule | None:
+    data = drop_blank_validate_identity(data)
     schedules = _load_all()
     for i, s in enumerate(schedules):
         if s.id != schedule_id:
@@ -574,6 +848,13 @@ def update_schedule(schedule_id: str, data: dict[str, Any]) -> PipelineSchedule 
         if (enabling or contract_changed) and (contract_id or require_signed):
             assert_signed_contract(contract_id, require_signed=require_signed)
         _assert_callable_schedule_sync(merged, sync_mode)
+        from services.schedule_mapping_contract import (
+            EMPTY_MAPPING_REFUSAL,
+            persisted_mapping_rows,
+        )
+
+        if enabling and not persisted_mapping_rows(merged.get("mappings")):
+            raise ValueError(EMPTY_MAPPING_REFUSAL)
         merged["contract_id"] = contract_id
         merged["require_signed_contract"] = require_signed
         updated = PipelineSchedule.from_dict(merged)
@@ -582,8 +863,48 @@ def update_schedule(schedule_id: str, data: dict[str, Any]) -> PipelineSchedule 
             updated.next_run_at = next_run_for(updated)
         schedules[i] = updated
         _save_all(schedules)
+        if "approval_request" not in data:
+            released = _release_empty_mapping_if_mapped(updated)
+            if released:
+                return released
         return updated
     return None
+
+
+def _release_empty_mapping_if_mapped(sched: PipelineSchedule) -> PipelineSchedule | None:
+    """Close EMPTY_MAPPING after Studio persists a replayable contract.
+
+    A signature cannot invent column names. Persisting mappings is the plan
+    change the inbox asked for — leave the finding open and the card still
+    says Needs approval after the operator did the work.
+    """
+    from services.schedule_mapping_contract import (
+        is_empty_mapping_finding,
+        persisted_mapping_rows,
+    )
+
+    if not persisted_mapping_rows(sched.mappings):
+        return None
+    if not has_open_approval(sched):
+        return None
+    request = sched.approval_request if isinstance(sched.approval_request, dict) else {}
+    if not is_empty_mapping_finding(
+        str(request.get("code") or ""),
+        str(request.get("finding") or ""),
+    ):
+        return None
+    from services.schedule_approvals import resolve_plan_change
+
+    result = resolve_plan_change(
+        sched.id,
+        actor="transfer_studio",
+        reason=(
+            "Validate-approved mapping contract persisted — empty-mapping park "
+            "is a plan change, not a signature."
+        ),
+    )
+    released = result.get("schedule") if result else None
+    return released if isinstance(released, PipelineSchedule) else None
 
 
 def delete_schedule(schedule_id: str) -> bool:
@@ -591,7 +912,7 @@ def delete_schedule(schedule_id: str) -> bool:
     filtered = [s for s in schedules if s.id != schedule_id]
     if len(filtered) == len(schedules):
         return False
-    _save_all(filtered)
+    _save_all(filtered, removed_ids=(schedule_id,))
     return True
 
 
@@ -638,6 +959,35 @@ def _is_running_stale(sched: PipelineSchedule) -> bool:
     return age > CLAIM_MAX_RUNTIME
 
 
+def _claim_running_mongo(schedule_id: str, instance: str, now: str) -> PipelineSchedule | None:
+    """CAS the running flag on the per-schedule Mongo document."""
+    svc = _mongo_backend()
+    if not svc:
+        return None
+    coll = svc.get_database()["pipeline_schedules"]
+    result = coll.find_one_and_update(
+        {
+            "_id": schedule_id,
+            "$or": [
+                {"running": {"$in": [False, None]}},
+                {"running": {"$exists": False}},
+            ],
+        },
+        {
+            "$set": {
+                "running": True,
+                "running_instance": instance,
+                "running_started_at": now,
+                "running_job_id": "",
+            }
+        },
+        return_document=True,
+    )
+    if not result:
+        return None
+    return PipelineSchedule.from_dict({**result, "id": result.get("id") or str(result.get("_id"))})
+
+
 def mark_schedule_running(schedule_id: str, instance: str) -> PipelineSchedule | None:
     """Mark a schedule as running on this instance.
 
@@ -645,26 +995,30 @@ def mark_schedule_running(schedule_id: str, instance: str) -> PipelineSchedule |
     schedule for the same source→dest connector pair) already has a live,
     non-stale run in flight.
     """
-    schedules = _load_all()
-    now = _now()
-    for i, s in enumerate(schedules):
-        if s.id != schedule_id:
-            continue
-        if s.running and not _is_running_stale(s):
-            return None
-        if connector_pair_busy(s.source_connector_id, s.dest_connector_id, exclude_id=s.id):
-            return None
-        updated = PipelineSchedule.from_dict({
-            **s.to_dict(),
-            "running": True,
-            "running_instance": instance,
-            "running_started_at": now,
-            "running_job_id": "",
-        })
-        schedules[i] = updated
-        _save_all(schedules)
-        return updated
-    return None
+    with _CLAIM_LOCK:
+        schedules = _load_all()
+        now = _now()
+        for i, s in enumerate(schedules):
+            if s.id != schedule_id:
+                continue
+            if s.running and not _is_running_stale(s):
+                return None
+            if connector_pair_busy(s.source_connector_id, s.dest_connector_id, exclude_id=s.id):
+                return None
+            claimed = _claim_running_mongo(schedule_id, instance, now)
+            if claimed is not None:
+                return claimed
+            updated = PipelineSchedule.from_dict({
+                **s.to_dict(),
+                "running": True,
+                "running_instance": instance,
+                "running_started_at": now,
+                "running_job_id": "",
+            })
+            schedules[i] = updated
+            _save_all(schedules)
+            return updated
+        return None
 
 
 def clear_schedule_running(schedule_id: str) -> PipelineSchedule | None:
@@ -695,7 +1049,6 @@ def set_running_job(schedule_id: str, job_id: str) -> PipelineSchedule | None:
         schedules[i] = updated
         _save_all(schedules)
         return updated
-    return None
     return None
 
 
@@ -822,13 +1175,34 @@ def connector_pair_busy(source_connector_id: str, dest_connector_id: str, exclud
     return False
 
 
+def has_open_approval(sched: Any) -> bool:
+    """True while a finding on this schedule is waiting on a human.
+
+    Only an unresolved request holds the cadence: a request that was approved or
+    rejected keeps its record for the audit trail but no longer blocks.
+    """
+    req = getattr(sched, "approval_request", None) or {}
+    if not isinstance(req, dict) or not req:
+        return False
+    return str(req.get("status") or "open").strip().lower() == "open"
+
+
 def due_schedules(now: datetime | None = None) -> list[PipelineSchedule]:
+    from services.schedule_mapping_contract import persisted_mapping_rows
+
     current = now or datetime.now(timezone.utc)
     due: list[PipelineSchedule] = []
     for s in _load_all():
         if not s.enabled:
             continue
+        if not persisted_mapping_rows(s.mappings):
+            continue
         if s.running and not _is_running_stale(s):
+            continue
+        if has_open_approval(s):
+            # A deterministic refusal waiting on a decision is not a cadence
+            # event: the same inputs would produce the same refusal, so running
+            # it again only buries the finding under identical failures.
             continue
         retry_at = _parse_ts(s.retry_at)
         if retry_at is not None:

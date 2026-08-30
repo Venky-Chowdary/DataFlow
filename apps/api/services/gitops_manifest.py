@@ -21,8 +21,80 @@ _SCHEDULE_RUNTIME_KEYS = frozenset(
         "running",
         "running_instance",
         "running_started_at",
+        "running_job_id",
         "run_history",
         "cursor_value",
+        "retry_at",
+        "retry_attempt",
+        "missed_window_count",
+        "last_missed_windows",
+        "approval_request",
+        "standing_authorization",
+    }
+)
+
+# Observed at run time. GitOps owns policy, not the last-run fingerprint —
+# stamping source_schema from env A onto env B hides real SOURCE_SCHEMA_DRIFT.
+_SCHEDULE_OBSERVED_KEYS = frozenset(
+    {
+        "source_schema",
+        "source_schema_fingerprint",
+        "source_schema_observed_at",
+        "source_primary_key",
+        "fidelity_campaign",
+        "created_at",
+    }
+)
+
+# Studio Advanced + cadence + contract. Export is an allowlist so CD cannot
+# silently drop write_via_staging / snapshot_mode the way a dump-minus-runtime
+# filter does when a new observed field lands in to_dict().
+_SCHEDULE_DECLARATIVE_KEYS = frozenset(
+    {
+        "id",
+        "name",
+        "source_connector_id",
+        "source_table",
+        "dest_connector_id",
+        "dest_table",
+        "interval",
+        "enabled",
+        "cron",
+        "timezone",
+        "sync_mode",
+        "validation_mode",
+        "schema_policy",
+        "backfill_new_fields",
+        "write_via_staging",
+        "priority_column",
+        "priority_direction",
+        "row_limit",
+        "delivery_guarantee",
+        "snapshot_mode",
+        "allow_append_only",
+        "cdc_row_filter",
+        "multi_subnet_failover",
+        "mappings",
+        "stream_contracts",
+        "cursor_column",
+        "primary_key",
+        "source_read_mode",
+        "procedure_call",
+        "source_query",
+        "procedure_params",
+        "workspace_id",
+        "contract_id",
+        "require_signed_contract",
+        "date_locale",
+        "number_locale",
+        "shape_recipe",
+        "approved_shape_recipe_hash",
+        "approved_decision_artifact_hash",
+        "approved_ddl_identity_hash",
+        "max_retries",
+        "retry_backoff_seconds",
+        "notify_on_failure",
+        "notify_on_success",
     }
 )
 
@@ -35,7 +107,24 @@ _CONTRACT_RUNTIME_KEYS = frozenset(
 
 def schedule_spec(sched: Any) -> dict[str, Any]:
     data = sched.to_dict() if hasattr(sched, "to_dict") else dict(sched)
-    return {k: v for k, v in data.items() if k not in _SCHEDULE_RUNTIME_KEYS}
+    return {
+        k: data[k]
+        for k in _SCHEDULE_DECLARATIVE_KEYS
+        if k in data
+        and k not in _SCHEDULE_RUNTIME_KEYS
+        and k not in _SCHEDULE_OBSERVED_KEYS
+    }
+
+
+def apply_schedule_spec(spec: dict[str, Any]) -> dict[str, Any]:
+    """Keep policy knobs from YAML; never stamp a remembered source shape."""
+    if not isinstance(spec, dict):
+        return {}
+    return {
+        k: v
+        for k, v in spec.items()
+        if k not in _SCHEDULE_RUNTIME_KEYS and k not in _SCHEDULE_OBSERVED_KEYS
+    }
 
 
 def contract_spec(contract: Any) -> dict[str, Any]:
@@ -108,12 +197,21 @@ def build_dataflow_manifest(
     *,
     include_contracts: bool = True,
     include_mapping_bundles: bool = False,
+    workspace_id: str = "",
+    isolation: bool = False,
 ) -> dict[str, Any]:
     """Build a multi-resource manifest of schedules (and optional contracts)."""
     from services.schedule_store import list_schedules
 
     resources: list[dict[str, Any]] = []
+    ws = (workspace_id or "").strip()
     for sched in list_schedules():
+        sws = (getattr(sched, "workspace_id", "") or "").strip()
+        if ws:
+            if isolation and sws != ws:
+                continue
+            if not isolation and sws and sws != ws:
+                continue
         resources.append(schedule_artifact(sched))
 
     if include_contracts or include_mapping_bundles:
@@ -128,6 +226,13 @@ def build_dataflow_manifest(
         if callable(list_fn):
             contracts = list_fn() or []
         for contract in contracts:
+            meta = getattr(contract, "metadata", None) or {}
+            cws = str(meta.get("workspace_id") or "").strip()
+            if ws:
+                if isolation and cws != ws:
+                    continue
+                if not isolation and cws and cws != ws:
+                    continue
             if include_contracts:
                 resources.append(contract_artifact(contract))
             if include_mapping_bundles:
@@ -258,6 +363,7 @@ def apply_manifest(
     *,
     dry_run: bool = False,
     require_signed_contracts: bool = False,
+    workspace_id: str = "",
 ) -> dict[str, Any]:
     """Apply a DatawrapManifest (or single resource). ``dry_run=True`` delegates to plan.
 
@@ -293,7 +399,10 @@ def apply_manifest(
         spec = resource.get("spec") if isinstance(resource.get("spec"), dict) else {}
         try:
             if kind == "PipelineSchedule":
-                apply_spec = dict(spec)
+                apply_spec = apply_schedule_spec(spec)
+                bound_ws = (workspace_id or "").strip()
+                if bound_ws:
+                    apply_spec["workspace_id"] = bound_ws
                 if require_signed_contracts:
                     apply_spec["require_signed_contract"] = True
                     cid = str(apply_spec.get("contract_id") or "").strip()
@@ -301,6 +410,10 @@ def apply_manifest(
                     assert_signed_contract(cid, require_signed=True)
                 sid = str(apply_spec.get("id") or "").strip()
                 if sid and get_schedule(sid):
+                    existing = get_schedule(sid)
+                    existing_ws = (getattr(existing, "workspace_id", "") or "").strip()
+                    if bound_ws and existing_ws and existing_ws != bound_ws:
+                        raise ValueError("Schedule belongs to another workspace")
                     updated = update_schedule(sid, apply_spec)
                     results.append({
                         "kind": kind,

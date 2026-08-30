@@ -129,10 +129,32 @@ export const BACKEND_SUITE = {
  * honesty filter (preflight required except file_source; email stays demoted
  * as write-only with no read-back, SFTP earned its place in
  * test_sftp_live_transfer.py against a real server).
+ * This is the count **when optional packages are present**. A given host may
+ * report fewer via `GET /capabilities` `unique_transfer_drivers`. Catalog tiles
+ * are a larger number and are never presented as live capability.
  * Regenerate by: `python -c "from src.transfer.connector_capabilities import transfer_live_driver_types; print(len(transfer_live_driver_types()))"`
- * Catalog tiles are a larger number and are never presented as live capability.
  */
 export const TRANSFER_READY_DRIVERS = 43;
+
+/**
+ * Catalog slots the desktop lab can bind and exercise as source + dest.
+ * This is an operator option, not 80 unique engines and not catalog tile count.
+ */
+export const DESKTOP_LAB_CATALOG_SLOTS = 80;
+
+/**
+ * Operator-facing honesty line. Catalog tile count is never a live-driver count.
+ * Hosts without optional warehouse/SaaS packages report fewer via capabilities.
+ */
+export function catalogHonestyLead(readyCount: number = TRANSFER_READY_DRIVERS): string {
+  return (
+    `Catalog tiles are not transfer-live. ${readyCount} drivers are TRANSFER_READY ` +
+    `when optional packages are present. A given host may report fewer via GET /capabilities.`
+  );
+}
+
+/** Studio-aligned family badge. Mixed = at least one name is Planned or package-gated. */
+export type CatalogFamilyBadge = "Certified" | "Mixed" | "Planned";
 
 /**
  * Internal operator ledger — not rendered on marketing pages.
@@ -141,9 +163,9 @@ export const TRANSFER_READY_DRIVERS = 43;
 export const NOT_PROVEN: UnprovenRow[] = [
   {
     area: "Snowflake, BigQuery, S3 / ADLS / GCS",
-    status: "planned",
+    status: "unaudited",
     reason:
-      "Warehouse and object-store connectors ship in the catalog. Shared-sandbox live-matrix certification is completed on the customer tenant during onboarding.",
+      "Emulator leftover MERGE is measured on test_warehouse_emulator_leftover_merge_* (moto/MinIO/fake-gcs/Azurite dest 4→3, incremental no-op, dest-engine GET COUNT; fakesnow + BigQuery emulator dest-engine DELETE). Customer-tenant Snowflake/BQ/S3 PRODUCTION_SKU is not claimed.",
   },
   {
     area: "Salesforce, Stripe, Shopify, HubSpot",
@@ -168,14 +190,27 @@ export const NOT_PROVEN: UnprovenRow[] = [
   },
   {
     area: "Transform row ledger and quarantine",
-    status: "planned",
+    status: "unaudited",
     reason:
-      "Transform loads are proven column-correct on three engines; a per-row read/written/quarantined account inside a transform does not exist yet.",
+      "Named sqlite fixture test_transform_quarantine_dlq_write_path persists failing not_null findings to the same DLQ and stamps row_accounting. Live warehouse transform-run quarantine is not yet matrix-measured.",
   },
   {
     area: "Contracts and Proofs surfaces",
     status: "unaudited",
-    reason: "Implemented and unit-tested, not yet examined at the live-matrix bar.",
+    reason:
+      "Named sqlite fixture test_contract_enforce_sqlite_fixture blocks missing required columns on a SIGNED file→sqlite contract. Shared-sandbox live-matrix certification is not claimed.",
+  },
+  {
+    area: "CDC snapshot+LSN live-matrix",
+    status: "planned",
+    reason:
+      "Postgres WAL, MySQL ROW binlog (test_cdc_mysql_binlog_transfer_e2e), SQL Server native CDC (test_cdc_sqlserver_native_transfer_e2e), and Oracle LogMiner (test_oracle_logminer_transfer_snapshot_resume_delete; dest {1:99, 3:30}, id=2 gone) are measured snapshot+resume+delete. MySQL→PostgreSQL dest-owned DELETE + replay is measured on test_mysql_binlog_postgres_dest_owned_delete_replay (dest {1:99, 3:30}, replay 0, stale LSN skipped). CDC default remains at-least-once upsert. Not dest-owned exactly-once.",
+  },
+  {
+    area: "Iceberg leftover MERGE",
+    status: "unaudited",
+    reason:
+      "SqlCatalog leftover MERGE is measured on test_iceberg_sql_catalog_leftover_merge_deletes_extra_and_count_is_snapshot_len (dest 4→3). REST warehouse leftover MERGE is measured on test_iceberg_rest_catalog_leftover_merge_deletes_extra_and_count_is_snapshot_len (dest 4→3, incremental no-op, file-footer COUNT) plus composite PK. Glue and Nessie stay Planned. Hadoop catalog is fail-closed in pyiceberg 0.11 (no SqlCatalog fallback).",
   },
   {
     area: "SOC 2 / ISO 27001 certification",
@@ -184,29 +219,45 @@ export const NOT_PROVEN: UnprovenRow[] = [
   },
 ];
 
-/** Public marketing — product language, never CI blockers. */
-export const MARKETING_STACK = [
+/**
+ * Public catalog families — product language, never CI blockers.
+ * Names may include Planned tiles. `note` must say so; `badge` matches Studio.
+ */
+export const MARKETING_STACK: ReadonlyArray<{
+  family: string;
+  items: string;
+  badge: CatalogFamilyBadge;
+  note: string;
+}> = [
   {
     family: "Warehouses",
     items: "Snowflake, BigQuery, Redshift, Databricks",
-    note: "Native MERGE loaders, capacity checks, and a reconcile report finance can archive.",
+    badge: "Mixed",
+    note:
+      "Snowflake and BigQuery are TRANSFER_READY when their packages are installed. Redshift and Databricks stay Planned until a named PRODUCTION_SKU matrix. Every warehouse load still maps, gates, quarantines, and checksums.",
   },
   {
     family: "Object storage",
     items: "Amazon S3, Azure Data Lake Storage, Google Cloud Storage",
-    note: "Land files and open-table paths with write accounting and quarantine visibility.",
+    badge: "Mixed",
+    note:
+      "S3, ADLS, and GCS are TRANSFER_READY when their packages are installed. Catalog tiles without a named matrix stay Planned. Writes still quarantine and account rows.",
   },
   {
     family: "Databases",
     items: "PostgreSQL, MySQL, SQL Server, Oracle, MongoDB",
-    note: "Schema carry, identity, keys, and checksum reconcile on every cutover.",
+    badge: "Mixed",
+    note:
+      "PostgreSQL, MySQL, and MongoDB are certified full transfer. SQL Server and Oracle are TRANSFER_READY when their packages are installed. Schema carry, identity, and checksum reconcile stay on every cutover.",
   },
   {
     family: "Applications",
     items: "Salesforce, Stripe, Shopify, HubSpot",
-    note: "Connect CRM and commerce systems with your integration user.",
+    badge: "Mixed",
+    note:
+      "Salesforce and HubSpot are certified reverse-ETL. Stripe and Shopify stay Planned until PRODUCTION_SKU. Connecting a catalog tile is not a live transfer.",
   },
-] as const;
+];
 
 export const MARKETING_PROOF_HIGHLIGHTS = [
   {

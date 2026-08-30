@@ -25,6 +25,7 @@ from services.decision_kernel.ddl import (
 )
 from services.decision_kernel.execute_gate import (
     build_artifact_from_mappings,
+    create_new_validate_holds_after_dest_exists,
     enforce_decision_artifact,
 )
 from services.decision_kernel.invent import (
@@ -95,6 +96,8 @@ from services.decision_kernel.findings import (
     build_finding,
     classify_transform_failure,
     findings_from_coercion_report,
+    findings_from_population_fit,
+    merge_validation_findings,
     rank_suggested_target_type,
     recommended_action_for_failure,
     typed_cast_incompatible_with_text_sink,
@@ -142,6 +145,8 @@ __all__ = [
     "build_decision_artifact",
     "build_finding",
     "findings_from_coercion_report",
+    "findings_from_population_fit",
+    "merge_validation_findings",
     "build_migration_proof_pack",
     "build_proof_plan",
     "classify_conversion",
@@ -152,6 +157,7 @@ __all__ = [
     "classify_transform_failure",
     "compute_content_hash",
     "create_new_mapping_target_type",
+    "create_new_validate_holds_after_dest_exists",
     "refuse_create_new_numeric_collapse",
     "ddl_identity_columns",
     "ddl_identity_divergence",

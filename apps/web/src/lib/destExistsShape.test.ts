@@ -45,6 +45,15 @@ describe("destExistsShape", () => {
     assert.equal(cta?.kind, "reload_dest_schema");
     assert.match(cta?.label || "", /Reload destination schema/);
     assert.equal(destExistsPrimaryCta({ primary_action: "continue_validate" }), null);
+    assert.equal(
+      destExistsPrimaryCta({
+        shape: "create_new_table",
+        primary_action: "review_map",
+        extra_source_columns: [],
+      }),
+      null,
+      "create-new with no extra columns must not steal the fit-widen CTA",
+    );
   });
 
   it("reads shape_contract from source_coverage or the G15 gate", () => {

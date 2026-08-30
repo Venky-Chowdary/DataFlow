@@ -21,6 +21,8 @@ Implemented engines
 * S3 — ``GetBucketAcl`` grant parse (never PutObject)
 * GCS — bucket IAM bindings (never upload)
 * ADLS — container metadata + role/account-key posture (never PutBlob)
+* generic_sql — embedded ``sqlite://`` / ``duckdb://`` delegates to those probes
+* DynamoDB — ``ListTables`` / ``DescribeTable`` (never PutItem)
 
 Contract
 --------
@@ -65,6 +67,9 @@ _SUPPORTED = frozenset({
     "gcs",
     "adls",
     "sftp",
+    "generic_sql",
+    "dynamodb",
+    "amazon_dynamodb",
 })
 
 _MONGO_WRITE_ACTIONS = frozenset({
@@ -178,7 +183,19 @@ def _normalize_engine(db_type: str) -> str:
         return "gcs"
     if engine in {"adls", "adls_gen2", "azure_data_lake", "azure_blob", "azure_blob_storage"}:
         return "adls"
+    if engine in {"amazon_dynamodb", "dynamodb_global_tables"}:
+        return "dynamodb"
     return engine
+
+
+def _embedded_sql_engine(connection_string: str, database: str = "") -> str:
+    """Map a generic_sql DSN to the embedded engine that owns its privilege catalog."""
+    raw = f"{connection_string or ''} {database or ''}".strip().lower()
+    if raw.startswith("duckdb:") or "duckdb:///" in raw or raw.startswith("duckdb:///"):
+        return "duckdb"
+    if raw.startswith("sqlite:") or raw.startswith("sqlite:///") or raw.endswith(".db"):
+        return "sqlite"
+    return ""
 
 
 def _finalize(
@@ -265,6 +282,10 @@ def probe_destination_privileges(
 ) -> PrivilegeProbeResult:
     """Probe write/create privileges for a destination without mutating data."""
     engine = _normalize_engine(db_type)
+    if engine == "generic_sql":
+        embedded = _embedded_sql_engine(connection_string, database)
+        if embedded:
+            engine = embedded
 
     if engine not in _SUPPORTED:
         return PrivilegeProbeResult(
@@ -306,6 +327,7 @@ def probe_destination_privileges(
                 connection_string=connection_string,
                 table_exists=table_exists,
                 need_update=need_update,
+                ssl=ssl,
             )
         if engine == "snowflake":
             return _probe_snowflake(
@@ -425,6 +447,16 @@ def probe_destination_privileges(
                 connection_string=connection_string,
                 ssl=ssl,
                 api_key=api_key or service_account,
+                table_exists=table_exists,
+            )
+        if engine == "dynamodb":
+            return _probe_dynamodb(
+                host=host,
+                port=port,
+                table=tbl,
+                username=username,
+                password=password,
+                connection_string=connection_string,
                 table_exists=table_exists,
             )
         if engine == "s3":
@@ -706,10 +738,14 @@ def _probe_mysql(
     connection_string: str,
     table_exists: bool,
     need_update: bool,
+    ssl: bool = False,
 ) -> PrivilegeProbeResult:
     from connectors.mysql_conn import get_connection
 
     db_name = schema or database
+    # Same TLS posture as the writer. Forcing SSL here made Validate refuse
+    # CREATE on a server the write path already used without TLS
+    # (Error 2026: SSL is required but the server doesn't support it).
     conn = get_connection(
         host=host,
         port=port,
@@ -717,7 +753,8 @@ def _probe_mysql(
         username=username,
         password=password,
         connection_string=connection_string,
-        ssl=True,
+        ssl=ssl,
+        purpose="probe",
     )
     try:
         with conn.cursor() as cur:
@@ -817,35 +854,82 @@ def _probe_snowflake(
                 logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
             grant_rows: list[tuple[Any, ...]] = []
-            if current_role:
-                try:
-                    # Identifier quote — role names are case-sensitive when quoted.
-                    cur.execute(f'SHOW GRANTS TO ROLE "{current_role}"')
-                    grant_rows = list(cur.fetchall())
-                except Exception:
+            grant_error = ""
+            try:
+                if current_role:
+                    try:
+                        # Identifier quote — role names are case-sensitive when quoted.
+                        cur.execute(f'SHOW GRANTS TO ROLE "{current_role}"')
+                        grant_rows = list(cur.fetchall())
+                    except Exception:
+                        cur.execute("SHOW GRANTS")
+                        grant_rows = list(cur.fetchall())
+                else:
                     cur.execute("SHOW GRANTS")
                     grant_rows = list(cur.fetchall())
-            else:
-                cur.execute("SHOW GRANTS")
-                grant_rows = list(cur.fetchall())
+            except Exception as exc:
+                grant_error = str(exc)
+                grant_rows = []
 
-            grants = _snowflake_privileges_from_rows(grant_rows)
-            can_write, can_create = evaluate_snowflake_privileges(
-                grants,
-                database=database,
-                schema=schema,
-                table=table,
-                table_exists=table_exists,
-                need_update=need_update,
-            )
-            return _finalize(
+            if grant_rows:
+                grants = _snowflake_privileges_from_rows(grant_rows)
+                can_write, can_create = evaluate_snowflake_privileges(
+                    grants,
+                    database=database,
+                    schema=schema,
+                    table=table,
+                    table_exists=table_exists,
+                    need_update=need_update,
+                )
+                return _finalize(
+                    engine="snowflake",
+                    can_write=can_write,
+                    can_create=can_create,
+                    table_exists=table_exists,
+                    table=table,
+                    schema=schema,
+                    need_update=need_update,
+                    method="SHOW GRANTS TO ROLE",
+                )
+
+            # fakesnow / restricted warehouses: SHOW GRANTS is missing, but
+            # ACCOUNTADMIN / SYSADMIN still own CREATE TABLE by Snowflake contract.
+            role_u = (current_role or "").upper()
+            if role_u in {"ACCOUNTADMIN", "SYSADMIN"}:
+                return _finalize(
+                    engine="snowflake",
+                    can_write=True,
+                    can_create=True,
+                    table_exists=table_exists,
+                    table=table,
+                    schema=schema,
+                    need_update=need_update,
+                    method="current_role_privilege_class",
+                )
+            from connectors.snowflake_conn import _is_local_account
+
+            if _is_local_account(account or ""):
+                # Emulator has no GRANT catalog. A live session that already
+                # resolved CURRENT_ROLE is the privilege analog of sqlite os.access.
+                return _finalize(
+                    engine="snowflake",
+                    can_write=True,
+                    can_create=True,
+                    table_exists=table_exists,
+                    table=table,
+                    schema=schema,
+                    need_update=need_update,
+                    method="fakesnow_session",
+                )
+            return PrivilegeProbeResult(
+                can_write=None,
+                can_create_table=None,
+                status="unavailable",
+                detail=(
+                    f"SHOW GRANTS failed ({grant_error or 'empty grant catalog'}) "
+                    f"and role {current_role or '(none)'} is not ACCOUNTADMIN/SYSADMIN"
+                ),
                 engine="snowflake",
-                can_write=can_write,
-                can_create=can_create,
-                table_exists=table_exists,
-                table=table,
-                schema=schema,
-                need_update=need_update,
                 method="SHOW GRANTS TO ROLE",
             )
         finally:
@@ -988,6 +1072,22 @@ def _probe_bigquery(
         )
 
     entries = list(getattr(ds, "access_entries", None) or [])
+    from connectors.google_emulator import looks_like_google_emulator
+
+    if looks_like_google_emulator(
+        endpoint=connection_string, host=host, port=port,
+    ) and not entries:
+        # goccy BQ has no IAM catalog. Empty ACL is not a customer deny.
+        return _finalize(
+            engine="bigquery",
+            can_write=True,
+            can_create=True,
+            table_exists=bool(exists),
+            table=table,
+            schema=dataset,
+            need_update=False,
+            method="emulator_no_iam_catalog",
+        )
     can_write, can_create, matched = evaluate_bigquery_access_entries(entries)
 
     # Dataset WRITER/OWNER implies both insert and create; if table missing and
@@ -2162,6 +2262,61 @@ def evaluate_elasticsearch_privileges(
     if not table_exists:
         can_write = can_write or can_create
     return can_write, can_create
+
+
+# ── DynamoDB ─────────────────────────────────────────────────────────────────
+
+def _probe_dynamodb(
+    *,
+    host: str,
+    port: int,
+    table: str,
+    username: str,
+    password: str,
+    connection_string: str,
+    table_exists: bool | None,
+) -> PrivilegeProbeResult:
+    """Measure DynamoDB write/create without PutItem.
+
+    DynamoDB has no GRANT catalog. Cloud IAM is the real privilege plane; local
+    moto / endpoint_url has none. ``ListTables`` succeeding is the metadata
+    analog of sqlite ``os.access`` — the process can call CreateTable. Never
+    writes an item.
+    """
+    import boto3
+
+    endpoint = (connection_string or "").strip()
+    if endpoint and not endpoint.startswith("http"):
+        endpoint = ""
+    if not endpoint and host:
+        endpoint = f"http://{host}:{int(port or 8000)}"
+
+    kwargs: dict[str, Any] = {"region_name": "us-east-1"}
+    if endpoint:
+        kwargs["endpoint_url"] = endpoint
+        kwargs["aws_access_key_id"] = username or "test"
+        kwargs["aws_secret_access_key"] = password or "test"
+    client = boto3.client("dynamodb", **kwargs)
+    client.list_tables()
+    exists = bool(table_exists)
+    if table:
+        try:
+            client.describe_table(TableName=table)
+            exists = True
+        except Exception:
+            exists = False
+    return _finalize(
+        engine="dynamodb",
+        can_write=True,
+        can_create=True,
+        table_exists=exists,
+        table=table,
+        schema="",
+        need_update=False,
+        method="list_tables",
+        write_action="PutItem",
+        create_action="CreateTable",
+    )
 
 
 # ── S3 / MinIO ───────────────────────────────────────────────────────────────

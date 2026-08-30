@@ -15,6 +15,38 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
+def rows_with_findings(details: list[dict[str, Any]]) -> int:
+    """Distinct source rows that carry a finding of their own."""
+    return len(
+        {
+            d.get("row")
+            for d in details
+            if isinstance(d, dict) and d.get("row") is not None
+        }
+    )
+
+
+def split_refused_unit(
+    details: list[dict[str, Any]], rejected_rows: int, summary: dict[str, Any]
+) -> int:
+    """Name the rows a refused write unit rolled back, and return the true rejects.
+
+    A refused unit reports every uncommitted row as rejected, because the writers
+    count ``source - kept`` and an abort keeps nothing. A 5,000-row batch holding
+    2,500 bad cells therefore claimed "5,000 quarantined" while only 2,500 rows
+    had a finding to review — a total Inspect could never explain, and no
+    remediation could act on. Quarantine is what the writer found; the rest of
+    the unit was rolled back with it.
+    """
+    found = rows_with_findings(details)
+    if not found or rejected_rows <= found:
+        return rejected_rows
+    summary["rows_rolled_back"] = rejected_rows - found
+    summary["rows_refused_unit"] = rejected_rows
+    summary["rejected_rows"] = found
+    return found
+
+
 def _persist_checkpoint_quarantine_delta(
     job_id: str,
     checkpoint: dict[str, Any] | None,
@@ -61,6 +93,32 @@ def _persist_checkpoint_quarantine_delta(
             "Quarantine DLQ persist failed at buffered checkpoint — refuse to "
             f"continue (rows cannot disappear): {exc}"
         ) from exc
+
+
+def checkpoint_quarantine_summary(
+    checkpoint: dict[str, Any],
+    details: list[dict[str, Any]],
+    preview: list[dict[str, Any]],
+    total: int,
+    truncated: bool,
+) -> dict[str, Any]:
+    """Destination summary for a running checkpoint, findings named separately.
+
+    A writer counts ``source - kept`` per unit, so a refused batch reports every
+    uncommitted row as rejected. Written straight onto the job that becomes
+    "5,000 quarantined / 0 findings" on Inspect: the rows without a finding of
+    their own were rolled back with the batch, and no finding exists to show.
+    """
+    summary: dict[str, Any] = {
+        "checksum": checkpoint.get("checksum", ""),
+        "rejected_details": preview,
+        "rejected_details_total": total,
+        "rejected_details_truncated": truncated,
+        "quarantine_checkpoint_durable": True,
+    }
+    rejected = int(checkpoint.get("rejected_rows") or total or 0)
+    summary["rejected_rows"] = split_refused_unit(details, rejected, summary)
+    return summary
 
 
 def _persist_job_quarantine(
@@ -191,6 +249,71 @@ def _persist_job_quarantine(
     from services.quarantine_dlq import assert_quarantine_durable_or_raise
 
     assert_quarantine_durable_or_raise(dest_summary)
+
+
+def fail_closed_on_silent_loss(
+    *,
+    job_id: str,
+    request: Any,
+    dest_summary: dict[str, Any],
+    recon: dict[str, Any],
+    rows_written: int,
+    operation: str,
+) -> Any | None:
+    """Refuse terminal success when a measured dest population does not close.
+
+    Returns a failed ``TransferResult`` or ``None`` when the ledger is honest
+    (balanced, or dest unmeasured). Owner: ``services.row_conservation``.
+    """
+    from services.row_conservation import (
+        PopulationConservationError,
+        assert_population_conservation_closed,
+    )
+    from src.transfer.models import TransferResult
+
+    try:
+        ledger = assert_population_conservation_closed(
+            {
+                "records_processed": rows_written,
+                "sync_mode": str(getattr(request, "sync_mode", "") or ""),
+                "reconciliation": recon,
+                "destination_summary": dest_summary,
+                "rejected_rows": dest_summary.get("rejected_rows"),
+                "coerced_null_rows": dest_summary.get("coerced_null_rows"),
+            },
+            validation_mode=str(getattr(request, "validation_mode", "") or ""),
+        )
+    except PopulationConservationError as exc:
+        from services.mongodb_service import get_mongodb_service
+
+        note = str(exc)
+        dest_summary = dict(dest_summary)
+        dest_summary["silent_loss"] = True
+        dest_summary["conservation_error"] = note[:500]
+        get_mongodb_service().update_job_status(
+            job_id,
+            "failed",
+            error=note,
+            phase="failed",
+            progress_pct=99,
+            message=note,
+            reconciliation=recon,
+            destination_summary=dest_summary,
+            rejected_rows=int(dest_summary.get("rejected_rows", 0) or 0),
+            coerced_null_rows=int(dest_summary.get("coerced_null_rows", 0) or 0),
+        )
+        return TransferResult(
+            success=False,
+            error=note,
+            operation=operation,
+            job_id=job_id,
+            records_transferred=rows_written,
+            destination_summary=dest_summary,
+            reconciliation=recon,
+        )
+    dest_summary["row_accounting"] = ledger.to_dict()
+    recon["row_accounting"] = ledger.to_dict()
+    return None
 
 
 def _attach_job_rollback_plan(

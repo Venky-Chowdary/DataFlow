@@ -78,7 +78,9 @@ def _parse_object_sample(value: Any) -> dict[str, Any] | None:
     if not (s.startswith("{") and s.endswith("}")):
         return None
     try:
-        parsed = json.loads(s)
+        from services.value_serializer import json_loads_exact
+
+        parsed = json_loads_exact(s)
     except json.JSONDecodeError:
         return None
     return parsed if isinstance(parsed, dict) else None
@@ -144,10 +146,33 @@ def _parse_array_sample(value: Any) -> list[Any] | None:
     if not (s.startswith("[") and s.endswith("]")):
         return None
     try:
-        parsed = json.loads(s)
+        from services.value_serializer import json_loads_exact
+
+        parsed = json_loads_exact(s)
     except json.JSONDecodeError:
         return None
     return parsed if isinstance(parsed, list) else None
+
+
+def parse_json_array(value: Any) -> list[Any] | None:
+    """Public parse for ShapeEngine unnest — same SSOT as Map explode."""
+    return _parse_array_sample(value)
+
+
+def parse_json_object(value: Any) -> dict[str, Any] | None:
+    """Public parse for ShapeEngine flatten — same SSOT as Map flatten."""
+    return _parse_object_sample(value)
+
+
+def json_cell_text(value: Any) -> Any:
+    """Serialize a nested JSON cell the way Map explode writes an element."""
+    if isinstance(value, (dict, list)):
+        from services.value_serializer import json_default
+
+        return json.dumps(
+            value, ensure_ascii=False, separators=(",", ":"), default=json_default
+        )
+    return value
 
 
 def apply_struct_policies_to_row(

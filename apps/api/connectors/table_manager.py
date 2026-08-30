@@ -125,6 +125,8 @@ def drop_table(
         return _drop_mongodb(cfg, table_name, schema)
     if dt == "snowflake":
         return _drop_snowflake(cfg, table_name, schema)
+    if dt == "bigquery":
+        return _drop_bigquery(cfg, table_name, schema)
     if dt == "clickhouse":
         return _drop_clickhouse(cfg, table_name, schema)
     if _routes_generic_sql_mutate(dt):
@@ -158,6 +160,50 @@ def _drop_postgresql(cfg: dict[str, Any], table_name: str, schema: str | None) -
                 sql.SQL("DROP TABLE IF EXISTS {}.{} CASCADE").format(schema_id, table_id)
             )
         conn.close()
+        return True
+    except Exception as exc:
+        raise TableDropError(table_name, exc) from exc
+
+
+def _drop_bigquery(cfg: dict[str, Any], table_name: str, schema: str | None) -> bool:
+    """DROP via the BigQuery client. Missing table is already clear.
+
+    SQLAlchemy cannot bind the goccy HTTP emulator (dialect ``http``). Inventing
+    a generic_sql DROP would fail-closed create-new overwrite as an append risk.
+    """
+    from connectors.bigquery_conn import get_client
+    from connectors.google_emulator import (
+        google_emulator_retry,
+        google_emulator_timeout,
+        looks_like_google_emulator,
+    )
+
+    project = str(cfg.get("database") or cfg.get("project_id") or "").strip()
+    dataset = str(schema or cfg.get("schema") or "").strip()
+    if not project or not dataset or not table_name:
+        raise TableDropError(
+            table_name or "unknown",
+            ValueError("BigQuery drop needs project, dataset, and table"),
+        )
+    try:
+        client = get_client(
+            project_id=project,
+            service_account=str(cfg.get("service_account") or ""),
+            location=str(cfg.get("location") or ""),
+            host=str(cfg.get("host") or ""),
+            port=int(cfg.get("port") or 0),
+            connection_string=str(cfg.get("connection_string") or ""),
+        )
+        table_id = f"{project}.{dataset}.{table_name}"
+        extra: dict[str, Any] = {}
+        if looks_like_google_emulator(
+            endpoint=str(cfg.get("connection_string") or ""),
+            host=str(cfg.get("host") or ""),
+            port=int(cfg.get("port") or 0),
+        ):
+            extra["retry"] = google_emulator_retry()
+            extra["timeout"] = google_emulator_timeout()
+        client.delete_table(table_id, not_found_ok=True, **extra)
         return True
     except Exception as exc:
         raise TableDropError(table_name, exc) from exc
@@ -329,6 +375,48 @@ def delete_by_primary_keys(
     # Single-column shorthand keeps the existing IN (...) fast path.
     pk_col = pk_cols[0] if len(pk_cols) == 1 else pk_cols
     dt = (db_type or "").lower().strip()
+    from services.dest_precount import _object_store_kind
+
+    store = _object_store_kind(dt)
+    if store in {"s3", "gcs", "adls"}:
+        from connectors.object_store_leftover import (
+            delete_by_primary_keys as _object_store_delete,
+        )
+
+        return _object_store_delete(
+            dt,
+            cfg,
+            table_name,
+            pk_cols,
+            list(keys),
+            schema=schema,
+        )
+    if dt == "snowflake":
+        from services.dest_precount import _snowflake_delete_keys
+
+        try:
+            return _snowflake_delete_keys(
+                cfg,
+                schema=str(schema or cfg.get("schema") or ""),
+                table_name=table_name,
+                cols=pk_cols,
+                keys=list(keys),
+            )
+        except Exception as exc:
+            raise DestinationDeleteError(table_name, exc) from exc
+    if dt == "bigquery":
+        from services.dest_precount import _bigquery_delete_keys
+
+        try:
+            return _bigquery_delete_keys(
+                cfg,
+                schema=str(schema or cfg.get("schema") or ""),
+                table_name=table_name,
+                cols=pk_cols,
+                keys=list(keys),
+            )
+        except Exception as exc:
+            raise DestinationDeleteError(table_name, exc) from exc
     # Iceberg owns scan + LSN filter + CoW overwrite (filesystem or pyiceberg).
     if dt in {"iceberg", "apache_iceberg"}:
         from connectors.iceberg_writer import delete_by_primary_keys as _iceberg_delete
@@ -526,12 +614,13 @@ def _fetch_pk_lsn_map_mongodb(
     try:
         db_name = cfg.get("database") or mongodb_database_from_uri(conn_str) or "test"
         coll = client[db_name][table_name]
-        # Coerce numeric-looking keys when docs store ints.
+        # Writer may have stored int / Decimal / ObjectId. isdigit() missed
+        # locale money and did not refuse Auto grouping.
+        from services.target_sample import mongo_query_key_variants
+
         query_keys: list[Any] = []
         for k in keys:
-            query_keys.append(k)
-            if isinstance(k, str) and k.isdigit():
-                query_keys.append(int(k))
+            query_keys.extend(mongo_query_key_variants(k))
         cursor = coll.find(
             {primary_key_column: {"$in": query_keys}},
             {primary_key_column: 1, lsn_column: 1},
@@ -1069,21 +1158,86 @@ def _mongo_bind_keys(coll: Any, pk_col: str, keys: list[str]) -> list[Any]:
 
 
 def _mongo_typed_key(raw: Any, sample: Any) -> Any:
-    text = str(raw)
+    """Bind one leftover/CDC key to the stored PK type — write-path, no invent.
+
+    Informal ``yes`` is not True. Auto ``1.234`` is not a float PK. Locale
+    money the write path stores still binds. Dest-canonical storage text
+    (``1.234`` on a float PK) uses ``Decimal(text)`` first so leftover
+    delete still finds the row.
+    """
     if sample is None:
         return raw
     type_name = type(sample).__name__
     if type_name == "ObjectId":
         from bson import ObjectId
 
-        return ObjectId(text)
+        return ObjectId(str(raw))
     if isinstance(sample, bool):
-        return text.strip().lower() in {"1", "true", "t", "yes"}
+        if isinstance(raw, bool):
+            return raw
+        from connectors.sql_bind import coerce_boolean_wire
+
+        parsed = coerce_boolean_wire(raw)
+        if isinstance(parsed, bool):
+            return parsed
+        raise ValueError(
+            f"Mongo leftover key {raw!r} is not a write-path boolean "
+            "(true/t/1/false/f/0) — refuse invent from yes/on"
+        )
     if isinstance(sample, int) and not isinstance(sample, bool):
-        return int(text)
+        if isinstance(raw, int) and not isinstance(raw, bool):
+            return raw
+        from connectors.sql_bind import coerce_integer_wire
+
+        try:
+            parsed = coerce_integer_wire(raw, ddl_type="INTEGER")
+        except ValueError as exc:
+            raise ValueError(
+                f"Mongo leftover key {raw!r} is not an integer — refuse invent"
+            ) from exc
+        if parsed is None:
+            raise ValueError(
+                f"Mongo leftover key {raw!r} is not an integer — refuse invent"
+            )
+        return int(parsed)
     if isinstance(sample, float):
-        return float(text)
-    return text
+        if isinstance(raw, bool):
+            raise ValueError(
+                f"Mongo leftover key {raw!r} is not a number — refuse invent"
+            )
+        from decimal import Decimal, InvalidOperation
+        from services.transform_engine import decimal_wire_value, float_carrier_or_refuse
+
+        parsed: Decimal | None = None
+        if isinstance(raw, float):
+            if raw != raw or raw in (float("inf"), float("-inf")):
+                return raw
+            parsed = Decimal(str(raw))
+        elif isinstance(raw, int):
+            parsed = Decimal(raw)
+        else:
+            text = str(raw).strip()
+            if not text:
+                raise ValueError(
+                    f"Mongo leftover key {raw!r} is not a number — refuse invent"
+                )
+            try:
+                dest = Decimal(text)
+                if dest.is_finite():
+                    parsed = dest
+            except (InvalidOperation, ValueError, ArithmeticError):
+                parsed = decimal_wire_value(text)
+        if parsed is None or not parsed.is_finite():
+            raise ValueError(
+                f"Mongo leftover key {raw!r} is not a number — refuse invent"
+            )
+        try:
+            return float_carrier_or_refuse(parsed)
+        except ValueError as exc:
+            raise ValueError(
+                f"Mongo leftover key {raw!r} is not a number — refuse invent"
+            ) from exc
+    return str(raw) if raw is not None else raw
 
 
 def _delete_clickhouse(

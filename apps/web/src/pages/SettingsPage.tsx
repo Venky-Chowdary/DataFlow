@@ -8,7 +8,9 @@ import { PageFrame } from "../components/ui/PageFrame";
 import { PageShell } from "../components/ui/PageShell";
 import { useToast } from "../components/Toast";
 import { useConfirm } from "../components/ui/ConfirmDialog";
-import { fetchAuditEvents, fetchAiProviderSettings, fetchModelCapabilities, fetchSsoConfigs, fetchSecurityPosture, downloadSecurityReport, fetchWorkspaceApiKeys, fetchWorkspaceSettings, ModelCapabilities, createWorkspaceApiKey, resolveApiBase, revokeWorkspaceApiKey, SecurityPosture, SsoConfig, SsoType, testSsoConfig, updateAiProviderSettings, updateSsoConfig, updateWorkspaceSettings, WorkspaceApiKey } from "../lib/api";
+import { fetchAuditEvents, exportAuditLog, fetchAiProviderSettings, fetchModelCapabilities, fetchPilotEngineStatus, PilotEngineChoice, PilotEngineStatus, testAiProviderKey, updatePilotEngine, fetchSsoConfigs, fetchSecurityPosture, downloadSecurityReport, fetchWorkspaceApiKeys, fetchWorkspaceSettings, ModelCapabilities, createWorkspaceApiKey, resolveApiBase, revokeWorkspaceApiKey, SecurityPosture, SsoConfig, SsoType, testSsoConfig, updateAiProviderSettings, updateSsoConfig, updateWorkspaceSettings, WorkspaceApiKey } from "../lib/api";
+import { PERMISSIONS, useWriteGate } from "../lib/PermissionsContext";
+import { PermissionNotice } from "../components/PermissionNotice";
 import { NotificationSettings } from "./settings/NotificationSettings";
 import { TeamSettings } from "./settings/TeamSettings";
 import { TenantSettings } from "./settings/TenantSettings";
@@ -45,26 +47,40 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
   const [retention, setRetention] = useState("90");
   const [settingsLoading, setSettingsLoading] = useState(true);
   const [settingsSaving, setSettingsSaving] = useState(false);
+  /** Why General could not be read. Empty means the values below are the API's. */
+  const [settingsError, setSettingsError] = useState("");
+  const [settingsLoaded, setSettingsLoaded] = useState(false);
   const [logFilter, setLogFilter] = useState<"all" | AuditLog["level"]>("all");
   const [auditEvents, setAuditEvents] = useState<AuditLog[]>([]);
   const [auditLoading, setAuditLoading] = useState(false);
   const [modelCapabilities, setModelCapabilities] = useState<ModelCapabilities | null>(null);
   const [modelCapabilitiesLoaded, setModelCapabilitiesLoaded] = useState(false);
+  const [modelError, setModelError] = useState("");
+  const [engineError, setEngineError] = useState("");
   const [ssoConfigs, setSsoConfigs] = useState<Record<SsoType, SsoConfig> | null>(null);
+  /** Why SSO state is unknown. "Not configured" must not stand in for "not readable". */
+  const [ssoError, setSsoError] = useState("");
   const [ssoEditor, setSsoEditor] = useState<SsoType | null>(null);
   const [ssoDraft, setSsoDraft] = useState<SsoConfig | null>(null);
   const [ssoSaving, setSsoSaving] = useState(false);
   const [aiEditor, setAiEditor] = useState<string | null>(null);
   const [aiDraft, setAiDraft] = useState({ api_key: "", model: "", base_url: "", enabled: true });
   const [aiSaving, setAiSaving] = useState(false);
+  const [aiTesting, setAiTesting] = useState<string | null>(null);
+  const [engineStatus, setEngineStatus] = useState<PilotEngineStatus | null>(null);
+  const [engineSaving, setEngineSaving] = useState(false);
   const [apiKeys, setApiKeys] = useState<WorkspaceApiKey[]>([]);
   const [apiKeysLoading, setApiKeysLoading] = useState(false);
+  const [apiKeysError, setApiKeysError] = useState("");
   const [apiKeyGenerating, setApiKeyGenerating] = useState(false);
   const [revokingKeyId, setRevokingKeyId] = useState<string | null>(null);
   const [newKeyName, setNewKeyName] = useState("Production key");
   const [revealedKey, setRevealedKey] = useState<string | null>(null);
   const [posture, setPosture] = useState<SecurityPosture | null>(null);
   const [postureLoading, setPostureLoading] = useState(false);
+  const workspaceManage = useWriteGate(PERMISSIONS.workspaceManage);
+  /** Only edit what was actually read: an unread value must not be re-saved. */
+  const generalEditable = workspaceManage.allowed && settingsLoaded;
 
   const loadPosture = useCallback(() => {
     setPostureLoading(true);
@@ -80,39 +96,49 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
 
   useEffect(() => {
     fetchModelCapabilities()
-      .then(setModelCapabilities)
-      .catch(() =>
-        setModelCapabilities({
-          active_provider: "local",
-          active_model: "deterministic",
-          agent_mode: "local_tools",
-          fallback_order: ["local"],
-          providers: [
-            {
-              provider: "local",
-              label: "Local engine",
-              default_model: "deterministic",
-              tier: "local",
-              roles: ["mapping", "preflight", "triage"],
-              best_for: "Works offline without cloud API keys",
-              configured: true,
-              package_installed: true,
-              available: true,
-              status: "ready",
-            },
-          ],
-          guarantees: [],
-        }),
-      )
+      .then((caps) => {
+        setModelCapabilities(caps);
+        setModelError("");
+      })
+      .catch((err: unknown) => {
+        // A refusal or an outage is not "the local engine is active": inventing
+        // a provider list here told admins the wrong routing.
+        setModelCapabilities(null);
+        setModelError(err instanceof Error ? err.message : "Could not read AI routing configuration.");
+      })
       .finally(() => setModelCapabilitiesLoaded(true));
-    fetchSsoConfigs().then(setSsoConfigs).catch(() => setSsoConfigs(null));
+    fetchPilotEngineStatus()
+      .then((status) => {
+        setEngineStatus(status);
+        setEngineError("");
+      })
+      .catch((err: unknown) => {
+        setEngineStatus(null);
+        setEngineError(err instanceof Error ? err.message : "Could not read the Pilot engine setting.");
+      });
+    fetchSsoConfigs()
+      .then((cfgs) => {
+        setSsoConfigs(cfgs);
+        setSsoError("");
+      })
+      .catch((err: unknown) => {
+        setSsoConfigs(null);
+        setSsoError(err instanceof Error ? err.message : "Could not read identity provider settings.");
+      });
     fetchWorkspaceSettings()
       .then((ws) => {
         setOrgName(ws.org_name);
         setTimezone(ws.timezone);
         setRetention(String(ws.retention_days));
+        setSettingsLoaded(true);
+        setSettingsError("");
       })
-      .catch(() => {})
+      .catch((err: unknown) => {
+        // A refusal or an outage is shown as itself. This used to swallow the
+        // error and display "Datawrap / UTC / 90", i.e. settings nobody saved.
+        setSettingsLoaded(false);
+        setSettingsError(err instanceof Error ? err.message : "Could not load workspace settings.");
+      })
       .finally(() => setSettingsLoading(false));
   }, []);
 
@@ -120,8 +146,15 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
     if (tab !== "api") return;
     setApiKeysLoading(true);
     fetchWorkspaceApiKeys()
-      .then(setApiKeys)
-      .catch(() => setApiKeys([]))
+      .then((keys) => {
+        setApiKeys(keys);
+        setApiKeysError("");
+      })
+      .catch((err: unknown) => {
+        // An empty list means "no keys". A refusal means "you may not look".
+        setApiKeys([]);
+        setApiKeysError(err instanceof Error ? err.message : "Could not list API keys.");
+      })
       .finally(() => setApiKeysLoading(false));
   }, [tab]);
 
@@ -144,8 +177,19 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
     setSsoEditor(type);
   };
 
+  /**
+   * Workspace administration is the gate for every Settings mutation.
+   * Refuse in words rather than firing a request the API will reject.
+   */
+  const mayAdminister = () => {
+    if (workspaceManage.allowed) return true;
+    toast({ title: "No write permission", message: workspaceManage.reason, tone: "warning" });
+    return false;
+  };
+
   const saveSsoConfig = async () => {
     if (!ssoEditor || !ssoDraft) return;
+    if (!mayAdminister()) return;
     setSsoSaving(true);
     try {
       const result = await updateSsoConfig(ssoEditor, ssoDraft);
@@ -168,6 +212,7 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
   };
 
   const openAiEditor = async (provider: string, defaultModel: string) => {
+    if (!mayAdminister()) return;
     try {
       const settings = await fetchAiProviderSettings();
       const cfg = settings[provider];
@@ -186,11 +231,21 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
 
   const saveAiProvider = async () => {
     if (!aiEditor) return;
+    if (!mayAdminister()) return;
     setAiSaving(true);
     try {
       await updateAiProviderSettings(aiEditor, aiDraft);
-      setModelCapabilities(await fetchModelCapabilities());
-      toast({ title: "AI provider updated", message: `${aiEditor} settings saved and applied.`, tone: "success" });
+      const [caps, engine] = await Promise.all([fetchModelCapabilities(), fetchPilotEngineStatus()]);
+      setModelCapabilities(caps);
+      setEngineStatus(engine);
+      toast({
+        title: "AI provider updated",
+        message:
+          engine.engine === "local"
+            ? `${aiEditor} saved. Pilot is still on the local engine — ${engine.reason}`
+            : `${aiEditor} saved. Pilot now answers through it (${engine.engine}).`,
+        tone: "success",
+      });
       setAiEditor(null);
     } catch (err) {
       toast({
@@ -203,8 +258,53 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
     }
   };
 
+  const testProviderKey = async (provider: string) => {
+    if (!mayAdminister()) return;
+    setAiTesting(provider);
+    try {
+      const result = await testAiProviderKey(provider);
+      setModelCapabilities(result.capabilities);
+      setEngineStatus(await fetchPilotEngineStatus());
+      toast({
+        title: result.ok ? `${provider} key works` : `${provider} key rejected`,
+        message: result.ok
+          ? "The provider accepted the saved key."
+          : result.error || "The provider rejected the saved key.",
+        tone: result.ok ? "success" : "error",
+      });
+    } catch (err) {
+      toast({
+        title: "Key test failed",
+        message: err instanceof Error ? err.message : "Could not test the saved key.",
+        tone: "error",
+      });
+    } finally {
+      setAiTesting(null);
+    }
+  };
+
+  const saveEngineChoice = async (engine: PilotEngineChoice) => {
+    if (!mayAdminister()) return;
+    setEngineSaving(true);
+    try {
+      const status = await updatePilotEngine(engine);
+      setEngineStatus(status);
+      setModelCapabilities(await fetchModelCapabilities());
+      toast({ title: "Pilot engine updated", message: status.reason, tone: "success" });
+    } catch (err) {
+      toast({
+        title: "Could not change engine",
+        message: err instanceof Error ? err.message : "Pilot engine setting was not saved.",
+        tone: "error",
+      });
+    } finally {
+      setEngineSaving(false);
+    }
+  };
+
   const generateApiKey = async () => {
     if (apiKeyGenerating) return;
+    if (!mayAdminister()) return;
     setApiKeyGenerating(true);
     try {
       const created = await createWorkspaceApiKey(newKeyName.trim() || "API key");
@@ -232,6 +332,7 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
 
   const revokeKey = async (keyId: string, keyName: string) => {
     if (revokingKeyId) return;
+    if (!mayAdminister()) return;
     const ok = await confirm({
       title: `Revoke “${keyName}”?`,
       message: "Applications using this key will stop working immediately.",
@@ -258,6 +359,17 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
   };
 
   const saveWorkspaceSettings = async () => {
+    // Never write back a value that was never read, and never pretend a
+    // refusal was a save.
+    if (!mayAdminister()) return;
+    if (!settingsLoaded) {
+      toast({
+        title: "Settings not loaded",
+        message: "These fields are not your saved values. Reload before saving.",
+        tone: "error",
+      });
+      return;
+    }
     setSettingsSaving(true);
     try {
       const ws = await updateWorkspaceSettings({
@@ -305,24 +417,27 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
     [auditEvents],
   );
 
-  const downloadAuditCsv = () => {
-    const headers = ["id", "time", "actor", "action", "resource", "level"];
-    const rows = filteredLogs.map((log) => [
-      log.id,
-      log.time,
-      log.actor,
-      log.action,
-      log.resource,
-      log.level,
-    ]);
-    const csv = [headers.join(","), ...rows.map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(","))].join("\n");
-    const blob = new Blob([csv], { type: "text/csv" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `dataflow-audit-${new Date().toISOString().slice(0, 10)}.csv`;
-    a.click();
-    URL.revokeObjectURL(url);
+  const downloadAuditExport = async (format: "csv" | "json") => {
+    try {
+      const blob = await exportAuditLog(format);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `datawrap-audit-${new Date().toISOString().slice(0, 10)}.${format}`;
+      a.click();
+      URL.revokeObjectURL(url);
+      toast({
+        title: "Audit export ready",
+        message: `Workspace-scoped ${format.toUpperCase()} — not a SOC 2 letter.`,
+        tone: "success",
+      });
+    } catch (err) {
+      toast({
+        title: "Export failed",
+        message: err instanceof Error ? err.message : "Could not export audit log",
+        tone: "error",
+      });
+    }
   };
 
   return (
@@ -365,15 +480,43 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                       <p>Defaults applied across Transfer Studio, jobs, and connectors.</p>
                     </div>
                   </div>
+                  <PermissionNotice
+                    allowed={workspaceManage.allowed}
+                    reason={workspaceManage.reason}
+                    what="Workspace settings are read-only for you."
+                  />
+                  {settingsError && (
+                    <div className="df2-permission-notice" role="alert" data-testid="settings-load-error">
+                      <DtIcon name="alert" size={16} />
+                      <p>
+                        <strong>Workspace settings could not be read. </strong>
+                        {settingsError} The fields below are not your saved values.
+                      </p>
+                    </div>
+                  )}
                   <div className="df2-settings-section-body">
                     <div className="df2-settings-grid df2-settings-grid--row">
                       <div className="df2-settings-field">
                         <label htmlFor="org-name">Organization name</label>
-                        <input id="org-name" className="df2-input" value={orgName} onChange={(e) => setOrgName(e.target.value)} />
+                        <input
+                          id="org-name"
+                          className="df2-input"
+                          value={orgName}
+                          disabled={!generalEditable}
+                          title={workspaceManage.reason || undefined}
+                          onChange={(e) => setOrgName(e.target.value)}
+                        />
                       </div>
                       <div className="df2-settings-field">
                         <label htmlFor="timezone">Default timezone</label>
-                        <select id="timezone" className="df2-select" value={timezone} onChange={(e) => setTimezone(e.target.value)}>
+                        <select
+                          id="timezone"
+                          className="df2-select"
+                          value={timezone}
+                          disabled={!generalEditable}
+                          title={workspaceManage.reason || undefined}
+                          onChange={(e) => setTimezone(e.target.value)}
+                        >
                           <option value="UTC">UTC</option>
                           <option value="America/New_York">Eastern Time</option>
                           <option value="America/Los_Angeles">Pacific Time</option>
@@ -382,7 +525,15 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                       </div>
                       <div className="df2-settings-field">
                         <label htmlFor="retention">Job retention (days)</label>
-                        <input id="retention" className="df2-input" type="number" value={retention} onChange={(e) => setRetention(e.target.value)} />
+                        <input
+                          id="retention"
+                          className="df2-input"
+                          type="number"
+                          value={retention}
+                          disabled={!generalEditable}
+                          title={workspaceManage.reason || undefined}
+                          onChange={(e) => setRetention(e.target.value)}
+                        />
                       </div>
                       <div className="df2-settings-field">
                         <label>Default destination</label>
@@ -395,12 +546,14 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                         )}
                       </div>
                     </div>
-                    <p className="df2-settings-hint">Completed jobs older than retention are archived. Write targets stay on each connector.</p>
+                    <p className="df2-settings-hint">Retention is stored on the workspace profile. Job archival is not wired — completed jobs are not deleted by this value. Write targets stay on each connector.</p>
                   </div>
                   <div className="df2-settings-section-footer">
                     <Button
                       variant="primary"
-                      disabled={settingsLoading || settingsSaving}
+                      data-testid="settings-general-save"
+                      disabled={settingsLoading || settingsSaving || !generalEditable}
+                      title={workspaceManage.reason || undefined}
                       loading={settingsSaving}
                       loadingLabel="Saving…"
                       onClick={() => void saveWorkspaceSettings()}
@@ -433,9 +586,9 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                           { title: "Encryption at rest", desc: "AES-256 for stored connector credentials and job artifacts.", on: posture.encryption_at_rest },
                           { title: "Audit logging", desc: "Immutable trail for transfers, configuration, and API access.", on: posture.audit_logging },
                           { title: "PII detection", desc: "Sensitive column tagging at ingest and mapping review.", on: posture.pii_detection },
-                          { title: "IP allowlisting", desc: "Restrict API and MCP access to approved CIDR ranges.", on: posture.ip_allowlist_enabled },
-                          { title: `Session timeout (${posture.session_timeout_hours}h)`, desc: "Automatically sign out idle workspace sessions.", on: posture.session_timeout_hours > 0 },
-                          { title: "MFA required for admins", desc: "Enforce multi-factor authentication for owner and admin roles.", on: posture.mfa_required },
+                          { title: "IP allowlisting", desc: posture.ip_allowlist_enforced ? "Enforced when Host matches this tenant custom domain." : "Stored CIDR list. Not enforced on the default app host.", on: Boolean(posture.ip_allowlist_enforced) },
+                          { title: `Session timeout (${posture.session_timeout_hours}h)`, desc: "Recorded only. Token TTL is DATAFLOW_TOKEN_TTL_SEC — this value does not sign sessions out.", on: false },
+                          { title: "MFA required for admins", desc: "Recorded policy. Login MFA is not wired.", on: false },
                         ].map((item) => (
                           <div key={item.title} className="df2-settings-policy-row">
                             <div>
@@ -551,6 +704,20 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                     <p>Connect your identity provider for enterprise single sign-on.</p>
                   </div>
                 </div>
+                <PermissionNotice
+                  allowed={workspaceManage.allowed}
+                  reason={workspaceManage.reason}
+                  what="Identity provider settings are administered by workspace admins."
+                />
+                {ssoError && workspaceManage.allowed && (
+                  <div className="df2-permission-notice" role="alert" data-testid="sso-load-error">
+                    <DtIcon name="alert" size={16} />
+                    <p>
+                      <strong>Identity provider state could not be read. </strong>
+                      {ssoError} The cards below do not reflect saved configuration.
+                    </p>
+                  </div>
+                )}
                 <div className="df2-settings-section-body">
                   <div className="df2-settings-sso-grid">
                     {([
@@ -565,9 +732,15 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                         <h3>{provider.name}</h3>
                         <p>{provider.desc}</p>
                         <span className={`df2-badge ${enabled ? "df2-badge-live" : "df2-badge-muted"}`}>
-                          {enabled ? "Enabled" : "Not configured"}
+                          {ssoConfigs ? (enabled ? "Enabled" : "Not configured") : "Unknown"}
                         </span>
-                        <button type="button" className="df2-btn df2-btn-sm df2-btn-primary" onClick={() => openSsoEditor(provider.type)}>
+                        <button
+                          type="button"
+                          className="df2-btn df2-btn-sm df2-btn-primary"
+                          disabled={!workspaceManage.allowed}
+                          title={workspaceManage.reason || undefined}
+                          onClick={() => openSsoEditor(provider.type)}
+                        >
                           {provider.action}
                         </button>
                       </div>
@@ -607,6 +780,26 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                             : "Local deterministic engine active while model status loads."}
                         </p>
                       </div>
+                      <div className="df2-settings-field">
+                        <label htmlFor="pilot-engine">Pilot engine</label>
+                        <select
+                          id="pilot-engine"
+                          className="df2-select"
+                          disabled={engineSaving || !engineStatus}
+                          value={engineStatus?.preference ?? "auto"}
+                          onChange={(e) => void saveEngineChoice(e.target.value as PilotEngineChoice)}
+                        >
+                          <option value="auto">Auto — use a configured provider, else local</option>
+                          <option value="local">Local engine only</option>
+                          <option value="hybrid">Hybrid — local tools, provider wording</option>
+                          <option value="cloud">Cloud provider</option>
+                        </select>
+                        <p className="df2-settings-hint">
+                          {engineStatus
+                            ? `Resolved: ${engineStatus.engine} — ${engineStatus.reason}`
+                            : "Loading which engine Pilot will use…"}
+                        </p>
+                      </div>
                       <div className="df2-model-route">
                         {(modelCapabilities?.fallback_order ?? ["local", "ollama", "anthropic", "openai"]).map((provider, index) => (
                           <span key={provider}>
@@ -619,6 +812,15 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                   </div>
                 </section>
 
+                {(modelError || engineError) && (
+                  <div className="df2-permission-notice" role="alert" data-testid="model-load-error">
+                    <DtIcon name="alert" size={16} />
+                    <p>
+                      <strong>Pilot routing could not be read. </strong>
+                      {modelError || engineError} What is shown below is not the active routing.
+                    </p>
+                  </div>
+                )}
                 <div className="df2-model-grid">
                   {!modelCapabilitiesLoaded ? (
                     <SectionLoader title="Loading model providers" hint="Fetching AI routing configuration…" />
@@ -641,19 +843,34 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                         </span>
                       </div>
                       <p className="df2-model-best">{provider.best_for}</p>
+                      {provider.blocked_reason && (
+                        <p className="df2-settings-hint">{provider.blocked_reason}</p>
+                      )}
                       <div className="df2-model-roles">
                         {provider.roles.slice(0, 4).map((role) => (
                           <span key={role}>{role.replace(/_/g, " ")}</span>
                         ))}
                       </div>
                       {provider.provider !== "local" && (
-                        <button
-                          type="button"
-                          className="df2-btn df2-btn-sm df2-btn-primary"
-                          onClick={() => void openAiEditor(provider.provider, provider.default_model)}
-                        >
-                          {provider.available ? "Update credentials" : "Configure"}
-                        </button>
+                        <div className="df2-model-card-actions">
+                          <button
+                            type="button"
+                            className="df2-btn df2-btn-sm df2-btn-primary"
+                            onClick={() => void openAiEditor(provider.provider, provider.default_model)}
+                          >
+                            {provider.available ? "Update credentials" : "Configure"}
+                          </button>
+                          {provider.tier === "cloud" && provider.configured && (
+                            <button
+                              type="button"
+                              className="df2-btn df2-btn-sm"
+                              disabled={aiTesting === provider.provider}
+                              onClick={() => void testProviderKey(provider.provider)}
+                            >
+                              {aiTesting === provider.provider ? "Testing…" : "Test key"}
+                            </button>
+                          )}
+                        </div>
                       )}
                     </article>
                   ))}
@@ -669,6 +886,20 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                     <p>Authenticate programmatic transfers, schedules, and MCP agent calls.</p>
                   </div>
                 </div>
+                <PermissionNotice
+                  allowed={workspaceManage.allowed}
+                  reason={workspaceManage.reason}
+                  what="API keys are administered by workspace admins."
+                />
+                {apiKeysError && workspaceManage.allowed && (
+                  <div className="df2-permission-notice" role="alert" data-testid="api-keys-load-error">
+                    <DtIcon name="alert" size={16} />
+                    <p>
+                      <strong>API keys could not be listed. </strong>
+                      {apiKeysError} This is not the same as having no keys.
+                    </p>
+                  </div>
+                )}
                 <div className="df2-settings-section-body">
                   <div className="df2-api-key-toolbar">
                     <div className="df2-settings-field">
@@ -684,7 +915,8 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                     <button
                       type="button"
                       className="df2-btn df2-btn-primary"
-                      disabled={apiKeyGenerating}
+                      disabled={apiKeyGenerating || !workspaceManage.allowed}
+                      title={workspaceManage.reason || undefined}
                       onClick={() => void generateApiKey()}
                     >
                       <DtIcon name="plus" size={14} />
@@ -723,7 +955,13 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                       title="No API keys yet"
                       description="Generate a production key to authenticate programmatic transfers and MCP calls."
                       action={
-                        <button type="button" className="df2-btn df2-btn-primary df2-btn-sm" disabled={apiKeyGenerating} onClick={() => void generateApiKey()}>
+                        <button
+                          type="button"
+                          className="df2-btn df2-btn-primary df2-btn-sm"
+                          disabled={apiKeyGenerating || !workspaceManage.allowed}
+                          title={workspaceManage.reason || undefined}
+                          onClick={() => void generateApiKey()}
+                        >
                           {apiKeyGenerating ? "Generating…" : "Generate key"}
                         </button>
                       }
@@ -750,7 +988,8 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                             <button
                               type="button"
                               className="df2-btn df2-btn-sm df2-btn-danger"
-                              disabled={revokingKeyId === key.id}
+                              disabled={revokingKeyId === key.id || !workspaceManage.allowed}
+                              title={workspaceManage.reason || undefined}
                               onClick={() => void revokeKey(key.id, key.name)}
                             >
                               {revokingKeyId === key.id ? "Revoking…" : "Revoke"}
@@ -769,16 +1008,24 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                 <div className="df2-settings-section-head">
                   <div>
                     <h2>Audit logs</h2>
-                    <p>Configuration changes, transfers, connector tests, and MCP activity.</p>
+                    <p>Workspace-scoped events. Export downloads the server log for this workspace — not a SOC 2 or HIPAA letter.</p>
                   </div>
-                  <button
-                    type="button"
-                    className="df2-btn df2-btn-secondary df2-btn-sm"
-                    onClick={downloadAuditCsv}
-                    disabled={filteredLogs.length === 0}
-                  >
-                    <DtIcon name="download" size={14} /> Export CSV
-                  </button>
+                  <div className="df2-settings-section-actions">
+                    <button
+                      type="button"
+                      className="df2-btn df2-btn-secondary df2-btn-sm"
+                      onClick={() => void downloadAuditExport("csv")}
+                    >
+                      <DtIcon name="download" size={14} /> Export CSV
+                    </button>
+                    <button
+                      type="button"
+                      className="df2-btn df2-btn-ghost df2-btn-sm"
+                      onClick={() => void downloadAuditExport("json")}
+                    >
+                      Export JSON
+                    </button>
+                  </div>
                 </div>
                 <div className="df2-settings-section-body">
                   <FilterTabs
@@ -848,8 +1095,8 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                   <h2 className="dt-modal-title">Configure {ssoEditor === "saml" ? "SAML 2.0" : ssoEditor === "oidc" ? "OpenID Connect" : "Azure AD"}</h2>
                   <p className="dt-modal-subtitle">Settings are persisted and used for workspace sign-in.</p>
                 </div>
-                <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" onClick={() => setSsoEditor(null)} aria-label="Close">
-                  <DtIcon name="x" />
+                <button type="button" className="df2-close-btn" onClick={() => setSsoEditor(null)} aria-label="Close">
+                  <DtIcon name="x" size={16} />
                 </button>
               </div>
               <div className="dt-modal-body">
@@ -903,8 +1150,8 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                   <h2 className="dt-modal-title">Configure {aiEditor}</h2>
                   <p className="dt-modal-subtitle">API keys are encrypted at rest. Leave key blank to keep the existing value.</p>
                 </div>
-                <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" onClick={() => setAiEditor(null)} aria-label="Close">
-                  <DtIcon name="x" />
+                <button type="button" className="df2-close-btn" onClick={() => setAiEditor(null)} aria-label="Close">
+                  <DtIcon name="x" size={16} />
                 </button>
               </div>
               <div className="dt-modal-body">

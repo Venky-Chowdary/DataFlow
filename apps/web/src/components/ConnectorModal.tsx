@@ -370,7 +370,7 @@ export function ConnectorModal({
       if (endpointUrl.trim()) payload.endpoint_url = endpointUrl || undefined;
       if (resolvedType === "s3" && pathStyle) payload.path_style = pathStyle;
     }
-    if (resolvedType === "snowflake") {
+    if (resolvedType === "snowflake" || resolvedType === "iceberg") {
       payload.warehouse = warehouse || undefined;
     }
     if (isGcpConnector(resolvedType) && !serviceAccount.trim() && connectionString.trim()) {
@@ -628,8 +628,8 @@ export function ConnectorModal({
                 How to set up
               </button>
             )}
-            <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" onClick={onClose} aria-label="Close">
-              <DtIcon name="x" />
+            <button type="button" className="df2-close-btn" onClick={onClose} aria-label="Close">
+              <DtIcon name="x" size={16} />
             </button>
           </div>
         </div>

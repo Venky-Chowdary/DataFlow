@@ -169,9 +169,12 @@ def write_mapped_rows(
 
     try:
         client = gcs_client(cfg)
+        from connectors.gcs_common import gcs_emulator_kwargs
+
+        probe_kw = gcs_emulator_kwargs(cfg)
         bucket_obj = client.bucket(bucket)
         try:
-            if not bucket_obj.exists():
+            if not bucket_obj.exists(**probe_kw):
                 if not create_table:
                     raise RuntimeError(
                         f"GCS bucket {bucket!r} is missing and create_table is disabled"
@@ -274,6 +277,7 @@ def write_mapped_rows(
             rejected_rows=len({d["row"] for d in rejected_details}),
             rejected_details=list(rejected_details),
             coerced_null_rows=_coerced_null_row_count(rejected_details, policy),
+            meta=mat.meta,
         )
     except Exception as exc:
         return WriteResult(

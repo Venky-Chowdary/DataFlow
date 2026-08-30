@@ -1,6 +1,7 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { SectionLoader } from "../components/LoadingState";
 import { Button } from "../components/ui/Button";
+import { HiddenFileInput } from "../components/ui/HiddenFileInput";
 import { EmptyState } from "../components/ui/EmptyState";
 import { PipelineCard } from "../components/ui/PipelineCard";
 import { PageFrame } from "../components/ui/PageFrame";
@@ -10,12 +11,15 @@ import { PageSection } from "../components/ui/PageSection";
 import { PageShell } from "../components/ui/PageShell";
 import { PageToolbar } from "../components/ui/PageToolbar";
 import { ScheduleForm } from "../components/schedules/ScheduleForm";
+import { ApprovalInbox } from "../components/schedules/ApprovalInbox";
 import {
   PIPELINE_TABS,
   PipelineDetailDrawer,
   type PipelineTab,
 } from "../components/PipelineDetailDrawer";
 import { useToast } from "../components/Toast";
+import { PERMISSIONS, useWriteGate } from "../lib/PermissionsContext";
+import { PermissionNotice } from "../components/PermissionNotice";
 import { useConfirm } from "../components/ui/ConfirmDialog";
 import {
   applyGitopsManifest,
@@ -24,6 +28,7 @@ import {
   exportDatawrapManifest,
   exportScheduleYaml,
   fetchContractBreaker,
+  fetchOpenScheduleApprovals,
   fetchOpsFreshness,
   fetchScheduleIntervals,
   fetchSchedules,
@@ -33,7 +38,16 @@ import {
   updateSchedule,
 } from "../lib/api";
 import { breakerBlocksRuns } from "../lib/contractBreakerUi";
-import { Connector, PipelineSchedule, ScheduleInput, ScheduleIntervals } from "../lib/types";
+import { fleetExportBlockedReason } from "../lib/schedulesGitops";
+import { scheduleCreateOpensStudio, scheduleNeedsStudio, studioIntentFromSchedule } from "../lib/scheduleApprovalCta";
+import {
+  Connector,
+  PipelineSchedule,
+  ScheduleApprovalInboxItem,
+  ScheduleInput,
+  ScheduleIntervals,
+} from "../lib/types";
+import type { JobsStudioIntent } from "./JobsPage";
 
 interface SchedulesPageProps {
   connectors: Connector[];
@@ -41,16 +55,22 @@ interface SchedulesPageProps {
   onOpenJob?: (jobId: string) => void;
   onSchedulesChange?: () => void | Promise<void>;
   highlightScheduleId?: string;
+  /** Open Transfer Studio with a schedule's route so Map can persist a contract. */
+  onStartTransfer?: (intent?: JobsStudioIntent) => void;
 }
 
 type ScheduleFilter = "all" | "active" | "paused";
 
-export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesChange, highlightScheduleId }: SchedulesPageProps) {
+export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesChange, highlightScheduleId, onStartTransfer }: SchedulesPageProps) {
   const { toast } = useToast();
+  const scheduleManage = useWriteGate(PERMISSIONS.scheduleManage);
+  const jobRun = useWriteGate(PERMISSIONS.jobRun);
   const { confirm } = useConfirm();
   const [schedules, setSchedules] = useState<PipelineSchedule[]>([]);
   const [intervals, setIntervals] = useState<ScheduleIntervals | null>(null);
   const [loading, setLoading] = useState(true);
+  /** Why the fleet could not be read, when it could not — never drawn as empty. */
+  const [loadError, setLoadError] = useState("");
   const [showForm, setShowForm] = useState(false);
   const [editing, setEditing] = useState<PipelineSchedule | null>(null);
   const [saving, setSaving] = useState(false);
@@ -64,6 +84,28 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
   const [breakers, setBreakers] = useState<Record<string, string>>({});
   /** schedule_id -> worst lag seconds when stale/critical */
   const [freshnessLag, setFreshnessLag] = useState<Record<string, { lag: number; severity: string }>>({});
+  /** Schedules parked on a deterministic finding, waiting on a named decision. */
+  const [approvals, setApprovals] = useState<ScheduleApprovalInboxItem[]>([]);
+
+  /**
+   * Refuse in words rather than firing a request the API will reject.
+   * Returns true when the caller may proceed.
+   */
+  const allowOrExplain = (gate: { allowed: boolean; reason: string }) => {
+    if (gate.allowed) return true;
+    toast({ title: "No write permission", message: gate.reason, tone: "warning" });
+    return false;
+  };
+
+  const loadApprovals = useCallback(async () => {
+    try {
+      setApprovals(await fetchOpenScheduleApprovals());
+    } catch {
+      // A viewer without schedule.read, or an older API: show no inbox rather than
+      // implying nothing is parked.
+      setApprovals([]);
+    }
+  }, []);
 
   const loadBreakers = useCallback(async (rows: PipelineSchedule[]) => {
     const ids = [...new Set(rows.map((s) => s.contract_id).filter(Boolean))] as string[];
@@ -115,13 +157,20 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
     try {
       const rows = await fetchSchedules();
       setSchedules(rows);
+      setLoadError("");
       void loadBreakers(rows);
       void loadFreshness();
+      void loadApprovals();
     } catch (e) {
+      // A list that could not be read is not an empty fleet. Drawing "No
+      // schedules yet" over a refused or failed read told a viewer that
+      // schedules they cannot see do not exist.
+      setSchedules([]);
+      setLoadError(e instanceof Error ? e.message : "Could not read this workspace's schedules.");
       console.error(e);
     }
     setLoading(false);
-  }, [loadBreakers, loadFreshness]);
+  }, [loadApprovals, loadBreakers, loadFreshness]);
 
   useEffect(() => {
     load();
@@ -164,6 +213,12 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
 
   const closeDrawer = () => setDrawerOpen(false);
 
+  const openStudioFromSchedule = (id: string) => {
+    const sched = schedules.find((s) => s.id === id);
+    if (!sched || !onStartTransfer) return;
+    onStartTransfer(studioIntentFromSchedule(sched));
+  };
+
   const enabledCount = schedules.filter((s) => s.enabled).length;
   const pausedCount = schedules.length - enabledCount;
   const filteredSchedules = useMemo(() => {
@@ -180,12 +235,14 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
   }, [schedules, filter, pipelineSearch]);
 
   const openCreate = () => {
+    if (!allowOrExplain(scheduleManage)) return;
     setResumeDrawerAfterEdit(false);
     setEditing(null);
     setShowForm(true);
   };
 
   const openEdit = (sched: PipelineSchedule) => {
+    if (!allowOrExplain(scheduleManage)) return;
     setEditing(sched);
     setShowForm(true);
     window.requestAnimationFrame(() => {
@@ -205,18 +262,30 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
   };
 
   const handleSubmit = async (input: Partial<ScheduleInput>) => {
+    if (!allowOrExplain(scheduleManage)) return;
     setSaving(true);
     try {
+      let created: PipelineSchedule | null = null;
       if (editing) {
         await updateSchedule(editing.id, input);
         toast({ title: "Schedule updated", message: `"${input.name ?? editing.name}" saved.`, tone: "success" });
       } else {
-        await createSchedule(input as ScheduleInput);
-        toast({ title: "Schedule created", message: `"${input.name}" is scheduled.`, tone: "success" });
+        created = await createSchedule(input as ScheduleInput);
+        toast({
+          title: input.enabled === false ? "Schedule saved paused" : "Schedule created",
+          message:
+            input.enabled === false
+              ? `"${input.name}" has no Validate mappings — opening Transfer Studio so the beat does not invent an auto-map.`
+              : `"${input.name}" is scheduled.`,
+          tone: "success",
+        });
       }
       closeForm();
       await load();
       void onSchedulesChange?.();
+      if (created && scheduleCreateOpensStudio(created) && onStartTransfer) {
+        onStartTransfer(studioIntentFromSchedule(created));
+      }
     } catch (err) {
       toast({
         title: editing ? "Could not update schedule" : "Could not create schedule",
@@ -229,18 +298,24 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
   };
 
   const toggleEnabled = async (sched: PipelineSchedule) => {
+    if (!allowOrExplain(scheduleManage)) return;
     try {
       await updateSchedule(sched.id, { enabled: !sched.enabled });
       await load();
       void onSchedulesChange?.();
       toast({ title: sched.enabled ? "Schedule paused" : "Schedule activated", tone: "success" });
     } catch (e) {
-      toast({ title: "Update failed", tone: "error" });
+      toast({
+        title: "Update failed",
+        message: e instanceof Error ? e.message : undefined,
+        tone: "error",
+      });
       console.error(e);
     }
   };
 
   const handleDelete = async (id: string) => {
+    if (!allowOrExplain(scheduleManage)) return;
     const target = schedules.find((s) => s.id === id);
     const ok = await confirm({
       title: target ? `Delete schedule “${target.name}”?` : "Delete this schedule?",
@@ -266,6 +341,7 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
   };
 
   const handleRunNow = async (id: string) => {
+    if (!allowOrExplain(jobRun)) return;
     const sched = schedules.find((s) => s.id === id);
     const contractId = sched?.contract_id;
     if (contractId && breakerBlocksRuns(breakers[contractId])) {
@@ -307,7 +383,6 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
     }
   };
 
-  const importInputRef = useRef<HTMLInputElement>(null);
   const [gitopsBusy, setGitopsBusy] = useState(false);
   const [gitopsRequireSigned, setGitopsRequireSigned] = useState(false);
 
@@ -324,6 +399,15 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
   };
 
   const handleExportFleet = async () => {
+    const emptyReason = fleetExportBlockedReason(schedules.length);
+    if (emptyReason) {
+      toast({
+        title: "Nothing to export",
+        message: emptyReason,
+        tone: "info",
+      });
+      return;
+    }
     setGitopsBusy(true);
     try {
       const blob = await exportDatawrapManifest();
@@ -362,6 +446,7 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
   };
 
   const handleImportFile = async (file: File) => {
+    if (!allowOrExplain(scheduleManage)) return;
     setGitopsBusy(true);
     try {
       const text = await file.text();
@@ -405,9 +490,14 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
       wide
       className="df2-page-pipelines"
       title="Schedules"
-      description="Recurring sync schedules (not ADF/Informatica DAG pipelines) — same Map→Validate→Execute engine."
+      description="Recurring same-engine syncs — Map → Validate → Execute on a cadence. Not ADF/Informatica DAG orchestration. A draft without mappings stays paused until Transfer Studio persists a contract."
     >
       <PageFrame className="df2-pipeline-page">
+      <PermissionNotice
+        allowed={scheduleManage.allowed}
+        reason={scheduleManage.reason}
+        what="Schedules are read-only for you."
+      />
       {!loading && (
         <PageToolbar
           className={showForm ? "df2-toolbar--creating" : ""}
@@ -443,11 +533,10 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
           actions={
             !showForm ? (
               <>
-                <input
-                  ref={importInputRef}
-                  type="file"
+                <HiddenFileInput
+                  id="df2-schedule-import"
                   accept=".yaml,.yml,.json,application/x-yaml,text/yaml,application/json"
-                  hidden
+                  disabled={!scheduleManage.allowed || gitopsBusy}
                   onChange={(e) => {
                     const f = e.target.files?.[0];
                     e.target.value = "";
@@ -459,8 +548,12 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
                     size="sm"
                     variant="ghost"
                     loading={gitopsBusy}
+                    disabled={gitopsBusy || schedules.length === 0}
                     onClick={() => void handleExportFleet()}
-                    title="Export schedules + contracts as dataflow.yaml"
+                    title={
+                      fleetExportBlockedReason(schedules.length)
+                      || "Export schedules + contracts as dataflow.yaml"
+                    }
                   >
                     Export YAML
                   </Button>
@@ -475,21 +568,27 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
                     />
                     <span>Require signed</span>
                   </label>
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    loading={gitopsBusy}
-                    onClick={() => importInputRef.current?.click()}
+                  <label
+                    htmlFor="df2-schedule-import"
+                    className="df2-btn df2-btn-sm df2-btn-ghost"
+                    aria-disabled={!scheduleManage.allowed || gitopsBusy}
                     title={
-                      gitopsRequireSigned
+                      scheduleManage.reason ||
+                      (gitopsRequireSigned
                         ? "Plan then apply with signed-contract gate"
-                        : "Plan then apply a dataflow.yaml manifest"
+                        : "Plan then apply a dataflow.yaml manifest")
                     }
                   >
                     Import YAML
-                  </Button>
-                  <Button size="sm" variant="primary" onClick={openCreate}>
-                    New pipeline
+                  </label>
+                  <Button
+                    size="sm"
+                    variant="primary"
+                    disabled={!scheduleManage.allowed}
+                    title={scheduleManage.reason || undefined}
+                    onClick={openCreate}
+                  >
+                    New schedule
                   </Button>
                 </div>
               </>
@@ -501,8 +600,8 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
       {showForm && (
         <div className="df2-pipeline-form is-active">
           <PageSection
-            title={editing ? "Edit pipeline" : "Create recurring sync"}
-            subtitle={editing ? editing.name : "Schedule source → destination with your saved connectors"}
+            title={editing ? "Edit schedule" : "Create recurring sync"}
+            subtitle={editing ? editing.name : "Cadence only — Transfer Studio persists the mapping contract. This is not a DAG."}
             className="df2-pipeline-form-card"
             actions={
               <button type="button" className="df2-btn df2-btn-ghost df2-btn-sm" onClick={closeForm}>
@@ -518,9 +617,31 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
               saving={saving}
               onSubmit={handleSubmit}
               onCancel={closeForm}
+              onOpenStudio={
+                editing
+                  ? () => openStudioFromSchedule(editing.id)
+                  : () => onStartTransfer?.()
+              }
             />
           </PageSection>
         </div>
+      )}
+
+      {!loading && !showForm && approvals.length > 0 && (
+        <ApprovalInbox
+          items={approvals}
+          onDecided={async () => {
+            await load();
+            void onSchedulesChange?.();
+          }}
+          onOpenSchedule={(id) => openDrawer(id, "Overview")}
+          onReviewMapping={(id) => {
+            const sched = schedules.find((s) => s.id === id);
+            if (sched) openEdit(sched);
+          }}
+          onOpenStudio={openStudioFromSchedule}
+          onRunNow={(id) => void handleRunNow(id)}
+        />
       )}
 
       <div className="df2-pipeline-workspace">
@@ -528,17 +649,42 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
         <SectionLoader title="Loading schedules" hint="Fetching schedules…" />
       ) : showForm && schedules.length === 0 ? null : (
       <div className="df2-pipeline-list df2-pipeline-scroll">
-        {schedules.length === 0 ? (
+        {loadError ? (
+          <EmptyState
+            page
+            icon="alert"
+            title="Schedules could not be read"
+            description={loadError}
+            action={
+              <Button variant="secondary" onClick={() => void load()}>
+                Try again
+              </Button>
+            }
+          />
+        ) : schedules.length === 0 ? (
           <EmptyState
             page
             icon="activity"
             title="No schedules yet"
-            description="Create a recurring sync to keep source and destination in step — watermark incremental, upsert, and quarantine included."
+            description="Unattended runs replay a Validate-approved mapping contract. Open Transfer Studio, Map → Validate, then Schedule from the footer. New schedule here saves cadence only — it stays paused until mappings exist."
             action={
               !showForm ? (
-                <Button variant="primary" onClick={openCreate}>
-                  Create pipeline
-                </Button>
+                <>
+                  <Button
+                    variant="primary"
+                    onClick={() => onStartTransfer?.()}
+                  >
+                    Open Transfer Studio
+                  </Button>
+                  <Button
+                    variant="secondary"
+                    disabled={!scheduleManage.allowed}
+                    title={scheduleManage.reason || undefined}
+                    onClick={openCreate}
+                  >
+                    Draft cadence only
+                  </Button>
+                </>
               ) : undefined
             }
           />
@@ -547,12 +693,12 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
             compact
             icon="activity"
             title={`No ${filter === "active" ? "active" : "paused"} schedules`}
-            description="Try another filter or create a new pipeline."
+            description="Try another filter or create a new schedule."
           />
         ) : (
           <div className="df2-pipeline-rows" role="list" aria-label="Schedules">
             <div className="df2-pipeline-rows-head" aria-hidden>
-              <span className="df2-pipeline-rows-head-name">Pipeline</span>
+              <span className="df2-pipeline-rows-head-name">Schedule</span>
               <span>Cadence</span>
               <span>Mode</span>
               <span>Last run</span>
@@ -612,6 +758,8 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
         }}
         onDelete={() => selectedSchedule && void handleDelete(selectedSchedule.id)}
         onToggle={() => selectedSchedule && void toggleEnabled(selectedSchedule)}
+        runRefusal={jobRun.allowed ? "" : jobRun.reason}
+        manageRefusal={scheduleManage.allowed ? "" : scheduleManage.reason}
         onResetBreaker={handleResetBreaker}
         onExportYaml={
           selectedSchedule
@@ -623,6 +771,11 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
           closeDrawer();
           onOpenJob?.(jobId);
         }}
+        onOpenStudio={
+          selectedSchedule && scheduleNeedsStudio(selectedSchedule)
+            ? () => openStudioFromSchedule(selectedSchedule.id)
+            : undefined
+        }
       />
       </PageFrame>
     </PageShell>

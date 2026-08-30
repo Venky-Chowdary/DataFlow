@@ -441,57 +441,19 @@ def vectorize_records(
         embed_column_parse_failed = False
         embed_column_parse_reason = ""
         if embedding_column and embedding_column in rec:
-            raw = rec[embedding_column]
-            if isinstance(raw, list):
-                if len(raw) == 0:
-                    embed_column_parse_failed = True
-                    embed_column_parse_reason = (
-                        f"embedding_column '{embedding_column}' is empty — "
-                        "refuse silent re-embed"
-                    )
-                else:
-                    try:
-                        embedding = [float(x) for x in raw]
-                    except (TypeError, ValueError) as exc:
-                        embed_column_parse_failed = True
-                        embed_column_parse_reason = (
-                            f"embedding_column '{embedding_column}' has non-numeric "
-                            f"values — refuse silent re-embed ({exc})"
-                        )
-            elif isinstance(raw, str):
-                text = raw.strip()
-                if not text or text.lower() in {"null", "none", "[]"}:
-                    embed_column_parse_failed = True
-                    embed_column_parse_reason = (
-                        f"embedding_column '{embedding_column}' is empty — "
-                        "refuse silent re-embed"
-                    )
-                else:
-                    try:
-                        parsed = json.loads(text)
-                        if not isinstance(parsed, list):
-                            raise ValueError("JSON value is not an array")
-                        if len(parsed) == 0:
-                            raise ValueError("empty array")
-                        embedding = [float(x) for x in parsed]
-                    except Exception as exc:
-                        embed_column_parse_failed = True
-                        embed_column_parse_reason = (
-                            f"embedding_column '{embedding_column}' is not a numeric "
-                            f"JSON array — refuse silent re-embed ({exc})"
-                        )
-            elif raw is None:
+            from services.vector_embedding import coerce_embedding
+
+            bound, err = coerce_embedding(rec[embedding_column])
+            if err:
+                # Never fall through to hash/model re-embed. Same binder the
+                # vector writers use — float(x) invented Auto 1.234 / 2**53+1.
                 embed_column_parse_failed = True
                 embed_column_parse_reason = (
-                    f"embedding_column '{embedding_column}' is null — "
+                    f"embedding_column '{embedding_column}' {err} — "
                     "refuse silent re-embed"
                 )
             else:
-                embed_column_parse_failed = True
-                embed_column_parse_reason = (
-                    f"embedding_column '{embedding_column}' must be a list or "
-                    f"JSON array, got {type(raw).__name__} — refuse silent re-embed"
-                )
+                embedding = bound
 
         source_id = str(rec.get("id", rec.get("_id", rec.get("source_id", ""))))
         metadata = rec.copy()

@@ -54,3 +54,25 @@ def gcs_client(cfg: dict[str, Any]):
     creds = _credentials(creds_ref, project)
     client_options = ClientOptions(api_endpoint=endpoint) if endpoint else None
     return storage.Client(project=project, credentials=creds, client_options=client_options)
+
+
+def gcs_emulator_kwargs(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Timeout + no-retry when talking to fake-gcs / localhost."""
+    from connectors.google_emulator import (
+        google_emulator_retry,
+        google_emulator_timeout,
+        looks_like_google_emulator,
+    )
+
+    cfg = cfg or {}
+    endpoint = _resolve_endpoint(cfg) or str(cfg.get("connection_string") or "")
+    if not looks_like_google_emulator(
+        endpoint=endpoint,
+        host=str(cfg.get("host") or ""),
+        port=int(cfg.get("port") or 0),
+    ):
+        return {}
+    return {
+        "timeout": google_emulator_timeout(),
+        "retry": google_emulator_retry(),
+    }

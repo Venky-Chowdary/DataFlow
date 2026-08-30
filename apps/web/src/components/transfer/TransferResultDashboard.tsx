@@ -14,7 +14,7 @@ import type { RepairMapping } from "../../lib/api";
 import { Gate8ProofCard, classifyGate8Status, gate8AppendIdentity, isGate8AppendDelta, isGate8KeyedBatch, type Gate8Reconciliation } from "./Gate8ProofCard";
 import { JobTrustScoreCard } from "./JobTrustScoreCard";
 import { ConservationLedgerCard } from "./ConservationLedgerCard";
-import { conservationCompleteCopy, destHeadline, writerAckDisagrees, writerHeadline } from "../../lib/conservationLedger";
+import { conservationCompleteCopy, destHeadline, readConservationLedger, writerAckDisagrees, writerHeadline } from "../../lib/conservationLedger";
 import { CdcCursorGapPanel } from "./CdcCursorGapPanel";
 import { CdcRetentionPanel } from "./CdcRetentionPanel";
 import { isCdcGapErrorCode } from "../../lib/jobTrustScore";
@@ -25,6 +25,7 @@ import { ReplaySafetyCard } from "./ReplaySafetyCard";
 import { TransformationsCard } from "./TransformationsCard";
 import { hashForScreen } from "../../lib/appNavigation";
 import { cdcDeliveryResultCopy } from "../../lib/cdcExactlyOnce";
+import { DEST_SCALE_PADDING_HONESTY } from "../../lib/decimalScaleHonesty";
 
 function asMappingProof(raw: unknown): MappingProof | null {
   if (!raw || typeof raw !== "object") return null;
@@ -227,6 +228,28 @@ export function TransferResultDashboard({
   }
   if (result.operation) {
     metaChips.push({ label: "Mode", value: result.operation });
+  }
+  const ledger = readConservationLedger({ row_accounting: result.row_accounting });
+  if (ledger && ledger.rows_source_filtered > 0) {
+    metaChips.push({
+      label: "Filtered on read",
+      value: ledger.rows_source_filtered.toLocaleString(),
+      title: "Rows the declared source filter removed on the read — counted, and absent from the destination by instruction, not quarantined.",
+    });
+  }
+  if (ledger && ledger.rows_shaped_out > 0) {
+    metaChips.push({
+      label: "Removed by transform",
+      value: ledger.rows_shaped_out.toLocaleString(),
+      title: "Rows the approved pre-load transform removed on the read. Removal is not quarantine — no cell was found unfit.",
+    });
+  }
+  if (ledger && ledger.shape_recipe_hash) {
+    metaChips.push({
+      label: "Transform recipe",
+      value: ledger.shape_recipe_hash,
+      title: "Identity of the pre-load transform recipe this run executed — the same recipe Validate approved.",
+    });
   }
   if (ds?.error_policy) {
     metaChips.push({ label: "Policy", value: ds.error_policy });
@@ -791,6 +814,9 @@ export function TransferResultDashboard({
                   {result.ddl_executed.map((d) => <li key={d}><code>{d}</code></li>)}
                 </ul>
               )}
+              {result.ddl_executed?.some((d) => /NUMBER\s*\(\s*\d+\s*,\s*(1[0-9]|[2-9]\d)\s*\)/i.test(d) || /DEP_TIME|ARR_TIME/i.test(d)) && (
+                <p className="df2-result-scale-honesty">{DEST_SCALE_PADDING_HONESTY}</p>
+              )}
             </div>
           </details>
         )}
@@ -808,7 +834,11 @@ export function TransferResultDashboard({
               rejectedRows={rejected || issueFindings}
               coercedNullRows={coercedNull}
               initialDetails={result.destination_summary?.rejected_details}
-              truncatedDetails={result.destination_summary?.rejected_details_truncated}
+              truncatedDetails={Math.max(
+                0,
+                Number(result.destination_summary?.rejected_details_total ?? 0) -
+                  (result.destination_summary?.rejected_details?.length ?? 0),
+              )}
               autoLoad
               initiallyOpen
               repairMappings={repairMappings}

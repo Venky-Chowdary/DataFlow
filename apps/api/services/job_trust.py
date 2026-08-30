@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from services.reconcile_coverage import NO_OP_DEST_UNCHANGED
+
 _TERMINAL = frozenset({
     "completed",
     "completed_with_quarantine",
@@ -62,7 +64,7 @@ def has_full_checksum_proof(recon: dict[str, Any] | None) -> bool:
         "writer_ack",
         "sample",
         "write_pass_dest_readback",
-        "no_op_destination_unchanged",
+        NO_OP_DEST_UNCHANGED,
         "none",
     }:
         return False
@@ -574,6 +576,22 @@ def _next_action(
                 "detail": (
                     "Dest grew by this run. Overwrite to replace existing rows, "
                     "or add a PK and upsert."
+                ),
+            }
+        assurance = str((recon or {}).get("assurance_level") or (recon or {}).get("coverage") or "").lower()
+        phase = str((recon or {}).get("phase") or "").lower()
+        if recon and recon.get("passed") is True and (
+            assurance in {"writer_ack", "write_pass_dest_readback"}
+            or "writer_ack" in phase
+            or "write_pass" in phase
+        ):
+            return {
+                "code": "identity_key",
+                "label": "Add an identity key for per-row proof",
+                "detail": (
+                    "Rows landed. Re-running Validate will not upgrade Gate-8. "
+                    "Map a PK or add Transform hash identity so dest read-back "
+                    "can align rows. Not migration_proven."
                 ),
             }
         return {

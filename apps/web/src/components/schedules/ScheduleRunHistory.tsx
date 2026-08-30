@@ -124,6 +124,14 @@ export function ScheduleRunHistory({ scheduleId, onOpenJob, onEditMapping }: Sch
                 {run.retry_scheduled && (
                   <span className="df2-sched-attempt" title="A retry was scheduled after this attempt">retry queued</span>
                 )}
+                {run.failure_class?.kind === "deterministic" && (
+                  <span
+                    className="df2-sched-attempt is-blocked"
+                    title="This failure is decided by the configuration — a retry reaches the same verdict"
+                  >
+                    not retryable
+                  </span>
+                )}
                 <time className="df2-sched-run-when" dateTime={run.started_at || undefined}>
                   {formatWhen(run.started_at)}
                 </time>
@@ -164,6 +172,9 @@ export function ScheduleRunHistory({ scheduleId, onOpenJob, onEditMapping }: Sch
               {run.error?.trim() && (
                 <div className="df2-sched-run-error">
                   <p title={run.error}>{run.error}</p>
+                  {run.failure_class?.corrective_action && (
+                    <p className="df2-sched-run-fix">{run.failure_class.corrective_action}</p>
+                  )}
                   {drift && (
                     <span className="df2-sched-history-error-actions">
                       {onEditMapping && (
@@ -181,9 +192,13 @@ export function ScheduleRunHistory({ scheduleId, onOpenJob, onEditMapping }: Sch
                           try {
                             const res = await acceptScheduleSourceSchema(scheduleId);
                             setAccepted(res.message || "Baseline updated.");
+                            await load();
                           } catch (err) {
+                            const raw = err instanceof Error ? err.message : "";
                             setAcceptError(
-                              err instanceof Error ? err.message : "Could not update the baseline",
+                              /timed out/i.test(raw)
+                                ? "Accept stopped waiting for the source. The finding already has the compared shape — retry once, or check the Snowflake/MySQL connector is reachable."
+                                : raw || "Could not update the baseline",
                             );
                           } finally {
                             setAccepting(false);

@@ -75,6 +75,7 @@ export const VALIDATION_MODES: {
 ];
 
 export type DateLocaleId = "" | "DMY" | "MDY";
+export type NumberLocaleId = "" | "US" | "EU";
 
 export const SYNC_MODES: { id: SyncModeId; label: string; detail: string }[] = [
   { id: "full_refresh_overwrite", label: "Full overwrite", detail: "Drop/replace destination, then load the full snapshot. Destroys existing rows." },
@@ -90,27 +91,27 @@ export const SCHEMA_POLICIES: { id: SchemaPolicyId; label: string; detail: strin
   {
     id: "manual_review",
     label: "Manual approval",
-    detail: "Detect drift; keep the approved contract until you review (safest default).",
+    detail: "Validate blocks on new/renamed columns until you Acknowledge or remap. Execute does not ADD COLUMN.",
   },
   {
     id: "propagate_columns",
     label: "Propagate columns",
-    detail: "Auto-add new destination columns on transfer (type changes still need review).",
+    detail: "Validate auto-maps additive columns. Execute ADD COLUMN. Type narrow still pauses.",
   },
   {
     id: "propagate_all",
     label: "Propagate columns (all streams)",
-    detail: "Same additive ADD COLUMN behavior as Propagate columns (not type auto-rewrite). Incompatible type changes still need review.",
+    detail: "Same ADD COLUMN kernel as propagate columns — every selected stream on this job. Does not rewrite destination types.",
   },
   {
     id: "pause_on_change",
     label: "Pause on drift",
-    detail: "Stop scheduled runs when schema changes — best for production warehouses.",
+    detail: "Any detected change — including additive — pauses Validate and scheduled beats.",
   },
   {
     id: "type_locked",
     label: "Type locked",
-    detail: "Reject type changes at the destination — fail closed on incompatible casts.",
+    detail: "Widen and dest type changes pause. New columns need review. No silent cast.",
   },
 ];
 
@@ -209,6 +210,86 @@ export const DATE_LOCALES: { id: DateLocaleId; label: string; detail: string }[]
   { id: "DMY", label: "DMY (day/month/year)", detail: "European / Indian / Australian date order." },
   { id: "MDY", label: "MDY (month/day/year)", detail: "United States date order." },
 ];
+
+export const NUMBER_LOCALES: { id: NumberLocaleId; label: string; detail: string }[] = [
+  { id: "", label: "Auto", detail: "Parse $1,000.00 and €2.000,50. Refuse a lone 1,234 / 1.234 — that is US thousands or EU decimal." },
+  { id: "US", label: "US (1,234.56)", detail: "Comma thousands, dot decimal." },
+  { id: "EU", label: "EU (1.234,56)", detail: "Dot thousands, comma decimal." },
+];
+
+/**
+ * Destination-aware sync caption. Full append into a leftover empty table is
+ * still dest-exists — live NUMBER/VARCHAR widths bind; Map does not ALTER them.
+ */
+export function syncModeHonestyLine(
+  mode: string,
+  destTableExists: boolean | null,
+): string {
+  if (mode === "full_refresh_append") {
+    if (destTableExists === true) {
+      return (
+        "Inserts into the existing table. Live destination types bind — Full append "
+        + "does not CREATE a new table and does not ALTER NUMBER/VARCHAR widths. "
+        + "An empty leftover table still exists."
+      );
+    }
+    if (destTableExists === false) {
+      return (
+        "Table is missing — first write CREATE TABLE from Map types, then insert. "
+        + "This is create-new, not append into leftover DDL."
+      );
+    }
+    return (
+      "Keep existing rows; insert the full snapshot again. Confirm whether the "
+      + "destination object exists before Execute — leftover empty tables still count as existing."
+    );
+  }
+  if (mode === "full_refresh_overwrite") {
+    if (destTableExists === true) {
+      return (
+        "Replaces rows in the existing table. Destroys current data. "
+        + "Does not by itself ALTER live column widths — widen in the warehouse or map to a new column."
+      );
+    }
+    return "Drop/replace destination, then load the full snapshot. Destroys existing rows if the object already exists.";
+  }
+  return SYNC_MODES.find((m) => m.id === mode)?.detail ?? "";
+}
+
+/**
+ * Schema-policy caption — matches ``resolve_schema_evolution`` (Validate + Execute SSOT).
+ * Hard type-narrow always pauses, including under propagate_* (not Airbyte airbyte_meta).
+ */
+export function schemaPolicyHonestyLine(policy: string): string {
+  switch ((policy || "").trim().toLowerCase()) {
+    case "propagate_columns":
+      return (
+        "Validate auto-maps additive columns; Execute issues ADD COLUMN. "
+        + "Type narrow, PK, and dest-only NOT NULL still pause — not a silent rewrite."
+      );
+    case "propagate_all":
+      return (
+        "Same ADD COLUMN kernel as propagate columns — every selected stream on this job. "
+        + "Does not rewrite destination types. Hard-breaking changes still pause."
+      );
+    case "pause_on_change":
+      return (
+        "Any detected change — including additive — pauses Validate and scheduled beats. "
+        + "Nothing is written until you change policy or remap."
+      );
+    case "type_locked":
+      return (
+        "Widen and destination type changes pause. New columns need review. "
+        + "Execute does not silent-cast."
+      );
+    case "manual_review":
+    default:
+      return (
+        "Validate blocks on new or renamed columns until you Acknowledge or remap. "
+        + "Execute does not ADD COLUMN. Hard type-narrow always pauses."
+      );
+  }
+}
 
 /** Single operator-facing copy for SCD2/mirror + multi-stream block (rank 74). */
 export const MULTI_STREAM_SCD2_MIRROR_BLOCK =

@@ -7,7 +7,8 @@ from starlette.responses import JSONResponse
 from services.platform_config import docs_enabled
 from services.tenant_bind import principal_allowed_for_tenant
 
-from ..services.auth_service import auth_required, lookup_user, verify_token
+from ..services import auth_service as _auth_service
+from ..services.auth_service import lookup_user, verify_token
 
 _PUBLIC_PREFIXES = (
     "/health",
@@ -117,7 +118,10 @@ class AuthMiddleware(BaseHTTPMiddleware):
         if not token and request.url.path.endswith("/stream"):
             token = request.query_params.get("token") or request.query_params.get("access_token") or ""
 
-        if not auth_required():
+        # Resolved on the module, not copied at import: enforcement is a live
+        # setting, and a stale copy means the middleware and the auth service
+        # disagree about whether the request needs a token.
+        if not _auth_service.auth_required():
             if token:
                 _attach_user(request, token)
                 forbidden = _tenant_bind_forbidden(request)

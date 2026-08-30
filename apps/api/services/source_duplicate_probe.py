@@ -19,6 +19,8 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from services.value_serializer import SQL_NULL_SENTINEL, cell_to_string
+
 logger = logging.getLogger(__name__)
 
 ProbeStatus = Literal[
@@ -94,11 +96,21 @@ def _normalize_pk_columns(
     return [raw]
 
 
+def _identity_cell(value: Any) -> str:
+    """One identity cell on the transfer wire.
+
+    ``str(value)`` invented ``True`` / ``1E+2`` / a Python ``b'...'`` repr and
+    a space timestamp. ``None`` used a private ``\\x00NULL`` token, then
+    findings collapsed it to ``""`` so Validate could not tell NULL from empty.
+    """
+    return cell_to_string(value, preserve_sql_null=True)
+
+
 def _finding_value(columns: list[str], values: tuple[Any, ...]) -> Any:
     """Scalar for single-col (backward compat); joined label for composite."""
     if len(columns) == 1:
         return values[0] if values else None
-    parts = ["" if v is None else str(v) for v in values]
+    parts = [_identity_cell(v) for v in values]
     return "(" + ", ".join(parts) + ")"
 
 
@@ -111,9 +123,18 @@ def _sql_duplicates(
     import sqlalchemy as sa
 
     from connectors.generic_sql import _engine
+    from connectors.sql_identifiers import split_qualified_table
+    from services.sql_object_identity import resolve_object_identity
 
     engine = _engine(cfg)
-    schema = (cfg.get("schema") or "").strip() or None
+    schema, table = split_qualified_table(table, (cfg.get("schema") or "").strip() or None)
+    # Case-folding engines and Studio ``schema.table`` spellings must address
+    # the catalog object, not ``public."public.case_a_src"``.
+    ident = resolve_object_identity(engine, table, schema, columns=pk_columns)
+    if ident.exists:
+        table = sa.sql.quoted_name(ident.table, True)
+        schema = sa.sql.quoted_name(ident.schema, True) if ident.schema else None
+        pk_columns = [ident.columns.get(c, c) for c in pk_columns]
 
     # Build a dialect-agnostic query so SQLAlchemy emits the right LIMIT/TOP/FETCH
     # syntax for SQL Server, Oracle, etc.
@@ -134,7 +155,9 @@ def _sql_duplicates(
     out: list[dict[str, Any]] = []
     n = len(pk_columns)
     for row in rows:
-        vals = tuple(row[i] if i < len(row) else None for i in range(n))
+        vals = tuple(
+            _identity_cell(row[i] if i < len(row) else None) for i in range(n)
+        )
         count = int(row[n]) if len(row) > n else 1
         out.append(
             {
@@ -191,14 +214,14 @@ def _mongo_duplicates(
         rid = r.get("_id")
         count = int(r.get("count", 1))
         if len(pk_columns) == 1:
-            vals = (rid,)
-            values = {pk_columns[0]: rid}
+            vals = (_identity_cell(rid),)
+            values = {pk_columns[0]: vals[0]}
         elif isinstance(rid, dict):
-            vals = tuple(rid.get(c) for c in pk_columns)
-            values = {c: rid.get(c) for c in pk_columns}
+            vals = tuple(_identity_cell(rid.get(c)) for c in pk_columns)
+            values = {c: vals[i] for i, c in enumerate(pk_columns)}
         else:
-            vals = (rid,)
-            values = {pk_columns[0]: rid}
+            vals = (_identity_cell(rid),)
+            values = {pk_columns[0]: vals[0]}
         out.append(
             {
                 "value": _finding_value(pk_columns, vals),
@@ -332,14 +355,21 @@ def _salesforce_duplicates(
         timeout=60,
     )
     response.raise_for_status()
+    from services.value_serializer import load_http_json
+
+    # Identity cells live in ``records``. Response.json() is stdlib
+    # json.loads — a long fraction in an External Id collapses to IEEE
+    # before Validate shows the duplicate key.
+    body = load_http_json(response)
+    records = body.get("records") if isinstance(body, dict) else None
     findings: list[dict[str, Any]] = []
-    for record in (response.json().get("records") or [])[: max(1, int(limit))]:
+    for record in (records or [])[: max(1, int(limit))]:
         if not isinstance(record, dict):
             continue
-        value = record.get(field)
+        value = _identity_cell(record.get(field))
         findings.append(
             {
-                "value": _finding_value(pk_columns, [value]),
+                "value": _finding_value(pk_columns, (value,)),
                 "values": [value],
                 "columns": list(pk_columns),
                 "count": int(record.get("dupes") or 0),
@@ -409,14 +439,8 @@ def _dynamodb_duplicates(
 
 
 def _normalize_key_cell(value: Any) -> str:
-    """Render one identity cell the way the destination key would compare it.
-
-    ``None`` is kept distinct from the empty string: a NULL key is a
-    nullability finding, not a duplicate of a row that carried ``''``.
-    """
-    if value is None:
-        return "\x00NULL"
-    return str(value)
+    """Render one identity cell the way the destination key would compare it."""
+    return _identity_cell(value)
 
 
 def _counter_findings(
@@ -428,7 +452,7 @@ def _counter_findings(
             break
         if len(out) >= max(1, int(limit)):
             break
-        values = ["" if v == "\x00NULL" else v for v in vals]
+        values = [_identity_cell(v) for v in vals]
         out.append(
             {
                 "value": _finding_value(pk_columns, values),

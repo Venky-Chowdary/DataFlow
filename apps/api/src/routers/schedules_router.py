@@ -7,6 +7,8 @@ from typing import Any, Literal, Optional
 from fastapi import APIRouter, Header, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
+from services.acknowledgment_contract import MIN_ACTOR_LEN
+from services.schedule_approvals import STATUS_OPEN
 from services.schedule_store import (
     INTERVALS,
     SYNC_MODES,
@@ -24,6 +26,20 @@ from services.workspace_access import (
 )
 
 router = APIRouter(prefix="/schedules", tags=["Scheduled Pipelines"])
+
+
+def _schedule_or_404(schedule_id: str) -> PipelineSchedule:
+    sched = get_schedule(schedule_id)
+    if not sched:
+        raise HTTPException(status_code=404, detail="Schedule not found")
+    return sched
+
+
+def _bound_schedule(request: Request, schedule_id: str) -> PipelineSchedule:
+    """Load a schedule and refuse cross-workspace access."""
+    sched = _schedule_or_404(schedule_id)
+    assert_resource_workspace(request, getattr(sched, "workspace_id", "") or "")
+    return sched
 
 SyncMode = Literal[
     "full_refresh_overwrite",
@@ -59,7 +75,15 @@ class ScheduleCreate(BaseModel):
     validation_mode: str = "strict"
     schema_policy: SchemaPolicy = "manual_review"
     backfill_new_fields: bool = False
+    write_via_staging: bool = False
+    priority_column: str = ""
+    priority_direction: str = "desc"
+    row_limit: int = Field(default=0, ge=0)
     delivery_guarantee: str = "at_least_once"
+    snapshot_mode: str = ""
+    allow_append_only: bool = False
+    cdc_row_filter: str = ""
+    multi_subnet_failover: bool = False
     mappings: list[dict[str, Any]] = Field(default_factory=list)
     stream_contracts: list[dict[str, Any]] = Field(default_factory=list)
     cursor_column: str = ""
@@ -71,11 +95,19 @@ class ScheduleCreate(BaseModel):
     workspace_id: str = ""
     contract_id: str = ""
     require_signed_contract: Optional[bool] = None
+    date_locale: str = ""
+    number_locale: str = ""
+    shape_recipe: dict[str, Any] = Field(default_factory=dict)
+    approved_shape_recipe_hash: str = ""
+    approved_decision_artifact_hash: str = ""
+    approved_ddl_identity_hash: str = ""
     max_retries: int = Field(default=0, ge=0, le=10)
     retry_backoff_seconds: int = Field(default=60, ge=0, le=3600)
     notify_on_failure: bool = True
     notify_on_success: bool = False
     enabled: bool = True
+    #: Inbox → Studio footer: persist mappings onto this draft instead of a new row.
+    replay_schedule_id: str = ""
 
 
 class ScheduleUpdate(BaseModel):
@@ -91,7 +123,15 @@ class ScheduleUpdate(BaseModel):
     validation_mode: Optional[str] = None
     schema_policy: Optional[SchemaPolicy] = None
     backfill_new_fields: Optional[bool] = None
+    write_via_staging: Optional[bool] = None
+    priority_column: Optional[str] = None
+    priority_direction: Optional[str] = None
+    row_limit: Optional[int] = Field(default=None, ge=0)
     delivery_guarantee: Optional[str] = None
+    snapshot_mode: Optional[str] = None
+    allow_append_only: Optional[bool] = None
+    cdc_row_filter: Optional[str] = None
+    multi_subnet_failover: Optional[bool] = None
     mappings: Optional[list[dict[str, Any]]] = None
     stream_contracts: Optional[list[dict[str, Any]]] = None
     cursor_column: Optional[str] = None
@@ -103,6 +143,12 @@ class ScheduleUpdate(BaseModel):
     workspace_id: Optional[str] = None
     contract_id: Optional[str] = None
     require_signed_contract: Optional[bool] = None
+    date_locale: Optional[str] = None
+    number_locale: Optional[str] = None
+    shape_recipe: Optional[dict[str, Any]] = None
+    approved_shape_recipe_hash: Optional[str] = None
+    approved_decision_artifact_hash: Optional[str] = None
+    approved_ddl_identity_hash: Optional[str] = None
     max_retries: Optional[int] = Field(default=None, ge=0, le=10)
     retry_backoff_seconds: Optional[int] = Field(default=None, ge=0, le=3600)
     notify_on_failure: Optional[bool] = None
@@ -124,7 +170,15 @@ class ScheduleResponse(BaseModel):
     validation_mode: str = "strict"
     schema_policy: str = "manual_review"
     backfill_new_fields: bool = False
+    write_via_staging: bool = False
+    priority_column: str = ""
+    priority_direction: str = "desc"
+    row_limit: int = 0
     delivery_guarantee: str = "at_least_once"
+    snapshot_mode: str = ""
+    allow_append_only: bool = False
+    cdc_row_filter: str = ""
+    multi_subnet_failover: bool = False
     cursor_column: str = ""
     primary_key: str = ""
     cursor_value: str = ""
@@ -135,6 +189,12 @@ class ScheduleResponse(BaseModel):
     workspace_id: str = ""
     contract_id: str = ""
     require_signed_contract: bool = False
+    date_locale: str = ""
+    number_locale: str = ""
+    shape_recipe: dict[str, Any] = Field(default_factory=dict)
+    approved_shape_recipe_hash: str = ""
+    approved_decision_artifact_hash: str = ""
+    approved_ddl_identity_hash: str = ""
     max_retries: int = 0
     retry_backoff_seconds: int = 60
     notify_on_failure: bool = True
@@ -155,6 +215,7 @@ class ScheduleResponse(BaseModel):
     created_at: str
     # Pipeline Detail needs schema map without a second Transfer Studio hop.
     mappings: list[dict[str, Any]] = Field(default_factory=list)
+    stream_contracts: list[dict[str, Any]] = Field(default_factory=list)
     # The source shape this schedule last read. A run is refused when a column
     # it carries changes type, is dropped or is renamed, so the operator has to
     # be able to see the baseline that judged it — otherwise the refusal is a
@@ -163,6 +224,10 @@ class ScheduleResponse(BaseModel):
     source_schema_fingerprint: str = ""
     source_schema_observed_at: str = ""
     mapping_count: int = 0
+    # Autopilot: the finding this schedule is parked on, and the standing
+    # authority (if any) that lets later identical runs proceed unattended.
+    approval_request: dict[str, Any] = Field(default_factory=dict)
+    standing_authorization: dict[str, Any] = Field(default_factory=dict)
 
     @classmethod
     def from_schedule(cls, s: PipelineSchedule) -> ScheduleResponse:
@@ -190,7 +255,17 @@ class ScheduleSummaryResponse(BaseModel):
     validation_mode: str = "strict"
     schema_policy: str = "manual_review"
     backfill_new_fields: bool = False
+    write_via_staging: bool = False
+    priority_column: str = ""
+    priority_direction: str = "desc"
+    row_limit: int = 0
+    date_locale: str = ""
+    number_locale: str = ""
     delivery_guarantee: str = "at_least_once"
+    snapshot_mode: str = ""
+    allow_append_only: bool = False
+    cdc_row_filter: str = ""
+    multi_subnet_failover: bool = False
     cursor_column: str = ""
     primary_key: str = ""
     cursor_value: str = ""
@@ -215,12 +290,35 @@ class ScheduleSummaryResponse(BaseModel):
     running: bool = False
     created_at: str
     mapping_count: int = 0
+    # Validate≡Execute stamps. Hashes only — shape_recipe stays on GET /{id}.
+    approved_shape_recipe_hash: str = ""
+    approved_decision_artifact_hash: str = ""
+    approved_ddl_identity_hash: str = ""
+    # A parked schedule reads as "off" from run_count and last_status alone. The
+    # list row has to say a human owes it a decision, without the full finding.
+    needs_approval: bool = False
+    approval_id: str = ""
+    approval_code: str = ""
+    approval_finding: str = ""
+    approvable: bool = False
+    authorized: bool = False
 
     @classmethod
     def from_schedule(cls, s: PipelineSchedule) -> ScheduleSummaryResponse:
         full = ScheduleResponse.from_schedule(s)
         payload = full.model_dump()
         payload.pop("mappings", None)
+        req = dict(s.approval_request or {})
+        open_req = str(req.get("status") or "").strip().lower() == STATUS_OPEN
+        grant = dict(s.standing_authorization or {})
+        payload.update(
+            needs_approval=open_req,
+            approval_id=str(req.get("id") or "") if open_req else "",
+            approval_code=str(req.get("code") or "") if open_req else "",
+            approval_finding=str(req.get("finding") or "") if open_req else "",
+            approvable=bool(req.get("approvable")) if open_req else False,
+            authorized=bool(grant.get("id")) and not grant.get("revoked_at"),
+        )
         return cls(**{k: v for k, v in payload.items() if k in cls.model_fields})
 
 
@@ -236,13 +334,22 @@ async def schedule_intervals():
 
 
 @router.get("/export/dataflow")
-def export_dataflow_manifest(format: Literal["yaml", "json"] = "yaml"):
-    """Export all schedules (+ contracts) as a single ``dataflow.yaml`` GitOps manifest."""
+def export_dataflow_manifest(
+    request: Request,
+    format: Literal["yaml", "json"] = "yaml",
+    workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+):
+    """Export schedules (+ contracts) visible in this workspace as dataflow.yaml."""
     import yaml
 
     from services.gitops_manifest import build_dataflow_manifest
+    from services.team_store import require_workspace_isolation
 
-    artifact = build_dataflow_manifest()
+    ws = resolve_read_workspace(request, workspace_id)
+    artifact = build_dataflow_manifest(
+        workspace_id=ws,
+        isolation=require_workspace_isolation(),
+    )
     if format == "yaml":
         return Response(
             content=yaml.safe_dump(artifact, sort_keys=False, default_flow_style=False),
@@ -253,10 +360,15 @@ def export_dataflow_manifest(format: Literal["yaml", "json"] = "yaml"):
 
 
 @router.post("/gitops/plan")
-async def gitops_plan_manifest(payload: dict[str, Any]):
+async def gitops_plan_manifest(
+    payload: dict[str, Any],
+    request: Request,
+    workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+):
     """Dry-run a DatawrapManifest / PipelineSchedule / DataContract YAML body."""
     from services.gitops_manifest import plan_manifest
 
+    resolve_read_workspace(request, workspace_id)
     try:
         return plan_manifest(payload)
     except ValueError as exc:
@@ -266,8 +378,10 @@ async def gitops_plan_manifest(payload: dict[str, Any]):
 @router.post("/gitops/apply")
 async def gitops_apply_manifest(
     payload: dict[str, Any],
+    request: Request,
     dry_run: bool = False,
     require_signed_contracts: bool = False,
+    workspace_id: str = Header(default="", alias="X-Workspace-Id"),
 ):
     """Apply a GitOps manifest (create/update schedules + draft contracts).
 
@@ -277,11 +391,13 @@ async def gitops_apply_manifest(
     """
     from services.gitops_manifest import apply_manifest
 
+    ws = resolve_write_workspace(request, workspace_id)
     try:
         return apply_manifest(
             payload,
             dry_run=dry_run,
             require_signed_contracts=require_signed_contracts,
+            workspace_id=ws,
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -297,7 +413,12 @@ async def list_pipeline_schedules(
     ws = resolve_read_workspace(request, workspace_id)
     schedules = await asyncio.to_thread(list_schedules)
     if ws:
-        schedules = [s for s in schedules if not s.workspace_id or s.workspace_id == ws]
+        from services.team_store import require_workspace_isolation
+
+        if require_workspace_isolation():
+            schedules = [s for s in schedules if s.workspace_id == ws]
+        else:
+            schedules = [s for s in schedules if not s.workspace_id or s.workspace_id == ws]
     return [ScheduleSummaryResponse.from_schedule(s) for s in schedules]
 
 
@@ -349,6 +470,8 @@ async def patch_pipeline_schedule(
         raise HTTPException(status_code=404, detail="Schedule not found")
     assert_resource_workspace(request, getattr(existing, "workspace_id", "") or "")
     data = {k: v for k, v in body.model_dump().items() if v is not None}
+    # A PATCH must not re-home a schedule into another workspace.
+    data.pop("workspace_id", None)
     if not data:
         return ScheduleResponse.from_schedule(existing)
     try:
@@ -361,15 +484,19 @@ async def patch_pipeline_schedule(
 
 
 @router.get("/{schedule_id}/export")
-def export_pipeline_schedule(schedule_id: str, format: Literal["yaml", "json"] = "yaml"):
+def export_pipeline_schedule(
+    schedule_id: str,
+    request: Request,
+    format: Literal["yaml", "json"] = "yaml",
+    workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+):
     """Export a schedule as a versionable YAML/JSON artifact for GitOps."""
     import yaml
 
     from services.gitops_manifest import schedule_artifact
 
-    sched = get_schedule(schedule_id)
-    if not sched:
-        raise HTTPException(status_code=404, detail="Schedule not found")
+    resolve_read_workspace(request, workspace_id)
+    sched = _bound_schedule(request, schedule_id)
     artifact = schedule_artifact(sched)
     if format == "yaml":
         return Response(
@@ -381,12 +508,22 @@ def export_pipeline_schedule(schedule_id: str, format: Literal["yaml", "json"] =
 
 
 @router.post("/import", response_model=ScheduleResponse, status_code=201)
-async def import_pipeline_schedule(payload: dict[str, Any]):
+async def import_pipeline_schedule(
+    payload: dict[str, Any],
+    request: Request,
+    workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+):
     """Import a PipelineSchedule GitOps artifact (create or replace by id)."""
     from services.gitops_manifest import apply_manifest
 
-    # Prefer single-resource apply so kind wrappers and bare specs both work.
-    result = apply_manifest(payload, dry_run=False)
+    ws = resolve_write_workspace(request, workspace_id)
+    if ws:
+        # Bind the imported spec to the caller's workspace so a pasted YAML
+        # cannot land in another tenant.
+        spec = payload.get("spec") if isinstance(payload.get("spec"), dict) else payload
+        if isinstance(spec, dict):
+            spec["workspace_id"] = ws
+    result = apply_manifest(payload, dry_run=False, workspace_id=ws)
     rows = result.get("results") or []
     sched_row = next((r for r in rows if r.get("kind") == "PipelineSchedule" and r.get("ok")), None)
     if not sched_row:
@@ -395,29 +532,74 @@ async def import_pipeline_schedule(payload: dict[str, Any]):
     sched = get_schedule(str(sched_row.get("id") or ""))
     if not sched:
         raise HTTPException(status_code=500, detail="Schedule imported but not readable")
+    assert_resource_workspace(request, getattr(sched, "workspace_id", "") or "")
     return ScheduleResponse.from_schedule(sched)
 
 @router.delete("/{schedule_id}")
-async def remove_pipeline_schedule(schedule_id: str):
+async def remove_pipeline_schedule(
+    schedule_id: str,
+    request: Request,
+    workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+):
+    resolve_write_workspace(request, workspace_id)
+    _bound_schedule(request, schedule_id)
     if not delete_schedule(schedule_id):
         raise HTTPException(status_code=404, detail="Schedule not found")
     return {"success": True}
 
 
 @router.get("/{schedule_id}/history")
-async def get_pipeline_history(schedule_id: str, limit: int = 25):
+async def get_pipeline_history(
+    schedule_id: str,
+    request: Request,
+    limit: int = 25,
+    workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+):
     """Return the persisted run history (most recent first)."""
-    import asyncio
-
-    sched = await asyncio.to_thread(get_schedule, schedule_id)
-    if not sched:
-        raise HTTPException(status_code=404, detail="Schedule not found")
+    resolve_read_workspace(request, workspace_id)
+    sched = _bound_schedule(request, schedule_id)
     history = list(reversed(sched.run_history))[: max(1, min(limit, 100))]
     return {"schedule_id": schedule_id, "runs": history}
 
 
+def _flat_schema_map(raw: Any) -> dict[str, str]:
+    if not isinstance(raw, dict):
+        return {}
+    nested = raw.get("columns")
+    if isinstance(nested, dict):
+        raw = nested
+    return {
+        str(k): str(v)
+        for k, v in raw.items()
+        if not str(k).startswith("_") and not isinstance(v, (dict, list))
+    }
+
+
+def _probe_source_schema_timed(endpoint, seconds: float = 12.0) -> dict[str, Any]:
+    """Live introspect with a hard ceiling so Accept cannot spin on a warehouse."""
+    from concurrent.futures import ThreadPoolExecutor
+    from concurrent.futures import TimeoutError as FuturesTimeout
+
+    from services.schedule_runner import probe_schedule_source_schema
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(probe_schedule_source_schema, endpoint)
+        try:
+            return future.result(timeout=seconds) or {}
+        except FuturesTimeout as exc:
+            raise TimeoutError(
+                "The source did not answer in time. Accept records the shape "
+                "this finding already compared — a sleeping warehouse cannot "
+                "block that."
+            ) from exc
+
+
 @router.post("/{schedule_id}/accept-source-schema")
-async def accept_source_schema(schedule_id: str):
+async def accept_source_schema(
+    schedule_id: str,
+    request: Request,
+    workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+):
     """Record the source's current shape as this schedule's baseline.
 
     A run refused for source drift is a finding, not a verdict: the operator has
@@ -427,76 +609,393 @@ async def accept_source_schema(schedule_id: str):
 
     Deliberately explicit. Re-baselining is the operator asserting the change is
     understood, so it is never done for them by a retry.
+
+    The shape that parked the run is preferred over a second live introspect.
+    Re-probing Snowflake while the warehouse is asleep is what made Accept hang
+    with no error. A same-spelling ``narrow_type`` (TIMESTAMP_NTZ →
+    TIMESTAMP_NTZ) uses the remembered baseline — there is nothing new to read.
     """
     from datetime import datetime, timezone
 
+    from services.schema_drift import is_same_declaration_narrow
+    from services.schedule_approvals import resolve_plan_change
     from services.schedule_runner import (
         _apply_callable_schedule_source,
         _endpoint_from_connector,
         _resolve_connector,
-        probe_schedule_source_schema,
     )
     from services.source_schema_memory import fingerprint_source
 
-    sched = get_schedule(schedule_id)
-    if not sched:
-        raise HTTPException(status_code=404, detail="Schedule not found")
+    resolve_write_workspace(request, workspace_id)
+    sched = _bound_schedule(request, schedule_id)
+    open_req = sched.approval_request if isinstance(sched.approval_request, dict) else {}
+    evidence = (
+        dict(open_req.get("evidence") or {})
+        if str(open_req.get("status") or "") == STATUS_OPEN
+        else {}
+    )
 
-    src = _resolve_connector(sched.source_connector_id)
-    if not src:
-        raise HTTPException(
-            status_code=400,
-            detail="Source connector is unavailable — cannot read the current schema.",
-        )
-    try:
-        endpoint = _endpoint_from_connector(src, sched.source_table)
-        _apply_callable_schedule_source(endpoint, sched)
-        info = probe_schedule_source_schema(endpoint) or {}
-    except Exception as exc:
-        raise HTTPException(
-            status_code=502, detail=f"Could not read the source schema: {exc}"
-        ) from exc
+    schema = _flat_schema_map(evidence.get("current_schema"))
+    columns = [str(c) for c in (evidence.get("current_columns") or schema.keys()) if str(c).strip()]
+    source = "finding"
 
-    schema = {str(k): str(v) for k, v in (info.get("schema") or {}).items()}
+    if not schema and is_same_declaration_narrow(evidence.get("breaking")):
+        schema = _flat_schema_map(getattr(sched, "source_schema", None) or {})
+        columns = list(schema.keys())
+        source = "unchanged-declaration"
+
+    if not schema:
+        src = _resolve_connector(sched.source_connector_id)
+        if not src:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Source connector is unavailable — cannot read the current "
+                    "schema. Open Map once the connector answers, or retry Accept."
+                ),
+            )
+        try:
+            endpoint = _endpoint_from_connector(src, sched.source_table)
+            _apply_callable_schedule_source(endpoint, sched)
+            info = _probe_source_schema_timed(endpoint)
+        except TimeoutError as exc:
+            raise HTTPException(status_code=504, detail=str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502, detail=f"Could not read the source schema: {exc}"
+            ) from exc
+        schema = _flat_schema_map(info.get("schema"))
+        columns = [str(c) for c in (info.get("columns") or schema.keys())]
+        source = "live-probe"
+
     if not schema:
         raise HTTPException(
             status_code=502,
             detail="Source returned no schema — nothing to record as a baseline.",
         )
-    columns = [str(c) for c in (info.get("columns") or schema.keys())]
-    fingerprint = fingerprint_source(columns, schema)
+    fingerprint = fingerprint_source(columns or list(schema.keys()), schema)
+    pk = [
+        str(p).strip()
+        for p in (evidence.get("current_primary_key") or getattr(sched, "source_primary_key", None) or [])
+        if str(p).strip()
+    ]
     updated = update_schedule(
         schedule_id,
         {
             "source_schema": schema,
             "source_schema_fingerprint": fingerprint,
             "source_schema_observed_at": datetime.now(timezone.utc).isoformat(),
+            "source_primary_key": pk,
         },
     )
     if not updated:
         raise HTTPException(status_code=404, detail="Schedule not found")
+
+    user = getattr(request.state, "user", None) or {}
+    actor = str(user.get("email") or user.get("name") or "").strip() or "operator"
+    closed = resolve_plan_change(
+        schedule_id,
+        actor=actor,
+        reason="Accepted the source's current shape as this schedule's baseline.",
+    )
+
     return {
         "success": True,
         "schedule_id": schedule_id,
         "source_schema_fingerprint": fingerprint,
         "columns": len(schema),
+        "recorded_from": source,
+        "approval_closed": bool(closed),
         "message": (
             f"Baseline updated to the source's current shape ({len(schema)} columns). "
-            "The next run compares against this."
+            + (
+                "The parked finding is closed — the next run compares against this."
+                if closed
+                else "The next run compares against this."
+            )
         ),
     }
 
 
 @router.post("/{schedule_id}/run")
-async def run_pipeline_now(schedule_id: str):
-    """Trigger an immediate run (does not change the regular cadence)."""
-    from ..services.schedule_runner import _run_schedule
+async def run_pipeline_now(
+    schedule_id: str,
+    request: Request,
+    workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+):
+    """Trigger an immediate run (does not change the regular cadence).
 
+    Paused / disabled is a cadence switch, not a Run now refusal. A paused
+    schedule still has connectors — collapsing that skip into "check
+    connectors" sent operators to Test on healthy Snowflake rows.
+    """
+    from services.schedule_store import assert_schedule_run_allowed
+    from ..services.schedule_runner import ScheduleStartError, _run_schedule
+
+    resolve_write_workspace(request, workspace_id)
+    sched = _bound_schedule(request, schedule_id)
+    try:
+        assert_schedule_run_allowed(sched)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    try:
+        job_id = _run_schedule(schedule_id, manual=True)
+    except ScheduleStartError as exc:
+        raise HTTPException(status_code=exc.http_status, detail=str(exc)) from exc
+    if not job_id:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Could not start this schedule. Open the schedule for the parked "
+                "finding, or confirm the source and destination connectors still resolve."
+            ),
+        )
+    updated = get_schedule(schedule_id)
+    return {"success": True, "job_id": job_id, "schedule": ScheduleResponse.from_schedule(updated)}
+
+
+# --- Autopilot: the approval inbox -------------------------------------------
+#
+# A scheduled run that a gate refuses used to record one more failed run and fail
+# identically on every later beat. It now parks on a single durable finding that a
+# human can decide, and a decision can optionally mint a scoped, expiring,
+# hash-bound standing authorization so later runs of the *same plan* proceed
+# unattended. Nothing here weakens execution: preflight, the destination reread
+# and Gate-8 reconciliation still decide whether a run is green.
+
+
+class ApprovalDecision(BaseModel):
+    reason: str = Field(..., min_length=8, max_length=1000)
+    #: Attestations the operator is making. Only those the finding asked for are
+    #: honoured; a scope with nothing signed behind it is refused.
+    compliance: bool = False
+    schema_drift: bool = False
+    fk_risk: bool = False
+    #: False approves this run only. True delegates the same signature to future
+    #: runs of the identical plan, and needs ``schedule.authorize``.
+    grant_standing: bool = False
+    expires_in_days: int = Field(default=30, ge=1, le=90)
+    scopes: Optional[list[str]] = None
+
+
+class RejectDecision(BaseModel):
+    reason: str = Field(..., min_length=8, max_length=1000)
+    #: Leave the schedule paused (default) rather than let the next beat re-raise
+    #: the same refusal.
+    disable: bool = True
+
+
+class AuthorizationGrant(BaseModel):
+    reason: str = Field(..., min_length=8, max_length=1000)
+    scopes: list[str] = Field(..., min_length=1)
+    compliance: bool = False
+    schema_drift: bool = False
+    fk_risk: bool = False
+    expires_in_days: int = Field(default=30, ge=1, le=90)
+
+
+def _decider(request: Request, *, authorize: bool = False) -> str:
+    """The named human behind this decision, or 403.
+
+    The actor is taken from the verified session whenever there is one, never from
+    the body: an audit trail the client names itself is not an audit trail. A
+    signed-in operator therefore decides without naming themselves twice, and the
+    role on that identity is still enforced. Only when no identity was verified —
+    a single-operator deployment with enforcement off — may the caller name
+    themselves through the ``X-Actor`` header.
+    """
+    from services.effective_role import (
+        effective_permissions,
+        workspace_id_from_request_headers,
+    )
+    from services.rbac import Permission
+    from src.services import auth_service
+
+    user = getattr(request.state, "user", None) or {}
+    needed = Permission.SCHEDULE_AUTHORIZE if authorize else Permission.SCHEDULE_MANAGE
+    if user:
+        granted = effective_permissions(user, workspace_id_from_request_headers(request.headers))
+        if needed not in granted:
+            raise HTTPException(status_code=403, detail=f"Permission denied: {needed}")
+        actor = str(user.get("email") or user.get("name") or "").strip()
+        if len(actor) >= MIN_ACTOR_LEN:
+            return actor
+    if not auth_service.auth_required():
+        actor = str(request.headers.get("X-Actor") or "").strip()
+        if len(actor) >= MIN_ACTOR_LEN:
+            return actor
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "X-Actor must name the person making this decision "
+                f"(at least {MIN_ACTOR_LEN} characters)."
+            ),
+        )
+    raise HTTPException(status_code=403, detail=f"Permission denied: {needed}")
+
+
+@router.get("/approvals/open")
+async def list_open_approvals(request: Request, workspace_id: str = ""):
+    """Every schedule currently parked on a decision, newest first."""
+    import asyncio
+
+    from services.schedule_approvals import open_approvals
+
+    scope = resolve_read_workspace(request, workspace_id)
+    items = await asyncio.to_thread(open_approvals, scope or "")
+    return {"count": len(items), "approvals": items}
+
+
+@router.get("/{schedule_id}/approval")
+async def get_schedule_approval(schedule_id: str, request: Request):
+    """This schedule's open finding and its standing authorization, if any."""
     sched = get_schedule(schedule_id)
     if not sched:
         raise HTTPException(status_code=404, detail="Schedule not found")
-    job_id = _run_schedule(schedule_id)
-    if not job_id:
-        raise HTTPException(status_code=400, detail="Could not start pipeline — check connectors")
-    updated = get_schedule(schedule_id)
-    return {"success": True, "job_id": job_id, "schedule": ScheduleResponse.from_schedule(updated)}
+    assert_resource_workspace(request, sched.workspace_id or "")
+    return {
+        "schedule_id": schedule_id,
+        "approval": dict(sched.approval_request or {}),
+        "authorization": dict(sched.standing_authorization or {}),
+    }
+
+
+@router.post("/{schedule_id}/approvals/{approval_id}/approve")
+async def approve_schedule_finding(
+    schedule_id: str,
+    approval_id: str,
+    payload: ApprovalDecision,
+    request: Request,
+):
+    """Approve one finding, and optionally delegate it to future identical runs."""
+    from services.schedule_approvals import (
+        AuthorizationRefused,
+        approve_request,
+    )
+
+    actor = _decider(request, authorize=bool(payload.grant_standing))
+    sched = get_schedule(schedule_id)
+    if not sched:
+        raise HTTPException(status_code=404, detail="Schedule not found")
+    assert_resource_workspace(request, sched.workspace_id or "")
+    try:
+        result = approve_request(
+            schedule_id,
+            approval_id,
+            actor=actor,
+            reason=payload.reason,
+            acknowledgments={
+                "compliance": payload.compliance,
+                "schema_drift": payload.schema_drift,
+                "fk_risk": payload.fk_risk,
+            },
+            scopes=payload.scopes,
+            grant_standing=payload.grant_standing,
+            expires_in_days=payload.expires_in_days,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except AuthorizationRefused as exc:
+        # A refused delegation writes nothing, so the schedule is never left
+        # half-approved.
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {
+        "success": True,
+        "approval": result["approval"],
+        "authorization": result["authorization"],
+        "schedule": ScheduleResponse.from_schedule(result["schedule"]),
+    }
+
+
+@router.post("/{schedule_id}/approvals/{approval_id}/reject")
+async def reject_schedule_finding(
+    schedule_id: str,
+    approval_id: str,
+    payload: RejectDecision,
+    request: Request,
+):
+    """Reject a finding; the schedule is paused rather than left to re-refuse."""
+    from services.schedule_approvals import reject_request
+
+    actor = _decider(request)
+    sched = get_schedule(schedule_id)
+    if not sched:
+        raise HTTPException(status_code=404, detail="Schedule not found")
+    assert_resource_workspace(request, sched.workspace_id or "")
+    try:
+        result = reject_request(
+            schedule_id,
+            approval_id,
+            actor=actor,
+            reason=payload.reason,
+            disable=payload.disable,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {
+        "success": True,
+        "approval": result["approval"],
+        "schedule": ScheduleResponse.from_schedule(result["schedule"]),
+    }
+
+
+@router.post("/{schedule_id}/authorization")
+async def grant_schedule_authorization(
+    schedule_id: str,
+    payload: AuthorizationGrant,
+    request: Request,
+):
+    """Grant scoped, expiring standing authority for this schedule's current plan."""
+    from services.schedule_approvals import (
+        AuthorizationRefused,
+        set_standing_authorization,
+    )
+
+    actor = _decider(request, authorize=True)
+    sched = get_schedule(schedule_id)
+    if not sched:
+        raise HTTPException(status_code=404, detail="Schedule not found")
+    assert_resource_workspace(request, sched.workspace_id or "")
+    try:
+        result = set_standing_authorization(
+            schedule_id,
+            actor=actor,
+            reason=payload.reason,
+            scopes=list(payload.scopes),
+            acknowledgments={
+                "compliance": payload.compliance,
+                "schema_drift": payload.schema_drift,
+                "fk_risk": payload.fk_risk,
+            },
+            expires_in_days=payload.expires_in_days,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except AuthorizationRefused as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {
+        "success": True,
+        "authorization": result["authorization"],
+        "schedule": ScheduleResponse.from_schedule(result["schedule"]),
+    }
+
+
+@router.delete("/{schedule_id}/authorization")
+async def revoke_schedule_authorization(
+    schedule_id: str,
+    request: Request,
+    reason: str = "",
+):
+    """Revoke standing authority. The record is kept, permanently unusable."""
+    from services.schedule_approvals import revoke_standing_authorization
+
+    actor = _decider(request, authorize=True)
+    sched = get_schedule(schedule_id)
+    if not sched:
+        raise HTTPException(status_code=404, detail="Schedule not found")
+    assert_resource_workspace(request, sched.workspace_id or "")
+    try:
+        result = revoke_standing_authorization(schedule_id, actor=actor, reason=reason)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"success": True, "authorization": result["authorization"]}

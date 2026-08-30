@@ -9,6 +9,10 @@ import {
   applyDestTypeChange,
   applyOperatorRemapDest,
   applyStructPolicyChange,
+  applyDeclaredSourceZone,
+  assumeTimezoneAwaitingZone,
+  declaredSourceZone,
+  suggestedSourceZones,
   acknowledgeMappingRisk,
   applyTransformChange,
   approveMappingHonestly,
@@ -32,10 +36,14 @@ import {
   engineStampedRiskChip,
   formatColumnProfileStrip,
   hasCreateNewTypeRisk,
+  isDestSchemaPending,
   mappingAckDoneLabel,
   mappingAckLabel,
   mappingAckTier,
   mappingRequiresRiskAck,
+  mappingRiskChipState,
+  clearExistingDestTypeOverride,
+  isExistingDestTypeOverride,
   pipelineTransformChip,
   widenMappingToVarchar,
   type EditableMapping,
@@ -170,6 +178,12 @@ export function ColumnReviewPanel({
   const filterCounts = useMemo(
     () => countByFilter(mappings, confidenceThreshold),
     [mappings, confidenceThreshold],
+  );
+
+  const zoneSuggestions = useMemo(
+    () =>
+      mappings.some((m) => m.transform === "assume_timezone") ? suggestedSourceZones() : [],
+    [mappings],
   );
 
   const filtered = useMemo(
@@ -443,6 +457,13 @@ export function ColumnReviewPanel({
         isDialog ? "is-dialog" : "",
       ].filter(Boolean).join(" ")}
     >
+      {zoneSuggestions.length > 0 && (
+        <datalist id="df2-iana-zones">
+          {zoneSuggestions.map((z) => (
+            <option key={z} value={z} />
+          ))}
+        </datalist>
+      )}
       {showHead && (
         <div className="df2-column-review-head">
           <div>
@@ -579,7 +600,7 @@ export function ColumnReviewPanel({
             {search && (
               <button
                 type="button"
-                className="df2-column-workbench-clear"
+                className="df2-close-btn df2-close-btn-sm df2-column-workbench-clear"
                 onClick={() => setSearch("")}
                 aria-label="Clear search"
               >
@@ -809,13 +830,25 @@ export function ColumnReviewPanel({
                       {(() => {
                         const engineRisk = engineStampedRiskChip(m);
                         if (!engineRisk || omitted) return null;
-                        if (!m.riskAcknowledged) {
+                        const riskState = mappingRiskChipState(m);
+                        if (riskState === "open") {
                           return (
                             <span
                               className="df2-badge df2-badge-run df2-badge-xs"
                               title={engineRisk.detail}
                             >
                               {engineRisk.label}
+                            </span>
+                          );
+                        }
+                        if (riskState === "fail_closed") {
+                          const policy = m.riskContract?.execution_policy || "fail-closed";
+                          return (
+                            <span
+                              className="df2-badge df2-badge-run df2-badge-xs"
+                              title={`Contract signed with ${policy} — that policy stops the write, so Validate stays blocked. Re-sign with a continue policy to proceed. ${engineRisk.detail}`}
+                            >
+                              contract · {policy} · blocked
                             </span>
                           );
                         }
@@ -892,7 +925,13 @@ export function ColumnReviewPanel({
                       />
                       <select
                         className="df2-input df2-select df2-column-dest-type-select"
-                        value={normalizeDestTypeValue(m.destType || m.inferredType || "VARCHAR", destType)}
+                        value={
+                          // An unread destination type must not display the source
+                          // type as if it were the destination's.
+                          isDestSchemaPending(m) && !m.destType
+                            ? ""
+                            : normalizeDestTypeValue(m.destType || m.inferredType || "VARCHAR", destType)
+                        }
                         onChange={(e) =>
                           updateMapping(index, applyDestTypeChange(m, e.target.value))
                         }
@@ -903,7 +942,16 @@ export function ColumnReviewPanel({
                             : "Destination logical type"
                         }
                       >
-                        {destTypeSelectOptions(m.destType || m.inferredType, destType).map((opt) => (
+                        {isDestSchemaPending(m) && !m.destType && (
+                          <option value="">— destination type not loaded —</option>
+                        )}
+                        {destTypeSelectOptions(
+                          // No destination type was read, so nothing is "current".
+                          // Passing the source type here labelled it as the
+                          // destination's current type.
+                          isDestSchemaPending(m) && !m.destType ? undefined : (m.destType || m.inferredType),
+                          destType,
+                        ).map((opt) => (
                           <option key={opt.value} value={opt.value}>
                             {opt.label}
                           </option>
@@ -1059,6 +1107,16 @@ export function ColumnReviewPanel({
                           Remap / ALTER required
                         </button>
                       )}
+                      {!omitted && !isExistingEnumBooleanConflict(m) && isExistingDestTypeOverride(m) && (
+                        <button
+                          type="button"
+                          className="df2-btn df2-btn-sm df2-btn-ghost"
+                          title={`Withdraw the ALTER request and keep the physical type ${m.destType || "as-is"} — remaining fidelity loss still needs a Risk Contract`}
+                          onClick={() => updateMapping(index, clearExistingDestTypeOverride(m))}
+                        >
+                          Keep {m.destType || "physical type"}
+                        </button>
+                      )}
                       {!omitted && isEnumToBooleanConflict(m) && canWidenMapping(m) && (
                         <button
                           type="button"
@@ -1092,6 +1150,24 @@ export function ColumnReviewPanel({
                             <option key={t.id} value={t.id}>{t.label}</option>
                           ))}
                         </select>
+                        {m.transform === "assume_timezone" && !omitted && (
+                          <input
+                            className="df2-input df2-input-sm df2-column-zone"
+                            value={declaredSourceZone(m)}
+                            placeholder="IANA zone, e.g. Europe/Berlin"
+                            list="df2-iana-zones"
+                            aria-label={`Source time zone for ${m.source}`}
+                            title="The zone this zoneless column was recorded in — the destination instant is asserted from it, never guessed"
+                            onChange={(e) =>
+                              updateMapping(index, applyDeclaredSourceZone(m, e.target.value))
+                            }
+                          />
+                        )}
+                        {assumeTimezoneAwaitingZone(m) && !omitted && (
+                          <span className="df2-col-badge-warn" title="No zone named yet — Validate stays blocked">
+                            zone required
+                          </span>
+                        )}
                         {pipelineTransformChip(m.engineTransform) && !omitted && (
                           <span
                             className="df2-col-badge-pipeline"
@@ -1136,6 +1212,21 @@ export function ColumnReviewPanel({
                           </span>
                         )}
                       </div>
+                    ) : isDestSchemaPending(m) ? (
+                      // No row-level action exists: the destination type was never
+                      // read, so Approve would claim a comparison nobody made.
+                      <div className="df2-column-risk-actions">
+                        <span
+                          className="df2-badge df2-badge-warn df2-badge-xs"
+                          title={
+                            "Destination column type has not been read from the destination. "
+                            + "Use Reload destination schema above — if the table does not exist, "
+                            + "the probe proves it absent and this column becomes a CREATE."
+                          }
+                        >
+                          dest type not loaded
+                        </span>
+                      </div>
                     ) : (
                       <div className="df2-column-risk-actions">
                         {mappingRequiresRiskAck(m) && (
@@ -1152,7 +1243,7 @@ export function ColumnReviewPanel({
                             <option value="">Policy…</option>
                             {EXECUTION_POLICY_OPTIONS.map((p) => (
                               <option key={p.id} value={p.id}>
-                                {p.label}
+                                {p.continueUnlock ? p.label : `${p.label} — keeps Validate blocked`}
                               </option>
                             ))}
                           </select>

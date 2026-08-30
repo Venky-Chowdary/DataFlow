@@ -1,5 +1,6 @@
 import { useState, type FormEvent } from "react";
 import { DtIcon } from "../../components/DtIcon";
+import { PilotRouteArt } from "../../components/marketing/hero-art/contactArt";
 import { TRANSFER_READY_DRIVERS } from "../../lib/provenEvidence";
 import type { PublicRoute } from "../../lib/publicNavigation";
 
@@ -147,7 +148,7 @@ export function ContactSalesPage({
 
   return (
     <div className="lp-mkt-page lp-sales">
-      <section className="lp-sales-hero lp-sales-hero--split" aria-label="Talk to sales">
+      <section className="lp-sales-hero lp-sales-hero--split lp-sales-hero--ink" aria-label="Contact sales">
         <div className="lp-mkt-wrap lp-sales-hero-inner">
           <div className="lp-sales-hero-copy">
             <p className="lp-sales-kicker">Contact sales</p>
@@ -162,7 +163,8 @@ export function ContactSalesPage({
               </a>
               <span>One business day. No SOC 2 certificate is claimed.</span>
             </p>
-            <ol className="lp-sales-hero-steps">
+            {/* The drawing carries these three steps above 960px; below it, the list does. */}
+            <ol className="lp-sales-hero-steps lp-sales-hero-steps--narrow">
               {NEXT_STEPS.map((s) => (
                 <li key={s.n}>
                   <span>{s.n}</span>
@@ -352,6 +354,10 @@ export function ContactSalesPage({
               </div>
             </form>
           )}
+
+          <div className="lp-sales-hero-route">
+            <PilotRouteArt />
+          </div>
         </div>
       </section>
 

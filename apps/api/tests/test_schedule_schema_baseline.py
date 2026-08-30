@@ -173,3 +173,59 @@ def test_the_accept_endpoint_is_registered():
 
     paths = {getattr(r, "path", "") for r in router.routes}
     assert any("accept-source-schema" in p for p in paths)
+
+
+def test_dest_mysql_does_not_invent_source_ntz_narrow(monkeypatch):
+    """Snowflake → MySQL must not park joining_date: TIMESTAMP_NTZ → TIMESTAMP_NTZ."""
+    ntz = {"joining_date": "TIMESTAMP_NTZ", "emp_id": "NUMBER"}
+
+    class _Src:
+        format = "snowflake"
+
+    class _Dst:
+        format = "mysql"
+
+    class _Cross:
+        source = _Src()
+        destination = _Dst()
+        mappings = [{"source": c, "target": c} for c in ntz]
+
+    recorded: list = []
+    import services.schedule_runner as runner
+
+    monkeypatch.setattr(
+        "src.transfer.endpoint_intelligence.introspect_endpoint",
+        lambda _e: {"schema": dict(ntz), "columns": list(ntz)},
+        raising=False,
+    )
+    monkeypatch.setattr(
+        runner,
+        "_remember_source_schema",
+        lambda s, schema, fp, **_k: recorded.append((schema, fp)),
+    )
+    runner._guard_source_schema_drift(_Sched(ntz), _Cross())
+    assert recorded, "unchanged source must record the baseline, not park"
+
+
+def test_same_declaration_narrow_helper_names_the_venky_finding():
+    from services.schema_drift import is_same_declaration_narrow
+
+    assert is_same_declaration_narrow([
+        {
+            "kind": "narrow_type",
+            "column": "joining_date",
+            "old_type": "TIMESTAMP_NTZ",
+            "new_type": "TIMESTAMP_NTZ",
+        }
+    ])
+    assert not is_same_declaration_narrow([
+        {
+            "kind": "narrow_type",
+            "column": "amount",
+            "old_type": "DECIMAL(12,2)",
+            "new_type": "DECIMAL(6,2)",
+        }
+    ])
+    assert not is_same_declaration_narrow([
+        {"kind": "drop", "column": "region", "old_type": "VARCHAR"},
+    ])

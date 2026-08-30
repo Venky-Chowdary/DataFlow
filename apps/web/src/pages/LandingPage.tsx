@@ -7,10 +7,11 @@ import {
 } from "../components/landing/AlgorithmCinema";
 import { TrustSection } from "../components/landing/TrustSection";
 import { ProofEvidenceSection } from "../components/landing/ProofEvidenceSection";
-import { LandingHeroFlow } from "../components/landing/LandingHeroFlow";
+import { ProductShot } from "../components/marketing/ProductShot";
 import { ObservabilityInAction } from "../components/landing/ObservabilityInAction";
 import { useRevealOnScroll } from "../hooks/useRevealOnScroll";
-import { BACKEND_SUITE, EVIDENCE_AS_OF, TRANSFER_READY_DRIVERS } from "../lib/provenEvidence";
+import { BACKEND_SUITE, EVIDENCE_AS_OF, TRANSFER_READY_DRIVERS, catalogHonestyLead } from "../lib/provenEvidence";
+import { connectorDisplayName } from "../lib/connectorTypes";
 import type { PublicRoute } from "../lib/publicNavigation";
 
 export interface LandingHomeProps {
@@ -112,13 +113,21 @@ function ConnectorMarquee({
         {loop.map((id, i) => (
           <span key={`${id}-${i}`} className="lp-conn-marquee-tile">
             <ConnectorIcon id={id} size={30} />
-            <em>{id.replace(/_/g, " ")}</em>
+            <em>{connectorDisplayName(id)}</em>
           </span>
         ))}
       </div>
     </div>
   );
 }
+
+const SURFACE_SHOTS: Record<string, string> = {
+  studio: "/docs/screenshots/app-transfer-source.png",
+  theater: "/docs/screenshots/app-jobs.png",
+  pipelines: "/docs/screenshots/app-pipelines.png",
+  mcp: "/docs/screenshots/app-mcp.png",
+  query: "/docs/screenshots/app-query.png",
+};
 
 const SURFACES: {
   id: string;
@@ -227,19 +236,12 @@ function SurfaceTabs({ onNavigate, onGetStarted }: Pick<LandingHomeProps, "onNav
               </button>
             </div>
           </div>
-          <div className="lp-home-tab-visual" aria-hidden>
-            <div className="lp-home-tab-card">
-              <header>
-                <span className="lp-home-tab-dot" />
-                {current.label}
-              </header>
-              <strong>{current.title}</strong>
-              <ul>
-                <li>Semantic map</li>
-                <li>G1–G9 preflight</li>
-                <li>Quarantine + checksum</li>
-              </ul>
-            </div>
+          <div className="lp-home-tab-visual">
+            <ProductShot
+              src={SURFACE_SHOTS[current.id] ?? "/docs/screenshots/app-overview.png"}
+              alt={`${current.title} in the Datawrap workspace`}
+              surface={current.label}
+            />
           </div>
         </div>
       </div>
@@ -252,16 +254,8 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
   return (
     <>
       {/* 1) Hero — brand-first, one headline, one visual */}
-      <section className="lp-hero lp-hero--home">
-        <div className="lp-hero-home-bg" aria-hidden>
-          <span className="lp-hero-home-mesh" />
-          <span className="lp-hero-home-glow lp-hero-home-glow--a" />
-          <span className="lp-hero-home-glow lp-hero-home-glow--b" />
-          <svg className="lp-hero-home-waves" viewBox="0 0 1440 180" preserveAspectRatio="none">
-            <path d="M0,90 C240,40 480,140 720,90 C960,40 1200,120 1440,70 L1440,180 L0,180 Z" />
-            <path d="M0,120 C300,70 540,160 840,110 C1080,70 1260,130 1440,100 L1440,180 L0,180 Z" />
-          </svg>
-        </div>
+      <section className="lp-hero lp-hero--home lp-hero--home-ink">
+        <div className="lp-hero-home-bg" aria-hidden />
         <div className="lp-hero-home-grid">
           <div className="lp-hero-copy">
             <p className="lp-hero-eyebrow">
@@ -273,17 +267,21 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
               <span className="lp-hero-title-b">anywhere — proven.</span>
             </h1>
             <p className="lp-hero-sub">
-              Semantic mapping, nine preflight gates, quarantine, dest query/CALL, and dest-engine
-              checksum on every load — Transfer Studio, Pipelines, Pilot, and MCP.{" "}
-              {TRANSFER_READY_DRIVERS} TRANSFER_READY drivers. Catalog tiles are not live.
+              Datawrap maps your columns by meaning, refuses the write when a gate fails, and asks
+              the destination engine itself to prove what landed. One governed path for Studio,
+              Pipelines, Pilot, and MCP.
             </p>
             <div className="lp-hero-cta">
               <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={onGetStarted}>
                 Try Datawrap free
                 <DtIcon name="arrow-right" size={16} />
               </button>
-              <button type="button" className="lp-btn lp-btn--outline lp-btn--lg" onClick={() => onNavigate("contact")}>
-                Talk to sales
+              <button
+                type="button"
+                className="lp-btn lp-btn--outline lp-btn--lg lp-btn--on-ink"
+                onClick={() => onNavigate("contact")}
+              >
+                Contact sales
               </button>
             </div>
             <p className="lp-hero-meta">
@@ -297,7 +295,12 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
             </p>
           </div>
           <div className="lp-hero-visual lp-hero-visual--stage">
-            <LandingHeroFlow />
+            <ProductShot
+              src="/docs/screenshots/app-jobs.png"
+              alt="Datawrap Job Theater — whole-history counts, destination population, and run proof"
+              surface="Job Theater · workspace"
+              route={{ source: "PostgreSQL · public.orders", dest: "Snowflake · ANALYTICS.ORDERS" }}
+            />
           </div>
         </div>
       </section>
@@ -307,9 +310,9 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
         <p className="lp-home-stack-label">Works with the stacks you already run</p>
         <div className="lp-home-stack-row">
           {STACK_IDS.map((id) => (
-            <span key={id} className="lp-home-stack-item" title={id}>
+            <span key={id} className="lp-home-stack-item" title={connectorDisplayName(id)}>
               <ConnectorIcon id={id} size={28} />
-              <em>{id}</em>
+              <em>{connectorDisplayName(id)}</em>
             </span>
           ))}
         </div>
@@ -485,8 +488,7 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
               <h3>Map · G1–G9 · quarantine · MATCH</h3>
               <p>
                 Extra source columns stay on Map. Dest INSERT/MERGE and dest CALL use binds only.
-                CDC default is at-least-once upsert until a route proves dest-owned exactly-once.{" "}
-                {TRANSFER_READY_DRIVERS} TRANSFER_READY drivers — catalog tiles are not claimed live.
+                CDC default is at-least-once upsert until a route proves dest-owned exactly-once.
               </p>
             </article>
           </div>
@@ -705,7 +707,8 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
         </div>
         <div className="lp-home-connectors-inner">
           <p className="lp-home-connectors-note">
-            Open the catalog to pick a source and destination — warehouses, lakes, databases, and apps.
+            {catalogHonestyLead()} Open the catalog to pick a source and destination — logos
+            include Planned tiles.
           </p>
           <div className="lp-home-arch-cta">
             <button type="button" className="lp-btn lp-btn--brand" onClick={() => onNavigate("integrations")}>
@@ -726,8 +729,8 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
         <div className="lp-home-final-inner">
           <h2>Ship a governed transfer today</h2>
           <p>
-            Start free on the same engine enterprises use for SSO, BYOK, and audit — semantic mapping,
-            nine core gates, quarantine, and checksum proof included.
+            Start free on the engine enterprises run behind SSO, BYOK, and audit. Your first load
+            ends the way every load should: a reconcile artifact you can hand to finance.
           </p>
           <div className="lp-hero-cta">
             <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={onGetStarted}>

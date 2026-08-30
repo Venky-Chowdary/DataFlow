@@ -98,6 +98,34 @@ def test_wire_check_blocks_unparseable_temporal():
     assert check["wire_value"] is None
 
 
+def test_parse_sql_datetime_refuses_auto_ambiguous_slash_timestamp():
+    """01/02/2024 00:00:00 is Jan 2 or Feb 1 — Auto must not invent MDY."""
+    assert parse_sql_datetime("01/02/2024 00:00:00") is None
+    assert parse_sql_datetime("01/02/2024") is None
+    check = wire_check_temporal("01/02/2024 00:00:00", "DATETIME(6)")
+    assert check["ok"] is False
+
+
+def test_parse_sql_datetime_accepts_unambiguous_day_first_timestamp():
+    assert parse_sql_datetime("31/12/2024 00:00:00") == datetime(2024, 12, 31, 0, 0, 0)
+
+
+def test_parse_sql_datetime_honors_date_locale_for_slash_timestamp():
+    from services.transform_engine import reset_active_date_locale, set_active_date_locale
+
+    mdy = set_active_date_locale("MDY")
+    try:
+        assert parse_sql_datetime("01/02/2024 00:00:00") == datetime(2024, 1, 2, 0, 0, 0)
+    finally:
+        reset_active_date_locale(mdy)
+
+    dmy = set_active_date_locale("DMY")
+    try:
+        assert parse_sql_datetime("01/02/2024 00:00:00") == datetime(2024, 2, 1, 0, 0, 0)
+    finally:
+        reset_active_date_locale(dmy)
+
+
 def test_coercion_probe_warns_iso_z_for_mysql_dest():
     report = analyze_coercion(
         sample_rows=[{"ts": "2024-08-09T01:58:42Z"}],

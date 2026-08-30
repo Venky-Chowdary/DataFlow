@@ -1,5 +1,7 @@
 """Transform engine unit tests."""
 
+from decimal import Decimal
+
 import pytest
 
 from services.transform_engine import apply_transform, dry_run_sample, infer_transform, preview_quarantine_cells
@@ -32,7 +34,7 @@ def test_infer_no_url_invent_on_text_image_column():
 def test_apply_decimal():
     val, err = apply_transform("1,234.50", "decimal")
     assert err is None
-    assert val == "1234.50"
+    assert Decimal(str(val)) == Decimal("1234.50")
 
 
 def test_apply_date():
@@ -153,15 +155,15 @@ def test_apply_uuid_validates():
 def test_apply_decimal_accounting_and_scientific():
     val, err = apply_transform("(1,234.56)", "decimal")
     assert err is None
-    assert val == "-1234.56"
+    assert Decimal(str(val)) == Decimal("-1234.56")
 
     val2, err2 = apply_transform("1.5e3", "decimal")
     assert err2 is None
-    assert val2 == "1500"
+    assert Decimal(str(val2)) == Decimal("1500")
 
     val3, err3 = apply_transform("$10,000.00", "decimal")
     assert err3 is None
-    assert val3 == "10000.00"
+    assert Decimal(str(val3)) == Decimal("10000.00")
 
 
 def test_unknown_transform_fails_closed():

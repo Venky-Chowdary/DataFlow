@@ -128,7 +128,11 @@ export function ConnectorCard({
             loadingLabel="Testing…"
             onClick={onTest}
             leadingIcon={<DtIcon name="activity" size={14} />}
+            aria-label={`Test ${c.name} connection`}
+            title={`Test ${c.name} connection`}
           >
+            {/* The label is hidden below 1367px, so the name has to live on the
+                control itself — otherwise the row's only action is unnamed. */}
             <span className="df2-btn-label">Test</span>
           </Button>
           <button type="button" className="df2-connector-row-open" onClick={onSelect} aria-label={`Open ${c.name} details`}>

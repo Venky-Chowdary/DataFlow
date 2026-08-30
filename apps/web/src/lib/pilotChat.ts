@@ -28,17 +28,51 @@ export const PILOT_SCREEN_LABELS: Record<string, string> = {
   benchmarks: "Proofs",
 };
 
-/** Apply non-mutating navigate suggestions from a chat turn. */
+/**
+ * Workspace screens Pilot may move an operator to. `landing` is absent on purpose:
+ * it is public marketing, so routing there logs the operator out of their context.
+ */
+const NAVIGABLE_SCREENS: readonly string[] = [
+  "dashboard",
+  "pilot",
+  "transfer",
+  "query",
+  "connectors",
+  "schedules",
+  "transforms",
+  "jobs",
+  "contracts",
+  "mcp",
+  "settings",
+  "docs",
+  "benchmarks",
+];
+
+/** Whether a suggested target is a real authenticated screen we can route to. */
+export function isNavigableScreen(screen: string | undefined): screen is Screen {
+  return !!screen && NAVIGABLE_SCREENS.includes(screen);
+}
+
+/**
+ * Move the operator only when this turn actually ran the `navigate` tool — i.e. they
+ * asked to be taken somewhere. Every other suggestion stays a chip they can press:
+ * auto-running them swallowed the answer (an explained "append mode" turn suggested
+ * the Transfer Studio guide and navigated before the paragraph could be read).
+ */
 export function applyPilotSafeActions(
   actions: { risk?: string; type?: string; screen?: string; route?: string }[] | undefined,
   onNavigate?: (screen: Screen) => void,
+  toolsUsed?: { name: string; success: boolean }[],
 ): void {
   if (!onNavigate || !actions?.length) return;
+  const asked = (toolsUsed || []).some((t) => t.name === "navigate" && t.success);
+  if (!asked) return;
   for (const a of actions) {
     if (a.risk === "mutate" || a.type === "studio") continue;
     const screen = a.screen || a.route;
-    if ((a.type === "navigate" || !a.type) && screen) {
-      onNavigate(screen as Screen);
+    if ((a.type === "navigate" || !a.type) && isNavigableScreen(screen)) {
+      onNavigate(screen);
+      return;
     }
   }
 }

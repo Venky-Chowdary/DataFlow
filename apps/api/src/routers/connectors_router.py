@@ -431,7 +431,11 @@ async def list_transfer_jobs(
     request: Request,
     workspace_id: str = Header(default="", alias="X-Workspace-Id"),
 ):
-    """List recent transfer jobs scoped to a workspace.
+    """List recent transfer jobs scoped to a workspace, with whole-history counts.
+
+    ``jobs`` is the most recent page; ``total`` and ``status_counts`` are counted
+    over the entire scoped history in the store. Counting the page instead made the
+    Jobs header read "All (50)" for a 90-job history and disagree with Pilot.
 
     Degrades gracefully when the job store is unavailable: returns an empty
     list flagged ``degraded`` (HTTP 200) so Job Theater still renders instead
@@ -442,11 +446,20 @@ async def list_transfer_jobs(
     try:
         mongo = get_mongodb_service()
         jobs = await asyncio.to_thread(mongo.list_jobs, workspace_id=workspace_id)
-        return {"jobs": jobs, "count": len(jobs), "degraded": False}
+        counts = await asyncio.to_thread(mongo.count_jobs, workspace_id=workspace_id)
+        return {
+            "jobs": jobs,
+            "count": len(jobs),
+            "total": int(counts.get("total") or 0),
+            "status_counts": counts.get("by_status") or {},
+            "degraded": False,
+        }
     except (PyMongoError, ConnectionError) as e:
         return {
             "jobs": [],
             "count": 0,
+            "total": 0,
+            "status_counts": {},
             "degraded": True,
             "persistence": "unavailable",
             "detail": str(e),
@@ -888,11 +901,12 @@ async def get_job_quarantine(job_id: str, request: Request):
         }
     open_n = int(closure.get("open_count") or 0)
     row_ids = {d.get("row") for d in details if isinstance(d, dict) and d.get("row") is not None}
+    finding_rows = len(row_ids) if row_ids else len(details)
     rejected_rows = int(
         job.get("rejected_details_total")
         or job.get("rejected_rows")
         or 0
-    ) or (len(row_ids) if row_ids else len(details))
+    ) or finding_rows
     has_write = bool(
         job.get("rejected_details")
         or (job.get("destination_summary") or {}).get("rejected_details")
@@ -923,6 +937,18 @@ async def get_job_quarantine(job_id: str, request: Request):
         # Older jobs wrote rejects without the flag — treat as unknown, not lost.
         quarantine_durable = None
     quarantine_dlq_error = ds.get("quarantine_dlq_error")
+    # A refused write unit rolls back rows that carry no finding of their own.
+    # Those rows are not reviewable quarantine scraps, so they are named here
+    # instead of inflating a total Inspect cannot show a single row for.
+    rows_rolled_back = int(ds.get("rows_rolled_back") or 0)
+    rows_refused_unit = int(ds.get("rows_refused_unit") or 0)
+    rows_unaccounted = max(0, rejected_rows - finding_rows - rows_rolled_back)
+    # `quarantine_durable` speaks for the control plane only. A destination DLQ
+    # table write can fail in the same run, so the two stores are reported
+    # separately instead of one flag reading `true` beside a failed write.
+    dest_dlq_durable: bool | None = None
+    if dest_dlq.get("table") or dest_dlq.get("error") or dest_dlq.get("ok") is not None:
+        dest_dlq_durable = bool(dest_dlq.get("ok")) and not dest_dlq.get("error")
     # Live open-row count when we have a saved transfer request + SQL dest.
     payload = job.get("transfer_request")
     if payload and dest_dlq.get("table"):
@@ -942,11 +968,16 @@ async def get_job_quarantine(job_id: str, request: Request):
         "job_id": job_id,
         "rejected_rows": rejected_rows,
         "issue_count": len(details),
+        "finding_rows": finding_rows,
+        "rows_rolled_back": rows_rolled_back,
+        "rows_refused_unit": rows_refused_unit,
+        "rows_unaccounted": rows_unaccounted,
         "open_count": open_n,
         "source": source,
         "quarantine": details,
         "dest_dlq": dest_dlq,
         "quarantine_durable": quarantine_durable,
+        "dest_dlq_durable": dest_dlq_durable,
         "quarantine_dlq_error": quarantine_dlq_error,
         "quarantine_closure": {
             "verdict": closure.get("verdict"),
@@ -1660,18 +1691,34 @@ async def delete_connector(connector_id: str):
 async def upload_file(
     file: UploadFile = File(...),
     enable_ocr: str = Form("false"),
+    read_options_json: str = Form(""),
 ):
-    """Upload and parse a file"""
+    """Upload and parse a file, through the declared read window if any."""
+    from services.read_options import ReadOptionsError, parse_read_options_payload
+
+    try:
+        read_options = parse_read_options_payload(read_options_json)
+    except ReadOptionsError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     try:
         content = await file.read()
         use_ocr = enable_ocr.lower() in ("true", "1", "yes")
-        result = FileParser.parse(content, file.filename, enable_ocr=use_ocr)
+        result = FileParser.parse(
+            content,
+            file.filename,
+            enable_ocr=use_ocr,
+            read_options=read_options,
+        )
 
         if not result.success:
             raise HTTPException(status_code=400, detail=result.error)
 
         if result.row_count == 0:
-            raise HTTPException(status_code=400, detail="File contains no records")
+            detail = "File contains no records"
+            if not read_options.is_default:
+                detail += f" through the declared read window ({read_options.describe()})"
+            raise HTTPException(status_code=400, detail=detail)
 
         if not result.columns:
             raise HTTPException(
@@ -1702,10 +1749,28 @@ async def upload_file(
 
         from services.pdf_ocr import ocr_dependency_status
 
+        sheets: list[dict] = []
+        if result.file_type == "excel":
+            from services.excel_parser import list_excel_sheets
+
+            sheets = list_excel_sheets(content)
+
+        stored_file_id = ""
+        try:
+            from services.file_parser import store_upload
+
+            stored = store_upload(file.filename or "upload.csv", content)
+            stored_file_id = str(stored.get("file_id") or "")
+        except Exception:
+            stored_file_id = ""
+
         return {
             "success": True,
             "filename": file.filename,
+            "file_id": stored_file_id or None,
             "file_type": result.file_type,
+            "sheets": sheets,
+            "read_options": read_options.to_wire(),
             "row_count": result.row_count,
             "columns": result.columns,
             "schema": schema,

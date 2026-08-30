@@ -163,7 +163,7 @@ def read_table_cursor_batch(
     del username, password, ssl, warehouse
     from google.cloud import bigquery
 
-    from services.keyset_pagination import split_cursor_bookmark
+    from services.keyset_pagination import present_cursor_bookmark, split_cursor_bookmark
 
     project_id = database or host
     dataset_id = schema or "dataflow"
@@ -200,10 +200,11 @@ def read_table_cursor_batch(
         params: list[Any] = []
         where = ""
         order = cursor_q
-        if cursor_after is not None and cursor_after != "":
+        bookmark = present_cursor_bookmark(cursor_after)
+        if bookmark is not None:
             has_tiebreak = bool(pk and pk != cursor_column)
             cur_val, split_pk = split_cursor_bookmark(
-                cursor_after, has_tiebreak=has_tiebreak
+                bookmark, has_tiebreak=has_tiebreak
             )
             pk_val = split_pk if has_tiebreak else None
             params.append(bigquery.ScalarQueryParameter("cursor", "STRING", str(cur_val)))

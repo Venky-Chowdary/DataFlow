@@ -14,6 +14,14 @@ import json
 import re
 from typing import Any
 
+# Bind normalize runs once per cell — a 10M-row load resolves these names ~60M
+# times, and a function-local import pays a module lookup and a failed
+# ``__path__`` attribute hook on each one. Neither module imports connectors,
+# so there is no cycle to avoid here.
+from connectors.sql_bind_route import BindRoute, bind_route
+from connectors.sql_temporal import coerce_sql_temporal
+from services.value_serializer import absent_sql_bind as _absent_sql_bind
+
 # Canonical boolean wire only — SSOT with type_system / transform_engine.
 # Informal yes/on/y/no/n invents truth; quarantine or operator transform owns those.
 _TRUE_TOKENS = frozenset({"true", "t", "1"})
@@ -40,8 +48,9 @@ def coerce_inet_wire(value: Any) -> Any:
     Prefer ``ipaddress`` objects for psycopg adaptation; validate strings
     fail-closed (Postgres network types — never invent from ints/floats).
     """
-    if value is None:
-        return None
+    handled, bound = _absent_sql_bind(value)
+    if handled:
+        return bound
     from ipaddress import (
         IPv4Address,
         IPv4Interface,
@@ -51,10 +60,6 @@ def coerce_inet_wire(value: Any) -> Any:
         ip_interface,
     )
 
-    from services.value_serializer import is_missing_sentinel
-
-    if is_missing_sentinel(value):
-        return value
     if isinstance(value, (IPv4Address, IPv4Interface, IPv6Address, IPv6Interface)):
         return value
     if isinstance(value, (bool, int, float, list, dict, bytes, bytearray, memoryview)):
@@ -83,14 +88,11 @@ def coerce_cidr_wire(value: Any) -> Any:
     Host bits outside the prefix must not silently pass — ``ip_network`` with
     ``strict=True`` matches Postgres CIDR input checking.
     """
-    if value is None:
-        return None
+    handled, bound = _absent_sql_bind(value)
+    if handled:
+        return bound
     from ipaddress import IPv4Network, IPv6Network, ip_network
 
-    from services.value_serializer import is_missing_sentinel
-
-    if is_missing_sentinel(value):
-        return value
     if isinstance(value, (IPv4Network, IPv6Network)):
         return value
     if isinstance(value, (bool, int, float, list, dict, bytes, bytearray, memoryview)):
@@ -128,12 +130,9 @@ _MAC_RE = re.compile(
 
 def coerce_macaddr_wire(value: Any, *, eui64: bool = False) -> Any:
     """Normalize PostgreSQL ``MACADDR`` / ``MACADDR8`` wire fail-closed."""
-    if value is None:
-        return None
-    from services.value_serializer import is_missing_sentinel
-
-    if is_missing_sentinel(value):
-        return value
+    handled, bound = _absent_sql_bind(value)
+    if handled:
+        return bound
     if isinstance(value, (bool, int, float, list, dict)):
         raise ValueError(
             f"macaddr wire cannot bind {type(value).__name__} — refuse invent"
@@ -160,12 +159,11 @@ def coerce_hstore_wire(value: Any) -> Any:
     classic ``"k"=>"v"`` text form. Refuse invent from scalars/lists that are not
     key/value pair records.
     """
-    if value is None:
-        return None
-    from services.value_serializer import is_missing_sentinel, json_default
+    handled, bound = _absent_sql_bind(value)
+    if handled:
+        return bound
+    from services.value_serializer import json_default
 
-    if is_missing_sentinel(value):
-        return value
     if isinstance(value, dict):
         # Stringify keys; null values stay JSON null (hstore NULL).
         normalized = {str(k): v for k, v in value.items()}
@@ -304,12 +302,9 @@ def coerce_range_wire(value: Any, *, multi: bool = False) -> Any:
     Accepts canonical literals (``[1,10)``, ``empty``, ``{[1,2),[5,6)}``) or a
     dict ``{lower, upper, bounds}``. Refuse invent from bare scalars.
     """
-    if value is None:
-        return None
-    from services.value_serializer import is_missing_sentinel
-
-    if is_missing_sentinel(value):
-        return value
+    handled, bound = _absent_sql_bind(value)
+    if handled:
+        return bound
     if isinstance(value, (bool, int, float)):
         raise ValueError(
             f"range wire cannot bind {type(value).__name__} — refuse invent into RANGE"
@@ -361,12 +356,9 @@ def coerce_jsonpath_wire(value: Any) -> str | None:
 
     Refuse invent from bool/number/object (jsonpath is not JSON document invent).
     """
-    if value is None:
-        return None
-    from services.value_serializer import is_missing_sentinel
-
-    if is_missing_sentinel(value):
-        return value  # type: ignore[return-value]
+    handled, bound = _absent_sql_bind(value)
+    if handled:
+        return bound
     if isinstance(value, (bool, int, float, dict, list)):
         raise ValueError(
             f"jsonpath wire cannot bind {type(value).__name__} — refuse invent into JSONPATH"
@@ -382,12 +374,9 @@ def coerce_xml_wire(value: Any) -> Any:
     Postgres accepts documents and content fragments (xmloption). Refuse invent
     from dict/list/scalars (Fivetran/HVR class: XML is not opaque VARCHAR invent).
     """
-    if value is None:
-        return None
-    from services.value_serializer import is_missing_sentinel
-
-    if is_missing_sentinel(value):
-        return value
+    handled, bound = _absent_sql_bind(value)
+    if handled:
+        return bound
     if isinstance(value, (bytes, bytearray, memoryview)):
         try:
             text = bytes(value).decode("utf-8")
@@ -434,12 +423,9 @@ def coerce_citext_wire(value: Any) -> Any:
     Store the original casing (Postgres citext compares case-insensitively but
     preserves input). Refuse invent from bytes/objects.
     """
-    if value is None:
-        return None
-    from services.value_serializer import is_missing_sentinel
-
-    if is_missing_sentinel(value):
-        return value
+    handled, bound = _absent_sql_bind(value)
+    if handled:
+        return bound
     if isinstance(value, (bytes, bytearray, memoryview, dict, list, bool)):
         raise ValueError(
             f"citext wire cannot bind {type(value).__name__} — refuse invent into CITEXT"
@@ -462,12 +448,9 @@ def coerce_ltree_wire(value: Any) -> Any:
     of spaces/dots inside labels). SQL Server ``hierarchyid`` slash paths
     (``/1/2/3/``) are converted to ltree polarity (AWS DMS migration class).
     """
-    if value is None:
-        return None
-    from services.value_serializer import is_missing_sentinel
-
-    if is_missing_sentinel(value):
-        return value
+    handled, bound = _absent_sql_bind(value)
+    if handled:
+        return bound
     if isinstance(value, (bool, int, float, dict, list, bytes, bytearray, memoryview)):
         raise ValueError(
             f"ltree wire cannot bind {type(value).__name__} — refuse invent into LTREE"
@@ -499,13 +482,10 @@ def coerce_hierarchyid_wire(value: Any, *, as_ltree: bool = False) -> Any:
     ``as_ltree=True`` emits PostgreSQL ltree polarity (dot labels). Invalid
     paths refuse invent — never silently stringify binary hierarchyids.
     """
-    if value is None:
-        return None
+    handled, bound = _absent_sql_bind(value)
+    if handled:
+        return bound
     from services.type_system import hierarchyid_to_ltree_path
-    from services.value_serializer import is_missing_sentinel
-
-    if is_missing_sentinel(value):
-        return value
     if isinstance(value, (bool, int, float, dict, list)):
         raise ValueError(
             f"hierarchyid cannot bind {type(value).__name__} — refuse invent"
@@ -547,12 +527,9 @@ def coerce_tsvector_wire(value: Any) -> Any:
     Accept lexeme strings; refuse invent from objects/numbers (Airbyte string
     carrier for full-text types).
     """
-    if value is None:
-        return None
-    from services.value_serializer import is_missing_sentinel
-
-    if is_missing_sentinel(value):
-        return value
+    handled, bound = _absent_sql_bind(value)
+    if handled:
+        return bound
     if isinstance(value, (bool, int, float, dict, bytes, bytearray, memoryview)):
         raise ValueError(
             f"tsvector wire cannot bind {type(value).__name__} — refuse invent"
@@ -571,18 +548,66 @@ def coerce_tsvector_wire(value: Any) -> Any:
     return text  # empty tsvector is valid — never invent NULL
 
 
+def geo_coord_carrier(value: Any) -> float:
+    """One IEEE coordinate for POINT/BOX/CIRCLE/LINE/LSEG/PATH/POLYGON.
+
+    Write-path decimal first. Locale money binds. Auto ``1,234`` refuses.
+    Dest-canonical ``1.234`` stays identity. ``2**53+1`` refuses.
+    Native bool is not a magnitude.
+    """
+    from decimal import Decimal, InvalidOperation
+
+    from services.transform_engine import decimal_wire_value, float_carrier_or_refuse
+
+    if isinstance(value, bool):
+        raise ValueError("geo coord cannot bind bool — refuse invent")
+    if isinstance(value, Decimal):
+        try:
+            return float_carrier_or_refuse(value)
+        except ValueError as exc:
+            raise ValueError(
+                f"refuse invent geo coord from decimal {value!r}"
+            ) from exc
+    if isinstance(value, int):
+        try:
+            return float_carrier_or_refuse(Decimal(value))
+        except ValueError as exc:
+            raise ValueError(
+                f"refuse invent geo coord from {value!r}"
+            ) from exc
+    if isinstance(value, float):
+        if value != value or value in (float("inf"), float("-inf")):
+            raise ValueError("geo coord cannot bind non-finite — refuse invent")
+        return value
+    text = str(value).strip()
+    if not text:
+        raise ValueError("geo coord empty — refuse invent")
+    parsed: Decimal | None = None
+    try:
+        dest = Decimal(text)
+        if dest.is_finite():
+            parsed = dest
+    except (InvalidOperation, ValueError, ArithmeticError):
+        parsed = None
+    if parsed is None:
+        parsed = decimal_wire_value(text)
+    if parsed is None or not parsed.is_finite():
+        raise ValueError(f"refuse invent geo coord from {value!r}")
+    try:
+        return float_carrier_or_refuse(parsed)
+    except ValueError as exc:
+        raise ValueError(f"refuse invent geo coord from {value!r}") from exc
+
+
 def coerce_point_wire(value: Any) -> Any:
     """Normalize PostgreSQL ``POINT`` wire (Fivetran JSON / PG literal class).
 
     Accepts ``(x,y)``, ``x,y``, or ``{"x":..,"y":..}``. Refuse invent from
     scalars/3-tuples.
     """
-    if value is None:
-        return None
-    from services.value_serializer import is_missing_sentinel
-
-    if is_missing_sentinel(value):
-        return value
+    handled, bound = _absent_sql_bind(value)
+    if handled:
+        return bound
     if isinstance(value, (bool, int, float, bytes, bytearray, memoryview)):
         raise ValueError(
             f"point wire cannot bind {type(value).__name__} — refuse invent into POINT"
@@ -593,8 +618,8 @@ def coerce_point_wire(value: Any) -> Any:
                 "point object requires x and y — refuse invent into POINT"
             )
         try:
-            x = float(value["x"])
-            y = float(value["y"])
+            x = geo_coord_carrier(value["x"])
+            y = geo_coord_carrier(value["y"])
         except (TypeError, ValueError) as exc:
             raise ValueError(
                 "point x/y must be numeric — refuse invent into POINT"
@@ -606,8 +631,8 @@ def coerce_point_wire(value: Any) -> Any:
                 "point sequence must have length 2 — refuse invent into POINT"
             )
         try:
-            x = float(value[0])
-            y = float(value[1])
+            x = geo_coord_carrier(value[0])
+            y = geo_coord_carrier(value[1])
         except (TypeError, ValueError) as exc:
             raise ValueError(
                 "point sequence values must be numeric — refuse invent into POINT"
@@ -624,6 +649,13 @@ def coerce_point_wire(value: Any) -> Any:
         raise ValueError(
             "point wire is not (x,y) literal — refuse invent into POINT"
         )
+    try:
+        geo_coord_carrier(m.group(1))
+        geo_coord_carrier(m.group(2))
+    except ValueError as exc:
+        raise ValueError(
+            "point wire is not (x,y) literal — refuse invent into POINT"
+        ) from exc
     return f"({m.group(1)},{m.group(2)})"
 
 
@@ -632,12 +664,9 @@ def coerce_box_wire(value: Any) -> Any:
 
     Accepts ``((x1,y1),(x2,y2))``, corner dicts, or a list of two points.
     """
-    if value is None:
-        return None
-    from services.value_serializer import is_missing_sentinel
-
-    if is_missing_sentinel(value):
-        return value
+    handled, bound = _absent_sql_bind(value)
+    if handled:
+        return bound
     if isinstance(value, (bool, int, float, bytes, bytearray, memoryview)):
         raise ValueError(
             f"box wire cannot bind {type(value).__name__} — refuse invent into BOX"
@@ -647,8 +676,8 @@ def coerce_box_wire(value: Any) -> Any:
         if {"x1", "y1", "x2", "y2"} <= set(value.keys()):
             try:
                 return (
-                    f"(({float(value['x1'])},{float(value['y1'])}),"
-                    f"({float(value['x2'])},{float(value['y2'])}))"
+                    f"(({geo_coord_carrier(value['x1'])},{geo_coord_carrier(value['y1'])}),"
+                    f"({geo_coord_carrier(value['x2'])},{geo_coord_carrier(value['y2'])}))"
                 )
             except (TypeError, ValueError) as exc:
                 raise ValueError(
@@ -676,6 +705,13 @@ def coerce_box_wire(value: Any) -> Any:
         raise ValueError(
             "box wire must contain four coordinates — refuse invent into BOX"
         )
+    try:
+        for n in nums:
+            geo_coord_carrier(n)
+    except ValueError as exc:
+        raise ValueError(
+            "box corners must be numeric — refuse invent into BOX"
+        ) from exc
     return f"(({nums[0]},{nums[1]}),({nums[2]},{nums[3]}))"
 
 
@@ -684,12 +720,9 @@ def coerce_circle_wire(value: Any) -> Any:
 
     Canonical output ``<(x,y),r>`` (Postgres default display form).
     """
-    if value is None:
-        return None
-    from services.value_serializer import is_missing_sentinel
-
-    if is_missing_sentinel(value):
-        return value
+    handled, bound = _absent_sql_bind(value)
+    if handled:
+        return bound
     if isinstance(value, (bool, int, float, bytes, bytearray, memoryview)):
         raise ValueError(
             f"circle wire cannot bind {type(value).__name__} — refuse invent into CIRCLE"
@@ -704,7 +737,7 @@ def coerce_circle_wire(value: Any) -> Any:
             )
         try:
             pt = coerce_point_wire(center)
-            r = float(value.get("r", value.get("radius")))
+            r = geo_coord_carrier(value.get("r", value.get("radius")))
         except (TypeError, ValueError) as exc:
             raise ValueError(
                 "circle center/radius must be numeric — refuse invent into CIRCLE"
@@ -719,7 +752,7 @@ def coerce_circle_wire(value: Any) -> Any:
             )
         pt = coerce_point_wire(value[0])
         try:
-            r = float(value[1])
+            r = geo_coord_carrier(value[1])
         except (TypeError, ValueError) as exc:
             raise ValueError(
                 "circle radius must be numeric — refuse invent into CIRCLE"
@@ -737,7 +770,14 @@ def coerce_circle_wire(value: Any) -> Any:
         raise ValueError(
             "circle wire must contain x,y,r — refuse invent into CIRCLE"
         )
-    r = float(nums[2])
+    try:
+        geo_coord_carrier(nums[0])
+        geo_coord_carrier(nums[1])
+        r = geo_coord_carrier(nums[2])
+    except ValueError as exc:
+        raise ValueError(
+            "circle center/radius must be numeric — refuse invent into CIRCLE"
+        ) from exc
     if r < 0:
         raise ValueError("circle radius cannot be negative — refuse invent")
     return f"<({nums[0]},{nums[1]}),{nums[2]}>"
@@ -751,17 +791,19 @@ def _extract_coord_pairs(text: str) -> list[tuple[str, str]]:
     )
     if len(nums) < 2 or len(nums) % 2 != 0:
         return []
+    try:
+        for n in nums:
+            geo_coord_carrier(n)
+    except ValueError:
+        return []
     return [(nums[i], nums[i + 1]) for i in range(0, len(nums), 2)]
 
 
 def coerce_lseg_wire(value: Any) -> Any:
     """Normalize PostgreSQL ``LSEG`` — two endpoints ``[(x1,y1),(x2,y2)]``."""
-    if value is None:
-        return None
-    from services.value_serializer import is_missing_sentinel
-
-    if is_missing_sentinel(value):
-        return value
+    handled, bound = _absent_sql_bind(value)
+    if handled:
+        return bound
     if isinstance(value, (bool, int, float, bytes, bytearray, memoryview)):
         raise ValueError(
             f"lseg wire cannot bind {type(value).__name__} — refuse invent into LSEG"
@@ -770,8 +812,8 @@ def coerce_lseg_wire(value: Any) -> Any:
         if {"x1", "y1", "x2", "y2"} <= set(value.keys()):
             try:
                 return (
-                    f"[({float(value['x1'])},{float(value['y1'])}),"
-                    f"({float(value['x2'])},{float(value['y2'])})]"
+                    f"[({geo_coord_carrier(value['x1'])},{geo_coord_carrier(value['y1'])}),"
+                    f"({geo_coord_carrier(value['x2'])},{geo_coord_carrier(value['y2'])})]"
                 )
             except (TypeError, ValueError) as exc:
                 raise ValueError(
@@ -795,12 +837,9 @@ def coerce_lseg_wire(value: Any) -> Any:
 
 def coerce_line_wire(value: Any) -> Any:
     """Normalize PostgreSQL ``LINE`` — ``{A,B,C}`` or two distinct points."""
-    if value is None:
-        return None
-    from services.value_serializer import is_missing_sentinel
-
-    if is_missing_sentinel(value):
-        return value
+    handled, bound = _absent_sql_bind(value)
+    if handled:
+        return bound
     if isinstance(value, (bool, bytes, bytearray, memoryview)):
         raise ValueError(
             f"line wire cannot bind {type(value).__name__} — refuse invent into LINE"
@@ -810,7 +849,11 @@ def coerce_line_wire(value: Any) -> Any:
             # Case-insensitive key pick.
             kv = {str(k).lower(): v for k, v in value.items()}
             try:
-                a, b, c = float(kv["a"]), float(kv["b"]), float(kv["c"])
+                a, b, c = (
+                    geo_coord_carrier(kv["a"]),
+                    geo_coord_carrier(kv["b"]),
+                    geo_coord_carrier(kv["c"]),
+                )
             except (TypeError, ValueError) as exc:
                 raise ValueError(
                     "line a,b,c must be numeric — refuse invent into LINE"
@@ -826,7 +869,11 @@ def coerce_line_wire(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         if len(value) == 3:
             try:
-                a, b, c = float(value[0]), float(value[1]), float(value[2])
+                a, b, c = (
+                    geo_coord_carrier(value[0]),
+                    geo_coord_carrier(value[1]),
+                    geo_coord_carrier(value[2]),
+                )
             except (TypeError, ValueError) as exc:
                 raise ValueError(
                     "line coefficients must be numeric — refuse invent into LINE"
@@ -847,7 +894,8 @@ def coerce_line_wire(value: Any) -> Any:
         )
         if len(nums) != 3:
             raise ValueError("line {A,B,C} needs three coeffs — refuse invent")
-        a, b = float(nums[0]), float(nums[1])
+        a, b = geo_coord_carrier(nums[0]), geo_coord_carrier(nums[1])
+        geo_coord_carrier(nums[2])
         if a == 0 and b == 0:
             raise ValueError("line A and B cannot both be zero — refuse invent")
         return f"{{{nums[0]},{nums[1]},{nums[2]}}}"
@@ -862,12 +910,9 @@ def coerce_line_wire(value: Any) -> Any:
 
 def coerce_path_wire(value: Any, *, closed: bool | None = None) -> Any:
     """Normalize PostgreSQL ``PATH`` — open ``[…]`` or closed ``(…)`` point lists."""
-    if value is None:
-        return None
-    from services.value_serializer import is_missing_sentinel
-
-    if is_missing_sentinel(value):
-        return value
+    handled, bound = _absent_sql_bind(value)
+    if handled:
+        return bound
     if isinstance(value, (bool, int, float, bytes, bytearray, memoryview)):
         raise ValueError(
             f"path wire cannot bind {type(value).__name__} — refuse invent into PATH"
@@ -900,12 +945,9 @@ def coerce_path_wire(value: Any, *, closed: bool | None = None) -> Any:
 
 def coerce_polygon_wire(value: Any) -> Any:
     """Normalize PostgreSQL ``POLYGON`` — closed vertex list ``((x,y),…)``."""
-    if value is None:
-        return None
-    from services.value_serializer import is_missing_sentinel
-
-    if is_missing_sentinel(value):
-        return value
+    handled, bound = _absent_sql_bind(value)
+    if handled:
+        return bound
     if isinstance(value, (bool, int, float, bytes, bytearray, memoryview)):
         raise ValueError(
             f"polygon wire cannot bind {type(value).__name__} — refuse invent into POLYGON"
@@ -942,12 +984,9 @@ def coerce_pg_lsn_wire(value: Any) -> str | None:
     (``(hi << 32) | lo``). Never invent an LSN from bool/float/garbage —
     CDC at-least-once guards depend on exact watermark fidelity.
     """
-    if value is None:
-        return None
-    from services.value_serializer import is_missing_sentinel
-
-    if is_missing_sentinel(value):
-        return value
+    handled, bound = _absent_sql_bind(value)
+    if handled:
+        return bound
     if isinstance(value, bool):
         raise ValueError("pg_lsn cannot bind bool — refuse invent")
     if isinstance(value, float):
@@ -991,12 +1030,9 @@ def coerce_oid_wire(value: Any) -> int | None:
 
     Refuse invent from bool, fractional float, or out-of-range values.
     """
-    if value is None:
-        return None
-    from services.value_serializer import is_missing_sentinel
-
-    if is_missing_sentinel(value):
-        return value
+    handled, bound = _absent_sql_bind(value)
+    if handled:
+        return bound
     if isinstance(value, bool):
         raise ValueError("oid cannot bind bool — refuse invent")
     if isinstance(value, float):
@@ -1026,12 +1062,9 @@ def coerce_tid_wire(value: Any) -> str | None:
 
     Block is uint32; offset is uint16 (Npgsql / Postgres ItemPointer class).
     """
-    if value is None:
-        return None
-    from services.value_serializer import is_missing_sentinel
-
-    if is_missing_sentinel(value):
-        return value
+    handled, bound = _absent_sql_bind(value)
+    if handled:
+        return bound
     if isinstance(value, bool):
         raise ValueError("tid cannot bind bool — refuse invent")
     if isinstance(value, dict):
@@ -1072,12 +1105,9 @@ def coerce_xid_wire(value: Any, *, width64: bool = False) -> int | None:
     """Normalize PostgreSQL ``xid`` (uint32) or ``xid8`` (uint64) transaction ids."""
     label = "xid8" if width64 else "xid"
     max_v = 0xFFFFFFFFFFFFFFFF if width64 else 0xFFFFFFFF
-    if value is None:
-        return None
-    from services.value_serializer import is_missing_sentinel
-
-    if is_missing_sentinel(value):
-        return value
+    handled, bound = _absent_sql_bind(value)
+    if handled:
+        return bound
     if isinstance(value, bool):
         raise ValueError(f"{label} cannot bind bool — refuse invent")
     if isinstance(value, float):
@@ -1118,12 +1148,9 @@ def coerce_txid_snapshot_wire(value: Any) -> str | None:
     e.g. ``10:20:10,14,15`` or ``100:100:`` (empty xip). Fail-closed — never
     invent a snapshot from bools or unstructured text (MVCC visibility class).
     """
-    if value is None:
-        return None
-    from services.value_serializer import is_missing_sentinel
-
-    if is_missing_sentinel(value):
-        return value
+    handled, bound = _absent_sql_bind(value)
+    if handled:
+        return bound
     if isinstance(value, bool):
         raise ValueError("txid_snapshot cannot bind bool — refuse invent")
     if isinstance(value, dict):
@@ -1184,13 +1211,10 @@ def coerce_enum_wire(value: Any, *, ddl_type: str) -> str | None:
     Index ``0`` / empty string is the MySQL error member — refuse invent (strict
     mode would reject; non-strict stores '' silently). Debezium often emits ints.
     """
-    if value is None:
-        return None
+    handled, bound = _absent_sql_bind(value)
+    if handled:
+        return bound
     from services.type_system import parse_enum_or_set_ordered_members
-    from services.value_serializer import is_missing_sentinel
-
-    if is_missing_sentinel(value):
-        return value
     parsed = parse_enum_or_set_ordered_members(ddl_type)
     if parsed is None or parsed[0] != "ENUM":
         raise ValueError("coerce_enum_wire requires ENUM(...) ddl — refuse invent")
@@ -1243,13 +1267,10 @@ def coerce_set_wire(
     (create-new SET→array polarity). MySQL keeps CSV string wire; HubSpot /
     Salesforce multipicklist use ``joiner=';'``.
     """
-    if value is None:
-        return None
+    handled, bound = _absent_sql_bind(value)
+    if handled:
+        return bound
     from services.type_system import parse_enum_or_set_ordered_members
-    from services.value_serializer import is_missing_sentinel
-
-    if is_missing_sentinel(value):
-        return value
     parsed = parse_enum_or_set_ordered_members(ddl_type)
     if parsed is None or parsed[0] != "SET":
         raise ValueError("coerce_set_wire requires SET(...) ddl — refuse invent")
@@ -1312,13 +1333,10 @@ def coerce_set_wire(
 
 def coerce_year_wire(value: Any) -> int | None:
     """Normalize MySQL ``YEAR`` to int 0 or 1901–2155 (string ``'0'`` → 2000)."""
-    if value is None:
-        return None
+    handled, bound = _absent_sql_bind(value)
+    if handled:
+        return bound
     from services.type_system import expand_mysql_year
-    from services.value_serializer import is_missing_sentinel
-
-    if is_missing_sentinel(value):
-        return value
     if isinstance(value, str) and not value.strip():
         raise ValueError(
             "empty string cannot coerce to YEAR — "
@@ -1342,8 +1360,9 @@ def coerce_boolean_wire(value: Any, *, as_int: bool = False) -> Any:
     Empty string refuses NULL invent on boolean sinks (upsert wipe). Informal
     ``yes``/``no`` pass through for quarantine — never invent True/False.
     """
-    if value is None:
-        return None
+    handled, bound = _absent_sql_bind(value)
+    if handled:
+        return bound
     if isinstance(value, bool):
         return (1 if value else 0) if as_int else value
     if isinstance(value, (int, float)) and value in (0, 1):
@@ -1369,14 +1388,15 @@ def coerce_integer_wire(
     ddl_type: str | None = None,
     engine: str = "",
 ) -> Any:
-    """Normalize integer-family bind (TINYINT…BIGINT). Digit strings → int.
+    """Normalize integer-family bind (TINYINT…BIGINT) via the write-path parser.
 
-    SQL Server ``TINYINT`` is unsigned 0–255 (Microsoft / pyodbc), not MySQL's
-    TINYINT(1) boolean convention. Out-of-range and non-integral floats refuse
-    invent — quarantine owns the row.
+    Auto ``1,234`` / ``1.000`` refuse (``Decimal(text)`` invented ``1.000`` →
+    ``1``). Locale money the write path stores still binds. Wordy boolean
+    tokens refuse. SQL Server ``TINYINT`` is unsigned 0–255.
     """
-    if value is None:
-        return None
+    handled, bound = _absent_sql_bind(value)
+    if handled:
+        return bound
     from decimal import Decimal, InvalidOperation
 
     upper = (ddl_type or "INTEGER").upper().split("(", 1)[0].strip()
@@ -1465,28 +1485,14 @@ def coerce_integer_wire(
                 f"refuse invent integer from boolean token {value!r} "
                 f"for {ddl_type or upper}"
             )
-        try:
-            if any(c in token for c in ".eE") and not re.fullmatch(
-                r"[-+]?\d+", token
-            ):
-                dec = Decimal(token)
-                if dec != dec.to_integral_value():
-                    raise ValueError(
-                        f"refuse invent integer from fractional {value!r}"
-                    )
-                return _range_check(int(dec))
-            return _range_check(int(token, 10))
-        except InvalidOperation as exc:
+        from services.transform_engine import integer_wire_value
+
+        parsed = integer_wire_value(token)
+        if parsed is None:
             raise ValueError(
                 f"refuse invent integer from {value!r} for {ddl_type or upper}"
-            ) from exc
-        except ValueError as exc:
-            msg = str(exc)
-            if "out of range" in msg or msg.startswith("refuse invent"):
-                raise
-            raise ValueError(
-                f"refuse invent integer from {value!r} for {ddl_type or upper}"
-            ) from exc
+            )
+        return _range_check(parsed)
     raise ValueError(
         f"refuse invent integer from {type(value).__name__} {value!r} "
         f"for {ddl_type or upper}"
@@ -1500,13 +1506,10 @@ def coerce_sql_variant_wire(value: Any, *, as_json_envelope: bool = False) -> An
     get a typed envelope ``{"sql_variant_base": "...", "value": ...}`` so the
     base type is not silently wiped (AWS SCT VARCHAR-only gap).
     """
-    if value is None:
-        return None
+    handled, bound = _absent_sql_bind(value)
+    if handled:
+        return bound
     from decimal import Decimal
-    from services.value_serializer import is_missing_sentinel
-
-    if is_missing_sentinel(value):
-        return value
 
     def _base_and_value(v: Any) -> tuple[str, Any]:
         if isinstance(v, bool):
@@ -1540,12 +1543,9 @@ def coerce_sql_variant_wire(value: Any, *, as_json_envelope: bool = False) -> An
 
 def coerce_rowid_wire(value: Any) -> str | None:
     """Normalize Oracle ``ROWID`` / ``UROWID`` to canonical string (18-char class)."""
-    if value is None:
-        return None
-    from services.value_serializer import is_missing_sentinel
-
-    if is_missing_sentinel(value):
-        return value
+    handled, bound = _absent_sql_bind(value)
+    if handled:
+        return bound
     if isinstance(value, (bool, int, float, dict, list, bytes, bytearray, memoryview)):
         raise ValueError(
             f"ROWID cannot bind {type(value).__name__} — refuse invent"
@@ -1560,32 +1560,49 @@ def coerce_rowid_wire(value: Any) -> str | None:
     return text
 
 
+_IEEE_NONFINITE_TOKENS = frozenset({
+    "nan",
+    "+nan",
+    "-nan",
+    "inf",
+    "+inf",
+    "-inf",
+    "infinity",
+    "+infinity",
+    "-infinity",
+})
+
+
 def coerce_float_wire(value: Any, *, ddl_type: str | None = None) -> Any:
-    """Normalize IEEE FLOAT/REAL/DOUBLE bind — digit strings → float.
+    """Normalize IEEE FLOAT/REAL/DOUBLE bind — write-path digit strings → float.
 
-    Non-numeric tokens refuse invent (never silent 0.0). Non-finite floats are
-    kept as IEEE values when the source already produced them; string
-    ``NaN``/``Infinity`` are accepted as explicit IEEE wire.
+    Auto ``1,234`` / ``1.234`` refuse (``float(token)`` invented 1.234). Locale
+    money the write path binds still lands. Non-finite Python floats are kept;
+    string ``NaN``/``Infinity`` stay explicit IEEE wire. Boolean tokens refuse.
     """
-    if value is None:
-        return None
-    from decimal import Decimal, InvalidOperation
-    from services.value_serializer import is_missing_sentinel
-
-    if is_missing_sentinel(value):
-        return value
+    handled, bound = _absent_sql_bind(value)
+    if handled:
+        return bound
+    from decimal import Decimal
     if isinstance(value, bool):
         raise ValueError(
             f"float cannot bind bool — refuse invent into {ddl_type or 'FLOAT'}"
         )
     if isinstance(value, float):
         return value
+    from services.transform_engine import float_carrier_or_refuse
+
     if isinstance(value, int):
-        return float(value)
+        try:
+            return float_carrier_or_refuse(Decimal(value))
+        except ValueError as exc:
+            raise ValueError(
+                f"refuse invent float from {value!r} for {ddl_type or 'FLOAT'}"
+            ) from exc
     if isinstance(value, Decimal):
         try:
-            return float(value)
-        except (InvalidOperation, OverflowError, ValueError) as exc:
+            return float_carrier_or_refuse(value)
+        except ValueError as exc:
             raise ValueError(
                 f"refuse invent float from decimal {value!r}"
             ) from exc
@@ -1601,8 +1618,17 @@ def coerce_float_wire(value: Any, *, ddl_type: str | None = None) -> Any:
             raise ValueError(
                 f"refuse invent float from boolean token {value!r}"
             )
-        try:
+        if low in _IEEE_NONFINITE_TOKENS:
             return float(token)
+        from services.transform_engine import decimal_wire_value
+
+        parsed = decimal_wire_value(token)
+        if parsed is None:
+            raise ValueError(
+                f"refuse invent float from {value!r} for {ddl_type or 'FLOAT'}"
+            )
+        try:
+            return float_carrier_or_refuse(parsed)
         except ValueError as exc:
             raise ValueError(
                 f"refuse invent float from {value!r} for {ddl_type or 'FLOAT'}"
@@ -1614,8 +1640,9 @@ def coerce_float_wire(value: Any, *, ddl_type: str | None = None) -> Any:
 
 def coerce_json_wire(value: Any, *, as_text: bool = True) -> Any:
     """Normalize JSON/JSONB bind. Empty refuses NULL invent; invalid scalars wrap as JSON text."""
-    if value is None:
-        return None
+    handled, bound = _absent_sql_bind(value)
+    if handled:
+        return bound
     from services.value_serializer import json_default
 
     if isinstance(value, (dict, list, tuple)):
@@ -1655,8 +1682,9 @@ def coerce_binary_wire(value: Any) -> Any:
     Invalid base64 must not silently UTF-8-encode into the blob — that invents
     bytes the operator never intended (Airbyte/Fivetran-class fail-closed).
     """
-    if value is None:
-        return None
+    handled, bound = _absent_sql_bind(value)
+    if handled:
+        return bound
     if isinstance(value, (bytes, bytearray, memoryview)):
         return bytes(value)
     if isinstance(value, str):
@@ -1683,8 +1711,9 @@ def coerce_uuid_wire(value: Any, *, as_uuid: bool = False) -> Any:
     """
     import uuid as _uuid
 
-    if value is None:
-        return None
+    handled, bound = _absent_sql_bind(value)
+    if handled:
+        return bound
     if isinstance(value, _uuid.UUID):
         return value if as_uuid else str(value).lower()
     text = str(value).strip()
@@ -1708,12 +1737,9 @@ def coerce_rowversion_wire(value: Any) -> bytes | None:
     Not a datetime — refuse ISO clock strings (Estuary/HVR BYTEA class).
     Accepts bytes, ``0x`` hex, 16-hex digits, or base64 encoding of 8 bytes.
     """
-    if value is None:
-        return None
-    from services.value_serializer import is_missing_sentinel
-
-    if is_missing_sentinel(value):
-        return value
+    handled, bound = _absent_sql_bind(value)
+    if handled:
+        return bound
     if isinstance(value, (bytes, bytearray, memoryview)):
         raw = bytes(value)
         if len(raw) != 8:
@@ -1777,8 +1803,9 @@ def coerce_bitstring_wire(
     PostgreSQL bit strings are not opaque bytes — refuse base64 invent into
     ``BIT(n)``. Accepts ``1010``, ``B'1010'``, or raw bytes (MSB-first bits).
     """
-    if value is None:
-        return None
+    handled, bound = _absent_sql_bind(value)
+    if handled:
+        return bound
     bits: str
     if isinstance(value, (bytes, bytearray, memoryview)):
         bits = "".join(f"{b:08b}" for b in bytes(value))
@@ -1818,8 +1845,9 @@ def coerce_array_wire(value: Any, *, engine: str = "", ddl_type: str = "") -> An
     When ``ddl_type`` is ``ARRAY<T>`` / ``T[]``, each element is normalized with
     the shared specialty SSOT (INET, UUID, …) — HVR-class typed array fidelity.
     """
-    if value is None:
-        return None
+    handled, bound = _absent_sql_bind(value)
+    if handled:
+        return bound
     eng = (engine or "").strip().lower()
     pg_native = eng in {
         "",
@@ -1878,15 +1906,12 @@ def coerce_array_wire(value: Any, *, engine: str = "", ddl_type: str = "") -> An
                 "refuse silent NULL invent (quarantine or remap upstream)"
             )
         if text.startswith("[") and text.endswith("]"):
-            try:
-                parsed = json.loads(text)
-            except Exception as exc:
+            from connectors.array_wire import parse_array_wire_elements
+
+            parsed, parse_error = parse_array_wire_elements(text)
+            if parse_error or parsed is None:
                 raise ValueError(
                     "array wire JSON parse failed — refuse invent into ARRAY"
-                ) from exc
-            if not isinstance(parsed, list):
-                raise ValueError(
-                    "array wire JSON must be a list — refuse invent into ARRAY"
                 )
             return _normalize_elems(parsed)
         # Postgres literal form {a,b,c} is driver-specific; pass through only
@@ -1910,12 +1935,11 @@ def coerce_struct_wire(value: Any, *, engine: str = "", ddl_type: str = "") -> A
     string unless the driver registers a native struct adapter — never invent
     a STRUCT from a scalar or array.
     """
-    if value is None:
-        return None
-    from services.value_serializer import is_missing_sentinel, json_default
+    handled, bound = _absent_sql_bind(value)
+    if handled:
+        return bound
+    from services.value_serializer import json_default
 
-    if is_missing_sentinel(value):
-        return value
     if isinstance(value, list):
         raise ValueError(
             "struct wire cannot bind array/list — refuse invent into STRUCT"
@@ -1963,12 +1987,11 @@ def coerce_map_wire(value: Any, *, engine: str = "", ddl_type: str = "") -> Any:
     Maps are string-keyed objects (Spark/Airbyte). Lists/scalars refuse invent.
     Document sinks get compact JSON text — same Destinations V2 pattern as STRUCT.
     """
-    if value is None:
-        return None
-    from services.value_serializer import is_missing_sentinel, json_default
+    handled, bound = _absent_sql_bind(value)
+    if handled:
+        return bound
+    from services.value_serializer import json_default
 
-    if is_missing_sentinel(value):
-        return value
     if isinstance(value, list):
         # Some warehouses encode MAP as list of {key,value} pairs — accept only
         # that explicit shape; refuse inventing from arbitrary arrays.
@@ -2019,34 +2042,26 @@ def coerce_map_wire(value: Any, *, engine: str = "", ddl_type: str = "") -> Any:
 
 
 def coerce_decimal_wire(value: Any, *, ddl_type: str = "", engine: str = "") -> Any:
-    """Exact ``Decimal`` bind — never float64 round-trip invent.
+    """Exact ``Decimal`` bind — write-path parse, never float64 invent.
 
-    Values that cannot fit ``DECIMAL|NUMERIC|NUMBER(p,s)`` raise. PostgreSQL-
-    family destinations round fractional excess (engine docs) — match
-    ``fits_decimal(..., dest_db=)`` so quarantine and bind never disagree.
-    Bare DECIMAL without (p,s) still returns an exact ``Decimal``.
+    Strings go through ``decimal_wire_value``. Auto ``1,234`` / ``1.234``
+    refuse; locale money the write path stores still binds. Values that
+    cannot fit ``DECIMAL|NUMERIC|NUMBER(p,s)`` raise. Identity maps never
+    round or strip currency — match ``fits_decimal`` so quarantine and bind
+    agree on every engine. Bare DECIMAL without (p,s) still returns an
+    exact ``Decimal``.
     """
-    if value is None:
-        return None
+    handled, bound = _absent_sql_bind(value)
+    if handled:
+        return bound
     from decimal import (
-        ROUND_HALF_UP,
-        Context,
         Decimal,
         InvalidOperation,
         Overflow,
-        localcontext,
     )
 
-    from connectors.writer_common import (
-        PG_DECIMAL_ROUND_DIALECTS,
-        decimal_int_digits_and_scale,
-        fits_decimal,
-    )
+    from connectors.writer_common import fits_decimal
     from services.type_system import parse_numeric_precision_scale
-    from services.value_serializer import is_missing_sentinel
-
-    if is_missing_sentinel(value):
-        return value
     from services.transform_engine import boolean_carrier_numeric_value
 
     _p, _s = parse_numeric_precision_scale(ddl_type)
@@ -2075,7 +2090,21 @@ def coerce_decimal_wire(value: Any, *, ddl_type: str = "", engine: str = "") -> 
                     f"empty string cannot coerce to decimal for {ddl_type or 'DECIMAL'} — "
                     "refuse silent NULL invent (quarantine or remap upstream)"
                 )
-            d = Decimal(text)
+            from services.type_system import has_currency_marker
+
+            if has_currency_marker(text):
+                raise ValueError(
+                    "currency marker on identity decimal — refuse invent "
+                    "(apply an operator currency transform or quarantine)"
+                )
+            from services.transform_engine import decimal_wire_value
+
+            parsed = decimal_wire_value(text)
+            if parsed is None:
+                raise ValueError(
+                    f"decimal wire parse failed — refuse invent into {ddl_type or 'DECIMAL'}"
+                )
+            d = parsed
         else:
             raise ValueError(
                 f"unsupported decimal wire type: {type(value).__name__}"
@@ -2103,14 +2132,6 @@ def coerce_decimal_wire(value: Any, *, ddl_type: str = "", engine: str = "") -> 
                 f"decimal overflow: value does not fit {ddl_type or f'DECIMAL({precision},{s})'} "
                 "— refuse silent quantize"
             )
-        # Apply the same PG scale round the engine would perform at INSERT.
-        if dest_db in PG_DECIMAL_ROUND_DIALECTS:
-            _, value_scale = decimal_int_digits_and_scale(d)
-            if value_scale > s:
-                with localcontext(
-                    Context(prec=max(int(precision) + 16, 80), rounding=ROUND_HALF_UP)
-                ):
-                    d = d.quantize(Decimal(1).scaleb(-s))
     return d
 
 
@@ -2125,12 +2146,21 @@ def coerce_interval_wire(
     Family polarity (YM vs DS) must match destination DDL — never invent a cast
     across ANSI/Oracle/Snowflake families (Fivetran HVR Compare write-location).
     """
-    from services.schema_inference import is_interval_wire, interval_wire_family
+    from services.schema_inference import (
+        interval_wire_family,
+        is_interval_wire,
+        is_zero_duration_interval_bind,
+    )
     from services.type_system import interval_family
     from services.value_serializer import format_bigquery_interval
 
-    if value is None:
-        return None
+    handled, bound = _absent_sql_bind(value)
+    if handled:
+        return bound
+    if is_zero_duration_interval_bind(value):
+        from datetime import timedelta
+
+        return timedelta(0)
     if not is_interval_wire(value):
         raise ValueError(
             "interval wire is not ISO-8601/SQL duration — refuse invent into INTERVAL"
@@ -2170,8 +2200,9 @@ def coerce_geography_wire(
     from services.type_system import parse_geography_srid
 
     del engine  # reserved for future engine-native EWKB objects
-    if value is None:
-        return None
+    handled, bound = _absent_sql_bind(value)
+    if handled:
+        return bound
     if not is_geography_wire(value):
         raise ValueError(
             "geography wire is not WKT/EWKT/GeoJSON/EWKB — refuse invent into GEOGRAPHY"
@@ -2189,6 +2220,72 @@ def coerce_geography_wire(
     return str(value).strip()
 
 
+
+def _bind_sql_variant(value: Any, route: BindRoute) -> Any:
+    """SQL_VARIANT envelope — a typed envelope still reaches the driver as JSON."""
+    envelope = coerce_sql_variant_wire(value, as_json_envelope=route.json_envelope)
+    if isinstance(envelope, (dict, list)):
+        return coerce_json_wire(envelope, as_text=True)
+    return envelope
+
+
+# One entry per bind route. The route is compiled per (ddl_type, engine) in
+# ``sql_bind_route``, so a cell pays one dict lookup instead of replaying a
+# 40-branch carrier chain.
+_BIND_DISPATCH: dict[str, Any] = {
+    "enum": lambda v, r: coerce_enum_wire(v, ddl_type=r.ddl_arg),
+    "set": lambda v, r: coerce_set_wire(v, ddl_type=r.ddl_arg, as_list=r.pg_list),
+    "year": lambda v, r: coerce_year_wire(v),
+    "bitstring": lambda v, r: coerce_bitstring_wire(
+        v, width=r.bit_width, varying=r.bit_varying
+    ),
+    "boolean": lambda v, r: coerce_boolean_wire(v, as_int=r.as_int),
+    "rowversion": lambda v, r: coerce_rowversion_wire(v),
+    "sql_variant": _bind_sql_variant,
+    "rowid": lambda v, r: coerce_rowid_wire(v),
+    "hierarchyid": lambda v, r: coerce_hierarchyid_wire(v, as_ltree=r.pg_list),
+    "binary": lambda v, r: coerce_binary_wire(v),
+    "uuid": lambda v, r: coerce_uuid_wire(v, as_uuid=r.as_uuid),
+    "pg_lsn": lambda v, r: coerce_pg_lsn_wire(v),
+    "oid": lambda v, r: coerce_oid_wire(v),
+    "tid": lambda v, r: coerce_tid_wire(v),
+    "xid": lambda v, r: coerce_xid_wire(v, width64=r.as_int),
+    "cid": lambda v, r: coerce_cid_wire(v),
+    "txid_snapshot": lambda v, r: coerce_txid_snapshot_wire(v),
+    "inet": lambda v, r: coerce_inet_wire(v),
+    "cidr": lambda v, r: coerce_cidr_wire(v),
+    "macaddr": lambda v, r: coerce_macaddr_wire(v, eui64=r.eui64),
+    "xml": lambda v, r: coerce_xml_wire(v),
+    "jsonpath": lambda v, r: coerce_jsonpath_wire(v),
+    "citext": lambda v, r: coerce_citext_wire(v),
+    "ltree": lambda v, r: coerce_ltree_wire(v),
+    "tsvector": lambda v, r: coerce_tsvector_wire(v),
+    "point": lambda v, r: coerce_point_wire(v),
+    "box": lambda v, r: coerce_box_wire(v),
+    "circle": lambda v, r: coerce_circle_wire(v),
+    "lseg": lambda v, r: coerce_lseg_wire(v),
+    "line": lambda v, r: coerce_line_wire(v),
+    "path": lambda v, r: coerce_path_wire(v),
+    "polygon": lambda v, r: coerce_polygon_wire(v),
+    "hstore": lambda v, r: coerce_hstore_wire(v),
+    "range": lambda v, r: coerce_range_wire(v, multi=r.multi_range),
+    "array": lambda v, r: coerce_array_wire(v, engine=r.eng, ddl_type=r.ddl_arg),
+    "struct": lambda v, r: coerce_struct_wire(v, engine=r.eng, ddl_type=r.ddl_arg),
+    "map": lambda v, r: coerce_map_wire(v, engine=r.eng, ddl_type=r.ddl_arg),
+    # JSON text is the portable wire for every engine here. Handing psycopg2 a
+    # native dict/list raises "can't adapt type 'dict'" and aborted the whole
+    # transfer (only psycopg3 adapts dicts), while Postgres casts an
+    # unknown-typed text parameter straight into json/jsonb. Read-back is
+    # unaffected — psycopg2 still parses jsonb into native dict/list.
+    "json": lambda v, r: coerce_json_wire(v, as_text=True),
+    "integer": lambda v, r: coerce_integer_wire(v, ddl_type=r.ddl_arg, engine=r.eng),
+    "float": lambda v, r: coerce_float_wire(v, ddl_type=r.ddl_arg),
+    "decimal": lambda v, r: coerce_decimal_wire(v, ddl_type=r.ddl_arg, engine=r.eng),
+    "interval": lambda v, r: coerce_interval_wire(v, ddl_type=r.ddl_arg, engine=r.eng),
+    "geography": lambda v, r: coerce_geography_wire(v, ddl_type=r.ddl_arg, engine=r.eng),
+}
+
+
 def normalize_sql_bind_value(
     value: Any,
     ddl_type: str,
@@ -2199,287 +2296,37 @@ def normalize_sql_bind_value(
 
     Temporal coercion stays in ``sql_temporal.coerce_sql_temporal`` — callers
     should apply that first (or via writer-specific helpers).
+
+    Which coercion a column needs depends only on its DDL type and the
+    destination engine, so that decision is compiled once per column by
+    ``sql_bind_route.bind_route``. Only the two value-dependent rules stay here:
+    temporal coercion and Oracle's zero-length-string-is-NULL storage rule.
     """
-    if value is None:
-        return None
-    from services.value_serializer import is_missing_sentinel
+    handled, bound = _absent_sql_bind(value)
+    if handled:
+        return bound
 
-    # Sparse CDC sentinel must survive bind normalize — writers omit from SET.
-    if is_missing_sentinel(value):
-        return value
-    from connectors.sql_temporal import coerce_sql_temporal, sql_base_type
+    route = bind_route(ddl_type or "", engine)
+    kind = route.kind
+    # ENUM/SET bind on their member domain, ahead of any temporal read.
+    if kind == "enum":
+        return coerce_enum_wire(value, ddl_type=route.ddl_arg)
+    if kind == "set":
+        return coerce_set_wire(value, ddl_type=route.ddl_arg, as_list=route.pg_list)
 
-    # ENUM/SET before sql_base_type — paren strip would drop member domain.
-    from services.type_system import parse_enum_or_set_ordered_members
+    if route.is_temporal_candidate:
+        temporal = coerce_sql_temporal(value, ddl_type, engine=route.eng)
+        if temporal is not value:
+            return temporal
 
-    eng = (engine or "").strip().lower()
-    enum_set = parse_enum_or_set_ordered_members(ddl_type)
-    if enum_set is not None:
-        kind, _members = enum_set
-        if kind == "ENUM":
-            return coerce_enum_wire(value, ddl_type=ddl_type)
-        # PostgreSQL create-new maps SET → TEXT[]; bind as list (psycopg array).
-        pg_set_list = eng in {
-            "postgresql",
-            "postgres",
-            "pg",
-            "cockroachdb",
-            "timescaledb",
-            "alloydb",
-            "yugabytedb",
-            "citus",
-            "supabase",
-            "greenplum",
-        } or eng.startswith("postgres")
-        return coerce_set_wire(value, ddl_type=ddl_type, as_list=pg_set_list)
-
-    temporal = coerce_sql_temporal(value, ddl_type, engine=eng)
-    if temporal is not value:
-        return temporal
-
-    upper = sql_base_type(ddl_type)
-
-    # MySQL YEAR before INTEGER collapse — string '0' → 2000 polarity.
-    from services.type_system import is_year_carrier
-
-    if is_year_carrier(ddl_type) or upper == "YEAR":
+    # MySQL YEAR before the INTEGER collapse — string '0' → 2000 polarity.
+    if kind == "year":
         return coerce_year_wire(value)
-    # Oracle VARCHAR2/CHAR: zero-length string is stored as NULL (HVR write
-    # coercion / Oracle semantics). Collapse only for true string carriers —
-    # never silence specialty DDL (INET/CITEXT/TSVECTOR/…) that maps to
-    # LOGICAL_STRING but must raise or keep '' under the honesty bar.
-    if (
-        isinstance(value, str)
-        and value == ""
-        and (eng in {"oracle", "oracledb", "oracle_autonomous"} or eng.startswith("oracle"))
-    ):
-        from services.type_system import (
-            LOGICAL_STRING,
-            LOGICAL_TEXT,
-            normalize_logical_type,
-            specialty_carrier_base,
-        )
+    # Oracle VARCHAR2/CHAR: a zero-length string is stored as NULL.
+    if route.oracle_empty_is_null and isinstance(value, str) and value == "":
+        return None
 
-        if not specialty_carrier_base(ddl_type or upper) and (
-            not upper
-            or normalize_logical_type(ddl_type or upper) in {
-                LOGICAL_STRING,
-                LOGICAL_TEXT,
-            }
-        ):
-            return None
-    # BIT / VARBIT before BINARY — "BIT" must not fall through as boolean here
-    # when width > 1 (caller passes BIT(32) etc.).
-    from services.type_system import (
-        is_bitstring_carrier,
-        is_varying_bitstring_carrier,
-        parse_bitstring_width,
-    )
-
-    if is_bitstring_carrier(ddl_type) or upper in {"BIT VARYING", "VARBIT"} or (
-        upper == "BIT" and parse_bitstring_width(ddl_type) not in {None, 1}
-    ):
-        return coerce_bitstring_wire(
-            value,
-            width=parse_bitstring_width(ddl_type),
-            varying=is_varying_bitstring_carrier(ddl_type) or upper in {"BIT VARYING", "VARBIT"},
-        )
-    # MySQL/SQL Server BIT(1) — boolean polarity (string '0' must stay 0, not True).
-    if upper == "BIT" and parse_bitstring_width(ddl_type) in {None, 1}:
-        return coerce_boolean_wire(value, as_int=eng in {"mysql", "mariadb", "tidb"})
-    if upper == "ROWVERSION":
-        return coerce_rowversion_wire(value)
-    if upper == "SQL_VARIANT":
-        json_env = eng in {
-            "postgresql",
-            "postgres",
-            "pg",
-            "cockroachdb",
-            "timescaledb",
-            "alloydb",
-            "yugabytedb",
-            "citus",
-            "supabase",
-            "greenplum",
-            "snowflake",
-            "databricks",
-        } or eng.startswith("postgres")
-        envelope = coerce_sql_variant_wire(value, as_json_envelope=json_env)
-        # The typed envelope is a dict; it still has to reach the driver as JSON
-        # text for the same reason JSON/JSONB does above.
-        if isinstance(envelope, (dict, list)):
-            return coerce_json_wire(envelope, as_text=True)
-        return envelope
-    if upper in {"ROWID", "UROWID"}:
-        return coerce_rowid_wire(value)
-    if upper == "HIERARCHYID":
-        pg_ltree = eng in {
-            "postgresql",
-            "postgres",
-            "pg",
-            "cockroachdb",
-            "timescaledb",
-            "alloydb",
-            "yugabytedb",
-            "citus",
-            "supabase",
-            "greenplum",
-        } or eng.startswith("postgres")
-        return coerce_hierarchyid_wire(value, as_ltree=pg_ltree)
-    if upper in {"BINARY", "BLOB", "LONGBLOB", "VARBINARY", "BYTEA"}:
-        return coerce_binary_wire(value)
-    if upper in {"UUID", "UNIQUEIDENTIFIER", "GUID"}:
-        # pyodbc UNIQUEIDENTIFIER prefers native uuid.UUID (ODBC 8169 on bad strings).
-        mssql_uuid = eng in {
-            "sqlserver",
-            "mssql",
-            "azure_sql",
-            "synapse",
-            "azure_synapse",
-        }
-        return coerce_uuid_wire(value, as_uuid=mssql_uuid)
-    if upper in {"PG_LSN", "LSN"}:
-        return coerce_pg_lsn_wire(value)
-    if upper == "OID":
-        return coerce_oid_wire(value)
-    if upper in {"TID", "CTID"}:
-        return coerce_tid_wire(value)
-    if upper == "XID8":
-        return coerce_xid_wire(value, width64=True)
-    if upper == "XID":
-        return coerce_xid_wire(value, width64=False)
-    if upper == "CID":
-        return coerce_cid_wire(value)
-    if upper in {"TXID_SNAPSHOT", "PG_SNAPSHOT"}:
-        return coerce_txid_snapshot_wire(value)
-    if upper in {"INET", "IPV4", "IPV6", "IP"}:
-        return coerce_inet_wire(value)
-    if upper in {"CIDR"}:
-        return coerce_cidr_wire(value)
-    if upper in {"MACADDR", "MACADDR8"}:
-        return coerce_macaddr_wire(value, eui64=upper == "MACADDR8")
-    if upper in {"XML", "XMLTYPE"}:
-        return coerce_xml_wire(value)
-    if upper == "JSONPATH":
-        return coerce_jsonpath_wire(value)
-    if upper == "CITEXT":
-        return coerce_citext_wire(value)
-    if upper == "LTREE":
-        return coerce_ltree_wire(value)
-    if upper in {"TSVECTOR", "TSQUERY"}:
-        return coerce_tsvector_wire(value)
-    if upper == "POINT":
-        return coerce_point_wire(value)
-    if upper == "BOX":
-        return coerce_box_wire(value)
-    if upper == "CIRCLE":
-        return coerce_circle_wire(value)
-    if upper == "LSEG":
-        return coerce_lseg_wire(value)
-    if upper == "LINE":
-        return coerce_line_wire(value)
-    if upper == "PATH":
-        return coerce_path_wire(value)
-    if upper == "POLYGON":
-        return coerce_polygon_wire(value)
-    if upper == "HSTORE":
-        return coerce_hstore_wire(value)
-    if "MULTIRANGE" in upper:
-        return coerce_range_wire(value, multi=True)
-    if upper.endswith("RANGE") and upper != "RANGE":  # int4range, daterange, …
-        return coerce_range_wire(value, multi=False)
-    if upper == "RANGE":
-        return coerce_range_wire(value, multi=False)
-    if upper == "ARRAY" or upper.endswith("[]") or (
-        (upper.startswith("ARRAY<") or upper.startswith("LIST<")) and upper.endswith(">")
-    ) or (
-        (upper.startswith("ARRAY(") or upper.startswith("LIST(") or upper.startswith("NESTED("))
-        and upper.endswith(")")
-    ):
-        return coerce_array_wire(value, engine=eng, ddl_type=ddl_type or upper)
-    if upper == "STRUCT" or upper.startswith(
-        ("STRUCT<", "RECORD<", "STRUCT(", "ROW(", "OBJECT(", "TUPLE(")
-    ):
-        return coerce_struct_wire(value, engine=eng, ddl_type=ddl_type or upper)
-    if upper == "MAP" or upper.startswith("MAP<") or upper.startswith("MAP("):
-        return coerce_map_wire(value, engine=eng, ddl_type=ddl_type or upper)
-    if upper in {"JSON", "JSONB", "VARIANT", "OBJECT", "SUPER"}:
-        # JSON text is the portable wire for every engine here. Handing psycopg2 a
-        # native dict/list raises "can't adapt type 'dict'" and aborted the whole
-        # transfer (only psycopg3 adapts dicts), while Postgres casts an
-        # unknown-typed text parameter straight into json/jsonb. Read-back is
-        # unaffected — psycopg2 still parses jsonb into native dict/list.
-        # SUPER (Redshift) shares empty→NULL refuse with VARIANT/OBJECT.
-        return coerce_json_wire(value, as_text=True)
-    if upper in {"BOOLEAN", "BOOL"}:
-        return coerce_boolean_wire(value, as_int=eng in {"mysql", "mariadb"})
-    if upper == "TINYINT" and eng in {"mysql", "mariadb", "tidb"}:
-        # MySQL TINYINT(1) convention — same as BOOLEAN wire (0/1 int).
-        return coerce_boolean_wire(value, as_int=True)
-    if upper in {
-        "TINYINT",
-        "SMALLINT",
-        "MEDIUMINT",
-        "INT",
-        "INTEGER",
-        "BIGINT",
-        "INT2",
-        "INT4",
-        "INT8",
-        "SERIAL",
-        "BIGSERIAL",
-        "SMALLSERIAL",
-    }:
-        # SQL Server TINYINT stays numeric 0–255 (pyodbc/Microsoft) — never bool.
-        return coerce_integer_wire(value, ddl_type=ddl_type or upper, engine=eng)
-    if upper in {
-        "FLOAT",
-        "FLOAT4",
-        "FLOAT8",
-        "FLOAT16",
-        "FLOAT32",
-        "FLOAT64",
-        "HALF",
-        "HALFFLOAT",
-        "REAL",
-        "DOUBLE",
-        "DOUBLE PRECISION",
-        "BINARY_FLOAT",
-        "BINARY_DOUBLE",
-    } or upper.startswith("FLOAT("):
-        return coerce_float_wire(value, ddl_type=ddl_type or upper)
-    if upper in {
-        "DECIMAL",
-        "NUMERIC",
-        "NUMBER",
-        "MONEY",
-        "SMALLMONEY",
-        "BIGNUMERIC",
-        "BIGDECIMAL",
-        "CURRENCY",
-    } or upper.startswith(("DECIMAL(", "NUMERIC(", "NUMBER(", "BIGNUMERIC(")):
-        return coerce_decimal_wire(value, ddl_type=ddl_type or upper, engine=eng)
-    from services.type_system import (
-        LOGICAL_GEOGRAPHY,
-        LOGICAL_INTERVAL,
-        LOGICAL_MAP,
-        LOGICAL_STRUCT,
-        normalize_logical_type,
-    )
-
-    logical = normalize_logical_type(ddl_type or upper)
-    if logical == LOGICAL_STRUCT:
-        return coerce_struct_wire(value, engine=eng, ddl_type=ddl_type or upper)
-    if logical == LOGICAL_MAP:
-        return coerce_map_wire(value, engine=eng, ddl_type=ddl_type or upper)
-    if logical == LOGICAL_INTERVAL or upper.startswith("INTERVAL"):
-        return coerce_interval_wire(value, ddl_type=ddl_type or upper, engine=eng)
-    if logical == LOGICAL_GEOGRAPHY or upper in {
-        "GEOGRAPHY",
-        "GEOMETRY",
-        "SDO_GEOMETRY",
-        "GEOGRAPHY(POINT)",
-        "GEOMETRY(POINT)",
-    }:
-        return coerce_geography_wire(value, ddl_type=ddl_type or upper, engine=eng)
-    return value
+    handler = _BIND_DISPATCH.get(kind)
+    if handler is None:
+        return value
+    return handler(value, route)

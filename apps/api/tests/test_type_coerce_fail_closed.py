@@ -1,4 +1,4 @@
-﻿"""Fail-closed boolean / decimal / timezone coerce — no invent."""
+"""Fail-closed boolean / decimal / timezone coerce — no invent."""
 
 from __future__ import annotations
 
@@ -90,6 +90,8 @@ def test_iceberg_integer_boolean_refuse_invent():
     with pytest.raises(ValueError, match="boolean|refuse invent"):
         _coerce_arrow_cell("maybe", pa.bool_(), pa)
     assert _coerce_arrow_cell("false", pa.bool_(), pa) is False
+    with pytest.raises(ValueError, match="boolean|INTEGER|invent"):
+        _coerce_arrow_cell(True, pa.int64(), pa)
     with pytest.raises(ValueError, match="float|bool|invent"):
         _coerce_arrow_cell(True, pa.float64(), pa)
     with pytest.raises(ValueError, match="float|invent"):

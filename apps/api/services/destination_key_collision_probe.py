@@ -27,6 +27,7 @@ from collections.abc import Mapping
 from typing import Any, Literal
 
 from services.source_duplicate_probe import SQLISH_SOURCE_TYPES
+from services.value_serializer import present_cell_text
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +53,20 @@ APPEND_ONLY_SYNC_MODES = frozenset(
 )
 
 MAX_PROBE_VALUES = 500
+
+
+def batch_key_texts(values: list[Any] | None, *, limit: int = MAX_PROBE_VALUES) -> list[str]:
+    """Present batch keys on the reader wire. SQL NULL is not a collision token."""
+    out: list[str] = []
+    for raw in values or []:
+        key = present_cell_text(raw)
+        if key is None:
+            continue
+        out.append(key)
+        if len(out) >= limit:
+            break
+    return out
+
 
 # Watermarks persisted before the canonical separator existed used a pipe.
 _LEGACY_SEP = "|"
@@ -146,10 +161,11 @@ def _sql_existing_keys(
     import sqlalchemy as sa
 
     from connectors.generic_sql import _engine
+    from connectors.sql_identifiers import split_qualified_table
     from services.sql_object_identity import resolve_object_identity
 
     engine = _engine(cfg)
-    schema = (cfg.get("schema") or "").strip() or None
+    schema, table = split_qualified_table(table, (cfg.get("schema") or "").strip() or None)
     # Case-folding engines (Oracle/Snowflake/DB2) render an unquoted lower-case
     # name folded, so the probe hit "table does not exist" and degraded to
     # ``error`` — a skip that is not proof of a clean append. Address the object
@@ -243,15 +259,16 @@ def rows_a_cursor_read_will_deliver(
         if cursor_column not in row:
             return rows
         cell = row.get(cursor_column)
-        if cell is None or str(cell) == "":
+        text = present_cell_text(cell)
+        if text is None:
             delta.append(row)
             continue
         if use_tiebreak:
             candidate = encode_keyset_bookmark(
-                [str(cell), str(row.get(tiebreak_column, ""))]
+                [text, present_cell_text(row.get(tiebreak_column)) or ""]
             )
         else:
-            candidate = str(cell)
+            candidate = text
         if compare_cursor_values(candidate, str(watermark)) > 0:
             delta.append(row)
     return delta
@@ -378,11 +395,7 @@ def probe_destination_key_collisions(
             message="No single-column identity key resolved for collision probe",
             db_type=db_type,
         )
-    probe_values = [
-        str(v)
-        for v in (values or [])
-        if v is not None and str(v).strip() != ""
-    ][:MAX_PROBE_VALUES]
+    probe_values = batch_key_texts(values, limit=MAX_PROBE_VALUES)
     if not probe_values:
         return DestinationCollisionResult(
             status="skipped_no_values",

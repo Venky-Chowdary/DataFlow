@@ -20,6 +20,8 @@ import {
   statusFromLastTest,
 } from "../lib/connectorHealth";
 import { resolveCatalogIdToType } from "../lib/connectorTypes";
+import { PERMISSIONS, useWriteGate } from "../lib/PermissionsContext";
+import { PermissionNotice } from "../components/PermissionNotice";
 import { Connector, PipelineSchedule, TransferJob } from "../lib/types";
 import { buildConnectionWorkbenchContext, lastUsedAtForConnector } from "../lib/connectionWorkbench";
 
@@ -64,11 +66,13 @@ export function ConnectorsPage({
   connectorEditorOpen = false,
 }: ConnectorsPageProps) {
   const { toast } = useToast();
+  const connectorWrite = useWriteGate(PERMISSIONS.connectorWrite);
   const [tab, setTab] = useState<"connections" | "catalog">("connections");
   const [role, setRole] = useState<"all" | "source" | "destination">("all");
   const [testingId, setTestingId] = useState<string | null>(null);
   const [testingAll, setTestingAll] = useState(false);
   const [query, setQuery] = useState("");
+  const [catalogQuery, setCatalogQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState<"all" | "ready" | "error">("all");
   const [selectedConnectionId, setSelectedConnectionId] = useState("");
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -150,6 +154,12 @@ export function ConnectorsPage({
   };
 
   const handleTest = async (id: string) => {
+    // A probe is a POST, so the API gate treats it as a connector write; refuse in
+    // words instead of letting a viewer collect a 403 per connector.
+    if (!connectorWrite.allowed) {
+      toast({ title: "No write permission", message: connectorWrite.reason, tone: "warning" });
+      return;
+    }
     setTestingId(id);
     try {
       const result = await testSavedConnector(id);
@@ -173,6 +183,10 @@ export function ConnectorsPage({
 
   const handleTestAll = async () => {
     if (!connectors.length) return;
+    if (!connectorWrite.allowed) {
+      toast({ title: "No write permission", message: connectorWrite.reason, tone: "warning" });
+      return;
+    }
     setTestingAll(true);
     let passed = 0;
     let failed = 0;
@@ -237,6 +251,10 @@ export function ConnectorsPage({
         tone: "warning",
       });
     }
+    if (!connectorWrite.allowed) {
+      toast({ title: "No write permission", message: connectorWrite.reason, tone: "warning" });
+      return;
+    }
     onAdd(catalogType(item.id));
   };
 
@@ -248,10 +266,17 @@ export function ConnectorsPage({
       description="Saved logins for Transfer Studio. Open a row for status and last test, or start a new connection."
     >
       <PageFrame className="df2-connectors-page">
+        <PermissionNotice
+          allowed={connectorWrite.allowed}
+          reason={connectorWrite.reason}
+          what="Connections are read-only for you."
+        />
+        {/* The toolbar owns search on both tabs — the catalog used to carry its
+            own box a row lower while this zone sat empty. */}
         <PageToolbar
-          searchValue={tab === "connections" && connectors.length > 0 ? query : undefined}
-          onSearchChange={tab === "connections" && connectors.length > 0 ? setQuery : undefined}
-          searchPlaceholder="Search saved connections…"
+          searchValue={tab === "catalog" ? catalogQuery : connectors.length > 0 ? query : undefined}
+          onSearchChange={tab === "catalog" ? setCatalogQuery : connectors.length > 0 ? setQuery : undefined}
+          searchPlaceholder={tab === "catalog" ? "Search connectors…" : "Search saved connections…"}
           filters={
             <FilterBar variant="inline" ariaLabel="Connector page filters">
               <FilterTabs
@@ -296,7 +321,8 @@ export function ConnectorsPage({
                   size="sm"
                   loading={testingAll}
                   loadingLabel="Testing…"
-                  disabled={testingAll}
+                  disabled={testingAll || !connectorWrite.allowed}
+                  title={connectorWrite.reason || undefined}
                   onClick={() => void handleTestAll()}
                   leadingIcon={<DtIcon name="activity" size={14} />}
                 >
@@ -306,6 +332,8 @@ export function ConnectorsPage({
               <Button
                 size="sm"
                 variant="primary"
+                disabled={!connectorWrite.allowed}
+                title={connectorWrite.reason || undefined}
                 onClick={() => onAdd()}
               >
                 New connection
@@ -413,6 +441,8 @@ export function ConnectorsPage({
                 initialStatus="live"
                 requireAvailable={false}
                 limit={200}
+                query={catalogQuery}
+                onQueryChange={setCatalogQuery}
               />
             </div>
           )}

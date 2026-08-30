@@ -191,6 +191,8 @@ class EnhancedSemanticAnalyzer:
             "reasoning": result.reasoning,
             "confidence": result.confidence,
             "method": result.method,
+            "sources": result.sources,
+            "grounded": result.grounded,
         }
 
 

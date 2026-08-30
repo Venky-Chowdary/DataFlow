@@ -769,6 +769,25 @@ class SqlServerNativeCdc:
     def _min_lsn(self, cur) -> str:
         return self._min_lsn_for(cur, self.capture_instance)
 
+    def _snapshot_handoff_lsn(self, cur, capture: str = "") -> str:
+        """Database max_lsn, never below this capture's retention floor.
+
+        Enabling a new capture instance can set ``min_lsn`` above the previous
+        database ``max_lsn`` until ``sp_cdc_scan`` advances the mapping.
+        Handing off below ``min_lsn`` makes ``fn_cdc_get_all_changes`` fail
+        (error 313) and the resume gap check refuse a brand-new table.
+        """
+        cap = capture or self.capture_instance
+        max_lsn = self._max_lsn(cur)
+        min_lsn = self._min_lsn_for(cur, cap) if cap else ""
+        if not max_lsn:
+            return min_lsn
+        if not min_lsn:
+            return max_lsn
+        if compare_mssql_hex_lsn(max_lsn, min_lsn) < 0:
+            return min_lsn
+        return max_lsn
+
     def _min_lsn_for(self, cur, capture_instance: str) -> str:
         cur.execute("SELECT sys.fn_cdc_get_min_lsn(%s)", (capture_instance,))
         row = cur.fetchone()
@@ -818,7 +837,7 @@ class SqlServerNativeCdc:
             with conn.cursor() as cur:
                 self._resolve_capture_instance(cur)
                 if not handoff:
-                    handoff = self._max_lsn(cur) or self._min_lsn(cur)
+                    handoff = self._snapshot_handoff_lsn(cur)
                 self._maybe_record_capture_schema(cur, offset=handoff)
                 yield from self._iter_snapshot_table(
                     cur,
@@ -860,9 +879,13 @@ class SqlServerNativeCdc:
                 self._resolve_all_captures(cur)
                 if not handoff:
                     handoff = self._max_lsn(cur)
-                if not handoff:
-                    for t in self.tables:
-                        handoff = self._min_lsn_for(cur, self._captures.get(t, "")) or handoff
+                for t in self.tables:
+                    cap = self._captures.get(t, "")
+                    floor = self._min_lsn_for(cur, cap) if cap else ""
+                    if floor and (
+                        not handoff or compare_mssql_hex_lsn(handoff, floor) < 0
+                    ):
+                        handoff = floor
                 for table_name in tables:
                     cap = self._captures.get(table_name, "")
                     if cap:

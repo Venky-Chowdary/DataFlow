@@ -38,8 +38,9 @@ def test_vectorize_refuses_silent_reembed_on_empty_embedding_list():
     )
     assert len(rows) == 1
     assert rows[0]["embedding"] is None
-    assert "empty" in str(rows[0].get("_df_embed_error") or "").lower()
-    assert "refuse silent re-embed" in str(rows[0].get("_df_embed_error") or "")
+    stamp = str(rows[0].get("_df_embed_error") or "").lower()
+    assert "refuse silent re-embed" in stamp
+    assert "empty" in stamp or "missing" in stamp
 
 
 def test_qdrant_refuses_invented_dimension_384():

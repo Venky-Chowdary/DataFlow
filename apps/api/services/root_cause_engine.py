@@ -37,6 +37,15 @@ _DUP_RE = re.compile(
     re.I,
 )
 
+_ENCODING_RE = re.compile(
+    r"format-control character|control character|invisible character|"
+    r"bidi(?:rectional)? (?:control|override)|zero.?width|"
+    r"lone surrogate|unpaired surrogate|invalid (?:utf-?8|byte sequence|encoding)|"
+    r"mojibake|replacement character|byte order mark|\bBOM\b|"
+    r"mixed encodings|undecodable",
+    re.I,
+)
+
 _FIDELITY_GATE_IDS = frozenset(
     {
         "g3_schema_contract",
@@ -65,6 +74,16 @@ _DUP_GATE_IDS = frozenset(
         "g9_data_integrity",
     }
 )
+
+
+# One root cause, one primary action — the label has to be the action the
+# operator actually needs, not the fidelity remap for every kind of block.
+_PRIMARY_ACTION_LABELS: dict[str, str] = {
+    "encoding_normalization": "Open Map · normalize text",
+    "duplicate_identity": "Open Sync · choose identity key",
+    "mapping_confidence": "Open Map · confirm mapping",
+    "uniqueness_probe_unavailable": "Re-read the source table",
+}
 
 
 @dataclass
@@ -128,8 +147,14 @@ class MigrationRootCause:
                 "examples": self.alternative_fixes[:4],
                 "suggested_actions": [
                     {
-                        "kind": "open_map",
-                        "label": "Open Map · remap / Risk Contract",
+                        "kind": (
+                            "recheck_source"
+                            if self.kind == "uniqueness_probe_unavailable"
+                            else "open_map"
+                        ),
+                        "label": _PRIMARY_ACTION_LABELS.get(
+                            self.kind, "Open Map · remap / Risk Contract"
+                        ),
                     }
                 ],
             },
@@ -248,6 +273,11 @@ def _is_fidelity_signal(
             return False
         if framing_kind in {"transform_errors"}:
             return False
+        # A uniqueness-probe skip/error is an identity/probe root. The G9
+        # summary still says "integrity failed", which used to trip the
+        # fidelity matcher and send operators to Map with Accept risk.
+        if _is_uniqueness_probe_signal(message, details, gate_id):
+            return False
         msg_l = (message or "").lower()
         # Transform dry-run / empty-url integrity copy — not declared type collapse.
         if (
@@ -263,6 +293,13 @@ def _is_fidelity_signal(
                 return False
     if details.get("fidelity_collapse") is True:
         return True
+    # Invisible / undecodable characters are an encoding root with its own fix
+    # (normalize or quarantine the rows). Absorbing them into fidelity collapse
+    # told operators to remap a type path that is not the problem — a TEXT→TEXT
+    # column was reported as collapsing fidelity because the G9 message says
+    # "integrity failed".
+    if _is_encoding_signal(message, details, gate_id):
+        return False
     kind = framing_kind or kind
     if kind in {
         "fidelity_collapse",
@@ -275,6 +312,8 @@ def _is_fidelity_signal(
     # "Data integrity failed: id duplicate key…" into fidelity collapse.
     if _is_duplicate_signal(message, details, gate_id):
         return False
+    if _is_uniqueness_probe_signal(message, details, gate_id):
+        return False
     if _FIDELITY_RE.search(blob):
         return True
     if _TYPE_ARROW_RE.search(blob) and gate_id in _FIDELITY_GATE_IDS:
@@ -284,6 +323,51 @@ def _is_fidelity_signal(
     ):
         return True
     return False
+
+
+def _is_uniqueness_probe_signal(
+    message: str,
+    details: dict[str, Any] | None,
+    gate_id: str,
+) -> bool:
+    """True when G9 blocked because the uniqueness probe did not run.
+
+    A missing relation (``public."public.case_a_src"``) or a probe ``status=error``
+    is not a type-path fidelity collapse. Operators were sent to Map with
+    Accept risk because the G9 summary still contains ``integrity failed``.
+    """
+    details = details or {}
+    if details.get("fidelity_collapse") is True:
+        return False
+    blob = _blob(message, details).lower()
+    if "uniqueness probe" in blob:
+        return True
+    probe = details.get("source_uniqueness_probe")
+    probe_status = ""
+    if isinstance(probe, dict):
+        probe_status = str(probe.get("status") or "")
+    status = str(
+        details.get("status") or details.get("probe_status") or probe_status or ""
+    ).lower()
+    if status == "error" and "probe" in blob:
+        return True
+    return False
+
+
+def _is_encoding_signal(
+    message: str,
+    details: dict[str, Any] | None,
+    gate_id: str,
+) -> bool:
+    """True for control-character / undecodable-byte findings on the sample."""
+    details = details or {}
+    if details.get("fidelity_collapse") is True:
+        return False
+    if details.get("encoding_issues"):
+        return True
+    if str(gate_id or "") not in {"g9_data_integrity", "g3_encoding", "g9_encoding"}:
+        return False
+    return bool(_ENCODING_RE.search(_blob(message, details)))
 
 
 def _is_transform_error_signal(
@@ -316,6 +400,23 @@ def _is_transform_error_signal(
         if "cannot coerce" in str(issue).lower():
             return True
     return False
+
+
+def _is_destination_collision_signal(details: dict[str, Any] | None) -> bool:
+    """True for a key the destination already stores, not a duplicate in the source.
+
+    The append collision probe stamps ``sample_collisions`` with its own rule id.
+    Only the probe's own evidence counts: matching on prose would relabel a real
+    source duplicate as a destination collision and send the operator to change
+    the sync mode instead of deduplicating.
+    """
+    details = details or {}
+    rule_id = str(details.get("rule_id") or "")
+    if rule_id.startswith("g6_target_ddl.append_key_collision"):
+        return True
+    return bool(details.get("sample_collisions")) and (
+        details.get("remediation_kind") == "change_sync_mode"
+    )
 
 
 def _is_duplicate_signal(
@@ -409,6 +510,103 @@ def _columns_from_details(details: dict[str, Any] | None) -> list[str]:
         if c not in seen:
             seen.add(c)
             out.append(c)
+    return out
+
+
+#: Separator in a ``SOURCE_TYPE → TARGET_TYPE`` label. One owner, because the
+#: label is both printed to the operator and read back to resolve the pair.
+_TYPE_PATH_ARROW = " → "
+
+
+def _collect_type_paths(
+    entries: list[dict[str, Any]],
+    coercion_report: dict[str, Any],
+) -> dict[str, str]:
+    """Map column → ``SOURCE_TYPE → TARGET_TYPE`` from every evidence shape.
+
+    Gates carry the pair on ``issues_detail`` rows; the coercion probe carries it
+    on its per-column report. Either one is enough to name the path.
+    """
+    paths: dict[str, str] = {}
+
+    def _record(row: Any) -> None:
+        if not isinstance(row, dict):
+            return
+        col = row.get("source") or row.get("column")
+        src_type = str(row.get("source_type") or "").strip()
+        tgt_type = str(row.get("target_type") or "").strip()
+        if col and src_type and tgt_type:
+            paths.setdefault(str(col), f"{src_type}{_TYPE_PATH_ARROW}{tgt_type}")
+
+    for entry in entries:
+        details = (entry or {}).get("details") or {}
+        if not isinstance(details, dict):
+            continue
+        for row in details.get("issues_detail") or details.get("issues") or []:
+            _record(row)
+    for row in coercion_report.get("columns") or []:
+        _record(row)
+    return paths
+
+
+def _column_type_path_label(column: str, type_paths: dict[str, str]) -> str:
+    """``name SOURCE_TYPE → TARGET_TYPE`` when the pair is known, else the name.
+
+    A bare column name sends the operator hunting through Map for what is wrong
+    with it. The type path is the finding itself, and it is what lets them judge
+    whether the verdict is even right.
+    """
+    path = type_paths.get(column)
+    return f"{column} {path}" if path else column
+
+
+def _destination_db(preflight: dict[str, Any]) -> str:
+    """The destination engine the gates ran against, or ``""`` when unstamped.
+
+    Carrier semantics are engine-specific — a bare ``date`` token is a
+    wall-clock day in SQL and an instant in BSON — so a remediation resolved
+    without the engine would be advice about a different database.
+    """
+    for key in ("destination_db_type", "dest_db_type"):
+        val = preflight.get(key)
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+    dest = preflight.get("destination")
+    if isinstance(dest, dict):
+        for key in ("db_type", "format", "type"):
+            val = dest.get(key)
+            if isinstance(val, str) and val.strip():
+                return val.strip()
+    return ""
+
+
+def _zoneless_instant_remedies(
+    columns: list[str],
+    type_paths: dict[str, str],
+    dest_db: str,
+) -> list[str]:
+    """Per-column remediation for a zoneless source landing on an instant carrier.
+
+    The generic fidelity fix ("remap to a preserving type, or sign
+    CAST_AND_CONTINUE") is a dead end for this path: a destination whose only
+    temporal carrier is an instant has nothing zoneless to remap to, and casting
+    on regardless is precisely the guessed-UTC shift the block exists to prevent.
+    The exit is the operator declaring the zone the source recorded, and the
+    wording comes from ``services.timezone_policy`` so Map, Validate and this
+    summary cannot describe the same policy differently.
+    """
+    from services.timezone_policy import POLICY_UTC_INVENT, resolve_timezone_policy
+
+    out: list[str] = []
+    for col in columns:
+        path = type_paths.get(col) or ""
+        if _TYPE_PATH_ARROW not in path:
+            continue
+        src_type, tgt_type = (p.strip() for p in path.split(_TYPE_PATH_ARROW, 1))
+        policy = resolve_timezone_policy(src_type, tgt_type, dest_db=dest_db)
+        if policy is None or policy.policy != POLICY_UTC_INVENT or not policy.remediation:
+            continue
+        out.append(f"{col} ({src_type} → {tgt_type}): {policy.remediation}")
     return out
 
 
@@ -507,9 +705,13 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
                     *[str(b.get("id")) for b in fidelity_blockers if b.get("id")],
                 }
             )
-            col_label = ", ".join(cols[:5]) + (
-                f" (+{len(cols) - 5} more)" if len(cols) > 5 else ""
+            type_paths = _collect_type_paths(fidelity_gates + fidelity_blockers, cr)
+            zone_remedies = _zoneless_instant_remedies(
+                cols, type_paths, _destination_db(preflight)
             )
+            col_label = ", ".join(
+                _column_type_path_label(c, type_paths) for c in cols[:5]
+            ) + (f" (+{len(cols) - 5} more)" if len(cols) > 5 else "")
             if cols:
                 summary = (
                     f"{len(cols)} column(s) collapse fidelity on write"
@@ -538,11 +740,24 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
                     estimated_total_rows=est_n,
                     risk_level="high",
                     recommended_fix=(
-                        "Open Map → Remap to a fidelity-preserving type, or "
-                        "Accept · cast & continue (Migration Risk Contract with "
-                        "CAST_AND_CONTINUE) → re-run Validate."
+                        # A zone the source never recorded cannot be remapped
+                        # into existence, so that exit leads the fix when this
+                        # is the path — the generic remap advice follows it.
+                        "; ".join(r.rstrip(". ") for r in zone_remedies)
+                        + ". Otherwise: open Map → Remap to a fidelity-preserving type."
+                        if zone_remedies
+                        else (
+                            "Open Map → Remap to a fidelity-preserving type, or "
+                            "Accept · cast & continue (Migration Risk Contract with "
+                            "CAST_AND_CONTINUE) → re-run Validate."
+                        )
                     ),
                     alternative_fixes=[
+                        *(
+                            ["Declare the source zone (assume_timezone:<IANA zone>) on Map"]
+                            if zone_remedies
+                            else []
+                        ),
                         "Remap destination column to TEXT/VARCHAR/STRING",
                         "Sign QUARANTINE_ROW contract for cast failures",
                         "Widen DECIMAL/INTEGER capacity when narrowing is the only issue",
@@ -605,9 +820,12 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
             merged_absorbed = sorted(
                 set(fidelity_root.absorbed_blocker_ids) | set(risk_absorbed)
             )
-            col_label = ", ".join(merged_cols[:5]) + (
-                f" (+{len(merged_cols) - 5} more)" if len(merged_cols) > 5 else ""
+            merged_paths = _collect_type_paths(
+                [*gates, *blockers], preflight.get("coercion_report") or {}
             )
+            col_label = ", ".join(
+                _column_type_path_label(c, merged_paths) for c in merged_cols[:5]
+            ) + (f" (+{len(merged_cols) - 5} more)" if len(merged_cols) > 5 else "")
             fidelity_root.affected_columns = merged_cols
             fidelity_root.absorbed_blocker_ids = merged_absorbed
             fidelity_root.impacted_gates = sorted(
@@ -921,16 +1139,247 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
             )
         )
 
+    enc_gates = [
+        g
+        for g in gates
+        if g.get("status") == "block"
+        and _is_encoding_signal(
+            str(g.get("message") or ""), g.get("details") or {}, str(g.get("id") or "")
+        )
+    ]
+    enc_blockers = [
+        b
+        for b in blockers
+        if _is_encoding_signal(
+            str(b.get("message") or ""), b.get("details") or {}, str(b.get("id") or "")
+        )
+    ]
+    if enc_gates or enc_blockers:
+        absorbed = sorted(
+            {
+                *[str(g.get("id")) for g in enc_gates if g.get("id")],
+                *[str(b.get("id")) for b in enc_blockers if b.get("id")],
+            }
+        )
+        cols = []
+        chars: list[str] = []
+        transforms: list[str] = []
+        for src in enc_gates + enc_blockers:
+            details = src.get("details") or {}
+            cols.extend(_columns_from_details(details))
+            for issue in details.get("encoding_issues") or details.get("issues") or []:
+                if not isinstance(issue, dict):
+                    continue
+                col = issue.get("column") or issue.get("source")
+                if col:
+                    cols.append(str(col))
+                chars.extend(str(c) for c in (issue.get("chars") or []) if c)
+                sug = issue.get("suggested_transform")
+                if sug:
+                    transforms.append(str(sug))
+        cols = list(dict.fromkeys(cols))
+        chars = list(dict.fromkeys(chars))
+        transform = next(iter(dict.fromkeys(transforms)), "strip_controls")
+        char_label = f" ({', '.join(chars[:4])})" if chars else ""
+        col_label = ", ".join(cols[:5]) + (
+            f" (+{len(cols) - 5} more)" if len(cols) > 5 else ""
+        )
+        roots.append(
+            MigrationRootCause(
+                root_id=_root_id("encoding_normalization", cols, absorbed),
+                kind="encoding_normalization",
+                title="Invisible / undecodable characters in source text",
+                summary=(
+                    (
+                        f"{len(cols)} column(s) carry characters that do not "
+                        f"survive as data{char_label}: {col_label}"
+                    )
+                    if cols
+                    else f"Undecodable or invisible characters{char_label} on the Validate sample"
+                ),
+                business_impact=(
+                    "Zero-width, bidi and control characters silently break joins, "
+                    "lookups and exact-match search in the destination — the value "
+                    "looks identical to a human and compares unequal to a machine. "
+                    "The type path is not the problem, so remapping it fixes nothing."
+                ),
+                affected_columns=cols,
+                affected_rows_sample=sample_n,
+                estimated_total_rows=est_n,
+                risk_level="high",
+                recommended_fix=(
+                    f"Open Map → apply the '{transform}' transform to "
+                    f"{col_label or 'the affected column(s)'} → re-run Validate."
+                ),
+                alternative_fixes=[
+                    "Sign QUARANTINE_ROW to hold out affected rows instead of normalizing",
+                    "Normalize at the source (Unicode NFC + control strip) and re-read",
+                    "Accept the characters explicitly if the destination is a text archive",
+                ],
+                recovery_strategy=(
+                    "Normalization is applied on read, so already-written rows keep "
+                    "the original characters — rewrite the affected table after the "
+                    "transform is in place."
+                ),
+                expected_runtime_impact=(
+                    "Re-Validate is sample-scoped; the transform costs one pass per cell"
+                ),
+                quarantine_policy=(
+                    "holdout_rejected_rows under QUARANTINE_ROW when normalization is refused"
+                ),
+                rollback_policy="DOCUMENT_ONLY",
+                documentation="docs/MIGRATION_RISK_CONTRACT.md",
+                impacted_gates=absorbed,
+                absorbed_blocker_ids=absorbed,
+                severity="block",
+            )
+        )
+
+    # Keys the destination already stores are not duplicates *in the source* —
+    # the source can be perfectly unique. Naming it "duplicate identity keys on
+    # the Validate sample" and prescribing "dedupe the source" sends the operator
+    # to fix data that is already correct, so this collision owns its own root.
+    collision_findings = [
+        item
+        for item in (
+            *[g for g in gates if g.get("status") == "block"],
+            *blockers,
+        )
+        if _is_destination_collision_signal(item.get("details") or {})
+    ]
+    if collision_findings:
+        absorbed = sorted({str(i.get("id")) for i in collision_findings if i.get("id")})
+        details = collision_findings[0].get("details") or {}
+        key = str((details.get("primary_key") or {}).get("target") or "") or "the identity key"
+        stored = len(details.get("sample_collisions") or [])
+        sync_mode = str(details.get("sync_mode") or "append")
+        roots.append(
+            MigrationRootCause(
+                root_id=_root_id("destination_key_collision", [key], absorbed),
+                kind="destination_key_collision",
+                title="Destination already stores these keys",
+                summary=(
+                    f"{stored or 'Some'} key value(s) in this batch are already at rest "
+                    f"in the destination on {key}, which enforces uniqueness — "
+                    f"a {sync_mode} insert aborts on the first one"
+                ),
+                business_impact=(
+                    "The write fails outright, so no rows land. Nothing is "
+                    "duplicated and nothing at the destination is damaged."
+                ),
+                affected_columns=[key] if key != "the identity key" else [],
+                affected_rows_sample=sample_n,
+                estimated_total_rows=est_n,
+                risk_level="high",
+                recommended_fix=(
+                    f"Switch this sync to upsert/merge on {key} — that is how a row "
+                    "the destination already has is meant to land. Use overwrite "
+                    "instead if this load should replace the existing table."
+                ),
+                alternative_fixes=[
+                    "Full refresh · overwrite to replace the destination generation",
+                    "Append only the rows the destination does not have yet",
+                    "Load into a new destination table if both generations must be kept",
+                ],
+                recovery_strategy=(
+                    "Nothing was written, so no cleanup is needed — change the sync "
+                    "mode and re-run Validate."
+                ),
+                expected_runtime_impact=(
+                    "Upsert costs a key-resolved write per row; overwrite rewrites "
+                    "the whole destination table"
+                ),
+                quarantine_policy="n/a — the batch is refused before any write",
+                rollback_policy="DOCUMENT_ONLY",
+                documentation="docs/MIGRATION_ROLLBACK.md",
+                impacted_gates=absorbed,
+                absorbed_blocker_ids=absorbed,
+                severity="block",
+            )
+        )
+
+    probe_gates = [
+        g
+        for g in gates
+        if g.get("status") == "block"
+        and _is_uniqueness_probe_signal(
+            str(g.get("message") or ""), g.get("details") or {}, str(g.get("id") or "")
+        )
+    ]
+    probe_blockers = [
+        b
+        for b in blockers
+        if _is_uniqueness_probe_signal(
+            str(b.get("message") or ""), b.get("details") or {}, str(b.get("id") or "")
+        )
+    ]
+    if probe_gates or probe_blockers:
+        absorbed = sorted(
+            {
+                *[str(g.get("id")) for g in probe_gates if g.get("id")],
+                *[str(b.get("id")) for b in probe_blockers if b.get("id")],
+            }
+        )
+        if absorbed:
+            roots.append(
+                MigrationRootCause(
+                    root_id=_root_id("uniqueness_probe_unavailable", [], absorbed),
+                    kind="uniqueness_probe_unavailable",
+                    title="Source uniqueness probe could not run",
+                    summary=(
+                        "Validate could not prove source identity uniqueness — "
+                        "the probe did not address the source table"
+                    ),
+                    business_impact=(
+                        "A uniqueness-required sync cannot be approved from the sample "
+                        "alone. This is not a type-path fidelity loss and Accept risk "
+                        "on Map will not make the probe run."
+                    ),
+                    affected_columns=[],
+                    affected_rows_sample=sample_n,
+                    estimated_total_rows=est_n,
+                    risk_level="high",
+                    recommended_fix=(
+                        "Re-run Validate so the uniqueness probe addresses the "
+                        "real source relation. Do not Approve eligible or Accept "
+                        "risk — a missing table is not a type-path."
+                    ),
+                    alternative_fixes=[
+                        "Re-select the source table from the catalog dropdown",
+                        "Switch to append only when the destination has no covering UNIQUE",
+                    ],
+                    recovery_strategy=(
+                        "After the probe runs against the real table, re-Validate. "
+                        "No write occurs until G9 can prove or refuse uniqueness."
+                    ),
+                    expected_runtime_impact="Re-Validate only — no destination rewrite",
+                    quarantine_policy="n/a — the probe must run, rows are not quarantined",
+                    rollback_policy="DOCUMENT_ONLY",
+                    documentation="docs/MIGRATION_ROLLBACK.md",
+                    impacted_gates=absorbed,
+                    absorbed_blocker_ids=absorbed,
+                    severity="block",
+                )
+            )
+
     dup_gates = [
         g
         for g in gates
         if g.get("status") == "block"
+        and not _is_destination_collision_signal(g.get("details") or {})
+        and not _is_uniqueness_probe_signal(
+            str(g.get("message") or ""), g.get("details") or {}, str(g.get("id") or "")
+        )
         and _is_duplicate_signal(str(g.get("message") or ""), g.get("details") or {}, str(g.get("id") or ""))
     ]
     dup_blockers = [
         b
         for b in blockers
-        if _is_duplicate_signal(str(b.get("message") or ""), b.get("details") or {}, str(b.get("id") or ""))
+        if not _is_destination_collision_signal(b.get("details") or {})
+        and not _is_uniqueness_probe_signal(
+            str(b.get("message") or ""), b.get("details") or {}, str(b.get("id") or "")
+        )
+        and _is_duplicate_signal(str(b.get("message") or ""), b.get("details") or {}, str(b.get("id") or ""))
     ]
     if len(dup_gates) + len(dup_blockers) >= 1:
         absorbed = sorted(

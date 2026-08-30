@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import sys
 from datetime import datetime, time, timezone
 from pathlib import Path
@@ -102,7 +103,9 @@ def test_upsert_batch_routes_hive_impala_and_skips_delete():
     class _Conn:
         def execute(self, stmt, params=None):  # noqa: ANN001
             text = str(getattr(stmt, "text", stmt))
-            if "DELETE" in text.upper():
+            # A DELETE *statement* — not the mirror-lattice probe
+            # `SELECT "_deleted" FROM t WHERE 1=0`, which merely contains it.
+            if re.match(r"\s*DELETE\b", text, flags=re.IGNORECASE):
                 calls.append("delete")
             return MagicMock(rowcount=1)
 

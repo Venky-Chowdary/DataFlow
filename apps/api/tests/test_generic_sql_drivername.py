@@ -3,7 +3,10 @@
 from connectors.generic_sql import (
     _build_url,
     _drivername,
+    _mssql_drivername,
+    _mssql_odbc_driver,
     _normalize_sqlalchemy_url_string,
+    adapt_mssql_sql,
 )
 
 
@@ -77,6 +80,55 @@ def test_normalize_preserves_password_with_at_sign():
     out = _normalize_sqlalchemy_url_string(raw, "mysql")
     assert out.startswith("mysql+pymysql://")
     assert "p@ss@" in out
+
+
+def test_mssql_drivername_falls_back_to_pymssql_without_odbc_driver(monkeypatch):
+    """pyodbc imported is not enough — missing libmsodbcsql must not win."""
+    import connectors.generic_sql as gs
+
+    monkeypatch.setattr(gs, "_mssql_odbc_driver", lambda: None)
+    assert _mssql_drivername() == "mssql+pymssql"
+
+
+def test_mssql_odbc_driver_prefers_installed_microsoft_driver():
+    found = _mssql_odbc_driver()
+    if found is None:
+        assert _mssql_drivername() == "mssql+pymssql"
+        return
+    assert found.startswith("ODBC Driver")
+    assert _mssql_drivername() == "mssql+pyodbc"
+    url = str(
+        _build_url(
+            {
+                "type": "sqlserver",
+                "host": "127.0.0.1",
+                "port": 1433,
+                "database": "dataflow",
+                "username": "sa",
+                "password": "x",
+            }
+        )
+    )
+    assert "mssql+pyodbc" in url
+    assert "ODBC+Driver" in url or "ODBC Driver" in url
+
+
+def test_adapt_mssql_sql_rewrites_percent_s_for_pyodbc(monkeypatch):
+    import connectors.generic_sql as gs
+
+    monkeypatch.setattr(gs, "_mssql_drivername", lambda: "mssql+pyodbc")
+    assert (
+        adapt_mssql_sql("WHERE t.name = %s AND s.name = %s")
+        == "WHERE t.name = ? AND s.name = ?"
+    )
+
+
+def test_adapt_mssql_sql_keeps_percent_s_for_pymssql(monkeypatch):
+    import connectors.generic_sql as gs
+
+    monkeypatch.setattr(gs, "_mssql_drivername", lambda: "mssql+pymssql")
+    sql = "WHERE t.name = %s AND s.name = %s"
+    assert adapt_mssql_sql(sql) == sql
 
 
 def test_build_url_encodes_at_in_password():

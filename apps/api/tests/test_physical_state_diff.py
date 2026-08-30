@@ -14,7 +14,10 @@ from services.migration_certificate import physical_state_findings
 from services.physical_state_diff import (
     ADVISORY_ASPECTS,
     ASPECTS,
+    PhysicalState,
     compare_physical_state,
+    _has_catalog_supplied_value,
+    _normalize_predicate,
     read_physical_state,
     verify_physical_state,
 )
@@ -221,7 +224,15 @@ def test_triggers_are_reported_but_never_block_the_verdict(tmp_path: Path) -> No
     triggers = result["aspects"]["triggers"]
     assert triggers["advisory"] is True
     assert triggers["status"] == "absent"
+    assert triggers["missing"] == ["trg_src (after insert)"]
     assert result["advisory"] == {"triggers": "absent"}
+    assert result["cutover_recreate"] == [
+        {
+            "kind": "trigger",
+            "name": "trg_src (after insert)",
+            "action": "recreate_before_cutover",
+        }
+    ]
     # Every blocking aspect carried, so the move is still verified.
     assert result["absent"] == []
     assert result["verified"] is True
@@ -238,6 +249,7 @@ def test_matching_triggers_are_carried(tmp_path: Path) -> None:
     result = _verify(cfg, "src", "dst")
     assert result["aspects"]["triggers"]["status"] == "carried"
     assert result["advisory"] == {}
+    assert result["cutover_recreate"] == []
 
 def test_trigger_body_events_do_not_shadow_the_declared_event(tmp_path: Path) -> None:
     """SQLite hands back the whole CREATE statement; the header event wins."""
@@ -250,5 +262,151 @@ def test_trigger_body_events_do_not_shadow_the_declared_event(tmp_path: Path) ->
         "CREATE TRIGGER trg_dst AFTER INSERT ON dst BEGIN SELECT 1; END",
     )
     state = read_physical_state(db_type="sqlite", cfg=cfg, table="src")
-    assert state.triggers == frozenset({("after", "insert")})
+    assert state.triggers == frozenset({("trg_src", "after", "insert")})
     assert _verify(cfg, "src", "dst")["aspects"]["triggers"]["status"] == "carried"
+
+
+def test_dependent_view_is_named_for_cutover_and_does_not_block(tmp_path: Path) -> None:
+    cfg = _db(
+        tmp_path,
+        UNCHECKED.format(name="src"),
+        UNCHECKED.format(name="dst"),
+        "CREATE VIEW v_src_open AS SELECT id, qty FROM src WHERE qty > 0",
+    )
+    result = _verify(cfg, "src", "dst")
+    views = result["aspects"]["views"]
+    assert views["advisory"] is True
+    assert views["status"] == "absent"
+    assert views["missing"] == ["v_src_open"]
+    assert result["verified"] is True
+    assert "views" not in result["absent"]
+    assert result["cutover_recreate"] == [
+        {
+            "kind": "view",
+            "name": "v_src_open",
+            "action": "recreate_before_cutover",
+        }
+    ]
+
+
+def test_same_named_dependent_view_is_present_not_a_body_claim(tmp_path: Path) -> None:
+    cfg = _db(
+        tmp_path,
+        UNCHECKED.format(name="src"),
+        UNCHECKED.format(name="dst"),
+        "CREATE VIEW v_open AS SELECT id, qty FROM src WHERE qty > 0",
+        "CREATE VIEW v_open_dst AS SELECT id, qty FROM dst WHERE qty > 0",
+    )
+    # Same SQLite file cannot reuse the view name; name presence is dest-side.
+    result = _verify(cfg, "src", "dst")
+    assert result["aspects"]["views"]["status"] == "absent"
+    assert "v_open" in result["aspects"]["views"]["missing"]
+
+
+def test_sqlite_has_no_routines_and_does_not_invent_unreadable(tmp_path: Path) -> None:
+    cfg = _db(tmp_path, UNCHECKED.format(name="src"), UNCHECKED.format(name="dst"))
+    src = read_physical_state("sqlite", cfg, table="src")
+    assert src.routines == frozenset()
+    result = _verify(cfg, "src", "dst")
+    assert result["aspects"]["routines"]["status"] == "carried"
+    assert result["aspects"]["routines"]["advisory"] is True
+    assert "routines" not in result.get("unreadable", [])
+
+
+def test_named_routine_is_advisory_cutover_and_never_blocks() -> None:
+    """Name presence only — missing dest routine must not veto verified."""
+    src = PhysicalState(found=True, readable=True, routines=frozenset({"sp_refresh"}))
+    dst = PhysicalState(found=True, readable=True)
+    result = compare_physical_state(src, dst)
+    assert result["verified"] is True
+    assert "routines" not in result["absent"]
+    assert result["aspects"]["routines"]["status"] == "absent"
+    assert result["aspects"]["routines"]["advisory"] is True
+    assert result["cutover_recreate"] == [
+        {
+            "kind": "routine",
+            "name": "sp_refresh",
+            "action": "recreate_before_cutover",
+        }
+    ]
+
+
+def test_same_named_routine_is_presence_not_a_body_claim() -> None:
+    src = PhysicalState(found=True, readable=True, routines=frozenset({"sp_refresh"}))
+    dst = PhysicalState(found=True, readable=True, routines=frozenset({"sp_refresh"}))
+    result = compare_physical_state(src, dst)
+    assert result["aspects"]["routines"]["status"] == "carried"
+    assert result["cutover_recreate"] == []
+    assert result["verified"] is True
+
+
+def test_unrelated_view_is_not_attributed_to_the_table(tmp_path: Path) -> None:
+    cfg = _db(
+        tmp_path,
+        UNCHECKED.format(name="src"),
+        UNCHECKED.format(name="dst"),
+        "CREATE TABLE other (id INTEGER PRIMARY KEY, qty INTEGER)",
+        "CREATE VIEW v_other AS SELECT id FROM other",
+    )
+    src = read_physical_state("sqlite", cfg, table="src")
+    assert src.views == frozenset()
+
+
+# --- cross-engine catalog spelling ------------------------------------------
+#
+# Two engines record the same guarantee in their own words. A comparison that
+# reads the words instead of the rule reports a phantom dropped constraint on
+# every cross-engine move, and the operator then cannot tell a real loss from
+# the destination's punctuation. Measured live: PostgreSQL stores the source
+# CHECK as ``status::text <> ''::text`` while MySQL stores the very constraint
+# it created as ``(`status` <> _utf8mb4'')``.
+
+
+def test_postgresql_cast_and_mysql_charset_introducer_are_the_same_check() -> None:
+    assert _normalize_predicate("status::text <> ''::text") == _normalize_predicate(
+        "(`status` <> _utf8mb4'')"
+    )
+
+
+def test_multi_word_type_cast_is_stripped_whole() -> None:
+    assert _normalize_predicate(
+        "ts::timestamp without time zone > '2020-01-01'"
+    ) == _normalize_predicate("[ts] > '2020-01-01'")
+    assert _normalize_predicate("qty::numeric(10,2) > 0") == _normalize_predicate(
+        "qty > 0"
+    )
+
+
+def test_a_cast_never_swallows_the_operator_that_follows_it() -> None:
+    """``x::text and y`` must keep its ``and``: a cast is not a word eater."""
+    assert _normalize_predicate("x::text and y > 0") == _normalize_predicate(
+        "x and y > 0"
+    )
+
+
+def test_literal_content_is_never_treated_as_a_cast_or_introducer() -> None:
+    """Real drift inside a literal must still be visible."""
+    assert _normalize_predicate("note <> 'a::b'") != _normalize_predicate(
+        "note <> 'a'"
+    )
+    assert _normalize_predicate("note <> '_utf8mb4'") != _normalize_predicate(
+        "note <> ''"
+    )
+
+
+def test_a_carried_generator_is_not_reported_as_a_dropped_default() -> None:
+    """MySQL exposes AUTO_INCREMENT with no column default at all.
+
+    Reflection shapes, verbatim from the two dialects: a PostgreSQL identity
+    column and the MySQL AUTO_INCREMENT column created from it must both count
+    as "the catalog fills this in", or a faithful create-new load reports its
+    carried generator as a lost default.
+    """
+    pg_identity = {"name": "id", "default": None, "identity": {"start": 1}}
+    mysql_auto = {"name": "id", "default": None, "autoincrement": True}
+    pg_serial = {"name": "id", "default": "nextval('t_id_seq'::regclass)"}
+    plain = {"name": "code", "default": None}
+    assert _has_catalog_supplied_value(pg_identity)
+    assert _has_catalog_supplied_value(mysql_auto)
+    assert _has_catalog_supplied_value(pg_serial)
+    assert not _has_catalog_supplied_value(plain)

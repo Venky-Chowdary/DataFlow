@@ -10,17 +10,17 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 
-from services.byok_key_manager import create_key, get_key, list_keys, rotate_key
+from services.byok_key_manager import (
+    create_key,
+    get_key,
+    list_keys,
+    public_key_dict,
+    rotate_key,
+)
 from services.team_store import (
-    add_workspace_member,
-    can_admin_workspace,
     can_read_workspace,
     can_write_workspace,
-    create_workspace,
     get_workspace,
-    list_workspace_members,
-    list_workspaces_for_user,
-    remove_workspace_member,
 )
 from services.tenant_store import (
     Tenant,
@@ -33,15 +33,6 @@ from services.tenant_store import (
 )
 
 router = APIRouter(prefix="/workspace", tags=["Workspace"])
-
-
-class WorkspaceCreateBody(BaseModel):
-    name: str = Field(default="", max_length=128)
-
-
-class MemberAddBody(BaseModel):
-    email: str = Field(..., max_length=128)
-    role: str = Field(default="viewer", pattern="^(owner|editor|viewer)$")
 
 
 class WorkspaceSettingsBody(BaseModel):
@@ -105,12 +96,37 @@ class AiProviderBody(BaseModel):
     base_url: str | None = None
 
 
+class PilotEngineBody(BaseModel):
+    engine: str = Field(description="auto | local | hybrid | cloud")
+
+
 class ApiKeyCreateBody(BaseModel):
     name: str = Field(default="API key", max_length=64)
 
 
 def _actor(request: Request) -> str:
     return getattr(request.state, "user_email", None) or "anonymous"
+
+
+def _can_admin_workspace(request: Request, workspace_id: str) -> bool:
+    """Whether this caller may administer the workspace the call names.
+
+    Resolved through the same two authorities the API gate uses — the platform
+    role and the membership row — so a platform administrator administers every
+    workspace and a workspace admin need not be a platform admin. Reading the
+    membership row alone refused the platform admin who created the workspace
+    and never joined it.
+    """
+    from src.services import auth_service
+
+    if not auth_service.auth_required():
+        return True
+    from services.effective_role import resolve_effective_role
+
+    user = getattr(request.state, "user", None)
+    if not isinstance(user, dict):
+        user = {"email": _actor(request), "role": "viewer"}
+    return resolve_effective_role(user, workspace_id) == "admin"
 
 
 @router.get("/settings")
@@ -190,7 +206,9 @@ async def get_ai_providers():
 
 
 @router.patch("/ai-providers/{provider}")
-async def patch_ai_provider(provider: str, body: AiProviderBody, request: Request):
+def patch_ai_provider(provider: str, body: AiProviderBody, request: Request):
+    # Sync on purpose: the live key check does blocking network I/O, so FastAPI
+    # must run this in a worker thread instead of on the event loop.
     from services.audit_log import append_audit_event
     from services.integrations_store import update_ai_provider
 
@@ -222,6 +240,70 @@ async def patch_ai_provider(provider: str, body: AiProviderBody, request: Reques
         details={"provider": provider, "enabled": updated.get("enabled"), "model": updated.get("model")},
     )
     return updated
+
+
+@router.post("/ai-providers/{provider}/test")
+def test_ai_provider(provider: str):
+    """Live-check the stored key for a provider without asking for it again.
+
+    Sync on purpose: the check does blocking network I/O.
+    """
+    from services.integrations_store import resolve_provider_api_key
+
+    from ..ai.llm.provider import clear_auth_failures, get_model_capabilities, verify_cloud_api_key
+
+    if provider not in {"openai", "anthropic"}:
+        raise HTTPException(status_code=400, detail=f"{provider} has no cloud key to test")
+
+    clear_auth_failures()
+    key = resolve_provider_api_key(provider)
+    if not key:
+        return {
+            "ok": False,
+            "provider": provider,
+            "error": "No API key is saved for this provider.",
+            "capabilities": get_model_capabilities(),
+        }
+    ok, err = verify_cloud_api_key(provider, key)
+    return {
+        "ok": ok,
+        "provider": provider,
+        "error": "" if ok else (err or "API key rejected"),
+        "capabilities": get_model_capabilities(),
+    }
+
+
+@router.get("/pilot-engine")
+async def get_pilot_engine():
+    from services.integrations_store import get_pilot_engine_preference
+
+    from ..ai.llm.provider import pilot_engine_decision
+
+    decision = pilot_engine_decision()
+    return {"preference": get_pilot_engine_preference(), **decision}
+
+
+@router.patch("/pilot-engine")
+async def patch_pilot_engine(body: PilotEngineBody, request: Request):
+    from services.audit_log import append_audit_event
+    from services.integrations_store import set_pilot_engine_preference
+
+    from ..ai.llm.provider import pilot_engine_decision
+
+    try:
+        saved = set_pilot_engine_preference(body.engine)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    decision = pilot_engine_decision()
+    append_audit_event(
+        action="workspace.pilot_engine.update",
+        resource="/workspace/pilot-engine",
+        actor=_actor(request),
+        level="info",
+        details={"preference": saved, "engine": decision["engine"], "source": decision["source"]},
+    )
+    return {"preference": saved, **decision}
 
 
 @router.get("/api-keys")
@@ -265,20 +347,9 @@ async def delete_api_key(key_id: str, request: Request):
     return {"ok": True}
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# Workspace / team management
-# ═══════════════════════════════════════════════════════════════════════════════
-
-
-@router.post("/workspaces")
-async def post_workspace(body: WorkspaceCreateBody, request: Request):
-    ws = create_workspace(name=body.name, created_by=_actor(request))
-    return ws.to_dict()
-
-
-@router.get("/workspaces")
-async def get_workspaces(request: Request):
-    return {"workspaces": [ws.to_dict() for ws in list_workspaces_for_user(_actor(request))]}
+# Workspace creation, membership and accounts live in ``src.routers.team_router``.
+# Two routers owning the same collection meant the UI could add a member through
+# one authorization rule and read it back through another.
 
 
 @router.get("/workspaces/{workspace_id}")
@@ -287,41 +358,6 @@ async def get_workspace_by_id(workspace_id: str, request: Request):
     if not ws:
         raise HTTPException(status_code=404, detail="Workspace not found")
     return ws.to_dict()
-
-
-@router.get("/workspaces/{workspace_id}/members")
-async def get_workspace_members_route(workspace_id: str, request: Request):
-    if not can_admin_workspace(workspace_id, _actor(request)) and not any(
-        m["workspace_id"] == workspace_id
-        for m in list_workspace_members(workspace_id)
-        if m["email"] == _actor(request)
-    ):
-        raise HTTPException(status_code=403, detail="Workspace access denied")
-    return {"members": list_workspace_members(workspace_id)}
-
-
-@router.post("/workspaces/{workspace_id}/members")
-async def post_workspace_member(workspace_id: str, body: MemberAddBody, request: Request):
-    membership = add_workspace_member(
-        workspace_id=workspace_id,
-        email=body.email,
-        role=body.role,
-        added_by=_actor(request),
-    )
-    if not membership:
-        raise HTTPException(status_code=403, detail="Unable to add member")
-    return membership.to_dict()
-
-
-@router.delete("/workspaces/{workspace_id}/members/{email}")
-async def delete_workspace_member(workspace_id: str, email: str, request: Request):
-    if not remove_workspace_member(
-        workspace_id=workspace_id,
-        email=email,
-        removed_by=_actor(request),
-    ):
-        raise HTTPException(status_code=403, detail="Unable to remove member")
-    return {"ok": True}
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -455,18 +491,57 @@ async def get_current_tenant(request: Request):
 
 
 @router.get("/tenants")
-async def get_all_tenants():
-    return {"tenants": [t.to_dict() for t in list_tenants()]}
+async def get_all_tenants(request: Request):
+    """List tenants the caller is allowed to see.
+
+    Platform admins see every tenant (or the header workspace when named).
+    Workspace admins see only tenants they administer — never another
+    customer's domain, MFA flag, or IP allowlist.
+    """
+    from src.services import auth_service
+
+    named = (request.headers.get("x-workspace-id") or "").strip()
+    tenants = list_tenants()
+    user = getattr(request.state, "user", None) or {}
+    platform_admin = str(user.get("role") or "") == "admin"
+    if auth_service.auth_required() and not platform_admin:
+        tenants = [
+            t
+            for t in tenants
+            if t.workspace_id and _can_admin_workspace(request, t.workspace_id)
+        ]
+    if named:
+        tenants = [t for t in tenants if t.workspace_id == named]
+    return {"tenants": [t.to_dict() for t in tenants]}
 
 
 @router.post("/tenant")
 async def post_tenant(body: TenantCreateBody, request: Request):
+    from services.audit_log import append_audit_event
+
     actor = _actor(request)
-    if body.workspace_id and not can_admin_workspace(body.workspace_id, actor):
+    # A tenant is read back by the workspace the request is scoped to, so it must
+    # be created against one. An unnamed workspace produced a tenant no GET could
+    # ever resolve — saved, invisible, and never authorized against a workspace.
+    named = (request.headers.get("x-workspace-id") or "").strip()
+    workspace_id = (body.workspace_id or "").strip() or named
+    if not workspace_id:
+        raise HTTPException(
+            status_code=400,
+            detail="workspace_id is required — a tenant belongs to a workspace",
+        )
+    # Authority over the named workspace is asked first: borrowing the header's
+    # scope to write into someone else's workspace is the stronger refusal.
+    if not _can_admin_workspace(request, workspace_id):
         raise HTTPException(status_code=403, detail="Workspace admin required to create a tenant")
+    if body.workspace_id and named and body.workspace_id.strip() != named:
+        raise HTTPException(
+            status_code=403,
+            detail="workspace_id does not match X-Workspace-Id",
+        )
     try:
         tenant = create_tenant(
-            workspace_id=body.workspace_id,
+            workspace_id=workspace_id,
             name=body.name,
             custom_domain=body.custom_domain,
             data_region=body.data_region,
@@ -478,36 +553,69 @@ async def post_tenant(body: TenantCreateBody, request: Request):
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    append_audit_event(
+        action="workspace.tenant.create",
+        resource=f"/workspace/tenant/{tenant.id}",
+        actor=actor,
+        level="info",
+        details={
+            "tenant_id": tenant.id,
+            "workspace_id": tenant.workspace_id,
+            "custom_domain": tenant.custom_domain,
+            "data_region": tenant.data_region,
+        },
+    )
     return tenant.to_dict()
 
 
 @router.patch("/tenant/{tenant_id}")
 async def patch_tenant(tenant_id: str, body: TenantUpdateBody, request: Request):
+    from services.audit_log import append_audit_event
+
     tenant = get_tenant(tenant_id)
     if not tenant:
         raise HTTPException(status_code=404, detail="Tenant not found")
     actor = _actor(request)
-    if tenant.workspace_id and not can_admin_workspace(tenant.workspace_id, actor):
+    if tenant.workspace_id and not _can_admin_workspace(request, tenant.workspace_id):
         raise HTTPException(status_code=403, detail="Workspace admin required")
     try:
         updated = update_tenant(tenant_id, **body.model_dump(exclude_none=True))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not updated:
-        raise HTTPException(status_code=500, detail="Update failed")
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    append_audit_event(
+        action="workspace.tenant.update",
+        resource=f"/workspace/tenant/{tenant_id}",
+        actor=actor,
+        level="info",
+        details={
+            "tenant_id": tenant_id,
+            "fields": sorted(body.model_dump(exclude_none=True).keys()),
+        },
+    )
     return updated.to_dict()
 
 
 @router.delete("/tenant/{tenant_id}")
 async def delete_tenant_route(tenant_id: str, request: Request):
+    from services.audit_log import append_audit_event
+
     tenant = get_tenant(tenant_id)
     if not tenant:
         raise HTTPException(status_code=404, detail="Tenant not found")
     actor = _actor(request)
-    if tenant.workspace_id and not can_admin_workspace(tenant.workspace_id, actor):
+    if tenant.workspace_id and not _can_admin_workspace(request, tenant.workspace_id):
         raise HTTPException(status_code=403, detail="Workspace admin required")
     if not delete_tenant(tenant_id):
-        raise HTTPException(status_code=500, detail="Delete failed")
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    append_audit_event(
+        action="workspace.tenant.delete",
+        resource=f"/workspace/tenant/{tenant_id}",
+        actor=actor,
+        level="warn",
+        details={"tenant_id": tenant_id, "workspace_id": tenant.workspace_id},
+    )
     return {"ok": True}
 
 
@@ -516,7 +624,7 @@ async def get_tenant_byok_keys(request: Request):
     tenant = _resolve_request_tenant(request)
     if not tenant:
         raise HTTPException(status_code=404, detail="No tenant configured")
-    return {"keys": [k.to_dict() for k in list_keys(tenant.id)]}
+    return {"keys": [public_key_dict(k) for k in list_keys(tenant.id)]}
 
 
 @router.post("/tenant/byok-keys")
@@ -524,8 +632,7 @@ async def post_tenant_byok_key(request: Request, body: BYOKKeyCreateBody):
     tenant = _resolve_request_tenant(request)
     if not tenant:
         raise HTTPException(status_code=404, detail="No tenant configured")
-    actor = _actor(request)
-    if tenant.workspace_id and not can_admin_workspace(tenant.workspace_id, actor):
+    if tenant.workspace_id and not _can_admin_workspace(request, tenant.workspace_id):
         raise HTTPException(status_code=403, detail="Workspace admin required")
     try:
         key = create_key(
@@ -539,7 +646,18 @@ async def post_tenant_byok_key(request: Request, body: BYOKKeyCreateBody):
             update_tenant(tenant.id, byok_key_id=key.id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return key.to_dict()
+    from services.audit_log import append_audit_event
+
+    append_audit_event(
+        action="workspace.byok.create",
+        resource=f"/workspace/tenant/byok-keys/{key.id}",
+        actor=_actor(request),
+        level="success",
+        workspace_id=tenant.workspace_id,
+        tenant_id=tenant.id,
+        details={"key_id": key.id, "provider": key.provider, "label": key.label},
+    )
+    return public_key_dict(key)
 
 
 @router.post("/tenant/byok-keys/{key_id}/rotate")
@@ -547,15 +665,25 @@ async def rotate_tenant_byok_key(key_id: str, request: Request):
     tenant = _resolve_request_tenant(request)
     if not tenant:
         raise HTTPException(status_code=404, detail="No tenant configured")
-    actor = _actor(request)
-    if tenant.workspace_id and not can_admin_workspace(tenant.workspace_id, actor):
+    if tenant.workspace_id and not _can_admin_workspace(request, tenant.workspace_id):
         raise HTTPException(status_code=403, detail="Workspace admin required")
     key = get_key(key_id)
     if not key or key.tenant_id != tenant.id:
         raise HTTPException(status_code=404, detail="Key not found")
     new_key = rotate_key(tenant.id, label=f"Rotated from {key.id[:8]}")
     update_tenant(tenant.id, byok_key_id=new_key.id)
-    return new_key.to_dict()
+    from services.audit_log import append_audit_event
+
+    append_audit_event(
+        action="workspace.byok.rotate",
+        resource=f"/workspace/tenant/byok-keys/{new_key.id}",
+        actor=_actor(request),
+        level="warn",
+        workspace_id=tenant.workspace_id,
+        tenant_id=tenant.id,
+        details={"previous_key_id": key.id, "new_key_id": new_key.id},
+    )
+    return public_key_dict(new_key)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -610,12 +738,26 @@ def _security_posture(tenant: Tenant | None = None) -> dict[str, Any]:
         "audit_logging": audit_logging,
         "pii_detection": False,  # detector hooks exist; not attested as always-on
         "ip_allowlist_enabled": bool(tenant and tenant.ip_allowlist),
+        # Enforced only when Host resolves this tenant (custom domain). The
+        # vanity app host never evaluates the CIDR list — do not badge it as live.
+        "ip_allowlist_enforced": bool(
+            tenant and tenant.ip_allowlist and (tenant.custom_domain or "").strip()
+        ),
         "mfa_required": tenant.mfa_required if tenant else False,
+        # Login MFA is not wired; the flag is policy memory only.
+        "mfa_enforced": False,
         "session_timeout_hours": tenant.session_timeout_hours if tenant else 8,
+        # Token TTL is DATAFLOW_TOKEN_TTL_SEC, not tenant.session_timeout_hours.
+        "session_timeout_enforced": False,
+        # True when this tenant has an active BYOK key. New connector secrets
+        # are wrapped with that key; enc:v1 leftovers stay readable until re-saved.
+        "byok_encrypts_secrets": bool(tenant and byok.get("active_count")),
         "tls_version": "1.3",
         # Surfaced CDC posture — explicit EO/ALO/AMO; only ALO is claimed.
         "cdc_delivery": DELIVERY_DEFAULT,
         "cdc_exactly_once_claimed": EXACTLY_ONCE_CLAIMED,
+        "catalog_tiles_are_not_transfer_live": True,
+        "customer_tenant_warehouse_sku_claimed": False,
         "cdc_at_most_once_claimed": False,
         "cdc_honesty": cdc_honesty,
         # Recovery Integrity — refuse invent of one-click undo / restore product.
@@ -688,8 +830,10 @@ async def get_security_report(request: Request):
         "# Datawrap Security & Compliance Report",
         f"Generated: {datetime.now(timezone.utc).isoformat()}Z",
         f"Environment: {posture['environment']}",
-        f"Tenant ID: {posture['tenant_id'] or 'default'}",
-        f"Workspace ID: {posture['workspace_id'] or 'default'}",
+        # "default" read as a configured tenant named default; a report handed to
+        # an auditor has to say when no tenant profile backs these controls.
+        f"Tenant ID: {posture['tenant_id'] or 'none — no tenant profile configured for this workspace'}",
+        f"Workspace ID: {posture['workspace_id'] or 'none — request carried no workspace scope'}",
         f"Custom domain: {posture['custom_domain'] or 'not configured'}",
         f"Primary data region: {posture['data_region']}",
         "",
@@ -698,9 +842,9 @@ async def get_security_report(request: Request):
         f"- TLS minimum version: {posture['tls_version']}",
         f"- Audit logging: {'enabled' if posture['audit_logging'] else 'disabled'}",
         f"- PII detection: {'enabled' if posture['pii_detection'] else 'disabled'}",
-        f"- IP allowlisting: {'enabled' if posture['ip_allowlist_enabled'] else 'disabled'}",
-        f"- MFA required for admins: {'yes' if posture['mfa_required'] else 'no'}",
-        f"- Session timeout: {posture['session_timeout_hours']} hours",
+        f"- IP allowlisting: {'enforced on custom domain' if posture.get('ip_allowlist_enforced') else ('stored, not enforced (needs custom domain)' if posture['ip_allowlist_enabled'] else 'disabled')}",
+        f"- MFA required for admins: recorded={('yes' if posture['mfa_required'] else 'no')}; enforced=no (login MFA is not wired)",
+        f"- Session timeout: recorded={posture['session_timeout_hours']}h; enforced=no (token TTL is DATAFLOW_TOKEN_TTL_SEC)",
         "",
         "## Deployment & data path",
         f"- Models: {', '.join((posture.get('deployment') or {}).get('models') or [])}",
@@ -710,6 +854,7 @@ async def get_security_report(request: Request):
         "",
         "## Key management",
         f"- BYOK configured: {'yes' if posture['byok']['configured'] else 'no'}",
+        f"- BYOK wraps new connector secrets: {'yes' if posture.get('byok_encrypts_secrets') else 'no — platform Fernet until an active key exists'}",
     ]
     if posture["byok"]["configured"]:
         lines.append(f"- Active keys: {posture['byok']['active_count']}")
@@ -817,6 +962,78 @@ async def run_fidelity_proof():
         )
     status = 200 if result.get("success") else 422
     return JSONResponse(result, status_code=status)
+
+
+@router.post("/proofs/desktop-lab")
+async def run_desktop_lab_proof():
+    """Exercise the desktop-lab catalog slots as source and destination.
+
+    80 is catalog slots, not unique engines. Hosted twins share a driver.
+    """
+    from services.desktop_lab import DESKTOP_LAB_MIN_DUPLEX, run_desktop_lab
+
+    try:
+        result = await asyncio.to_thread(run_desktop_lab, persist=True)
+    except Exception as exc:
+        return JSONResponse(
+            {"success": False, "error": str(exc), "tier": "desktop_lab"},
+            status_code=500,
+        )
+    duplex = int(result.get("catalog_slots_duplex_passed") or 0)
+    ops = int(result.get("catalog_slots_operations_passed") or 0)
+    slots = int(result.get("catalog_slots") or 0)
+    result["success"] = (
+        duplex >= DESKTOP_LAB_MIN_DUPLEX
+        and ops == slots
+        and duplex == slots
+        and int(result.get("failed") or 0) == 0
+    )
+    status = 200 if result["success"] else 422
+    return JSONResponse(result, status_code=status)
+
+
+@router.get("/proofs/desktop-lab")
+async def get_desktop_lab_proof():
+    """Last persisted desktop-lab duplex report, if any."""
+    from services.desktop_lab import last_desktop_lab_report
+
+    report = last_desktop_lab_report()
+    if report is None:
+        return JSONResponse({"available": False, "catalog_slots": 0})
+    return JSONResponse({"available": True, **report})
+
+
+@router.post("/proofs/desktop-lab-cross")
+async def run_desktop_lab_cross_proof():
+    """Unique-engine source × dest cartesian on live desktop backends.
+
+    Not 80×80 catalog aliases. Hosted twins stay on the duplex lab.
+    """
+    from services.desktop_lab_cross import run_live_engine_cross_matrix
+
+    try:
+        result = await asyncio.to_thread(run_live_engine_cross_matrix, persist=True)
+    except Exception as exc:
+        return JSONResponse(
+            {"success": False, "error": str(exc), "tier": "desktop_lab_cross"},
+            status_code=500,
+        )
+    passed = int(result.get("passed") or 0)
+    failed = int(result.get("failed") or 0)
+    result["success"] = passed > 0 and failed == 0
+    status = 200 if result["success"] else 422
+    return JSONResponse(result, status_code=status)
+
+
+@router.get("/proofs/desktop-lab-cross")
+async def get_desktop_lab_cross_proof():
+    """Last persisted unique-engine cartesian, if any."""
+    from services.desktop_lab_cross import last_cross_report
+
+    report = last_cross_report()
+    if report is None:
+        return JSONResponse({"available": False, "pairs": 0})
+    return JSONResponse({"available": True, **report})
 
 
 @router.post("/benchmark")

@@ -32,12 +32,21 @@ from bson import json_util
 from connectors.mongodb_change_stream import MongodbChangeStreamCdc
 from connectors.mysql_change_stream import MySqlChangeStreamCdc
 from connectors.oracle_change_stream import OracleFlashbackCdc
-from connectors.oracle_logminer import OracleLogMinerCdc
+from connectors.oracle_logminer import (
+    OracleLogMinerCdc,
+    is_unparsed_sql_redo,
+    sql_redo_reject_detail,
+)
 from connectors.postgresql_change_stream import PostgreSqlChangeStreamCdc
 from connectors.sqlserver_cdc_native import SqlServerNativeCdc
 from connectors.sqlserver_change_stream import SqlServerChangeTrackingCdc
 from connectors.table_manager import delete_by_primary_keys
 from connectors.writer_common import DF_LSN_COL, extract_cdc_lsn
+from services.cdc_capability import (
+    LogCaptureRefusal,
+    LogCaptureUnavailable,
+    classify_log_capture_failure,
+)
 from services.cdc_effectively_once import gate_cdc_destination
 from services.dest_precount import DestBeforeCensus
 from services.tombstone import (
@@ -391,6 +400,40 @@ def _assert_cdc_lease_before_apply(cdc: Any) -> None:
         )
 
 
+def _refuse_log_capture(cdc: Any, dialect: str) -> LogCaptureUnavailable:
+    """Turn ``is_available() is False`` into a classified refusal."""
+    reason = getattr(cdc, "unavailable_reason", None)
+    if not isinstance(reason, LogCaptureRefusal):
+        reason = classify_log_capture_failure(
+            dialect, f"{dialect} log-based CDC reader reported unavailable"
+        )
+    return LogCaptureUnavailable(reason, dialect)
+
+
+def _query_cdc_downgrade(exc: BaseException, dialect: str) -> dict[str, str | bool]:
+    """Fields for a run that must read by cursor instead of the change log.
+
+    Fails closed unless the source server itself does not emit a change log: a
+    cursor poll cannot observe a DELETE, so substituting it for log capture on a
+    repairable attach failure (slot quota, missing grant) silently diverges the
+    destination.
+    """
+    refusal = (
+        exc.refusal
+        if isinstance(exc, LogCaptureUnavailable)
+        else classify_log_capture_failure(dialect, str(exc))
+    )
+    if refusal.fail_closed:
+        raise RuntimeError(refusal.message(dialect)) from exc
+    logging.getLogger(__name__).warning(
+        "CDC capture downgraded to cursor polling for %s (%s): %s",
+        dialect,
+        refusal.cause,
+        refusal.detail,
+    )
+    return refusal.as_fields(dialect)
+
+
 def _source_ha_lag_fields(cdc: Any) -> dict[str, Any]:
     probe = getattr(cdc, "_source_ha", None)
     if probe is None:
@@ -730,6 +773,35 @@ def _refuse_cdc_advance_on_abort(
         raise ValueError(abort)
 
 
+def _split_unparsed_sql_redo(
+    records: list[dict[str, Any]] | None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Hold unparsed LogMiner SQL_REDO out of dest upsert — quarantine only."""
+    keep: list[dict[str, Any]] = []
+    rejected: list[dict[str, Any]] = []
+    for rec in records or []:
+        if is_unparsed_sql_redo(rec):
+            rejected.append(sql_redo_reject_detail(rec))
+        else:
+            keep.append(rec)
+    return keep, rejected
+
+
+def _stamp_unparsed_sql_redo_summary(
+    dest_summary: dict[str, Any] | None,
+    rejected_details: list[dict[str, Any]],
+) -> dict[str, Any]:
+    out = dict(dest_summary or {})
+    if not rejected_details:
+        return out
+    out.setdefault("rejected_details", [])
+    out["rejected_details"] = list(out["rejected_details"]) + list(rejected_details)
+    out["rejected_rows"] = int(out.get("rejected_rows") or 0) + len(rejected_details)
+    out["error_policy"] = "quarantine"
+    out["cdc_unparsed_sql_redo"] = len(rejected_details)
+    return out
+
+
 def _apply_change_batch(
     dest_type: str,
     destination: Any,
@@ -755,10 +827,29 @@ def _apply_change_batch(
     from services.cdc_exactly_once import normalize_delivery_guarantee
     from services.cdc_snapshot_window import _pk_columns
 
+    clean_inserts, rej_inserts = _split_unparsed_sql_redo(change.inserts)
+    clean_updates, rej_updates = _split_unparsed_sql_redo(change.updates)
+    rejected_details = [
+        dict(d)
+        for d in (getattr(change, "rejected", None) or [])
+        if isinstance(d, dict)
+    ] + rej_inserts + rej_updates
+    if rej_inserts or rej_updates or rejected_details:
+        change = ChangeBatch(
+            inserts=clean_inserts,
+            updates=clean_updates,
+            deletes=list(change.deletes or []),
+            unchanged=change.unchanged,
+            resume_token=change.resume_token,
+            table=change.table,
+            ack_barrier=change.ack_barrier,
+            rejected=rejected_details,
+        )
+
     if normalize_delivery_guarantee(delivery_guarantee) == "exactly_once":
         from connectors.cdc_eos_sql import apply_change_batch_exactly_once
 
-        return apply_change_batch_exactly_once(
+        rows, checksum, dest_summary, deleted = apply_change_batch_exactly_once(
             dest_type=dest_type,
             dest_cfg=dest_cfg,
             dest_table=dest_table,
@@ -771,6 +862,9 @@ def _apply_change_batch(
             stream_name=stream_name,
             writer_fence=writer_fence,
         )
+        return rows, checksum, _stamp_unparsed_sql_redo_summary(
+            dest_summary, rejected_details
+        ), deleted
 
     # Normalize once so every writer and the delete path see a real column list.
     # A comma-joined string here used to survive into conflict_columns, where
@@ -951,6 +1045,7 @@ def _apply_change_batch(
         from services.row_conservation import CENSUS_KEY
 
         dest_summary[CENSUS_KEY] = census_payload
+    dest_summary = _stamp_unparsed_sql_redo_summary(dest_summary, rejected_details)
 
     return rows_written, last_checksum, dest_summary, deleted
 
@@ -1235,7 +1330,7 @@ def _run_cdc_shared_multi_table(
             batch_size=CHUNK_SIZE,
         )
         if not cdc.is_available():
-            raise RuntimeError("PostgreSQL shared logical decoding not available")
+            raise _refuse_log_capture(cdc, "postgresql")
     elif src_type == "mysql":
         cdc = MySqlChangeStreamCdc(
             {**src_cfg, "job_id": job_id},
@@ -1248,7 +1343,7 @@ def _run_cdc_shared_multi_table(
             cursor_key=shared_key,
         )
         if not cdc.is_available():
-            raise RuntimeError("MySQL shared binlog reader not available")
+            raise _refuse_log_capture(cdc, "mysql")
     elif src_type in {"sqlserver", "mssql"}:
         from services.dialect_profiles import default_schema_for
 
@@ -1552,9 +1647,12 @@ def _run_cdc_shared_multi_table(
             if is_side_channel_resume_token(change.resume_token):
                 skip_ack = True
             else:
-                token_s: str
+                from services.cdc_resume_tokens import serialize_resume_token
+
                 try:
-                    token_s = json.dumps(change.resume_token, default=json_util.default)
+                    token_s = serialize_resume_token(
+                        change.resume_token, default=json_util.default
+                    )
                 except TypeError:
                     token_s = str(change.resume_token)
                 # Stage, do not publish. Only a table that actually received a
@@ -1972,6 +2070,8 @@ def _run_cdc_single_stream(
 
     headers = list(schema.keys())
     column_types = {c: schema.get(c, "string") for c in headers}
+    # Non-empty only when log capture was refused and cursor polling took over.
+    capture_downgrade: dict[str, str | bool] = {}
 
     if src_type == "mongodb":
         try:
@@ -1994,7 +2094,13 @@ def _run_cdc_single_stream(
                 f"CDC(change_stream) {src_type}.{table_name} → {dest_type}.{dest_table} "
                 f"(pk={primary_key}, resume_token={'set' if watermark else 'initial'})"
             ]
-        except Exception:
+        except Exception as exc:
+            # No oplog to tail (standalone deployment or change streams denied):
+            # a server-side condition DataFlow cannot repair mid-run. Declare the
+            # capture actually used instead of implying change-stream fidelity.
+            capture_downgrade = classify_log_capture_failure(
+                "mongodb", str(exc), server_log_enabled=False
+            ).as_fields("mongodb")
             cdc = CdcEngine(
                 src_cfg,
                 src_driver,
@@ -2007,7 +2113,9 @@ def _run_cdc_single_stream(
             )
             ddl_log = [
                 f"CDC(query) {src_type}.{table_name} → {dest_type}.{dest_table} "
-                f"(cursor={cursor_field}, pk={primary_key}, watermark={watermark or 'initial'})"
+                f"(cursor={cursor_field}, pk={primary_key}, watermark={watermark or 'initial'})",
+                "CDC capture downgraded: change stream → cursor poll — deletes are not "
+                "captured. Run MongoDB as a replica set to capture deletes.",
             ]
     elif src_type == "mysql":
         try:
@@ -2021,7 +2129,7 @@ def _run_cdc_single_stream(
                 cursor_key=cursor_key,
             )
             if not cdc.is_available():
-                raise RuntimeError("MySQL binlog not available; falling back to query CDC")
+                raise _refuse_log_capture(cdc, "mysql")
             ddl_log = [
                 f"CDC(binlog) {src_type}.{table_name} → {dest_type}.{dest_table} "
                 f"(pk={primary_key}, resume={'set' if watermark else 'initial'})"
@@ -2031,6 +2139,7 @@ def _run_cdc_single_stream(
 
             if isinstance(exc, CdcLeaseConflict):
                 raise
+            capture_downgrade = _query_cdc_downgrade(exc, "mysql")
             cdc = CdcEngine(
                 src_cfg,
                 src_driver,
@@ -2043,7 +2152,10 @@ def _run_cdc_single_stream(
             )
             ddl_log = [
                 f"CDC(query) {src_type}.{table_name} → {dest_type}.{dest_table} "
-                f"(cursor={cursor_field}, pk={primary_key}, watermark={watermark or 'initial'})"
+                f"(cursor={cursor_field}, pk={primary_key}, watermark={watermark or 'initial'})",
+                f"CDC capture downgraded: binlog → cursor poll "
+                f"({capture_downgrade['cdc_capture_downgrade_cause']}) — DELETEs are not "
+                f"captured. {capture_downgrade['cdc_capture_downgrade_remedy']}",
             ]
     elif src_type == "postgresql":
         try:
@@ -2060,7 +2172,7 @@ def _run_cdc_single_stream(
                 batch_size=CHUNK_SIZE,
             )
             if not cdc.is_available():
-                raise RuntimeError("PostgreSQL logical decoding not available; falling back to query CDC")
+                raise _refuse_log_capture(cdc, "postgresql")
             ddl_log = [
                 f"CDC(logical_decoding) {src_type}.{table_name} → {dest_type}.{dest_table} "
                 f"(pk={primary_key}, resume={'set' if watermark else 'initial+slot+lsn'})"
@@ -2070,6 +2182,7 @@ def _run_cdc_single_stream(
 
             if isinstance(exc, CdcLeaseConflict):
                 raise
+            capture_downgrade = _query_cdc_downgrade(exc, "postgresql")
             cdc = CdcEngine(
                 src_cfg,
                 src_driver,
@@ -2082,7 +2195,10 @@ def _run_cdc_single_stream(
             )
             ddl_log = [
                 f"CDC(query) {src_type}.{table_name} → {dest_type}.{dest_table} "
-                f"(cursor={cursor_field}, pk={primary_key}, watermark={watermark or 'initial'})"
+                f"(cursor={cursor_field}, pk={primary_key}, watermark={watermark or 'initial'})",
+                f"CDC capture downgraded: logical decoding → cursor poll "
+                f"({capture_downgrade['cdc_capture_downgrade_cause']}) — DELETEs are not "
+                f"captured. {capture_downgrade['cdc_capture_downgrade_remedy']}",
             ]
             try:
                 from services.ops_metrics import record_cdc_poll
@@ -2297,9 +2413,14 @@ def _run_cdc_single_stream(
             is_durable_log_resume_token,
             is_side_channel_resume_token,
             is_txn_held_token,
+            serialize_resume_token,
         )
 
-        if not change.total_changes and change.resume_token is None:
+        if (
+            not change.total_changes
+            and not getattr(change, "rejected", None)
+            and change.resume_token is None
+        ):
             return False
 
         # Mid-txn hold: no watermark/ack. Treat as non-progress so one open txn
@@ -2365,14 +2486,14 @@ def _run_cdc_single_stream(
                 skip_ack = True
             elif is_durable_log_resume_token(change.resume_token):
                 try:
-                    state.running_cursor = json.dumps(
+                    state.running_cursor = serialize_resume_token(
                         change.resume_token, default=json_util.default
                     )
                 except TypeError:
                     state.running_cursor = str(change.resume_token)
             else:
                 try:
-                    state.running_cursor = json.dumps(
+                    state.running_cursor = serialize_resume_token(
                         change.resume_token, default=json_util.default
                     )
                 except TypeError:
@@ -2605,6 +2726,8 @@ def _run_cdc_single_stream(
         summary["snapshot_plan"] = stamp
     summary["watermark"] = final_watermark
     summary["checksum"] = state.last_checksum
+    if capture_downgrade:
+        summary.update(capture_downgrade)
     if hasattr(cdc, "close"):
         try:
             cdc.close()

@@ -21,6 +21,7 @@ from services.dest_precount import (
     stamp_vector_census,
 )
 from services.reconcile_coverage import (
+    NO_OP_DEST_UNCHANGED,
     SOURCE_DIGEST_ENGINE_POPULATION,
     SOURCE_DIGEST_REMAPPED_ROWS,
     SOURCE_DIGEST_SOURCE_REREAD,
@@ -28,7 +29,13 @@ from services.reconcile_coverage import (
     SOURCE_DIGEST_WRITER_ACK,
     WHOLE_TABLE_NOT_COMPARABLE,
     WRITTEN_BATCH_KEYS,
+    is_no_op_report,
 )
+from services.destination_key_collision_probe import (
+    destination_enforces_key,
+    sync_mode_appends_without_key_resolution,
+)
+from services.row_conservation import CENSUS_KEY, live_records_for_digest
 from services.reconciliation import (
     KEYED_READBACK_ENGINES,
     TargetSampleUnavailable,
@@ -41,6 +48,7 @@ from services.reconciliation import (
 )
 
 from .adapters import records_to_matrix, resolve_connector_config
+from .adapters_introspect import _introspect_table_schema_rich
 from .models import EndpointConfig
 
 
@@ -59,7 +67,82 @@ def _finalize_reconcile(
             out[PRECOUNT_KEY] = raw_before
     if isinstance(snap, dict) and snap:
         out["source_snapshot"] = dict(snap)
+    from services.reconciliation import attach_dest_readback
+
+    out = attach_dest_readback(out)
+    job_id = ""
+    if isinstance(dest_summary, dict):
+        job_id = str(dest_summary.get("job_id") or dest_summary.get("_id") or "")
+    if job_id:
+        try:
+            from services.lineage_telemetry import emit_reconciliation, persist_event_on_job
+
+            event = emit_reconciliation(
+                run_id=str(out.get("run_id") or job_id),
+                job_id=job_id,
+                source_count=int(out.get("source_rows") or 0),
+                target_count=int(out.get("target_rows") or 0),
+                checksum_ok=out.get("checksum_match") if out.get("checksum_match") is not None else None,
+            )
+            persist_event_on_job(job_id, event)
+        except Exception:
+            pass
     return out
+
+
+_ADVISORY_KEY_TOKENS = ("not enforced", "advisory", "informational")
+
+
+def _destination_enforces_single_key(
+    db_type: str,
+    cfg: dict[str, Any],
+    *,
+    schema: str,
+    table_name: str,
+    key_column: str,
+) -> bool:
+    """True when the destination itself rejects a duplicate of ``key_column``.
+
+    Only a constraint the destination enforces makes a key-scoped digest
+    comparable to the source digest: it is what guarantees the read-back returns
+    one row per written key. A key named by the stream contract, the merge
+    request or Map's identity inference guarantees nothing on an append-only
+    write — appending the same batch twice into a keyless table left two rows per
+    key, so the keyed read-back covered 2x the batch and its digest could never
+    equal the source's. That failed a correct append with two hex strings.
+
+    Enforcement is read from the destination catalog, and a catalog that
+    declares its keys advisory (Snowflake/BigQuery-class ``NOT ENFORCED``) does
+    not enforce them. Anything unproven answers False, which keeps the append
+    delta as the proof rather than inventing comparability.
+    """
+    if not key_column or not table_name:
+        return False
+    probe_cfg = dict(cfg or {})
+    if schema:
+        probe_cfg.setdefault("schema", schema)
+    try:
+        _types, _nulls, keys = _introspect_table_schema_rich(
+            db_type, probe_cfg, table_name, [], strict_namespace=True
+        )
+    except Exception as exc:
+        logging.getLogger(__name__).debug(
+            "destination key enforcement unproven for %s.%s: %s",
+            table_name,
+            key_column,
+            exc,
+            exc_info=exc,
+        )
+        return False
+    warnings = " ".join(str(w).lower() for w in (keys.get("warnings") or []))
+    if any(token in warnings for token in _ADVISORY_KEY_TOKENS):
+        return False
+    return destination_enforces_key(
+        key_column,
+        destination_pk_columns=list(keys.get("primary_key_columns") or []),
+        destination_unique_keys=list(keys.get("unique_keys") or []),
+    )
+
 
 def _dest_types_from_mappings(mappings: list[dict]) -> dict[str, str]:
     return {
@@ -303,6 +386,38 @@ def _ladder_declined(report: dict[str, Any], rows: int, budget: int) -> dict[str
     return out
 
 
+def _ladder_declined_for_shape(
+    report: dict[str, Any], recipe_hash: str
+) -> dict[str, Any]:
+    """Decline source/destination cell equality for a shaped run, and say so.
+
+    The rows left in the source are the pre-shape values; the destination holds
+    the post-shape ones. Comparing them would report the operator's own declared
+    change as corruption, so the ladder names the recipe instead of asserting an
+    equality shaping made false. Gate-8 row balance and the destination re-read
+    are unaffected.
+    """
+    out = dict(report or {})
+    out["verification_ladder"] = {
+        "layers": {},
+        "passed": bool(out.get("passed")),
+        "assurance_level": str(out.get("assurance_level") or ""),
+        "population_proof": False,
+        "population_checksum_proof": bool(out.get("checksum_match")),
+        "skipped": True,
+        "shape_recipe_hash": recipe_hash,
+        "reason": (
+            f"Transform recipe {recipe_hash} rewrote source-side values on the read, "
+            "so the source table no longer holds what this run wrote; "
+            "source→destination cell equality is declined rather than reported "
+            "false. Gate-8 row balance and the destination re-read still apply."
+        ),
+        "localization": {},
+        "localization_summary": "",
+    }
+    return out
+
+
 def _maybe_engine_profile_ladder(
     report: dict[str, Any],
     *,
@@ -326,6 +441,11 @@ def _maybe_engine_profile_ladder(
     profile, leaving the existing decline in charge.
     """
     if source_endpoint is None or getattr(source_endpoint, "kind", "") != "database":
+        return None
+    if dest_summary.get("shape_recipe_hash"):
+        # Column aggregates over the unshaped source describe values this run
+        # deliberately changed, so a rounded or filtered column would be reported
+        # as drift. The shaped decline in the caller states the reason instead.
         return None
     from services.procedure_source import is_callable_source
 
@@ -434,6 +554,12 @@ def _maybe_attach_verification_ladder(
     validation_mode: str,
 ) -> dict[str, Any]:
     """Property 5 — run L1–L5 when source+dest populations fit the row budget."""
+    if is_no_op_report(report):
+        # Nothing was read past the watermark, so there is no batch for the
+        # ladder to verify: it would compare a zero-row write against a sink
+        # that legitimately holds earlier rows, fail L1 conservation, and veto a
+        # correct quiet poll. The destination count not moving is the proof.
+        return report
     from services.verification_ladder import (
         MAX_LADDER_ROWS,
         PopulationTooLarge,
@@ -525,6 +651,15 @@ def _maybe_attach_verification_ladder(
         logging.getLogger(__name__).debug("ladder dest load failed: %s", exc)
         return report
 
+    # A shaping recipe rewrote source-side values on the read, so the rows still
+    # in the source table are no longer what this run wrote. Re-reading them here
+    # would compare pre-shape values against post-shape values and report every
+    # shaped cell as a mismatch, so the cell ladder declines and says why — the
+    # proof for a shaped run is the pinned recipe hash plus the destination
+    # re-read, not a source/destination cell equality that shaping made false.
+    shaped_run = bool(dest_summary.get("shape_recipe_hash"))
+    if source_endpoint is not None and not source_rows and shaped_run:
+        return _ladder_declined_for_shape(report, str(dest_summary["shape_recipe_hash"]))
     if source_endpoint is not None and not source_rows:
         from services.procedure_source import is_callable_source
 
@@ -578,7 +713,6 @@ def _maybe_attach_verification_ladder(
     raw_before = dest_summary.get(PRECOUNT_KEY)
     dest_before = int(raw_before) if isinstance(raw_before, int) else None
     from services.row_conservation import (
-        CENSUS_KEY,
         KIND_KEYED,
         KeyCensus,
         conservation_kind,
@@ -765,6 +899,146 @@ def _writer_supplied_engine_digests(
     return source, target, int(rows or 0)
 
 
+def _localize_checksum_mismatch(
+    report: dict[str, Any],
+    dest_summary: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Name what the two hashes disagree about when no cell was found to differ.
+
+    A strict mismatch that survives a clean key-aligned sample on a conserved
+    population is not a corrupted cell — it is the two sides having been hashed
+    on different bases or over different populations. Reporting only the pair of
+    hashes left the operator with nothing to act on, so the classification and
+    the facts behind it are stamped for the run panel:
+
+    ``digest_basis`` — how each side was obtained (write-pass, independent
+    re-read, writer ack) and, when known, the columns whose granularity the
+    destination carrier decides.
+
+    The verdict itself does not move: a mismatch still fails Gate-8.
+    """
+    if report.get("checksum_match") is not False:
+        return report
+    summary = dest_summary or {}
+    sample = report.get("sample_compare") or {}
+    compared = int((sample or {}).get("compared") or 0)
+    sample_clean = bool(sample) and bool(sample.get("passed")) and compared > 0
+    if not sample_clean:
+        return report
+    rows = int(sample.get("rows_compared") or 0)
+    basis = {
+        "source_digest": str(
+            report.get("source_checksum_provenance")
+            or summary.get("checksum_mode")
+            or ""
+        ),
+        "source_scope": str(report.get("checksum_scope") or ""),
+        "carrier_rounded_columns": list(report.get("carrier_rounded_columns") or []),
+        "keyed_sample_rows_without_mismatch": rows or compared,
+        "keyed_sample_cells_without_mismatch": compared,
+    }
+    scope = f"{rows:,} row(s) / {compared:,} cell(s)" if rows else f"{compared:,} cell(s)"
+    report["mismatch_class"] = "comparison_basis_or_population_scope"
+    report["digest_basis"] = basis
+    report["message"] = (
+        f"{str(report.get('message') or '').rstrip()} No differing cell was found "
+        f"in {scope} of key-aligned data, so the two digests differ in how or "
+        f"over what they were taken, not in a sampled value — source digest "
+        f"{basis['source_digest'] or 'unknown'}"
+        + (f", scope {basis['source_scope']}" if basis["source_scope"] else "")
+        + ". Gate-8 still fails: an unexplained digest difference is not proof."
+    )
+    return report
+
+
+def _attach_match_summary(
+    report: dict[str, Any],
+    dest_summary: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Say what was compared, how much of it agreed, and what to do about it.
+
+    A reconcile verdict of two hex strings is not proof an operator can use: it
+    names no population, no percentage anyone can reproduce, and no next move.
+    This stamps the denominators the run actually holds — source population,
+    destination population, the rows this pass moved, and the keyed sample's row
+    and cell counts — so a match percentage always says what it is a percentage
+    *of*, plus an ordered remediation list whose entries map to real controls.
+
+    Nothing here softens a verdict: a failed report stays failed, and a
+    percentage taken from a sample is labelled sample evidence, never population
+    proof.
+    """
+    summary = dest_summary or {}
+    sample = report.get("sample_compare") or {}
+    rows = int(sample.get("rows_compared") or 0)
+    cells = int(sample.get("cells_compared") or sample.get("compared") or 0)
+    differing = len(list(sample.get("mismatches") or []))
+    match: dict[str, Any] = {
+        "source_rows": report.get("source_rows"),
+        "dest_rows": report.get("target_rows"),
+        "dest_rows_before": summary.get(PRECOUNT_KEY),
+        "rows_moved_this_run": summary.get("rows_written"),
+        "rejected_rows": report.get("rejected_rows"),
+        "sample_rows_compared": rows,
+        "sample_cells_compared": cells,
+        "sample_cells_differing": differing,
+        "scope": str(report.get("checksum_scope") or ""),
+    }
+    if cells:
+        agreeing = max(0, cells - differing)
+        match["sample_match_percent"] = round(100.0 * agreeing / cells, 4)
+        match["denominator"] = (
+            f"{cells} cell(s) across {rows} key-aligned row(s) of the read-back "
+            "sample — sample evidence, not population proof"
+        )
+    else:
+        match["sample_match_percent"] = None
+        match["denominator"] = "no key-aligned cells were comparable in this run"
+    report["match_summary"] = match
+
+    if report.get("passed"):
+        return report
+    actions: list[dict[str, str]] = []
+    mismatches = [m for m in (sample.get("mismatches") or []) if isinstance(m, dict)]
+    if mismatches:
+        first = mismatches[0]
+        actions.append({
+            "action": "open_map",
+            "label": f"Fix the mapping for {first.get('source')} → {first.get('target')}",
+            "why": (
+                f"{len(mismatches)} sampled cell(s) differ, e.g. source "
+                f"{first.get('source_value')!r} vs destination "
+                f"{first.get('target_value')!r} — a value that changed on write is "
+                "a transform or type decision, not a digest artefact."
+            ),
+        })
+    if report.get("mismatch_class") == "comparison_basis_or_population_scope":
+        actions.append({
+            "action": "overwrite_or_keyed_resync",
+            "label": "Re-run this table with overwrite, or upsert on its key",
+            "why": (
+                "No sampled cell differs, so the digests disagree on basis or "
+                "population, not on data. A full refresh or a keyed merge gives "
+                "both sides one comparable population."
+            ),
+        })
+    if int(report.get("rejected_rows") or 0) > 0:
+        actions.append({
+            "action": "replay_quarantine",
+            "label": f"Replay {int(report['rejected_rows']):,} quarantined row(s)",
+            "why": "Those rows are absent from the destination until they are replayed.",
+        })
+    if summary.get("resumed_from") is not None:
+        actions.append({
+            "action": "resume",
+            "label": "Resume from the checkpoint",
+            "why": "The pass stopped part-way; resuming moves only the tail.",
+        })
+    if actions:
+        report["remediation"] = actions
+    return report
+
+
 def _engine_digest_enabled() -> bool:
     """Operator gate — default **off** until two gaps are closed.
 
@@ -910,18 +1184,26 @@ def run_reconciliation(
     # Where the source digest came from. Held in a box because the early-return
     # paths below run before it is known, and the report must never claim two
     # independent digests agreed when only the writer's was available.
-    digest_provenance: dict[str, str] = {"source": ""}
+    digest_provenance: dict[str, str] = {"source": "", "source_scope": ""}
     # Late-bound: populated once driver/schema/table are resolved. _finalize
     # is defined before those names exist; file-export returns must not stamp.
     vector_stamp_ctx: dict[str, Any] = {}
     keyset_stamp_ctx: dict[str, Any] = {}
     scd2_stamp_ctx: dict[str, Any] = {}
+    # Late-bound with the resolved destination engine and physical types: which
+    # columns Gate-8 could only prove at the carrier's granularity.
+    carrier_ctx: dict[str, Any] = {}
 
     def _finalize(payload: dict[str, Any]) -> dict[str, Any]:
         if digest_provenance["source"] and "source_checksum_provenance" not in payload:
             payload = {
                 **payload,
                 "source_checksum_provenance": digest_provenance["source"],
+            }
+        if digest_provenance["source_scope"] and "source_checksum_scope" not in payload:
+            payload = {
+                **payload,
+                "source_checksum_scope": digest_provenance["source_scope"],
             }
         # Property 3 — carry source snapshot id onto the reconcile report /
         # migration certificate surface.
@@ -934,11 +1216,19 @@ def run_reconciliation(
             "full_checksum",
         }:
             rows = stamped.get("target_rows") or stamped.get("source_rows") or 0
-            stamped["message"] = (
-                f"Writer acknowledgment for {rows} row(s) — source digest was "
-                "the write-pass hash, not an independent dest read-back. "
-                "Not migration_proven."
-            )
+            dest_hash = str(stamped.get("target_checksum") or "").strip()
+            if assurance == "write_pass_dest_readback" or dest_hash:
+                stamped["message"] = (
+                    f"Destination read-back matches the write-pass fingerprint "
+                    f"({rows} row(s)). Source warehouse was not independently "
+                    "re-read — not migration_proven."
+                )
+            else:
+                stamped["message"] = (
+                    f"Writer acknowledgment for {rows} row(s) — source digest was "
+                    "the write-pass hash, not an independent dest read-back. "
+                    "Not migration_proven."
+                )
         if vector_stamp_ctx:
             stamped = stamp_vector_census(
                 stamped,
@@ -986,11 +1276,54 @@ def run_reconciliation(
             )
         if physical_state:
             stamped["physical_state"] = dict(physical_state)
+        rounded = list(carrier_ctx.get("rounded_columns") or [])
+        if rounded:
+            # Both digests were taken at the destination carrier's granularity,
+            # so a match here proves every cell the destination *can* hold. The
+            # fractional seconds it cannot hold are a declared narrowing, and
+            # saying so is the difference between honest proof and a green that
+            # over-claims.
+            stamped["carrier_rounded_columns"] = rounded
+            named = ", ".join(
+                f"{c.get('column')} {c.get('source_type')} → {c.get('target_type')}"
+                for c in rounded[:3]
+            )
+            more = f" (+{len(rounded) - 3} more)" if len(rounded) > 3 else ""
+            note = (
+                f" Instants on {len(rounded)} column(s) were compared at the "
+                f"destination carrier's granularity — {named}{more} — because "
+                "that column cannot store the source's fractional seconds; "
+                "those dropped digits are a declared narrowing, not proven "
+                "cell fidelity."
+            )
+            stamped["message"] = f"{str(stamped.get('message') or '').rstrip()}{note}"
+        stamped = _localize_checksum_mismatch(stamped, dest_summary)
+        stamped = _attach_match_summary(stamped, dest_summary)
         return stamped
 
     rejected_rows = int(dest_summary.get("rejected_rows", 0) or 0)
     coerced_null_rows = int(dest_summary.get("coerced_null_rows", 0) or 0)
     rows_skipped = int(dest_summary.get("rows_skipped", 0) or 0)
+    # Rows an approved shaping recipe removed on the read. They were read — so
+    # they belong to the source population this run counted — and they are
+    # deliberately not at the destination, so conservation has to name them
+    # instead of reading their absence as short delivery.
+    rows_shaped_out = int(dest_summary.get("rows_shaped_out", 0) or 0)
+    rows_expanded = int(dest_summary.get("rows_expanded", 0) or 0)
+    # Rows a declared source filter removed on the read. The source population
+    # this run counted includes them (the source paged and counted them), so the
+    # filter has to be stated here for the same reason a recipe does.
+    rows_source_filtered = int(dest_summary.get("rows_source_filtered", 0) or 0)
+    # The streaming reader counts every row it removed on the read — a declared
+    # filter's and a recipe's — for committed pages only, and cumulatively across
+    # resumes. When it reports that, it is the authoritative removal total: the
+    # recipe's own tally covers this pass alone.
+    rows_removed_on_read = int(dest_summary.get("rows_removed_on_read", 0) or 0)
+    if (
+        "rows_source_filtered" not in dest_summary
+        and rows_removed_on_read > rows_shaped_out + rows_source_filtered
+    ):
+        rows_source_filtered = rows_removed_on_read - rows_shaped_out
     # A resumed pass reads and writes only the tail of the population, while the
     # destination read-back is always full-table. Comparing the two directly
     # reports a mismatch on data that is correct, so the resumed slice must be
@@ -1037,7 +1370,15 @@ def run_reconciliation(
         source_rows = resume_full_source_rows
     elif resumed_from:
         source_rows += resumed_from
-    expected_written = max(source_rows - dropped_rows - rows_skipped, 0)
+    expected_written = max(
+        source_rows
+        + rows_expanded
+        - dropped_rows
+        - rows_skipped
+        - rows_shaped_out
+        - rows_source_filtered,
+        0,
+    )
     # Destinations with no read-back are accounted from writer counts, so rows a
     # previous pass already committed have to be added back or a correct resume
     # reads as short delivery.
@@ -1126,6 +1467,25 @@ def run_reconciliation(
         for k, v in physical.items():
             if v:
                 dest_types[str(k)] = str(v)
+    # The plan's target_type is Map's intent; the carrier the rows landed in is
+    # what the digests must be taken against. A pre-existing destination column
+    # contradicts the plan (declared DATETIME(6), physical datetime) and hashing
+    # the plan's precision failed correct loads with two opaque hashes.
+    if not physical and table_name and endpoint.kind == "database":
+        try:
+            from services.dest_physical_types import (
+                apply_physical_temporal_precision,
+            )
+
+            dest_types = apply_physical_temporal_precision(
+                dest_types, db_type, cfg, table=str(table_name)
+            )
+        except Exception as exc:
+            logging.getLogger(__name__).warning(
+                "physical destination temporal precision unavailable: %s",
+                exc,
+                exc_info=exc,
+            )
     if source_schema:
         try:
             from services.transform_resolver import attach_transforms_to_mappings
@@ -1138,12 +1498,32 @@ def run_reconciliation(
         except Exception as exc:
             logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
+    try:
+        from services.carrier_instant import carrier_rounded_columns
+
+        carrier_ctx["rounded_columns"] = carrier_rounded_columns(
+            mapping_dicts,
+            source_schema=source_schema,
+            dest_types=dest_types,
+            dest_engine=db_type,
+        )
+    except Exception as exc:
+        logging.getLogger(__name__).warning(
+            "carrier granularity disclosure skipped: %s", exc, exc_info=exc
+        )
+
     target_cols = _mapped_targets(mapping_dicts, columns)
     pk_cols = list(
         dest_summary.get("primary_key_columns")
         or dest_summary.get("conflict_columns")
         or []
     )
+    # Whether the *destination* stands behind this key — a declared PK/unique
+    # constraint — as opposed to a key named by the stream contract or inferred
+    # by Map. Naming a key is not enforcing it: a contract primary_key on an
+    # append-only write leaves a keyless table free to hold the same key twice,
+    # so it may align a sample but must never scope a digest. Resolved from the
+    # destination catalog at the append branch below, where it is used.
     # Quarantine replay / upsert writers may stamp written_ids without PK meta.
     # Resolve identity from Map so keyed Gate-8 can re-scope the target digest.
     if not pk_cols and mapping_dicts:
@@ -1322,8 +1702,23 @@ def run_reconciliation(
         source_checksum_provenance = SOURCE_DIGEST_SOURCE_REREAD
         digest_provenance["source"] = source_checksum_provenance
     else:
+        digest_records = records
+        if records and pk_cols and dest_summary.get(CENSUS_KEY):
+            # The keyed upsert hard-DELETEd tombstoned keys, so the destination
+            # holds the live population only. Hashing the tombstoned rows here
+            # compares two different scopes and fails a correct run — same owner
+            # the write path strips with.
+            digest_records, tombstones_excluded = live_records_for_digest(
+                records,
+                key_columns=[str(c) for c in pk_cols if c],
+                mappings=mapping_dicts,
+            )
+            if tombstones_excluded:
+                digest_provenance["source_scope"] = (
+                    f"live_population_excluding_{tombstones_excluded}_tombstones"
+                )
         source_checksum, source_checksum_provenance = _compute_source_checksum(
-            records,
+            digest_records,
             columns,
             mapping_dicts,
             source_schema,
@@ -1365,6 +1760,9 @@ def run_reconciliation(
             sample_compare=None,
             coerced_null_rows=coerced_null_rows,
             rows_skipped=rows_skipped,
+            rows_shaped_out=rows_shaped_out,
+            rows_source_filtered=rows_source_filtered,
+            rows_expanded=rows_expanded,
         )
         return _finalize(report.to_dict())
 
@@ -1793,6 +2191,9 @@ def run_reconciliation(
             strict_checksum=False,
             coerced_null_rows=coerced_null_rows,
             rows_skipped=rows_skipped,
+            rows_shaped_out=rows_shaped_out,
+            rows_source_filtered=rows_source_filtered,
+            rows_expanded=rows_expanded,
             sample_compare=sample_compare,
         )
         return _finalize(report.to_dict())
@@ -1809,6 +2210,9 @@ def run_reconciliation(
             sample_compare=sample_compare,
             coerced_null_rows=coerced_null_rows,
             rows_skipped=rows_skipped,
+            rows_shaped_out=rows_shaped_out,
+            rows_source_filtered=rows_source_filtered,
+            rows_expanded=rows_expanded,
         )
         return _finalize(report.to_dict())
 
@@ -1866,7 +2270,7 @@ def run_reconciliation(
                 "rejected_rows": rejected_rows,
                 "coerced_null_rows": coerced_null_rows,
                 "rows_skipped": rows_skipped,
-                "assurance_level": "no_op_destination_unchanged",
+                "assurance_level": NO_OP_DEST_UNCHANGED,
             })
 
     # Streaming append/upsert soft-pass of extra dest rows without a stashed
@@ -1907,10 +2311,17 @@ def run_reconciliation(
     # are not comparable. Keyed fingerprint of written_ids proves the batch for
     # balanced and strict alike (strict_checksum only governs fail-closed severity
     # inside reconcile(), not whether we may re-scope the target digest).
+    # The keyed digest is only comparable to the source digest when the key list
+    # covers the *whole* batch. `written_ids` is capped (writer stash / bounded
+    # sample), so a 100-row append whose stash held 50 keys re-read 50 rows and
+    # compared them to the 100-row source digest — a guaranteed mismatch
+    # reported as "checksum mismatch (strict)" on a correct load. A partial key
+    # list is a diagnostic sample, not a scope: fall through to the append delta.
+    keys_cover_batch = bool(written_ids) and len(written_ids) >= expected_batch
     if (
         allow_extra
         and pk_column
-        and written_ids
+        and keys_cover_batch
         and target_rows > expected_batch
         and source_checksum
         and target_checksum
@@ -1929,7 +2340,24 @@ def run_reconciliation(
             written_ids=written_ids,
             pk_column=pk_column,
         )
-        if keyed_checksum:
+        # A key-scoped digest is only comparable when the key identifies *one*
+        # destination row. An append (no merge, no enforced constraint) can put
+        # the same key in twice: appending one batch twice left two rows per key,
+        # the keyed read-back returned 2x the batch, and its digest could never
+        # equal the source's — a correct append failed itself with two hex
+        # strings. Merge writes own their conflict target, and a declared
+        # PK/unique constraint rejects the second copy; an identity inferred from
+        # Map guarantees neither, so an append keeps the delta as its identity.
+        keys_identify_one_row = not sync_mode_appends_without_key_resolution(
+            sync_mode
+        ) or _destination_enforces_single_key(
+            db_type,
+            cfg,
+            schema=schema,
+            table_name=table_name,
+            key_column=pk_column,
+        )
+        if keyed_checksum and keys_identify_one_row:
             target_checksum = keyed_checksum
             keyed_scope = WRITTEN_BATCH_KEYS
 
@@ -1944,6 +2372,9 @@ def run_reconciliation(
         sample_compare=sample_compare,
         coerced_null_rows=coerced_null_rows,
         rows_skipped=rows_skipped,
+        rows_shaped_out=rows_shaped_out,
+        rows_source_filtered=rows_source_filtered,
+        rows_expanded=rows_expanded,
         target_rows_before=rows_before,
         checksum_scope=keyed_scope,
     )

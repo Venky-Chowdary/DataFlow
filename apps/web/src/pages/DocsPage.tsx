@@ -448,8 +448,8 @@ export function DocsPage() {
     window.scrollTo({ top: 0, behavior: "smooth" });
   };
 
-  const transferLive = stats?.unique_drivers ?? stats?.transfer_live ?? stats?.live ?? 130;
-  const total = stats?.total ?? 734;
+  const transferLive = stats?.unique_drivers ?? stats?.transfer_live ?? stats?.live;
+  const total = stats?.catalog_tiles ?? stats?.total;
 
   return (
     <PageShell
@@ -479,10 +479,18 @@ export function DocsPage() {
             ))}
           </nav>
           <div className="df2-docs-toc-card">
+            {/* The headline number is the live one. A catalog tile is not a
+                transfer-live driver, so it never gets the dominant type. */}
             <StatCard
-              label="Connector catalog"
-              value={total.toLocaleString()}
-              sub={statsError ? "Catalog offline" : `${transferLive.toLocaleString()} transfer-ready`}
+              label="Transfer-ready drivers"
+              value={statsError || transferLive == null ? "—" : transferLive.toLocaleString()}
+              sub={
+                statsError
+                  ? "Catalog offline"
+                  : transferLive == null || total == null
+                    ? "Loading catalog honesty…"
+                    : `of ${total.toLocaleString()} catalog tiles — tiles are not transfer-live`
+              }
               icon="database"
               tone="blue"
             />
@@ -505,7 +513,7 @@ export function DocsPage() {
                 <strong>Connectors</strong> — add or test sources/destinations; watch Test passed vs failed.
               </li>
               <li>
-                <strong>Transfer Studio</strong> — Source → Destination → Map → Validate → Run.
+                <strong>Transfer Studio</strong> — Source → Destination → Transform → Map → Validate → Run.
               </li>
               <li>
                 <strong>Job Theater</strong> — open the job and verify reconcile / row fidelity.

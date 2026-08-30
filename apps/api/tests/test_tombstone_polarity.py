@@ -23,8 +23,15 @@ def test_audit_lookalikes_are_not_tombstones():
 def test_boolean_tombstone_fails_closed_on_ambiguity():
     assert is_tombstone_set({"is_deleted": True}, "is_deleted") is True
     assert is_tombstone_set({"is_deleted": False}, "is_deleted") is False
-    assert is_tombstone_set({"is_deleted": "yes"}, "is_deleted") is True
+    assert is_tombstone_set({"is_deleted": "true"}, "is_deleted") is True
+    assert is_tombstone_set({"is_deleted": "t"}, "is_deleted") is True
+    assert is_tombstone_set({"is_deleted": "1"}, "is_deleted") is True
     assert is_tombstone_set({"is_deleted": "0"}, "is_deleted") is False
+    assert is_tombstone_set({"is_deleted": "false"}, "is_deleted") is False
+    # Informal yes/y/2 are not write-path TRUE — refuse to hard-DELETE.
+    assert is_tombstone_set({"is_deleted": "yes"}, "is_deleted") is False
+    assert is_tombstone_set({"is_deleted": "y"}, "is_deleted") is False
+    assert is_tombstone_set({"is_deleted": "2"}, "is_deleted") is False
     assert is_tombstone_set({"is_deleted": "maybe"}, "is_deleted") is False
 
 

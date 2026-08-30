@@ -108,9 +108,13 @@ def test_e2e_upload_to_preflight(filename: str) -> None:
         sample_rows=sample_rows,
         estimated_bytes=record.get("file_size_bytes", 0),
     )
-    assert pf["total_gates"] == 11
+    # 13 file gates + the population fit gate, which is stated on every run
+    # (including "nothing to scan") so a bounded carrier is never an unasked
+    # question.
+    assert pf["total_gates"] == 14
     by_id = {g["id"]: g for g in pf["gates"]}
     assert "g13_source_coverage" in by_id
+    assert "g3f_population_fit" in by_id
     assert by_id.get("g1_source", {}).get("status") == "pass", pf["gates"]
     assert by_id.get("g2_destination", {}).get("status") == "block", pf["gates"]
     # Offline warehouse map: G3/G4 may block on low confidence or residual coercion —
@@ -145,7 +149,7 @@ def test_e2e_schema_types_column_accuracy() -> None:
     expected = {
         "row_id": "INTEGER",
         "amount": "DECIMAL",
-        "is_active": "BOOLEAN",
+        "is_active": "VARCHAR",
         "created_at": "TIMESTAMPTZ",
         "birth_date": "DATE",
         "txn_yyyymmdd": "DATE",
@@ -186,7 +190,8 @@ def test_e2e_jsonl_parsing() -> None:
     [
         (["1500", "2000", "3"], "INTEGER"),
         (["1500.50", "2000.00"], "DECIMAL"),
-        (["true", "false", "yes"], "BOOLEAN"),
+        (["true", "false", "1"], "BOOLEAN"),
+        (["true", "false", "yes"], "VARCHAR"),
         (["2024-01-15", "2024-02-01"], "DATE"),
         (["20240115", "20240201"], "DATE"),
         (["2024-01-15 10:30:00", "2024-02-01T14:22:33Z"], "TIMESTAMP"),

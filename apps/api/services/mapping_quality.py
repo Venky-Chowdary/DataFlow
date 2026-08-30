@@ -5,13 +5,16 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from services.transform_engine import CANONICAL_BOOLEAN_TOKENS, apply_transform, decimal_wire_value
+from services.value_serializer import is_null_evidence
+
 EMAIL_RE = re.compile(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
 UUID_RE = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-5][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
 )
 PHONE_RE = re.compile(r"^\+?[0-9][0-9\s().-]{6,18}[0-9]$")
-DATE_RE = re.compile(r"^(?:\d{4}-\d{2}-\d{2}|\d{8}|\d{4}/\d{2}/\d{2})(?:[T\s]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)?$")
-BOOL_VALUES = {"true", "false", "yes", "no", "y", "n", "1", "0", "t", "f"}
+# Write-path tokens only — informal yes/on must not score as boolean dest.
+BOOL_VALUES = set(CANONICAL_BOOLEAN_TOKENS)
 
 # Create-new identity is "ready to CREATE", not proven against an existing dest.
 IDENTITY_PASSTHROUGH_CONF_CAP = 0.93
@@ -38,16 +41,18 @@ CONFIDENCE_CLASS_LABELS: dict[str, str] = {
     "weak_or_conflicted": "Weak or conflicted evidence",
 }
 
+# Pairs are in the *logical* vocabulary ``_logical_type`` returns
+# (``normalize_logical_type``): BIGINT/SMALLINT collapse to ``integer``,
+# DOUBLE/REAL to ``float``, NUMBER to ``decimal``, and TIMESTAMP/DATETIME to
+# ``datetime``. Physical spellings here are unreachable — ``("date",
+# "timestamp")`` never matched, so every DATE → TIMESTAMP widening (the shape
+# of a re-run against a destination DataFlow itself created) was classed
+# "weak or conflicted" and held for review.
 _SAFE_PROMOTIONS = frozenset({
-    ("integer", "bigint"),
     ("integer", "decimal"),
     ("integer", "float"),
-    ("integer", "double"),
-    ("integer", "number"),
-    ("float", "double"),
     # float→decimal is IEEE→fixed-point invent — not a safe promotion (lossy).
-    ("float", "number"),
-    ("date", "timestamp"),
+    ("date", "datetime"),
     ("boolean", "integer"),
     ("string", "text"),
     ("text", "string"),
@@ -117,14 +122,22 @@ _STRING_TYPE_TOKENS = (
 )
 
 
-def _non_empty(samples: list[str]) -> list[str]:
-    return [s.strip() for s in samples if s is not None and str(s).strip()]
+def _non_empty(samples: list[Any]) -> list[str]:
+    """Present samples only. Reader-wired SQL NULL is not a VARCHAR token."""
+    out: list[str] = []
+    for raw in samples:
+        if is_null_evidence(raw):
+            continue
+        text = raw.strip() if isinstance(raw, str) else str(raw).strip()
+        if text and not is_null_evidence(text):
+            out.append(text)
+    return out
 
 
-def _null_rate(samples: list[str]) -> float:
+def _null_rate(samples: list[Any]) -> float:
     if not samples:
         return 0.0
-    empty = sum(1 for s in samples if s is None or str(s).strip() == "")
+    empty = sum(1 for raw in samples if is_null_evidence(raw))
     return empty / len(samples)
 
 
@@ -164,9 +177,21 @@ def _target_is_temporal(target_name: str, target_type: str) -> bool:
     return _contains_term(target_name, _TEMPORAL_NAME_TERMS)
 
 
+def _sample_binds_temporal(value: str) -> bool:
+    """True when the write path can bind this cell as date or datetime."""
+    text = (value or "").strip()
+    if not text:
+        return False
+    parsed, err = apply_transform(text, "date")
+    if parsed is not None and not err:
+        return True
+    parsed, err = apply_transform(text, "datetime")
+    return parsed is not None and not err
+
+
 def analyze_column_profile(name: str, samples: list[str]) -> dict[str, Any]:
     """Infer column profile from sample values for mapping quality scoring."""
-    vals = _non_empty([str(x) for x in samples[:24]])
+    vals = _non_empty(samples[:24])
     profile: dict[str, Any] = {
         "name": name,
         "sample_count": len(samples),
@@ -187,15 +212,14 @@ def analyze_column_profile(name: str, samples: list[str]) -> dict[str, Any]:
         email_ratio = _pattern_rate(vals, EMAIL_RE)
         phone_ratio = _pattern_rate(vals, PHONE_RE)
         uuid_ratio = _pattern_rate(vals, UUID_RE)
-        date_ratio = _pattern_rate(vals, DATE_RE)
+        date_hits = sum(1 for v in vals if _sample_binds_temporal(v))
+        date_ratio = date_hits / len(vals)
         bool_hits = sum(1 for v in vals if v.lower() in BOOL_VALUES)
+
         numeric = 0
         for v in vals:
-            try:
-                float(v.replace(",", ""))
+            if decimal_wire_value(v) is not None:
                 numeric += 1
-            except ValueError:
-                pass
 
         numeric_ratio = numeric / len(vals)
         bool_ratio = bool_hits / len(vals)
@@ -203,11 +227,29 @@ def analyze_column_profile(name: str, samples: list[str]) -> dict[str, Any]:
         profile["semantic_pattern_score"] = round(best_ratio, 3)
 
         profile["likely_identifier"] = profile["unique_ratio"] >= 0.95 or uuid_ratio >= 0.5
-        profile["likely_email"] = email_ratio >= 0.5 or _contains_term(name, {"email", "mail"})
-        profile["likely_phone"] = phone_ratio >= 0.5 or _contains_term(name, {"phone", "mobile", "tel"})
-        profile["likely_uuid"] = uuid_ratio >= 0.5 or _contains_term(name, {"uuid", "guid", "identifier"})
-        profile["likely_numeric"] = numeric_ratio >= 0.75 or _contains_term(name, {"amount", "qty", "total", "balance", "price"})
-        profile["likely_date"] = date_ratio >= 0.5 or _contains_term(name, {"date", "time", "dt", "timestamp", "created", "updated"})
+        # Name may disambiguate only when samples already match. A column named
+        # email/phone/uuid whose values are plain text must not invent a type.
+        profile["likely_email"] = email_ratio >= 0.75 or (
+            email_ratio >= 0.5 and _contains_term(name, {"email", "mail"})
+        )
+        profile["likely_phone"] = phone_ratio >= 0.75 or (
+            phone_ratio >= 0.5 and _contains_term(name, {"phone", "mobile", "tel"})
+        )
+        profile["likely_uuid"] = uuid_ratio >= 0.75 or (
+            uuid_ratio >= 0.5 and _contains_term(name, {"uuid", "guid"})
+        )
+        # Name may disambiguate only when samples already bind. Auto-ambiguous
+        # 1,234 must not score as numeric — the write path refuses them.
+        profile["likely_numeric"] = numeric_ratio >= 0.75 or (
+            numeric_ratio >= 0.5
+            and _contains_term(name, {"amount", "qty", "total", "balance", "price"})
+        )
+        # Name may disambiguate only when samples already bind. Auto-ambiguous
+        # 01/02/2024 must not score as date-like — the write path refuses them.
+        profile["likely_date"] = date_ratio >= 0.7 or (
+            date_ratio >= 0.5
+            and _contains_term(name, {"date", "time", "dt", "timestamp", "created", "updated"})
+        )
         # Name alone is not enough for "status" — that is usually a string enum.
         profile["likely_boolean"] = bool_ratio >= 0.7 or (
             bool_ratio >= 0.5 and _contains_term(name, {"flag", "is_", "has_", "active", "enabled", "verified"})
@@ -216,9 +258,9 @@ def analyze_column_profile(name: str, samples: list[str]) -> dict[str, Any]:
         # Sample-aware DECIMAL(p,s) / IEEE kind for Map profiling strip.
         if numeric_ratio >= 0.5 or profile["likely_numeric"]:
             try:
-                from services.decimal_observe import observe_numeric_samples
+                from services.decimal_observe import observe_source_numeric_samples
 
-                obs = observe_numeric_samples(vals)
+                obs = observe_source_numeric_samples(vals)
                 if obs.get("kind") not in {None, "empty"}:
                     profile["observed_precision"] = obs.get("precision")
                     profile["observed_scale"] = obs.get("scale")
@@ -227,12 +269,11 @@ def analyze_column_profile(name: str, samples: list[str]) -> dict[str, Any]:
                     profile["ieee_signals"] = obs.get("ieee_signals") or []
             except Exception:
                 pass
-            nums: list[float] = []
+            nums = []
             for v in vals:
-                try:
-                    nums.append(float(v.replace(",", "").replace("$", "").replace("£", "").replace("€", "")))
-                except ValueError:
-                    continue
+                parsed = decimal_wire_value(v)
+                if parsed is not None:
+                    nums.append(parsed)
             if nums:
                 profile["min"] = min(nums)
                 profile["max"] = max(nums)
@@ -303,7 +344,8 @@ def _logical_type(type_str: str) -> str:
         if any(x in t for x in ("JSON", "JSONB", "VARIANT", "ARRAY")):
             return "json"
         if any(x in t for x in ("DATE", "TIME", "TIMESTAMP")):
-            return "timestamp" if "TIME" in t else "date"
+            # Same vocabulary as ``normalize_logical_type`` above.
+            return "datetime" if "TIME" in t else "date"
         if "BOOL" in t:
             return "boolean"
         return "string"
@@ -564,8 +606,7 @@ def score_mapping_pair(
         samples = [str(x).strip() for x in profile["sample_values"] if str(x).strip()]
     distinct = {s.lower() for s in samples}
     looks_enum = len(distinct) > 2 or any(
-        s not in {"true", "false", "t", "f", "yes", "no", "y", "n", "0", "1", "on", "off"}
-        for s in distinct
+        s not in CANONICAL_BOOLEAN_TOKENS for s in distinct
     )
     if looks_enum and ("BOOL" in tgt_type or tgt_type == "BOOLEAN" or "bool" in tgt):
         delta -= 0.85
@@ -703,8 +744,7 @@ def detect_cross_field_issues(
         tgt_type = str(m.get("target_type") or "").upper()
         if not samples:
             continue
-        strict_bool = {"true", "false", "t", "f", "yes", "no", "y", "n", "0", "1", "on", "off"}
-        if any(s not in strict_bool for s in samples) and (
+        if any(s not in CANONICAL_BOOLEAN_TOKENS for s in samples) and (
             "BOOL" in tgt_type or "bool" in (m.get("target") or "").lower()
         ):
             issues.append(

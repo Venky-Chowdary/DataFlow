@@ -16,6 +16,12 @@ import { PageToolbar } from "../components/ui/PageToolbar";
 import { useToast } from "../components/Toast";
 import { useActiveData } from "../lib/DataContext";
 import { fetchJob, fetchJobMappingProof, renameJob, retryJob, resumeJob, RetryRefusedError } from "../lib/api";
+import {
+  jobFilterCounts,
+  jobHistoryFromResponse,
+  jobWindowNote,
+  type JobHistory,
+} from "../lib/jobHistory";
 import { isJobSuccess, jobStatusBadgeClass, jobStatusLabel } from "../lib/uiUtils";
 import { JobProgress, TransferJob } from "../lib/types";
 import { QuarantinePanel } from "../components/transfer/QuarantinePanel";
@@ -34,6 +40,7 @@ import {
 } from "../lib/transferConstants";
 import { jobStudioDataRules } from "../lib/studioDataRules";
 import { jobStudioDeliveryGuarantee } from "../lib/cdcExactlyOnce";
+import { blockerTitle } from "../lib/preflightGates";
 import { clampPercent } from "../lib/progressRing";
 import { nextListSelection, shouldApplyInitialJobFocus } from "../lib/jobSelection";
 import { LoadHistoryPanel } from "../components/transfer/LoadHistoryPanel";
@@ -71,6 +78,13 @@ export type JobsStudioIntent = {
   validationMode?: string;
   schemaPolicy?: string;
   deliveryGuarantee?: string;
+  /** Schedules → Studio: preload the parked route so Map can persist a contract. */
+  sourceConnectorId?: string;
+  destConnectorId?: string;
+  sourceTable?: string;
+  destTable?: string;
+  /** Persist mappings onto this draft — do not POST a second empty schedule. */
+  scheduleId?: string;
 };
 
 function asMappingProof(raw: unknown): MappingProof | null {
@@ -138,6 +152,8 @@ function formatJobDuration(startedAt?: string, completedAt?: string): string | n
 
 interface JobsPageProps {
   jobs: TransferJob[];
+  /** Whole-history counts; the table still shows the recent page in `jobs`. */
+  history?: JobHistory;
   onRefresh?: () => void;
   /** Open Transfer Studio — optional intent lands on Validate / Map with repair context. */
   onStartTransfer?: (intent?: JobsStudioIntent) => void;
@@ -163,16 +179,34 @@ function defaultDetailTab(status: string, rejectedRows: number): JobDetailTab {
   return "detail";
 }
 
-function jobRouteLabel(job: Pick<TransferJob, "source_name" | "destination_database" | "destination_collection" | "destination_type">) {
+/** Source side of a route label. Never renders a missing name as "undefined". */
+function jobSourceLabel(job: Pick<TransferJob, "source_name" | "source_type">) {
+  return (job.source_name || "").trim() || (job.source_type || "").trim() || "source";
+}
+
+function jobRouteLabel(
+  job: Pick<
+    TransferJob,
+    "source_name" | "source_type" | "destination_database" | "destination_collection" | "destination_type"
+  >,
+) {
   const dest =
     [job.destination_database, job.destination_collection].filter(Boolean).join(".")
     || job.destination_type
     || "destination";
-  return `${job.source_name} → ${dest}`;
+  return `${jobSourceLabel(job)} → ${dest}`;
 }
 
 function jobDisplayName(
-  job: Pick<TransferJob, "name" | "source_name" | "destination_database" | "destination_collection" | "destination_type">,
+  job: Pick<
+    TransferJob,
+    | "name"
+    | "source_name"
+    | "source_type"
+    | "destination_database"
+    | "destination_collection"
+    | "destination_type"
+  >,
   override?: string | null,
 ) {
   const named = (override ?? job.name)?.trim();
@@ -202,7 +236,7 @@ function duplicateJobNameError(
   return null;
 }
 
-export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initialPanel }: JobsPageProps) {
+export function JobsPage({ jobs, history, onRefresh, onStartTransfer, initialJobId, initialPanel }: JobsPageProps) {
   const { toast } = useToast();
   const { setActiveData } = useActiveData();
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -240,13 +274,12 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
     })).filter((m) => m.source);
   }, [liveJob?.transfer_request?.mappings]);
 
-  const counts = useMemo(() => ({
-    all: jobs.length,
-    running: jobs.filter((j) => j.status === "running" || j.status === "pending").length,
-    completed: jobs.filter((j) => isJobSuccess(j.status)).length,
-    quarantine: jobs.filter((j) => j.status === "completed_with_quarantine").length,
-    failed: jobs.filter((j) => j.status === "failed").length,
-  }), [jobs]);
+  // Counted over the whole history, not the page of rows below: counting the rows
+  // showed "All (50)" for a 90-job history and disagreed with Pilot.
+  const counts = useMemo(
+    () => jobFilterCounts(history || jobHistoryFromResponse({ jobs })),
+    [history, jobs],
+  );
 
   const filtered = useMemo(() => {
     let list = jobs;
@@ -274,6 +307,13 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
     );
   }, [jobs, filter, jobSearch, nameOverrides]);
 
+  const windowNote = jobWindowNote({
+    counts,
+    filter,
+    loaded: jobs.length,
+    shown: jobSearch.trim() ? undefined : filtered.length,
+  });
+
   useEffect(() => {
     const ids = jobs.map((j) => j._id);
     if (!shouldApplyInitialJobFocus(initialJobId, appliedFocusRef.current, ids)) return;
@@ -285,6 +325,9 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
       setDetailTab("mapping");
       setEvidenceDrawer("mapping-proof");
       setMappingProofOpen(true);
+    } else if (initialPanel === "quarantine") {
+      setDetailTab("quarantine");
+      setEvidenceDrawer("quarantine");
     }
     window.requestAnimationFrame(() => {
       document.getElementById(`job-item-${initialJobId}`)?.scrollIntoView({
@@ -329,7 +372,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
     if (!job) return;
     const dest = job.destination_collection || job.destination_database || job.destination_type || "destination";
     setActiveData((prev) => ({
-      name: prev?.name || job.source_name || "job",
+      name: prev?.name || (job.source_name || "").trim() || "job",
       filename: prev?.filename,
       columns: prev?.columns || [],
       row_count: job.records_processed ?? prev?.row_count ?? 0,
@@ -338,7 +381,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
       preflight_run_id: prev?.preflight_run_id,
       job_id: job._id,
       validation_status: job.status,
-      route: `${job.source_name} → ${dest}`,
+      route: `${jobSourceLabel(job)} → ${dest}`,
       blockers: job.error ? [job.error] : prev?.blockers,
     }));
   }, [jobs, selectedId, setActiveData]);
@@ -809,6 +852,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
                     );
                   })
                 )}
+                {windowNote && <p className="df2-jobs-v3-window-note">{windowNote}</p>}
               </aside>
 
               <section className="df2-jobs-v3-detail" aria-label="Job detail">
@@ -1558,7 +1602,7 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
             <ul className="df2-jobs-preflight-blockers">
               {jobPreflight.blockers.slice(0, 8).map((b) => (
                 <li key={b.id}>
-                  <strong>{b.id}</strong> — {b.message}
+                  <strong title={b.id}>{blockerTitle(b.id, b.message)}</strong> — {b.message}
                   {b.guidance?.fix ? <span className="df2-muted"> Fix: {b.guidance.fix}</span> : null}
                 </li>
               ))}
@@ -1995,11 +2039,15 @@ export function JobsPage({ jobs, onRefresh, onStartTransfer, initialJobId, initi
             rejectedRows={liveJob.rejected_rows}
             coercedNullRows={liveJob.coerced_null_rows}
             initialDetails={Array.isArray(liveJob.rejected_details) ? liveJob.rejected_details : undefined}
-            truncatedDetails={
-              liveJob.rejected_details_truncated
-              ?? (liveJob.destination_summary as { rejected_details_truncated?: number } | undefined)
-                ?.rejected_details_truncated
-            }
+            truncatedDetails={Math.max(
+              0,
+              Number(
+                liveJob.rejected_details_total
+                  ?? (liveJob.destination_summary as { rejected_details_total?: number } | undefined)
+                    ?.rejected_details_total
+                  ?? 0,
+              ) - (Array.isArray(liveJob.rejected_details) ? liveJob.rejected_details.length : 0),
+            )}
             autoLoad
             initiallyOpen
             repairMappings={jobRepairMappings}

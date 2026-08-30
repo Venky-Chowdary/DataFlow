@@ -21,7 +21,7 @@ from services.keyset_pagination import (
     split_cursor_bookmark,
 )
 from services.platform_config import data_dir
-from services.value_serializer import json_default
+from services.value_serializer import json_default, present_cell_text
 
 _logger = logging.getLogger(__name__)
 
@@ -151,6 +151,26 @@ def is_append_sync(mode: str | None) -> bool:
 SCHEMALESS_DESTINATIONS = frozenset({"redis", "kafka"})
 
 
+def destination_exists_for_shape(
+    exists: bool | None,
+    *,
+    dest_format: str = "",
+) -> bool | None:
+    """Dest-exists boolean for Map / G15 / auto-map.
+
+    Never collapse ``exists=True`` + empty column catalog to missing. That
+    collapse is a *typing* concern (``destination_exists_for_typing``) and
+    invents create-new against a table the probe already listed.
+
+    Schemaless dests have no dest-exists contract — treat as create-new for
+    shape. Overwrite recreate is a separate branch; do not call this helper
+    to decide DROP.
+    """
+    if (dest_format or "").strip().lower() in SCHEMALESS_DESTINATIONS:
+        return False
+    return exists
+
+
 def destination_exists_for_typing(
     mode: str | None,
     exists: bool | None,
@@ -159,6 +179,9 @@ def destination_exists_for_typing(
     dest_format: str = "",
 ) -> bool | None:
     """Is there a live column shape for the write to bind its types to?
+
+    Not a dest-exists / create-new authority. Use
+    ``destination_exists_for_shape`` for Map / G15 / auto-map existence.
 
     Two situations answer no, and both used to be mistaken for "wait for a
     Studio stamp", which leaves every target type pending and makes the
@@ -306,11 +329,27 @@ class IncrementalReadScope:
     primary_key: str = ""
     watermark: str | None = None
     cursor_key: str = ""
+    #: Column the stored watermark was actually measured on ("" when unrecorded).
+    watermark_cursor_column: str = ""
 
     @property
     def bounded(self) -> bool:
         """True when a stored watermark narrows the read to a delta."""
         return bool(self.cursor_column and self.watermark)
+
+    @property
+    def cursor_column_changed(self) -> bool:
+        """Was the stored watermark measured on a different column?
+
+        A watermark is a value *of one column*. Reusing ``id = 250`` to bound a
+        read on ``updated_at`` either explodes (``invalid input syntax for type
+        timestamp: "250"``) or, when both columns happen to be comparable,
+        silently skips rows. Neither may be resolved by guessing.
+        """
+        stored = (self.watermark_cursor_column or "").strip()
+        if not stored or not self.watermark:
+            return False
+        return stored.lower() != (self.cursor_column or "").strip().lower()
 
 
 def resolve_incremental_read_scope(
@@ -355,11 +394,13 @@ def resolve_incremental_read_scope(
     )
     pk_cols = contract.primary_key_columns() if contract else []
     tiebreak = next((c for c in pk_cols if c and c != cursor_column), "")
+    watermark, metadata = get_watermark_record(cursor_key)
     return IncrementalReadScope(
         cursor_column=cursor_column,
         primary_key=tiebreak,
-        watermark=get_watermark(cursor_key),
+        watermark=watermark,
         cursor_key=cursor_key,
+        watermark_cursor_column=str(metadata.get("cursor_column") or ""),
     )
 
 
@@ -393,6 +434,34 @@ def _load() -> dict[str, Any]:
 
 def _save(data: dict[str, Any]) -> None:
     write_json_atomic(STORE_PATH, data, indent=2, default=json_default)
+
+
+def get_watermark_record(cursor_key: str) -> tuple[str | None, dict[str, Any]]:
+    """Return ``(watermark, metadata)`` — the value and what it was measured on.
+
+    The metadata carries the cursor column, so a route whose cursor was changed
+    cannot have the old column's value applied to the new one.
+    """
+    coll = _mongo_cursors()
+    if coll is not None:
+        try:
+            doc = coll.find_one({"key": cursor_key})
+            if doc and doc.get("watermark") is not None:
+                meta = doc.get("metadata")
+                return str(doc["watermark"]), dict(meta) if isinstance(meta, dict) else {}
+            return None, {}
+        except Exception:
+            _logger.exception("Mongo get_watermark failed for %s", cursor_key)
+
+    for entry in _load().get("cursors", []):
+        if entry.get("key") == cursor_key:
+            val = entry.get("watermark")
+            meta = entry.get("metadata")
+            return (
+                str(val) if val is not None else None,
+                dict(meta) if isinstance(meta, dict) else {},
+            )
+    return None, {}
 
 
 def get_watermark(cursor_key: str) -> str | None:
@@ -461,6 +530,21 @@ def set_watermark(cursor_key: str, watermark: str, *, metadata: dict[str, Any] |
     _save(data)
 
 
+def list_cursor_keys() -> list[str]:
+    """Every persisted cursor key, so a reset can be aimed without guessing one.
+
+    Clearing a watermark requires its exact key; an operator who has just reset
+    a destination knows the route, not the key string.
+    """
+    coll = _mongo_cursors()
+    if coll is not None:
+        try:
+            return [str(d.get("key")) for d in coll.find({}, {"key": 1}) if d.get("key")]
+        except Exception:
+            _logger.exception("Mongo list_cursor_keys failed")
+    return [str(e.get("key")) for e in _load().get("cursors", []) if e.get("key")]
+
+
 def clear_watermark(cursor_key: str) -> dict[str, Any]:
     """Delete a CDC/sync watermark so the next run re-snapshots (when_needed/initial).
 
@@ -503,6 +587,125 @@ def _is_composite(watermark: str) -> bool:
     return KEYSET_SEP in watermark or "|" in watermark
 
 
+def incremental_read_narrows(sync_mode: str) -> bool:
+    """True when the write reads only rows past the stored watermark.
+
+    SCD2 snapshots the whole source against current destination versions.
+    CDC applies a changelog, not a table rescan. Incremental append/deduped
+    are the modes whose population-fit walk must match the delta — a full
+    table scan false-blocks the second run on historical overflows the
+    write will never re-read.
+    """
+    return normalize_sync_mode(sync_mode, default="") in {
+        "incremental_append",
+        "incremental_deduped",
+    }
+
+
+def row_after_watermark(
+    rec: Any,
+    cursor_column: str,
+    watermark: str | None,
+    *,
+    primary_key: str = "",
+) -> bool | None:
+    """True if ``rec`` is past ``watermark``, False if already landed, None if unreadable.
+
+    One predicate for the batch bound, the collision probe, and the
+    population-fit walk. A missing cursor value is unreadable — callers that
+    write must refuse; callers that only judge keep the row so it cannot
+    silently leave the batch.
+    """
+    col = (cursor_column or "").strip()
+    if not col:
+        return True
+    pk = (primary_key or "").strip()
+    raw = rec.get(col) if isinstance(rec, dict) else None
+    text = present_cell_text(raw)
+    if text is None:
+        return None
+    candidate = text
+    if pk and pk != col:
+        candidate = encode_keyset_bookmark(
+            [candidate, present_cell_text(rec.get(pk) if isinstance(rec, dict) else None) or ""]
+        )
+    if watermark is None:
+        return True
+    return compare_cursor_values(candidate, watermark) > 0
+
+
+def iter_rows_after_watermark(
+    rows: Any,
+    scope: IncrementalReadScope | None,
+    *,
+    keep_unreadable: bool = True,
+):
+    """Yield the rows an incremental write will deliver.
+
+    Historical rows (``cursor <= watermark``) are dropped. Unreadable cursor
+    cells stay in the stream when ``keep_unreadable`` so a checker cannot
+    shrink the batch it is judging. Pass-through when the scope is not bounded.
+    """
+    if rows is None:
+        return None
+    if scope is None or not scope.bounded:
+        return rows
+
+    def _gen():
+        for rec in rows:
+            verdict = row_after_watermark(
+                rec,
+                scope.cursor_column,
+                scope.watermark,
+                primary_key=scope.primary_key,
+            )
+            if verdict is False:
+                continue
+            if verdict is None and not keep_unreadable:
+                continue
+            yield rec
+
+    return _gen()
+
+
+def records_after_watermark(
+    records: list[dict[str, Any]],
+    cursor_column: str,
+    watermark: str | None,
+    *,
+    primary_key: str = "",
+) -> tuple[list[dict[str, Any]], int]:
+    """Bound already-parsed records to the delta past ``watermark``.
+
+    A database source is bounded in its WHERE clause, but a file or document
+    payload arrives whole, so the same cursor contract has to be honoured after
+    the parse — otherwise an "incremental append" of a daily CSV re-appends
+    every row the file still contains, which is the duplicate-load operators
+    report as data corruption and is exactly what the mode promised not to do.
+
+    Comparison goes through :func:`compare_cursor_values`, so a file delta is
+    bounded by the same typed comparator (and the same composite tie-break) the
+    database reader uses. Returns ``(delta, unbounded)`` where ``unbounded``
+    counts records that carry no cursor value: those cannot be proven new or
+    old, and the caller must refuse rather than guess.
+    """
+    col = (cursor_column or "").strip()
+    if not col:
+        return list(records), 0
+    delta: list[dict[str, Any]] = []
+    unbounded = 0
+    for rec in records:
+        verdict = row_after_watermark(
+            rec, cursor_column, watermark, primary_key=primary_key
+        )
+        if verdict is None:
+            unbounded += 1
+            continue
+        if verdict:
+            delta.append(rec)
+    return delta, unbounded
+
+
 def max_cursor_value(
     rows: list[list[str]],
     headers: list[str],
@@ -532,21 +735,29 @@ def max_cursor_value(
             pk_idx = None
 
     if pk_idx is None:
-        values = [rows[i][idx] for i in range(len(rows)) if idx < len(rows[i]) and rows[i][idx]]
+        values: list[str] = []
+        for row in rows:
+            if idx >= len(row):
+                continue
+            text = present_cell_text(row[idx])
+            if text is not None:
+                values.append(text)
         if not values:
             return None
         from services.cdc_engine import infer_watermark_type, max_watermark
 
-        str_values = [str(v) for v in values]
-        wm_type = infer_watermark_type(str_values)
-        return max_watermark(str_values, wm_type)
+        wm_type = infer_watermark_type(values)
+        return max_watermark(values, wm_type)
 
     best: str | None = None
     for row in rows:
-        if idx >= len(row) or not row[idx]:
+        if idx >= len(row):
+            continue
+        cursor_text = present_cell_text(row[idx])
+        if cursor_text is None:
             continue
         pk_val = row[pk_idx] if pk_idx < len(row) else ""
-        cand = encode_keyset_bookmark([row[idx], pk_val])
+        cand = encode_keyset_bookmark([cursor_text, pk_val])
         if best is None or compare_cursor_values(cand, best) > 0:
             best = cand
     return best

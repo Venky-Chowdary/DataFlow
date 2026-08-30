@@ -1,6 +1,19 @@
-import { API_BASE, ActiveDataContext, Connector, EnhancedAnalysis, ParsedUpload, PipelineSchedule, TransferJob, TransferPlan } from "./types";
+import { API_BASE, ActiveDataContext, Connector, EnhancedAnalysis, ParsedUpload, PipelineSchedule, SourceReadOptions, TransferJob, TransferPlan } from "./types";
 import { coerceLastTestOk, statusFromLastTest } from "./connectorHealth";
-import { clearSession, getAuthToken } from "./session";
+import { JobHistory, jobHistoryFromResponse } from "./jobHistory";
+import { clearSession, getAuthToken, getSessionActor } from "./session";
+import { getActiveWorkspaceId } from "./workspace";
+import { permissionFromRefusal, refusalSentence } from "./permissionCopy";
+import { readOptionsPayload } from "./readOptions";
+import type {
+  ShapeCatalog,
+  ShapePreviewResponse,
+  ShapeProfileResponse,
+  ShapeRecipeWire,
+} from "./shape";
+import { slimPreflightForExplain } from "./slimPreflightForExplain";
+
+export { refusalSentence };
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 15000;
 const LONG_REQUEST_TIMEOUT_MS = 180000;
@@ -84,19 +97,87 @@ function notifyAuthRequired(requestUrl: string) {
   }
 }
 
-async function parseApiError(res: Response, fallback: string): Promise<string> {
-  try {
-    const data = await res.json();
-    const detail = data.detail ?? data.error ?? data.message;
-    if (typeof detail === "string") return detail;
-    if (detail && typeof detail === "object") {
-      if (typeof detail.error === "string") return detail.error;
-      if (typeof detail.message === "string") return detail.message;
-    }
-    return fallback;
-  } catch {
-    return fallback;
+/**
+ * A refusal that keeps the status that caused it.
+ *
+ * A 403 is not a transport failure and must not be rendered as one, nor —
+ * as this client used to — replaced with plausible-looking defaults. Callers
+ * check {@link ApiError.forbidden} to say "you do not have permission" and name
+ * the permission the API asked for.
+ */
+export class ApiError extends Error {
+  readonly status: number;
+  readonly requiredPermission: string;
+  readonly effectiveRole: string;
+
+  constructor(message: string, status: number, requiredPermission = "", effectiveRole = "") {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
+    this.requiredPermission = requiredPermission;
+    this.effectiveRole = effectiveRole;
   }
+
+  get forbidden(): boolean {
+    return this.status === 403;
+  }
+}
+
+export function isForbidden(err: unknown): boolean {
+  return err instanceof ApiError && err.forbidden;
+}
+
+/** The API's own reason for a non-OK response, plus the 403 metadata it carries. */
+async function readApiRefusal(
+  res: Response,
+  fallback: string,
+): Promise<{ detail: string; permission: string; role: string }> {
+  let detail = fallback;
+  let permission = "";
+  let role = "";
+  try {
+    const data = await res.clone().json();
+    permission = typeof data?.required_permission === "string" ? data.required_permission : "";
+    role = typeof data?.effective_role === "string" ? data.effective_role : "";
+    const raw = data?.detail ?? data?.error ?? data?.message;
+    if (typeof raw === "string" && raw.trim()) detail = raw;
+    else if (raw && typeof raw === "object") {
+      if (typeof raw.error === "string") detail = raw.error;
+      else if (typeof raw.message === "string") detail = raw.message;
+    }
+  } catch {
+    /* keep the fallback */
+  }
+  if (res.status === 502 || res.status === 504) {
+    if (detail === fallback || /<html/i.test(detail)) {
+      detail = (
+        `Control plane timed out (HTTP ${res.status}) while Validate was running. `
+        + `Re-run Validate. Execute stays locked.`
+      );
+    }
+  }
+  if (res.status === 403) {
+    // A denial the gate phrased for itself is rewritten for the person reading
+    // it — but only when a permission is actually identified. Not every 403 is a
+    // role problem: rewriting an unnamed one invented "ask a workspace admin for
+    // the editor role" for a mistyped current password, hiding the real reason.
+    const named = permissionFromRefusal(detail, permission);
+    if (named) {
+      detail = refusalSentence(named, role);
+      permission = named;
+    }
+  }
+  return { detail, permission, role };
+}
+
+/** Build the typed refusal for a non-OK response, preserving the API's reason. */
+export async function apiErrorFrom(res: Response, fallback: string): Promise<ApiError> {
+  const { detail, permission, role } = await readApiRefusal(res, fallback);
+  return new ApiError(detail, res.status, permission, role);
+}
+
+async function parseApiError(res: Response, fallback: string): Promise<string> {
+  return (await readApiRefusal(res, fallback)).detail;
 }
 
 async function apiFetch(input: RequestInfo | URL, init: TimedRequestInit = {}): Promise<Response> {
@@ -105,6 +186,19 @@ async function apiFetch(input: RequestInfo | URL, init: TimedRequestInit = {}): 
   const token = getAuthToken();
   if (token && !headers.has("Authorization")) {
     headers.set("Authorization", `Bearer ${token}`);
+  }
+  // Name the workspace being viewed, so the API gates on the role held *there*
+  // rather than on the platform label alone.
+  const workspaceId = getActiveWorkspaceId();
+  if (workspaceId && !headers.has("X-Workspace-Id")) {
+    headers.set("X-Workspace-Id", workspaceId);
+  }
+  // A JSON body the caller forgot to label is still a JSON body. Without this
+  // the request reaches FastAPI as an unparsed string and every field of the
+  // model comes back as missing — a 422 that reads like the payload was wrong.
+  // FormData and Blob bodies are left alone so the browser sets their boundary.
+  if (typeof requestInit.body === "string" && !headers.has("Content-Type")) {
+    headers.set("Content-Type", "application/json");
   }
   const mergedInit = { ...requestInit, headers };
   if (timeoutMs <= 0) return fetch(input, { ...mergedInit, signal });
@@ -331,6 +425,7 @@ export async function runPreflight(payload: {
   backfill_new_fields?: boolean;
   stream_contracts?: Record<string, unknown>[];
   date_locale?: string;
+  number_locale?: string;
   /** Operator attested governance policy allows moving detected PII. */
   compliance_acknowledged?: boolean;
   /** Operator acknowledged schema drift under manual_review for this run. */
@@ -345,10 +440,22 @@ export async function runPreflight(payload: {
   acknowledgment_reason?: string;
   /** Pre-ingestion staging (SQL destinations only). */
   write_via_staging?: boolean;
+  /** Execute-applied priority sort + optional row cap. Named on G17. */
+  priority_column?: string;
+  priority_direction?: "asc" | "desc";
+  row_limit?: number;
   /** Connector-specific dest settings (Redshift staging_bucket / iam_role). */
   dest_extra?: Record<string, unknown>;
   source_kind?: string;
   source_type?: string;
+  /** Persisted /connectors/upload id — Validate scans the stored file, not the preview. */
+  source_file_id?: string;
+  /**
+   * Approved pre-load transform recipe. Execute shapes rows on the read, so the
+   * gates have to judge the transformed rows or they refuse values the write
+   * never carries.
+   */
+  shape_recipe?: ShapeRecipeWire;
 }): Promise<import("./types").PreflightResult> {
   const res = await apiFetch(`${API_BASE}/preflight/run`, {
     method: "POST",
@@ -371,10 +478,17 @@ export async function explainPreflight(payload: {
   validation_mode?: string;
   use_llm?: boolean;
 }): Promise<import("./types").ValidationExplanation> {
+  const slimed = slimPreflightForExplain(payload.preflight);
   const res = await apiFetch(`${API_BASE}/preflight/explain`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ use_llm: true, ...payload }),
+    body: JSON.stringify({
+      use_llm: true,
+      dest_type: payload.dest_type,
+      validation_mode: payload.validation_mode,
+      run_id: slimed.run_id,
+      preflight: slimed,
+    }),
     timeoutMs: LONG_REQUEST_TIMEOUT_MS,
   });
   if (!res.ok) throw new Error(await parseApiError(res, "Explain failed"));
@@ -396,6 +510,13 @@ export type CellPreviewResult = {
     message?: string;
     transform?: string;
   }>;
+  transform_image?: {
+    recipe_hash?: string;
+    sample_rows_in?: number;
+    sample_rows_out?: number;
+    sample_rows_removed?: number;
+    retyped_columns?: Record<string, string>;
+  };
 };
 
 /** Cell-level will-quarantine / will-coerce preview before run. */
@@ -405,6 +526,13 @@ export async function previewQuarantineCells(payload: {
   mappings: Array<{ source: string; target: string; transform?: string | null; target_type?: string | null }>;
   column_types?: Record<string, string>;
   sample_size?: number;
+  /**
+   * The approved pre-load recipe. Execute transforms on the read, so a cell
+   * preview scanned on raw values reports findings the writer never sees.
+   */
+  shape_recipe?: ShapeRecipeWire | null;
+  date_locale?: string;
+  number_locale?: string;
 }): Promise<CellPreviewResult> {
   const res = await apiFetch(`${API_BASE}/preflight/preview-cells`, {
     method: "POST",
@@ -412,6 +540,67 @@ export async function previewQuarantineCells(payload: {
     body: JSON.stringify(payload),
   });
   if (!res.ok) throw new Error(await parseApiError(res, "Cell preview failed"));
+  return res.json();
+}
+
+/**
+ * Shape (pre-write shaping) design-time calls.
+ *
+ * All four are pure design aids: they take the sampled rows the studio already
+ * holds and never touch a source or a destination, so the editor stays
+ * responsive and the answers are reproducible — the property Validate≡Execute
+ * later depends on.
+ */
+export async function fetchShapeCatalog(): Promise<ShapeCatalog> {
+  const res = await apiFetch(`${API_BASE}/shape/catalog`);
+  if (!res.ok) throw await apiErrorFrom(res, "Shape catalog unavailable");
+  return res.json();
+}
+
+export async function checkShapeExpression(payload: {
+  expression: string;
+  source_columns?: string[];
+}): Promise<{ valid: boolean; columns?: string[]; error?: string }> {
+  const res = await apiFetch(`${API_BASE}/shape/expression`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw await apiErrorFrom(res, "Expression check failed");
+  return res.json();
+}
+
+export async function profileShapeSource(payload: {
+  sample_rows: Record<string, unknown>[];
+  source_columns?: string[];
+  target_schema?: Record<string, string>;
+}): Promise<ShapeProfileResponse> {
+  const res = await apiFetch(`${API_BASE}/shape/profile`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+    timeoutMs: LONG_REQUEST_TIMEOUT_MS,
+  });
+  if (!res.ok) throw await apiErrorFrom(res, "Profile failed");
+  return res.json();
+}
+
+export async function previewShapeRecipe(payload: {
+  recipe: ShapeRecipeWire;
+  sample_rows: Record<string, unknown>[];
+  source_columns?: string[];
+  /** Declared source carriers — untouched columns keep them, touched ones are re-read. */
+  column_types?: Record<string, string>;
+  target_schema?: Record<string, string>;
+  include_profile?: boolean;
+}): Promise<ShapePreviewResponse> {
+  const res = await apiFetch(`${API_BASE}/shape/preview`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+    timeoutMs: LONG_REQUEST_TIMEOUT_MS,
+  });
+  if (!res.ok) throw await apiErrorFrom(res, "Shape preview failed");
   return res.json();
 }
 
@@ -605,6 +794,19 @@ export interface PilotTransferPreview {
   breaker_state?: string;
 }
 
+/** One retrieved citation behind a grounded answer. */
+export interface CopilotSource {
+  title?: string;
+  doc?: string;
+  section?: string;
+  href?: string;
+  text?: string;
+  source?: string;
+  url?: string;
+  snippet?: string;
+  type?: string;
+}
+
 export interface CopilotChatResponse {
   answer: string;
   intent: string;
@@ -625,7 +827,9 @@ export interface CopilotChatResponse {
   };
   tools_used?: { name: string; success: boolean; summary: string }[];
   /** RAG citations for knowledge answers. */
-  sources?: { title?: string; source?: string; url?: string; snippet?: string }[];
+  sources?: CopilotSource[];
+  /** True only when the answer rests on a citation or a live read, not authored prose. */
+  grounded?: boolean;
 }
 
 export interface PilotToolRegistry {
@@ -651,6 +855,9 @@ export interface ModelCapabilities {
   active_model: string;
   agent_mode: string;
   pilot_engine?: string;
+  pilot_engine_source?: string;
+  pilot_engine_reason?: string;
+  configured_providers?: string[];
   fallback_order: string[];
   providers: {
     provider: string;
@@ -663,6 +870,7 @@ export interface ModelCapabilities {
     package_installed: boolean;
     available: boolean;
     status: string;
+    blocked_reason?: string;
   }[];
   guarantees: string[];
 }
@@ -924,13 +1132,18 @@ export async function fetchConnectors(): Promise<Connector[]> {
   return [];
 }
 
-export async function fetchJobs(): Promise<TransferJob[]> {
-  const data = await requestJson<{ jobs?: TransferJob[] }>(
+/** Recent jobs plus the whole-history counts the operator-visible totals read. */
+export async function fetchJobs(): Promise<JobHistory> {
+  const data = await requestJson<{
+    jobs?: TransferJob[];
+    total?: number;
+    status_counts?: Record<string, number>;
+  }>(
     [`${API_BASE}/connectors/jobs`, `${API_BASE}/jobs`],
     "Failed to load jobs",
     { timeoutMs: 45_000 },
   );
-  return data.jobs || [];
+  return jobHistoryFromResponse(data);
 }
 
 export type JobProgress = import("./types").JobProgress;
@@ -1370,7 +1583,7 @@ export function streamJobProgress(
             })
             .filter((p): p is NonNullable<typeof p> => Boolean(p))
         : undefined,
-      created_at: String(raw.created_at ?? new Date().toISOString()),
+      created_at: raw.created_at ? String(raw.created_at) : "",
       updated_at: raw.updated_at ? String(raw.updated_at) : undefined,
       started_at: raw.started_at ? String(raw.started_at) : undefined,
       completed_at: raw.completed_at ? String(raw.completed_at) : undefined,
@@ -1506,9 +1719,18 @@ export async function fetchScheduleHistory(
  */
 export async function acceptScheduleSourceSchema(
   id: string,
-): Promise<{ success: boolean; message?: string; columns?: number }> {
+): Promise<{
+  success: boolean;
+  message?: string;
+  columns?: number;
+  recorded_from?: string;
+  approval_closed?: boolean;
+}> {
   const res = await apiFetch(`${API_BASE}/schedules/${id}/accept-source-schema`, {
     method: "POST",
+    // Live probe is capped server-side; 20s leaves room for the 12s ceiling
+    // plus JSON. The old default 15s abort looked like Accept "kept loading".
+    timeoutMs: 20_000,
   });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) {
@@ -1516,7 +1738,132 @@ export async function acceptScheduleSourceSchema(
       typeof data?.detail === "string" ? data.detail : "Could not update the baseline",
     );
   }
-  return data as { success: boolean; message?: string; columns?: number };
+  return data as {
+    success: boolean;
+    message?: string;
+    columns?: number;
+    recorded_from?: string;
+    approval_closed?: boolean;
+  };
+}
+
+/**
+ * Every schedule currently parked on a decision.
+ *
+ * Autopilot's inbox: a deterministic refusal is a finding a human owes an answer
+ * to, not something the next beat should replay.
+ */
+export async function fetchOpenScheduleApprovals(): Promise<
+  import("./types").ScheduleApprovalInboxItem[]
+> {
+  const res = await apiFetch(`${API_BASE}/schedules/approvals/open`);
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not load approvals"));
+  const data = (await res.json()) as {
+    approvals?: import("./types").ScheduleApprovalInboxItem[];
+  };
+  return data.approvals ?? [];
+}
+
+/** The finding and the standing authority currently recorded on one schedule. */
+export async function fetchScheduleApprovalDetail(scheduleId: string): Promise<{
+  schedule_id: string;
+  approval: import("./types").ScheduleApproval | Record<string, never>;
+  authorization: import("./types").StandingAuthorization | Record<string, never>;
+}> {
+  const res = await apiFetch(
+    `${API_BASE}/schedules/${encodeURIComponent(scheduleId)}/approval`,
+  );
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not load the approval"));
+  return res.json();
+}
+
+/**
+ * Headers for a call that records a human decision.
+ *
+ * The API names the decider from the identity it verified; `X-Actor` only carries
+ * the operator's name for a deployment that does not enforce authentication, so a
+ * decision is never anonymous there.
+ */
+function decisionHeaders(json: boolean): Record<string, string> {
+  const headers: Record<string, string> = json ? { "Content-Type": "application/json" } : {};
+  const actor = getSessionActor();
+  if (actor) headers["X-Actor"] = actor;
+  return headers;
+}
+
+/**
+ * Approve one finding.
+ *
+ * `grantStanding` is the powerful half: it delegates the same signature to every
+ * later run of the *identical* plan, so it needs `schedule.authorize` and it stops
+ * applying the moment the mapping, source shape or policy moves.
+ */
+export async function approveScheduleFinding(
+  scheduleId: string,
+  approvalId: string,
+  payload: {
+    reason: string;
+    compliance?: boolean;
+    schema_drift?: boolean;
+    fk_risk?: boolean;
+    grant_standing?: boolean;
+    expires_in_days?: number;
+  },
+): Promise<{
+  approval: import("./types").ScheduleApproval;
+  authorization: import("./types").StandingAuthorization;
+  schedule: PipelineSchedule;
+}> {
+  const res = await apiFetch(
+    `${API_BASE}/schedules/${encodeURIComponent(scheduleId)}/approvals/${encodeURIComponent(
+      approvalId,
+    )}/approve`,
+    {
+      method: "POST",
+      headers: decisionHeaders(true),
+      body: JSON.stringify(payload),
+    },
+  );
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not approve this finding"));
+  return res.json();
+}
+
+/** Reject a finding; the schedule is paused rather than left to re-refuse. */
+export async function rejectScheduleFinding(
+  scheduleId: string,
+  approvalId: string,
+  payload: { reason: string; disable?: boolean },
+): Promise<{
+  approval: import("./types").ScheduleApproval;
+  schedule: PipelineSchedule;
+}> {
+  const res = await apiFetch(
+    `${API_BASE}/schedules/${encodeURIComponent(scheduleId)}/approvals/${encodeURIComponent(
+      approvalId,
+    )}/reject`,
+    {
+      method: "POST",
+      headers: decisionHeaders(true),
+      body: JSON.stringify(payload),
+    },
+  );
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not reject this finding"));
+  return res.json();
+}
+
+/** Revoke standing authority. The record is kept, permanently unusable. */
+export async function revokeScheduleAuthorization(
+  scheduleId: string,
+  reason = "",
+): Promise<{ authorization: import("./types").StandingAuthorization }> {
+  const res = await apiFetch(
+    `${API_BASE}/schedules/${encodeURIComponent(scheduleId)}/authorization?reason=${encodeURIComponent(
+      reason,
+    )}`,
+    { method: "DELETE", headers: decisionHeaders(false) },
+  );
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not revoke the authorization"));
+  return res.json();
 }
 
 export async function createSchedule(
@@ -1743,11 +2090,13 @@ export async function updateConnector(
 
 export async function uploadFile(
   file: File,
-  options?: { enableOcr?: boolean },
+  options?: { enableOcr?: boolean; readOptions?: SourceReadOptions },
 ): Promise<ParsedUpload> {
   const formData = new FormData();
   formData.append("file", file);
   formData.append("enable_ocr", options?.enableOcr === true ? "true" : "false");
+  const readOptions = readOptionsPayload(options?.readOptions);
+  if (readOptions) formData.append("read_options_json", readOptions);
   const res = await apiFetch(`${API_BASE}/connectors/upload`, { method: "POST", body: formData, timeoutMs: LONG_REQUEST_TIMEOUT_MS });
   if (!res.ok) throw new Error(await parseApiError(res, "Upload failed"));
   return res.json();
@@ -2099,11 +2448,141 @@ export async function mapTransferPlan(
   return res.json();
 }
 
-export async function preflightTransferPlan(planId: string) {
+export type PreflightAcknowledgments = {
+  compliance_acknowledged?: boolean;
+  schema_drift_acknowledged?: boolean;
+  fk_risk_acknowledged?: boolean;
+  acknowledgment_actor?: string;
+  acknowledgment_reason?: string;
+};
+
+const PREFLIGHT_POLL_MS = 1500;
+const PREFLIGHT_POLL_DEADLINE_MS = 10 * 60 * 1000;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, ms);
+  });
+}
+
+/**
+ * Transport / proxy failures are not recipe refusals. A 504 HTML body used to
+ * become the fallback "Plan preflight failed" and Validate stayed Not run.
+ */
+export function isTransportFailure(message: string, status?: number): boolean {
+  if (status === 502 || status === 504 || status === 0) return true;
+  return /timed out|abort|504|502|network|failed to fetch|econnreset/i.test(message);
+}
+
+export function validateTransportMessage(
+  message: string,
+  rowCount?: number | null,
+): string {
+  // Studio estimates are `number | null`. Optional params are `undefined`.
+  // Do not invent a row count from 0 / null / NaN.
+  const n = typeof rowCount === "number" && Number.isFinite(rowCount) && rowCount > 0
+    ? rowCount
+    : 0;
+  const rows = n > 0 ? ` while checking ${n.toLocaleString()} row(s)` : "";
+  if (!isTransportFailure(message)) return message;
+  return (
+    `Validate did not finish${rows}. The control plane timed out or hung — `
+    + `Re-run Validate. Execute stays locked until the API returns a verdict.`
+  );
+}
+
+async function pollPlanPreflight(
+  planId: string,
+  runId: string,
+  onProgress?: (progress: {
+    status?: string;
+    elapsed_ms?: number;
+    rows_scanned?: number;
+    rows_estimate?: number;
+    phase?: string;
+  }) => void,
+): Promise<Record<string, unknown>> {
+  const deadline = Date.now() + PREFLIGHT_POLL_DEADLINE_MS;
+  let lastError = "Validate is still running.";
+  while (Date.now() < deadline) {
+    await sleep(PREFLIGHT_POLL_MS);
+    const res = await apiFetch(
+      `${API_BASE}/transfer/plans/${planId}/preflight${runId ? `?run_id=${encodeURIComponent(runId)}` : ""}`,
+      { timeoutMs: 20_000 },
+    );
+    if (res.status === 404) {
+      lastError = "Validate run was not found — Re-run Validate.";
+      continue;
+    }
+    if (res.status === 502 || res.status === 504) {
+      lastError = await parseApiError(res, `Control plane timed out (HTTP ${res.status})`);
+      continue;
+    }
+    if (!res.ok) throw new Error(await parseApiError(res, "Plan preflight failed"));
+    const data = await res.json() as {
+      status?: string;
+      error?: string;
+      passed?: boolean;
+      run_id?: string;
+      elapsed_ms?: number;
+      rows_scanned?: number;
+      rows_estimate?: number;
+      phase?: string;
+    };
+    if (data.status === "running" || data.status === "queued") {
+      onProgress?.({
+        status: data.status,
+        elapsed_ms: data.elapsed_ms,
+        rows_scanned: data.rows_scanned,
+        rows_estimate: data.rows_estimate,
+        phase: data.phase,
+      });
+      lastError = "Validate is still scanning the population.";
+      continue;
+    }
+    if (data.status === "failed") {
+      throw new Error(data.error || "Plan preflight failed");
+    }
+    return data;
+  }
+  throw new Error(
+    `${lastError} Re-run Validate — Execute stays locked until a verdict lands.`,
+  );
+}
+
+export async function preflightTransferPlan(
+  planId: string,
+  acknowledgments: PreflightAcknowledgments = {},
+  // The run shapes rows on the read, so the plan-scoped Validate — the call the
+  // wizard actually makes — has to carry the approved recipe too, or the gates
+  // score a source image the writer never sees.
+  shapeRecipe?: ShapeRecipeWire,
+  onProgress?: (progress: {
+    status?: string;
+    elapsed_ms?: number;
+    rows_scanned?: number;
+    rows_estimate?: number;
+    phase?: string;
+  }) => void,
+) {
   const res = await apiFetch(`${API_BASE}/transfer/plans/${planId}/preflight`, {
     method: "POST",
-    timeoutMs: LONG_REQUEST_TIMEOUT_MS,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      compliance_acknowledged: acknowledgments.compliance_acknowledged ?? false,
+      schema_drift_acknowledged: acknowledgments.schema_drift_acknowledged ?? false,
+      fk_risk_acknowledged: acknowledgments.fk_risk_acknowledged ?? false,
+      acknowledgment_actor: acknowledgments.acknowledgment_actor ?? "",
+      acknowledgment_reason: acknowledgments.acknowledgment_reason ?? "",
+      shape_recipe: shapeRecipe ?? null,
+      async_run: true,
+    }),
+    timeoutMs: 45_000,
   });
+  if (res.status === 202) {
+    const started = await res.json() as { plan_id?: string; run_id?: string };
+    return pollPlanPreflight(started.plan_id || planId, started.run_id || "", onProgress);
+  }
   if (!res.ok) throw new Error(await parseApiError(res, "Plan preflight failed"));
   return res.json();
 }
@@ -2216,6 +2695,7 @@ export async function runUniversalTransfer(options: {
   priorityDirection?: "asc" | "desc";
   limit?: number;
   dateLocale?: string;
+  numberLocale?: string;
   /** Client-supplied key; when omitted a fresh UUID is sent so HTTP retries converge. */
   idempotencyKey?: string;
   /** Validate→Execute ack trail — must match Studio Validate acknowledgments. */
@@ -2233,6 +2713,12 @@ export async function runUniversalTransfer(options: {
   /** Bound data contract — same fail-closed SIGNED gate as scheduled runs. */
   contractId?: string;
   requireSignedContract?: boolean;
+  /** Declared source read window (sheet, header row, skips, encoding, delimiter). */
+  readOptions?: SourceReadOptions;
+  /** Ordered row-local shaping applied on the read, before mapping. */
+  shapeRecipe?: ShapeRecipeWire;
+  /** Recipe identity Validate approved — a changed recipe is refused, not run. */
+  approvedShapeRecipeHash?: string;
 }) {
   const formData = new FormData();
   if (options.file) formData.append("file", options.file);
@@ -2253,11 +2739,28 @@ export async function runUniversalTransfer(options: {
   formData.append("backfill_new_fields", options.backfillNewFields === true ? "true" : "false");
   formData.append("write_via_staging", options.writeViaStaging === true ? "true" : "false");
   formData.append("enable_ocr", options.enableOcr === true ? "true" : "false");
+  // The same window the preview was profiled through — a run that omits it
+  // would read the active sheet and reconcile against rows nobody approved.
+  const runReadOptions = readOptionsPayload(options.readOptions);
+  if (runReadOptions) formData.append("read_options_json", runReadOptions);
+  // The recipe the operator approved, and its identity. Execute re-applies this
+  // recipe and refuses if the hash no longer matches what Validate scanned.
+  // An approval names a recipe, so it travels only with the recipe it names: a
+  // hash sent beside no recipe reads as "the approved recipe went missing" and
+  // is refused — which would block the pass-through run this is.
+  if (options.shapeRecipe?.steps?.length) {
+    formData.append("shape_recipe_json", JSON.stringify(options.shapeRecipe));
+    if (options.approvedShapeRecipeHash) {
+      formData.append("approved_shape_recipe_hash", options.approvedShapeRecipeHash);
+    }
+  }
   if (options.destExtra && Object.keys(options.destExtra).length) {
     formData.append("dest_extra_json", JSON.stringify(options.destExtra));
   }
   if (options.sourceExtra && Object.keys(options.sourceExtra).length) {
     formData.append("source_extra_json", JSON.stringify(options.sourceExtra));
+    const storedId = String(options.sourceExtra.file_id || "").trim();
+    if (storedId) formData.append("source_file_id", storedId);
   }
   if (options.priorityColumn) formData.append("priority_column", options.priorityColumn);
   if (options.priorityDirection) formData.append("priority_direction", options.priorityDirection);
@@ -2298,6 +2801,7 @@ export async function runUniversalTransfer(options: {
     options.requireSignedContract === true ? "true" : "false",
   );
   formData.append("date_locale", options.dateLocale || "");
+  formData.append("number_locale", options.numberLocale || "");
   formData.append(
     "compliance_acknowledged",
     options.complianceAcknowledged === true ? "true" : "false",
@@ -2544,7 +3048,10 @@ export async function fetchWorkspaceSettings(): Promise<{
 }> {
   const res = await apiFetch(`${API_BASE}/workspace/settings`);
   if (!res.ok) {
-    return { org_name: "Datawrap", timezone: "UTC", retention_days: 90 };
+    // Never invent settings. A refusal or an outage has to reach the page as
+    // itself: returning a plausible organisation name here showed a viewer a
+    // Settings screen that was pure fiction.
+    throw await apiErrorFrom(res, "Failed to load workspace settings");
   }
   return res.json();
 }
@@ -2564,9 +3071,42 @@ export async function updateWorkspaceSettings(body: {
     body: JSON.stringify(body),
   });
   if (!res.ok) {
-    throw new Error(await parseApiError(res, "Failed to save workspace settings"));
+    throw await apiErrorFrom(res, "Failed to save workspace settings");
   }
   return res.json();
+}
+
+export type EffectiveIdentity = {
+  email: string;
+  name: string;
+  platform_role: string;
+  workspace_id: string;
+  workspace_role: string;
+  effective_role: string;
+  permissions: string[];
+  can_write_connectors: boolean;
+  can_run_jobs: boolean;
+  can_manage_schedules: boolean;
+  can_manage_workspace: boolean;
+  workspace_choice_ambiguous: boolean;
+  must_change_password: boolean;
+  auth_required: boolean;
+};
+
+/** Who the API says you are, and what it will let you do in this workspace. */
+export async function fetchEffectiveIdentity(): Promise<EffectiveIdentity> {
+  const res = await apiFetch(`${API_BASE}/auth/me`);
+  if (!res.ok) throw await apiErrorFrom(res, "Failed to load your identity");
+  return res.json();
+}
+
+export async function changeOwnPassword(currentPassword: string, newPassword: string): Promise<void> {
+  const res = await apiFetch(`${API_BASE}/auth/change-password`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
+  });
+  if (!res.ok) throw await apiErrorFrom(res, "Failed to change your password");
 }
 
 export async function fetchAuditEvents(limit = 50, level?: string): Promise<Array<{
@@ -2584,6 +3124,14 @@ export async function fetchAuditEvents(limit = 50, level?: string): Promise<Arra
   if (!res.ok) return [];
   const data = await res.json();
   return data.events ?? [];
+}
+
+/** Server-side tenant-scoped audit download (not the last 100 table rows). */
+export async function exportAuditLog(format: "csv" | "json" = "csv"): Promise<Blob> {
+  const params = new URLSearchParams({ format, limit: "5000" });
+  const res = await apiFetch(`${API_BASE}/audit/export?${params}`);
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not export audit log"));
+  return res.blob();
 }
 
 export type SsoType = "saml" | "oidc" | "azure_ad";
@@ -2669,6 +3217,43 @@ export async function updateAiProviderSettings(provider: string, body: {
   return res.json();
 }
 
+export type PilotEngineChoice = "auto" | "local" | "hybrid" | "cloud";
+
+export type PilotEngineStatus = {
+  preference: PilotEngineChoice;
+  engine: string;
+  source: string;
+  reason: string;
+  configured_providers: string[];
+};
+
+export async function testAiProviderKey(provider: string): Promise<{
+  ok: boolean;
+  provider: string;
+  error: string;
+  capabilities: ModelCapabilities;
+}> {
+  const res = await apiFetch(`${API_BASE}/workspace/ai-providers/${provider}/test`, { method: "POST" });
+  if (!res.ok) throw new Error(await parseApiError(res, "Provider key test failed"));
+  return res.json();
+}
+
+export async function fetchPilotEngineStatus(): Promise<PilotEngineStatus> {
+  const res = await apiFetch(`${API_BASE}/workspace/pilot-engine`);
+  if (!res.ok) throw new Error("Failed to load Pilot engine setting");
+  return res.json();
+}
+
+export async function updatePilotEngine(engine: PilotEngineChoice): Promise<PilotEngineStatus> {
+  const res = await apiFetch(`${API_BASE}/workspace/pilot-engine`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ engine }),
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to save Pilot engine setting"));
+  return res.json();
+}
+
 export type WorkspaceApiKey = {
   id: string;
   name: string;
@@ -2700,58 +3285,169 @@ export async function revokeWorkspaceApiKey(keyId: string): Promise<void> {
   if (!res.ok) throw new Error(await parseApiError(res, "Failed to revoke API key"));
 }
 
+export type WorkspaceRole = "admin" | "editor" | "viewer";
+
 export type Workspace = {
   id: string;
   name: string;
   created_at: string;
   created_by: string;
+  member_count?: number;
 };
 
 export type WorkspaceMember = {
   workspace_id: string;
   email: string;
-  role: "owner" | "editor" | "viewer";
+  role: WorkspaceRole;
   added_at: string;
   added_by: string;
+  /** Whether this email can actually sign in, and how the account was provisioned. */
+  has_account?: boolean;
+  account_status?: "active" | "disabled" | "provisioned" | "no_account";
+  name?: string;
 };
 
-export async function fetchWorkspaces(): Promise<Workspace[]> {
-  const res = await apiFetch(`${API_BASE}/workspace/workspaces`);
+export type PlatformUser = {
+  email: string;
+  name: string;
+  role: "admin" | "member";
+  status: "active" | "disabled";
+  created_at: string;
+  created_by: string;
+  updated_at: string;
+  last_login_at: string | null;
+  must_change_password: boolean;
+  workspaces?: { workspace_id: string; role: WorkspaceRole }[];
+};
+
+export async function fetchWorkspaces(): Promise<{ workspaces: Workspace[]; platformAdmin: boolean; actor: string }> {
+  const res = await apiFetch(`${API_BASE}/team/workspaces`);
   if (!res.ok) throw new Error(await parseApiError(res, "Failed to load workspaces"));
   const data = await res.json();
-  return data.workspaces ?? [];
+  return { workspaces: data.workspaces ?? [], platformAdmin: !!data.platform_admin, actor: data.actor ?? "" };
 }
 
 export async function createWorkspace(name: string): Promise<Workspace> {
-  const res = await apiFetch(`${API_BASE}/workspace/workspaces`, {
+  const res = await apiFetch(`${API_BASE}/team/workspaces`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ name }),
   });
   if (!res.ok) throw new Error(await parseApiError(res, "Failed to create workspace"));
-  return res.json();
+  return (await res.json()).workspace;
+}
+
+export async function renameWorkspace(workspaceId: string, name: string): Promise<Workspace> {
+  const res = await apiFetch(`${API_BASE}/team/workspaces/${workspaceId}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to rename workspace"));
+  return (await res.json()).workspace;
+}
+
+export async function deleteWorkspace(workspaceId: string): Promise<void> {
+  const res = await apiFetch(`${API_BASE}/team/workspaces/${workspaceId}`, { method: "DELETE" });
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to delete workspace"));
 }
 
 export async function fetchWorkspaceMembers(workspaceId: string): Promise<WorkspaceMember[]> {
-  const res = await apiFetch(`${API_BASE}/workspace/workspaces/${workspaceId}/members`);
+  const res = await apiFetch(`${API_BASE}/team/workspaces/${workspaceId}/members`);
   if (!res.ok) throw new Error(await parseApiError(res, "Failed to load members"));
   const data = await res.json();
   return data.members ?? [];
 }
 
-export async function addWorkspaceMember(workspaceId: string, email: string, role: string): Promise<WorkspaceMember> {
-  const res = await apiFetch(`${API_BASE}/workspace/workspaces/${workspaceId}/members`, {
+export async function addWorkspaceMember(
+  workspaceId: string,
+  email: string,
+  role: string,
+  options: { createAccount?: boolean; name?: string } = {},
+): Promise<{ membership: WorkspaceMember; hasAccount: boolean; temporaryPassword: string | null }> {
+  const res = await apiFetch(`${API_BASE}/team/workspaces/${workspaceId}/members`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ email, role }),
+    body: JSON.stringify({ email, role, create_account: !!options.createAccount, name: options.name ?? "" }),
   });
   if (!res.ok) throw new Error(await parseApiError(res, "Failed to add member"));
-  return res.json();
+  const data = await res.json();
+  return { membership: data.membership, hasAccount: !!data.has_account, temporaryPassword: data.temporary_password ?? null };
+}
+
+export async function updateWorkspaceMemberRole(
+  workspaceId: string,
+  email: string,
+  role: string,
+): Promise<WorkspaceMember> {
+  const res = await apiFetch(`${API_BASE}/team/workspaces/${workspaceId}/members/${encodeURIComponent(email)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ role }),
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to change role"));
+  const data = await res.json();
+  return data.membership as WorkspaceMember;
 }
 
 export async function removeWorkspaceMember(workspaceId: string, email: string): Promise<void> {
-  const res = await apiFetch(`${API_BASE}/workspace/workspaces/${workspaceId}/members/${encodeURIComponent(email)}`, { method: "DELETE" });
+  const res = await apiFetch(`${API_BASE}/team/workspaces/${workspaceId}/members/${encodeURIComponent(email)}`, { method: "DELETE" });
   if (!res.ok) throw new Error(await parseApiError(res, "Failed to remove member"));
+}
+
+export async function fetchPlatformUsers(): Promise<PlatformUser[]> {
+  const res = await apiFetch(`${API_BASE}/team/users`);
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to load accounts"));
+  return (await res.json()).users ?? [];
+}
+
+export async function createPlatformUser(input: {
+  email: string;
+  name?: string;
+  platformRole?: "admin" | "member";
+  password?: string;
+  workspaceId?: string;
+  workspaceRole?: WorkspaceRole;
+}): Promise<{ user: PlatformUser; temporaryPassword: string | null }> {
+  const res = await apiFetch(`${API_BASE}/team/users`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      email: input.email,
+      name: input.name ?? "",
+      platform_role: input.platformRole ?? "member",
+      password: input.password ? input.password : null,
+      workspace_id: input.workspaceId ?? "",
+      workspace_role: input.workspaceRole ?? "viewer",
+    }),
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to create account"));
+  const data = await res.json();
+  return { user: data.user, temporaryPassword: data.temporary_password ?? null };
+}
+
+export async function updatePlatformUser(
+  email: string,
+  patch: { name?: string; platformRole?: "admin" | "member"; status?: "active" | "disabled" },
+): Promise<PlatformUser> {
+  const res = await apiFetch(`${API_BASE}/team/users/${encodeURIComponent(email)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name: patch.name, platform_role: patch.platformRole, status: patch.status }),
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to update account"));
+  return (await res.json()).user;
+}
+
+export async function resetPlatformUserPassword(email: string): Promise<string | null> {
+  const res = await apiFetch(`${API_BASE}/team/users/${encodeURIComponent(email)}/reset-password`, { method: "POST" });
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to reset password"));
+  return (await res.json()).temporary_password ?? null;
+}
+
+export async function deletePlatformUser(email: string): Promise<void> {
+  const res = await apiFetch(`${API_BASE}/team/users/${encodeURIComponent(email)}`, { method: "DELETE" });
+  if (!res.ok) throw new Error(await parseApiError(res, "Failed to delete account"));
 }
 
 export async function loginWorkspace(email: string, password: string): Promise<{
@@ -2765,7 +3461,10 @@ export async function loginWorkspace(email: string, password: string): Promise<{
     body: JSON.stringify({ email, password }),
   });
   if (!res.ok) {
-    throw new Error(await parseApiError(res, "Sign-in failed"));
+    // Carry the status: a refused password (401) and an unreachable control
+    // plane are different facts, and the sign-in screen cannot tell them apart
+    // from message text alone.
+    throw new ApiError(await parseApiError(res, "Sign-in failed"), res.status);
   }
   return res.json();
 }
@@ -2899,6 +3598,16 @@ export interface QuarantineInfo {
   job_id: string;
   rejected_rows: number;
   issue_count?: number;
+  /** Distinct source rows carrying a finding of their own. */
+  finding_rows?: number;
+  /** Rows the refused (atomic) write unit rolled back without a finding. */
+  rows_rolled_back?: number;
+  /** Rows the refused write unit counted, findings plus rollbacks. */
+  rows_refused_unit?: number;
+  /** Reject total that no retrievable finding or named rollback explains. */
+  rows_unaccounted?: number;
+  /** Destination DLQ table durability — independent of the control plane. */
+  dest_dlq_durable?: boolean | null;
   open_count?: number;
   /** write = load-time rejects; preflight = Validate/Run integrity findings */
   source?: "write" | "preflight" | "none" | string;
@@ -2912,6 +3621,8 @@ export interface QuarantineInfo {
     values?: Record<string, string>;
     chars?: string[];
     suggested_transform?: string;
+    suggested_fix?: string;
+    suggested_target_type?: string;
     _df_qid?: string;
     retry_status?: string;
   }[];
@@ -2984,7 +3695,7 @@ export async function downloadJobQuarantineCsv(
 ): Promise<{ filename: string; row_count: number; blob: Blob }> {
   const escape = (v: unknown) => `"${String(v ?? "").replace(/"/g, '""')}"`;
   const toCsv = (rows: QuarantineInfo["quarantine"]) => {
-    const lines = ["row,column,target,value,reason,policy,suggested_transform"];
+    const lines = ["row,column,target,value,reason,policy,suggested_transform,suggested_fix,suggested_target_type"];
     const mark = (v: unknown) => {
       let text = String(v ?? "");
       text = text
@@ -2998,7 +3709,7 @@ export async function downloadJobQuarantineCsv(
     };
     for (const r of rows) {
       lines.push(
-        [r.row, r.column, r.target, mark(r.value), r.reason, r.policy, r.suggested_transform]
+        [r.row, r.column, r.target, mark(r.value), r.reason, r.policy, r.suggested_transform, r.suggested_fix, r.suggested_target_type]
           .map(escape)
           .join(","),
       );
@@ -3189,15 +3900,28 @@ export type SecurityPosture = {
   audit_logging: boolean;
   pii_detection: boolean;
   ip_allowlist_enabled: boolean;
+  ip_allowlist_enforced?: boolean;
   mfa_required: boolean;
+  mfa_enforced?: boolean;
   session_timeout_hours: number;
+  session_timeout_enforced?: boolean;
+  byok_encrypts_secrets?: boolean;
   tls_version: string;
   compliance: Array<{ framework: string; status: string; evidence: string }>;
   attestations: Array<{ name: string; last_completed?: string | null; next_due?: string | null; status?: string }>;
 };
 
-export async function fetchTenant(): Promise<Tenant | null> {
-  const res = await apiFetch(`${API_BASE}/workspace/tenant`);
+/** The tenant of a named workspace, or of the workspace being viewed.
+ *
+ * The named form exists because the Enterprise tab lets an admin point at a
+ * workspace other than the active one: resolving that read against the session's
+ * workspace reported a saved tenant as "No tenant configured".
+ */
+export async function fetchTenant(workspaceId?: string): Promise<Tenant | null> {
+  const res = await apiFetch(
+    `${API_BASE}/workspace/tenant`,
+    workspaceId ? { headers: { "X-Workspace-Id": workspaceId } } : {},
+  );
   if (!res.ok) return null;
   return res.json();
 }
@@ -3205,7 +3929,10 @@ export async function fetchTenant(): Promise<Tenant | null> {
 export async function createTenant(body: Omit<Tenant, "id" | "created_at" | "updated_at">): Promise<Tenant> {
   const res = await apiFetch(`${API_BASE}/workspace/tenant`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    // The scope in the body is the scope of the request: without this the
+    // session's workspace header disagrees with the workspace named on the
+    // form, and the API refuses the write as a cross-workspace borrow.
+    headers: { "Content-Type": "application/json", ...(body.workspace_id ? { "X-Workspace-Id": body.workspace_id } : {}) },
     body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error(await parseApiError(res, "Could not create tenant"));
@@ -3231,14 +3958,24 @@ export async function downloadSecurityReport(): Promise<Blob> {
   return res.blob();
 }
 
-export async function fetchSecurityPosture(): Promise<SecurityPosture> {
-  const res = await apiFetch(`${API_BASE}/workspace/security/posture`);
+export async function fetchSecurityPosture(workspaceId?: string): Promise<SecurityPosture> {
+  const res = await apiFetch(
+    `${API_BASE}/workspace/security/posture`,
+    workspaceId ? { headers: { "X-Workspace-Id": workspaceId } } : {},
+  );
   if (!res.ok) throw new Error(await parseApiError(res, "Could not load security posture"));
   return res.json();
 }
 
-export async function fetchByokKeys(): Promise<{ keys: ByokKey[] }> {
-  const res = await apiFetch(`${API_BASE}/workspace/tenant/byok-keys`);
+export async function fetchByokKeys(workspaceId?: string): Promise<{ keys: ByokKey[] }> {
+  const res = await apiFetch(
+    `${API_BASE}/workspace/tenant/byok-keys`,
+    workspaceId ? { headers: { "X-Workspace-Id": workspaceId } } : {},
+  );
+  // Keys hang off a tenant, so a workspace with no tenant has none — that is an
+  // empty list, not a failed read. Reporting it as an error printed "No tenant
+  // configured" as a red banner over a working page.
+  if (res.status === 404) return { keys: [] };
   if (!res.ok) throw new Error(await parseApiError(res, "Could not load BYOK keys"));
   return res.json();
 }
@@ -3253,15 +3990,30 @@ export async function createByokKey(body: { label: string; provider: ByokKey["pr
   return res.json();
 }
 
+export async function rotateByokKey(keyId: string): Promise<ByokKey> {
+  const res = await apiFetch(`${API_BASE}/workspace/tenant/byok-keys/${encodeURIComponent(keyId)}/rotate`, {
+    method: "POST",
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not rotate BYOK key"));
+  return res.json();
+}
+
 export type ProofLedger = {
   generated_at: string;
   headline: string;
   metrics: {
     unique_transfer_drivers: number;
+    desktop_lab_catalog_slots?: number;
+    desktop_lab_duplex_passed?: number;
+    desktop_lab_unique_engines?: number;
     transfer_live_drivers: string[];
     catalog_transfer_ready_aliases?: number;
     live_route_combinations?: number;
     production_sku_routes: number;
+    production_sku_sold?: number;
+    production_sku_driver_missing?: number;
+    production_sku_refused?: number;
+    production_sku_note?: string;
     fidelity_proofs_on_disk: number;
     fidelity_proofs_passed: number;
     planned_catalog_entries?: number;
@@ -3273,6 +4025,9 @@ export type ProofLedger = {
     dest_format: string;
     route: string;
     status: string;
+    sold?: boolean;
+    validate_ok?: boolean;
+    driver_gap?: string | null;
   }[];
   recent_proofs: {
     id: string;
@@ -3322,6 +4077,86 @@ export async function runFidelityProof(): Promise<FidelityProofResult> {
     timeoutMs: 120_000,
   });
   if (!res.ok) throw new Error(await parseApiError(res, "Fidelity proof failed"));
+  return res.json();
+}
+
+export type DesktopLabConnector = {
+  catalog_id: string;
+  driver: string;
+  role: string;
+  family: string;
+  dest_status: string;
+  source_status: string;
+  dest_error?: string;
+  source_error?: string;
+  dest_rows?: number | null;
+  source_rows?: number | null;
+  duplex: boolean;
+};
+
+export type DesktopLabReport = {
+  success?: boolean;
+  available?: boolean;
+  catalog_slots: number;
+  catalog_slots_duplex_passed: number;
+  unique_engines_duplex_passed: number;
+  dest_passed?: number;
+  source_passed?: number;
+  failed?: number;
+  skipped?: number;
+  honesty?: Record<string, unknown>;
+  connectors?: DesktopLabConnector[];
+  error?: string;
+};
+
+export async function runDesktopLab(): Promise<DesktopLabReport> {
+  const res = await apiFetch(`${API_BASE}/workspace/proofs/desktop-lab`, {
+    method: "POST",
+    timeoutMs: 300_000,
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Desktop lab failed"));
+  return res.json();
+}
+
+export async function fetchDesktopLab(): Promise<DesktopLabReport> {
+  const res = await apiFetch(`${API_BASE}/workspace/proofs/desktop-lab`);
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not load desktop lab"));
+  return res.json();
+}
+
+export type DesktopLabCrossReport = {
+  success?: boolean;
+  available?: boolean;
+  unique_engines?: string[];
+  unique_engines_seeded?: string[];
+  pairs: number;
+  passed: number;
+  failed: number;
+  skipped: number;
+  routes?: Array<{
+    source: string;
+    destination: string;
+    status: string;
+    error?: string;
+    dest_count?: number | null;
+    integrity?: string;
+  }>;
+  honesty?: Record<string, unknown>;
+  error?: string;
+};
+
+export async function runDesktopLabCross(): Promise<DesktopLabCrossReport> {
+  const res = await apiFetch(`${API_BASE}/workspace/proofs/desktop-lab-cross`, {
+    method: "POST",
+    timeoutMs: 900_000,
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Unique-engine matrix failed"));
+  return res.json();
+}
+
+export async function fetchDesktopLabCross(): Promise<DesktopLabCrossReport> {
+  const res = await apiFetch(`${API_BASE}/workspace/proofs/desktop-lab-cross`);
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not load unique-engine matrix"));
   return res.json();
 }
 
@@ -3857,6 +4692,13 @@ export interface TransformRunResult {
   model_count: number;
   failed_model_count: number;
   failed_test_count: number;
+  /** Count-proven ledger — failing error tests only; not a live-matrix claim. */
+  row_accounting?: {
+    models_run: number;
+    rows_written: number;
+    rows_quarantined: number;
+    tests_failed: number;
+  };
 }
 
 export async function runTransformProject(

@@ -14,6 +14,8 @@ import {
   type ContractTab,
 } from "../components/ContractDetailDrawer";
 import { useToast } from "../components/Toast";
+import { PERMISSIONS, useWriteGate } from "../lib/PermissionsContext";
+import { PermissionNotice } from "../components/PermissionNotice";
 import {
   DataContractSummary,
   deprecateContract,
@@ -55,6 +57,8 @@ function upsertContract(list: DataContractSummary[], next: DataContractSummary):
 
 export function ContractsPage({ active = true }: { active?: boolean }) {
   const { toast } = useToast();
+  /** Signing, deprecating and resetting a breaker are writes (connector.write). */
+  const contractWrite = useWriteGate(PERMISSIONS.connectorWrite);
   const toastRef = useRef(toast);
   toastRef.current = toast;
 
@@ -177,6 +181,10 @@ export function ContractsPage({ active = true }: { active?: boolean }) {
   const closeDrawer = () => setDrawerOpen(false);
 
   const run = async (id: string, fn: () => Promise<unknown>, ok: string) => {
+    if (!contractWrite.allowed) {
+      toast({ title: "No write permission", message: contractWrite.reason, tone: "warning" });
+      return;
+    }
     setBusyId(id);
     try {
       await fn();
@@ -211,6 +219,11 @@ export function ContractsPage({ active = true }: { active?: boolean }) {
       description="Signed schema agreements that gate transfers and detect drift. Sign / deprecate are workspace lifecycle status flips — not cryptographic signatures or an MDM catalog."
     >
       <PageFrame className="df2-contracts-workspace">
+        <PermissionNotice
+          allowed={contractWrite.allowed}
+          reason={contractWrite.reason}
+          what="Contracts are read-only for you."
+        />
         <div className="df2-alert df2-alert-info" role="note">
           <DtIcon name="info" size={18} />
           <div>

@@ -39,7 +39,7 @@ from services.brand_env import getenv_brand
 from services.cdc_cursor_gap import CdcCursorGapError, CdcOplogGapError
 from services.cdc_engine import ChangeBatch
 
-from connectors.mongodb_common import _mongo_client
+from connectors.mongodb_common import _new_mongo_client
 from connectors.mongodb_reader import (
     _connection_string,
     _serialize,
@@ -145,7 +145,11 @@ class MongodbChangeStreamCdc:
         self.batch_size = batch_size
         self.max_wait_seconds = max_wait_seconds
         self.full_document = full_document
-        self.client = _mongo_client(_connection_string(cfg))
+        # Dedicated (uncached) client: this stream owns the lifecycle and calls
+        # close() on lease release. Sharing the pooled client would let one
+        # stream's shutdown poison every concurrent bulk reader/writer on the
+        # same URI ("Cannot use MongoClient after close").
+        self.client = _new_mongo_client(_connection_string(cfg))
         self.coll = self.client[self.db_name][collection]
         if isinstance(resume_token, str):
             try:

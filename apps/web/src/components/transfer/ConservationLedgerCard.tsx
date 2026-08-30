@@ -41,7 +41,12 @@ export function ConservationLedgerCard({
   const writer = writerHeadline(job);
   const measured = isDestMeasured(ledger);
   const disagrees = writerAckDisagrees(ledger);
-  const unbalanced = Boolean(ledger && ledger.balanced === false);
+  // A run whose read was never counted is *unmeasured*, not unbalanced: there
+  // is no equation to fail. Calling it "Ledger unbalanced — rows read do not
+  // equal dest COUNT(*)" beside "READ —" states a comparison that never ran.
+  const unmeasuredRead =
+    Boolean(ledger) && (ledger?.rows_read == null || ledger?.conservation_kind === "unmeasured");
+  const unbalanced = Boolean(ledger && ledger.balanced === false) && !unmeasuredRead;
   const isMirror = ledger?.conservation_kind === "mirror";
   const isJob = ledger?.conservation_kind === "job_rollup";
   const isArtifact = ledger?.rows_written_source === "artifact_readback";
@@ -65,6 +70,8 @@ export function ConservationLedgerCard({
   const unit = isMirror ? "ACTIVE" : isJob && dest.value === "—" ? "STREAMS" : isArtifact ? "RECORDS" : isVector ? "IDENTITIES" : isScd2 ? "CURRENT" : isAppend || isKeyed ? "DEST Δ" : "COUNT(*)";
   const nextTitle = unbalanced
     ? "Ledger unbalanced"
+    : unmeasuredRead
+      ? "Not proven — no measured read"
     : measured
       ? isAppend
         ? "Append delta balanced"
@@ -90,6 +97,8 @@ export function ConservationLedgerCard({
             : ledger && (ledger.missing_keys || ledger.extra_keys)
               ? "COUNT(*) balanced or not, dest-engine keyset found MISSING_TARGET or EXTRA_TARGET keys. COUNT(*) can net missing+extra to a false balance."
               : "Rows read do not equal dest COUNT(*) plus hold-outs and skips."
+    : unmeasuredRead
+      ? "No source row count was captured, so nothing is claimed either way — this is not a balance failure. Re-run so Gate-8 counts the read, then compare."
     : measured
       ? isJob
         ? dest.value === "—"
@@ -258,7 +267,7 @@ export function ConservationLedgerCard({
       )}
 
       <div className="df2-conservation-ledger-next">
-        <DtIcon name={unbalanced || !measured ? "alert" : "check"} size={14} />
+        <DtIcon name={unbalanced || unmeasuredRead || !measured ? "alert" : "check"} size={14} />
         <div>
           <strong>{nextTitle}</strong>
           <span>{nextBody}</span>

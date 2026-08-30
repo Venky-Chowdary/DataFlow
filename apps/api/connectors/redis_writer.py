@@ -16,7 +16,7 @@ from services.primary_key import (
 from services.sync_cursor import is_overwrite_sync
 from services.value_serializer import json_default, sanitize_json_value
 
-from connectors.redis_reader import _redis_client, redis_key_for
+from connectors.redis_reader import _redis_client, load_redis_json_doc, redis_key_for
 from connectors.writer_common import WriteResult as _WriteResult
 from connectors.writer_common import (
     build_mapped_rows_with_details,
@@ -68,12 +68,7 @@ def _fetch_redis_physical_types(
                 raw = client.get(key)
                 if not raw:
                     continue
-                try:
-                    if isinstance(raw, (bytes, bytearray)):
-                        raw = raw.decode("utf-8")
-                    doc = json.loads(raw)
-                except (TypeError, ValueError, UnicodeDecodeError, json.JSONDecodeError):
-                    continue
+                doc = load_redis_json_doc(raw)
                 if not isinstance(doc, dict):
                     continue
                 sampled += 1
@@ -230,7 +225,9 @@ def _normalize_redis_typed_doc(
 
     out = dict(doc)
     for col, typ in zip(target_cols, logical_types):
-        if col not in out or out[col] is None:
+        from services.value_serializer import is_reader_null_cell
+
+        if col not in out or is_reader_null_cell(out[col]):
             continue
         upper = (typ or "").upper()
         if upper in {"UUID", "UNIQUEIDENTIFIER", "GUID"}:
@@ -296,19 +293,11 @@ def _redis_row_to_doc(
     """Build Redis JSON doc with null-polarity honesty.
 
     * ``DF_MISSING`` / STOP_COLUMN → omit key (sparse merge keeps prior JSON)
-    * ``None`` / ``SQL_NULL_SENTINEL`` → JSON ``null`` (explicit wipe)
+    * ``None`` / reader-null → JSON ``null`` (explicit wipe)
     """
-    from services.value_serializer import SQL_NULL_SENTINEL, is_missing_sentinel
+    from connectors.writer_common import present_field_bindings
 
-    doc: dict[str, Any] = {}
-    for c, v in zip(target_cols, row):
-        if is_missing_sentinel(v):
-            continue
-        if v is None or v == SQL_NULL_SENTINEL:
-            doc[c] = None
-        else:
-            doc[c] = v
-    return doc
+    return present_field_bindings(dict(zip(target_cols, row)))
 
 
 # Thin aliases — tests/engine may import these names from the writer module.
@@ -342,7 +331,9 @@ def _resolve_redis_key_id(
 
         if not is_present_cdc_row_key(val):
             return None, col
-        parts.append(str(val))
+        from services.value_serializer import present_cell_text
+
+        parts.append(present_cell_text(val) or "")
     return "|".join(parts), cols[0]
 
 
@@ -794,10 +785,7 @@ def write_mapped_rows(
                 if needs_merge:
                     existing_raw = client.get(key)
                     if existing_raw:
-                        try:
-                            existing = json.loads(existing_raw)
-                        except (TypeError, ValueError, json.JSONDecodeError):
-                            existing = None
+                        existing = load_redis_json_doc(existing_raw)
                         if isinstance(existing, dict):
                             doc = {**existing, **doc}
                 safe_doc = sanitize_json_value(doc)

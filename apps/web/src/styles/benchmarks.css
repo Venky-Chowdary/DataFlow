@@ -68,7 +68,7 @@
 .df2-page-benchmarks-section h3 {
   margin: 0 0 8px;
   font-size: 15px;
-  font-weight: 650;
+  font-weight: 600;
   color: var(--df-ink-primary, #0f172a);
 }
 
@@ -110,6 +110,40 @@
 
 .df2-page-benchmarks-table tr:last-child td {
   border-bottom: none;
+}
+
+/* Proof surfaces are long identifiers (quarantine_panel + rejected_details).
+   Held on one line they pushed the column past the container and the evidence
+   read as a truncated token behind a scrollbar — the one cell that must be
+   readable in full. Wrap it instead of scrolling the table. */
+.df2-page-benchmarks-table td code {
+  white-space: normal;
+  /* break-word, not anywhere: wrap at the `+` and space boundaries between
+     artifacts, and only split a single artifact name if it cannot fit at all. */
+  overflow-wrap: break-word;
+  word-break: normal;
+}
+
+.df2-page-benchmarks-table td:has(code) {
+  white-space: normal;
+  /* Wide enough for the longest artifact name we emit
+     (`proof_ledger.run_fidelity_proof`) to stay one unbroken token. */
+  min-width: 34ch;
+}
+
+/* Route (`postgresql → snowflake`) and the check list are open-ended, and held
+   on one line they pushed the artifact ledger 1383px past its container at
+   1280. They wrap; timestamps, tier and counts stay on one line. */
+.df2-page-benchmarks-table td.df2-page-benchmarks-cell-wrap {
+  white-space: normal;
+  overflow-wrap: break-word;
+  min-width: 18ch;
+}
+
+/* Sentence columns kept the table wider than its container, so the evidence
+   column paid for it with a scrollbar. Prose wraps; the artifact names do not. */
+.df2-page-benchmarks-table--prose td {
+  white-space: normal;
 }
 
 .df2-page-benchmarks-product strong {

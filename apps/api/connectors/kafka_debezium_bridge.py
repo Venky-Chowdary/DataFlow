@@ -12,6 +12,8 @@ import logging
 from dataclasses import dataclass, field
 from typing import Any, Iterator
 
+from services.value_serializer import json_loads_exact
+
 logger = logging.getLogger(__name__)
 
 
@@ -30,7 +32,7 @@ def parse_debezium_envelope(payload: dict[str, Any] | str) -> DebeziumChange | N
     """Parse a Debezium JSON envelope (payload or full message)."""
     if isinstance(payload, str):
         try:
-            payload = json.loads(payload)
+            payload = json_loads_exact(payload)
         except json.JSONDecodeError:
             return None
     if not isinstance(payload, dict):
@@ -190,7 +192,7 @@ class KafkaDebeziumConsumer:
                     yield parsed
                 elif isinstance(parsed, str):
                     try:
-                        obj = json.loads(parsed)
+                        obj = json_loads_exact(parsed)
                     except json.JSONDecodeError:
                         yield {"_kafka_value": parsed}
                         continue

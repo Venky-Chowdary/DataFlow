@@ -103,9 +103,9 @@ export function buildConnectionWorkbenchContext(
     const s = relatedSchedules.find((x) => x.enabled);
     scheduleLabel = s ? `${s.interval} · ${s.name}` : "Manual";
   } else if (enabledScheduleCount > 1) {
-    scheduleLabel = `${enabledScheduleCount} pipelines enabled`;
+    scheduleLabel = `${enabledScheduleCount} schedules enabled`;
   } else if (relatedSchedules.length > 0) {
-    scheduleLabel = `${relatedSchedules.length} pipeline(s) paused`;
+    scheduleLabel = `${relatedSchedules.length} schedule(s) paused`;
   }
 
   return {

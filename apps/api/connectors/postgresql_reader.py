@@ -10,6 +10,7 @@ from typing import Any
 from connectors.base import ReadBatch
 from connectors.driver_guard import require_driver
 from connectors.postgresql_conn import get_connection
+from connectors.sql_identifiers import split_qualified_table
 
 _api_root = Path(__file__).resolve().parents[1]
 
@@ -33,6 +34,11 @@ def _cell(value: Any) -> str:
     return cell_to_string(value, preserve_sql_null=True)
 
 
+def _bind(schema: str | None, table: str) -> tuple[str, str]:
+    """Studio ``public.t`` plus connector schema=public must address ``public.t``."""
+    sch, tbl = split_qualified_table(table, schema or "public")
+    return sch or "public", tbl
+
 
 def count_table_rows(
     *,
@@ -48,7 +54,7 @@ def count_table_rows(
 ) -> int:
     from psycopg2 import sql
 
-    schema = schema or "public"
+    schema, table = _bind(schema, table)
     conn = get_connection(
         host=host,
         port=port,
@@ -107,11 +113,14 @@ def _json_column_names(cur, schema: str, table: str) -> frozenset[str]:
         """,
         (schema, table),
     )
-    return frozenset(
-        str(name)
-        for name, data_type, udt_name in cur.fetchall()
-        if is_json_catalog_type(str(data_type or ""), str(udt_name or ""))
-    )
+    def _json_row(row) -> bool:
+        if len(row) < 2:
+            return False
+        data_type = str(row[1] or "")
+        udt_name = str(row[2] or "") if len(row) > 2 else ""
+        return is_json_catalog_type(data_type, udt_name)
+
+    return frozenset(str(row[0]) for row in cur.fetchall() if _json_row(row))
 
 
 def _ordered_column_names(cur, schema: str, table: str) -> list[str]:
@@ -213,7 +222,7 @@ def read_table_batch(
 
     from services.source_snapshot import get_source_snapshot_conn
 
-    schema = schema or "public"
+    schema, table = _bind(schema, table)
     # Prefer an explicit conn, then a transfer-bound RR snapshot (Property 3).
     shared = conn if conn is not None else get_source_snapshot_conn()
     close_conn = shared is None
@@ -304,7 +313,7 @@ def read_table_scan_batch(
     from connectors.sql_snapshot_scan import close_table_scan
     from services.source_snapshot import get_source_snapshot_conn
 
-    schema = schema or "public"
+    schema, table = _bind(schema, table)
     if not scan_state.get("started"):
         shared = get_source_snapshot_conn()
         close_conn = shared is None
@@ -441,10 +450,10 @@ def read_table_cursor_batch(
     """
     from psycopg2 import sql
 
-    from services.keyset_pagination import split_cursor_bookmark
+    from services.keyset_pagination import present_cursor_bookmark, split_cursor_bookmark
     from services.source_snapshot import get_source_snapshot_conn
 
-    schema = schema or "public"
+    schema, table = _bind(schema, table)
     shared = conn if conn is not None else get_source_snapshot_conn()
     close_conn = shared is None
     if shared is None:
@@ -479,7 +488,8 @@ def read_table_cursor_batch(
                     sql.Identifier(schema),
                     sql.Identifier(table),
                 )
-            if cursor_after:
+            bookmark = present_cursor_bookmark(cursor_after)
+            if bookmark is not None:
                 # Composite order: cursor then primary key when provided so tied
                 # watermarks do not skip peer rows (timestamp-cursor Airbyte trap).
                 pk = (cursor_primary_key or "").strip()
@@ -494,7 +504,7 @@ def read_table_cursor_batch(
                         sql.Identifier(pk),
                     )
                     cur_val, pk_val = split_cursor_bookmark(
-                        cursor_after, has_tiebreak=True
+                        bookmark, has_tiebreak=True
                     )
                     cur.execute(query, (cur_val, pk_val, limit))
                 else:
@@ -503,7 +513,7 @@ def read_table_cursor_batch(
                         sql.Identifier(cursor_column),
                         sql.Identifier(cursor_column),
                     )
-                    cur_val, _ = split_cursor_bookmark(cursor_after, has_tiebreak=False)
+                    cur_val, _ = split_cursor_bookmark(bookmark, has_tiebreak=False)
                     cur.execute(query, (cur_val, limit))
             else:
                 pk = (cursor_primary_key or "").strip()

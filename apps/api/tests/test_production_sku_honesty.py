@@ -9,63 +9,13 @@ from __future__ import annotations
 
 import pytest
 
-from src.transfer.connector_capabilities import driver_available, resolve_driver_type
+from services.sku_honesty import route_driver_gap
+from src.transfer.connector_capabilities import resolve_driver_type
 from src.transfer.registry import LIVE_MATRIX, PRODUCTION_SKU, validate_transfer
-
-# Destinations that require optional packages; skip (not fail) when absent.
-_OPTIONAL_DRIVERS = {
-    "sqlserver",
-    "oracle",
-    "sftp",
-    "adls",
-    "snowflake",
-    "bigquery",
-    "s3",
-    "salesforce",
-    "hubspot",
-    "pgvector",
-    "qdrant",
-    "weaviate",
-    "pinecone",
-    "milvus",
-    "kafka",
-}
 
 
 def _route_skip_reason(src_fmt: str, dst_fmt: str) -> str | None:
-    src = resolve_driver_type(src_fmt)
-    dst = resolve_driver_type(dst_fmt)
-    if src in _OPTIONAL_DRIVERS and not driver_available(src, src_fmt):
-        return f"source driver {src} not installed"
-    if dst in _OPTIONAL_DRIVERS and not driver_available(dst, dst_fmt):
-        return f"destination driver {dst} not installed"
-    # File formats always "available"
-    if src in {"csv", "json", "jsonl", "tsv", "parquet", "ndjson", "excel", "avro", "orc", "xml"}:
-        pass
-    elif src not in {"sqlite", "postgresql", "mysql", "mongodb", "rest_api", "iceberg"} and not driver_available(
-        src, src_fmt
-    ):
-        return f"source driver {src} not installed"
-    if dst not in {
-        "sqlite",
-        "postgresql",
-        "mysql",
-        "mongodb",
-        "csv",
-        "json",
-        "jsonl",
-        "tsv",
-        "excel",
-        "parquet",
-        "ndjson",
-        "avro",
-        "orc",
-        "xml",
-        "iceberg",
-        "rest_api",
-    } and dst not in _OPTIONAL_DRIVERS and not driver_available(dst, dst_fmt):
-        return f"destination driver {dst} not installed"
-    return None
+    return route_driver_gap(src_fmt, dst_fmt)
 
 
 @pytest.mark.parametrize(

@@ -136,14 +136,15 @@ def _role_from_samples(samples: list[Any], inferred_type: str) -> tuple[str | No
     if not non_empty:
         return None, 0.0
 
+    from services.transform_engine import decimal_wire_value
+
     numeric = 0
     date_like = 0
     currency_like = 0
     id_like = 0
 
     for s in non_empty[:20]:
-        cleaned = s.replace(",", "").replace("$", "").strip()
-        if re.match(r"^-?\d+(\.\d+)?$", cleaned):
+        if decimal_wire_value(s) is not None:
             numeric += 1
         if re.match(r"^\d{4}-\d{2}-\d{2}", s) or re.match(r"^\d{8}$", s):
             date_like += 1

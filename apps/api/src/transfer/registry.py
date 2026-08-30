@@ -359,6 +359,20 @@ def get_capabilities() -> dict:
             "error": str(exc),
         }
 
+    try:
+        from services.sku_honesty import sku_honesty_summary
+
+        sku_counts = sku_honesty_summary()
+        sku_sold = sku_counts["production_sku_sold"]
+        sku_missing = sku_counts["production_sku_driver_missing"]
+        sku_refused = sku_counts["production_sku_refused"]
+        sku_note = sku_counts["note"]
+    except Exception:
+        sku_sold = 0
+        sku_missing = 0
+        sku_refused = 0
+        sku_note = "SKU honesty summary unavailable"
+
     return {
         "live_combinations": combos,
         "source_formats": LIVE_SOURCE_FORMATS,
@@ -369,6 +383,9 @@ def get_capabilities() -> dict:
         "transfer_live_count": summary["transfer_live_count"],
         "unique_transfer_drivers": len(drivers),
         "production_sku_routes": len(PRODUCTION_SKU),
+        "production_sku_sold": sku_sold,
+        "production_sku_driver_missing": sku_missing,
+        "production_sku_refused": sku_refused,
         "connect_only_count": summary["connect_only_count"],
         "live_route_combinations": summary["live_route_combinations"],
         "operations": ["upload", "migration", "convert", "dump", "transfer"],
@@ -378,10 +395,13 @@ def get_capabilities() -> dict:
         "description": (
             f"{len(drivers)} unique transfer-ready drivers "
             f"({summary['transfer_live_count']} catalog aliases). "
-            f"{len(PRODUCTION_SKU)} PRODUCTION_SKU routes committed in CI; "
+            f"{sku_sold} of {len(PRODUCTION_SKU)} PRODUCTION_SKU routes sold on this host "
+            f"(validate_transfer + driver present; {sku_missing} driver-missing, "
+            f"{sku_refused} refused). "
             f"{summary['live_route_combinations']} capability combinations. "
-            "Catalog roadmap entries require driver implementation before production use."
+            "Catalog tiles are not transfer-live."
         ),
+        "production_sku_note": sku_note,
     }
 
 

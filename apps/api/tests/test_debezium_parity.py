@@ -321,6 +321,36 @@ def test_signal_table_poll_tracks_processed_ids(tmp_path, monkeypatch) -> None:
     assert seen2 == seen
 
 
+def test_schedule_snapshot_mode_is_cdc_only() -> None:
+    from services.cdc_snapshot_mode import schedule_snapshot_mode
+
+    assert schedule_snapshot_mode("cdc", "when_needed") == "when_needed"
+    assert schedule_snapshot_mode("full_refresh_overwrite", "when_needed") == ""
+    assert schedule_snapshot_mode("cdc", "") == "initial"
+
+
+def test_snapshot_mode_preflight_gate_uses_execute_kernel() -> None:
+    from services.cdc_snapshot_mode import build_snapshot_mode_preflight_gate
+
+    blocked = build_snapshot_mode_preflight_gate(
+        sync_mode="cdc",
+        stream_contracts=[{"selected": True, "snapshot_mode": "never"}],
+        watermark=None,
+    )
+    assert blocked and blocked["status"] == "block"
+    assert blocked["details"]["primary_action"] == "open_advanced"
+
+    streamed = build_snapshot_mode_preflight_gate(
+        sync_mode="cdc",
+        stream_contracts=[{"selected": True, "snapshot_mode": "never"}],
+        watermark="0/16B8A40",
+    )
+    assert streamed and streamed["status"] == "pass"
+    assert streamed["details"]["run_snapshot"] is False
+
+    assert build_snapshot_mode_preflight_gate(sync_mode="full_refresh_append") is None
+
+
 def test_snapshot_modes_debezium_compatible() -> None:
     assert parse_snapshot_mode("initial") == SnapshotMode.INITIAL
     assert should_run_snapshot(SnapshotMode.INITIAL, watermark=None) is True
@@ -735,7 +765,7 @@ def test_idle_change_stream_persists_post_batch_resume_token() -> None:
         db.__getitem__ = MagicMock(return_value=coll)
         client = MagicMock()
         client.__getitem__ = MagicMock(return_value=db)
-        with patch("connectors.mongodb_change_stream._mongo_client", return_value=client):
+        with patch("connectors.mongodb_change_stream._new_mongo_client", return_value=client):
             return MongodbChangeStreamCdc(
                 local,
                 collection="orders",

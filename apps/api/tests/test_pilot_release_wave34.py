@@ -68,6 +68,9 @@ def test_search_knowledge_empty_shape_from_tool(monkeypatch):
     assert tr.success
     assert tr.output["count"] == 0
     assert tr.output.get("empty") is True
+    assert tr.output.get("grounded") is False
+    assert tr.output.get("source") == "unsupported_question"
+    assert "will not" in (tr.output.get("answer") or "").lower()
     assert "No grounded" in (tr.output.get("hint") or "")
 
 

@@ -11,7 +11,22 @@ from __future__ import annotations
 import logging
 from typing import Any, Iterable
 
+from services.value_serializer import present_cell_text
+
 logger = logging.getLogger(__name__)
+
+
+def _fk_key(value: Any) -> str | None:
+    """Present FK cell. Reader-wired SQL NULL is not a parent lookup key."""
+    return present_cell_text(value)
+
+
+def _fk_display(value: Any, *, limit: int = 80) -> str:
+    text = _fk_key(value)
+    if text is None:
+        return ""
+    return text[:limit]
+
 
 # Cap distinct FK values probed from the Validate sample (O(sample), not O(table)).
 _MAX_DISTINCT_FK_VALUES = 500
@@ -33,12 +48,8 @@ def distinct_fk_values(
         if not isinstance(row, dict):
             continue
         raw = row.get(column)
-        if raw is None:
-            continue
-        if isinstance(raw, str) and not raw.strip():
-            continue
-        key = str(raw)
-        if key in seen:
+        key = _fk_key(raw)
+        if key is None or key in seen:
             continue
         seen.add(key)
         out.append(raw)
@@ -52,14 +63,12 @@ def orphan_values(
     parent_values: Iterable[Any],
 ) -> list[Any]:
     """Return child values with no match in parent (string-normalized)."""
-    parent_keys = {str(v) for v in parent_values if v is not None and str(v) != ""}
+    parent_keys = {key for v in parent_values if (key := _fk_key(v)) is not None}
     orphans: list[Any] = []
     seen: set[str] = set()
     for v in child_values:
-        if v is None:
-            continue
-        key = str(v)
-        if not key or key in seen:
+        key = _fk_key(v)
+        if key is None or key in seen:
             continue
         if key not in parent_keys:
             seen.add(key)
@@ -74,33 +83,36 @@ def _sql_existing_parent_keys(
     parent_column: str,
     values: list[Any],
 ) -> list[Any]:
-    """Return the subset of ``values`` that exist in the parent table."""
-    import sqlalchemy as sa
-
-    from connectors.generic_sql import _engine
+    """Return the subset of single-column ``values`` that exist in the parent."""
+    from services.fk_tuple_scan import sql_existing_parent_tuples
 
     if not values or not parent_table or not parent_column:
         return []
+    found = sql_existing_parent_tuples(
+        cfg,
+        parent_table=parent_table,
+        parent_columns=[parent_column],
+        values=[(v,) for v in values],
+    )
+    return [row[0] for row in found if row]
 
-    engine = _engine(cfg)
-    schema = (cfg.get("schema") or "").strip() or None
-    table_name = parent_table
-    if "." in parent_table and schema is None:
-        parts = parent_table.split(".", 1)
-        schema, table_name = parts[0].strip() or None, parts[1].strip()
-    elif "." in parent_table:
-        table_name = parent_table.split(".", 1)[-1].strip()
 
-    tbl = sa.table(table_name, schema=schema)
-    col = sa.column(parent_column)
-    found: list[Any] = []
-    with engine.connect() as conn:
-        for i in range(0, len(values), _PARENT_IN_CHUNK):
-            chunk = values[i : i + _PARENT_IN_CHUNK]
-            stmt = sa.select(col).select_from(tbl).where(col.in_(chunk))
-            rows = conn.execute(stmt).fetchall()
-            found.extend(r[0] for r in rows if r and r[0] is not None)
-    return found
+def _sql_existing_parent_tuples(
+    cfg: dict[str, Any],
+    *,
+    parent_table: str,
+    parent_columns: list[str],
+    values: list[tuple[Any, ...]],
+) -> list[tuple[Any, ...]]:
+    """Return the subset of composite ``values`` that exist as whole tuples."""
+    from services.fk_tuple_scan import sql_existing_parent_tuples
+
+    return sql_existing_parent_tuples(
+        cfg,
+        parent_table=parent_table,
+        parent_columns=parent_columns,
+        values=values,
+    )
 
 
 def _resolve_source_column(
@@ -126,17 +138,42 @@ def _resolve_source_column(
 
 
 def _fk_parts(fk: dict[str, Any]) -> tuple[list[str], str, list[str]]:
-    cols = fk.get("columns") or fk.get("column") or fk.get("fk_columns") or []
+    """Normalize source-catalog, dest-inspector, and Studio FK payloads.
+
+    Source probe uses ``columns`` / ``referenced_*``. Destination RI and some
+    engine extras use ``constrained_columns`` / ``referred_*``. One parser so
+    Validate does not treat a dest-shaped composite as incomplete.
+    """
+    cols = (
+        fk.get("columns")
+        or fk.get("column")
+        or fk.get("fk_columns")
+        or fk.get("constrained_columns")
+        or []
+    )
     if isinstance(cols, str):
         cols = [cols]
     cols = [str(c).strip() for c in cols if str(c).strip()]
     ref_table = str(
-        fk.get("referenced_table") or fk.get("ref_table") or ""
+        fk.get("referenced_table")
+        or fk.get("ref_table")
+        or fk.get("referred_table")
+        or ""
     ).strip()
-    ref_schema = str(fk.get("referenced_schema") or fk.get("ref_schema") or "").strip()
+    ref_schema = str(
+        fk.get("referenced_schema")
+        or fk.get("ref_schema")
+        or fk.get("referred_schema")
+        or ""
+    ).strip()
     if ref_schema and ref_table and "." not in ref_table:
         ref_table = f"{ref_schema}.{ref_table}"
-    ref_cols = fk.get("referenced_columns") or fk.get("ref_columns") or []
+    ref_cols = (
+        fk.get("referenced_columns")
+        or fk.get("ref_columns")
+        or fk.get("referred_columns")
+        or []
+    )
     if isinstance(ref_cols, str):
         ref_cols = [ref_cols]
     ref_cols = [str(c).strip() for c in ref_cols if str(c).strip()]
@@ -323,14 +360,14 @@ def probe_sample_fk_orphans(
                 }
             )
             continue
-        # Composite FKs: probe only single-column (composite needs tuple IN).
-        if len(cols) != 1 or len(ref_cols) != 1:
+        if len(cols) != len(ref_cols):
             checks.append(
                 {
                     "skipped": True,
-                    "reason": "composite_fk_not_probed",
+                    "reason": "fk_column_pairing_incomplete",
                     "columns": cols,
                     "referenced_table": ref_table,
+                    "referenced_columns": ref_cols,
                     "coverage": "sample_orphan_probe",
                     "population_proof": False,
                 }
@@ -345,46 +382,85 @@ def probe_sample_fk_orphans(
                     "coverage": "sample_orphan_probe",
                     "population_proof": False,
                     "message": (
-                        f"Composite FK {cols} → {ref_table}{ref_cols} was not probed "
-                        "(tuple IN not implemented). Coverage=sample_orphan_probe — "
-                        "population RI not proven; remap to single-column FK, run a "
-                        "population orphan scan, or acknowledge FK risk."
+                        f"FK {cols} → {ref_table}{ref_cols} has no usable column pairing "
+                        f"({len(cols)} child vs {len(ref_cols)} parent). "
+                        "Coverage=sample_orphan_probe — population RI not proven."
                     ),
                 }
             )
             continue
 
-        child_col = cols[0]
-        parent_col = ref_cols[0]
-        sample_col = _resolve_source_column(maps, child_col)
-        values = distinct_fk_values(sample_rows, sample_col)
-        if not values:
-            checks.append(
-                {
-                    "column": child_col,
-                    "sample_column": sample_col,
-                    "referenced_table": ref_table,
-                    "checked_values": 0,
-                    "orphan_count": 0,
-                    "coverage": "sample_orphan_probe",
-                    "population_proof": False,
-                    "note": "No non-null FK values in Validate sample.",
-                }
-            )
-            continue
+        sample_cols = [_resolve_source_column(maps, c) or c for c in cols]
+        parent_cols = list(ref_cols)
+        composite = len(cols) > 1
+        label = "+".join(cols)
+        parent_label = "+".join(parent_cols)
 
         try:
-            present = _sql_existing_parent_keys(
-                cfg,
-                parent_table=ref_table,
-                parent_column=parent_col,
-                values=values,
-            )
-            missing = orphan_values(values, present)
+            if composite:
+                from services.fk_tuple_scan import (
+                    distinct_fk_tuples,
+                    orphan_example_text,
+                    orphan_tuples,
+                )
+
+                values = distinct_fk_tuples(sample_rows, sample_cols, present_key=_fk_key)
+                if not values:
+                    checks.append(
+                        {
+                            "column": label,
+                            "columns": cols,
+                            "sample_columns": sample_cols,
+                            "referenced_table": ref_table,
+                            "checked_values": 0,
+                            "orphan_count": 0,
+                            "coverage": "sample_orphan_probe",
+                            "population_proof": False,
+                            "note": "No MATCH SIMPLE (all-non-null) FK tuples in Validate sample.",
+                        }
+                    )
+                    continue
+                present = _sql_existing_parent_tuples(
+                    cfg,
+                    parent_table=ref_table,
+                    parent_columns=parent_cols,
+                    values=values,
+                )
+                missing = orphan_tuples(values, present, present_key=_fk_key)
+                example_fn = orphan_example_text
+                checked_n = len(values)
+            else:
+                child_col = cols[0]
+                parent_col = parent_cols[0]
+                sample_col = sample_cols[0]
+                flat = distinct_fk_values(sample_rows, sample_col)
+                if not flat:
+                    checks.append(
+                        {
+                            "column": child_col,
+                            "sample_column": sample_col,
+                            "referenced_table": ref_table,
+                            "checked_values": 0,
+                            "orphan_count": 0,
+                            "coverage": "sample_orphan_probe",
+                            "population_proof": False,
+                            "note": "No non-null FK values in Validate sample.",
+                        }
+                    )
+                    continue
+                present = _sql_existing_parent_keys(
+                    cfg,
+                    parent_table=ref_table,
+                    parent_column=parent_col,
+                    values=flat,
+                )
+                missing = orphan_values(flat, present)
+                example_fn = _fk_display
+                checked_n = len(flat)
         except Exception as exc:
             logger.warning(
                 "Sample orphan parent lookup failed for %s→%s: %s",
-                child_col,
+                cols,
                 ref_table,
                 exc,
                 exc_info=exc,
@@ -393,20 +469,20 @@ def probe_sample_fk_orphans(
                 {
                     "code": "fk_orphan_probe_failed",
                     "severity": sev if sev == "block" else "ack_required",
-                    "columns": [child_col],
+                    "columns": cols,
                     "referenced_table": ref_table,
                     "coverage": "sample_orphan_probe",
                     "population_proof": False,
                     "message": (
-                        f"Could not verify sample orphans for {child_col} → "
-                        f"{ref_table}.{parent_col}: {exc}. "
+                        f"Could not verify sample orphans for {label} → "
+                        f"{ref_table}.({parent_label}): {exc}. "
                         "Population RI not proven; fail closed on probe error."
                     ),
                 }
             )
             checks.append(
                 {
-                    "column": child_col,
+                    "columns": cols,
                     "error": str(exc),
                     "coverage": "sample_orphan_probe",
                     "population_proof": False,
@@ -414,38 +490,42 @@ def probe_sample_fk_orphans(
             )
             continue
 
-        total_checked += len(values)
+        total_checked += checked_n
         total_orphans += len(missing)
         check = {
-            "column": child_col,
-            "sample_column": sample_col,
+            "column": cols[0] if not composite else label,
+            "columns": cols,
+            "sample_columns": sample_cols,
             "referenced_table": ref_table,
-            "referenced_column": parent_col,
-            "checked_values": len(values),
+            "referenced_column": parent_cols[0] if not composite else parent_label,
+            "referenced_columns": parent_cols,
+            "checked_values": checked_n,
             "orphan_count": len(missing),
-            "orphan_examples": [str(v)[:80] for v in missing[:5]],
+            "orphan_examples": [example_fn(v) for v in missing[:5]],
             "coverage": "sample_orphan_probe",
             "population_proof": False,
+            "match_simple": True,
         }
         checks.append(check)
         if missing:
-            examples = ", ".join(str(v)[:40] for v in missing[:3])
+            examples = ", ".join(example_fn(v)[:40] for v in missing[:3] if example_fn(v))
             findings.append(
                 {
                     "code": "fk_orphan_in_sample",
                     "severity": sev,
-                    "columns": [child_col],
+                    "columns": cols,
                     "referenced_table": ref_table,
-                    "referenced_columns": [parent_col],
+                    "referenced_columns": parent_cols,
                     "orphan_count": len(missing),
-                    "checked_values": len(values),
+                    "checked_values": checked_n,
                     "coverage": "sample_orphan_probe",
                     "population_proof": False,
                     "message": (
-                        f"Sample orphan probe: {len(missing)}/{len(values)} distinct "
-                        f"{child_col} value(s) missing from {ref_table}.{parent_col} "
-                        f"(examples: {examples}). Coverage=sample_orphan_probe — "
-                        "population RI not proven."
+                        f"Sample orphan probe: {len(missing)}/{checked_n} distinct "
+                        f"{label} {'tuple' if composite else 'value'}(s) missing from "
+                        f"{ref_table}.({parent_label})"
+                        + (f" (examples: {examples})" if examples else "")
+                        + ". Coverage=sample_orphan_probe — population RI not proven."
                     ),
                 }
             )

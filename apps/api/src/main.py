@@ -47,10 +47,12 @@ from .routers.query_router import router as query_router
 from .routers.repair_router import router as repair_router
 from .routers.saved_connectors_router import router as saved_connectors_router
 from .routers.schedules_router import router as schedules_router
+from .routers.shape_router import router as shape_router
 from .routers.training_agent_router import router as training_agent_router
 from .transfer.engine import DuplicateTransferSubmission
 from .routers.transfer_router import router as transfer_router
 from .routers.usage_router import router as usage_router
+from .routers.team_router import router as team_router
 from .routers.workspace_router import router as workspace_router
 from .services.rbac import RBACMiddleware
 
@@ -407,6 +409,7 @@ async def add_timing_header(request: Request, call_next):
                 actor=actor,
                 level="error" if response.status_code >= 500 else "info",
                 correlation_id=correlation_id,
+                workspace_id=request.headers.get("X-Workspace-Id") or request.headers.get("x-workspace-id") or "",
                 details={"status": response.status_code, "ms": round(process_time * 1000, 1)},
             )
         except Exception as exc:
@@ -432,6 +435,7 @@ app.include_router(auth_router)
 app.include_router(audit_router, prefix="/api/v1")
 app.include_router(cdc_mapping_review_router, prefix="/api/v1")
 app.include_router(workspace_router, prefix="/api/v1")
+app.include_router(team_router, prefix="/api/v1")
 app.include_router(contracts_router, prefix="/api/v1")
 app.include_router(fidelity_router, prefix="/api/v1")
 app.include_router(resource_acl_router, prefix="/api/v1")
@@ -440,6 +444,7 @@ app.include_router(query_router, prefix="/api/v1")
 app.include_router(usage_router, prefix="/api/v1")
 app.include_router(ops_router, prefix="/api/v1")
 app.include_router(repair_router, prefix="/api/v1")
+app.include_router(shape_router, prefix="/api/v1")
 
 
 @app.get("/")

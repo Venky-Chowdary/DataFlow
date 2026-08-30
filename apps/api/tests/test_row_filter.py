@@ -13,6 +13,8 @@ if str(_API_ROOT) not in sys.path:
 from services.row_filter import (  # noqa: E402
     apply_row_filter,
     apply_row_filter_to_matrix,
+    filter_columns,
+    iter_filtered_rows,
 )
 
 RECORDS = [
@@ -99,3 +101,25 @@ def test_matrix_filter() -> None:
     rows = [["1", "active", "100"], ["2", "inactive", "250"], ["3", "active", "75"]]
     result = apply_row_filter_to_matrix(headers, rows, {"column": "status", "operator": "eq", "value": "active"})
     assert result == [["1", "active", "100"], ["3", "active", "75"]]
+
+
+def test_filter_columns_reads_nested_and() -> None:
+    spec = {
+        "and": [
+            {"column": "status", "operator": "eq", "value": "active"},
+            {"field": "country", "operator": "eq", "value": "US"},
+        ]
+    }
+    assert filter_columns(spec) == ["status", "country"]
+
+
+def test_iter_filtered_rows_streams_the_subset() -> None:
+    kept = list(
+        iter_filtered_rows(
+            iter(RECORDS),
+            {"column": "status", "operator": "eq", "value": "active"},
+        )
+    )
+    assert [r["id"] for r in kept] == ["1", "3"]
+    assert iter_filtered_rows(RECORDS, None) is RECORDS
+    assert iter_filtered_rows(None, {"column": "status", "operator": "eq", "value": "x"}) is None

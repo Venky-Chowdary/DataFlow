@@ -331,6 +331,7 @@ def test_sftp(
     host_key: str = "",
     known_hosts: str = "",
     host_key_policy: str = "",
+    require_object: bool = True,
     **_kwargs: Any,
 ) -> tuple[bool, str]:
     """Verify SFTP connectivity and optional directory access.
@@ -338,6 +339,13 @@ def test_sftp(
     Host-key settings are forwarded so the test proves the *same* trust the
     transfer will use — a test that verified under looser trust than the write
     is worse than no test.
+
+    ``require_object=False`` is the write/introspect contract: a target file the
+    run is about to *create* must not be demanded up front. Requiring it turned
+    every first write to a new remote path into "Destination unreachable:
+    Authentication failed" on a server that had authenticated fine, and made
+    introspect report ``connected: False`` for a path it could see the parent of.
+    A missing *directory* still fails closed — the writer cannot invent one.
     """
     try:
         cfg = parse_sftp_config(
@@ -374,6 +382,11 @@ def test_sftp(
                             sftp.stat(directory)
                         except OSError:
                             return False, f"SFTP authenticated but path not found: {cfg.path}"
+                        if not require_object:
+                            return True, (
+                                f"SFTP directory {directory} reachable on "
+                                f"{cfg.host}:{cfg.port}; {filename} does not exist yet."
+                            )
                         return False, f"SFTP authenticated but file not found: {cfg.path}"
                     return False, f"SFTP authenticated but path not found: {cfg.path} ({exc})"
                 if statmod.S_ISDIR(st.st_mode):

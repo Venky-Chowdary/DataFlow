@@ -7,7 +7,7 @@
 /* ── Tokens tighten ─────────────────────────────────────────────── */
 .lp {
   /* Canonical content width — landing + all marketing pages share this */
-  --lp-shell: min(1120px, calc(100% - clamp(28px, 5vw, 64px)));
+  --lp-shell: min(var(--lp-shell-max), calc(100% - clamp(28px, 5vw, 64px)));
   --lp-shell-wide: var(--lp-shell);
   --lp-bg: #f6f8fa;
   --lp-ink: #0b1220;
@@ -29,7 +29,7 @@
   --lp-fs-small: 12.5px;
   --lp-title-lg: var(--lp-fs-h1-home);
   --lp-title: var(--lp-fs-h1);
-  --lp-section-y: clamp(72px, 10vh, 120px);
+  --lp-section-y: clamp(48px, 6vh, 72px);
   --lp-measure: 40rem;
   --lp-shadow-editorial: 0 1px 0 rgba(15, 23, 42, 0.04), 0 24px 64px rgba(10, 61, 58, 0.08);
   --lp-shadow-soft: 0 1px 0 rgba(15, 23, 42, 0.04);
@@ -40,7 +40,7 @@
 }
 
 .lp-home {
-  --lp-section-y: clamp(80px, 11vh, 128px);
+  --lp-section-y: clamp(48px, 6vh, 72px);
 }
 
 /* ── Announce ───────────────────────────────────────────────────── */
@@ -323,11 +323,11 @@
 
 .lp-hero-home-grid {
   width: min(1240px, calc(100% - clamp(24px, 5vw, 72px))) !important;
-  padding: clamp(40px, 7vh, 80px) 0 clamp(28px, 4vh, 48px) !important;
-  gap: clamp(28px, 4vw, 56px) !important;
+  padding: clamp(24px, 3.5vh, 40px) 0 clamp(20px, 3vh, 32px) !important;
+  gap: clamp(24px, 3.5vw, 40px) !important;
   position: relative;
   z-index: 1;
-  align-items: stretch !important;
+  align-items: center !important;
 }
 
 /* Hero brand lockup removed — logo lives in navbar only */
@@ -342,11 +342,11 @@
 .lp-hero.lp-hero--home .lp-hero-title {
   font-family: var(--lp-font-display) !important;
   font-size: var(--lp-title-lg) !important;
-  font-weight: 760 !important;
-  letter-spacing: -0.048em !important;
-  line-height: 1.02 !important;
-  margin-bottom: 20px !important;
-  max-width: 12ch !important;
+  font-weight: 650 !important;
+  letter-spacing: -0.024em !important;
+  line-height: 1.16 !important;
+  margin-bottom: 14px !important;
+  max-width: 20ch !important;
 }
 
 .lp-hero--home .lp-hero-sub {
@@ -374,10 +374,11 @@
   padding: 0 !important;
   background: transparent !important;
   box-shadow: var(--lp-shadow-editorial);
-  overflow: hidden !important;
+  overflow: visible !important;
+  min-width: 0 !important;
   min-height: 0 !important;
   height: auto !important;
-  align-self: stretch !important;
+  align-self: center !important;
   display: flex !important;
 }
 
@@ -1374,6 +1375,14 @@
   box-shadow: var(--lp-shadow-editorial);
 }
 
+.lp-home-tab-visual {
+  min-width: 0;
+}
+
+.lp-home-tab-visual .lp-product-shot-route {
+  color: #475569;
+}
+
 .lp-home-tab-copy h3 {
   font-family: var(--lp-font-display);
   font-size: clamp(1.4rem, 2.2vw, 1.85rem);
@@ -2079,7 +2088,7 @@
   position: relative;
   overflow: hidden;
   color: #ecfdf5;
-  padding: clamp(48px, 8vh, 88px) 0 clamp(40px, 6vh, 64px);
+  padding: clamp(28px, 3.6vw, 48px) 0 clamp(28px, 3.6vw, 48px);
   background:
     radial-gradient(ellipse 65% 55% at 82% 18%, rgba(245, 158, 11, 0.22), transparent 55%),
     radial-gradient(ellipse 50% 50% at 8% 88%, rgba(45, 212, 191, 0.18), transparent 50%),
@@ -2463,7 +2472,7 @@
   position: relative;
   overflow: hidden;
   color: #ecfdf5;
-  padding: clamp(48px, 8vh, 88px) 0 clamp(40px, 6vh, 64px);
+  padding: clamp(28px, 3.6vw, 48px) 0 clamp(28px, 3.6vw, 48px);
   background:
     radial-gradient(ellipse 70% 60% at 78% 18%, rgba(45, 212, 191, 0.24), transparent 55%),
     radial-gradient(ellipse 45% 50% at 6% 90%, rgba(56, 189, 248, 0.12), transparent 50%),
@@ -2824,7 +2833,7 @@
   position: relative;
   overflow: hidden;
   color: #ecfdf5;
-  padding: clamp(48px, 8vh, 88px) 0 clamp(40px, 6vh, 64px);
+  padding: clamp(28px, 3.6vw, 48px) 0 clamp(28px, 3.6vw, 48px);
   background:
     radial-gradient(ellipse 60% 55% at 85% 15%, rgba(56, 189, 248, 0.18), transparent 55%),
     radial-gradient(ellipse 50% 45% at 10% 85%, rgba(245, 158, 11, 0.14), transparent 50%),
@@ -6555,48 +6564,6 @@
   background: #f7f8fa;
 }
 
-.lp-wh-hero {
-  background:
-    radial-gradient(ellipse 60% 50% at 85% 20%, rgba(45, 212, 191, 0.16), transparent 55%),
-    linear-gradient(160deg, #071c1a 0%, #0a3d3a 50%, #0f766e 100%);
-  color: #ecfdf5;
-  padding: clamp(48px, 8vh, 84px) 0;
-}
-
-.lp-wh-hero-inner {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  gap: clamp(24px, 4vw, 40px);
-  align-items: center;
-}
-
-.lp-wh-hero-copy h1 {
-  font-family: var(--lp-font-display);
-  font-size: clamp(2.1rem, 4vw, 3.2rem);
-  font-weight: 760;
-  letter-spacing: -0.045em;
-  line-height: 1.08;
-  margin: 0 0 14px;
-  color: #fff;
-  max-width: 14ch;
-}
-
-.lp-wh-lead {
-  margin: 0 0 24px;
-  font-size: 16.5px;
-  line-height: 1.55;
-  color: rgba(236, 253, 245, 0.78);
-  max-width: 42ch;
-}
-
-.lp-wh-hero-visual {
-  min-width: 0;
-}
-
-.lp-wh-hero-visual > * {
-  max-width: 100%;
-}
-
 .lp-wh-rail {
   background: #fff;
   border-bottom: 1px solid var(--lp-line);
@@ -6895,7 +6862,7 @@
     radial-gradient(ellipse 45% 50% at 8% 85%, rgba(245, 158, 11, 0.1), transparent 50%),
     linear-gradient(155deg, #071c1a 0%, #0a3d3a 45%, #0f766e 82%, #115e59 100%);
   color: #ecfdf5;
-  padding: clamp(48px, 8vh, 88px) 0 clamp(36px, 5vh, 56px);
+  padding: clamp(28px, 3.6vw, 48px) 0 clamp(28px, 3.6vw, 48px);
 }
 
 .lp-ent-hero-waves {
@@ -7371,7 +7338,7 @@
     radial-gradient(ellipse 60% 80% at 80% 20%, rgba(45, 212, 191, 0.18), transparent 55%),
     linear-gradient(160deg, #071c1a 0%, #0a3d3a 55%, #0f766e 100%);
   color: #ecfdf5;
-  padding: clamp(48px, 7vh, 80px) 0;
+  padding: clamp(32px, 5vh, 48px) 0;
 }
 
 .lp-ent-cta-inner {
@@ -7385,10 +7352,10 @@
 
 .lp-ent-cta-inner h2 {
   font-family: var(--lp-font-display);
-  font-size: clamp(1.6rem, 2.8vw, 2.2rem);
-  font-weight: 740;
-  letter-spacing: -0.035em;
-  margin: 0 0 10px;
+  font-size: var(--lp-fs-h2, clamp(1.25rem, 1.5vw, 1.5rem));
+  font-weight: 650;
+  letter-spacing: -0.02em;
+  margin: 0 0 8px;
   color: #fff;
 }
 
@@ -7428,13 +7395,14 @@
 /* ── Solutions editorial ────────────────────────────────────────── */
 .lp-sol-hero {
   position: relative;
-  overflow: hidden;
+  overflow-x: clip;
+  overflow-y: visible;
   background:
     radial-gradient(ellipse 70% 60% at 78% 20%, rgba(45, 212, 191, 0.2), transparent 55%),
     radial-gradient(ellipse 40% 50% at 8% 90%, rgba(245, 158, 11, 0.1), transparent 50%),
     linear-gradient(155deg, #071c1a 0%, #0a3d3a 48%, #0f766e 100%);
   color: #ecfdf5;
-  padding: clamp(48px, 8vh, 84px) 0 clamp(40px, 6vh, 64px);
+  padding: clamp(28px, 3.6vw, 48px) 0 clamp(28px, 3.6vw, 48px);
 }
 
 .lp-sol-hero-waves {
@@ -7457,13 +7425,13 @@
 
 .lp-sol-hero-copy h1 {
   font-family: var(--lp-font-display);
-  font-size: clamp(2rem, 4vw, 3.1rem);
-  font-weight: 760;
-  letter-spacing: -0.04em;
-  line-height: 1.1;
-  margin: 0 0 14px;
+  font-size: var(--lp-fs-h1, clamp(1.75rem, 2.2vw, 2.125rem));
+  font-weight: 650;
+  letter-spacing: -0.022em;
+  line-height: 1.18;
+  margin: 0 0 10px;
   color: #fff;
-  max-width: 16ch;
+  max-width: 22ch;
 }
 
 .lp-sol-hero-lead {
@@ -7815,7 +7783,6 @@
   .lp-cust3-featured-grid,
   .lp-cust3-story,
   .lp-cust3-metrics-row,
-  .lp-wh-hero-inner,
   .lp-wh-split-grid,
   .lp-wh-flow-list {
     grid-template-columns: 1fr !important;
@@ -8098,6 +8065,22 @@
   gap: 16px;
 }
 
+/* A pill is a label, not a banner: it takes its text width, not the card's. */
+.lp .lp-mkt-evidence-card > .lp-cust-industry {
+  justify-self: start;
+}
+
+/* Four cards read as a balanced 2x2, not a full row plus one stray. */
+.lp .lp-mkt-evidence-grid:has(> :nth-child(4):last-child) {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+@media (max-width: 720px) {
+  .lp .lp-mkt-evidence-grid:has(> :nth-child(4):last-child) {
+    grid-template-columns: 1fr;
+  }
+}
+
 .lp-mkt-evidence-card {
   display: grid;
   grid-template-rows: auto 1fr auto;
@@ -8202,7 +8185,7 @@
 
 /* Compliance posture — badges always carry the "no certificate yet" note. */
 .lp-mkt-compliance-note {
-  max-width: 1120px;
+  max-width: var(--lp-shell-max);
   margin: 0 auto;
   padding: 0 clamp(16px, 4vw, 40px) 20px;
   font-size: 12.5px;
@@ -8497,15 +8480,18 @@
   align-items: start !important;
 }
 
-.lp-mkt-hero-visual {
+/* A decorative illustration can be cropped to keep the hero band short; a
+   product shot cannot — clipping the semantic map to 248px hid two of its four
+   mapped columns and made the hero claim less than the product does. */
+.lp-mkt-hero-visual .lp-mkt-illustration {
   max-height: 248px;
   overflow: hidden;
 }
 
-.lp-mkt-hero-visual .lp-mkt-illustration,
 .lp-mkt-hero-visual .lp-mkt-shot,
 .lp-mkt-hero-visual .lp-cinema-stage {
-  max-height: 248px !important;
+  max-height: none;
+  overflow: visible;
 }
 
 .lp-footer.lp-footer--compact {

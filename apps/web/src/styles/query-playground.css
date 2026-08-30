@@ -11,8 +11,8 @@
 }
 
 .df2-query-hero .df2-page-title {
-  font-size: 1.75rem;
-  font-weight: 700;
+  font-size: var(--df-fs-page-title);
+  font-weight: var(--df-fw-bold);
   margin: 0;
 }
 
@@ -36,7 +36,6 @@
   flex-wrap: wrap;
   gap: 12px;
   width: 100%;
-  align-items: flex-end;
 }
 
 .df2-query-meta > .df2-field,
@@ -549,14 +548,14 @@
   border: 1px solid rgba(15, 118, 110, 0.25);
 }
 
-.qe-tok--keyword { color: #5eead4; font-weight: 650; }
+.qe-tok--keyword { color: #5eead4; font-weight: 600; }
 .qe-tok--string { color: #86efac; }
 .qe-tok--number { color: #fdba74; }
 .qe-tok--comment { color: #64748b; font-style: italic; }
 .qe-tok--function { color: #7dd3fc; }
 .qe-tok--ident { color: #e2e8f0; }
 .qe-tok--punct { color: #94a3b8; }
-.qe-tok--bind { color: #f472b6; font-weight: 650; }
+.qe-tok--bind { color: #f472b6; font-weight: 600; }
 .qe-tok--key { color: #67e8f9; font-weight: 600; }
 
 .df2-query-editor-shell[data-invalid="true"] .df2-query-editor-wrap--powered {

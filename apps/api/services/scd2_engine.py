@@ -68,18 +68,35 @@ def _now_utc() -> datetime:
 
 
 def _compose_key(row: dict[str, Any], columns: list[str]) -> str:
-    from services.value_serializer import cell_to_string
+    from connectors.writer_common import conflict_key_wire
 
-    return _KEY_SEP.join(cell_to_string(row.get(c)) for c in columns)
+    return _KEY_SEP.join(conflict_key_wire(row.get(c)) for c in columns)
 
 
-def _pk_or_clause(columns: list[str], keys: set[str], *, prefix: str) -> tuple[str, dict[str, Any]]:
+def _qchar(dialect: str) -> str:
+    """Identifier quote character for this destination engine.
+
+    MySQL parses ``\"col\"`` as a string literal, so ANSI-only quoting made every
+    SCD2 statement a syntax error there. One owner: ``dialect_profiles``.
+    """
+    from services.dialect_profiles import quote_char_for
+
+    return quote_char_for(dialect) or '"'
+
+
+def _pk_or_clause(
+    columns: list[str],
+    keys: set[str],
+    *,
+    prefix: str,
+    dialect: str = "",
+) -> tuple[str, dict[str, Any]]:
     """Build ``(c1=:p0_0 AND c2=:p0_1) OR …`` for composite PK membership."""
     from connectors.writer_common import quote_sql_identifier
 
     if not keys or not columns:
         return "1=0", {}
-    quoted = [quote_sql_identifier(c) for c in columns]
+    quoted = [quote_sql_identifier(c, _qchar(dialect)) for c in columns]
     clauses: list[str] = []
     params: dict[str, Any] = {}
     for i, key in enumerate(keys):
@@ -98,11 +115,12 @@ def _pk_or_clause(columns: list[str], keys: set[str], *, prefix: str) -> tuple[s
     return "(" + " OR ".join(clauses) + ")", params
 
 
-def _qualified_name(table: str, schema: str | None) -> str:
+def _qualified_name(table: str, schema: str | None, dialect: str = "") -> str:
     from connectors.writer_common import quote_sql_identifier
 
-    table_quoted = quote_sql_identifier(table)
-    schema_quoted = quote_sql_identifier(schema) if schema else None
+    q = _qchar(dialect)
+    table_quoted = quote_sql_identifier(table, q)
+    schema_quoted = quote_sql_identifier(schema, q) if schema else None
     return f"{schema_quoted}.{table_quoted}" if schema_quoted else table_quoted
 
 
@@ -122,7 +140,8 @@ def _row_hash(row: dict[str, Any], target_cols: list[str]) -> str:
     from the current SCD2 version before hashing so STOP_COLUMN cannot invent
     false history by hashing as empty/NULL.
     """
-    from services.value_serializer import cell_to_string, is_missing_sentinel
+    from connectors.writer_common import conflict_key_wire
+    from services.value_serializer import is_missing_sentinel
 
     parts = []
     for c in target_cols:
@@ -131,7 +150,7 @@ def _row_hash(row: dict[str, Any], target_cols: list[str]) -> str:
         val = row.get(c)
         if is_missing_sentinel(val):
             continue
-        parts.append(f"{c}={cell_to_string(val)}")
+        parts.append(f"{c}={conflict_key_wire(val)}")
     return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
 
 
@@ -178,9 +197,9 @@ def _ensure_scd_columns(engine: Any, table_obj: Any, dialect_name: str) -> None:
     if ROW_HASH_COLUMN not in existing:
         additions.append((ROW_HASH_COLUMN, _sa_type_for_logical("string", dialect_name)))
 
-    qualified = _qualified_name(table_name, schema)
+    qualified = _qualified_name(table_name, schema, dialect_name)
     for col_name, sa_type in additions:
-        col_quoted = quote_sql_identifier(col_name)
+        col_quoted = quote_sql_identifier(col_name, _qchar(dialect_name))
         type_ddl = sa_type.compile(dialect=engine.dialect)
         ddl = f"ALTER TABLE {qualified} ADD COLUMN {col_quoted} {type_ddl}"
         with engine.begin() as conn:
@@ -249,9 +268,10 @@ def _fetch_current_snapshots(
         return {}
     attr_cols = [c for c in target_cols if c not in SCD2_COLUMNS]
     select_cols = list(dict.fromkeys(list(pk_columns) + [ROW_HASH_COLUMN] + attr_cols))
-    cols_quoted = ", ".join(quote_sql_identifier(c) for c in select_cols)
-    current_quoted = quote_sql_identifier(IS_CURRENT_COLUMN)
-    where_keys, params = _pk_or_clause(pk_columns, keys, prefix="k")
+    q = _qchar(dialect_name)
+    cols_quoted = ", ".join(quote_sql_identifier(c, q) for c in select_cols)
+    current_quoted = quote_sql_identifier(IS_CURRENT_COLUMN, q)
+    where_keys, params = _pk_or_clause(pk_columns, keys, prefix="k", dialect=dialect_name)
     current_pred = scd2_is_current_predicate(dialect_name, current_quoted)
     sql = (
         f"SELECT {cols_quoted} FROM {qualified} "  # nosec B608
@@ -308,9 +328,10 @@ def _expire_rows(
 
     if not keys or not pk_columns:
         return 0
-    current_quoted = quote_sql_identifier(IS_CURRENT_COLUMN)
-    valid_to_quoted = quote_sql_identifier(VALID_TO_COLUMN)
-    where_keys, params = _pk_or_clause(pk_columns, keys, prefix="e")
+    q = _qchar(dialect_name)
+    current_quoted = quote_sql_identifier(IS_CURRENT_COLUMN, q)
+    valid_to_quoted = quote_sql_identifier(VALID_TO_COLUMN, q)
+    where_keys, params = _pk_or_clause(pk_columns, keys, prefix="e", dialect=dialect_name)
     params["ts"] = timestamp
     current_pred = scd2_is_current_predicate(dialect_name, current_quoted)
     false_lit = scd2_is_current_false_sql(dialect_name)
@@ -339,10 +360,11 @@ def _active_checksum(
     from connectors.writer_common import quote_sql_identifier
     from services.reconciliation_api import stream_select_checksum
 
-    current_quoted = quote_sql_identifier(IS_CURRENT_COLUMN)
+    q = _qchar(dialect_name)
+    current_quoted = quote_sql_identifier(IS_CURRENT_COLUMN, q)
     current_pred = scd2_is_current_predicate(dialect_name, current_quoted)
     attr_cols = [c for c in target_cols if c not in SCD2_COLUMNS]
-    cols_quoted = ",".join(quote_sql_identifier(c) for c in attr_cols)
+    cols_quoted = ",".join(quote_sql_identifier(c, q) for c in attr_cols)
     sql = f"SELECT {cols_quoted} FROM {qualified} WHERE {current_pred}"  # nosec B608
     return stream_select_checksum(
         conn,
@@ -416,8 +438,8 @@ def _pk_validate_mapped_rows(
     *,
     row_numbers: list[int] | None = None,
 ) -> list[dict[str, Any]]:
-    """Empty / DF_MISSING PK identity quarantines — never a silent skip."""
-    from services.value_serializer import is_missing_sentinel
+    """Empty / DF_MISSING / reader-null PK identity quarantines — never a silent skip."""
+    from connectors.writer_common import _is_nullish_conflict_key
 
     pk_ok_rows: list[dict[str, Any]] = []
     for row_idx, row in enumerate(mapped_rows):
@@ -426,36 +448,18 @@ def _pk_validate_mapped_rows(
             if row_numbers is not None and row_idx < len(row_numbers)
             else row_idx + 1
         )
-        if any(is_missing_sentinel(row.get(c)) for c in pk_columns):
+        nullish = [c for c in pk_columns if _is_nullish_conflict_key(row.get(c))]
+        if nullish:
             rejected_details.append(
                 {
                     "row": row_no,
-                    "column": ",".join(pk_columns),
+                    "column": ",".join(nullish),
                     "target": ",".join(pk_columns),
                     "value": "",
-                    "reason": "SCD2 primary key cannot be DF_MISSING / STOP_COLUMN omit",
-                    "policy": "quarantine",
-                    "chars": [],
-                }
-            )
-            continue
-        key = _compose_key(row, pk_columns)
-        # Never use truthiness — numeric 0 / "0" are valid PK values.
-        parts: list[str] = []
-        for c in pk_columns:
-            raw = row.get(c)
-            if raw is None:
-                parts.append("")
-            else:
-                parts.append(str(raw).strip())
-        if not key or any(p == "" for p in parts):
-            rejected_details.append(
-                {
-                    "row": row_no,
-                    "column": ",".join(pk_columns),
-                    "target": ",".join(pk_columns),
-                    "value": "",
-                    "reason": "SCD2 row missing primary key identity",
+                    "reason": (
+                        "SCD2 primary key cannot be DF_MISSING / STOP_COLUMN omit "
+                        "or extract SQL NULL"
+                    ),
                     "policy": "quarantine",
                     "chars": [],
                 }
@@ -798,7 +802,7 @@ def apply_scd2(
             timestamp = _now_utc()
             inserted_total = 0
             expired_total = 0
-            qualified = _qualified_name(table, schema_name)
+            qualified = _qualified_name(table, schema_name, dialect_name)
 
             with engine.begin() as conn:
                 for pk_ok, _details, _errors in iter_scd2_prepared_bundles(

@@ -71,6 +71,7 @@ def test_native_snapshot_handoff_and_capture_resolve() -> None:
     cur.fetchone.side_effect = [
         ("dbo_orders",),  # resolve
         (bytes.fromhex("0abc"),),  # max lsn
+        (bytes.fromhex("0abc"),),  # min lsn (floor)
     ]
     cur.fetchall.side_effect = [
         [],  # captured_columns
@@ -330,6 +331,25 @@ def test_assert_resume_lsn_in_retention_raises_on_gap() -> None:
     except CdcLsnGapError as exc:
         assert "min_lsn" in str(exc)
         assert "failover" in str(exc).lower() or "cleanup" in str(exc).lower()
+
+
+def test_snapshot_handoff_clamps_to_capture_min_lsn() -> None:
+    """New capture min_lsn can sit above stale database max_lsn until scan."""
+    from connectors.sqlserver_cdc_native import SqlServerNativeCdc
+
+    cdc = SqlServerNativeCdc(
+        {"host": "localhost", "database": "app"},
+        table="orders",
+        primary_key="id",
+        schema="dbo",
+        capture_instance="dbo_orders",
+    )
+    cur = MagicMock()
+    cur.fetchone.side_effect = [
+        (bytes.fromhex("0a"),),  # max_lsn below floor
+        (bytes.fromhex("0b"),),  # capture min_lsn
+    ]
+    assert cdc._snapshot_handoff_lsn(cur, "dbo_orders") == "0b"
 
 
 def test_poll_fails_closed_when_resume_before_min_lsn() -> None:

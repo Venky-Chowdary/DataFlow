@@ -100,12 +100,17 @@ def test_full_population_owners_never_emit_limit_offset_windows() -> None:
     scd2 = (api / "services" / "scd2_engine.py").read_text(encoding="utf-8")
     mirror = (api / "services" / "mirror_engine.py").read_text(encoding="utf-8")
     stream = (api / "src" / "transfer" / "stream.py").read_text(encoding="utf-8")
+    # The SCD2/mirror staging scan lives in ``stream_scd2`` since the F8 split.
+    stream_scd2 = (api / "src" / "transfer" / "stream_scd2.py").read_text(
+        encoding="utf-8"
+    )
     assert forbidden not in scd2
     assert forbidden not in mirror
     assert forbidden not in stream
+    assert forbidden not in stream_scd2
     assert "stream_select_checksum" in scd2
     assert "stream_select_checksum" in mirror
-    assert "iter_select_row_dicts" in stream
+    assert "iter_select_row_dicts" in stream_scd2
 
 
 def test_stream_select_checksum_empty_is_blank_not_sha_of_empty() -> None:

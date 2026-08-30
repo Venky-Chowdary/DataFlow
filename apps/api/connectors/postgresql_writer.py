@@ -38,6 +38,7 @@ from connectors.write_resilience import (
 from connectors.writer_common import (
     DF_LSN_COL,
     _coerced_null_row_count,
+    _is_nullish_conflict_key,
     _rejected_row_count,
     assert_sparse_upsert_has_pk,
     flush_normalized_child_batches,
@@ -474,7 +475,7 @@ def _redshift_delete_by_keys(
         values: list[Any] = []
         for col, idx in zip(conflict_cols, conflict_idxs):
             val = row[idx] if idx < len(row) else None
-            if val is None or (isinstance(val, str) and str(val).strip() == ""):
+            if _is_nullish_conflict_key(val):
                 raise ValueError(
                     f"Redshift upsert delete refused null/empty conflict key {col!r} — "
                     "IS NULL predicates would mass-delete destination rows"
@@ -525,6 +526,33 @@ def _redshift_null_safe_match(sql_mod: Any, conflict_cols: list[str], *, left: s
     return sql_mod.SQL(" AND ").join(parts)
 
 
+def _conflict_key_sql_predicates(
+    sql_mod: Any,
+    conflict_cols: list[str],
+    conflict_idxs: list[int],
+    row: Any,
+) -> tuple[list[Any], list[Any]]:
+    """IS NULL for reader-null / blank keys; equality otherwise.
+
+    Shared by Redshift LSN lookup and stage-delete so extract
+    ``SQL_NULL_SENTINEL`` never binds as ``col = '__DF_SQL_NULL__'``.
+    """
+    predicates: list[Any] = []
+    values: list[Any] = []
+    for col, idx in zip(conflict_cols, conflict_idxs):
+        val = row[idx] if idx < len(row) else None
+        if _is_nullish_conflict_key(val):
+            predicates.append(sql_mod.SQL("{} IS NULL").format(sql_mod.Identifier(col)))
+        else:
+            predicates.append(
+                sql_mod.SQL("{} = {}").format(
+                    sql_mod.Identifier(col), sql_mod.Placeholder()
+                )
+            )
+            values.append(val)
+    return predicates, values
+
+
 def _redshift_filter_stale_lsn_rows(
     cursor: Any,
     sql_mod: Any,
@@ -542,19 +570,9 @@ def _redshift_filter_stale_lsn_rows(
     to_write: list[Any] = []
     for row in batch:
         if lsn_idx is not None:
-            predicates = []
-            values: list[Any] = []
-            for col, idx in zip(conflict_cols, conflict_idxs):
-                val = row[idx] if idx < len(row) else None
-                if val is None:
-                    predicates.append(sql_mod.SQL("{} IS NULL").format(sql_mod.Identifier(col)))
-                else:
-                    predicates.append(
-                        sql_mod.SQL("{} = {}").format(
-                            sql_mod.Identifier(col), sql_mod.Placeholder()
-                        )
-                    )
-                    values.append(val)
+            predicates, values = _conflict_key_sql_predicates(
+                sql_mod, conflict_cols, conflict_idxs, row
+            )
             where = sql_mod.SQL(" AND ").join(predicates)
             cursor.execute(
                 sql_mod.SQL("SELECT {} FROM {}.{} WHERE {} LIMIT 1").format(
@@ -707,49 +725,26 @@ def _redshift_stage_delete(
     batch: list[tuple] | list[list],
 ) -> list[tuple] | list[list]:
     """Stage batch keys and delete matches in one statement (txn-atomic)."""
-    from connectors.writer_common import DF_LSN_COL, compare_lsn
-
     stage = f"_df_upsert_stage_{abs(hash((schema, table_name, tuple(conflict_cols)))) % 10_000_000}"
     conflict_idxs = [target_cols.index(c) for c in conflict_cols]
-    lsn_idx = target_cols.index(DF_LSN_COL) if DF_LSN_COL in target_cols else None
 
-    # Filter stale LSN rows client-side first (same honesty as per-row path).
-    to_write: list[Any] = []
-    for row in batch:
-        if lsn_idx is not None:
-            predicates = []
-            values: list[Any] = []
-            for col, idx in zip(conflict_cols, conflict_idxs):
-                val = row[idx] if idx < len(row) else None
-                if val is None:
-                    predicates.append(sql_mod.SQL("{} IS NULL").format(sql_mod.Identifier(col)))
-                else:
-                    predicates.append(
-                        sql_mod.SQL("{} = {}").format(sql_mod.Identifier(col), sql_mod.Placeholder())
-                    )
-                    values.append(val)
-            where = sql_mod.SQL(" AND ").join(predicates)
-            cursor.execute(
-                sql_mod.SQL("SELECT {} FROM {}.{} WHERE {} LIMIT 1").format(
-                    sql_mod.Identifier(DF_LSN_COL),
-                    sql_mod.Identifier(schema),
-                    sql_mod.Identifier(table_name),
-                    where,
-                ),
-                values,
-            )
-            existing = cursor.fetchone()
-            incoming_lsn = row[lsn_idx] if lsn_idx < len(row) else None
-            if existing is not None and compare_lsn(incoming_lsn, existing[0]) <= 0:
-                continue
-        to_write.append(row)
+    # Filter stale LSN rows client-side first (same honesty as MERGE path).
+    to_write = _redshift_filter_stale_lsn_rows(
+        cursor,
+        sql_mod,
+        schema=schema,
+        table_name=table_name,
+        target_cols=target_cols,
+        conflict_cols=conflict_cols,
+        batch=batch,
+    )
     if not to_write:
         return []
 
     for row in to_write:
         for col, idx in zip(conflict_cols, conflict_idxs):
             val = row[idx] if idx < len(row) else None
-            if val is None or (isinstance(val, str) and str(val).strip() == ""):
+            if _is_nullish_conflict_key(val):
                 raise ValueError(
                     f"Redshift upsert stage-delete refused null/empty conflict key "
                     f"{col!r} — NULL-safe join would mass-delete destination rows"
@@ -1211,10 +1206,10 @@ def _escape_copy_text(text: str) -> str:
 
 
 def _copy_text_value(value: Any) -> str:
-    from services.value_serializer import is_missing_sentinel
+    from services.value_serializer import is_reader_null_cell
 
-    # Dense COPY: absent schemaless fields → SQL NULL (never bind sentinel text).
-    if value is None or is_missing_sentinel(value):
+    # Dense COPY: reader-null / Missing → SQL NULL (never bind sentinel text).
+    if is_reader_null_cell(value):
         return "\\N"
     if isinstance(value, bool):
         return "t" if value else "f"
@@ -1231,7 +1226,11 @@ def _copy_text_value(value: Any) -> str:
         # field ``\x68656c6c6f``, which bytea parses as hex.
         raw = "\\x" + bytes(value).hex()
     elif isinstance(value, Decimal):
-        return str(value)
+        from services.value_serializer import safe_decimal_text
+
+        # Dest-canonical text — str(Decimal("1E+2")) is "1E+2" so COPY and
+        # parameter binds checksum-diverged after extract emits 100.
+        return safe_decimal_text(value) or str(value)
     elif isinstance(value, (int, float)):
         return str(value)
     else:
@@ -1568,6 +1567,9 @@ def write_mapped_rows(
                 error=str(exc),
             )
 
+    from connectors.sql_identifiers import split_qualified_table
+
+    schema, table_name = split_qualified_table(table_name, schema or "public")
     schema = schema or "public"
     table_name = sanitize_identifier(table_name, preserve_case=True)
     engine = str(_kwargs.get("engine") or _kwargs.get("db_type") or "postgresql").lower()

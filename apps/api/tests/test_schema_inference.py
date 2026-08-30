@@ -17,8 +17,9 @@ class TestInferType:
         "samples,expected",
         [
             (["1", "2", "100"], "INTEGER"),
-            # Sample-aware DECIMAL(p,s) — bare DECIMAL invents (38,15) floors.
-            (["1.5", "2.0", "100.99"], "DECIMAL(8,4)"),
+            # Source inference and dest invent share the exact envelope
+            # (3 int digits + scale 2). Extra dest scale is forbidden.
+            (["1.5", "2.0", "100.99"], "DECIMAL(5,2)"),
             (["true", "false"], "BOOLEAN"),
             (["0", "1"], "INTEGER"),
             (["2024-01-15"], "DATE"),
@@ -105,7 +106,9 @@ class TestSchemaTypesFixture:
         types = {c["name"]: c["inferred_type"] for c in record["columns"]}
         assert types["row_id"] == "INTEGER"
         assert str(types["amount"]).startswith("DECIMAL")
-        assert types["is_active"] == "BOOLEAN"
+        # Fixture mixes true/false/1 with informal yes/no — must not invent
+        # BOOLEAN dest the write path cannot bind.
+        assert types["is_active"] == "VARCHAR"
         assert types["created_at"] == "TIMESTAMPTZ"
         assert types["birth_date"] == "DATE"
         assert types["txn_yyyymmdd"] == "DATE"

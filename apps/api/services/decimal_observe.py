@@ -29,40 +29,46 @@ _IEEE_SCALE_TAIL = 8
 _IEEE_MIN_SIGNIFICANT_DIGITS = 15
 
 
-def _canonical_numeric_text(value: Any) -> str | None:
-    """Locale/currency-aware decimal text via transform_engine SSOT.
+def _canonical_numeric(value: Any) -> Decimal | None:
+    """The write-path decimal for this cell, or ``None`` (do not invent 0).
 
-    Returns ``None`` when the cell is empty / unparseable (do not invent 0).
+    Auto ``1,234`` / ``1.234`` / ``1.000`` refuse. Locale money
+    (``$1,234`` / ``€1.234``) binds — stripping the symbol then calling
+    ``_normalize_locale_separators`` without the implied currency locale
+    used to miss those whole-currency cells and invent INTEGER / empty
+    from the leftover ``$99``.
     """
-    if value is None:
-        return None
-    if isinstance(value, bool):
-        return None
-    if isinstance(value, Decimal):
-        if not value.is_finite():
-            return None
-        return format(value.normalize(), "f")
-    if isinstance(value, int) and not isinstance(value, bool):
-        return str(value)
-    if isinstance(value, float):
-        if value != value or value in (float("inf"), float("-inf")):
-            return None
-        try:
-            return format(Decimal(str(value)).normalize(), "f")
-        except (InvalidOperation, Overflow, ValueError):
-            return None
-    text = str(value).strip()
-    if not text:
-        return None
-    from services.transform_engine import (
-        _normalize_locale_separators,
-        _normalize_numeric_text,
-    )
+    from services.transform_engine import decimal_wire_value
 
-    cleaned = _normalize_numeric_text(text)
-    if not cleaned:
-        return None
-    return _normalize_locale_separators(cleaned)
+    return decimal_wire_value(value)
+
+
+def write_int_digits_and_scale(value: Any) -> tuple[int, int]:
+    """(integer_digits, fractional_scale) for write fit / bind.
+
+    Trailing zeros are padding (``2000.00`` → scale 0). Snowflake
+    ``NUMBER(38,0)`` stores that as 2000. Significant cents stay
+    (``2000.10`` → 2). Create-new invent must keep money scale via
+    ``cell_int_digits_and_scale`` and must not call this.
+    """
+    try:
+        d = _canonical_numeric(value)
+        if d is None or not d.is_finite():
+            if isinstance(value, Decimal) and value.is_finite():
+                d = value
+            else:
+                return 0, 0
+        with localcontext() as ctx:
+            ctx.prec = max(len(d.as_tuple().digits) + 1, 28)
+            n = d.normalize()
+        _sign, digits, exponent = n.as_tuple()
+        if not isinstance(exponent, int):
+            return 0, 0
+        scale = -exponent if exponent < 0 else 0
+        int_digits = max(0, len(digits) + exponent)
+        return int_digits, scale
+    except (InvalidOperation, Overflow, ValueError, TypeError):
+        return 0, 0
 
 
 def cell_int_digits_and_scale(value: Any) -> tuple[int, int]:
@@ -73,11 +79,8 @@ def cell_int_digits_and_scale(value: Any) -> tuple[int, int]:
     raw scale is in the float-tail band.
     """
     try:
-        text = _canonical_numeric_text(value)
-        if not text:
-            return 0, 0
-        d = Decimal(text)
-        if not d.is_finite():
+        d = _canonical_numeric(value)
+        if d is None or not d.is_finite():
             return 0, 0
         _sign, digits, exponent = d.as_tuple()
         raw_scale = -exponent if exponent < 0 else 0
@@ -105,11 +108,8 @@ def significant_digit_count(value: Any) -> int:
     context wide enough to leave the value alone.
     """
     try:
-        text = _canonical_numeric_text(value)
-        if not text:
-            return 0
-        d = Decimal(text)
-        if not d.is_finite():
+        d = _canonical_numeric(value)
+        if d is None or not d.is_finite():
             return 0
         with localcontext() as ctx:
             ctx.prec = max(len(d.as_tuple().digits) + 1, 28)
@@ -147,13 +147,84 @@ def _significant_scale(scales: list[int]) -> int:
     return ordered[-1]
 
 
+#: Extra dest scale is a critical invent bug (Snowsight ``9.083333000000``).
+#: Trailing zeros after the decimal do not change the value, but CREATE /
+#: invent / transform must not invent them on any connector. Keep the
+#: constant at 0 so leftover callers cannot re-introduce a +2 pad.
+CREATE_NEW_NUMERIC_SAFETY_MARGIN = 0
+
+
+def exact_create_decimal_ps(
+    max_int_digits: int,
+    max_scale: int,
+    *,
+    max_precision: int = 38,
+    safety_margin: int = 0,
+) -> tuple[int, int]:
+    """CREATE/invent ``(precision, scale)`` from observed digits. No pad.
+
+    Dest scale is the significant observed scale. Dest int digits are the
+    observed max. Do not add +2 scale or +1 int — that is what printed
+    ``9.083333000000`` on Snowflake and the same lie on every other engine.
+
+    Values that need more digits widen later to this same exact envelope
+    (population fit + write-time ``fits_decimal``). Never invent head-room
+    "just in case." ``safety_margin`` stays for explicit callers only and
+    defaults to 0.
+
+    When both observed parts exceed ``max_precision``, precision may be
+    larger than the cap so ``ddl_type`` can pick BIGNUMERIC / NUMERIC
+    instead of silently truncating scale.
+    """
+    observed_scale = max(0, int(max_scale or 0))
+    observed_int = max(0, int(max_int_digits or 0))
+    margin = max(0, int(safety_margin or 0))
+    scale = observed_scale
+    int_digits = observed_int
+    if margin and scale > 0:
+        scale = scale + min(2, margin)
+    if margin and int_digits > 0:
+        int_digits = int_digits + 1
+    if scale == 0 and int_digits == 0:
+        return 0, 0
+    if int_digits + scale > max_precision:
+        # Reclaim invented head-room only — never a digit the samples used.
+        scale = max(observed_scale, min(scale, max(0, max_precision - int_digits)))
+    if int_digits + scale > max_precision:
+        int_digits = max(observed_int, max_precision - scale)
+    precision = max(scale, int_digits + scale)
+    if 0 < precision <= max_precision:
+        precision = min(max_precision, precision)
+    return precision, scale
+
+
+def observe_source_numeric_samples(
+    samples: list[Any] | None,
+    *,
+    max_precision: int = 38,
+) -> dict[str, Any]:
+    """What the column *is*, from the cells — no dest invent pad.
+
+    Trailing zeros still collapse through ``cell_int_digits_and_scale`` (same
+    rule as ``fits_decimal`` / Validate). Create-new dest invent uses the
+    same exact envelope — it must not add scale the cells do not have.
+    """
+    return observe_numeric_samples(
+        samples, safety_margin=0, max_precision=max_precision
+    )
+
+
 def observe_numeric_samples(
     samples: list[Any] | None,
     *,
-    safety_margin: int = 2,
+    safety_margin: int = 0,
     max_precision: int = 38,
 ) -> dict[str, Any]:
     """Profile numeric samples into invent-ready precision/scale + kind.
+
+    Default invent is the exact observed envelope (margin 0). A non-zero
+    ``safety_margin`` is an explicit opt-in and must not be the product
+    default — extra dest scale is operator-visible data-shape corruption.
 
     Returns keys: ``kind``, ``max_int_digits``, ``max_scale``, ``scale``,
     ``precision``, ``carrier``, ``parse_rate``, ``sample_count``, ``ieee_signals``,
@@ -183,23 +254,17 @@ def observe_numeric_samples(
     residue_scale = 0
     parsed = 0
     for raw in rows[:500]:
-        text = _canonical_numeric_text(raw)
-        if not text:
+        d = _canonical_numeric(raw)
+        if d is None or not d.is_finite():
             continue
-        try:
-            d = Decimal(text)
-            if not d.is_finite():
-                continue
-        except (InvalidOperation, Overflow, ValueError):
-            continue
-        idig, scale = cell_int_digits_and_scale(text)
+        idig, scale = cell_int_digits_and_scale(d)
         parsed += 1
         int_digits_list.append(idig)
         scales.append(scale)
         # Scientific notation is a rendering, not a storage class: exporters emit
         # ``9.87E+20`` for exact decimals all the time, so it is judged on the
         # same mantissa evidence as any other spelling.
-        if looks_like_binary_residue(text):
+        if looks_like_binary_residue(d):
             ieee_signals.append("hard_scale_residue")
             residue_scale = max(residue_scale, scale)
 
@@ -239,28 +304,29 @@ def observe_numeric_samples(
         ieee_signals = sorted(set(ieee_signals + ["scale_tail_outlier"]))
 
     margin = max(0, int(safety_margin))
-    # Modest buffer on scale for fixed money; ieee uses significant scale only.
-    scale_out = scale
-    if kind == "fixed_decimal" and scale_out > 0:
-        scale_out = min(max_precision, scale_out + min(2, margin))
-    int_out = max(1, max_int + (1 if max_int > 0 else 0))
-    # The cap may reclaim the head-room this function added, never a digit the
-    # samples actually used. Truncating observed scale here would hand the
-    # writer a carrier that silently rounds real values away, and it would do so
-    # before ``ddl_type`` gets to choose NUMERIC / BIGNUMERIC on destinations
-    # that can hold the value, or a lossless text carrier on those that cannot.
-    if int_out + scale_out > max_precision:
-        scale_out = max(scale, min(scale_out, max(0, max_precision - int_out)))
-    if int_out + scale_out > max_precision:
-        int_out = max(max(1, max_int), max_precision - scale_out)
-    precision = max(scale_out, int_out + scale_out)
-    if precision <= max_precision:
-        precision = min(max_precision, precision)
+    # Exact observed envelope. ieee uses significant scale (no pad) and FLOAT.
+    if kind == "fixed_decimal":
+        precision, scale_out = exact_create_decimal_ps(
+            max_int,
+            scale,
+            max_precision=max_precision,
+            safety_margin=margin,
+        )
+    else:
+        precision, scale_out = exact_create_decimal_ps(
+            max_int,
+            scale if kind != "integer" else 0,
+            max_precision=max_precision,
+            safety_margin=0,
+        )
 
     if kind == "integer":
         # Wide integers beyond BIGINT → DECIMAL(p,0); else INTEGER.
         if max_int > 18:
-            carrier = f"DECIMAL({min(max_precision, max(max_int + 1, 19))},0)"
+            wide_p, _wide_s = exact_create_decimal_ps(
+                max_int, 0, max_precision=max_precision
+            )
+            carrier = f"DECIMAL({min(max_precision, max(wide_p, 19))},0)"
         else:
             carrier = "INTEGER"
     elif kind == "ieee_float":
@@ -273,7 +339,7 @@ def observe_numeric_samples(
             else f"suggested_fixed=DECIMAL({precision},0)"
         )
     else:
-        carrier = f"DECIMAL({precision},{scale_out})"
+        carrier = f"DECIMAL({precision},{scale_out})" if precision else "DECIMAL"
 
     return {
         "kind": kind,
@@ -339,8 +405,8 @@ def create_new_decimal_carrier(
     """Logical carrier for create-new invent from samples (+ optional source stamp).
 
     Prefer declared ``DECIMAL(p,s)`` on ``source_type`` when present. Otherwise
-    observe samples. Destination physical DDL is applied by the caller via
-    ``ddl_type(dest_db, carrier)``.
+    observe samples at the exact envelope (no +2 scale / +1 int). Destination
+    physical DDL is applied by the caller via ``ddl_type(dest_db, carrier)``.
     """
     from services.type_system import (
         LOGICAL_DECIMAL,
@@ -354,7 +420,7 @@ def create_new_decimal_carrier(
         if p is not None:
             return src if s is not None else f"DECIMAL({p},0)"
 
-    obs = observe_numeric_samples(samples)
+    obs = observe_numeric_samples(samples, safety_margin=0)
     if obs.get("kind") in {None, "empty"}:
         # No evidence — keep declared source token (caller falls through to ddl).
         return src or "DECIMAL"
@@ -362,6 +428,269 @@ def create_new_decimal_carrier(
     # dest_db reserved for future dialect-specific invent (BQ BIGNUMERIC, …).
     _ = (dest_db or "").strip()
     return carrier
+
+
+def decimal_widen_precision_scale(
+    value: Any,
+    *,
+    dest_db: str = "",
+    current_type: str = "",
+) -> tuple[int, int] | None:
+    """Smallest (precision, scale) that holds ``value`` without shrinking dest.
+
+    Write-path digits (trailing zeros collapse). Dest int-width is kept so a
+    ``NUMBER(9,6)`` clock column that overflowed at scale 7 becomes
+    ``NUMBER(10,7)``, not ``NUMBER(8,7)``. Returns ``None`` when the cell
+    is not a decimal the write path would bind.
+    """
+    from connectors.writer_common import parse_decimal_precision_scale
+
+    d = _canonical_numeric(value)
+    if d is None or not d.is_finite():
+        return None
+    idig, scale = write_int_digits_and_scale(d)
+    parsed = parse_decimal_precision_scale(current_type, dest_db=dest_db)
+    cur_p, cur_s = parsed if parsed else (0, 0)
+    cur_int = max(0, cur_p - cur_s) if parsed else 0
+    need_s = max(cur_s, scale)
+    need_int = max(cur_int, idig, 1 if idig == 0 and scale == 0 else 0)
+    need_p = need_int + need_s
+    dialect = (dest_db or "").strip().lower()
+    cap = 76 if dialect in {"bigquery", "bq"} and need_s > 9 else 38
+    if need_p > cap:
+        need_int = max(idig, min(need_int, cap - need_s))
+        need_p = need_int + need_s
+        if need_p > cap:
+            need_p = cap
+            need_s = min(need_s, max(0, cap - need_int))
+    if need_p <= 0:
+        return None
+    return need_p, need_s
+
+
+def _decimal_carrier_token(
+    *,
+    dest_db: str,
+    current_type: str,
+    precision: int,
+    scale: int,
+) -> str:
+    dialect = (dest_db or "").strip().lower()
+    declared = re.split(r"[\s(]", (current_type or "").strip(), maxsplit=1)[0].upper()
+    if dialect in {"snowflake", "oracle"} or declared == "NUMBER":
+        return "NUMBER"
+    if dialect in {"bigquery", "bq"}:
+        return "BIGNUMERIC" if precision > 38 or scale > 9 else "NUMERIC"
+    if dialect in {"postgresql", "postgres", "redshift"} or declared == "NUMERIC":
+        return "NUMERIC"
+    return "DECIMAL"
+
+
+def decimal_widen_carrier(
+    value: Any,
+    *,
+    dest_db: str = "",
+    current_type: str = "",
+) -> str:
+    """Dest-spelled NUMBER/DECIMAL/NUMERIC that would hold ``value``."""
+    got = decimal_widen_precision_scale(
+        value, dest_db=dest_db, current_type=current_type
+    )
+    if got is None:
+        return ""
+    precision, scale = got
+    token = _decimal_carrier_token(
+        dest_db=dest_db, current_type=current_type, precision=precision, scale=scale
+    )
+    return f"{token}({precision},{scale})"
+
+
+def _decimal_precision_cap(dest_db: str, scale: int) -> int:
+    dialect = (dest_db or "").strip().lower()
+    return 76 if dialect in {"bigquery", "bq"} and scale > 9 else 38
+
+
+def decimal_widen_from_envelope(
+    *,
+    max_int_digits: int,
+    max_scale: int,
+    dest_db: str = "",
+    current_type: str = "",
+) -> str:
+    """One CREATE/widen type that holds every observed overflow, not the first cell.
+
+    flights-1m: ``0.23333333`` alone suggested NUMBER(11,8); ``0.016666668``
+    later still overflowed. The envelope of all unfit cells is NUMBER(12,9).
+
+    Digit math only. Callers that emit an Apply action must use
+    :func:`proven_decimal_widen` so the writer predicate agrees.
+    """
+    from connectors.writer_common import parse_decimal_precision_scale
+
+    parsed = parse_decimal_precision_scale(current_type, dest_db=dest_db)
+    cur_p, cur_s = parsed if parsed else (0, 0)
+    cur_int = max(0, cur_p - cur_s) if parsed else 0
+    need_s = max(cur_s, int(max_scale or 0))
+    need_int = max(cur_int, int(max_int_digits or 0))
+    if need_int == 0 and need_s == 0:
+        need_int = 1
+    need_p = need_int + need_s
+    cap = _decimal_precision_cap(dest_db, need_s)
+    if need_p > cap:
+        need_p = cap
+        need_s = min(need_s, max(0, cap - need_int))
+    if need_p <= 0:
+        return ""
+    token = _decimal_carrier_token(
+        dest_db=dest_db, current_type=current_type, precision=need_p, scale=need_s
+    )
+    return f"{token}({need_p},{need_s})"
+
+
+def proven_decimal_widen(
+    *,
+    values: list[Any] | tuple[Any, ...] = (),
+    dest_db: str = "",
+    current_type: str = "",
+    max_int_digits: int = 0,
+    max_scale: int = 0,
+    safety_margin: int = 0,
+) -> str:
+    """CREATE/widen type the write path accepts for every supplied overflow.
+
+    Envelope digits can disagree with ``fits_decimal`` (IEEE residue, dest
+    cap shrinking scale). Never emit a ``to_type`` the writer would refuse
+    after the operator clicks Apply.
+    """
+    from connectors.writer_common import fits_decimal, parse_decimal_precision_scale
+
+    parsed = parse_decimal_precision_scale(current_type, dest_db=dest_db)
+    cur_p, cur_s = parsed if parsed else (0, 0)
+    cur_int = max(0, cur_p - cur_s) if parsed else 0
+    observed_int = max(0, int(max_int_digits or 0))
+    observed_s = max(0, int(max_scale or 0))
+    margin = max(0, int(safety_margin or 0))
+    cells = [v for v in values if v is not None and str(v).strip() != ""]
+    for raw in cells:
+        idig, scale = write_int_digits_and_scale(raw)
+        observed_s = max(observed_s, scale)
+        observed_int = max(observed_int, idig)
+    need_s = max(cur_s, observed_s)
+    need_int = max(cur_int, observed_int)
+    if margin:
+        need_s += margin
+        if need_int > 0:
+            need_int += 1
+    if need_int == 0 and need_s == 0:
+        need_int = 1
+
+    cap = _decimal_precision_cap(dest_db, need_s)
+    for _ in range(cap + 2):
+        need_p = need_int + need_s
+        if need_p > cap:
+            # Reclaim unused dest integer head-room (NUMBER(38,0) + scale 6)
+            # before shrinking observed scale. Never invent extra scale.
+            need_int = max(observed_int, min(need_int, cap - need_s))
+            need_p = need_int + need_s
+            if need_p > cap:
+                need_s = min(need_s, max(0, cap - need_int))
+                need_p = need_int + need_s
+            if need_p > cap or need_p <= 0:
+                return ""
+        leftovers = [
+            v for v in cells
+            if not fits_decimal(v, need_p, need_s, dest_db=dest_db)
+        ]
+        if not leftovers:
+            token = _decimal_carrier_token(
+                dest_db=dest_db,
+                current_type=current_type,
+                precision=need_p,
+                scale=need_s,
+            )
+            return f"{token}({need_p},{need_s})"
+        grew = False
+        for raw in leftovers:
+            idig, scale = write_int_digits_and_scale(raw)
+            if scale > need_s:
+                need_s = scale
+                grew = True
+            if idig > need_int:
+                need_int = idig
+                grew = True
+        if not grew:
+            # Do not invent +1 scale/int. Extra dest zeros are data-shape
+            # corruption (currency 12.50 → 12.500). Return empty so the
+            # gate cannot Apply a type the cells did not prove.
+            return ""
+        cap = _decimal_precision_cap(dest_db, need_s)
+    return ""
+
+
+def fractional_trailing_zeros_same_value(left: Any, right: Any) -> bool:
+    """True when dest only padded scale after the decimal — the number is unchanged.
+
+    ``9.083333`` and ``9.083333000000`` are the same value. Zeros *before* the
+    decimal (``9.083333`` → ``908333.3``) would change magnitude and fail this.
+    """
+    a = _canonical_numeric(left)
+    b = _canonical_numeric(right)
+    if a is None or b is None:
+        return False
+    return a == b
+
+
+def dest_scale_padding_honesty(
+    *,
+    source_example: str = "9.083333",
+    dest_example: str = "9.083333000000",
+) -> str:
+    """Operator copy for Snowflake NUMBER display padding (flights DEP_TIME)."""
+    return (
+        f"Zeros after the decimal are display scale, not a bigger number. "
+        f"{source_example} and {dest_example} compare equal — the time did not "
+        f"increase. Zeros before the decimal would change the value; these do not. "
+        f"New CREATE/invent must use the observed scale only — never invent "
+        f"those extra zeros on any connector."
+    )
+
+
+def decimal_scale_overflow_fix(
+    value: Any,
+    *,
+    dest_db: str = "",
+    current_type: str = "",
+    column: str = "",
+    widened: str = "",
+    create_new: bool = False,
+    unfit_rows: int = 0,
+    example_row: int | None = None,
+) -> str:
+    """One operator action when dest NUMBER/DECIMAL cannot hold the cell."""
+    widened = widened or decimal_widen_carrier(
+        value, dest_db=dest_db, current_type=current_type
+    )
+    if not widened:
+        return ""
+    col = str(column or "").strip() or "the column"
+    if create_new:
+        where = f" (first {value!r} at row {example_row})" if example_row else ""
+        count = f"{unfit_rows} value(s)" if unfit_rows else "Values"
+        return (
+            f"New table — CREATE uses the Map type, not an ALTER. "
+            f"The preview peek stamped {current_type or 'a narrow numeric type'}. "
+            f"{count} in the source need {widened}{where}. "
+            f"Approve updates the CREATE type to {widened}. "
+            f"That type is proven against the overflow values Validate scanned "
+            f"(write-path fits_decimal). Re-Validate of those same values "
+            "should clear this gate. Source values are not modified. "
+            f"{dest_scale_padding_honesty()} "
+            "Do not silently truncate."
+        )
+    return (
+        f"Open Map → widen {col} to {widened} (or ALTER the destination) "
+        "→ re-Validate. Do not silently truncate."
+    )
 
 
 def ieee_float_create_new_risk(observation: dict[str, Any] | None) -> dict[str, str] | None:
@@ -374,7 +703,8 @@ def ieee_float_create_new_risk(observation: dict[str, Any] | None) -> dict[str, 
         "severity": "warn",
         "message": (
             "Samples look like IEEE/Excel binary floats (long fractional residue). "
-            f"Create-new stamps FLOAT (approximate). Prefer {suggested} only when "
-            "the business domain is fixed-point money/scores — accept risk or remap."
+            f"FLOAT is approximate — do not Apply it as the default CREATE type. "
+            f"Prefer {suggested} for money/clocks/scores. Accept · Risk Contract "
+            "only if the business domain is truly IEEE, then remap to FLOAT."
         ),
     }

@@ -157,13 +157,13 @@ export function ConnectorDetailDrawer({
       )}
 
       {/* Related jobs & pipelines */}
-      <section className="df2-drawer-section" aria-label="Related jobs and pipelines">
+      <section className="df2-drawer-section" aria-label="Related jobs and schedules">
         <div className="df2-drawer-section-head">
-          <h3><DtIcon name="activity" size={14} /> Related pipelines</h3>
+          <h3><DtIcon name="activity" size={14} /> Related schedules</h3>
           <span className="df2-drawer-count">{relatedSchedules.length}</span>
         </div>
         {relatedSchedules.length === 0 ? (
-          <p className="df2-drawer-empty-line">No pipelines reference this connection yet.</p>
+          <p className="df2-drawer-empty-line">No schedules reference this connection yet.</p>
         ) : (
           <ul className="df2-drawer-related-list">
             {relatedSchedules.slice(0, 6).map((s) => {

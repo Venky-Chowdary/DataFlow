@@ -33,6 +33,36 @@ from services.decision_kernel import is_lossy_coercion, normalize_logical_type
 # Policies that auto-apply additive field evolution (Airbyte propagate_*).
 PROPAGATE_POLICIES = frozenset({"propagate_columns", "propagate_all"})
 
+#: Operator caption — same meaning as Studio ``schemaPolicyHonestyLine``.
+SCHEMA_POLICY_HONESTY: dict[str, str] = {
+    "manual_review": (
+        "Validate blocks on new or renamed columns until you Acknowledge or remap. "
+        "Execute does not ADD COLUMN. Hard type-narrow always pauses."
+    ),
+    "propagate_columns": (
+        "Validate auto-maps additive columns; Execute issues ADD COLUMN. "
+        "Type narrow, PK, and dest-only NOT NULL still pause — not a silent rewrite."
+    ),
+    "propagate_all": (
+        "Same ADD COLUMN kernel as propagate columns — every selected stream on this job. "
+        "Does not rewrite destination types. Hard-breaking changes still pause."
+    ),
+    "pause_on_change": (
+        "Any detected change — including additive — pauses Validate and scheduled beats. "
+        "Nothing is written until you change policy or remap."
+    ),
+    "type_locked": (
+        "Widen and destination type changes pause. New columns need review. "
+        "Execute does not silent-cast."
+    ),
+}
+
+
+def schema_policy_honesty_line(policy: str) -> str:
+    """Studio / G10 caption for the Advanced schema-change policy."""
+    key = (policy or "manual_review").strip().lower()
+    return SCHEMA_POLICY_HONESTY.get(key, SCHEMA_POLICY_HONESTY["manual_review"])
+
 # Always pause — Airbyte breaking + Datawrap type-fidelity (no silent narrow).
 HARD_BREAKING_KINDS = frozenset({
     "primary_key_change",
@@ -131,7 +161,14 @@ def _is_type_narrow(old_type: str, new_type: str, *, dest_db: str = "") -> bool:
 
     Same-logical pairs must still consult ``is_lossy_coercion`` — first ``(p``
     digit alone misses DECIMAL(10,4)→DECIMAL(10,2) and BIGINT→TINYINT.
+
+    A declaration is not a narrow of itself. Coercion helpers read two identical
+    unparameterized carriers (``TIMESTAMP_NTZ``) through ``dest_db`` defaults and
+    invent dest-floor vs source-ceiling loss — that is a fidelity-gate concern
+    against the real destination type, not source-vs-source drift.
     """
+    if _norm_type(old_type) == _norm_type(new_type):
+        return False
     old_logical = normalize_logical_type(old_type)
     new_logical = normalize_logical_type(new_type)
     if is_lossy_coercion(old_type, new_type, dest_db=dest_db):
@@ -309,9 +346,21 @@ def classify_schema_change(
         old_t, new_t = old_cols[col], new_cols[col]
         same_logical = normalize_logical_type(old_t) == normalize_logical_type(new_t)
         same_length = _type_length(old_t) == _type_length(new_t)
+        # A declaration is not drift against itself. Coercion helpers read the
+        # two spellings through the destination's defaults, so an unparameterized
+        # carrier (TIMESTAMP_NTZ, TIMESTAMP) resolves to the source ceiling on
+        # one side and the destination floor on the other and accuses a column
+        # nobody touched of narrowing. Loss against the destination is the
+        # fidelity gate's concern, measured on real destination types; drift only
+        # reports what changed between two schemas.
+        unchanged_declaration = _norm_type(old_t) == _norm_type(new_t)
         # Never short-circuit on same logical + same first-number length alone —
         # DECIMAL(10,4)→DECIMAL(10,2) and BIGINT→TINYINT share that trap.
-        if same_logical and same_length and not _is_type_narrow(old_t, new_t, dest_db=dest_db):
+        if unchanged_declaration or (
+            same_logical
+            and same_length
+            and not _is_type_narrow(old_t, new_t, dest_db=dest_db)
+        ):
             # Same declared type; nullability tighten is breaking.
             if col in old_null and col in new_null and old_null[col] and not new_null[col]:
                 breaking.append({
@@ -380,6 +429,27 @@ def _schema_dict_from_flat(
         "nullable": {c: (nullable or {}).get(c, True) for c in cols},
         "primary_key": list(primary_key or []),
     }
+
+
+def is_same_declaration_narrow(entries: list[dict[str, Any]] | None) -> bool:
+    """True when every row is a type-narrow of a declaration against itself.
+
+    ``joining_date: TIMESTAMP_NTZ → TIMESTAMP_NTZ (narrow_type)`` is dest-floor
+    vs source-ceiling invent, not a column anyone changed. A mixed list (a real
+    drop plus this invent) is not a no-op — the operator still owes the drop.
+    """
+    rows = [e for e in (entries or []) if isinstance(e, dict)]
+    if not rows:
+        return False
+    for entry in rows:
+        kind = str(entry.get("kind") or "").strip().lower()
+        if kind != "narrow_type":
+            return False
+        old_t = str(entry.get("old_type") or entry.get("from_type") or "")
+        new_t = str(entry.get("new_type") or entry.get("to_type") or "")
+        if not old_t or not new_t or _norm_type(old_t) != _norm_type(new_t):
+            return False
+    return True
 
 
 def classify_from_column_maps(
@@ -662,8 +732,26 @@ def detect_schema_drift(
     cursor_fields: list[str] | None = None,
     schema_policy: str = "manual_review",
     table_exists: bool | None = None,
+    declared_source_columns: list[str] | None = None,
+    declared_source_schema: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    """Compare live schemas to stored contracts; attach schema_evolution plan."""
+    """Compare live schemas to stored contracts; attach schema_evolution plan.
+
+    Two different questions are asked of the source here, and an approved
+    pre-load transform separates them:
+
+    * *Did the source change under the stored mapping revision?* — answered by
+      the **declared** source, because that is what the revision fingerprinted.
+    * *Do the values this run will bind fit the destination carrier?* — answered
+      by the **transformed** image, because that is what the writer receives.
+
+    Conflating them blocks a correct run either way: judging the fingerprint on
+    the transformed image reports the operator's own recipe as source drift,
+    while judging the carrier on the declared type grades a column rounded to
+    whole numbers as a ``DECIMAL(11,8) → INT4`` precision collapse for values
+    that are now integers. ``declared_source_*`` default to the live arguments,
+    so an unshaped run behaves exactly as before.
+    """
     source_schema = source_schema or {}
     target_columns = target_columns or []
     target_schema = target_schema or {}
@@ -675,7 +763,13 @@ def detect_schema_drift(
     # (None) and create-new must not invent destination drift from Studio maps.
     live_ddl_contract = bool(table_exists is True and target_schema and not schemaless)
 
-    live_source_fp = fingerprint_schema(source_columns, source_schema)
+    # The revision signed the declared source, so the fingerprint questions read
+    # it; every value/carrier question below reads the live (possibly
+    # transformed) image.
+    fp_source_columns = list(declared_source_columns or source_columns)
+    fp_source_schema = dict(declared_source_schema or source_schema)
+
+    live_source_fp = fingerprint_schema(fp_source_columns, fp_source_schema)
     live_target_fp = (
         fingerprint_schema(target_columns, target_schema)
         if target_columns and live_ddl_contract
@@ -683,7 +777,7 @@ def detect_schema_drift(
     )
 
     source_changed = bool(stored_source_fp) and not schemas_match(
-        stored_source_fp, source_columns, source_schema
+        stored_source_fp, fp_source_columns, fp_source_schema
     )
     target_changed = bool(
         live_ddl_contract
@@ -799,8 +893,8 @@ def detect_schema_drift(
         classification = classify_from_column_maps(
             prev_cols or list(prev_types.keys()),
             prev_types,
-            source_columns,
-            source_schema,
+            fp_source_columns,
+            fp_source_schema,
             old_pk=previous_primary_key,
             new_pk=live_primary_key,
             cursor_fields=cursor_fields,

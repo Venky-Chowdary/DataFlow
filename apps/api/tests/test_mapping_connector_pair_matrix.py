@@ -128,7 +128,11 @@ def test_connector_pair_mapping_accuracy(pair_id: str, tmp_path: Path) -> None:
         risks = row.get("create_new_risks") or []
         # Dest may preserve TZ (PG TIMESTAMPTZ) — risks optional; never invent silent green hide.
         if risks:
-            assert row.get("requires_review") is True
+            from services.create_new_risk_stamp import create_new_risk_locks_review
+
+            locking = [r for r in risks if create_new_risk_locks_review(r)]
+            if locking:
+                assert row.get("requires_review") is True
             kinds = {r.get("kind") for r in risks}
             assert kinds & {
                 "timezone_polarity",
@@ -136,6 +140,8 @@ def test_connector_pair_mapping_accuracy(pair_id: str, tmp_path: Path) -> None:
                 "precision_collapse",
                 "varchar_width_cap",
                 "varchar_narrow",
+                # MySQL TIMESTAMP keeps the instant but only 1970..2038 of it.
+                "instant_range_cap",
             }
     assert score >= 0.85, (
         f"{pair_id}: mapping score {score:.2%} below 85% "

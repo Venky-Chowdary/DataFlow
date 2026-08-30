@@ -17,6 +17,7 @@ from services.unique_key_introspect import (
     _sqlite_fetch_unique_keys,
     _sqlserver_fetch_unique_keys,
 )
+from services.catalog_defaults import normalize_catalog_default
 from services.check_constraints import probe_check_constraints
 from services.foreign_key_metadata import probe_foreign_keys
 from services.identity_carry import apply_identity_probe
@@ -126,6 +127,47 @@ def _refine_columns_by_samples(
     return columns
 
 
+#: Engines whose catalog keys on (namespace, bare object name). Studio may carry
+#: a qualified name ("public.orders", "SALES.PUBLIC.ORDERS"), and
+#: ``information_schema`` stores ``orders`` — never ``public.orders`` — so the
+#: name has to be split before the lookup. Document stores are deliberately
+#: absent: a MongoDB collection name may legitimately contain a dot.
+_NAMESPACED_SQL_ENGINES = frozenset({
+    "postgresql", "redshift", "pgvector", "mysql", "mariadb", "snowflake",
+    "sqlserver", "mssql", "sql_server", "azure_sql", "oracle", "oracle_db",
+    "amazon_rds_oracle", "bigquery", "generic_sql", "duckdb", "clickhouse",
+    "trino", "presto",
+})
+
+
+def split_object_namespace(
+    db_type: str, table: str | None, *, schema: str, database: str
+) -> tuple[str, str, str]:
+    """``(schema, database, object)`` for a possibly qualified object name.
+
+    A source table that sorted outside the bounded object listing was declared
+    "not found" for exactly this reason: the listing is what normalises
+    ``public.vt_src`` to ``vt_src``, so past the listing cap the catalog was
+    asked for a table literally named ``public.vt_src`` and answered no rows.
+    Existence must never depend on where a name sorts in a truncated page.
+    """
+    name = (table or "").strip()
+    if not name or (db_type or "").lower() not in _NAMESPACED_SQL_ENGINES:
+        return schema, database, name
+    parts = [p.strip().strip('"').strip("`").strip("[]") for p in name.split(".")]
+    parts = [p for p in parts if p]
+    if len(parts) < 2:
+        return schema, database, name
+    leaf = parts[-1]
+    namespace = parts[-2]
+    if (db_type or "").lower() in {"mysql", "mariadb"}:
+        # MySQL has no schema layer: the qualifier is the database, and the
+        # introspector prefers ``database`` over ``schema``.
+        return schema, namespace, leaf
+    catalog = parts[-3] if len(parts) >= 3 else ""
+    return namespace, (catalog or database), leaf
+
+
 def introspect_schema(
     db_type: str,
     *,
@@ -177,6 +219,11 @@ def introspect_schema(
             "type": catalog_type or db_type,
         }
         return introspect_table_schema(cfg, table or "")
+    # A qualified name is resolved once, here, so every engine branch below asks
+    # its catalog for the bare object in the right namespace.
+    schema, database, table = split_object_namespace(
+        db_type, table, schema=schema, database=database
+    )
     if db_type == "postgresql" or db_type == "redshift":
         return _introspect_postgresql(
             host=host,
@@ -1067,8 +1114,11 @@ def _introspect_mysql(**kwargs) -> dict[str, Any]:
                         "name": name,
                         "inferred_type": logical,
                         "nullable": nullable == "YES",
-                        "default": (
-                            str(default) if default is not None else None
+                        # MySQL stores a literal default as its bare value while
+                        # MariaDB stores an expression; normalize to SQL text so
+                        # the fidelity whitelist sees one spelling.
+                        "default": normalize_catalog_default(
+                            "mysql", default, data_type=str(dtype or ""), extra=extra
                         ),
                         "is_identity": "auto_increment" in extra,
                         "generation": (
@@ -2251,23 +2301,23 @@ def _introspect_oracle(**kwargs) -> dict[str, Any]:
     try:
         with engine.connect() as conn:
             tables: list[str] = []
-            if schema:
-                rows = conn.execute(
-                    sa.text(
-                        "SELECT table_name FROM all_tables WHERE owner = :owner ORDER BY table_name"
-                    ),
-                    {"owner": schema},
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    sa.text("SELECT table_name FROM user_tables ORDER BY table_name")
-                ).fetchall()
-            tables = [r[0] for r in rows]
-
             if not table:
+                if schema:
+                    rows = conn.execute(
+                        sa.text(
+                            "SELECT table_name FROM all_tables WHERE owner = :owner ORDER BY table_name"
+                        ),
+                        {"owner": schema},
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        sa.text("SELECT table_name FROM user_tables ORDER BY table_name")
+                    ).fetchall()
+                tables = [r[0] for r in rows]
                 return {"ok": True, "columns": [], "tables": tables, "schema": schema}
 
             owner = schema or (kwargs.get("username") or "").upper()
+            tables = [table.upper()]
             # Stored spelling inside the requested owner: a quoted lower-case
             # table read as "does not exist" under the folded name, so Validate
             # planned create-new (and skipped the destination PK / duplicate
@@ -2279,6 +2329,7 @@ def _introspect_oracle(**kwargs) -> dict[str, Any]:
             resolved_table = _ident.table if _ident.exists else table.upper()
             if _ident.exists and _ident.schema:
                 owner = _ident.schema
+            tables = [resolved_table]
             # VIRTUAL_COLUMN / IDENTITY_COLUMN — client INSERT must omit ALWAYS.
             # ALL_TAB_COLS (not ALL_TAB_COLUMNS) is the view that exposes
             # VIRTUAL_COLUMN; the join used to fail with ORA-00904 on every
@@ -2514,22 +2565,24 @@ def _introspect_sqlserver(**kwargs) -> dict[str, Any]:
 
     try:
         with engine.connect() as conn:
-            tables = [
-                r[0]
-                for r in conn.execute(
-                    sa.text(
-                        """
-                        SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES
-                        WHERE TABLE_TYPE = 'BASE TABLE' AND TABLE_SCHEMA = :schema
-                        ORDER BY TABLE_NAME
-                        """
-                    ),
-                    {"schema": schema},
-                ).fetchall()
-            ]
+            tables: list[str] = []
             if not table:
+                tables = [
+                    r[0]
+                    for r in conn.execute(
+                        sa.text(
+                            """
+                            SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES
+                            WHERE TABLE_TYPE = 'BASE TABLE' AND TABLE_SCHEMA = :schema
+                            ORDER BY TABLE_NAME
+                            """
+                        ),
+                        {"schema": schema},
+                    ).fetchall()
+                ]
                 return {"ok": True, "columns": [], "tables": tables, "schema": schema}
 
+            tables = [table]
             col_rows = conn.execute(
                 sa.text(
                     """
@@ -3062,10 +3115,13 @@ def _sample_logical_type(value: Any, key: str = "") -> str:
     except Exception:
         pass
     if isinstance(value, datetime.datetime):
-        # Mongo UTCDateTime is always timezone-aware in pymongo (UTC).
-        if value.tzinfo is not None:
-            return "TIMESTAMPTZ"
-        return "TIMESTAMP_NTZ"
+        # BSON stores milliseconds since the epoch — an instant, always UTC.
+        # Whether the driver hands it back aware is a client setting
+        # (``tz_aware``), not a property of the stored value, so a naive render
+        # must not be stamped zoneless: that made the timezone policy see
+        # naive→naive, ask for no contract, and let Validate clear a batch the
+        # writer then refused row by row.
+        return "TIMESTAMPTZ"
     if isinstance(value, datetime.date):
         return "DATE"
     if _BSON_DECIMAL and isinstance(value, _BSON_DECIMAL):

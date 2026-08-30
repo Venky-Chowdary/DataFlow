@@ -4,7 +4,12 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { destProvenCount } from "./conservationLedger.js";
-import { buildThroughputSeries } from "./overviewAnalytics.js";
+import { jobHistoryFromResponse } from "./jobHistory.js";
+import {
+  buildOverviewJobStats,
+  buildStatusDistributionFromHistory,
+  buildThroughputSeries,
+} from "./overviewAnalytics.js";
 
 function job(partial: Record<string, unknown>) {
   return {
@@ -96,5 +101,44 @@ describe("Overview throughput uses conservation identity, not dest after", () =>
     assert.equal(destProvenCount(keyed), null);
     const series = buildThroughputSeries([keyed as never], 1);
     assert.equal(series[0]?.rows, 0);
+  });
+});
+
+describe("Overview job stats use whole-history counts, not the page", () => {
+  const history = jobHistoryFromResponse({
+    jobs: [
+      job({ _id: "a", status: "completed" }),
+      job({ _id: "b", status: "failed" }),
+    ],
+    total: 90,
+    status_counts: {
+      completed: 42,
+      completed_with_quarantine: 2,
+      running: 17,
+      pending: 2,
+      failed: 27,
+    },
+  });
+
+  it("mix badge and success rate read the counted history", () => {
+    const stats = buildOverviewJobStats(history);
+    assert.equal(stats.total, 90);
+    assert.equal(stats.completed, 44);
+    assert.equal(stats.failed, 27);
+    assert.equal(stats.running, 19);
+    assert.equal(stats.quarantine, 2);
+    assert.equal(stats.successRate, 49);
+    assert.equal(stats.windowLoaded, 2);
+    assert.equal(stats.isWindow, true);
+  });
+
+  it("donut slices use status_counts, not the two loaded rows", () => {
+    const slices = buildStatusDistributionFromHistory(history);
+    const byKey = Object.fromEntries(slices.map((s) => [s.key, s.count]));
+    assert.equal(byKey.completed, 42);
+    assert.equal(byKey.quarantine, 2);
+    assert.equal(byKey.running, 19);
+    assert.equal(byKey.failed, 27);
+    assert.equal(Object.values(byKey).reduce((s, n) => s + n, 0), 90);
   });
 });

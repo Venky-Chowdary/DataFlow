@@ -7,24 +7,21 @@ objects. The reader expects either a ``cfg`` dict (the canonical
 
 from __future__ import annotations
 
-import json
-from datetime import date, datetime, time
-from decimal import Decimal
 from typing import Any
 
 from connectors.base import ReadBatch
+from services.value_serializer import cell_to_string
 
 
 def _stringify(value: Any) -> str:
-    from services.value_serializer import SQL_NULL_SENTINEL, cell_to_string
+    """One Iceberg cell. Same wire as PostgreSQL / SQL readers.
 
-    if value is None:
-        return SQL_NULL_SENTINEL
-    if isinstance(value, (dict, list)):
-        return json.dumps(value, default=str)
-    if isinstance(value, (datetime, date, time, Decimal)):
-        return str(value)
-    # Bytes → base64 via cell_to_string SSOT — never UTF-8 errors="replace" (U+FFFD invent).
+    Nested STRUCT/LIST used to ``json.dumps(..., default=str)`` — nested
+    BINARY became a Python ``b'...'`` repr, Decimal used ``str()`` (scientific
+    invent), and timestamps used a space instead of ISO ``T``. Leaf datetime /
+    Decimal used ``str(value)`` for the same invent. ``cell_to_string`` is the
+    one reader algorithm.
+    """
     return cell_to_string(value, preserve_sql_null=True)
 
 

@@ -27,6 +27,7 @@ contract that a downstream reader has to know about.
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Final
@@ -50,6 +51,11 @@ POLICY_UTC_NORMALIZED: Final[str] = "utc_normalized_wall_clock"
 POLICY_OFFSET_TEXT: Final[str] = "offset_preserving_text"
 POLICY_WALL_CLOCK_LOCAL: Final[str] = "wall_clock_local_only"
 POLICY_UTC_INVENT: Final[str] = "utc_invented_from_naive"
+
+#: The window a MySQL-family ``TIMESTAMP`` column can hold, in words.
+MYSQL_TIMESTAMP_RANGE_TEXT: Final[str] = (
+    "1970-01-01 00:00:01 UTC .. 2038-01-19 03:14:07 UTC"
+)
 
 
 @dataclass(frozen=True)
@@ -146,6 +152,30 @@ def effective_source_type(source_type: str, transform: str | None) -> str:
     if datetime_timezone_polarity(source_type) != "ntz":
         return source_type
     return "TIMESTAMPTZ"
+
+
+def declared_source_column_types(
+    column_types: Mapping[str, str],
+    mappings: Sequence[Mapping[str, object]],
+) -> dict[str, str]:
+    """Source column types as the operator's zone declarations make them true.
+
+    Map carries the declaration on the mapping's transform, while every gate
+    reasons over the introspected source types. Projecting one onto the other in
+    a single place is what keeps the declaration from being a transform that
+    changes the written value while the gate still blocks the run for the
+    zoneless problem the operator just answered.
+    """
+    out = dict(column_types)
+    for m in mappings:
+        col = m.get("source") or m.get("source_column")
+        if not isinstance(col, str) or col not in out:
+            continue
+        transform = m.get("transform")
+        out[col] = effective_source_type(
+            out[col], transform if isinstance(transform, str) else "",
+        )
+    return out
 
 
 def resolve_timezone_policy(
@@ -285,8 +315,43 @@ def resolve_timezone_policy(
 
 def _range_limit(target_type: str, db: str) -> str:
     if db == "mysql" and _polarity(target_type, dest_db="mysql") in {"tz", "ltz"}:
-        return "1970-01-01 00:00:01 UTC .. 2038-01-19 03:14:07 UTC"
+        return MYSQL_TIMESTAMP_RANGE_TEXT
     return "engine default"
+
+
+def instant_range_would_cap(
+    source_type: str,
+    target_type: str,
+    *,
+    dest_db: str = "",
+) -> bool:
+    """True when an aware source lands in an epoch-bounded instant carrier.
+
+    MySQL ``TIMESTAMP`` is the right carrier for an instant — it is the only
+    MySQL column that stores one — but it holds barely 68 years of them. A
+    PostgreSQL ``TIMESTAMPTZ`` or Snowflake ``TIMESTAMP_TZ`` column spans
+    4713 BC..294276 AD, so create-new picks a carrier whose *domain* is
+    narrower than the source's even though its polarity and precision are
+    exact. That narrowing is invisible until a row outside the window reaches
+    the writer, which rejects it (or, outside STRICT mode, zeroes it).
+    """
+    from services.type_system import _normalize_dest_db
+
+    db = _normalize_dest_db(dest_db) if dest_db else ""
+    if db != "mysql":
+        return False
+    if not is_mysql_timestamp_carrier(target_type):
+        return False
+    return _polarity(source_type) in {"tz", "ltz"}
+
+
+def samples_outside_instant_range(samples: Sequence[Any] | None) -> list[str]:
+    """The sampled values a MySQL ``TIMESTAMP`` column could not hold."""
+    return [
+        str(v)
+        for v in (samples or [])
+        if v is not None and mysql_timestamp_out_of_range(v)
+    ]
 
 
 def is_mysql_timestamp_carrier(target_type: str) -> bool:

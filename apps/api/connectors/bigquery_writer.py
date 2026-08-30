@@ -48,6 +48,7 @@ from connectors.writer_common import (
 from connectors.writer_common import (
     WriteResult as _WriteResult,
 )
+from connectors.writer_common import writer_meta_with_source_rows
 
 
 @dataclass
@@ -152,11 +153,20 @@ def bq_type(inferred: str) -> str:
     return wire.upper() if wire else wire
 
 
-def bq_schema_field(bigquery_mod: Any, col: str, inferred: str) -> Any:
+def bq_schema_field(
+    bigquery_mod: Any,
+    col: str,
+    inferred: str,
+    *,
+    emulator: bool = False,
+) -> Any:
     """Build SchemaField honoring Map ``(p,s)`` / ``max_length`` stamps.
 
     Map≡CREATE: explicit NUMERIC/BIGNUMERIC(p,s) become SchemaField
     ``precision`` / ``scale`` — never bare platform invent (76,38) / (38,9).
+
+    goccy's emulator unmarshals Precision as a Go string; JSON numbers 400.
+    Emulator create-new therefore omits typmod — not a customer-tenant claim.
     """
     from services.type_system import (
         parse_binary_carrier_width,
@@ -165,6 +175,8 @@ def bq_schema_field(bigquery_mod: Any, col: str, inferred: str) -> Any:
 
     field_type = bq_type(inferred)
     kwargs: dict[str, Any] = {}
+    if emulator:
+        return bigquery_mod.SchemaField(col, field_type)
     if field_type in {"NUMERIC", "BIGNUMERIC"}:
         fp = _bq_fixed_point_spec(inferred)
         if fp is not None and fp[1] is not None and fp[2] is not None:
@@ -765,6 +777,34 @@ def _bq_scan_finished_bundles(**kwargs: Any) -> Any:
     return acc, source_row_count
 
 
+def _bq_get_table_schema(
+    client: Any,
+    table_id: str,
+    *,
+    host: str = "",
+    port: int = 0,
+    connection_string: str = "",
+) -> list[Any]:
+    """Physical schema probe. Emulator missing-table 500s must not retry-sleep."""
+    from connectors.google_emulator import (
+        google_emulator_retry,
+        google_emulator_timeout,
+        looks_like_google_emulator,
+    )
+
+    kw: dict[str, Any] = {}
+    if looks_like_google_emulator(
+        endpoint=str(connection_string or ""),
+        host=str(host or ""),
+        port=int(port or 0),
+    ):
+        kw = {
+            "retry": google_emulator_retry(),
+            "timeout": google_emulator_timeout(),
+        }
+    return list(client.get_table(table_id, **kw).schema)
+
+
 def write_mapped_rows(
     *,
     host: str,
@@ -887,6 +927,11 @@ def write_mapped_rows(
         from connectors.bigquery_conn import get_client, _is_local_endpoint
 
         is_local, _ = _is_local_endpoint(host, connection_string)
+        from connectors.google_emulator import looks_like_google_emulator
+
+        emulator = bool(is_local) or looks_like_google_emulator(
+            endpoint=connection_string, host=host, port=port,
+        )
 
         client = get_client(
             project_id=project_id,
@@ -905,7 +950,9 @@ def write_mapped_rows(
         table_existed = False
         physical_schema = None
         try:
-            physical_schema = list(client.get_table(table_id).schema)
+            physical_schema = _bq_get_table_schema(
+                client, table_id, host=host, port=port, connection_string=connection_string,
+            )
             table_existed = True
         except Exception as probe_exc:
             msg = str(probe_exc).lower()
@@ -966,18 +1013,40 @@ def write_mapped_rows(
                         dest_types.get(col)
                         or (logical_types[i] if i < len(logical_types) else "STRING")
                     ),
+                    emulator=emulator,
                 )
                 for i, col in enumerate(target_cols)
             ]
-            existing_datasets = {ds.dataset_id for ds in client.list_datasets()}
-            if dataset_id not in existing_datasets:
-                client.create_dataset(bigquery.Dataset(dataset_ref))
+            create_kw: dict[str, Any] = {}
+            if emulator:
+                from connectors.google_emulator import (
+                    google_emulator_retry,
+                    google_emulator_timeout,
+                )
+
+                create_kw = {
+                    "retry": google_emulator_retry(),
+                    "timeout": google_emulator_timeout(),
+                }
+                # Never list leftover emulator tables — goccy 500s retry-hang.
+                try:
+                    client.create_dataset(
+                        bigquery.Dataset(dataset_ref), exists_ok=True, **create_kw,
+                    )
+                except Exception:
+                    pass
+            else:
+                existing_datasets = {ds.dataset_id for ds in client.list_datasets()}
+                if dataset_id not in existing_datasets:
+                    client.create_dataset(bigquery.Dataset(dataset_ref))
             table = bigquery.Table(table_id, schema=schema_fields)
-            client.create_table(table, exists_ok=True)
+            client.create_table(table, exists_ok=True, **create_kw)
             # Re-probe after exists_ok — concurrent/pre-existing tables must still
             # overlay live DDL (probe race must not invent Map VARCHAR bind).
             try:
-                physical_schema = list(client.get_table(table_id).schema)
+                physical_schema = _bq_get_table_schema(
+                client, table_id, host=host, port=port, connection_string=connection_string,
+            )
                 table_existed = True
             except Exception as post_exc:
                 return WriteResult(
@@ -1049,13 +1118,15 @@ def write_mapped_rows(
                             if i < len(logical_types)
                             else "STRING"
                         )
-                new_fields.append(bq_schema_field(bigquery, col, typ))
+                new_fields.append(bq_schema_field(bigquery, col, typ, emulator=emulator))
             if new_fields:
                 table.schema = list(table.schema) + new_fields
                 client.update_table(table, ["schema"])
                 # Refresh physical after additive evolve.
                 try:
-                    physical_schema = list(client.get_table(table_id).schema)
+                    physical_schema = _bq_get_table_schema(
+                client, table_id, host=host, port=port, connection_string=connection_string,
+            )
                     table_existed = True
                 except Exception as refresh_exc:
                     return WriteResult(
@@ -1078,7 +1149,9 @@ def write_mapped_rows(
 
             if physical_schema is None:
                 try:
-                    physical_schema = list(client.get_table(table_id).schema)
+                    physical_schema = _bq_get_table_schema(
+                client, table_id, host=host, port=port, connection_string=connection_string,
+            )
                 except Exception as schema_exc:
                     return WriteResult(
                         ok=False,
@@ -1188,6 +1261,7 @@ def write_mapped_rows(
                     dest_types.get(col)
                     or (logical_types[i] if i < len(logical_types) else "STRING")
                 ),
+                emulator=emulator,
             )
             for i, col in enumerate(target_cols)
         ]
@@ -1202,7 +1276,9 @@ def write_mapped_rows(
         # Prefer physical table (p,s) so append into NUMERIC never silent-overflows.
         if physical_schema is None:
             try:
-                physical_schema = list(client.get_table(table_id).schema)
+                physical_schema = _bq_get_table_schema(
+                client, table_id, host=host, port=port, connection_string=connection_string,
+            )
             except Exception:
                 physical_schema = None
         decimal_target_types = resolve_bigquery_decimal_target_types(
@@ -1495,6 +1571,7 @@ def write_mapped_rows(
             coerced_null_rows=coerced_null_rows,
             rows_skipped=rows_skipped,
             warnings=transform_errors,
+            meta=writer_meta_with_source_rows(None, source_row_count),
         )
     except Exception as exc:
         cleanup = locals().get("_cleanup_spool")

@@ -7,8 +7,12 @@
  */
 
 import {
+  DATE_LOCALES,
+  NUMBER_LOCALES,
   SCHEMA_POLICIES,
   VALIDATION_MODES,
+  type DateLocaleId,
+  type NumberLocaleId,
   type SchemaPolicyId,
   type ValidationModeId,
 } from "./transferConstants";
@@ -35,6 +39,48 @@ export function schemaPolicyBackfills(policy: string): boolean {
   return policy === "propagate_columns" || policy === "propagate_all";
 }
 
+/**
+ * SQL table writers only — same set as ``services.pre_ingestion_staging._STAGING_SUPPORTED``.
+ * Mongo / files / SaaS cannot host ``{table}_df_staging``.
+ */
+const STAGING_SUPPORTED_DESTS = new Set([
+  "sqlite",
+  "postgresql",
+  "postgres",
+  "mysql",
+  "sqlserver",
+  "mssql",
+  "oracle",
+  "snowflake",
+  "redshift",
+  "generic_sql",
+  "duckdb",
+  "bigquery",
+]);
+
+export function writeViaStagingSupported(destType?: string | null): boolean {
+  const dest = String(destType || "")
+    .trim()
+    .toLowerCase()
+    .replace(/-/g, "_");
+  return STAGING_SUPPORTED_DESTS.has(dest);
+}
+
+const DATE_LOCALE_IDS = new Set<string>(DATE_LOCALES.map((l) => l.id));
+const NUMBER_LOCALE_IDS = new Set<string>(NUMBER_LOCALES.map((l) => l.id));
+
+export function namedStudioDateLocale(raw?: string | null): DateLocaleId {
+  const value = String(raw || "").trim().toUpperCase();
+  if (value === "DMY" || value === "MDY") return value;
+  return DATE_LOCALE_IDS.has(value) ? (value as DateLocaleId) : "";
+}
+
+export function namedStudioNumberLocale(raw?: string | null): NumberLocaleId {
+  const value = String(raw || "").trim().toUpperCase();
+  if (value === "US" || value === "EU") return value;
+  return NUMBER_LOCALE_IDS.has(value) ? (value as NumberLocaleId) : "";
+}
+
 export function jobStudioDataRules(job: {
   validation_mode?: string;
   schema_policy?: string;
@@ -52,21 +98,103 @@ export function studioSchedulePolicies(input: {
   validationMode?: string;
   schemaPolicy?: string;
   backfillNewFields?: boolean;
+  writeViaStaging?: boolean;
+  priorityColumn?: string;
+  priorityDirection?: "asc" | "desc" | string;
+  rowLimit?: number;
+  dateLocale?: string;
+  numberLocale?: string;
+  syncMode?: string;
+  snapshotMode?: string;
 }): {
   validation_mode?: string;
   schema_policy?: string;
   backfill_new_fields: boolean;
+  write_via_staging: boolean;
+  priority_column: string;
+  priority_direction: "asc" | "desc";
+  row_limit: number;
+  date_locale: DateLocaleId;
+  number_locale: NumberLocaleId;
+  snapshot_mode?: string;
 } {
   const validationMode = namedStudioValidationMode(input.validationMode);
   const schemaPolicy = namedStudioSchemaPolicy(input.schemaPolicy);
+  const direction = input.priorityDirection === "asc" ? "asc" : "desc";
+  const limit = Math.max(0, Number(input.rowLimit || 0) || 0);
   const out: {
     validation_mode?: string;
     schema_policy?: string;
     backfill_new_fields: boolean;
+    write_via_staging: boolean;
+    priority_column: string;
+    priority_direction: "asc" | "desc";
+    row_limit: number;
+    date_locale: DateLocaleId;
+    number_locale: NumberLocaleId;
+    snapshot_mode?: string;
   } = {
     backfill_new_fields: Boolean(input.backfillNewFields) && schemaPolicyBackfills(schemaPolicy),
+    write_via_staging: Boolean(input.writeViaStaging),
+    priority_column: String(input.priorityColumn || "").trim(),
+    priority_direction: direction,
+    row_limit: limit,
+    date_locale: namedStudioDateLocale(input.dateLocale),
+    number_locale: namedStudioNumberLocale(input.numberLocale),
   };
   if (validationMode) out.validation_mode = validationMode;
   if (schemaPolicy) out.schema_policy = schemaPolicy;
+  if (String(input.syncMode || "").trim().toLowerCase() === "cdc") {
+    const mode = String(input.snapshotMode || "initial").trim().toLowerCase().replace(/-/g, "_");
+    out.snapshot_mode = mode || "initial";
+  }
   return out;
+}
+
+const SQL_SERVER_CDC_TYPES = new Set([
+  "sqlserver",
+  "mssql",
+  "azure_sql_database",
+  "microsoft_sql_server",
+  "amazon_rds_sql_server",
+]);
+
+export function isSqlServerCdcSource(sourceType?: string | null): boolean {
+  return SQL_SERVER_CDC_TYPES.has(String(sourceType || "").trim().toLowerCase().replace(/-/g, "_"));
+}
+
+export type CdcRowFilterId = "all" | "all update old" | "net";
+
+export function namedCdcRowFilter(raw?: string | null): CdcRowFilterId {
+  const value = String(raw || "").trim().toLowerCase().replace(/[_-]+/g, " ");
+  if (value === "all update old") return "all update old";
+  if (value === "net") return "net";
+  return "all";
+}
+
+/** Destination Advanced CDC extras — hourly beat must replay these or Studio diverges. */
+export function studioScheduleCdcExtras(input: {
+  syncMode?: string;
+  allowAppendOnly?: boolean;
+  cdcRowFilter?: string;
+  multiSubnetFailover?: boolean;
+}): {
+  allow_append_only: boolean;
+  cdc_row_filter: string;
+  multi_subnet_failover: boolean;
+} {
+  const cdc = String(input.syncMode || "").trim().toLowerCase() === "cdc";
+  if (!cdc) {
+    return { allow_append_only: false, cdc_row_filter: "", multi_subnet_failover: false };
+  }
+  return {
+    allow_append_only: Boolean(input.allowAppendOnly),
+    cdc_row_filter: namedCdcRowFilter(input.cdcRowFilter),
+    multi_subnet_failover: Boolean(input.multiSubnetFailover),
+  };
+}
+
+/** Operations → Pipelines create has no Validate contract — do not enable the beat. */
+export function scheduleCreateMustPauseWithoutMappings(mappingCount: number): boolean {
+  return mappingCount <= 0;
 }

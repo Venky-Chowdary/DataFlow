@@ -8,8 +8,9 @@ instead of from Validate. The outcome was safe — no rows land — but the fail
 arrives as a driver error with no remediation, after the operator approved.
 
 Honesty: nullability comes from the destination catalog. When the catalog was
-not read, the gate reports *unmeasured* rather than pass — an unread catalog is
-not evidence that every required column is filled.
+not read, or was only partly read versus the live dest column list, the gate
+reports *unmeasured* rather than pass — a partial catalog is not evidence that
+every required column is filled.
 """
 
 from __future__ import annotations
@@ -54,6 +55,18 @@ def unfilled_required_columns(
     ]
 
 
+def _nullability_covers_dest(
+    column_nullability: dict[str, bool] | None,
+    dest_columns: list[str] | None,
+) -> bool:
+    """False when live dest columns exist that have no nullability entry."""
+    if not dest_columns:
+        return True
+    measured = _lower_set(list((column_nullability or {}).keys()))
+    dest = _lower_set(dest_columns)
+    return dest <= measured
+
+
 def build_destination_requirements_gate(
     *,
     destination_table_exists: bool | None,
@@ -62,6 +75,7 @@ def build_destination_requirements_gate(
     identity_columns: list[str] | None,
     generated_columns: list[str] | None,
     mappings: list[dict[str, Any]] | None,
+    dest_columns: list[str] | None = None,
 ) -> dict[str, Any] | None:
     """Return the G14 gate, or ``None`` when there is no existing table to check."""
     if destination_table_exists is not True:
@@ -88,6 +102,28 @@ def build_destination_requirements_gate(
                 "reason": "nullability_metadata_unavailable",
                 "unmeasured": True,
                 "rule_id": f"{GATE_ID}.unmeasured",
+                "remediation_kind": "retry_validate",
+            },
+        }
+
+    if not _nullability_covers_dest(column_nullability, dest_columns):
+        missing = sorted(
+            _lower_set(dest_columns) - _lower_set(list((column_nullability or {}).keys()))
+        )
+        return {
+            "id": GATE_ID,
+            "status": "skip",
+            "message": (
+                "Destination nullability catalog is partial — required-column "
+                "coverage is unmeasured for dest columns with no nullability "
+                "entry (not proven). The NOT NULL contract is still enforced at write."
+            ),
+            "duration_ms": 0,
+            "details": {
+                "reason": "nullability_metadata_partial",
+                "unmeasured": True,
+                "unmeasured_columns": missing[:_NAMED_LIMIT],
+                "rule_id": f"{GATE_ID}.unmeasured_partial",
                 "remediation_kind": "retry_validate",
             },
         }
@@ -166,6 +202,7 @@ def build_mapping_contract_gates(
         identity_columns=identity_columns,
         generated_columns=generated_columns,
         mappings=list(mappings or []),
+        dest_columns=list(dest_columns or []),
     )
     from services.shape_contract import build_shape_gate, classify_dest_exists_shape
 

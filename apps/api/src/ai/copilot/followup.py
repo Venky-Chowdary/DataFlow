@@ -108,9 +108,16 @@ def _words(text: str) -> list[str]:
 
 
 def last_assistant_content(history: list[dict] | None) -> str:
+    from .dialogue_acts import turn_text
+
     for m in reversed(history or []):
-        if m.get("role") == "assistant" and (m.get("content") or "").strip():
-            return str(m["content"]).strip()
+        if not isinstance(m, dict):
+            continue
+        if str(m.get("role") or "").lower() != "assistant":
+            continue
+        text = turn_text(m)
+        if text:
+            return text
     return ""
 
 

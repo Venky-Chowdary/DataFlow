@@ -45,10 +45,8 @@ def test_generic_sql_scan_never_offsets():
         [("1", "A"), ("2", "B")],
         [],
     ]
-    streamed = MagicMock()
-    streamed.execute.return_value = result
     conn = MagicMock()
-    conn.execution_options.return_value = streamed
+    conn.execute.return_value = result
     engine = MagicMock()
     engine.connect.return_value = conn
     col = sa.column("id")
@@ -105,10 +103,15 @@ def test_generic_sql_scan_never_offsets():
 
     assert first.rows == [["1", "A"], ["2", "B"]]
     assert second.rows == []
-    streamed.execute.assert_called_once()
-    stmt = streamed.execute.call_args[0][0]
+    conn.execute.assert_called_once()
+    stmt = conn.execute.call_args[0][0]
     compiled = str(stmt.compile(compile_kwargs={"literal_binds": True}))
     assert "OFFSET" not in compiled.upper()
+    # Streaming is asked for on the statement, not the connection: setting it on
+    # the connection leaks into every later statement, and a following DDL then
+    # compiles as DECLARE CURSOR FOR <ddl>.
+    conn.execution_options.assert_not_called()
+    assert stmt.get_execution_options().get("stream_results") is True
 
 
 def test_bigquery_scan_sql_has_no_offset():

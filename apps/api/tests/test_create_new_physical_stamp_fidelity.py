@@ -70,3 +70,30 @@ def test_real_narrowing_still_blocks_after_physical_stamp():
     assert row["fidelity"] != "preserve"
     assert row["requires_risk_contract"] is True
     assert row["confidence"] <= 0.84
+
+
+def test_risky_column_without_a_prior_confidence_still_stamps():
+    """A mapping whose confidence Map never scored must not raise NameError.
+
+    The F8 extraction moved the stamp out of ``semantic_mapper`` but left the
+    identity-passthrough floor behind, so every risky create-new column that
+    reached the stamp without a scored confidence — the IEEE float artifact
+    path is the common one — died with ``NameError`` mid-Map.
+    """
+    mapping = {
+        "source": "amt",
+        "target": "amt",
+        "source_type": "DOUBLE PRECISION",
+        "target_type": "DOUBLE PRECISION",
+        "assignment_strategy": "create_compatible_new",
+        "create_new": True,
+        "confidence": 0,
+    }
+    row = _apply_create_new_risk_stamps(
+        [mapping],
+        "postgresql",
+        source_samples={"amt": [0.1, 0.2, 1234.5678901234567]},
+        dest_table_exists=False,
+    )[0]
+    assert row["requires_review"] is True
+    assert 0.0 < float(row["confidence"]) <= 0.84

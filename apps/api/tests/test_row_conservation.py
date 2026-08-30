@@ -61,9 +61,11 @@ from services.row_conservation import (
     KIND_OVERWRITE,
     KIND_SCD2,
     KIND_VECTOR,
+    PopulationConservationError,
     account_job,
     account_job_streams,
     account_population,
+    assert_population_conservation_closed,
     conservation_kind,
     dest_count_from_recon,
     hold_outs,
@@ -75,6 +77,123 @@ def test_hold_outs_exclude_coerced_null_rows_that_landed():
     assert hold_outs(rejected_rows=5, coerced_null_rows=2) == 3
     assert hold_outs(rejected_rows=2, coerced_null_rows=2) == 0
     assert hold_outs(rejected_rows=0, coerced_null_rows=3) == 0
+
+
+def test_measured_shortfall_is_silent_loss_not_a_green():
+    job = {
+        "sync_mode": "full_refresh_overwrite",
+        "records_processed": 4,
+        "reconciliation": {
+            "source_rows": 4,
+            "target_rows": 3,
+            "target_checksum": "abc",
+            "dest_count_source": DEST_READBACK,
+            "passed": True,
+        },
+        "destination_summary": {},
+    }
+    with pytest.raises(PopulationConservationError, match="silent loss|unaccounted|neither"):
+        assert_population_conservation_closed(job)
+
+
+def test_unmeasured_dest_is_honest_not_a_fake_green():
+    job = {
+        "sync_mode": "full_refresh_overwrite",
+        "records_processed": 4,
+        "reconciliation": {
+            "source_rows": 4,
+            "target_rows": 4,
+            "phase": "post_write_writer_ack",
+            "coverage": "writer_ack",
+        },
+        "destination_summary": {},
+    }
+    ledger = assert_population_conservation_closed(job)
+    assert ledger.balanced is False or ledger.rows_written_source == DEST_UNMEASURED
+    # Must not raise — unmeasured stays open, never invented closed.
+
+
+def test_strict_mode_refuses_coerced_null_as_corruption():
+    job = {
+        "sync_mode": "full_refresh_overwrite",
+        "records_processed": 2,
+        "coerced_null_rows": 1,
+        "reconciliation": {
+            "source_rows": 2,
+            "target_rows": 2,
+            "target_checksum": "abc",
+            "dest_count_source": DEST_READBACK,
+            "coerced_null_rows": 1,
+            "passed": True,
+        },
+        "destination_summary": {},
+    }
+    with pytest.raises(PopulationConservationError, match="coerced"):
+        assert_population_conservation_closed(job, validation_mode="strict")
+    # Balanced mode surfaces the cell; it is not silent loss of the row.
+    ledger = assert_population_conservation_closed(job, validation_mode="balanced")
+    assert ledger.rows_coerced_null == 1
+
+
+def test_append_delta_balanced_is_not_silent_loss():
+    """Append closes on dest delta, not whole-table COUNT — any dest."""
+    job = {
+        "sync_mode": "full_refresh_append",
+        "records_processed": 10,
+        "reconciliation": {
+            "source_rows": 10,
+            "target_rows": 40,
+            "target_checksum": "abc",
+            "dest_count_source": DEST_READBACK,
+            "target_rows_before": 30,
+            "passed": True,
+        },
+        "destination_summary": {"target_rows_before": 30},
+    }
+    ledger = assert_population_conservation_closed(job)
+    assert ledger.balanced is True
+    assert ledger.dest_delta == 10
+
+
+def test_keyed_dest_shortfall_fails_closed():
+    """Upsert/CDC into a non-empty dest: dest delta short of inserts is loss."""
+    job = {
+        "sync_mode": "upsert",
+        "records_processed": 4,
+        "reconciliation": {
+            "source_rows": 4,
+            "target_rows": 32,
+            "target_checksum": "abc",
+            "dest_count_source": DEST_READBACK,
+            "target_rows_before": 30,
+            "keyed_census": {"unique_batch_keys": 4, "dest_preexisting": 1},
+            "passed": True,
+        },
+        "destination_summary": {
+            "target_rows_before": 30,
+            "keyed_census": {"unique_batch_keys": 4, "dest_preexisting": 1},
+        },
+    }
+    with pytest.raises(PopulationConservationError, match="silent loss|unaccounted|neither"):
+        assert_population_conservation_closed(job)
+
+
+def test_file_export_writer_ack_stays_honestly_open():
+    """CSV/object dests without an artifact COUNT do not invent a closed ledger."""
+    job = {
+        "sync_mode": "full_refresh_overwrite",
+        "records_processed": 4,
+        "reconciliation": {
+            "source_rows": 4,
+            "target_rows": 4,
+            "skipped_readback": True,
+            "phase": "post_write_writer_ack",
+            "coverage": "writer_ack",
+        },
+        "destination_summary": {},
+    }
+    ledger = assert_population_conservation_closed(job)
+    assert ledger.balanced is False or ledger.rows_written_source == DEST_UNMEASURED
 
 
 def test_writer_ack_phase_without_dest_digest_is_not_a_dest_count():
@@ -1672,6 +1791,80 @@ def test_true_quarantine_hold_outs_close_with_dest_count():
     )
     assert ledger.rows_quarantined == 2
     assert ledger.balanced is True
+
+
+def test_keyset_missing_equal_to_quarantine_is_not_silent_loss():
+    """Dest-engine S includes hold-outs. missing==quarantine is the DLQ, not DMS."""
+    ledger = account_population(
+        rows_read=5,
+        dest_count=3,
+        dest_count_source=DEST_READBACK,
+        dest_count_before=0,
+        rejected_rows=2,
+        coerced_null_rows=0,
+        rows_skipped=0,
+        writer_ack=3,
+        sync_mode="full_refresh_overwrite",
+        keyset={MISSING_KEYS_KEY: 2, EXTRA_KEYS_KEY: 0},
+    )
+    assert ledger.unaccounted == 0
+    assert ledger.missing_keys == 2
+    assert ledger.extra_keys == 0
+    assert ledger.rows_quarantined == 2
+    assert ledger.balanced is True
+    assert "not silent loss" in ledger.note.lower()
+    assert_population_conservation_closed(
+        {
+            "sync_mode": "full_refresh_overwrite",
+            "records_processed": 3,
+            "rejected_rows": 2,
+            "reconciliation": {
+                "source_rows": 5,
+                "target_rows": 3,
+                "target_checksum": "ages",
+                "dest_count_source": DEST_READBACK,
+                MISSING_KEYS_KEY: 2,
+                EXTRA_KEYS_KEY: 0,
+            },
+        }
+    )
+
+
+def test_keyset_missing_above_quarantine_is_still_silent_loss():
+    """COUNT(*) can net one leftover + one unexplained miss. That stays red."""
+    ledger = account_population(
+        rows_read=5,
+        dest_count=4,
+        dest_count_source=DEST_READBACK,
+        dest_count_before=0,
+        rejected_rows=1,
+        coerced_null_rows=0,
+        rows_skipped=0,
+        writer_ack=4,
+        sync_mode="full_refresh_overwrite",
+        keyset={MISSING_KEYS_KEY: 2, EXTRA_KEYS_KEY: 1},
+    )
+    assert ledger.unaccounted == 0
+    assert ledger.missing_keys == 2
+    assert ledger.extra_keys == 1
+    assert ledger.balanced is False
+    assert "unexplained" in ledger.note.lower()
+    with pytest.raises(PopulationConservationError, match="MISSING_TARGET|unexplained"):
+        assert_population_conservation_closed(
+            {
+                "sync_mode": "full_refresh_overwrite",
+                "records_processed": 4,
+                "rejected_rows": 1,
+                "reconciliation": {
+                    "source_rows": 5,
+                    "target_rows": 4,
+                    "target_checksum": "ages",
+                    "dest_count_source": DEST_READBACK,
+                    MISSING_KEYS_KEY: 2,
+                    EXTRA_KEYS_KEY: 1,
+                },
+            }
+        )
 
 
 def test_append_uses_dest_delta_not_whole_table_count():
@@ -6507,6 +6700,7 @@ def test_iceberg_sql_catalog_leftover_merge_deletes_extra_and_count_is_snapshot_
     from those files. Never pyiceberg scan().count() / to_arrow().
     Incremental remains a hard no-op.
     """
+    pytest.importorskip("pyiceberg")
     from connectors.iceberg_writer import write_mapped_rows
     from pyiceberg.table import DataScan
     from services.dest_precount import _iceberg_snapshot_rows, destination_keyset_census
@@ -6613,6 +6807,7 @@ def test_iceberg_sql_catalog_leftover_merge_composite_pk(
     Never ``In('order_id,line_id', ...)``. Never scan().to_arrow() for
     leftover listing. Incremental remains a hard no-op.
     """
+    pytest.importorskip("pyiceberg")
     from connectors.iceberg_writer import write_mapped_rows
     from pyiceberg.table import DataScan
     from services.dest_precount import _iceberg_snapshot_rows
@@ -6915,65 +7110,163 @@ def test_sqlserver_login_failure_is_unmeasured_not_empty(monkeypatch: pytest.Mon
     assert engine.sql
 
 
+class _ScriptedSnowflakeCursor:
+    """Minimal Snowflake DBAPI cursor: records SQL, answers resolve + COUNT(*)."""
+
+    def __init__(self, sql: list[str], stored_name: str | None, count: int, error=None):
+        self.sql = sql
+        self._stored_name = stored_name
+        self._count = count
+        self._error = error
+        self._pending: tuple | None = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, sql, params=None):
+        self.sql.append(sql)
+        if "information_schema.tables" in sql.lower():
+            self._pending = (self._stored_name,) if self._stored_name else None
+            return self
+        if self._error is not None:
+            raise self._error
+        self._pending = (self._count,)
+        return self
+
+    def fetchone(self):
+        return self._pending
+
+
+class _ScriptedSnowflakeConnection:
+    def __init__(self, sql: list[str], stored_name: str | None, count: int, error=None):
+        self._sql = sql
+        self._stored_name = stored_name
+        self._count = count
+        self._error = error
+
+    def cursor(self):
+        return _ScriptedSnowflakeCursor(
+            self._sql, self._stored_name, self._count, self._error
+        )
+
+    def close(self):
+        return None
+
+
+def _patch_snowflake_native(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    stored_name: str | None,
+    count: int = 0,
+    error: Exception | None = None,
+    connect_error: Exception | None = None,
+) -> list[str]:
+    """Route the native Snowflake driver the dest count now shares with Gate-8."""
+    import connectors.snowflake_conn as sf
+
+    sql: list[str] = []
+
+    def _connect(**_kwargs):
+        if connect_error is not None:
+            raise connect_error
+        return _ScriptedSnowflakeConnection(sql, stored_name, count, error)
+
+    monkeypatch.setattr(sf, "get_connection", _connect)
+    return sql
+
+
 def test_snowflake_dest_count_is_engine_count_not_information_schema(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """Snowflake dest COUNT is SELECT COUNT(*), never INFORMATION_SCHEMA.ROW_COUNT."""
-    from sqlalchemy.exc import ProgrammingError
+    """Snowflake dest COUNT is SELECT COUNT(*) through the driver Gate-8 uses.
 
-    missing = _patch_warehouse(
-        monkeypatch,
-        _ScriptedWarehouseEngine(
-            error=ProgrammingError(
-                "SELECT",
-                {},
-                Exception("SQL compilation error: Object 'T' does not exist or not authorized."),
-            ),
-        ),
-    )
+    The SQLAlchemy route needs `snowflake-sqlalchemy`, which the product does
+    not ship: it returned unmeasured for every Snowflake append while dest-after
+    counted fine natively, so a correct append had no delta to prove.
+    """
+    missing = _patch_snowflake_native(monkeypatch, stored_name=None)
     assert destination_row_count("snowflake", {"host": "h"}, schema="PUBLIC", table_name="T") == 0
-    assert any('"PUBLIC"."T"' in sql for sql in missing.sql)
-    assert all("INFORMATION_SCHEMA" not in sql.upper() for sql in missing.sql)
+    assert missing, "the destination was interrogated, not assumed empty"
+    assert all("COUNT(*)" not in sql.upper() for sql in missing)
 
-    engine = _patch_warehouse(monkeypatch, _ScriptedWarehouseEngine(count=2, rows=[(1,), (2,)]))
-    cfg = {"host": "h", "schema": "PUBLIC"}
+    sql = _patch_snowflake_native(monkeypatch, stored_name="ORDERS", count=2)
+    cfg = {"host": "h", "schema": "PUBLIC", "username": "u", "password": "p"}
     assert destination_row_count("snowflake", cfg, schema="PUBLIC", table_name="ORDERS") == 2
-    assert any("COUNT(*)" in sql.upper() for sql in engine.sql)
-    listed = destination_key_list(
-        "snowflake", cfg, schema="PUBLIC", table_name="ORDERS", key_columns=["id"]
-    )
-    assert listed == [(1,), (2,)]
+    count_sql = [s for s in sql if "COUNT(*)" in s.upper()]
+    assert count_sql, sql
+    assert all("ROW_COUNT" not in s.upper() for s in count_sql)
+    assert any('"PUBLIC"."ORDERS"' in s for s in count_sql)
+
+
+def test_snowflake_dest_count_reads_the_stored_lowercase_table(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A quoted-lowercase table is not the folded name — count the stored one."""
+    sql = _patch_snowflake_native(monkeypatch, stored_name="sunday0816", count=200)
+    cfg = {"host": "h", "schema": "PUBLIC", "username": "u", "password": "p"}
+    assert destination_row_count("snowflake", cfg, schema="PUBLIC", table_name="SUNDAY0816") == 200
+    assert any('"sunday0816"' in s for s in sql if "COUNT(*)" in s.upper())
 
 
 def test_snowflake_auth_failure_is_unmeasured_not_empty(monkeypatch: pytest.MonkeyPatch):
-    _patch_warehouse(
+    _patch_snowflake_native(
         monkeypatch,
-        _ScriptedWarehouseEngine(error=RuntimeError("250001: Failed to connect to DB. Incorrect username or password")),
+        stored_name="T",
+        connect_error=RuntimeError(
+            "250001: Failed to connect to DB. Incorrect username or password"
+        ),
     )
     assert destination_row_count("snowflake", {"host": "h"}, schema="PUBLIC", table_name="T") is None
 
 
-def test_bigquery_dest_count_quotes_project_dataset_not_tables_row_count(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    from sqlalchemy.exc import ProgrammingError
+class _ScriptedBigQueryClient:
+    def __init__(self, sql: list[str], count: int, error=None):
+        self._sql = sql
+        self._count = count
+        self._error = error
 
-    missing = _patch_warehouse(
-        monkeypatch,
-        _ScriptedWarehouseEngine(
-            error=ProgrammingError("SELECT", {}, Exception("Not found: Table proj:ds.fresh")),
-        ),
+    def query(self, sql):
+        self._sql.append(sql)
+        if self._error is not None:
+            raise self._error
+        return self
+
+    def result(self):
+        return [(self._count,)]
+
+
+def _patch_bigquery_native(
+    monkeypatch: pytest.MonkeyPatch, *, count: int = 0, error: Exception | None = None
+) -> list[str]:
+    import connectors.bigquery_conn as bq
+
+    sql: list[str] = []
+    monkeypatch.setattr(
+        bq, "get_client", lambda **_kwargs: _ScriptedBigQueryClient(sql, count, error)
     )
-    cfg = {"project": "proj", "schema": "ds"}
+    return sql
+
+
+def test_bigquery_dest_count_queries_not_table_metadata(monkeypatch: pytest.MonkeyPatch):
+    from google.api_core.exceptions import NotFound
+
+    cfg = {"database": "proj", "schema": "ds"}
+    missing = _patch_bigquery_native(monkeypatch, error=NotFound("Table proj:ds.fresh"))
     assert destination_row_count("bigquery", cfg, schema="ds", table_name="fresh") == 0
-    assert any("`proj.ds.fresh`" in sql for sql in missing.sql)
+    assert any("`proj`.`ds`.`fresh`" in sql for sql in missing)
 
-    denied = _patch_warehouse(
-        monkeypatch,
-        _ScriptedWarehouseEngine(error=RuntimeError("403 Access Denied")),
-    )
+    sql = _patch_bigquery_native(monkeypatch, count=7)
+    assert destination_row_count("bigquery", cfg, schema="ds", table_name="fresh") == 7
+    # Table.num_rows lags the streaming buffer; a stale estimate is not a count.
+    assert all("__TABLES__" not in s.upper() for s in sql)
+    assert any("COUNT(*)" in s.upper() for s in sql)
+
+    denied = _patch_bigquery_native(monkeypatch, error=RuntimeError("403 Access Denied"))
     assert destination_row_count("bigquery", cfg, schema="ds", table_name="fresh") is None
-    assert denied.sql
+    assert denied
 
 
 def test_databricks_missing_table_is_zero(monkeypatch: pytest.MonkeyPatch):
@@ -8090,3 +8383,370 @@ def test_oracle_live_scd2_current_when_reachable():
     except Exception:
         pass
 
+
+def test_removed_on_read_names_both_authorities_and_ignores_negatives():
+    from services.row_conservation import removed_on_read
+
+    assert removed_on_read(2, 1) == 3
+    assert removed_on_read(0, 0) == 0
+    assert removed_on_read(-5, 4) == 4
+
+
+def test_rows_removed_by_filter_and_recipe_close_the_population():
+    """A shaped run is short at the destination by instruction, not by loss."""
+    ledger = account_population(
+        rows_read=5,
+        dest_count=2,
+        dest_count_source=DEST_READBACK,
+        dest_count_before=0,
+        rejected_rows=0,
+        coerced_null_rows=0,
+        rows_skipped=0,
+        writer_ack=2,
+        sync_mode="overwrite",
+        rows_shaped_out=2,
+        rows_source_filtered=1,
+    )
+    assert ledger.conservation_kind == KIND_OVERWRITE
+    assert ledger.rows_read == 5
+    assert ledger.rows_written == 2
+    assert ledger.rows_shaped_out == 2
+    assert ledger.rows_source_filtered == 1
+    assert ledger.unaccounted == 0
+    assert ledger.balanced is True
+    assert "declared source filter" in ledger.note
+    assert "approved transform recipe" in ledger.note
+    assert "Removal is not quarantine" in ledger.note
+
+
+def test_removed_rows_do_not_excuse_a_real_shortfall():
+    ledger = account_population(
+        rows_read=10,
+        dest_count=5,
+        dest_count_source=DEST_READBACK,
+        dest_count_before=0,
+        rejected_rows=0,
+        coerced_null_rows=0,
+        rows_skipped=0,
+        writer_ack=5,
+        sync_mode="overwrite",
+        rows_shaped_out=2,
+        rows_source_filtered=0,
+    )
+    assert ledger.unaccounted == 3
+    assert ledger.balanced is False
+
+
+def test_a_shaped_run_that_removed_nothing_reads_exactly_as_before():
+    plain = account_population(
+        rows_read=4,
+        dest_count=4,
+        dest_count_source=DEST_READBACK,
+        dest_count_before=0,
+        rejected_rows=0,
+        coerced_null_rows=0,
+        rows_skipped=0,
+        writer_ack=4,
+        sync_mode="overwrite",
+    )
+    shaped = account_population(
+        rows_read=4,
+        dest_count=4,
+        dest_count_source=DEST_READBACK,
+        dest_count_before=0,
+        rejected_rows=0,
+        coerced_null_rows=0,
+        rows_skipped=0,
+        writer_ack=4,
+        sync_mode="overwrite",
+        rows_shaped_out=0,
+        rows_source_filtered=0,
+    )
+    assert shaped.note == plain.note
+    assert shaped.balanced is plain.balanced is True
+    assert shaped.rows_shaped_out == 0
+    assert shaped.shape_recipe_hash == ""
+
+
+def test_unnest_expansion_closes_dest_count_as_a_declared_projection():
+    """2 source rows + 1 unnest extra = dest COUNT 3. Not surplus."""
+    ledger = account_population(
+        rows_read=2,
+        dest_count=3,
+        dest_count_source=DEST_READBACK,
+        dest_count_before=0,
+        rejected_rows=0,
+        coerced_null_rows=0,
+        rows_skipped=0,
+        writer_ack=3,
+        sync_mode="overwrite",
+        rows_expanded=1,
+    )
+    assert ledger.unaccounted == 0
+    assert ledger.balanced is True
+    assert ledger.rows_expanded == 1
+    assert "declared projection" in ledger.note
+    assert "not a surplus" in ledger.note
+
+
+def test_unnest_expansion_does_not_excuse_a_real_surplus():
+    ledger = account_population(
+        rows_read=2,
+        dest_count=5,
+        dest_count_source=DEST_READBACK,
+        dest_count_before=0,
+        rejected_rows=0,
+        coerced_null_rows=0,
+        rows_skipped=0,
+        writer_ack=5,
+        sync_mode="overwrite",
+        rows_expanded=1,
+    )
+    assert ledger.unaccounted == -2
+    assert ledger.balanced is False
+
+
+def test_unnest_plus_filter_closes_both_ledger_terms():
+    """2 in + 1 expanded − 1 filtered = dest 2."""
+    ledger = account_population(
+        rows_read=2,
+        dest_count=2,
+        dest_count_source=DEST_READBACK,
+        dest_count_before=0,
+        rejected_rows=0,
+        coerced_null_rows=0,
+        rows_skipped=0,
+        writer_ack=2,
+        sync_mode="overwrite",
+        rows_shaped_out=1,
+        rows_expanded=1,
+    )
+    assert ledger.unaccounted == 0
+    assert ledger.balanced is True
+    assert ledger.rows_shaped_out == 1
+    assert ledger.rows_expanded == 1
+
+
+def test_quarantine_and_removal_are_separate_terms_in_one_close():
+    ledger = account_population(
+        rows_read=10,
+        dest_count=6,
+        dest_count_source=DEST_READBACK,
+        dest_count_before=0,
+        rejected_rows=2,
+        coerced_null_rows=0,
+        rows_skipped=1,
+        writer_ack=6,
+        sync_mode="overwrite",
+        rows_shaped_out=1,
+        rows_source_filtered=0,
+    )
+    assert ledger.rows_quarantined == 2
+    assert ledger.rows_skipped == 1
+    assert ledger.rows_shaped_out == 1
+    assert ledger.unaccounted == 0
+    assert ledger.balanced is True
+
+
+def test_mirror_close_counts_rows_the_recipe_removed():
+    ledger = account_population(
+        rows_read=5,
+        dest_count=8,
+        dest_count_source=DEST_ACTIVE_READBACK,
+        dest_count_before=0,
+        rejected_rows=0,
+        coerced_null_rows=0,
+        rows_skipped=0,
+        writer_ack=3,
+        sync_mode="mirror",
+        mirror={"active_rows": 3, "physical_rows": 8},
+        rows_shaped_out=2,
+        rows_source_filtered=0,
+    )
+    assert ledger.conservation_kind == KIND_MIRROR
+    assert ledger.unaccounted == 0
+    assert ledger.balanced is True
+    assert ledger.rows_shaped_out == 2
+
+
+def test_scd2_close_counts_rows_the_recipe_removed():
+    ledger = account_population(
+        rows_read=4,
+        dest_count=3,
+        dest_count_source=DEST_CURRENT_READBACK,
+        dest_count_before=0,
+        rejected_rows=0,
+        coerced_null_rows=0,
+        rows_skipped=0,
+        writer_ack=3,
+        sync_mode="scd2",
+        scd2={"current_rows": 3, "history_rows": 5},
+        rows_shaped_out=1,
+        rows_source_filtered=0,
+    )
+    assert ledger.conservation_kind == KIND_SCD2
+    assert ledger.unaccounted == 0
+    assert ledger.balanced is True
+
+
+def test_vector_close_counts_rows_the_filter_removed():
+    ledger = account_population(
+        rows_read=3,
+        dest_count=2,
+        dest_count_source=DEST_IDENTITY_READBACK,
+        dest_count_before=0,
+        rejected_rows=0,
+        coerced_null_rows=0,
+        rows_skipped=0,
+        writer_ack=2,
+        sync_mode="full_refresh_overwrite",
+        vector={"identity_rows": 2, "vector_rows": 9},
+        rows_shaped_out=0,
+        rows_source_filtered=1,
+    )
+    assert ledger.conservation_kind == KIND_VECTOR
+    assert ledger.unaccounted == 0
+    assert ledger.balanced is True
+
+
+def test_account_job_reads_shape_terms_and_recipe_identity_from_the_run():
+    job = {
+        "status": "completed",
+        "records_processed": 2,
+        "sync_mode": "overwrite",
+        "destination_summary": {
+            "rows": 2,
+            "rows_shaped_out": 2,
+            "rows_source_filtered": 1,
+            "rows_removed_on_read": 3,
+            "shape_recipe_hash": "abc123def4567890",
+        },
+        "reconciliation": {
+            "phase": "post_write_verified",
+            "source_rows": 5,
+            "target_rows": 2,
+            "target_checksum": "deadbeef",
+            "source_checksum": "deadbeef",
+            "rejected_rows": 0,
+            "coerced_null_rows": 0,
+            "rows_skipped": 0,
+        },
+    }
+    ledger = account_job(job)
+    assert ledger.rows_read == 5
+    assert ledger.rows_written == 2
+    assert ledger.rows_shaped_out == 2
+    assert ledger.rows_source_filtered == 1
+    assert ledger.shape_recipe_hash == "abc123def4567890"
+    assert ledger.unaccounted == 0
+    assert ledger.balanced is True
+    assert ledger.to_dict()["rows_shaped_out"] == 2
+    assert ledger.to_dict()["shape_recipe_hash"] == "abc123def4567890"
+
+
+def test_account_job_attributes_an_unsplit_removal_total_to_the_filter():
+    """A streaming pass may report only the cumulative removal total."""
+    job = {
+        "status": "completed",
+        "records_processed": 3,
+        "sync_mode": "overwrite",
+        "destination_summary": {
+            "rows": 3,
+            "rows_shaped_out": 1,
+            "rows_removed_on_read": 4,
+        },
+        "reconciliation": {
+            "phase": "post_write_verified",
+            "source_rows": 7,
+            "target_rows": 3,
+            "target_checksum": "deadbeef",
+            "source_checksum": "deadbeef",
+            "rejected_rows": 0,
+            "coerced_null_rows": 0,
+            "rows_skipped": 0,
+        },
+    }
+    ledger = account_job(job)
+    assert ledger.rows_shaped_out == 1
+    assert ledger.rows_source_filtered == 3
+    assert ledger.unaccounted == 0
+    assert ledger.balanced is True
+
+
+def test_job_rollup_sums_each_stream_removals_and_keeps_one_recipe_identity():
+    streams = {
+        "orders": {
+            "records_processed": 2,
+            "row_accounting": {
+                "conservation_kind": KIND_OVERWRITE,
+                "rows_written_source": DEST_READBACK,
+                "rows_read": 5,
+                "rows_written": 2,
+                "dest_count": 2,
+                "rows_quarantined": 0,
+                "rows_skipped": 0,
+                "rows_shaped_out": 2,
+                "rows_source_filtered": 1,
+                "shape_recipe_hash": "abc123def4567890",
+                "writer_ack": 2,
+                "unaccounted": 0,
+                "balanced": True,
+            },
+        },
+        "lines": {
+            "records_processed": 4,
+            "row_accounting": {
+                "conservation_kind": KIND_OVERWRITE,
+                "rows_written_source": DEST_READBACK,
+                "rows_read": 6,
+                "rows_written": 4,
+                "dest_count": 4,
+                "rows_quarantined": 0,
+                "rows_skipped": 0,
+                "rows_shaped_out": 2,
+                "rows_source_filtered": 0,
+                "shape_recipe_hash": "abc123def4567890",
+                "writer_ack": 4,
+                "unaccounted": 0,
+                "balanced": True,
+            },
+        },
+    }
+    ledger = account_job_streams(streams)
+    assert ledger is not None
+    assert ledger.rows_read == 11
+    assert ledger.rows_written == 6
+    assert ledger.rows_shaped_out == 4
+    assert ledger.rows_source_filtered == 1
+    assert ledger.shape_recipe_hash == "abc123def4567890"
+    assert ledger.unaccounted == 0
+    assert ledger.balanced is True
+    assert "approved transform recipe" in ledger.note
+
+
+def test_job_rollup_does_not_name_one_recipe_when_the_streams_ran_two():
+    def stream(hash_: str) -> dict:
+        return {
+            "records_processed": 2,
+            "row_accounting": {
+                "conservation_kind": KIND_OVERWRITE,
+                "rows_written_source": DEST_READBACK,
+                "rows_read": 3,
+                "rows_written": 2,
+                "dest_count": 2,
+                "rows_quarantined": 0,
+                "rows_skipped": 0,
+                "rows_shaped_out": 1,
+                "rows_source_filtered": 0,
+                "shape_recipe_hash": hash_,
+                "writer_ack": 2,
+                "unaccounted": 0,
+                "balanced": True,
+            },
+        }
+
+    ledger = account_job_streams({"a": stream("1111111111111111"), "b": stream("2222222222222222")})
+    assert ledger is not None
+    assert ledger.rows_shaped_out == 2
+    assert ledger.shape_recipe_hash == ""
+    assert ledger.balanced is True

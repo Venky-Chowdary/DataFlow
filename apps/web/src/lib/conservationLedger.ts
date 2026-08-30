@@ -43,6 +43,9 @@ export type ConservationLedger = {
   measured_streams: number | null;
   summable: boolean | null;
   per_stream: StreamLedgerSlice[] | null;
+  rows_shaped_out: number;
+  rows_source_filtered: number;
+  shape_recipe_hash: string;
 };
 
 export type StreamLedgerSlice = {
@@ -127,6 +130,9 @@ export function readConservationLedger(
     measured_streams: num(raw.measured_streams),
     summable: raw.summable == null ? null : Boolean(raw.summable),
     per_stream: parsePerStream(raw.per_stream),
+    rows_shaped_out: num(raw.rows_shaped_out) ?? 0,
+    rows_source_filtered: num(raw.rows_source_filtered) ?? 0,
+    shape_recipe_hash: String(raw.shape_recipe_hash ?? ""),
   };
 }
 
@@ -229,9 +235,29 @@ function fmt(value: number | null | undefined): string {
   return Number(value).toLocaleString();
 }
 
+/**
+ * Rows the read counted and, by instruction, never offered the writer.
+ *
+ * A declared source filter and an approved pre-load transform recipe both remove
+ * rows inside the population the reader counted, so the identity has to name
+ * them or a correct transformed run reads as silent loss.
+ */
+export function removedOnRead(ledger: ConservationLedger): number {
+  return (
+    Math.max(num(ledger.rows_shaped_out) ?? 0, 0)
+    + Math.max(num(ledger.rows_source_filtered) ?? 0, 0)
+  );
+}
+
+function removedTerm(ledger: ConservationLedger): string {
+  const removed = removedOnRead(ledger);
+  return removed ? ` + removed on read ${fmt(removed)}` : "";
+}
+
 /** Engine numbers rendered as the identity — never recomputed. */
 export function ledgerEquation(ledger: ConservationLedger): string {
   const kind = ledger.conservation_kind;
+  const removed = removedTerm(ledger);
   if (kind === "keyed") {
     return `dest Δ ${fmt(ledger.dest_delta)} = inserts ${fmt(ledger.inserts)} − deletes ${fmt(ledger.deletes)}`;
   }
@@ -245,13 +271,13 @@ export function ledgerEquation(ledger: ConservationLedger): string {
     return `job closed iff every stream is closed (${fmt(ledger.measured_streams)}/${fmt(ledger.stream_count)} measured)`;
   }
   if (kind === "mirror") {
-    return `read ${fmt(ledger.rows_read)} = active ${fmt(ledger.active_count)} + held out ${fmt(ledger.rows_quarantined)} + skipped ${fmt(ledger.rows_skipped)}`;
+    return `read ${fmt(ledger.rows_read)} = active ${fmt(ledger.active_count)} + held out ${fmt(ledger.rows_quarantined)} + skipped ${fmt(ledger.rows_skipped)}${removed}`;
   }
   if (kind === "vector") {
-    return `read ${fmt(ledger.rows_read)} = identities ${fmt(ledger.dest_count)} + held out ${fmt(ledger.rows_quarantined)} + skipped ${fmt(ledger.rows_skipped)}`;
+    return `read ${fmt(ledger.rows_read)} = identities ${fmt(ledger.dest_count)} + held out ${fmt(ledger.rows_quarantined)} + skipped ${fmt(ledger.rows_skipped)}${removed}`;
   }
   if (kind === "scd2") {
-    return `read ${fmt(ledger.rows_read)} = current ${fmt(ledger.dest_count)} + held out ${fmt(ledger.rows_quarantined)} + skipped ${fmt(ledger.rows_skipped)}`;
+    return `read ${fmt(ledger.rows_read)} = current ${fmt(ledger.dest_count)} + held out ${fmt(ledger.rows_quarantined)} + skipped ${fmt(ledger.rows_skipped)}${removed}`;
   }
   if (kind === "append_delta") {
     return `dest Δ ${fmt(ledger.dest_delta)} = COUNT(*) after ${fmt(ledger.dest_count)} − before ${fmt(ledger.dest_count_before)}`;
@@ -263,9 +289,9 @@ export function ledgerEquation(ledger: ConservationLedger): string {
     return "dest COUNT unmeasured — writer ack is not destination proof";
   }
   if (ledger.rows_written_source === ARTIFACT_READBACK) {
-    return `read ${fmt(ledger.rows_read)} = artifact ${fmt(ledger.dest_count)} + held out ${fmt(ledger.rows_quarantined)} + skipped ${fmt(ledger.rows_skipped)}`;
+    return `read ${fmt(ledger.rows_read)} = artifact ${fmt(ledger.dest_count)} + held out ${fmt(ledger.rows_quarantined)} + skipped ${fmt(ledger.rows_skipped)}${removed}`;
   }
-  return `read ${fmt(ledger.rows_read)} = dest ${fmt(ledger.dest_count)} + held out ${fmt(ledger.rows_quarantined)} + skipped ${fmt(ledger.rows_skipped)}`;
+  return `read ${fmt(ledger.rows_read)} = dest ${fmt(ledger.dest_count)} + held out ${fmt(ledger.rows_quarantined)} + skipped ${fmt(ledger.rows_skipped)}${removed}`;
 }
 
 export function writerAckDisagrees(source: unknown): boolean {
@@ -569,6 +595,30 @@ export type LedgerIdentityCell = { label: string; value: string };
 
 /** Display-only identity cells from engine fields — not a second algorithm. */
 export function ledgerIdentityCells(ledger: ConservationLedger): LedgerIdentityCell[] {
+  return [...identityCellsForKind(ledger), ...transformIdentityCells(ledger)];
+}
+
+/**
+ * Removal and recipe identity, stated only when the run reported them, so a
+ * plain transfer shows no transform row and a zero is never drawn as evidence.
+ */
+function transformIdentityCells(ledger: ConservationLedger): LedgerIdentityCell[] {
+  const cells: LedgerIdentityCell[] = [];
+  const filtered = num(ledger.rows_source_filtered) ?? 0;
+  const shaped = num(ledger.rows_shaped_out) ?? 0;
+  if (filtered > 0) {
+    cells.push({ label: "Filtered on read", value: fmt(filtered) });
+  }
+  if (shaped > 0) {
+    cells.push({ label: "Removed by transform", value: fmt(shaped) });
+  }
+  if (ledger.shape_recipe_hash) {
+    cells.push({ label: "Transform recipe", value: ledger.shape_recipe_hash });
+  }
+  return cells;
+}
+
+function identityCellsForKind(ledger: ConservationLedger): LedgerIdentityCell[] {
   if (ledger.conservation_kind === "job_rollup") {
     const cells: LedgerIdentityCell[] = [
       { label: "Streams", value: fmt(ledger.stream_count) },

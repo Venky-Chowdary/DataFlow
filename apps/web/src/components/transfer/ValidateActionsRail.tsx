@@ -4,6 +4,7 @@ import { DtIcon } from "../DtIcon";
 import { Button } from "../ui/Button";
 import type { PreflightResult } from "../../lib/types";
 import { buildDisplayBlockers, buildExecutiveSummary } from "../../lib/validateIssueGrouping";
+import { resolveValidateStudioPrimary } from "../../lib/validateStudioPrimary";
 
 interface ValidateActionsRailProps {
   preflight: PreflightResult | null;
@@ -15,9 +16,20 @@ interface ValidateActionsRailProps {
   rowCount?: number;
   transferLaunch?: { jobId: string; rows: number } | null;
   savingContract?: boolean;
+  /**
+   * Last Validate attempt failed before a verdict (504 / hung control plane).
+   * Status is Failed — never leave the rail on Not run after an operator click.
+   */
+  preflightError?: string;
   /** Extra execute block (e.g. non-CDC multi-stream). */
   executeBlocked?: boolean;
   executeBlockedReason?: string;
+  /**
+   * Route a previous completed run wrote, when the plan has since been
+   * retargeted. Stated here because Validate is where the operator stands when
+   * the retarget happens — the run they remember answers for another table.
+   */
+  supersededRunLabel?: string;
   /** CDC retention Check control (SQL Server / Oracle) — shown above footer when present. */
   cdcRetentionSlot?: ReactNode;
   /** Bind a signed data contract before Execute (plans + schedules persist this). */
@@ -50,9 +62,11 @@ export function ValidateActionsRail({
   riskAckPendingCount = 0,
   rowCount,
   transferLaunch,
+  preflightError = "",
   savingContract,
   executeBlocked = false,
   executeBlockedReason,
+  supersededRunLabel,
   cdcRetentionSlot,
   contractSlot,
   onPrimaryFix,
@@ -69,11 +83,25 @@ export function ValidateActionsRail({
 }: ValidateActionsRailProps) {
   const passed = preflight?.passed;
   const blocked = preflight && !preflight.passed && !preflighting;
+  const transportFailed = Boolean(preflightError) && !preflight && !preflighting;
   const mappingBlocked = preflight?.blockers.some((b) => b.id.includes("mapping"));
   const decision = preflight?.proof_bundle?.transfer_decision?.decision
     ?? (preflight ? "review" : "pending");
   const reviewGrade = Boolean(passed && decision === "review");
   const executeDisabled = transferring || !passed || reviewGrade || executeBlocked;
+  const studioPrimary = resolveValidateStudioPrimary({
+    preflight,
+    preflighting,
+    transferring,
+    mappingReviewCount,
+    riskAckPendingCount,
+    transferLaunch,
+    executeBlocked,
+    hasPrimaryFix: Boolean(onPrimaryFix && primaryFixLabel),
+    primaryFixLabel,
+    hasHoldOut: Boolean(onHoldOutRows),
+  });
+  const isPrimary = (kind: typeof studioPrimary.kind) => studioPrimary.kind === kind;
   const executiveSummary = useMemo(() => buildExecutiveSummary(preflight), [preflight]);
   const displayBlockers = useMemo(
     () => (preflight ? buildDisplayBlockers(preflight) : []),
@@ -86,22 +114,26 @@ export function ValidateActionsRail({
     ? "Validating…"
     : transferLaunch
       ? "Transfer started"
-      : !preflight
-        ? "Not run"
-        : reviewGrade
-          ? "Review-grade"
-          : passed
-            ? "Ready"
-            : "Blocked";
+      : transportFailed
+        ? "Failed"
+        : !preflight
+          ? "Not run"
+          : reviewGrade
+            ? "Review-grade"
+            : passed
+              ? "Ready"
+              : "Blocked";
 
   const statusDetail = transferLaunch
     ? `Job queued · ${transferLaunch.rows.toLocaleString()} rows`
     : preflighting
       ? "Gates running"
-      : preflight
-        ? (executiveSummary?.railLine
-          ?? `${preflight.passed_count}/${preflight.total_gates} gates · ${preflight.readiness_score}%`)
-        : "Run preflight to unlock Execute";
+      : transportFailed
+        ? preflightError
+        : preflight
+          ? (executiveSummary?.railLine
+            ?? `${preflight.passed_count}/${preflight.total_gates} gates · ${preflight.readiness_score}%`)
+          : "Run preflight to unlock Execute";
 
   return (
     <>
@@ -122,7 +154,7 @@ export function ValidateActionsRail({
         </Button>
 
         <div className="df2-validate-footer-status" aria-live="polite">
-          <span className={passed && !reviewGrade ? "is-ok" : blocked || reviewGrade ? "is-warn" : undefined}>
+          <span className={passed && !reviewGrade ? "is-ok" : blocked || reviewGrade || transportFailed ? "is-warn" : undefined}>
             <strong>Validate</strong> {statusLabel}
           </span>
           <span title={firstBlockerMessage || undefined}>{statusDetail}</span>
@@ -134,33 +166,49 @@ export function ValidateActionsRail({
           {executeBlocked && executeBlockedReason && (
             <span className="is-warn" role="alert">{executeBlockedReason}</span>
           )}
+          {supersededRunLabel && !transferLaunch && (
+            <span className="is-warn">
+              Last run wrote {supersededRunLabel} — nothing written for this route yet
+            </span>
+          )}
         </div>
 
-        <div className="df2-validate-footer-actions">
+        <div className="df2-validate-footer-actions" data-studio-primary-kind={studioPrimary.kind}>
           {transferLaunch ? (
             <Button
               variant="primary"
               onClick={onOpenJobTheater}
               leadingIcon={<DtIcon name="activity" size={14} />}
+              data-studio-primary="true"
             >
               Open live progress
             </Button>
           ) : (
             <>
-              {(blocked || (!preflight && !preflighting)) && (
-                <Button
-                  variant={!preflight ? "primary" : "ghost"}
-                  onClick={onRunPreflight}
-                  loading={preflighting}
-                  leadingIcon={<DtIcon name="gate" size={16} />}
-                >
-                  {!preflight ? "Run preflight" : "Re-run"}
-                </Button>
-              )}
+              {/* Available in every state: a green verdict ages the moment the
+                  source, destination or mappings move, so re-running the same
+                  governed gates must not require a trip back through Map. */}
+              <Button
+                variant={isPrimary("run_preflight") ? "primary" : "ghost"}
+                onClick={onRunPreflight}
+                loading={preflighting}
+                leadingIcon={<DtIcon name="gate" size={16} />}
+                data-studio-primary={isPrimary("run_preflight") ? "true" : "false"}
+                className={isPrimary("run_preflight") ? "df2-validate-studio-primary" : undefined}
+                title={
+                  preflight
+                    ? "Discard this verdict and re-run the same API gates — acknowledgments and Risk Contracts still apply"
+                    : transportFailed
+                      ? "Last Validate did not finish — re-run the same API gates"
+                      : "Run API preflight gates"
+                }
+              >
+                {!preflight && !transportFailed ? "Run preflight" : "Re-run Validate"}
+              </Button>
 
               {blocked && onPrimaryFix && primaryFixLabel && (
                 <Button
-                  variant="primary"
+                  variant={isPrimary("primary_fix") ? "primary" : "ghost"}
                   onClick={onPrimaryFix}
                   leadingIcon={
                     <DtIcon
@@ -173,10 +221,10 @@ export function ValidateActionsRail({
                     />
                   }
                   title={primaryFixLabel}
+                  data-studio-primary={isPrimary("primary_fix") ? "true" : "false"}
+                  className={isPrimary("primary_fix") ? "df2-validate-studio-primary" : undefined}
                 >
-                  {primaryFixLabel.length > 28
-                    ? `${primaryFixLabel.slice(0, 26)}…`
-                    : primaryFixLabel}
+                  <span className="df2-validate-studio-primary-label">{primaryFixLabel}</span>
                 </Button>
               )}
 
@@ -184,20 +232,22 @@ export function ValidateActionsRail({
                 <>
                   {onHoldOutRows && (
                     <Button
-                      variant="primary"
+                      variant={isPrimary("hold_out") ? "primary" : "ghost"}
                       onClick={onHoldOutRows}
                       loading={holdingOutRows}
                       loadingLabel="Signing…"
                       leadingIcon={<DtIcon name="shield" size={16} />}
+                      data-studio-primary={isPrimary("hold_out") ? "true" : "false"}
                       title={`Sign a quarantine Risk Contract for ${riskAckPendingCount} column(s) and re-validate here. Failing rows go to quarantine for replay — nothing is written lossily.`}
                     >
                       Run with rows held out
                     </Button>
                   )}
                   <Button
-                    variant={onHoldOutRows ? "ghost" : "primary"}
+                    variant={isPrimary("choose_policy") ? "primary" : "ghost"}
                     onClick={onOpenMapForRisk || onBack}
                     leadingIcon={<DtIcon name="layers" size={16} />}
+                    data-studio-primary={isPrimary("choose_policy") ? "true" : "false"}
                     title="Choose a per-column execution policy on Map — approvals are preserved"
                   >
                     Choose policy on Map
@@ -211,9 +261,10 @@ export function ValidateActionsRail({
                 && riskAckPendingCount === 0
                 && !onPrimaryFix && (
                 <Button
-                  variant="primary"
+                  variant={isPrimary("approve_mappings") ? "primary" : "ghost"}
                   onClick={onApproveMappings}
                   leadingIcon={<DtIcon name="check" size={16} />}
+                  data-studio-primary={isPrimary("approve_mappings") ? "true" : "false"}
                 >
                   Approve mappings
                 </Button>
@@ -221,11 +272,13 @@ export function ValidateActionsRail({
 
               {preflight && (
                 <Button
-                  variant={blocked || reviewGrade ? "ghost" : "primary"}
+                  variant={studioPrimary.executeIsPrimary ? "primary" : "ghost"}
                   onClick={onExecute}
                   loading={transferring}
                   loadingLabel="Starting…"
                   disabled={executeDisabled}
+                  data-studio-primary={studioPrimary.executeIsPrimary ? "true" : "false"}
+                  className={studioPrimary.executeIsPrimary ? "df2-validate-studio-primary" : undefined}
                   title={
                     executeBlocked
                       ? (executeBlockedReason || "Execution blocked")
@@ -239,11 +292,12 @@ export function ValidateActionsRail({
                   }
                   leadingIcon={<DtIcon name="arrow-right" size={16} />}
                 >
-                  {executeBlocked || !passed
-                    ? "Execute (blocked)"
-                    : reviewGrade
-                      ? "Execute (review)"
-                      : "Execute"}
+                  {studioPrimary.executeLabel
+                    ?? (executeBlocked || !passed
+                      ? "Execute (blocked)"
+                      : reviewGrade
+                        ? "Execute (review)"
+                        : "Execute")}
                 </Button>
               )}
 

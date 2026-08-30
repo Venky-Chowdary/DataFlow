@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import Any
 
 from services.platform_config import data_dir
-from services.value_serializer import json_default
+from services.value_serializer import json_default, json_loads_exact
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +39,18 @@ DLQ_PATH = data_dir() / "quarantine_dlq.jsonl"
 _MONGO_COLL = "quarantine_dlq"
 # Rotate JSONL before unbounded growth fills the disk (and then silently fails).
 _DLQ_MAX_BYTES = 100 * 1024 * 1024  # 100 MiB
+
+
+def load_dlq_event(line: str) -> dict[str, Any] | None:
+    """One JSONL DLQ event. Numbers match ``json_loads_exact``.
+
+    Invalid JSON or a non-object line is skipped — never invent an event.
+    """
+    try:
+        ev = json_loads_exact(line)
+    except (json.JSONDecodeError, ValueError, TypeError):
+        return None
+    return ev if isinstance(ev, dict) else None
 
 
 class QuarantineDlqLostError(RuntimeError):
@@ -289,7 +301,7 @@ def persist_rejected_rows(
                 "skipped_contract": skip_n,
             },
         )
-    return {
+    out = {
         **(last_event or {}),
         "rows": len(rows),
         "chunks": len(chunks),
@@ -298,6 +310,23 @@ def persist_rejected_rows(
         "total_rejected": len(rows),
         "skipped_contract": skip_n,
     }
+    try:
+        from services.lineage_telemetry import emit_quarantine, persist_event_on_job
+
+        reasons: dict[str, int] = {}
+        for row in rows:
+            key = str(row.get("failure_reason") or row.get("reason") or "quarantine")[:80]
+            reasons[key] = reasons.get(key, 0) + 1
+        event = emit_quarantine(
+            run_id=jid,
+            job_id=jid,
+            quarantine_count=len(rows),
+            reasons=reasons,
+        )
+        persist_event_on_job(jid, event)
+    except Exception:
+        logger.debug("quarantine lineage emit skipped", exc_info=True)
+    return out
 
 
 def quarantine_details_from_dlq(
@@ -378,9 +407,8 @@ def list_dlq_events(*, job_id: str | None = None, limit: int = 100) -> list[dict
         line = line.strip()
         if not line:
             continue
-        try:
-            ev = json.loads(line)
-        except json.JSONDecodeError:
+        ev = load_dlq_event(line)
+        if ev is None:
             continue
         if job_id and ev.get("job_id") != job_id:
             continue
@@ -420,7 +448,15 @@ def replay_row_identity(detail: dict[str, Any] | None) -> str:
 
     row = normalize_quarantine_row(detail if isinstance(detail, dict) else {})
     pk = row.get("source_pk")
-    if row.get("source_pk_proven") and pk is not None and str(pk) != "":
+    # Column-name lists are not an event id — two ages would share pk:['id'].
+    from services.quarantine_row_contract import _column_name_list
+
+    if (
+        row.get("source_pk_proven")
+        and pk is not None
+        and str(pk) != ""
+        and _column_name_list(pk) is None
+    ):
         return f"pk:{pk}"
     src_row = row.get("row")
     try:

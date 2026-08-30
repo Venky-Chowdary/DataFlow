@@ -188,3 +188,53 @@ def test_redact_reconciliation_masks_sample_compare_mismatches():
     tgt = redacted["sample_compare"]["mismatches"][0]["target_value"]
     assert "*" in src and "*" in tgt
     assert "bob" not in src and "example" not in src
+
+
+def test_pii_findings_matches_unfiltered_pattern_sweep():
+    """The prefilter/union gate must be exactly the per-label sweep it replaces.
+
+    Guards the throughput fast path in ``pii_findings``: a value holding no
+    ``@`` and no digit cannot match any pattern, and the union regex is only a
+    gate — never a narrower matcher.
+    """
+    import random
+    import string
+
+    from services.pii_guard import PII_PATTERNS, pii_findings
+
+    def sweep(text: str) -> dict[str, int]:
+        found: dict[str, int] = {}
+        for label, pattern in PII_PATTERNS.items():
+            matches = pattern.findall(text)
+            if matches:
+                found[label] = len(matches)
+        return found
+
+    cases: list[str] = [
+        "a@b.co",
+        "contact alice@example.com or bob@example.org",
+        "call 555-123-4567",
+        "123-45-6789",
+        "4111 1111 1111 1111",
+        "10.0.0.1",
+        "",
+        "Aarav",
+        "30137",
+        "2011-08-12",
+        '{"email": "a@b.co"}',
+        "no-pii-here",
+    ]
+    rng = random.Random(1729)
+    for _ in range(4000):
+        size = rng.randint(0, 16)
+        cases.append("".join(rng.choice(string.printable) for _ in range(size)))
+
+    for case in cases:
+        assert pii_findings(case) == sweep(case), case
+
+
+def test_detect_pii_sample_is_masked_for_clean_and_dirty_values():
+    assert detect_pii("alice@example.com")["sample"] == mask("alice@example.com")
+    assert detect_pii("Operations")["sample"] == mask("Operations")
+    assert detect_pii('{"a": 1}')["sample"] == mask('{"a": 1}')
+    assert detect_pii(None)["sample"] == mask("")

@@ -6,11 +6,12 @@ Semantic search over known patterns, synonyms, and type mappings.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from ..knowledge.semantic_patterns import SEMANTIC_PATTERNS
 from ..knowledge.synonyms import CANONICAL_FORMS, are_synonyms, resolve_canonical
 from .document_ingestion import DataTransferDocumentIngestion
+from .product_docs import ProductDocHit, product_doc_search
 from .vector_store import VectorDocument, get_vector_store
 
 
@@ -23,6 +24,21 @@ class RetrievalResult:
     matched_pattern: str | None
     synonym_matches: list[str]
     confidence: float
+    product_docs: list[ProductDocHit] = field(default_factory=list)
+
+    @property
+    def grounded(self) -> bool:
+        """True when a documentation section covers the question.
+
+        Retrieved vector documents are not evidence on their own: the fallback
+        embedding scores unrelated passages 0.3, so "documents came back" once
+        justified narrating an answer about anything.
+        """
+        return bool(self.product_docs)
+
+    @property
+    def top_grounding(self) -> float:
+        return max((h.grounding for h in self.product_docs), default=0.0)
 
 
 class DataTransferRetriever:
@@ -52,6 +68,14 @@ class DataTransferRetriever:
 
         matched_pattern = self._match_pattern(query)
         confidence = self._calculate_confidence(query, docs, matched_pattern)
+        product_docs = (
+            [] if doc_type else product_doc_search(query, limit=min(n_results, 4))
+        )
+        if product_docs:
+            confidence = max(
+                confidence,
+                min(0.5 + 0.45 * product_docs[0].grounding, 0.95),
+            )
 
         return RetrievalResult(
             query=query,
@@ -60,6 +84,7 @@ class DataTransferRetriever:
             matched_pattern=matched_pattern,
             synonym_matches=synonym_matches,
             confidence=confidence,
+            product_docs=product_docs,
         )
 
     def retrieve_for_column(

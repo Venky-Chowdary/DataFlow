@@ -8,6 +8,7 @@ from services.mapping_constraints import (
     classify_source_coverage,
     detect_duplicate_targets,
     enforce_destination_constraints,
+    retain_dest_exists_write_mappings,
 )
 from services.preflight_service import run_file_preflight
 
@@ -159,6 +160,28 @@ def test_low_confidence_mapping_dropped_from_the_active_map_blocks():
 
     assert dropped == ["c21"]
     assert "c21" in classify_source_coverage(SOURCE_COLUMNS, kept)["unaccounted"]
+
+
+def test_dest_exists_overwrite_leaves_extra_source_unaccounted():
+    """Write by dest name — extra source is G13, not an invented dest column."""
+    dest_cols = ["id", "amount", "code"]
+    mappings = [
+        {"source": "id", "target": "id", "create_new": True, "confidence": 0.99},
+        {"source": "amount", "target": "amount", "create_new": True, "confidence": 0.99},
+        {"source": "code", "target": "code", "create_new": True, "confidence": 0.99},
+        {
+            "source": "extra_unmapped",
+            "target": "extra_unmapped",
+            "create_new": True,
+            "confidence": 0.99,
+        },
+    ]
+    kept = retain_dest_exists_write_mappings(mappings, dest_cols)
+    assert [m["source"] for m in kept] == ["id", "amount", "code"]
+    coverage = classify_source_coverage(
+        ["id", "amount", "code", "extra_unmapped"], kept
+    )
+    assert coverage["unaccounted"] == ["extra_unmapped"]
 
 
 def test_create_new_mapping_counts_as_written():

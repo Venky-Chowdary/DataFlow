@@ -17,6 +17,17 @@ WHOLE_TABLE_NOT_COMPARABLE = "whole_table_not_comparable"
 # Target digest was re-read WHERE pk IN (written keys): per-cell proof of this
 # batch, deliberately silent about rows the job never wrote.
 WRITTEN_BATCH_KEYS = "written_batch_keys"
+# A quiet incremental poll: the reader found nothing past the watermark, so no
+# batch exists to compare and the proof is that the destination count did not
+# move. Population evidence must not be turned on such a report — comparing a
+# zero-row batch against a sink that legitimately holds earlier rows fails the
+# normal outcome of every scheduled incremental sync.
+NO_OP_DEST_UNCHANGED: Final[str] = "no_op_destination_unchanged"
+
+
+def is_no_op_report(report: dict[str, Any]) -> bool:
+    """True when the report declares a no-op poll (nothing read, nothing written)."""
+    return str((report or {}).get("assurance_level") or "") == NO_OP_DEST_UNCHANGED
 
 
 def row_count_scope_stamp(out: dict[str, Any]) -> dict[str, Any] | None:
@@ -91,7 +102,10 @@ def is_writer_ack_only(
     where the digest came from, whereas the message text can only be guessed at.
     """
     if source_provenance == SOURCE_DIGEST_WRITER_ACK:
-        return True
+        # A dest digest is independent even when the source side is the writer's
+        # account. Treating that pair as writer-only hid a 1M-row Snowflake
+        # SELECT * behind "read-back not available".
+        return not bool(target_checksum)
     if source_provenance in INDEPENDENT_SOURCE_DIGESTS:
         return False
     return bool(

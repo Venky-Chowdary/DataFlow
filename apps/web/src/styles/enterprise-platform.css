@@ -117,8 +117,8 @@ body {
 
 .df2-page-head-enterprise .df2-page-title {
   margin: 0;
-  font-size: clamp(22px, 2.2vw, 28px);
-  font-weight: 650;
+  font-size: var(--df-fs-page-title);
+  font-weight: var(--df-fw-bold);
   letter-spacing: -0.02em;
   color: var(--df-ink-primary);
   line-height: 1.15;
@@ -239,7 +239,7 @@ body {
 .df2-jobs-command-main h2 {
   margin: 6px 0;
   font-size: 18px;
-  font-weight: 650;
+  font-weight: 600;
 }
 
 .df2-jobs-command-main p {
@@ -338,7 +338,7 @@ body {
 .df-app-boot-title {
   margin: 0;
   font-size: 16px;
-  font-weight: 650;
+  font-weight: 600;
   color: var(--df-ink-primary);
 }
 
@@ -408,7 +408,7 @@ body {
 }
 
 .df2-catalog-nav button:hover {
-  background: #f0f3f6;
+  background: var(--df-surface-muted);
   color: var(--df-ink-primary);
 }
 
@@ -421,6 +421,10 @@ body {
 .df2-connector-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  /* One tile height for the whole catalog. Names wrap to two lines and some
+     connectors carry no description, so content-sized rows made neighbouring
+     tiles differ by up to 34px in the same grid. */
+  grid-auto-rows: 1fr;
   gap: 12px;
   width: 100%;
 }
@@ -449,7 +453,7 @@ body {
 .df2-connector-tile.is-planned {
   opacity: 0.72;
   cursor: not-allowed;
-  background: #fafbfc;
+  background: var(--df-surface-muted);
 }
 
 .df2-connector-tile.is-planned:hover {
@@ -462,6 +466,16 @@ body {
   font-size: 14px;
   font-weight: 600;
   color: var(--df-ink-primary);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* Capability badge sits on the tile floor so every card reads on one baseline
+   whatever its name and description length. */
+.df2-connector-tile > .df2-badge {
+  margin-top: auto;
 }
 
 .df2-connector-tile-desc {
@@ -805,7 +819,7 @@ body {
 .df2-dashboard-next h2 {
   margin: 8px 0 6px;
   font-size: 18px;
-  font-weight: 650;
+  font-weight: 600;
   letter-spacing: -0.02em;
 }
 
@@ -1094,7 +1108,7 @@ body {
 .df2-next-action-card h2 {
   margin: 4px 0 6px;
   font-size: 15px;
-  font-weight: 650;
+  font-weight: 600;
 }
 
 .df2-next-action-card p {
@@ -1233,7 +1247,7 @@ body {
 .df2-empty-title {
   margin: 8px 0 0;
   font-size: 16px;
-  font-weight: 650;
+  font-weight: 600;
   color: var(--df-ink-primary);
 }
 
@@ -1335,7 +1349,7 @@ body {
 .df2-login-head h2 {
   margin: 6px 0 4px;
   font-size: 22px;
-  font-weight: 650;
+  font-weight: 600;
 }
 
 .df2-login-head p {
@@ -1829,15 +1843,13 @@ body {
 
 .df2-btn {
   font-size: 13px;
-  padding: 7px 14px;
-  min-height: 34px;
-  border-radius: 8px;
+  padding: 0 14px;
+  border-radius: var(--df-radius-md, 8px);
 }
 
 .df2-btn-lg {
   font-size: 14px;
-  padding: 9px 18px;
-  min-height: 38px;
+  padding: 0 18px;
 }
 
 .df2-card-head {
@@ -1850,7 +1862,7 @@ body {
 
 .df2-card-title {
   font-size: 15px;
-  font-weight: 650;
+  font-weight: 600;
 }
 
 .df2-label {
