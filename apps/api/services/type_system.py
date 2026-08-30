@@ -4479,16 +4479,56 @@ def is_oracle_long_text_carrier(inferred: str | None) -> bool:
     return upper == "LONG"
 
 
-def oracle_long_numeric_invent(source_type: str, target_type: str) -> bool:
+#: Engines whose bare ``LONG`` token is the deprecated Oracle text LOB. Every
+#: other engine that spells a 64-bit integer ``long`` — Spark/Hive/Iceberg,
+#: Parquet/Avro/ORC, Elasticsearch, and BSON ``long`` — means INT64.
+_ORACLE_LONG_TEXT_SOURCES: frozenset[str] = frozenset({"oracle", "oracledb", "oracle_db"})
+
+
+def source_long_is_int64(source_db: str | None) -> bool:
+    """True when this source engine's bare ``long`` is INT64, not Oracle's LOB.
+
+    Empty means "unknown", never "not Oracle": the caller keeps its
+    conservative answer rather than reading a text LOB as a number.
+    """
+    raw = (source_db or "").strip().lower().replace("-", "_")
+    if not raw:
+        return False
+    return raw not in _ORACLE_LONG_TEXT_SOURCES
+
+
+def source_long_is_text_lob(source_db: str | None) -> bool:
+    """True only when the source engine is the one that spells a text LOB ``LONG``.
+
+    The mirror of :func:`source_long_is_int64` for the other decision — which
+    carrier to invent — and deliberately not its negation: an unknown source
+    answers ``False`` to both, so neither a numeric nor a text carrier is
+    invented on a guess.
+    """
+    raw = (source_db or "").strip().lower().replace("-", "_")
+    return raw in _ORACLE_LONG_TEXT_SOURCES
+
+
+def oracle_long_numeric_invent(
+    source_type: str, target_type: str, *, source_db: str = ""
+) -> bool:
     """True when Oracle LONG text would be stamped/mapped as NUMBER/integer.
 
     Exact ``LONG`` is Oracle's deprecated text LOB. Mapping to BIGINT/NUMBER
     invents numeric polarity — Accept risk. Lakehouse INT64 should use INT64 /
     BIGINT tokens, not bare LONG, when the source is not Oracle.
+
+    The token alone cannot decide that: ``long`` is also the Spark/Hive/Iceberg,
+    Avro/Parquet, Elasticsearch and BSON spelling of INT64, where ``BIGINT`` is
+    the *identity* carrier — and the one ``ddl_type`` itself stamps off Oracle.
+    So the bound source engine decides, and only an unknown engine keeps the
+    conservative refusal.
     """
     if not is_oracle_long_text_carrier(source_type):
         return False
     if is_oracle_long_text_carrier(target_type):
+        return False
+    if source_long_is_int64(source_db or active_source_engine()):
         return False
     tgt_u = strip_identity_qualifier(target_type).upper().replace(" ", "")
     if tgt_u.startswith(

@@ -78,6 +78,8 @@ from services.type_system import (
     parse_numeric_precision_scale,
     parse_string_carrier_width,
     parse_temporal_fractional_precision,
+    source_long_is_int64,
+    source_long_is_text_lob,
     specialty_carrier_base,
     specialty_wire_preserves_value,
     strip_identity_qualifier,
@@ -406,7 +408,16 @@ def ddl_type(db_type: str, inferred: str | LogicalType | NativeType | None) -> s
     # with soft-pass (INTEGER→TEXT allow-list greenwash). LONG→BIGINT is gated
     # by oracle_long_numeric_invent (Accept risk).
     if base_early == "LONG":
-        if db == "oracle":
+        # The token's meaning belongs to the *source* engine: only Oracle spells a
+        # text LOB ``LONG``. A BSON/Spark/Iceberg INT64 landing in CLOB would
+        # invent text polarity for a number, and an Oracle text LOB landing in
+        # BIGINT would invent a numeric domain for text, so each side is decided
+        # by the engine that wrote the token, not by the destination alone.
+        source_engine = active_source_engine()
+        if source_long_is_text_lob(source_engine):
+            # Whatever this destination calls its large-text carrier.
+            return ddl_type(db, "CLOB")
+        if db == "oracle" and not source_long_is_int64(source_engine):
             return "CLOB"
         int_ddl = _integer_ddl_for_dest(db, "BIGINT")
         if int_ddl:

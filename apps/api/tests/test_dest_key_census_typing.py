@@ -43,6 +43,12 @@ from services.dest_key_typing import (  # noqa: E402
     key_domain,
 )
 from services.dest_precount import destination_key_hits  # noqa: E402
+from tests.helpers.live_env import (  # noqa: E402
+    mysql_creds,
+    mysql_up,
+    pg_creds,
+    pg_up,
+)
 
 
 @pytest.mark.parametrize(
@@ -121,50 +127,39 @@ def test_composite_keys_coerce_per_column() -> None:
 # Live engines: the failure was only visible against a real server.
 # --------------------------------------------------------------------------
 
-_PG = {
-    "host": "127.0.0.1",
-    "port": 5432,
-    "database": "dataflow",
-    "username": "dataflow",
-    "password": "dataflow",
-}
-_MYSQL = {
-    "host": "127.0.0.1",
-    "port": 3306,
-    "database": "dataflow",
-    "username": "dataflow",
-    "password": "dataflow",
-}
+# Credentials resolve through the one shared live resolver (libpq / MYSQL_* env,
+# then the local compose default), so this suite targets the same servers as
+# every other live matrix instead of carrying a third spelling of them.
+_PG = pg_creds("KEYCENSUS")
+_MYSQL = mysql_creds("KEYCENSUS")
 
 
 def _pg_conn() -> Any:
     psycopg2 = pytest.importorskip("psycopg2")
-    try:
-        return psycopg2.connect(
-            host=_PG["host"],
-            port=_PG["port"],
-            dbname=_PG["database"],
-            user=_PG["username"],
-            password=_PG["password"],
-            connect_timeout=4,
-        )
-    except Exception as exc:  # noqa: BLE001
-        pytest.skip(f"PostgreSQL unavailable: {exc}")
+    if not pg_up("KEYCENSUS"):
+        pytest.skip("PostgreSQL not reachable/authenticating for the live key census")
+    return psycopg2.connect(
+        host=_PG["host"],
+        port=_PG["port"],
+        dbname=_PG["database"],
+        user=_PG["username"],
+        password=_PG["password"],
+        connect_timeout=4,
+    )
 
 
 def _mysql_conn() -> Any:
     pymysql = pytest.importorskip("pymysql")
-    try:
-        return pymysql.connect(
-            host=_MYSQL["host"],
-            port=int(_MYSQL["port"]),
-            database=_MYSQL["database"],
-            user=_MYSQL["username"],
-            password=_MYSQL["password"],
-            connect_timeout=4,
-        )
-    except Exception as exc:  # noqa: BLE001
-        pytest.skip(f"MySQL unavailable: {exc}")
+    if not mysql_up("KEYCENSUS"):
+        pytest.skip("MySQL not reachable/authenticating for the live key census")
+    return pymysql.connect(
+        host=_MYSQL["host"],
+        port=int(_MYSQL["port"]),
+        database=_MYSQL["database"],
+        user=_MYSQL["username"],
+        password=_MYSQL["password"],
+        connect_timeout=4,
+    )
 
 
 def _seed(conn: Any, table: str, coltype: str, values: list[Any], quote: str) -> None:
