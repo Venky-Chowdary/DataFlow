@@ -380,6 +380,12 @@ export async function runPreflight(payload: {
     type_narrowing?: boolean;
     risk_acknowledged?: boolean;
     intentional_omit?: boolean;
+    /** Field Reduction Ledger (G16) evidence for an omitted column. */
+    omit_reason?: string;
+    omit_reason_text?: string;
+    archive_reference?: string;
+    retention_until?: string;
+    omit_approved_by?: string;
     risk_contract?: Record<string, unknown>;
     struct_policy?: string;
     struct_derived?: boolean;

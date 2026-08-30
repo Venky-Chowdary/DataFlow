@@ -1381,6 +1381,35 @@
   font-style: italic;
 }
 
+/* Field Reduction Ledger (G16) controls on an omitted row. */
+.df2-column-omit-block {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 100%;
+  min-width: 0;
+}
+
+.df2-column-omit-reason,
+.df2-column-omit-note,
+.df2-column-omit-archive,
+.df2-column-omit-retention,
+.df2-column-omit-approver {
+  font-size: 12px;
+  width: 100%;
+  min-width: 0;
+}
+
+.df2-column-omit-gap {
+  font-size: 11px;
+  line-height: 1.35;
+  color: #b45309;
+}
+
+.df2-column-row.is-omitted td .df2-column-omit-block {
+  opacity: 1;
+}
+
 @keyframes df2-column-focus {
   0%, 15% { background: rgba(15, 118, 110, 0.14); }
   100% { background: transparent; }

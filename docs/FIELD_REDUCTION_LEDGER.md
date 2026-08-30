@@ -65,6 +65,25 @@ a decision, and it blocks at G13.
 * A signed ledger proves the reduction decisions were not edited after
   approval. It does not prove the reduction was a good idea.
 
+## Recording a reduction in Map
+
+Set `Transform → Omit` on the source row. The destination cell then asks for the
+reduction itself:
+
+| Control | Wire field | When |
+| --- | --- | --- |
+| Why is it dropped? | `omit_reason` | always |
+| Note | `omit_reason_text` | required by every judgement code |
+| Archive that holds it | `archive_reference` | required by `archive_only` |
+| Retained until | `retention_until` | optional, `archive_only` |
+| Accepted by | `omit_approved_by` | optional (required in strict mode) |
+
+Map names the evidence G16 still needs on the row itself, so the gap is visible
+before Validate. It deliberately does not predict the sample-contradiction
+block: only the engine sees the sample, and a green row from a check Datawrap
+never ran would be a false promise. Carrying the column again clears its
+reduction evidence — a carried field has no reduction to justify.
+
 ## Where it appears
 
 * Gate `g16_field_reduction` in Validate (hard gate; `warn` for unexplained

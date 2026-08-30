@@ -168,6 +168,161 @@ export interface EditableMapping {
   reviewKind?: MappingReviewKind;
   /** Operator explicitly confirmed a false-friend pair (not Approve eligible). */
   falseFriendConfirmed?: boolean;
+  /**
+   * Field Reduction Ledger (G16) disposition for an omitted column — why this
+   * source field is not carried. Empty means the drop is declared but
+   * unexplained: the ledger records it as `dropped_unclassified`.
+   */
+  omitReason?: ReductionReasonCode;
+  /** Operator note behind a judgement reason (required by every judgement code). */
+  omitReasonText?: string;
+  /** Where the field is retained when the reason is archive_only. */
+  archiveReference?: string;
+  /** Retention horizon of that archive copy, when known. */
+  retentionUntil?: string;
+  /** Named accepter of the drop — recorded, not authenticated. */
+  omitApprovedBy?: string;
+}
+
+/** Reduction reason codes — keep aligned with ``REDUCTION_DISPOSITIONS``. */
+export type ReductionReasonCode =
+  | "dropped_empty"
+  | "dropped_constant"
+  | "dropped_redundant"
+  | "dropped_obsolete"
+  | "dropped_pii_minimization"
+  | "dropped_not_required"
+  | "archive_only"
+  | "deferred_phase";
+
+export interface ReductionReasonOption {
+  id: ReductionReasonCode;
+  label: string;
+  detail: string;
+  /**
+   * "observed" codes assert a fact about the data. G16 checks them against the
+   * Validate sample and blocks the ones the sample disproves, so they are
+   * offered as claims the operator can be held to — not as convenient labels.
+   */
+  kind: "observed" | "judgement";
+  requires: ("omitReasonText" | "archiveReference")[];
+}
+
+export const REDUCTION_REASONS: ReductionReasonOption[] = [
+  {
+    id: "dropped_empty",
+    label: "Empty in source",
+    detail:
+      "The column holds no values. Checked against the Validate sample — a single "
+      + "sampled value blocks this claim.",
+    kind: "observed",
+    requires: [],
+  },
+  {
+    id: "dropped_constant",
+    label: "Single constant value",
+    detail:
+      "Every row carries the same value, so it holds no information. Checked "
+      + "against the Validate sample.",
+    kind: "observed",
+    requires: [],
+  },
+  {
+    id: "dropped_redundant",
+    label: "Redundant — derivable elsewhere",
+    detail: "The value is available from another field that is carried. Name that field.",
+    kind: "judgement",
+    requires: ["omitReasonText"],
+  },
+  {
+    id: "dropped_obsolete",
+    label: "Obsolete in the target process",
+    detail: "COBOL filler, dead flags, retired codes — no longer part of the process.",
+    kind: "judgement",
+    requires: ["omitReasonText"],
+  },
+  {
+    id: "dropped_pii_minimization",
+    label: "Dropped for data minimisation",
+    detail: "Deliberately not carried so the target holds less personal data.",
+    kind: "judgement",
+    requires: ["omitReasonText"],
+  },
+  {
+    id: "dropped_not_required",
+    label: "Not required by the target process",
+    detail: "A judgement call: the new screen/process does not use this field.",
+    kind: "judgement",
+    requires: ["omitReasonText"],
+  },
+  {
+    id: "archive_only",
+    label: "Retained in an archive, not in the target",
+    detail:
+      "The data still exists somewhere else. G16 blocks unless the archive is "
+      + "named — \"kept elsewhere\" is not evidence until the elsewhere is.",
+    kind: "judgement",
+    requires: ["omitReasonText", "archiveReference"],
+  },
+  {
+    id: "deferred_phase",
+    label: "Deferred to a later migration phase",
+    detail: "Not dropped permanently — out of scope for this cutover. Say which phase.",
+    kind: "judgement",
+    requires: ["omitReasonText"],
+  },
+];
+
+export function reductionReasonMeta(
+  code?: string | null,
+): ReductionReasonOption | undefined {
+  if (!code) return undefined;
+  return REDUCTION_REASONS.find((r) => r.id === code);
+}
+
+/**
+ * What G16 still needs from this omitted row, in operator words.
+ *
+ * Mirrors the backend requirement table so Map can show the gap before
+ * Validate does. It deliberately does NOT predict the sample-contradiction
+ * block: only the engine sees the sample, and guessing here would either
+ * invent a block or promise a pass Datawrap has not checked.
+ */
+export function reductionEvidenceGap(m: EditableMapping): string | null {
+  if (!isIntentionalOmit(m)) return null;
+  const meta = reductionReasonMeta(m.omitReason);
+  if (!meta) return "No reduction reason — the drop is recorded as unexplained";
+  if (meta.requires.includes("omitReasonText") && !String(m.omitReasonText || "").trim()) {
+    return `${meta.label} needs a note saying why`;
+  }
+  if (meta.requires.includes("archiveReference") && !String(m.archiveReference || "").trim()) {
+    return "Archive-only needs the archive that holds the field";
+  }
+  return null;
+}
+
+/** Record (or clear) the reduction reason on an omitted row. */
+export function applyReductionReason(
+  m: EditableMapping,
+  code: string,
+): EditableMapping {
+  const meta = reductionReasonMeta(code);
+  if (!meta) {
+    return {
+      ...m,
+      omitReason: undefined,
+      // Reason-scoped evidence goes with the reason it justified; keeping a
+      // stale archive reference under "no reason" would ship an orphan claim.
+      archiveReference: undefined,
+      retentionUntil: undefined,
+    };
+  }
+  return {
+    ...m,
+    omitReason: meta.id,
+    archiveReference: meta.requires.includes("archiveReference") ? m.archiveReference : undefined,
+    retentionUntil: meta.requires.includes("archiveReference") ? m.retentionUntil : undefined,
+  };
 }
 
 /** Compact profiler strip from ``mapping_quality.column_profile_for_map``. */
@@ -1721,6 +1876,12 @@ export function applyTransformChange(m: EditableMapping, next: MappingTransform)
     engineTransform: next === "none" ? undefined : UI_TO_ENGINE_TRANSFORM[next],
     target: restoring && !String(m.target || "").trim() ? m.source : m.target,
     reason: restoring && m.reason === "Intentionally omitted from transfer" ? undefined : m.reason,
+    // A carried column has no reduction to justify.
+    omitReason: restoring ? undefined : m.omitReason,
+    omitReasonText: restoring ? undefined : m.omitReasonText,
+    archiveReference: restoring ? undefined : m.archiveReference,
+    retentionUntil: restoring ? undefined : m.retentionUntil,
+    omitApprovedBy: restoring ? undefined : m.omitApprovedBy,
     approved: false,
     riskAcknowledged: false,
   };
@@ -1897,6 +2058,14 @@ export function buildPreflightMappings(
         user_override: Boolean(safe.riskAcknowledged) || (safe.approved && !enumBool && !mappingRequiresRiskAck(safe)),
         transform: omitted ? "omit" : uiTransformToEngine(safe.transform, safe.engineTransform),
         intentional_omit: omitted || undefined,
+        // Field Reduction Ledger (G16) evidence. Only travels for omitted rows:
+        // a reason left over from an earlier omit must not describe a column
+        // that is now carried.
+        omit_reason: omitted ? (safe.omitReason || undefined) : undefined,
+        omit_reason_text: omitted ? (safe.omitReasonText?.trim() || undefined) : undefined,
+        archive_reference: omitted ? (safe.archiveReference?.trim() || undefined) : undefined,
+        retention_until: omitted ? (safe.retentionUntil?.trim() || undefined) : undefined,
+        omit_approved_by: omitted ? (safe.omitApprovedBy?.trim() || undefined) : undefined,
         // Existing dest: never invent target_type from inferredType when Map
         // left destType blank (partial Studio honesty — write path fail-closes).
         // Create-new may still preview from inferredType / destType stamp.

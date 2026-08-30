@@ -304,14 +304,40 @@ def test_warn_message_says_execute_is_not_blocked():
     assert gate["details"]["warning_columns"] == 2
 
 
-def test_gate_cta_does_not_promise_a_map_control_that_does_not_exist():
+def test_gate_cta_sends_the_operator_to_the_map_control_that_exists():
     from services.preflight_rules import PREFLIGHT_GATE_RULES
 
     rule = PREFLIGHT_GATE_RULES["g16_field_reduction"]
     labels = [a["label"] for a in rule["suggested_actions"]]
 
-    assert labels == ["Open Map to review the omitted columns"]
-    assert "Map has no reduction-reason control yet" in rule["fix"]
+    assert labels == ["Open Map to record reduction reasons"]
+    # The old text sent operators to the API because Map had no control.
+    assert "mappings API" not in rule["fix"]
+    assert "Open Map" in rule["fix"]
+
+
+def test_preflight_request_keeps_reduction_evidence_on_the_wire():
+    """A mapping model that drops these leaves every UI reduction unexplained."""
+    from src.routers.preflight_router import MappingItem
+
+    item = MappingItem(
+        source="old_audit_trail",
+        target="",
+        transform="omit",
+        intentional_omit=True,
+        omit_reason="archive_only",
+        omit_reason_text="Kept for the 7-year retention obligation",
+        archive_reference="s3://audit-archive/legacy/2026",
+        retention_until="2033-01-31",
+        omit_approved_by="R. Mehta",
+    )
+    row = item.model_dump()
+
+    gate = build_field_reduction_evidence(
+        source_columns=["old_audit_trail"], mappings=[row], sample_rows=SAMPLE_ROWS
+    )[1]
+
+    assert gate["status"] == "pass"
 
 
 # ── Legacy omissions and strict mode ─────────────────────────────────────────
