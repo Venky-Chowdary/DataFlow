@@ -5333,7 +5333,27 @@ class UniversalTransferEngine:
                 read_options=resolve_read_options(request),
             )
         if request.source.kind == "database":
-            return read_source_database(request.source)
+            cursor_column = ""
+            cursor_after = None
+            try:
+                from services.batch_incremental import bind_transfer_request
+
+                bound = bind_transfer_request(request, self._resolved_format(request.source))
+                # First incremental run has a cursor column but no watermark —
+                # that is a full extract. Only seek when a dest-owned mark exists.
+                if bound.active and bound.scope.watermark:
+                    cursor_column = bound.scope.cursor_column
+                    cursor_after = bound.scope.watermark
+            except ValueError:
+                # Cursor-identity refusal is owned by execute_tracked after the
+                # read; do not turn it into a retried source error here.
+                cursor_column = ""
+                cursor_after = None
+            return read_source_database(
+                request.source,
+                cursor_column=cursor_column,
+                cursor_after=cursor_after,
+            )
         raise ValueError(f"Unsupported source kind: {request.source.kind}")
 
     def analyze_compatibility(

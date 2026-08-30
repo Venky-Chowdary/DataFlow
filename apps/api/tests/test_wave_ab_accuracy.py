@@ -259,6 +259,7 @@ def test_stripe_total_rows_none():
         )
     assert len(batch.rows) == 1
     assert batch.total_rows is None
+    assert (batch.meta or {}).get("truncated") is True
 
 
 def test_integer_bind_refuses_non_integral_float():

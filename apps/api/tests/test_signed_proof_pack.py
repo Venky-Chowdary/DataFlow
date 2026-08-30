@@ -113,3 +113,57 @@ def test_export_includes_accepted_risks_policies_and_rollback():
     assert pack["hashes"]["mapping_hash"] == "map-h1"
     assert pack["connector_versions"]["source"] == "postgresql"
     assert verify_signed_proof_pack(pack)["ok"] is True
+
+
+def test_cdc_count_scope_does_not_ladder_veto_leftover_extras():
+    from services.reconcile_coverage import CDC_SOURCE_IMAGE_COUNT
+    from services.signed_proof_pack import (
+        apply_fidelity_veto,
+        classify_post_write_assurance,
+        fidelity_veto,
+    )
+
+    recon = {
+        "passed": True,
+        "checksum_scope": CDC_SOURCE_IMAGE_COUNT,
+        "checksum_match": False,
+        "source_rows": 2,
+        "target_rows": 3,
+        "verification_ladder": {
+            "passed": False,
+            "localization_summary": "L4/L5 localized: row id='99'",
+            "layers": {
+                "L1": {"passed": True},
+                "L3": {"passed": True},
+                "L4": {"passed": False},
+            },
+        },
+    }
+    assert fidelity_veto(recon) is None
+    out = apply_fidelity_veto(recon)
+    assert out["passed"] is True
+    assurance = classify_post_write_assurance(out)
+    assert assurance["migration_proven"] is False
+    assert assurance["post_write_verified"] is True
+    assert assurance["claim_level"] == CDC_SOURCE_IMAGE_COUNT
+
+
+def test_overwrite_ladder_fail_still_vetoes_when_not_cdc_count_scope():
+    from services.signed_proof_pack import apply_fidelity_veto, fidelity_veto
+
+    recon = {
+        "passed": True,
+        "checksum_scope": "",
+        "checksum_match": False,
+        "verification_ladder": {
+            "passed": False,
+            "localization_summary": "L4 extra dest key",
+            "layers": {"L1": {"passed": True}, "L4": {"passed": False}},
+        },
+    }
+    veto = fidelity_veto(recon)
+    assert veto is not None
+    assert veto.operational_passed is False
+    out = apply_fidelity_veto(recon)
+    assert out["passed"] is False
+    assert out.get("migration_proven") is False

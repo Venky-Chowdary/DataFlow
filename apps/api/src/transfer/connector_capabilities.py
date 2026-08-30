@@ -42,7 +42,14 @@ _DRIVER_CAPS: dict[str, dict[str, bool]] = {
     # Reverse-ETL destinations: full read+write (warehouse → CRM activation).
     "salesforce": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
     "hubspot": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
-    "stripe": {"test": True, "read": True, "write": True, "introspect": False, "preflight": True, "certified": False},
+    # Stripe: incremental ``created`` cursor SKU as a *source* (named fixture
+    # dest COUNT). Reverse-ETL write exists in stripe_writer but is not a
+    # PRODUCTION_SKU dest — certified_dest stays False until execute + dest
+    # COUNT on a named Stripe object.
+    "stripe": {
+        "test": True, "read": True, "write": True, "introspect": False, "preflight": True,
+        "certified_dest": False,
+    },
     "shopify": {"test": True, "read": True, "write": True, "introspect": False, "preflight": True, "certified": False},
     "zendesk": {"test": True, "read": True, "write": True, "introspect": False, "preflight": True, "certified": False},
     "notion": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True, "certified": False},
@@ -159,16 +166,18 @@ SUGGESTED_SOURCES = [
     "csv___tsv", "json", "jsonl", "excel", "parquet",
     "dynamodb", "amazon_s3", "gcs", "google_cloud_storage", "adls", "redis", "elasticsearch",
     "sftp",
-    "salesforce", "hubspot",
+    "salesforce", "hubspot", "stripe",
 ]
 
 # Catalog entry ids that map to implemented drivers — blocks false "Full transfer" on aliases.
 # Hosted twins (RDS/Neon/Atlas/…) share the same duplex driver and are transfer-ready
 # under the same evidence bar — counting them is honest; inventing rest_api SaaS is not.
 # Only SKU-proven / certified duplex brands. Uncertified SaaS writers
-# (stripe/shopify/airtable/zendesk/notion) stay out — certified:False in
-# _DRIVER_CAPS until they earn PRODUCTION_SKU. Redshift is declared RW but
-# not yet in PRODUCTION_SKU, so it is demoted from this frozenset.
+# (shopify/airtable/zendesk/notion) stay out — certified:False in
+# _DRIVER_CAPS until they earn PRODUCTION_SKU. Stripe earned a named
+# incremental-cursor SKU (created watermark → sqlite dest COUNT).
+# Redshift is declared RW but not yet in PRODUCTION_SKU, so it stays
+# demoted from this frozenset until execute + dest COUNT.
 _TRANSFER_READY_CORE = frozenset({
     "postgresql", "mysql", "mongodb", "sqlserver", "sql_server", "oracle",
     "snowflake", "bigquery",
@@ -176,7 +185,7 @@ _TRANSFER_READY_CORE = frozenset({
     "azure_blob_storage", "azure_data_lake", "azure_data_lake_storage",
     "redis", "elasticsearch", "sqlite", "generic_sql",
     "iceberg", "apache_iceberg", "kafka", "apache_kafka",
-    "salesforce", "hubspot",
+    "salesforce", "hubspot", "stripe",
     "csv___tsv", "json", "jsonl", "ndjson", "excel", "parquet",
     # SFTP earns this with introspect (typed schema off the remote payload),
     # Validate gates and a Gate-8 read-back, proven against a real SFTP server
@@ -665,6 +674,8 @@ def capability_label(caps: dict[str, bool]) -> str:
             return "Destination only"
         if caps.get("file_source"):
             return "File transfer"
+        if caps.get("certified_dest") is False:
+            return "Source certified"
         return "Full transfer"
     if _source_only_ready(caps):
         return "Source only"
@@ -856,6 +867,10 @@ def dest_ready(caps: dict[str, bool]) -> bool:
     """True when connector can act as a transfer destination."""
     if caps.get("file_export"):
         return True
+    # Writer code is not dest SKU. Stripe reverse-ETL stays off the dest picker
+    # until PRODUCTION_SKU execute + dest COUNT on a named Stripe object.
+    if caps.get("certified_dest") is False:
+        return False
     # Destination-only and duplex writers must be certified.
     return bool(caps.get("write") and (caps.get("read") or caps.get("dest_only")) and transfer_ready(caps))
 

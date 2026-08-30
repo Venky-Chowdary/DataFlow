@@ -114,7 +114,7 @@ def fidelity_veto(recon: dict[str, Any]) -> FidelityVeto | None:
     Operational ``passed`` (rows landed) is a different question — a coerced
     write can complete and still be forbidden from claiming ``migration_proven``.
     """
-    from services.reconcile_coverage import WRITTEN_BATCH_KEYS
+    from services.reconcile_coverage import CDC_SOURCE_IMAGE_COUNT, WRITTEN_BATCH_KEYS
 
     ladder = recon.get("verification_ladder") if isinstance(recon.get("verification_ladder"), dict) else {}
     if ladder and not ladder.get("skipped") and ladder.get("passed") is False:
@@ -132,6 +132,11 @@ def fidelity_veto(recon: dict[str, Any]) -> FidelityVeto | None:
                 and recon.get("checksum_match") is True
                 and l3_ok
             ):
+                skip_veto = True
+            # CDC COUNT-only: leftover dest keys sit outside the source-image
+            # COUNT proof. Changelog is not S; leftover MERGE is a hard no-op.
+            # checksum_match is False by design — do not claim full_checksum.
+            elif str(recon.get("checksum_scope") or "") == CDC_SOURCE_IMAGE_COUNT:
                 skip_veto = True
         if not skip_veto:
             return _ladder_fail_veto(ladder)
@@ -350,6 +355,23 @@ def classify_post_write_assurance(
             "note": (
                 "Append/upsert dest-before delta verified — whole-table digests "
                 "are not comparable. Per-cell / population fidelity is not proven."
+            ),
+        }
+
+    from services.reconcile_coverage import CDC_SOURCE_IMAGE_COUNT
+
+    if str(recon.get("checksum_scope") or "") == CDC_SOURCE_IMAGE_COUNT and passed:
+        return {
+            "claim_level": CDC_SOURCE_IMAGE_COUNT,
+            "post_write_verified": True,
+            "migration_proven": False,
+            "population_proof": False,
+            "referential_integrity_proven": False,
+            "checksum_match": False,
+            "note": (
+                "CDC dest COUNT vs live source-table COUNT. Leftover MERGE is a "
+                "no-op. At-least-once upsert — not platform exactly-once. "
+                "Not full_checksum / migration proven."
             ),
         }
 

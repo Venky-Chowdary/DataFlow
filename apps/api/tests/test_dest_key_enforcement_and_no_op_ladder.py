@@ -165,3 +165,36 @@ def test_no_op_poll_is_not_re_judged_by_the_verification_ladder(tmp_path: Path) 
     assert out["passed"] is True
     assert out["assurance_level"] == NO_OP_DEST_UNCHANGED
     assert "verification_ladder" not in out
+
+
+def test_cdc_source_image_count_does_not_attach_ladder(tmp_path: Path) -> None:
+    """COUNT-only CDC leftover extras must not be judged as snapshot identity."""
+    from services.reconcile_coverage import CDC_SOURCE_IMAGE_COUNT
+
+    report = {
+        "passed": True,
+        "message": "CDC catch-up dest COUNT=3 vs source image COUNT=2",
+        "assurance_level": CDC_SOURCE_IMAGE_COUNT,
+        "checksum_scope": CDC_SOURCE_IMAGE_COUNT,
+        "source_rows": 2,
+        "target_rows": 3,
+    }
+    endpoint = EndpointConfig(
+        kind="database",
+        format="sqlite",
+        database=str(tmp_path / "dest.db"),
+        table="t",
+    )
+    out = _maybe_attach_verification_ladder(
+        report,
+        endpoint=endpoint,
+        source_endpoint=endpoint,
+        records=[],
+        columns=["id"],
+        dest_summary={"sync_mode": "cdc", "checksum_mode": "cdc_source_image"},
+        mappings=[{"source": "id", "target": "id"}],
+        validation_mode="strict",
+    )
+    assert out["passed"] is True
+    assert out["checksum_scope"] == CDC_SOURCE_IMAGE_COUNT
+    assert "verification_ladder" not in out

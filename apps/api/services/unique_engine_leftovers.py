@@ -10,7 +10,12 @@ Competitors still leave these implicit:
 
 DataFlow leftover MERGE is dest-key-addressed. Every source field is mapped or
 ``intentional_omit``. Dropping Mongo ``_id`` quietly is G13 silent loss.
-``100%`` means a named fixture, not marketing.
+``100%`` means a named fixture, not marketing. In this slice that fixture is
+the leftover mapping cartesian (``test_unique_engine_leftovers``) plus live
+sqlite TEXT dest COUNT and sqlite TEXT → postgresql TEXT dest COUNT
+(``test_unique_engine_leftovers_live``). Inventing NUMERIC / DECIMAL from
+those TEXT digits is refuse proof (dest COUNT 0), not a transfer.
+Not a 5×5 live matrix. Not PRODUCTION_SKU tenant execute.
 """
 
 from __future__ import annotations
@@ -18,7 +23,6 @@ from __future__ import annotations
 from typing import Any
 
 from services.mapping_constraints import is_intentional_omit, write_mappings
-from services.type_system import ddl_type
 
 MONGO_OBJECT_ID_OMISSION: dict[str, Any] = {
     "source": "_id",
@@ -44,9 +48,11 @@ def leftover_column_mappings(
     """Map a leftover cartesian cell without inventing dest types.
 
     Mongo source ``_id`` is omitted (G13) unless the dest is Mongo and the
-    business key binds to ``_id``. SQLite dest ``amount`` stays TEXT. Typed
-    warehouse dests may bind NUMERIC with ``source_type=TEXT`` — Validate still
-    owns fit. Dest-exists is write-by-name; this helper never invents create-new.
+    business key binds to ``_id``. SQLite TEXT ``amount`` stays TEXT on every
+    dest — stamping NUMERIC / DECIMAL(65,30) / DECIMAL(18,2) from those digits
+    invents capacity. Typed warehouse dests bind NUMERIC only when the source
+    already declared a numeric domain. Dest-exists is write-by-name; this
+    helper never invents create-new.
     """
     src = _norm(source_format)
     dst = _norm(dest_format)
@@ -86,16 +92,20 @@ def leftover_column_mappings(
                 "source": "id",
                 "target": "id",
                 "confidence": 0.99,
-                "source_type": "TEXT",
+                # sqlite leftover fixture stores INTEGER affinity, not TEXT digits.
+                "source_type": "INTEGER" if src == "sqlite" else "TEXT",
                 "target_type": "BIGINT" if dst in {"postgresql", "mysql"} else "TEXT",
             }
         )
 
     if has_amount:
-        if dst == "sqlite":
+        if src == "sqlite" or dst == "sqlite":
+            # TEXT carrier. Never invent NUMERIC / DECIMAL capacity from digits.
             amount_type = "TEXT"
-        elif dst in {"postgresql", "mysql"}:
-            amount_type = ddl_type(dst, "DECIMAL(18,2)") or "NUMERIC(18,2)"
+        elif dst == "postgresql":
+            amount_type = "NUMERIC"
+        elif dst == "mysql":
+            amount_type = "DECIMAL(65,30)"
         else:
             amount_type = "TEXT"
         maps.append(
@@ -143,5 +153,24 @@ def leftover_sqlite_dest_invents_decimal(mappings: list[dict[str, Any]], dest_fo
     for m in write_mappings(mappings):
         tgt_type = str(m.get("target_type") or "").upper()
         if "DECIMAL" in tgt_type or tgt_type.startswith("NUMERIC"):
+            return True
+    return False
+
+
+def leftover_text_carrier_invents_numeric(mappings: list[dict[str, Any]]) -> bool:
+    """True when a TEXT/STRING source field is stamped NUMERIC/DECIMAL dest.
+
+    That invents capacity from digits. The leftover cartesian must not do it.
+    Refuse fixtures stamp this on purpose and prove Execute dest COUNT 0.
+    """
+    for m in write_mappings(mappings):
+        src_t = str(m.get("source_type") or "").upper().replace(" ", "")
+        tgt_t = str(m.get("target_type") or "").upper().replace(" ", "")
+        src_text = src_t in {"TEXT", "STRING", "CLOB", "NVARCHAR", "VARCHAR", "CHAR"} or src_t.startswith(
+            ("VARCHAR", "CHAR", "NVARCHAR", "NCHAR")
+        )
+        if not src_text:
+            continue
+        if "DECIMAL" in tgt_t or tgt_t.startswith("NUMERIC") or tgt_t.startswith("NUMBER"):
             return True
     return False

@@ -241,6 +241,9 @@ PRODUCTION_SKU: list[tuple[str, str, str, str]] = [
     ("file", "csv", "database", "milvus"),
     ("database", "rest_api", "database", "postgresql"),
     ("database", "rest_api", "database", "mongodb"),
+    # Named SaaS SKU: Stripe incremental ``created`` cursor → sqlite dest COUNT.
+    # Not more catalog tiles. Shopify stays Planned.
+    ("database", "stripe", "database", "sqlite"),
 ]
 
 

@@ -714,3 +714,45 @@ def test_enforce_bound_contract_format_drift_fail_closed(monkeypatch):
     )
     with pytest.raises(ContractViolation, match="Destination format changed"):
         enforce_bound_contract(req, schema={"id": "INTEGER"}, mappings=[])
+
+
+def test_require_signed_without_id_refuses_auto_create_draft(monkeypatch):
+    """SDK / skip_preflight must not invent a DRAFT when SIGNED was demanded."""
+    from services.data_contract import ContractViolation
+    from src.transfer.contract_engine import enforce_or_create_contract
+
+    _backend(monkeypatch)
+    req = SimpleNamespace(
+        contract_id="",
+        enforce_contract=True,
+        require_signed_contract=True,
+        source=SimpleNamespace(format="postgresql"),
+        destination=SimpleNamespace(format="postgresql"),
+        column_types={"id": "INTEGER"},
+    )
+    with pytest.raises(ContractViolation, match="no contract_id"):
+        enforce_or_create_contract(req, {"id": "INTEGER"}, [], preflight={"passed": True})
+
+
+def test_require_signed_enforces_even_when_enforce_contract_is_false(monkeypatch):
+    from services.data_contract import ContractViolation
+    from src.transfer.contract_engine import enforce_or_create_contract
+
+    backend, DataContract, ContractStatus = _backend(monkeypatch)
+    draft = DataContract(
+        name="draft-skip-enforce",
+        status=ContractStatus.DRAFT,
+        source={"format": "postgresql"},
+        destination={"format": "postgresql"},
+    )
+    backend.save_contract(draft)
+    req = SimpleNamespace(
+        contract_id=draft.id,
+        enforce_contract=False,
+        require_signed_contract=True,
+        source=SimpleNamespace(format="postgresql"),
+        destination=SimpleNamespace(format="postgresql"),
+        column_types={"id": "INTEGER"},
+    )
+    with pytest.raises(ContractViolation, match="must be SIGNED"):
+        enforce_or_create_contract(req, {"id": "INTEGER"}, [], preflight=None)

@@ -131,14 +131,28 @@ def enforce_or_create_contract(
     The associated circuit breaker is also consulted: an OPEN breaker halts
     the transfer until the contract is re-signed or the recovery timeout elapses.
     Otherwise a new contract is generated from the preflight result and saved.
+
+    ``require_signed_contract`` is fail-closed on the engine path, not only at
+    the HTTP stamp: skip_preflight / SDK / desktop lab must not invent a DRAFT
+    and write when the operator demanded SIGNED.
     """
     store = get_contract_store()
-    if request.contract_id and getattr(request, "enforce_contract", True):
-        contract = store.get_contract(request.contract_id)
+    require_signed = bool(getattr(request, "require_signed_contract", False))
+    cid = str(getattr(request, "contract_id", "") or "").strip()
+    enforce = bool(getattr(request, "enforce_contract", True)) or require_signed
+
+    if require_signed and not cid:
+        raise ContractViolation(
+            "require_signed_contract is set but no contract_id — refuse write",
+            violations=[{"rule": "contract_required", "contract_id": ""}],
+        )
+
+    if cid and enforce:
+        contract = store.get_contract(cid)
         if contract is None:
             raise ContractViolation(
-                f"Contract {request.contract_id} not found",
-                violations=[{"rule": "contract_not_found", "contract_id": request.contract_id}],
+                f"Contract {cid} not found",
+                violations=[{"rule": "contract_not_found", "contract_id": cid}],
             )
         breaker = store.get_breaker(contract.id)
         if not breaker.allow():
@@ -146,17 +160,16 @@ def enforce_or_create_contract(
                 f"Circuit breaker for contract {contract.id} is OPEN; transfer blocked until recovery",
                 violations=[{"rule": "circuit_breaker_open", "contract_id": contract.id, "state": breaker.state.value}],
             )
-        require_signed = bool(getattr(request, "require_signed_contract", False))
         enforcer = ContractEnforcer(contract)
         enforcer.enforce(
             request,
-            sample_schema=schema or request.column_types or {},
+            sample_schema=schema or getattr(request, "column_types", None) or {},
             require_signed=require_signed,
         )
         return contract.id
 
     if not getattr(request, "enforce_contract", True):
-        return request.contract_id
+        return getattr(request, "contract_id", "") or ""
 
     contract = build_contract_from_preflight(request, preflight, schema=schema, mappings=mappings)
     store.save_contract(contract)

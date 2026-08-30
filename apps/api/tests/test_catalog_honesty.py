@@ -41,8 +41,8 @@ def test_dedicated_saas_source_only_drivers() -> None:
 
 
 def test_dedicated_saas_transfer_ready_drivers() -> None:
-    """Writers exist for Stripe/Shopify/Airtable but stay Planned until PRODUCTION_SKU."""
-    planned = ("stripe", "shopify", "airtable", "zendesk", "notion")
+    """Shopify/Airtable stay Planned until PRODUCTION_SKU. Stripe earned incremental SKU."""
+    planned = ("shopify", "airtable", "zendesk", "notion")
     for brand in planned:
         row = enrich_catalog_entry(
             {"id": brand, "name": brand.title(), "category": "saas", "status": "live", "description": ""}
@@ -54,9 +54,9 @@ def test_dedicated_saas_transfer_ready_drivers() -> None:
 
 
 def test_dedicated_saas_drivers_activation_and_source_only() -> None:
-    """HubSpot/Salesforce are reverse-ETL write-ready; Stripe/Shopify/Airtable Planned."""
-    certified = ("hubspot", "salesforce")
-    planned = ("stripe", "airtable", "shopify", "zendesk", "notion")
+    """HubSpot/Salesforce certified duplex; Stripe source-certified; Shopify Planned."""
+    certified = ("hubspot", "salesforce", "stripe")
+    planned = ("airtable", "shopify", "zendesk", "notion")
     for brand in certified:
         row = enrich_catalog_entry(
             {"id": brand, "name": brand.title(), "category": "saas", "status": "live", "description": ""}
@@ -64,6 +64,12 @@ def test_dedicated_saas_drivers_activation_and_source_only() -> None:
         assert row["transfer_ready"] is True, brand
         assert row["certification_tier"] == "certified", brand
         assert row["effective_status"] == "live", brand
+    stripe = enrich_catalog_entry(
+        {"id": "stripe", "name": "Stripe", "category": "saas", "status": "live", "description": ""}
+    )
+    assert stripe["source_ready"] is True
+    assert stripe["dest_ready"] is False
+    assert stripe["capability_label"] == "Source certified"
     for brand in planned:
         row = enrich_catalog_entry(
             {"id": brand, "name": brand.title(), "category": "saas", "status": "live", "description": ""}
@@ -173,7 +179,7 @@ def test_redshift_is_planned_until_production_sku() -> None:
 def test_uncertified_saas_not_in_transfer_ready_catalog_ids() -> None:
     from src.transfer.connector_capabilities import TRANSFER_READY_CATALOG_IDS
 
-    for brand in ("stripe", "shopify", "airtable", "zendesk", "notion", "redshift"):
+    for brand in ("shopify", "airtable", "zendesk", "notion", "redshift"):
         assert brand not in TRANSFER_READY_CATALOG_IDS, brand
 
 

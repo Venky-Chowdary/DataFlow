@@ -594,12 +594,24 @@ def _read_batch_impl(
             offset=offset,
             columns=columns,
         )
-    if src_type in ("salesforce", "hubspot"):
+    if src_type in ("salesforce", "hubspot", "stripe"):
         from .connector_dispatch import read_via_registry
 
         if src_type == "salesforce" and cursor_column:
             # SOQL OFFSET is capped at 2000 rows, so any object larger than that
             # can only be walked by seeking on the cursor (normally Id).
+            return read_via_registry(
+                src_type,
+                cfg=cfg,
+                table=table,
+                limit=limit,
+                offset=0,
+                cursor_column=cursor_column,
+                cursor_after=cursor_after,
+            )
+        if src_type == "stripe" and cursor_column:
+            # Stripe incremental is created[gte], not OFFSET. starting_after is
+            # pagination inside the filtered window.
             return read_via_registry(
                 src_type,
                 cfg=cfg,

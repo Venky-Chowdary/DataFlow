@@ -17,6 +17,10 @@ WHOLE_TABLE_NOT_COMPARABLE = "whole_table_not_comparable"
 # Target digest was re-read WHERE pk IN (written keys): per-cell proof of this
 # batch, deliberately silent about rows the job never wrote.
 WRITTEN_BATCH_KEYS = "written_batch_keys"
+# CDC catch-up: dest COUNT vs current source-table COUNT. Last-batch writer
+# checksum is not that population. Engine digest of source vs dest (same
+# engine) can still close full_checksum; this scope is COUNT-only honesty.
+CDC_SOURCE_IMAGE_COUNT = "cdc_source_image_count"
 # A quiet incremental poll: the reader found nothing past the watermark, so no
 # batch exists to compare and the proof is that the destination count did not
 # move. Population evidence must not be turned on such a report — comparing a
@@ -28,6 +32,16 @@ NO_OP_DEST_UNCHANGED: Final[str] = "no_op_destination_unchanged"
 def is_no_op_report(report: dict[str, Any]) -> bool:
     """True when the report declares a no-op poll (nothing read, nothing written)."""
     return str((report or {}).get("assurance_level") or "") == NO_OP_DEST_UNCHANGED
+
+
+def is_cdc_source_image_count_report(report: dict[str, Any]) -> bool:
+    """True when Gate-8 proved CDC catch-up by dest COUNT vs live source COUNT.
+
+    Leftover dest keys sit outside that proof (changelog is not S; leftover
+    MERGE is a hard no-op). The in-memory ladder must not treat those extras as
+    a snapshot-identity failure, and must not claim ``full_checksum``.
+    """
+    return str((report or {}).get("checksum_scope") or "") == CDC_SOURCE_IMAGE_COUNT
 
 
 def row_count_scope_stamp(out: dict[str, Any]) -> dict[str, Any] | None:

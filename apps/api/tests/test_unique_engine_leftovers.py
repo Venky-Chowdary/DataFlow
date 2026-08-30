@@ -1,7 +1,10 @@
 """Named fixture: Mongo _id leftover + SQLite TEXT→DECIMAL invent.
 
-Measured on this file only. Not a 5×5 cartesian claim. Not PRODUCTION_SKU
-tenant execute. CDC remains at-least-once upsert.
+Measured on this file only. ``100%`` here means every cell in this leftover
+mapping fixture plus the sqlite TEXT live writes in
+``test_unique_engine_leftovers_live`` (sqlite dest COUNT=1 and postgresql
+TEXT dest COUNT=1). Not a 5×5 cartesian claim. Not PRODUCTION_SKU tenant
+execute. CDC remains at-least-once upsert.
 """
 
 from __future__ import annotations
@@ -20,6 +23,7 @@ from services.unique_engine_leftovers import (
     leftover_column_mappings,
     leftover_g13_accounted,
     leftover_sqlite_dest_invents_decimal,
+    leftover_text_carrier_invents_numeric,
 )
 
 
@@ -55,15 +59,39 @@ def test_sqlite_dest_never_invents_decimal_affinity(source: str) -> None:
     assert str(amount.get("target_type") or "").upper() == "TEXT"
 
 
-def test_sqlite_source_stamps_text_when_binding_warehouse_numeric() -> None:
-    maps = leftover_column_mappings(
-        source_format="sqlite",
-        dest_format="postgresql",
-        source_columns=SQLITE_COLS,
+def test_sqlite_source_keeps_text_carrier_on_typed_dests() -> None:
+    """sqlite TEXT digits are a carrier. Dest NUMERIC/DECIMAL is invent."""
+    for dest in ("postgresql", "mysql"):
+        maps = leftover_column_mappings(
+            source_format="sqlite",
+            dest_format=dest,
+            source_columns=SQLITE_COLS,
+        )
+        amount = next(m for m in maps if m.get("source") == "amount")
+        assert str(amount.get("source_type") or "").upper() == "TEXT", dest
+        assert str(amount.get("target_type") or "").upper() == "TEXT", dest
+        assert leftover_text_carrier_invents_numeric(maps) is False, dest
+        ident = next(m for m in maps if m.get("source") == "id")
+        assert str(ident.get("source_type") or "").upper() == "INTEGER", dest
+
+
+def test_text_carrier_invent_predicate_flags_numeric_stamp() -> None:
+    from services.unique_engine_leftovers import leftover_text_carrier_invents_numeric
+
+    honest = leftover_column_mappings(
+        source_format="sqlite", dest_format="postgresql", source_columns=SQLITE_COLS
     )
-    amount = next(m for m in maps if m.get("source") == "amount")
-    assert str(amount.get("source_type") or "").upper() == "TEXT"
-    assert "TEXT" not in str(amount.get("target_type") or "").upper()
+    assert leftover_text_carrier_invents_numeric(honest) is False
+    invented = [
+        {
+            "source": "amount",
+            "target": "amount",
+            "confidence": 0.99,
+            "source_type": "TEXT",
+            "target_type": "DECIMAL(18,2)",
+        }
+    ]
+    assert leftover_text_carrier_invents_numeric(invented) is True
 
 
 @pytest.mark.fake_mongo
@@ -80,3 +108,5 @@ def test_leftover_cartesian_cells_are_g13_complete() -> None:
             assert leftover_g13_accounted(maps, cols), f"{src}->{dst}"
             if dst == "sqlite":
                 assert leftover_sqlite_dest_invents_decimal(maps, dst) is False
+            if src == "sqlite":
+                assert leftover_text_carrier_invents_numeric(maps) is False, f"{src}->{dst}"

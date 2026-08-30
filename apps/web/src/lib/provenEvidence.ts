@@ -134,7 +134,7 @@ export const BACKEND_SUITE = {
  * are a larger number and are never presented as live capability.
  * Regenerate by: `python -c "from src.transfer.connector_capabilities import transfer_live_driver_types; print(len(transfer_live_driver_types()))"`
  */
-export const TRANSFER_READY_DRIVERS = 43;
+export const TRANSFER_READY_DRIVERS = 44;
 
 /**
  * Catalog slots the desktop lab can bind and exercise as source + dest.
@@ -171,12 +171,13 @@ export const NOT_PROVEN: UnprovenRow[] = [
     area: "Salesforce, Stripe, Shopify, HubSpot",
     status: "planned",
     reason:
-      "Application connectors are implemented and unit-tested. Live certification uses the customer integration user during a guided rollout.",
+      "Salesforce and HubSpot are certified reverse-ETL. Stripe is a named incremental created-cursor SKU (sqlite dest COUNT, not a Stripe tenant). Shopify stays Planned until PRODUCTION_SKU. Connecting a catalog tile is not a live transfer.",
   },
   {
     area: "Exactly-once change delivery",
     status: "planned",
-    reason: "CDC is at-least-once idempotent upsert. Exactly-once is not claimed for any route.",
+    reason:
+      "CDC default is at-least-once upsert. One named dest-owned route (MySQL CDC → Postgres) has a crash-replay artifact when Postgres is reachable; PLATFORM_EXACTLY_ONCE_CLAIMED stays False.",
   },
   {
     area: "Scheduled backfill / catch-up",
@@ -255,7 +256,7 @@ export const MARKETING_STACK: ReadonlyArray<{
     items: "Salesforce, Stripe, Shopify, HubSpot",
     badge: "Mixed",
     note:
-      "Salesforce and HubSpot are certified reverse-ETL. Stripe and Shopify stay Planned until PRODUCTION_SKU. Connecting a catalog tile is not a live transfer.",
+      "Salesforce and HubSpot are certified reverse-ETL. Stripe is a named incremental-cursor SKU (created watermark, dest COUNT). Shopify stays Planned until PRODUCTION_SKU. Connecting a catalog tile is not a live transfer.",
   },
 ];
 
