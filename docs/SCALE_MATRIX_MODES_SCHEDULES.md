@@ -11,9 +11,9 @@ path in the harness.
 
 ```bash
 cd apps/api
-DATAFLOW_SCALE_MODES=1 python -m tests.scale.run_matrix            # everything
-DATAFLOW_SCALE_MODES=1 python -m tests.scale.run_matrix cdc        # one suite
-DATAFLOW_SCALE_MODES=1 python -m tests.scale.run_matrix crash batch scheduler
+DATAFLOW_SCALE_MODES=1 python -m tests.scale.run_modes_matrix            # everything
+DATAFLOW_SCALE_MODES=1 python -m tests.scale.run_modes_matrix cdc        # one suite
+DATAFLOW_SCALE_MODES=1 python -m tests.scale.run_modes_matrix crash batch scheduler
 ```
 
 Without `DATAFLOW_SCALE_MODES=1` the entry point prints a skip line and exits 0,

@@ -194,6 +194,12 @@ def read_via_registry(
         "offset": offset,
         "limit": limit,
     }
+    # TLS trust/pin, Oracle service_name/sid, MSSQL driver & failover: these
+    # decide which server answers and whether the handshake succeeds, so the
+    # reader has to dial the same connection the writer does.
+    from connectors.generic_sql import connection_options
+
+    kwargs.update(connection_options(cfg))
     if columns is not None:
         kwargs["columns"] = columns
     try:

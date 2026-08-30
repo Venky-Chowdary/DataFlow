@@ -25,7 +25,7 @@ from typing import Any, Sequence
 
 from tests.scale import live_engines as L
 from tests.scale import stores
-from tests.scale.matrix import Cell, Matrix, contract, fill, run_transfer
+from tests.scale.modes_matrix import Cell, Matrix, contract, fill, run_transfer
 
 COLS = ["id", "region", "amount", "note", "updated_at"]
 SHAPE = "id BIGINT PK, region TEXT, amount NUMERIC(12,2), note TEXT NULL, updated_at TIMESTAMP"

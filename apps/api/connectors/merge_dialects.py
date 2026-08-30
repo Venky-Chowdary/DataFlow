@@ -20,6 +20,41 @@ import sqlalchemy as sa
 
 
 
+def _stage_insert(
+    table_obj: sa.Table, stage_insert_sql: str, target_cols: list[str]
+) -> Any:
+    """Staging INSERT whose binds carry the *target* column types.
+
+    A bare :func:`sqlalchemy.text` insert binds every parameter as "whatever the
+    driver guesses". pyodbc guesses wall-clock ``datetime2`` for a tz-aware
+    value, so a SQL Server MERGE staged ``2021-03-14 01:59:29+05:30`` and the
+    destination kept ``01:59:29`` with no offset — an instant silently moved by
+    the upsert path while the plain INSERT path (typed by SQLAlchemy) was
+    correct. Stages are column-shape clones of the target, so the target's own
+    types are the right binds.
+    """
+    binds = [
+        sa.bindparam(col, type_=table_obj.c[col].type)
+        for col in target_cols
+        if col in table_obj.c
+    ]
+    stmt = sa.text(stage_insert_sql)
+    return stmt.bindparams(*binds) if binds else stmt
+
+
+def _stage_rows(
+    conn: Any,
+    table_obj: sa.Table,
+    stage_insert_sql: str,
+    rows: list[dict[str, Any]],
+    target_cols: list[str],
+) -> None:
+    """Load ``rows`` into a staging table with type-carrying binds."""
+    insert_sql = _stage_insert(table_obj, stage_insert_sql, target_cols)
+    for row in rows:
+        conn.execute(insert_sql, {c: row.get(c) for c in target_cols})
+
+
 def _duckdb_quote(ident: str) -> str:
     return '"' + str(ident).replace('"', '""') + '"'
 
@@ -62,11 +97,13 @@ def _duckdb_merge_upsert(
     )
     try:
         placeholders = ", ".join(f":{c}" for c in target_cols)
-        insert_sql = sa.text(
-            f"INSERT INTO {stage_q} ({col_sql}) VALUES ({placeholders})"  # nosec B608
+        _stage_rows(
+            conn,
+            table_obj,
+            f"INSERT INTO {stage_q} ({col_sql}) VALUES ({placeholders})",  # nosec B608
+            rows,
+            target_cols,
         )
-        for row in rows:
-            conn.execute(insert_sql, {c: row.get(c) for c in target_cols})
 
         on_sql = null_safe_merge_on(
             conflict_cols,
@@ -153,11 +190,13 @@ def _db2_merge_upsert(
 
     try:
         placeholders = ", ".join(f":{c}" for c in target_cols)
-        insert_sql = sa.text(
-            f"INSERT INTO {stage} ({col_sql}) VALUES ({placeholders})"  # nosec B608
+        _stage_rows(
+            conn,
+            table_obj,
+            f"INSERT INTO {stage} ({col_sql}) VALUES ({placeholders})",  # nosec B608
+            rows,
+            target_cols,
         )
-        for row in rows:
-            conn.execute(insert_sql, {c: row.get(c) for c in target_cols})
 
         on_sql = null_safe_merge_on(
             conflict_cols,
@@ -249,11 +288,13 @@ def _teradata_merge_upsert(
     )
     try:
         placeholders = ", ".join(f":{c}" for c in target_cols)
-        insert_sql = sa.text(
-            f"INSERT INTO {stage} ({col_sql}) VALUES ({placeholders})"  # nosec B608
+        _stage_rows(
+            conn,
+            table_obj,
+            f"INSERT INTO {stage} ({col_sql}) VALUES ({placeholders})",  # nosec B608
+            rows,
+            target_cols,
         )
-        for row in rows:
-            conn.execute(insert_sql, {c: row.get(c) for c in target_cols})
 
         on_sql = _teradata_merge_on(conflict_cols)
         insert_cols = ", ".join(_teradata_quote(c) for c in target_cols)
@@ -415,11 +456,13 @@ def _hana_merge_upsert(
     )
     try:
         placeholders = ", ".join(f":{c}" for c in target_cols)
-        insert_sql = sa.text(
-            f"INSERT INTO {stage} ({col_sql}) VALUES ({placeholders})"  # nosec B608
+        _stage_rows(
+            conn,
+            table_obj,
+            f"INSERT INTO {stage} ({col_sql}) VALUES ({placeholders})",  # nosec B608
+            rows,
+            target_cols,
         )
-        for row in rows:
-            conn.execute(insert_sql, {c: row.get(c) for c in target_cols})
 
         on_sql = null_safe_merge_on(
             conflict_cols,
@@ -497,11 +540,13 @@ def _vertica_merge_upsert(
     )
     try:
         placeholders = ", ".join(f":{c}" for c in target_cols)
-        insert_sql = sa.text(
-            f"INSERT INTO {stage} ({col_sql}) VALUES ({placeholders})"  # nosec B608
+        _stage_rows(
+            conn,
+            table_obj,
+            f"INSERT INTO {stage} ({col_sql}) VALUES ({placeholders})",  # nosec B608
+            rows,
+            target_cols,
         )
-        for row in rows:
-            conn.execute(insert_sql, {c: row.get(c) for c in target_cols})
 
         on_sql = null_safe_merge_on(
             conflict_cols,
@@ -579,11 +624,13 @@ def _netezza_merge_upsert(
     )
     try:
         placeholders = ", ".join(f":{c}" for c in target_cols)
-        insert_sql = sa.text(
-            f"INSERT INTO {stage} ({col_sql}) VALUES ({placeholders})"  # nosec B608
+        _stage_rows(
+            conn,
+            table_obj,
+            f"INSERT INTO {stage} ({col_sql}) VALUES ({placeholders})",  # nosec B608
+            rows,
+            target_cols,
         )
-        for row in rows:
-            conn.execute(insert_sql, {c: row.get(c) for c in target_cols})
 
         on_sql = null_safe_merge_on(
             conflict_cols,
@@ -662,11 +709,13 @@ def _informix_merge_upsert(
     )
     try:
         placeholders = ", ".join(f":{c}" for c in target_cols)
-        insert_sql = sa.text(
-            f"INSERT INTO {stage} ({col_sql}) VALUES ({placeholders})"  # nosec B608
+        _stage_rows(
+            conn,
+            table_obj,
+            f"INSERT INTO {stage} ({col_sql}) VALUES ({placeholders})",  # nosec B608
+            rows,
+            target_cols,
         )
-        for row in rows:
-            conn.execute(insert_sql, {c: row.get(c) for c in target_cols})
 
         on_sql = null_safe_merge_on(
             conflict_cols,
@@ -743,11 +792,13 @@ def _sybase_merge_upsert(
     )
     try:
         placeholders = ", ".join(f":{c}" for c in target_cols)
-        insert_sql = sa.text(
-            f"INSERT INTO {stage} ({col_sql}) VALUES ({placeholders})"  # nosec B608
+        _stage_rows(
+            conn,
+            table_obj,
+            f"INSERT INTO {stage} ({col_sql}) VALUES ({placeholders})",  # nosec B608
+            rows,
+            target_cols,
         )
-        for row in rows:
-            conn.execute(insert_sql, {c: row.get(c) for c in target_cols})
 
         on_sql = null_safe_merge_on(
             conflict_cols,
@@ -1024,12 +1075,13 @@ def _mssql_merge_upsert(
     )
     try:
         placeholders = ", ".join(f":{c}" for c in target_cols)
-        insert_sql = sa.text(
-            f"INSERT INTO {stage} ({col_sql}) VALUES ({placeholders})"  # nosec B608
+        _stage_rows(
+            conn,
+            table_obj,
+            f"INSERT INTO {stage} ({col_sql}) VALUES ({placeholders})",  # nosec B608
+            rows,
+            target_cols,
         )
-        for row in rows:
-            params = {c: row.get(c) for c in target_cols}
-            conn.execute(insert_sql, params)
 
         on_sql = null_safe_merge_on(
             conflict_cols,
@@ -1137,11 +1189,13 @@ def _oracle_merge_upsert(
             created = "gtt"
 
         placeholders = ", ".join(f":{c}" for c in target_cols)
-        insert_sql = sa.text(
-            f"INSERT INTO {stage_ref} ({col_sql}) VALUES ({placeholders})"  # nosec B608
+        _stage_rows(
+            conn,
+            table_obj,
+            f"INSERT INTO {stage_ref} ({col_sql}) VALUES ({placeholders})",  # nosec B608
+            rows,
+            target_cols,
         )
-        for row in rows:
-            conn.execute(insert_sql, {c: row.get(c) for c in target_cols})
 
         on_sql = null_safe_merge_on(
             conflict_cols,

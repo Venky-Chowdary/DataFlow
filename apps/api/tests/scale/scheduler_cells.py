@@ -27,7 +27,7 @@ from zoneinfo import ZoneInfo
 
 from tests.scale import live_engines as L
 from tests.scale import stores
-from tests.scale.matrix import Cell, Matrix
+from tests.scale.modes_matrix import Cell, Matrix
 
 COLS = ["id", "region", "amount", "note", "updated_at"]
 SHAPE = "id BIGINT PK, region TEXT, amount NUMERIC(12,2), note TEXT NULL, updated_at TIMESTAMP"

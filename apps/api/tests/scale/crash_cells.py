@@ -37,7 +37,7 @@ from typing import Any
 
 from tests.scale import live_engines as L
 from tests.scale.cdc_cells import SHAPE, CdcRoute, cdc_summary
-from tests.scale.matrix import Cell, Matrix, fill
+from tests.scale.modes_matrix import Cell, Matrix, fill
 
 API_DIR = Path(__file__).resolve().parents[2]
 

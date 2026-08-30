@@ -21,7 +21,7 @@ import re
 from typing import Any, Sequence
 
 from tests.scale import live_engines as L
-from tests.scale.matrix import Cell, Matrix, contract, fill, run_transfer
+from tests.scale.modes_matrix import Cell, Matrix, contract, fill, run_transfer
 
 COLS: list[str] = ["id", "region", "amount", "note", "updated_at"]
 SHAPE = "id BIGINT PK, region TEXT, amount NUMERIC(12,2), note TEXT NULL, updated_at TIMESTAMP"

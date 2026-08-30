@@ -1,68 +1,145 @@
-"""One command to re-run the Track D matrix.
+"""One command to re-run the SQL scale matrix and write the evidence.
 
-    cd apps/api
-    DATAFLOW_SCALE_MODES=1 python -m tests.scale.run_matrix            # everything
-    DATAFLOW_SCALE_MODES=1 python -m tests.scale.run_matrix cdc crash  # selected suites
+    cd apps/api && DATAFLOW_SCALE_MATRIX=1 PYTHONPATH=. python -m tests.scale.run_matrix
 
-Env gate: without ``DATAFLOW_SCALE_MODES=1`` nothing runs and the process exits
-0 with a printed skip, so CI without engines cannot report a green it never
-measured. ``DATAFLOW_SCALE_ROWS`` lowers the row count for local iteration —
-every published number names the count it was measured at.
+Options: ``--rows`` (default 100000), ``--engines pg,mysql,...``, ``--out``
+(JSON evidence), ``--markdown`` (result table for ``docs/SCALE_MATRIX_SQL.md``).
+Engines that do not answer are reported as ``skip`` with the exact reason —
+never as a pass, and never omitted.
 """
 
 from __future__ import annotations
 
+import argparse
+import json
+import os
 import sys
+import time
+from pathlib import Path
+from typing import Any, Sequence
 
-from tests.scale import live_engines as L
-from tests.scale.matrix import ARTIFACT_DIR, Matrix
-
-SUITES = ("cdc", "crash", "batch", "scheduler")
-
-
-def run(suites: tuple[str, ...] = SUITES, rows: int = L.SCALE_ROWS) -> Matrix:
-    matrix = Matrix()
-    if "cdc" in suites:
-        from tests.scale import cdc_cells
-
-        cdc_cells.postgres_cdc(matrix, rows)
-        cdc_cells.mysql_cdc(matrix, rows)
-        cdc_cells.mongo_cdc(matrix, rows)
-    if "crash" in suites:
-        from tests.scale import crash_cells
-
-        crash_cells.crash_cells(matrix, rows)
-    if "batch" in suites:
-        from tests.scale import batch_cells
-
-        batch_cells.batch_mode_cells(matrix, rows)
-    if "scheduler" in suites:
-        from tests.scale import scheduler_cells
-
-        scheduler_cells.scheduler_cells(matrix, rows)
-    return matrix
+from tests.scale.fixture import ENGINES
+from tests.scale.matrix import (
+    BLOCKING_SHAPES,
+    DATA_SHAPES,
+    MODES,
+    ROWS_DEFAULT,
+    SLOW_ROWS_PER_SEC,
+    Cell,
+    run_matrix,
+)
 
 
-def main(argv: list[str]) -> int:
-    if not L.enabled():
-        print("skip: set DATAFLOW_SCALE_MODES=1 to run the live scale matrix")
-        return 0
-    suites = tuple(a for a in argv if a in SUITES) or SUITES
-    print(f"scale matrix: suites={suites} rows={L.SCALE_ROWS}", flush=True)
-    matrix = run(suites)
-    print("\n" + matrix.markdown())
-    counts = matrix.counts()
-    # A partial run gets its own artifact: a single-suite re-run must not
-    # overwrite the full-matrix evidence with a subset of the cells.
-    name = (
-        "scale_matrix_modes_schedules.json"
-        if suites == SUITES
-        else f"scale_matrix_{'_'.join(suites)}.json"
+def markdown_table(report: dict[str, Any]) -> str:
+    head = (
+        "| source | destination | mode | shape | status | src rows | dest rows | "
+        "expected | checksum | rejected | quarantined | coerced NULL | rows/sec | "
+        "elapsed s | run id |\n"
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | "
+        "--- | --- | --- |\n"
     )
-    path = matrix.write_json(ARTIFACT_DIR / name)
-    print(f"\ncounts={counts}\nartifact={path}")
-    return 1 if counts["fail"] else 0
+    lines = []
+    for cell in report["cells"]:
+        chk = cell["checksum_match"]
+        chk_text = "n/a" if chk is None else ("match" if chk else "MISMATCH")
+        lines.append(
+            "| {source} | {destination} | {mode} | {shape} | {status} | {source_rows} "
+            "| {dest_rows} | {expected_rows} | {chk} | {rejected} | {quarantined} | "
+            "{coerced_null} | {rps} | {elapsed} | `{run}` |".format(
+                chk=chk_text,
+                rps=f"{cell['rows_per_sec']:,.0f}" if cell["rows_per_sec"] else "-",
+                elapsed=cell["elapsed_seconds"],
+                run=(cell["run_ids"] or ["-"])[0],
+                **{
+                    k: cell[k]
+                    for k in (
+                        "source",
+                        "destination",
+                        "mode",
+                        "shape",
+                        "status",
+                        "source_rows",
+                        "dest_rows",
+                        "expected_rows",
+                        "rejected",
+                        "quarantined",
+                        "coerced_null",
+                    )
+                },
+            )
+        )
+    return head + "\n".join(lines) + "\n"
 
 
-if __name__ == "__main__":
-    raise SystemExit(main(sys.argv[1:]))
+def _progress(cell: Cell) -> None:
+    print(
+        f"[{time.strftime('%H:%M:%S')}] {cell.source}->{cell.destination} "
+        f"{cell.mode}/{cell.shape}: {cell.status.upper()} "
+        f"dest={cell.dest_rows}/{cell.expected_rows} "
+        f"{cell.rows_per_sec:,.0f} rows/s"
+        + (f" — {cell.reason}" if cell.status != "pass" else ""),
+        flush=True,
+    )
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--rows", type=int, default=ROWS_DEFAULT)
+    parser.add_argument("--engines", default=",".join(ENGINES))
+    parser.add_argument("--modes", default=",".join(MODES))
+    parser.add_argument(
+        "--blocking-shapes", default=",".join(BLOCKING_SHAPES)
+    )
+    parser.add_argument("--data-shapes", default=",".join(DATA_SHAPES))
+    # Modes to repeat the dest-exists / blocking shapes under. Kept narrow by
+    # default because every extra mode is another full population at --rows.
+    parser.add_argument("--shape-modes", default="full_refresh_overwrite")
+    parser.add_argument("--blocking-modes", default="full_refresh_overwrite")
+    parser.add_argument("--prefix", default="scale")
+    parser.add_argument("--out", default="")
+    parser.add_argument("--markdown", default="")
+    args = parser.parse_args(argv)
+
+    if os.environ.get("DATAFLOW_SCALE_MATRIX") != "1":
+        print("DATAFLOW_SCALE_MATRIX=1 is required (live engines are mutated).")
+        return 2
+
+    blocking = [s for s in args.blocking_shapes.split(",") if s]
+    data_shapes = [s for s in args.data_shapes.split(",") if s]
+    for name, given, known in (
+        ("--blocking-shapes", blocking, BLOCKING_SHAPES),
+        ("--data-shapes", data_shapes, DATA_SHAPES),
+    ):
+        unknown = [s for s in given if s not in known]
+        if unknown:
+            print(f"{name}: unknown {unknown} (known: {list(known)})")
+            return 2
+
+    report = run_matrix(
+        rows=args.rows,
+        engines=[e for e in args.engines.split(",") if e],
+        modes=[m for m in args.modes.split(",") if m],
+        shapes=blocking,
+        data_shapes=data_shapes,
+        shape_modes=[m for m in args.shape_modes.split(",") if m],
+        blocking_modes=[m for m in args.blocking_modes.split(",") if m],
+        prefix=args.prefix,
+        progress=_progress,
+    )
+    print(
+        f"\npass={report['pass']} fail={report['fail']} skip={report['skip']} "
+        f"slow(<{SLOW_ROWS_PER_SEC} rows/s)={len(report['slow_routes'])}"
+    )
+    for name, reason in report["skipped_engines"].items():
+        print(f"skip {name}: {reason}")
+    if args.out:
+        Path(args.out).write_text(json.dumps(report, indent=2, default=str))
+        print(f"evidence: {args.out}")
+    if args.markdown:
+        Path(args.markdown).write_text(markdown_table(report))
+        print(f"table: {args.markdown}")
+    return 1 if report["fail"] else 0
+
+
+if __name__ == "__main__":  # pragma: no cover
+    sys.exit(main())

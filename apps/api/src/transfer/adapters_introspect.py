@@ -185,6 +185,7 @@ def _introspect_table_schema_rich(
         except Exception as exc:
             logger.debug("table schema introspection failed: %s", exc, exc_info=exc)
 
+    from connectors.generic_sql import connection_options
     from services.dialect_profiles import schema_from_cfg
     from services.schema_introspect import introspect_schema
 
@@ -224,6 +225,8 @@ def _introspect_table_schema_rich(
         auth_role=str(cfg.get("auth_role") or ""),
         private_key=str(cfg.get("private_key") or ""),
         strict_namespace=strict_namespace,
+        # TLS / service-name / driver keywords the writer will use.
+        **connection_options(cfg),
     )
     if info.get("ok") and info.get("columns"):
         types, nulls, defaults, ident, gen, coll = _columns_schema_meta(
@@ -275,6 +278,7 @@ def _introspect_table_schema_rich(
             auth_source=cfg.get("auth_source", ""),
             api_key=cfg.get("api_key", ""),
             strict_namespace=strict_namespace,
+            **connection_options(cfg),
         )
         if info_retry.get("ok") and info_retry.get("columns"):
             types, nulls, defaults, ident, gen, coll = _columns_schema_meta(

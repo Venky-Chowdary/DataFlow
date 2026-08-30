@@ -176,6 +176,21 @@ def stores_originating_offset(engine: str, type_name: str) -> bool:
     if eng in _INSTANT_ONLY_ENGINES:
         return False
 
+    # Callers hand over the *mapping* stamp, which may be a logical token
+    # (``TIMESTAMPTZ``) rather than the engine spelling of the column that was
+    # created (``DATETIMEOFFSET``). Resolving it through the canonical type map
+    # keeps one answer per engine: without this, a SQL Server DATETIMEOFFSET
+    # column stamped ``TIMESTAMPTZ`` looked instant-only and every write was
+    # UTC-normalized, dropping the originating offset the column can hold.
+    if eng:
+        from services.type_system import ddl_type
+
+        physical = re.sub(
+            r"\s*\(\s*\d+\s*\)", "", re.sub(r"\s+", " ", (ddl_type(eng, raw) or "").upper())
+        ).strip()
+        if physical:
+            collapsed = physical
+
     if eng in _SQLSERVER_FAMILY:
         return "DATETIMEOFFSET" in collapsed
 
