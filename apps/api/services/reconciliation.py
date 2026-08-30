@@ -4138,6 +4138,11 @@ def _decimal_from_ieee_float(value: float) -> Decimal | None:
     Double has ~15–17 significant digits; formatting with 15 significant figures
     matches Airbyte/Fivetran-class compare and avoids Gate-8 false fails when
     DECIMAL sinks store the human value.
+
+    Residue lives in the *fraction*. An integer-valued double carries no such
+    tail, so 15 significant figures there would rewrite the number itself:
+    ``9007199254740994`` (2^53 + 2, exactly representable) would fingerprint as
+    ``9007199254740990`` and report a faithful big-integer transfer as corrupt.
     """
     import math
 
@@ -4145,6 +4150,8 @@ def _decimal_from_ieee_float(value: float) -> Decimal | None:
         return None
     if math.isinf(value):
         return Decimal("Infinity") if value > 0 else Decimal("-Infinity")
+    if value.is_integer():
+        return Decimal(int(value))
     return Decimal(format(value, ".15g"))
 
 
@@ -4208,9 +4215,16 @@ def _canonicalize_number(value: Any) -> str | None:
             if d.is_finite():
                 digits = d.as_tuple().digits
                 exp = d.as_tuple().exponent
+                # Only a fractional tail can be binary residue. A large integer
+                # (Dynamo ``N``, Mongo ``long``, BIGINT beyond 2^53) has real
+                # low-order digits, and collapsing them is data loss inside the
+                # ruler that is supposed to detect data loss.
+                has_fraction = isinstance(exp, int) and exp < 0
                 if (
-                    len(digits) > 15 or (isinstance(exp, int) and exp < -12)
-                ) and _is_exact_double(d):
+                    has_fraction
+                    and (len(digits) > 15 or exp < -12)
+                    and _is_exact_double(d)
+                ):
                     try:
                         d = _decimal_from_ieee_float(float(d)) or d
                     except (OverflowError, ValueError):

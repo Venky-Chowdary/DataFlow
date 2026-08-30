@@ -105,6 +105,11 @@ class Checkpoint:
     #: The declared source filter's share of ``rows_removed_on_read``. Proof
     #: names the two removals apart, so resume has to restore the split too.
     rows_source_filtered: int = 0
+    #: Rows the incremental cursor bound excluded after the read, for a source
+    #: that cannot push the bound down. They are outside this run's read scope,
+    #: so resume must restore them or the population double-counts the pages a
+    #: previous pass already bounded.
+    rows_cursor_bounded: int = 0
 
     def add_rejected_details(self, details: list[dict[str, Any]] | None) -> None:
         """Append rejection evidence, keeping the checkpoint document bounded.
@@ -165,6 +170,7 @@ class Checkpoint:
             "coerced_null_rows": self.coerced_null_rows,
             "rows_removed_on_read": self.rows_removed_on_read,
             "rows_source_filtered": self.rows_source_filtered,
+            "rows_cursor_bounded": self.rows_cursor_bounded,
             "rejected_details": self.rejected_details,
             "rejected_details_truncated": self.rejected_details_truncated,
             "target_rows_before": self.target_rows_before,

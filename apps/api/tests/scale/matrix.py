@@ -27,7 +27,7 @@ from typing import Any, Mapping, Sequence
 
 from src.transfer.models import EndpointConfig, TransferResult
 
-from tests.scale.engines import Engine, build_engines, live_engines
+from tests.scale.sql_engines import Engine, build_engines, live_engines
 from tests.scale.fixture import (
     domain_contract_columns,
     engine_columns,

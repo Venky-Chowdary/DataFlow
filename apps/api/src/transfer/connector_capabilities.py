@@ -442,6 +442,27 @@ def resolve_driver_type(catalog_id: str) -> str:
     return base
 
 
+def resolve_bind_dialect(catalog_id: str, *, config_type: str = "") -> str:
+    """Concrete SQL dialect the write path binds against.
+
+    ``resolve_driver_type`` collapses every SQLAlchemy engine onto the
+    ``generic_sql`` driver family. That token names a driver, not a dialect, so
+    carrier rules resolved from it (bare ``TIMESTAMP`` fractional precision,
+    integer storage bounds) fall back to the fail-closed unknown-engine defaults
+    while the writer — which reads the endpoint ``type`` and knows the target is
+    DuckDB or ClickHouse — resolves them per dialect. Gate-8 then hashes one
+    cell two ways: a DuckDB microsecond ``TIMESTAMP`` fingerprints as
+    ``01:59:27.535`` on the destination read-back and as the whole-second
+    ``01:59:28`` on the source re-read, failing the checksum on a byte-perfect
+    transfer. Both sides must name the same dialect.
+    """
+    driver = resolve_driver_type(catalog_id)
+    if driver != "generic_sql":
+        return driver
+    concrete = (config_type or "").strip().lower() or (catalog_id or "").strip().lower()
+    return concrete or driver
+
+
 @lru_cache(maxsize=1)
 def _saas_catalog_ids() -> FrozenSet[str]:
     """Catalog IDs that are SaaS/API connectors and can use the generic REST driver."""
