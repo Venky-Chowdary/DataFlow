@@ -1789,6 +1789,15 @@ def _run_cdc_shared_multi_table(
         last_summary["eos_bundle"] = True
     else:
         last_summary["cdc_delivery"] = "at-least-once"
+    from services.cdc_named_eos import stamp_named_eos_on_summary
+
+    last_summary = stamp_named_eos_on_summary(
+        last_summary,
+        source_type=src_type,
+        dest_type=dest_type,
+        sync_mode=sync_mode or "cdc",
+        eos_operator_requested=eos_active,
+    )
     last_summary["cdc_shared_reader"] = True
     last_summary["snapshot_mode"] = snapshot_mode.value
     stamp = snapshot_plan_stamp(snapshot_plan)
@@ -2697,6 +2706,15 @@ def _run_cdc_single_stream(
     else:
         summary["cdc_delivery"] = lag_fields.get("cdc_delivery") or "at-least-once"
         summary.setdefault("delivery_semantics", DELIVERY_SEMANTICS_ALO)
+    from services.cdc_named_eos import stamp_named_eos_on_summary
+
+    summary = stamp_named_eos_on_summary(
+        summary,
+        source_type=src_type,
+        dest_type=dest_type,
+        sync_mode=sync_mode or "cdc",
+        eos_operator_requested=eos_active,
+    )
     summary["cdc_row_filter"] = lag_fields.get("cdc_row_filter")
     summary["cdc_lease_holder"] = lag_fields.get("cdc_lease_holder")
     summary["cdc_lease_resource"] = lag_fields.get("cdc_lease_resource")

@@ -140,6 +140,23 @@ def test_platform_exactly_once_stays_false_on_named_route() -> None:
     assert blob["exactly_once_active"] is True
     assert blob["eligible"] is True
     assert blob["lsn_family"] == NAMED_EOS_LSN_FAMILY
+    template = crash_replay_artifact_template()
+    assert template["exactly_once_active"] is False
+    assert template["measured"] is False
+    assert template["platform_exactly_once_claimed"] is False
+    from services.cdc_named_eos import stamp_named_eos_on_summary
+
+    stamped = stamp_named_eos_on_summary(
+        {},
+        source_type="mysql",
+        dest_type="postgresql",
+        sync_mode="cdc",
+        eos_operator_requested=False,
+    )
+    assert stamped["named_eos_route"] is True
+    assert stamped["named_eos_route_id"] == NAMED_EOS_ROUTE_ID
+    assert stamped["exactly_once_active"] is False
+    assert stamped["platform_exactly_once_claimed"] is False
     assert is_named_dest_owned_eos_route(
         source_type="mysql", dest_type="postgresql", sync_mode="cdc"
     )
@@ -241,10 +258,12 @@ def test_named_mysql_cdc_postgres_crash_replay_dest_count() -> None:
         )
 
         artifact["measured"] = True
+        artifact["exactly_once_active"] = True
         artifact["dest_count"] = _count(table)
         artifact["platform_exactly_once_claimed"] = PLATFORM_EXACTLY_ONCE_CLAIMED
         assert artifact["platform_exactly_once_claimed"] is False
         assert artifact["dest_count"] == 2
+        assert artifact["exactly_once_active"] is True
     finally:
         try:
             _drop(table)

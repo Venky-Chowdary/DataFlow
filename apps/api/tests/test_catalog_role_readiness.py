@@ -169,6 +169,10 @@ def test_transfer_capabilities_splits_the_two_sides():
     # A duplex engine belongs on both sides.
     assert "postgresql" in sources and "postgresql" in destinations
 
+    # Stripe earned a source SKU, not reverse-ETL dest SKU.
+    assert "stripe" in sources
+    assert "stripe" not in destinations
+
 
 def test_planned_tiles_are_ready_for_neither_side():
     """A roadmap entry must not be offered on either side of a transfer."""

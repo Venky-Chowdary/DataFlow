@@ -98,7 +98,7 @@ def crash_replay_artifact_template() -> dict[str, Any]:
         "protocol": PROTOCOL,
         "lsn_family": NAMED_EOS_LSN_FAMILY,
         "platform_exactly_once_claimed": PLATFORM_EXACTLY_ONCE_CLAIMED,
-        "exactly_once_active": True,
+        "exactly_once_active": False,
         "honesty": (
             "Named dest-owned route only. PLATFORM_EXACTLY_ONCE_CLAIMED stays "
             "False. Dest COUNT is the destination's COUNT(*), not a writer ack."
@@ -107,3 +107,37 @@ def crash_replay_artifact_template() -> dict[str, Any]:
         "measured": False,
         "skip_reason": "",
     }
+
+
+def stamp_named_eos_on_summary(
+    summary: dict[str, Any] | None,
+    *,
+    source_type: str,
+    dest_type: str,
+    sync_mode: str = NAMED_EOS_SYNC,
+    eos_operator_requested: bool = False,
+) -> dict[str, Any]:
+    """Stamp named-route identity onto a CDC dest summary.
+
+    Does not flip ``PLATFORM_EXACTLY_ONCE_CLAIMED``. Does not invent
+    ``exactly_once_active`` for unnamed routes. Operator-requested EOS on
+    this named pair is dest-owned apply; otherwise the default stays
+    at-least-once upsert.
+    """
+    out = dict(summary or {})
+    blob = named_eos_eligibility(
+        source_type=source_type,
+        dest_type=dest_type,
+        sync_mode=sync_mode,
+    )
+    out["named_eos_route_id"] = blob.get("route_id") or ""
+    out["named_eos_route"] = bool(blob.get("named_route"))
+    out["platform_exactly_once_claimed"] = PLATFORM_EXACTLY_ONCE_CLAIMED
+    if blob.get("named_route"):
+        out["named_eos_lsn_family"] = blob.get("lsn_family") or ""
+        out["named_eos_eligible"] = bool(blob.get("eligible"))
+        if eos_operator_requested and blob.get("eligible"):
+            out.setdefault("exactly_once_active", True)
+        else:
+            out.setdefault("exactly_once_active", False)
+    return out

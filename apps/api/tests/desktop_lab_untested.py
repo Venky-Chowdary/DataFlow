@@ -1678,6 +1678,30 @@ def _run_saas_stub() -> list[dict[str, Any]]:
             )
             name = f"reverse_etl_stub postgresql->{fmt}"
             try:
+                if fmt == "stripe":
+                    # Writer exists; dest SKU does not. Honesty is refuse.
+                    first = _xfer_bounded(
+                        src, dest, sync_mode="reverse_etl", mappings=mappings,
+                        validation_mode="balanced", timeout_s=60.0,
+                    )
+                    err = str(first.error or "")
+                    refused = (not first.success) and (
+                        "destination" in err.lower()
+                        or "planned" in err.lower()
+                    )
+                    cells.append(_cell(
+                        "saas", name,
+                        "passed" if refused else "failed",
+                        dest_rows=0,
+                        local_stub_not_customer_org=True,
+                        dest_sku_uncertified=True,
+                        note=(
+                            "Stripe reverse-ETL dest is not PRODUCTION_SKU — "
+                            "refuse, not stub-green"
+                        ),
+                        error="" if refused else (err or "expected dest refuse")[:300],
+                    ))
+                    continue
                 first = _xfer_bounded(
                     src, dest, sync_mode="reverse_etl", mappings=mappings,
                     validation_mode="balanced", timeout_s=60.0,

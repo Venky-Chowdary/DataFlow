@@ -42,8 +42,14 @@ _DRIVER_CAPS: dict[str, dict[str, bool]] = {
     # Reverse-ETL destinations: full read+write (warehouse → CRM activation).
     "salesforce": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
     "hubspot": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True},
-    # Stripe: incremental ``created`` cursor SKU (named fixture dest COUNT).
-    "stripe": {"test": True, "read": True, "write": True, "introspect": False, "preflight": True},
+    # Stripe: incremental ``created`` cursor SKU as a *source* (named fixture
+    # dest COUNT). Reverse-ETL write exists in stripe_writer but is not a
+    # PRODUCTION_SKU dest — certified_dest stays False until execute + dest
+    # COUNT on a named Stripe object.
+    "stripe": {
+        "test": True, "read": True, "write": True, "introspect": False, "preflight": True,
+        "certified_dest": False,
+    },
     "shopify": {"test": True, "read": True, "write": True, "introspect": False, "preflight": True, "certified": False},
     "zendesk": {"test": True, "read": True, "write": True, "introspect": False, "preflight": True, "certified": False},
     "notion": {"test": True, "read": True, "write": True, "introspect": True, "preflight": True, "certified": False},
@@ -668,6 +674,8 @@ def capability_label(caps: dict[str, bool]) -> str:
             return "Destination only"
         if caps.get("file_source"):
             return "File transfer"
+        if caps.get("certified_dest") is False:
+            return "Source certified"
         return "Full transfer"
     if _source_only_ready(caps):
         return "Source only"
@@ -859,6 +867,10 @@ def dest_ready(caps: dict[str, bool]) -> bool:
     """True when connector can act as a transfer destination."""
     if caps.get("file_export"):
         return True
+    # Writer code is not dest SKU. Stripe reverse-ETL stays off the dest picker
+    # until PRODUCTION_SKU execute + dest COUNT on a named Stripe object.
+    if caps.get("certified_dest") is False:
+        return False
     # Destination-only and duplex writers must be certified.
     return bool(caps.get("write") and (caps.get("read") or caps.get("dest_only")) and transfer_ready(caps))
 

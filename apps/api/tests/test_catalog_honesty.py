@@ -54,7 +54,7 @@ def test_dedicated_saas_transfer_ready_drivers() -> None:
 
 
 def test_dedicated_saas_drivers_activation_and_source_only() -> None:
-    """HubSpot/Salesforce/Stripe are certified; Shopify/Airtable Planned."""
+    """HubSpot/Salesforce certified duplex; Stripe source-certified; Shopify Planned."""
     certified = ("hubspot", "salesforce", "stripe")
     planned = ("airtable", "shopify", "zendesk", "notion")
     for brand in certified:
@@ -64,6 +64,12 @@ def test_dedicated_saas_drivers_activation_and_source_only() -> None:
         assert row["transfer_ready"] is True, brand
         assert row["certification_tier"] == "certified", brand
         assert row["effective_status"] == "live", brand
+    stripe = enrich_catalog_entry(
+        {"id": "stripe", "name": "Stripe", "category": "saas", "status": "live", "description": ""}
+    )
+    assert stripe["source_ready"] is True
+    assert stripe["dest_ready"] is False
+    assert stripe["capability_label"] == "Source certified"
     for brand in planned:
         row = enrich_catalog_entry(
             {"id": brand, "name": brand.title(), "category": "saas", "status": "live", "description": ""}

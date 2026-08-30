@@ -686,6 +686,15 @@ def _guard_truncated_read(batch, db_type: str, name: str) -> None:
             f"are capped at {len(batch.rows):,}. Use database-to-database transfer (async) "
             "for large tables."
         )
+    meta = batch.meta if isinstance(getattr(batch, "meta", None), dict) else {}
+    # SaaS list APIs (Stripe) do not publish COUNT(*). ``truncated`` is the
+    # reader's proof that pagination still had pages after the execute cap.
+    if meta.get("truncated"):
+        raise ValueError(
+            f"Source {db_type}.{name} still has unread pages after a "
+            f"non-streaming read of {len(batch.rows):,} rows. Refusing silent "
+            "truncate. Use database-to-database transfer (async) for large objects."
+        )
 
 
 def _pack_source_read(
@@ -715,6 +724,8 @@ def read_source_database(
     limit: int = _NON_STREAMING_ROW_LIMIT,
     raise_on_truncate: bool = True,
     stamp_total: dict[str, Any] | None = None,
+    cursor_column: str = "",
+    cursor_after: Any = None,
 ) -> tuple[list[dict], list[str], dict[str, str]]:
     from .connector_capabilities import resolve_driver_type
 
@@ -1160,7 +1171,14 @@ def read_source_database(
         mod = __import__(f"connectors.{db_type}", fromlist=["read_object"])
         read_fn = getattr(mod, "read_object")
         sobject = endpoint.table or endpoint.database or endpoint.collection or ""
-        batch: ReadBatch = read_fn(cfg=cfg, object=sobject, limit=limit)
+        saas_kwargs: dict[str, Any] = {}
+        if cursor_column:
+            # Buffered execute is the Stripe/HubSpot/Salesforce path. Streaming
+            # already passes created[gte] / SOQL seek; this must too or the
+            # incremental SKU is only a client-side filter after a full re-read.
+            saas_kwargs["cursor_column"] = cursor_column
+            saas_kwargs["cursor_after"] = cursor_after
+        batch: ReadBatch = read_fn(cfg=cfg, object=sobject, limit=limit, **saas_kwargs)
         if raise_on_truncate:
             _guard_truncated_read(batch, db_type, sobject or db_type)
         records = [dict(zip(batch.headers, row)) for row in batch.rows]

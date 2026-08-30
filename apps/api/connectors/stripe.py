@@ -75,7 +75,11 @@ def stripe_row_after_watermark(
     created_gte: int | None,
     last_id: str = "",
 ) -> bool:
-    """True when the Stripe object is strictly after the incremental watermark."""
+    """True when the Stripe object is after the incremental watermark.
+
+    Same unix second is kept (at-least-once). Only the exact last id is
+    dropped when the composite bookmark carries it.
+    """
     if created_gte is None:
         return True
     if not isinstance(rec, dict):
@@ -91,8 +95,10 @@ def stripe_row_after_watermark(
     rid = str(rec.get("id") or "")
     if last_id and rid == last_id:
         return False
-    # Same unix second: keep peers, drop only the exact last id (at-least-once).
-    return True if last_id else False
+    # Same unix second: keep peers. A created-only watermark (empty last_id)
+    # must re-extract the boundary second — dropping it is silent loss.
+    # Drop only the exact last id when the composite bookmark carries it.
+    return True
 
 
 def test_stripe(
@@ -151,6 +157,7 @@ def read_object(
     items: list[dict[str, Any]] = []
     starting_after = ""
     skip_remaining = 0
+    last_has_more = False
     created_gte, last_id = stripe_created_watermark(cursor_column, cursor_after)
     if offset is not None and str(offset).strip() and created_gte is None:
         off = str(offset).strip()
@@ -172,6 +179,7 @@ def read_object(
         page = data.get("data")
         if not isinstance(page, list):
             raise ValueError("Stripe list response missing data array")
+        last_has_more = bool(data.get("has_more"))
         if created_gte is not None:
             page = [
                 rec
@@ -198,7 +206,7 @@ def read_object(
             page = page[skip_remaining:]
             skip_remaining = 0
         items.extend(page)
-        if not data.get("has_more"):
+        if not last_has_more:
             break
         raw_page = data.get("data") if isinstance(data.get("data"), list) else page
         if not raw_page:
@@ -219,6 +227,17 @@ def read_object(
         "stripe", items[:requested]
     )
     incremental = created_gte is not None
+    # Stripe does not publish COUNT(*). Stopping at ``requested`` while the
+    # list still reports ``has_more`` is a silent truncate — stamp it so the
+    # execute cap can refuse. Peek/sample callers pass raise_on_truncate=False.
+    truncated = bool(last_has_more and len(items) >= requested)
+    stripe_meta = {
+        "catalog_id": "stripe",
+        "incremental_cursor": "created" if incremental else "",
+        "created_gte": created_gte,
+        "truncated": truncated,
+        "has_more": last_has_more,
+    }
     if typed_keys and typed_rows:
         return ReadBatch(
             headers=typed_keys,
@@ -229,9 +248,7 @@ def read_object(
                 "native_types": typed_schema,
                 "schema": typed_schema,
                 "saas_typed": True,
-                "catalog_id": "stripe",
-                "incremental_cursor": "created" if incremental else "",
-                "created_gte": created_gte,
+                **stripe_meta,
             },
         )
 
@@ -239,8 +256,6 @@ def read_object(
     # Stripe list APIs do not publish authoritative totals — never claim the
     # fetched page length is the object cardinality (stream early-stop trap).
     batch.total_rows = None
-    if incremental:
-        batch.meta = dict(batch.meta or {})
-        batch.meta["incremental_cursor"] = "created"
-        batch.meta["created_gte"] = created_gte
+    batch.meta = dict(batch.meta or {})
+    batch.meta.update(stripe_meta)
     return batch
