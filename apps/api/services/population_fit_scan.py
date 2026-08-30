@@ -1703,6 +1703,74 @@ def applyable_widen_actions(report: FitScanReport) -> list[dict[str, Any]]:
     ]
 
 
+@dataclass(frozen=True)
+class CreateNewWiden:
+    """A create-new carrier resized from the population and re-proven on it."""
+
+    report: FitScanReport
+    applied: tuple[dict[str, str], ...]
+
+
+def create_new_population_widen(
+    report: FitScanReport,
+    mappings: list[dict[str, Any]] | None,
+    replay: Callable[[], Iterable[Mapping[str, Any]] | None],
+    *,
+    scan_kwargs: dict[str, Any] | None = None,
+) -> CreateNewWiden | None:
+    """Resize a create-new carrier the peek sized too narrow, then re-prove it.
+
+    A destination table that does not exist yet is ours to shape. Sizing it
+    from the peeked rows and then quarantining row 2,868 — or aborting a 1M
+    load with nothing committed — is our defect: the operator did not choose
+    ``NUMBER(11,8)``, the sample did. When the whole population was measured,
+    the widen is applied to the mapping the CREATE will use and re-scanned
+    against the same rows.
+
+    Fail-closed: no findings, no proven widen action, an unreplayable
+    population, non-exact evidence, or a re-scan that still finds an unfit
+    value all return ``None`` and leave the original verdict standing. The
+    mapping is only stamped once the wider carrier is proven over the same
+    population, so this can never turn a real overflow into a silent one.
+    """
+    from services.agentic_repair import apply_actions_to_mappings
+
+    if not report.findings or report.evidence != EVIDENCE_EXACT:
+        return None
+    rows_list = list(mappings or [])
+    if not rows_list:
+        return None
+    actions = applyable_widen_actions(report)
+    if not actions:
+        return None
+    rows = replay()
+    if rows is None:
+        return None
+    updated = apply_actions_to_mappings(rows_list, actions)
+    after = scan_population_fit(rows, updated, **(scan_kwargs or {}))
+    if after.findings or after.evidence != EVIDENCE_EXACT:
+        return None
+
+    by_source = {str(m.get("source") or ""): m for m in rows_list}
+    applied: list[dict[str, str]] = []
+    for new_map in updated:
+        src = str(new_map.get("source") or "")
+        original = by_source.get(src)
+        if original is None:
+            continue
+        was = str(original.get("target_type") or "")
+        now = str(new_map.get("target_type") or "")
+        if not now or now == was:
+            continue
+        for key in ("target_type", "dest_type", "destination_type", "destType"):
+            if key in original or key in ("target_type", "dest_type"):
+                original[key] = now
+        applied.append({"column": src, "from": was, "to": now})
+    if not applied:
+        return None
+    return CreateNewWiden(report=after, applied=tuple(applied))
+
+
 def apply_suggested_widens_and_rescan(
     rows: Iterable[Mapping[str, Any]] | None,
     mappings: list[dict[str, Any]],

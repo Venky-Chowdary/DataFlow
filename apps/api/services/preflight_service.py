@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import sys
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
@@ -1719,6 +1719,12 @@ def run_file_preflight(
             fit_report_payload["reused_from_validate"] = True
             fit_gate = build_population_fit_gate(fit_report)
         if not skip_population_fit:
+          # A caller-supplied population is a one-shot iterable; a stored upload
+          # or a table walk can be produced again. Only the replayable ones may
+          # re-prove a create-new widen, because an exhausted iterator would
+          # "prove" a clean scan over zero rows.
+          replay_source: Callable[[], Iterable[Mapping[str, Any]] | None] | None = None
+          widen = None
           if population_rows is None and str(source_file_id or "").strip():
             from services.file_parser import iter_stored_upload_rows
 
@@ -1726,6 +1732,9 @@ def run_file_preflight(
             if stored_rows is not None:
                 population_rows = stored_rows
                 rows_are_population = True
+
+                def replay_source() -> Iterable[Mapping[str, Any]] | None:
+                    return iter_stored_upload_rows(source_file_id)
           if population_rows is None:
             try:
                 table_rows = _iter_table_population_for_preflight(
@@ -1781,6 +1790,52 @@ def run_file_preflight(
                             walked = shaped
                     population_rows = walked
                     rows_are_population = True
+
+                    def replay_source() -> Iterable[Mapping[str, Any]] | None:
+                        again = _iter_table_population_for_preflight(
+                            source_kind=source_kind,
+                            source_format=source_format,
+                            source_connector_id=source_connector_id,
+                            source_config=source_config,
+                            source_table=source_table,
+                            mappings=mappings,
+                            column_types=column_types,
+                            dest_types=destination_column_types or {},
+                            dest_db=destination_db_type,
+                            sync_mode=sync_mode,
+                            read_scope=(
+                                read_scope
+                                if incremental_read_narrows(sync_mode)
+                                else None
+                            ),
+                            source_filter=resolved_filter or None,
+                        )
+                        if again is None or not shape_recipe:
+                            return again
+                        from services.shape_preflight import shaped_population_rows
+
+                        return (
+                            shaped_population_rows(
+                                shape_recipe, again, source_columns=columns
+                            )
+                            or again
+                        )
+
+          def _narrowed(rows_in: Iterable[Mapping[str, Any]]) -> Iterable[Mapping[str, Any]]:
+              """Same scope the first scan measured — filter then watermark."""
+              out_rows = rows_in
+              if resolved_filter:
+                  filtered_again = iter_filtered_rows(out_rows, resolved_filter)
+                  if filtered_again is not None:
+                      out_rows = filtered_again
+              if incremental_read_narrows(sync_mode) and read_scope.bounded:
+                  narrowed_again = iter_rows_after_watermark(
+                      out_rows, read_scope, keep_unreadable=True
+                  )
+                  if narrowed_again is not None:
+                      out_rows = narrowed_again
+              return out_rows
+
           scan_input = population_rows if population_rows is not None else sample_rows
           fit_rows_total = int(row_count or 0)
           if resolved_filter:
@@ -1817,7 +1872,44 @@ def run_file_preflight(
             ),
             on_progress=on_fit_progress,
           )
+          if destination_table_exists is False and replay_source is not None:
+            # We own the CREATE here: no live DDL binds, so a carrier the peek
+            # sized too narrow is our defect, not the operator's. Widen it from
+            # the measured population and re-prove on the same rows — an
+            # unproven widen is dropped and the block stands.
+            from services.population_fit_scan import create_new_population_widen
+
+            replay_scoped = replay_source
+
+            def _replay() -> Iterable[Mapping[str, Any]] | None:
+                again = replay_scoped()
+                return None if again is None else _narrowed(again)
+
+            widen = create_new_population_widen(
+                fit_report,
+                mappings,
+                _replay,
+                scan_kwargs=dict(
+                    dest_types=destination_column_types or {},
+                    source_types=column_types or {},
+                    dest_db=destination_db_type,
+                    dialect_label=destination_db_type,
+                    job_error_policy=transform_error_policy_for_validation_mode(
+                        validation_mode
+                    ),
+                    rows_total=fit_rows_total,
+                    rows_are_population=bool(rows_are_population),
+                    source_kind=source_kind,
+                    source_format=source_format,
+                    sync_mode=sync_mode,
+                    dest_table_exists=destination_table_exists,
+                ),
+            )
+            if widen is not None:
+                fit_report = widen.report
           fit_report_payload = fit_report.to_dict()
+          if widen is not None:
+            fit_report_payload["create_new_widen"] = list(widen.applied)
           if incremental_read_narrows(sync_mode) and read_scope.bounded:
             fit_report_payload["delta_scope"] = {
                 "cursor_column": read_scope.cursor_column,
