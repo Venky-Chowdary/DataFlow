@@ -104,12 +104,18 @@ def invents_unproven_capacity(
     from services.decision_kernel.types import normalize_logical_type
     from services.type_system import (
         LOGICAL_DECIMAL,
+        bare_decimal_lands_dialect_floor,
         bignumeric_capacity_would_invent,
         decimal_params_would_narrow,
         is_timezone_polarity_loss,
         parse_numeric_precision_scale,
     )
 
+    # The dialect's own fixed-point floor keeps every source digit, so it is not
+    # a collapse — but the source never declared that scale, so the operator
+    # still sees the invent chip. Fidelity and invent are two verdicts.
+    if bare_decimal_lands_dialect_floor(source_type, target_type, dest_db=dest_db):
+        return True
     if decimal_params_would_narrow(source_type, target_type, dest_db=dest_db):
         sp, ss = parse_numeric_precision_scale(source_type)
         tp, ts = parse_numeric_precision_scale(target_type)

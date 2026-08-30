@@ -611,8 +611,22 @@ def destination_row_count(
         if db_type == "redis":
             return _redis_prefix_row_count(cfg, prefix=table)
 
+        if db_type == "dynamodb":
+            return _dynamodb_row_count(cfg, table_name=table)
+
         if db_type == "clickhouse":
             return _clickhouse_row_count(cfg, schema=schema, table_name=table)
+
+        # Every SQLAlchemy engine that is not one of the named dialects above
+        # arrives here as ``generic_sql`` (DuckDB, Trino, RisingWave, …). Having
+        # no branch meant dest-before was unknowable for all of them, so an
+        # append delta and a quiet incremental poll could not be proven and
+        # correct runs were reported unproven — while dest-*after* counted fine
+        # through the same connection.
+        if db_type == "generic_sql":
+            from connectors.generic_sql import count_table
+
+            return count_table(cfg, table)
 
         from services.dialect_profiles import warehouse_sql_quote_dialect
 
@@ -701,6 +715,20 @@ def destination_key_hits(
             )
         except Exception as exc:
             logger.warning("BigQuery dest key census failed: %s", exc)
+            return None
+    if db_type == "redis":
+        try:
+            return _redis_key_hits(cfg, prefix=table, keys=unique)
+        except Exception as exc:
+            logger.warning("Redis dest key census failed: %s", exc)
+            return None
+    if db_type == "dynamodb":
+        try:
+            return _dynamodb_key_hits(
+                cfg, table_name=table, cols=cols, keys=unique
+            )
+        except Exception as exc:
+            logger.warning("DynamoDB dest key census failed: %s", exc)
             return None
     try:
         from services.dialect_profiles import warehouse_sql_quote_dialect
@@ -3390,6 +3418,168 @@ def _redis_prefix_row_count(cfg: dict[str, Any], *, prefix: str) -> int | None:
             seen.add(raw.decode() if isinstance(raw, bytes) else str(raw))
         if cursor == 0:
             return len(seen)
+
+
+def _redis_key_hits(
+    cfg: dict[str, Any],
+    *,
+    prefix: str,
+    keys: list[tuple[Any, ...]],
+) -> int | None:
+    """How many of these identities Redis already holds under ``prefix:*``.
+
+    Redis ``SET`` replaces the value at the key, so a re-written identity does
+    not move the key count. The census needs the split (new keys vs replaced
+    keys) to close, and it is only honest if the probed key is the exact key
+    the writer addresses: ``connectors.redis_reader.redis_key_for`` on the
+    ``|``-joined identity, which is the same rule
+    ``redis_writer._resolve_redis_key_id`` writes with.
+    """
+    from connectors.redis_reader import _redis_client, redis_key_for
+    from services.value_serializer import present_cell_text
+
+    if not prefix:
+        return None
+    client = _redis_client(cfg)
+    hits = 0
+    chunk: list[str] = []
+    for tup in keys:
+        identity = "|".join(present_cell_text(part) or "" for part in tup)
+        chunk.append(redis_key_for(prefix, identity))
+        if len(chunk) >= 500:
+            hits += _redis_exists_count(client, chunk)
+            chunk = []
+    if chunk:
+        hits += _redis_exists_count(client, chunk)
+    return hits
+
+
+def _redis_exists_count(client: Any, keys: list[str]) -> int:
+    pipe = client.pipeline()
+    for key in keys:
+        pipe.exists(key)
+    return sum(1 for landed in pipe.execute() if landed)
+
+
+def _dynamodb_row_count(cfg: dict[str, Any], *, table_name: str) -> int | None:
+    """Exact item COUNT of a DynamoDB table, paginated.
+
+    ``DescribeTable.ItemCount`` is refreshed roughly every six hours, so it is
+    a stale estimate and can never close a delta — this is
+    ``Scan(Select="COUNT")`` across every page, the dest-engine analogue of
+    ``COUNT(*)``. A missing table is 0 (a known-empty destination is a proof);
+    an unreachable endpoint stays ``None``.
+    """
+    from botocore.exceptions import ClientError
+
+    from connectors.aws_common import boto3_client
+
+    table = (table_name or "").strip()
+    if not table:
+        return None
+    client = boto3_client("dynamodb", cfg)
+    total = 0
+    start_key: dict[str, Any] | None = None
+    while True:
+        kwargs: dict[str, Any] = {"TableName": table, "Select": "COUNT"}
+        if start_key:
+            kwargs["ExclusiveStartKey"] = start_key
+        try:
+            resp = client.scan(**kwargs)
+        except ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") == "ResourceNotFoundException":
+                return 0
+            raise
+        total += int(resp.get("Count") or 0)
+        start_key = resp.get("LastEvaluatedKey") or None
+        if not start_key:
+            return total
+
+
+def _dynamodb_key_hits(
+    cfg: dict[str, Any],
+    *,
+    table_name: str,
+    cols: list[str],
+    keys: list[tuple[Any, ...]],
+) -> int | None:
+    """How many of these keys DynamoDB already holds (``BatchGetItem``).
+
+    ``PutItem`` replaces the item at the key, so a re-written key does not move
+    the item count. The probe is only a proof when the census key columns are
+    the table's own ``KeySchema``; anything else would compare a non-identity
+    and is left unmeasured instead.
+    """
+    from botocore.exceptions import ClientError
+
+    from connectors.aws_common import boto3_client
+    from connectors.dynamodb_reader import describe_key_schema
+    from connectors.dynamodb_writer import _to_attr
+
+    table = (table_name or "").strip()
+    if not table or not cols:
+        return None
+    try:
+        schema = describe_key_schema(cfg, table)
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") == "ResourceNotFoundException":
+            return 0
+        raise
+    key_names = [str(item.get("name") or "") for item in schema]
+    if sorted(name.lower() for name in key_names) != sorted(
+        col.lower() for col in cols
+    ):
+        return None
+    # The key attribute must be serialized as the type the table declared: a
+    # numeric HASH key probed as ``S`` matches nothing and would report every
+    # replaced key as a new insert.
+    declared = {
+        str(item.get("name") or "").lower(): str(item.get("attr_type") or "VARCHAR")
+        for item in schema
+    }
+    client = boto3_client("dynamodb", cfg)
+    hits = 0
+    pending: list[dict[str, Any]] = []
+    for tup in keys:
+        item = {
+            name: _to_attr(value, declared.get(name.lower(), "VARCHAR"))
+            for name, value in zip(cols, tup)
+        }
+        pending.append(item)
+        if len(pending) >= 100:
+            landed = _dynamodb_batch_get_count(client, table, pending, key_names)
+            if landed is None:
+                return None
+            hits += landed
+            pending = []
+    if pending:
+        landed = _dynamodb_batch_get_count(client, table, pending, key_names)
+        if landed is None:
+            return None
+        hits += landed
+    return hits
+
+
+def _dynamodb_batch_get_count(
+    client: Any,
+    table: str,
+    items: list[dict[str, Any]],
+    key_names: list[str],
+) -> int | None:
+    """``BatchGetItem`` hit count. Unprocessed keys stay unmeasured, not 0."""
+    request = {table: {"Keys": items, "ConsistentRead": True}}
+    found = 0
+    attempts = 0
+    while request:
+        resp = client.batch_get_item(RequestItems=request)
+        found += len(resp.get("Responses", {}).get(table) or [])
+        unprocessed = resp.get("UnprocessedKeys") or {}
+        request = unprocessed if unprocessed.get(table) else {}
+        attempts += 1
+        if request and attempts >= 5:
+            return None
+    del key_names
+    return found
 
 
 def _sftp_row_count(cfg: dict[str, Any], *, table_name: str) -> int | None:

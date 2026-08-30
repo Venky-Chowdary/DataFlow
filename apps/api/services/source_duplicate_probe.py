@@ -56,7 +56,15 @@ OBJECT_PAYLOAD_SOURCE_TYPES = frozenset({
 PROBED_SOURCE_TYPES = (
     SQLISH_SOURCE_TYPES
     | frozenset(
-        {"mongodb", "mongodb_atlas", "dynamodb", "amazon_dynamodb", "salesforce", "stripe"}
+        {
+            "mongodb",
+            "mongodb_atlas",
+            "dynamodb",
+            "amazon_dynamodb",
+            "redis",
+            "salesforce",
+            "stripe",
+        }
     )
     | OBJECT_PAYLOAD_SOURCE_TYPES
 )
@@ -473,6 +481,78 @@ def _dynamodb_duplicates(
     )
 
 
+def _redis_duplicates(
+    cfg: dict[str, Any],
+    keyspace: str,
+    pk_columns: list[str],
+    *,
+    limit: int = 5,
+) -> tuple[list[dict[str, Any]], ProbeStatus, str]:
+    """Prove identity uniqueness for a Redis keyspace source.
+
+    ``redis_key`` is unique by construction — one value per key — so an identity
+    that is the key itself is answered structurally, like a DynamoDB table key.
+    An identity read out of the stored document carries no such guarantee (two
+    keys may hold the same ``id``), so those are counted across a real SCAN of
+    the keyspace. Skipping the engine entirely failed every uniqueness-required
+    Redis route closed for a probe the keyspace can actually answer.
+    """
+    from collections import Counter
+
+    from connectors.redis_reader import RedisScanState, read_keys_batch, resolve_key_pattern
+
+    wanted = [c.strip().lower() for c in pk_columns]
+    if wanted == ["redis_key"]:
+        return (
+            [],
+            "ran",
+            "Redis enforces uniqueness on the key itself (redis_key)",
+        )
+
+    pattern = resolve_key_pattern(keyspace)
+    state = RedisScanState.from_any(None)
+    counts: Counter[tuple[str, ...]] = Counter()
+    scanned = 0
+    idx: list[int] = []
+    while scanned < _PAYLOAD_SCAN_CAP:
+        batch, state = read_keys_batch(
+            cfg=cfg, pattern=pattern, limit=_PAYLOAD_PAGE, scan_state=state
+        )
+        rows = list(batch.rows or [])
+        if rows and not idx:
+            headers = [str(h) for h in (batch.headers or [])]
+            missing = [c for c in pk_columns if c not in headers]
+            if missing:
+                raise ValueError(
+                    f"identity column(s) {', '.join(missing)} are not present "
+                    f"in Redis keyspace {pattern}"
+                )
+            idx = [headers.index(c) for c in pk_columns]
+        for row in rows:
+            counts[
+                tuple(_normalize_key_cell(row[i] if i < len(row) else None) for i in idx)
+            ] += 1
+        scanned += len(rows)
+        if not rows or state.exhausted:
+            break
+    if scanned >= _PAYLOAD_SCAN_CAP and not state.exhausted:
+        return (
+            _counter_findings(counts, pk_columns, limit),
+            "skipped_unsupported",
+            (
+                f"Redis keyspace exceeds the {_PAYLOAD_SCAN_CAP:,}-key uniqueness "
+                f"scan cap ({scanned:,} read); uniqueness on "
+                f"({','.join(pk_columns)}) is unproven for the remainder"
+            ),
+        )
+    return (
+        _counter_findings(counts, pk_columns, limit),
+        "ran",
+        f"Redis keyspace uniqueness scan on {pattern}.({','.join(pk_columns)}) "
+        f"over {scanned:,} key(s)",
+    )
+
+
 def _normalize_key_cell(value: Any) -> str:
     """Render one identity cell the way the destination key would compare it."""
     return _identity_cell(value)
@@ -660,6 +740,26 @@ def probe_source_duplicate_keys_result(
                 )
             findings, status, message = _dynamodb_duplicates(
                 cfg, tbl, pk_columns, limit=limit
+            )
+            return SourceDuplicateProbeResult(
+                findings=findings,
+                status=status,
+                message=message,
+                db_type=db_type,
+                primary_key_columns=pk_columns,
+            )
+
+        if db_type == "redis":
+            keyspace = source_table or source_collection
+            if not keyspace:
+                return SourceDuplicateProbeResult(
+                    status="skipped_no_source",
+                    message="Redis source missing keyspace for uniqueness probe",
+                    db_type=db_type,
+                    primary_key_columns=pk_columns,
+                )
+            findings, status, message = _redis_duplicates(
+                cfg, keyspace, pk_columns, limit=limit
             )
             return SourceDuplicateProbeResult(
                 findings=findings,
