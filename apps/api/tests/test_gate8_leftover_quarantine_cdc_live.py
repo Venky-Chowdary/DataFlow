@@ -395,6 +395,12 @@ def test_live_pg_cdc_leftover_dest_key_is_not_merge_deleted() -> None:
         assert recon.get("passed") is True, recon
         assert recon.get("source_rows") == 2
         assert recon.get("target_rows") == 3
+        from services.reconcile_coverage import CDC_SOURCE_IMAGE_COUNT
+
+        assert recon.get("checksum_scope") == CDC_SOURCE_IMAGE_COUNT
+        assert recon.get("checksum_match") is False
+        assert recon.get("population_proof") is False
+        assert recon.get("migration_proven") in {None, False}
     finally:
         _pg_drop_slot(slot)
         _pg_drop(src_t, dst_t)
@@ -424,6 +430,36 @@ def test_cdc_source_image_count_scope_does_not_claim_full_checksum() -> None:
         checksum_scope=CDC_SOURCE_IMAGE_COUNT,
     )
     assert mismatch.passed is False
+    assert mismatch.checksum_match is False
+
+    extras = reconcile(
+        source_rows=2,
+        target_rows=3,
+        source_checksum="last-batch",
+        target_checksum="full-dest",
+        checksum_scope=CDC_SOURCE_IMAGE_COUNT,
+    )
+    assert extras.passed is True
+    assert extras.checksum_match is False
+    assert extras.population_proof is False
+    assert extras.target_rows == 3
+    assert extras.source_rows == 2
+
+    equal_stamped = report.to_dict()
+    assert equal_stamped["passed"] is True
+    assert equal_stamped["checksum_match"] is False
+    assert equal_stamped["phase"] == "post_write_row_count"
+    assert equal_stamped["coverage"] == CDC_SOURCE_IMAGE_COUNT
+    assert equal_stamped.get("migration_proven") is False
+
+    extras_stamped = extras.to_dict()
+    assert extras_stamped["passed"] is True
+    assert extras_stamped["checksum_match"] is False
+    assert extras_stamped["phase"] == "post_write_row_count"
+
+    short_stamped = mismatch.to_dict()
+    assert short_stamped["passed"] is False
+    assert short_stamped["phase"] == "post_write_failed"
 
 
 def test_stamp_cdc_source_image_sqlite(tmp_path: Path) -> None:

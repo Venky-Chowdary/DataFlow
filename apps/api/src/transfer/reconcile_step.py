@@ -30,6 +30,7 @@ from services.reconcile_coverage import (
     SOURCE_DIGEST_WRITER_ACK,
     WHOLE_TABLE_NOT_COMPARABLE,
     WRITTEN_BATCH_KEYS,
+    is_cdc_source_image_count_report,
     is_no_op_report,
 )
 from services.destination_key_collision_probe import (
@@ -560,6 +561,12 @@ def _maybe_attach_verification_ladder(
         # ladder to verify: it would compare a zero-row write against a sink
         # that legitimately holds earlier rows, fail L1 conservation, and veto a
         # correct quiet poll. The destination count not moving is the proof.
+        return report
+    if is_cdc_source_image_count_report(report):
+        # COUNT-only CDC: leftover dest keys are expected. L1–L5 would compare
+        # the live source table to dest as snapshot identity, fail L4/L5 on
+        # extras, and veto a correct catch-up. Dest COUNT vs source image is
+        # the proof; leftover MERGE stays a no-op.
         return report
     from services.verification_ladder import (
         MAX_LADDER_ROWS,

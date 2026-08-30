@@ -276,6 +276,21 @@ def stamp_post_write_phase(report: dict[str, Any]) -> dict[str, Any]:
         out["checksum_match"] = False
         return out
 
+    if str(out.get("checksum_scope") or "") == CDC_SOURCE_IMAGE_COUNT:
+        # Last-batch writer checksum vs dest digest is not a population compare.
+        # Dest extras are leftover MERGE no-op; dest COUNT short already set
+        # passed=False in reconcile(). Never upgrade to full_checksum.
+        dest_short = not bool(out.get("passed"))
+        out["phase"] = "post_write_failed" if dest_short else "post_write_row_count"
+        out["post_write_pending"] = False
+        out["preview"] = False
+        out["coverage"] = "none" if dest_short else CDC_SOURCE_IMAGE_COUNT
+        out["assurance_level"] = "none" if dest_short else CDC_SOURCE_IMAGE_COUNT
+        out["migration_proven"] = False
+        out["population_proof"] = False
+        out["checksum_match"] = False
+        return out
+
     if is_unproven_export(out, msg):
         out["phase"] = "post_write_skipped"
         out["post_write_pending"] = False
@@ -742,6 +757,37 @@ def reconcile(
         # the destination's empty digest and failed an all-quarantined run that
         # behaved exactly as the policy asked.
         source_checksum = target_checksum
+    if checksum_scope == CDC_SOURCE_IMAGE_COUNT:
+        # Dest extras are expected (changelog is not S; leftover MERGE is a
+        # hard no-op). Dest COUNT short of the live source image is a fail.
+        dest_short = target_rows < expected_rows
+        extra = extra_rows_note(target_rows, expected_rows) if target_rows > expected_rows else ""
+        short_note = (
+            " Destination is short of the live source image." if dest_short else ""
+        )
+        return ReconciliationReport(
+            passed=not dest_short,
+            source_rows=source_rows,
+            target_rows=target_rows,
+            source_checksum=source_checksum,
+            target_checksum=target_checksum,
+            message=(
+                f"CDC catch-up dest COUNT={target_rows:,} vs source image "
+                f"COUNT={expected_rows:,}{extra}{short_note}. Last-batch writer "
+                "checksum is diagnostic — not a source-image population digest. "
+                "Leftover MERGE is a no-op on CDC. At-least-once upsert. "
+                "Not platform exactly-once."
+            ),
+            rejected_rows=rejected_rows,
+            coerced_null_rows=coerced_null_rows,
+            rows_skipped=rows_skipped,
+            sample_compare=sample_compare,
+            checksum_match=False,
+            population_proof=False,
+            assurance_level=CDC_SOURCE_IMAGE_COUNT,
+            checksum_scope=CDC_SOURCE_IMAGE_COUNT,
+            target_rows_before=target_rows_before,
+        )
     row_count_ok = target_rows == expected_rows or (
         allow_extra_rows and target_rows >= expected_rows
     )
@@ -789,32 +835,6 @@ def reconcile(
             coerced_null_rows=coerced_null_rows,
             rows_skipped=rows_skipped,
             sample_compare=sample_compare,
-        )
-
-    if checksum_scope == CDC_SOURCE_IMAGE_COUNT:
-        extra = extra_rows_note(target_rows, expected_rows) if target_rows > expected_rows else ""
-        return ReconciliationReport(
-            passed=True,
-            source_rows=source_rows,
-            target_rows=target_rows,
-            source_checksum=source_checksum,
-            target_checksum=target_checksum,
-            message=(
-                f"CDC catch-up dest COUNT={target_rows:,} vs source image "
-                f"COUNT={expected_rows:,}{extra}. Last-batch writer checksum is "
-                "diagnostic — not a source-image population digest. "
-                "Leftover MERGE is a no-op on CDC. At-least-once upsert. "
-                "Not platform exactly-once."
-            ),
-            rejected_rows=rejected_rows,
-            coerced_null_rows=coerced_null_rows,
-            rows_skipped=rows_skipped,
-            sample_compare=sample_compare,
-            checksum_match=False,
-            population_proof=False,
-            assurance_level=CDC_SOURCE_IMAGE_COUNT,
-            checksum_scope=CDC_SOURCE_IMAGE_COUNT,
-            target_rows_before=target_rows_before,
         )
 
     if source_checksum != target_checksum:

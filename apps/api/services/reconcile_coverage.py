@@ -34,6 +34,16 @@ def is_no_op_report(report: dict[str, Any]) -> bool:
     return str((report or {}).get("assurance_level") or "") == NO_OP_DEST_UNCHANGED
 
 
+def is_cdc_source_image_count_report(report: dict[str, Any]) -> bool:
+    """True when Gate-8 proved CDC catch-up by dest COUNT vs live source COUNT.
+
+    Leftover dest keys sit outside that proof (changelog is not S; leftover
+    MERGE is a hard no-op). The in-memory ladder must not treat those extras as
+    a snapshot-identity failure, and must not claim ``full_checksum``.
+    """
+    return str((report or {}).get("checksum_scope") or "") == CDC_SOURCE_IMAGE_COUNT
+
+
 def row_count_scope_stamp(out: dict[str, Any]) -> dict[str, Any] | None:
     """Phase stamp for a report whose digests cover different populations.
 
