@@ -329,11 +329,16 @@ def _as_number(value: Any) -> Decimal:
     text = _as_text(value)
     if text is None or text.strip() == "":
         raise EvalError("expected a number, got an empty value")
-    from services.transform_engine import decimal_wire_value
+    from services.transform_engine import (
+        decimal_wire_value,
+        number_locale_ambiguity_reason,
+    )
 
     parsed = decimal_wire_value(text)
     if parsed is None:
-        raise EvalError(f"'{text}' is not a number")
+        raise EvalError(
+            number_locale_ambiguity_reason(text) or f"'{text}' is not a number"
+        )
     return parsed
 
 
@@ -607,12 +612,17 @@ def _fn_to_number(value: Any) -> Any:
         raise EvalError("a boolean is not a number")
     if isinstance(value, (int, float, Decimal)) and not isinstance(value, bool):
         return _as_number(value)
-    from services.transform_engine import decimal_wire_value
+    from services.transform_engine import (
+        decimal_wire_value,
+        number_locale_ambiguity_reason,
+    )
 
     parsed = decimal_wire_value(value)
     if parsed is not None:
         return parsed
-    raise EvalError(f"'{value}' is not a number")
+    raise EvalError(
+        number_locale_ambiguity_reason(value) or f"'{value}' is not a number"
+    )
 
 
 def _fn_to_date(value: Any, fmt: Any = None) -> Any:

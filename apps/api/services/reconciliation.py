@@ -48,6 +48,7 @@ from services.transform_engine import (
     _STRICT_BOOL_TRUE,
     _parse_date,
     _parse_datetime,
+    NUMBER_LOCALE_WIRE,
     apply_transform,
     decimal_wire_value,
     reset_active_number_locale,
@@ -3878,7 +3879,10 @@ def fingerprint_for_reconcile(
     if ddl_type:
         # Dest read-back is storage-canonical. Re-applying the transfer locale
         # turns EU ``1.234`` (from ``1,234``) into 1234 and false-fails Gate-8.
-        token = set_active_number_locale("")
+        # WIRE reads that canonical form as itself — ``20.500`` out of
+        # ``NUMERIC(12,3)`` is 20.5, not a refusal that left one side of the
+        # compare unquantized and reported a faithful row as corruption.
+        token = set_active_number_locale(NUMBER_LOCALE_WIRE)
         try:
             try:
                 wire = normalize_sql_bind_value(wire, ddl_type, engine=engine)
@@ -4190,6 +4194,10 @@ def _canonicalize_number(value: Any) -> str | None:
                 return None
             # Checksum dest text is already storage-canonical. Re-applying the
             # transfer locale turns EU ``1.234`` (from ``1,234``) into 1234.
+            # Auto also keeps an ambiguous form opaque here on purpose: the
+            # digest must not read ``1.000`` as 1 and match a destination that
+            # really holds a different number. Carrier-aware quantization is
+            # the fingerprint path's job, not the digest's.
             token = set_active_number_locale("")
             try:
                 parsed = decimal_wire_value(text)

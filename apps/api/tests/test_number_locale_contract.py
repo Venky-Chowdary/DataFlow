@@ -282,7 +282,7 @@ def test_shape_to_number_refuses_lone_group():
     from services.shape_expr import EvalError, compile_expression
 
     expr = compile_expression("to_number([x])")
-    with pytest.raises(EvalError, match="not a number"):
+    with pytest.raises(EvalError, match="ambiguous number grouping"):
         expr.evaluate({"x": "1,234"})
     assert expr.evaluate({"x": "$1,000.00"}) == Decimal("1000.00")
 

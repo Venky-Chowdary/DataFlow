@@ -83,6 +83,42 @@ def file_source_types() -> FrozenSet[str]:
     """Catalog ids that are file sources — Test must not claim Connected without a path."""
     return frozenset(_FILE_CAPS)
 
+
+# Sources whose cells reach the write path as text *we* rendered from a typed
+# carrier (``NUMERIC(12,3)`` → ``10.129``), never as something a human typed.
+_TYPED_WIRE_SOURCES: FrozenSet[str] = frozenset({
+    "postgresql", "redshift", "greenplum", "cockroachdb", "mysql", "mariadb",
+    "sqlserver", "synapse", "oracle", "db2", "teradata", "sap_hana", "vertica",
+    "snowflake", "bigquery", "databricks", "clickhouse", "duckdb", "sqlite",
+    "generic_sql", "mongodb", "dynamodb",
+})
+
+
+def renders_typed_wire_values(driver_type: str) -> bool:
+    """True when this source's numbers are machine-rendered, not human-written.
+
+    Decides the number-grouping contract for a run: ``10.129`` out of a typed
+    column is 10.129, while the same characters in a CSV are genuinely
+    ambiguous (US 10.129 / EU 10129) and must still fail closed. A file, an
+    object store holding files, and free-text stores are not on this list.
+    """
+    return (driver_type or "").strip().lower() in _TYPED_WIRE_SOURCES
+
+
+def typed_wire_number_locale(source_kind: str, source_format: str) -> str:
+    """``WIRE`` when this source's numbers are ours to read canonically, else ''.
+
+    One owner for the whole run: Validate and Execute must read ``10.129``
+    the same way, or Validate clears a route Run then quarantines (and the
+    reverse). Callers apply it only when the operator declared no locale.
+    """
+    from services.transform_engine import NUMBER_LOCALE_WIRE
+
+    if (source_kind or "").strip().lower() != "database":
+        return ""
+    driver = resolve_driver_type((source_format or "").strip())
+    return NUMBER_LOCALE_WIRE if renders_typed_wire_values(driver) else ""
+
 # Catalog marketplace id → driver / format type
 CATALOG_ID_ALIASES: dict[str, str] = {
     "csv___tsv": "csv",

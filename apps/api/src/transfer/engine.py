@@ -1012,6 +1012,27 @@ def _execute_preflight_identity_kwargs(request: TransferRequest) -> dict[str, An
     return _execute_preflight_parity_kwargs(request, destination_connected=True)
 
 
+def _run_number_locale(request: TransferRequest) -> str:
+    """The grouping contract this run reads numbers under.
+
+    An operator declaration always wins. With none, a source that hands us
+    text it rendered from a typed carrier reads as WIRE: ``NUMERIC(12,3)``
+    arrives as ``10.129`` and must not be refused as US/EU-ambiguous, while a
+    CSV keeps Auto and still fails closed on ``10.129`` — a human wrote that
+    one, and it is 10.129 or 10129 depending on where they wrote it.
+    """
+    declared = str(getattr(request, "number_locale", "") or "").strip()
+    if declared:
+        return declared
+    from .connector_capabilities import typed_wire_number_locale
+
+    src = getattr(request, "source", None)
+    return typed_wire_number_locale(
+        str(getattr(src, "kind", "") or ""),
+        str(getattr(src, "format", "") or ""),
+    )
+
+
 def _execute_policy_gates_for_request(
     request: TransferRequest,
     *,
@@ -1905,7 +1926,9 @@ class UniversalTransferEngine:
                 # Audit best-effort — contracts are already on the job document.
                 pass
         locale_token = set_active_date_locale(request.date_locale)
-        number_token = set_active_number_locale(getattr(request, "number_locale", "") or "")
+        number_token = set_active_number_locale(
+            _run_number_locale(request)
+        )
         try:
             from services.tracing import (
                 current_trace_id,

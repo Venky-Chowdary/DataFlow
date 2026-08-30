@@ -212,9 +212,14 @@ def reset_active_date_locale(token: contextvars.Token[str]) -> None:
     _DATE_LOCALE_VAR.reset(token)
 
 
-# Number grouping: 'US' (1,234.56), 'EU' (1.234,56), or '' fail-closed on
-# a lone 3-digit group (1,234 / 1.234). Same contract shape as date_locale —
-# never guess US vs EU. Currency marks and both separators still parse.
+# Number grouping: 'US' (1,234.56), 'EU' (1.234,56), 'WIRE' (machine-canonical
+# 10.129, no grouping at all), or '' fail-closed on a lone 3-digit group
+# (1,234 / 1.234). Same contract shape as date_locale — never guess US vs EU.
+# Currency marks and both separators still parse.
+NUMBER_LOCALE_WIRE = "WIRE"
+_NUMBER_LOCALES = frozenset({"US", "EU", NUMBER_LOCALE_WIRE})
+# What a typed carrier renders as: sign, digits, one dot, optional exponent.
+_WIRE_NUMBER_RE = re.compile(r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$")
 _NUMBER_LOCALE_VAR: contextvars.ContextVar[str] = contextvars.ContextVar(
     "number_locale", default=""
 )
@@ -222,18 +227,24 @@ _NUMBER_LOCALE_VAR: contextvars.ContextVar[str] = contextvars.ContextVar(
 
 def _active_number_locale(explicit: str = "") -> str:
     loc = (explicit or _NUMBER_LOCALE_VAR.get() or "").strip().upper()
-    return loc if loc in {"US", "EU"} else ""
+    return loc if loc in _NUMBER_LOCALES else ""
 
 
 def set_active_number_locale(locale: str) -> contextvars.Token[str]:
-    """Pin US/EU for this transfer, or Auto when ``locale`` is empty.
+    """Pin US/EU/WIRE for this transfer, or Auto when ``locale`` is empty.
 
     Empty must clear the pin — ``_active_number_locale("")`` inherits the
     current context, so ``set(\"\")`` used to leave EU in place and Gate-8
     re-read dest ``1.234`` as thousands.
+
+    ``WIRE`` is for values our own readers rendered from a typed carrier: a
+    PostgreSQL ``NUMERIC(12,3)`` reaches the write path as ``10.129``, which
+    Auto refuses as US-thousands-vs-EU-decimal ambiguous even though no human
+    ever typed it. Under WIRE a dot is the decimal point and a grouping
+    separator is not a number at all — canonical, still no guessing.
     """
     pinned = (locale or "").strip().upper()
-    return _NUMBER_LOCALE_VAR.set(pinned if pinned in {"US", "EU"} else "")
+    return _NUMBER_LOCALE_VAR.set(pinned if pinned in _NUMBER_LOCALES else "")
 
 
 def reset_active_number_locale(token: contextvars.Token[str]) -> None:
@@ -298,6 +309,37 @@ def _looks_like_grouped_number(raw: str) -> bool:
     if not text or not any(ch.isdigit() for ch in text):
         return False
     return "," in text or "." in text
+
+
+def number_locale_ambiguity_reason(value: Any) -> str:
+    """Why Auto refused ``value``, when the only reason is US/EU grouping.
+
+    ``'10.129' is not a number`` is a wrong diagnosis with no next action:
+    the value *is* a number, it just reads 10.129 under US grouping and 10129
+    under EU, and Auto refuses to pick. Returns '' when the value is refused
+    for any other reason, so a genuinely unparseable cell keeps its own error.
+    """
+    text = str(value or "").strip()
+    if not text or not _looks_like_grouped_number(text):
+        return ""
+    if _parse_decimal(text) is not None:
+        return ""
+    readings: dict[str, str] = {}
+    for loc in ("US", "EU"):
+        token = set_active_number_locale(loc)
+        try:
+            parsed = _parse_decimal(text)
+        finally:
+            reset_active_number_locale(token)
+        if parsed is not None:
+            readings[loc] = parsed
+    if len(readings) < 2 or readings["US"] == readings["EU"]:
+        return ""
+    return (
+        f"'{text}' is ambiguous number grouping — US reads {readings['US']}, "
+        f"EU reads {readings['EU']}. Set number locale US or EU in "
+        "Destination → Advanced. Auto never guesses which one you meant."
+    )
 
 
 def ambiguous_number_columns(
@@ -708,6 +750,15 @@ def _normalize_locale_separators(text: str, number_locale: str = "") -> str | No
         return None
 
     locale = _active_number_locale(number_locale)
+    if locale == NUMBER_LOCALE_WIRE:
+        # Machine-rendered text from a typed carrier: a lone dot group is the
+        # decimal point, because no reader ever emits grouping. Anything that
+        # is not wire-shaped is not ours and keeps the Auto contract, so this
+        # only ever resolves the one ambiguity Auto cannot — it never guesses
+        # a grouping convention Auto would have refused.
+        if _WIRE_NUMBER_RE.match(text):
+            return text
+        locale = ""
     # Remove ASCII spaces used as thousands separators (e.g. "1 000 000").
     text = text.replace(" ", "").replace("\t", "")
 

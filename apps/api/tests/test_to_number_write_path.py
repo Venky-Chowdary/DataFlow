@@ -26,7 +26,7 @@ def _value(source: str, row: dict | None = None):
 
 def test_to_number_auto_three_digit_group_refuses():
     for token in ("1.234", "1,234", "1.000", "1.005"):
-        with pytest.raises(EvalError, match="not a number"):
+        with pytest.raises(EvalError, match="ambiguous number grouping"):
             _value("to_number([x])", {"x": token})
 
 

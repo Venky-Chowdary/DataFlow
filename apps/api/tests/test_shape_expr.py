@@ -68,9 +68,9 @@ def test_compare_and_add_use_write_path_decimals():
     assert value("[amt] > 2000", {"amt": "$1,234.56"}) is False
     assert value("[amt] > 1000", {"amt": "€1.234,56"}) is True
     assert value("[amt] + 1", {"amt": "$1,234.56"}) == Decimal("1235.56")
-    with pytest.raises(EvalError, match="not a number"):
+    with pytest.raises(EvalError, match="ambiguous number grouping"):
         value("[amt] * 2", {"amt": "1,234"})
-    with pytest.raises(EvalError, match="not a number"):
+    with pytest.raises(EvalError, match="ambiguous number grouping"):
         value("[amt] * 2", {"amt": "1.005"})
 
 

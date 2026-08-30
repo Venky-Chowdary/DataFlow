@@ -956,6 +956,17 @@ def run_file_preflight(
             number_locale = inferred_numbers
             set_active_number_locale(number_locale)
 
+    if not number_locale:
+        # Same contract Execute runs under: values a typed source rendered are
+        # canonical, so Validate must not refuse NUMERIC(12,3) 10.129 as
+        # US/EU-ambiguous and then let (or block) Run under a different rule.
+        from src.transfer.connector_capabilities import typed_wire_number_locale
+
+        wire = typed_wire_number_locale(source_kind, source_format)
+        if wire:
+            number_locale = wire
+            set_active_number_locale(number_locale)
+
     # If the caller did not supply rich source types, infer them from the sample
     # rows. This keeps schemaless sources (MongoDB, DynamoDB, Redis, S3 JSON) from
     # being treated as all-VARCHAR against a typed warehouse target.
@@ -2670,9 +2681,15 @@ def run_file_preflight(
     date_findings = ambiguous_date_columns(
         sample_rows, columns, date_locale=date_locale
     )
-    out["number_locale"] = number_locale
+    # WIRE is a property of the source, not an operator choice — the locale
+    # control stays on Auto so it never reads back a value it cannot offer.
+    from services.transform_engine import NUMBER_LOCALE_WIRE
+
+    operator_locale = "" if number_locale == NUMBER_LOCALE_WIRE else number_locale
+    out["number_locale"] = operator_locale
     out["number_locale_report"] = {
-        "number_locale": number_locale or "",
+        "number_locale": operator_locale or "",
+        "reads_typed_wire_values": number_locale == NUMBER_LOCALE_WIRE,
         "ambiguous_columns": number_findings,
         "decision": "set_locale" if number_findings else "ok",
     }
