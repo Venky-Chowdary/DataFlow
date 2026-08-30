@@ -267,6 +267,7 @@ def catalog_summary() -> dict:
             c.get("driver_type") for c in enriched if c.get("dest_ready") and c.get("driver_type")
         }),
         "catalog_tiles_are_not_transfer_live": True,
+        "customer_tenant_warehouse_sku_claimed": False,
         "honesty_note": (
             "Catalog tiles are not transfer-live. Public live/certified counts "
             "are unique engines (unique_drivers). source_live / dest_live are "

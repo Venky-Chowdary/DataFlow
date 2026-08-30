@@ -141,6 +141,21 @@ def test_e1_catalog_summary_prefers_unique_drivers() -> None:
     assert summary["unique_drivers"] <= summary.get("catalog_tile_total", summary["total"])
     assert "alias_tiles" in summary
     assert "honesty_note" in summary
+    assert summary["catalog_tiles_are_not_transfer_live"] is True
+    assert summary["customer_tenant_warehouse_sku_claimed"] is False
+    assert summary["unique_drivers"] < summary.get("catalog_tile_total", summary["total"])
+
+
+def test_catalog_tiles_are_not_transfer_live() -> None:
+    """Named honesty: tile count is not TRANSFER_READY / unique_drivers."""
+    from services.catalog_service import catalog_summary
+
+    summary = catalog_summary()
+    assert summary["catalog_tiles_are_not_transfer_live"] is True
+    tiles = int(summary.get("catalog_tile_total") or 0)
+    live = int(summary.get("unique_drivers") or 0)
+    assert tiles > live
+    assert live == int(summary.get("transfer_live") or 0)
     assert summary.get("catalog_tiles_are_not_transfer_live") is True
     assert "not transfer-live" in str(summary.get("honesty_note") or "")
 
