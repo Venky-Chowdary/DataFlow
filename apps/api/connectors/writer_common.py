@@ -570,7 +570,8 @@ def to_json_value(value: Any, col: str, dest_types: dict[str, str]) -> Any:
         from services.type_system import normalize_logical_type
     except Exception:
         normalize_logical_type = lambda x: str(x or "").lower()  # type: ignore[assignment]
-    ctype = normalize_logical_type(dest_types.get(col, "")) if dest_types else ""
+    declared = str(dest_types.get(col, "") or "") if dest_types else ""
+    ctype = normalize_logical_type(declared) if dest_types else ""
     if ctype in {"date", "datetime", "time"}:
         from connectors.sql_temporal import (
             coerce_sql_temporal,
@@ -578,7 +579,16 @@ def to_json_value(value: Any, col: str, dest_types: dict[str, str]) -> Any:
             logical_to_temporal_ddl,
         )
 
-        ddl = logical_to_temporal_ddl(ctype) or "DATETIME"
+        # ``normalize_logical_type`` folds every timestamp flavour into
+        # ``datetime``, so resolving the carrier from it alone downgraded an
+        # offset-bearing column to NTZ ``DATETIME`` and the wire value kept the
+        # local wall clock while losing the offset — a different instant. The
+        # declared type names the carrier, so ask it first.
+        ddl = (
+            logical_to_temporal_ddl(declared)
+            or logical_to_temporal_ddl(ctype)
+            or "DATETIME"
+        )
         try:
             coerced = coerce_sql_temporal(value, ddl)
             wire = format_wire_value(value, ddl)
