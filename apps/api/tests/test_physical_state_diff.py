@@ -152,6 +152,21 @@ def test_read_state_reports_the_stored_facts(tmp_path: Path) -> None:
     assert "note" in state.defaults
 
 
+def test_file_path_schema_is_not_read_as_a_catalog_qualifier(tmp_path: Path) -> None:
+    """A SQLite-backed writer reports the db *file* as the schema it wrote.
+
+    SQLite reads a schema as an ATTACHed database name, so that path turned
+    every reflection into ``"/tmp/x.db".sqlite_master`` and structural
+    attestation came back unreadable on a table that is right there.
+    """
+    cfg = _db(tmp_path, FULL.format(name="src"))
+    state = read_physical_state(
+        "sqlite", cfg, schema=str(cfg["database"]), table="src"
+    )
+    assert state.found and state.readable
+    assert state.primary_key == ("id",)
+
+
 def test_compare_is_symmetric_about_direction(tmp_path: Path) -> None:
     cfg = _db(
         tmp_path,

@@ -116,11 +116,14 @@
     },
     {
       "id": "confirmed_missing_table_is_create_new",
+      "note": "A proven-absent table is CREATE with the source's own names and types: identity, lossless, Approve-eligible. Demanding review here is Risk-Contract spam on every column of every new table. The honesty this case holds is that create_new is invented only when the destination object is proven absent, and that the strategy stays identity_passthrough.",
       "sources": ["cust_id"],
       "targets": [],
       "destination_table_exists": false,
       "create_new": true,
-      "requires_review": true
+      "requires_review": false,
+      "assignment_strategy": "identity_passthrough",
+      "mapping_class": "equivalent_create_new"
     }
   ]
 }

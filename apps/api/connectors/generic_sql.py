@@ -1100,6 +1100,18 @@ class _ExactJSON(sa.JSON):
 
     __visit_name__ = "JSON"
 
+    def _gen_dialect_impl(self, dialect: Any) -> Any:
+        """Keep these processors — a dialect JSON impl re-serializes the text.
+
+        SQLAlchemy swaps ``sa.JSON`` for the dialect's own JSON type via
+        ``colspecs`` (``sqlite.JSON``, ``mysql.JSON``, …), and that impl dumps
+        the canonical text we already produced, so every JSON column landed as
+        a quoted JSON *string*: ``"{\\"tier\\":\\"gold\\"}"``. DDL still
+        compiles through ``visit_JSON`` on the dialect, so the column type is
+        unchanged.
+        """
+        return self
+
     def bind_processor(self, dialect: Any) -> Callable[[Any], Any] | None:
         def process(value: Any) -> Any:
             from services.value_serializer import (

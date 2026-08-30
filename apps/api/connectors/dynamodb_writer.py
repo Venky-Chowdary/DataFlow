@@ -259,12 +259,15 @@ def _to_dynamo_value(value: Any, source_type: str) -> Any:
 
             return {coerce_binary_wire(x) if not isinstance(x, (bytes, bytearray)) else bytes(x) for x in items}
     if isinstance(value, str) and value.startswith("{") and "_df_ddb_set" in value:
+        # Only a failed *parse* falls through to scalar handling. A member the
+        # write path refuses must raise, or the envelope lands as a map and the
+        # destination silently holds a document where a set was declared.
         try:
             parsed = json.loads(value, parse_float=Decimal)
-            if isinstance(parsed, dict) and parsed.get("_df_ddb_set"):
-                return _to_dynamo_value(parsed, source_type)
         except Exception:
-            pass
+            parsed = None
+        if isinstance(parsed, dict) and parsed.get("_df_ddb_set"):
+            return _to_dynamo_value(parsed, source_type)
     upper = source_type.upper()
     if upper in {"BOOLEAN", "BOOL", "BIT"}:
         from connectors.sql_bind import coerce_boolean_wire

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import importlib
 import sys
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -113,7 +114,9 @@ def test_db_to_db_route_live(src: str, dest: str):
     "source_type,target_type,raw,transform,expected",
     [
         ("VARCHAR", "INTEGER", "42", "integer", 42),
-        ("VARCHAR", "DECIMAL", "$1,234.50", "decimal", "1234.50"),
+        # The decimal transform hands the writer an exact Decimal (ec8c95ff) so
+        # bind cannot re-read the canonical spelling under another locale.
+        ("VARCHAR", "DECIMAL", "$1,234.50", "decimal", Decimal("1234.50")),
         ("VARCHAR", "BOOLEAN", "true", "boolean", True),
         ("VARCHAR", "DATE", "2024-06-01", "date", "2024-06-01"),
         ("TIMESTAMP", "DATETIME", "2024-06-01T12:00:00Z", "datetime", "2024-06-01T12:00:00Z"),
@@ -340,7 +343,7 @@ def test_csv_rows_map_to_snowflake_typed_values():
     )
     assert not errors, errors
     assert mapped[0][0] == "ORD-9001"
-    assert mapped[0][2] == "2499.00"
+    assert mapped[0][2] == Decimal("2499.00")
     # Native INTEGER wire is identity — digit text is not Parse integer.
     assert mapped[0][3] in {5, "5"}
     assert mapped[0][4] is True
@@ -366,8 +369,13 @@ def test_csv_to_snowflake_lossy_coercions_flagged():
         ("n", "boolean", None, True),
         ("maybe", "boolean", None, True),
         # decimals preserve precision
-        ("12345678901234567890.12345", "decimal", "12345678901234567890.12345", False),
-        ("1.5e-10", "decimal", "0.00000000015", False),
+        (
+            "12345678901234567890.12345",
+            "decimal",
+            Decimal("12345678901234567890.12345"),
+            False,
+        ),
+        ("1.5e-10", "decimal", Decimal("0.00000000015"), False),
         # integers reject fractional values
         ("42.0", "integer", 42, False),
         ("999999999999999999999999999999", "integer", 999999999999999999999999999999, False),

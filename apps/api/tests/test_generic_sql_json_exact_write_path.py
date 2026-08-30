@@ -48,6 +48,27 @@ def test_sa_type_for_logical_json_is_exact_on_generic_engines():
         assert isinstance(sa_t, sa.JSON)
 
 
+def test_exact_json_survives_the_dialect_impl_swap(tmp_path):
+    """A real INSERT must land a document, not a quoted JSON string.
+
+    SQLAlchemy replaces ``sa.JSON`` with the dialect's own JSON type through
+    ``colspecs``, and that impl re-serialized the canonical text this type
+    already produced — every generic-SQL JSON column read back as
+    ``"{\\"tier\\":\\"gold\\"}"``, so a JSON destination silently became text.
+    """
+    engine = sa.create_engine(f"sqlite:///{tmp_path/'j.db'}")
+    md = sa.MetaData()
+    t = sa.Table("j", md, sa.Column("payload", _sa_type_for_logical("JSON", "sqlite", "sqlite")))
+    md.create_all(engine)
+    doc = '{"tags":["a","b"],"tier":"gold"}'
+    with engine.begin() as conn:
+        conn.execute(t.insert(), [{"payload": doc}])
+    with engine.connect() as conn:
+        stored = conn.exec_driver_sql("SELECT payload FROM j").scalar_one()
+    assert stored == doc
+    assert json.loads(stored) == {"tags": ["a", "b"], "tier": "gold"}
+
+
 def test_sa_type_for_logical_json_stays_jsonb_on_postgres():
     sa_t = _sa_type_for_logical("JSON", "postgresql", "postgresql")
     assert not isinstance(sa_t, _ExactJSON)
@@ -57,7 +78,12 @@ def test_sa_type_for_logical_json_stays_jsonb_on_postgres():
 def test_sa_type_for_logical_json_stays_text_on_oracle_clickhouse():
     for dialect, db in (("oracle", "oracle"), ("clickhouse", "clickhouse")):
         sa_t = _sa_type_for_logical("JSON", dialect, db)
-        assert isinstance(sa_t, (sa.Text, sa.String)), (dialect, type(sa_t))
+        # ClickHouse spells a nullable column ``Nullable(String)``, so the text
+        # verdict lives one wrapper down — unwrap rather than accept the outer
+        # type, or a JSON impl smuggled inside would pass unnoticed.
+        inner = getattr(sa_t, "nested_type", sa_t)
+        assert isinstance(inner, (sa.Text, sa.String)), (dialect, type(sa_t))
+        assert not isinstance(inner, _ExactJSON)
         assert not isinstance(sa_t, _ExactJSON)
 
 

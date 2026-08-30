@@ -315,6 +315,11 @@ def _decimal_to_json(value: Decimal) -> Any:
 
     Extreme exponents stay scientific — never expand into a multi-megabyte
     fixed-point string (that path raised decimal.Overflow mid-transfer).
+
+    Exported *files* are the exception: a reader expects a numeric column to
+    be a JSON number, so exporters serialize through
+    ``json_dumps_exact_numbers``, which writes the same exact digits as an
+    unquoted literal.
     """
     return safe_decimal_text(value)
 
@@ -682,3 +687,44 @@ def sanitize_json_value(value: Any, *, refuse_nonfinite: bool = True) -> Any:
 def json_default(value: Any) -> Any:
     """Public JSON-default helper for json.dumps() callers."""
     return _json_default(value)
+
+
+_JSON_NUMBER_RE = re.compile(r"^-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?$")
+
+
+def _mark_exact_numbers(value: Any, mark: str) -> Any:
+    """Tag Decimals so the dump can restore them as unquoted literals."""
+    if isinstance(value, Decimal):
+        text = safe_decimal_text(value)
+        return mark + text if _JSON_NUMBER_RE.match(text) else text
+    if isinstance(value, dict):
+        return {k: _mark_exact_numbers(v, mark) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_mark_exact_numbers(v, mark) for v in value]
+    return value
+
+
+def json_dumps_exact_numbers(value: Any, **kwargs: Any) -> str:
+    """``json.dumps`` that writes Decimals as exact JSON *numbers*.
+
+    JSON numbers carry arbitrary precision, so an exported ``NUMERIC(12,2)``
+    cell belongs in the file as ``1000.00`` — not as the quoted ``"1000.00"``
+    the string policy in ``_decimal_to_json`` produces, which retypes a whole
+    numeric column to text for every downstream reader. Digits, scale and
+    exponent are the exact ones the source stated; ``float`` is never involved.
+
+    Values JSON has no number grammar for (NaN, Infinity) keep the string form.
+    """
+    kwargs.setdefault("default", json_default)
+    kwargs.setdefault("ensure_ascii", False)
+    kwargs.setdefault("allow_nan", False)
+    # Per-dump token: a *string* cell that happened to carry the marker text
+    # must never be unquoted into a bare literal.
+    mark = f"\x00df{uuid.uuid4().hex}#"
+    dumped = json.dumps(_mark_exact_numbers(value, mark), **kwargs)
+    pattern = re.escape(json.dumps(mark)[1:-1])
+    return re.sub(
+        rf'"{pattern}(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)"',
+        lambda m: m.group(1),
+        dumped,
+    )

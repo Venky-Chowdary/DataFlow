@@ -28,13 +28,12 @@ from __future__ import annotations
 
 import csv
 import io
-import json
 import tempfile
 from dataclasses import dataclass, field
 from typing import Any, Sequence
 
 from services.brand_env import getenv_brand
-from services.value_serializer import cell_to_string, json_default
+from services.value_serializer import cell_to_string, json_dumps_exact_numbers
 
 DEFAULT_MATERIALIZE_BATCH = 1024
 _SAMPLE_LIMIT = 50
@@ -186,19 +185,10 @@ class ObjectStoreEncoder:
             if self._records_written or self._header_written:
                 self._spool.write(b"\n")
             self._header_written = True
-            self._spool.write(
-                json.dumps(
-                    record,
-                    default=json_default,
-                    ensure_ascii=False,
-                    allow_nan=False,
-                ).encode("utf-8")
-            )
+            self._spool.write(json_dumps_exact_numbers(record).encode("utf-8"))
 
     def _emit_json_record(self, rec: dict[str, Any], *, comma: bool) -> None:
-        dumped = json.dumps(
-            rec, indent=2, default=json_default, ensure_ascii=False, allow_nan=False
-        )
+        dumped = json_dumps_exact_numbers(rec, indent=2)
         indented = "\n".join(
             (f"  {line}" if line else line) for line in dumped.split("\n")
         )

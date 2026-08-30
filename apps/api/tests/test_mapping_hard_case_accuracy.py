@@ -79,12 +79,17 @@ def test_mapping_hard_cases_with_proof_artifact(tmp_path: Path) -> None:
             destination_table_exists=case.get("destination_table_exists"),
         )
         row = mapped[0]
+        # Review is per case: an unread destination must be held, while a
+        # proven-absent table is a lossless identity CREATE the operator
+        # approves — holding that one turns every new table into contract spam.
         ok = (
             bool(row.get("create_new")) is bool(case["create_new"])
-            and row.get("requires_review") is True
+            and bool(row.get("requires_review")) is bool(case.get("requires_review", True))
         )
         if case.get("assignment_strategy"):
             ok = ok and row.get("assignment_strategy") == case["assignment_strategy"]
+        if case.get("mapping_class"):
+            ok = ok and row.get("mapping_class") == case["mapping_class"]
         correct += int(ok)
         results.append({
             "id": case["id"],

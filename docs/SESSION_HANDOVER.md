@@ -291,6 +291,39 @@ sync mode (only `full_refresh_append` at 221.5 s and `incremental_deduped` at
 
 ---
 
+## 3c. Number-locale + exact-Decimal wave (`4bfde98a` → this commit)
+
+An ambiguous file number now settles once — declaration → typed wire → evidence
+in the sample → US fallback — and inference, profiling, preflight, the writer
+and Gate-8 all read that single owner (`services/transform_engine.py`). A typed
+database numeric carrier is `WIRE`, so a faithful `NUMERIC(12,3)` route is no
+longer refused as "ambiguous grouping", and `20.5` vs `20.500` is no longer
+reconciled as corruption.
+
+This commit closes the 12 type/decimal failures that predated the locale work
+(verified failing at `1b2bf77a~1`), each a real defect, not a test edit:
+
+| Defect | Fix |
+| --- | --- |
+| Currency text (`$1,234.56`) silently became `1234.56` at a DECIMAL bind nobody declared a conversion for | `coerce_decimal_wire` refuses the marker; a declared decimal transform hands bind an exact `Decimal` |
+| A refused DynamoDB `NS` member fell through and landed the envelope as a Dynamo **map** — a declared number set silently became a document | only a failed JSON *parse* falls through; a refusal raises |
+| Exported JSON/JSONL retyped every numeric column to text (`"1000.00"`) | `json_dumps_exact_numbers` writes exact digits as an unquoted literal; `float` is never involved |
+| Generic-SQL JSON columns read back as a quoted JSON string | SQLAlchemy swaps `sa.JSON` for the dialect impl via `colspecs`, which re-serialized our canonical text — `_ExactJSON._gen_dialect_impl` keeps our processors |
+| Structural attestation "unreadable" on a table that exists (SQLite-backed generic SQL) | a writer reports the db *file* as the schema; `_catalog_schema` maps a non-attached path to the default schema |
+| Mapping hard-case golden at 92.9% | fixture semantics: a **proven-absent** table is a lossless identity CREATE (`create_new`, `identity_passthrough`, `equivalent_create_new`, approve-eligible). Existing-but-unreadable stays `pending_dest_schema`, `create_new=false`, review-required. The 100% floor was not lowered |
+
+Measured: `1122 passed, 12 skipped` across
+`test_cross_schema_edge_types / test_cross_type_accuracy / test_decimal_write_path /
+test_dynamodb_ns_write_path / test_value_serializer / test_mapping_hard_case_accuracy /
+test_object_store_materialize`, plus `35 passed` on
+`test_physical_state_diff / test_generic_sql_json_exact_write_path`. CI ruff
+allowlist clean; CI mypy shows the same 4 baseline errors as before this wave.
+
+Not proven by this wave: the 60+ connector matrix, 100K/1M per connector, live
+Snowflake, notification delivery, MCP from a real client.
+
+---
+
 ## 4. Earlier waves on this branch (already pushed and proven)
 
 | Area | Evidence |

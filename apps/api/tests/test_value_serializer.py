@@ -15,6 +15,7 @@ if str(_API_ROOT) not in sys.path:
 from services.value_serializer import (  # noqa: E402
     cell_to_string,
     json_default,
+    json_dumps_exact_numbers,
     sanitize_json_value,
 )
 
@@ -91,3 +92,26 @@ def test_cell_to_string_preserves_decimal_in_nested_json():
 def test_cell_to_string_decimal_scalar_is_text():
     assert cell_to_string(Decimal("1000.00")) == "1000.00"
     assert cell_to_string(Decimal("-999999999999999999.999999")) == "-999999999999999999.999999"
+
+
+def test_exact_number_dump_keeps_scale_and_digits_unquoted():
+    """An exported numeric column stays a JSON number, digit for digit."""
+    text = json_dumps_exact_numbers(
+        {
+            "amount": Decimal("1000.00"),
+            "precision": Decimal("0.0000000000001"),
+            "nested": [{"n": Decimal("-12.5")}],
+        }
+    )
+    assert '"amount": 1000.00' in text
+    assert '"precision": 0.0000000000001' in text
+    assert '"n": -12.5' in text
+    assert json.loads(text, parse_float=Decimal)["amount"] == Decimal("1000.00")
+
+
+def test_exact_number_dump_never_unquotes_a_string_cell():
+    payload = {"note": "1000.00", "raw": '\x00df0#12', "amt": Decimal("7")}
+    parsed = json.loads(json_dumps_exact_numbers(payload))
+    assert parsed["note"] == "1000.00"
+    assert parsed["raw"] == "\x00df0#12"
+    assert parsed["amt"] == 7

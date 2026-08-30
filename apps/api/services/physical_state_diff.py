@@ -324,6 +324,7 @@ def read_physical_state(
     collector = _Collector()
     with engine.connect() as conn:
         inspector = sa.inspect(conn)
+        schema = _catalog_schema(inspector, conn, schema)
         args: dict[str, Any] = {"schema": schema or None}
         # Oracle and other upper-folding catalogs only match the stored spelling.
         name = _resolve_table_name(inspector, table, schema or None)
@@ -749,6 +750,27 @@ def catalog_table_names(
     return [
         str(normalize(str(r[0])) if callable(normalize) else r[0]) for r in (rows or [])
     ]
+
+
+def _catalog_schema(inspector: Any, conn: Any, schema: str) -> str:
+    """The qualifier this catalog actually knows, or "" for the default one.
+
+    A writer reports ``schema or database`` as the place it wrote, which is the
+    qualifier on MySQL but a *file path* on SQLite-backed engines (sqlite,
+    generic_sql, duckdb over a file). SQLite reads a schema as an ATTACHed
+    database name, so the path made every reflection query read
+    ``"/tmp/x.db".sqlite_master`` and the whole structural attestation came
+    back unreadable on a table that is right there.
+    """
+    if not schema:
+        return ""
+    if getattr(conn.dialect, "name", "") != "sqlite":
+        return schema
+    try:
+        attached = {str(s) for s in inspector.get_schema_names()}
+    except Exception:  # noqa: BLE001 — an unreadable list is not a qualifier
+        return ""
+    return schema if schema in attached else ""
 
 
 def _resolve_table_name(inspector: Any, table: str, schema: str | None) -> str | None:
