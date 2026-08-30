@@ -346,6 +346,10 @@ def source_types_are_authoritative(source_kind: str, source_format: str = "") ->
 # profiling *onto* one is a loss of evidence.
 UNTYPED_TEXT_LOGICALS = frozenset({"string", "text", "varchar", "unknown"})
 
+# Families whose *declared* form carries a domain even with no parameters:
+# ``NUMERIC`` / Dynamo ``N`` / BSON ``Decimal128`` accept values no sample bounds.
+_NUMERIC_DOMAIN_LOGICALS = frozenset({"decimal", "integer", "float"})
+
 
 def _inference_would_demote_to_text(declared: str, inferred: str) -> bool:
     """True when profiling stringified samples would erase a typed declaration.
@@ -382,6 +386,7 @@ def merge_profiler_schema(
     profiled: dict[str, str],
     *,
     authoritative_existing: bool = False,
+    source_carriers_sampled: bool = False,
 ) -> dict[str, str]:
     """Combine declared column types with statistical inference from samples.
 
@@ -400,14 +405,27 @@ def merge_profiler_schema(
       type keeps its precision when inference agrees on the same logical family
       but drops the parameters, and except that inference may never demote a
       typed declaration to text (see :func:`_inference_would_demote_to_text`).
+
+    ``source_carriers_sampled`` marks a source that declares no width at all —
+    a document or keyspace store, where every page is a new sample of an
+    unbounded family. A file's measured ``DECIMAL(8,6)`` is a fact about a
+    finite object; the same number read from Redis is a fact about the 200 keys
+    the probe happened to scan, and stamping it created a destination column the
+    *next* value could not enter. Such a numeric profile keeps its family and
+    loses its bound, so create-new invents the platform floor instead.
     """
-    from services.type_system import normalize_logical_type
+    from services.type_system import (
+        normalize_logical_type,
+        unbound_sampled_numeric_carrier,
+    )
 
     merged = dict(existing)
     for col, inferred in profiled.items():
         declared = str(existing.get(col) or "").strip()
         if not inferred:
             continue
+        if source_carriers_sampled:
+            inferred = unbound_sampled_numeric_carrier(str(inferred))
         if authoritative_existing:
             # The source declared this column. Even a bare TEXT is a fact here
             # (Postgres TEXT is unbounded), not the placeholder a header scan
@@ -418,6 +436,22 @@ def merge_profiler_schema(
             continue
         if _inference_would_demote_to_text(declared, str(inferred)):
             continue
+        if "(" not in declared and "(" in str(inferred):
+            try:
+                declared_logical = normalize_logical_type(declared)
+                same_family = declared_logical == normalize_logical_type(inferred)
+            except Exception:
+                declared_logical, same_family = "", False
+            if same_family and declared_logical in _NUMERIC_DOMAIN_LOGICALS:
+                # The source declared the family and declared no bound: a Dynamo
+                # ``N`` or a Mongo ``Decimal128`` accepts values the sample never
+                # showed. Sizing that declaration down to the sample's
+                # ``DECIMAL(9,6)`` invents a domain the source does not have, and
+                # the create-new carrier (``DECIMAL(38,15)``) then reads as a
+                # narrowing of the profile rather than a widening of the
+                # declaration. Inference types the untyped; it does not bound the
+                # unbounded.
+                continue
         if "(" in declared and "(" not in str(inferred):
             try:
                 same_family = normalize_logical_type(declared) == normalize_logical_type(inferred)

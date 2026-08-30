@@ -24,6 +24,8 @@ def _columns_type_and_nullability(
 
 def _columns_schema_meta(
     columns: list[dict[str, Any]],
+    *,
+    physical_carriers: bool = False,
 ) -> tuple[
     dict[str, str],
     dict[str, bool],
@@ -45,6 +47,23 @@ def _columns_schema_meta(
             continue
         key = str(name)
         types[key] = str(col.get("inferred_type") or "TEXT")
+        # A destination is judged by what its DDL accepts. Sample-derived
+        # narrowing (bare ``numeric`` measured as DECIMAL(7,6), ``text`` read
+        # back as DATETIME/JSON) is evidence about the rows already there, and
+        # presenting it as the sink's carrier makes Validate refuse a write the
+        # column would take. The declared type is restored for that role.
+        # ``logical_translated`` is the same problem from the other side: a
+        # dialect whose catalog carrier was rewritten into DataFlow's neutral
+        # vocabulary (BigQuery ``DATETIME`` → ``TIMESTAMP_NTZ``) reads as a
+        # foreign spelling when graded against that dialect's own rules.
+        if physical_carriers and (
+            col.get("sample_refined")
+            or col.get("decimal_capacity_measured")
+            or col.get("logical_translated")
+        ):
+            declared = str(col.get("declared_type") or "").strip()
+            if declared:
+                types[key] = declared
         if "nullable" in col:
             nulls[key] = bool(col["nullable"])
         dflt = col.get("default")
@@ -70,8 +89,13 @@ def _introspect_table_schema_rich(
     records: list[dict] | None = None,
     *,
     strict_namespace: bool = False,
+    physical_carriers: bool = False,
 ) -> tuple[dict[str, str], dict[str, bool], dict[str, Any]]:
     """Load column types + nullability + unique keys from INFORMATION_SCHEMA.
+
+    ``physical_carriers`` asks for the catalog's declared carrier instead of the
+    sample-narrowed logical type — the destination role, where the question is
+    what the column will accept rather than what it currently holds.
 
     ``strict_namespace`` is required for destination probes so missing tables in
     the chosen DB/schema are not "healed" from another namespace on the host.
@@ -149,7 +173,7 @@ def _introspect_table_schema_rich(
             info = introspect_table_schema(cfg, table)
             if info.get("ok") and info.get("columns"):
                 types, nulls, defaults, ident, gen, coll = _columns_schema_meta(
-                    info["columns"]
+                    info["columns"], physical_carriers=physical_carriers
                 )
                 return types, nulls, _keys_from_info(
                     info,
@@ -205,7 +229,9 @@ def _introspect_table_schema_rich(
         **connection_options(cfg),
     )
     if info.get("ok") and info.get("columns"):
-        types, nulls, defaults, ident, gen, coll = _columns_schema_meta(info["columns"])
+        types, nulls, defaults, ident, gen, coll = _columns_schema_meta(
+            info["columns"], physical_carriers=physical_carriers
+        )
         return types, nulls, _keys_from_info(
             info,
             defaults=defaults,
@@ -256,7 +282,7 @@ def _introspect_table_schema_rich(
         )
         if info_retry.get("ok") and info_retry.get("columns"):
             types, nulls, defaults, ident, gen, coll = _columns_schema_meta(
-                info_retry["columns"]
+                info_retry["columns"], physical_carriers=physical_carriers
             )
             return types, nulls, _keys_from_info(
                 info_retry,

@@ -28,7 +28,11 @@ from typing import Any
 
 from services.db_type_utils import SCHEMALESS_DESTS, ci_get, normalize_dest_kind
 from services.schema_fingerprint import fingerprint_schema, schemas_match
-from services.decision_kernel import is_lossy_coercion, normalize_logical_type
+from services.decision_kernel import (
+    decimal_capacity_is_equal_or_wider,
+    is_lossy_coercion,
+    normalize_logical_type,
+)
 
 # Policies that auto-apply additive field evolution (Airbyte propagate_*).
 PROPAGATE_POLICIES = frozenset({"propagate_columns", "propagate_all"})
@@ -171,6 +175,12 @@ def _is_type_narrow(old_type: str, new_type: str, *, dest_db: str = "") -> bool:
         return False
     old_logical = normalize_logical_type(old_type)
     new_logical = normalize_logical_type(new_type)
+    if decimal_capacity_is_equal_or_wider(old_type, new_type, dest_db=dest_db):
+        # A wider fixed-point carrier cannot lose a digit. It can still *invent*
+        # a shape the source never declared (BigQuery bare BIGNUMERIC is 76,38),
+        # which stays a fidelity/contract chip — but calling it drift-narrow
+        # paused every second run into a table this product had just created.
+        return False
     if is_lossy_coercion(old_type, new_type, dest_db=dest_db):
         return True
     if old_logical == new_logical:
@@ -860,6 +870,14 @@ def detect_schema_drift(
                 })
                 continue
             if not is_lossy_coercion(src_type, tgt_type, dest_db=dest_db):
+                continue
+            if decimal_capacity_is_equal_or_wider(
+                str(src_type), str(tgt_type), dest_db=dest_db
+            ):
+                # Drift asks whether the destination carrier can still take the
+                # source. A wider fixed-point sink can. The invented shape
+                # (BigQuery bare BIGNUMERIC is 76,38) stays a fidelity/contract
+                # chip, so pausing the sync here only re-reported it as loss.
                 continue
 
             if is_precision_collapse_coercion(src_type, tgt_type, dest_db=dest_db):

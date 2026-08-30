@@ -584,7 +584,16 @@ def _bq_apply_specialty_quarantine(
         mapped_rows, target_cols, decimal_target_types, rejected_details, policy
     )
     mapped_rows = quarantine_unfit_temporals(
-        mapped_rows, target_cols, decimal_target_types, rejected_details, policy
+        mapped_rows,
+        target_cols,
+        decimal_target_types,
+        rejected_details,
+        policy,
+        # BigQuery TIMESTAMP is a UTC instant carrier (DATETIME is the wall-clock
+        # one). Without the dialect this helper read bare TIMESTAMP as NTZ and
+        # quarantined every offset-bearing value — a whole TIMESTAMPTZ column
+        # held out for a strip that BigQuery does not perform.
+        dest_db="bigquery",
     )
     mapped_rows = quarantine_unfit_specialty_types(
         mapped_rows, target_cols, decimal_target_types, rejected_details, policy

@@ -1064,14 +1064,18 @@ def _logical_type_from_sa(col_type: Any) -> str:
             return "integer"
         return "decimal"
 
-    if isinstance(col_type, (sa.Integer, sa.BigInteger, sa.SmallInteger)):
-        # Keep the width: the bind range-checks the stamped token, so a 64-bit
-        # column reflected as bare "integer" got int4 bounds and refused every
-        # value above 2^31 the BIGINT destination stores natively.
-        if isinstance(col_type, sa.BigInteger):
-            return "bigint"
-        if isinstance(col_type, sa.SmallInteger):
-            return "smallint"
+    # Integer *width* is declared, so it is reported, in this function's
+    # lower-case token vocabulary. Collapsing BIGINT, INTEGER and SMALLINT onto
+    # one "integer" token made every generic-SQL engine (DuckDB, ClickHouse,
+    # Trino, …) describe a 64-bit column as a 32-bit one: the bind then
+    # range-checked int4 bounds and refused every value above 2**31 the BIGINT
+    # destination stores natively, while a genuinely INT32 destination read the
+    # same way — a real overflow was indistinguishable from a false alarm.
+    if isinstance(col_type, sa.BigInteger):
+        return "bigint"
+    if isinstance(col_type, sa.SmallInteger):
+        return "smallint"
+    if isinstance(col_type, sa.Integer):
         return "integer"
 
     if isinstance(col_type, (sa.DateTime,)):
@@ -3404,6 +3408,38 @@ def _count_table_raw(
     except Exception:
         # Never fabricate len(rows) as cardinality — that stops streaming after page one.
         return None
+
+
+def count_table(cfg: dict[str, Any], table: str) -> int | None:
+    """``COUNT(*)`` of a table through this engine's own connection.
+
+    A table that does not exist counts ``0`` — create-on-first-write is a known
+    empty destination, which is a measurement. ``None`` is reserved for a count
+    that could not be taken, so callers can leave conservation unproven instead
+    of substituting the writer's acknowledgement.
+    """
+    if not SQLALCHEMY_AVAILABLE:
+        return None
+    name = (table or "").strip()
+    if not name:
+        return None
+    engine = _engine(cfg)
+    try:
+        schema_name = _schema_name(cfg)
+        try:
+            if not inspect(engine).has_table(name, schema=schema_name):
+                return 0
+        except Exception:
+            # Reflection is unavailable on some SQL endpoints; let the COUNT
+            # itself answer rather than reporting a wrong 0.
+            pass
+        with engine.connect() as conn:
+            return _count_table_raw(conn, name, schema_name, dialect=_dialect_key(cfg))
+    except Exception:
+        logger.warning("generic_sql count_table failed for %s", name, exc_info=True)
+        return None
+    finally:
+        release_engine(engine)
 
 
 def read_table_batch(

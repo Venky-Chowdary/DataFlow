@@ -78,6 +78,7 @@ from services.decision_kernel.structural import (
 from services.decision_kernel.logical_type import LogicalType, NativeType, parse_type_ref
 from services.decision_kernel.types import (
     create_new_mapping_target_type,
+    decimal_capacity_is_equal_or_wider,
     ddl_invent_never_narrower_than_table,
     ddl_type,
     float_width_carrier,
@@ -174,6 +175,7 @@ __all__ = [
     "invent_context_from_sync_mode",
     "invent_dest_type",
     "stamp_additive_mapping_types",
+    "decimal_capacity_is_equal_or_wider",
     "is_lossy_coercion",
     "is_precision_collapse_coercion",
     "materialize_dest_ddl",

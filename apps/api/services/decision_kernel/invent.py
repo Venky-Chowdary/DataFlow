@@ -12,6 +12,7 @@ from typing import Any
 
 from services.column_case import column_type_or_none
 from services.mapping_constraints import is_intentional_omit
+from services.type_system import destination_carriers_are_inferred
 
 
 class InventContext(str, Enum):
@@ -332,6 +333,16 @@ def stamp_additive_mapping_types(
             continue
         live_hit = live.get(tgt) or live_fold.get(tgt.lower())
         stamped = str(row.get("target_type") or row.get("dest_type") or "").strip()
+        if live_hit and stamped and destination_carriers_are_inferred(db):
+            # Bind-existing authority rests on the live carrier being *declared*.
+            # A document / keyspace store has no DDL: its "live type" is read off
+            # a page of documents, so a collection currently holding small ids
+            # reports ``INTEGER`` and would narrow a ``BIGINT`` population on the
+            # second run — and re-spell the Map's BSON carrier in relational
+            # tokens, which diverges from the Validate stamp (Map→DDL identity
+            # refusal on run 2 of an unchanged transfer). Keep the operator's
+            # stamp; an unstamped column still invents from the source below.
+            live_hit = None
         if live_hit:
             # Bind-existing authority — live carrier always wins over Map invent.
             widened = _backfill_widened_type(
