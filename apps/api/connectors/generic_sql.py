@@ -73,6 +73,7 @@ from services.decision_kernel import (
     materialize_dest_ddl,
     normalize_logical_type,
 )
+from services.dialect_profiles import denormalize_result_key
 from services.engine_pool import release_engine
 from services.identity_carry import identity_seed_step
 from services.type_system import parse_numeric_precision_scale
@@ -108,10 +109,31 @@ try:
         cache_ok = True
 
         def __init__(self, col_spec: str) -> None:
-            self._col_spec = col_spec
+            # SQLAlchemy's ``adapt()`` rebuilds the type with
+            # ``constructor_copy``, which reads the ctor argument names off the
+            # instance: a private ``_col_spec`` made every adapt() raise.
+            self.col_spec = col_spec
 
         def get_col_spec(self, **_kw: Any) -> str:
-            return self._col_spec
+            return self.col_spec
+
+    class _OracleJSON(sa.types.UserDefinedType):
+        """Oracle 21c+ native ``JSON`` column type.
+
+        SQLAlchemy 2.0 has no Oracle JSON type at all: reflection yields
+        ``NullType`` ("Did not recognize type 'JSON'") and DDL cannot render
+        ``sa.JSON``. An unrecognised source column then read as an untyped
+        container, so the JSON *document* went out through the string-wire
+        container policy and ``{"i": 0}`` arrived as ``{"i": "0"}``.
+        """
+
+        cache_ok = True
+
+        def get_col_spec(self, **_kw: Any) -> str:
+            return "JSON"
+
+    if oracle is not None and "JSON" not in oracle.base.OracleDialect.ischema_names:
+        oracle.base.OracleDialect.ischema_names["JSON"] = _OracleJSON
 
 except (ImportError, AttributeError):  # pragma: no cover
     SQLALCHEMY_AVAILABLE = False
@@ -1043,6 +1065,13 @@ def _logical_type_from_sa(col_type: Any) -> str:
         return "decimal"
 
     if isinstance(col_type, (sa.Integer, sa.BigInteger, sa.SmallInteger)):
+        # Keep the width: the bind range-checks the stamped token, so a 64-bit
+        # column reflected as bare "integer" got int4 bounds and refused every
+        # value above 2^31 the BIGINT destination stores natively.
+        if isinstance(col_type, sa.BigInteger):
+            return "bigint"
+        if isinstance(col_type, sa.SmallInteger):
+            return "smallint"
         return "integer"
 
     if isinstance(col_type, (sa.DateTime,)):
@@ -1055,6 +1084,12 @@ def _logical_type_from_sa(col_type: Any) -> str:
             f"{type(col_type).__name__} {col_type!r}".lower()
         ):
             return "timestamptz"
+        # Oracle TIMESTAMP WITH LOCAL TIME ZONE carries awareness on
+        # ``local_timezone`` and leaves ``timezone`` False, so the flag alone
+        # read an instant carrier as NTZ and the writer quarantined every aware
+        # value the column exists to hold.
+        if getattr(col_type, "local_timezone", False):
+            return "timestamp_ltz"
         tz = getattr(col_type, "timezone", None)
         if tz is True:
             return "timestamptz"
@@ -1504,6 +1539,18 @@ def _sa_type_for_logical(
         from services.type_system import integer_bit_width
 
         int_u = raw.upper().split("(", 1)[0].strip().replace(" ", "")
+        if int_u in {"NUMBER", "NUMERIC", "DECIMAL", "DEC"}:
+            from services.type_system import (
+                parse_numeric_precision_scale as _declared_precision,
+            )
+
+            declared, _declared_scale = _declared_precision(raw)
+            if declared is not None:
+                # A declared NUMBER(p,0) carries its own domain. The 64-bit
+                # never-narrower default below is for *ambiguous* widths, and
+                # applying it here widened a planned NUMBER(1) boolean carrier
+                # to NUMBER(19) — CREATE contradicting the stamped plan.
+                return _maybe_nullable(sa.Numeric(int(declared), 0))
         carrier = integer_width_carrier(raw) or ""
         width = integer_bit_width(carrier) if carrier else None
         if int_u in {"INT", "INTEGER"} and db_type:
@@ -1593,9 +1640,24 @@ def _sa_type_for_logical(
         # Approximate IEEE float — never rewrite to fixed-point Numeric.
         # Exact lowercase logical ``float`` → Double (never-narrower invent).
         # Honor Map REAL/FLOAT4/FLOAT stamps (sa.Double invents mantissa widen).
+        float_u = raw.upper().split("(", 1)[0].strip()
+        if _is_oracle_wire(dialect_name, db_type):
+            # Oracle DOUBLE PRECISION / FLOAT(n) are NUMBER-backed: magnitude
+            # caps near 1e125, so an IEEE-754 double source (1.5e300) will not
+            # fit. BINARY_DOUBLE / BINARY_FLOAT are the true IEEE carriers.
+            single = float_u in {
+                "REAL",
+                "FLOAT4",
+                "HALF",
+                "FLOAT16",
+                "BINARY_FLOAT",
+                "FLOAT32",
+            }
+            return _maybe_nullable(
+                oracle.BINARY_FLOAT() if single else oracle.BINARY_DOUBLE()
+            )
         if (raw or "").strip() == LOGICAL_FLOAT:
             return _maybe_nullable(sa.Double())
-        float_u = raw.upper().split("(", 1)[0].strip()
         if float_u in {"REAL", "FLOAT4", "HALF", "FLOAT16", "BINARY_FLOAT", "FLOAT32"}:
             if dialect_name == "postgresql" and hasattr(postgresql, "REAL"):
                 return _maybe_nullable(postgresql.REAL())
@@ -1753,6 +1815,11 @@ def _sa_type_for_logical(
         if width is not None:
             if is_fixed_char_carrier(raw):
                 return _maybe_nullable(sa.NCHAR(width))
+            if _is_oracle_wire(dialect_name, db_type) and oracle is not None:
+                # sa.Unicode compiles to Oracle VARCHAR2, so an NVARCHAR2 source
+                # column landed as a non-national carrier and the fidelity gate
+                # reported the create-new table as a narrowing.
+                return _maybe_nullable(oracle.NVARCHAR2(width))
             return _maybe_nullable(sa.Unicode(width))
         if dialect_name == "mssql" or db_type in {"sqlserver", "mssql", "azure_sql"}:
             # sa.UnicodeText compiles to deprecated NTEXT; NVARCHAR(max) is the
@@ -1767,6 +1834,11 @@ def _sa_type_for_logical(
     width = string_carrier_length(raw)
     if width is not None:
         if is_fixed_char_carrier(raw):
+            if _is_oracle_wire(dialect_name, db_type) and _DialectNativeType is not None:
+                # Oracle CHAR(n) means n *bytes*: a 36-character UUID key in a
+                # multibyte charset no longer fits, and the fidelity gate reads
+                # the created column back as a narrowing of CHAR(n CHAR).
+                return _maybe_nullable(_DialectNativeType(f"CHAR({width} CHAR)"))
             return _maybe_nullable(sa.CHAR(width))
         return _maybe_nullable(sa.String(width))
 
@@ -2211,6 +2283,22 @@ def test_generic_sql(**kwargs: Any) -> tuple[bool, str]:
         return False, str(exc)
 
 
+def reflected_column_name(table_obj: Any, name: str) -> str | None:
+    """Reflected spelling of a caller-supplied column name, or ``None``.
+
+    Callers speak the spelling the catalog stores (Oracle ``ID``) while
+    SQLAlchemy reflection normalises case-insensitive names to lower case
+    (``id``), so a catalog-spelled projection missed every column and the read
+    silently degraded to an untyped ``SELECT *``. Only an unambiguous single
+    fold match is accepted: on PostgreSQL "Foo" and "foo" are distinct columns.
+    """
+    if name in table_obj.c:
+        return name
+    folded = str(name).casefold()
+    hits = [str(col.name) for col in table_obj.c if str(col.name).casefold() == folded]
+    return hits[0] if len(hits) == 1 else None
+
+
 def _reflect_table(
     engine: Any,
     table: str,
@@ -2265,18 +2353,32 @@ def _reflect_table(
     if columns is None:
         return table_obj
 
+    dialect_name = str(getattr(getattr(engine, "dialect", None), "name", "") or "")
     # Restrict to requested columns but keep the full table for ordering/cursor.
     selected = []
     for c in columns:
-        if c in table_obj.c:
-            selected.append(table_obj.c[c])
-        else:
+        resolved = reflected_column_name(table_obj, str(c))
+        if resolved is None:
             raise ValueError(f"Column '{c}' not found in table {table}")
+        selected.append(table_obj.c[resolved])
     # Return a subselect proxy with those columns only so we can still use .c.
+    # ``quote=True`` renders the name verbatim, so the projection has to carry
+    # the catalog's own spelling: on Oracle a lower-case literal compiles to
+    # ORA-00942 and the caller silently degrades to an untyped ``SELECT *``.
     new_meta = sa.MetaData()
-    new_table = sa.Table(table, new_meta, schema=schema, quote=True, quote_schema=True)
+    new_table = sa.Table(
+        denormalize_result_key(dialect_name, table),
+        new_meta,
+        schema=denormalize_result_key(dialect_name, schema) if schema else schema,
+        quote=True,
+        quote_schema=True,
+    )
     for col in selected:
-        new_table.append_column(sa.Column(col.name, col.type, quote=True))
+        new_table.append_column(
+            sa.Column(
+                denormalize_result_key(dialect_name, col.name), col.type, quote=True
+            )
+        )
     return new_table
 
 
@@ -2393,6 +2495,26 @@ def _build_table_for_write(
             if str(c).casefold() in by_fold_ident
         }
 
+    # COLLATE the planner certified as "carried". Without this the create-new
+    # DDL emitted types only, the destination silently took the server default
+    # collation, and the certificate claimed an equality rule the table did not
+    # have (re-reading it then reports a fidelity collapse against the source).
+    plan_collations: dict[str, str] = {}
+    if fidelity_plan is not None:
+        by_fold_coll = {str(c).casefold(): c for c in columns}
+        for c, clauses in (
+            getattr(fidelity_plan, "column_suffixes", {}) or {}
+        ).items():
+            key = by_fold_coll.get(str(c).casefold())
+            if not key:
+                continue
+            for clause in clauses or []:
+                match = re.match(
+                    r"\s*COLLATE\s+(.+?)\s*$", str(clause), flags=re.IGNORECASE
+                )
+                if match:
+                    plan_collations[key] = match.group(1).strip().strip('"')
+
     cols = []
     for col in columns:
         logical = column_types.get(col, "string")
@@ -2420,12 +2542,24 @@ def _build_table_for_write(
                 identity_arg.append(
                     sa.Identity(always=False, start=seed, increment=step)
                 )
+        sa_type = _sa_type_for_logical(
+            logical, dialect_name, db_type, nullable=nullable
+        )
+        collation = plan_collations.get(col)
+        if collation and isinstance(sa_type, sa.String):
+            # String-family types render ``… COLLATE <name>`` from this attribute
+            # on every dialect that supports column collation.
+            sa_type = sa_type.copy() if hasattr(sa_type, "copy") else sa_type
+            try:
+                sa_type.collation = collation
+            except Exception:  # noqa: BLE001 — immutable type: keep types-only DDL
+                logger.warning(
+                    "collation %s could not be applied to %s", collation, col
+                )
         cols.append(
             sa.Column(
                 col,
-                _sa_type_for_logical(
-                    logical, dialect_name, db_type, nullable=nullable
-                ),
+                sa_type,
                 *identity_arg,
                 primary_key=is_pk,
                 nullable=nullable,
@@ -2707,7 +2841,7 @@ def _sample_raw_table(
     else:
         stmt = f"SELECT * FROM {qualified} LIMIT 200"  # nosec B608
     result = conn.execute(sa.text(stmt))
-    headers = list(result.keys())
+    headers = _result_headers(dialect_l, result)
     rows = result.fetchall()
     return headers, rows
 
@@ -2853,11 +2987,14 @@ def introspect_table_schema(
                     "schema": schema or "",
                 }
 
+        from services.dialect_profiles import denormalize_result_key
+
+        dialect_key = _dialect_key(cfg)
         result = []
         for col in columns:
             result.append(
                 {
-                    "name": col["name"],
+                    "name": denormalize_result_key(dialect_key, str(col["name"])),
                     "inferred_type": _logical_type_from_sa(col.get("type")),
                     "nullable": col.get("nullable", True),
                 }
@@ -3170,7 +3307,7 @@ def _read_table_raw(
     # Discover columns so we can ORDER BY the first one — bare LIMIT/OFFSET is
     # non-deterministic and silently duplicates/skips rows across pages.
     probe = conn.execute(sa.text(zero_row_probe_sql(dialect, qualified)))
-    headers = list(probe.keys())
+    headers = _result_headers(dialect, probe)
     if not headers:
         return [], []
     q = quote_char_for(dialect) or '"'
@@ -3190,7 +3327,7 @@ def _read_table_raw(
             order_col = quote_sql_identifier(order_name, q)
     sql = f"{base} ORDER BY {order_col} {page_clause(dialect, offset, limit)}"  # nosec B608
     result = conn.execute(sa.text(sql))
-    headers = list(result.keys())
+    headers = _result_headers(dialect, result)
     rows = [
         [cell_to_string(value, preserve_sql_null=True) for value in row]
         for row in result.fetchall()
@@ -3200,6 +3337,29 @@ def _read_table_raw(
 
 #: Driver type names that cannot appear in an ORDER BY on Oracle/DB2.
 _UNORDERABLE_TYPE_TOKENS: Final = ("CLOB", "NCLOB", "BLOB", "LONG", "XMLTYPE")
+
+
+def _catalog_headers(dialect: str, cols: Any) -> list[str]:
+    """Selected column names in the spelling the catalog stores."""
+    return [denormalize_result_key(dialect, str(col.name)) for col in cols]
+
+
+def _selected_catalog_columns(table_obj: Any, columns: list[str]) -> list[Any]:
+    """Reflected columns for caller-supplied (catalog-spelled) names."""
+    resolved = [reflected_column_name(table_obj, str(c)) for c in columns]
+    return [table_obj.c[name] for name in resolved if name is not None]
+
+
+def _result_headers(dialect: str, result: Any) -> list[str]:
+    """Result column names in the spelling the *catalog* stores.
+
+    Oracle/DB2/Snowflake fold unquoted identifiers to upper case and their
+    drivers hand the result keys back lowercased. The pipeline then read ``id``
+    while introspection — and therefore every mapping built from it — says
+    ``ID``: the row dicts were keyed differently from the mappings and every
+    mapped value arrived empty.
+    """
+    return [denormalize_result_key(dialect, str(key)) for key in result.keys()]
 
 
 def _orderable_header(dialect: str, headers: list[str], probe: Any) -> str | None:
@@ -3300,9 +3460,7 @@ def read_table_batch(
                 table_obj = _reflect_table(engine, table, schema_name, columns)
                 selected_cols = list(table_obj.c)
                 if columns:
-                    selected_cols = [
-                        table_obj.c[c] for c in columns if c in table_obj.c
-                    ]
+                    selected_cols = _selected_catalog_columns(table_obj, columns)
                 else:
                     columns = selected_cols = list(table_obj.c)
 
@@ -3325,8 +3483,8 @@ def read_table_batch(
                 stmt = stmt.offset(offset).limit(limit)
 
                 fetched = conn.execute(stmt).fetchall()
-                headers = [c.name for c in selected_cols]
                 dialect = _dialect_key(cfg)
+                headers = _catalog_headers(dialect, selected_cols)
                 rows = [_serialize_source_row(row, selected_cols, dialect) for row in fetched]
 
                 if known_total_rows is not None:
@@ -3409,9 +3567,7 @@ def read_table_scan_batch(
                 table_obj = _reflect_table(engine, table, schema_name, columns)
                 selected_cols = list(table_obj.c)
                 if columns:
-                    selected_cols = [
-                        table_obj.c[c] for c in columns if c in table_obj.c
-                    ]
+                    selected_cols = _selected_catalog_columns(table_obj, columns)
                 pk_cols = (
                     [c for c in table_obj.primary_key.columns]
                     if table_obj.primary_key is not None
@@ -3430,7 +3586,7 @@ def read_table_scan_batch(
                 # Statement-scoped: on the connection it leaks into later DDL,
                 # which then compiles as DECLARE CURSOR FOR <ddl> and fails.
                 result = conn.execute(stmt.execution_options(stream_results=True))
-                headers = [c.name for c in selected_cols]
+                headers = _catalog_headers(dialect, selected_cols)
                 serialize = True
             except Exception:
                 headers, result = _open_raw_table_scan(
@@ -3500,7 +3656,7 @@ def _open_raw_table_scan(
     qualified = quote_table_ref(table, schema, dialect=dialect)
     base = f"SELECT * FROM {qualified}"  # nosec B608
     probe = conn.execute(sa.text(zero_row_probe_sql(dialect, qualified)))
-    headers = list(probe.keys())
+    headers = _result_headers(dialect, probe)
     if not headers:
         return [], None
     q = quote_char_for(dialect) or '"'
@@ -3515,7 +3671,7 @@ def _open_raw_table_scan(
             order_col = quote_sql_identifier(order_name, q)
     sql = f"{base} ORDER BY {order_col}"  # nosec B608
     result = conn.execute(sa.text(sql))
-    return list(result.keys()), result
+    return _result_headers(dialect, result), result
 
 
 def read_table_cursor_batch(
@@ -3573,20 +3729,37 @@ def read_table_cursor_batch(
             table_obj = _reflect_table(engine, table, schema_name, columns)
             selected_cols = list(table_obj.c)
             if columns:
-                selected_cols = [table_obj.c[c] for c in columns if c in table_obj.c]
+                selected_cols = _selected_catalog_columns(table_obj, columns)
             else:
-                columns = [c.name for c in selected_cols]
+                columns = _catalog_headers(_dialect_key(cfg), selected_cols)
 
             # Resolve ordered key columns for seek.
             key_names: list[str] = []
             if cursor_key_columns:
-                key_names = [c for c in cursor_key_columns if c and c in table_obj.c]
+                key_names = [
+                    name
+                    for name in (
+                        reflected_column_name(table_obj, str(c))
+                        for c in cursor_key_columns
+                        if c
+                    )
+                    if name is not None
+                ]
             else:
-                if cursor_column and cursor_column in table_obj.c:
-                    key_names = [cursor_column]
-                pk = (cursor_primary_key or "").strip()
-                if pk and pk != cursor_column and pk in table_obj.c:
-                    key_names.append(pk)
+                cursor_name = (
+                    reflected_column_name(table_obj, cursor_column)
+                    if cursor_column
+                    else None
+                )
+                if cursor_name is not None:
+                    key_names = [cursor_name]
+                pk_name = (
+                    reflected_column_name(table_obj, (cursor_primary_key or "").strip())
+                    if (cursor_primary_key or "").strip()
+                    else None
+                )
+                if pk_name is not None and pk_name not in key_names:
+                    key_names.append(pk_name)
             if not key_names:
                 raise ValueError(
                     f"Cursor/keyset columns not found in table {table} "
@@ -3604,8 +3777,8 @@ def read_table_cursor_batch(
             stmt = stmt.order_by(*key_cols).limit(limit)
 
             fetched = conn.execute(stmt).fetchall()
-            headers = [c.name for c in selected_cols]
             dialect = _dialect_key(cfg)
+            headers = _catalog_headers(dialect, selected_cols)
             rows = [_serialize_source_row(row, selected_cols, dialect) for row in fetched]
 
         return ReadBatch(headers=headers, rows=rows, offset=0, total_rows=None)
@@ -3692,6 +3865,27 @@ def _prefetch_existing_lsn(
 
 
 
+# pyodbc reports executemany ``rowcount`` per-statement (and SQL Server hands
+# back the last statement's count, or -1 under SET NOCOUNT / triggers), so a
+# committed 200-row INSERT can report 39. A plain INSERT has no partial mode:
+# it either raises or every row landed, so a short positive count is a driver
+# reporting quirk. Trusting it invented "161 rejected" rows that were, in fact,
+# all present at the destination — the exact reverse of a data-loss report.
+_EXECUTEMANY_ROWCOUNT_UNRELIABLE = {"mssql", "sqlserver", "azure_sql", "synapse"}
+
+
+def _insert_rows_written(result: Any, batch_len: int, dialect_name: str) -> int:
+    """Rows an all-or-nothing INSERT committed, ignoring driver miscounts."""
+    reported = getattr(result, "rowcount", None)
+    if not isinstance(reported, int) or reported <= 0:
+        return batch_len
+    if reported < batch_len and (dialect_name or "").lower() in (
+        _EXECUTEMANY_ROWCOUNT_UNRELIABLE
+    ):
+        return batch_len
+    return reported
+
+
 def _upsert_batch(
     conn: Any,
     table_obj: sa.Table,
@@ -3750,7 +3944,7 @@ def _upsert_batch(
         raise
     if not conflict_cols:
         result = conn.execute(table_obj.insert(), batch)
-        return max(0, getattr(result, "rowcount", None) or 0) or len(batch)
+        return _insert_rows_written(result, len(batch), dialect_name)
 
     from connectors.writer_common import partition_dense_upsert_rows
 
@@ -4082,7 +4276,7 @@ def _upsert_batch(
                 ", ".join(conflict_cols) or "<key>",
             )
             result = conn.execute(table_obj.insert(), apply_rows)
-            return max(0, getattr(result, "rowcount", None) or 0) or len(apply_rows)
+            return _insert_rows_written(result, len(apply_rows), dialect_name)
         return 0
 
     # Athena / Hive / Impala: MERGE is ACID/Iceberg-only. DELETE+INSERT invents
@@ -4096,7 +4290,7 @@ def _upsert_batch(
     ):
         if apply_rows:
             result = conn.execute(table_obj.insert(), apply_rows)
-            return max(0, getattr(result, "rowcount", None) or 0) or len(apply_rows)
+            return _insert_rows_written(result, len(apply_rows), dialect_name)
         return 0
 
     if apply_rows:
@@ -4108,7 +4302,7 @@ def _upsert_batch(
             )
         _delete_by_keys(conn, table_obj, apply_rows, conflict_cols)
         result = conn.execute(table_obj.insert(), apply_rows)
-        return max(0, getattr(result, "rowcount", None) or 0) or len(apply_rows)
+        return _insert_rows_written(result, len(apply_rows), dialect_name)
     return 0
 
 
@@ -5588,9 +5782,9 @@ def write_mapped_rows(
                                 chunk_written = len(batch)
                         else:
                             result = conn.execute(table_obj.insert(), batch)
-                            chunk_written = max(
-                                0, getattr(result, "rowcount", None) or 0
-                            ) or len(batch)
+                            chunk_written = _insert_rows_written(
+                                result, len(batch), dialect_name
+                            )
                         if ledger_table is not None:
                             mark_sqlalchemy_chunk_committed(
                                 conn,

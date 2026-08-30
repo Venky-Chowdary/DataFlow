@@ -22,7 +22,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
-from typing import Any, Callable, Iterable, Sequence
+from typing import Any, Callable, Iterable, Mapping, Sequence
 
 ENGINES = ("postgresql", "mysql", "sqlserver", "sqlite", "oracle")
 
@@ -33,11 +33,32 @@ CAPABILITY_GAPS: dict[str, dict[str, str]] = {
     "sqlite": {
         "tz_timestamp": "engine has no timezone-aware timestamp type",
         "json_type": "engine has no JSON type (TEXT carrier only)",
+        # Measured: a DECIMAL(20,9) column has NUMERIC affinity, so SQLite
+        # rewrote -12345678901.123456789 to the REAL -12345678901.123457 and
+        # 99999999999.999999999 to the INTEGER 100000000000. TEXT keeps the
+        # digits but is a genuine type change against a DECIMAL destination,
+        # which the product blocks. Either way SQLite cannot carry an exact
+        # 20-digit decimal, so the column is a skip on SQLite routes.
+        "exact_decimal": "engine has no exact decimal type (NUMERIC affinity is IEEE-754 REAL)",
     },
     "sqlserver": {
         "json_type": "SQL Server 2022 has no JSON data type (NVARCHAR carrier only)"
     },
     "oracle": {"empty_string": "engine stores '' as NULL (no empty-string domain)"},
+}
+
+#: Gaps that only bite when the engine is the *destination*, and that are
+#: product limitations rather than engine limitations. Recorded here so the rest
+#: of the route is still measured, and reported as a defect in the evidence doc
+#: rather than passed over in silence.
+DEST_CAPABILITY_GAPS: dict[str, dict[str, str]] = {
+    "oracle": {
+        "json_type": (
+            "product defect: create-new stamps JSON->CLOB for Oracle "
+            "destinations (no version-aware native JSON for 21c+), so a JSON "
+            "source column fail-closed blocks the whole route"
+        )
+    },
 }
 
 _UNICODE_SAMPLES = (
@@ -206,12 +227,15 @@ _JSON_NS = uuid.UUID("6f4d1f0a-6a0e-4c0f-9a6b-2b1c9c0f0000")
 COLUMNS: tuple[Column, ...] = (
     Column(
         name="id",
+        # 64-bit on every engine: SQLite's INTEGER *is* 64-bit and is
+        # introspected as BIGINT, so a 32-bit INT elsewhere would make every
+        # SQLite-source route a real (correctly blocked) narrowing.
         ddl={
-            "postgresql": "INTEGER",
-            "mysql": "INT",
-            "sqlserver": "INT",
-            "sqlite": "INTEGER",
-            "oracle": "NUMBER(10)",
+            "postgresql": "BIGINT",
+            "mysql": "BIGINT",
+            "sqlserver": "BIGINT",
+            "sqlite": "BIGINT",
+            "oracle": "NUMBER(19)",
         },
         value=lambda i: i + 1,
         normalize=_n_int,
@@ -235,14 +259,12 @@ COLUMNS: tuple[Column, ...] = (
             "postgresql": "NUMERIC(20,9)",
             "mysql": "DECIMAL(20,9)",
             "sqlserver": "DECIMAL(20,9)",
-            # SQLite has no exact decimal type: NUMERIC affinity rewrites
-            # DECIMAL(20,9) into a lossy REAL, so TEXT affinity is the honest
-            # local carrier for a 20-digit decimal.
             "sqlite": "TEXT",
             "oracle": "NUMBER(20,9)",
         },
         value=lambda i: _DECIMALS[i % len(_DECIMALS)],
         normalize=_n_decimal,
+        capability="exact_decimal",
     ),
     Column(
         name="amt_float",
@@ -276,10 +298,14 @@ COLUMNS: tuple[Column, ...] = (
     Column(
         name="note_null",
         ddl={
-            "postgresql": "TEXT",
-            "mysql": "TEXT COLLATE utf8mb4_0900_bin",
+            # Bounded on every engine: an unbounded TEXT source against a
+            # bounded destination is a genuine narrowing the product blocks,
+            # which belongs to the narrowing shape rather than to the
+            # "destination exists compatible" shape this column carries.
+            "postgresql": "VARCHAR(400)",
+            "mysql": "VARCHAR(400) COLLATE utf8mb4_0900_bin",
             "sqlserver": "NVARCHAR(400) COLLATE Latin1_General_100_BIN2",
-            "sqlite": "TEXT",
+            "sqlite": "VARCHAR(400)",
             "oracle": "NVARCHAR2(400)",
         },
         value=lambda i: None if i % 3 == 0 else f"note {i}",
@@ -289,10 +315,10 @@ COLUMNS: tuple[Column, ...] = (
     Column(
         name="note_empty",
         ddl={
-            "postgresql": "TEXT",
-            "mysql": "TEXT COLLATE utf8mb4_0900_bin",
+            "postgresql": "VARCHAR(400)",
+            "mysql": "VARCHAR(400) COLLATE utf8mb4_0900_bin",
             "sqlserver": "NVARCHAR(400) COLLATE Latin1_General_100_BIN2",
-            "sqlite": "TEXT",
+            "sqlite": "VARCHAR(400)",
             "oracle": "NVARCHAR2(400)",
         },
         value=lambda i: "" if i % 3 == 1 else f"filled {i}",
@@ -354,7 +380,9 @@ COLUMNS: tuple[Column, ...] = (
             "postgresql": "UUID",
             "mysql": "CHAR(36) COLLATE utf8mb4_0900_bin",
             "sqlserver": "UNIQUEIDENTIFIER",
-            "sqlite": "TEXT",
+            # Bounded ≥36 is the certified UUID wire; bare TEXT loses UUID
+            # polarity and the product blocks it without a risk contract.
+            "sqlite": "CHAR(36)",
             "oracle": "CHAR(36 CHAR)",
         },
         value=lambda i: str(uuid.uuid5(_JSON_NS, str(i))),
@@ -410,13 +438,22 @@ def engine_gap(engine: str, capability: str) -> str:
     return CAPABILITY_GAPS.get(engine, {}).get(capability, "")
 
 
+def dest_gap(engine: str, capability: str) -> str:
+    """Why ``engine`` cannot *receive* a column needing ``capability``."""
+    if not capability:
+        return ""
+    return DEST_CAPABILITY_GAPS.get(engine, {}).get(capability, "")
+
+
 def projection(source: str, destination: str) -> tuple[list[str], dict[str, str]]:
     """Mapped columns for a route plus the skip reason for each excluded one."""
     cols: list[str] = []
     skips: dict[str, str] = {}
     for col in COLUMNS:
         src_gap = engine_gap(source, col.capability)
-        dst_gap = engine_gap(destination, col.capability)
+        dst_gap = engine_gap(destination, col.capability) or dest_gap(
+            destination, col.capability
+        )
         if src_gap or dst_gap:
             side = source if src_gap else destination
             skips[col.name] = f"skip ({side}: {src_gap or dst_gap})"
@@ -492,18 +529,62 @@ def ddl_for(
         col = COLUMNS_BY_NAME[name]
         type_sql = col.ddl[engine]
         if name == narrow:
-            type_sql = _NARROW_DDL[engine]
+            type_sql = _NARROW_DDL[name][engine]
         null_sql = "NULL" if col.nullable else "NOT NULL"
         pk = " PRIMARY KEY" if col.primary_key and not keyless else ""
         parts.append(f"{qt(name)} {type_sql} {null_sql}{pk}")
     return ", ".join(parts)
 
 
-#: Narrower carrier for ``amt_dec`` (DECIMAL(20,9) source): integer-only.
+def invented_ddl_for(
+    engine: str,
+    columns: Sequence[str],
+    source_types: Mapping[str, str],
+    *,
+    quote: Callable[[str], str] | None = None,
+    keyless: bool = False,
+) -> str:
+    """Column DDL body the *product* would create for this route.
+
+    The dest-exists-compatible shape has to be the table create-new would have
+    stamped, not the destination engine's own idiomatic fixture DDL: an Oracle
+    ``NUMBER(19,0)`` source against a hand-written PostgreSQL ``BIGINT`` is a
+    genuine narrowing (``NUMBER(19,0)`` holds 10**19-1) and the product is right
+    to block it. Asking the canonical inventor
+    (``services.type_system.ddl_type`` → ``decision_kernel.type_invent``) keeps
+    one algorithm owner: the harness declares no second type map.
+    """
+    from services.type_system import ddl_type
+
+    qt = quote or (lambda ident: f'"{ident}"')
+    parts = []
+    for name in columns:
+        col = COLUMNS_BY_NAME[name]
+        source_type = source_types.get(name) or col.ddl[engine]
+        type_sql = ddl_type(engine, source_type)
+        null_sql = "NULL" if col.nullable else "NOT NULL"
+        pk = " PRIMARY KEY" if col.primary_key and not keyless else ""
+        parts.append(f"{qt(name)} {type_sql} {null_sql}{pk}")
+    return ", ".join(parts)
+
+
+#: Narrower carrier per attackable column — a destination that must block.
+#: ``amt_dec``: DECIMAL(20,9) into an integer carrier (rounding).
+#: ``name_txt``: VARCHAR(64) Unicode into VARCHAR(8) (truncation) — used on
+#: routes where the decimal is skipped for lack of an exact decimal type.
 _NARROW_DDL = {
-    "postgresql": "INTEGER",
-    "mysql": "INT",
-    "sqlserver": "INT",
-    "sqlite": "INTEGER",
-    "oracle": "NUMBER(10)",
+    "amt_dec": {
+        "postgresql": "INTEGER",
+        "mysql": "INT",
+        "sqlserver": "INT",
+        "sqlite": "INTEGER",
+        "oracle": "NUMBER(10)",
+    },
+    "name_txt": {
+        "postgresql": "VARCHAR(8)",
+        "mysql": "VARCHAR(8) COLLATE utf8mb4_0900_bin",
+        "sqlserver": "NVARCHAR(8) COLLATE Latin1_General_100_BIN2",
+        "sqlite": "VARCHAR(8)",
+        "oracle": "NVARCHAR2(8)",
+    },
 }

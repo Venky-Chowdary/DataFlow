@@ -87,8 +87,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--rows", type=int, default=ROWS_DEFAULT)
     parser.add_argument("--engines", default=",".join(ENGINES))
     parser.add_argument("--modes", default=",".join(MODES))
-    parser.add_argument("--shapes", default=",".join(BLOCKING_SHAPES))
+    parser.add_argument(
+        "--blocking-shapes", default=",".join(BLOCKING_SHAPES)
+    )
     parser.add_argument("--data-shapes", default=",".join(DATA_SHAPES))
+    # Modes to repeat the dest-exists / blocking shapes under. Kept narrow by
+    # default because every extra mode is another full population at --rows.
+    parser.add_argument("--shape-modes", default="full_refresh_overwrite")
+    parser.add_argument("--blocking-modes", default="full_refresh_overwrite")
     parser.add_argument("--prefix", default="scale")
     parser.add_argument("--out", default="")
     parser.add_argument("--markdown", default="")
@@ -98,12 +104,25 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("DATAFLOW_SCALE_MATRIX=1 is required (live engines are mutated).")
         return 2
 
+    blocking = [s for s in args.blocking_shapes.split(",") if s]
+    data_shapes = [s for s in args.data_shapes.split(",") if s]
+    for name, given, known in (
+        ("--blocking-shapes", blocking, BLOCKING_SHAPES),
+        ("--data-shapes", data_shapes, DATA_SHAPES),
+    ):
+        unknown = [s for s in given if s not in known]
+        if unknown:
+            print(f"{name}: unknown {unknown} (known: {list(known)})")
+            return 2
+
     report = run_matrix(
         rows=args.rows,
         engines=[e for e in args.engines.split(",") if e],
         modes=[m for m in args.modes.split(",") if m],
-        shapes=[s for s in args.shapes.split(",") if s],
-        data_shapes=[s for s in args.data_shapes.split(",") if s],
+        shapes=blocking,
+        data_shapes=data_shapes,
+        shape_modes=[m for m in args.shape_modes.split(",") if m],
+        blocking_modes=[m for m in args.blocking_modes.split(",") if m],
         prefix=args.prefix,
         progress=_progress,
     )

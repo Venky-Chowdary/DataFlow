@@ -311,7 +311,15 @@ def plan_collation_carry(
         charset = ""
         collation = ""
         refusal = ""
-        if dest in {"mysql", "mariadb"}:
+        if src == dest and eq.native_name and not existing:
+            # Same engine: the source collation name is valid verbatim, so carry
+            # it instead of an equality-class approximation. Latin1_General_BIN
+            # is not Latin1_General_100_BIN2 — re-reading the destination then
+            # reports a collation the source never had and the fidelity gate
+            # (correctly) calls it a collapse.
+            collation = eq.native_name
+            charset = eq.charset if dest in {"mysql", "mariadb"} else ""
+        elif dest in {"mysql", "mariadb"}:
             charset, collation, refusal = _mysql_dest_spelling(eq)
         elif dest == "postgresql":
             if eq.case == "sensitive":

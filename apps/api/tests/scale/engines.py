@@ -21,12 +21,18 @@ import struct
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Callable, Iterator, Sequence
+from typing import Any, Callable, Iterator, Mapping, Sequence
 
 from services.brand_env import getenv_brand_str
 from src.transfer.models import EndpointConfig
 
-from tests.scale.fixture import COLUMNS_BY_NAME, Checksum, ddl_for, rows
+from tests.scale.fixture import (
+    COLUMNS_BY_NAME,
+    Checksum,
+    ddl_for,
+    invented_ddl_for,
+    rows,
+)
 
 BATCH = 5_000
 
@@ -66,7 +72,17 @@ class Engine:
 
     # ---- SQL dialect ----------------------------------------------------
     def quote(self, ident: str) -> str:
-        return f'"{ident}"'
+        return f'"{self.stored(ident)}"'
+
+    def stored(self, ident: str) -> str:
+        """Spelling the catalog stores for ``ident`` on this engine.
+
+        Oracle folds unquoted identifiers to upper case, so an Oracle table
+        written by any ordinary tool holds ``ID``, not ``id``. The fixture
+        speaks lower case everywhere; each engine translates to its own stored
+        spelling so mappings name the columns the product will actually see.
+        """
+        return ident
 
     def qualified(self, table: str) -> str:
         return self.quote(table)
@@ -89,10 +105,20 @@ class Engine:
         narrow: str = "",
         extra_columns: str = "",
         keyless: bool = False,
+        source_types: Mapping[str, str] | None = None,
     ) -> None:
-        body = ddl_for(
-            self.name, columns, narrow=narrow, quote=self.quote, keyless=keyless
-        )
+        if source_types is not None:
+            body = invented_ddl_for(
+                self.name,
+                columns,
+                source_types,
+                quote=self.quote,
+                keyless=keyless,
+            )
+        else:
+            body = ddl_for(
+                self.name, columns, narrow=narrow, quote=self.quote, keyless=keyless
+            )
         if extra_columns:
             body = f"{body}, {extra_columns}"
         conn = self.autocommit_conn()
@@ -205,6 +231,37 @@ class Engine:
     def table_types(self, table: str) -> dict[str, str]:
         """Live destination DDL, so 'created' claims are checked not assumed."""
         return {}
+
+    def introspect_types(self, table: str) -> dict[str, str]:
+        """Column types as the *product* reads them.
+
+        The dest-exists-compatible destination has to be built from what the
+        product sees on the source, not from the catalog spelling this harness
+        would write: an Oracle ``DATE`` carries a time-of-day, so the product
+        reads it as ``TIMESTAMP(0)`` and a hand-built PostgreSQL ``DATE``
+        destination is a real truncation the engine is right to refuse.
+        ``services.schema_introspect`` is that owner.
+        """
+        from services.schema_introspect import introspect_schema
+
+        endpoint = self.endpoint(table)
+        payload = introspect_schema(
+            endpoint.format,
+            host=endpoint.host,
+            port=endpoint.port or 0,
+            database=endpoint.database,
+            username=endpoint.username,
+            password=endpoint.password,
+            schema=endpoint.schema,
+            table=table,
+            ssl=endpoint.ssl,
+            **dict(endpoint.extra or {}),
+        )
+        return {
+            str(column.get("name")): str(column.get("inferred_type") or "")
+            for column in (payload.get("columns") or [])
+            if column.get("name") and column.get("inferred_type")
+        }
 
 
 class PostgresEngine(Engine):
@@ -560,6 +617,9 @@ class OracleEngine(Engine):
     def schema(self) -> str:
         return self.user.upper()
 
+    def stored(self, ident: str) -> str:
+        return ident.upper()
+
     def available(self) -> tuple[bool, str]:
         if not reachable(self.host, self.port):
             return False, f"Oracle not listening on {self.host}:{self.port}"
@@ -587,7 +647,13 @@ class OracleEngine(Engine):
         if column == "ts_tz":
             # Fetching TIMESTAMP WITH TIME ZONE through the driver drops the
             # offset here, so render it in SQL where it is unambiguous.
-            return f"TO_CHAR(\"ts_tz\", '{_ORA_TSTZ_FMT}')"
+            # SYS_EXTRACT_UTC pins the instant for both carriers Oracle may hold
+            # it in: TZH:TZM is not a legal TO_CHAR format for WITH LOCAL TIME
+            # ZONE (ORA-01821), which is what a Postgres timestamptz lands as.
+            return (
+                f"TO_CHAR(SYS_EXTRACT_UTC({self.quote('ts_tz')}), "
+                f"'{_ORA_UTC_FMT}') || '+00:00'"
+            )
         return self.quote(column)
 
     def param(self, index: int, name: str) -> str:
@@ -599,7 +665,7 @@ class OracleEngine(Engine):
 
     def _drop_with(self, cur: Any, table: str) -> None:
         try:
-            cur.execute(f'DROP TABLE "{table}" PURGE')
+            cur.execute(f"DROP TABLE {self.qualified(table)} PURGE")
         except Exception as exc:  # noqa: BLE001 — ORA-00942 table does not exist
             if "ORA-00942" not in str(exc):
                 raise
@@ -655,7 +721,7 @@ class OracleEngine(Engine):
                 "SELECT column_name, data_type, data_precision, data_scale, "
                 "char_length, nullable FROM all_tab_columns "
                 "WHERE owner = :1 AND table_name = :2",
-                [self.schema, table],
+                [self.schema, self.stored(table)],
             )
             out = {}
             for name, dtype, prec, scale, char_len, nullable in cur.fetchall():
@@ -671,6 +737,7 @@ class OracleEngine(Engine):
 
 
 _ORA_TSTZ_FMT = 'YYYY-MM-DD"T"HH24:MI:SS.FF6TZH:TZM'
+_ORA_UTC_FMT = 'YYYY-MM-DD"T"HH24:MI:SS.FF6'
 
 
 def _oracle_exact_numbers(cursor: Any, metadata: Any) -> Any:

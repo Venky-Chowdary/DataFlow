@@ -53,6 +53,9 @@ BLOCKING_SHAPES = (
 
 #: Column the blocking shapes attack: DECIMAL(20,9) into an integer carrier.
 NARROW_COLUMN = "amt_dec"
+#: Routes that skip the decimal (SQLite has no exact decimal type) narrow the
+#: bounded Unicode column instead — VARCHAR(64) into VARCHAR(8) truncates.
+NARROW_COLUMN_FALLBACK = "name_txt"
 #: Column removed from the destination to create an extra unmapped source column.
 G13_COLUMN = "note_null"
 #: Destination-only NOT NULL column with no default.
@@ -95,7 +98,7 @@ class Cell:
         return data
 
 
-def _stream_contract(name: str, mode: str) -> dict[str, Any]:
+def _stream_contract(name: str, mode: str, key: str = "id") -> dict[str, Any]:
     """The contract this fixture can honestly sign for a mode.
 
     ``full_refresh_append`` declares no key: the fixture ids repeat on the
@@ -111,6 +114,10 @@ def _stream_contract(name: str, mode: str) -> dict[str, Any]:
     from tests.sync_mode_probe import stream_contract
 
     contract = stream_contract(name, mode)
+    if contract.get("primary_key"):
+        contract["primary_key"] = key
+    if contract.get("cursor_field"):
+        contract["cursor_field"] = key
     if mode == "full_refresh_append":
         contract.pop("primary_key", None)
     if mode.startswith("incremental"):
@@ -118,8 +125,14 @@ def _stream_contract(name: str, mode: str) -> dict[str, Any]:
     return contract
 
 
-def _mappings(columns: Sequence[str]) -> list[dict[str, Any]]:
-    return [{"source": c, "target": c, "confidence": 0.99} for c in columns]
+def _mappings(
+    columns: Sequence[str], src: Engine, dst: Engine
+) -> list[dict[str, Any]]:
+    """Mappings in each side's *stored* column spelling (Oracle folds to upper)."""
+    return [
+        {"source": src.stored(c), "target": dst.stored(c), "confidence": 0.99}
+        for c in columns
+    ]
 
 
 def execute(
@@ -129,6 +142,8 @@ def execute(
     mode: str,
     columns: Sequence[str],
     stream: str,
+    src: Engine,
+    dst: Engine,
     validation_mode: str = "strict",
 ) -> tuple[TransferResult, str, float]:
     """One real, preflight-on transfer. Returns the result, run id and wall time."""
@@ -140,8 +155,8 @@ def execute(
         destination=destination,
         sync_mode=mode,
         validation_mode=validation_mode,
-        stream_contracts=[_stream_contract(stream, mode)],
-        mappings=_mappings(columns),
+        stream_contracts=[_stream_contract(stream, mode, key=src.stored("id"))],
+        mappings=_mappings(columns, src, dst),
         # skip_preflight stays False: fail-closed preflight is under test too.
     )
     run_id = uuid.uuid4().hex[:24]
@@ -194,6 +209,7 @@ class SourceCache:
         self.rows = rows
         self.prefix = prefix
         self._tables: dict[tuple[str, tuple[str, ...]], str] = {}
+        self._types: dict[tuple[str, tuple[str, ...]], dict[str, str]] = {}
 
     def table(self, engine: Engine, columns: Sequence[str]) -> str:
         key = (engine.name, tuple(columns))
@@ -204,6 +220,21 @@ class SourceCache:
         engine.seed(name, columns, self.rows)
         self._tables[key] = name
         return name
+
+    def source_types(self, engine: Engine, columns: Sequence[str]) -> dict[str, str]:
+        """Live source DDL per fixture column, for invented-destination shapes."""
+        key = (engine.name, tuple(columns))
+        cached = self._types.get(key)
+        if cached is None:
+            live = engine.introspect_types(self.table(engine, columns))
+            folded = {str(name).casefold(): str(ddl) for name, ddl in live.items()}
+            cached = {
+                column: folded[column.casefold()]
+                for column in columns
+                if column.casefold() in folded
+            }
+            self._types[key] = cached
+        return cached
 
     def drop_all(self, engines: dict[str, Engine]) -> None:
         for (engine_name, _cols), table in self._tables.items():
@@ -249,7 +280,12 @@ def run_data_cell(
             # 2N is only the correct answer for a keyless append sink, so that
             # is the destination this mode is proven against.
             cell.shape = "keyless_append_sink"
-            dst.create_table(dst_table, columns, keyless=True)
+            dst.create_table(
+                dst_table,
+                columns,
+                keyless=True,
+                source_types=cache.source_types(src, columns),
+            )
             cell.notes.append(
                 "append sink created without the primary key; a keyed "
                 "destination fails closed on the duplicate-key insert instead"
@@ -257,11 +293,19 @@ def run_data_cell(
         elif shape == "create_new":
             dst.drop(dst_table)
         elif shape == "dest_exists_compatible":
-            dst.create_table(dst_table, columns)
+            dst.create_table(
+                dst_table,
+                columns,
+                source_types=cache.source_types(src, columns),
+            )
         elif shape == "dest_exists_missing_column":
             # The destination lacks a mapped column: the engine must either
             # refuse or evolve the table — never write the rest and drop it.
-            dst.create_table(dst_table, [c for c in columns if c != G13_COLUMN])
+            dst.create_table(
+                dst_table,
+                [c for c in columns if c != G13_COLUMN],
+                source_types=cache.source_types(src, columns),
+            )
         else:  # pragma: no cover — guarded by DATA_SHAPES
             raise ValueError(f"unknown data shape {shape}")
 
@@ -272,6 +316,8 @@ def run_data_cell(
                 mode=mode,
                 columns=columns,
                 stream=src_table,
+                src=src,
+                dst=dst,
             )
             cell.run_ids.append(run_id)
             _accounting(cell, result)
@@ -361,7 +407,10 @@ def run_blocking_cell(
     try:
         map_columns: Sequence[str] = columns
         if shape == "dest_exists_narrower":
-            dst.create_table(dst_table, columns, narrow=NARROW_COLUMN)
+            narrow_col = (
+                NARROW_COLUMN if NARROW_COLUMN in columns else NARROW_COLUMN_FALLBACK
+            )
+            dst.create_table(dst_table, columns, narrow=narrow_col)
         elif shape == "g13_extra_source_column":
             # The destination cannot take note_null and nobody mapped or
             # declared it omitted: G13 must block instead of dropping it.
@@ -384,6 +433,8 @@ def run_blocking_cell(
             mode=mode,
             columns=map_columns,
             stream=src_table,
+            src=src,
+            dst=dst,
         )
         cell.run_ids.append(run_id)
         _accounting(cell, result)
@@ -435,6 +486,8 @@ def run_matrix(
     modes: Sequence[str] = MODES,
     shapes: Sequence[str] = BLOCKING_SHAPES,
     data_shapes: Sequence[str] = DATA_SHAPES,
+    shape_modes: Sequence[str] = ("full_refresh_overwrite",),
+    blocking_modes: Sequence[str] = ("full_refresh_overwrite",),
     prefix: str = "scale",
     progress: Any = None,
 ) -> dict[str, Any]:
@@ -470,23 +523,31 @@ def run_matrix(
             for shape in data_shapes:
                 if shape == "create_new":
                     continue
-                emit(
-                    run_data_cell(
-                        src,
-                        dst,
-                        "full_refresh_overwrite",
-                        shape,
-                        rows=rows,
-                        cache=cache,
-                        prefix=prefix,
+                for mode in shape_modes or ("full_refresh_overwrite",):
+                    emit(
+                        run_data_cell(
+                            src,
+                            dst,
+                            mode,
+                            shape,
+                            rows=rows,
+                            cache=cache,
+                            prefix=prefix,
+                        )
                     )
-                )
             for shape in shapes:
-                emit(
-                    run_blocking_cell(
-                        src, dst, shape, rows=rows, cache=cache, prefix=prefix
+                for mode in blocking_modes or ("full_refresh_overwrite",):
+                    emit(
+                        run_blocking_cell(
+                            src,
+                            dst,
+                            shape,
+                            rows=rows,
+                            cache=cache,
+                            prefix=prefix,
+                            mode=mode,
+                        )
                     )
-                )
 
     cache.drop_all(live)
     return summarize(cells, live, skipped, rows)

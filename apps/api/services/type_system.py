@@ -2592,11 +2592,7 @@ def _string_ddl_for_dest(db: str, inferred: str | None) -> str | None:
         return None
     fixed = is_fixed_width_char_carrier(inferred)
     upper = strip_identity_qualifier(inferred).upper()
-    national = bool(
-        re.search(r"\bN(?:VAR)?CHAR\b", upper)
-        or re.search(r"\bNATIONAL\s+CHARACTER\b", upper)
-        or re.search(r"\bNATIONAL\s+CHAR\b", upper)
-    )
+    national = is_national_string_carrier(inferred)
     # Over-cap create-new: unbounded text beats silent width clamp.
     if not fixed and width > cap:
         if db in {"mysql", "mariadb"}:
@@ -2641,9 +2637,11 @@ def _string_ddl_for_dest(db: str, inferred: str | None) -> str | None:
         w = min(width, cap)
         if national:
             return f"{'NCHAR' if fixed else 'NVARCHAR2'}({w})"
-        unit = "CHAR" if re.search(r"\(\s*\d+\s*CHAR\s*\)", upper) else "BYTE"
-        if re.search(r"\(\s*\d+\s*BYTE\s*\)", upper):
-            unit = "BYTE"
+        # Every other engine states a string width in *characters*, so BYTE
+        # semantics here would silently shrink the column: VARCHAR(64) of CJK
+        # needs up to 256 bytes and Oracle would reject or truncate at 64.
+        # Only a source that declared BYTE itself keeps byte semantics.
+        unit = "BYTE" if re.search(r"\(\s*\d+\s*BYTE\s*\)", upper) else "CHAR"
         return f"{'CHAR' if fixed else 'VARCHAR2'}({w} {unit})"
     return None
 
@@ -5346,6 +5344,23 @@ def materialize_dest_ddl(
 
 
 
+#: Character carrier width, or ``None`` when the type is not a sized character
+#: type. Oracle spells its length semantics inside the parentheses —
+#: ``CHAR(36 CHAR)`` / ``CHAR(36 BYTE)`` — and a UUID is 36 ASCII characters,
+#: so both spellings hold one. Without the qualifier Oracle's own create-new
+#: UUID carrier read as an uncertified collapse.
+_UUID_CHAR_CARRIER_RE = re.compile(
+    r"^(?:N?VAR)?CHAR(?:ACTER)?2?\s*\(\s*(\d+)\s*(?:CHAR|BYTE)?\s*\)$"
+)
+_UUID_STRING_CARRIER_RE = re.compile(r"^STRING\s*\(\s*(\d+)\s*\)$")
+
+
+def _uuid_carrier_width(upper: str) -> int | None:
+    """Declared width of a sized character type ('' / unsized → ``None``)."""
+    m = _UUID_CHAR_CARRIER_RE.match(upper) or _UUID_STRING_CARRIER_RE.match(upper)
+    return int(m.group(1)) if m else None
+
+
 def uuid_exact_wire_carrier(target_type: str | None) -> bool:
     """True only for exact 36-char UUID string wires (not VARCHAR(50)+)."""
     raw = strip_identity_qualifier(target_type).strip()
@@ -5354,17 +5369,7 @@ def uuid_exact_wire_carrier(target_type: str | None) -> bool:
     upper = raw.upper()
     if upper in {"UUID", "UNIQUEIDENTIFIER", "GUID"}:
         return True
-    m = re.match(
-        r"^(?:N?VAR)?CHAR(?:ACTER)?\s*\(\s*(\d+)\s*\)$",
-        upper,
-    )
-    if m and int(m.group(1)) == 36:
-        return True
-    m = re.match(r"^VARCHAR2\s*\(\s*(\d+)\s*\)$", upper)
-    if m and int(m.group(1)) == 36:
-        return True
-    m = re.match(r"^STRING\s*\(\s*(\d+)\s*\)$", upper)
-    return bool(m and int(m.group(1)) == 36)
+    return _uuid_carrier_width(upper) == 36
 
 
 def uuid_capacity_string_carrier(target_type: str | None) -> bool:
@@ -5384,18 +5389,8 @@ def uuid_capacity_string_carrier(target_type: str | None) -> bool:
     raw = strip_identity_qualifier(target_type).strip()
     if not raw:
         return False
-    upper = raw.upper()
-    m = re.match(
-        r"^(?:N?VAR)?CHAR(?:ACTER)?\s*\(\s*(\d+)\s*\)$",
-        upper,
-    )
-    if m and int(m.group(1)) >= 36:
-        return True
-    m = re.match(r"^VARCHAR2\s*\(\s*(\d+)\s*\)$", upper)
-    if m and int(m.group(1)) >= 36:
-        return True
-    m = re.match(r"^STRING\s*\(\s*(\d+)\s*\)$", upper)
-    return bool(m and int(m.group(1)) >= 36)
+    width = _uuid_carrier_width(raw.upper())
+    return width is not None and width >= 36
 
 
 
