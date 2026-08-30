@@ -120,8 +120,33 @@ def test_e2e_stream_write_batch_iceberg(tmp_path: Path) -> None:
     assert summary["driver"] == "iceberg"
 
 
+SF_ACCOUNT_DESCRIBE = [
+    {
+        "name": "External_Id__c",
+        "type": "string",
+        "length": 255,
+        "externalId": True,
+        "createable": True,
+        "updateable": True,
+    },
+    {
+        "name": "Name",
+        "type": "string",
+        "length": 255,
+        "createable": True,
+        "updateable": True,
+    },
+]
+
+
+# Describe is stubbed, not left to the network: a host that resolves to a
+# proxy answering 401 is an auth failure to the writer, which then refuses the
+# write (correctly — an org whose metadata cannot be read is not written to).
+@patch("connectors.salesforce.describe_sobject", return_value=SF_ACCOUNT_DESCRIBE)
 @patch("connectors.salesforce_writer.request")
-def test_e2e_adapter_write_salesforce_reverse_etl(mock_req: MagicMock) -> None:
+def test_e2e_adapter_write_salesforce_reverse_etl(
+    mock_req: MagicMock, _mock_describe: MagicMock
+) -> None:
     mock_resp = MagicMock()
     mock_resp.content = b"[]"
     mock_resp.json.return_value = [

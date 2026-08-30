@@ -89,8 +89,10 @@ def test_quarantine_holds_out_a_fractional_cell_with_the_reason():
     )
     assert out == [("22", "fine")]
     assert details and "fractional" in details[0]["reason"]
-    assert details[0].get("suggested_target_type") == "DOUBLE"
-    assert "DOUBLE" in (details[0].get("suggested_fix") or "")
+    # The widen suggestion is exact, not IEEE: DOUBLE cannot hold 22.433332
+    # without rounding, and a clock or a money column must not be rounded.
+    assert details[0].get("suggested_target_type") == "DECIMAL(8,6)"
+    assert "DECIMAL(8,6)" in (details[0].get("suggested_fix") or "")
 
 
 def test_quarantine_holds_out_overflow_integer():

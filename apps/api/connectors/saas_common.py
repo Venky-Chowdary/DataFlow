@@ -8,7 +8,7 @@ from typing import Any, NoReturn
 
 import requests
 from services.error_handling import RetryBudget, with_retry
-from services.value_serializer import cell_to_string
+from services.value_serializer import cell_to_string, sanitize_json_value
 
 from connectors.base import ReadBatch
 
@@ -259,12 +259,23 @@ def request(
     auth_header: str = "Authorization",
     auth_scheme: str = "Bearer",
 ) -> requests.Response:
-    """Make an HTTP request with retriable transient handling (429 / 5xx / timeouts)."""
+    """Make an HTTP request with retriable transient handling (429 / 5xx / timeouts).
+
+    The body is sanitized before it reaches ``requests``, whose encoder knows
+    only JSON-native types: a mapped ``DECIMAL`` cell binds as ``Decimal`` and
+    a temporal cell as ``datetime``, so every reverse-ETL batch holding one
+    died with ``Object of type Decimal is not JSON serializable`` — the whole
+    chunk, not the cell. Sanitizing keeps a decimal exact (``"500.25"``, never
+    a binary float) and refuses non-finite and absent values instead of wiring
+    ``NaN`` or the ``__DF_MISSING__`` sentinel into a customer's CRM record.
+    """
     h = dict(headers or {})
     if token and auth_header:
         h.setdefault(auth_header, f"{auth_scheme} {token}".strip())
     h.setdefault("Accept", "application/json")
     h.setdefault("User-Agent", "Datawrap/1.0")
+
+    body = sanitize_json_value(data) if data is not None else None
 
     def _call() -> requests.Response:
         resp = requests.request(
@@ -272,7 +283,7 @@ def request(
             url=url,
             headers=h,
             params=params,
-            json=data,
+            json=body,
             timeout=timeout,
         )
         resp.raise_for_status()
