@@ -10,11 +10,17 @@
  * forward only while the decision fingerprint is unchanged; if the type path,
  * fidelity verdict, transform, or create-new posture moved, the row must be
  * decided again rather than inheriting a stale signature.
+ *
+ * A declared reduction is the exception: it is a decision about the source
+ * field itself, so it survives regeneration by source name together with its
+ * G16 evidence.
  */
 
 import {
   CONTINUE_EXECUTION_POLICIES,
   acknowledgeMappingRisk,
+  applyTransformChange,
+  isIntentionalOmit,
   mappingRequiresRiskAck,
   type EditableMapping,
   type ExecutionPolicy,
@@ -51,12 +57,16 @@ export function carryOperatorDecisions(
 ): EditableMapping[] {
   if (!prior?.length || !next.length) return next;
   const decided = new Map<string, EditableMapping>();
+  const omitted = new Map<string, EditableMapping>();
   for (const p of prior) {
+    if (isIntentionalOmit(p)) omitted.set(p.source, p);
     if (!p.approved && !p.riskAcknowledged) continue;
     decided.set(mappingDecisionFingerprint(p), p);
   }
-  if (!decided.size) return next;
+  if (!decided.size && !omitted.size) return next;
   return next.map((m) => {
+    const dropped = omitted.get(m.source);
+    if (dropped) return carryReduction(m, dropped);
     const hit = decided.get(mappingDecisionFingerprint(m));
     if (!hit) return m;
     return {
@@ -67,6 +77,28 @@ export function carryOperatorDecisions(
       riskContract: hit.riskContract,
     };
   });
+}
+
+/**
+ * Replay a declared reduction onto a regenerated row.
+ *
+ * An omission is a decision about the source field, not about a destination
+ * type path, so it survives regeneration by source name — unlike a risk
+ * acknowledgement, which is scoped to the type facts it was signed for. It is
+ * carried outside the fingerprint on purpose: regeneration proposes a target
+ * for the column again, which changes the fingerprint, and dropping the
+ * decision there silently deleted the reduction reason, the archive reference
+ * and the named accepter the operator had recorded for G16.
+ */
+function carryReduction(m: EditableMapping, prior: EditableMapping): EditableMapping {
+  return {
+    ...applyTransformChange(m, "omit"),
+    omitReason: prior.omitReason,
+    omitReasonText: prior.omitReasonText,
+    archiveReference: prior.archiveReference,
+    retentionUntil: prior.retentionUntil,
+    omitApprovedBy: prior.omitApprovedBy,
+  };
 }
 
 /** Rows whose risk is value-dependent hold out the offending row; the rest

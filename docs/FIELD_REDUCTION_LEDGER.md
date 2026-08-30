@@ -78,6 +78,15 @@ reduction itself:
 | Retained until | `retention_until` | optional, `archive_only` |
 | Accepted by | `omit_approved_by` | optional (required in strict mode) |
 
+`approved_at` stays `null` for a Map-recorded reduction: Map can record who
+accepted the drop, but the moment a name was typed into a form is not an
+approval timestamp. It is populated only by a caller that supplies one.
+
+A declared reduction survives Map regeneration (returning from Validate,
+reloading the destination schema) by source name, together with its evidence —
+unlike a fidelity acknowledgement, which is scoped to the type facts it was
+signed for.
+
 Map names the evidence G16 still needs on the row itself, so the gap is visible
 before Validate. It deliberately does not predict the sample-contradiction
 block: only the engine sees the sample, and a green row from a check Datawrap

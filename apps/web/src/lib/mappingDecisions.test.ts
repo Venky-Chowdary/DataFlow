@@ -82,6 +82,44 @@ describe("carryOperatorDecisions", () => {
     assert.deepEqual(carryOperatorDecisions(regenerated, []), regenerated);
   });
 
+  it("keeps a declared reduction and its G16 evidence across regeneration", () => {
+    // Regeneration proposes a target for the column again, which moves the
+    // decision fingerprint — the omission must survive that anyway.
+    const dropped: EditableMapping = {
+      ...clean({ source: "old_audit_trail", target: "", transform: "omit", approved: true }),
+      omitReason: "archive_only",
+      omitReasonText: "Retired 2019 audit trail",
+      archiveReference: "mainframe-vault://audit/2019",
+      retentionUntil: "2031-12-31",
+      omitApprovedBy: "Priya Raman",
+    };
+
+    const carried = carryOperatorDecisions(
+      [clean({ source: "old_audit_trail", target: "old_audit_trail" }), lossy()],
+      [dropped, lossy()],
+    );
+
+    assert.equal(carried[0].transform, "omit");
+    assert.equal(carried[0].target, "");
+    assert.equal(carried[0].omitReason, "archive_only");
+    assert.equal(carried[0].omitReasonText, "Retired 2019 audit trail");
+    assert.equal(carried[0].archiveReference, "mainframe-vault://audit/2019");
+    assert.equal(carried[0].retentionUntil, "2031-12-31");
+    assert.equal(carried[0].omitApprovedBy, "Priya Raman");
+    // Other rows are untouched by the reduction replay.
+    assert.equal(carried[1].transform, undefined);
+  });
+
+  it("does not omit a column the operator never dropped", () => {
+    const carried = carryOperatorDecisions(
+      [clean({ source: "email", target: "email" })],
+      [clean({ source: "old_audit_trail", target: "", transform: "omit", approved: true })],
+    );
+
+    assert.equal(carried[0].transform, undefined);
+    assert.equal(carried[0].target, "email");
+  });
+
   it("fingerprints differ per column so decisions never cross rows", () => {
     assert.notEqual(
       mappingDecisionFingerprint(lossy()),
