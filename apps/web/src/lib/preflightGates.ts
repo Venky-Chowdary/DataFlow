@@ -79,6 +79,12 @@ export const GATE_CATALOG: GateCatalogEntry[] = [
     rule: "Existing-table shape is classified once (equal / source-superset / dest-superset / overlap). Writes are name-addressed — never source-positional. Dest-only columns stay off SET.",
   },
   {
+    id: "g16_field_reduction",
+    label: "Field reduction governance",
+    icon: "layers",
+    rule: "Every source column not carried to the destination holds a typed reduction reason. A reason that claims a fact about the data (empty / constant) is checked against the Validate sample and blocks when the sample disproves it; archive_only must name the archive. Sample evidence — never population proof.",
+  },
+  {
     id: "g18_cdc_snapshot_mode",
     label: "CDC snapshot mode",
     icon: "transfer",

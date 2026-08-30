@@ -36,6 +36,7 @@ HARD_GATE_IDS = {
     "g13_source_coverage",
     "g14_destination_requirements",
     "g15_dest_exists_shape",
+    "g16_field_reduction",
     "g18_cdc_snapshot_mode",
     "g3f_population_fit",
 }
@@ -170,6 +171,35 @@ PREFLIGHT_GATE_RULES: dict[str, dict[str, Any]] = {
         ],
         "suggested_actions": [
             {"kind": "review_mappings", "label": "Open Map to fill required columns"},
+        ],
+    },
+    "g16_field_reduction": {
+        "title": "Field reduction governance",
+        "category": "hard",
+        "why": (
+            "A declared omission says the drop was deliberate; it does not say "
+            "why, who accepted it, or — when the reason is 'the data is kept "
+            "elsewhere' — where. An auditor reviewing a field-reducing migration "
+            "(10 legacy fields into a 7-field screen) asks for the reason per "
+            "field. This gate also refuses a reason the data disproves: a column "
+            "declared empty whose sample carries values is a false record, not a "
+            "decision."
+        ),
+        "fix": (
+            "Open Map and give each omitted column a reduction reason. Use a "
+            "factual code (dropped_empty / dropped_constant) only when the data "
+            "supports it; otherwise use a judgement code (dropped_not_required, "
+            "dropped_redundant, dropped_obsolete, dropped_pii_minimization) with "
+            "a note. archive_only must name the archive that holds the field."
+        ),
+        "examples": [
+            "COBOL filler columns → dropped_obsolete with a note naming the copybook release.",
+            "Card PAN not carried into the analytics target → dropped_pii_minimization.",
+            "Legacy audit trail kept in the mainframe archive → archive_only + archive_reference.",
+            "Column declared empty but 12 of 500 sampled rows hold a value → blocked as a false claim.",
+        ],
+        "suggested_actions": [
+            {"kind": "review_mappings", "label": "Open Map to record reduction reasons"},
         ],
     },
     "g15_dest_exists_shape": {

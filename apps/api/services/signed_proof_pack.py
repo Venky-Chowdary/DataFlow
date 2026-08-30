@@ -806,6 +806,14 @@ def export_proof_pack_for_job(job: dict[str, Any], *, actor: str = "system") -> 
                     or (pf.get("proof_bundle") or {}).get("source_coverage")
                     or {}
                 ),
+                # Why each source field was not carried, per field. Omitted
+                # names alone cannot distinguish a governed reduction from an
+                # unexplained one.
+                "field_reduction_ledger": (
+                    pf.get("field_reduction_ledger")
+                    or (pf.get("proof_bundle") or {}).get("field_reduction_ledger")
+                    or {}
+                ),
             }
             if pf
             else None

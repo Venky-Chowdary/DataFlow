@@ -2176,10 +2176,38 @@ def run_file_preflight(
         dest_columns=list((destination_column_types or {}).keys()),
     )
     out["source_coverage"] = src_coverage
+
+    # Field Reduction Ledger (G16) — a typed, evidenced disposition per source
+    # field. G13 proves the drop was declared; this proves it was decided.
+    from services.field_reduction_ledger import build_field_reduction_evidence
+
+    field_reduction, reduction_gate = build_field_reduction_evidence(
+        source_columns=list(columns or []),
+        mappings=list(mappings or []),
+        target_columns=list((destination_column_types or {}).keys()),
+        source_column_types=dict(column_types or {}),
+        target_column_types=dict(destination_column_types or {}),
+        sample_rows=list(sample_rows or []),
+    )
+    out["field_reduction_ledger"] = field_reduction
+    contract_gates = [*contract_gates, reduction_gate]
+    if reduction_gate.get("status") == "block":
+        contract_blockers = [
+            *contract_blockers,
+            {
+                "id": reduction_gate["id"],
+                "message": reduction_gate["message"],
+                "details": reduction_gate["details"],
+            },
+        ]
     if isinstance(out.get("proof_bundle"), dict):
         out["proof_bundle"] = {
             **out["proof_bundle"],
             "source_coverage": src_coverage,
+            # The reduction ledger travels with the pack: an auditor reading the
+            # export must see why each field was not carried, not only that it
+            # was declared omitted.
+            "field_reduction_ledger": field_reduction,
             # Evidence travels with the proof pack, not only with the HTTP
             # response: an exported pack must show whether the bounded carriers
             # were decided on every row or on a preview.
