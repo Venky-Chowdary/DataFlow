@@ -54,6 +54,10 @@ def test_bq_schema_field_honors_map_decimal_stamp():
     assert "precision" not in bare.kwargs
     assert "scale" not in bare.kwargs
 
+    emu = bq_schema_field(bq, "amount", "DECIMAL(20,6)", emulator=True)
+    assert emu.args == ("amount", "BIGNUMERIC")
+    assert emu.kwargs == {}
+
 
 def test_bq_schema_field_numeric_over_cap_promotes_keeping_stamp():
     """NUMERIC(40,4) exceeds NUMERIC caps — BIGNUMERIC with same (p,s)."""

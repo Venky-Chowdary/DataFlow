@@ -1859,11 +1859,52 @@ def verify_bigquery_table(
             port=port,
         )
         table_id = f"{project_id}.{dataset_id}.{table_name}"
-        table = client.get_table(table_id)
-        count = table.num_rows or 0
+        from connectors.google_emulator import (
+            google_emulator_retry,
+            google_emulator_timeout,
+            looks_like_google_emulator,
+        )
+
+        probe_kw: dict[str, Any] = {}
+        if looks_like_google_emulator(
+            endpoint=connection_string, host=host, port=port,
+        ):
+            probe_kw = {
+                "retry": google_emulator_retry(),
+                "timeout": google_emulator_timeout(),
+            }
+        table = client.get_table(table_id, **probe_kw)
+        # Table.num_rows lags the streaming buffer and goccy reports 0.
+        # Dest-engine COUNT(*) is the Gate-8 SSOT (same as dest_precount).
+        from services.dest_precount import _bigquery_row_count
+
+        counted = _bigquery_row_count(
+            {
+                "database": project_id,
+                "schema": dataset_id,
+                "host": host,
+                "port": port,
+                "connection_string": connection_string,
+            },
+            schema=dataset_id,
+            table_name=table_name,
+        )
+        count = int(counted) if counted is not None else 0
         field_names = [field.name for field in table.schema] if table.schema else []
+
         def _row_iter():
             yielded = 0
+            if probe_kw:
+                # goccy list_rows retries until operator timeout. Query instead.
+                from services.dest_precount import _bigquery_run_query
+
+                qualified = f"`{project_id}`.`{dataset_id}`.`{table_name}`"
+                sql = f"SELECT * FROM {qualified}"
+                if limit:
+                    sql += f" LIMIT {int(limit)}"
+                for row in _bigquery_run_query(client, sql):
+                    yield list(row.values()) if hasattr(row, "values") else list(row)
+                return
             for row in client.list_rows(table_id):
                 if limit and yielded >= limit:
                     break

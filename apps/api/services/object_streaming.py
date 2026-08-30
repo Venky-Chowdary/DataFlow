@@ -831,9 +831,11 @@ def download_s3_object(path: Path, cfg: dict[str, Any], bucket: str, key: str) -
 
 
 def download_gcs_object(path: Path, cfg: dict[str, Any], bucket: str, key: str) -> None:
-    from connectors.gcs_common import gcs_client
+    from connectors.gcs_common import gcs_client, gcs_emulator_kwargs
 
-    gcs_client(cfg).bucket(bucket).blob(key).download_to_filename(str(path))
+    gcs_client(cfg).bucket(bucket).blob(key).download_to_filename(
+        str(path), **gcs_emulator_kwargs(cfg)
+    )
 
 
 def download_adls_object(path: Path, cfg: dict[str, Any], bucket: str, key: str) -> None:

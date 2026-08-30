@@ -229,6 +229,9 @@ def token(  # nosec B107
             return v
     if username and password:
         return f"{username.strip()}:{password.strip()}"
+    # Private-app / bearer tokens are often pasted in Password only.
+    if password:
+        return password.strip()
     return ""
 
 

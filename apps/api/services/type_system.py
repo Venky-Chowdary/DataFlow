@@ -2312,6 +2312,12 @@ def ddl_carrier_type(inferred: str | None) -> str:
     if logical == LOGICAL_JSON:
         return "JSON"
     if logical == LOGICAL_ARRAY:
+        # Typed T[] / ARRAY<T> must stay typed. Bare ARRAY is the document
+        # invent (JSONB on PG). Stripping INTEGER[] → ARRAY made dest-exists
+        # invent JSONB and fail-closed a native array bind.
+        stripped = strip_identity_qualifier(raw).strip() or raw
+        if parse_array_element(stripped):
+            return stripped
         return "ARRAY"
     if logical == LOGICAL_BINARY:
         return "BINARY"

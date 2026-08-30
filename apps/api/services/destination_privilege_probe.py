@@ -1072,6 +1072,22 @@ def _probe_bigquery(
         )
 
     entries = list(getattr(ds, "access_entries", None) or [])
+    from connectors.google_emulator import looks_like_google_emulator
+
+    if looks_like_google_emulator(
+        endpoint=connection_string, host=host, port=port,
+    ) and not entries:
+        # goccy BQ has no IAM catalog. Empty ACL is not a customer deny.
+        return _finalize(
+            engine="bigquery",
+            can_write=True,
+            can_create=True,
+            table_exists=bool(exists),
+            table=table,
+            schema=dataset,
+            need_update=False,
+            method="emulator_no_iam_catalog",
+        )
     can_write, can_create, matched = evaluate_bigquery_access_entries(entries)
 
     # Dataset WRITER/OWNER implies both insert and create; if table missing and

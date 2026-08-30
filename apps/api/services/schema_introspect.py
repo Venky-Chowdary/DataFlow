@@ -2301,23 +2301,23 @@ def _introspect_oracle(**kwargs) -> dict[str, Any]:
     try:
         with engine.connect() as conn:
             tables: list[str] = []
-            if schema:
-                rows = conn.execute(
-                    sa.text(
-                        "SELECT table_name FROM all_tables WHERE owner = :owner ORDER BY table_name"
-                    ),
-                    {"owner": schema},
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    sa.text("SELECT table_name FROM user_tables ORDER BY table_name")
-                ).fetchall()
-            tables = [r[0] for r in rows]
-
             if not table:
+                if schema:
+                    rows = conn.execute(
+                        sa.text(
+                            "SELECT table_name FROM all_tables WHERE owner = :owner ORDER BY table_name"
+                        ),
+                        {"owner": schema},
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        sa.text("SELECT table_name FROM user_tables ORDER BY table_name")
+                    ).fetchall()
+                tables = [r[0] for r in rows]
                 return {"ok": True, "columns": [], "tables": tables, "schema": schema}
 
             owner = schema or (kwargs.get("username") or "").upper()
+            tables = [table.upper()]
             # Stored spelling inside the requested owner: a quoted lower-case
             # table read as "does not exist" under the folded name, so Validate
             # planned create-new (and skipped the destination PK / duplicate
@@ -2329,6 +2329,7 @@ def _introspect_oracle(**kwargs) -> dict[str, Any]:
             resolved_table = _ident.table if _ident.exists else table.upper()
             if _ident.exists and _ident.schema:
                 owner = _ident.schema
+            tables = [resolved_table]
             # VIRTUAL_COLUMN / IDENTITY_COLUMN — client INSERT must omit ALWAYS.
             # ALL_TAB_COLS (not ALL_TAB_COLUMNS) is the view that exposes
             # VIRTUAL_COLUMN; the join used to fail with ORA-00904 on every
@@ -2564,22 +2565,24 @@ def _introspect_sqlserver(**kwargs) -> dict[str, Any]:
 
     try:
         with engine.connect() as conn:
-            tables = [
-                r[0]
-                for r in conn.execute(
-                    sa.text(
-                        """
-                        SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES
-                        WHERE TABLE_TYPE = 'BASE TABLE' AND TABLE_SCHEMA = :schema
-                        ORDER BY TABLE_NAME
-                        """
-                    ),
-                    {"schema": schema},
-                ).fetchall()
-            ]
+            tables: list[str] = []
             if not table:
+                tables = [
+                    r[0]
+                    for r in conn.execute(
+                        sa.text(
+                            """
+                            SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES
+                            WHERE TABLE_TYPE = 'BASE TABLE' AND TABLE_SCHEMA = :schema
+                            ORDER BY TABLE_NAME
+                            """
+                        ),
+                        {"schema": schema},
+                    ).fetchall()
+                ]
                 return {"ok": True, "columns": [], "tables": tables, "schema": schema}
 
+            tables = [table]
             col_rows = conn.execute(
                 sa.text(
                     """

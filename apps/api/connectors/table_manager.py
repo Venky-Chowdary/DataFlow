@@ -125,6 +125,8 @@ def drop_table(
         return _drop_mongodb(cfg, table_name, schema)
     if dt == "snowflake":
         return _drop_snowflake(cfg, table_name, schema)
+    if dt == "bigquery":
+        return _drop_bigquery(cfg, table_name, schema)
     if dt == "clickhouse":
         return _drop_clickhouse(cfg, table_name, schema)
     if _routes_generic_sql_mutate(dt):
@@ -158,6 +160,50 @@ def _drop_postgresql(cfg: dict[str, Any], table_name: str, schema: str | None) -
                 sql.SQL("DROP TABLE IF EXISTS {}.{} CASCADE").format(schema_id, table_id)
             )
         conn.close()
+        return True
+    except Exception as exc:
+        raise TableDropError(table_name, exc) from exc
+
+
+def _drop_bigquery(cfg: dict[str, Any], table_name: str, schema: str | None) -> bool:
+    """DROP via the BigQuery client. Missing table is already clear.
+
+    SQLAlchemy cannot bind the goccy HTTP emulator (dialect ``http``). Inventing
+    a generic_sql DROP would fail-closed create-new overwrite as an append risk.
+    """
+    from connectors.bigquery_conn import get_client
+    from connectors.google_emulator import (
+        google_emulator_retry,
+        google_emulator_timeout,
+        looks_like_google_emulator,
+    )
+
+    project = str(cfg.get("database") or cfg.get("project_id") or "").strip()
+    dataset = str(schema or cfg.get("schema") or "").strip()
+    if not project or not dataset or not table_name:
+        raise TableDropError(
+            table_name or "unknown",
+            ValueError("BigQuery drop needs project, dataset, and table"),
+        )
+    try:
+        client = get_client(
+            project_id=project,
+            service_account=str(cfg.get("service_account") or ""),
+            location=str(cfg.get("location") or ""),
+            host=str(cfg.get("host") or ""),
+            port=int(cfg.get("port") or 0),
+            connection_string=str(cfg.get("connection_string") or ""),
+        )
+        table_id = f"{project}.{dataset}.{table_name}"
+        extra: dict[str, Any] = {}
+        if looks_like_google_emulator(
+            endpoint=str(cfg.get("connection_string") or ""),
+            host=str(cfg.get("host") or ""),
+            port=int(cfg.get("port") or 0),
+        ):
+            extra["retry"] = google_emulator_retry()
+            extra["timeout"] = google_emulator_timeout()
+        client.delete_table(table_id, not_found_ok=True, **extra)
         return True
     except Exception as exc:
         raise TableDropError(table_name, exc) from exc

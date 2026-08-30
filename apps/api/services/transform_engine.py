@@ -1487,6 +1487,9 @@ def infer_transform_for_mapping(
         if tgt == "boolean":
             return "boolean"
         if tgt in {"json", "array"}:
+            # Dest-exists typed array → typed array is identity, not JSON invent.
+            if src == "array" and tgt == "array":
+                return "none"
             return "json"
         if tgt == "binary":
             return "binary"

@@ -62,6 +62,8 @@ def _is_absent_object_error(message: str) -> bool:
             "unknown table",
             "002043",
             "no columns for table",
+            "nosuchkey",
+            "404",
         )
     )
 
@@ -756,7 +758,15 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
             bucket = cfg["database"]
             key = endpoint.table or endpoint.collection or ""
             if bucket and key:
-                batch = read_object(cfg=cfg, bucket=bucket, key=key, offset=0, limit=sample_limit)
+                try:
+                    batch = read_object(cfg=cfg, bucket=bucket, key=key, offset=0, limit=sample_limit)
+                except Exception as exc:
+                    if _is_absent_object_error(str(exc)):
+                        out["table_exists"] = False
+                        out["schema"] = {}
+                        out["columns"] = []
+                        return
+                    raise
                 out["columns"] = batch.headers
                 out["schema"] = _schema_from_batch(batch)
                 out["row_estimate"] = (batch.total_rows or 0)
