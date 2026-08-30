@@ -145,7 +145,14 @@ def test_destination_schema_probe_overwrite_keeps_existence_clears_types():
 
 
 def test_destination_schema_probe_overwrite_dest_exists_keeps_nullability():
-    """Dest-exists overwrite keeps live NOT NULL so G14 can block dest-only columns."""
+    """Dest-exists overwrite: existence and nullability stay, live types do not.
+
+    The listed table is dropped and recreated from the source shape, so its
+    current physical types are not this run's carrier — binding them made a
+    stale ``VARCHAR(64)`` refuse a ``TEXT`` source that the CREATE would have
+    declared ``LONGTEXT``. Existence and the nullability catalog stay measured:
+    unknown existence must never become create-new by a failed probe.
+    """
     from src.transfer.engine import _destination_schema_probe
     from src.transfer.models import EndpointConfig
 
@@ -160,7 +167,7 @@ def test_destination_schema_probe_overwrite_dest_exists_keeps_nullability():
     ):
         schema, exists = _destination_schema_probe(dest, sync_mode="full_refresh_overwrite")
     assert exists is True
-    assert schema["tenant_id"] == "TEXT"
+    assert schema == {}
     assert (dest.extra or {}).get("schema_nullability") == {"id": False, "tenant_id": False}
 
 

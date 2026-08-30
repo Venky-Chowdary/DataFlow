@@ -53,9 +53,13 @@ def test_json_to_postgresql_preserves_types(fmt: str, content_fn):
         pytest.skip("PostgreSQL not reachable on localhost:5432")
 
     table_name = f"json_pg_{fmt}_{uuid.uuid4().hex[:8]}"
+    # JSON can say ``null``, so it is what a null source cell looks like here. An
+    # empty string is a *value* in this format and is asserted as one by
+    # test_json_empty_string_is_a_value_not_a_null below — only a blank CSV cell,
+    # which cannot express the difference, means NULL.
     rows = [
         {"id": "1", "amount": "1000.00", "note": "hello", "created": "2024-01-15T00:00:00", "active": "true", "meta": '{"k":"v"}', "tags": '["a","b"]'},
-        {"id": "2", "amount": "2000.50", "note": "", "created": "2024-02-28T14:30:00", "active": "false", "meta": "", "tags": ""},
+        {"id": "2", "amount": "2000.50", "note": None, "created": "2024-02-28T14:30:00", "active": "false", "meta": None, "tags": None},
         {"id": "3", "amount": "3.14", "note": "null", "created": "2024-03-01T00:00:00", "active": "1", "meta": "{}", "tags": "[]"},
     ]
 
@@ -124,6 +128,58 @@ def test_json_to_postgresql_preserves_types(fmt: str, content_fn):
     assert _json(rows[0][6]) == '["a", "b"]'
     assert _json(rows[1][6]) is None
     assert _json(rows[2][6]) == '[]'
+
+
+def test_json_empty_string_is_a_value_not_a_null():
+    """``""`` in JSON is an empty string, and the destination keeps it as one.
+
+    A blank CSV cell means NULL because CSV cannot say anything else. JSON can:
+    it has ``null``. Normalizing ``""`` to NULL here would erase a distinction
+    the source declared, so the text column stores the empty string.
+    """
+    try:
+        with socket.create_connection(("localhost", 5432), timeout=1):
+            pass
+    except OSError:
+        pytest.skip("PostgreSQL not reachable on localhost:5432")
+
+    table_name = f"json_pg_empty_{uuid.uuid4().hex[:8]}"
+    rows = [
+        {"id": "1", "note": ""},
+        {"id": "2", "note": None},
+        {"id": "3", "note": "hello"},
+    ]
+
+    request = TransferRequest(
+        source=EndpointConfig(kind="file", format="json"),
+        source_filename="sample.json",
+        source_content=_json_bytes(rows),
+        destination=_pg_destination(table_name),
+        sync_mode="full_refresh_overwrite",
+        stream_contracts=[{
+            "name": "notes",
+            "sync_mode": "full_refresh_overwrite",
+            "primary_key": "id",
+            "selected": True,
+        }],
+        skip_preflight=True,
+    )
+
+    result = UniversalTransferEngine().execute_tracked(request, uuid.uuid4().hex[:24])
+    assert result.success is True, result.error
+
+    import psycopg2
+
+    conn = psycopg2.connect(
+        host="localhost", port=5432, database="dataflow",
+        user="dataflow", password="dataflow",
+    )
+    cur = conn.cursor()
+    cur.execute(f'SELECT id, note FROM public."{table_name}" ORDER BY id')
+    stored = cur.fetchall()
+    conn.close()
+
+    assert [row[1] for row in stored] == ["", None, "hello"]
 
 
 def test_json_tz_aware_source_carries_timestamptz():

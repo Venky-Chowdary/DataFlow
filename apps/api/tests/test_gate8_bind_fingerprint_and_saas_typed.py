@@ -115,12 +115,21 @@ def test_saas_catalog_stays_planned_not_sku():
     """Typed read must not silently flip Planned SaaS to TRANSFER_READY."""
     from transfer.connector_capabilities import enrich_catalog_entry
 
-    for brand in ("airtable", "notion", "stripe"):
+    for brand in ("airtable", "notion"):
         row = enrich_catalog_entry(
             {"id": brand, "name": brand.title(), "category": "saas", "status": "live"}
         )
         assert row["transfer_ready"] is False, brand
         assert row["certification_tier"] == "planned", brand
+
+    # Stripe earned an incremental ``created`` cursor SKU as a *source* only
+    # (see test_catalog_honesty.test_dedicated_saas_drivers_activation_and_
+    # source_only). A typed read still may not certify it as a destination.
+    stripe = enrich_catalog_entry(
+        {"id": "stripe", "name": "Stripe", "category": "saas", "status": "live"}
+    )
+    assert stripe["source_ready"] is True
+    assert stripe["dest_ready"] is False
 
 
 def test_rest_api_meta_exposes_native_types_for_airtable():

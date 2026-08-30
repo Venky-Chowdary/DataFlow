@@ -870,3 +870,45 @@ def test_schema_policy_honesty_line_matches_evolution_kernel():
     g10 = next(g for g in gates if g["id"] == "g10_schema_policy")
     assert g10["status"] == "pass"
     assert g10["details"]["honesty_line"] == manual
+
+
+def test_overwrite_recreation_does_not_bind_the_table_it_drops():
+    """Full refresh drops the dest table, so its old types are not this run's carrier.
+
+    A live ``VARCHAR(64)`` sink narrows ``TEXT`` and must pause — but under
+    overwrite that column is gone before the first row, and the carrier is the
+    one the CREATE declares.
+    """
+    cols = ["id", "note"]
+    schema = {"id": "INTEGER", "note": "TEXT"}
+    mappings = [
+        {"source": "id", "target": "id", "confidence": 0.99},
+        {"source": "note", "target": "note", "confidence": 0.99},
+    ]
+    live = detect_schema_drift(
+        source_columns=cols,
+        source_schema=schema,
+        target_columns=cols,
+        target_schema={"id": "INT", "note": "VARCHAR(64)"},
+        mappings=mappings,
+        destination_db_type="mysql",
+        table_exists=True,
+    )
+    assert live["drift_detected"] is True
+
+    recreated = detect_schema_drift(
+        source_columns=cols,
+        source_schema=schema,
+        target_columns=cols,
+        target_schema={"id": "INT", "note": "VARCHAR(64)"},
+        mappings=mappings,
+        destination_db_type="mysql",
+        table_exists=True,
+        dest_recreated=True,
+    )
+    assert recreated["target_changed"] is False
+    assert recreated["severity"] in {"none", "additive"}
+    assert not any(
+        "narrow" in str(change.get("change_type", ""))
+        for change in recreated.get("changes", [])
+    )

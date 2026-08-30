@@ -9,6 +9,7 @@ read-back, the row count and the checksum all agree on the rows that landed.
 from __future__ import annotations
 
 import sys
+import tempfile
 import uuid
 from pathlib import Path
 
@@ -27,8 +28,8 @@ ROW_COUNT = 5000  # more than one DuckDB vector
 def test_duckdb_scan_spanning_vectors_transfers_every_row():
     duckdb = pytest.importorskip("duckdb")
 
-    src_path = f"/tmp/duckdb_scan_src_{uuid.uuid4().hex[:8]}.duck"
-    dst_path = f"/tmp/duckdb_scan_dst_{uuid.uuid4().hex[:8]}.duck"
+    src_path = f"{tempfile.gettempdir()}/duckdb_scan_src_{uuid.uuid4().hex[:8]}.duck"
+    dst_path = f"{tempfile.gettempdir()}/duckdb_scan_dst_{uuid.uuid4().hex[:8]}.duck"
     src_table = f"scan_src_{uuid.uuid4().hex[:8]}"
     dst_table = f"scan_dst_{uuid.uuid4().hex[:8]}"
 

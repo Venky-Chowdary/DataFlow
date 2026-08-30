@@ -6,6 +6,7 @@ import csv
 import io
 import os
 import sys
+import tempfile
 import uuid
 from decimal import Decimal
 from datetime import date
@@ -34,7 +35,7 @@ def test_messy_csv_to_duckdb_preserves_types():
     pytest.importorskip("duckdb")
 
     table_name = "messy_duckdb_test_" + uuid.uuid4().hex[:8]
-    path = f"/tmp/{table_name}.duck"
+    path = f"{tempfile.gettempdir()}/{table_name}.duck"
     rows = [
         {"id": "1", "amount": "1,000.00", "note": "", "created": "2024-01-15", "active": "true", "meta": '{"k":"v"}', "tags": '["a","b"]'},
         {"id": "2", "amount": "2.000,50", "note": "hello", "created": "2024-02-28 14:30:00", "active": "false", "meta": "", "tags": ""},

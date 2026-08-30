@@ -744,6 +744,7 @@ def detect_schema_drift(
     table_exists: bool | None = None,
     declared_source_columns: list[str] | None = None,
     declared_source_schema: dict[str, str] | None = None,
+    dest_recreated: bool = False,
 ) -> dict[str, Any]:
     """Compare live schemas to stored contracts; attach schema_evolution plan.
 
@@ -761,11 +762,23 @@ def detect_schema_drift(
     whole numbers as a ``DECIMAL(11,8) → INT4`` precision collapse for values
     that are now integers. ``declared_source_*`` default to the live arguments,
     so an unshaped run behaves exactly as before.
+
+    ``dest_recreated`` says this run drops the destination and recreates it from
+    the source shape, which is what every overwrite sync does. The table
+    standing there now is not the carrier the rows land in, so grading the
+    source against it invents loss that cannot happen: ``TEXT → VARCHAR(64)``
+    paused an overwrite whose own DDL creates ``LONGTEXT``. Existence reads as
+    create-new here because that is what the run leaves behind.
     """
     source_schema = source_schema or {}
     target_columns = target_columns or []
     target_schema = target_schema or {}
     mappings = mappings or []
+    if dest_recreated:
+        target_columns = []
+        target_schema = {}
+        stored_target_fp = ""
+        table_exists = False
     dest_kind = normalize_dest_kind(destination_db_type)
     schemaless = dest_kind in SCHEMALESS_DESTS
     create_new = table_exists is False

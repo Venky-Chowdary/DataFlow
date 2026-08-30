@@ -197,11 +197,16 @@ def classify_dest_exists_shape(
     column_defaults: dict[str, str] | None = None,
     identity_columns: list[str] | None = None,
     generated_columns: list[str] | None = None,
+    dest_recreated: bool = False,
 ) -> dict[str, Any]:
     """Single dest-exists shape + per-column verdicts.
 
     Map / Validate / Execute / UI must consume this object — not a parallel
     heuristic. G13/G14 stay the blockers; this is the contract they name.
+
+    ``dest_recreated`` is an overwrite/full-refresh run: the table listed now
+    is dropped and recreated from the source shape, so its columns are not the
+    contract this run binds and its columns are a CREATE, not an ADD COLUMN.
     """
     sources = [str(c) for c in (source_columns or []) if str(c).strip()]
     dests = [str(c) for c in (dest_columns or []) if str(c).strip()]
@@ -209,7 +214,7 @@ def classify_dest_exists_shape(
     dest_l = {_norm(c) for c in dests}
     coverage = classify_source_coverage(sources, maps)
 
-    if destination_table_exists is False:
+    if destination_table_exists is False or dest_recreated:
         shape = SHAPE_CREATE_NEW
     elif destination_table_exists is None:
         shape = SHAPE_UNKNOWN
@@ -275,7 +280,7 @@ def classify_dest_exists_shape(
             generated_columns=generated_columns,
             mappings=maps,
         )
-        if destination_table_exists is True
+        if destination_table_exists is True and not dest_recreated
         else []
     )
     filled_spellings = {
