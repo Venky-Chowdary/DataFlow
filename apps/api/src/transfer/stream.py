@@ -722,6 +722,13 @@ def _write_batch(
             "error_policy": error_policy,
             "destination_column_nullability": dest_nullability,
             "destination_column_types": dest_column_types,
+            # Create-new fidelity (PK / NOT NULL / defaults / collation) and the
+            # empty-vs-NULL rule are route facts, not Postgres/MySQL facts: the
+            # registry path dropped both, so a SQL Server destination created
+            # itself with the server default collation and then failed its own
+            # re-read as a fidelity collapse.
+            "source_schema_catalog": source_schema_catalog,
+            "empty_cells_as_null": empty_cells_as_null,
             "on_checkpoint": (
                 (lambda c, t, r: on_checkpoint(chunk_idx, total_chunks, rows_so_far + r))
                 if on_checkpoint
@@ -1785,8 +1792,20 @@ def _stream_database_transfer_impl(
         if keyset_order_cols
         else (columns[0] if columns and not incremental else "")
     )
+    if incremental and cursor_source_col:
+        # An incremental run seeks on the column its watermark was taken on.
+        # Seeking a different column silently drops the watermark: the seek
+        # branch carries the bookmark *as* the read filter, so a source paged
+        # by seek (SQL Server / Oracle) re-read the whole table every run and
+        # an append destination died on its own primary key.
+        keyset_col = cursor_source_col
+        keyset_order_cols = [cursor_source_col] + [
+            c for c in keyset_order_cols if c != cursor_source_col
+        ]
     keyset_tiebreak = next((c for c in keyset_order_cols if c != keyset_col), "")
     keyset_after = checkpoint.cursor_value
+    if keyset_after in (None, "") and incremental and keyset_col == cursor_source_col:
+        keyset_after = watermark
     decision = decide_keyset_pagination(
         src_type=src_type,
         keyset_order_cols=keyset_order_cols,

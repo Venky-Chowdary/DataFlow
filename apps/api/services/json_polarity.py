@@ -33,9 +33,10 @@ from typing import Any, Literal
 
 JsonKind = Literal["number", "string", "boolean", "null", "array", "object"]
 
-# MySQL JSON_TYPE splits numbers; PostgreSQL jsonb_typeof does not.
+# MySQL JSON_TYPE splits numbers (INTEGER / UNSIGNED INTEGER / DOUBLE /
+# DECIMAL); PostgreSQL jsonb_typeof does not.
 _NUMBER_SPELLINGS: frozenset[str] = frozenset(
-    {"number", "integer", "double", "decimal"}
+    {"number", "integer", "unsigned integer", "double", "decimal"}
 )
 
 IEEE754_SAFE_INT: int = 2**53
@@ -68,7 +69,7 @@ def is_json_catalog_type(data_type: str, udt_name: str = "") -> bool:
 
 def normalize_json_kind(kind: str) -> str:
     """Map dest-engine type names onto the portable polarity class."""
-    token = (kind or "").strip().lower()
+    token = " ".join((kind or "").split()).lower()
     if token in _NUMBER_SPELLINGS:
         return "number"
     if token in {"string", "boolean", "null", "array", "object"}:
@@ -138,7 +139,11 @@ def json_document_wire(value: Any) -> str:
     as already-canonical engine text; any other ``str`` is a JSON string
     scalar and is quoted.
     """
-    from services.value_serializer import SQL_NULL_SENTINEL, json_default, json_loads_exact
+    from services.value_serializer import (
+        SQL_NULL_SENTINEL,
+        json_document_text,
+        json_loads_exact,
+    )
 
     if value is None:
         return SQL_NULL_SENTINEL
@@ -156,10 +161,4 @@ def json_document_wire(value: Any) -> str:
         except (json.JSONDecodeError, ValueError, TypeError):
             return json.dumps(value, ensure_ascii=False)
         return text
-    return json.dumps(
-        value,
-        ensure_ascii=False,
-        separators=(",", ":"),
-        allow_nan=False,
-        default=json_default,
-    )
+    return json_document_text(value)

@@ -43,6 +43,7 @@ def physical_column_types(
     if not table or not db_type:
         return {}
     try:
+        from connectors.generic_sql import connection_options
         from services.dialect_profiles import schema_from_cfg
         from services.schema_introspect import introspect_schema
 
@@ -65,6 +66,7 @@ def physical_column_types(
             # A destination probe must never borrow a same-named table from
             # another database on the host.
             strict_namespace=True,
+            **connection_options(cfg),
         )
     except Exception as exc:
         logger.warning("physical dest type probe failed: %s", exc, exc_info=exc)

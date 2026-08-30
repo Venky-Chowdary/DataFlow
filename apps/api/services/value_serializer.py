@@ -304,6 +304,11 @@ def format_bigquery_interval(value: Any) -> str:
     return text
 
 
+# Integral Decimals wider than this stay exact text rather than becoming a
+# JSON number: 1E+1000000 would otherwise expand to a million digits.
+_JSON_EXACT_DIGIT_LIMIT = 512
+
+
 def _decimal_to_json(value: Decimal) -> Any:
     """Convert a Decimal to a JSON-compatible value.
 
@@ -390,6 +395,54 @@ def demote_exact_json(value: Any) -> Any:
     StAX never disagree on a leaf the write path already binds as float.
     """
     return _demote_exactly_representable(value)
+
+
+def json_document_text(value: Any, *, sort_keys: bool = False) -> str:
+    """Exact JSON text for a *document* a driver already decoded.
+
+    ``json.dumps(..., default=json_default)`` renders a ``Decimal`` as a JSON
+    **string** — correct for a DECIMAL column travelling on the string wire,
+    wrong inside a JSON document: python-oracledb decodes OSON numbers as
+    ``Decimal``, so ``{"i": 0}`` was rewritten as ``{"i": "0"}`` and the
+    document changed type on the way to the destination. Numbers stay numbers
+    with every digit they were stated with (``services.json_polarity``: we do
+    not stringify past 2**53 either).
+    """
+    return _document_text(value, sort_keys=sort_keys)
+
+
+def _document_text(value: Any, *, sort_keys: bool = False) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        return json.dumps(value, allow_nan=False)
+    if isinstance(value, Decimal):
+        if not value.is_finite():
+            raise ValueError(f"non-finite Decimal refused for JSON write: {value!r}")
+        text = safe_decimal_text(value)
+        if text is None:
+            raise ValueError(f"Decimal not representable as JSON: {value!r}")
+        return text
+    if isinstance(value, str):
+        return json.dumps(value, ensure_ascii=False)
+    if isinstance(value, (list, tuple, set, frozenset)):
+        items = [_document_text(v, sort_keys=sort_keys) for v in value]
+        return "[" + ",".join(items) + "]"
+    if isinstance(value, Mapping):
+        pairs = [(str(k), v) for k, v in value.items()]
+        if sort_keys:
+            pairs.sort(key=lambda kv: kv[0])
+        body = ",".join(
+            f"{json.dumps(k, ensure_ascii=False)}:"
+            f"{_document_text(v, sort_keys=sort_keys)}"
+            for k, v in pairs
+        )
+        return "{" + body + "}"
+    return _document_text(_json_default(value), sort_keys=sort_keys)
 
 
 def _json_default(value: Any) -> Any:

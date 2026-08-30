@@ -215,6 +215,11 @@ def parse_declared_charset(type_str: str, charset: str = "") -> str:
     c = _COLLATE_RE.search(text)
     if c:
         name = c.group(1).lower()
+        # SQL Server 2019+ ``*_UTF8`` collations make CHAR/VARCHAR UTF-8. The
+        # code-page prefix of the collation name (``Latin1_General_...``) is the
+        # sort rule, not the storage encoding, so it must not win here.
+        if name.endswith("_utf8"):
+            return "utf8"
         if name.startswith("utf8mb4"):
             return "utf8mb4"
         if name.startswith("utf8mb3"):
@@ -243,6 +248,15 @@ def classify_capacity(
 
     if token in {"binary"}:
         return EncodingCapacity(form="binary", name=declared or "binary")
+
+    # SQL Server N-types are UTF-16 whatever the collation says. A column
+    # declared ``NVARCHAR(64) COLLATE Latin1_General_100_BIN2`` holds CJK and
+    # emoji fine; reading the collation prefix as the encoding classified it
+    # latin1 and quarantined every non-Latin cell the engine writes happily.
+    if eng in _SQLSERVER_FAMILY and any(
+        tok in upper_type for tok in ("NVARCHAR", "NCHAR", "NTEXT")
+    ):
+        return EncodingCapacity(form="utf16", name="national")
 
     if token in {"utf8mb3"} or (token == "utf8" and eng in _MYSQL_FAMILY):
         return EncodingCapacity(

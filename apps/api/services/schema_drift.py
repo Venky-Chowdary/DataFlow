@@ -833,8 +833,12 @@ def detect_schema_drift(
         orphan_targets = []
 
     type_mismatches: list[dict[str, str]] = []
+    risk_acknowledged: list[dict[str, str]] = []
     if live_ddl_contract:
         from services.coercion_probe import samples_coerce_mapping
+        from services.migration_risk_contract import (
+            mapping_has_clearing_risk_contract,
+        )
 
         for m in active_mappings:
             src = str(m.get("source") or "")
@@ -878,6 +882,22 @@ def detect_schema_drift(
                 # source. A wider fixed-point sink can. The invented shape
                 # (BigQuery bare BIGNUMERIC is 76,38) stays a fidelity/contract
                 # chip, so pausing the sync here only re-reported it as loss.
+                continue
+
+            # A signed Migration Risk Contract is the operator's approval of
+            # this exact pair. The fidelity gate
+            # (services.type_coercion_validator) already honours it and stays
+            # the authority on real loss, so drift must not pause a pair the
+            # operator cleared — otherwise a contract-cleared dest-exists route
+            # has no path to run at all. It is recorded, never dropped.
+            if mapping_has_clearing_risk_contract(m):
+                risk_acknowledged.append({
+                    "source": src,
+                    "target": tgt,
+                    "source_type": src_type.upper(),
+                    "target_type": tgt_type.upper(),
+                    "reason": "risk_contract_signed",
+                })
                 continue
 
             if is_precision_collapse_coercion(src_type, tgt_type, dest_db=dest_db):
@@ -1038,6 +1058,7 @@ def detect_schema_drift(
         "evolution_unmapped_sources": evolution_unmapped,
         "orphan_targets": orphan_targets,
         "type_mismatches": type_mismatches,
+        "risk_acknowledged_pairs": risk_acknowledged,
         "intentional_omits": intentional_omits,
         "mapping_coverage": round(
             len({str(m.get("source")).lower() for m in active_mappings if m.get("source")})
