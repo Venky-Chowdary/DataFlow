@@ -377,6 +377,30 @@ def _inference_would_demote_to_text(declared: str, inferred: str) -> bool:
     )
 
 
+def _inference_would_invent_fixed_point(declared: str, inferred: str) -> bool:
+    """True when profiling would turn a declared float into a sized decimal.
+
+    Profiling reads ``cell_to_string`` output, so an IEEE double arrives as
+    ``"0.025"`` and is indistinguishable from a fixed-point cell. Sizing it that
+    way invents a domain the source never declared *and* bounds it to the sample:
+    a Mongo collection whose ``amount`` starts near zero profiled as
+    ``DECIMAL(3,2)``, create-new built that PostgreSQL column, and a 100k CDC
+    snapshot landed 999 rows with the rest quarantined at ``10.00``. A declared
+    float keeps its inexact carrier; the destination can still hold every value.
+    """
+    if not declared or not inferred:
+        return False
+    from services.type_system import normalize_logical_type
+
+    try:
+        return (
+            normalize_logical_type(declared) == "float"
+            and normalize_logical_type(inferred) == "decimal"
+        )
+    except Exception:
+        return False
+
+
 def merge_profiler_schema(
     existing: dict[str, str],
     profiled: dict[str, str],
@@ -399,7 +423,9 @@ def merge_profiler_schema(
     * Otherwise (files): inference wins, except that a parameterised declared
       type keeps its precision when inference agrees on the same logical family
       but drops the parameters, and except that inference may never demote a
-      typed declaration to text (see :func:`_inference_would_demote_to_text`).
+      typed declaration to text (see :func:`_inference_would_demote_to_text`)
+      nor invent fixed point off a declared float (see
+      :func:`_inference_would_invent_fixed_point`).
     """
     from services.type_system import normalize_logical_type
 
@@ -417,6 +443,8 @@ def merge_profiler_schema(
             merged[col] = inferred
             continue
         if _inference_would_demote_to_text(declared, str(inferred)):
+            continue
+        if _inference_would_invent_fixed_point(declared, str(inferred)):
             continue
         if "(" in declared and "(" not in str(inferred):
             try:

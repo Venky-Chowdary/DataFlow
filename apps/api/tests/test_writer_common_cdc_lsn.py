@@ -125,6 +125,20 @@ def test_sqlite_lsn_guard_orders_pg_hex_not_lexicographic() -> None:
         conn.close()
 
 
+def test_mysql_lsn_predicate_covers_pg_hex_family():
+    """A PG-sourced CDC stamp must be comparable at a MySQL destination.
+
+    Without a hi/lo branch every ``hi/lo`` stamp fell through to a predicate
+    that is always false, so ON DUPLICATE KEY UPDATE kept the old row and CDC
+    updates vanished while the run reported success.
+    """
+    pred = mysql_lsn_values_newer_sql()
+    assert "CONV(" in pred and "SUBSTRING_INDEX" in pred
+    # Casted so the hex halves compare numerically, not as CONV's string result.
+    assert "CAST(CONV(" in pred
+    assert compare_lsn("0/14F23958", "0/140E5260") == 1
+
+
 def test_snowflake_lsn_predicate_covers_pg_hex_family():
     pred = snowflake_lsn_match_predicate()
     # Must parse hex hi/lo — bare text would order 0/100 < 0/20 incorrectly.

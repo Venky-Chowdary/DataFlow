@@ -440,9 +440,9 @@ def postgres_lsn_update_guard_sql(table_name: str, lsn_column: str = DF_LSN_COL)
 def mysql_lsn_values_newer_sql(lsn_column: str = DF_LSN_COL, *, quote: str = "`") -> str:
     """Boolean SQL: ``VALUES(lsn)`` is strictly newer than the destination cell.
 
-    Handles empty dest, ``file:pos`` (file then integer pos), numeric versions,
-    and opaque tokens — refuses cross-family invent. Used inside
-    ``ON DUPLICATE KEY UPDATE col=IF(<pred>, VALUES(col), col)``.
+    Handles empty dest, PG ``hi/lo`` hex, ``file:pos`` (file then integer pos),
+    numeric versions, and opaque tokens — refuses cross-family invent. Used
+    inside ``ON DUPLICATE KEY UPDATE col=IF(<pred>, VALUES(col), col)``.
     """
     col = f"{quote}{lsn_column}{quote}"
     inc = f"VALUES({col})"
@@ -459,6 +459,16 @@ def mysql_lsn_values_newer_sql(lsn_column: str = DF_LSN_COL, *, quote: str = "`"
         f"AND CAST(SUBSTRING_INDEX({inc}, ':', -1) AS UNSIGNED) "
         f"> CAST(SUBSTRING_INDEX({dest}, ':', -1) AS UNSIGNED)))"
     )
+    both_pg = f"({inc} REGEXP '{pg_re}' AND {dest} REGEXP '{pg_re}')"
+    # CONV returns a string, so each half is cast to UNSIGNED before compare —
+    # otherwise 0/100 sorts before 0/20 under text ordering.
+    inc_hi = f"CAST(CONV(SUBSTRING_INDEX({inc}, '/', 1), 16, 10) AS UNSIGNED)"
+    dest_hi = f"CAST(CONV(SUBSTRING_INDEX({dest}, '/', 1), 16, 10) AS UNSIGNED)"
+    inc_lo = f"CAST(CONV(SUBSTRING_INDEX({inc}, '/', -1), 16, 10) AS UNSIGNED)"
+    dest_lo = f"CAST(CONV(SUBSTRING_INDEX({dest}, '/', -1), 16, 10) AS UNSIGNED)"
+    pg_newer = (
+        f"({inc_hi} > {dest_hi} OR ({inc_hi} = {dest_hi} AND {inc_lo} > {dest_lo}))"
+    )
     both_numeric = f"({inc} REGEXP '{num_re}' AND {dest} REGEXP '{num_re}')"
     both_opaque = (
         f"(NOT ({inc} LIKE '%:%' AND {inc} NOT LIKE 'gtid:%') "
@@ -469,6 +479,7 @@ def mysql_lsn_values_newer_sql(lsn_column: str = DF_LSN_COL, *, quote: str = "`"
     return (
         f"({dest} IS NULL OR {dest} = '' "
         f"OR ({both_filepos} AND {filepos_newer}) "
+        f"OR ({both_pg} AND {pg_newer}) "
         f"OR ({both_numeric} AND CAST({inc} AS UNSIGNED) > CAST({dest} AS UNSIGNED)) "
         f"OR ({both_opaque} AND {inc} > {dest}))"
     )
