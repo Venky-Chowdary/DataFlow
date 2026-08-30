@@ -3600,6 +3600,10 @@ def _introspect_elasticsearch(**kwargs) -> dict[str, Any]:
     if not index:
         return {"ok": False, "error": "Elasticsearch index name required", "columns": [], "tables": []}
     try:
+        from connectors.elasticsearch_mapping import (
+            carrier_for_es_field_type,
+            carrier_from_es_property,
+        )
         from connectors.elasticsearch_reader import _client
 
         from services.schema_inference import infer_column
@@ -3663,7 +3667,7 @@ def _introspect_elasticsearch(**kwargs) -> dict[str, Any]:
                 if not isinstance(info, dict):
                     info = {"type": "text"}
                 es_type = info.get("type", "text")
-                mapped = _es_mapping_type(es_type)
+                mapped = carrier_for_es_field_type(es_type)
                 # Nested / object mapping honesty — preserve structure carriers.
                 if es_type == "nested":
                     mapped = "ARRAY<JSON>"
@@ -3683,7 +3687,13 @@ def _introspect_elasticsearch(**kwargs) -> dict[str, Any]:
                         mapped = "JSON"
                 samples = samples_by_name.get(name, [])
                 semantic_role = None
-                if es_type == "date" or (es_type in ("text", "keyword") and samples):
+                declared_carrier = carrier_from_es_property(info)
+                if declared_carrier:
+                    # A transfer that created this field recorded the carrier it
+                    # declared; an ES field type cannot express DECIMAL(12,4) vs
+                    # DECIMAL, so the declaration outranks re-derivation.
+                    mapped = declared_carrier
+                elif es_type == "date" or (es_type in ("text", "keyword") and samples):
                     intel = infer_column(samples, field_name=name)
                     inferred = str(intel["logical_type"])
                     semantic_role = intel.get("semantic_role")

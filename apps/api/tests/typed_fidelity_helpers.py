@@ -98,6 +98,17 @@ def mongo_endpoint(collection: str) -> EndpointConfig:
     )
 
 
+def elasticsearch_endpoint(index: str) -> EndpointConfig:
+    return EndpointConfig(
+        kind="database",
+        format="elasticsearch",
+        host="localhost",
+        port=9200,
+        database=index,
+        table=index,
+    )
+
+
 def snowflake_endpoint(table: str) -> EndpointConfig:
     return EndpointConfig(
         kind="database",

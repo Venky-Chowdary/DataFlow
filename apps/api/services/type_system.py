@@ -3638,8 +3638,19 @@ def datetime_timezone_polarity(inferred: str | None, *, dest_db: str = "") -> st
 
 # Engines whose single temporal carrier stores a full instant, so the logical
 # "date" DDL token there still holds a time of day. BSON date is milliseconds
-# since epoch; there is no date-only BSON type to narrow into.
-_INSTANT_ONLY_TEMPORAL_ENGINES = frozenset({"mongodb", "cosmosdb", "documentdb", "firestore"})
+# since epoch; there is no date-only BSON type to narrow into. Elasticsearch /
+# OpenSearch spell that same carrier ``date`` (epoch millis by default), so the
+# token understates it exactly as BSON's does.
+_INSTANT_ONLY_TEMPORAL_ENGINES = frozenset(
+    {
+        "mongodb",
+        "cosmosdb",
+        "documentdb",
+        "firestore",
+        "elasticsearch",
+        "opensearch",
+    }
+)
 
 
 def temporal_carrier_holds_time(db_type: str) -> bool:
