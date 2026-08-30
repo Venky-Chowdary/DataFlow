@@ -282,7 +282,13 @@ def _normalize_redis_typed_doc(
             "INT4",
             "INT8",
         }:
-            out[col] = coerce_integer_wire(out[col], ddl_type=upper or "INTEGER")
+            # Name the engine for the same reason as DECIMAL above: a Redis JSON
+            # number has no int4/int8 width, and an ``INTEGER`` token here was
+            # inferred from whichever documents were sampled — an int4 bound
+            # would refuse ids beyond 2^31 that Redis stores natively.
+            out[col] = coerce_integer_wire(
+                out[col], ddl_type=upper or "INTEGER", engine="redis"
+            )
     return out
 
 

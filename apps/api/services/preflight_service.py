@@ -990,29 +990,37 @@ def run_file_preflight(
     # "0".."49" into INTEGER here while Execute kept TEXT, so Validate approved a
     # DDL Execute refused to materialize — and had they agreed, leading zeros
     # would have been dropped on the destination.
+    # Profiling is per column through ``merge_profiler_schema`` — the same owner
+    # and the same precedence the Map step uses. An all-or-nothing gate here
+    # ("only infer when *every* declared type is generic") made the two steps
+    # read one source differently: DynamoDB declares ``amount`` as ``N`` but
+    # ``id`` as ``S``, so Map profiled ``id`` to INTEGER and created BIGINT while
+    # preflight kept VARCHAR and then blocked the run as an ``id VARCHAR →
+    # BIGINT`` collapse of a carrier the product itself had just invented.
     if (
         sample_rows
         and columns
         and not source_types_are_authoritative(source_kind, source_format)
     ):
-        generic_types = {"", "varchar", "text", "string"}
-        if not column_types or all(
-            (column_types.get(c) or "").lower() in generic_types for c in columns
-        ):
-            try:
-                from services.file_parser import FileParser
+        try:
+            from services.data_profiler import merge_profiler_schema, profile_dataset
+            from services.type_system import destination_carriers_are_inferred
 
-                inferred = FileParser.infer_schema(sample_rows)
-                if inferred:
-                    column_types = {
-                        **column_types,
-                        **{
-                            c: inferred.get(c, column_types.get(c, "VARCHAR"))
-                            for c in columns
-                        },
-                    }
-            except Exception as exc:
-                logger.debug("preflight schema inference failed: %s", exc, exc_info=exc)
+            profiled = profile_dataset(columns, sample_rows).get("schema") or {}
+            if profiled:
+                column_types = merge_profiler_schema(
+                    dict(column_types or {}),
+                    {c: profiled[c] for c in columns if c in profiled},
+                    authoritative_existing=False,
+                    # A keyspace / document store declares no numeric width, so
+                    # this page's DECIMAL(p,s) is a description of the sample and
+                    # not a bound Execute may enforce on the population.
+                    source_carriers_sampled=destination_carriers_are_inferred(
+                        source_format or source_kind
+                    ),
+                )
+        except Exception as exc:
+            logger.debug("preflight schema inference failed: %s", exc, exc_info=exc)
 
     # Additive / create-new under backfill: Decision Kernel stamps target_type
     # after source types are known — same invent path writers honor (never bare

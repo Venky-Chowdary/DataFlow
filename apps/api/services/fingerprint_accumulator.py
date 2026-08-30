@@ -6,6 +6,17 @@ without holding every fingerprint in memory: it sorts and hashes in place until
 a threshold, then spills sorted chunks to disk and merges them. The digest is
 identical either way — with no spill it sorts and hashes exactly as the plain
 list path does.
+
+Ordering is by the **fingerprint**, never by the row key. Only the fingerprint is
+hashed, so ordering by anything else makes the digest depend on data the digest
+does not cover: a source re-read supplies the primary key as the row key while a
+destination re-read supplies ``""``, so one byte-identical population sorted into
+two different orders and produced two different digests. Gate-8 then reported a
+checksum mismatch it could not localise — the cell-level sample compared every
+row and found no differing cell. Sorting on the hashed value itself makes the
+digest a property of the fingerprint multiset alone, which is what
+order-independence has to mean for two sides to compare at all. Row keys stay in
+the stream because the keyed compare paths downstream need them.
 """
 
 from __future__ import annotations
@@ -51,7 +62,7 @@ class FingerprintAccumulator:
     def _spill(self) -> None:
         if not self.buffer:
             return
-        self.buffer.sort(key=lambda x: (x[0], x[1]))
+        self.buffer.sort(key=lambda x: x[1])
         if self._tempdir is None:
             self._tempdir = tempfile.TemporaryDirectory(prefix="dataflow_fp_")
         fd, path = tempfile.mkstemp(dir=self._tempdir.name, suffix=".chk")
@@ -83,13 +94,13 @@ class FingerprintAccumulator:
 
     def _sorted_stream(self) -> Iterable[tuple[str, str]]:
         if not self.chunk_files:
-            self.buffer.sort(key=lambda x: (x[0], x[1]))
+            self.buffer.sort(key=lambda x: x[1])
             yield from self.buffer
             return
         if self.buffer:
             self._spill()
         streams = [self._read_chunk(p) for p in self.chunk_files]
-        yield from heapq.merge(*streams, key=lambda x: (x[0], x[1]))
+        yield from heapq.merge(*streams, key=lambda x: x[1])
 
     def digest(self) -> str:
         """Full SHA-256 hex digest (audit §2.8 — never truncate to 64 bits)."""
@@ -122,7 +133,7 @@ def fingerprint_checksum(fingerprints: Iterable[tuple[str, str]]) -> str:
 
 
 def _hash_fingerprints(fingerprints: list[tuple[str, str]]) -> str:
-    fingerprints.sort(key=lambda x: (x[0], x[1]))
+    fingerprints.sort(key=lambda x: x[1])
     h = hashlib.sha256()
     for _, fp in fingerprints:
         h.update(fp.encode("utf-8"))

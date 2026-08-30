@@ -922,23 +922,41 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
         # Destination: stay in the operator-chosen DB/schema. Cross-namespace
         # "heal" invents Existing table when another DB on the host has the name.
         strict_namespace = purpose == "destination"
+        # Same role, different question: a destination is described by the
+        # carrier its DDL declares, not by the shape of the rows already in it.
+        physical_carriers = purpose == "destination"
         # Always attempt column introspect — even when the schema-scoped probe list
         # missed the name (LIMIT 50, wrong default schema, cross-schema table).
         # Short-circuiting on table_exists=False falsely flipped Map into create-new
         # while writers still appended into the real table (e.g. railway.airports).
         # For destination, same-namespace-only (strict) — LIMIT miss still works.
         schema_map, schema_nulls, schema_keys = _introspect_table_schema_rich(
-            fmt, cfg, resolve_table, [], strict_namespace=strict_namespace
+            fmt,
+            cfg,
+            resolve_table,
+            [],
+            strict_namespace=strict_namespace,
+            physical_carriers=physical_carriers,
         )
         if not schema_map and listed and listed != table:
             schema_map, schema_nulls, schema_keys = _introspect_table_schema_rich(
-                fmt, cfg, table, [], strict_namespace=strict_namespace
+                fmt,
+                cfg,
+                table,
+                [],
+                strict_namespace=strict_namespace,
+                physical_carriers=physical_carriers,
             )
         if not schema_map and not listed:
             # Last chance: bare leaf name may live outside the connector schema
             # for *source* discovery only. Destination stays strict above.
             schema_map, schema_nulls, schema_keys = _introspect_table_schema_rich(
-                fmt, cfg, table, [], strict_namespace=strict_namespace
+                fmt,
+                cfg,
+                table,
+                [],
+                strict_namespace=strict_namespace,
+                physical_carriers=physical_carriers,
             )
         probe_error = str((schema_keys or {}).get("probe_error") or "").strip()
         if not schema_map and probe_error and not _is_absent_object_error(probe_error):
