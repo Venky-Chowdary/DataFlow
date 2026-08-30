@@ -23,12 +23,13 @@ from __future__ import annotations
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 from src.transfer.models import EndpointConfig, TransferResult
 
 from tests.scale.engines import Engine, build_engines, live_engines
 from tests.scale.fixture import (
+    domain_contract_columns,
     engine_columns,
     expected_checksum,
     projection,
@@ -49,6 +50,7 @@ BLOCKING_SHAPES = (
     "dest_exists_narrower",
     "g13_extra_source_column",
     "g14_dest_notnull_no_default",
+    "domain_contract_unsigned",
 )
 
 #: Column the blocking shapes attack: DECIMAL(20,9) into an integer carrier.
@@ -125,14 +127,50 @@ def _stream_contract(name: str, mode: str, key: str = "id") -> dict[str, Any]:
     return contract
 
 
+def _risk_contract_draft(column: str, reason: str) -> dict[str, Any]:
+    """An unsigned Migration Risk Contract draft the engine signs before gating.
+
+    ``QUARANTINE_ROW`` is the honest policy for a domain the destination cannot
+    declare: the carrier holds every canonical UUID, so no row is expected to
+    fail, and any row that does must be quarantined rather than coerced.
+    """
+    return {
+        "column": column,
+        "approved_by": "tests.scale.run_matrix",
+        "reason": reason,
+        "execution_policy": "QUARANTINE_ROW",
+        "severity": "high",
+        "expected_precision_loss": False,
+        "expected_truncation": False,
+        "expected_nulls": False,
+        "quarantine_policy": "holdout_rejected_rows",
+        "rollback_strategy": "DOCUMENT_ONLY",
+        "loss_classification": "domain_not_enforced",
+    }
+
+
 def _mappings(
-    columns: Sequence[str], src: Engine, dst: Engine
+    columns: Sequence[str],
+    src: Engine,
+    dst: Engine,
+    *,
+    sign_risk: Mapping[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     """Mappings in each side's *stored* column spelling (Oracle folds to upper)."""
-    return [
-        {"source": src.stored(c), "target": dst.stored(c), "confidence": 0.99}
-        for c in columns
-    ]
+    drafts = dict(sign_risk or {})
+    out: list[dict[str, Any]] = []
+    for c in columns:
+        mapping: dict[str, Any] = {
+            "source": src.stored(c),
+            "target": dst.stored(c),
+            "confidence": 0.99,
+        }
+        if c in drafts:
+            mapping["risk_contract"] = _risk_contract_draft(
+                src.stored(c), drafts[c]
+            )
+        out.append(mapping)
+    return out
 
 
 def execute(
@@ -145,6 +183,7 @@ def execute(
     src: Engine,
     dst: Engine,
     validation_mode: str = "strict",
+    sign_risk: Mapping[str, str] | None = None,
 ) -> tuple[TransferResult, str, float]:
     """One real, preflight-on transfer. Returns the result, run id and wall time."""
     from src.transfer.engine import UniversalTransferEngine
@@ -156,7 +195,7 @@ def execute(
         sync_mode=mode,
         validation_mode=validation_mode,
         stream_contracts=[_stream_contract(stream, mode, key=src.stored("id"))],
-        mappings=_mappings(columns, src, dst),
+        mappings=_mappings(columns, src, dst, sign_risk=sign_risk),
         # skip_preflight stays False: fail-closed preflight is under test too.
     )
     run_id = uuid.uuid4().hex[:24]
@@ -257,6 +296,7 @@ def run_data_cell(
     keep: bool = False,
 ) -> Cell:
     columns, skips = projection(src.name, dst.name)
+    contracts = domain_contract_columns(dst.name, columns)
     cell = Cell(
         source=src.name,
         destination=dst.name,
@@ -266,6 +306,13 @@ def run_data_cell(
         skipped_columns=skips,
         source_rows=rows,
     )
+    if contracts:
+        cell.notes.append(
+            "signed Migration Risk Contract: "
+            + "; ".join(f"{k}: {v}" for k, v in contracts.items())
+            + " (the unsigned refusal is proven by the "
+            "domain_contract_unsigned cell)"
+        )
     src_table = cache.table(src, columns)
     dst_table = f"{prefix}_dst_{uuid.uuid4().hex[:8]}"
     runs = 2 if shape == "create_new" else 1
@@ -285,6 +332,7 @@ def run_data_cell(
                 columns,
                 keyless=True,
                 source_types=cache.source_types(src, columns),
+                source_engine=src.name,
             )
             cell.notes.append(
                 "append sink created without the primary key; a keyed "
@@ -297,6 +345,7 @@ def run_data_cell(
                 dst_table,
                 columns,
                 source_types=cache.source_types(src, columns),
+                source_engine=src.name,
             )
         elif shape == "dest_exists_missing_column":
             # The destination lacks a mapped column: the engine must either
@@ -305,6 +354,7 @@ def run_data_cell(
                 dst_table,
                 [c for c in columns if c != G13_COLUMN],
                 source_types=cache.source_types(src, columns),
+                source_engine=src.name,
             )
         else:  # pragma: no cover — guarded by DATA_SHAPES
             raise ValueError(f"unknown data shape {shape}")
@@ -318,6 +368,7 @@ def run_data_cell(
                 stream=src_table,
                 src=src,
                 dst=dst,
+                sign_risk=contracts,
             )
             cell.run_ids.append(run_id)
             _accounting(cell, result)
@@ -406,7 +457,20 @@ def run_blocking_cell(
     dst_table = f"{prefix}_blk_{uuid.uuid4().hex[:8]}"
     try:
         map_columns: Sequence[str] = columns
-        if shape == "dest_exists_narrower":
+        if shape == "domain_contract_unsigned":
+            contracts = domain_contract_columns(dst.name, columns)
+            if not contracts:
+                cell.status = "skip"
+                cell.reason = (
+                    f"{dst.name} declares every mapped domain natively — "
+                    "no Migration Risk Contract is required on this route"
+                )
+                return cell
+            cell.notes.append(
+                "unsigned: " + "; ".join(f"{k}: {v}" for k, v in contracts.items())
+            )
+            dst.drop(dst_table)
+        elif shape == "dest_exists_narrower":
             narrow_col = (
                 NARROW_COLUMN if NARROW_COLUMN in columns else NARROW_COLUMN_FALLBACK
             )
@@ -426,7 +490,7 @@ def run_blocking_cell(
         else:  # pragma: no cover — guarded by BLOCKING_SHAPES
             raise ValueError(f"unknown blocking shape {shape}")
 
-        before = dst.count(dst_table)
+        before = 0 if shape == "domain_contract_unsigned" else dst.count(dst_table)
         result, run_id, _wall = execute(
             src.endpoint(src_table),
             dst.endpoint(dst_table),
@@ -439,7 +503,10 @@ def run_blocking_cell(
         cell.run_ids.append(run_id)
         _accounting(cell, result)
         cell.quarantine_sample = _quarantine_sample(result)
-        cell.dest_rows = dst.count(dst_table) - before
+        try:
+            cell.dest_rows = dst.count(dst_table) - before
+        except Exception:  # noqa: BLE001 — a refused create-new leaves no table
+            cell.dest_rows = 0
         cell.elapsed_seconds = round(result.elapsed_seconds or 0.0, 3)
         cell.reason = str(result.error or "")[:300]
         if not result.success and cell.dest_rows == 0:

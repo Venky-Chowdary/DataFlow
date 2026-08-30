@@ -106,6 +106,7 @@ class Engine:
         extra_columns: str = "",
         keyless: bool = False,
         source_types: Mapping[str, str] | None = None,
+        source_engine: str = "",
     ) -> None:
         if source_types is not None:
             body = invented_ddl_for(
@@ -114,6 +115,7 @@ class Engine:
                 source_types,
                 quote=self.quote,
                 keyless=keyless,
+                source_engine=source_engine,
             )
         else:
             body = ddl_for(

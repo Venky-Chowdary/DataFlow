@@ -262,6 +262,29 @@ def _file_export_ddl(inferred: str | None) -> str:
     return carrier
 
 
+def _uuid_exact_wire_ddl(db: str, inferred: str | None) -> str:
+    """Spell an exact CHAR(36)/VARCHAR(36) UUID wire the destination's way.
+
+    Keeps the 36-char contract: ``STRING(36)`` is BigQuery/Databricks wire and
+    a syntax error on PostgreSQL / MySQL / Oracle CREATE.
+    """
+    exact_wire = strip_identity_qualifier(inferred).strip()
+    bounded = _string_ddl_for_dest(db, exact_wire)
+    if bounded:
+        return bounded
+    # No bounded string wire on this engine (SQLite / DuckDB / ClickHouse /
+    # Iceberg): keep the foreign token only when its base is what this
+    # engine already spells, else fall back to the native unbounded wire
+    # (wider, never narrower — width is not the UUID contract here).
+    native_string = DDL_TYPES.get(db, {}).get(LOGICAL_STRING) or DEFAULT_DDL.get(db, "")
+    exact_base = exact_wire.upper().split("(", 1)[0].strip()
+    native_base = native_string.upper().split("(", 1)[0].strip()
+    widthless_native = "(" in exact_wire and "(" not in native_string
+    if native_string and (exact_base != native_base or widthless_native):
+        return native_string
+    return exact_wire
+
+
 def ddl_type(db_type: str, inferred: str | LogicalType | NativeType | None) -> str:
     """Map a logical source type to a destination-native DDL type.
 
@@ -364,24 +387,13 @@ def ddl_type(db_type: str, inferred: str | LogicalType | NativeType | None) -> s
             return native_uuid
         return "VARCHAR(36)"
     if uuid_exact_wire_carrier(inferred):
-        # Keep the 36-char contract, but spell it the way this destination
-        # spells a string: ``STRING(36)`` is BigQuery/Databricks wire and a
-        # syntax error on PostgreSQL / MySQL / Oracle CREATE.
-        exact_wire = strip_identity_qualifier(inferred).strip()
-        bounded = _string_ddl_for_dest(db, exact_wire)
-        if bounded:
-            return bounded
-        # No bounded string wire on this engine (SQLite / DuckDB / ClickHouse /
-        # Iceberg): keep the foreign token only when its base is what this
-        # engine already spells, else fall back to the native unbounded wire
-        # (wider, never narrower — width is not the UUID contract here).
-        native_string = DDL_TYPES.get(db, {}).get(LOGICAL_STRING) or DEFAULT_DDL.get(db, "")
-        exact_base = exact_wire.upper().split("(", 1)[0].strip()
-        native_base = native_string.upper().split("(", 1)[0].strip()
-        widthless_native = "(" in exact_wire and "(" not in native_string
-        if native_string and (exact_base != native_base or widthless_native):
-            return native_string
-        return exact_wire
+        # A text UUID wire also carries the source's collation: a column pinned
+        # to a binary collation landing in the destination's default
+        # accent/case-insensitive collation changes equality and uniqueness of
+        # the hex text (``A1B2…`` and ``a1b2…`` collide).
+        return _with_collation_clause(
+            db, inferred, _uuid_exact_wire_ddl(db, inferred), LOGICAL_STRING
+        )
     # MongoDB ObjectId — dialect-native wire (never invent BigQuery VARCHAR).
     if base_early in {"OBJECTID", "OBJECT_ID"} or normalize_logical_type(inferred) == LOGICAL_OBJECTID:
         types_oid = DDL_TYPES.get(db) or {}

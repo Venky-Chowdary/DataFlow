@@ -6,6 +6,7 @@ import datetime
 import json
 import logging
 import re
+from collections.abc import Sequence
 from typing import Any
 
 from services.engine_pool import release_engine
@@ -3650,6 +3651,41 @@ def _sqlite_text_over_numeric_samples(declared: str, inferred: str) -> str:
     return inferred
 
 
+def _sqlite_temporal_precision_over_text(inferred: str, values: Sequence[Any]) -> str:
+    """State the fractional-second precision a TEXT temporal carrier holds.
+
+    Sample inference names the family (``TIMESTAMP``) but no precision, and a
+    bare temporal token is read downstream as second precision — MySQL and
+    Oracle bare ``TIMESTAMP`` really is (0). So re-reading the TEXT column our
+    own SQLite DDL picks for a ``TIMESTAMP_NTZ(6)`` source reported
+    ``TIMESTAMP_NTZ(6) → TIMESTAMP`` and the second run of an unchanged route
+    blocked as a precision collapse. TEXT bounds no fraction at all, so the
+    honest statement is the precision the values themselves carry.
+    """
+    token = (inferred or "").strip()
+    if not token or "(" in token:
+        return inferred
+    if token.upper() not in {
+        "TIMESTAMP",
+        "TIMESTAMPTZ",
+        "TIMESTAMP_NTZ",
+        "TIMESTAMP_TZ",
+        "TIMESTAMP_LTZ",
+        "DATETIME",
+        "TIME",
+        "TIMETZ",
+    }:
+        return inferred
+    digits = 0
+    for value in values:
+        if isinstance(value, bytes):
+            continue
+        match = re.search(r"\d{2}:\d{2}:\d{2}\.(\d{1,9})", str(value))
+        if match:
+            digits = max(digits, len(match.group(1)))
+    return f"{token}({digits})" if digits else inferred
+
+
 def _introspect_sqlite(
     *,
     database: str = "",
@@ -3773,8 +3809,12 @@ def _introspect_sqlite(
                         else:
                             inferred = "DOUBLE PRECISION"
                     elif declared_base in {"TEXT", "VARCHAR", "CHAR", "CLOB", "STRING"}:
-                        inferred = _sqlite_text_over_numeric_samples(
-                            declared, _sqlite_declared_over_samples(declared, inferred)
+                        inferred = _sqlite_temporal_precision_over_text(
+                            _sqlite_text_over_numeric_samples(
+                                declared,
+                                _sqlite_declared_over_samples(declared, inferred),
+                            ),
+                            str_values,
                         )
                     else:
                         inferred = _sqlite_declared_over_samples(declared, inferred)

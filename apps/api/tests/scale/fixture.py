@@ -445,6 +445,30 @@ def dest_gap(engine: str, capability: str) -> str:
     return DEST_CAPABILITY_GAPS.get(engine, {}).get(capability, "")
 
 
+#: Columns whose *domain* the destination engine cannot declare, where the
+#: product's documented remedy is a signed Migration Risk Contract rather than a
+#: refusal for all time (``services.type_coercion_validator``: create-new
+#: UUID -> bare TEXT is a polarity collapse, and
+#: ``services.migration_risk_contract`` is the authority that clears it). The
+#: route is measured twice: unsigned it must block, signed it must round-trip
+#: every value byte-exact.
+DOMAIN_CONTRACT_COLUMNS: dict[str, dict[str, str]] = {
+    "sqlite": {
+        "uid": (
+            "SQLite has no UUID domain: create-new stamps TEXT and preflight "
+            "blocks the UUID->TEXT polarity collapse until a Migration Risk "
+            "Contract is signed"
+        )
+    },
+}
+
+
+def domain_contract_columns(destination: str, columns: Sequence[str]) -> dict[str, str]:
+    """Mapped columns of this route that need a signed contract to be written."""
+    gaps = DOMAIN_CONTRACT_COLUMNS.get(destination, {})
+    return {name: gaps[name] for name in columns if name in gaps}
+
+
 def projection(source: str, destination: str) -> tuple[list[str], dict[str, str]]:
     """Mapped columns for a route plus the skip reason for each excluded one."""
     cols: list[str] = []
@@ -543,6 +567,7 @@ def invented_ddl_for(
     *,
     quote: Callable[[str], str] | None = None,
     keyless: bool = False,
+    source_engine: str = "",
 ) -> str:
     """Column DDL body the *product* would create for this route.
 
@@ -551,17 +576,22 @@ def invented_ddl_for(
     ``NUMBER(19,0)`` source against a hand-written PostgreSQL ``BIGINT`` is a
     genuine narrowing (``NUMBER(19,0)`` holds 10**19-1) and the product is right
     to block it. Asking the canonical inventor
-    (``services.type_system.ddl_type`` → ``decision_kernel.type_invent``) keeps
-    one algorithm owner: the harness declares no second type map.
+    (``decision_kernel.type_invent.create_new_mapping_target_type``) keeps one
+    algorithm owner: the harness declares no second type map. ``source_engine``
+    is what lets the inventor keep encoding capacity — a PostgreSQL
+    ``VARCHAR(64)`` holding CJK must land on SQL Server ``NVARCHAR(64)``, since
+    a code-page ``VARCHAR`` cannot spell U+8A9E.
     """
-    from services.type_system import ddl_type
+    from services.decision_kernel.type_invent import create_new_mapping_target_type
 
     qt = quote or (lambda ident: f'"{ident}"')
     parts = []
     for name in columns:
         col = COLUMNS_BY_NAME[name]
         source_type = source_types.get(name) or col.ddl[engine]
-        type_sql = ddl_type(engine, source_type)
+        type_sql = create_new_mapping_target_type(
+            source_type, engine, source_db=source_engine or engine
+        )
         null_sql = "NULL" if col.nullable else "NOT NULL"
         pk = " PRIMARY KEY" if col.primary_key and not keyless else ""
         parts.append(f"{qt(name)} {type_sql} {null_sql}{pk}")
