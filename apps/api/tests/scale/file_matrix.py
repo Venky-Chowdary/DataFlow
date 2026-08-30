@@ -33,6 +33,7 @@ import sys
 import time
 import traceback
 import uuid
+import zipfile
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable
@@ -209,6 +210,34 @@ def variant_path(name: str, rows: int) -> Path:
     if not path.exists() or path.stat().st_size == 0:
         fixture.write_variant(name, path, rows)
     return path
+
+
+def unsupported_carrier_path(carrier: str, rows: int) -> Path:
+    """A real file in a carrier the product does not read, for refusal proof.
+
+    ``xls``: BIFF is genuinely unreadable here — openpyxl is the only spreadsheet
+    reader in ``requirements.txt`` and BIFF8 caps a sheet at 65,536 rows anyway,
+    so a 100K-row ``.xls`` cannot exist. The proof that matters is the refusal, so
+    the payload is the .xlsx fixture under an ``.xls`` name — exactly the case a
+    client hits when they rename a file.
+    ``zip``: no zip branch exists in the reader at all (gzip is handled); a real
+    archive proves whether the engine refuses or silently misparses the container.
+    """
+    FIXTURE_DIR.mkdir(parents=True, exist_ok=True)
+    if carrier == "xls":
+        src = fixture_path("excel", rows)
+        path = FIXTURE_DIR / f"dirty_legacy_{rows}.xls"
+        if not path.exists() or path.stat().st_size == 0:
+            path.write_bytes(src.read_bytes())
+        return path
+    if carrier == "zip":
+        src = fixture_path("csv", rows)
+        path = FIXTURE_DIR / f"dirty_csv_{rows}.zip"
+        if not path.exists() or path.stat().st_size == 0:
+            with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
+                zf.write(src, arcname=src.name)
+        return path
+    raise ValueError(f"unknown unsupported carrier {carrier!r}")
 
 
 # --------------------------------------------------------------------------- #
@@ -586,6 +615,53 @@ def run_file_to_file(cell: Cell, rows: int) -> CellResult:
         res.notes.append("row-level fidelity lost in conversion (checksum differs)")
     else:
         res.status = "pass"
+    return res
+
+
+def run_unsupported_carrier(cell: Cell, rows: int) -> CellResult:
+    """An unreadable carrier must refuse, not misparse into a plausible table.
+
+    ``pass`` here means "engine refused and the destination stayed empty". A
+    success, or any row landing, is silent corruption of a container the reader
+    does not understand.
+    """
+    res = _base_result(cell, rows)
+    from src.transfer.models import EndpointConfig
+
+    carrier = cell.source
+    path = unsupported_carrier_path(carrier, rows)
+    table = f"scale_unsupported_{carrier}"
+    rb.pg_drop(table)
+    res.rows_expected = 0
+    res.checksum_expected = ""
+    request = _request(
+        source=EndpointConfig(kind="file", format="excel" if carrier == "xls" else "csv"),
+        destination=_pg_dest(table),
+        source_path=str(path),
+        source_filename=path.name,
+        dialect="postgres",
+        mode=cell.mode,
+    )
+    result, run_id, elapsed = execute(request)
+    res.run_id = run_id
+    res.elapsed_seconds = round(elapsed, 2)
+    res.engine_rows_claimed = int(getattr(result, "records_transferred", 0) or 0)
+    landed = 0
+    try:
+        landed = rb.pg_table_count(table)
+    except Exception as exc:  # noqa: BLE001 — "table absent" is the expected outcome
+        res.notes.append(f"destination probe: {type(exc).__name__}: {str(exc).splitlines()[0]}")
+    res.dest_rows_independent = landed
+    res.verification = f"independent COUNT(*) after refusal = {landed}"
+    if getattr(result, "success", False):
+        res.status = "fail"
+        res.notes.append(f"engine accepted a .{carrier} payload it has no reader for")
+    elif landed:
+        res.status = "fail"
+        res.notes.append(f"partial write: {landed} rows survived a refused .{carrier} job")
+    else:
+        res.status = "pass"
+        res.notes.append(f"refused: {str(getattr(result, 'error', ''))[:200]}")
     return res
 
 
@@ -1060,6 +1136,21 @@ def build_cells() -> list[Cell]:
                 runner=run_strict_refusal,
                 mode=STRICT_MODE,
                 note="strict mode must refuse the job and leave no partial write",
+            )
+        )
+    for carrier, note in (
+        ("xls", "legacy BIFF .xls: no BIFF reader shipped, and BIFF8 caps a sheet at 65,536 rows"),
+        ("zip", "zip container: the reader handles gzip only, no zip branch exists"),
+    ):
+        cells.append(
+            Cell(
+                name=f"unsupported_{carrier}_to_postgres",
+                route="file_to_postgres",
+                store="local",
+                source=carrier,
+                destination="postgresql",
+                runner=run_unsupported_carrier,
+                note=note,
             )
         )
     for store, label, reason in CREDENTIAL_SKIPS:

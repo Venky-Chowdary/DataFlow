@@ -181,6 +181,16 @@ def _is_path(value: Any) -> bool:
     return isinstance(value, (str, os.PathLike))
 
 
+def _xml_source(content: bytes | str | os.PathLike) -> bytes | Path:
+    """XML readers take bytes or ``Path``; to them a ``str`` is document text.
+
+    ``content`` here is either an in-memory payload or a filesystem path, and a
+    path arrives as ``str`` (see ``prepare_stream_content``). Handed on
+    unconverted it would be counted as though the path itself were the document.
+    """
+    return Path(os.fspath(content)) if _is_path(content) else bytes(content)
+
+
 def _source_suffix(filename: str) -> str:
     name = os.path.basename(filename or "upload")
     _, ext = os.path.splitext(name)
@@ -528,7 +538,8 @@ def peek_file_source(
         from services.dest_precount import UnmeasuredArtifact
         from services.file_parser import count_xml_records, iter_xml_dicts
 
-        total = count_xml_records(content)
+        xml_src = _xml_source(content)
+        total = count_xml_records(xml_src)
         if total is None:
             raise ValueError(
                 "XML document is unmeasured — sibling collections or document XML "
@@ -537,7 +548,7 @@ def peek_file_source(
         sample_objs: list[dict] = []
         columns: dict[str, None] = {}
         try:
-            for rec in iter_xml_dicts(content):
+            for rec in iter_xml_dicts(xml_src):
                 if not isinstance(rec, dict):
                     continue
                 for key in rec:
@@ -736,7 +747,7 @@ def _batch_iterator_for_type(
 
         def _xml_batches():
             batch: list[dict] = []
-            for rec in iter_xml_dicts(content):
+            for rec in iter_xml_dicts(_xml_source(content)):
                 if not isinstance(rec, dict):
                     continue
                 batch.append(rec)
