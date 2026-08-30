@@ -1314,6 +1314,21 @@ def scan_rows(
                     "(or fix the source UUID) → re-Validate. "
                     "Do not silently coerce."
                 )
+            elif _is_interval_carrier(target.target_type) or "interval" in why_l:
+                suggested_fix = (
+                    f"Open Map → remap {target.target} off {target.target_type} "
+                    "or fix the source interval → re-Validate. "
+                    "Do not silently coerce YEAR-MONTH into DAY-SECOND."
+                )
+            elif _is_year_carrier(target.target_type) or "year" in why_l:
+                # A YEAR refusal is a domain refusal, not an integer overflow:
+                # ``1899`` parses fine and is four digits wide. Proposing a
+                # decimal carrier here would answer a question nobody asked.
+                suggested_fix = (
+                    f"Open Map → remap {target.target} off {target.target_type} "
+                    "or fix the source year → re-Validate. "
+                    "Do not silently store 0000."
+                )
             elif (
                 target.transform in {"integer", "decimal", "currency", "percentage"}
                 or "fractional" in why_l
@@ -1360,18 +1375,6 @@ def scan_rows(
                     f"Open Map → remap {target.target} off {target.target_type} "
                     "or fix the source time value → re-Validate. "
                     "Do not silently coerce an invalid time."
-                )
-            elif _is_interval_carrier(target.target_type) or "interval" in why_l:
-                suggested_fix = (
-                    f"Open Map → remap {target.target} off {target.target_type} "
-                    "or fix the source interval → re-Validate. "
-                    "Do not silently coerce YEAR-MONTH into DAY-SECOND."
-                )
-            elif _is_year_carrier(target.target_type) or "year" in why_l:
-                suggested_fix = (
-                    f"Open Map → remap {target.target} off {target.target_type} "
-                    "or fix the source year → re-Validate. "
-                    "Do not silently store 0000."
                 )
             else:
                 suggested_fix = (
