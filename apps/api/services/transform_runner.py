@@ -14,6 +14,15 @@ by fetching them defeats the purpose of having pushed the compute down. The
 results are still emitted in the expectations engine's shape so the job
 plumbing and UI consume them unchanged.
 
+**Hold-out is physical, not an accounting fiction.** A failing error-severity
+test used to stamp ``rows_quarantined`` from ``COUNT(*)`` while the violating
+rows stayed in the mart — silent pollution. After the count fails, this runner
+SELECTs the violators, writes the same dest DLQ table as transfer
+(``{model}_df_quarantine``), and DELETEs them from the mart **only if** that
+dest write succeeded. ``rows_quarantined`` is the dest COUNT decrease.
+Warn-severity tests never delete. No project_id / dest write failure is
+fail-closed: mart unchanged, no hold-out claim.
+
 **Identifiers are never interpolated raw.** Model names, columns and unique
 keys all reach SQL text. Every one of them goes through
 ``require_safe_identifier`` at definition time and ``quote_table_ref`` /
@@ -41,6 +50,10 @@ from services.transform_models import (
 )
 
 logger = logging.getLogger(__name__)
+
+#: Fail-closed cap. COUNT stays O(1); hold-out SELECTs only after a test fails.
+#: Crossing this cap refuses DELETE rather than pulling a warehouse into RAM.
+TRANSFORM_HOLDOUT_ROW_CAP = 100_000
 
 @dataclass(frozen=True)
 class MaterializationDialect:
@@ -155,6 +168,11 @@ class ModelRunResult:
     tests: list[dict[str, Any]] = field(default_factory=list)
     #: target column → model column, for incremental loads that ran.
     column_alignment: dict[str, str] = field(default_factory=dict)
+    #: Rows physically removed from the mart after dest DLQ write succeeded.
+    rows_held_out: int = 0
+    hold_out_persisted: bool = False
+    hold_out_warning: str = ""
+    quarantine_details: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -164,11 +182,13 @@ class ModelRunResult:
             "relation": self.relation,
             "strategy": self.strategy,
             "rows_affected": self.rows_affected,
+            "rows_held_out": self.rows_held_out,
             "seconds": round(self.seconds, 3),
             "sql": self.sql,
             "error": self.error,
             "tests": list(self.tests),
             "column_alignment": dict(self.column_alignment),
+            "hold_out_warning": self.hold_out_warning,
         }
 
 
@@ -197,17 +217,15 @@ class TransformRunResult:
         ]
 
     def row_accounting(self) -> dict[str, int]:
-        """Count-proven ledger — never invent per-row cells we did not read."""
+        """Dest-COUNT ledger — ``rows_quarantined`` is hold-out, not COUNT(*).
+
+        Failing tests that could not be held out (no project_id, dest DLQ write
+        failed, cap exceeded) keep ``rows_quarantined=0`` even when
+        ``tests_failed>0``. Claiming COUNT(*) as quarantined while the mart
+        still holds the rows is silent pollution.
+        """
         written = sum(m.rows_affected for m in self.models if m.rows_affected >= 0)
-        quarantined = 0
-        for model in self.models:
-            for test in model.tests:
-                if test.get("passed") or test.get("severity") != "error":
-                    continue
-                try:
-                    quarantined += max(int(test.get("failing_rows") or 0), 0)
-                except (TypeError, ValueError):
-                    continue
+        quarantined = sum(max(int(m.rows_held_out or 0), 0) for m in self.models)
         return {
             "models_run": len(self.models),
             "rows_written": written,
@@ -628,6 +646,69 @@ class TransformRunner:
 
         raise ValueError(f"Unsupported test type {test.test_type!r}")
 
+    def build_violation_predicate(self, model: TransformModel, test: Any) -> str:
+        """WHERE predicate matching rows that fail ``test`` (no WHERE keyword).
+
+        Shared by the violator SELECT and the hold-out DELETE so COUNT, payload
+        and dest COUNT decrease describe the same population. Unique tests
+        match every row in a duplicate group, not the group count.
+        """
+        relation = self.relation_for(model.name)
+        col = self.quote_column(test.column) if test.column else ""
+
+        if test.test_type == "not_null":
+            return f"{col} IS NULL"
+
+        if test.test_type == "unique":
+            # Nested subquery so SQLite will DELETE from the same table.
+            return (
+                f"{col} IN (SELECT {col} FROM ("
+                f"SELECT {col} FROM {relation} "
+                f"WHERE {col} IS NOT NULL GROUP BY {col} HAVING COUNT(*) > 1"
+                ") AS _df_dupes)"
+            )
+
+        if test.test_type == "accepted_values":
+            literals = ", ".join(_sql_literal(v) for v in test.values)
+            return f"{col} IS NOT NULL AND {col} NOT IN ({literals})"
+
+        if test.test_type == "positive":
+            return f"{col} <= 0"
+
+        if test.test_type == "relationships":
+            parent = self.relation_for(test.to_model)
+            parent_col = self.quote_column(test.to_column)
+            child_col = self.quote_column(test.column) if test.column else parent_col
+            return (
+                f"{child_col} IS NOT NULL AND NOT EXISTS "
+                f"(SELECT 1 FROM {parent} AS _df_p "
+                f"WHERE _df_p.{parent_col} = {relation}.{child_col})"
+            )
+
+        raise ValueError(f"Unsupported test type {test.test_type!r}")
+
+    def build_violation_select_sql(self, model: TransformModel, test: Any) -> str:
+        relation = self.relation_for(model.name)
+        predicate = self.build_violation_predicate(model, test)
+        return f"SELECT * FROM {relation} WHERE {predicate}"  # nosec B608
+
+    def build_holdout_delete_sql(self, model: TransformModel, test: Any) -> str:
+        relation = self.relation_for(model.name)
+        predicate = self.build_violation_predicate(model, test)
+        return f"DELETE FROM {relation} WHERE {predicate}"  # nosec B608
+
+    def _dest_endpoint_for_model(self, model_name: str) -> Any:
+        from src.transfer.models import EndpointConfig
+
+        data = dict(self.cfg)
+        data.setdefault("format", self.dialect)
+        data.setdefault("type", self.dialect)
+        data["table"] = model_name
+        data["table_name"] = model_name
+        if self.schema:
+            data.setdefault("schema", self.schema)
+        return EndpointConfig.from_dict("database", data)
+
     # ------------------------------------------------------------- execution
 
     def run(
@@ -696,6 +777,8 @@ class TransformRunner:
                         continue
                     run = self._run_one(engine, model, plan.models)
                     result.models.append(run)
+                    if run.hold_out_warning:
+                        result.warnings.append(run.hold_out_warning)
                     if run.status == "failed":
                         failed.add(name)
         finally:
@@ -726,23 +809,28 @@ class TransformRunner:
         return result
 
     def _persist_transform_quarantine(self, result: TransformRunResult) -> None:
-        """Same DLQ as transfer — one finding per failing error-severity test.
+        """Mint Inspect job. Row payloads are persisted during hold-out.
 
-        Tests return COUNT(*), not cell bodies. We persist the count-proven
-        finding; we do not invent per-row payloads we did not read.
+        Count-only findings are a leftover path for error tests that never
+        selected rows (test could not run). Held-out models already wrote
+        real payloads + dest DLQ; do not double-persist COUNT(*) as if it
+        were a row body.
         """
         job_id = self.transform_job_id()
         if not job_id or self.dry_run:
             return
         details: list[dict[str, Any]] = []
+        already_held = False
         for model in result.models:
+            if model.hold_out_persisted and model.quarantine_details:
+                already_held = True
+                details.extend(model.quarantine_details)
+                continue
             for test in model.tests:
                 if test.get("passed") or str(test.get("severity") or "error") != "error":
                     continue
-                try:
-                    failing = max(int(test.get("failing_rows") or 0), 0)
-                except (TypeError, ValueError):
-                    failing = 0
+                if model.hold_out_persisted:
+                    continue
                 message = str(test.get("message") or "") or (
                     f"{test.get('test_type')} failed on {model.name}"
                 )
@@ -752,7 +840,7 @@ class TransformRunner:
                         "message": message,
                         "column": test.get("column") or "",
                         "failure_reason": message,
-                        "original_value": failing,
+                        "original_value": test.get("failing_rows") or 0,
                         "expected_type": str(test.get("test_type") or "test"),
                         "actual_type": "violating_row",
                         "job_id": job_id,
@@ -761,9 +849,13 @@ class TransformRunner:
                         "model": model.name,
                     }
                 )
-        if not details:
+        if not details and not already_held:
             return
         self._ensure_transform_inspect_job(job_id, result, details)
+        if already_held:
+            return
+        if not details:
+            return
         try:
             from services.quarantine_dlq import persist_rejected_rows
 
@@ -779,7 +871,8 @@ class TransformRunner:
                 "Transform quarantine persist failed for %s: %s", job_id, exc
             )
             result.warnings.append(
-                f"Transform test findings could not be written to the quarantine DLQ: {exc}"
+                "Transform test findings could not be written to the quarantine "
+                f"DLQ: {exc}"
             )
 
     def _ensure_transform_inspect_job(
@@ -881,6 +974,10 @@ class TransformRunner:
                 # Tests run after the commit so they observe what an operator
                 # would see, not uncommitted state inside our own transaction.
                 run.tests = self._run_tests(conn, model)
+                violators = self._collect_violators(conn, model, run)
+            # Dest DLQ write uses its own connection (sqlite NullPool). Hold
+            # the sqlalchemy handle closed first so the file lock is released.
+            self._apply_transform_holdout(engine, model, run, violators)
         except Exception as exc:
             run.status = "failed"
             run.error = str(exc)
@@ -889,6 +986,197 @@ class TransformRunner:
             )
         run.seconds = time.perf_counter() - started
         return run
+
+    def _collect_violators(
+        self,
+        conn: Any,
+        model: TransformModel,
+        run: ModelRunResult,
+    ) -> list[dict[str, Any]]:
+        """SELECT row bodies for error-severity test failures.
+
+        Empty when there is nothing to hold out (pass, warn, view, no rows).
+        Crossing TRANSFORM_HOLDOUT_ROW_CAP sets a warning and returns [].
+        """
+        import sqlalchemy as sa
+
+        if self.dry_run or not model.is_materialized:
+            return []
+        if model.materialization not in {"table", "incremental"}:
+            return []
+
+        batches: list[dict[str, Any]] = []
+        for test, entry in zip(model.tests, run.tests):
+            if entry.get("passed") or str(entry.get("severity") or "error") != "error":
+                continue
+            try:
+                failing = max(int(entry.get("failing_rows") or 0), 0)
+            except (TypeError, ValueError):
+                failing = 0
+            if failing <= 0:
+                continue
+            try:
+                sql = self.build_violation_select_sql(model, test)
+                result = conn.execute(sa.text(sql))
+                fetched: list[dict[str, Any]] = []
+                for raw in result:
+                    fetched.append(_sqlalchemy_row_dict(raw))
+                    if len(fetched) > TRANSFORM_HOLDOUT_ROW_CAP:
+                        run.hold_out_warning = (
+                            f"Transform hold-out refused on {model.name}: "
+                            f"{test.test_type} selected more than "
+                            f"{TRANSFORM_HOLDOUT_ROW_CAP:,} violating rows. "
+                            "Mart left intact (fail-closed)."
+                        )
+                        return []
+            except Exception as exc:
+                run.hold_out_warning = (
+                    f"Transform hold-out SELECT failed on {model.name} "
+                    f"({test.test_type}): {exc}. Mart left intact."
+                )
+                logger.warning(
+                    "Transform hold-out SELECT failed for %s: %s",
+                    model.name,
+                    exc,
+                    exc_info=exc,
+                )
+                return []
+            if not fetched:
+                continue
+            batches.append({"test": test, "entry": entry, "rows": fetched})
+        return batches
+
+    def _apply_transform_holdout(
+        self,
+        engine: Any,
+        model: TransformModel,
+        run: ModelRunResult,
+        violators: list[dict[str, Any]],
+    ) -> None:
+        """Persist payloads + dest DLQ, then DELETE only if dest write succeeded."""
+        import sqlalchemy as sa
+
+        if not violators:
+            return
+        if run.hold_out_warning:
+            return
+
+        job_id = self.transform_job_id()
+        if not job_id:
+            run.hold_out_warning = (
+                f"Transform hold-out refused on {model.name}: no project_id, "
+                "so violating rows were left in the mart rather than deleted "
+                "without durable evidence."
+            )
+            return
+
+        details = _violator_details(
+            violators,
+            job_id=job_id,
+            connector=self.dialect,
+            model_name=model.name,
+        )
+        if not details:
+            return
+
+        try:
+            from services.quarantine_dlq import persist_rejected_rows
+
+            persist_rejected_rows(
+                job_id=job_id,
+                rejected_details=details,
+                workspace_id=self.workspace_id,
+                source="transform",
+                connector=self.dialect,
+            )
+            run.hold_out_persisted = True
+            run.quarantine_details = details
+        except Exception as exc:
+            run.hold_out_warning = (
+                f"Transform hold-out refused on {model.name}: control-plane "
+                f"DLQ persist failed ({exc}). Mart left intact."
+            )
+            logger.warning(
+                "Transform hold-out DLQ persist failed for %s: %s", job_id, exc
+            )
+            return
+
+        try:
+            from services.dest_quarantine import dest_supports_dlq_table, write_dest_quarantine
+
+            if not dest_supports_dlq_table(self.dialect):
+                run.hold_out_warning = (
+                    f"Transform hold-out refused on {model.name}: dialect "
+                    f"{self.dialect!r} cannot host a dest DLQ table. Mart left intact."
+                )
+                return
+            dest_result = write_dest_quarantine(
+                self._dest_endpoint_for_model(model.name),
+                details,
+                job_id=job_id,
+            )
+        except Exception as exc:
+            run.hold_out_warning = (
+                f"Transform hold-out refused on {model.name}: dest DLQ write "
+                f"failed ({exc}). Mart left intact."
+            )
+            logger.warning(
+                "Transform dest DLQ write failed for %s: %s", model.name, exc
+            )
+            return
+
+        if not dest_result.get("ok"):
+            reason = dest_result.get("error") or dest_result.get("reason") or "not ok"
+            run.hold_out_warning = (
+                f"Transform hold-out refused on {model.name}: dest DLQ write "
+                f"{reason}. Mart left intact."
+            )
+            return
+
+        deleted = 0
+        try:
+            with engine.connect() as conn:
+                with conn.begin():
+                    before_row = conn.execute(
+                        sa.text(f"SELECT COUNT(*) FROM {self.relation_for(model.name)}")  # nosec B608
+                    ).fetchone()
+                    before = (
+                        int(before_row[0])
+                        if before_row and before_row[0] is not None
+                        else 0
+                    )
+                    for batch in violators:
+                        stmt = self.build_holdout_delete_sql(model, batch["test"])
+                        conn.execute(sa.text(stmt))
+                    after_row = conn.execute(
+                        sa.text(f"SELECT COUNT(*) FROM {self.relation_for(model.name)}")  # nosec B608
+                    ).fetchone()
+                    dest_count = (
+                        int(after_row[0])
+                        if after_row and after_row[0] is not None
+                        else 0
+                    )
+                deleted = max(before - dest_count, 0)
+        except Exception as exc:
+            run.hold_out_warning = (
+                f"Transform dest DLQ wrote but mart DELETE failed on "
+                f"{model.name} ({exc}). Rows may remain in the mart; "
+                "rows_quarantined stays 0."
+            )
+            logger.warning(
+                "Transform hold-out DELETE failed for %s: %s", model.name, exc
+            )
+            return
+
+        run.rows_held_out = deleted
+        run.rows_affected = dest_count
+        run.hold_out_persisted = True
+        if deleted <= 0:
+            run.rows_held_out = 0
+            run.hold_out_warning = (
+                f"Transform dest DLQ wrote but mart COUNT did not decrease on "
+                f"{model.name}. rows_quarantined stays 0."
+            )
 
     def _aligned_incremental_statements(
         self,
@@ -994,6 +1282,65 @@ class TransformRunner:
                 )
             results.append(entry)
         return results
+
+
+def _sqlalchemy_row_dict(row: Any) -> dict[str, Any]:
+    mapping = getattr(row, "_mapping", None)
+    if mapping is not None:
+        return {str(k): v for k, v in dict(mapping).items()}
+    if hasattr(row, "_asdict"):
+        return {str(k): v for k, v in row._asdict().items()}
+    keys = getattr(row, "keys", None)
+    if callable(keys):
+        return {str(k): row[i] for i, k in enumerate(list(keys()))}
+    return {}
+
+
+def _violator_details(
+    batches: list[dict[str, Any]],
+    *,
+    job_id: str,
+    connector: str,
+    model_name: str,
+) -> list[dict[str, Any]]:
+    from connectors.writer_common import quarantine_cell_wire
+
+    details: list[dict[str, Any]] = []
+    idx = 0
+    for batch in batches:
+        test = batch["test"]
+        entry = batch["entry"]
+        col = str(getattr(test, "column", "") or "")
+        message = str(entry.get("message") or "") or (
+            f"{getattr(test, 'test_type', 'test')} failed on {model_name}"
+        )
+        for row in batch.get("rows") or []:
+            idx += 1
+            values = {str(k): quarantine_cell_wire(v) for k, v in row.items()}
+            cell = row.get(col) if col else None
+            details.append(
+                {
+                    "reason": message,
+                    "message": message,
+                    "column": col,
+                    "target": col,
+                    "failure_reason": message,
+                    "original_value": cell,
+                    "value": cell,
+                    "expected_type": str(getattr(test, "test_type", "") or "test"),
+                    "actual_type": "violating_row",
+                    "job_id": job_id,
+                    "connector": connector,
+                    "source": "transform",
+                    "model": model_name,
+                    "policy": "quarantine",
+                    "values": values,
+                    "row": idx,
+                    "retry_status": "open",
+                    "transform_attempted": "none",
+                }
+            )
+    return details
 
 
 def _quote_char(style: str) -> str:

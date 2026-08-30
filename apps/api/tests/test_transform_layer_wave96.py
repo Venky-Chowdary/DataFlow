@@ -450,6 +450,21 @@ class TestDataTestSql:
         for test in model.tests:
             assert self._runner().build_test_sql(model, test).startswith("SELECT COUNT(*)")
 
+    def test_violation_select_and_delete_share_not_null_predicate(self):
+        model = _model("m", "SELECT 1 AS x", tests=[DataTest(test_type="not_null", column="x")])
+        runner = self._runner()
+        pred = runner.build_violation_predicate(model, model.tests[0])
+        assert pred == '"x" IS NULL'
+        assert '"x" IS NULL' in runner.build_violation_select_sql(model, model.tests[0])
+        assert runner.build_holdout_delete_sql(model, model.tests[0]).startswith("DELETE FROM")
+
+    def test_unique_holdout_sql_deletes_duplicate_group_members(self):
+        model = _model("m", "SELECT 1 AS x", tests=[DataTest(test_type="unique", column="x")])
+        sql = self._runner().build_holdout_delete_sql(model, model.tests[0])
+        assert sql.startswith("DELETE FROM")
+        assert "HAVING COUNT(*) > 1" in sql
+        assert "AS _df_dupes" in sql
+
 
 # ----------------------------------------------------------------- execution
 
@@ -540,6 +555,10 @@ class TestRealExecution:
         assert failing["passed"] is False
         assert failing["failing_rows"] == 1
         assert "violate unique" in failing["message"]
+        con = sqlite3.connect(warehouse)
+        dest_count = con.execute("SELECT COUNT(*) FROM dupes").fetchone()[0]
+        con.close()
+        assert dest_count == 4, "no project_id → fail-closed, unique groups stay in the mart"
 
     def test_a_warn_severity_test_does_not_downgrade_the_run(self, warehouse):
         models = [
