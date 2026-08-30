@@ -1005,9 +1005,13 @@ def promote_create_new_capacity_stamp(
     deliberate representation change — nobody projects a string carrier for a
     numeric source — and stands as written. Landing a value the stamp cannot
     hold is then a real cast failure the writer must quarantine, not a width
-    Datawrap may silently re-choose. An operator-chosen narrowing
-    (``user_override`` / ``risk_acknowledged``) never reaches here.
+    Datawrap may silently re-choose. Identity polarity (``SERIAL`` /
+    ``IDENTITY`` / ``GENERATED ALWAYS``) is not width: re-projecting
+    ``INTEGER``→``SERIAL`` into ``BIGINT`` erases the invent so Validate never
+    sees it. An operator-chosen narrowing (``user_override`` /
+    ``risk_acknowledged``) never reaches here.
     """
+    from services.identity_fit import identity_domain_would_invent, is_identity_column
     from services.type_system import is_lossy_coercion, normalize_logical_type
 
     stamp = (stamped or "").strip()
@@ -1019,6 +1023,8 @@ def promote_create_new_capacity_stamp(
     if logical != normalize_logical_type(stamp):
         return stamp
     if logical not in _CAPACITY_PROMOTABLE_LOGICALS:
+        return stamp
+    if identity_domain_would_invent(src, stamp) or is_identity_column(stamp):
         return stamp
     if not is_lossy_coercion(src, stamp, dest_db=db):
         return stamp

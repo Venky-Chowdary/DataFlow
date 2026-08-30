@@ -101,3 +101,37 @@ def test_additive_stamping_carries_the_promotion() -> None:
         dest_table_exists=False,
     )
     assert stamped[0]["target_type"].upper() != "NUMERIC(6,4)"
+
+
+def test_integer_to_serial_invent_is_not_rewritten_to_bigint() -> None:
+    """Identity polarity is not width. SERIAL must survive so Validate can refuse."""
+    for stamp in (
+        "SERIAL",
+        "BIGSERIAL",
+        "INTEGER GENERATED ALWAYS AS IDENTITY",
+    ):
+        assert (
+            promote_create_new_capacity_stamp("INTEGER", stamp, "postgresql") == stamp
+        )
+
+
+def test_additive_stamping_keeps_serial_invent() -> None:
+    rows = [
+        {
+            "source": "id",
+            "target": "id",
+            "source_type": "INTEGER",
+            "target_type": "SERIAL",
+            "create_new": True,
+        }
+    ]
+    stamped, _unstamped = stamp_additive_mapping_types(
+        rows,
+        dest_db="postgresql",
+        source_types={"id": "INTEGER"},
+        live_dest_types={},
+        dest_table_exists=False,
+    )
+    kept = str(stamped[0]["target_type"] or "").upper()
+    assert "SERIAL" in kept
+    assert kept != "BIGINT"
