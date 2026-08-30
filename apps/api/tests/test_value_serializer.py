@@ -13,6 +13,7 @@ if str(_API_ROOT) not in sys.path:
     sys.path.insert(0, str(_API_ROOT))
 
 from services.value_serializer import (  # noqa: E402
+    bson_safe_document,
     cell_to_string,
     json_default,
     json_dumps_exact_numbers,
@@ -107,6 +108,31 @@ def test_exact_number_dump_keeps_scale_and_digits_unquoted():
     assert '"precision": 0.0000000000001' in text
     assert '"n": -12.5' in text
     assert json.loads(text, parse_float=Decimal)["amount"] == Decimal("1000.00")
+
+
+def test_bson_safe_document_encodes_decimals_exactly():
+    """A metadata document carrying Decimals must reach BSON without loss."""
+    import bson
+    from bson.decimal128 import Decimal128
+
+    doc = {
+        "amount": Decimal("1000.00"),
+        "rows": [Decimal("1"), {"nested": Decimal("-12.5")}],
+        "plain": "1000.00",
+    }
+    safe = bson_safe_document(doc)
+    assert isinstance(safe["amount"], Decimal128)
+    assert safe["amount"].to_decimal() == Decimal("1000.00")
+    assert safe["rows"][1]["nested"].to_decimal() == Decimal("-12.5")
+    assert safe["plain"] == "1000.00"
+    decoded = bson.BSON.encode(safe).decode()
+    assert decoded["amount"].to_decimal() == Decimal("1000.00")
+
+
+def test_bson_safe_document_keeps_overwide_decimal_digits_as_text():
+    """Wider than Decimal128 keeps its exact digits rather than rounding."""
+    wide = Decimal("1." + "1" * 40)
+    assert bson_safe_document(wide) == str(wide)
 
 
 def test_exact_number_dump_never_unquotes_a_string_cell():

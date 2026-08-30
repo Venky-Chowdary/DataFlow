@@ -11,6 +11,7 @@ from abc import ABC, abstractmethod
 from typing import Any
 
 from services.data_contract import CircuitBreaker, DataContract
+from services.value_serializer import bson_safe_document
 
 
 class ContractStore(ABC):
@@ -99,7 +100,7 @@ class MongoContractStore(ContractStore):
         try:
             db["contracts"].update_one(
                 {"id": contract.id},
-                {"$set": contract.to_dict()},
+                {"$set": bson_safe_document(contract.to_dict())},
                 upsert=True,
             )
         except Exception as exc:

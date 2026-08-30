@@ -3514,7 +3514,7 @@ def _dynamodb_key_hits(
 
     from connectors.aws_common import boto3_client
     from connectors.dynamodb_reader import describe_key_schema
-    from connectors.dynamodb_writer import _to_attr
+    from connectors.dynamodb_writer import _coerce_dynamo_cell, _to_attr
 
     table = (table_name or "").strip()
     if not table or not cols:
@@ -3537,12 +3537,28 @@ def _dynamodb_key_hits(
         str(item.get("name") or "").lower(): str(item.get("attr_type") or "VARCHAR")
         for item in schema
     }
+    # The census has to build the key exactly the way the writer built it, or
+    # ``BatchGetItem`` answers ``Type mismatch for key`` (a numeric-looking id
+    # under an ``S`` key serializes as ``N``) and the whole probe reports
+    # unmeasured. ``_coerce_dynamo_cell`` is that one canonical step.
+    key_letters = {
+        name: {"VARCHAR": "S", "DECIMAL": "N", "BINARY": "B"}.get(declared_type, "S")
+        for name, declared_type in declared.items()
+    }
     client = boto3_client("dynamodb", cfg)
     hits = 0
     pending: list[dict[str, Any]] = []
     for tup in keys:
         item = {
-            name: _to_attr(value, declared.get(name.lower(), "VARCHAR"))
+            name: _to_attr(
+                _coerce_dynamo_cell(
+                    value,
+                    col=name,
+                    logical_type=declared.get(name.lower(), "VARCHAR"),
+                    key_types={name: key_letters.get(name.lower(), "S")},
+                ),
+                declared.get(name.lower(), "VARCHAR"),
+            )
             for name, value in zip(cols, tup)
         }
         pending.append(item)

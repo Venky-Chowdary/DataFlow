@@ -726,6 +726,13 @@ BQ_PROJECT = env("DATAFLOW_BQ_PROJECT", "dataflow-test")
 BQ_DATASET = env("DATAFLOW_BQ_DATASET", "dataflow")
 
 
+# The emulator can die mid-sweep (goccy/googlesqlite has panicked on a DDL
+# script here). The BigQuery client's default retry has no deadline for a
+# connection refused, so every probe below carries one: a dead emulator must
+# surface as a measured failure, never as a sweep that hangs forever.
+BQ_DEADLINE_S = float(env("DATAFLOW_BQ_DEADLINE_S", "120"))
+
+
 def _bq_client():
     from google.api_core.client_options import ClientOptions
     from google.auth.credentials import AnonymousCredentials
@@ -738,10 +745,16 @@ def _bq_client():
     )
 
 
+def _bq_retry():
+    from google.api_core.retry import Retry
+
+    return Retry(deadline=BQ_DEADLINE_S)
+
+
 def bigquery_available() -> tuple[bool, str]:
     try:
         client = _bq_client()
-        list(client.list_datasets(max_results=1))
+        list(client.list_datasets(max_results=1, retry=_bq_retry(), timeout=30))
         return True, ""
     except Exception as exc:  # noqa: BLE001
         return False, f"{type(exc).__name__}: {exc}"[:300]
@@ -753,7 +766,8 @@ def bigquery_read(table: str) -> Iterator[dict[str, Any]]:
         "SELECT id, uid, big_int, amount, unicode_key, payload, ts_naive, ts_zoned "
         f"FROM `{BQ_PROJECT}.{BQ_DATASET}.{table}`"
     )
-    for row in client.query(query).result(page_size=5000):
+    job = client.query(query, retry=_bq_retry(), timeout=BQ_DEADLINE_S)
+    for row in job.result(page_size=5000, timeout=BQ_DEADLINE_S):
         yield {
             "id": row["id"],
             "uid": row["uid"],
@@ -774,9 +788,12 @@ def bigquery_drop(table: str) -> None:
     TEXT`` for a route that had never been asked to write text.
     """
     client = _bq_client()
-    client.query(
-        f"DROP TABLE IF EXISTS `{BQ_PROJECT}.{BQ_DATASET}.{table}`"
-    ).result()
+    job = client.query(
+        f"DROP TABLE IF EXISTS `{BQ_PROJECT}.{BQ_DATASET}.{table}`",
+        retry=_bq_retry(),
+        timeout=BQ_DEADLINE_S,
+    )
+    job.result(timeout=BQ_DEADLINE_S)
 
 
 def bigquery_endpoint(table: str) -> EndpointConfig:

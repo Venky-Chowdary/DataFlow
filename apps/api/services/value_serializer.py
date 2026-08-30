@@ -15,7 +15,7 @@ import re
 import uuid
 from collections.abc import Mapping
 from datetime import date, datetime, time, timedelta
-from decimal import Decimal, InvalidOperation, Overflow
+from decimal import Decimal, DecimalException, InvalidOperation, Overflow
 from enum import Enum
 from typing import Any
 
@@ -687,6 +687,36 @@ def sanitize_json_value(value: Any, *, refuse_nonfinite: bool = True) -> Any:
 def json_default(value: Any) -> Any:
     """Public JSON-default helper for json.dumps() callers."""
     return _json_default(value)
+
+
+def bson_safe_document(value: Any) -> Any:
+    """Rewrite a metadata document into types BSON can encode.
+
+    BSON has no wire for Python ``Decimal``, so a contract/checkpoint document
+    that carries one raises ``InvalidDocument`` and the whole write is lost to a
+    fallback path. ``Decimal128`` is the exact carrier for it — 34 significant
+    digits, no float — and a value wider than that keeps its exact digits as
+    text rather than being rounded into the wire.
+    """
+    if isinstance(value, Decimal):
+        text = safe_decimal_text(value)
+        if text is None:
+            return None
+        try:
+            from bson.decimal128 import Decimal128
+        except ImportError:
+            return text
+        try:
+            return Decimal128(text)
+        except (DecimalException, ValueError, TypeError):
+            return text
+    if isinstance(value, dict):
+        return {str(k): bson_safe_document(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [bson_safe_document(v) for v in value]
+    if isinstance(value, set):
+        return [bson_safe_document(v) for v in sorted(value, key=repr)]
+    return value
 
 
 _JSON_NUMBER_RE = re.compile(r"^-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?$")
