@@ -46,7 +46,13 @@ try:
     from services.replay_safety import classify_replay_safety
     from services.resilience import adaptive_chunk_size
     from services.row_filter import apply_row_filter
-    from services.transform_engine import infer_date_locale, set_active_date_locale
+    from services.transform_engine import (
+        assumed_number_locale,
+        infer_date_locale,
+        infer_number_locale,
+        set_active_date_locale,
+        set_active_number_locale,
+    )
 except ImportError:  # pragma: no cover - tests with api root on path
     from src.services.checkpoint_service import Checkpoint, CheckpointService
     from src.services.error_handling import RetryBudget, with_retry
@@ -54,7 +60,13 @@ except ImportError:  # pragma: no cover - tests with api root on path
     from src.services.replay_safety import classify_replay_safety
     from src.services.resilience import adaptive_chunk_size
     from src.services.row_filter import apply_row_filter
-    from src.services.transform_engine import infer_date_locale, set_active_date_locale
+    from src.services.transform_engine import (
+        assumed_number_locale,
+        infer_date_locale,
+        infer_number_locale,
+        set_active_date_locale,
+        set_active_number_locale,
+    )
 
 _api_root = Path(__file__).resolve().parents[2]
 if str(_api_root) not in sys.path:
@@ -808,6 +820,7 @@ def stream_file_to_database(
     source_filter: dict[str, Any] | None = None,
     skip_preflight: bool = False,
     date_locale: str = "",
+    number_locale: str = "",
     read_options: ReadOptions | None = None,
     shape_runner: Any = None,
 ) -> tuple[int, list[str], dict[str, Any], list[str]]:
@@ -822,6 +835,24 @@ def stream_file_to_database(
     )
     if not schema:
         schema = probe_schema
+
+    # Settle how this file's text reads before anything parses it — the recipe
+    # below shapes the sample, and its own numeric steps need the contract.
+    # Re-settled here rather than inherited: a chunk runs on a worker thread,
+    # which starts with none of the caller's contextvars.
+    if not date_locale and sample_rows and columns:
+        date_locale = infer_date_locale(sample_rows, columns) or ""
+    if date_locale:
+        set_active_date_locale(date_locale)
+    if not number_locale and sample_rows and columns:
+        number_locale = (
+            infer_number_locale(sample_rows, columns)
+            or assumed_number_locale(sample_rows, columns)
+            or ""
+        )
+    if number_locale:
+        set_active_number_locale(number_locale)
+
     if shape_runner is not None:
         # The recipe can add, drop and rename columns, so everything downstream —
         # mapping fallbacks, fingerprints, DDL, the sample used for chunk sizing —
@@ -835,12 +866,6 @@ def stream_file_to_database(
         sample_rows = probe.records(sample_rows)
         columns = list(probe.output_columns or columns)
         schema = shaped_schema(probe, sample_rows, schema)
-
-    # Resolve ambiguous day/month date order from the sample before any transform.
-    if not date_locale and sample_rows and columns:
-        date_locale = infer_date_locale(sample_rows, columns) or ""
-    if date_locale:
-        set_active_date_locale(date_locale)
 
     if not mappings:
         mappings = [{"source": c, "target": c, "confidence": 0.95} for c in columns]
@@ -1423,9 +1448,11 @@ def stream_file_to_database(
 
     def _process_file_chunk(idx: int, batch: list[dict]) -> dict[str, Any]:
         # Worker threads do not inherit the caller's contextvars, so each chunk
-        # must re-apply the resolved date locale before any date coercion runs.
+        # must re-apply the resolved locales before any coercion runs.
         if date_locale:
             set_active_date_locale(date_locale)
+        if number_locale:
+            set_active_number_locale(number_locale)
         empty = {
             "batch_written": 0,
             "last_checksum": "",

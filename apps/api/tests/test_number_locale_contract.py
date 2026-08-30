@@ -1,7 +1,9 @@
-"""Number locale contract — fail closed on 1,234 / 1.234 unless US or EU is set.
+"""Number locale contract — no parse ever guesses 1,234 / 1.234.
 
-Currency marks and both-separator forms still parse without a contract.
-A naive US default would silently rewrite EU ``1,234`` as 1234.
+Currency marks and both-separator forms still parse without a contract. A run
+whose sample stays ambiguous is read as US, but only because preflight settled
+and stamped that assumption first — the parser itself still fails closed, so a
+value can never be silently rewritten by a path that skipped the stamp.
 """
 
 from __future__ import annotations
@@ -190,7 +192,7 @@ def test_ambiguous_number_columns_name_the_next_action():
     assert "US or EU" in findings[0]["next_action"]
 
 
-def test_preflight_surfaces_ambiguous_grouping_with_next_action():
+def test_preflight_stamps_the_us_assumption_and_names_the_eu_switch():
     from services.preflight_service import run_file_preflight
 
     pf = run_file_preflight(
@@ -202,15 +204,19 @@ def test_preflight_surfaces_ambiguous_grouping_with_next_action():
         destination_connected=True,
     )
     report = pf.get("number_locale_report") or {}
-    assert report.get("decision") == "set_locale"
-    cols = [c.get("column") for c in report.get("ambiguous_columns") or []]
+    assert report.get("decision") == "assumed_us"
+    assert report.get("assumed") is True
+    cols = [c.get("column") for c in report.get("assumed_columns") or []]
     assert "amt" in cols
+    # The operator is never told an assumption without the control to reverse it.
     warns = pf.get("warnings") or []
-    assert any(
-        (isinstance(w, dict) and w.get("id") == "number_locale")
-        or (isinstance(w, str) and "number locale" in w.lower())
+    assumed = [
+        w
         for w in warns
-    )
+        if isinstance(w, dict) and w.get("id") == "number_locale_assumed"
+    ]
+    assert assumed
+    assert "EU" in assumed[0]["message"]
 
 
 def test_ambiguous_number_columns_empty_when_locale_set():
@@ -222,13 +228,10 @@ def test_ambiguous_number_columns_empty_when_locale_set():
         reset_active_number_locale(token)
 
 
-def test_execute_auto_quarantines_lone_group_instead_of_guessing(monkeypatch):
+def test_execute_auto_reads_a_lone_group_as_us_after_settling_the_run(monkeypatch):
     result, rows = _sqlite_amount(monkeypatch, "", "1,234")
-    written = [r[1] for r in rows]
-    assert "1234" not in {str(v) for v in written}
-    assert "1.234" not in {str(v) for v in written}
-    rejected = int((result.destination_summary or {}).get("rejected_rows") or 0)
-    assert rejected >= 1 or result.records_transferred == 0
+    assert result.success is True, result.error
+    assert str(rows[0][1]) in {"1234", "1234.0", "1234.00"}
 
 
 def test_execute_us_writes_comma_group_as_thousands(monkeypatch):

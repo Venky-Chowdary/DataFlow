@@ -258,22 +258,34 @@ export function schemaDriftCompatibilityHeadline(
 }
 
 export interface NumberLocaleValidateAction {
-  decision: "set_locale";
+  decision: "set_locale" | "assumed_us";
   columns: string[];
   message: string;
 }
 
-/** Validate next action when Auto cannot parse 1,234 vs 1.234. */
+/** Validate next action when grouping is ambiguous — refused, or read as US. */
 export function numberLocaleValidateAction(
   preflight: PreflightResult | null | undefined,
 ): NumberLocaleValidateAction | null {
   const report = preflight?.number_locale_report;
   if (!report || typeof report !== "object") return null;
-  if (String(report.decision || "") !== "set_locale") return null;
+  const decision = String(report.decision || "");
+  if (decision !== "set_locale" && decision !== "assumed_us") return null;
   const columns = (report.ambiguous_columns || [])
     .map((row) => String(row?.column || "").trim())
     .filter(Boolean);
   const named = columns.slice(0, 6).join(", ") || "amount";
+  if (decision === "assumed_us") {
+    return {
+      decision: "assumed_us",
+      columns,
+      // The run will read these as US. Say so before Execute, not after.
+      message:
+        `${named}: no locale declared and the sample shows no grouping ` +
+        "evidence — reading as US (1,234.56). If this export is European, " +
+        "set number locale EU in Destination → Advanced before you run.",
+    };
+  }
   return {
     decision: "set_locale",
     columns,

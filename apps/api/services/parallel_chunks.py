@@ -17,6 +17,7 @@ caller supplies a ``process(idx, item)`` function.
 from __future__ import annotations
 
 import concurrent.futures
+import contextvars
 import queue
 import threading
 from collections.abc import Callable, Iterable, Iterator
@@ -135,7 +136,13 @@ class ChunkDispatcher:
         if self._executor is None:
             raise RuntimeError("Use ChunkDispatcher as a context manager (with ...)")
         self._wait_for_room()
-        future = self._executor.submit(self._guarded(process), idx, item)
+        # A worker starts with none of the caller's contextvars, and the run's
+        # locale contracts live there: without this copy a chunk reads 10.129
+        # under Auto and refuses a row the first chunk wrote.
+        ctx = contextvars.copy_context()
+        future = self._executor.submit(
+            lambda i, it: ctx.run(self._guarded(process), i, it), idx, item
+        )
         self._pending[future] = idx
         if self._next_yield is None:
             self._next_yield = idx
@@ -242,7 +249,12 @@ class OrderedChunkRunner(ChunkDispatcher):
                 # Sentinel tells the dispatcher the input stream is done.
                 self._prefetch.put(None)
 
-        reader_thread = threading.Thread(target=_reader, daemon=True)
+        # The iterable itself does work (shaping, parsing) that reads the same
+        # per-run contracts, so the reader inherits the caller's context too.
+        reader_ctx = contextvars.copy_context()
+        reader_thread = threading.Thread(
+            target=lambda: reader_ctx.run(_reader), daemon=True
+        )
         reader_thread.start()
 
         try:

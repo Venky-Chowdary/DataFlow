@@ -36,6 +36,7 @@ try:
     from services.mongodb_service import get_mongodb_service
     from services.pipeline_explanation import build_pipeline_explanation
     from services.transform_engine import (
+        assumed_number_locale,
         decimal_wire_value,
         infer_date_locale,
         infer_number_locale,
@@ -84,7 +85,9 @@ except (
     from src.services.mongodb_service import get_mongodb_service
     from src.services.pipeline_explanation import build_pipeline_explanation
     from src.services.transform_engine import (
+        assumed_number_locale,
         decimal_wire_value,
+        infer_date_locale,
         infer_number_locale,
         reset_active_date_locale,
         reset_active_number_locale,
@@ -1031,6 +1034,38 @@ def _run_number_locale(request: TransferRequest) -> str:
         str(getattr(src, "kind", "") or ""),
         str(getattr(src, "format", "") or ""),
     )
+
+
+def _settle_locales(
+    request: TransferRequest,
+    rows: list[dict[str, Any]],
+    columns: list[str],
+) -> None:
+    """Pin how this run reads dates and numbers, once, before anything parses.
+
+    Order is the operator's declaration, then the typed-wire contract, then
+    unambiguous evidence in the read, and only then the US assumption Validate
+    reports — the same order preflight applies, so a route Validate cleared
+    cannot read differently on Run. Called on the raw read: grouping is a
+    property of the source text, and a Shape recipe's own numeric steps parse
+    it, so settling afterwards leaves those steps guessing.
+    """
+    if not rows or not columns:
+        return
+    if not getattr(request, "date_locale", ""):
+        inferred_dates = infer_date_locale(rows, columns)
+        if inferred_dates:
+            request.date_locale = inferred_dates
+            set_active_date_locale(inferred_dates)
+    if _run_number_locale(request):
+        return
+    settled = infer_number_locale(rows, columns)
+    assumed = "" if settled else assumed_number_locale(rows, columns)
+    settled = settled or assumed
+    if settled:
+        request.number_locale = settled
+        request.number_locale_assumed = bool(assumed)
+        set_active_number_locale(settled)
 
 
 def _execute_policy_gates_for_request(
@@ -2315,6 +2350,7 @@ class UniversalTransferEngine:
                 return incremental_no_op_result(
                     request, job_id, incremental_bound.scope.watermark
                 )
+            _settle_locales(request, records, columns)
             shape_runner = _open_shape_runner(request, columns)
             if shape_runner is not None:
                 records, columns, schema = _shape_materialized_read(
@@ -2341,20 +2377,6 @@ class UniversalTransferEngine:
             mongo.update_job_status(
                 job_id, "running", total_rows=total_rows, records_processed=0
             )
-
-            # If the operator did not specify a locale for ambiguous day/month
-            # dates, scan the source sample for an unambiguous majority before
-            # any date coercion runs.
-            if not request.date_locale:
-                inferred_locale = infer_date_locale(records, columns)
-                if inferred_locale:
-                    request.date_locale = inferred_locale
-                    set_active_date_locale(inferred_locale)
-            if not getattr(request, "number_locale", ""):
-                inferred_numbers = infer_number_locale(records, columns)
-                if inferred_numbers:
-                    request.number_locale = inferred_numbers
-                    set_active_number_locale(inferred_numbers)
 
             dest_schema_types, dest_table_exists_flag = _destination_schema_probe(
                 request.destination,
@@ -3592,6 +3614,7 @@ class UniversalTransferEngine:
             # identity are decided from the shaped columns and values the writer
             # will receive. A separate throwaway runner shapes the design-time
             # sample: those effects are not the population's.
+            _settle_locales(request, sample_rows, columns)
             shape_runner = _open_shape_runner(request, columns)
             declared_contract = resolve_sync_contract(request.stream_contracts)
             shape_refusal = _shape_stream_refusal(
@@ -4475,24 +4498,13 @@ class UniversalTransferEngine:
             # approve carriers for data the writer never receives. Two runners —
             # the sample's effects are design-time and must not be added to the
             # population accounting the ledger publishes.
+            _settle_locales(request, sample_rows, columns)
             shape_runner = _open_shape_runner(request, columns)
             if shape_runner is not None:
                 sample_probe = ShapeRunner(shape_runner.recipe)
                 sample_rows = sample_probe.records(sample_rows)
                 columns = list(sample_probe.output_columns or columns)
                 schema = shaped_schema(sample_probe, sample_rows, schema)
-
-            # Resolve ambiguous day/month date order from the sample before mapping.
-            if not request.date_locale and sample_rows and columns:
-                inferred_locale = infer_date_locale(sample_rows, columns)
-                if inferred_locale:
-                    request.date_locale = inferred_locale
-                    set_active_date_locale(inferred_locale)
-            if not getattr(request, "number_locale", "") and sample_rows and columns:
-                inferred_numbers = infer_number_locale(sample_rows, columns)
-                if inferred_numbers:
-                    request.number_locale = inferred_numbers
-                    set_active_number_locale(inferred_numbers)
 
             mongo.update_job_status(
                 job_id, "running", total_rows=total_rows, records_processed=0
@@ -4896,6 +4908,7 @@ class UniversalTransferEngine:
                 source_filter=request.source_filter,
                 skip_preflight=request.skip_preflight,
                 date_locale=request.date_locale,
+                number_locale=_run_number_locale(request),
                 read_options=read_options,
                 shape_runner=shape_runner,
             )

@@ -15,6 +15,8 @@ from services.transform_engine import (
     _parse_integer,
     _parse_uuid,
     decimal_wire_value,
+    pin_settled_number_locale,
+    reset_active_number_locale,
 )
 from services.value_serializer import cell_to_string, is_null_evidence
 
@@ -242,6 +244,19 @@ def profile_column(name: str, values: list[Any], *, sample_limit: int = 200) -> 
     }
 
 
+def _settled_number_locale(columns: list[str], sample: list[dict[str, Any]]):
+    """Read the profile under the contract the transfer will read under.
+
+    A column of ``10.129`` is Auto-ambiguous, so profiling it under Auto types
+    it VARCHAR — and Map then bills a VARCHAR→DECIMAL fidelity collapse for a
+    column preflight and the writer read as US. The profile has to settle the
+    same way they do: evidence first, the reported US assumption last.
+    """
+    if not columns or not sample:
+        return None
+    return pin_settled_number_locale(sample, columns)
+
+
 def profile_dataset(
     columns: list[str],
     rows: list[dict[str, Any]],
@@ -254,13 +269,18 @@ def profile_dataset(
     schema: dict[str, str] = {}
     primary_key_candidates: list[str] = []
 
-    for col in columns:
-        col_values = [row.get(col) for row in sample]
-        prof = profile_column(col, col_values)
-        profiles[col] = prof
-        schema[col] = prof["inferred_type"]
-        if prof.get("likely_primary_key"):
-            primary_key_candidates.append(col)
+    token = _settled_number_locale(columns, sample)
+    try:
+        for col in columns:
+            col_values = [row.get(col) for row in sample]
+            prof = profile_column(col, col_values)
+            profiles[col] = prof
+            schema[col] = prof["inferred_type"]
+            if prof.get("likely_primary_key"):
+                primary_key_candidates.append(col)
+    finally:
+        if token is not None:
+            reset_active_number_locale(token)
 
     quality_score = 0.0
     if profiles:

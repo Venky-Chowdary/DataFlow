@@ -17,6 +17,14 @@ const COPY = {
     title: "Open Destination → Advanced and set Number locale to US or EU",
     className: "df2-vd-number-locale",
   },
+  assumed_us: {
+    label: "Number locale",
+    badge: "assumed US",
+    rowHint: "read as US (1,234.56) — switch to EU if this export is European",
+    cta: "Switch to EU",
+    title: "Open Destination → Advanced and set Number locale to EU",
+    className: "df2-vd-number-locale",
+  },
   date: {
     label: "Date locale",
     badge: "set DMY or MDY",
@@ -30,7 +38,10 @@ const COPY = {
 /** One root cause → Destination → Advanced. Auto will not guess locale. */
 export function NumberLocalePanel({ action, onOpenAdvanced, kind = "number" }: Props) {
   if (!action) return null;
-  const copy = COPY[kind];
+  const copy =
+    kind === "number" && action.decision === "assumed_us"
+      ? COPY.assumed_us
+      : COPY[kind];
   const cols = action.columns.slice(0, 6);
 
   return (

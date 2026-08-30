@@ -47,6 +47,7 @@ from services.source_duplicate_probe import probe_source_duplicate_keys_result
 from services.transform_engine import (
     ambiguous_date_columns,
     ambiguous_number_columns,
+    assumed_number_locale,
     infer_date_locale,
     infer_number_locale,
     reset_active_date_locale,
@@ -965,6 +966,20 @@ def run_file_preflight(
         wire = typed_wire_number_locale(source_kind, source_format)
         if wire:
             number_locale = wire
+            set_active_number_locale(number_locale)
+
+    number_locale_assumed: list[dict[str, Any]] = []
+    if not number_locale and sample_rows and columns:
+        # Nothing declared it, no typed carrier rendered it, and the sample
+        # carries no grouping evidence. Assume US rather than refuse the load,
+        # and hand the operator the columns it covers so switching to EU is a
+        # decision they can see, not a corruption they find later.
+        assumed = assumed_number_locale(sample_rows, columns, number_locale=number_locale)
+        if assumed:
+            number_locale_assumed = ambiguous_number_columns(
+                sample_rows, columns, number_locale=number_locale
+            )
+            number_locale = assumed
             set_active_number_locale(number_locale)
 
     # If the caller did not supply rich source types, infer them from the sample
@@ -2690,9 +2705,29 @@ def run_file_preflight(
     out["number_locale_report"] = {
         "number_locale": operator_locale or "",
         "reads_typed_wire_values": number_locale == NUMBER_LOCALE_WIRE,
-        "ambiguous_columns": number_findings,
-        "decision": "set_locale" if number_findings else "ok",
+        "ambiguous_columns": number_findings or number_locale_assumed,
+        "assumed": bool(number_locale_assumed),
+        "assumed_columns": number_locale_assumed,
+        "decision": (
+            "assumed_us"
+            if number_locale_assumed
+            else ("set_locale" if number_findings else "ok")
+        ),
     }
+    if number_locale_assumed:
+        cols = ", ".join(f["column"] for f in number_locale_assumed[:6])
+        out.setdefault("warnings", []).append(
+            {
+                "id": "number_locale_assumed",
+                "message": (
+                    f"{cols}: no locale declared and the sample carries no "
+                    "grouping evidence — reading as US (1,234.56). If this "
+                    "export is European, set number locale EU in "
+                    "Destination → Advanced before you run."
+                ),
+                "details": {"columns": number_locale_assumed},
+            }
+        )
     out["date_locale"] = date_locale
     out["date_locale_report"] = {
         "date_locale": date_locale or "",

@@ -374,6 +374,50 @@ def ambiguous_number_columns(
     return findings
 
 
+# Last resort after declaration, typed-wire and sample evidence. Machine
+# exports overwhelmingly write 1,234.56, and refusing a whole load because
+# 10.129 *could* be EU grouping strands operators on files no competitor
+# refuses. This is an assumption, not a reading: callers must stamp it.
+NUMBER_LOCALE_DEFAULT = "US"
+
+
+def assumed_number_locale(
+    rows: list[dict] | None,
+    columns: list[str] | None = None,
+    number_locale: str = "",
+) -> str:
+    """``US`` when a sample still holds Auto-ambiguous numbers, else ''.
+
+    Returns '' whenever a locale is already settled or nothing in the sample
+    is ambiguous, so the assumption is only ever made where Auto would
+    otherwise refuse — and the columns it covers are exactly
+    ``ambiguous_number_columns``, which the caller reports as the assumption's
+    scope alongside the control to switch to EU.
+    """
+    if _active_number_locale(number_locale) or not rows:
+        return ""
+    if not ambiguous_number_columns(rows, columns, number_locale=number_locale):
+        return ""
+    return NUMBER_LOCALE_DEFAULT
+
+
+def pin_settled_number_locale(
+    rows: list[dict] | None, columns: list[str] | None = None
+) -> "contextvars.Token[str] | None":
+    """Pin the contract a read settles on, or ``None`` if nothing to pin.
+
+    The one place that answers "how does this sample's grouping read": an
+    already-pinned locale stands, else evidence in the sample, else the
+    reported US fallback. Type inference and profiling call it so a column the
+    writer lands as DECIMAL is not typed VARCHAR a step earlier. Callers must
+    ``reset_active_number_locale`` the token they get back.
+    """
+    if _active_number_locale() or not rows:
+        return None
+    settled = infer_number_locale(rows, columns) or assumed_number_locale(rows, columns)
+    return set_active_number_locale(settled) if settled else None
+
+
 # Currency symbols and codes that are safe to strip from numeric values.
 _CURRENCY_SYMBOLS = "".join({
     "$", "€", "£", "¥", "₹", "₩", "₽", "₺", "₴", "₱", "₫", "₭", "₦", "₲",

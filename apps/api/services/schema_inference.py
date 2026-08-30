@@ -603,11 +603,40 @@ def infer_schema_map(
     """
     schema: dict[str, str] = {}
     intel: dict[str, dict[str, Any]] = {}
-    for field, samples in samples_by_field.items():
-        rec = infer_column(samples, field_name=field)
-        schema[field] = str(rec["logical_type"])
-        intel[field] = rec
+    token = _settled_number_locale(samples_by_field)
+    try:
+        for field, samples in samples_by_field.items():
+            rec = infer_column(samples, field_name=field)
+            schema[field] = str(rec["logical_type"])
+            intel[field] = rec
+    finally:
+        if token is not None:
+            from services.transform_engine import reset_active_number_locale
+
+            reset_active_number_locale(token)
     return schema, intel
+
+
+def _settled_number_locale(samples_by_field: dict[str, list[str]]) -> Any:
+    """Infer under the grouping contract the transfer itself will read under.
+
+    Auto refuses ``10.129`` as US-decimal-vs-EU-grouping ambiguous, so the
+    column inferred VARCHAR while preflight and the writer read it as US and
+    landed a DECIMAL — Map then billed the difference as a VARCHAR→DECIMAL
+    fidelity collapse and the route dead-ended.
+    """
+    from services.transform_engine import pin_settled_number_locale
+
+    if not samples_by_field:
+        return None
+    columns = list(samples_by_field)
+    width = max((len(v) for v in samples_by_field.values()), default=0)
+    rows = [
+        {c: (samples_by_field[c][i] if i < len(samples_by_field[c]) else None)
+         for c in columns}
+        for i in range(width)
+    ]
+    return pin_settled_number_locale(rows, columns)
 
 
 def _samples_fit_declared_numeric(samples: list[str], logical_type: str) -> bool | None:

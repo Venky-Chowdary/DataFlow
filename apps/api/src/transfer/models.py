@@ -140,6 +140,10 @@ class TransferRequest:
     # Locale for ambiguous grouping: 'US' (1,234.56), 'EU' (1.234,56), or ''
     # to fail closed on a lone 3-digit group. Currency marks still parse.
     number_locale: str = ""
+    # True when number_locale is the run's US fallback for a sample that carried
+    # no grouping evidence, not an operator declaration. Proof must keep the
+    # difference: an assumption is reversible by switching the column to EU.
+    number_locale_assumed: bool = False
     # Client-supplied idempotency key. When set it replaces the derived request
     # fingerprint, letting a caller make its own HTTP retries safe. When empty,
     # the fingerprint still guards against accidental double submission.
@@ -305,6 +309,7 @@ def transfer_request_to_dict(request: TransferRequest) -> dict:
         "triggered_by": request.triggered_by,
         "date_locale": request.date_locale,
         "number_locale": request.number_locale,
+        "number_locale_assumed": bool(request.number_locale_assumed),
         "idempotency_key": request.idempotency_key,
         "delivery_guarantee": request.delivery_guarantee or "at_least_once",
         "compliance_acknowledged": bool(request.compliance_acknowledged),
@@ -410,6 +415,7 @@ def transfer_request_from_dict(data: dict) -> TransferRequest:
             if (loc := (data.get("number_locale") or "").strip().upper()) in {"US", "EU"}
             else ""
         ),
+        number_locale_assumed=bool(data.get("number_locale_assumed")),
         idempotency_key=(data.get("idempotency_key") or "").strip(),
         delivery_guarantee=(data.get("delivery_guarantee") or "at_least_once").strip().lower(),
         compliance_acknowledged=bool(data.get("compliance_acknowledged")),
