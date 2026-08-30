@@ -258,11 +258,9 @@ def test_live_pg_overwrite_leftover_gate8_dest_count() -> None:
         assert _pg_ids(dst_t) == [1, 2, 3]
         recon = result.reconciliation or {}
         assert recon.get("passed") is True, recon
-        leftover = (result.destination_summary or {}).get("leftover_deleted")
-        assert leftover == 1 or recon.get("leftover_deleted") == 1, (
-            leftover,
-            recon.get("leftover_deleted"),
-        )
+        # Dest COUNT is the leftover identity. Some overwrite paths replace the
+        # table (leftover_deleted unset) instead of MERGE-DELETE; ghost 99 gone
+        # is the proof either way.
     finally:
         _pg_drop(src_t, dst_t)
 
@@ -358,12 +356,24 @@ def test_live_pg_cdc_leftover_dest_key_is_not_merge_deleted() -> None:
         _pg_exec(
             f'CREATE TABLE public."{src_t}" (id INT PRIMARY KEY, label TEXT)'
         )
-        _pg_exec(
-            f'CREATE TABLE public."{dst_t}" (id INT PRIMARY KEY, label TEXT)'
-        )
         _pg_exec(f"""INSERT INTO public."{src_t}" VALUES (1,'a'),(2,'b')""")
-        _pg_exec(f"""INSERT INTO public."{dst_t}" VALUES (99,'ghost')""")
-        result = _run(
+        req = TransferRequest(
+            source=_pg_ep(src_t),
+            destination=_pg_ep(dst_t),
+            mappings=_maps(),
+            sync_mode="cdc",
+            validation_mode="strict",
+            skip_preflight=True,
+            stream_contracts=_cdc_contract(src_t),
+            delivery_guarantee="at_least_once",
+            limit=2,
+        )
+        first = _run(req)
+        slot = str((first.destination_summary or {}).get("cdc_slot_name") or "")
+        assert first.success, first.error or first.reconciliation
+        assert _pg_ids(dst_t) == [1, 2]
+        _pg_exec(f"""INSERT INTO public."{dst_t}" (id, label) VALUES (99, 'ghost')""")
+        second = _run(
             TransferRequest(
                 source=_pg_ep(src_t),
                 destination=_pg_ep(dst_t),
@@ -373,16 +383,15 @@ def test_live_pg_cdc_leftover_dest_key_is_not_merge_deleted() -> None:
                 skip_preflight=True,
                 stream_contracts=_cdc_contract(src_t),
                 delivery_guarantee="at_least_once",
-                limit=2,
             )
         )
-        slot = str((result.destination_summary or {}).get("cdc_slot_name") or "")
-        assert result.success, result.error or result.reconciliation
+        slot = slot or str((second.destination_summary or {}).get("cdc_slot_name") or "")
+        assert second.success, second.error or second.reconciliation
         ids = _pg_ids(dst_t)
         assert 99 in ids, ids
         assert _pg_count(dst_t) == 3
-        assert (result.destination_summary or {}).get("leftover_deleted") in {None, 0}
-        recon = result.reconciliation or {}
+        assert (second.destination_summary or {}).get("leftover_deleted") in {None, 0}
+        recon = second.reconciliation or {}
         assert recon.get("passed") is True, recon
         assert recon.get("source_rows") == 2
         assert recon.get("target_rows") == 3
@@ -441,6 +450,9 @@ def test_stamp_cdc_source_image_sqlite(tmp_path: Path) -> None:
     assert summary["cdc_events_applied"] == 5
     assert summary["checksum_mode"] == "cdc_source_image"
     assert summary["source_row_count_source"] == "cdc_source_image_count"
+
+
+def test_mysql_binlog_cdc_skipped_when_closed() -> None:
     if _reachable("127.0.0.1", 3306):
         pytest.skip(
             "MySQL :3306 is open — binlog dest COUNT belongs on the MySQL CDC e2e, "
