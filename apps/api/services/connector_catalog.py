@@ -30,8 +30,18 @@ def list_catalog(
     offset: int = 0,
     limit: int = 48,
 ) -> dict[str, Any]:
+    """Catalog page whose statuses are the enriched, capability-derived ones.
+
+    This endpoint served the raw catalog file, so a roadmap tile carrying
+    ``status: live`` was published to a client as live and ``live_count``
+    counted those tiles — an overclaim of hundreds of connectors against a
+    handful of transfer-live drivers. Enrichment and the driver count both come
+    from the canonical catalog service.
+    """
+    from services.catalog_service import catalog_summary, enriched_connectors
+
     data = _load()
-    items: list[dict] = data.get("connectors", [])
+    items: list[dict] = enriched_connectors()
     query = q.strip().lower()
 
     if query:
@@ -51,20 +61,21 @@ def list_catalog(
     page = items[offset : offset + limit]
     categories = sorted({c.get("category", "other") for c in data.get("connectors", [])})
 
-    live_count = sum(1 for c in data.get("connectors", []) if c.get("status") == "live")
+    summary = catalog_summary()
     return {
         "total": total,
         "offset": offset,
         "limit": limit,
         "categories": categories,
-        "live_count": live_count,
-        "catalog_total": data.get("total", len(data.get("connectors", []))),
+        # Unique transfer-live drivers, never the number of tiles.
+        "live_count": int(summary.get("unique_drivers") or 0),
+        "live_tiles": int(summary.get("transfer_live_tiles") or 0),
+        "catalog_total": len(enriched_connectors()),
         "connectors": page,
     }
 
 
 def get_connector_meta(connector_id: str) -> dict | None:
-    for c in _load().get("connectors", []):
-        if c.get("id") == connector_id:
-            return c
-    return None
+    from services.catalog_service import get_connector_by_id
+
+    return get_connector_by_id(connector_id)

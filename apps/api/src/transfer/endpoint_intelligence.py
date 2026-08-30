@@ -873,6 +873,16 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
                             client.close()
                         except Exception as exc:
                             logging.getLogger(__name__).debug("Exception suppressed: %s", exc, exc_info=exc)
+                if exists is False:
+                    # ``indices.exists`` already proved the index absent, and the
+                    # sample read would raise 404 — letting that escape discarded
+                    # the proof and left existence unknown, which fail-closes a
+                    # create-new destination that is simply not there yet.
+                    out["columns"] = []
+                    out["schema"] = {}
+                    out["row_estimate"] = 0
+                    out["table_exists"] = False
+                    return
                 result = read_index_batch(cfg=cfg, index=index, offset=0, limit=sample_limit)
                 batch = result[0] if isinstance(result, tuple) else result
                 out["columns"] = batch.headers

@@ -228,10 +228,14 @@ export function ConnectorModal({
   };
 
   const handleCatalogPick = (item: CatalogConnector) => {
-    if (
-      item.effective_status === "planned" ||
-      (!item.transfer_ready && !item.connect_only && item.status !== "live" && item.status !== "beta")
-    ) {
+    // Pickable = the capability SSOT says this tile can take a side or at least
+    // connect. The raw catalog `status` is not that answer: a tile shipped as
+    // `status: "live"` with no registered reader/writer used to open a form that
+    // could only fail at Execute, which is the catalog overclaiming to an operator.
+    const pickable =
+      item.effective_status !== "planned" &&
+      (item.transfer_ready || item.source_ready || item.dest_ready || item.connect_only);
+    if (!pickable) {
       toast({
         title: "Not available yet",
         message: `${item.name} is on the roadmap — no driver registered yet.`,

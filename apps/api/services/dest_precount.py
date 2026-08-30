@@ -185,6 +185,7 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "PRECOUNT_KEY",
+    "count_dialect",
     "ARTIFACT_COUNT_KEY",
     "DEST_COUNT_SOURCE_KEY",
     "DEST_COUNT_ARTIFACT",
@@ -501,10 +502,17 @@ def destination_row_count(
 
     A missing table counts as ``0`` — create-on-first-write is a known empty
     destination, which is a proof, not an unknown.
+
+    Callers that resolved the *capability* family hand in ``generic_sql`` for
+    every engine behind the shared SQLAlchemy writer. That name matches no
+    branch below, so the count came back unknowable while the write itself
+    worked; normalising here keeps one owner for the engine identity.
     """
     table = (table_name or "").strip()
     if not table:
         return None
+    if db_type == "generic_sql":
+        db_type = count_dialect(str(cfg.get("type") or db_type))
     try:
         from connectors.sql_identifiers import quote_table_ref
 
@@ -610,6 +618,12 @@ def destination_row_count(
 
         if db_type == "redis":
             return _redis_prefix_row_count(cfg, prefix=table)
+
+        if db_type == "dynamodb":
+            return _dynamodb_item_count(cfg, table=table)
+
+        if db_type in {"elasticsearch", "opensearch"}:
+            return _search_index_doc_count(cfg, index=table)
 
         if db_type == "clickhouse":
             return _clickhouse_row_count(cfg, schema=schema, table_name=table)
@@ -3392,6 +3406,56 @@ def _redis_prefix_row_count(cfg: dict[str, Any], *, prefix: str) -> int | None:
             return len(seen)
 
 
+def _dynamodb_item_count(cfg: dict[str, Any], *, table: str) -> int | None:
+    """Items in the table, paged through ``Scan Select=COUNT``.
+
+    ``DescribeTable.ItemCount`` is refreshed roughly every six hours, so it
+    cannot answer "what did the destination hold *before* this write" — an
+    append into Dynamo had no pre-count and the delta stayed unproven. A missing
+    table is 0: create-on-first-write is a known-empty destination.
+    """
+    from botocore.exceptions import ClientError
+
+    from connectors.aws_common import boto3_client
+
+    client = boto3_client("dynamodb", cfg)
+    total = 0
+    start_key: dict[str, Any] | None = None
+    while True:
+        kwargs: dict[str, Any] = {"TableName": table, "Select": "COUNT"}
+        if start_key:
+            kwargs["ExclusiveStartKey"] = start_key
+        try:
+            resp = client.scan(**kwargs)
+        except ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") == "ResourceNotFoundException":
+                return 0
+            raise
+        total += int(resp.get("Count") or 0)
+        start_key = resp.get("LastEvaluatedKey") or None
+        if not start_key:
+            return total
+
+
+def _search_index_doc_count(cfg: dict[str, Any], *, index: str) -> int | None:
+    """Documents in the index through the cluster's own ``_count``.
+
+    An absent index is 0 rather than unknowable, for the same reason a missing
+    table is: the writer creates it, and refusing to count it left append and
+    quiet-incremental runs without a pre-write number to subtract.
+    """
+    from connectors.elasticsearch_reader import _client
+
+    client = _client(cfg)
+    try:
+        if not client.indices.exists(index=index):
+            return 0
+        client.indices.refresh(index=index)
+        return int(client.count(index=index).get("count") or 0)
+    finally:
+        client.close()
+
+
 def _sftp_row_count(cfg: dict[str, Any], *, table_name: str) -> int | None:
     """Dest-engine artifact COUNT of an SFTP GET stream. Missing file is 0.
 
@@ -3878,6 +3942,27 @@ def precount_table(db_type: str, cfg: dict[str, Any], table_name: str) -> int | 
     )
 
 
+def count_dialect(raw_type: str) -> str:
+    """The engine identity this module must COUNT against.
+
+    ``resolve_driver_type`` answers a *capability* question and folds every SQL
+    engine that shares the SQLAlchemy writer into ``generic_sql``. That family
+    has no COUNT: asked for DuckDB it returned ``None``, so append delta and
+    keyed conservation were permanently unprovable for every engine behind the
+    generic writer while the writer itself worked. The dialect owner
+    (``dialect_profiles.normalize_driver``) keeps the concrete engine and still
+    folds hosted SKUs (``azure_sql`` → ``sqlserver``), so it is the right
+    resolver once the family says "generic SQL".
+    """
+    from services.dialect_profiles import normalize_driver
+    from src.transfer.connector_capabilities import resolve_driver_type
+
+    family = resolve_driver_type(raw_type)
+    if family != "generic_sql":
+        return family
+    return normalize_driver(raw_type) or family
+
+
 def precount_destination(
     endpoint: EndpointConfig, cfg: dict[str, Any]
 ) -> int | None:
@@ -3887,9 +3972,8 @@ def precount_destination(
     the delta is measured against the object the rows actually land in.
     """
     from src.transfer.adapters import resolve_dest_table
-    from src.transfer.connector_capabilities import resolve_driver_type
 
-    db_type = resolve_driver_type(str(cfg.get("type") or endpoint.format or ""))
+    db_type = count_dialect(str(cfg.get("type") or endpoint.format or ""))
     return precount_table(
         db_type, cfg, resolve_dest_table(db_type, endpoint, "dt_import")
     )
@@ -3909,11 +3993,10 @@ def count_endpoint_rows(
     if endpoint is None:
         return None
     from src.transfer.adapters import resolve_connector_config, resolve_dest_table
-    from src.transfer.connector_capabilities import resolve_driver_type
 
     try:
         cfg = resolve_connector_config(endpoint)
-        db_type = resolve_driver_type(str(cfg.get("type") or endpoint.format or ""))
+        db_type = count_dialect(str(cfg.get("type") or endpoint.format or ""))
         name = (table_name or "").strip() or resolve_dest_table(
             db_type, endpoint, "dt_import"
         )
