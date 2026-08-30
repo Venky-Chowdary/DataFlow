@@ -21,7 +21,7 @@ from services.decision_kernel import (
     normalize_logical_type,
     refuse_create_new_numeric_collapse,
 )
-from services.type_system import ddl_carrier_type
+from services.type_system import ddl_carrier_type, destination_carriers_are_inferred
 
 logger = logging.getLogger("datawrap.mapping")
 
@@ -629,6 +629,12 @@ def run_mapping_pipeline(
                 # A database source declares its own types; sampling must not
                 # re-guess them and lose precision or the numeric class.
                 authoritative_existing=source_types_authoritative,
+                # A keyspace / document store declares no numeric width: this
+                # page's DECIMAL(p,s) describes the sample, so stamping it would
+                # create a destination column the next wider value cannot enter.
+                source_carriers_sampled=destination_carriers_are_inferred(
+                    source_db_type
+                ),
             )
             # profile_dataset returns columns as name→profile dict — attach for
             # Map strip (null%/min/max/observed DECIMAL scale), not type invent only.

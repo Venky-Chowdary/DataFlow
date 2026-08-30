@@ -140,6 +140,21 @@ def _raw_page_filtered(batch: Any) -> int:
         return 0
 
 
+def _raw_page_cursor_bounded(batch: Any) -> int:
+    """Rows this page held that the incremental cursor bound excluded (0 if none).
+
+    A source that cannot push the bound into its read call hands the whole
+    keyspace over, so the bound is applied to the page. Those rows are outside
+    this run's read scope — not a removal charged to a filter or a recipe.
+    """
+    if batch is None:
+        return 0
+    try:
+        return int(batch.raw_page_cursor_bounded or 0)
+    except AttributeError:
+        return 0
+
+
 def _raw_page_cursor(batch: Any) -> str:
     """The page's highest cursor value before it was rewritten ("" if unmarked)."""
     if batch is None:

@@ -602,6 +602,35 @@ def incremental_read_narrows(sync_mode: str) -> bool:
     }
 
 
+#: Source types whose *read call* bounds an incremental page to the delta — a
+#: SQL ``WHERE cursor > :watermark`` or the engine's own filtered scan. Every
+#: other source hands its whole population over and the cursor contract has to
+#: be honoured after the read (:func:`records_after_watermark`); a source that
+#: is on neither side of this line silently re-reads everything, which appends
+#: the full population again on every schedule tick.
+CURSOR_PUSHDOWN_SOURCES = frozenset({
+    "postgresql",
+    "redshift",
+    "mysql",
+    "snowflake",
+    "mongodb",
+    "bigquery",
+    "generic_sql",
+})
+
+
+def source_bounds_cursor_reads(source_type: str) -> bool:
+    """True when this source's read call itself applies the cursor bound.
+
+    One owner for the question, because the read path and the accounting path
+    must answer it identically: a reader that pushes the bound down never hands
+    a historical row over, while a key-addressed store (Redis ``SCAN``, Dynamo
+    ``Scan``, an ES search) hands the whole keyspace over and the bound has to
+    be applied to the page.
+    """
+    return (source_type or "").strip().lower() in CURSOR_PUSHDOWN_SOURCES
+
+
 def row_after_watermark(
     rec: Any,
     cursor_column: str,

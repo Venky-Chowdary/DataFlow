@@ -292,6 +292,21 @@ def _is_mysql_engine(engine: str) -> bool:
     return _normalize_dest_db(eng) == "mysql"
 
 
+def _bare_timestamp_is_instant(engine: str) -> bool:
+    """True when this dialect's bare ``TIMESTAMP`` token is an instant carrier.
+
+    BigQuery and Databricks spell the UTC instant ``TIMESTAMP`` and the wall
+    clock ``DATETIME``; MySQL is handled by its own epoch-bounded branch. The
+    polarity owner (``services.type_system.datetime_timezone_polarity``) decides
+    — binding must not carry a second table of dialect spellings.
+    """
+    if not (engine or "").strip():
+        return False
+    from services.type_system import datetime_timezone_polarity
+
+    return datetime_timezone_polarity("TIMESTAMP", dest_db=engine) in {"tz", "ltz"}
+
+
 @lru_cache(maxsize=8192)
 def sql_type_is_temporal(source_type: str) -> bool:
     """True when ``coerce_sql_temporal`` can act on this DDL type.
@@ -309,8 +324,10 @@ def coerce_sql_temporal(value: Any, source_type: str, *, engine: str = "") -> An
     ``engine`` disambiguates the bare ``TIMESTAMP`` token. On MySQL it is an
     instant carrier (stored UTC, converted with the session ``time_zone``, which
     writers pin to ``+00:00``), so an offset-bearing wire is converted to UTC
-    rather than having its offset stripped off the civil digits. Everywhere else
-    bare ``TIMESTAMP`` stays wall-clock.
+    rather than having its offset stripped off the civil digits. BigQuery and
+    Databricks spell the instant the same way (``DATETIME`` is their wall clock),
+    so an offset is kept there. On every other dialect bare ``TIMESTAMP`` stays
+    wall-clock.
     """
     from services.value_serializer import absent_sql_bind
 
@@ -344,6 +361,18 @@ def coerce_sql_temporal(value: Any, source_type: str, *, engine: str = "") -> An
         if parsed is None:
             return value
         return parsed.astimezone(timezone.utc).replace(tzinfo=None)
+    if base == "TIMESTAMP" and _bare_timestamp_is_instant(engine):
+        # BigQuery / Databricks bare TIMESTAMP holds an instant, so the offset is
+        # part of the value, not decoration to strip. Stripping it here handed the
+        # JSON wire a naive datetime the engine then refused for the whole column.
+        if not input_has_timezone(value):
+            raise ValueError(
+                f"{base} refuses naive wall-clock on this dialect (would invent "
+                "UTC). Provide an offset/Z, or map to DATETIME for "
+                "timezone-less values."
+            )
+        parsed = parse_sql_datetime(value, aware_utc=True)
+        return parsed if parsed is not None else value
     if base in {
         "TIMESTAMPTZ",
         "TIMESTAMP_TZ",

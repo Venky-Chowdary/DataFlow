@@ -150,6 +150,10 @@ DEST_EMPTY_PASS = "empty_pass"
 DEST_ARTIFACT_READBACK = "artifact_readback"
 DEST_IDENTITY_READBACK = "identity_readback"
 CENSUS_KEY = "keyed_census"
+# Set by the write path when the destination addresses every write by identity
+# (Redis SET / DynamoDB PutItem / ES index-by-_id / vector upsert). Owner of
+# the classification is ``services.primary_key.dest_is_key_addressed``.
+KEY_ADDRESSED_KEY = "dest_key_addressed"
 # Dest population that may close overwrite cardinality. Artifact COUNT is
 # dest-engine analogue for a replaced file — not SQL COUNT(*), not writer ack.
 # Identity COUNT is dest-engine analogue for chunked vector loads.
@@ -894,6 +898,7 @@ def conservation_kind(
     sync_mode: str | None,
     *,
     dest_count_before: int | None,
+    dest_key_addressed: bool = False,
 ) -> str:
     """Which cardinality identity this run is allowed to close.
 
@@ -909,6 +914,12 @@ def conservation_kind(
     COUNT(*) grows on every attribute change. Dest-engine
     ``COUNT(*) WHERE is_current`` is the population identity.
     ``is_current`` is temporal current-version, not a tombstone.
+
+    Append into a key-addressed store (Redis SET, DynamoDB PutItem, ES
+    index-by-``_id``) is keyed, not append-delta: a row whose key already
+    exists replaces the value there, so COUNT(*) does not grow and the delta
+    identity would read a correct run as silent loss. The dest-engine key
+    census (new keys vs replaced keys) is the identity that closes.
     """
     if _is_mirror_sync(sync_mode):
         return KIND_MIRROR
@@ -917,6 +928,8 @@ def conservation_kind(
     if is_overwrite_sync(sync_mode):
         return KIND_OVERWRITE
     if is_append_sync(sync_mode):
+        if dest_key_addressed:
+            return KIND_OVERWRITE if dest_count_before == 0 else KIND_KEYED
         return KIND_APPEND_DELTA
     if dest_count_before == 0:
         return KIND_OVERWRITE
@@ -1803,6 +1816,7 @@ def account_population(
     rows_shaped_out: int = 0,
     rows_source_filtered: int = 0,
     rows_expanded: int = 0,
+    dest_key_addressed: bool = False,
 ) -> ConservationLedger:
     """Close ``reader + expanded == dest_population + hold_outs + skipped + removed``.
 
@@ -1834,6 +1848,7 @@ def account_population(
         removal_note=_removal_phrase(shaped_out, source_filtered),
         expanded=expanded,
         expansion_note=_expansion_phrase(expanded),
+        dest_key_addressed=dest_key_addressed,
     )
     if not (shaped_out or source_filtered or expanded):
         return ledger
@@ -1865,11 +1880,16 @@ def _close_population(
     removal_note: str,
     expanded: int = 0,
     expansion_note: str = "",
+    dest_key_addressed: bool = False,
 ) -> ConservationLedger:
     quarantined = hold_outs(rejected_rows, coerced_null_rows)
     skipped = int(rows_skipped or 0)
     coerced = int(coerced_null_rows or 0)
-    kind = conservation_kind(sync_mode, dest_count_before=dest_count_before)
+    kind = conservation_kind(
+        sync_mode,
+        dest_count_before=dest_count_before,
+        dest_key_addressed=dest_key_addressed,
+    )
     ack = writer_ack if writer_ack is not None else None
     # File replace is overwrite regardless of the operator's SQL sync-mode
     # label: the engine opens the artifact ``wb``. Append-delta / keyed
@@ -2274,6 +2294,9 @@ def account_job(job: Mapping[str, Any]) -> ConservationLedger:
         recon.get("shape_recipe_hash") or dest.get("shape_recipe_hash") or ""
     )
     ledger = account_population(
+        dest_key_addressed=bool(
+            dest.get(KEY_ADDRESSED_KEY) or recon.get(KEY_ADDRESSED_KEY)
+        ),
         rows_shaped_out=shaped_out,
         rows_source_filtered=source_filtered,
         rows_expanded=expanded,

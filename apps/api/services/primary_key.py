@@ -129,6 +129,18 @@ def sync_requires_unique_identity(
     return _normalized_mode(sync_mode) in _UNIQUE_IDENTITY_SYNC_MODES
 
 
+def dest_is_key_addressed(dest_kind: str | None) -> bool:
+    """True when every write to this destination is addressed by identity.
+
+    Redis ``SET``, DynamoDB ``PutItem``, Elasticsearch index-by-``_id`` and
+    vector upserts replace the value held at the key. Re-writing a key that
+    already exists is the destination's defined behaviour, not a lost row, so
+    cardinality growth cannot account for such a write.
+    """
+    kind = normalize_dest_kind(dest_kind) if dest_kind else ""
+    return kind in KEY_ADDRESSED_DESTS
+
+
 def _normalized_mode(sync_mode: str | None) -> str:
     mode = (sync_mode or "").strip().lower()
     try:

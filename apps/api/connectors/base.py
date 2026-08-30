@@ -39,3 +39,9 @@ class ReadBatch:
     #: operator excluded by filter was never offered to the recipe, and a row
     #: the recipe removed was in scope and shaped out.
     raw_page_filtered: int = 0
+    #: Rows this page held that the incremental cursor bound excluded, for a
+    #: source whose read call cannot push the bound down (Redis SCAN, Dynamo
+    #: Scan, an ES search). They were handed over but are not in this run's
+    #: read scope, exactly as a pushed-down ``WHERE`` would never have read
+    #: them — so the run's source population must not count them.
+    raw_page_cursor_bounded: int = 0
