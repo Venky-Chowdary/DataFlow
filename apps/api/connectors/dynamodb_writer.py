@@ -964,7 +964,17 @@ def _table_key_types(client, table: str) -> dict[str, str]:
 
 
 def _attr_type_for_logical(logical: str) -> str:
-    upper = (logical or "").upper()
+    """Key ``AttributeType`` for a column's declared type.
+
+    Callers resolve types through Map, which stamps DynamoDB's own carriers
+    (``N`` / ``S`` / ``B`` / ``BOOL``) — reading only SQL spellings created the
+    key as ``S`` for a numeric identity, so an INTEGER id landed as text and the
+    read-back collapsed VARCHAR → BIGINT. ``BOOL`` is deliberately not a key
+    carrier: DynamoDB keys are S, N or B only.
+    """
+    upper = (logical or "").upper().replace(" ", "")
+    if upper in {"N", "S", "B"}:
+        return upper
     if upper.startswith("DECIMAL") or upper in {
         "INTEGER", "NUMERIC", "FLOAT", "DOUBLE", "LONG", "BIGINT", "NUMBER",
     }:
