@@ -1793,6 +1793,24 @@ def _warehouse_sql_key_hits(
     try:
         with _warehouse_sql_engine(db_type, cfg) as engine:
             with engine.connect() as conn:
+                from services.dest_key_typing import (
+                    coerce_key_tuples,
+                    key_column_types_sqlalchemy,
+                )
+
+                keys, dropped = coerce_key_tuples(
+                    keys,
+                    cols,
+                    key_column_types_sqlalchemy(
+                        conn, schema=schema, table_name=table_name
+                    ),
+                )
+                if dropped:
+                    logger.info(
+                        "dest key census: %d key(s) not representable in %s key column type(s)",
+                        dropped,
+                        dialect,
+                    )
                 for i in range(0, len(keys), _KEY_HIT_CHUNK):
                     chunk = keys[i : i + _KEY_HIT_CHUNK]
                     if width == 1:
@@ -1983,7 +2001,10 @@ def _key_hits_sql(
         if not database:
             return None
         with closing(sqlite3.connect(database)) as conn:
-            total = _sum_distinct_hits(conn, table_ref, col_sql, cols, keys, ph)
+            total = _sum_distinct_hits(
+                conn, table_ref, col_sql, cols, keys, ph, dialect=dialect, schema=schema,
+                table_name=table_name,
+            )
         return total
     if dialect in {"postgresql", "redshift"}:
         from connectors.postgresql_conn import get_connection
@@ -1998,7 +2019,10 @@ def _key_hits_sql(
             ssl=bool(cfg.get("ssl", False)),
         )
         try:
-            return _sum_distinct_hits(conn, table_ref, col_sql, cols, keys, ph)
+            return _sum_distinct_hits(
+                conn, table_ref, col_sql, cols, keys, ph, dialect=dialect, schema=schema,
+                table_name=table_name,
+            )
         finally:
             conn.close()
     if dialect == "mysql":
@@ -2014,7 +2038,10 @@ def _key_hits_sql(
             ssl=bool(cfg.get("ssl", False)),
         )
         try:
-            return _sum_distinct_hits(conn, table_ref, col_sql, cols, keys, ph)
+            return _sum_distinct_hits(
+                conn, table_ref, col_sql, cols, keys, ph, dialect=dialect, schema=schema,
+                table_name=table_name,
+            )
         finally:
             conn.close()
     return None
@@ -2027,7 +2054,28 @@ def _sum_distinct_hits(
     cols: list[str],
     keys: list[tuple[Any, ...]],
     ph: str,
+    *,
+    dialect: str = "",
+    schema: str = "",
+    table_name: str = "",
 ) -> int:
+    from services.dest_key_typing import coerce_key_tuples, key_column_types_dbapi
+
+    col_types = key_column_types_dbapi(
+        conn,
+        dialect=dialect,
+        schema=schema,
+        table_name=table_name,
+        placeholder=ph,
+    )
+    keys, dropped = coerce_key_tuples(keys, cols, col_types)
+    if dropped:
+        # Values the destination column cannot represent are misses, not errors.
+        logger.info(
+            "dest key census: %d key(s) not representable in %s key column type(s)",
+            dropped,
+            dialect or "destination",
+        )
     total = 0
     width = len(cols)
     for i in range(0, len(keys), _KEY_HIT_CHUNK):

@@ -1,4 +1,7 @@
-"""Independent driver access for the five relational engines in the matrix.
+"""Independent driver access for the relational engines in the duplex matrix.
+
+The NoSQL/analytical tracks declare their stores as ``EngineSpec`` adapters in
+``engines.py``; this module is the relational duplex matrix's own driver layer.
 
 Every number the matrix reports about a destination is read **here**, through a
 driver connection the transfer engine never touched: ``COUNT(*)`` and a
