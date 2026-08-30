@@ -161,6 +161,69 @@ async def get_audit_tip():
     }
 
 
+@router.get("/verify")
+async def verify_audit_chain(
+    limit: int = Query(5000, ge=1, le=20000, description="Records to walk, oldest first"),
+):
+    """Re-walk the evidence chain and name every record that does not hold up.
+
+    Unscoped by workspace on purpose: the chain links every record, so a
+    workspace filter would show gaps that are only filtering. Retention is
+    reported as retention, not as a broken chain.
+    """
+    from services.evidence_chain import verify_chain
+
+    return verify_chain(limit=limit)
+
+
+@router.post("/verify-pack")
+async def verify_proof_pack_against_chain(pack: dict):
+    """Verify an exported proof pack, and whether the chain still holds its record.
+
+    Three separable questions, answered separately: is the pack's own signature
+    intact, does it still hold the content its chain record was filed for, and
+    is that record still in the store.
+    """
+    from services.evidence_chain import find_anchor
+    from services.signed_proof_pack import (
+        pack_body_digest_excluding_anchor,
+        verify_signed_proof_pack,
+    )
+
+    if not isinstance(pack, dict) or not pack:
+        raise HTTPException(status_code=400, detail="Body must be an exported proof pack object")
+    result = verify_signed_proof_pack(pack)
+    anchor = pack.get("chain_anchor") if isinstance(pack.get("chain_anchor"), dict) else {}
+    digest = pack_body_digest_excluding_anchor(pack)
+    chain_record = find_anchor(digest) if anchor.get("anchored") else None
+    return {
+        **result,
+        "evidence_sha256": digest,
+        "chain_anchor": anchor or None,
+        "chain_record_found": bool(chain_record),
+        "chain_record": (
+            {
+                "id": chain_record.get("id"),
+                "time": chain_record.get("time"),
+                "actor": chain_record.get("actor"),
+                "event_hash": chain_record.get("event_hash"),
+                "prev_hash": chain_record.get("prev_hash"),
+            }
+            if chain_record
+            else None
+        ),
+        "honesty": (
+            "Signature intact means the pack was not edited since it was sealed. "
+            "A missing chain record means the store no longer holds the record filed "
+            "for this pack — which retention alone can cause, so read /audit/verify "
+            "for the retention checkpoints before calling it tampering."
+            if anchor.get("anchored")
+            else "This pack was exported without a chain anchor, so there is no "
+            "chain record to compare it against."
+        ),
+    }
+
+
 @router.post("/tip/anchor")
 async def force_anchor_tip():
     """Manually seal the current tip (ops / compliance export)."""

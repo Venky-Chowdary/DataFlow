@@ -3144,6 +3144,30 @@ export async function exportAuditLog(format: "csv" | "json" = "csv"): Promise<Bl
   return res.blob();
 }
 
+export type AuditChainFinding = {
+  kind: string;
+  index: number;
+  event_id: string;
+  detail: string;
+};
+
+export type AuditChainVerification = {
+  verified: boolean;
+  checked: number;
+  chain_head: string | null;
+  findings: AuditChainFinding[];
+  retention_checkpoints: Array<{ removed_count: number; at: string }>;
+  honesty: string;
+};
+
+/** Re-walk the hash chain server-side and report any record that fails. */
+export async function verifyAuditChain(limit = 5000): Promise<AuditChainVerification> {
+  const params = new URLSearchParams({ limit: String(limit) });
+  const res = await apiFetch(`${API_BASE}/audit/verify?${params}`);
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not verify the audit chain"));
+  return res.json();
+}
+
 export type SsoType = "saml" | "oidc" | "azure_ad";
 
 export type SsoConfig = {

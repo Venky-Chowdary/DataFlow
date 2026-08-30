@@ -145,6 +145,45 @@
   gap: 8px;
 }
 
+.df2-chain-verdict {
+  margin: 0 0 14px;
+  padding: 12px 14px;
+  border: 1px solid var(--df-line, #e2e8f0);
+  border-left-width: 3px;
+  border-radius: 8px;
+  font-size: 13px;
+  background: #f8fafc;
+}
+
+.df2-chain-verdict.is-ok {
+  border-left-color: #16a34a;
+}
+
+.df2-chain-verdict.is-broken {
+  border-left-color: #dc2626;
+  background: #fef2f2;
+}
+
+.df2-chain-verdict ul {
+  margin: 8px 0 0;
+  padding-left: 18px;
+}
+
+.df2-chain-verdict li {
+  margin: 4px 0;
+  color: #b91c1c;
+}
+
+.df2-chain-verdict p {
+  margin: 8px 0 0;
+  color: #475569;
+}
+
+.df2-chain-verdict-honesty {
+  font-size: 12px;
+  color: #64748b;
+}
+
 .df2-settings-policy-actions {
   display: flex;
   flex-wrap: wrap;
