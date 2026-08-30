@@ -110,6 +110,12 @@ def _database_name(cfg: dict[str, Any]) -> str:
     return cfg.get("database") or mongodb_database_from_uri(_connection_string(cfg)) or "test"
 
 
+def _has_key(pk: str) -> bool:
+    from services.cdc_identity import is_present_cdc_row_key
+
+    return is_present_cdc_row_key(pk)
+
+
 def _doc_to_record(doc: dict[str, Any], columns: list[str] | None) -> dict[str, Any]:
     if "_id" in doc:
         doc["_id"] = str(doc["_id"])
@@ -191,6 +197,12 @@ class MongodbChangeStreamCdc:
         )
         self._oplog_catalog_cache: dict[str, Any] | None = None
         self._oplog_catalog_cache_at: float = 0.0
+        # A delete event publishes ``documentKey`` (``_id``) and nothing else. A
+        # pipeline keyed on a business column can only name the deleted row from
+        # the collection's pre-image, so ask for one whenever the key is not
+        # ``_id`` — and refuse the delete rather than drop it if none arrives.
+        self._needs_pre_image = self.primary_key != "_id"
+        self._pre_images_enabled: bool | None = None
 
     @property
     def lease_holder_id(self) -> str:
@@ -423,6 +435,55 @@ class MongodbChangeStreamCdc:
             # poll consumer (same or different process) can take over immediately.
             self._lease.release()
 
+    def pre_images_enabled(self) -> bool:
+        """Whether the collection records change-stream pre-images (Mongo 6+)."""
+        if self._pre_images_enabled is None:
+            enabled = False
+            try:
+                info = self.client[self.db_name].command(
+                    "listCollections", filter={"name": self.collection}
+                )
+                for entry in info.get("cursor", {}).get("firstBatch", []):
+                    opts = entry.get("options") or {}
+                    images = opts.get("changeStreamPreAndPostImages") or {}
+                    enabled = bool(images.get("enabled"))
+            except Exception as exc:
+                logger.warning("pre-image capability probe failed: %s", exc)
+            self._pre_images_enabled = enabled
+        return self._pre_images_enabled
+
+    def _watch_kwargs(self, base: dict[str, Any]) -> dict[str, Any]:
+        """Add ``fullDocumentBeforeChange`` when deletes need a business key."""
+        if self._needs_pre_image and self.pre_images_enabled():
+            base["full_document_before_change"] = "whenAvailable"
+        return base
+
+    def _delete_key(self, change: dict[str, Any]) -> str:
+        """Business key of a deleted document, or fail closed.
+
+        The pre-image is the only place a delete event can carry a non-``_id``
+        column. Returning "no key" here would silently leave the row at the
+        destination, which is the divergence log-based CDC exists to prevent, so
+        an unresolvable delete raises with the ``collMod`` remedy instead.
+        """
+        before = change.get("fullDocumentBeforeChange")
+        if isinstance(before, dict):
+            pk = self._pk_value(before)
+            if _has_key(pk):
+                return pk
+        pk = self._pk_value(change)
+        if _has_key(pk):
+            return pk
+        from services.cdc_capability import (
+            LogCaptureUnavailable,
+            mongo_delete_key_refusal,
+        )
+
+        raise LogCaptureUnavailable(
+            mongo_delete_key_refusal(self.db_name, self.collection, self.primary_key),
+            "mongodb",
+        )
+
     def _pk_value(self, doc: dict[str, Any]) -> str:
         from services.value_serializer import SQL_NULL_SENTINEL, cell_to_string
 
@@ -474,10 +535,10 @@ class MongodbChangeStreamCdc:
         """Non-acking change-stream peek for DDD-3 stream-wins during incremental snapshot."""
         events: list[dict[str, Any]] = []
         peek_limit = min(int(sig.chunk_size or self.batch_size), 200)
-        watch_kwargs: dict[str, Any] = {
+        watch_kwargs: dict[str, Any] = self._watch_kwargs({
             "full_document": self.full_document,
             "max_await_time_ms": 200,
-        }
+        })
         resume = self._usable_resume()
         if resume:
             watch_kwargs["resume_after"] = resume
@@ -496,11 +557,8 @@ class MongodbChangeStreamCdc:
                     elif op in ("update", "replace") and doc:
                         events.append({"op": "u", "row": _doc_to_record(doc, self.columns)})
                     elif op == "delete":
-                        from services.cdc_identity import is_present_cdc_row_key
-
-                        pk = self._pk_value(change)
-                        if is_present_cdc_row_key(pk):
-                            events.append({"op": "d", "pk": pk, "row": {self.primary_key: pk}})
+                        pk = self._delete_key(change)
+                        events.append({"op": "d", "pk": pk, "row": {self.primary_key: pk}})
                     elif op == "invalidate":
                         from services.cdc_retention_probe import classify_mongo_oplog_retention
 
@@ -542,10 +600,10 @@ class MongodbChangeStreamCdc:
         )
 
         pipeline: list[dict[str, Any]] | None = None
-        watch_kwargs: dict[str, Any] = {
+        watch_kwargs: dict[str, Any] = self._watch_kwargs({
             "full_document": self.full_document,
             "max_await_time_ms": 1000,
-        }
+        })
         resume = self._usable_resume()
         self._assert_resume_in_oplog(resume)
         if resume:
@@ -578,11 +636,7 @@ class MongodbChangeStreamCdc:
                         else:
                             updates.append(record)
                     elif op == "delete":
-                        from services.cdc_identity import is_present_cdc_row_key
-
-                        pk = self._pk_value(change)
-                        if is_present_cdc_row_key(pk):
-                            deletes.append(pk)
+                        deletes.append(self._delete_key(change))
                     elif op == "invalidate":
                         from services.cdc_retention_probe import classify_mongo_oplog_retention
 

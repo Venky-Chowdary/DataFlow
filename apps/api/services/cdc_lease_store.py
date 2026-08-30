@@ -152,6 +152,13 @@ return {"status", "ok"}
 """
 
 
+def _sorted_leases(raws: Any) -> list[dict[str, Any]]:
+    """Copy lease dicts, most recently heartbeated first."""
+    out = [dict(r) for r in raws or [] if isinstance(r, dict)]
+    out.sort(key=lambda r: float(r.get("heartbeat_at") or 0.0), reverse=True)
+    return out
+
+
 class LeaseStoreError(RuntimeError):
     """Backend unavailable or misconfigured (fail-closed)."""
 
@@ -196,6 +203,15 @@ class LeaseStore(ABC):
     @abstractmethod
     def get(self, cursor_key: str) -> dict[str, Any] | None:
         ...
+
+    @abstractmethod
+    def list_leases(self) -> list[dict[str, Any]]:
+        """Every lease currently held, newest heartbeat first.
+
+        A conflict names the *resource* it refused on (``mysql_server_id:90269``),
+        but breaking a lease needs its ``cursor_key``. Without enumeration an
+        operator whose worker died cannot find the key that is blocking them.
+        """
 
     def debug_set_heartbeat(self, cursor_key: str, heartbeat_at: float) -> None:
         """Test helper — not for production paths."""
@@ -343,6 +359,10 @@ class MemoryLeaseStore(LeaseStore):
         with self._lock:
             raw = self._leases.get(cursor_key)
             return dict(raw) if raw else None
+
+    def list_leases(self) -> list[dict[str, Any]]:
+        with self._lock:
+            return _sorted_leases(self._leases.values())
 
     def debug_set_heartbeat(self, cursor_key: str, heartbeat_at: float) -> None:
         with self._lock:
@@ -549,6 +569,10 @@ class FileLeaseStore(LeaseStore):
             raw = (self._load().get("leases") or {}).get(cursor_key)
             return dict(raw) if isinstance(raw, dict) else None
 
+    def list_leases(self) -> list[dict[str, Any]]:
+        with self._lock_cm():
+            return _sorted_leases((self._load().get("leases") or {}).values())
+
     def debug_set_heartbeat(self, cursor_key: str, heartbeat_at: float) -> None:
         with self._lock_cm():
             data = self._load()
@@ -729,6 +753,29 @@ class RedisLeaseStore(LeaseStore):
             return data if isinstance(data, dict) else None
         except Exception:
             return None
+
+    def list_leases(self) -> list[dict[str, Any]]:
+        client = self._connect()
+        pattern = f"{self._prefix}{LEASE_KEY_PREFIX}*"
+        out: list[dict[str, Any]] = []
+        try:
+            # SCAN, not KEYS: enumeration must not block a shared Redis.
+            for key in client.scan_iter(match=pattern, count=200):
+                raw = client.get(key)
+                if not raw:
+                    continue
+                try:
+                    data = json.loads(raw)
+                except Exception:
+                    continue
+                if isinstance(data, dict):
+                    out.append(data)
+        except LeaseStoreError:
+            raise
+        except Exception as exc:
+            self._client = None
+            raise LeaseStoreError(f"CDC Redis lease scan failed: {exc}") from exc
+        return _sorted_leases(out)
 
     def debug_set_heartbeat(self, cursor_key: str, heartbeat_at: float) -> None:
         client = self._connect()
