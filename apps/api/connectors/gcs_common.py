@@ -7,8 +7,16 @@ from typing import Any
 
 
 def _resolve_endpoint(cfg: dict[str, Any]) -> str | None:
-    """Support GCS-compatible emulators (fake-gcs-server, LocalStack, etc.)."""
-    raw = (cfg.get("connection_string") or cfg.get("host") or "").strip()
+    """Support GCS-compatible emulators (fake-gcs-server, LocalStack, etc.).
+
+    ``endpoint_url`` is the canonical field for a private/compatible object-store
+    endpoint and is what the S3 side reads first; a GCS endpoint configured there
+    used to be ignored, leaving the client pointed at hosted googleapis while the
+    operator believed they had aimed it at their own stack.
+    """
+    raw = (
+        cfg.get("endpoint_url") or cfg.get("connection_string") or cfg.get("host") or ""
+    ).strip()
     if raw.startswith("http://") or raw.startswith("https://"):
         return raw.rstrip("/")
     port = cfg.get("port") or 0

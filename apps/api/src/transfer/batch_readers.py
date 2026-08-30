@@ -15,6 +15,18 @@ from typing import Any
 
 from .connector_capabilities import resolve_driver_type
 
+# Sources whose pages are addressed by an opaque continuation token instead of a
+# row offset. The token a page returns must be handed to the next read: these
+# readers ignore ``offset`` entirely, so a caller that pages them by offset
+# re-reads page one forever — the same rows counted twice and the tail never
+# read. Keyed by driver type (``resolve_driver_type``).
+CONTINUATION_KWARG: dict[str, str] = {
+    "dynamodb": "dynamodb_cursor",
+    "elasticsearch": "es_search_after",
+    "redis": "redis_scan_state",
+    "kafka": "kafka_cursor",
+}
+
 
 def _read_batch_impl(
     src_type: str,

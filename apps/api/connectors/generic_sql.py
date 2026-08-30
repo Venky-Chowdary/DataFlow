@@ -174,6 +174,7 @@ from connectors.writer_common import (
     resolve_target_columns,
     row_checksum,
     split_dense_sparse_rows,
+    multi_row_insert_written,
     stamp_is_operator_ceiling,
     transform_error_policy,
 )
@@ -3875,15 +3876,30 @@ _EXECUTEMANY_ROWCOUNT_UNRELIABLE = {"mssql", "sqlserver", "azure_sql", "synapse"
 
 
 def _insert_rows_written(result: Any, batch_len: int, dialect_name: str) -> int:
-    """Rows an all-or-nothing INSERT committed, ignoring driver miscounts."""
-    reported = getattr(result, "rowcount", None)
-    if not isinstance(reported, int) or reported <= 0:
-        return batch_len
-    if reported < batch_len and (dialect_name or "").lower() in (
+    """Rows an all-or-nothing INSERT committed, ignoring driver miscounts.
+
+    ``writer_common.multi_row_insert_written`` is the canonical accounting owner;
+    it settles by the dialect's own ``supports_sane_multi_rowcount`` declaration.
+    The named-dialect set below is a second guard for drivers that declare sane
+    multi-rowcount and still under-report, and the ``getattr`` path keeps callers
+    holding a result object without a SQLAlchemy execution context working.
+    """
+    try:
+        written = multi_row_insert_written(result, batch_len)
+    except (AttributeError, TypeError, ValueError):
+        written = None
+    if written is None:
+        reported = getattr(result, "rowcount", None)
+        written = (
+            batch_len
+            if not isinstance(reported, int) or reported <= 0
+            else reported
+        )
+    if written < batch_len and (dialect_name or "").lower() in (
         _EXECUTEMANY_ROWCOUNT_UNRELIABLE
     ):
         return batch_len
-    return reported
+    return written
 
 
 def _upsert_batch(
